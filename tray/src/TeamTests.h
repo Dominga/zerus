@@ -34,6 +34,18 @@ struct Run {
     int flakyRuns = 0, flakyFailed = 0;     // a recent history when sent; 0 runs: none
     double budgetMinutes = 0;
     QStringList affected;
+    // Task 88: one result per test from the provider's report (CTest, pytest
+    // or gtest JUnit, VSTest TRX, Unreal automation), failures first; the
+    // counts cover the tests the record left out too.
+    struct TestCase {
+        QString suite, name, status, message;
+        qint64 ms = 0;
+    };
+    QList<TestCase> tests;
+    int passed = 0, failed = 0, skipped = 0, errors = 0;
+    bool hasReport = false;
+    QString reportNote;
+    QString countsText() const;   // "41 passed, 2 failed, 1 skipped"
     static Run parse(const QJsonObject &record);
     bool flaky() const { return retried || status == QLatin1String("flaky") || (flakyRuns > 0 && flakyFailed > 0 && flakyFailed < flakyRuns); }
     QString flakyTip() const;

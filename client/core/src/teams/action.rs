@@ -186,6 +186,15 @@ pub enum TeamAction {
         #[serde(default)]
         measure: bool,
     },
+    /// Task 88: the team's test configuration for its Tests settings:
+    /// `get` reads it, `check` checks a candidate override (`tests`, an
+    /// object shaped like .zerus/tests.toml, or null); neither writes. The
+    /// owner's Save is `settings` with `tests`.
+    TestConfig {
+        action: String,
+        #[serde(default)]
+        tests: Value,
+    },
     /// Task 11: releases a task the owner held.
     Release {
         task: u64,
@@ -432,6 +441,7 @@ impl TeamAction {
             Self::DecideTool { .. } => "decide-tool",
             Self::AnswerDeferred { .. } => "answer-deferred",
             Self::Disk { .. } => "disk",
+            Self::TestConfig { .. } => "test-config",
             Self::Release { .. } => "release",
             Self::Retry { .. } => "retry",
             Self::Finish { .. } => "finish",
@@ -623,6 +633,18 @@ impl TeamAction {
             Self::DecideTool { offer, reason, .. } => {
                 word(offer, "tool offer")?;
                 plain(reason, "A reason", 2000)
+            }
+            Self::TestConfig { action, tests } => {
+                if !matches!(action.as_str(), "get" | "check") {
+                    return Err("Read the test configuration or check an override.".into());
+                }
+                if !(tests.is_null() || tests.is_object()) {
+                    return Err("The tests override is an object shaped like .zerus/tests.toml.".into());
+                }
+                if tests.to_string().len() > 64 * 1024 {
+                    return Err("The tests override has at most 64 KiB.".into());
+                }
+                Ok(())
             }
             Self::Disk { action, scope, paths, path, policy, .. } => {
                 if !matches!(action.as_str(), "list" | "clean" | "policy" | "forget") {
@@ -897,6 +919,12 @@ impl TeamAction {
                 put("allow", json!(allow));
                 if !allow && !reason.is_empty() {
                     put("reason", json!(reason));
+                }
+            }
+            Self::TestConfig { action, tests } => {
+                put("action", json!(action));
+                if !tests.is_null() {
+                    put("tests", tests.clone());
                 }
             }
             Self::Disk { action, scope, dry_run, policy, paths, path, refresh, measure } => {

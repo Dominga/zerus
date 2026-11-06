@@ -1,3 +1,4 @@
+import { tr } from "../../i18n";
 import type { TeamPipelineRun, TeamProfileView, TeamTestsView } from "../../types";
 import type { PlacedNode } from "./plan";
 import { taskHeat } from "./heat";
@@ -154,3 +155,22 @@ export function heatSeed(team: string, stored: string | null, modes: string): bo
     return false;
   }
 }
+
+/** Task 88: "41 passed, 2 failed, 1 skipped" for a run's report (Qt Run::countsText). */
+export function reportCounts(report: { passed: number; failed: number; skipped: number; errors: number } | null | undefined): string {
+  if (!report) return "";
+  const parts: string[] = [];
+  if (report.passed) parts.push(tr("%1 passed", report.passed));
+  if (report.failed) parts.push(tr("%1 failed", report.failed));
+  if (report.errors) parts.push(tr("%1 errors", report.errors));
+  if (report.skipped) parts.push(tr("%1 skipped", report.skipped));
+  return parts.length ? parts.join(", ") : tr("no tests reported");
+}
+
+/** Task 88: a test's name as the Tests mode shows it: suite::name unless the name already starts with its suite. */
+export function caseName(test: { suite: string; name: string }): string {
+  return !test.suite || test.name.startsWith(test.suite) ? test.name : `${test.suite}::${test.name}`;
+}
+
+/** Task 88: whether a test failed (a failure or an error). */
+export const caseFailed = (test: { status: string }): boolean => test.status === "failed" || test.status === "error";

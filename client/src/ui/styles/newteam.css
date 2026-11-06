@@ -69,3 +69,8 @@
 .nt-page-head h1 { margin: 0; font-size: var(--fs-lg); }
 .set-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
 .set-note { color: var(--z-color-muted); font-size: var(--fs-sm); max-width: 620px; }
+
+/* Task 88: the Tests section of the team settings. */
+.nt-mono { font-family: var(--z-font-mono, ui-monospace, monospace); font-size: var(--fs-xs); white-space: pre-wrap; overflow-wrap: anywhere; }
+.nt-list { margin: 4px 0 8px; padding-left: 18px; font-size: var(--fs-sm); color: var(--z-color-text2, inherit); }
+.nt-list li { overflow-wrap: anywhere; }

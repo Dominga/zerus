@@ -1402,6 +1402,21 @@ class TaskDelivery(DeliveryFixture):
         self.assertNotIn("LEGACY_QUOTA_FRESH", self.received())
         self.assertFalse(self.execution(legacy).get("attempts"))
 
+    def test_a_counted_task_with_broken_updates_refuses_an_agent_start(self):
+        # review-win-c on #1519 R3: a counted task whose updates log does not
+        # frame or import whole is unknown evidence, never fewer starts.
+        self.settings(agents_other=True, agent_limit=1)
+        self.hgs("cutover", "--project", "orchard", "--hold", "on")
+        delivered = self.add("BROKEN_UPDATES_DELIVERED", "--target", self.name)
+        later = self.add("BROKEN_UPDATES_LATER", "--target", self.name)
+        self.hgs("send", delivered["ref"], "--json", session="codex/actor")
+        self.wait_received("BROKEN_UPDATES_DELIVERED"); self.confirm()
+        updates = self.state / "replica" / hashlib.sha256(b"project-1").hexdigest() / "tasks" / (delivered["uuid"] + ".updates")
+        updates.write_bytes(b"garbage" + updates.read_bytes())
+        refused = self.hgs("send", later["ref"], session="codex/actor", ok=False)
+        self.assertIn("cannot be counted", refused)
+        self.assertNotIn("BROKEN_UPDATES_LATER", self.received())
+
     def test_an_unreadable_receipt_after_a_start_is_uncertain(self):
         # review-win-c on #1519 R2 (zerus-hhxn5): a receipt that cannot be
         # read after a possible delivery is unknown evidence, never
@@ -1421,10 +1436,21 @@ class TaskDelivery(DeliveryFixture):
         self.assertEqual(self.hgs("start-deliver", legacy["ref"], text=json.dumps(plan))["state"], "submitted")
         self.wait_received("RECEIPT_LEGACY"); self.confirm()
         self.assertFalse(self.execution(legacy).get("attempts"))
-        (self.state / "input_receipts" / (plan["id"] + ".json")).write_text("{corrupt")
-        for extra in ((), ("--recover-only",)):
-            again = self.hgs("start-deliver", legacy["ref"], *extra, text=json.dumps(plan))
-            self.assertEqual(again["state"], "uncertain", again)
+        receipt = self.state / "input_receipts" / (plan["id"] + ".json")
+        original = json.loads(receipt.read_text())
+        # Unreadable JSON, or JSON that is not a whole receipt (review-win-c
+        # on #1519 R3: `{}`, a missing or mistyped field, another schema).
+        malformed = ("{corrupt", "{}", "null", "[]", json.dumps(dict(original, digest=None)),
+                     json.dumps({k: v for k, v in original.items() if k != "name"}),
+                     json.dumps(dict(original, status="lost")), json.dumps(dict(original, first_message="no")))
+        for body in malformed:
+            receipt.write_text(body)
+            for extra in ((), ("--recover-only",)):
+                again = self.hgs("start-deliver", legacy["ref"], *extra, text=json.dumps(plan))
+                self.assertEqual(again["state"], "uncertain", (body, again))
+        # A whole receipt of other content is another request's: refused.
+        receipt.write_text(json.dumps(dict(original, digest="0" * 64)))
+        self.assertEqual(self.hgs("start-deliver", legacy["ref"], text=json.dumps(plan))["state"], "refused")
         self.assertEqual((self.received().count("RECEIPT_MANAGED"), self.received().count("RECEIPT_LEGACY")), (1, 1))
 
     def test_the_agent_limit_bounds_a_frozen_handoff_too(self):

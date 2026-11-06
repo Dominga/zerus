@@ -876,9 +876,12 @@ pub(crate) enum Lookup {
 
 pub(super) fn task_reply_lookup(name: &str, request: &Value) -> Result<Lookup> {
     let parsed: Request = serde_json::from_value(request.clone()).map_err(|e| e.to_string())?;
-    uuid::Uuid::parse_str(&parsed.request_id).map_err(|_| "invalid message identity")?;
+    // The submission names its receipt by the canonical form of the ID.
+    let request_id = uuid::Uuid::parse_str(&parsed.request_id)
+        .map_err(|_| "invalid message identity")?
+        .to_string();
     let digest = format!("{:x}", Sha256::digest(request.to_string().as_bytes()));
-    lookup(name, &parsed.request_id, &digest)
+    lookup(name, &request_id, &digest)
 }
 
 fn lookup(name: &str, request_id: &str, digest: &str) -> Result<Lookup> {
@@ -891,10 +894,43 @@ fn lookup(name: &str, request_id: &str, digest: &str) -> Result<Lookup> {
         Err(e) => return Err(e.to_string()),
     };
     let receipt: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    if string(&receipt, "digest") != digest || string(&receipt, "name") != name {
+    // Only a receipt that decodes whole into the schema this writes can tell
+    // another request apart; anything else is unknown evidence (#1519 R3).
+    let stored: Stored = serde_json::from_value(receipt.clone())
+        .map_err(|e| format!("the receipt is malformed: {e}"))?;
+    let hex = |s: &str| {
+        s.len() == 64
+            && s.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    if stored.request_id != request_id
+        || stored.name.is_empty()
+        || !hex(&stored.digest)
+        || !matches!(stored.status.as_str(), "in_progress" | "submitted")
+    {
+        return Err("the receipt is malformed".into());
+    }
+    let _ = (
+        &stored.run_id,
+        &stored.conversation_id,
+        stored.first_message,
+    );
+    if stored.digest != digest || stored.name != name {
         return Ok(Lookup::Other);
     }
     Ok(Lookup::Found(receipt))
+}
+
+/// The fields every input receipt holds, as `submit_core` writes them.
+#[derive(Deserialize)]
+struct Stored {
+    request_id: String,
+    name: String,
+    run_id: String,
+    conversation_id: String,
+    first_message: bool,
+    digest: String,
+    status: String,
 }
 
 /// The receipt of request `request_id` to `name` whose exact bytes hashed to

@@ -1073,11 +1073,17 @@ impl ProjectStore {
         if task.uuid() != uuid {
             return Err(Error::failed("the task file does not match its name"));
         }
+        // Every update block must frame and import whole: a broken or cut
+        // record is unknown evidence, never fewer starts (#1519 R3).
         match read_counted(&self.updates_path(uuid)) {
             Ok(bytes) => {
-                for (payload, _) in blocks(&bytes).0 {
+                let (found, intact) = blocks(&bytes);
+                if !intact {
+                    return Err(Error::failed("the task's updates are not whole"));
+                }
+                for (payload, _) in found {
                     if !task.import_block(payload) {
-                        break;
+                        return Err(Error::failed("an update of the task cannot be read"));
                     }
                 }
             }
@@ -1563,6 +1569,56 @@ mod tests {
         }
         let _ = path;
         assert_eq!(count(&store, soon).unwrap(), 1);
+        // Updates whose framing is broken, or cut short, are not counted as
+        // fewer starts: the count refuses (#1519 R3).
+        task.comment("an update", &Actor::Person, 6).unwrap();
+        store.save(&mut task).unwrap();
+        let updates = store.updates_path(task.uuid());
+        let whole = fs::read(&updates).unwrap();
+        assert_eq!(count(&store, soon).unwrap(), 1);
+        let mut broken = b"garbage".to_vec();
+        broken.extend_from_slice(&whole);
+        fs::write(&updates, &broken).unwrap();
+        assert!(count(&store, soon).is_err());
+        fs::write(&updates, &whole[..whole.len() - 1]).unwrap();
+        assert!(count(&store, soon).is_err());
+        fs::write(&updates, &whole).unwrap();
+        assert_eq!(count(&store, soon).unwrap(), 1);
+    }
+
+    /// desktop-u's fifth control on #1519 R3: an agent's start recorded
+    /// in a legacy task's updates, with one checksum bit flipped, is unknown
+    /// evidence: the count refuses, never reads it as no start.
+    #[test]
+    fn a_torn_legacy_charge_is_unknown_not_zero() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(root.path(), "p1").unwrap();
+        let to = SessionKey {
+            machine: "m1".into(),
+            session: "codex/api".into(),
+            session_id: "launch_id:api".into(),
+        };
+        let mut legacy = new_task(&store, "W");
+        store.save(&mut legacy).unwrap();
+        legacy
+            .record_send(&to, "legacy", &Actor::Agent(to.clone()), 5)
+            .unwrap();
+        store.save(&mut legacy).unwrap();
+        assert!(!store.managed_path(legacy.uuid()).exists());
+        let soon = Instant::now() + Duration::from_secs(5);
+        let count = |store: &ProjectStore| {
+            store
+                .admit_until(Instant::now() + Duration::from_secs(5))
+                .unwrap()
+                .agent_starts_since(0, soon)
+        };
+        assert_eq!(count(&store).unwrap(), 1);
+        let updates = store.updates_path(legacy.uuid());
+        let mut bytes = fs::read(&updates).unwrap();
+        assert!(bytes.len() > 8);
+        bytes[4] ^= 1;
+        fs::write(&updates, bytes).unwrap();
+        assert!(count(&store).is_err());
     }
 
     #[test]

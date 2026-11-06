@@ -311,6 +311,25 @@ describe("composer store", () => {
     });
   });
 
+  it("a held Compact and continue message follows the open composer, never a successor while it opens (zerus-i0ak2)", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers, undefined, f.notify);
+      const held = { request_id: "send-a", text: "A's held message", attachments: [] };
+      // The composer's own view: no draft-key comparison decides it.
+      c.apply(view({ held, key: "a key the row would not compute", sending: true }));
+      expect(c.held()).toEqual(held);
+      const other: SessionRef = { ...SESSION, key: "run:other", name: "claude/sample-project/other" };
+      f.holdOpens();
+      const opening = c.open(other);
+      await tick();
+      expect(c.held()).toBeNull();
+      f.finishOpen(view({ handle: 2, key: draftKey(other) }));
+      await opening;
+      expect(c.held()).toBeNull();
+    });
+  });
+
   it("edits are debounced and flushed before a send", async () => {
     const f = fakes();
     await createRoot(async () => {

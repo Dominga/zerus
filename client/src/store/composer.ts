@@ -220,6 +220,8 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
   const pushEnabled = () => !closing() && opening() === 0 && !!view() && !view()?.subagent && view()?.input_visible !== false;
   /** The old session's queue must not remain actionable while its successor opens. */
   const queue = () => opening() > 0 ? null : view()?.queue ?? null;
+  /** The message a Compact and continue holds (zerus-pabah): like the queue, the open composer's own, never a successor's while it opens. */
+  const heldNow = () => opening() > 0 ? null : view()?.held ?? null;
 
   /** The composer goes or changes: its open question answers Cancel, as its modal dialog would. */
   function dropDialog() {
@@ -419,7 +421,7 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
   }
 
   return {
-    view, text, selection, dialog, locked, operationLocked, sendEnabled, pushEnabled, queue, hint,
+    view, text, selection, dialog, locked, operationLocked, sendEnabled, pushEnabled, queue, held: heldNow, hint,
     /** The status line: Qt's order, with the composer's own error and the typed length. */
     status: (): StatusLine => statusLine(view(), error(), tooLong()),
     apply, receive,

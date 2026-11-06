@@ -658,6 +658,8 @@ fn a_handed_compact_and_continue_ends_as_its_send_ended() {
         compact_and_continue(&c, &view, "keep me");
         let view = until(&c, |v| !v.sending && !v.cancel_send && v.status_error);
         assert_eq!(view.text, "keep me", "{line}");
+        // The draft is back: no held entry stands for it any longer.
+        assert_eq!(view.held, None, "{line}");
         assert_eq!(view.uncertain, uncertain, "{line}");
         assert_eq!(view.status, line);
         assert_eq!(held(&c).is_some(), uncertain, "{line}: identity");
@@ -724,6 +726,14 @@ fn a_handed_compact_and_continue_locks_cancel_send_and_is_checked_until_settled(
     assert!(view.cancel_send && view.sending && !view.status_error);
     assert_eq!(view.status, STILL_SENDING);
     assert_eq!(view.local[0].status, Status::Sending);
+    // zerus-pabah: the composer shows nothing of it, so the held entry
+    // stands for its row: the exact text, until it is sent.
+    assert!(view.text.is_empty());
+    let pending = view.held.clone().expect("the held message");
+    assert_eq!(
+        (pending.request_id.as_str(), pending.text.as_str()),
+        (view.local[0].id.as_str(), "slow")
+    );
     // A Cancel send sent anyway changes nothing.
     c.cancel_send(view.handle);
     assert!(c.current().unwrap().cancel_locked);
@@ -742,6 +752,7 @@ fn a_handed_compact_and_continue_locks_cancel_send_and_is_checked_until_settled(
     ]);
     let view = ticks(&c, &fake, LONGEST, |v| !v.delivery_pending);
     assert!(view.text.is_empty() && !view.cancel_send && !view.cancel_locked);
+    assert_eq!(view.held, None, "sent: its row shows it now");
     assert!(!view.uncertain && held(&c).is_none());
     assert_eq!(view.local[0].status, Status::Sent);
     let checked = lock(&service.checked).clone();
@@ -780,9 +791,12 @@ fn a_reloaded_compact_and_continue_is_only_looked_up() {
     lock(&looked.checks).extend([Checked::InProgress]);
     let view = open_local(&again);
     assert!(view.uncertain && !view.delivery_pending, "loaded uncertain");
+    assert_eq!(view.text, "across a restart");
     again.tick();
     let view = ticks(&again, &fake, 0.0, |v| v.delivery_pending);
     assert_eq!(view.status, STILL_SENDING);
+    // Reloaded, the draft itself shows it: no second, held entry.
+    assert_eq!(view.held, None);
     assert_eq!(lock(&looked.checked)[0].compaction_request_id, id);
     assert!(lock(&looked.offered).is_empty());
 }

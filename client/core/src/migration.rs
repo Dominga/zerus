@@ -17,8 +17,13 @@ use zerus_desktop_migration::{
     MAX_IMPORT_RECORD_BYTES, MAX_SNAPSHOT_BYTES, SOURCE, VERSION,
 };
 
+pub mod creation_report;
+pub mod download_report;
+pub mod draft_preload;
+pub mod draft_report;
 pub mod families;
 pub mod journal;
+pub(crate) mod lineage;
 pub mod preload;
 pub mod sources;
 pub mod transport;

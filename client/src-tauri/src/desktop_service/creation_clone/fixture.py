@@ -9,6 +9,8 @@ if sys.argv[1:] == ['--help']:
         sys.exit(1)
     if not c.get('clone_no_abi'):
         print('Desktop creation clone ABI: desktop-creation-clone-v1', flush=True)
+    if c.get('worktree_abi'):
+        print('Desktop creation worktree ABI: desktop-creation-worktree-v1', flush=True)
 elif sys.argv[1:3] in [['desktop', 'frontend-request'], ['desktop', 'request']]:
     import io
     line = sys.stdin.readline()
@@ -16,6 +18,13 @@ elif sys.argv[1:3] in [['desktop', 'frontend-request'], ['desktop', 'request']]:
     import json
     value = json.loads(line)
     request = value.get('request', value)
+    if request.get('op') == 'creation_worktree':
+        # Only a sent worktree intent whose reply is lost is modelled.
+        import os
+        from pathlib import Path
+        with (Path(__file__).parent / 'worktree-calls').open('a') as log:
+            log.write(json.dumps({'args': sys.argv[1:], 'value': value, 'pid': os.getpid()}) + '\n')
+        sys.exit(1)
     if request.get('op') in ['creation_clone', 'creation_clone_result']:
         import hashlib
         import os

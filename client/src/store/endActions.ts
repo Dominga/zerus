@@ -104,9 +104,16 @@ export function createEndActions(port: EndPort, notices: NoticeBus, uuid: () => 
       if (!ready || closed) { finish(); return; }
       if (options.current && !options.current()) { cancel(true); return; }
       finish(); // Release presentation busy only; native claims still exclude other writers.
+      const progress = notices.notify("info", names, true, key,
+        captures.length === 1 ? tr(ongoing[verb][0]) : tr(ongoing[verb][1], captures.length),
+        { busy: true, dismissible: false });
       try { return await run(captures.map((_, index) => ({ id, index })), key); }
       catch (error) { reportError(error); }
-      finally { await port.cancel(id).catch(() => {}); } // Release unused/refused batch members.
+      finally {
+        // Only our progress id: a native cleanup phase/result may replace it.
+        notices.dismiss(progress);
+        await port.cancel(id).catch(() => {}); // Release unused/refused batch members.
+      }
     } catch (error) {
       if (active) { finish(); await port.cancel(id).catch(() => {}); reportError(error); }
     }

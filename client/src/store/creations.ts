@@ -65,11 +65,11 @@ export interface CreationsDeps {
 }
 
 /** A bound creation's exact session: an online, live row of its computer with the host's full bound name. */
-function findSession(deps: CreationsDeps, want: { host: string; bound_session: string }): string | undefined {
+function findSession(deps: CreationsDeps, want: { host: string; bound_session: string; launch_id?: string }): string | undefined {
   const keys = deps.sessionKeys();
   for (let i = keys.length - 1; i >= 0; i--) {
     const s = deps.session(keys[i]);
-    if (s && s.computer === want.host && s.name === want.bound_session && s.state !== "archived" && deps.online(s.computer)) return s.key;
+    if (s && s.computer === want.host && s.name === want.bound_session && (!want.launch_id || s.launchId === want.launch_id) && s.state !== "archived" && deps.online(s.computer)) return s.key;
   }
   return undefined;
 }
@@ -84,7 +84,7 @@ export function createCreations(deps: CreationsDeps) {
   /** m_creationSessionToSelect: the adopted session's row key. */
   const [adopted, setAdopted] = createSignal<string>();
   /** A bound creation whose session is not listed yet: it is adopted once it is. */
-  const [waiting, setWaiting] = createSignal<{ host: string; bound_session: string }>();
+  const [waiting, setWaiting] = createSignal<{ host: string; bound_session: string; launch_id?: string }>();
   const notices = new Map<string, string>();
   /** Show requests in flight: a hidden card's older answers do not end its reveal. */
   const showing = new Set<string>();
@@ -97,6 +97,26 @@ export function createCreations(deps: CreationsDeps) {
   const creations = createMemo(() => Object.values(cards).sort(newestFirst));
   const selectedCreation = createMemo(() => creationOfRow(deps.selectedKey()));
   const selectedCard = () => { const id = selectedCreation(); return id === undefined ? undefined : cards[id]; };
+
+  // Catalog and creation events use separate channels. Suppress a placeholder
+  // in the same reactive transaction that publishes its exact live launch,
+  // without waiting for the worker's durable bound event. Keep the operation
+  // itself: presentation never completes or retries a creation.
+  const confirmed = createMemo(() => {
+    const pending = new Map(creations().filter((c) => c.launch_dispatched && c.launch_id)
+      .map((c) => [JSON.stringify([c.host, c.launch_id]), c]));
+    const out = new Map<string, string>();
+    if (!pending.size) return out;
+    for (const key of deps.sessionKeys()) {
+      const s = deps.session(key);
+      if (!s?.launchId) continue;
+      const c = pending.get(JSON.stringify([s.computer, s.launchId]));
+      if (c && s.state !== "archived" && (s.accountProvider || s.cmd) === c.cmd && s.name.split("/").slice(2).join("/") === c.tag
+        && (!c.bound_session || s.name === c.bound_session) && deps.online(s.computer)) out.set(c.id, key);
+    }
+    return out;
+  });
+  const pendingCards = createMemo(() => creations().filter((c) => !confirmed().has(c.id)));
 
   function notice(c: CreationCard) {
     const n = noticeOf(c);
@@ -143,13 +163,21 @@ export function createCreations(deps: CreationsDeps) {
 
   /** Bound: its card goes; a selected one hands the selection to its exact session (3036-3039, 3253-3255). */
   function bound(c: CreationCard) {
+    const want = { host: c.host, bound_session: c.bound_session, launch_id: c.launch_id };
+    const key = c.bound_session ? findSession(deps, want) : undefined;
+    const pending = cards[c.id];
+    // The bound event can beat the catalog batch. Retain the current attempt's
+    // placeholder until that exact row arrives, so neither channel order
+    // produces an empty frame or two rows. Older hosts keep their name handoff.
+    if (!key && c.bound_session && c.launch_id && pending?.launch_id === c.launch_id && pending.launch_dispatched) {
+      setCards(c.id, "bound_session", c.bound_session);
+      return;
+    }
     const selectedNow = selectedCreation() === c.id;
     forget(c.id);
     if (!selectedNow) return;
     setWaiting(undefined);
     if (!c.bound_session) return;
-    const want = { host: c.host, bound_session: c.bound_session };
-    const key = findSession(deps, want);
     if (key) adopt(key);
     else setWaiting(want);
   }
@@ -243,7 +271,7 @@ export function createCreations(deps: CreationsDeps) {
   }
 
   const adoptedRow = () => { const key = adopted(); return key === undefined ? undefined : deps.session(key); };
-  const placement = (): Placement => ({ cards: creations(), revealed: revealed(), adopted: adoptedRow(), groupOf: deps.groupOf, details: (id) => details[id] });
+  const placement = (): Placement => ({ cards: pendingCards(), revealed: revealed(), adopted: adoptedRow(), groupOf: deps.groupOf, details: (id) => details[id] });
 
   /** The list's rows with the creation rows (model.ts `listRows`). */
   const withCreations = (rows: Row[], scope: ListScope): Row[] => placeCreations(rows, scope, placement());
@@ -277,6 +305,13 @@ export function createCreations(deps: CreationsDeps) {
 
   // A filter or search change ends the reveal and the adoption (385, 408, 416-419).
   createEffect(on(deps.filterKey, () => batch(() => { setRevealed(undefined); setAdopted(undefined); setWaiting(undefined); }), { defer: true }));
+
+  createEffect(() => {
+    for (const [id, key] of confirmed()) {
+      if (selectedCreation() === id) adopt(key);
+      if (cards[id]?.bound_session) forget(id);
+    }
+  });
 
   // A bound creation's session that was not listed yet is adopted once it is, unless another row was selected meanwhile.
   createEffect(() => {

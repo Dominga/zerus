@@ -156,7 +156,8 @@ void TeamController::act(const QString &operation, QJsonObject input, const Done
         if (done) done(ok, message);
         // Task 107: only a confirmed change; a refused or unknown one keeps
         // what waits, with the caller's reason.
-        if (ok) emit decided(input.value("team").toString(m_watch), operation, input);
+        if (ok || (operation == QLatin1String("decide-proposal") && withdrawn(message)))
+            emit decided(input.value("team").toString(m_watch), operation, input);
     });
 }
 
@@ -211,7 +212,9 @@ void TeamController::call(const QString &operation, QJsonObject input, const Rep
     m_calls.insert(m_client->requestTeam({}, operation, input, timeoutMs),
                    [this, done, operation, input](bool ok, const QJsonObject &result, const QString &error) {
         if (done) done(ok, result, error);
-        if (ok && !operation.startsWith(QLatin1String("catalog ")))
+        // Task 111: a proposal hgs withdrew leaves what waits too.
+        if ((ok && !operation.startsWith(QLatin1String("catalog ")))
+            || (!ok && operation == QLatin1String("decide-proposal") && withdrawn(error)))
             emit decided(input.value("team").toString(m_watch), operation, input);
     });
 }

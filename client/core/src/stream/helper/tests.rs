@@ -1,10 +1,10 @@
-use super::*;
 use crate::{
     desktop::drain::{Gate, Observation, Role},
     stream::{probe_until, resources::Scope, Probe},
     ComputerId,
 };
 use serde_json::json;
+use std::io;
 use std::{
     fs,
     path::{Path, PathBuf},

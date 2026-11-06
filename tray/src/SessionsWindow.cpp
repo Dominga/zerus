@@ -817,7 +817,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
      connect(m_teamStripText,&QLabel::linkActivated,this,[this](const QString &link){if(link.startsWith("task:"))openTeamTask(link.mid(5).toInt());});
      auto *open=new QPushButton(tr("Open team panel"));open->setObjectName("teamStripOpen");open->setFlat(true);open->setCursor(Qt::PointingHandCursor);
      connect(open,&QPushButton::clicked,this,[this]{if(const auto *entry=selected())if(const auto *team=m_teams?m_teams->teamOfSession(entry->host,entry->session.name):nullptr)showTeam(team->id);});
-     strip->addWidget(m_teamStripText,1);strip->addWidget(open);}
+     // Task 112: Resume team, on a paused team's session.
+     m_teamStripResume=new QPushButton(tr("Resume team"));m_teamStripResume->setObjectName("teamStripResume");m_teamStripResume->hide();
+     connect(m_teamStripResume,&QPushButton::clicked,this,[this]{if(const auto *entry=selected())if(const auto *team=m_teams?m_teams->teamOfSession(entry->host,entry->session.name):nullptr)
+         if(team->status=="paused")m_teams->act("resume",QJsonObject{{"team",team->id}});});
+     strip->addWidget(m_teamStripText,1);strip->addWidget(m_teamStripResume);strip->addWidget(open);}
     activityLayout->addWidget(m_teamStrip);
     m_activityView = new ActivityView; m_activityView->setObjectName("mainActivity"); m_composer = new MessageComposer; m_question = new QuestionCard;
     auto *voice = new SpeechComposer(hgsPath, m_composer, [this] {
@@ -6945,12 +6949,39 @@ bool SessionsWindow::confirmLocalStart(const Entry original)
     showNotice(tr("The session changed. Open its actions again."), true); return false;
 }
 
+int SessionsWindow::askResumeTeam(const QString &team)
+{
+    // Task 112: one meaning of Pause: a paused team stays paused whatever its
+    // sessions do, so resuming one of them asks once about the team.
+    if (resumeTeamChoice) return resumeTeamChoice(team);
+    QMessageBox box(QMessageBox::Question, tr("Resume the team too?"),
+        tr("%1 is paused: its members get no tasks while it stays paused. Resume the team too?").arg(team),
+        QMessageBox::NoButton, this);
+    box.setObjectName("resumeTeamToo");
+    auto *both = box.addButton(tr("Resume team"), QMessageBox::AcceptRole);
+    auto *only = box.addButton(tr("Only this session"), QMessageBox::ActionRole);
+    auto *cancel = box.addButton(QMessageBox::Cancel);
+    box.setDefaultButton(both); box.setEscapeButton(cancel);
+    both->setFocus();
+    box.exec();
+    return box.clickedButton() == both ? 2 : box.clickedButton() == only ? 1 : 0;
+}
+
 void SessionsWindow::changeSession()
 {
     const auto *e = selected(); if (!e || !e->online || m_pending || !m_changeAction->isEnabled()) return;
     if (e->session.state != "running") {
         if (!confirmLocalStart(*e)) return;
         e = selected(); if (!e->online || m_pending || !m_changeAction->isEnabled()) return;
+    }
+    if (e->session.state != "running" && e->session.state != "archived" && m_teams) {
+        if (const auto *team = m_teams->teamOfSession(e->host, e->session.name); team && team->status == "paused") {
+            const QString id = team->id;
+            const int choice = askResumeTeam(team->name);
+            if (choice == 0) return;
+            if (choice == 2) m_teams->act("resume", QJsonObject{{"team", id}});
+            e = selected(); if (!e || !e->online || m_pending || !m_changeAction->isEnabled()) return;
+        }
     }
     const QString restoreKey = e->host + '\n' + e->session.name;
     if (e->session.state == "archived" && (!m_restoreWriteKey.isEmpty() || m_restores.contains(restoreKey)
@@ -7585,8 +7616,12 @@ void SessionsWindow::updateTeamPanel()
         const auto *found=entry?m_teams->teamOfSession(entry->host,entry->session.name):nullptr;
         const auto *member=found?found->memberOfSession(entry->host,entry->session.name):nullptr;
         m_teamStrip->setVisible(member);
+        if(m_teamStripResume)m_teamStripResume->setVisible(member&&found->status=="paused");
         if(member){
             QString text=tr("Team <b>%1</b> · %2").arg(found->name.toHtmlEscaped(),found->roleOf(member->id).toHtmlEscaped());
+            // Task 112: a paused team says so on every one of its sessions.
+            if(found->status=="paused")
+                text+=QStringLiteral(" · <span style='color:%1;'>%2</span>").arg(m_dark?QStringLiteral("#d6b25e"):QStringLiteral("#8a6414"),found->pausedText().toHtmlEscaped());
             for(const auto &task:found->tasks){
                 const auto *attempt=task.last();
                 const bool current=task.assignee==member->id&&!task.finished()&&task.status!="pending"&&task.status!="draft";

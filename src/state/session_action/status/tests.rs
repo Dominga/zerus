@@ -56,6 +56,93 @@ fn absent_root_directory_and_receipt_remain_absent() {
 }
 
 #[test]
+fn shared_observer_uses_the_exact_original_writer_hash_and_never_reissues_it() {
+    let f = Fixture::new();
+    let mut r = request();
+    r.action = "terminate".into();
+    let original = serde_json::to_vec_pretty(&r).unwrap();
+    let claimed = receipt(&r, NAME, &request_hash(&r, NAME), "claimed");
+    f.write(&claimed);
+    let bytes = fs::read(f.path()).unwrap();
+    let modified = fs::metadata(f.path()).unwrap().modified().unwrap();
+    for _ in 0..3 {
+        let data = crate::state::observe_lifecycle_receipt(&f.root, NAME, &original).unwrap();
+        assert_eq!(data, observe(&f.root, &r, NAME).unwrap());
+        assert_eq!(data["status"], "uncertain");
+        assert_eq!(fs::read(f.path()).unwrap(), bytes);
+        assert_eq!(
+            fs::metadata(f.path()).unwrap().modified().unwrap(),
+            modified
+        );
+    }
+    f.write(&completed(&r));
+    let bytes = fs::read(f.path()).unwrap();
+    let data = crate::state::observe_lifecycle_receipt(&f.root, NAME, &original).unwrap();
+    assert_eq!(data["status"], "completed");
+    assert_eq!(data["result_target"]["archive_id"], ARCHIVE);
+    assert_eq!(fs::read(f.path()).unwrap(), bytes);
+    assert_eq!(
+        fs::read_dir(f.root.join("action_receipts"))
+            .unwrap()
+            .count(),
+        1
+    );
+    assert!(!f.root.join(".lock").exists());
+    assert!(!f
+        .root
+        .join("action_receipts")
+        .join(format!("{ID}.lock"))
+        .exists());
+
+    for (field, replacement) in [
+        ("expected_run_id", json!("another-run")),
+        ("expected_conversation_id", json!("another-conversation")),
+        ("action", json!("archive")),
+    ] {
+        let mut changed = serde_json::to_value(&r).unwrap();
+        changed[field] = replacement;
+        assert!(crate::state::observe_lifecycle_receipt(
+            &f.root,
+            NAME,
+            &serde_json::to_vec(&changed).unwrap(),
+        )
+        .is_err());
+        assert_eq!(fs::read(f.path()).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn shared_observer_caps_raw_input_and_keeps_absence_as_unavailable() {
+    let f = Fixture::new();
+    let r = request();
+    let mut raw = serde_json::to_vec(&r).unwrap();
+    raw.resize(INPUT_LIMIT, b' ');
+    assert_eq!(
+        crate::state::observe_lifecycle_receipt(&f.root, NAME, &raw).unwrap()["status"],
+        "unavailable"
+    );
+    raw.push(b' ');
+    assert!(crate::state::observe_lifecycle_receipt(&f.root, NAME, &raw).is_err());
+    let absent = f.root.join("never-created");
+    for original in [
+        b"{".as_slice(),
+        br#"{"request_id":"11111111-1111-4111-8111-111111111111","request_id":"11111111-1111-4111-8111-111111111111","action":"terminate","expected_run_id":"run-1","expected_conversation_id":"conversation-1"}"#.as_slice(),
+        br#"{"request_id":"11111111-1111-4111-8111-111111111111","action":"terminate","expected_run_id":"run-1","expected_conversation_id":"conversation-1","allow_retry":true}"#.as_slice(),
+    ] {
+        assert!(crate::state::observe_lifecycle_receipt(&absent, NAME, original).is_err());
+    }
+    assert!(!absent.exists());
+    assert!(!f.path().exists());
+    assert!(!f.root.join(".lock").exists());
+    assert_eq!(
+        fs::read_dir(f.root.join("action_receipts"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[test]
 fn claimed_is_observed_unknown_without_rewriting_and_a_later_result_is_visible() {
     let f = Fixture::new();
     let r = request();

@@ -41,6 +41,8 @@ export class WaitingNotices {
     const fresh: WaitingNotice[] = [];
     for (const item of items) {
       if (this.posted.has(item.id)) continue;
+      // Task 112: a paused team is a state, not a question: listed, never notified.
+      if (item.kind === "team_paused") continue;
       const notice = {
         token: waitingToken(item),
         // Task 109: a drive low on space is no team's; its notice says what it is.

@@ -84,7 +84,7 @@ object SessionCardPresentation {
     fun inactiveChild(child: JSONObject, countsComplete: Boolean = false): Boolean {
         val state = childState(child)
         // A failed turn has ended too; its error belongs to the parent's result.
-        val inactive = state == "finished" || state == "idle" || state == "ready" || state == "error"
+        val inactive = state == "finished" || state == "idle" || state == "ready" || state == "error" || state == "ended"
         // Explicit display evidence wins over an older raw turn state or count.
         if (state.isNotEmpty() && !inactive) return false
         if (flag(child, "group")) return countsComplete && (child.opt("active_count") as? Number)?.toDouble() == 0.0
@@ -96,6 +96,7 @@ object SessionCardPresentation {
         "finished", "ready", "idle" -> "Ready"
         "error" -> "Error"
         "paused" -> "Paused"
+        "ended" -> "Ended"
         "approval", "input", "attention" -> "Needs input"
         else -> "Unknown"
     }
@@ -124,7 +125,7 @@ object SessionCardPresentation {
     /** The expanded rows. Finished, idle, ready and failed turns are hidden unless completed children are included. */
     fun children(session: Session, online: Boolean, includeCompleted: Boolean = false,
         drafted: Set<String> = emptySet()): List<SessionCardChild> {
-        val current = SessionFilters.currentActivity(session, online)
+        val current = !SessionFilters.archived(session) && SessionFilters.currentActivity(session, online)
         val complete = flag(session.raw, "subagent_counts_complete")
         return roster(session.raw).filter { (id, child) ->
             includeCompleted || !flag(child, "group") && id in drafted || !inactiveChild(child, complete)
@@ -146,7 +147,7 @@ object SessionCardPresentation {
     fun childCount(session: Session, online: Boolean, expanded: Boolean = false, includeCompleted: Boolean = false): String {
         val raw = session.raw
         val source = text(raw, "subagent_source")
-        if (!SessionFilters.currentActivity(session, online) || source == "unavailable") return ""
+        if (SessionFilters.archived(session) || !SessionFilters.currentActivity(session, online) || source == "unavailable") return ""
         val count = integer(raw, "subagent_count", 0)
         val active = maxOf(integer(raw, "subagent_active_count", count), count)
         val total = integer(raw, "subagent_total_count", -1)

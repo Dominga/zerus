@@ -53,11 +53,10 @@ pub struct Operation {
 }
 
 fn family(source: &SourceRecord) -> Option<(Kind, sources::Origin)> {
-    let (name, origin) = if let Some(name) = source.family.strip_prefix("next-") {
-        (name, sources::Origin::Next)
-    } else {
-        (source.family.strip_prefix("qt-")?, sources::Origin::Qt)
-    };
+    // The 0.48 upgrade deliberately ignores Qt operation records. Even an
+    // older private report must not re-offer a Qt request as a Next recovery.
+    let name = source.family.strip_prefix("next-")?;
+    let origin = sources::Origin::Next;
     if source.schema != 1 {
         return None;
     }

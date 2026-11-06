@@ -841,7 +841,7 @@ impl Native<'_> {
         if ["pane", "pid", "process_start", "conversation_id"]
             .iter()
             .any(|key| current[*key] != self.original[*key])
-            || !matches(&current, live()?.get(string(&current, "name")))
+            || !matches(&current, panes_of(&live()?, &current))
             || !process_alive(&current)
             || pause_active(&current)
             || !string(&current, "error").is_empty()

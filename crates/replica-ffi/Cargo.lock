@@ -2112,6 +2112,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "fs2",
+ "libc",
  "loro",
  "serde",
  "serde_json",

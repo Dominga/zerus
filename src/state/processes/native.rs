@@ -127,7 +127,7 @@ pub(super) fn codex(record: &Value, rows: &[Value], jobs: &mut Jobs) {
                 .cloned()
                 .unwrap_or_else(|| native_job(record, call, &command, started));
             if !command.is_empty() {
-                job["command"] = json!(journal::clipped(&json!(command), 16000));
+                set_command(&mut job, &command);
             }
             if item["cwd"].is_string() {
                 job["cwd"] = item["cwd"].clone();
@@ -437,7 +437,12 @@ fn kimi(record: &Value, jobs: &mut Jobs, live: bool) -> Result<()> {
                         .is_some_and(|birth| at > 0. && (birth - at).abs() < 5.)
                 );
                 if job["observed"] == true {
-                    job["os_pid"] = json!(pid);
+                    if let Some(identity) = crate::platform::process_identity(pid) {
+                        job["os_pid"] = json!(pid);
+                        job["process_birth"] = json!(identity.birth);
+                    } else {
+                        job["observed"] = json!(false);
+                    }
                 }
                 job["exit_code"] = task
                     .get("exitCode")
@@ -627,7 +632,9 @@ pub(super) fn dsh(record: &Value, inspected: &Value) -> Jobs {
         if !call.is_empty() {
             if let Some(previous) = jobs.remove(&id(record, owner, call)) {
                 job["output"] = previous["output"].clone();
-                job["command"] = previous["command"].clone();
+                for field in ["command", "command_digest", "command_truncated"] {
+                    job[field] = previous[field].clone();
+                }
                 job["cwd"] = previous["cwd"].clone();
             }
             job["call_id"] = json!(call);

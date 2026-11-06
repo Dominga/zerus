@@ -173,6 +173,31 @@ pub fn default_preferences() -> Value {
 /// any other kind, so exchanges with them omit newer kinds; members that list
 /// kinds receive only the kinds they list (`order` came after `preference`).
 pub const LEGACY_KINDS: [&str; 4] = ["project", "folder", "session", "machine"];
+/// The kinds hgs v0.47.0 parses, the rollback floor of zerus-ucck P2. A
+/// requester that names no kinds (`swarm export` from v0.47.0 or older)
+/// receives only these, so a kind added later never reaches it.
+pub const FLOOR_KINDS: [&str; 6] = ["project", "folder", "session", "machine", "preference", "order"];
+/// What `swarm hello` advertises: the catalog kinds, and `session_id` for the
+/// session ID memberships kept beside the catalog (zerus-ucck P2c-1), which
+/// only members that list it receive.
+pub fn advertised() -> BTreeSet<String> {
+    let mut kinds = kinds();
+    kinds.insert(SESSION_ID_KIND.to_owned());
+    kinds
+}
+pub const SESSION_ID_KIND: &str = "session_id";
+/// The catalog `swarm export` gives a requester: only the kinds it lists, or
+/// [`FLOOR_KINDS`] when it lists none (zerus-ucck P2c-1). Every key's
+/// operations go or stay together, so their parents stay consistent.
+pub fn exported(catalog: &Catalog, kinds: &Value) -> Catalog {
+    let kinds: BTreeSet<String> = serde_json::from_value(kinds.clone())
+        .unwrap_or_else(|_| FLOOR_KINDS.into_iter().map(str::to_owned).collect());
+    let mut exported = catalog.clone();
+    exported
+        .operations
+        .retain(|_, op| kinds.contains(op.key.kind()));
+    exported
+}
 pub fn kinds() -> BTreeSet<String> {
     [
         "project",

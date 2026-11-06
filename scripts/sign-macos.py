@@ -213,8 +213,10 @@ def main():
     info = plistlib.loads((args.app / "Contents/Info.plist").read_bytes())
     if info.get("CFBundleShortVersionString") != args.version or info.get("ZerusReleaseVersion") != release:
         parser.error("the bundle version does not match --version and --release")
-    qt_version = (LEGACY_QT_VERSION if info.get("ZerusGUI") == "tauri" else
-                  json.loads((ROOT / "packaging/macos/qt.json").read_text())["qt_version"])
+    if info.get("ZerusGUI") != "tauri":
+        parser.error("only Zerus Next bundles can be newly signed")
+    # Legacy update clients require this syntactically valid compatibility field.
+    qt_version = LEGACY_QT_VERSION
     work = args.output.with_name(args.output.name + ".signing")
     app = work / "Zerus.app"
     subprocess.run(["ditto", str(args.app), str(app)], check=True)

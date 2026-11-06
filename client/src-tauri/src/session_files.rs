@@ -297,10 +297,11 @@ impl SessionFiles {
         };
         let root = crate::files::folder(&self.app);
         let me = self.clone();
+        let writer = self.cache.writer();
         (self.spawn)(Box::new(move || {
             let result = me
                 .cache
-                .run(move || download_cache::lookup(&root, &source, now_ms()))
+                .run(move || writer.lookup(&root, &source, now_ms()))
                 .and_then(|r| r);
             {
                 let mut dialogs = lock(&me.dialogs);
@@ -471,10 +472,9 @@ impl SessionFiles {
         }
         let root = crate::files::folder(&self.app);
         let me = self.clone();
+        let writer = self.cache.writer();
         (self.spawn)(Box::new(move || {
-            let result = me
-                .cache
-                .run(move || download_cache::trim(&root, limit, now_ms()));
+            let result = me.cache.run(move || writer.trim(&root, limit, now_ms()));
             me.trim_busy.store(false, Ordering::Release);
             match result {
                 Ok(usage) => {

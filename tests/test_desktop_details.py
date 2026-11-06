@@ -85,6 +85,28 @@ class Details(unittest.TestCase):
         self.assertFalse(stale['accepted'])
         self.assertEqual(stale['code'], 'stale_detail_lease')
 
+    def test_the_gui_s_bounded_tasks_follow_is_admitted(self):
+        # zerus-1fb4q: the Service-mode GUI follows Tasks with its bounded
+        # window; the service refused the unknown field, so the board never
+        # loaded. The exact GUI shape is admitted; near misses still refuse.
+        self.ready()
+        watcher, hello, _ = self.d.watch()
+        lease = hello['value']['details']['lease']
+        follow = lambda subscription: self.command(lease, hello['epoch'], op='detail_follow', id=new_id(),
+                                                   computer='', subscription=subscription)
+        admitted = follow({'topic': 'tasks', 'project': 'p', 'window': 50})
+        self.assertTrue(admitted['accepted'], admitted)
+        for subscription, code in [
+            ({'topic': 'tasks', 'project': 'q', 'window': 0}, 'invalid_detail_subscription'),
+            ({'topic': 'tasks', 'project': 'q', 'window': 201}, 'invalid_detail_subscription'),
+            ({'topic': 'tasks', 'project': 'q', 'windows': 50}, 'invalid_detail_request'),
+            ({'topic': 'organization', 'window': 50}, 'invalid_detail_subscription'),
+        ]:
+            refused = follow(subscription)
+            self.assertEqual((refused['accepted'], refused['code']), (False, code), subscription)
+        watcher.stdin.close()
+        watcher.wait(timeout=5)
+
     def test_revoke_closes_detail_leases_before_original_source_drain(self):
         self.ready()
         watcher, hello, _ = self.d.watch()

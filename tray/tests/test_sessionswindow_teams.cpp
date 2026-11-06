@@ -1,5 +1,6 @@
 // U62 (#712): Agent teams in the list, leads and their subordinates, from test_sessionswindow.
 #include "SessionsWindowFixture.h"
+#include <QMessageBox>
 
 class TestSessionsWindow : public SessionsWindowFixture {
     Q_OBJECT
@@ -18,6 +19,7 @@ private slots:
     void teamRowBarsCountThePhaseInWork();
     void teamLeftoverStopAsksTheRealAction();
     void leadSessionHeaderCarriesTheTeam();
+    void aPausedTeamSaysSoOnItsSessionsAndResumingOneAsksAboutTheTeam();
     void leadSessionAnswersAProposalOnItsCard();
     void aBusyTeamStoreKeepsTheLeadsTeamAndItsCards();
     void modelServersRailButtonOnlyWithAServer();
@@ -1108,6 +1110,85 @@ void TestSessionsWindow::designerSessionDropsTheTeamHeader()
 }
 
 QTEST_MAIN(TestSessionsWindow)
+// Task 112 (owner, 2026-11-06: "I paused it in the morning, unpaused it in
+// the afternoon, but Zerus still thinks it is paused"): a paused team says
+// since when and by whom on its team bar and on each of its sessions, where
+// Resume team resumes it; resuming one of its sessions asks once whether to
+// resume the team too, Resume team focused.
+void TestSessionsWindow::aPausedTeamSaysSoOnItsSessionsAndResumingOneAsksAboutTheTeam()
+{
+    const QStringList keys{"workspace/skin", "workspace/organization", "workspace/inspectorVisible", "workspace/collapsedTeams"};
+    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) removeSetting(key); });
+    QSettings().setValue("workspace/skin", "whitewh");
+    setJsonSetting("workspace/organization", QJsonDocument(ReadmeShots::organization()).toJson(QJsonDocument::Compact));
+    QSettings().setValue("workspace/inspectorVisible", false);
+    const double now = QDateTime::currentSecsSinceEpoch();
+    const auto plain = ReadmeShots::fleet(now);
+    auto team = ReadmeShots::team(now);
+    const double pausedAt = now - 3600;
+    team["status"] = "paused";
+    team["paused"] = QJsonObject{{"at", pausedAt}, {"by", "You"}, {"reason", "paused"}};
+    const QJsonObject data{{"inspect", ReadmeShots::conversations(plain, now)}, {"accounts", ReadmeShots::accounts(now)}, {"team", team},
+                           {"feed", ReadmeShots::feed(now)}, {"catalog", ReadmeShots::catalog()}, {"organization", ReadmeShots::organization()}};
+    const QString fixture = m_dir->filePath("hgs-team-paused");
+    QVERIFY(FakeCli::install(fixture, ReadmeShots::program));
+    QVERIFY(FakeCli::replace(fixture + ".json", QJsonDocument(data).toJson(QJsonDocument::Compact)));
+    QFile::remove(fixture + ".calls");
+    SessionsWindow window(FakeCli::program(fixture)); window.resize(1440, 900); window.setFleet(plain); window.show();
+    auto *controller = window.findChild<TeamController *>(); QVERIFY(controller);
+    QTRY_COMPARE_WITH_TIMEOUT(controller->teams().size(), 1, 10000);
+    const QString since = QDateTime::fromSecsSinceEpoch(qint64(pausedAt)).date() == QDate::currentDate()
+        ? QDateTime::fromSecsSinceEpoch(qint64(pausedAt)).toString("HH:mm") : QDateTime::fromSecsSinceEpoch(qint64(pausedAt)).toString("yyyy-MM-dd HH:mm");
+    const QString words = QStringLiteral("Team paused since %1 by You: members get no tasks").arg(since);
+    QCOMPARE(controller->teams().first().pausedText(), words);
+    // A member's session: the strip says it and offers Resume team.
+    window.showSession({}, "dsh/orbit/checkout-api");
+    auto *strip = window.findChild<QLabel *>("teamStripText"); QVERIFY(strip);
+    QTRY_VERIFY_WITH_TIMEOUT(strip->isVisible() && strip->text().contains(words), 10000);
+    auto *stripResume = window.findChild<QPushButton *>("teamStripResume");
+    QTRY_VERIFY(stripResume && stripResume->isVisible());
+    // The lead's session: the team bar says it, with Resume team.
+    window.showSession({}, "claude/orbit/checkout");
+    auto *details = window.findChild<QWidget *>("sessionDetailPanel"); QVERIFY(details);
+    QLabel *paused = nullptr;
+    QTRY_VERIFY_WITH_TIMEOUT((paused = details->findChild<QLabel *>("teamWorkspacePaused")) && paused->isVisible(), 10000);
+    QCOMPARE(paused->text(), words);
+    auto *resume = details->findChild<QPushButton *>("teamWorkspaceResume");
+    QVERIFY(resume && resume->isVisible());
+    QCOMPARE(resume->text(), QStringLiteral("Resume team"));
+    const auto resumes = [&] {
+        int count = 0;
+        QFile file(fixture + ".calls");
+        if (file.open(QIODevice::ReadOnly))
+            for (const auto &line : file.readAll().split('\n'))
+                if (QJsonDocument::fromJson(line).object()["args"].toArray().at(1).toString() == "resume") ++count;
+        return count;
+    };
+    // Resume team on a session's strip resumes the team.
+    window.showSession({}, "dsh/orbit/checkout-api");
+    QTRY_VERIFY(stripResume->isVisible());
+    stripResume->click();
+    QTRY_COMPARE(resumes(), 1);
+    // Resuming a paused team's session asks once, Resume team focused.
+    QString seen;
+    QTimer::singleShot(0, &window, [&] {
+        auto *box = window.findChild<QMessageBox *>("resumeTeamToo");
+        if (!box) return;
+        seen = box->defaultButton() ? box->defaultButton()->text() : QString();
+        for (auto *button : box->buttons()) if (button->text() == "Only this session") button->click();
+    });
+    QCOMPARE(window.askResumeTeam("Checkout v2"), 1);
+    QCOMPARE(seen, QStringLiteral("Resume team"));
+    QTimer::singleShot(0, &window, [&] {
+        if (auto *box = window.findChild<QMessageBox *>("resumeTeamToo")) box->defaultButton()->click();
+    });
+    QCOMPARE(window.askResumeTeam("Checkout v2"), 2);
+    QTimer::singleShot(0, &window, [&] {
+        if (auto *box = window.findChild<QMessageBox *>("resumeTeamToo")) box->reject();
+    });
+    QCOMPARE(window.askResumeTeam("Checkout v2"), 0);
+}
+
 #include "test_sessionswindow_teams.moc"
 
 // Task 101 (owner, 2026-11-06, team 33fbafeb): with the Team tab open the

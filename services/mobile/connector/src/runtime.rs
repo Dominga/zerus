@@ -121,6 +121,9 @@ pub struct State {
     pub archive_preview_next: f64,
     /// Archive pairs admitted by a page, read or lookup, with when.
     pub paged_archives: HashMap<(String, String), f64>,
+    /// The listed session ID of each live run in the latest listing
+    /// (`session_selector::index`).
+    pub session_ids: HashMap<String, String>,
 }
 
 impl State {
@@ -151,7 +154,10 @@ pub struct Connector<N: Native> {
     /// One journal for this computer and every peer context.
     pub journal: Rc<Journal>,
     pub settings: Settings,
-    pub flags: Cell<Flags>,
+    pub flags: Rc<Cell<Flags>>,
+    /// A peer context's gateway capabilities: its calls pass the gateway's
+    /// own mobile peer entry point first.
+    gateway_flags: Option<Rc<Cell<Flags>>>,
     pub state: RefCell<State>,
     pub snapshot_ready: Event,
     /// The first capability probe has finished (`fleet.probe_complete`).
@@ -202,7 +208,8 @@ impl<N: Native + 'static> Connector<N> {
             native,
             journal: Rc::new(journal),
             settings,
-            flags: Cell::new(Flags::default().for_native_platform()),
+            flags: Rc::new(Cell::new(Flags::default().for_native_platform())),
+            gateway_flags: None,
             state: RefCell::new(State::fresh()),
             snapshot_ready: Event::default(),
             probed: Event::default(),
@@ -225,7 +232,8 @@ impl<N: Native + 'static> Connector<N> {
                 binding: machine_id.to_owned(),
                 ..self.settings.clone()
             },
-            flags: Cell::new(Flags::default()),
+            flags: Rc::new(Cell::new(Flags::default())),
+            gateway_flags: Some(Rc::clone(&self.flags)),
             state: RefCell::new(State::fresh()),
             snapshot_ready: Event::default(),
             probed: Event::default(),
@@ -325,6 +333,41 @@ impl<N: Native + 'static> Connector<N> {
                 .splice(0..0, ["--expect-machine".to_owned(), machine]);
         }
         self.native.call(call).await
+    }
+
+    /// The session a phone mutation also selects by ID (zerus-ucck P1c-2b):
+    /// the listed session ID of the request's exact run, once every CLI on the
+    /// call's path lists the markers. A call through a mobile peer entry point,
+    /// from a peer context or a request routed to this computer, also needs
+    /// that CLI's [`crate::session_selector::PEER_MARKER`], and a peer's call
+    /// the gateway's as well. Anything else keeps the name form.
+    pub fn selection(
+        &self,
+        operation: &str,
+        session: &str,
+        payload: &Value,
+    ) -> Option<crate::session_selector::Selection> {
+        if !crate::session_selector::selects(operation, payload) {
+            return None;
+        }
+        let flags = self.flags.get();
+        let through_peer_entry = self.peer || LOCAL_MACHINE.try_with(|_| ()).is_ok();
+        let gateway = self.gateway_flags.as_ref().map(|gateway| gateway.get());
+        if !flags.session_selector
+            || (through_peer_entry && !flags.peer_session_id)
+            || gateway.is_some_and(|gateway| !gateway.peer_session_id)
+        {
+            return None;
+        }
+        let run = payload
+            .get("expected_run_id")
+            .and_then(Value::as_str)
+            .filter(|run| !run.is_empty())?;
+        let id = self.state.borrow().session_ids.get(run)?.clone();
+        Some(crate::session_selector::Selection {
+            name: session.to_owned(),
+            id,
+        })
     }
 
     /// Runs `future` with this computer's guarded native entry point.
@@ -465,6 +508,8 @@ impl<N: Native + 'static> Connector<N> {
                 .filter_map(|row| row.get("name").and_then(Value::as_str))
                 .map(str::to_owned)
                 .collect();
+            state.session_ids =
+                crate::session_selector::index(sessions.iter().filter_map(Value::as_object));
             state.archives = sessions
                 .iter()
                 .filter_map(Value::as_object)
@@ -1170,6 +1215,7 @@ fn native_text(error: NativeError) -> String {
         NativeError::Failed(text) => text.into(),
         NativeError::Unicode => crate::execute::GENERIC.into(),
         NativeError::Stopping => crate::journal::RESTART_ERROR.into(),
+        NativeError::SessionChanged => crate::session_selector::CHANGED.into(),
     }
 }
 

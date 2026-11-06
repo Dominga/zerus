@@ -388,3 +388,37 @@ fn only_exact_completed_receipts_settle_the_action_and_cleanup_evidence_survives
         }
     }
 }
+
+/// zerus-1wchz: a delayed clear that answered at all may have typed /clear,
+/// so an oversize or late answer is uncertain; other end actions keep their
+/// definite refusal.
+#[test]
+fn an_answered_clear_is_uncertain_unless_its_receipt_matches() {
+    let detail = "Invalid acknowledgement. Check the session before retrying.";
+    for action in ends() {
+        let c = capture(action.clone());
+        let inv = c.invocation(REQUEST).unwrap();
+        let oversize = Exit::Code {
+            code: 0,
+            stdout: vec![b' '; RECEIPT_LIMIT + 1],
+            stderr: String::new(),
+        };
+        let clear = matches!(action, Action::ClearContext { .. });
+        let expected = if clear {
+            actions::uncertain(detail)
+        } else {
+            actions::failed(detail)
+        };
+        assert_eq!(c.completed(&inv, oversize), expected, "{action:?}");
+        if clear {
+            assert_eq!(
+                c.completed(&inv, Exit::TimedOut),
+                actions::uncertain("Request timed out. Check Terminal before retrying.")
+            );
+            assert_eq!(
+                c.completed(&inv, Exit::StartFailed("missing".into())),
+                actions::failed("missing")
+            );
+        }
+    }
+}

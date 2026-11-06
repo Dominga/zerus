@@ -494,6 +494,12 @@ impl Adapter {
                         if group.wanted.session != native.session {
                             return refused("conflicting_detail_identity");
                         }
+                        // One native subscription per project carries one
+                        // window: another bound for it is refused, never
+                        // answered with the first one's (zerus-1fb4q).
+                        if group.wanted.window != native.window {
+                            return refused("conflicting_detail_window");
+                        }
                     } else if self.groups.len() >= GROUPS
                         || self
                             .groups

@@ -217,6 +217,39 @@ inspections and answers; cancellation after a possible send remains unknown.
 Read receipt retries remain distinct from this no-replay approval rule. Neither
 status nor a command receipt establishes worker drain, currentness or release.
 
+Schema 22 adds an approval-phase index, so that an eligible approval is found
+quickly however large the catalog is. Each stored catalog row carries an
+`approval` flag, written in the same transaction that stores that row version.
+The flag is set when the row's phase is `approval` or `input`, or when a
+subagent waits for approval. It covers every row the policy can accept, and it
+decides nothing by itself.
+
+While the policy is enabled, each scan reads at most 16 flagged rows of the
+current generation, rotating across native sources. Each source walks a pass in
+row id order:
+
+- A pass runs from the last row it handled up to the highest flagged id when
+  the pass began. An update keeps its row id, so neither arrivals nor phase
+  changes can extend a pass. Rows that arrive, or enter approval behind the
+  pass, come in the next pass.
+- A pass moves past a row only once the scan has inspected it or found it needs
+  nothing. At the first candidate with no free approval slot, the scan stops,
+  and the next scan starts there.
+
+Each indexed row then takes the same candidate, inspection, current-source and
+reservation path as before. The one-page catalog walk remains the backstop. The
+index and the walk take turns to go first, so neither keeps both approval slots.
+A turn passes only on a scan that has a free approval slot. Otherwise, slow
+inspections that hold both slots could make every real admission fall to the
+same side. Each time the index goes first on such a scan, it starts with the
+next source in turn. Every source's index therefore leads regularly, whatever
+sources the walk visits.
+
+Rows stored before schema 22 have no flag until the scan backfills them. Each
+scan derives at most 1024 rows in one short transaction, reading their JSON one
+row at a time and stopping after 8 MiB once at least one row is done. The
+backfill resumes where it stopped, including after a restart.
+
 
 ## Read-only approval audit
 

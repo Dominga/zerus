@@ -66,6 +66,7 @@ impl From<NativeError> for Failure {
             NativeError::Failed(text) => Failure::text(text),
             NativeError::Unicode => Failure::Generic,
             NativeError::Stopping => Failure::Stopped,
+            NativeError::SessionChanged => Failure::text(crate::session_selector::CHANGED),
         }
     }
 }

@@ -3,7 +3,7 @@ import * as bridge from "../bridge";
 import { orderedRows } from "../store/catalog";
 import { activity, subagentActivity } from "../store/session";
 import { notices, perform } from "../store/actions";
-import { composer } from "../store/composer";
+import { composer, draftKey } from "../store/composer";
 import { terminal } from "../store/terminal";
 import { processes } from "../store/processes";
 import { questions } from "../store/questions";
@@ -80,7 +80,7 @@ async function select(name: string): Promise<Session> {
   const row = orderedRows().find((candidate) => candidate.name === name)!;
   setDetailTab("activity");
   setSelectedKey(row.key);
-  await until(() => activity.target()?.id === row.key && activity.loaded() && composer.view()?.key === `${row.computer}\n${row.name}` && composer.view()?.loaded === true
+  await until(() => activity.target()?.id === row.key && activity.loaded() && composer.view()?.key === draftKey({ computer: row.computer, key: row.catalogKey, name: row.name, archive_id: null, session_id: row.sessionId ?? null }) && composer.view()?.loaded === true
     && composer.view()?.unavailable_reason !== "Checking the session…" && composer.view()?.block_reason !== "Checking the session…",
     15_000, `${name} did not open`)
     .catch((error) => {
@@ -1227,7 +1227,7 @@ async function subagentStep() {
   type("child smoke");
   await until(() => composer.text() === "child smoke", 1000, "the child editor did not take the text");
   button("Main activity").click();
-  await until(() => !subagentOpen() && composer.view()?.key === `${parent.computer}\n${parent.name}`, 5000, "the parent composer did not return");
+  await until(() => !subagentOpen() && composer.view()?.key === draftKey({ computer: parent.computer, key: parent.catalogKey, name: parent.name, archive_id: null, session_id: parent.sessionId ?? null }), 5000, "the parent composer did not return");
   await openChild("agent-writable", "Writable child");
   if (composer.text() !== "child smoke") throw new Error("the child draft did not survive navigation");
   await until(() => composer.sendEnabled(), 10_000, "the reopened child did not restore Send");

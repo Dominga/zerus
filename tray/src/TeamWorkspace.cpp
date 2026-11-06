@@ -1113,8 +1113,13 @@ QWidget *TeamWorkspace::headerActionsContent(const Team &team)
         });
         pause->setToolTip(tr("Running turns finish; nothing new is handed out")); iconFor(pause, "pause");
     } else if (team.status == "paused") {
-        auto *resume = add(tr("Resume"), "teamWorkspaceResume", true, [this] { m_panel->act("resume", {}); });
-        resume->setToolTip(tr("Hand out tasks again")); iconFor(resume, "play");
+        // Task 112: one meaning of Pause: the team bar says since when and by
+        // whom, and only Resume team hands out tasks again.
+        auto *paused = new QLabel(team.pausedText()); paused->setObjectName("teamWorkspacePaused");
+        paused->setStyleSheet(QStringLiteral("color:%1;").arg(c.warn.name()));
+        h->addWidget(paused);
+        auto *resume = add(tr("Resume team"), "teamWorkspaceResume", true, [this] { m_panel->act("resume", {}); });
+        resume->setToolTip(tr("Hand out tasks again; resuming a member's session does not")); iconFor(resume, "play");
     }
     // U59: the open free phase builds when asked and closes on your word.
     if (team.freeMode() && team.freePhase.known && (team.status == "running" || team.status == "paused")) {

@@ -440,16 +440,24 @@ fn sweep_at(
     lock: &super::super::store::HandoffLock,
     now: u64,
 ) -> Result<Swept> {
+    sweep_with_clock(location, lock, now, Instant::now)
+}
+fn sweep_with_clock(
+    location: &Location,
+    lock: &super::super::store::HandoffLock,
+    now: u64,
+    mut clock: impl FnMut() -> Instant,
+) -> Result<Swept> {
     lock.verify(location)?;
     location.check_existing()?;
     let root = location.root.join("imports");
     let pin = super::held::directory_handle(&root)?;
     let key = id(&pin)?;
     let mut result = Swept::default();
-    let until = Instant::now() + Duration::from_millis(100);
+    let until = clock() + Duration::from_millis(100);
     let mut directory = fs::read_dir(&root)?;
     for _ in 0..ENTRIES {
-        if result.removed >= REMOVE || Instant::now() >= until {
+        if result.removed >= REMOVE || clock() >= until {
             result.incomplete = true;
             break;
         }

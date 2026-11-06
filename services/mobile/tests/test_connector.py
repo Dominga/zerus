@@ -21,7 +21,7 @@ from pathlib import Path
 root = Path(__file__).parent
 payload = sys.stdin.read()
 with (root / 'calls.jsonl').open('a') as log:
-    keys = ('HGS_RUN_ID', 'HGS_ACCOUNT_ID', 'HGS_SESSION', 'TMUX', 'CODEX_HOME',
+    keys = ('HGS_RUN_ID', 'HGS_ACCOUNT_ID', 'HGS_SESSION', 'HGS_SESSION_ID', 'TMUX', 'CODEX_HOME',
             'HGS_CONFIG_DIR', 'HGS_STATE_DIR', 'HGS_PEERS')
     log.write(json.dumps({'argv': sys.argv[1:], 'stdin': payload,
                          'env': {k: os.environ[k] for k in keys if k in os.environ}}) + '\n')
@@ -140,13 +140,14 @@ class ConnectorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_scrubs_native_identity_but_preserves_machine_paths(self):
         environment = {"HGS_RUN_ID": "calling-run", "HGS_ACCOUNT_ID": "calling-account",
-                       "HGS_SESSION": "calling-session", "TMUX": "calling-socket",
+                       "HGS_SESSION": "calling-session", "HGS_SESSION_ID": "calling-session-id",
+                       "TMUX": "calling-socket",
                        "HGS_CONFIG_DIR": "/synthetic/config", "HGS_STATE_DIR": "/synthetic/state",
                        "HGS_PEERS": "synthetic-peer", "CODEX_HOME": "/calling/account-home"}
         with patch.dict(os.environ, environment):
             await self.connector.execute(self.request("inspect"))
         env = self.calls()[-1]["env"]
-        for key in ("HGS_RUN_ID", "HGS_ACCOUNT_ID", "HGS_SESSION", "TMUX", "CODEX_HOME"):
+        for key in ("HGS_RUN_ID", "HGS_ACCOUNT_ID", "HGS_SESSION", "HGS_SESSION_ID", "TMUX", "CODEX_HOME"):
             self.assertNotIn(key, env)
         for key in ("HGS_CONFIG_DIR", "HGS_STATE_DIR", "HGS_PEERS"):
             self.assertEqual(env[key], environment[key])

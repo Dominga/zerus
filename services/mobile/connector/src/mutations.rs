@@ -18,7 +18,7 @@
 //! generic receipt.
 use crate::capabilities::LIFECYCLE;
 use crate::execute::{Failure, GENERIC};
-use crate::native::{Call, Native};
+use crate::native::{Call, Native, NativeError};
 use crate::projects::is_archived;
 use crate::pyvalue::{
     bounded, canonical_uuid, is_str, is_true, py_eq, py_isspace, py_len, py_strip, py_uuid, token,
@@ -708,7 +708,28 @@ impl<N: Native + 'static> Connector<N> {
 
     async fn write(&self, call: Call, started: &Cell<bool>) -> Result<Value, Failure> {
         self.begin(started)?;
-        Ok(self.native(call).await?.json())
+        match self.native(call).await {
+            Ok(output) => Ok(output.json()),
+            // The CLI refused the selected session ID before any effect, so
+            // no write began: a definite failure, never retried.
+            Err(NativeError::SessionChanged) => {
+                started.set(false);
+                Err(Failure::text(crate::session_selector::CHANGED))
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// `call`, selecting its session by the listed ID as well when
+    /// [`Connector::selection`] admits it (zerus-ucck P1c-2b).
+    fn selected(&self, operation: &str, session: &str, payload: &Value, call: Call) -> Call {
+        let Some(selection) = self.selection(operation, session, payload) else {
+            return call;
+        };
+        match crate::session_selector::selected_argv(&call.argv, &selection) {
+            Some(argv) => Call { argv, ..call }.selecting(selection),
+            None => call,
+        }
     }
 
     /// `context_preflight`: fresh native state before a context command,
@@ -939,12 +960,9 @@ impl<N: Native + 'static> Connector<N> {
     ) -> Result<Value, Failure> {
         let mut stdin = payload.clone();
         stdin["action"] = json!(operation);
-        let result = self
-            .write(
-                Call::new(["session-action", session, "--json"]).payload(stdin),
-                started,
-            )
-            .await?;
+        let call = Call::new(["session-action", session, "--json"]).payload(stdin);
+        let call = self.selected(operation, session, payload, call);
+        let result = self.write(call, started).await?;
         let Value::Object(mut result) = result else {
             return Err(Failure::text(LIFECYCLE_MISMATCH));
         };
@@ -1060,6 +1078,7 @@ impl<N: Native + 'static> Connector<N> {
             other => other,
         };
         let call = Call::new([command, session, "--json"]).payload(payload.clone());
+        let call = self.selected(operation, session, payload, call);
         let result = self.write(call, started).await?;
         let object = result.as_object();
         let identity = |object: &Map<String, Value>| {

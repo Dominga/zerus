@@ -6,7 +6,7 @@
 #ifdef __APPLE__
 #define _DARWIN_C_SOURCE 1
 #else
-#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE 1
 #endif
 #include <sys/types.h>
 #include <errno.h>
@@ -23,6 +23,9 @@
 #include <unistd.h>
 #ifdef __APPLE__
 #include <libproc.h>
+#else
+#include <sys/mman.h>
+#include <time.h>
 #endif
 
 static pid_t child = -1;
@@ -71,8 +74,46 @@ static void birth(pid_t pid, char *output, size_t length) {
     check(field != NULL); snprintf(output, length, "%s", field);
 #endif
 }
+#ifdef __linux__
+/* Native adversarial relay: SAME binary/uid/direct parent/argv, a kernel-sealed
+ * image instead of the installed inode. No product FD or image assertion. */
+static int sealed_image(const char *path, const char *mode) {
+    int input = open(path, O_RDONLY | O_CLOEXEC); check(input >= 0);
+    struct stat info; check(fstat(input, &info) == 0 && S_ISREG(info.st_mode));
+    check(info.st_size > 0 && info.st_size <= (256L << 20));
+    int image = memfd_create("zerus-helper-image", MFD_CLOEXEC | MFD_ALLOW_SEALING | 0x10);
+    check(image >= 0);
+    struct timespec start, now; check(clock_gettime(CLOCK_MONOTONIC, &start) == 0);
+    char buffer[65536]; off_t total = 0;
+    for (;;) {
+        ssize_t used = read(input, buffer, sizeof(buffer));
+        if (used < 0 && errno == EINTR) continue;
+        check(used >= 0); if (!used) break;
+        total += used; check(total <= info.st_size);
+        write_all(image, buffer, (size_t)used);
+        check(clock_gettime(CLOCK_MONOTONIC, &now) == 0 && now.tv_sec - start.tv_sec < 5);
+    }
+    check(total == info.st_size); close(input);
+    int seals = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+    if (!strcmp(mode, "missing-write")) seals &= ~F_SEAL_WRITE;
+    else if (!strcmp(mode, "missing-grow")) seals &= ~F_SEAL_GROW;
+    else if (!strcmp(mode, "missing-shrink")) seals &= ~F_SEAL_SHRINK;
+    else if (!strcmp(mode, "missing-seal")) seals &= ~F_SEAL_SEAL;
+    else if (!strcmp(mode, "future-write")) seals = F_SEAL_FUTURE_WRITE;
+    else check(!strcmp(mode, "sealed") || !strcmp(mode, "wrong-parent"));
+    check(fcntl(image, F_ADD_SEALS, seals) == 0);
+    return image;
+}
+#endif
 int main(int argc, char **argv) {
-    check(argc == 3);
+    check(argc == 3 || argc == 4);
+    int image = -1;
+    int rendezvous = argc == 4 && !strcmp(argv[3], "rendezvous");
+#ifdef __linux__
+    if (argc == 4 && !rendezvous) image = sealed_image(argv[2], argv[3]);
+#else
+    check(argc == 3 || rendezvous);
+#endif
     signal(SIGPIPE, SIG_IGN); signal(SIGTERM, stop); signal(SIGALRM, stop); alarm(35);
     int listener = socket(AF_UNIX, SOCK_STREAM, 0); check(listener >= 0);
     check(fcntl(listener, F_SETFD, FD_CLOEXEC) == 0);
@@ -86,20 +127,50 @@ int main(int argc, char **argv) {
     check(bind(listener, (struct sockaddr *)&address, sizeof(address)) == 0);
     check(chmod(argv[1], 0600) == 0 && listen(listener, 8) == 0);
     int input[2], output[2]; check(pipe(input) == 0 && pipe(output) == 0);
+    int identity_pipe[2]; check(pipe(identity_pipe) == 0);
     child = fork(); check(child >= 0);
     if (child == 0) {
+        close(identity_pipe[0]);
+        if (argc == 4 && !strcmp(argv[3], "wrong-parent")) {
+            child = fork(); check(child >= 0);
+            if (child > 0) {
+                write_all(identity_pipe[1], (const char *)&child, sizeof(child));
+                close(identity_pipe[1]);
+                close(input[0]); close(input[1]); close(output[0]); close(output[1]); close(listener);
+                int result; check(waitpid(child, &result, 0) == child); child = -1;
+                check(WIFEXITED(result)); _exit(WEXITSTATUS(result));
+            }
+        }
+        close(identity_pipe[1]);
         close(input[1]); close(output[0]);
         check(dup2(input[0], STDIN_FILENO) >= 0 && dup2(output[1], STDOUT_FILENO) >= 0);
         close(input[0]); close(output[1]);
         /* A marked native parent stays visible even if its relay is clean. */
         unsetenv("HGS_RUN_ID");
-        execl(argv[2], argv[2], "desktop", "frontend-request", "--json", (char *)NULL);
+        char program[64];
+        const char *selected = argv[2];
+        if (image >= 0) {
+            snprintf(program, sizeof(program), "/proc/self/fd/%d", image);
+            selected = program;
+        }
+        if (rendezvous)
+            execl(selected, argv[2], "--desktop-helper-rendezvous-v1", "desktop", "frontend-request", "--json", (char *)NULL);
+        else
+            execl(selected, argv[2], "desktop", "frontend-request", "--json", (char *)NULL);
         _exit(127);
     }
     close(input[0]); close(output[1]);
-    char identity[128]; birth(child, identity, sizeof(identity));
-    printf("{\"pid\":%d,\"birth\":\"%s\"}\n", child, identity); fflush(stdout);
+    if (image >= 0) close(image);
+    close(identity_pipe[1]);
+    pid_t relay = child;
+    if (argc == 4 && !strcmp(argv[3], "wrong-parent")) {
+        check(read(identity_pipe[0], &relay, sizeof(relay)) == (ssize_t)sizeof(relay));
+    }
+    close(identity_pipe[0]);
+    char identity[128]; birth(relay, identity, sizeof(identity));
+    printf("{\"pid\":%d,\"birth\":\"%s\"}\n", relay, identity); fflush(stdout);
     char *envelope = line(), *reply = line(), *query = line();
+    if (rendezvous) write_all(input[1], "HGS-ORIGINAL-CHILD-V1\n", sizeof("HGS-ORIGINAL-CHILD-V1\n") - 1);
     write_all(input[1], envelope, strlen(envelope)); close(input[1]); free(envelope);
     size_t total = 0; int proofs = 0;
     for (;;) {

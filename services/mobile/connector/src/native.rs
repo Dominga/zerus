@@ -19,10 +19,11 @@ use zerus_relay::json;
 /// The calling agent's identity, which native hgs never receives
 /// (`connector.py:46-52`). Everything else, HGS_CONFIG_DIR and HGS_PEERS
 /// included, passes on.
-pub const CONTEXT_KEYS: [&str; 23] = [
+pub const CONTEXT_KEYS: [&str; 24] = [
     "TMUX",
     "TMUX_PANE",
     "HGS_SESSION",
+    "HGS_SESSION_ID",
     "HGS_RUN_ID",
     "HGS_EXPECTED_ID",
     "HGS_EXECUTABLE",
@@ -74,6 +75,10 @@ pub struct Call {
     pub json_output: bool,
     pub failure_json: bool,
     pub max_output_bytes: Option<usize>,
+    /// The session this call selects by ID as well (zerus-ucck P1c-2b): its
+    /// standard error is kept within the cap, so the CLI's refusal of that
+    /// exact ID can be told from any other failure.
+    pub selected: Option<crate::session_selector::Selection>,
 }
 
 impl Call {
@@ -85,6 +90,7 @@ impl Call {
             json_output: true,
             failure_json: false,
             max_output_bytes: None,
+            selected: None,
         }
     }
     pub fn payload(mut self, payload: Value) -> Self {
@@ -101,6 +107,10 @@ impl Call {
     }
     pub fn failure_json(mut self) -> Self {
         self.failure_json = true;
+        self
+    }
+    pub fn selecting(mut self, selection: crate::session_selector::Selection) -> Self {
+        self.selected = Some(selection);
         self
     }
 }
@@ -129,6 +139,9 @@ pub enum NativeError {
     Unicode,
     /// The connector is stopping: no new native call starts (divergence h).
     Stopping,
+    /// The CLI refused the call's `--session-id` before any effect
+    /// ([`crate::session_selector::refused`]): a definite failure.
+    SessionChanged,
 }
 
 pub type NativeResult = Result<Output, NativeError>;
@@ -309,6 +322,8 @@ impl Drop for Owned {
 impl Native for Process {
     fn command(&self) -> Option<Command> {
         let mut command = Command::new(&self.hgs);
+        #[cfg(windows)]
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW, including the watch child.
         for key in CONTEXT_KEYS {
             command.env_remove(key);
         }
@@ -396,9 +411,10 @@ impl Native for Process {
                     None => Ok(Read::Done(Vec::new())),
                 }
             };
+            let keep_stderr = call.selected.is_some();
             let stderr_read = async {
                 match stderr_pipe.as_mut() {
-                    Some(pipe) => read_capped(pipe, cap, mobile_create, false).await,
+                    Some(pipe) => read_capped(pipe, cap, mobile_create, keep_stderr).await,
                     None => Ok(Read::Done(Vec::new())),
                 }
             };
@@ -419,7 +435,7 @@ impl Native for Process {
         };
         let child = owned.0.as_mut().expect("spawned");
         let exited = match &outcome {
-            Ok((_, success)) => Some(*success),
+            Ok((_, _, status)) => Some(status.success()),
             Err(_) => None,
         };
         if exited.is_none() && matches!(child.try_wait(), Ok(None)) {
@@ -439,7 +455,16 @@ impl Native for Process {
             let _ = tokio::time::timeout(DRAIN, cleanup).await;
         }
         match outcome {
-            Ok((stdout, success)) => interpret(&call, success, stdout),
+            Ok((stdout, stderr, status)) => {
+                let refused = call.selected.as_ref().is_some_and(|selection| {
+                    !status.success()
+                        && crate::session_selector::refused(selection, status.code(), &stderr)
+                });
+                if refused {
+                    return Err(NativeError::SessionChanged);
+                }
+                interpret(&call, status.success(), stdout)
+            }
             Err(Ended::TimedOut) => Err(NativeError::Failed(TIMED_OUT)),
             Err(Ended::Oversized) => Err(NativeError::Failed(OUTPUT_TOO_LARGE)),
             Err(Ended::Io) => Err(NativeError::Failed(COULD_NOT_START)),
@@ -454,25 +479,26 @@ enum Ended {
 }
 
 /// `asyncio.gather(read(stdout), read(stderr), write(), process.wait())`:
-/// the first failure ends the call, as gather propagates it.
+/// the first failure ends the call, as gather propagates it. Standard error
+/// is empty unless its reader retained it.
 async fn run_call(
     write: impl Future<Output = std::io::Result<()>>,
     stdout: impl Future<Output = std::io::Result<Read>>,
     stderr: impl Future<Output = std::io::Result<Read>>,
     wait: impl Future<Output = std::io::Result<std::process::ExitStatus>>,
-) -> Result<(Vec<u8>, bool), Ended> {
+) -> Result<(Vec<u8>, Vec<u8>, std::process::ExitStatus), Ended> {
     let fail = |read: std::io::Result<Read>| match read {
         Ok(Read::Done(bytes)) => Ok(bytes),
         Ok(Read::Oversized) => Err(Ended::Oversized),
         Err(_) => Err(Ended::Io),
     };
     let stdout = async { fail(stdout.await) };
-    let stderr = async { fail(stderr.await).map(drop) };
+    let stderr = async { fail(stderr.await) };
     let write = async { write.await.map_err(|_| Ended::Io) };
     let wait = async { wait.await.map_err(|_| Ended::Io) };
-    let (stdout, (), (), status) =
+    let (stdout, stderr, (), status) =
         futures_util::future::try_join4(stdout, stderr, write, wait).await?;
-    Ok((stdout, status.success()))
+    Ok((stdout, stderr, status))
 }
 
 #[cfg(test)]

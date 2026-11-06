@@ -59,6 +59,13 @@ response body or exception. The same UUID and request fingerprint returns its
 original receipt before revision checking; different input under that UUID is
 rejected. A `revision_conflict` leaves the editor intact for explicit refresh.
 Unknown outcomes are reconciled with `config_status`, never a fresh mutation ID.
+If the speech service restarts with an uncertain original Test job,
+`config_status` retains `uncertain`; the client keeps the original operation
+available for review. Only a schema-1 reply for that exact job UUID can update
+its receipt. Another job or an unsupported reply leaves the previous evidence
+unchanged and grants no permission to repeat the Test.
+Older receipts mislabeled `failed` with `service_restarted` or `result_expired`
+are restored to `uncertain` on lookup, including while the service is offline.
 
 The host privately stores managed profiles, credentials and operation receipts
 transactionally. Existing schema-1 `speech.json` profiles are imported once,

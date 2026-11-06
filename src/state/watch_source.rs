@@ -128,11 +128,11 @@ pub(crate) fn git_status(path: &Path) -> Result<Value> {
     Ok(git_status::inspect(path))
 }
 
-/// The rows a tracked session's Activity shows: its journal name and the
-/// conversations its timeline spans, taken from its saved binding.
+/// The rows a tracked session's Activity shows: its journal name, the
+/// conversations its timeline spans and, for a fork, its sources up to where
+/// it began, taken from its saved binding.
 pub(crate) struct Timeline {
     record: Value,
-    earlier: String,
 }
 
 impl Timeline {
@@ -158,18 +158,17 @@ impl Timeline {
     /// Events after `after` as `inspect` shapes them, oldest first: the first
     /// `limit`, or with `newest` the last `limit`.
     pub(crate) fn events(&self, db: &Connection, after: i64, limit: usize, newest: bool) -> Result<Vec<Value>> {
+        let scope = journal::activity_scope(db, &self.record);
         let rows = journal::timeline_rows(
             db,
             self.journal(),
             self.record["conversation_id"].as_str(),
-            &self.earlier,
+            &scope,
             after,
             limit,
             newest,
         )?;
-        rows.into_iter()
-            .map(|(seq, payload)| journal::timeline_event(&self.record, seq, &payload))
-            .collect()
+        rows.iter().map(|row| row.event(&self.record)).collect()
     }
 }
 
@@ -181,8 +180,7 @@ pub(crate) fn timeline(name: &str) -> Result<Option<Timeline>> {
         return Ok(None);
     }
     let record = read(name)?;
-    let earlier = clear_context::earlier_conversations(&record).to_string();
-    Ok(Some(Timeline { record, earlier }))
+    Ok(Some(Timeline { record }))
 }
 
 /// Whether a run is in Archive. Rare: only for a catalog row that disappeared.
@@ -250,7 +248,7 @@ pub(crate) fn rows(wanted: &BTreeSet<String>) -> Result<Option<(Vec<Value>, u64)
     let (sessions, ids) = terminal()?;
     // As in a listing: the panes and the bindings are read under the lock, so
     // a rename is seen before it began or after it finished (zerus-gd02).
-    let (snapshot, names, records) = {
+    let (snapshot, mut names, records) = {
         let _guard = lock(None)?;
         let (snapshot, names) = live_sessions()?;
         let mut records = Vec::with_capacity(wanted.len());
@@ -280,14 +278,17 @@ pub(crate) fn rows(wanted: &BTreeSet<String>) -> Result<Option<(Vec<Value>, u64)
     let mut process_work = processes::WorkSample::default();
     let mut rows = Vec::with_capacity(records.len());
     for record in records {
-        let name = string(&record, "name");
-        let Some(session) = sessions.iter().find(|session| string(session, "name") == name) else {
+        // Its row is its own terminal's (P3b), listed under its label.
+        let terminal = terminal_name(&record);
+        let Some(session) = sessions.iter().find(|session| string(session, "name") == terminal) else {
             return Ok(None);
         };
-        if !matches(&record, snapshot.get(name)) {
+        if !matches(&record, panes_of(&snapshot, &record)) {
             return Ok(None);
         }
         let mut session = session.clone();
+        label_row(&mut session, &record);
+        workspace::relabel(&mut names, terminal, string(&record, "name"));
         session
             .as_object_mut()
             .ok_or("invalid session")?
@@ -341,20 +342,26 @@ pub(crate) fn probe(rows: &[&Value]) -> Result<Probe> {
     let mut stale = Vec::new();
     for row in rows {
         let name = string(row, "name");
-        if row["tracked"] != true || !snapshot.contains_key(name) || native(name) {
+        if row["tracked"] != true || native(name) {
             continue;
         }
+        // A row lists its label; its liveness is its own terminal's (P3b).
         let Ok(record) = read(name) else {
-            stale.push(name.to_owned());
+            if snapshot.contains_key(name) {
+                stale.push(name.to_owned());
+            }
             continue;
         };
+        if !terminal_live(&snapshot, &record).unwrap_or(true) {
+            continue;
+        }
         let quiet = string(&record, "conversation_id").is_empty()
             || record["last_event_at"].as_f64().unwrap_or(0.) == 0.;
         let idle = row["activity"] == "idle" && row["phase"] == "idle";
         // As the summary decides `terminal_supported` of a live pane.
         let terminal = string(&record, "archive_id").is_empty() && process_alive(&record);
         if quiet
-            || !matches(&record, snapshot.get(name))
+            || !matches(&record, panes_of(&snapshot, &record))
             || row["terminal_supported"] != json!(terminal)
             || work(row["process_work"].clone()) != work(sample.summary(&record, idle))
         {

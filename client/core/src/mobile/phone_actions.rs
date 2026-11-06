@@ -98,7 +98,7 @@ fn encode(s: &str) -> String {
 }
 fn answer(hgs: &Path, call: Invocation) -> Result<Value, String> {
     // Never surface a CLI payload, stderr or provider error: it can contain a code.
-    let output = crate::run::run_limited(hgs, &call, &[], 64 * 1024).map_err(|_| UNCERTAIN)?;
+    let output = super::run_phone_cli(hgs, &call, 64 * 1024).map_err(|_| UNCERTAIN)?;
     match output {
         Exit::Code {
             code: 0, stdout, ..

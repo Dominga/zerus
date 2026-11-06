@@ -183,6 +183,7 @@ private slots:
     void waitingPagePagesStayStableWhileItemsArrive();
     void waitingPageEmptyAndRefused();
     void waitingItemsAreAnsweredInPlace();
+    void waitingReportHeldRetryAndFinishAnswerInPlace();
     void waitingAdditionCancelDeclinesIt();
     void waitingBannerAnswersInPlaceAndWithdrawsTheNotice();
     void aWaitingReadThatChangesNothingRedrawsNothing();
@@ -1969,10 +1970,10 @@ void TestTeamsUiWaiting::waitingItemsAreAnsweredInPlace()
         for (const auto &value : answerItems(now)) if (!gone.contains(value.toObject()["id"].toString())) left.append(value);
         QVERIFY(writeWaiting(script() + ".waiting", left));
     };
-    // A report and a held task are read in the team first: Open team only.
+    // Task 116: a report and a held task are answered here too, never only in
+    // the Team tab: each has its card.
     for (const auto &id : {report, held}) {
-        QVERIFY(row(id)->findChild<QPushButton *>("teamWaitingOpen"));
-        QVERIFY(!row(id)->findChild<QPushButton *>("teamWaitingAnswerToggle") && !row(id)->findChild<QPushButton *>("teamWaitingApprove"));
+        QVERIFY2(row(id)->findChild<QPushButton *>("teamWaitingAnswerToggle"), qPrintable(id));
     }
     const auto toggle = [&](const QString &id) { row(id)->findChild<QPushButton *>("teamWaitingAnswerToggle")->click(); };
     // Open the three cards: the proposal, the addition and the permission.
@@ -2079,6 +2080,92 @@ void TestTeamsUiWaiting::waitingItemsAreAnsweredInPlace()
     // An answer between rebuilds never shows as a window of its own.
     for (auto *window : QApplication::topLevelWidgets())
         QVERIFY2(!(window->objectName() == QLatin1String("teamWaitingAnswer") && window->isVisible()), "a stray answer window");
+}
+
+// Task 116 (owner, 2026-11-06): a report, a held task, a retry and the end of
+// the team are answered where they wait — the same operations as their task
+// cards, not only Open team in the Team tab.
+void TestTeamsUiWaiting::waitingReportHeldRetryAndFinishAnswerInPlace()
+{
+    Settings::set("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { Settings::remove("workspace/skin"); darkPalette(); });
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    auto team = answerTeam();
+    {
+        auto tasks = team["tasks"].toArray();
+        auto first = tasks[0].toObject(); first["status"] = "submitted"; tasks[0] = first;
+        auto second = tasks[1].toObject(); second["hold"] = QJsonObject{{"by", "You"}, {"reason", "After the release"}, {"at", 1}}; tasks[1] = second;
+        auto fifth = tasks[4].toObject();
+        fifth["waits"] = QJsonObject{{"for", "model"}, {"on", QJsonArray{"model"}}, {"unblock", "choose a model"}};
+        tasks[4] = fifth;
+        team["tasks"] = tasks;
+    }
+    setTeam(team);
+    auto report = waitingItem("report-1", "report_escalated", "decide_report", "Report on #1 Saved cards API from Backend waits for your decision", now - 300);
+    report["task"] = 1; report["member"] = "Backend";
+    auto held = waitingItem("held-2", "task_waits_owner", "release_task", "#2 Release notes is held by you: after the release", now - 360);
+    held["task"] = 2;
+    auto retry = waitingItem("retry-5", "task_waits_owner", "retry_task", "#5 Code review waits: hgs: unknown model", now - 400);
+    retry["task"] = 5;
+    auto finish = waitingItem("finish", "team_finished", "finish", "All 4 tasks decided: waits for you to finish", now - 900);
+    QJsonArray waiting{report, held, retry, finish};
+    QVERIFY(writeWaiting(script() + ".waiting", waiting));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamWaitingPage page(&controller);
+    QStringList answered;
+    page.answered = [&](const TeamWaitingPage::Item &item) { answered << item.id; };
+    darkPalette(); page.setDark(true);
+    page.resize(900, 1000); page.show();
+    const auto row = [&](const QString &id) -> QFrame * {
+        for (auto *frame : page.findChildren<QFrame *>("teamWaitingRow")) if (frame->property("itemId") == id) return frame;
+        return nullptr;
+    };
+    const QString reportId = report["id"].toString(), heldId = held["id"].toString(),
+                  retryId = retry["id"].toString(), finishId = finish["id"].toString();
+    // The store drops what was answered: so does the fake's list, for the polls.
+    const auto leave = [&](const QString &id) {
+        QJsonArray left;
+        for (const auto &value : waiting) if (value.toObject()["id"].toString() != id) left.append(value);
+        waiting = left;
+        QVERIFY(writeWaiting(script() + ".waiting", waiting));
+    };
+    QTRY_VERIFY(row(reportId) && row(heldId) && row(retryId) && row(finishId));
+    // The report: Reject with the member's reason.
+    row(reportId)->findChild<QPushButton *>("teamWaitingAnswerToggle")->click();
+    QTRY_VERIFY(row(reportId)->findChild<QLineEdit *>("teamWaitingReportReason"));
+    row(reportId)->findChild<QLineEdit *>("teamWaitingReportReason")->setText("Fix the flaky test first");
+    row(reportId)->findChild<QPushButton *>("teamWaitingReportReject")->click();
+    QTRY_COMPARE(calls(script(), "reject").size(), 1);
+    auto sent = calls(script(), "reject").first();
+    QCOMPARE(sent["team"].toString(), QStringLiteral("team-1"));
+    QCOMPARE(sent["task"].toInt(), 1);
+    QCOMPARE(sent["reason"].toString(), QStringLiteral("Fix the flaky test first"));
+    QTRY_VERIFY(!row(reportId)); leave(reportId);
+    // The held task: Release.
+    row(heldId)->findChild<QPushButton *>("teamWaitingAnswerToggle")->click();
+    QTRY_VERIFY(row(heldId)->findChild<QPushButton *>("teamWaitingReleaseAction"));
+    row(heldId)->findChild<QPushButton *>("teamWaitingReleaseAction")->click();
+    QTRY_COMPARE(calls(script(), "release").size(), 1);
+    sent = calls(script(), "release").first();
+    QCOMPARE(sent["task"].toInt(), 2);
+    QTRY_VERIFY(!row(heldId)); leave(heldId);
+    // The step Zerus could not take: Retry.
+    row(retryId)->findChild<QPushButton *>("teamWaitingAnswerToggle")->click();
+    QTRY_VERIFY(row(retryId)->findChild<QPushButton *>("teamWaitingReleaseAction"));
+    row(retryId)->findChild<QPushButton *>("teamWaitingReleaseAction")->click();
+    QTRY_COMPARE(calls(script(), "retry").size(), 1);
+    QCOMPARE(calls(script(), "retry").first()["task"].toInt(), 5);
+    QTRY_VERIFY(!row(retryId)); leave(retryId);
+    // The end of the team: the summary reaches the lead.
+    row(finishId)->findChild<QPushButton *>("teamWaitingAnswerToggle")->click();
+    QTRY_VERIFY(row(finishId)->findChild<QLineEdit *>("teamWaitingFinishSummary"));
+    row(finishId)->findChild<QLineEdit *>("teamWaitingFinishSummary")->setText("Shipped 0.43");
+    row(finishId)->findChild<QPushButton *>("teamWaitingFinishAction")->click();
+    QTRY_COMPARE(calls(script(), "finish").size(), 1);
+    QCOMPARE(calls(script(), "finish").first()["summary"].toString(), QStringLiteral("Shipped 0.43"));
+    QTRY_VERIFY(!row(finishId)); leave(finishId);
+    QCOMPARE(answered, (QStringList{reportId, heldId, retryId, finishId}));
 }
 
 // U29 (owner, 2026-10-31: an addition waited for the owner and could be

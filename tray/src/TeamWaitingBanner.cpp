@@ -166,9 +166,9 @@ void TeamWaitingBanner::setExpanded(bool expanded)
 QString TeamWaitingBanner::actionText(const QString &action)
 {
     // #724: Approve… asks the team's question here; Answer opens the item's
-    // card in the row. Accept… (a report read first) opens the team at it.
-    if (action == "approve_phase" || action == "approve_plan") return QObject::tr("Approve…");
-    if (action == "decide_report") return QObject::tr("Accept…");
+    // card in the row, for every kind that has one (task 116: a report, a
+    // held task, a retry and the end of the team too).
+    if (TeamWaitingAnswer::approves(action)) return QObject::tr("Approve…");
     if (TeamWaitingAnswer::opensCard(action)) return QObject::tr("Answer");
     return QObject::tr("Open team");
 }

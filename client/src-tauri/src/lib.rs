@@ -59,6 +59,13 @@ mod login_item;
 #[cfg(target_os = "macos")]
 mod macos_notification_diagnostics;
 mod metrics;
+mod sandbox;
+
+/// Task 75: why this process is a sandbox, None on a normal desktop.
+#[tauri::command]
+fn sandbox_check() -> Option<String> {
+    sandbox::reason()
+}
 #[cfg(feature = "live")]
 mod mobile;
 #[cfg(feature = "live")]
@@ -1538,6 +1545,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         screens::session_usage,
         screens::accounts_view,
         screens::session_switch_account,
+        sandbox_check,
         screens::account_edits::account_edit_open,
         screens::account_edits::account_edit_apply,
         screens::account_edits::account_edit_close,

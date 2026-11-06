@@ -16,6 +16,8 @@ import { object, text } from "../screens/tasks-ui";
 import { homeShort, sessionAccount, sessionGoal, sessionPlan, usageRows } from "./inspector-data";
 import { machineCards } from "../../store/machines";
 import { SessionLeadPanel } from "./SessionLeadPanel";
+import { privateStoreNotices } from "../../store/privateStoreNotices";
+import { toast } from "../../store/notices";
 import { filterFolder, clearFolderFilter } from "../../store/folderFilter";
 import { of, sameKey, native } from "./paths";
 import type { BoundRow } from "./scope-filters";
@@ -63,6 +65,11 @@ function PlanAgents() {
 function Details() {
   const s = () => selected()!;
   const details = () => detailsFor(s(), !computerOffline(s().computer), followedFor(s().key));
+  createEffect(() => {
+    const view = details();
+    privateStoreNotices((notice) => toast(notice.title, notice.body, "error", true))
+      .observe(s().computer, s().machine, !computerOffline(s().computer), view?.private_stores ?? []);
+  });
   const identity = () => sessionIdentity(s(), details());
   const value = (v: string | undefined) => v || tr("Not reported");
   const rows = createMemo(() => usageRows(raw()));

@@ -3602,23 +3602,10 @@ pub(crate) fn host_still_starting(error: &str) -> bool {
 
 fn launch(team: &Team, member: &Member) -> anyhow::Result<()> {
     super::super::iron_rules::for_team(team, member)?;
-    // Task 115: a Kimi member starts with the narrow read-only hgs rules, so
-    // only a command that changes something asks the lead. A member on another
-    // computer is prepared there by the launch that runs on it.
-    if member.agent == "kimi" && member.computer.is_empty() {
-        match crate::config::Config::load() {
-            Ok(config) => {
-                let home = crate::accounts::launch_home(&config, "kimi", &member.account);
-                if let Err(error) = crate::state::kimi_permissions::allow_read_only_hgs(&home) {
-                    eprintln!(
-                        "zerus: Kimi read-only hgs rules not written to {}: {error}",
-                        home.display()
-                    );
-                }
-            }
-            Err(error) => eprintln!("zerus: Kimi read-only hgs rules not written: {error}"),
-        }
-    }
+    // Task 115: a Kimi member's read-only rules are the owner's explicit
+    // opt-in (`hgs account kimi-read-only`), never written by a launch: Kimi
+    // has no per-launch rule override, and editing the config a launch reads
+    // would silently change every Kimi session on this computer.
     let folder = member_folder(team, member)?;
     let args = launch_args(team, member, &folder);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();

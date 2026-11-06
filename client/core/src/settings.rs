@@ -160,6 +160,8 @@ pub const KEYS: &[Key] = &[
     key("workspace/launchAgent", Kind::Text("")),
     key("workspace/launchOpenTerminal", Kind::Flag(false)),
     key("workspace/launchAccounts", Kind::Text("")),
+    // Task 74: Qt's SessionLeads JSON object, by session identity.
+    key("workspace/sessionLeads", Kind::Text("")),
     // A first-G3 family import handles this separately from the old seed.
     Key {
         name: "workspace/allSwarmProjects",

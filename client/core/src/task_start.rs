@@ -202,7 +202,7 @@ fn outcome(
     reply
         .get("state")
         .and_then(Value::as_str)
-        .filter(|s| matches!(*s, "submitted" | "uncertain" | "refused"))
+        .filter(|s| matches!(*s, "submitted" | "uncertain" | "refused" | "cutting_over"))
         .map(str::to_owned)
         .ok_or_else(|| "The start outcome could not be read. Recovery data was kept.".into())
 }
@@ -334,9 +334,11 @@ pub fn start(
         Err(error) => ("uncertain".into(), error),
     };
     let mut settled = record.clone();
+    // A refused or cutting-over start reserved nothing and sent nothing
+    // (A4): released, with its reason. Only "submitted" is a started task.
     settled["phase"] = json!(match state.as_str() {
         "submitted" => "started",
-        "refused" => "released",
+        "refused" | "cutting_over" => "released",
         _ => "review",
     });
     settled["error"] = json!(error.chars().take(ERROR_CHARS).collect::<String>());
@@ -366,7 +368,8 @@ pub fn release(
         true,
     ))?;
     let state = outcome(&reply, project, task, id)?;
-    if state == "refused" {
+    // A recovery read never cuts over; if one says so, nothing is released.
+    if matches!(state.as_str(), "refused" | "cutting_over") {
         return Err(RELEASE_FAILED.into());
     }
     let mut settled = record.clone();
@@ -589,6 +592,43 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(after["intent"]["retained_input"] == before["intent"]["retained_input"]);
+    }
+
+    #[test]
+    fn a_refused_or_cutting_over_start_is_released_with_its_reason() {
+        // Nothing was reserved or sent (A4): the start is released with the
+        // executor's reason, and another start is allowed. Only "submitted"
+        // starts the task; "uncertain" stays for review.
+        for state in ["refused", "cutting_over"] {
+            let s = Scratch::new();
+            let view = attempt(&s.0, FIRST, state);
+            assert!(!view.pending, "{state}");
+            assert_eq!(
+                (
+                    view.phase.as_str(),
+                    view.outcome.as_deref(),
+                    view.error.as_str()
+                ),
+                ("released", Some(state), "provider result")
+            );
+            let next = attempt(&s.0, SECOND, "submitted");
+            assert_eq!((next.id.as_str(), next.phase.as_str()), (SECOND, "started"));
+        }
+        let s = Scratch::new();
+        let unknown = attempt(&s.0, FIRST, "uncertain");
+        assert_eq!((unknown.pending, unknown.phase.as_str()), (true, "review"));
+        // A recovery read that claims a cutover releases nothing.
+        assert_eq!(
+            release(&s.0, "example", TASK, FIRST, &unknown.snapshot, |_| {
+                Ok(delivered(FIRST, "cutting_over"))
+            })
+            .err()
+            .as_deref(),
+            Some(RELEASE_FAILED)
+        );
+        assert!(outbox::pending(&root(&s.0), "example", TASK)
+            .unwrap()
+            .is_some());
     }
 
     #[test]

@@ -85,7 +85,10 @@ export async function startTask(project: string, task: Task) {
     const answer = await taskStarts.start(input);
     if (answer.outcome === "submitted") notify("info", tr("Task started."));
     else if (answer.outcome === "refused") notify("error", answer.error);
-    else if (answer.pending) notify("error", answer.error || START_PENDING);
+    // Nothing was reserved or sent; the executor's reason follows (A4).
+    else if (answer.outcome === "cutting_over") notify("error", answer.error, true, undefined, tr("Not started: this task is moving to execution records. Nothing was sent; try again later."));
+    // It may have reached the executor: reviewed, never sent again.
+    else if (answer.pending) notify("error", answer.error || START_PENDING, true, undefined, tr("Start unconfirmed: check the executor’s session. The task will not be sent again automatically."));
   } catch (e) { notify("error", String(e)); taskStarts.refresh(); }
   finally { setWritingTask(undefined); }
 }

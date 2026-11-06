@@ -1576,11 +1576,64 @@ GitHub releases or a schedule.
 ### 1. Build and review a candidate
 
 `release.yml` runs quick checks plus full Linux CLI, Arch, macOS and Windows
-validation from one exact commit. macOS can be explicitly disabled; Windows
-cannot, because the candidate carries the portable zip that this run tested. It
+validation from one exact commit, including macOS and Windows (the latter ships
+the portable zip that this run tested). It
 consumes that run's Arch package and Windows zip, verifies their embedded
-version/source commit, assembles source and binary archives, rebuilds both stable
-recipes, runs namcap and seals the result.
+version/source commit and assembles source and binary archives. In parallel with
+verification, a credential-free, cache-free source-recipe job builds the exact
+`git archive` with `makepkg` including `check()`, then runs namcap and
+`check-package.py`. Final assembly regenerates the tarball and requires identical
+raw-tar and compressed SHA-256 digests, recipe and `.SRCINFO` before reusing that
+same run's checked source package. Changed source, metadata or package bytes fail
+closed. It builds and checks only `zerus-ade-bin` afterwards.
+
+The signed cask install check and final assembly run in parallel. Neither produces
+the final candidate alone: the sealing job waits for both selected checks, then
+validates and uploads the immutable candidate. Optional casks may be skipped only
+when disabled for this run. Source/package jobs and sealing receive no credentials
+or cache access.
+
+Each required test suite runs once per candidate. Stable unsigned Mac packaging
+keeps bundle/self-tests but delegates core/Tauri/frontend regressions to its
+same-SHA verification gate. The verification Arch package uses `--nocheck` only
+when this release's source-recipe job supplies `check()` and the seal consumes
+that job's exact digest receipt. Ordinary PR/manual/Nightly Arch checks still run
+`check()`. Windows unit/lint/connector filesystem contracts run in parallel with
+the release CLI, desktop and portable build; both jobs are required by the suite
+gate. Host, client, package and installer-survival checks still test the release
+binaries in the packaging job.
+
+Do not start a second full matrix, including candidate verification, while
+another full matrix already tests that exact SHA. Before a manual candidate or
+full CI dispatch, check the resolved source (the `Resolve commit` job), wait for
+an existing full run, or select only a missing platform where appropriate.
+An existing PR run is not a substitute for the release's own required gate. Main CI regression also
+observes exact-SHA upstream-main Stable/Nightly candidate verification before
+starting: an active (or already successful) verify in an active candidate run
+suppresses only the duplicate regression scheduling. This observation is read-only
+and is never a test-pass receipt. A failed candidate or unavailable/bounded API
+observation runs regression normally. A race in which a candidate starts after
+that observation still needs the same scheduling rule; never cancel an unrelated
+candidate or substitute another SHA to reduce runner use.
+
+A maintainer may measure the credential-free graph on a reviewed branch without
+calling `release.yml` or changing a release in progress:
+
+```sh
+gh workflow run ci.yml --ref REVIEWED_BRANCH -f release_rehearsal=true \
+  -f run_linux=true -f run_arch=true -f run_macos=true \
+  -f run_windows=true -f run_ios=true
+```
+
+Leave `ref` empty so the workflow and tested source are the same commit. This runs
+one full manual matrix alongside the same reusable source recipe and unsigned Mac
+build, then the same assembly and sealing helpers. Partial coverage cannot produce
+a successful rehearsal. It has no signing/notary/environment secrets and no draft
+or publication step; its final artifact is named `release-rehearsal-SHA`, which the
+publisher cannot consume. The measurement excludes protected signing/notarization
+and signed cask installation, so report those separately. Do not start this while
+a PR/full matrix already tests the SHA, or while an active release needs the Mac
+runner slots.
 Stable and nightly candidates call the common `checks.yml` workflow directly
 with read-only cache access. Their verification never includes the main-push dev
 publisher or requests its tag-writing permissions.
@@ -1636,9 +1689,11 @@ an empty output directory. Build artifacts are ignored and are never committed t
 the application or AUR repositories.
 
 Once the repository variable `MACOS_CASKS_ENABLED` is `true`, the candidate run
-also builds the Apple Silicon Zerus Next bundle, without Qt (`--gui tauri`), signs
-and notarizes it in the main-only `macos-signing` environment and installs the result
-through a local tap before assembly (`macos-cask.yml`). The candidate then uses
+also builds the unsigned Apple Silicon Zerus Next bundle, without Qt (`--gui tauri`),
+in parallel with full verification. Only after verification and that same run's
+bundle both succeed does it sign and notarize in the main-only `macos-signing` environment and installs the result
+through a local tap alongside final assembly (`macos-cask-install.yml`); sealing
+waits for both. The candidate then uses
 release-info schema 2 and contains the `zerus-VERSION-macos-arm64.zip` asset and
 `homebrew/zerus.rb`. Until then, and with `-f macos_cask=false`, the candidate has
 no macOS asset. Details, secrets and retry rules are in

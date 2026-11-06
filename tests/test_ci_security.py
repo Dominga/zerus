@@ -304,7 +304,7 @@ class WorkflowSecurityTests(unittest.TestCase):
             workflow = (ROOT / '.github/workflows' / name).read_text()
             self.assertIn('      run_windows: true\n', job(workflow, 'verify'))
             self.assertIn('      run_ios: true\n', job(workflow, 'verify'))
-            assemble = job(workflow, 'assemble')
+            assemble = job((ROOT / '.github/workflows/release-assemble.yml').read_text(), 'assemble') if name == 'release.yml' else job(workflow, 'assemble')
             self.assertIn('name: windows-x86_64-${{ github.sha }}\n          path: artifacts/windows\n', assemble)
             self.assertIn('--windows-zip "${portables[0]}"', assemble)
         review = job(self.ci, 'review')
@@ -334,9 +334,18 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn("CARGO_BUILD_JOBS: 4", windows)
         self.assertIn("timeout-minutes: 25", windows)
         self.assertIn("--gui target/windows-next/release/hgs-tray.exe", windows)
-        # A new stable Rust release must not fail an unchanged commit.
-        self.assertIn("cargo +1.99.1 clippy --locked --all-targets -- -D warnings", windows)
-        self.assertNotRegex(windows, r"(?m)^\s*cargo clippy")
+        # Unit/lint contracts run in parallel, but stay mandatory in the suite gate.
+        unit = job((ROOT / '.github/workflows/checks.yml').read_text(), 'windows-tests')
+        self.assertEqual(field(unit, 'needs'), 'source')
+        self.assertEqual(field(unit, 'if'), field(windows, 'if'))
+        self.assertEqual(field(unit, 'runs-on'), 'windows-2025')
+        self.assertNotIn('secrets.', unit)
+        self.assertNotIn('environment:', unit)
+        self.assertNotIn('actions/cache/save', unit)
+        self.assertIn("cargo +1.99.1 clippy --locked --all-targets -- -D warnings", unit)
+        self.assertNotRegex(unit, r"(?m)^\s*cargo clippy")
+        self.assertNotIn('cargo test --locked', windows)
+        self.assertIn("'windows-tests': json.loads(os.environ['RUN_WINDOWS'])", job((ROOT / '.github/workflows/checks.yml').read_text(), 'gate'))
         self.assertIn("rustup toolchain install 1.99.1 --profile minimal --component clippy", windows)
         # The runner's stdin is a synchronous pipe that Windows OpenSSH never exits on.
         for line in ("cargo test --locked </dev/null", "test_windows_client.py -v </dev/null",
@@ -344,7 +353,7 @@ class WorkflowSecurityTests(unittest.TestCase):
                      "test_windows_mobile_gateway.py -v </dev/null",
                      "--output artifacts/zerus-windows-x86_64.zip </dev/null",
                      "--run --selftest \\\n            </dev/null"):
-            self.assertIn(line, windows)
+            self.assertIn(line, unit if line.startswith('cargo test') else windows)
         for line in ("name: windows-x86_64-${{ needs.source.outputs.commit }}",
                      "retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}",
                      "check-windows-portable.py artifacts/zerus-windows-x86_64.zip --run"):
@@ -455,7 +464,7 @@ class WorkflowSecurityTests(unittest.TestCase):
     def test_checks_gate_requires_exactly_the_selected_suites(self):
         gate = job((ROOT / ".github/workflows/checks.yml").read_text(), "gate")
         self.assertIn("needs: [source, quick, client-frontend, relay, connector, connector-macos, ios, android, client-native-linux, client-native-macos-core, client-native-macos-tauri, client-native-windows, cli, "
-                      "cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, arch-package, windows-desktop, windows-host]", gate)
+                      "cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, arch-package, windows-tests, windows-desktop, windows-host]", gate)
         self.assertIn("RUN_WINDOWS: ${{ needs.source.outputs.run_windows == 'true' }}", gate)
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
@@ -465,7 +474,7 @@ class WorkflowSecurityTests(unittest.TestCase):
                 "cli-macos-native": "success", "cli-macos": "success", "arch": "success", "arch-package": "success",
                 "mac-desktop": "success", "connector-macos": "success", "ios": "success"}
         # All Windows jobs are selected together, and each must pass on its own.
-        windows = ("client-native-windows", "windows-desktop", "windows-host")
+        windows = ("client-native-windows", "windows-tests", "windows-desktop", "windows-host")
         for name in windows:
             for selected, result, success in [("true", "success", True), ("true", "failure", False),
                                               ("true", "skipped", False), ("true", "cancelled", False),
@@ -808,7 +817,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
         names = ("source", "quick", "client-frontend", "relay", "connector", "connector-macos", "ios", "android", "client-native-linux", "client-native-macos-core", "client-native-macos-tauri", "client-native-windows",
                  "cli", "cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "arch-package",
-                 "windows-desktop", "windows-host")
+                 "windows-tests", "windows-desktop", "windows-host")
         for run_macos, smoke_result, success in [("true", "success", True), ("true", "failure", False),
                                                  ("true", "skipped", False), ("false", "skipped", True),
                                                  ("false", "success", False)]:
@@ -852,7 +861,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
         names = ("source", "quick", "client-frontend", "relay", "connector", "connector-macos", "ios", "android", "client-native-linux", "client-native-macos-core", "client-native-macos-tauri", "client-native-windows",
                  "cli", "cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "arch-package",
-                 "windows-desktop", "windows-host")
+                 "windows-tests", "windows-desktop", "windows-host")
         for run_ios, ios_result, success in [("true", "success", True), ("true", "failure", False),
                                                ("true", "skipped", False), ("true", "cancelled", False),
                                                ("false", "skipped", True), ("false", "success", False)]:
@@ -892,7 +901,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn("\n        if: always()\n", upload)
         self.assertIn("name: arch-x86_64-${{ needs.source.outputs.commit }}\n          path: artifacts\n", upload)
         for line in ("ZERUS_DEV_BUILD_NUMBER: ${{ github.repository == 'ufna/zerus'", "fetch-depth: 0",
-                     "run: runuser -u user -- bash scripts/build-arch-package.sh",
+                     "runuser -u user -- bash scripts/build-arch-package.sh",
                      "runuser -u user -- python3 scripts/check-installed-package.py"):
             self.assertIn(line, package)
         self.assertLess(package.index("build-arch-package.sh"), package.index("name: arch-x86_64-"))
@@ -923,7 +932,7 @@ class WorkflowSecurityTests(unittest.TestCase):
                          {"actions/cache/restore", "actions/cache/save"})
         names = re.findall(r"(?m)^  ([a-z][\w-]*):\n", checks.split("\njobs:\n", 1)[1])
         # Restore-only consumers never save: two jobs saving one key would race.
-        read_only = {"windows-host": {"rust-cache"}, "client-native-macos-core": {"rust-cache"}}
+        read_only = {"windows-tests": {"rust-cache"}, "windows-host": {"rust-cache"}, "client-native-macos-core": {"rust-cache"}}
         saves = 0
         for name in names:
             restores, saved = {}, []
@@ -1128,8 +1137,9 @@ class WorkflowSecurityTests(unittest.TestCase):
                    if word != "\\"]
         self.assertEqual(modules, ["test_windows_host", "test_windows_host_conpty", "test_windows_host_survival",
                                    "test_windows_lifecycle", "test_windows_hooks", "test_backend_contract"])
-        connector = next(step for step in steps if "Windows mobile connector build" in step)
-        self.assertIn("--test windows_gateway </dev/null", connector)
+        connector = next(step for step in steps if "Release CLI and connector for host and package checks" in step)
+        unit_connector = next(step for step in self.checks_steps("windows-tests") if "Windows connector filesystem contracts" in step)
+        self.assertIn("--test windows_gateway </dev/null", unit_connector)
         self.assertIn("--locked --release --manifest-path services/mobile/connector/Cargo.toml", connector)
         self.assertNotIn("--features test-hooks", connector)
         self.assertLess(steps.index(connector), steps.index(host))
@@ -1586,7 +1596,7 @@ class WorkflowSecurityTests(unittest.TestCase):
             with self.subTest(change=change):
                 self.assertFalse(runs(**change))
 
-    def assemble_runs(self, workflow, verify, macos, enabled, requested=True):
+    def assemble_runs(self, workflow, verify, macos, enabled, requested=True, source="success"):
         expression = field(job(workflow, "assemble"), "if")
         self.assertIn("!cancelled()", expression)
         expression = expression.replace("&&", " and ").replace("||", " or ")
@@ -1595,7 +1605,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         return bool(eval(expression, {"__builtins__": {}}, {
             "cancelled": lambda: False, "inputs": SimpleNamespace(macos_cask=requested),
             "vars": SimpleNamespace(MACOS_CASKS_ENABLED="true" if enabled else ""),
-            "needs": SimpleNamespace(verify=SimpleNamespace(result=verify), gate=SimpleNamespace(result=verify), macos=SimpleNamespace(result=macos)),
+            "needs": SimpleNamespace(verify=SimpleNamespace(result=verify), gate=SimpleNamespace(result=verify), macos=SimpleNamespace(result=macos), source=SimpleNamespace(result=source)),
         }))
 
     def test_casks_are_built_only_once_signing_is_enabled(self):
@@ -1618,13 +1628,122 @@ class WorkflowSecurityTests(unittest.TestCase):
                                              (requested, enabled, result))
                         self.assertFalse(self.assemble_runs(workflow, "failure", "skipped", enabled, requested))
 
+    def test_release_rehearsal_cannot_sign_publish_or_succeed_with_a_partial_matrix(self):
+        ci = (ROOT / '.github/workflows/ci.yml').read_text()
+        source = job(ci, 'rehearsal-source')
+        for platform in ('linux', 'arch', 'macos', 'windows', 'ios'):
+            self.assertIn('inputs.run_' + platform, field(source, 'if'))
+        self.assertEqual(field(source, 'uses'), './.github/workflows/release-source.yml')
+        for name in ('rehearsal-source', 'rehearsal-macos', 'rehearsal-assemble', 'rehearsal-seal'):
+            selected = job(ci, name)
+            self.assertIn("github.event_name == 'workflow_dispatch'", field(selected, 'if'))
+            self.assertIn('inputs.release_rehearsal', field(selected, 'if'))
+            self.assertNotIn('secrets.', selected)
+            self.assertNotIn('environment:', selected)
+            self.assertEqual(field(selected, 'cache-mode'), 'none')
+        seal = job(ci, 'rehearsal-seal')
+        self.assertIn('release-rehearsal-${{ github.sha }}', seal)
+        self.assertNotIn('-candidate', seal)
+        code = inline_python(seal)
+        for failed in (None, 'review', 'rehearsal-source', 'rehearsal-macos', 'rehearsal-assemble'):
+            results = {key: {'result': 'success'} for key in ('review', 'rehearsal-source', 'rehearsal-macos', 'rehearsal-assemble')}
+            if failed: results[failed]['result'] = 'skipped'
+            with self.subTest(failed=failed), patch.dict(os.environ, RESULTS=json.dumps(results)):
+                if failed:
+                    with self.assertRaises(AssertionError): exec(code, {})
+                else:
+                    exec(code, {})
+        # Only the existing trusted-main push path can reach the signing tail.
+        self.assertIn("github.event_name == 'push'", field(job(ci, 'dev-tail'), 'if'))
+
+    def test_stable_unsigned_overlap_keeps_the_full_gate_and_exact_version(self):
+        release = (ROOT / '.github/workflows/release.yml').read_text()
+        bundle = job(release, 'macos-unsigned')
+        self.assertEqual(field(bundle, 'needs'), 'version')
+        self.assertEqual(field(bundle, 'uses'), './.github/workflows/macos-bundle.yml')
+        self.assertNotIn('secrets.', bundle)
+        self.assertIn('run_tests: false', bundle)
+        self.assertIn('tests_in_verify: true', bundle)
+        self.assertIn('run_macos: true', job(release, 'verify'))
+        self.assertIn('arch_check_in_source: true', job(release, 'verify'))
+        macos = job(release, 'macos')
+        self.assertEqual(field(macos, 'needs'), '[verify, macos-unsigned]')
+        self.assertIn("needs.verify.result == 'success'", field(macos, 'if'))
+        self.assertIn("needs.macos-unsigned.result == 'success'", field(macos, 'if'))
+        self.assertIn('reuse_unsigned: true', macos)
+        self.assertIn('unsigned_release: ${{ needs.macos-unsigned.outputs.release }}', macos)
+        signing = job((ROOT / '.github/workflows/macos-cask.yml').read_text(), 'sign')
+        code = inline_python(signing)
+        self.assertLess(signing.index('Bind the parallel candidate'), signing.index('Prepare a temporary signing keychain'))
+        with tempfile.TemporaryDirectory(prefix='zerus-macos-reuse-') as tmp:
+            root = Path(tmp); (root / 'VERSION').write_text('0.99.0'); (root / 'DEV_VERSION').write_text('0.100.0')
+            for channel, event, version, admitted in [
+                    ('stable', 'workflow_dispatch', '0.99.0', True),
+                    ('dev', 'push', '0.100.0-dev.123', True),
+                    ('stable', 'push', '0.99.0', False),
+                    ('stable', 'pull_request', '0.99.0', False),
+                    ('stable', 'workflow_dispatch', '0.98.0', False),
+                    ('nightly', 'workflow_dispatch', '0.99.0', False),
+                    ('dev', 'workflow_dispatch', '0.100.0-dev.123', False),
+                    ('dev', 'push', '0.100.0-dev.122', False)]:
+                with self.subTest(channel=channel, event=event, version=version), \
+                        patch.dict(os.environ, CHANNEL=channel, EVENT_NAME=event, RELEASE=version, RUN_NUMBER='123'), \
+                        patch('pathlib.Path', side_effect=lambda p: root / p):
+                    if admitted:
+                        exec(code, {})
+                    else:
+                        with self.assertRaises(AssertionError): exec(code, {})
+
+    def test_release_parallel_source_and_install_jobs_cannot_bypass_sealing(self):
+        workflow = (ROOT / '.github/workflows/release.yml').read_text()
+        source = job(workflow, 'source')
+        self.assertEqual(field(source, 'needs'), 'version')
+        self.assertEqual(field(source, 'cache-mode'), 'none')
+        self.assertNotIn('secrets.', source)
+        self.assertNotIn('actions/cache', source)
+        source_worker = job((ROOT / '.github/workflows/release-source.yml').read_text(), 'source')
+        self.assertEqual(field(source, 'uses'), './.github/workflows/release-source.yml')
+        self.assertIn('--source-only', source_worker)
+        assemble = job(workflow, 'assemble')
+        self.assertEqual(field(assemble, 'needs'), '[verify, source, macos]')
+        self.assertEqual(field(assemble, 'uses'), './.github/workflows/release-assemble.yml')
+        worker = job((ROOT / '.github/workflows/release-assemble.yml').read_text(), 'assemble')
+        self.assertIn('--source-check artifacts/release-source', worker)
+        self.assertIn('--binary-only --defer-seal', worker)
+        self.assertNotIn('scripts/seal-release.py', worker)
+        for result in ('failure', 'cancelled', 'skipped'):
+            self.assertFalse(self.assemble_runs(workflow, 'success', 'success', True, source=result))
+        self.assertIn('verify_installation: false', job(workflow, 'macos'))
+        install = job(workflow, 'cask-install')
+        self.assertEqual(field(install, 'needs'), 'macos')
+        self.assertEqual(field(install, 'uses'), './.github/workflows/macos-cask-install.yml')
+        seal = job(workflow, 'seal')
+        self.assertEqual(field(seal, 'needs'), '[assemble, cask-install]')
+        self.assertIn('scripts/seal-release.py dist', seal)
+        # Evaluate the real workflow predicate for every terminal result and
+        # optional-cask setting; a failed selected install can never seal.
+        expression = field(seal, 'if').replace('needs.cask-install', 'needs.install')
+        expression = expression.replace('&&', ' and ').replace('||', ' or ')
+        expression = re.sub(r'!(?!=)', 'not ', expression)
+        for assembled, installed, wanted, cancelled in product(
+                ('success', 'failure', 'cancelled', 'skipped'),
+                ('success', 'failure', 'cancelled', 'skipped'), (True, False), (True, False)):
+            actual = bool(eval(expression, {'__builtins__': {}}, {
+                'cancelled': lambda: cancelled,
+                'inputs': SimpleNamespace(macos_cask=wanted),
+                'vars': SimpleNamespace(MACOS_CASKS_ENABLED='true'),
+                'needs': SimpleNamespace(assemble=SimpleNamespace(result=assembled), install=SimpleNamespace(result=installed)),
+            }))
+            self.assertEqual(actual, not cancelled and assembled == 'success' and
+                             (installed == 'success' or (installed == 'skipped' and not wanted)))
+
     def test_release_draft_survives_a_skipped_cask(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         expression = field(job(workflow, "draft"), "if")
         # Without a status function GitHub adds success() over the whole chain,
         # which would skip the draft whenever the optional cask was skipped.
         self.assertIn("!cancelled()", expression)
-        self.assertIn("needs.assemble.result == 'success'", expression)
+        self.assertIn("needs.seal.result == 'success'", expression)
         self.assertIn("inputs.create_draft", expression)
 
     def test_tap_deploy_key_is_only_available_to_the_publishers(self):
@@ -1826,7 +1945,7 @@ class WindowsInstallerPublicationWorkflow(unittest.TestCase):
         self.assertIn('--info artifacts/installer/windows-installer-info.json', windows)
         self.assertIn('HGS_TEST_INSTALLER_VERSION=', windows)
         for workflow in ('release.yml', 'nightly.yml'):
-            assembly = job((ROOT / '.github/workflows' / workflow).read_text(), 'assemble')
+            assembly = job((ROOT / '.github/workflows' / ('release-assemble.yml' if workflow == 'release.yml' else workflow)).read_text(), 'assemble')
             self.assertIn('--windows-installer artifacts/windows/installer/zerus-windows-x86_64-setup.exe', assembly)
             self.assertIn('--windows-installer-info artifacts/windows/installer/windows-installer-info.json', assembly)
             self.assertNotIn('secrets.', assembly)

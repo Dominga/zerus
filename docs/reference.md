@@ -1852,6 +1852,9 @@ descriptions only for reviewed text. In a Git subdirectory or worktree, Codex
 folder access names the repository root that Codex will trust. Claude wraps a
 long workspace path across rows; the joined rows must still equal the launch
 folder exactly.
+Codex 0.167 can offer **Back to Agent Command Center** instead of **Quit**.
+Back cancels opening the folder without saving trust and keeps Codex running;
+Quit exits the original Codex process. Both require an explicit user choice.
 Trust persistence belongs to the native agent.
 Already-running Claude and Kimi sessions can retain the exact Bitwarden launcher
 notices above the complete workspace-trust panel; Claude also accepts its
@@ -1915,6 +1918,11 @@ for your message. A dialog too narrow to read, or for another goal, stays in
 Terminal.
 
 Optional Codex questions preserve the regular composer and support **Skip**.
+Codex closes unanswered optional questions when their native turn completes,
+is interrupted, or accepts an ordinary follow-up. Zerus removes those cards
+and their question badge without recording a user answer. Continued tool work
+alone does not close a question. Questions belonging to a native child remain
+with that child's parent; they are not requests for the person.
 When Codex's own question panel is open, Zerus answers or skips there. Codex's
 animated working status above the panel does not block an answer; any change
 to the panel itself does. An open panel taller than its pane keeps its title
@@ -1933,7 +1941,10 @@ If an optional answer enters Codex's native queue, the question stays visible as
 **Submitted / Awaiting agent** with the original answer locked. Submission means
 the verified terminal received the answer; it does not mean Codex has recorded
 it yet. This state survives polling and GUI restarts. The card disappears after
-the exact native question reply appears in the conversation. Zerus never resends
+the exact native question reply appears in the conversation. If Codex closes
+the question first, this exact submitted answer stays as a read-only delivery
+receipt until acknowledgement; it is not an outstanding request for input.
+Zerus never resends
 the answer or promotes the queue automatically; **Send now** remains an explicit
 native queue action. Delivery without confirmed submission still requires
 checking Terminal before retrying.
@@ -5091,8 +5102,8 @@ holds the `question_id` of the newest 32, oldest first, and `latest_at` is when
 the newest was asked (seconds since the epoch, or `null` when not recorded).
 Without any it is `{"count": 0}`, as for saved, archived and non-Codex sessions.
 A question stops counting once its answer appears in the conversation, it is
-skipped, or its answer was submitted (**Submitted / Awaiting agent**); one asked
-in an earlier run of the same conversation counts until then. Only the main
+skipped, closed by native turn completion/interruption or ordinary follow-up,
+or its answer was submitted (**Submitted / Awaiting agent**). Only the main
 conversation is indexed: async questions of Codex native subagents are not
 counted. The value is `null` while the question index is incomplete or held by
 another process (as above) or cannot be read: unknown, never a count of 0, so a

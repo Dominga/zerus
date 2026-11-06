@@ -16,9 +16,9 @@ pub fn reason() -> Option<String> {
 
 #[cfg(windows)]
 fn windows_reason() -> Option<String> {
-    use windows_sys::Win32::Security::{IsTokenRestricted, OpenProcessToken, TOKEN_QUERY};
+    use windows_sys::Win32::Security::{IsTokenRestricted, TOKEN_QUERY};
     use windows_sys::Win32::System::JobObjects::IsProcessInJob;
-    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     unsafe {
         let mut token = std::ptr::null_mut();

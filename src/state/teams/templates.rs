@@ -135,13 +135,15 @@ pub(crate) const BUILTIN: &[Template] = &[
     // provider's job.
     Template {
         id: "py-test",
-        summary: "the project .venv interpreter runs pytest (typed -k expression, -m mark and node names; JUnit XML in .zerus-team/python)",
+        summary: "the project .venv interpreter runs pytest (typed -k expression, -m mark, node names and test file or folder paths; JUnit XML in .zerus-team/python)",
         program: "python",
-        args: &["-m", "pytest", "-q", "--junitxml=.zerus-team/python/junit.xml", "-k={filter}", "-m={mark}", "{tests}"],
+        args: &["-m", "pytest", "-q", "--junitxml=.zerus-team/python/junit.xml", "-k={filter}", "-m={mark}", "{tests}", "{paths}"],
         params: &[
             optional("filter", Kind::Text),
             optional("mark", Kind::Identifier),
             optional("tests", Kind::Identifiers),
+            // Task 137: the test files `hgs test affected` chose.
+            optional("paths", Kind::Paths),
         ],
         timeout_secs: 1800,
     },
@@ -2905,6 +2907,12 @@ kind = "path"
         assert!(py.argv.contains(&"test_a.py::test_x".to_owned()));
         assert!(py.argv.contains(&"--junitxml=.zerus-team/python/junit.xml".to_owned()));
         assert!(!py.argv.iter().any(|arg| arg.starts_with("-m=")));
+        // Task 137: the test files an affected set chose, as paths.
+        std::fs::create_dir_all(dir.path().join("tests")).unwrap();
+        std::fs::write(dir.path().join("tests/test_demo.py"), "").unwrap();
+        let files = plan("py-test", &json!({"paths":["tests/test_demo.py"]}), dir.path()).unwrap();
+        assert!(files.argv.contains(&"tests/test_demo.py".to_owned()), "{:?}", files.argv);
+        assert!(plan("py-test", &json!({"paths":["tests/missing.py"]}), dir.path()).is_err());
         let cy = plan("cython-build", &json!({"sources":["a.pyx"]}), dir.path()).unwrap();
         assert_eq!(cy.argv, ["setup.py", "build_ext", "--inplace", "a.pyx"]);
         let uvdir = temp();

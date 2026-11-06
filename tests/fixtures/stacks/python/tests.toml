@@ -1,0 +1,10 @@
+version = 1
+
+[[provider]]
+name = "demo-pytest"
+kind = "pytest"
+root = "."
+sources = ["**"]
+tests = ["tests/**"]
+affected = "build"
+

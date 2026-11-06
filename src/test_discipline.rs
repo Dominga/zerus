@@ -13,6 +13,9 @@ pub mod detect;
 pub mod durations;
 pub mod glob;
 pub mod map;
+pub mod msbuild;
+#[cfg(test)]
+mod stacks_tests;
 pub mod tools;
 
 use crate::cli::{Error, Result};

@@ -1371,8 +1371,9 @@ class TaskDelivery(DeliveryFixture):
         fifo = tasks / (str(uuid.uuid4()) + ".loro")
         os.mkfifo(fifo)
         self.addCleanup(lambda: fifo.unlink(missing_ok=True))
-        # By its UUID: a short ID is found by reading every task, which the
-        # FIFO would hold (zerus-r75ru, not the quota count).
+        # By its UUID, so only the quota count reads the FIFO here; a
+        # short-ID lookup beside one is test_an_irregular_task_file_never_
+        # holds_project_reads (zerus-r75ru).
         ref = "orchard/" + late["uuid"]
         began = time.monotonic()
         refused = self.hgs("send", ref, session="codex/actor", ok=False)
@@ -1381,6 +1382,24 @@ class TaskDelivery(DeliveryFixture):
         self.assertNotIn("UNCOUNTED_LATE", self.received())
         self.assertEqual(self.hgs("send", ref)["task"]["stage"], "active")
         self.wait_received("UNCOUNTED_LATE")
+
+    def test_an_irregular_task_file_never_holds_project_reads(self):
+        # zerus-r75ru: a FIFO named as a task's file never holds a command
+        # that reads every task. It is listed as damaged; the other tasks
+        # are listed, found by short ID and added beside it as before.
+        kept = self.add("KEPT_BESIDE_A_FIFO", "--target", self.name)
+        tasks = self.state / "replica" / hashlib.sha256(b"project-1").hexdigest() / "tasks"
+        fifo = tasks / (str(uuid.uuid4()) + ".loro")
+        os.mkfifo(fifo)
+        self.addCleanup(lambda: fifo.unlink(missing_ok=True))
+        began = time.monotonic()
+        listing = self.hgs("list", "--project", "orchard")
+        self.assertIn(kept["uuid"], [task["uuid"] for task in listing["tasks"]])
+        self.assertIn(fifo.stem, json.dumps(listing["damaged"]))
+        self.assertEqual(self.hgs("get", kept["ref"])["task"]["uuid"], kept["uuid"])
+        added = self.add("ADDED_BESIDE_A_FIFO")
+        self.assertEqual(self.hgs("get", added["ref"])["task"]["uuid"], added["uuid"])
+        self.assertLess(time.monotonic() - began, 25)
 
     def test_the_legacy_route_counts_a_possible_agent_start_too(self):
         # desktop-u on #1519 R2: the legacy route's limit counts the tasks as
@@ -1482,6 +1501,42 @@ class TaskDelivery(DeliveryFixture):
         self.assertNotIn("resumed", [e["kind"] for e in current["log"]])
         self.assertEqual(self.notes(task, identity), [])
         self.assertNotIn("OUTSIDER_TEXT", self.received())
+
+    def test_a_legacy_reopen_obeys_the_project_s_agent_rules(self):
+        # zerus-anemc: the legacy route (here, the person's hold over a task
+        # with no floor or attempt) applies the same rules: an outsider agent
+        # may not reopen another session's task when agents keep to their
+        # own, and an agent past the hourly limit may not reopen one. A
+        # refusal saves no note and sends nothing; the person still reopens.
+        self.hgs("cutover", "--project", "orchard", "--hold", "on")
+        self.settings(agents_other=False)
+        task = self.reviewed("LEGACY_OUTSIDER_TASK")
+        self.assertFalse(self.execution(task).get("attempts"))
+        self.agent("codex/outsider")
+        identity = str(uuid.uuid4())
+        refused = self.message(task, "LEGACY_OUTSIDER_TEXT", mode="reopen", identity=identity,
+                               session="codex/outsider", ok=False)
+        self.assertIn("only in their own session", refused)
+        self.assertEqual(self.hgs("get", task["ref"])["task"]["stage"], "review")
+        self.assertEqual(self.notes(task, identity), [])
+        self.assertNotIn("LEGACY_OUTSIDER_TEXT", self.received())
+        # Past the hourly limit: an agent the rules let reach any session,
+        # which just made the hour's one start, is refused too.
+        self.settings(agents_other=True, agent_limit=1)
+        warm = self.add("LEGACY_REOPEN_WARM", "--target", self.name)
+        self.hgs("send", warm["ref"], "--json", session="codex/actor")
+        self.wait_received("LEGACY_REOPEN_WARM"); self.confirm()
+        limited = str(uuid.uuid4())
+        refused = self.message(task, "LEGACY_LIMIT_TEXT", mode="reopen", identity=limited,
+                               session="codex/actor", ok=False)
+        self.assertIn("per hour", refused)
+        self.assertEqual(self.notes(task, limited), [])
+        self.assertNotIn("LEGACY_LIMIT_TEXT", self.received())
+        # The person's reopen goes on, on the legacy route.
+        reopened = self.message(task, "LEGACY_PERSON_TEXT", mode="reopen")
+        self.assertEqual(reopened["task"]["stage"], "active")
+        self.assertNotIn("attempt", reopened)
+        self.wait_received("LEGACY_PERSON_TEXT")
 
     def test_a_start_id_reused_for_another_body_is_refused(self):
         # desktop-u on #1519 (zerus-f5q49): an ID answers only for its own

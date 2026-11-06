@@ -335,9 +335,14 @@ impl ProjectStore {
     )> {
         let path = self.dir().join(CACHE);
         let mark = self.dir().join(CACHE_MARK);
-        let old: Cache = fs::read(&path)
+        let old: Cache = crate::store::read_regular(&path)
             .ok()
-            .filter(|bytes| fs::read_to_string(&mark).ok() == Some(cache_mark(bytes)))
+            .filter(|bytes| {
+                crate::store::read_regular(&mark)
+                    .ok()
+                    .and_then(|mark| String::from_utf8(mark).ok())
+                    == Some(cache_mark(bytes))
+            })
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
         let mut cache = Cache::default();
@@ -615,7 +620,7 @@ impl ProjectStore {
             return Recovery::Unreadable;
         };
         let marked = self.was_managed(uuid);
-        let local = match fs::read(self.updates_path(uuid)) {
+        let local = match crate::store::read_regular(&self.updates_path(uuid)) {
             Ok(local) => local,
             Err(error) if error.kind() == ErrorKind::NotFound => Vec::new(),
             Err(_) if marked => return Recovery::Kept(Keep::Marked),
@@ -652,7 +657,7 @@ impl ProjectStore {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_millis());
         for path in [self.snapshot_path(uuid), self.updates_path(uuid)] {
-            match fs::read(&path) {
+            match crate::store::read_regular(&path) {
                 Ok(bytes) => {
                     let name = path.file_name().unwrap_or_default().to_string_lossy();
                     write_atomic(
@@ -1112,6 +1117,104 @@ mod tests {
         assert!(store.updates_path(task.uuid()).exists());
         let uuid = task.uuid().to_owned();
         (dir, store, uuid, peer.snapshot().unwrap())
+    }
+
+    /// zerus-r75ru: an import or an inventory beside an irregular file (a
+    /// FIFO) in a task's or the cache's place never waits on it. The copy is
+    /// kept for review, or its import refused; a marked copy's freshness is
+    /// unknown. Each runs under a watchdog, so a regression fails, not hangs.
+    #[cfg(unix)]
+    #[test]
+    fn an_import_or_inventory_beside_an_irregular_file_never_waits() {
+        fn fifo(path: &std::path::Path) {
+            let _ = fs::remove_file(path);
+            let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        }
+        fn soon<T: Send + 'static>(
+            root: &std::path::Path,
+            read: impl FnOnce(ProjectStore) -> T + Send + 'static,
+        ) -> T {
+            let root = root.to_owned();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(read(ProjectStore::open(&root, "project-1").unwrap()));
+            });
+            rx.recv_timeout(Duration::from_secs(20))
+                .expect("waited on an irregular file")
+        }
+        // A marked copy's updates log that is a FIFO: its freshness is
+        // unknown and the copy is kept, never read through.
+        let (dir, store, uuid, peer) = beside_a_peer(true);
+        fifo(&store.updates_path(&uuid));
+        drop(store);
+        let (fresh, kept) = soon(dir.path(), move |store| {
+            let fresh = store.fresh_version(&uuid).is_some();
+            (fresh, store.import_task(&uuid, &peer).unwrap_err().kept)
+        });
+        assert!(!fresh);
+        assert_eq!(kept, Some(Keep::Marked));
+        // An unmarked copy: a FIFO as its updates log is local data that
+        // cannot be read (kept); as its snapshot, beside updates that would
+        // give way, the replacement refuses when it sets the files aside.
+        for snapshot in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = ProjectStore::open(dir.path(), "project-1").unwrap();
+            let mut task = created();
+            store.save(&mut task).unwrap();
+            task.comment("Local", &Actor::Person, 2).unwrap();
+            store.save(&mut task).unwrap();
+            assert!(!store.was_managed(task.uuid()));
+            let (uuid, peer) = (task.uuid().to_owned(), task.snapshot().unwrap());
+            fifo(&if snapshot {
+                store.snapshot_path(&uuid)
+            } else {
+                store.updates_path(&uuid)
+            });
+            drop(store);
+            let refused = soon(dir.path(), move |store| {
+                store.import_task(&uuid, &peer).err()
+            });
+            let refused = refused.expect("refused");
+            if !snapshot {
+                assert_eq!(refused.kept, Some(Keep::UnreadableLocalData));
+            }
+        }
+        // The inventory cache and its mark, each written by an inventory of
+        // a task and then replaced by a FIFO.
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(dir.path(), "project-1").unwrap();
+        let mut task = created();
+        store.save(&mut task).unwrap();
+        // Only settled files are cached.
+        let old_time = SystemTime::now() - Duration::from_secs(60);
+        for path in [
+            store.snapshot_path(task.uuid()),
+            store.updates_path(task.uuid()),
+        ] {
+            if let Ok(file) = fs::File::options().write(true).open(&path) {
+                file.set_times(fs::FileTimes::new().set_modified(old_time))
+                    .unwrap();
+            }
+        }
+        drop(store);
+        for name in [CACHE, CACHE_MARK] {
+            let store = ProjectStore::open(dir.path(), "project-1").unwrap();
+            for stale in [CACHE, CACHE_MARK] {
+                let _ = fs::remove_file(store.dir().join(stale));
+            }
+            store.inventory().unwrap();
+            for written in [CACHE, CACHE_MARK] {
+                let meta = fs::symlink_metadata(store.dir().join(written)).unwrap();
+                assert!(meta.is_file(), "{written}");
+            }
+            fifo(&store.dir().join(name));
+            drop(store);
+            assert!(
+                soon(dir.path(), |store| store.inventory().is_ok()),
+                "{name}"
+            );
+        }
     }
 
     fn damaged_beside_a_pre_attempt_peer() -> (tempfile::TempDir, ProjectStore, String, Vec<u8>) {

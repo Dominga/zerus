@@ -551,7 +551,7 @@ fn digest(bytes: &[u8]) -> String {
 /// The first block of an updates file, header and payload; none when the
 /// file is missing or its first block is cut short.
 fn first_block(path: &Path) -> Result<Option<Vec<u8>>> {
-    let mut file = match File::open(path) {
+    let mut file = match open_regular(path) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
@@ -594,18 +594,11 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// The intact blocks with their end offsets, and whether the whole input was
-/// intact. A short, empty or mismatched block ends the list.
-/// The most one task file may hold for the agent-start count: a document is
-/// at most `MAX_DOCUMENT`, and its updates log grows until it is folded.
-const COUNTED_BYTES: u64 = 16 * crate::schema::MAX_DOCUMENT as u64;
-
-/// One task file, read whole without waiting (#1519 review): only a regular
-/// file, refused before it is opened otherwise; opened without following a
-/// final link or waiting for a FIFO's writer; the handle a regular file; at
-/// most `COUNTED_BYTES`. A missing file is `NotFound`.
-fn read_counted(path: &Path) -> std::io::Result<Vec<u8>> {
-    use std::io::Read;
+/// A store file opened for reading without waiting (#1519 review,
+/// zerus-r75ru): only a regular file, refused before it is opened otherwise;
+/// opened without following a final link or waiting for a FIFO's writer; the
+/// handle a regular file. A missing file is `NotFound`.
+fn open_regular(path: &Path) -> std::io::Result<File> {
     let irregular = || std::io::Error::other("not a regular file");
     if !fs::symlink_metadata(path)?.is_file() {
         return Err(irregular());
@@ -627,14 +620,29 @@ fn read_counted(path: &Path) -> std::io::Result<Vec<u8>> {
     if !file.metadata()?.is_file() {
         return Err(irregular());
     }
+    Ok(file)
+}
+
+/// One task or project file, read whole without waiting (`open_regular`).
+/// Every read of a store's documents goes through it, so a FIFO, device or
+/// link in a task's place never holds a command that reads every task: that
+/// task does not load, and is listed as damaged.
+///
+/// No size is refused (zerus-ern6o): no writer bounds these files. A
+/// project's or a task's Loro history grows with every edit, and only a
+/// task's visible text is held to `MAX_DOCUMENT`, so any cap here would make
+/// a file this store wrote unreadable. A read takes the memory a load of
+/// that file always took; only regular files are read.
+pub(crate) fn read_regular(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut file = open_regular(path)?;
     let mut bytes = Vec::new();
-    file.take(COUNTED_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > COUNTED_BYTES {
-        return Err(std::io::Error::other("larger than a task file"));
-    }
+    file.read_to_end(&mut bytes)?;
     Ok(bytes)
 }
 
+/// The intact blocks with their end offsets, and whether the whole input was
+/// intact. A short, empty or mismatched block ends the list.
 pub(crate) fn blocks(bytes: &[u8]) -> (Vec<(&[u8], usize)>, bool) {
     let mut out = Vec::new();
     let mut at = 0;
@@ -798,7 +806,7 @@ impl ProjectStore {
     }
 
     pub fn project(&self) -> Result<ProjectDoc> {
-        match fs::read(self.dir.join("project.loro")) {
+        match read_regular(&self.dir.join("project.loro")) {
             Ok(bytes) => ProjectDoc::from_bytes(&bytes),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(ProjectDoc::new()),
             Err(error) => Err(error.into()),
@@ -926,7 +934,7 @@ impl ProjectStore {
 
     /// The task's mark; none when it is missing or cannot be read.
     pub(crate) fn mark(&self, uuid: &str) -> Option<Mark> {
-        Mark::unsealed(&fs::read(self.managed_path(uuid)).ok()?)
+        Mark::unsealed(&read_regular(&self.managed_path(uuid)).ok()?)
     }
 
     /// Whether the task is marked, and the version its mark says this store
@@ -934,7 +942,7 @@ impl ProjectStore {
     /// when there is nothing to read.
     fn marked(&self, uuid: &str) -> Marked {
         let path = self.managed_path(uuid);
-        match fs::read(&path) {
+        match read_regular(&path) {
             Ok(bytes) => Mark::unsealed(&bytes)
                 .and_then(|mark| mark.version())
                 .map_or(Marked::Unreadable, Marked::Saved),
@@ -963,7 +971,7 @@ impl ProjectStore {
         if self.was_managed(uuid) {
             return Some(Keep::Marked);
         }
-        match fs::read(self.updates_path(uuid)) {
+        match read_regular(&self.updates_path(uuid)) {
             Ok(bytes) => (!blocks(&bytes).1).then_some(Keep::UnreadableLocalData),
             Err(error) if error.kind() == ErrorKind::NotFound => None,
             Err(_) => Some(Keep::UnreadableLocalData),
@@ -1066,16 +1074,16 @@ impl ProjectStore {
     }
 
     /// A task read only for the agent-start count, inside an admission:
-    /// every file of it read whole (`read_counted`), and a copy that holds
+    /// every file of it read whole (`read_regular`), and a copy that holds
     /// less than its mark is damaged. It writes nothing (no mark is raised).
     fn counted(&self, uuid: &str) -> Result<TaskDoc> {
-        let mut task = TaskDoc::from_bytes(&read_counted(&self.snapshot_path(uuid))?)?;
+        let mut task = TaskDoc::from_bytes(&read_regular(&self.snapshot_path(uuid))?)?;
         if task.uuid() != uuid {
             return Err(Error::failed("the task file does not match its name"));
         }
         // Every update block must frame and import whole: a broken or cut
         // record is unknown evidence, never fewer starts (#1519 R3).
-        match read_counted(&self.updates_path(uuid)) {
+        match read_regular(&self.updates_path(uuid)) {
             Ok(bytes) => {
                 let (found, intact) = blocks(&bytes);
                 if !intact {
@@ -1090,7 +1098,7 @@ impl ProjectStore {
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        match read_counted(&self.managed_path(uuid)) {
+        match read_regular(&self.managed_path(uuid)) {
             Ok(bytes) => {
                 let saved = Mark::unsealed(&bytes)
                     .and_then(|mark| mark.version())
@@ -1109,12 +1117,12 @@ impl ProjectStore {
     }
 
     fn load_admitted(&self, uuid: &str) -> Result<TaskDoc> {
-        let mut task = TaskDoc::from_bytes(&fs::read(self.snapshot_path(uuid))?)?;
+        let mut task = TaskDoc::from_bytes(&read_regular(&self.snapshot_path(uuid))?)?;
         if task.uuid() != uuid {
             return Err(Error::failed("the task file does not match its name"));
         }
         let mut first = None;
-        match fs::read(self.updates_path(uuid)) {
+        match read_regular(&self.updates_path(uuid)) {
             Ok(bytes) => {
                 let (found, intact) = blocks(&bytes);
                 task.needs_fold = !intact;
@@ -1517,6 +1525,139 @@ mod tests {
     /// fails closed and never waits. It counts what it reads whole; a task
     /// file it cannot read as a bounded regular file (a FIFO, a link, one
     /// it may not read) or the deadline is an error, never a count of zero.
+    /// zerus-ern6o (review-win-c on #1521): a project whose settings history
+    /// outgrew the earlier 64 MiB read cap, written by `save_project` as any
+    /// long-lived project's would be, is read again. No writer bounds a
+    /// document's history, so the reader refuses no size.
+    #[test]
+    fn a_project_whose_history_outgrew_any_cap_is_read_again() {
+        use crate::project::Settings;
+        fn text(seed: &mut u64) -> String {
+            const LETTERS: &[u8] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+            let mut text = String::from("[Zerus task]\n");
+            while text.len() < 16 * 1024 {
+                *seed ^= *seed << 13;
+                *seed ^= *seed >> 7;
+                *seed ^= *seed << 17;
+                text.push(LETTERS[(*seed as usize) % LETTERS.len()] as char);
+            }
+            text
+        }
+        let earlier_cap = 16 * crate::schema::MAX_DOCUMENT;
+        let mut doc = ProjectDoc::new();
+        let mut seed = 0x67c2_1ab7_d393_u64;
+        for _ in 0..2250 {
+            let settings = Settings {
+                task_template: text(&mut seed),
+                cancel_template: text(&mut seed),
+                agents_other: true,
+                agent_limit: 0,
+            };
+            doc.set_settings(&settings).unwrap();
+        }
+        let root = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(root.path(), "growth").unwrap();
+        store.save_project(&doc).unwrap();
+        let size = fs::metadata(store.dir().join("project.loro"))
+            .unwrap()
+            .len();
+        assert!(size > earlier_cap as u64, "{size}");
+        let read = store.project().unwrap();
+        assert_eq!(read.settings(), doc.settings());
+        // A regular file of any size is read whole, by every reader.
+        let large = root.path().join("large.loro");
+        let file = File::create(&large).unwrap();
+        file.set_len(earlier_cap as u64 * 2 + 1).unwrap();
+        assert_eq!(
+            read_regular(&large).unwrap().len() as u64,
+            earlier_cap as u64 * 2 + 1
+        );
+    }
+
+    /// zerus-r75ru: a FIFO in place of any task file, or of the project
+    /// file, never holds a read: that task does not load and is listed as
+    /// damaged (kept for review), the others load, and a short ID is found.
+    /// Each read runs under a watchdog, so a regression fails, not hangs.
+    #[cfg(unix)]
+    #[test]
+    fn an_irregular_task_file_never_holds_a_read_of_every_task() {
+        fn fifo(path: &Path) {
+            let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        }
+        fn soon<T: Send + 'static>(read: impl FnOnce() -> T + Send + 'static) -> T {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(read());
+            });
+            rx.recv_timeout(Duration::from_secs(20))
+                .expect("a read waited on an irregular file")
+        }
+        let root = tempfile::tempdir().unwrap();
+        let open = {
+            let root = root.path().to_owned();
+            move || ProjectStore::open(&root, "example").unwrap()
+        };
+        let store = open();
+        let mut good = new_task(&store, "U");
+        store.save(&mut good).unwrap();
+        let mut updated = new_task(&store, "V");
+        store.save(&mut updated).unwrap();
+        updated.comment("an update", &Actor::Person, 2).unwrap();
+        store.save(&mut updated).unwrap();
+        let mut marked = new_task(&store, "W");
+        store.save(&mut marked).unwrap();
+        let lone = "11111111-1111-4111-8111-111111111111";
+        fifo(&store.snapshot_path(lone));
+        let updates = store.updates_path(updated.uuid());
+        fs::remove_file(&updates).unwrap();
+        fifo(&updates);
+        fifo(&store.managed_path(marked.uuid()));
+        let (short, uuids) = (
+            good.id().to_owned(),
+            [lone, updated.uuid(), marked.uuid()].map(str::to_owned),
+        );
+        let project = store.dir().join("project.loro");
+        // Each read opens its own store, as a command does.
+        drop(store);
+        let (loaded, damaged) = soon({
+            let open = open.clone();
+            move || {
+                let (tasks, damaged) = open().tasks().unwrap();
+                let ids: Vec<_> = tasks.iter().map(|t| t.uuid().to_owned()).collect();
+                let damaged: BTreeSet<_> = damaged.into_iter().map(|d| d.uuid).collect();
+                (ids, damaged)
+            }
+        });
+        assert_eq!(loaded, [good.uuid().to_owned()]);
+        assert_eq!(damaged, BTreeSet::from(uuids.clone()));
+        // Each is kept for review: an irregular updates log or mark is
+        // local data that cannot be read.
+        let kept = soon({
+            let (open, uuids) = (open.clone(), uuids.clone());
+            move || uuids.map(|uuid| open().locally_kept(&uuid))
+        });
+        assert_eq!(kept[1], Some(Keep::UnreadableLocalData));
+        assert_eq!(kept[2], Some(Keep::Marked));
+        // The mark itself is not read through either.
+        let mark = uuids[2].clone();
+        assert!(soon({
+            let open = open.clone();
+            move || open().mark(&mark).is_none()
+        }));
+        // A short ID is found by reading every task.
+        let found = soon({
+            let open = open.clone();
+            move || open().find(&short).map(|t| t.uuid().to_owned())
+        });
+        assert_eq!(found.unwrap(), good.uuid());
+        // A FIFO as the project file is refused, not waited on.
+        fs::remove_file(&project).ok();
+        fifo(&project);
+        assert!(soon(move || open().project().is_err()));
+    }
+
     #[test]
     fn the_admitted_agent_count_fails_closed_and_never_waits() {
         let root = tempfile::tempdir().unwrap();

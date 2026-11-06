@@ -343,6 +343,21 @@ pub const KEYS: &[Key] = &[
             max: 85,
         },
     ),
+    // Task 103: the Teams view preferences the move keeps. Qt keeps "hide
+    // finished" and the catalog's unused-role switch as plain flags; its heat
+    // mode is per team, so the imported map holds team -> "time" | "tokens".
+    key("teams/hideFinished", Kind::Flag(false)),
+    key("ui/catalogHideUnusedRoles", Kind::Flag(false)),
+    Key {
+        name: "teams/heatModes",
+        kind: Kind::Text("{}"),
+        seeded: false,
+    },
+    Key {
+        name: "teams/planModes",
+        kind: Kind::Text("{}"),
+        seeded: false,
+    },
 ];
 
 /// Task 102: New session's remembered folder mode.

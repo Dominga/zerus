@@ -44,9 +44,12 @@ impl Location {
             self.root.parent().context("missing state folder")?,
             &self.root,
         ] {
-            platform::private_dir(path)?;
+            // The state folder may inherit a sandbox group's read ACE (Codex
+            // adds one to ~/.local), so creation is owner-only and an existing
+            // owned folder is made private in place; the check stays.
+            platform::owner_only_dir(path)?;
             ensure!(
-                platform::verify_private(path, platform::Private::Directory)?,
+                crate::private_stores::ensure(path, platform::Private::Directory)?,
                 "desktop folders must be private directories"
             );
         }

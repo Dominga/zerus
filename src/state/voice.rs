@@ -128,8 +128,9 @@ struct Store {
 }
 impl Store {
     fn open_at(directory: &Path) -> Result<Self> {
-        private_dir(directory)?;
-        // #569: made private again when only too open, else reported.
+        // #526/#569: owner-only at creation, never trusted to inherit it; a
+        // store only too open is made private again, else reported.
+        crate::platform::owner_only_dir(directory).map_err(err)?;
         if !crate::private_stores::ensure(directory, crate::platform::Private::Directory)
             .map_err(err)?
         {

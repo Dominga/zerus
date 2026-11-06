@@ -124,8 +124,13 @@ pub(crate) struct Store {
 }
 impl Store {
     pub fn open(directory: &Path) -> Result<Self> {
-        private_dir(directory)?;
-        if !crate::platform::verify_private(directory, crate::platform::Private::Directory)
+        // A sandbox installer can leave an inherited read ACE on the profile
+        // (Codex adds its group to ~/.local), so a folder made by inheritance
+        // is not private. Create it owner-only, and make an existing owned one
+        // private in place, as the other private stores do (#569); the check
+        // below stays the stricter verify_private, never a looser one.
+        crate::platform::owner_only_dir(directory).map_err(|e| e.to_string())?;
+        if !crate::private_stores::ensure(directory, crate::platform::Private::Directory)
             .map_err(|e| e.to_string())?
         {
             return Err("Search index directory must be private and owned by this user".into());

@@ -202,9 +202,9 @@ fn index(parent: &Value, r: &Request) -> Result<(Connection, Guard)> {
 }
 /// Opens, creating or migrating, the private history index of `parent` in `directory`.
 fn index_in(directory: &Path, parent: &Value, r: &Request) -> Result<(Connection, Guard)> {
-    private_dir(directory)?;
-    // #569: an index only too open is made private again; one that stays
-    // refused is reported with its fix.
+    // #526/#569: owner-only at creation, never trusted to inherit it; an
+    // index only too open is made private again, else reported.
+    crate::platform::owner_only_dir(directory).map_err(|e| e.to_string())?;
     if !crate::private_stores::ensure(directory, crate::platform::Private::Directory)
         .map_err(|e| e.to_string())?
     {

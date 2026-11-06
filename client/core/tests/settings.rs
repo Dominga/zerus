@@ -790,6 +790,85 @@ fn first_g3_families_import_once_after_the_switch_and_existing_next_values_win()
 }
 
 #[test]
+fn the_teams_view_preferences_import_once_and_existing_next_values_win() {
+    let scratch = Scratch::new("g3-teams-view");
+    let qt = scratch.0.join("qt.conf");
+    let bytes = b"[teams]\nhideFinished=true\nheat\\team-one=time\nheat\\team-two=tokens\nplanMode\\team-one=free\n[ui]\ncatalogHideUnusedRoles=true\n";
+    fs::write(&qt, bytes).unwrap();
+    let path = scratch.0.join("settings.json");
+    // The switch happened before this family existed: the old seed never
+    // repeats, so only the family can import these keys now.
+    legacy_switch(&path, json!({"teams/hideFinished": false}));
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert!(
+        !settings.flag("teams/hideFinished"),
+        "an existing Next value wins"
+    );
+    assert!(settings.flag("ui/catalogHideUnusedRoles"));
+    assert_eq!(
+        settings.text("teams/heatModes"),
+        r#"{"team-one":"time","team-two":"tokens"}"#
+    );
+    assert_eq!(settings.text("teams/planModes"), r#"{"team-one":"free"}"#);
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    // Qt's store is only read.
+    assert_eq!(fs::read(&qt).unwrap(), bytes);
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let record = &saved["g3"]["families"]["teams-view-preferences"];
+    assert_eq!(record["family"], "teams-view-preferences");
+    assert_eq!(
+        record["keys"],
+        json!([
+            "teams/heat/team-one",
+            "teams/heat/team-two",
+            "teams/hideFinished",
+            "teams/planMode/team-one",
+            "ui/catalogHideUnusedRoles"
+        ])
+    );
+    // A handled family imports nothing more, even from a changed source.
+    fs::write(&qt, b"[teams]\nhideFinished=false\nheat\\team-one=tokens\n").unwrap();
+    let again = Settings::open(path.clone(), Some(QtStore::Ini(qt)));
+    assert!(again.flag("ui/catalogHideUnusedRoles"));
+    assert_eq!(
+        again.text("teams/heatModes"),
+        r#"{"team-one":"time","team-two":"tokens"}"#
+    );
+    assert_eq!(again.text("teams/planModes"), r#"{"team-one":"free"}"#);
+    assert!(again.flush_within(FLUSH));
+}
+
+#[test]
+fn a_bad_teams_view_family_is_quarantined_without_partial_values() {
+    let scratch = Scratch::new("g3-teams-view-bad");
+    let qt = scratch.0.join("qt.conf");
+    let bytes =
+        b"[teams]\nhideFinished=true\nheat\\team-one=purple\n[ui]\ncatalogHideUnusedRoles=true\n";
+    fs::write(&qt, bytes).unwrap();
+    let path = scratch.0.join("settings.json");
+    legacy_switch(&path, json!({}));
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert!(
+        !settings.flag("teams/hideFinished"),
+        "no partial family is imported"
+    );
+    assert!(!settings.flag("ui/catalogHideUnusedRoles"));
+    assert_eq!(settings.text("teams/heatModes"), "{}");
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(saved["g3"]["families"]
+        .get("teams-view-preferences")
+        .is_none());
+    assert_eq!(
+        saved["g3"]["quarantine"]["teams-view-preferences"]["preserved_in"],
+        "source"
+    );
+    assert!(!saved.to_string().contains("purple"));
+}
+
+#[test]
 fn a_failed_family_is_quarantined_as_metadata_and_retries_without_partial_values() {
     let scratch = Scratch::new("g3-retry");
     let qt = scratch.0.join("qt.conf");

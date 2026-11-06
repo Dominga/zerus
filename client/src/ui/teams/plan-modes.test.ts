@@ -5,6 +5,7 @@ import {
   boardColumns,
   formatSeconds,
   formatTokens,
+  heatSeed,
   heatShare,
   layerRows,
   lossText,
@@ -133,5 +134,18 @@ describe("tests mode", () => {
     expect(runTime(45000)).toBe("45s");
     expect(testStatus("timed_out")).toBe("timed-out");
     expect(testStatus("passed")).toBe("passed");
+  });
+});
+
+describe("the move keeps Qt's Teams view preferences (task 103)", () => {
+  it("starts the Lateness switch from Qt's heat mode until this browser chooses", () => {
+    expect(heatSeed("team-one", null, '{"team-one":"time"}')).toBe(true);
+    expect(heatSeed("team-one", null, '{"team-one":"tokens"}')).toBe(true);
+    expect(heatSeed("team-one", null, '{"team-two":"time"}')).toBe(false);
+    expect(heatSeed("team-one", null, "{}")).toBe(false);
+    expect(heatSeed("team-one", null, "not json")).toBe(false);
+    // This browser's own stored choice always wins, on and off.
+    expect(heatSeed("team-one", "1", '{}')).toBe(true);
+    expect(heatSeed("team-one", "0", '{"team-one":"time"}')).toBe(false);
   });
 });

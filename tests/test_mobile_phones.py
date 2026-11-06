@@ -108,6 +108,31 @@ class MobilePhones(unittest.TestCase):
         self.assertEqual(self.calls(), [])
 
     @unittest.skipIf(os.name == 'nt', 'Unix executable fixtures; Windows runs the exact packaged UI trial')
+    def test_inherited_installer_booleans_do_not_select_a_runtime_connector(self):
+        package = self.root / 'installer-flag-package'
+        package.mkdir()
+        staged = package / 'hgs'
+        try:
+            os.link(HGS, staged)
+        except OSError:
+            shutil.copy2(HGS, staged)
+        connector = package / 'zerus-mobile-connector'
+        connector.write_text('#!/usr/bin/env python3\nMODE="selected"\n' + FAKE_PROTECTED_CONNECTOR)
+        connector.chmod(0o755)
+        folder = self.config / 'mobile'
+        folder.mkdir()
+        (folder / 'connector.json').write_text(json.dumps(
+            {'server_url': 'https://relay.example.test', 'encrypted_workspace': {}}))
+        for flag in ['0', '1']:
+            with self.subTest(installer_flag=flag):
+                environment = dict(self.env, HGS_MOBILE_CONNECTOR=flag)
+                environment.pop('ZERUS_CLIENT_MOBILE_CONNECTOR_PATH', None)
+                result = subprocess.run([str(staged), 'mobile', 'phones', '--json'], env=environment,
+                                        capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(json.loads(result.stdout)['configured'])
+
+    @unittest.skipIf(os.name == 'nt', 'Unix executable fixtures; Windows runs the exact packaged UI trial')
     def test_exact_packaged_connector_beats_a_stale_sibling_of_the_real_staged_cli(self):
         stage, package = self.root / 'stage', self.root / 'package'
         stage.mkdir()
@@ -127,7 +152,7 @@ class MobilePhones(unittest.TestCase):
         (folder / 'connector.json').write_text(json.dumps(
             {'server_url': 'https://relay.example.test', 'encrypted_workspace': {}}))
         environment = dict(self.env, PATH=str(package) + os.pathsep + self.env['PATH'])
-        environment.pop('HGS_MOBILE_CONNECTOR', None)
+        environment.pop('ZERUS_CLIENT_MOBILE_CONNECTOR_PATH', None)
 
         def run():
             return subprocess.run([str(staged), 'mobile', 'phones', '--json'], env=environment,
@@ -140,14 +165,14 @@ class MobilePhones(unittest.TestCase):
         calls = self.root / 'protected-calls'
         self.assertEqual(calls.read_text().splitlines(), ['stale:status'])
         calls.write_text('')
-        environment['HGS_MOBILE_CONNECTOR'] = str(selected)
+        environment['ZERUS_CLIENT_MOBILE_CONNECTOR_PATH'] = str(selected)
         current = run()
         self.assertEqual(current.returncode, 0, current.stderr)
         self.assertTrue(json.loads(current.stdout)['configured'])
         self.assertEqual(calls.read_text().splitlines(), ['selected:status', 'selected:list-devices'])
         calls.write_text('')
         for bad in ['', 'relative-connector', str(package / 'missing-connector')]:
-            environment['HGS_MOBILE_CONNECTOR'] = bad
+            environment['ZERUS_CLIENT_MOBILE_CONNECTOR_PATH'] = bad
             refused = run()
             self.assertNotEqual(refused.returncode, 0)
             self.assertEqual(calls.read_text(), '', 'invalid explicit selection must never fall back')

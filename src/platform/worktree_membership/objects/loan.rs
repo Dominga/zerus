@@ -2,8 +2,10 @@
 //! custody DATA only. Native peer/phase admission and stop consent are separate.
 use super::*;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use zerus_client_core::worktree_programs::custody::{clock, Binding};
 use zerus_client_core::worktree_programs::{DirectoryId, Manifest};
 
+pub(crate) mod borrower;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod holder;
 #[cfg(target_os = "linux")]
@@ -29,6 +31,64 @@ pub(crate) struct Description {
     path: String,
     root: DirectoryId,
     parents: Vec<Parent>,
+}
+
+/// A host-local DATA transfer, never a grant. Bind the delivered objects to
+/// the exact original request/phase and the SAME absolute operation deadline.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Transfer {
+    version: u32,
+    binding: Binding,
+    deadline_millis: u64,
+    objects: Description,
+}
+
+pub(crate) fn transfer(
+    scope: &Scope,
+    binding: &Binding,
+    deadline_millis: u64,
+    until: Instant,
+) -> io::Result<Vec<u8>> {
+    if !binding.valid() {
+        return Err(invalid());
+    }
+    let deadline = until.min(clock::restore(deadline_millis)?);
+    let objects =
+        serde_json::from_slice(&scope.describe_loan(deadline)?).map_err(io::Error::other)?;
+    let bytes = serde_json::to_vec(&Transfer {
+        version: 1,
+        binding: binding.clone(),
+        deadline_millis,
+        objects,
+    })
+    .map_err(io::Error::other)?;
+    if bytes.len() > MAX_FRAME {
+        return Err(invalid());
+    }
+    check(deadline)?;
+    Ok(bytes)
+}
+
+pub(crate) fn receive_transfer(
+    bytes: &[u8],
+    descriptors: Vec<OwnedFd>,
+    binding: &Binding,
+    original: &Manifest,
+    until: Instant,
+) -> io::Result<(Scope, Instant)> {
+    if bytes.len() > MAX_FRAME || !binding.valid() {
+        return Err(invalid());
+    }
+    let transfer: Transfer = serde_json::from_slice(bytes).map_err(io::Error::other)?;
+    if transfer.version != 1 || transfer.binding != *binding {
+        return Err(invalid());
+    }
+    let deadline = until.min(clock::restore(transfer.deadline_millis)?);
+    let objects = serde_json::to_vec(&transfer.objects).map_err(io::Error::other)?;
+    let scope = receive(&objects, descriptors, original, deadline)?;
+    check(deadline)?;
+    Ok((scope, deadline))
 }
 
 impl Scope {
@@ -190,6 +250,48 @@ mod tests {
             issued: 1000,
             expires: 1300,
             programs: Vec::new(),
+        }
+    }
+    #[test]
+    fn transfers_bind_the_exact_phase_and_cannot_restart_an_absolute_deadline() {
+        let temporary = tempfile::tempdir().unwrap();
+        let scope = Scope::open(&temporary.path().canonicalize().unwrap(), until()).unwrap();
+        let original = manifest(&scope);
+        let binding = Binding {
+            pipeline: uuid::Uuid::new_v4().to_string(),
+            manifest: "a".repeat(64),
+            request: uuid::Uuid::new_v4().to_string(),
+            input: "b".repeat(64),
+        };
+        let bound = until();
+        let stamp = clock::freeze(bound).unwrap();
+        let bytes = transfer(&scope, &binding, stamp, bound).unwrap();
+        let (received, deadline) =
+            receive_transfer(&bytes, copies(&scope), &binding, &original, until()).unwrap();
+        assert!(deadline <= bound);
+        received.current(deadline).unwrap();
+        for change in 0..7 {
+            let mut packet: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            match change {
+                0 => packet["binding"]["request"] = uuid::Uuid::new_v4().to_string().into(),
+                1 => packet["binding"]["pipeline"] = uuid::Uuid::new_v4().to_string().into(),
+                2 => packet["binding"]["input"] = "c".repeat(64).into(),
+                3 => packet["deadline_millis"] = clock::now().unwrap().saturating_sub(1).into(),
+                4 => packet["deadline_millis"] = u64::MAX.into(),
+                5 => packet["version"] = 2.into(),
+                _ => packet["stop"] = true.into(),
+            }
+            assert!(
+                receive_transfer(
+                    &serde_json::to_vec(&packet).unwrap(),
+                    copies(&scope),
+                    &binding,
+                    &original,
+                    until()
+                )
+                .is_err(),
+                "change {change}"
+            );
         }
     }
     #[test]

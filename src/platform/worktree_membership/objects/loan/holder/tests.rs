@@ -52,7 +52,7 @@ fn the_readonly_holder_lives_across_a_physically_retired_phase_but_never_reloans
         holder.joined(&request).is_err(),
         "an owner ACK cannot retire a live helper"
     );
-    fixture.expect_loan(&input.manifest);
+    fixture.expect_loan(&input.manifest, &Request::decode(&request).unwrap());
     holder.lend(&fixture.socket, &request).unwrap();
     assert!(holder.lend(&fixture.socket, &request).is_err());
     assert!(holder.joined(&request).is_err());

@@ -37,6 +37,35 @@ fn original_helper_fixture() {
                 Command::new("/bin/sleep").arg("300").exec()
             );
         }
+        if byte == *b"B" {
+            let mut size = [0; 4];
+            std::io::stdin().read_exact(&mut size).unwrap();
+            let size = u32::from_be_bytes(size) as usize;
+            assert!(size <= zerus_client_core::worktree_programs::custody::FRAME_BYTES);
+            let mut bytes = vec![0; size];
+            std::io::stdin().read_exact(&mut bytes).unwrap();
+            let intent: zerus_client_core::worktree_programs::invocation::Intent =
+                serde_json::from_slice(&bytes).unwrap();
+            let bound = until();
+            let borrowed = super::super::borrower::Borrowed::acquire(&intent, bound).unwrap();
+            assert!(borrowed.deadline() <= bound);
+            assert_eq!(borrowed.scope().identity(), &intent.input.manifest.checkout);
+            borrowed.current(&intent).unwrap();
+            let mut changed = intent.clone();
+            changed.pipeline = uuid::Uuid::new_v4().to_string();
+            assert!(borrowed.current(&changed).is_err());
+            super::super::transport::send(
+                &socket,
+                b"borrowed original native objects",
+                &[],
+                until(),
+            )
+            .unwrap();
+            std::io::stdin().read_exact(&mut byte).unwrap();
+            assert_eq!(byte, *b"R");
+            borrowed.current(&intent).unwrap();
+            return;
+        }
         assert_eq!(byte, *b"L");
         let mut size = [0; 4];
         std::io::stdin().read_exact(&mut size).unwrap();
@@ -44,10 +73,12 @@ fn original_helper_fixture() {
         assert!(size <= zerus_client_core::worktree_programs::MAX_BYTES);
         let mut bytes = vec![0; size];
         std::io::stdin().read_exact(&mut bytes).unwrap();
-        let manifest = serde_json::from_slice(&bytes).unwrap();
+        let (manifest, binding) = serde_json::from_slice(&bytes).unwrap();
         let (description, fds) = super::super::transport::receive(&socket, until()).unwrap();
-        let original = super::super::receive(&description, fds, &manifest, until()).unwrap();
-        original.current(until()).unwrap();
+        let (original, deadline) =
+            super::super::receive_transfer(&description, fds, &binding, &manifest, until())
+                .unwrap();
+        original.current(deadline).unwrap();
         super::super::transport::send(&socket, b"original native objects received", &[], until())
             .unwrap();
         // Keep the actual received objects, not a path reconstruction, until
@@ -80,6 +111,8 @@ pub(crate) struct Fixture {
     pub(crate) socket: UnixStream,
     pub(crate) audit: Option<[u32; 8]>,
     _dir: tempfile::TempDir,
+    pub(crate) listener: UnixListener,
+    pub(crate) path: std::path::PathBuf,
 }
 impl Fixture {
     pub(crate) fn start(program: &str) -> Self {
@@ -139,6 +172,8 @@ impl Fixture {
             socket,
             audit,
             _dir: dir,
+            listener,
+            path,
         }
     }
     pub(crate) fn original(&self) -> Peer {
@@ -157,8 +192,9 @@ impl Fixture {
     pub(crate) fn expect_loan(
         &mut self,
         manifest: &zerus_client_core::worktree_programs::Manifest,
+        binding: &zerus_client_core::worktree_programs::custody::Binding,
     ) {
-        let bytes = serde_json::to_vec(manifest).unwrap();
+        let bytes = serde_json::to_vec(&(manifest, binding)).unwrap();
         let input = self.child.stdin.as_mut().unwrap();
         input.write_all(b"L").unwrap();
         input

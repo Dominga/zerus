@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use crate::run::worktree_custody::{Error, Owner};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod clock;
 
 pub const ABI: &str = "worktree-program-custody-v1";
 pub const HELP_MARKER: &str = "Worktree program custody ABI: worktree-program-custody-v1";
@@ -95,7 +97,7 @@ pub enum Control {
         pipeline: String,
         input: Box<Input>,
         borrower: NativeChild,
-        remaining_millis: u64,
+        deadline_millis: u64,
     },
     Observe {
         pipeline: String,
@@ -126,11 +128,11 @@ impl Control {
                     pipeline,
                     input,
                     borrower,
-                    remaining_millis,
+                    deadline_millis,
                 } => {
                     input.valid()
                         && borrower.valid()
-                        && (1..=PHASE_MILLIS).contains(remaining_millis)
+                        && *deadline_millis > 0
                         && Binding::for_input(pipeline, input).valid()
                 }
                 Self::Joined { binding } => binding.valid(),
@@ -271,20 +273,18 @@ mod tests {
         let mut raw = serde_json::to_value(&binding).unwrap();
         raw["drained"] = true.into();
         assert!(Binding::decode(&serde_json::to_vec(&raw).unwrap()).is_err());
-        for invalid in [0, PHASE_MILLIS + 1] {
-            assert!(!Control::Arm {
-                pipeline: pipeline.into(),
-                input: Box::new(input.clone()),
-                borrower: NativeChild {
-                    pid: 2,
-                    parent: 3,
-                    birth: "native".into(),
-                    audit: None,
-                },
-                remaining_millis: invalid
-            }
-            .valid());
+        assert!(!Control::Arm {
+            pipeline: pipeline.into(),
+            input: Box::new(input.clone()),
+            borrower: NativeChild {
+                pid: 2,
+                parent: 3,
+                birth: "native".into(),
+                audit: None,
+            },
+            deadline_millis: 0
         }
+        .valid());
         let arm = Control::Arm {
             pipeline: pipeline.into(),
             input: Box::new(input.clone()),
@@ -294,7 +294,7 @@ mod tests {
                 birth: "native".into(),
                 audit: None,
             },
-            remaining_millis: PHASE_MILLIS,
+            deadline_millis: 1,
         };
         assert_eq!(Control::decode(&arm.encode().unwrap()).unwrap(), arm);
         let ready = Reply::Ready {

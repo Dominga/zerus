@@ -379,10 +379,7 @@ impl Owner {
         if self.armed.is_some() {
             return self.fail(Error::Unsettled);
         }
-        let remaining = until
-            .saturating_duration_since(Instant::now())
-            .as_millis()
-            .min(wire::PHASE_MILLIS as u128) as u64;
+        let deadline_millis = wire::clock::freeze(until).map_err(|_| Error::Expired)?;
         let binding = Binding::for_input(&self.pipeline, input);
         self.armed = Some(binding.clone()); // missing ACK never permits another phase
         match self.exchange(
@@ -390,7 +387,7 @@ impl Owner {
                 pipeline: self.pipeline.clone(),
                 input: Box::new(input.clone()),
                 borrower,
-                remaining_millis: remaining,
+                deadline_millis,
             },
             until,
         )? {

@@ -193,14 +193,14 @@ fn serve(config: &crate::config::Config, input: RawFd, out: &mut impl Write) -> 
                 Control::Arm {
                     input,
                     borrower,
-                    remaining_millis,
+                    deadline_millis,
                     ..
                 } => {
                     if owner(&manifest.capture)?["id"] != manifest.capture.owner_id {
                         return Err(INVALID.into());
                     }
                     let deadline =
-                        until.min(Instant::now() + Duration::from_millis(remaining_millis));
+                        until.min(custody::clock::restore(deadline_millis).map_err(failed)?);
                     let original = Peer::pin(
                         borrower.pid,
                         &borrower.birth,

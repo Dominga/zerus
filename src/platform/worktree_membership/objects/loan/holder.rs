@@ -30,6 +30,7 @@ struct Phase {
     borrower: Peer,
     until: Instant,
     spent: bool,
+    deadline_millis: u64,
 }
 
 pub(crate) struct Holder {
@@ -137,6 +138,7 @@ impl Holder {
             return Err(invalid());
         }
         self.scope.current(until)?;
+        let deadline_millis = zerus_client_core::worktree_programs::custody::clock::freeze(until)?;
         if self.source.is_none() {
             self.source = Some(input.source.clone());
         }
@@ -146,6 +148,7 @@ impl Holder {
             borrower,
             until,
             spent: false,
+            deadline_millis,
         });
         Ok(())
     }
@@ -160,7 +163,8 @@ impl Holder {
             return Err(invalid());
         }
         phase.borrower.current(stream, until)?;
-        let description = self.scope.describe_loan(until)?;
+        let description =
+            super::transfer(&self.scope, &phase.request, phase.deadline_millis, until)?;
         phase.borrower.current(stream, until)?;
         phase.spent = true;
         transport::send(

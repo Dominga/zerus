@@ -1089,8 +1089,9 @@ save has not started cannot dispatch during shutdown.
 The catalog retains at most 256 native children per session, never the
 hook-profile fallback. The list follows Qt's completed-child rule, retaining
 the selected child and nongroup children with drafts. A child Activity is one
-bounded replacement page of at most 200 events from `inspect --subagent`, read
-only while that exact child is visible and online; it never inherits the
+bounded replacement page of at most 200 events from `inspect NAME --agent ID`
+(the CLI's child option; `--subagent` is refused), read only while that exact
+child is visible and online; it never inherits the
 parent's live state or grows a history. Child attachments carry the same exact
 agent identity.
 

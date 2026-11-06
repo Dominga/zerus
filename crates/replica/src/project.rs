@@ -145,6 +145,22 @@ impl ProjectDoc {
         }))
     }
 
+    /// The cutover hold exactly as stored: `None` when nobody set it, an
+    /// error when its value cannot be read. `cutover_hold` reads such a value
+    /// as on; a decision that must tell unknown evidence from a hold that is
+    /// on (the first floor's bootstrap gate, C3 activation) reads this.
+    pub fn stored_cutover_hold(&self) -> Result<Option<CutoverHold>> {
+        let Some(raw) = self.doc.get_map("settings").get("cutover_hold") else {
+            return Ok(None);
+        };
+        match raw.into_value().ok() {
+            Some(LoroValue::String(s)) => serde_json::from_str::<CutoverHold>(&s)
+                .map(Some)
+                .map_err(|_| Error::new("the cutover hold cannot be read")),
+            _ => Err(Error::new("the cutover hold cannot be read")),
+        }
+    }
+
     /// Sets or clears the cutover hold, as one last-writer-wins value that
     /// names who set it and when. Only a person sets it; an agent or an
     /// automatic process never does.
@@ -294,5 +310,10 @@ mod tests {
             .unwrap();
         let damaged = project.cutover_hold().unwrap();
         assert!(damaged.on && damaged.by.is_none() && damaged.at.is_none());
+        // Read exactly, it is an error: unknown, not a hold that is on.
+        assert!(project.stored_cutover_hold().is_err());
+        project.set_cutover_hold(false, &Actor::Person, 30).unwrap();
+        assert!(!project.stored_cutover_hold().unwrap().unwrap().on);
+        assert_eq!(ProjectDoc::new().stored_cutover_hold().unwrap(), None);
     }
 }

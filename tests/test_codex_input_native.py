@@ -32,6 +32,7 @@ class NativeCodexInput(unittest.TestCase):
     def setUp(self):
         self.server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), questions.Provider)
         self.server.requests, self.server.release, self.server.questions = [], threading.Event(), []
+        self.server.collaboration = False
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
         self.addCleanup(self.server.release.set)
@@ -111,6 +112,7 @@ class NativeCodexStartup(test_pause.Harness):
                 self.env.pop(key, None)
         self.server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), questions.Provider)
         self.server.requests, self.server.release, self.server.questions = [], threading.Event(), []
+        self.server.collaboration = False
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
         self.addCleanup(self.server.release.set)

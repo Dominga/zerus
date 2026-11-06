@@ -76,7 +76,34 @@ impl Writer {
         store.add(relative, record)
     }
 
-    /// A plan closes only when none of its items is open or deferred.
+    /// Moves one item through its lifecycle. A closed status needs its fields;
+    /// done/dropped/superseded may only reopen with a reason.
+    pub fn item_status(&self, store: &Store, plan: &str, id: &str, status: &str, fields: &serde_json::Map<String, Value>, areas: &[String]) -> Result<()> {
+        let relative = format!("lore/plans/{plan}.jsonl");
+        let mut records = store.read(&relative)?;
+        let Some(position) = records.iter().position(|record| record.get("id").and_then(Value::as_str) == Some(id)) else {
+            return Err(LoreError(format!("no item {id} in plan {plan}")));
+        };
+        let old = records[position].get("status").and_then(Value::as_str).unwrap_or_default().to_owned();
+        let allowed = matches!(status, "done" | "dropped" | "superseded" | "deferred" | "open");
+        if !allowed { return Err(LoreError(format!("unknown item status {status}"))); }
+        if old == "open" || old == "deferred" {
+            // free to any status
+        } else if status == "open" && fields.get("reason").and_then(Value::as_str).is_some_and(|r| !r.is_empty()) {
+            // reopening needs a reason
+        } else {
+            return Err(LoreError(format!("item {id} is {old}; only reopen with a reason")));
+        }
+        let record = &mut records[position];
+        for key in ["commits", "reason", "decided_by", "superseded_by", "outcome"] {
+            record.as_object_mut().map(|map| map.remove(key));
+        }
+        record["status"] = json!(status);
+        for (key, value) in fields { record[key] = value.clone(); }
+        let errors = validate(record, areas, None);
+        if !errors.is_empty() { return Err(LoreError(errors.join("\n"))); }
+        store.write(&relative, &records)
+    }    /// A plan closes only when none of its items is open or deferred.
     pub fn close_plan(store: &Store, plan: &str, outcome: &str, areas: &[String]) -> Result<()> {
         let relative = format!("lore/plans/{plan}.jsonl");
         let mut records = store.read(&relative)?;
@@ -108,3 +135,5 @@ fn read_holder(file: &mut File) -> Option<String> {
     let value: Value = serde_json::from_str(&text).ok()?;
     Some(format!("{} since {}", value["who"].as_str().unwrap_or("unknown"), value["since"].as_u64().unwrap_or(0)))
 }
+
+

@@ -90,3 +90,37 @@ fn fixed_embeddings_keep_the_ollama_shape_offline() {
     assert_eq!(vectors, vec![vec![0.1, 0.2], vec![0.3, 0.4]]);
     assert!(fixed.embed(&["one".into(), "two".into(), "three".into()]).is_err());
 }
+
+#[test]
+fn config_refuses_like_python() {
+    use zerus_lore::config::parse;
+    let data: toml::Value = toml::from_str("version = 2\ndir = \"lore\"\nareas = [\"Plans\", \"plans\"]\n[commit]\nmode = \"yolo\"\n[other]\nx = 1").unwrap();
+    let error = parse(&data, std::path::Path::new("."), "lore.toml").unwrap_err().to_string();
+    for word in ["version", "must match", "reserved", "commit.mode", "unknown key `other`"] {
+        assert!(error.contains(word), "{word} missing in {error}");
+    }
+    let good: toml::Value = toml::from_str("version = 1\nareas = [\"git\"]\n[commit]\nmode = \"plain\"\n[embed]\nmodel = \"nomic-embed-text-v1.5\"").unwrap();
+    let config = parse(&good, std::path::Path::new("."), "lore.toml").unwrap();
+    assert_eq!(config.prefixes(), ("search_document: ".into(), "search_query: ".into()));
+}
+
+#[test]
+fn plan_items_move_through_their_lifecycle() {
+    use serde_json::json;
+    use zerus_lore::{Store, Writer};
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path());
+    let plan = json!({"v":3,"id":"pl","kind":"plan","area":"plans","title":"p","goal":"g","status":"live",
+        "created":"2026-10-24","updated":"2026-10-24","by":"me"});
+    let item = json!({"v":3,"id":"pl#1","kind":"item","area":"plans","plan":"pl","title":"i","status":"open",
+        "created":"2026-10-24","updated":"2026-10-24","by":"me"});
+    store.write("lore/plans/pl.jsonl", &[plan, item]).unwrap();
+    let writer = Writer::acquire(dir.path(), "test").unwrap();
+    let areas = vec!["plans".to_owned()];
+    assert!(writer.item_status(&store, "pl", "pl#1", "done", &json!({}).as_object().unwrap().clone(), &areas).is_err());
+    writer.item_status(&store, "pl", "pl#1", "done", json!({"commits":["abcd1234"]}).as_object().unwrap(), &areas).unwrap();
+    assert!(Writer::close_plan(&store, "pl", "finished", &areas).is_ok());
+}
+
+
+

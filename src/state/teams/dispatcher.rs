@@ -4270,6 +4270,7 @@ fn hand_out_now(
         &rules_team,
         rules_team.member(member_id).context("Unknown member")?,
     )?;
+    sample_member_usage(&rules_team, member_id);
     // Record the attempt before sending; a crash leaves it Unconfirmed.
     let attempt_id = uuid::Uuid::new_v4().to_string();
     let mut message = None;
@@ -4438,6 +4439,7 @@ fn stage_hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &st
     anyhow::ensure!(team.status == TeamStatus::Running, "the team is not running");
     let member = team.member(member_id).cloned().with_context(|| format!("Unknown member {member_id}"))?;
     let session = member.session.clone().context("no session")?;
+    sample_member_usage(&team, member_id);
     let member_host = member.computer.clone();
     let (run_id, stage_role) = {
         let task = team.task(task_id).context("unknown task")?;
@@ -7077,6 +7079,7 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
     let listing: Value = serde_json::from_slice(&output.stdout).context("invalid hgs ls output")?;
     let sessions = seen(&listing);
     let listed = listed_hosts(&listing);
+    sample_usage(&teams, &sessions);
     for team in &teams {
         if let Err(error) = take_outbox(store, team, &sessions) {
             eprintln!("hgs team worker: {}: outbox: {error}", team.name);
@@ -7100,6 +7103,65 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
         }
     }
     Ok(true)
+}
+
+/// How often a working DeepSeek member's counters are sampled (seconds).
+const USAGE_EVERY: f64 = 10.0;
+
+/// DeepSeek reports only the running total of its tokens and keeps no history,
+/// so the team profile takes an attempt's tokens from counter samples taken at
+/// its ends (`usage_samples`). Each tick, a local DeepSeek member session that
+/// works, or worked at the last sample, is read in the background (the host may
+/// take long to answer; the tick never waits for it): the reading while it works
+/// and one more after it turned idle, so the end of its turn has a reading.
+fn sample_usage(teams: &[Team], seen: &[Seen]) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+    static READING: AtomicBool = AtomicBool::new(false);
+    /// Per session: when it was last read and whether that reading was still
+    /// of a working (or just changed) session.
+    static LAST: Mutex<std::collections::BTreeMap<String, (f64, bool)>> = Mutex::new(std::collections::BTreeMap::new());
+    let at = now();
+    let due: Vec<(String, bool)> = {
+        let last = LAST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut names = BTreeSet::new();
+        for team in teams {
+            for member in team.members.iter().filter(|member| member.state != MemberState::Removed) {
+                let Some(session) = member.session.as_ref().filter(|session| session.host.is_empty()) else { continue };
+                let Some(found) = session_of(member, seen).filter(|found| found.agent == "dsh" && found.live) else { continue };
+                let (read_at, dirty) = last.get(&session.name).copied().unwrap_or((0.0, false));
+                let working = !found.idle;
+                if (working || dirty) && at - read_at >= USAGE_EVERY {
+                    names.insert((session.name.clone(), working));
+                }
+            }
+        }
+        names.into_iter().collect()
+    };
+    if due.is_empty() || READING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let spawned = std::thread::Builder::new().name("usage-samples".into()).spawn(move || {
+        for (name, working) in due {
+            let changed = super::super::dsh::sample_usage(&name, false).unwrap_or(false);
+            LAST.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(name, (now(), working || changed));
+        }
+        READING.store(false, Ordering::SeqCst);
+    });
+    if spawned.is_err() {
+        READING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// The reading an attempt's or stage's start is measured from: the session's
+/// counters at the hand-out, before the message goes out.
+fn sample_member_usage(team: &Team, member_id: &str) {
+    let Some(session) = team.member(member_id).and_then(|member| member.session.as_ref()).filter(|session| session.host.is_empty()) else {
+        return;
+    };
+    if super::super::dsh::exists(&session.name) {
+        let _ = super::super::dsh::sample_usage(&session.name, true);
+    }
 }
 
 /// N13: the folder the worker reads a member's outbox from is the one the

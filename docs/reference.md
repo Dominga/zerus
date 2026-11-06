@@ -628,6 +628,14 @@ while 0.155.1 lacks that required flag.
 
 New hooks call `hgs __state hook`. Existing trusted Python commands are retained:
 `hgs_state.py` forwards them to the Rust CLI, so keep Python for legacy hooks.
+Codex can request **Hooks need review** before both a new session and a saved
+conversation's resume or archive restore. Activity shows that exact native
+decision; messages remain blocked while it is open. Only the person's explicit
+choice trusts or skips hooks, and Codex persists that choice. A pending message
+receipt is never retried by recognizing or answering the card. Normal supervised
+startup preserves existing tracking definitions; an unchanged registration does
+not require trust again merely because the Zerus binary was updated. New or
+changed definitions can require a new native review.
 The CLI and session core are Rust; SQLite is bundled and requires a C compiler at
 build time. Existing session bindings and provider history remain compatible.
 

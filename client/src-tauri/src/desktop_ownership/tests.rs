@@ -1264,7 +1264,8 @@ mod native {
         }
         let _process = crate::PROCESS_TREE.read().unwrap();
         let f = Fixture::new(Mode::Native, json!({}));
-        let ready = native_takeover(f.root.join("hgs"), f.owner.responder.clone().unwrap()).unwrap();
+        let ready =
+            native_takeover(f.root.join("hgs"), f.owner.responder.clone().unwrap()).unwrap();
         let before = f.calls("frontend-request").len();
         let source = ready.program_source().unwrap();
         assert!(Arc::ptr_eq(&source.connection().unwrap(), &ready.helper));
@@ -1272,7 +1273,10 @@ mod native {
             source.configuration(),
             ready._receipt.as_ref().unwrap().configuration
         );
-        assert_eq!(source.original_ownership(), ready._receipt.as_ref().unwrap());
+        assert_eq!(
+            source.original_ownership(),
+            ready._receipt.as_ref().unwrap()
+        );
         assert!(source.environment().current());
         assert!(source.route_current());
         assert_eq!(

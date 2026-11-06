@@ -6,9 +6,9 @@ use std::sync::Weak;
 use zerus_client_core::{termination_cleanup::Status, Outcome};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-mod native;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod descendants;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod native;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod pipeline;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

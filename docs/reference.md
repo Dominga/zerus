@@ -3726,6 +3726,10 @@ reads everything the record binds again:
     (`member_unobserved`), and so does a damaged record file
     (`members_unreadable`). The records only refuse; their absence is never
     taken as "nothing changed";
+  - a certified member must positively show replica protocol 1 and task
+    schema 7 or later: another protocol, an older schema or none refuses
+    (`member_downgraded`), so a direct member rolled back below the
+    floor-aware build stops the reuse at its next recorded hello;
 - the hold, for a first attempt;
 - the task: holding the certified version, with its floor and raw stored
   schema.

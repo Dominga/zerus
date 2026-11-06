@@ -929,10 +929,14 @@ impl Proof {
 ///   `member_unobserved` (zerus-j1wjh: the attempt writer observes every
 ///   direct member before it certifies);
 /// - a certified member recorded with another store or with no replica, or
-///   one recorded with a replica but not certified: `member_store_changed`.
+///   one recorded with a replica but not certified: `member_store_changed`;
+/// - a certified member whose latest record speaks another replica protocol
+///   or advertises a task schema below the execution schema (a rollback
+///   below the floor-aware build, which the owner's boundary leaves
+///   unsupported): `member_downgraded` (C3 activation, A1).
 ///
-/// An indirect member's store is not observable offline (the documented
-/// boundary). `None` when every direct member agrees.
+/// An indirect member's store and build are not observable offline (the
+/// documented boundary). `None` when every direct member agrees.
 fn members_disagree(
     config: &Config,
     catalog: &LockedStore,
@@ -957,6 +961,13 @@ fn members_disagree(
         };
         if !agrees {
             return refused(Some(&peer.node), "member_store_changed");
+        }
+        let current = record.protocol == Some(PROTOCOL)
+            && record
+                .task_schema
+                .is_some_and(|schema| schema >= zerus_replica::execution::EXECUTION_TASK_SCHEMA);
+        if !record.no_replica && !current {
+            return refused(Some(&peer.node), "member_downgraded");
         }
     }
     None
@@ -1078,6 +1089,25 @@ impl Proof {
         config: &Config,
         deadline: Instant,
     ) -> Result<std::result::Result<Certificate, Closed>> {
+        let (certificate, bytes) = match self.certificate(config)? {
+            Ok(built) => built,
+            Err(refused) => return Ok(Err(refused)),
+        };
+        self.admit_in(config, deadline, |catalog, admitted, _| {
+            if let Some(refused) = members_disagree(config, catalog, &self.nodes) {
+                return Ok(Err(refused));
+            }
+            write_certificate(admitted, &self.task, &bytes)?;
+            Ok(Ok(certificate.clone()))
+        })
+    }
+
+    /// This proof's certificate and its bytes, built and checked before any
+    /// lock is taken: never a record that its reuse would refuse.
+    fn certificate(
+        &self,
+        config: &Config,
+    ) -> Result<std::result::Result<(Certificate, Vec<u8>), Closed>> {
         let store = self.me.store.clone().unwrap_or_default();
         let Some(configuration) = configuration(config) else {
             return closed(Some(&self.me.node), "changed_identity");
@@ -1098,7 +1128,6 @@ impl Proof {
             digest: String::new(),
         };
         certificate.digest = certificate.digest_of();
-        // Never a record that its reuse would refuse.
         if !certificate.intact() {
             return closed(None, "malformed");
         }
@@ -1106,31 +1135,281 @@ impl Proof {
         if bytes.len() as u64 > CERTIFICATE_BYTES {
             return closed(None, "certificate_oversized");
         }
-        self.admit_in(config, deadline, |catalog, admitted, _| {
-            use std::io::Write;
-            if let Some(refused) = members_disagree(config, catalog, &self.nodes) {
-                return Ok(Err(refused));
-            }
-            let path = certificate_path(admitted.dir(), &self.task);
-            std::fs::create_dir_all(path.parent().expect("a fence folder"))?;
-            // A fresh file only: whatever was left at the partial path goes,
-            // and creating it never follows a link or waits on a FIFO.
-            let partial = path.with_extension("json.partial");
-            match std::fs::remove_file(&partial) {
-                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-                    return Err(error.into())
-                }
-                _ => {}
-            }
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&partial)?;
-            file.write_all(&bytes)?;
-            drop(file);
-            std::fs::rename(&partial, &path)?;
-            Ok(Ok(certificate.clone()))
-        })
+        Ok(Ok((certificate, bytes)))
+    }
+}
+
+/// Writes a certificate's bytes for `task` inside a final admission. The
+/// record replaces any earlier one by an atomic rename; whatever was left at
+/// the partial path goes, and creating it never follows a link or waits on
+/// a FIFO.
+fn write_certificate(admitted: &Admitted<'_>, task: &str, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let path = certificate_path(admitted.dir(), task);
+    std::fs::create_dir_all(path.parent().expect("a fence folder"))?;
+    let partial = path.with_extension("json.partial");
+    match std::fs::remove_file(&partial) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+        _ => {}
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&partial)?;
+    file.write_all(bytes)?;
+    drop(file);
+    std::fs::rename(&partial, &path)?;
+    Ok(())
+}
+
+/// How an attempt's reservation was admitted (C3 activation, A1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Via {
+    /// The task's certificate, with no network at all.
+    Certificate,
+    /// A fresh proof; `certified` when its certificate was written in the
+    /// same critical section, for the next attempt to reuse.
+    Proof { certified: bool },
+}
+
+/// What one attempt's admission came to (C3 activation, A1; desktop-u's
+/// placement conditions). Only `Reserved` permits the native input, and only
+/// after every lock is released; nothing here submits anything.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Admission<R> {
+    /// `reserve` confirmed its durable reservation inside the final
+    /// admission.
+    Reserved { value: R, via: Via },
+    /// Nothing was floored or reserved, and the task is positively known
+    /// to hold no floor and no attempt while its project's bootstrap gate is
+    /// positively open: a member known not current, or the person's hold.
+    /// Only this outcome lets the caller keep the legacy route.
+    Legacy(Closed),
+    /// Nothing was reserved, and the task may hold a floor or an attempt,
+    /// or what decides is unknown: it is cutting over, never legacy. The
+    /// fence's first reason, the hold, busy, the deadline, unknown bootstrap
+    /// evidence, or `reserve`'s own refusal of a business change.
+    Refused(Closed),
+    /// `reserve` was entered and did not confirm: whether its reservation
+    /// was saved is unknown. It is never run again, and never legacy.
+    Uncertain(String),
+}
+
+/// The first floor's bootstrap gate (C3 activation; desktop-u's (i)): C2's
+/// cutover evidence read POSITIVELY, inside the floor's own admission (the
+/// catalog lock, which every membership change and member record write
+/// takes, then the project lock). It never reads the status's `closed`,
+/// which a project with no floor yet always leaves empty.
+/// - `Satisfied`: the phase is known (the bounded count finished), the hold
+///   reads off, the member records read strictly, and every eligible direct
+///   member (all but one genuinely recorded with no replica) is recorded
+///   for its current enrolment with protocol 1, task schema 7 or later, a
+///   valid store and a complete exchange of the project.
+/// - `Open`: positively not: the hold is on, or a member is known not
+///   current (`swarm::cutover_open`'s reason).
+/// - `Unknown`: the count, the records or an enrolment cannot be read.
+enum Bootstrap {
+    Satisfied,
+    Open(Closed),
+    Unknown(Closed),
+}
+
+/// The bounded count of a project's cut-over tasks, as the status reads it.
+const SCAN_ENTRIES: usize = 200_000;
+const SCAN_TIME: Duration = Duration::from_millis(500);
+
+fn bootstrap(
+    config: &Config,
+    catalog: &LockedStore,
+    store: &ProjectStore,
+    project: &str,
+    scan: usize,
+) -> Bootstrap {
+    let refused = |node: Option<&str>, reason| Closed {
+        node: node.map(str::to_owned),
+        reason,
+    };
+    if !matches!(store.cut_over_within(scan, SCAN_TIME), Ok(Some(_))) {
+        return Bootstrap::Unknown(refused(None, "scan_budget"));
+    }
+    // A hold that cannot be read is on.
+    let held = store
+        .project()
+        .map_or(true, |doc| doc.cutover_hold().is_some_and(|hold| hold.on));
+    if held {
+        return Bootstrap::Open(refused(None, "held"));
+    }
+    let Ok(records) = super::replica_members::read_strict(config) else {
+        return Bootstrap::Unknown(refused(None, "members_unreadable"));
+    };
+    for (alias, peer) in &catalog.data.peers {
+        if !ids::is_uuid(&peer.node) {
+            return Bootstrap::Unknown(refused(None, "member_unverified"));
+        }
+        let record = records.get(alias).filter(|record| record.node == peer.node);
+        if record.is_some_and(|record| record.no_replica) {
+            continue;
+        }
+        if let Some((reason, _)) = super::replica_members::open_reason(record, project, None) {
+            return Bootstrap::Open(refused(Some(&peer.node), reason));
+        }
+    }
+    Bootstrap::Satisfied
+}
+
+/// What the floor step decided for the task.
+#[derive(Debug, PartialEq)]
+enum Floor {
+    /// It holds a floor or an attempt already, or one this cannot read:
+    /// never taken as absent.
+    Managed,
+    /// Its first floor was written and saved now.
+    Written,
+    Legacy(Closed),
+    Refused(Closed),
+}
+
+/// The task's first floor, decided and saved in ONE critical section within
+/// `deadline`: the catalog lock, the project lock, the store's admission,
+/// with the task and the bootstrap gate read there, so the membership, the
+/// member records, the store and the hold it decides on are the ones it
+/// saves under. The floor is a one-way data write, never delivery authority:
+/// the input still needs the fence. A failed save is an error, never legacy
+/// (the floor may be on disk).
+fn floor_within(config: &Config, project: &str, uuid: &str, deadline: Instant) -> Result<Floor> {
+    floor_scanning(config, project, uuid, deadline, SCAN_ENTRIES)
+}
+
+/// `floor_within`, counting at most `scan` task entries.
+fn floor_scanning(
+    config: &Config,
+    project: &str,
+    uuid: &str,
+    deadline: Instant,
+    scan: usize,
+) -> Result<Floor> {
+    let busy = || {
+        Ok(Floor::Refused(Closed {
+            node: None,
+            reason: "busy",
+        }))
+    };
+    let Some(catalog) = LockedStore::load_until(config, deadline)? else {
+        return busy();
+    };
+    let root = config.state.join("replica");
+    let Some(store) = ProjectStore::open_within(&root, project, left(deadline))? else {
+        return busy();
+    };
+    let gate = bootstrap(config, &catalog, &store, project, scan);
+    let Some(mut admitted) = store.admit_until(deadline) else {
+        return busy();
+    };
+    let Ok(mut task) = admitted.load(uuid) else {
+        return Ok(Floor::Refused(Closed {
+            node: None,
+            reason: "damaged",
+        }));
+    };
+    if task.execution_managed() {
+        return Ok(Floor::Managed);
+    }
+    let floor = match gate {
+        Bootstrap::Satisfied => {
+            task.floor()?;
+            admitted.save(&mut task)?;
+            Floor::Written
+        }
+        Bootstrap::Open(closed) => Floor::Legacy(closed),
+        Bootstrap::Unknown(closed) => Floor::Refused(closed),
+    };
+    drop(admitted);
+    drop(store);
+    drop(catalog);
+    Ok(floor)
+}
+
+/// Admits ONE reservation of the task's next attempt (C3 activation, A1;
+/// dormant until the attempt writer calls it), all within ONE `deadline`
+/// that is never renewed: the floor, the certificate, the fresh proof,
+/// every lock wait and the certificate's write. No lock spans the network.
+/// `reserve` runs inside the fence's final admission and nowhere else, at
+/// most once, with the task as admitted there (after a proof's imports). It
+/// checks the frozen request's business binding against that task and
+/// either refuses with a typed reason, reserving nothing, or reserves and
+/// saves (`Admitted::save`) before it returns.
+/// 1. The task's certificate, with no network (`admit_certified`). Only its
+///    typed refusals before `reserve` lead on; the hold refuses at once.
+/// 2. The task's first floor when it holds none (`floor_within`): written
+///    when the bootstrap gate is satisfied, `Legacy` when it is positively
+///    open, refused when unknown.
+/// 3. A fresh proof over `net`, then its final admission. In that same
+///    critical section, after `reserve`, the proof's certificate is written
+///    when every direct member agrees (`members_disagree`); failing that
+///    never undoes the reservation.
+#[allow(dead_code)]
+pub(crate) fn admit_attempt<R>(
+    config: &Config,
+    net: &dyn Net,
+    project: &str,
+    uuid: &str,
+    deadline: Instant,
+    reserve: impl FnOnce(&mut Admitted<'_>, &mut TaskDoc) -> Result<std::result::Result<R, Closed>>,
+) -> Result<Admission<R>> {
+    let entered = std::cell::Cell::new(false);
+    let mut reserve = Some(reserve);
+    let mut run = |admitted: &mut Admitted<'_>, task: &mut TaskDoc| {
+        entered.set(true);
+        (reserve.take().expect("reserved at most once"))(admitted, task)
+    };
+    // An error once `reserve` was entered leaves its save unknown.
+    let uncertain = |error: anyhow::Error| Admission::Uncertain(format!("{error:#}"));
+    match admit_certified(config, project, uuid, deadline, &mut run) {
+        Ok(Ok(Ok(value))) => {
+            return Ok(Admission::Reserved {
+                value,
+                via: Via::Certificate,
+            })
+        }
+        Ok(Ok(Err(refused))) => return Ok(Admission::Refused(refused)),
+        // A certified task holds a floor: its hold refuses, never legacy.
+        Ok(Err(refused)) if refused.reason == "held" => return Ok(Admission::Refused(refused)),
+        // Any other typed refusal before `reserve`: prove afresh.
+        Ok(Err(_)) => {}
+        Err(error) if entered.get() => return Ok(uncertain(error)),
+        Err(error) => return Err(error),
+    }
+    match floor_within(config, project, uuid, deadline)? {
+        Floor::Managed | Floor::Written => {}
+        Floor::Legacy(closed) => return Ok(Admission::Legacy(closed)),
+        Floor::Refused(closed) => return Ok(Admission::Refused(closed)),
+    }
+    let (_, proved) = prove(config, net, project, uuid, deadline)?;
+    let proof = match proved {
+        Ok(proof) => proof,
+        Err(refused) => return Ok(Admission::Refused(refused)),
+    };
+    let certificate = proof.certificate(config)?.ok().map(|(_, bytes)| bytes);
+    let admitted = proof.admit_in(config, deadline, |catalog, admitted, task| {
+        let value = match run(admitted, task)? {
+            Ok(value) => value,
+            Err(refused) => return Ok(Ok(Admission::Refused(refused))),
+        };
+        // The certificate only spares the next attempt a proof.
+        let certified = certificate.as_deref().is_some_and(|bytes| {
+            members_disagree(config, catalog, &proof.nodes).is_none()
+                && write_certificate(admitted, &proof.task, bytes).is_ok()
+        });
+        Ok(Ok(Admission::Reserved {
+            value,
+            via: Via::Proof { certified },
+        }))
+    });
+    match admitted {
+        Ok(Ok(decided)) => Ok(decided),
+        Ok(Err(refused)) => Ok(Admission::Refused(refused)),
+        Err(error) if entered.get() => Ok(uncertain(error)),
+        Err(error) => Err(error),
     }
 }
 
@@ -2451,6 +2730,729 @@ mod tests {
         assert_eq!(reuse(&members, &uuid), (Ok(()), 1));
     }
 
+    /// The in-process members, counting every call.
+    struct Counted<'a> {
+        net: InProcess<'a>,
+        calls: std::cell::Cell<usize>,
+    }
+
+    impl Net for Counted<'_> {
+        fn call(
+            &self,
+            alias: &str,
+            route: Route<'_>,
+            command: &str,
+            input: Option<&Value>,
+            deadline: Instant,
+        ) -> Result<Value> {
+            self.calls.set(self.calls.get() + 1);
+            self.net.call(alias, route, command, input, deadline)
+        }
+    }
+
+    fn counted<'a>(members: &'a Members, faults: Faults) -> Counted<'a> {
+        Counted {
+            net: InProcess::new(members, faults),
+            calls: std::cell::Cell::new(0),
+        }
+    }
+
+    /// A send's reservation as the attempt writer makes it: the attempt with
+    /// its native request frozen, saved in the admission. `runs` counts it.
+    fn send<'r>(
+        id: &'r str,
+        runs: &'r std::cell::Cell<usize>,
+    ) -> impl FnOnce(&mut Admitted<'_>, &mut TaskDoc) -> Result<std::result::Result<String, Closed>> + 'r
+    {
+        move |admitted, task| {
+            runs.set(runs.get() + 1);
+            let executor = zerus_replica::SessionKey {
+                machine: "m1".into(),
+                session: "codex/executor".into(),
+                session_id: "launch_id:executor".into(),
+            };
+            let native = zerus_replica::execution::NativeRequest {
+                machine: "m1".into(),
+                name: "codex/executor".into(),
+                run_id: "run-executor".into(),
+                conversation_id: "conversation-executor".into(),
+                digest: "ab".repeat(32),
+            };
+            let attempt = task.reserve_attempt(
+                id,
+                zerus_replica::execution::Origin::Send,
+                &executor,
+                native,
+                &zerus_replica::Actor::Person,
+                10,
+            )?;
+            admitted.save(task)?;
+            Ok(Ok(attempt.id))
+        }
+    }
+
+    /// The writer saw the input refused before admission: the task can be
+    /// sent again.
+    fn not_admitted(members: &Members, uuid: &str, id: &str) {
+        let store = ProjectStore::open(&members.configs["a"].state.join("replica"), "p").unwrap();
+        let mut task = store.load(uuid).unwrap();
+        task.settle_attempt(
+            id,
+            zerus_replica::Settlement::NotAdmitted,
+            &zerus_replica::Actor::Person,
+            11,
+        )
+        .unwrap();
+        store.save(&mut task).unwrap();
+    }
+
+    fn attempts(members: &Members, uuid: &str) -> usize {
+        held(members, "a", uuid)
+            .unwrap()
+            .view()
+            .unwrap()
+            .execution
+            .map_or(0, |e| e.attempts)
+    }
+
+    fn reserved<R>(value: R, via: Via) -> Admission<R> {
+        Admission::Reserved { value, via }
+    }
+
+    fn outcome<R: std::fmt::Debug>(
+        admission: Admission<R>,
+    ) -> (&'static str, Option<String>, bool) {
+        match admission {
+            Admission::Legacy(closed) => (closed.reason, closed.node, true),
+            Admission::Refused(closed) => (closed.reason, closed.node, false),
+            other => panic!("not a refusal: {other:?}"),
+        }
+    }
+
+    /// A task with no floor yet, in `name`'s store.
+    fn unfloored(members: &Members, name: &str) -> TaskDoc {
+        let store = ProjectStore::open(&members.configs[name].state.join("replica"), "p").unwrap();
+        let mut task = TaskDoc::create(zerus_replica::NewTask {
+            project: "p",
+            id: &store.unused_short_id().unwrap(),
+            text: "Add rate limiting",
+            stage: zerus_replica::Stage::Todo,
+            target: zerus_replica::Target::Any,
+            author: zerus_replica::Actor::Person,
+            rank: "V",
+            now: 1,
+        })
+        .unwrap();
+        store.save(&mut task).unwrap();
+        task
+    }
+
+    /// What a swarm sync records at `name` for each direct member: its
+    /// verified hello, and a complete exchange of the project.
+    fn synced(members: &Members, name: &str) {
+        let config = &members.configs[name];
+        for alias in &config.peers {
+            let hello = transport::hello(&members.configs[alias], false).unwrap();
+            let observed = super::super::replica_members::Observed::of(&members.ids[alias], &hello);
+            super::super::replica_members::seen(config, alias, &observed, 1).unwrap();
+            super::super::replica_members::exchanged(
+                config,
+                alias,
+                &observed,
+                &[("p".to_owned(), Ok(()))],
+                &BTreeSet::from(["p".to_owned()]),
+                2,
+            )
+            .unwrap();
+        }
+    }
+
+    fn hold(members: &Members, on: bool) {
+        let store = ProjectStore::open(&members.configs["a"].state.join("replica"), "p").unwrap();
+        let mut doc = store.project().unwrap();
+        doc.set_cutover_hold(on, &zerus_replica::Actor::Person, 2)
+            .unwrap();
+        store.save_project(&doc).unwrap();
+    }
+
+    const FIRST: &str = "11111111-1111-4111-8111-111111111111";
+    const SECOND: &str = "22222222-2222-4222-8222-222222222222";
+
+    /// C3 activation A1: a task's first attempt is admitted through a fresh
+    /// proof, whose certificate is written in the same critical section; the
+    /// next attempt is admitted through that certificate with no network at
+    /// all. Each reservation runs once, inside its admission.
+    #[test]
+    fn an_attempt_is_proved_once_then_admitted_offline() {
+        let members = chain_abc();
+        let task = floored(&members, "a");
+        observe_direct(&members, "a");
+        let config = &members.configs["a"];
+        let runs = std::cell::Cell::new(0);
+        let net = counted(&members, Faults::default());
+        let first =
+            admit_attempt(config, &net, "p", task.uuid(), soon(), send(FIRST, &runs)).unwrap();
+        assert_eq!(
+            first,
+            reserved(FIRST.to_owned(), Via::Proof { certified: true })
+        );
+        assert!(net.calls.get() > 0);
+        assert_eq!((runs.get(), attempts(&members, task.uuid())), (1, 1));
+        assert!(record_path(&members, task.uuid()).exists());
+        not_admitted(&members, task.uuid(), FIRST);
+        let offline = counted(&members, Faults::default());
+        let second = admit_attempt(
+            config,
+            &offline,
+            "p",
+            task.uuid(),
+            soon(),
+            send(SECOND, &runs),
+        )
+        .unwrap();
+        assert_eq!(second, reserved(SECOND.to_owned(), Via::Certificate));
+        assert_eq!(offline.calls.get(), 0, "no network for a certified task");
+        assert_eq!((runs.get(), attempts(&members, task.uuid())), (2, 2));
+        // An unreachable or incomplete exchange outcome is no capability or
+        // store change: still reused, still with no network.
+        not_admitted(&members, task.uuid(), SECOND);
+        super::super::replica_members::unreachable(
+            config,
+            "b",
+            super::super::replica_members::Incomplete::Unreachable,
+            &BTreeSet::from(["p".to_owned()]),
+            20,
+        )
+        .unwrap();
+        let third = "33333333-3333-4333-8333-333333333333";
+        let offline = counted(&members, Faults::default());
+        let admitted = admit_attempt(
+            config,
+            &offline,
+            "p",
+            task.uuid(),
+            soon(),
+            send(third, &runs),
+        )
+        .unwrap();
+        assert_eq!(admitted, reserved(third.to_owned(), Via::Certificate));
+        assert_eq!(offline.calls.get(), 0);
+    }
+
+    /// A refused certificate falls back to a fresh proof. A direct member
+    /// that disagrees with the proof never blocks the reservation, only the
+    /// certificate: none is written, and the next attempt proves again.
+    #[test]
+    fn a_refused_certificate_falls_back_to_a_fresh_proof() {
+        let members = chain_abc();
+        let task = floored(&members, "a");
+        let config = &members.configs["a"];
+        let runs = std::cell::Cell::new(0);
+        // Not observed yet: the reservation stands, with no certificate.
+        let net = counted(&members, Faults::default());
+        let first =
+            admit_attempt(config, &net, "p", task.uuid(), soon(), send(FIRST, &runs)).unwrap();
+        assert_eq!(
+            first,
+            reserved(FIRST.to_owned(), Via::Proof { certified: false })
+        );
+        assert!(!record_path(&members, task.uuid()).exists());
+        not_admitted(&members, task.uuid(), FIRST);
+        // Observed, and an unusable record at the path: proved again, and
+        // certified this time.
+        observe_direct(&members, "a");
+        let path = record_path(&members, task.uuid());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{damaged").unwrap();
+        let net = counted(&members, Faults::default());
+        let second =
+            admit_attempt(config, &net, "p", task.uuid(), soon(), send(SECOND, &runs)).unwrap();
+        assert_eq!(
+            second,
+            reserved(SECOND.to_owned(), Via::Proof { certified: true })
+        );
+        assert!(net.calls.get() > 0);
+        assert_eq!(runs.get(), 2);
+    }
+
+    /// The hold refuses a certified task's first attempt at once, with no
+    /// network, and never as legacy (it holds a floor); a closed proof
+    /// reserves nothing. Neither runs the reservation.
+    #[test]
+    fn the_hold_or_a_closed_proof_reserves_nothing() {
+        let members = chain_abc();
+        let task = floored(&members, "a");
+        observe_direct(&members, "a");
+        let config = &members.configs["a"];
+        let net = InProcess::new(&members, Faults::default());
+        let proof = prove(config, &net, "p", task.uuid(), soon())
+            .unwrap()
+            .1
+            .unwrap();
+        proof.certify(config, soon()).unwrap().unwrap();
+        hold(&members, true);
+        let runs = std::cell::Cell::new(0);
+        let net = counted(&members, Faults::default());
+        let held =
+            admit_attempt(config, &net, "p", task.uuid(), soon(), send(FIRST, &runs)).unwrap();
+        assert_eq!(outcome(held), ("held", None, false));
+        assert_eq!((net.calls.get(), runs.get()), (0, 0));
+        // Without a certificate and with c offline, the proof closes.
+        let members = chain_abc();
+        let task = floored(&members, "a");
+        observe_direct(&members, "a");
+        let offline = Faults {
+            offline: BTreeSet::from([members.ids["c"].clone()]),
+            ..Faults::default()
+        };
+        let net = counted(&members, offline);
+        let closed = admit_attempt(
+            &members.configs["a"],
+            &net,
+            "p",
+            task.uuid(),
+            soon(),
+            send(FIRST, &runs),
+        )
+        .unwrap();
+        let (_, node, legacy) = outcome(closed);
+        assert_eq!((node, legacy), (Some(members.ids["c"].clone()), false));
+        assert_eq!((runs.get(), attempts(&members, task.uuid())), (0, 0));
+    }
+
+    /// desktop-u's (i): a task's first floor needs the bootstrap gate read
+    /// POSITIVELY in the floor's own admission. A project with no floor yet
+    /// (its status leaves `closed` empty) and an unseen or older member, no
+    /// or an incomplete exchange, or the person's hold keeps the legacy
+    /// route, floors nothing and calls no member; unreadable records refuse
+    /// instead, never legacy. Satisfied, the floor is written there, the
+    /// fence carries it to every node, and the first attempt is reserved.
+    #[test]
+    fn the_first_floor_needs_a_positive_bootstrap_gate() {
+        let open = |prepare: &dyn Fn(&Members)| -> (&'static str, bool, bool) {
+            let members = chain_abc();
+            let task = unfloored(&members, "a");
+            prepare(&members);
+            let runs = std::cell::Cell::new(0);
+            let net = counted(&members, Faults::default());
+            let admitted = admit_attempt(
+                &members.configs["a"],
+                &net,
+                "p",
+                task.uuid(),
+                soon(),
+                send(FIRST, &runs),
+            )
+            .unwrap();
+            assert_eq!((net.calls.get(), runs.get()), (0, 0));
+            assert!(
+                !held(&members, "a", task.uuid())
+                    .unwrap()
+                    .execution_managed(),
+                "no floor"
+            );
+            let (reason, node, legacy) = outcome(admitted);
+            (
+                reason,
+                node.as_deref() == Some(members.ids["b"].as_str()),
+                legacy,
+            )
+        };
+        let record_b = |members: &Members, replica: Value| {
+            let observed = super::super::replica_members::Observed::of(
+                &members.ids["b"],
+                &json!({ "replica": replica }),
+            );
+            super::super::replica_members::seen(&members.configs["a"], "b", &observed, 1).unwrap();
+        };
+        let older = json!({"protocol": PROTOCOL, "task_schema": 6,
+                           "store": "77777777-7777-4777-8777-777777777777"});
+        assert_eq!(open(&|_| {}), ("unseen", true, true));
+        assert_eq!(
+            open(&|members| record_b(members, older.clone())),
+            ("task_schema", true, true)
+        );
+        assert_eq!(
+            open(&|members| observe_direct(members, "a")),
+            ("no_inventory", true, true)
+        );
+        assert_eq!(
+            open(&|members| {
+                synced(members, "a");
+                super::super::replica_members::unreachable(
+                    &members.configs["a"],
+                    "b",
+                    super::super::replica_members::Incomplete::Unreachable,
+                    &BTreeSet::from(["p".to_owned()]),
+                    20,
+                )
+                .unwrap();
+            }),
+            ("unreachable", true, true)
+        );
+        assert_eq!(
+            open(&|members| {
+                synced(members, "a");
+                hold(members, true);
+            }),
+            ("held", false, true)
+        );
+        assert_eq!(
+            open(&|members| {
+                synced(members, "a");
+                let file = members.configs["a"]
+                    .dir
+                    .join("swarm")
+                    .join(super::super::replica_members::FILE);
+                std::fs::write(file, b"{damaged").unwrap();
+            }),
+            ("members_unreadable", false, false)
+        );
+        let members = chain_abc();
+        let task = unfloored(&members, "a");
+        synced(&members, "a");
+        let runs = std::cell::Cell::new(0);
+        let net = counted(&members, Faults::default());
+        let admitted = admit_attempt(
+            &members.configs["a"],
+            &net,
+            "p",
+            task.uuid(),
+            soon(),
+            send(FIRST, &runs),
+        )
+        .unwrap();
+        assert_eq!(
+            admitted,
+            reserved(FIRST.to_owned(), Via::Proof { certified: true })
+        );
+        for name in ["a", "b", "c"] {
+            assert!(
+                held(&members, name, task.uuid())
+                    .unwrap()
+                    .floor_record()
+                    .is_some(),
+                "{name}"
+            );
+        }
+    }
+
+    /// The gate reads only what decides: a member genuinely recorded with no
+    /// replica holds no task and is skipped; a count of the project's tasks
+    /// that does not finish leaves the phase unknown, which refuses, never
+    /// legacy and never a floor.
+    #[test]
+    fn the_bootstrap_gate_skips_replicaless_members_and_needs_a_known_phase() {
+        let members = chain_abc();
+        let a = &members.configs["a"];
+        let task = unfloored(&members, "a");
+        synced(&members, "a");
+        let observed = super::super::replica_members::Observed::of(&members.ids["b"], &json!({}));
+        super::super::replica_members::seen(a, "b", &observed, 3).unwrap();
+        assert_eq!(
+            floor_scanning(a, "p", task.uuid(), soon(), 0).unwrap(),
+            Floor::Refused(Closed {
+                node: None,
+                reason: "scan_budget"
+            })
+        );
+        assert!(!held(&members, "a", task.uuid())
+            .unwrap()
+            .execution_managed());
+        assert_eq!(
+            floor_within(a, "p", task.uuid(), soon()).unwrap(),
+            Floor::Written
+        );
+        assert!(held(&members, "a", task.uuid())
+            .unwrap()
+            .floor_record()
+            .is_some());
+        assert_eq!(
+            floor_within(a, "p", task.uuid(), soon()).unwrap(),
+            Floor::Managed
+        );
+    }
+
+    /// A business change refused through the certificate ends there: no
+    /// fresh proof, no second run.
+    #[test]
+    fn a_business_refusal_through_the_certificate_ends_the_admission() {
+        let members = chain_abc();
+        let (uuid, _) = certified(&members);
+        let runs = std::cell::Cell::new(0);
+        let refusing = |_: &mut Admitted<'_>,
+                        _: &mut TaskDoc|
+         -> Result<std::result::Result<String, Closed>> {
+            runs.set(runs.get() + 1);
+            Ok(Err(Closed {
+                node: None,
+                reason: "changed",
+            }))
+        };
+        let net = counted(&members, Faults::default());
+        let admitted =
+            admit_attempt(&members.configs["a"], &net, "p", &uuid, soon(), refusing).unwrap();
+        assert_eq!(outcome(admitted), ("changed", None, false));
+        assert_eq!(
+            (runs.get(), net.calls.get(), attempts(&members, &uuid)),
+            (1, 0, 0)
+        );
+    }
+
+    /// The hold, or a new enrolment, arriving while the proof runs (after
+    /// the floor, before the final admission) refuses the first attempt
+    /// there: the task holds its floor, so it is never legacy, and nothing
+    /// is reserved.
+    #[test]
+    fn a_hold_or_membership_change_before_the_final_admission_refuses() {
+        let refused = |change: &dyn Fn(&Members)| -> (&'static str, bool) {
+            let members = chain_abc();
+            let task = unfloored(&members, "a");
+            synced(&members, "a");
+            let runs = std::cell::Cell::new(0);
+            let net = counted(&members, Faults::default());
+            *net.net.during.borrow_mut() = Some(Box::new(|| change(&members)));
+            let admitted = admit_attempt(
+                &members.configs["a"],
+                &net,
+                "p",
+                task.uuid(),
+                soon(),
+                send(FIRST, &runs),
+            )
+            .unwrap();
+            assert_eq!((runs.get(), attempts(&members, task.uuid())), (0, 0));
+            assert!(held(&members, "a", task.uuid())
+                .unwrap()
+                .floor_record()
+                .is_some());
+            let (reason, _, legacy) = outcome(admitted);
+            (reason, legacy)
+        };
+        assert_eq!(refused(&|members| hold(members, true)), ("held", false));
+        // b disconnected and enrolled again: another membership incarnation.
+        let membership = refused(&|members| {
+            let mut catalog = LockedStore::load(&members.configs["a"]).unwrap();
+            let peer = catalog.data.peers.remove("b").unwrap();
+            catalog.save().unwrap();
+            catalog.data.peers.insert("b".into(), peer);
+            catalog.save().unwrap();
+        });
+        assert_eq!(membership, ("membership_changed", false));
+    }
+
+    /// desktop-u's condition 2: `reserve` sees the task as admitted after
+    /// the proof's imports. Refusing a business change there reserves
+    /// nothing, and nothing falls back or runs again.
+    #[test]
+    fn reserve_sees_imported_changes_and_may_refuse_them() {
+        let members = chain_abc();
+        let task = floored(&members, "a");
+        observe_direct(&members, "a");
+        let uuid = task.uuid().to_owned();
+        // The plan froze the task as a held it; b and c hold it too.
+        let frozen = held(&members, "a", &uuid)
+            .unwrap()
+            .view()
+            .unwrap()
+            .log
+            .len();
+        let net = InProcess::new(&members, Faults::default());
+        prove(&members.configs["a"], &net, "p", &uuid, soon())
+            .unwrap()
+            .1
+            .unwrap();
+        let b = ProjectStore::open(&members.configs["b"].state.join("replica"), "p").unwrap();
+        let mut copy = b.load(&uuid).unwrap();
+        copy.comment("changed on b", &zerus_replica::Actor::Person, 5)
+            .unwrap();
+        b.save(&mut copy).unwrap();
+        drop(b);
+        let runs = std::cell::Cell::new(0);
+        let checked = |_: &mut Admitted<'_>,
+                       task: &mut TaskDoc|
+         -> Result<std::result::Result<String, Closed>> {
+            runs.set(runs.get() + 1);
+            if task.view()?.log.len() != frozen {
+                return Ok(Err(Closed {
+                    node: None,
+                    reason: "changed",
+                }));
+            }
+            anyhow::bail!("the change was not imported")
+        };
+        let net = counted(&members, Faults::default());
+        let admitted =
+            admit_attempt(&members.configs["a"], &net, "p", &uuid, soon(), checked).unwrap();
+        assert_eq!(outcome(admitted), ("changed", None, false));
+        assert_eq!((runs.get(), attempts(&members, &uuid)), (1, 0));
+    }
+
+    /// desktop-u's conditions 1 and 3: once `reserve` was entered, an error
+    /// is `Uncertain`: it is never run again, no fresh proof follows the
+    /// certificate's, and it is never legacy. The reservation it saved
+    /// stays.
+    #[test]
+    fn an_error_after_the_reservation_is_uncertain_and_never_repeated() {
+        fn unconfirmed(
+            runs: &std::cell::Cell<usize>,
+        ) -> impl FnOnce(
+            &mut Admitted<'_>,
+            &mut TaskDoc,
+        ) -> Result<std::result::Result<String, Closed>>
+               + '_ {
+            let send = send(FIRST, runs);
+            move |admitted, task| {
+                assert!(send(admitted, task)?.is_ok());
+                anyhow::bail!("the save could not be confirmed")
+            }
+        }
+        // Through the certificate.
+        let members = chain_abc();
+        let (uuid, _) = certified(&members);
+        let runs = std::cell::Cell::new(0);
+        let net = counted(&members, Faults::default());
+        let admitted = admit_attempt(
+            &members.configs["a"],
+            &net,
+            "p",
+            &uuid,
+            soon(),
+            unconfirmed(&runs),
+        )
+        .unwrap();
+        assert!(matches!(admitted, Admission::Uncertain(_)), "{admitted:?}");
+        assert_eq!(
+            (runs.get(), net.calls.get(), attempts(&members, &uuid)),
+            (1, 0, 1)
+        );
+        // Through a fresh proof.
+        let members = chain_abc();
+        let task = floored(&members, "a");
+        observe_direct(&members, "a");
+        let runs = std::cell::Cell::new(0);
+        let net = counted(&members, Faults::default());
+        let admitted = admit_attempt(
+            &members.configs["a"],
+            &net,
+            "p",
+            task.uuid(),
+            soon(),
+            unconfirmed(&runs),
+        )
+        .unwrap();
+        assert!(matches!(admitted, Admission::Uncertain(_)), "{admitted:?}");
+        assert_eq!((runs.get(), attempts(&members, task.uuid())), (1, 1));
+    }
+
+    /// A certificate that cannot be written after the reservation keeps the
+    /// reservation, reported as uncertified.
+    #[test]
+    fn a_failed_certificate_write_keeps_the_reservation() {
+        let members = chain_abc();
+        let task = floored(&members, "a");
+        observe_direct(&members, "a");
+        // A file where the fence folder goes.
+        let path = record_path(&members, task.uuid());
+        std::fs::write(path.parent().unwrap(), b"not a folder").unwrap();
+        let runs = std::cell::Cell::new(0);
+        let net = counted(&members, Faults::default());
+        let admitted = admit_attempt(
+            &members.configs["a"],
+            &net,
+            "p",
+            task.uuid(),
+            soon(),
+            send(FIRST, &runs),
+        )
+        .unwrap();
+        assert_eq!(
+            admitted,
+            reserved(FIRST.to_owned(), Via::Proof { certified: false })
+        );
+        assert_eq!((runs.get(), attempts(&members, task.uuid())), (1, 1));
+    }
+
+    /// A rollback below the floor-aware build is unsupported (the owner's
+    /// boundary), yet a direct member whose latest record shows one stops
+    /// the certificate: another replica protocol, or a task schema missing or
+    /// below the execution schema, is `member_downgraded`. A fresh proof
+    /// still decides the reservation, and writes no certificate then.
+    #[test]
+    fn a_downgraded_direct_member_stops_the_certificate() {
+        let observed = |members: &Members, replica: fn(Value) -> Value| {
+            let store =
+                ProjectStore::store_id(&members.configs["b"].state.join("replica")).unwrap();
+            let observed = super::super::replica_members::Observed::of(
+                &members.ids["b"],
+                &json!({ "replica": replica(json!(store)) }),
+            );
+            super::super::replica_members::seen(&members.configs["a"], "b", &observed, 9).unwrap();
+        };
+        let current: fn(Value) -> Value =
+            |store| json!({"protocol": PROTOCOL, "task_schema": TASK_SCHEMA, "store": store});
+        let older: [fn(Value) -> Value; 3] = [
+            |store| json!({"protocol": PROTOCOL, "task_schema": 6, "store": store}),
+            |store| json!({"protocol": PROTOCOL, "store": store}),
+            |store| json!({"protocol": PROTOCOL + 1, "task_schema": TASK_SCHEMA, "store": store}),
+        ];
+        for replica in older {
+            let members = chain_abc();
+            let (uuid, _) = certified(&members);
+            observed(&members, replica);
+            let (reused, runs) = reuse(&members, &uuid);
+            assert_eq!(runs, 0);
+            let refused = reused.unwrap_err();
+            assert_eq!(
+                (refused.node.as_deref(), refused.reason),
+                (Some(members.ids["b"].as_str()), "member_downgraded")
+            );
+            // Current again: reused.
+            observed(&members, current);
+            assert_eq!(reuse(&members, &uuid), (Ok(()), 1));
+        }
+        // The attempt itself is proved afresh, with no certificate written.
+        let members = chain_abc();
+        let task = floored(&members, "a");
+        observed(&members, older[0]);
+        let runs = std::cell::Cell::new(0);
+        let net = counted(&members, Faults::default());
+        let admitted = admit_attempt(
+            &members.configs["a"],
+            &net,
+            "p",
+            task.uuid(),
+            soon(),
+            send(FIRST, &runs),
+        )
+        .unwrap();
+        assert_eq!(
+            admitted,
+            reserved(FIRST.to_owned(), Via::Proof { certified: false })
+        );
+        assert!(!record_path(&members, task.uuid()).exists());
+    }
+
+    /// A direct member recorded with no replica at all holds no task: it is
+    /// neither certified nor downgraded, and agrees.
+    #[test]
+    fn a_direct_member_without_a_replica_agrees_uncertified() {
+        let members = chain_abc();
+        let a = &members.configs["a"];
+        let observed = super::super::replica_members::Observed::of(&members.ids["b"], &json!({}));
+        super::super::replica_members::seen(a, "b", &observed, 9).unwrap();
+        let catalog = LockedStore::load(a).unwrap();
+        assert_eq!(members_disagree(a, &catalog, &BTreeMap::new()), None);
+        let certified = BTreeMap::from([(
+            members.ids["b"].clone(),
+            "77777777-7777-4777-8777-777777777777".to_owned(),
+        )]);
+        assert_eq!(
+            members_disagree(a, &catalog, &certified).unwrap().reason,
+            "member_store_changed"
+        );
+    }
+
     /// `certify` never writes a record its reuse would refuse.
     #[test]
     fn a_malformed_proof_is_never_certified() {
@@ -2543,7 +3545,10 @@ mod tests {
         let task = floored(&members, "a");
         let config = &members.configs["a"];
         let net = InProcess::new(&members, Faults::default());
-        let proof = prove(config, &net, "p", task.uuid(), soon()).unwrap().1.unwrap();
+        let proof = prove(config, &net, "p", task.uuid(), soon())
+            .unwrap()
+            .1
+            .unwrap();
         let mut runs = 0;
         let mut admit = |deadline: Instant| proof.admit(config, deadline, |_, _| { runs += 1; Ok(()) }).unwrap();
         // The hold, for a task that records no attempt yet.

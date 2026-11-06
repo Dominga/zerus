@@ -72,7 +72,10 @@ fn a_missing_supervisor_report_is_separate_from_native_exit_and_output() {
         {"launch_id":"original","code":null,"output":"","diagnostic_code":SUPERVISOR_REPORT_MISSING},
         {"launch_id":"other","code":2,"output":"native error","diagnostic_code":"foreign"}
     ]}))).unwrap();
-    assert_eq!(listing.ended_launches[0].diagnostic_code, SUPERVISOR_REPORT_MISSING);
+    assert_eq!(
+        listing.ended_launches[0].diagnostic_code,
+        SUPERVISOR_REPORT_MISSING
+    );
     assert_eq!(listing.ended_launches[0].code, None);
     assert_eq!(listing.ended_launches[0].output, "");
     assert_eq!(listing.ended_launches[1].diagnostic_code, "");

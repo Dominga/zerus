@@ -31,7 +31,7 @@ import { terminal } from "../../store/terminal";
 import type { LocalMessage } from "../../types";
 import { animationFrames, createActivityEnd, newLocalSends } from "./activity-end";
 import { replyVisible } from "../../store/viewedReply";
-import { buildTranscript, createTranscriptProjection, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
+import { buildTranscript, createActivityProjections, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
 import { DELETE_TEXT, DELETE_TITLE, retryReason, routeInspect } from "./local-actions";
 import { markdownReady, markdownTree, type Inline, type MarkdownBlock } from "./markdown";
 import { activityAll, activityFlow, activityRange, measureActivityRows, activitySelectionIndexes, activitySelectionText, activityText, activityTexts, activityVirtualOffset, selectActivityAll, selectionCoversActivity } from "./activity-virtual";
@@ -787,14 +787,9 @@ export function ActivityView(props: { source?: ActivitySource }) {
   // Items keep their identity while events append, including across the virtual window.
   const [view, setView] = createStore<{ items: TranscriptItem[]; expired: boolean; loaded: boolean; pane: ReturnType<typeof paneStates>; tool: string }>({ items: [], expired: false, loaded: false, pane: paneStates(source(), s()), tool: "" });
   const local = createMemo(() => localRows(source(), s()), undefined, { equals: (a, b) => a === b || (a.length === 0 && b.length === 0) });
-  const projection = createTranscriptProjection();
-  let projectedTarget: string | undefined;
+  const project = createActivityProjections();
   const displayTarget = () => source().displayKey?.() ?? source().target()?.id;
-  const built = createMemo(() => {
-    const target = displayTarget();
-    if (target !== projectedTarget) { projection.reset(); projectedTarget = target; }
-    return projection.build(source().events(), source().transcriptSummary?.() ?? source().summary(), local());
-  });
+  const built = createMemo(() => project(!!subagentOpen(), displayTarget(), source().events(), source().transcriptSummary?.() ?? source().summary(), local()));
   createEffect(() => {
     const items = built(), loaded = source().loaded();
     const expired = source().olderDone() && source().events().length > 0 && source().summary()?.history_truncated === true;

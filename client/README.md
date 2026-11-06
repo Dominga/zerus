@@ -1095,8 +1095,10 @@ child is visible and online; it never inherits the
 parent's live state or grows a history. "Reading activity…" lasts only until
 the first answer: an offline computer, a parent with no run or conversation
 identity, a refused read and a read with no answer after 20 seconds each end in
-their reason, and the reads resume once they can. Child attachments carry the
-same exact agent identity.
+their reason, and the reads resume once they can. A child shows no other row's
+sent messages, and a brief visit to one leaves its parent's receipt on screen
+while that receipt waits for its journal event. Child attachments carry the same
+exact agent identity.
 
 A child with a matching inspection and `send_supported` gets the ordinary
 composer layout and durable draft under

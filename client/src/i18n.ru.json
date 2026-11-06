@@ -4066,6 +4066,7 @@
   "Waiting for %1. Changes will sync when connected; those machines keep their last settings.": "Ожидание %1. Изменения будут синхронизироваться при подключении; эти машины сохраняют свои последние настройки.",
   "Waiting for Start": "Ожидание запуска",
   "Waiting for a current worktree catalog.": "Ожидание актуального каталога рабочих деревьев.",
+  "Waiting for a person's answer": "Ожидание ответа человека",
   "Waiting for acceptance": "Ожидает принятия",
   "Waiting for agent": "Ожидание агента",
   "Waiting for confirmation": "Ожидание подтверждения",

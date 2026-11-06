@@ -205,7 +205,7 @@ owner; the lead on the owner's word), event `phase_acceptance_changed`.
 - The owner's attention list and Waiting for you carry `phase_acceptance` (action `accept_phase`) with a summary
   `{accepted, rejected, cancelled, tests, minutes}`. The lead's session reads "Waiting for you to accept phase N"
   (`team_phase_acceptance`, a Waiting for you reason under the existing contract) while nothing else is out; a
-  member held behind it waits for the owner. Task timelines show `phase_pause` and `owner_acceptance` spans.
+  member held behind it waits for the owner. Task timelines show `phase_pause` and, since task 118, the wait for the acceptance as a `person` span (reason `acceptance`).
 
 ### `hgs team finish --json` (lead or owner)
 

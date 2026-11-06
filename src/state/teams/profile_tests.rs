@@ -482,3 +482,31 @@ fn a_deepseek_members_attempts_get_their_tokens_from_counter_samples() {
         assert_eq!(dev["tokens_per_accepted"], 1100, "{dev}");
     });
 }
+
+/// Task 118: time that waited for a person's answer is its own loss, with the
+/// seconds of each reason, apart from the lead's waits, and counts in the totals.
+#[test]
+fn time_that_waited_for_a_person_is_its_own_loss_and_total() {
+    use crate::state::teams::model::Decider;
+    let mut team = known();
+    // #2's question was the owner's to answer, and the owner decided #1's last report.
+    team.task_mut(2).unwrap().attempts[0].questions[0].by = "You".into();
+    team.task_mut(1).unwrap().decided_by = Some(Decider::Human);
+    let value = run(&team, &tokens(None), &Page { limit: 100, ..Default::default() });
+    let items = value["losses"]["by_time"]["items"].as_array().unwrap();
+    let find = |id: &str| items.iter().find(|item| item["id"] == id).unwrap_or_else(|| panic!("{id} in {items:?}"));
+    assert_eq!((find("person_wait:2")["s"].clone(), find("person_wait:2")["reasons"].clone()), (json!(300), json!({"question":300})));
+    assert_eq!((find("person_wait:1")["s"].clone(), find("person_wait:1")["reasons"].clone()), (json!(100), json!({"report":100})));
+    assert_eq!(find("person_wait:1")["kind"], "person_wait");
+    // The lead's waits no longer hold them: #2's question and #1's second decision left.
+    assert_eq!((find("lead_wait:2")["lead_s"].clone(), find("lead_wait:2")["question_s"].clone()), (json!(100), json!(0)));
+    assert_eq!(find("lead_wait:1")["s"], 60);
+    // Its own cause in the totals.
+    let totals = &value["summary"]["totals"];
+    assert_eq!(totals["person"], 400);
+    assert!(totals["question"].is_null(), "{totals}");
+    assert_eq!(totals["lead"], 160);
+    // A member waiting for a person is not working: dev's busy time is its own.
+    let dev = value["members"].as_array().unwrap().iter().find(|member| member["member"] == "dev").unwrap();
+    assert_eq!(dev["busy_s"], 680);
+}

@@ -97,6 +97,10 @@ pub enum Control {
         borrower: NativeChild,
         remaining_millis: u64,
     },
+    Observe {
+        pipeline: String,
+        observation: String,
+    },
     Joined {
         binding: Binding,
     },
@@ -107,9 +111,10 @@ pub enum Control {
 impl Control {
     pub fn pipeline(&self) -> &str {
         match self {
-            Self::Open { pipeline, .. } | Self::Arm { pipeline, .. } | Self::Close { pipeline } => {
-                pipeline
-            }
+            Self::Open { pipeline, .. }
+            | Self::Arm { pipeline, .. }
+            | Self::Observe { pipeline, .. }
+            | Self::Close { pipeline } => pipeline,
             Self::Joined { binding } => &binding.pipeline,
         }
     }
@@ -129,6 +134,10 @@ impl Control {
                         && Binding::for_input(pipeline, input).valid()
                 }
                 Self::Joined { binding } => binding.valid(),
+                Self::Observe {
+                    pipeline,
+                    observation,
+                } => canonical_uuid(observation) && observation != pipeline,
                 Self::Close { .. } => true,
             }
     }
@@ -168,6 +177,11 @@ pub enum Reply {
     Armed {
         binding: Binding,
     },
+    Observed {
+        pipeline: String,
+        observation: String,
+        manifest: Box<Manifest>,
+    },
     Retired {
         binding: Binding,
     },
@@ -195,6 +209,17 @@ impl Reply {
                     && !socket.chars().any(char::is_control)
             }
             Self::Armed { binding } | Self::Retired { binding } => binding.valid(),
+            Self::Observed {
+                pipeline,
+                observation,
+                manifest,
+            } => {
+                canonical_uuid(pipeline)
+                    && canonical_uuid(observation)
+                    && pipeline != observation
+                    && pipeline != &manifest.id
+                    && manifest.valid(now)
+            }
             Self::Closed { pipeline } => canonical_uuid(pipeline),
         }
     }
@@ -289,6 +314,29 @@ mod tests {
             ready
         );
         assert!(Reply::decode(&ready.encode(1000).unwrap(), 1300).is_err());
+        let observation = "88888888-8888-4888-8888-888888888888";
+        let observe = Control::Observe {
+            pipeline: pipeline.into(),
+            observation: observation.into(),
+        };
+        assert_eq!(
+            Control::decode(&observe.encode().unwrap()).unwrap(),
+            observe
+        );
+        let mut current = input.manifest.clone();
+        current.id = "77777777-7777-4777-8777-777777777777".into();
+        let observed = Reply::Observed {
+            pipeline: pipeline.into(),
+            observation: observation.into(),
+            manifest: Box::new(current),
+        };
+        assert_eq!(
+            Reply::decode(&observed.encode(1100).unwrap(), 1100).unwrap(),
+            observed
+        );
+        let mut raw = serde_json::to_value(&observe).unwrap();
+        raw["force"] = true.into();
+        assert!(Control::decode(&serde_json::to_vec(&raw).unwrap()).is_err());
         let mut changed = input;
         changed.original.push('\n');
         assert_ne!(binding, Binding::for_input(pipeline, &changed));

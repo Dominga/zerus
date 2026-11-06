@@ -7,7 +7,7 @@ use crate::worktree_programs::custody::{self as wire, Binding, Control, NativeCh
 use std::io::{BufRead, BufReader};
 
 const SETUP: Duration = Duration::from_secs(10);
-const MAX_REPLIES: usize = 2 * wire::MAX_PHASES + 2;
+const MAX_REPLIES: usize = 3 * wire::MAX_PHASES + 2;
 type OriginalSpawn = Arc<dyn Fn(&mut Command) -> std::io::Result<Child> + Send + Sync>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,6 +34,8 @@ pub struct Owner {
     setup: Instant,
     ready: bool,
     armed: Option<Binding>,
+    original: Option<crate::worktree_programs::Manifest>,
+    observations: usize,
 }
 fn seconds() -> u64 {
     std::time::SystemTime::now()
@@ -281,6 +283,8 @@ impl Owner {
             setup,
             ready: false,
             armed: None,
+            original: None,
+            observations: 0,
         })
     }
     fn fail<T>(&self, error: Error) -> Result<T, Error> {
@@ -335,6 +339,7 @@ impl Owner {
             return self.fail(Error::Invalid);
         }
         self.ready = true;
+        self.original = Some((**manifest).clone());
         Ok(reply)
     }
     fn exchange(&self, frame: Control, until: Instant) -> Result<Reply, Error> {
@@ -392,6 +397,46 @@ impl Owner {
             Reply::Armed { binding: accepted } if accepted == binding => Ok(()),
             _ => self.fail(Error::Invalid),
         }
+    }
+    /// The same native owner may obtain a fresh LIST after the old mutator has
+    /// actually retired. This is data only, never fresh stop/Force permission.
+    pub fn observe(&mut self, until: Instant) -> Result<crate::worktree_programs::Manifest, Error> {
+        if self.armed.is_some() || self.observations >= wire::MAX_PHASES {
+            return self.fail(Error::Unsettled);
+        }
+        self.observations += 1;
+        let observation = uuid::Uuid::new_v4().to_string();
+        let reply = self.exchange(
+            Control::Observe {
+                pipeline: self.pipeline.clone(),
+                observation: observation.clone(),
+            },
+            until,
+        )?;
+        let Reply::Observed {
+            pipeline,
+            observation: accepted,
+            manifest,
+        } = reply
+        else {
+            return self.fail(Error::Invalid);
+        };
+        let Some(original) = &self.original else {
+            return self.fail(Error::Invalid);
+        };
+        if pipeline != self.pipeline
+            || accepted != observation
+            || manifest.id == original.id
+            || manifest.capture != original.capture
+            || manifest.configuration != original.configuration
+            || manifest.boot != original.boot
+            || manifest.checkout != original.checkout
+            || manifest.expires != original.expires
+            || manifest.issued != original.issued
+        {
+            return self.fail(Error::Invalid);
+        }
+        Ok(*manifest)
     }
     /// The native host calls this ONLY after its original mutator and EVERY
     /// owned pipe/worker/loan physically settle. This ACK is not that witness.

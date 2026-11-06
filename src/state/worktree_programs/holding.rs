@@ -15,7 +15,7 @@ use zerus_client_core::worktree_programs::custody::{
 };
 
 const SETUP_WAIT: Duration = Duration::from_secs(5);
-const MAX_CONTROLS: usize = 2 * MAX_PHASES + 2;
+const MAX_CONTROLS: usize = 3 * MAX_PHASES + 2;
 
 fn failed(error: impl std::fmt::Display) -> String {
     error.to_string()
@@ -224,6 +224,23 @@ fn serve(config: &crate::config::Config, input: RawFd, out: &mut impl Write) -> 
                         .joined(&binding.bytes().map_err(failed)?)
                         .map_err(failed)?;
                     emit(out, &Reply::Retired { binding })?;
+                }
+                Control::Observe { observation, .. } => {
+                    let ownership = owner(&manifest.capture)?;
+                    let observed = holder
+                        .observe(now() as u64, until.min(Instant::now() + SETUP_WAIT))
+                        .map_err(failed)?;
+                    if owner(&manifest.capture)? != ownership {
+                        return Err(INVALID.into());
+                    }
+                    emit(
+                        out,
+                        &Reply::Observed {
+                            pipeline: pipeline.clone(),
+                            observation,
+                            manifest: Box::new(observed),
+                        },
+                    )?;
                 }
                 Control::Close { .. } => {
                     holder.close();

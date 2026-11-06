@@ -41,6 +41,7 @@ pub(crate) struct Holder {
     used: BTreeSet<String>,
     phase: Option<Phase>,
     source: Option<Source>,
+    observations: usize,
 }
 impl Holder {
     /// The original Scope is MOVED here before confirmation; no serialized
@@ -72,6 +73,7 @@ impl Holder {
             used: BTreeSet::new(),
             phase: None,
             source: None,
+            observations: 0,
         })
     }
     fn open(&mut self, until: Instant) -> io::Result<Instant> {
@@ -84,6 +86,28 @@ impl Holder {
             return Err(io::ErrorKind::TimedOut.into());
         }
         Ok(until)
+    }
+    /// New read-only observations retain THIS scope, original target and fixed
+    /// expiry. They may name new programs for review, never authorize stopping
+    /// them. An unretired mutator blocks observation for Force, even after EOF.
+    pub(crate) fn observe(&mut self, now: u64, until: Instant) -> io::Result<Manifest> {
+        let until = self.open(until)?;
+        if self.phase.is_some() || self.observations >= MAX_PHASES || !self.original.valid(now) {
+            return Err(invalid());
+        }
+        self.observations += 1;
+        let programs = crate::platform::worktree_membership::programs(&self.scope, until)?;
+        let mut current = self.original.clone();
+        current.id = uuid::Uuid::new_v4().to_string();
+        current.programs = programs;
+        // Original issued/expires anchor custody, not a new permit. Fresh
+        // rows are correlated by the observation nonce on the native stream.
+        // NEVER extend original.expires or self.until while presenting a list.
+        if !current.valid(now) || Instant::now() >= until {
+            return Err(invalid());
+        }
+        self.scope.current(until)?;
+        Ok(current)
     }
     /// DATA admission only, not normal-stop/Force authority. The caller must
     /// already hold its native confirmation and the original guarded helper.

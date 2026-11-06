@@ -92,23 +92,34 @@ class WorktreeLifecycle(test_pause.Harness):
         try:
             child.stdin.write((json.dumps({'op':'open','pipeline':pipeline,'discovery':{'capture':capture}})+'\n').encode())
             child.stdin.flush()
-            # Read one bounded frame without relying on EOF from the live holder.
-            deadline=time.monotonic()+10;frame=bytearray();cap=128*1024+4096
-            while not frame.endswith(b'\n') and len(frame)<=cap:
-                remaining=deadline-time.monotonic()
-                self.assertGreater(remaining,0,'the original holder did not publish its manifest')
-                self.assertTrue(select.select([child.stdout],[],[],remaining)[0],'holder readiness expired')
-                chunk=os.read(child.stdout.fileno(),1)
-                if not chunk:
-                    _,error=child.communicate(timeout=5)
-                    self.fail('holder exited before its original manifest: '+error.decode(errors='replace'))
-                frame.extend(chunk)
-            self.assertLessEqual(len(frame),cap)
-            ready=json.loads(frame);self.assertEqual(ready['op'],'ready');self.assertEqual(ready['pipeline'],pipeline)
+            # Read bounded native frames without relying on the live holder's EOF.
+            def read_frame():
+                deadline=time.monotonic()+10;frame=bytearray();cap=128*1024+4096
+                while not frame.endswith(b'\n') and len(frame)<=cap:
+                    remaining=deadline-time.monotonic()
+                    self.assertGreater(remaining,0,'the original holder did not publish its frame')
+                    self.assertTrue(select.select([child.stdout],[],[],remaining)[0],'holder readiness expired')
+                    chunk=os.read(child.stdout.fileno(),1)
+                    if not chunk:
+                        _,error=child.communicate(timeout=5)
+                        self.fail('holder exited before its frame: '+error.decode(errors='replace'))
+                    frame.extend(chunk)
+                self.assertLessEqual(len(frame),cap)
+                return json.loads(frame)
+            ready=read_frame();self.assertEqual(ready['op'],'ready');self.assertEqual(ready['pipeline'],pipeline)
             self.assertEqual(ready['manifest']['capture'],capture)
             self.assertEqual(ready['holder']['pid'],child.pid);self.assertEqual(ready['holder']['parent'],os.getpid())
             self.assertTrue(Path(ready['socket']).is_socket());self.assertIsNone(child.poll())
             self.assertEqual(before,sorted(p.relative_to(self.project).as_posix() for p in self.project.rglob('*')))
+            self.assertTrue(self.binding(name));self.assertEqual(self.archives(),[])
+            observation=str(uuid.uuid4())
+            child.stdin.write((json.dumps({'op':'observe','pipeline':pipeline,'observation':observation})+'\n').encode())
+            child.stdin.flush();observed=read_frame()
+            self.assertEqual(observed['op'],'observed');self.assertEqual(observed['observation'],observation)
+            self.assertEqual(observed['pipeline'],pipeline)
+            for field in ('capture','configuration','boot','checkout','issued','expires'):
+                self.assertEqual(observed['manifest'][field],ready['manifest'][field],field)
+            self.assertNotEqual(observed['manifest']['id'],ready['manifest']['id'])
             self.assertTrue(self.binding(name));self.assertEqual(self.archives(),[])
             child.stdin.write((json.dumps({'op':'close','pipeline':pipeline})+'\n').encode());child.stdin.flush()
             stdout,stderr=child.communicate(timeout=10)

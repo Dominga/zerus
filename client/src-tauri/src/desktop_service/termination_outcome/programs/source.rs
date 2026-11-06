@@ -198,6 +198,23 @@ impl Source {
     pub(super) fn not_after(&self) -> Instant {
         self.not_after
     }
+    /// Read-only list for a subsequent native dialog; the original Source and
+    /// checkout pins stay owned here. This never reconstructs a stop permit.
+    pub(super) fn observe(&self, until: Instant) -> Result<Manifest, String> {
+        if !self.current() {
+            return Err(UNCONFIRMED.into());
+        }
+        let manifest = self
+            .owner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .observe(until.min(self.not_after))
+            .map_err(|_| UNCONFIRMED)?;
+        if !self.current() {
+            return Err(UNCONFIRMED.into());
+        }
+        Ok(manifest)
+    }
     /// Close is available only after the prior mutator's separate actual-join
     /// witness. Owner also refuses to close an unretired phase independently.
     pub(super) fn close(&self) -> Result<(), String> {

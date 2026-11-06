@@ -9,7 +9,7 @@ use std::{
 };
 
 const SCRIPT: &str = r#"#!/usr/bin/python3
-import json,os,pathlib,sys,time
+import json,os,pathlib,sys,time,uuid
 root=pathlib.Path(__file__).parent
 args=sys.argv[1:]
 assert args.pop(0)=='--desktop-helper-rendezvous-v1'
@@ -23,10 +23,19 @@ first=json.loads(sys.stdin.buffer.readline())
 assert first['op']=='open'
 manifest=json.loads((root/'manifest').read_text())
 manifest['capture']=first['discovery']['capture']
-manifest['issued']=int(time.time());manifest['expires']=manifest['issued']+300
+manifest['issued']=int(time.time())-(10 if (root/'early-retention').exists() else 0);manifest['expires']=manifest['issued']+300
 print(json.dumps(dict(op='ready',abi='worktree-program-custody-v1',pipeline=first['pipeline'],manifest=manifest,
     holder=dict(pid=os.getpid(),parent=os.getppid(),birth='fixture-data',audit=None),socket='/tmp/example/pins')),flush=True)
 frame=json.loads(sys.stdin.buffer.readline())
+while frame['op']=='observe':
+    current=dict(manifest);current['id']=str(uuid.uuid4())
+    result=dict(op='observed',pipeline=first['pipeline'],observation=frame['observation'],manifest=current)
+    if (root/'wrong-observation').exists():result['observation']=str(uuid.uuid4())
+    if (root/'renew-expiry').exists():current['expires']+=1;current['issued']+=1
+    if (root/'wrong-checkout').exists():current['checkout']=dict(current['checkout'],inode=current['checkout']['inode']+1)
+    if (root/'old-list').exists():current['id']=manifest['id']
+    print(json.dumps(result),flush=True)
+    frame=json.loads(sys.stdin.buffer.readline())
 assert frame==dict(op='close',pipeline=first['pipeline'])
 if (root/'hold-output').exists() and os.fork()==0:
     until=time.monotonic()+20
@@ -106,7 +115,17 @@ impl Drop for Fixture {
 fn the_original_duplex_owner_probes_first_keeps_input_and_joins_every_pipe_on_close() {
     let fixture = Fixture::new();
     let (mut owner, released) = fixture.owner();
-    assert!(matches!(owner.ready().unwrap(), Reply::Ready { .. }));
+    let Reply::Ready {
+        manifest: original, ..
+    } = owner.ready().unwrap()
+    else {
+        panic!("ready")
+    };
+    let observed = owner
+        .observe(Instant::now() + Duration::from_secs(3))
+        .unwrap();
+    assert_eq!(observed.expires, original.expires);
+    assert_ne!(observed.id, original.id);
     assert!(released.upgrade().is_some());
     assert_eq!(fixture.calls()[0], ["--help"]);
     assert_eq!(
@@ -120,6 +139,47 @@ fn the_original_duplex_owner_probes_first_keeps_input_and_joins_every_pipe_on_cl
     );
     drop(owner);
     assert!(released.upgrade().is_none());
+}
+
+#[test]
+fn observation_never_renews_the_checkout_or_accepts_an_uncorrelated_list() {
+    for marker in [
+        "wrong-observation",
+        "renew-expiry",
+        "wrong-checkout",
+        "old-list",
+    ] {
+        let fixture = Fixture::new();
+        fs::write(fixture.0.join("early-retention"), b"bounded original").unwrap();
+        fs::write(fixture.0.join(marker), b"foreign data").unwrap();
+        let (mut owner, _released) = fixture.owner();
+        owner.ready().unwrap();
+        assert!(
+            owner
+                .observe(Instant::now() + Duration::from_secs(3))
+                .is_err(),
+            "{marker}"
+        );
+    }
+}
+
+#[test]
+fn an_unretired_mutating_phase_blocks_a_new_observation_before_any_frame_is_sent() {
+    let fixture = Fixture::new();
+    let (mut owner, _released) = fixture.owner();
+    owner.ready().unwrap();
+    let binding = Binding {
+        pipeline: owner.pipeline.clone(),
+        manifest: "a".repeat(64),
+        request: uuid::Uuid::new_v4().to_string(),
+        input: "b".repeat(64),
+    };
+    assert!(binding.valid());
+    owner.armed = Some(binding);
+    assert_eq!(
+        owner.observe(Instant::now() + Duration::from_secs(3)),
+        Err(Error::Unsettled)
+    );
 }
 #[test]
 fn a_legacy_image_never_receives_a_new_subcommand_or_a_replacement_selection() {

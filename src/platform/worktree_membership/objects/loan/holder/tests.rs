@@ -45,6 +45,10 @@ fn the_readonly_holder_lives_across_a_physically_retired_phase_but_never_reloans
         .unwrap();
     assert!(!holder.settled());
     assert!(
+        holder.observe(1001, until()).is_err(),
+        "an active original mutator still owns its phase"
+    );
+    assert!(
         holder.joined(&request).is_err(),
         "an owner ACK cannot retire a live helper"
     );
@@ -55,6 +59,11 @@ fn the_readonly_holder_lives_across_a_physically_retired_phase_but_never_reloans
     fixture.release_loan();
     holder.joined(&request).unwrap();
     assert!(holder.settled());
+    let observed = holder.observe(1001, until()).unwrap();
+    assert_eq!(observed.capture, input.manifest.capture);
+    assert_eq!(observed.checkout, input.manifest.checkout);
+    assert_eq!(observed.expires, input.manifest.expires);
+    assert_ne!(observed.id, input.manifest.id);
     let next = Fixture::start("original");
     assert!(
         holder.arm(&input, next.original(), 1000, until()).is_err(),
@@ -145,6 +154,7 @@ fn cancellation_expiry_and_failed_transfer_keep_the_old_mutation_charged() {
             holder.close();
         }
         assert!(holder.lend(&fixture.socket, &request).is_err());
+        assert!(holder.observe(1001, until()).is_err());
         assert!(!holder.settled());
         assert!(holder.joined(&request).is_err());
         fixture.child.kill().unwrap();
@@ -171,6 +181,61 @@ fn cancellation_expiry_and_failed_transfer_keep_the_old_mutation_charged() {
     fixture.child.kill().unwrap();
     fixture.child.wait().unwrap();
     holder.joined(&request).unwrap();
+}
+
+#[test]
+fn a_fresh_readonly_list_preserves_original_custody_but_never_expands_the_old_consent() {
+    struct Owned(std::process::Child);
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let (_dir, mut holder, input, _request) = holder();
+    let child = Owned(
+        std::process::Command::new("/bin/sleep")
+            .arg("300")
+            .current_dir(&input.manifest.capture.root)
+            .spawn()
+            .unwrap(),
+    );
+    let fresh = holder.observe(1001, until()).unwrap();
+    assert!(fresh.programs.iter().any(|p| p.pid == child.0.id()));
+    assert_eq!(fresh.capture, input.manifest.capture);
+    assert_eq!(fresh.checkout, input.manifest.checkout);
+    assert_eq!(
+        (fresh.issued, fresh.expires),
+        (input.manifest.issued, input.manifest.expires)
+    );
+    assert_ne!(fresh.id, input.manifest.id);
+    assert!(!holder.original.contains_originals(&fresh.programs));
+    let mut changed = input;
+    changed.manifest = fresh;
+    let borrower = Fixture::start("original");
+    assert!(
+        holder
+            .arm(&changed, borrower.original(), 1001, until())
+            .is_err(),
+        "a confirmed old empty list cannot stop a newly observed program"
+    );
+    assert!(
+        crate::platform::process_identity(child.0.id()).is_some(),
+        "observation never signals the new program"
+    );
+}
+
+#[test]
+fn an_observation_cannot_adopt_a_replaced_root_or_extend_the_original_bound() {
+    let (dir, mut original, _input, _request) = holder();
+    let moved = dir.path().with_extension("original");
+    std::fs::rename(dir.path(), &moved).unwrap();
+    std::fs::create_dir(dir.path()).unwrap();
+    assert!(original.observe(1001, until()).is_err());
+    std::fs::remove_dir(moved).unwrap();
+    let (_dir, mut original, _input, _request) = holder();
+    original.until = Instant::now();
+    assert!(original.observe(1001, until()).is_err());
 }
 
 #[test]

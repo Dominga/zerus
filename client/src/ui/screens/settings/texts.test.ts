@@ -448,9 +448,6 @@ describe("Settings texts", () => {
     const qtOrder = [...nav.matchAll(/tr\("([^"]+)"\)/g)].map((m) => m[1]);
     // Worktrees goes in before Automatic approvals (SettingsPage.h:140).
     qtOrder.splice(qtOrder.indexOf("Automatic approvals"), 0, "Worktrees");
-    // WhiteWh fork: Extensions (SettingsPage.h) is in the Qt desktop only.
-    const fork = qtOrder.indexOf("Extensions");
-    if (fork >= 0) qtOrder.splice(fork, 1);
     // The fork appends Teams and Model servers after the nav list (SessionsWindow.cpp:2235, 2241).
     const sessionsWindow = fs.readFileSync(new URL("tray/src/SessionsWindow.cpp", repo), "utf8");
     const appended = [...sessionsWindow.matchAll(/addSection\(tr\("([^"]+)"\)/g)].map((match) => match[1]);

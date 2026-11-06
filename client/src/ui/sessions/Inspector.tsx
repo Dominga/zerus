@@ -18,6 +18,8 @@ import { machineCards } from "../../store/machines";
 import { SessionLeadPanel } from "./SessionLeadPanel";
 import { privateStoreNotices } from "../../store/privateStoreNotices";
 import { toast } from "../../store/notices";
+import { flag } from "../../store/settings";
+import { SocratiCodePanel } from "./SocratiCodePanel";
 import { filterFolder, clearFolderFilter } from "../../store/folderFilter";
 import { of, sameKey, native } from "./paths";
 import type { BoundRow } from "./scope-filters";
@@ -112,6 +114,7 @@ function Details() {
     <Card id="details-account" title={tr("Account")}><Row icon="user-round-cog" label={tr("account")} title={profileId() ? tr("Profile %1", profileId()) : undefined} tail={<Show when={account().tag}><span class="acct-pid tabular" title={tr("Profile %1", profileId())}>{account().tag}</span></Show>}>{accountText()}</Row><Row icon="hard-drive" label={tr("agent home")} mono title={home() || undefined}>{value(homeShort(home()))}</Row><Row icon="sparkles" label={tr("model")}>{value(s().model)} {s().effort}</Row></Card>
     <Card id="details-lead" title={tr("Session lead")}><SessionLeadPanel /></Card>
     <Card id="details-usage" title={tr("Session usage")}><Show when={rows().length} fallback={<div class="hint">{tr("No native usage reported for this conversation yet.")}</div>}><table class="usage"><tbody><For each={rows()}>{([label, val]) => <tr><td>{label}</td><td class="tabular">{val}</td></tr>}</For></tbody></table><Show when={usage().costNote}><div class="hint">{usage().costNote}</div></Show><div class="hint">{usage().footer}</div></Show></Card>
+    <Show when={flag("extensions/socraticode") === true && !!s().cwdPath}><Card id="details-socraticode" title={tr("SocratiCode")}><SocratiCodePanel /></Card></Show>
     <Show when={!subagentOpen()}><div class="insp-foot"><span class="muted" title={context()?.tooltip}>{tr("Context: %1", context()?.text || tr("Not reported"))}</span><span class="grow" /><button class="btn small" title={clear()?.reason || undefined} disabled={!clear()?.enabled} onClick={() => composer.openClear()}>{clear()?.running ? tr("Clearing…") : tr("Clear session…")}</button></div></Show>
   </div>;
 }

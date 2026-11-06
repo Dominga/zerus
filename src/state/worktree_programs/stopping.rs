@@ -574,19 +574,31 @@ for line in sys.stdin:
             previous_binding: input.binding(),
         };
         assert!(force.follows(&input, &normal));
-        let forced = drive(
-            &force,
-            &scope,
-            Instant::now() + Duration::from_secs(1),
-            &mut false,
-            &mut || Ok(()),
-            &mut || Ok(()),
-        )
-        .unwrap();
+        let (forced, status) = std::thread::scope(|threads| {
+            // Act as the original fixture's parent while the worker observes
+            // exit. Darwin cannot read BSD metadata for an unreaped zombie;
+            // that uncertainty must still refuse in production.
+            let child = &mut process.child;
+            let input_pipe = child.stdin.take();
+            let reaped = threads.spawn(move || child.wait());
+            let forced = drive(
+                &force,
+                &scope,
+                Instant::now() + Duration::from_secs(1),
+                &mut false,
+                &mut || Ok(()),
+                &mut || Ok(()),
+            );
+            // On refusal, EOF also settles this private child before joining
+            // its waiter. A successful Force must still prove SIGKILL below.
+            drop(input_pipe);
+            (forced, reaped.join().unwrap().unwrap())
+        });
+        let forced = forced.unwrap();
         assert_eq!(forced.state, State::Complete);
         assert_eq!(forced.members[0].observation, Observation::Exited);
         use std::os::unix::process::ExitStatusExt;
-        assert_eq!(process.child.wait().unwrap().signal(), Some(libc::SIGKILL));
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
     }
     #[test]
     fn outside_replaced_cancelled_or_changed_originals_never_receive_a_signal() {

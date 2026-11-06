@@ -1,5 +1,6 @@
 // U62 (#712): Activity and the composer: drafts, delivery, recovery and cold caches, from test_sessionswindow.
 #include "SessionsWindowFixture.h"
+#include <QSignalSpy>
 
 class TestSessionsWindow : public SessionsWindowFixture {
     Q_OBJECT
@@ -174,10 +175,21 @@ else:print('{}')
     const auto body = QJsonDocument::fromJson(log.readAll().split('\n').first()).object(); log.close();
     QVERIFY(body["queue_when_unconfirmed"].toBool());
     QTRY_VERIFY_WITH_TIMEOUT(composer->editor()->toPlainText().isEmpty(), 15000);
+    auto *client = window.findChild<HgsClient *>(); QVERIFY(client);
     QVERIFY(FakeCli::replace(temp.filePath("held.json"), "[]"));
     QVERIFY(FakeCli::replace(temp.filePath("settled.json"), QJsonDocument(QJsonArray{QJsonObject{{"request_id", body["request_id"]},
         {"text", body["text"]}, {"status", "failed"}, {"error", "session identity changed; nothing was sent"}}}).toJson()));
-    QTRY_COMPARE_WITH_TIMEOUT(composer->editor()->toPlainText(), QStringLiteral("Also run the tests"), 15000);
+    // Task 120: the send's own read may still be in flight here, holding the
+    // files as they were before the settlement (the run after midnight showed
+    // exactly that: its reply still listed the message as held), and the details
+    // poll is kept out (24 h), so nothing else reads again. The test asks for one
+    // read that starts after the files changed and waits for that reply: the
+    // client runs one inspection per session, so the reply after a successful
+    // request is the new one.
+    QSignalSpy replies(client, &HgsClient::inspectionReady); qsizetype issued = -1;
+    QTRY_VERIFY(issued >= 0 || (client->requestInspection({}, "codex/hgs/dashboard") && (issued = replies.size(), true)));
+    QTRY_VERIFY(replies.size() > issued);
+    QCOMPARE(composer->editor()->toPlainText(), QStringLiteral("Also run the tests"));
     QTRY_VERIFY(window.findChild<QLabel *>("notice")->text().contains(QStringLiteral("Not delivered: session identity changed")));
     QVERIFY(window.findChild<QLabel *>("notice")->property("error").toBool());
     // Only once: a new draft stays as it is on the next reads.

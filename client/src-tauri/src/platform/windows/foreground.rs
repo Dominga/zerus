@@ -39,3 +39,10 @@ pub fn present(window: &tauri::WebviewWindow) -> Option<Front> {
     let hwnd = window.hwnd().ok()?;
     Some(bring_to_front(&Window(hwnd.0)))
 }
+
+/// Another process's already visible window, raised with this process's own
+/// foreground right: a second start that could not hand its activation over
+/// (task 110). No right is passed on to that process.
+pub fn present_handle(hwnd: HWND) -> Front {
+    bring_to_front(&Window(hwnd))
+}

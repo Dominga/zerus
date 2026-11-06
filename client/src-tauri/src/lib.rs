@@ -114,6 +114,8 @@ mod socraticode;
 mod speech_settings;
 #[cfg(feature = "live")]
 mod startup_error;
+#[cfg(feature = "live")]
+mod second_start;
 mod startup_log;
 #[cfg(feature = "live")]
 mod task_details;
@@ -460,15 +462,37 @@ pub fn run() {
                 instance::Claim::Forwarded => {
                     return;
                 }
-                instance::Claim::Duplicate(_) => return,
-                instance::Claim::Failed(_) => {
+                // Task 110: a second start never exits silently. It brings the
+                // running Zerus (either client) forward or says what runs.
+                #[cfg(feature = "live")]
+                instance::Claim::Duplicate(_) => {
+                    second_start::settle(context, second_start::Refusal::Unanswered, !options.background);
+                    return;
+                }
+                #[cfg(not(feature = "live"))]
+                instance::Claim::Duplicate(reason) => {
+                    eprintln!("zerus-client: another Zerus is running but did not answer ({reason})");
+                    return;
+                }
+                #[cfg(feature = "live")]
+                instance::Claim::Failed(error) => {
+                    let asked = !options.background;
+                    second_start::settle(context, second_start::Refusal::Failed(error), asked);
+                    if !asked {
+                        std::process::exit(3);
+                    }
+                    return;
+                }
+                #[cfg(not(feature = "live"))]
+                instance::Claim::Failed(error) => {
+                    eprintln!("zerus-client: cannot claim the single-instance channel: {error}");
                     std::process::exit(3);
                 }
                 // Nothing was forwarded to that server; say so instead of exiting silently.
                 #[cfg(all(windows, feature = "live"))]
                 instance::Claim::Untrusted => {
                     startup_error::record("instance.claim", "activation_pipe_untrusted");
-                    startup_error::show_untrusted_pipe(context);
+                    second_start::settle(context, second_start::Refusal::Untrusted, !options.background);
                     return;
                 }
                 #[cfg(all(windows, not(feature = "live")))]

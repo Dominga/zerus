@@ -43,7 +43,8 @@ export class WaitingNotices {
       if (this.posted.has(item.id)) continue;
       const notice = {
         token: waitingToken(item),
-        title: tr("Waiting for you in %1", item.team_name || item.team),
+        // Task 109: a drive low on space is no team's; its notice says what it is.
+        title: item.kind === "disk_low" ? tr("Low disk space on %1", item.team_name) : tr("Waiting for you in %1", item.team_name || item.team),
         body: item.title,
       };
       this.posted.set(item.id, notice.token);

@@ -84,6 +84,7 @@ mod session_upload;
 mod session_state;
 mod switch_account;
 mod builds;
+pub(crate) mod build_dirs;
 mod native_subagents;
 mod supervisor;
 mod tasks;
@@ -927,6 +928,15 @@ pub(crate) fn task_bindings_in(root: &Path) -> Result<Vec<Value>> {
 pub(crate) mod builds_test_support {
     pub(crate) fn write_qa_binding() {
         super::builds::tests::write_qa_binding();
+    }
+
+    /// Task 108: a live `hgs run` claim with this command, for busy checks.
+    pub(crate) fn running_claim(id: &str, cwd: &std::path::Path, command: &str) -> std::path::PathBuf {
+        let path = super::builds::test_running_claim(id, cwd, "hgs_run");
+        let mut claim: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        claim["command"] = serde_json::json!(command);
+        std::fs::write(&path, claim.to_string()).unwrap();
+        path
     }
     pub(crate) fn set_dsh_session(conversation: Option<&str>) {
         super::builds::TEST_DSH_SESSION.with(|value| *value.borrow_mut() = conversation.map(str::to_owned));

@@ -12,6 +12,7 @@ import { AnalyticsSection } from "./Analytics";
 import { ApprovalsSection } from "./Approvals";
 import { ExtensionsSection } from "./Extensions";
 import { WorktreesSection, refreshWorktrees } from "./Worktrees";
+import { DiskSection } from "./Disk";
 import { MobileSection } from "./Mobile";
 import { ProcessesSection } from "./Processes";
 import { AboutSection, refreshAbout } from "./About";
@@ -26,7 +27,7 @@ import { trNoop } from "../../../i18n";
 
 export type SectionId =
   | "appearance" | "sessions" | "teams" | "recovery" | "processes" | "updates" | "mobile" | "files"
-  | "worktrees" | "approvals" | "voice" | "keyboard" | "analytics" | "extensions" | "about" | "modelservers";
+  | "worktrees" | "disk" | "approvals" | "voice" | "keyboard" | "analytics" | "extensions" | "about" | "modelservers";
 
 export interface Section {
   id: SectionId;
@@ -55,6 +56,9 @@ export const SECTIONS: readonly Section[] = [
   // own nav, and Model servers after it (2241, task 67).
   { id: "teams", label: "Teams", icon: "users", component: TeamsSection },
   { id: "modelservers", label: trNoop("Model servers"), icon: "hard-drive", component: ModelServersSection },
+  // Task 108: the build folders Zerus holds and their cleanup, after Model
+  // servers as in Qt.
+  { id: "disk", label: trNoop("Build folders"), icon: "trash-2", component: DiskSection },
 ];
 
 /** The sections the client has so far, in Qt's order. */

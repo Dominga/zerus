@@ -6,9 +6,10 @@ import { answeredWaiting, memberRow, showWaiting, teams, waiting } from "../../s
 import { teamsWaitingOlder } from "../../bridge";
 import { waitingNotices } from "../../store/waitingNotices";
 import { setDetailTab, setPage, setSelectedKey } from "../../store/ui";
+import { openSettings } from "../screens/settings/sections";
 import { ProposalCardList, useModel, windowPort } from "./ProposalCards";
 import {
-  BANNER_ROWS, WaitingAnswer, acceptanceSummary, approves, deferredRequest, opensCard, splitDeferred, toolOffer, waitingActionLabel, waitingAge,
+  BANNER_ROWS, WaitingAnswer, acceptanceSummary, approves, opensDisk, deferredRequest, opensCard, splitDeferred, toolOffer, waitingActionLabel, waitingAge,
   waitingCount, waitingFields, waitingKindIcon, waitingKindLabel, type QuestionChoice,
 } from "./decisions";
 import type { TeamWaitingItem } from "../../types";
@@ -224,6 +225,9 @@ function Row(props: { item: TeamWaitingItem; compact?: boolean }) {
         </Show>
         <Show when={item().team}>
           <button class="btn small ghost" onClick={(event) => { event.stopPropagation(); openTeam(item()); }}>{tr("Open team")}</button>
+        </Show>
+        <Show when={opensDisk(item())}>
+          <button class="btn small" onClick={(event) => { event.stopPropagation(); openSettings("disk"); }}>{tr("Open Build folders")}</button>
         </Show>
       </div>
       <Show when={open()}><Answer item={item()} /></Show>

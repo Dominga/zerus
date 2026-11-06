@@ -98,6 +98,7 @@ pub(super) fn catalog() -> Result<Connection> {
         CREATE TABLE IF NOT EXISTS archive_rows(id TEXT PRIMARY KEY,name TEXT NOT NULL,run TEXT NOT NULL,conversation TEXT NOT NULL,at REAL NOT NULL,search TEXT NOT NULL,stamp TEXT NOT NULL,seen TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS archive_by_date ON archive_rows(at DESC,id DESC);
         CREATE INDEX IF NOT EXISTS archive_identity ON archive_rows(name,run,conversation);"))?;
+    let reference_schema = archive_references::schema(&db)?;
     sql(db.execute(
         "INSERT OR IGNORE INTO catalog_meta VALUES('id',?)",
         [uuid::Uuid::new_v4().to_string()],
@@ -113,7 +114,7 @@ pub(super) fn catalog() -> Result<Connection> {
         [],
         |r| r.get(0),
     ))?;
-    if current == prior {
+    if current == prior && reference_schema {
         return Ok(db);
     }
     let tx = sql(db.transaction())?;
@@ -132,6 +133,12 @@ pub(super) fn catalog() -> Result<Connection> {
             if uuid::Uuid::parse_str(id).is_err() {
                 continue;
             }
+            // Restore coverage is independent of the search reader's label/ID
+            // selection and omission policy. Never rebuild it in cleanup.
+            if !archive_references::current(&tx,&path,id) {
+                let _=archive_references::reconcile(&tx,&path);
+            }
+            sql(tx.execute("UPDATE archive_references SET seen=? WHERE id=?",params![generation,id]))?;
             let file_stamp = stamp(&path)?;
             let unchanged = sql(tx.execute(
                 "UPDATE archive_rows SET seen=? WHERE id=? AND stamp=?",
@@ -193,7 +200,12 @@ pub(super) fn catalog() -> Result<Connection> {
             ))?;
         }
     }
-    sql(tx.execute("DELETE FROM archive_rows WHERE seen!=?", [generation]))?;
+    sql(tx.execute("DELETE FROM archive_rows WHERE seen!=?", [&generation]))?;
+    sql(tx.execute("DELETE FROM archive_references WHERE seen!=?",[&generation]))?;
+    sql(tx.execute("DELETE FROM archive_reference_paths WHERE id NOT IN (SELECT id FROM archive_references)", []))?;
+    // Commit migration completeness with the rows, so an interrupted first
+    // reconciliation cannot leave an initialized-but-empty reference cache.
+    sql(tx.execute("INSERT OR REPLACE INTO catalog_meta VALUES('archive_references_v1','1')",[]))?;
     sql(tx.execute(
         "INSERT OR REPLACE INTO catalog_meta VALUES('stamp',?)",
         [current],

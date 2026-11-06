@@ -129,7 +129,7 @@ pub(super) fn prepare_removal(common: &Path, row: &Value) -> Result<()> {
     if ownership["branch"] != row["branch"] {
         return Err("The managed worktree branch changed; review it manually".into());
     }
-    archive::visit_bounded(Instant::now()+Duration::from_secs(2), |mut record| {
+    super::archive_references::visit_related(Instant::now()+Duration::from_secs(2), path, string(&ownership,"id"), |mut record| {
         let refers = ["cwd", "launch_dir"]
             .iter()
             .any(|key| Path::new(string(&record, key)).starts_with(path));

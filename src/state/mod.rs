@@ -6,6 +6,7 @@ mod answer_channel;
 mod agent_hint;
 mod archive;
 pub(crate) mod archive_catalog;
+mod archive_references;
 mod claude_trust;
 mod claude_permission;
 mod claude_resume;

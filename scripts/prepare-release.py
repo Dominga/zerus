@@ -13,6 +13,7 @@ import tempfile
 
 from macos_release import add_macos
 from release_common import binary_dependencies
+from release_source import source_archive, reuse as reuse_source
 import windows_portable
 import windows_installer_release
 
@@ -33,6 +34,7 @@ def main():
     parser.add_argument("--windows-installer", type=Path, help="tested installer from the same CI run")
     parser.add_argument("--windows-installer-info", type=Path, help="the installer CI build metadata")
     parser.add_argument("--macos", type=Path, help="signed and notarized macOS artifact from the macos-signing job")
+    parser.add_argument("--source-check", type=Path, help="this run's successful parallel source-recipe qualification")
     args = parser.parse_args()
     version = (ROOT / "VERSION").read_text().strip()
     if not re.fullmatch(r"\d+\.\d+\.\d+", args.version) or args.version != version:
@@ -56,8 +58,7 @@ def main():
     if any(args.output.iterdir()):
         parser.error("use an empty candidate output directory; never overwrite an existing candidate")
     source = args.output / f"zerus-{version}-source.tar.gz"
-    archive = subprocess.check_output(["git", "archive", "--format=tar", f"--prefix=zerus-{version}/", "HEAD"], cwd=ROOT)
-    source.write_bytes(gzip.compress(archive, mtime=epoch))
+    source_archive(ROOT, version, source)
     binary = args.output / f"zerus-{version}-arch-x86_64.tar.gz"
     with tempfile.TemporaryDirectory(prefix="zerus-release-") as temporary:
         root = Path(temporary)
@@ -94,6 +95,8 @@ def main():
         for key, value in values.items():
             text = text.replace(key, value)
         (directory / "PKGBUILD").write_text(text)
+    if args.source_check:
+        reuse_source(ROOT, args.source_check, args.output, version, revision)
     (args.output / "SHA256SUMS").write_text("".join(f"{digest(path)}  {path.name}\n" for path in (source, binary)))
     info = {"version": version, "source_commit": revision, "architecture": "x86_64", "distribution": "Arch Linux",
             "publication": "candidate", "binary_dependencies": libraries, "native_agents_bundled": False}

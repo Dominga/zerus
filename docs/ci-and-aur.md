@@ -1579,8 +1579,19 @@ GitHub releases or a schedule.
 validation from one exact commit. macOS can be explicitly disabled; Windows
 cannot, because the candidate carries the portable zip that this run tested. It
 consumes that run's Arch package and Windows zip, verifies their embedded
-version/source commit, assembles source and binary archives, rebuilds both stable
-recipes, runs namcap and seals the result.
+version/source commit and assembles source and binary archives. In parallel with
+verification, a credential-free, cache-free source-recipe job builds the exact
+`git archive` with `makepkg` including `check()`, then runs namcap and
+`check-package.py`. Final assembly regenerates the tarball and requires identical
+raw-tar and compressed SHA-256 digests, recipe and `.SRCINFO` before reusing that
+same run's checked source package. Changed source, metadata or package bytes fail
+closed. It builds and checks only `zerus-ade-bin` afterwards.
+
+The signed cask install check and final assembly run in parallel. Neither produces
+the final candidate alone: the sealing job waits for both selected checks, then
+validates and uploads the immutable candidate. Optional casks may be skipped only
+when disabled for this run. Source/package jobs and sealing receive no credentials
+or cache access.
 Stable and nightly candidates call the common `checks.yml` workflow directly
 with read-only cache access. Their verification never includes the main-push dev
 publisher or requests its tag-writing permissions.
@@ -1638,7 +1649,8 @@ the application or AUR repositories.
 Once the repository variable `MACOS_CASKS_ENABLED` is `true`, the candidate run
 also builds the Apple Silicon Zerus Next bundle, without Qt (`--gui tauri`), signs
 and notarizes it in the main-only `macos-signing` environment and installs the result
-through a local tap before assembly (`macos-cask.yml`). The candidate then uses
+through a local tap alongside final assembly (`macos-cask-install.yml`); sealing
+waits for both. The candidate then uses
 release-info schema 2 and contains the `zerus-VERSION-macos-arm64.zip` asset and
 `homebrew/zerus.rb`. Until then, and with `-f macos_cask=false`, the candidate has
 no macOS asset. Details, secrets and retry rules are in

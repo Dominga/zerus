@@ -5,8 +5,16 @@ cd "$(dirname "$0")/.."
 if [ "$(id -u)" = 0 ]; then echo 'makepkg must run as an unprivileged user.' >&2; exit 1; fi
 release_dir=$(realpath "${1:-dist}")
 repo_root="$PWD"
+mode=${2:-all}
+case "$mode" in
+    all) flavors=(zerus zerus-ade-bin) ;;
+    --source-only) flavors=(zerus) ;;
+    --binary-only) flavors=(zerus-ade-bin) ;;
+    *) echo 'Expected all, --source-only or --binary-only.' >&2; exit 2 ;;
+esac
+if [ "${3:-}" != '' ] && [ "${3:-}" != --defer-seal ]; then exit 2; fi
 mkdir -p .ci-build/release-packages artifacts/test-results
-for flavor in zerus zerus-ade-bin; do
+for flavor in "${flavors[@]}"; do
     recipe_dir="$release_dir/aur/$flavor"
     (cd "$recipe_dir"; makepkg --printsrcinfo > .SRCINFO)
     work="$repo_root/.ci-build/release-packages/$flavor"
@@ -36,6 +44,10 @@ PY
     )
     python3 scripts/check-package.py --root "$work/pkg/$flavor" --package-name "$flavor"
 done
+if [ "$mode" = --source-only ]; then
+    python3 scripts/release_source.py record --directory "$release_dir"
+    exit 0
+fi
 mkdir -p "$release_dir/aur/zerus-git"
 cp packaging/aur/zerus-git/PKGBUILD "$release_dir/aur/zerus-git/PKGBUILD"
 python3 - "$release_dir/aur/zerus-git/PKGBUILD" <<'PY'
@@ -48,13 +60,7 @@ revision = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text
 path.write_text(re.sub(r"^pkgver=.*$", f"pkgver={version}.r{count}.g{revision}", path.read_text(), flags=re.M))
 PY
 (cd "$release_dir/aur/zerus-git"; makepkg --printsrcinfo > .SRCINFO)
-python3 - "$release_dir" <<'PY'
-from pathlib import Path
-import sys
-sys.path.insert(0, "scripts")
-from release_common import finish_candidate, validate_candidate
-directory = Path(sys.argv[1])
-finish_candidate(directory)
-validate_candidate(directory, Path("VERSION").read_text().strip())
-PY
-printf 'Zerus Next source and binary packages validated; all three stable AUR metadata pairs prepared. Nothing was published.\n'
+if [ "${3:-}" != --defer-seal ]; then
+    python3 scripts/seal-release.py "$release_dir"
+fi
+printf 'Selected release recipes validated; stable AUR metadata prepared. Nothing was published.\n'

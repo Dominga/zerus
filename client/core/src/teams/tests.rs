@@ -966,3 +966,26 @@ fn a_failure_keeps_a_pending_view_in_the_batch() {
     );
     assert!(coalescer.take().is_empty());
 }
+
+/// Task #58: status carries each phase's mode and the free phase; the list
+/// names the free phases; an older hgs sends neither.
+#[test]
+fn task_58_each_phase_carries_its_mode() {
+    let status = json!({"id":"t1","name":"Checkout","status":"running","lead":"lead","members":[{"id":"lead"}],
+        "plan_mode":"standard","phase_modes":{"1":"standard","2":"free"},
+        "free_phase":{"phase":2,"state":"idle","running":[]},
+        "phase_summary":[{"n":1,"title":"Build","state":"running"},{"n":2,"title":"Support","state":"running"},{"n":3,"state":"draft"}]});
+    let view = view::team(&status);
+    assert!(view.phase_modes_known);
+    assert_eq!(view.free_phase, Some(2));
+    let modes: Vec<(u64, &str)> = view.phases.iter().map(|phase| (phase.n, phase.mode.as_str())).collect();
+    assert_eq!(modes, [(1, "standard"), (2, "free"), (3, "standard")], "a phase not named reads the team's mode");
+    let older = view::team(&json!({"id":"t1","name":"Checkout","status":"running","lead":"lead","plan_mode":"free",
+        "phase_summary":[{"n":1,"state":"running"}]}));
+    assert!(!older.phase_modes_known);
+    assert_eq!((older.phases[0].mode.as_str(), older.free_phase), ("", None));
+    let list = view::list(&json!({"items":[
+        {"id":"a","name":"A","status":"running","lead":"lead","members":[],"phase_modes":{"1":"standard","3":"free"}},
+        {"id":"b","name":"B","status":"running","lead":"lead","members":[]}]}));
+    assert_eq!((list.teams[0].free_phases.clone(), list.teams[1].free_phases.clone()), (vec![3], vec![]));
+}

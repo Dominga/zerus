@@ -4,7 +4,7 @@ import { Icon } from "../lib/icons";
 import { teams } from "../../store/teams";
 import { useModel, windowPort } from "./ProposalCards";
 import {
-  TeamActions, barActions, barChips, finishSummary, formText, moreItems, openQuestions, questionClosed, stageName, subtreeImpact, taskButtons,
+  TeamActions, barActions, barChips, finishSummary, formText, moreItems, openQuestions, phaseModeSwitch, questionClosed, stageName, subtreeImpact, taskButtons,
   type ActTask, type ActTeam, type BarAction, type BarChip, type TaskForm,
 } from "./actions";
 import type { ComputerId } from "../../types";
@@ -37,6 +37,26 @@ function TextDialog(props: {
           onClick={() => { if (state().ok) { props.submit(text()); props.close(); } }}>{props.action}</button>
       </div>
     </dialog>
+  );
+}
+
+/** Task #58: a phase's mode chip and its switch (free <-> standard), confirmed first. */
+export function PhaseModeControl(props: { computer: ComputerId; team: ActTeam; phase: number }) {
+  const { model, tick } = useModel((changed) => new TeamActions(windowPort, () => ({ computer: props.computer, team: props.team }), changed));
+  const read = () => (tick(), model);
+  const mode = () => props.team.phases.find((phase) => phase.n === props.phase)?.mode ?? "";
+  const free = () => (props.team.free_phase ?? 0) === props.phase || mode() === "free";
+  const switching = createMemo(() => phaseModeSwitch(props.team, props.phase));
+  return (
+    <span class="team-phase-mode" data-phase-mode={free() ? "free" : mode() || "standard"} onClick={(event) => event.stopPropagation()}>
+      <Show when={free()}><span class="pt-chip pt-chip-free" title={tr("Free planning: the phase stays open and takes tasks as they come until you close it")}>{tr("Free")}</span></Show>
+      <Show when={switching()}>{(shown) => (
+        <button type="button" class="btn ghost small" data-action="phase-mode" data-mode={shown().mode}
+          disabled={!shown().enabled || read().busy} title={shown().why || undefined}
+          onClick={(event) => { event.stopPropagation(); void model.phaseMode(shown().phase, shown().mode); }}>{shown().text}</button>
+      )}</Show>
+      <Show when={read().notice}><span class="danger team-phase-mode-notice" role="status">{read().notice}</span></Show>
+    </span>
   );
 }
 

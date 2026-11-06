@@ -21,7 +21,7 @@ import { roleStyle } from "./roles";
 import { TeamProposals } from "./ProposalCards";
 import { TeamReports } from "./TeamReports";
 import { WaitingBanner } from "./Waiting";
-import { Blockers, TaskActions, TeamBarActions, TeamBarChips, TeamQuestions } from "./TeamActions";
+import { Blockers, PhaseModeControl, TaskActions, TeamBarActions, TeamBarChips, TeamQuestions } from "./TeamActions";
 import { composer } from "../../store/composer";
 import type { ComputerId, TeamMemberView, TeamView } from "../../types";
 import type { Session } from "../sessions/types";
@@ -110,7 +110,7 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
       </Show>
       <div class="team-body" ref={body}>
         <div class="team-canvas">
-          <Show when={graph()} fallback={<TeamPhases team={props.team} />}>
+          <Show when={graph()} fallback={<TeamPhases computer={props.computer} team={props.team} />}>
             {(shown) => (
               <PlanView
                 team={props.team}
@@ -123,6 +123,7 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
                   const task = props.team.tasks.find((candidate) => candidate.id === id);
                   return task ? <TaskActions computer={props.computer} team={props.team} task={task} /> : <></>;
                 }}
+                phaseActions={(n) => <PhaseModeControl computer={props.computer} team={props.team} phase={n} />}
               />
             )}
           </Show>
@@ -221,13 +222,14 @@ function TeamBar(props: {
 }
 
 /** The canvas until the plan view takes it: the phases with their progress. */
-function TeamPhases(props: { team: TeamView }) {
+function TeamPhases(props: { computer: ComputerId; team: TeamView }) {
   return (
     <div class="team-phases">
       <For each={props.team.phases} fallback={<p class="dim team-empty">{tr("No phases yet")}</p>}>{(phase) => (
         <div class="team-phase" data-phase={phase.n} classList={{ draft: phase.state === "draft", running: phase.state === "running", done: phase.state === "done" }}>
           <span class="team-phase-n mono">{phase.n}</span>
           <b class="ell">{phase.title || tr("Phase %1", phase.n)}</b>
+          <PhaseModeControl computer={props.computer} team={props.team} phase={phase.n} />
           <span class="grow" />
           <span class="team-phase-bar"><i style={{ width: phase.total ? `${(phase.done / phase.total) * 100}%` : "0%" }} /></span>
           <span class="mono dim">{phase.done}/{phase.total}</span>

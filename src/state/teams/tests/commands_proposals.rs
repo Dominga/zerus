@@ -401,6 +401,41 @@ fn the_switch_dialog_switches_the_plan_mode_through_decide_proposal() {
     assert!(store.events("t", None, 50).unwrap().to_string().contains("plan_mode_switched"));
 }
 
+/// Task #58: a switch card naming a phase switches that phase only, through
+/// the same decide-proposal; the owner's direct switch is one guarded op.
+#[test]
+fn a_phase_switch_card_and_the_owners_op_switch_one_phase() {
+    use super::super::model::PlanMode;
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+    let mut team = running_team();
+    let lead = Actor::Member("lead".into());
+    let input = json!({"kind":"switch-plan-mode","mode":"free","phase":1,"reason":"support requests"});
+    ops::apply(&mut team, "propose", &input, &lead, &BTreeSet::new(), &mut Vec::new()).unwrap();
+    let hash = team.proposals[0]["hash"].as_str().unwrap().to_owned();
+    store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+    let receipt = decide_proposal_in(&mut store, &json!({"team":"t","proposal":"p1","accept":true,"expected_hash":hash}), &Actor::Human).unwrap();
+    assert_eq!(receipt["status"], "accepted", "{receipt}");
+    assert_eq!((receipt["result"]["phase"].as_u64(), receipt["result"]["mode"].as_str()), (Some(1), Some("free")));
+    let stored = store.load("t").unwrap().unwrap();
+    assert_eq!((stored.plan_mode, stored.phase_mode(1)), (PlanMode::Standard, PlanMode::Free));
+    assert!(store.events("t", None, 50).unwrap().to_string().contains("phase_mode_switched"));
+    // The owner locks it back with one guarded op; the same request id
+    // answers its receipt again and never switches twice.
+    let request = json!({"team":"t","request_id":"22222222-2222-4222-8222-222222222222","phase":1,"mode":"standard"});
+    let first = store.mutate(Some(("22222222-2222-4222-8222-222222222222", &request)), "t", None, |team, events| {
+        ops::apply(team, "phase-mode", &request, &Actor::Human, &BTreeSet::new(), events)
+    })
+    .unwrap();
+    let again = store.mutate(Some(("22222222-2222-4222-8222-222222222222", &request)), "t", None, |team, events| {
+        ops::apply(team, "phase-mode", &request, &Actor::Human, &BTreeSet::new(), events)
+    })
+    .unwrap();
+    assert_eq!(first["mode"], "standard", "{first}");
+    assert_eq!(again["mode"], first["mode"], "{again}");
+    assert_eq!(store.load("t").unwrap().unwrap().phase_mode(1), PlanMode::Standard);
+}
+
 #[test]
 fn an_accepted_swap_proposal_runs_with_its_fields() {
     // C8: the spec's shape (member id plus section 5 fields) is kept by

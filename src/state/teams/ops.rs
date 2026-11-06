@@ -1141,7 +1141,8 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
     let approval = if urgent { Approval::Auto } else { phase_approval(team) };
     // U59: a free team's open phase takes the tasks as they come, with no new
     // phase and no approval; they run as added.
-    let free_open = (team.plan_mode == PlanMode::Free && target.is_none()).then(|| open_phase(team));
+    // Task #58: the phase that plans in free mode, whichever it is.
+    let free_open = if target.is_none() { free_phase(team) } else { None };
     // Several drafts may queue, in order; a phase added while an earlier one is
     // still a Draft is a Draft too, whatever the approval says (F9). U58: tasks
     // added to an accepted phase are Pending, not Draft.
@@ -2380,12 +2381,150 @@ pub(crate) fn open_phase(team: &Team) -> u32 {
         .unwrap_or(1)
 }
 
+/// Task #58 (owner, 2026-11-06): the phase that takes tasks as they come, if
+/// any: the open phase when it plans in free mode (its own mode, else the
+/// team's), else the running phase the owner opened to free planning. At most
+/// one phase is free at a time, so `extend` always knows where tasks go.
+pub(crate) fn free_phase(team: &Team) -> Option<u32> {
+    let open = open_phase(team);
+    if team.phase_mode(open) == PlanMode::Free {
+        return Some(open);
+    }
+    // Only a phase's own mode counts here: an older phase that merely reads
+    // the team's mode never reopens once the open phase was locked.
+    team.phases
+        .iter()
+        .rev()
+        .filter(|phase| phase.state == PhaseState::Approved)
+        .map(|phase| phase.n)
+        .chain(std::iter::once(1))
+        .find(|n| team.phase_modes.get(n) == Some(&PlanMode::Free))
+}
+
+/// Task #58: the mode of every phase the team has (phase 1, the records and
+/// any phase a task names), by number, for status, the list and the watch.
+pub(crate) fn phase_modes_view(team: &Team) -> Value {
+    let numbers: BTreeSet<u32> = std::iter::once(1)
+        .chain(team.tasks.iter().map(|task| task.phase))
+        .chain(team.phases.iter().filter(|phase| phase.state != PhaseState::Discarded).map(|phase| phase.n))
+        .collect();
+    Value::Object(numbers.into_iter().map(|n| (n.to_string(), json!(team.phase_mode(n)))).collect())
+}
+
+/// U59/task #58: the owner's close of a free phase (`close-phase`, or its
+/// build accepted): the team continues in standard mode, as U59 closes it, and
+/// the phase drops a mode of its own, so it reads standard and a later switch
+/// of the team's mode reaches it again. Unlike `phase-mode`, which changes one
+/// phase only, this is the team's U59 close.
+fn close_free_phase(team: &mut Team, n: u32) {
+    team.phase_modes.remove(&n);
+    team.plan_mode = PlanMode::Standard;
+}
+
+/// Task #58 (owner, 2026-11-06): switches one phase between free and standard
+/// planning; every other phase keeps its mode and the team's own mode stays
+/// the default of phases without one. The owner switches directly
+/// (`phase-mode`), the lead only through a `switch-plan-mode` card naming the
+/// phase.
+///
+/// Standard -> free opens a running phase (approved, or phase 1): new tasks
+/// join it as they come and run as added; while it is free it is never done by
+/// itself and no queued phase starts behind it. Only one phase is free at a
+/// time.
+///
+/// Free -> standard locks an accepted phase: its tasks keep their state and
+/// run on, and no new task joins it without a plan edit (`extend` with its
+/// phase, which asks the owner for an accepted phase). Its open build task
+/// stays an ordinary task of the phase (the phase is done only when it is
+/// decided) and no longer closes anything; a pending close of the phase ends
+/// with the lock, which is that close (`close_pending` in the receipt and the
+/// event).
+pub(crate) fn switch_phase_mode(
+    team: &mut Team,
+    n: u32,
+    mode: PlanMode,
+    by: &str,
+    proposal: &str,
+    reason: &str,
+    events: &mut Vec<Event>,
+) -> anyhow::Result<Value> {
+    ensure!(
+        matches!(team.status, TeamStatus::Running | TeamStatus::Paused),
+        "Only a running or paused team switches a phase's mode"
+    );
+    // Phase 1 is the approved initial plan and has no record.
+    let state = match team.phases.iter().find(|phase| phase.n == n) {
+        Some(record) => record.state,
+        None if n == 1 => PhaseState::Approved,
+        None => bail!("Unknown phase {n}"),
+    };
+    let word = |mode: PlanMode| if mode == PlanMode::Free { "free" } else { "standard" };
+    ensure!(team.phase_mode(n) != mode, "Phase {n} already plans in {} mode", word(mode));
+    let mut build = None;
+    let mut close_pending = None;
+    match mode {
+        PlanMode::Free => {
+            ensure!(
+                state == PhaseState::Approved,
+                "Phase {n} is not running: only a running phase opens for tasks as they come"
+            );
+            if let Some(open) = free_phase(team).filter(|open| *open != n) {
+                bail!("Phase {open} already takes tasks as they come; switch it to standard first");
+            }
+            team.phase_modes.insert(n, PlanMode::Free);
+        }
+        PlanMode::Standard => {
+            ensure!(state.is_accepted(), "Phase {n} is not accepted: a draft has no mode to lock");
+            team.phase_modes.insert(n, PlanMode::Standard);
+            build = team
+                .tasks
+                .iter()
+                .find(|task| task.phase == n && task.phase_build && !task.status.finished())
+                .map(|task| task.id);
+            if team.free_close_pending == Some(n) {
+                close_pending = team.free_close_pending.take();
+            }
+        }
+    }
+    let proposal = (!proposal.is_empty()).then_some(proposal);
+    events.push(Event::new(
+        "phase_mode_switched",
+        json!({"by":by,"phase":n,"mode":mode,"proposal":proposal,"reason":reason,"build":build,"close_pending":close_pending}),
+    ));
+    Ok(json!({"status":"switched","phase":n,"mode":mode,"build":build,"close_pending":close_pending,
+        "phase_modes":phase_modes_view(team)}))
+}
+
+/// U59/task #58: what Allow on a `switch-plan-mode` card applies: with a phase
+/// in its change, that phase's mode; without one, the team's own mode (U59).
+pub(crate) fn apply_mode_proposal(
+    team: &mut Team,
+    change: &Value,
+    mode: &str,
+    id: &str,
+    reason: &str,
+    events: &mut Vec<Event>,
+) -> anyhow::Result<Value> {
+    let wanted = if mode == "free" { PlanMode::Free } else { PlanMode::Standard };
+    if let Some(n) = change.get("phase").filter(|phase| !phase.is_null()) {
+        let n = n.as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0).context("Not a phase number")?;
+        return switch_phase_mode(team, n, wanted, "You", id, reason, events);
+    }
+    // U59: the team's mode. The open phase follows it with every phase that
+    // has no mode of its own, so the switch reaches the running work.
+    team.plan_mode = wanted;
+    let open = open_phase(team);
+    team.phase_modes.remove(&open);
+    if wanted == PlanMode::Standard {
+        // Task #58: back to standard leaves no phase free.
+        team.phase_modes.retain(|_, mode| *mode != PlanMode::Free);
+    }
+    events.push(Event::new("plan_mode_switched", json!({"by":"You","mode":mode,"proposal":id,"reason":reason})));
+    Ok(json!({"status":"switched","plan_mode":mode}))
+}
+
 /// The accepted phases (phase 1 included) whose tasks are all finished.
 fn phases_done(team: &Team) -> BTreeSet<u32> {
-    // U59: a free team's open phase is never done by itself.
-    if team.plan_mode == PlanMode::Free {
-        return BTreeSet::new();
-    }
     let mut numbers: BTreeSet<u32> = team.tasks.iter().map(|task| task.phase).collect();
     // U63: a phase that requires the owner's acceptance is done once accepted.
     numbers.retain(|n| {
@@ -2395,19 +2534,27 @@ fn phases_done(team: &Team) -> BTreeSet<u32> {
             })
     });
     numbers.retain(|n| team.tasks.iter().filter(|task| task.phase == *n).all(|task| task.status.finished()));
+    // U59: a free phase is never done by itself (task #58: whichever phase it is).
+    if let Some(free) = free_phase(team) {
+        numbers.remove(&free);
+    }
     numbers
 }
 
 /// U25: a phase whose tasks all ended says so once, and a queued phase starts
 /// once every earlier phase is finished.
 fn advance_phases(team: &mut Team, done_before: &BTreeSet<u32>, events: &mut Vec<Event>) {
-    if !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) || team.plan_mode == PlanMode::Free {
-        // U59: a free phase never closes by itself and no phase starts behind it.
+    if !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
         return;
     }
     for n in phases_done(team).difference(done_before) {
         let title = team.phases.iter().find(|phase| phase.n == *n).map(|phase| phase.title.clone()).unwrap_or_default();
         events.push(Event::new("phase_done", json!({"phase":n,"title":title})));
+    }
+    if free_phase(team).is_some() {
+        // U59: a free phase never closes by itself and no phase starts behind
+        // it (task #58: the free phase is never in the done set above).
+        return;
     }
     let mut order: Vec<usize> = (0..team.phases.len()).filter(|at| team.phases[*at].state == PhaseState::Queued).collect();
     order.sort_by_key(|at| (team.phases[*at].order(), team.phases[*at].n));
@@ -2941,8 +3088,8 @@ fn revoke(task: &mut Task, why: &str) -> Option<u32> {
 /// lead to extend it or finish it.
 pub(crate) fn all_decided(team: &Team) -> bool {
     // U59: an empty queue in free mode is idle, not done: the team waits for
-    // tasks to be added to its open phase.
-    if team.plan_mode == PlanMode::Free {
+    // tasks to be added to its open phase (task #58: any free phase).
+    if free_phase(team).is_some() {
         return false;
     }
     !team.tasks.is_empty() && team.tasks.iter().all(|task| task.status.finished())
@@ -4617,10 +4764,20 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
     ensure!(!reason.is_empty() || kind == "question", "A proposal needs its reason");
     // U59: a plan-mode proposal names the mode.
     let mut mode = String::new();
+    // Task #58: a plan-mode proposal that names a phase switches that phase only.
+    let mut mode_phase = None;
     if kind == "switch-plan-mode" {
         let requested = text(input, "mode").to_owned();
         ensure!(matches!(requested.as_str(), "free" | "standard"), "A plan-mode proposal names free or standard");
         mode = requested;
+        if let Some(value) = input.get("phase").filter(|value| !value.is_null()) {
+            let n = value
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .filter(|n| *n > 0)
+                .context("A plan-mode proposal's phase is a phase number")?;
+            mode_phase = Some(n);
+        }
     }
     // U57: the exact change the owner's card shows and Allow applies.
     let change = match kind.as_str() {
@@ -4653,6 +4810,10 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
             let phase = input["phase"].as_u64().context("The discard-phase proposal names its phase")?;
             json!({"phase":phase})
         }
+        "switch-plan-mode" => match mode_phase {
+            Some(n) => json!({"phase":n}),
+            None => Value::Null,
+        },
         "question" => question_change(input)?,
         "swap-member" => swap_change(team, input)?,
         // Task #21: an owner-gated operation the owner allows with a click.
@@ -4907,14 +5068,7 @@ fn run_proposal(team: &mut Team, kind: &str, member: &Value, change: &Value, mod
             let phase = change["phase"].as_u64().context("The discard-phase proposal carries its phase")?;
             apply(team, "discard-phase", &json!({"phase":phase}), &Actor::Human, offline, events)?
         }
-        "switch-plan-mode" => {
-            team.plan_mode = if mode == "free" { PlanMode::Free } else { PlanMode::Standard };
-            events.push(Event::new(
-                "plan_mode_switched",
-                json!({"by":"You","mode":mode,"proposal":id,"reason":reason}),
-            ));
-            json!({"status":"switched","plan_mode":mode})
-        }
+        "switch-plan-mode" => apply_mode_proposal(team, change, mode, id, reason, events)?,
         "switch-setting" if change["op"] == "settings" => {
             let mut value = change["input"].clone();
             value["team"] = json!(team.id);
@@ -5245,10 +5399,10 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
         team.last_build_at = Some(now());
         team.free_accepted_since_build = 0;
         if let Some(n) = team.free_close_pending.take() {
-            team.plan_mode = PlanMode::Standard;
+            close_free_phase(team, n);
             events.push(Event::new("free_phase_closed", json!({"by":label,"phase":n,"build":true})));
         }
-    } else if accept && team.plan_mode == PlanMode::Free {
+    } else if accept && team.task(id).is_some_and(|task| free_phase(team) == Some(task.phase)) {
         team.free_accepted_since_build += 1;
     } else if !accept && phase_build {
         if let Some(n) = team.free_close_pending.take() {
@@ -5643,8 +5797,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         "integrate-build" => {
             ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you start the phase build");
             ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
-            ensure!(team.plan_mode == PlanMode::Free, "The build task belongs to a free phase");
-            let n = open_phase(team);
+            let n = free_phase(team).context("The build task belongs to a free phase")?;
             let id = add_build_task(team, n, &actor.label(team), events)?;
             Ok(json!({"status":"build_added","phase":n,"task":id}))
         }
@@ -5695,12 +5848,32 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             ));
             Ok(json!({"status":if undo {"undone"} else {"started"},"phase":n,"start_ahead":!undo}))
         }
+        // Task #58 (owner, 2026-11-06): the owner switches one phase between
+        // free and standard planning; the lead asks with a switch-plan-mode
+        // card naming the phase.
+        "phase-mode" => {
+            ensure!(
+                matches!(actor, Actor::Human),
+                "Only you switch a phase's mode; the lead proposes it (kind switch-plan-mode with its phase)"
+            );
+            let n = phase_number(input)?;
+            let mode = match text(input, "mode") {
+                "free" => PlanMode::Free,
+                "standard" => PlanMode::Standard,
+                _ => bail!("A phase's mode is free or standard"),
+            };
+            let reason = clean(text(input, "reason").trim(), 2000, "A reason")?;
+            switch_phase_mode(team, n, mode, "You", "", &reason, events)
+        }
         "close-phase" => {
             ensure!(matches!(actor, Actor::Human), "Only you close a free phase");
-            ensure!(team.plan_mode == PlanMode::Free, "The team is not planning in free mode");
+            let n = free_phase(team).context("The team is not planning in free mode")?;
             ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
             let reason = clean(text(input, "reason").trim(), 2000, "A close reason")?;
-            let n = open_phase(team);
+            // Task #58: a close that names its phase names the free one.
+            if let Some(named) = input.get("phase").and_then(Value::as_u64) {
+                ensure!(named == u64::from(n), "Phase {named} is not the free phase; phase {n} is");
+            }
             // (b) a phase whose work still runs is not closed; the running ids
             // are named so the owner or the lead knows what waits.
             let running: Vec<u32> = team
@@ -5724,7 +5897,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
                 events.push(Event::new("free_phase_close_pending", json!({"phase":n,"build":build})));
                 return Ok(json!({"status":"close_pending","phase":n,"build":build}));
             }
-            team.plan_mode = PlanMode::Standard;
+            close_free_phase(team, n);
             team.free_close_pending = None;
             events.push(Event::new("free_phase_closed", json!({"by":"You","phase":n,"reason":reason})));
             Ok(json!({"status":"closed","phase":n,"plan_mode":"standard","build_at":team.last_build_at}))
@@ -6104,6 +6277,10 @@ mod ops_phases;
 #[cfg(test)]
 #[path = "tests/ops_phase_control.rs"]
 mod ops_phase_control;
+
+#[cfg(test)]
+#[path = "tests/ops_phase_modes.rs"]
+mod ops_phase_modes;
 
 #[cfg(test)]
 #[path = "tests/ops_tasks.rs"]

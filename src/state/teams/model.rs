@@ -2110,6 +2110,12 @@ pub(crate) struct Team {
     /// default and every stored team deserializes as standard.
     #[serde(default, skip_serializing_if = "PlanMode::is_standard")]
     pub plan_mode: PlanMode,
+    /// Task #58 (owner, 2026-11-06): the mode of each phase that has its own,
+    /// by phase number (phase 1 included, which has no record). A phase not
+    /// named here plans in the team's `plan_mode`, so a team stored before
+    /// this field reads its mode on every phase, and a new phase starts in it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub phase_modes: std::collections::BTreeMap<u32, PlanMode>,
     /// U62: the owner's one-time permission for one full test run, bound to a
     /// release; the next full run uses it once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2309,6 +2315,11 @@ pub(crate) struct StopNotice {
 }
 
 impl Team {
+    /// Task #58: the mode phase `n` plans in: its own, else the team's.
+    pub(crate) fn phase_mode(&self, n: u32) -> PlanMode {
+        self.phase_modes.get(&n).copied().unwrap_or(self.plan_mode)
+    }
+
     /// U26: the change an already-spent owner word paid for, if any.
     pub(crate) fn owner_word_used(&self, event: i64) -> Option<String> {
         self.used_owner_words

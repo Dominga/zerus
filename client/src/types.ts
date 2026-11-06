@@ -926,6 +926,8 @@ export interface TeamSummary {
   attention: number; open_proposals: number; waiting_for_lead: boolean; pending_phase: number | null; updated: number; revision: number;
   /** Task 52: the team whose task this sub-team came from ("" for none); the tree is walked by it. */
   parent?: string;
+  /** Task #58: the phases that plan in free mode. */
+  free_phases?: number[];
 }
 
 export interface TeamList { teams: TeamSummary[]; truncated: boolean }
@@ -1008,6 +1010,8 @@ export interface TeamTestsView {
 export interface TeamPhaseView {
   n: number; title: string; state: string; status: string; done: number; total: number; barrier: boolean; auto: boolean;
   acceptance: string; paused: boolean; health: string;
+  /** Task #58: the mode the phase plans in, "standard" or "free"; "" from an older hgs. */
+  mode?: string;
 }
 
 export interface TeamFinding { kind: string; text: string; task: number | null; member: string }
@@ -1015,6 +1019,8 @@ export interface TeamFinding { kind: string; text: string; task: number | null; 
 export interface TeamView {
   id: string; name: string; status: string; project: string; folder: string; goal: string; plan_mode: string; lead: string;
   revision: number; created: number; updated: number; waiting_for_lead: boolean; pending_phase: number | null;
+  /** Task #58: the phase that takes tasks as they come, and whether hgs sends each phase's mode. */
+  free_phase?: number | null; phase_modes_known?: boolean;
   settings: Record<string, unknown>; members: TeamMemberView[]; tasks: TeamTaskView[]; phases: TeamPhaseView[];
   proposals: TeamProposalView[];
   attention: unknown[];
@@ -1064,6 +1070,7 @@ export type TeamAction =
   | { kind: "answer"; member: string; question_id: string; expected_question_hash: string; answers: unknown[] }
   | { kind: "add_to_phase"; phase: number; confirm: string; confirmation?: string; decline?: boolean }
   | { kind: "accept_phase"; phase: number }
+  | { kind: "phase_mode"; phase: number; mode: "free" | "standard"; reason?: string }
   | { kind: "send_back_phase"; phase: number; comment: string }
   | { kind: "decide_tool"; offer: string; allow: boolean; reason?: string }
   | { kind: "release"; task: number }

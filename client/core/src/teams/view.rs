@@ -163,6 +163,9 @@ pub struct TeamSummary {
     /// Task 52: the team whose task this sub-team came from ("" for a team
     /// with no parent), so a tree action counts the whole tree from the list.
     pub parent: String,
+    /// Task #58: the phases that plan in free mode, from the list's
+    /// `phase_modes` (empty from an older hgs).
+    pub free_phases: Vec<u64>,
 }
 
 impl TeamSummary {
@@ -220,6 +223,18 @@ pub fn list(value: &Value) -> TeamList {
                 updated: number(item, "updated"),
                 revision: count(item, "revision"),
                 parent: item.get("parent").map(|parent| name(parent, "team")).unwrap_or_default(),
+                free_phases: item
+                    .get("phase_modes")
+                    .and_then(Value::as_object)
+                    .map(|modes| {
+                        modes
+                            .iter()
+                            .filter(|(_, mode)| mode.as_str() == Some("free"))
+                            .filter_map(|(n, _)| n.parse::<u64>().ok())
+                            .take(ITEMS_KEPT)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             }
         })
         .collect();
@@ -400,6 +415,9 @@ pub struct PhaseView {
     pub acceptance: String,
     pub paused: bool,
     pub health: String,
+    /// Task #58: the mode the phase plans in, "standard" or "free" (its own,
+    /// else the team's); "" from an hgs that sends no phase modes.
+    pub mode: String,
 }
 
 /// One open proposal, as its card shows it: hgs's own summary when the change
@@ -488,6 +506,11 @@ pub struct TeamView {
     pub folder: String,
     pub goal: String,
     pub plan_mode: String,
+    /// Task #58: the phase that takes tasks as they come (`free_phase`), if any.
+    pub free_phase: Option<u64>,
+    /// Task #58: whether hgs sends each phase's mode (`phase_modes`), so the
+    /// owner can switch one phase (`phase-mode`).
+    pub phase_modes_known: bool,
     pub lead: String,
     pub revision: u64,
     pub created: f64,
@@ -616,6 +639,19 @@ fn task(value: &Value) -> TaskView {
     }
 }
 
+/// Task #58: phase `n`'s mode from status's `phase_modes`, else the team's
+/// `plan_mode` for a phase it does not name; "" from an older hgs.
+fn phase_mode(team: &Value, n: u64) -> String {
+    let Some(modes) = team.get("phase_modes").and_then(Value::as_object) else {
+        return String::new();
+    };
+    match modes.get(&n.to_string()).and_then(Value::as_str) {
+        Some(mode @ ("free" | "standard")) => mode.to_owned(),
+        _ if name(team, "plan_mode") == "free" => "free".into(),
+        _ => "standard".into(),
+    }
+}
+
 fn phase(value: &Value) -> PhaseView {
     PhaseView {
         n: count(value, "n"),
@@ -629,6 +665,7 @@ fn phase(value: &Value) -> PhaseView {
         acceptance: name(value, "acceptance"),
         paused: value.get("pause").is_some_and(|pause| !pause.is_null()),
         health: text(value, "health_line", LINE_CHARS),
+        mode: String::new(),
     }
 }
 
@@ -709,6 +746,8 @@ pub fn team(value: &Value) -> TeamView {
         folder: text(value, "folder", LINE_CHARS),
         goal: text(value, "goal", TEXT_CHARS),
         plan_mode: name(value, "plan_mode"),
+        free_phase: value.get("free_phase").and_then(|free| free.get("phase")).and_then(Value::as_u64),
+        phase_modes_known: value.get("phase_modes").is_some_and(Value::is_object),
         revision: count(value, "revision"),
         created: number(value, "created"),
         updated: number(value, "updated"),
@@ -727,7 +766,11 @@ pub fn team(value: &Value) -> TeamView {
         phases: array(value, "phase_summary")
             .iter()
             .take(ITEMS_KEPT)
-            .map(phase)
+            .map(|found| {
+                let mut view = phase(found);
+                view.mode = phase_mode(value, view.n);
+                view
+            })
             .collect(),
         proposals: open
             .iter()

@@ -1176,6 +1176,16 @@ subteamChoice does. The team history's lines (`src/ui/teams/history.ts`)
 word the feed events as Qt's feedLine does; an event without its own line
 shows its kind.
 
+Each phase carries its plan mode (task #58): status's `phase_modes` reach the
+core's `PhaseView.mode`, with `free_phase` and `phase_modes_known` on the team.
+A phase header (`PhaseModeControl` in `src/ui/teams/TeamActions.tsx`) shows
+Free on the free phase and offers the owner's switch: a running phase opens to
+free planning while no phase is free, and the free phase switches back to
+standard. The switch is confirmed first (`phaseModeConfirmation`, Qt's
+teamPhaseModeDialog words, Cancel focused) and sends `phase_mode`
+(`hgs team phase-mode`). The lead's `switch-plan-mode` card for one phase
+names it.
+
 ### Catalog editor and Team designer
 
 The catalog editor (`src/ui/teams/TeamCatalogEditor.tsx`) has the controls of

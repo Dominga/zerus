@@ -10,7 +10,7 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|integrate-build|start-ahead|full-tests|test|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|phase-mode|integrate-build|start-ahead|full-tests|test|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "move-task", "add-to-phase", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
@@ -20,6 +20,8 @@ const MUTATIONS: &[&str] = &[
     "archive", "report", "ask", "reply", "hold", "release", "accept", "reject", "skip-stage", "send-back", "reassign", "take-over", "cancel",
     "retry", "check", "expect", "swap-member", "use-last-reply", "relaunch", "add-member", "scale", "drain", "pause-member", "resume-member", "remove-member", "settings", "finding",
     "draft", "propose", "close-phase", "integrate-build", "start-ahead", "full-tests",
+    // Task #58: the owner switches one phase between free and standard planning.
+    "phase-mode",
 ];
 
 fn text<'a>(input: &'a Value, key: &str) -> &'a str {
@@ -599,6 +601,8 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
             if let Some(health) = validation.phases_health.get(&phase.n.to_string()) {
                 value["health"] = json!(health);
             }
+            // Task #58: the mode the phase plans in (its own, else the team's).
+            value["mode"] = json!(team.phase_mode(phase.n));
         }
     }
     value["layers"] = json!(plan::layers(&team.tasks));
@@ -609,6 +613,9 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
     // U59: the plan mode (standard or free) the team's phase runs in, and the
     // free phase's own state for the plan header.
     value["plan_mode"] = json!(team.plan_mode);
+    // Task #58: every phase's own mode, phase 1 included; `plan_mode` stays
+    // the team's default for a phase without one.
+    value["phase_modes"] = ops::phase_modes_view(team);
     // U62 (#715): the full-run policy and the owner's one-time grant.
     value["full_tests"] = json!(team.settings.full_tests);
     value["full_tests_grant"] = json!(team.full_tests_grant);
@@ -616,8 +623,7 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
     // approval chooses one of the two.
     value["plan_mode_offer"] = json!(team.plan_mode_offer);
     value["plan_mode_reason"] = json!(team.plan_mode_reason);
-    if team.plan_mode == super::model::PlanMode::Free {
-        let n = ops::open_phase(team);
+    if let Some(n) = ops::free_phase(team) {
         let tasks: Vec<&super::model::Task> = team.tasks.iter().filter(|task| task.phase == n).collect();
         let running: Vec<u32> = tasks.iter().filter(|task| !task.status.finished()).map(|task| task.id).collect();
         let accepted = tasks.iter().filter(|task| task.status == TaskStatus::Accepted).count();
@@ -1080,11 +1086,15 @@ fn summary(team: &Team, include_cancelled: bool) -> Value {
             "state":if cancelled.contains(&p.n) { json!("cancelled") } else { json!(p.state) },"tasks":p.tasks,
             "note":p.note,"rejection":p.rejection,
             // U63: the phase's pause and who accepts it.
-            "pause":p.pause,"acceptance":p.acceptance}))
+            "pause":p.pause,"acceptance":p.acceptance,
+            // Task #58: the mode the phase plans in.
+            "mode":team.phase_mode(p.n)}))
         .collect();
     json!({
         "id":team.id,"name":team.name,"status":team.status,"project":team.project,"folder":team.folder,
         "plan_mode":team.plan_mode,
+        // Task #58: every phase's mode, phase 1 included.
+        "phase_modes":ops::phase_modes_view(team),
         "lead":team.lead,"members":members,"tasks":tasks,"phases":phases,
         "accepted":count(TaskStatus::Accepted),"submitted":count(TaskStatus::Submitted),
         "in_review":count(TaskStatus::InReview),"in_test":count(TaskStatus::InTest),
@@ -1809,14 +1819,10 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
         "switch-plan-mode" => {
             // U59: the desktop's dialog decides through this path; the switch
             // applies only the mode the proposal names.
+            // Task #58: a card that names a phase switches that phase only.
             let mode = team.proposals[at]["mode"].as_str().unwrap_or_default().to_owned();
-            let asked = team.proposals[at]["reason"].clone();
-            store.mutate(None, &team_id, None, |team, events| {
-                team.plan_mode = if mode == "free" { super::model::PlanMode::Free } else { super::model::PlanMode::Standard };
-                events.push(Event::new("plan_mode_switched", json!({"by":"You","mode":mode,"proposal":id,"reason":asked})));
-                Ok(Value::Null)
-            })?;
-            json!({"status":"switched","plan_mode":mode})
+            let asked = team.proposals[at]["reason"].as_str().unwrap_or_default().to_owned();
+            store.mutate(None, &team_id, None, |team, events| ops::apply_mode_proposal(team, &change, &mode, &id, &asked, events))?
         }
         // Task #21: a switch card for base_branch, full_tests or max_members
         // runs the settings change it names, as the owner's own.

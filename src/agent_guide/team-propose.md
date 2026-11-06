@@ -19,7 +19,9 @@ Each kind sends its exact change:
   {"kind":"full-tests","release":"v1.2"} (one full test run)
   {"kind":"iron-rules","scope":"project","project":"ID","rules":[...],
    "expected_revision":N} (or "scope":"session" with the member's session)
-  swap-member, next-goal and switch-plan-mode as before
+  {"kind":"switch-plan-mode","mode":"free","phase":N} switches phase N
+    only (free or standard); without "phase", the team's mode
+  swap-member and next-goal as before
 with "reason" and a request_id, piped to hgs team propose --json. An
 operation's fields may also go in "input":{...}.
 

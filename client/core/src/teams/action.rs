@@ -134,6 +134,14 @@ pub enum TeamAction {
     AcceptPhase {
         phase: u64,
     },
+    /// Task #58: switches one phase between free and standard planning
+    /// (`hgs team phase-mode`); the owner confirms it first.
+    PhaseMode {
+        phase: u64,
+        mode: String,
+        #[serde(default)]
+        reason: String,
+    },
     /// Task 11: sends a phase back to the lead with the owner's comment.
     SendBackPhase {
         phase: u64,
@@ -388,6 +396,7 @@ impl TeamAction {
             Self::Answer { .. } => "answer",
             Self::AddToPhase { .. } => "add-to-phase",
             Self::AcceptPhase { .. } => "accept-phase",
+            Self::PhaseMode { .. } => "phase-mode",
             Self::SendBackPhase { .. } => "send-back-phase",
             Self::DecideTool { .. } => "decide-tool",
             Self::Release { .. } => "release",
@@ -557,6 +566,15 @@ impl TeamAction {
                     return Err("Not a phase number.".into());
                 }
                 Ok(())
+            }
+            Self::PhaseMode { phase, mode, reason } => {
+                if *phase == 0 || *phase > u64::from(u32::MAX) {
+                    return Err("Not a phase number.".into());
+                }
+                if !matches!(mode.as_str(), "free" | "standard") {
+                    return Err("A plan mode is standard or free.".into());
+                }
+                plain(reason, "A reason", 2000)
             }
             Self::SendBackPhase { phase, comment } => {
                 if *phase == 0 {
@@ -793,6 +811,13 @@ impl TeamAction {
                 }
             }
             Self::AcceptPhase { phase } => put("phase", json!(phase)),
+            Self::PhaseMode { phase, mode, reason } => {
+                put("phase", json!(phase));
+                put("mode", json!(mode));
+                if !reason.trim().is_empty() {
+                    put("reason", json!(reason.trim()));
+                }
+            }
             Self::SendBackPhase { phase, comment } => {
                 put("phase", json!(phase));
                 put("comment", json!(comment));
@@ -1002,6 +1027,23 @@ impl TeamAction {
                     "Approve and run",
                 )
             }),
+            // Task #58: Qt's teamPhaseModeDialog.
+            Self::PhaseMode { phase, mode, .. } if mode == "free" => Some(ask(
+                "teamPhaseModeConfirm",
+                "Switch to free planning?",
+                format!(
+                    "Switch phase {phase} to free planning? It stays open when its tasks are accepted: new tasks join it and run as they are added. The other phases keep their modes."
+                ),
+                "Switch to free",
+            )),
+            Self::PhaseMode { phase, .. } => Some(ask(
+                "teamPhaseModeConfirm",
+                "Switch to standard planning?",
+                format!(
+                    "Switch phase {phase} to standard planning? Its tasks keep their state and run on; new work is planned in a new phase, approved by you. The other phases keep their modes."
+                ),
+                "Switch to standard",
+            )),
             Self::CatalogApply => Some(ask(
                 "teamCatalogApplyConfirm",
                 "Apply the catalog draft?",

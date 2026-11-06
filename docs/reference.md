@@ -3125,9 +3125,11 @@ later hourly check; it does not rescan project disks or journals. Archive metada
 checks verify compact reference metadata against the complete native archive-file
 roster and exact file versions, at most 5000 entries and 32 MiB within their
 deadline. Ordinary archive catalog migration/reconciliation builds this metadata;
-archive writes,
-rewrites and removals maintain it. Missing, stale or corrupt coverage keeps the
-folder; cleanup never rebuilds it or interprets an omitted row as no reference.
+archive writes, rewrites and removals maintain it. Its ordinary reconciliation
+stamp is separate from the search stamp, so an older CLI's search refresh cannot
+hide pending reference maintenance. Warm pages still use only these stamps.
+Missing, stale or corrupt coverage keeps the folder; cleanup never rebuilds it
+or interprets an omitted row as no reference.
 Before deletion, an indexed checkout query reads the relevant authoritative
 archive bodies within the same bounds and durably prepares Restore for every
 compatible reference, including older archives without an ownership field.

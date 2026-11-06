@@ -80,11 +80,9 @@ fn version(file: &fs::File) -> Result<Version> {
     })
 }
 fn open(path: &Path) -> Result<fs::File> {
-    let file = crate::platform::never_block(crate::platform::refuse_link(
-        fs::OpenOptions::new().read(true),
-    ))
-    .open(path)
-    .map_err(fail)?;
+    let file = crate::platform::no_follow(fs::OpenOptions::new().read(true))
+        .open(path)
+        .map_err(fail)?;
     let metadata = file.metadata().map_err(fail)?;
     if !metadata.is_file() {
         return Err(INVALID.into());
@@ -298,15 +296,17 @@ fn directory_stamp(path: &Path) -> Result<String> {
         return Err(INVALID.into());
     }
     let mut options = fs::OpenOptions::new();
-    options.read(true);
+    crate::platform::refuse_link(options.read(true));
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS);
+        // custom_flags replaces rather than merges the earlier reparse flag.
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        };
+        options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
     }
-    let file = crate::platform::refuse_link(&mut options)
-        .open(path)
-        .map_err(fail)?;
+    let file = options.open(path).map_err(fail)?;
     if !file.metadata().map_err(fail)?.is_dir() {
         return Err(INVALID.into());
     }

@@ -114,7 +114,14 @@ pub(super) fn catalog() -> Result<Connection> {
         [],
         |r| r.get(0),
     ))?;
-    if current == prior && reference_schema {
+    // Older executables update only the search stamp. Keep our reconciliation
+    // stamp separate so their refresh cannot hide owed reference maintenance.
+    let references: String = sql(db.query_row(
+        "SELECT COALESCE((SELECT value FROM catalog_meta WHERE key='archive_references_stamp'),'')",
+        [],
+        |r| r.get(0),
+    ))?;
+    if current == prior && current == references && reference_schema {
         return Ok(db);
     }
     let tx = sql(db.transaction())?;
@@ -206,6 +213,10 @@ pub(super) fn catalog() -> Result<Connection> {
     // Commit migration completeness with the rows, so an interrupted first
     // reconciliation cannot leave an initialized-but-empty reference cache.
     sql(tx.execute("INSERT OR REPLACE INTO catalog_meta VALUES('archive_references_v1','1')",[]))?;
+    sql(tx.execute(
+        "INSERT OR REPLACE INTO catalog_meta VALUES('archive_references_stamp',?)",
+        [&current],
+    ))?;
     sql(tx.execute(
         "INSERT OR REPLACE INTO catalog_meta VALUES('stamp',?)",
         [current],

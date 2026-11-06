@@ -1158,6 +1158,7 @@ QWidget *TeamPanel::tasks(const Team &team, bool narrow)
     for (const auto &task : team.tasks) {
         for (const auto &dep : task.deps) {
             view->edges[task.id].append(dep.task);
+            if (task.origin > 0) view->origins[task.id] = task.origin;
             if (dep.soft && !team.allHard) view->soft.insert({dep.task, task.id});
         }
     }
@@ -1275,3 +1276,5 @@ QWidget *TeamPanel::feed(const Team &team)
     } else if (shown) v->addWidget(label(tr("Beginning of team history"), c.muted, 11));
     return box;
 }
+
+

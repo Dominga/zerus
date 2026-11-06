@@ -15,6 +15,7 @@ import {
   phasePlans,
   phaseStatus,
   rowEdges,
+  rowOrigins,
 } from "./plan";
 
 function task(id: number, phase: number, deps: number[] = [], status = "pending"): TaskView {
@@ -150,6 +151,15 @@ describe("phase layout", () => {
     const lastBuild = rows.find((row) => row.key === "phase:2:layer:3")!;
     expect(rowEdges(phases[1], lastBuild).map((entry) => `${entry.edge.from}>${entry.edge.to}`)).toEqual(["3>4"]);
     expect(edgePath(phases[1].nodes[0], phases[1].nodes[1], lastBuild.top).startsWith("M ")).toBe(true);
+  });
+
+  it("draws a follow-up's origin apart from its dependencies", () => {
+    const team = { ...TEAM, tasks: TEAM.tasks.map((row) => (row.id === 4 ? { ...row, origin: 5 } : row)) };
+    const phases = phasePlans(team, GRAPH);
+    const rows = buildRows(phases, new Set());
+    const lastBuild = rows.find((row) => row.key === "phase:2:layer:3")!;
+    expect(rowOrigins(phases[1], lastBuild).map((entry) => `${entry.origin}>${entry.to.node.id}`)).toEqual(["5>4"]);
+    expect(rowEdges(phases[1], lastBuild).map((entry) => entry.to.node.id)).toEqual([4]);
   });
 
   it("virtualizes phases as headers and layer rows, not one row per task", () => {

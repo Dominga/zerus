@@ -312,7 +312,9 @@ fn matches(family: &str, key: &str) -> bool {
         }
         "no-consumer" => NO_CONSUMER.contains(&key),
         "inspector-panel" => matches!(
+            key,
             "workspace/inspectorVisible" | "workspace/inspectorWidth" | "workspace/inspectorTab"
+        ),
         _ => false,
     }
 }

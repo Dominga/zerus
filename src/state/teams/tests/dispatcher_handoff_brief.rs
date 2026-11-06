@@ -140,7 +140,10 @@ fn dependency_reports_are_cut_to_two_thousand_characters() {
     let text = hand_off_text(&team, &task, &attempt, "", "");
     // Cut at a character boundary, with the note.
     assert_eq!(text.matches('é').count(), 2000);
-    assert!(text.contains("[cut: shown 2000 of 2500 characters; full report: hgs team status --json, task #1]"), "{text}");
+    assert!(text.contains(&format!(
+        "[cut: shown 2000 of 2500 characters; full report: {} | hgs team status --json]",
+        json!({"team":team.id,"task":1})
+    )), "{text}");
     // A report within the bound is whole, with no note.
     team.task_mut(1).unwrap().attempts = vec![attempt_with_report("dev", &"ζ".repeat(2000), AttemptState::Reported)];
     let text = hand_off_text(&team, &task, &attempt, "", "");
@@ -173,9 +176,15 @@ fn dependency_reports_stop_at_the_total_limit() {
     let text = hand_off_text(&team, &task, &attempt, "", "");
     // 500 shown whole, then 2,000 + 2,000, then the last 1,500 of the 6,000.
     assert!(text.contains("α".repeat(500).as_str()), "{text}");
-    assert!(!text.contains("task #1]"), "{text}");
-    assert!(text.contains("[cut: shown 2000 of 3000 characters; full report: hgs team status --json, task #4]"), "{text}");
-    assert!(text.contains("[cut: shown 1500 of 3000 characters; full report: hgs team status --json, task #6]"), "{text}");
+    assert!(!text.contains(&format!("full report: {} | hgs team status --json", json!({"team":team.id,"task":1}))), "{text}");
+    assert!(text.contains(&format!(
+        "[cut: shown 2000 of 3000 characters; full report: {} | hgs team status --json]",
+        json!({"team":team.id,"task":4})
+    )), "{text}");
+    assert!(text.contains(&format!(
+        "[cut: shown 1500 of 3000 characters; full report: {} | hgs team status --json]",
+        json!({"team":team.id,"task":6})
+    )), "{text}");
     assert!(text.contains("#7 Dep 7 (accepted) by dev (Backend), folder: work\n[report omitted: limit reached]"), "{text}");
     assert_eq!(text.matches('α').count(), 500);
     assert_eq!(text.matches('β').count(), 2000);

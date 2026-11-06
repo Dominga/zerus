@@ -183,6 +183,7 @@ private slots:
     void aWaitingReadThatChangesNothingRedrawsNothing();
     void aPhaseIsAcceptedOrSentBackFromWaitingForYou();
     void aStalledLeadShowsOnTheTeamBarAndNotifiesEachRound();
+    void deferredRequestsAreAnsweredUnderDeferred();
 };
 
 // N32 of #499: Zerus started in the tray has no Sessions window, yet a team's
@@ -2532,6 +2533,75 @@ void TestTeamsUiWaiting::aStalledLeadShowsOnTheTeamBarAndNotifiesEachRound()
     team["attention"] = QJsonArray{};
     setTeam(team);
     QTRY_VERIFY(([&] { controller.refresh(); return !workspace.findChild<QPushButton *>("teamHeaderLeadStalled"); })());
+}
+
+// Task 97: what Zerus answered safely while the owner was away waits under
+// Deferred with its exact text; Allow, Deny or an answer becomes one message
+// (hgs team answer-deferred), with no team to read first.
+void TestTeamsUiWaiting::deferredRequestsAreAnsweredUnderDeferred()
+{
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    setTeam(answerTeam());
+    const QJsonArray items{
+        QJsonObject{{"id", "deferred/ab12"}, {"team", "team-1"}, {"team_name", "Checkout redesign"}, {"kind", "deferred"},
+                    {"title", "Deferred permission of Backend: Bash: cargo test --locked"}, {"since", now - 60}, {"action", "answer_deferred"},
+                    {"deferred", "ab12"}, {"request", "permission"}, {"text", "Bash: cargo test --locked"}, {"session", "codex/x/dev"},
+                    {"outcome", "Zerus denied it for now"}, {"questions", QJsonArray{}}},
+        QJsonObject{{"id", "deferred/cd34"}, {"team", ""}, {"team_name", "claude/p/solo"}, {"kind", "deferred"},
+                    {"title", "Deferred question of claude/p/solo: Which storage?"}, {"since", now - 30}, {"action", "answer_deferred"},
+                    {"deferred", "cd34"}, {"request", "question"}, {"text", "Which storage?"}, {"session", "claude/p/solo"},
+                    {"outcome", "Zerus chose Postgres (Recommended) for now"},
+                    {"questions", QJsonArray{QJsonObject{{"id", "q"}, {"question", "Which storage?"},
+                        {"options", QJsonArray{QJsonObject{{"id", "a"}, {"label", "SQLite"}}, QJsonObject{{"id", "b"}, {"label", "Postgres (Recommended)"}}}}}}}},
+        QJsonObject{{"id", "team-1/phase_draft/3"}, {"team", "team-1"}, {"team_name", "Checkout redesign"}, {"kind", "phase_draft"},
+                    {"title", "Phase 3 draft waits"}, {"since", now - 10}, {"action", "approve_phase"}, {"phase", 3}}};
+    QVERIFY(writeWaiting(script() + ".waiting", items));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamWaitingPage page(&controller);
+    QStringList answered;
+    page.answered = [&](const TeamWaitingPage::Item &item) { answered << item.id; };
+    page.resize(900, 900); page.show();
+    const auto row = [&](const QString &id) -> QFrame * {
+        for (auto *frame : page.findChildren<QFrame *>("teamWaitingRow")) if (frame->property("itemId") == id) return frame;
+        return nullptr;
+    };
+    QTRY_VERIFY(row("deferred/ab12") && row("deferred/cd34") && row("team-1/phase_draft/3"));
+    QVERIFY(page.findChild<QLabel *>("teamWaitingDeferredHead"));
+    QCOMPARE(row("deferred/ab12")->findChild<QLabel *>("teamWaitingKind")->text(), QStringLiteral("Deferred"));
+    // Deferred comes after everything else.
+    const auto rows = page.findChildren<QFrame *>("teamWaitingRow");
+    QCOMPARE(rows.first()->property("itemId").toString(), QStringLiteral("team-1/phase_draft/3"));
+    const int statusReads = calls(script(), "status").size();
+    for (const auto &id : {"deferred/ab12", "deferred/cd34"}) row(id)->findChild<QPushButton *>("teamWaitingAnswerToggle")->click();
+    QTRY_VERIFY(row("deferred/ab12")->findChild<QFrame *>("teamWaitingDeferred") && row("deferred/cd34")->findChild<QFrame *>("teamWaitingDeferred"));
+    auto *permission = row("deferred/ab12")->findChild<QFrame *>("teamWaitingDeferred");
+    QCOMPARE(permission->findChild<QLabel *>("teamWaitingDeferredText")->text(), QStringLiteral("Bash: cargo test --locked"));
+    QCOMPARE(permission->findChild<QLabel *>("teamWaitingDeferredOutcome")->text(), QStringLiteral("Zerus denied it for now"));
+    QVERIFY(permission->findChild<QPushButton *>("teamWaitingDeferredAllow") && permission->findChild<QPushButton *>("teamWaitingDeferredDeny"));
+    QVERIFY(!row("deferred/cd34")->findChild<QPushButton *>("teamWaitingDeferredAllow"));
+    for (auto *label : page.findChildren<QLabel *>()) QVERIFY2(!label->text().contains(QStringLiteral(" · ")), qPrintable(label->text()));
+    shot(&page, "task97-deferred");
+    // Allow: one owner operation, never a team read or a replayed tool.
+    permission->findChild<QPushButton *>("teamWaitingDeferredAllow")->click();
+    QTRY_COMPARE(calls(script(), "answer-deferred").size(), 1);
+    auto sent = calls(script(), "answer-deferred").first();
+    QCOMPARE(sent["id"].toString(), QStringLiteral("ab12"));
+    QCOMPARE(sent["decision"].toString(), QStringLiteral("allow"));
+    QCOMPARE(sent["by"].toString(), QStringLiteral("human"));
+    QTRY_VERIFY(!row("deferred/ab12"));
+    QVERIFY(writeWaiting(script() + ".waiting", QJsonArray{items[1], items[2]}));
+    // A question: an option is the owner's answer in words.
+    QPushButton *sqlite = nullptr;
+    for (auto *pick : row("deferred/cd34")->findChildren<QPushButton *>("teamWaitingDeferredOption")) if (pick->text() == QStringLiteral("SQLite")) sqlite = pick;
+    QVERIFY(sqlite);
+    sqlite->click();
+    QTRY_COMPARE(calls(script(), "answer-deferred").size(), 2);
+    sent = calls(script(), "answer-deferred").at(1);
+    QCOMPARE((QStringList{sent["id"].toString(), sent["decision"].toString(), sent["text"].toString()}),
+             (QStringList{"cd34", "answer", "SQLite"}));
+    QTRY_COMPARE(answered, (QStringList{"deferred/ab12", "deferred/cd34"}));
+    QCOMPARE(calls(script(), "status").size(), statusReads);
 }
 
 QTEST_MAIN(TestTeamsUiWaiting)

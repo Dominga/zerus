@@ -415,6 +415,30 @@ fn every_action_sends_its_request_once_and_gives_the_receipt() {
         expected.insert("request_id".into(), json!(request_id));
         assert_eq!(request, Value::Object(expected));
     }
+    // Task 97: a deferred request belongs to no team; the owner's answer is
+    // sent as it is, and an answer without words never runs.
+    reply(&fake, "answer-deferred", "", json!({"stdout": {"status": "sent"}}));
+    let outcome = run(
+        &fake.path(),
+        &TeamCall {
+            team: String::new(),
+            ..call(TeamAction::AnswerDeferred { id: "0a1b2c3d4e5f6a7b".into(), decision: "allow".into(), text: String::new() })
+        },
+    );
+    let TeamOutcome::Done { request_id, .. } = &outcome else { panic!("{outcome:?}") };
+    let (op, request) = requests(&fake).pop().unwrap();
+    assert_eq!(op, "answer-deferred");
+    assert_eq!(request, json!({"id":"0a1b2c3d4e5f6a7b","decision":"allow","by":"human","request_id":request_id}));
+    let before_deferred = requests(&fake).len();
+    let empty = run(
+        &fake.path(),
+        &TeamCall {
+            team: String::new(),
+            ..call(TeamAction::AnswerDeferred { id: "0a1b2c3d4e5f6a7b".into(), decision: "answer".into(), text: " ".into() })
+        },
+    );
+    assert!(matches!(empty, TeamOutcome::Failed { .. }), "{empty:?}");
+    assert_eq!(requests(&fake).len(), before_deferred);
     // A send back without a comment and an answer without a choice never run.
     let before = requests(&fake).len();
     for action in [

@@ -142,6 +142,12 @@ pub(crate) struct Settings {
     /// the owner sets it.
     #[serde(default = "default_lead_stall")]
     pub lead_stall_minutes: u64,
+    /// Task 97 (owner, 2026-11-06): minutes a native permission prompt or
+    /// question of the lead or a member may wait unanswered before Zerus
+    /// answers it with the safe choice (Deny; the recommended or first option)
+    /// and queues it for the owner; 0 turns it off. Only the owner sets it.
+    #[serde(default = "default_defer")]
+    pub defer_minutes: u64,
     /// Minutes a Background job without a declared budget may run before the
     /// lead hears it is red (C12).
     #[serde(default = "default_background_red")]
@@ -293,6 +299,11 @@ pub(crate) const DEFAULT_LEAD_STALL_MINUTES: u64 = 20;
 fn default_lead_stall() -> u64 {
     DEFAULT_LEAD_STALL_MINUTES
 }
+/// Task 97: a team session's prompt waits 10 minutes for an answer.
+pub(crate) const DEFAULT_DEFER_MINUTES: u64 = 10;
+fn default_defer() -> u64 {
+    DEFAULT_DEFER_MINUTES
+}
 fn default_background_red() -> u64 {
     30
 }
@@ -317,6 +328,7 @@ impl Default for Settings {
             remind_owner_minutes: default_remind_owner(),
             remind_owner_permission_minutes: default_remind_owner_permission(),
             lead_stall_minutes: default_lead_stall(),
+            defer_minutes: default_defer(),
             background_red_minutes: default_background_red(),
             worktrees_forbidden: false,
             resume_after_limits: false,
@@ -507,6 +519,11 @@ pub(crate) struct Member {
     /// The lead was told once about this starvation episode (C7).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub starved_told: bool,
+    /// Task 97: the questions (`id:hash`) Zerus answered with the safe choice
+    /// and queued for the owner, newest last, at most 50. A question here is
+    /// never answered by Zerus again, whatever its delivery was.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred: Vec<String>,
     /// The member's declared time budget for its background work (C12).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<Budget>,
@@ -2762,6 +2779,8 @@ mod tests {
         );
         // Task 95: an old team hears of a stalled lead after the default.
         assert_eq!(team.settings.lead_stall_minutes, 20);
+        // Task 97: an old team defers its sessions' prompts after the default.
+        assert_eq!(team.settings.defer_minutes, 10);
         assert!(team.lead_stall.is_none());
         assert_eq!(team.settings.background_red_minutes, 30);
         assert!(team.inbox.told.is_empty() && team.inbox.told_at == 0.0);

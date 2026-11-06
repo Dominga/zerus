@@ -155,6 +155,15 @@ pub enum TeamAction {
         #[serde(default)]
         reason: String,
     },
+    /// Task 97: the owner's answer to a request the owner queue deferred:
+    /// `allow` or `deny` a permission, or `answer` with the owner's text. The
+    /// session gets one message; the tool is never replayed.
+    AnswerDeferred {
+        id: String,
+        decision: String,
+        #[serde(default)]
+        text: String,
+    },
     /// Task 11: releases a task the owner held.
     Release {
         task: u64,
@@ -399,6 +408,7 @@ impl TeamAction {
             Self::PhaseMode { .. } => "phase-mode",
             Self::SendBackPhase { .. } => "send-back-phase",
             Self::DecideTool { .. } => "decide-tool",
+            Self::AnswerDeferred { .. } => "answer-deferred",
             Self::Release { .. } => "release",
             Self::Retry { .. } => "retry",
             Self::Finish { .. } => "finish",
@@ -442,6 +452,7 @@ impl TeamAction {
             self,
             Self::DraftStart { .. }
                 | Self::DecideTool { .. }
+                | Self::AnswerDeferred { .. }
                 | Self::CatalogPropose { .. }
                 | Self::CatalogDecide { .. }
                 | Self::CatalogApply
@@ -588,6 +599,16 @@ impl TeamAction {
             Self::DecideTool { offer, reason, .. } => {
                 word(offer, "tool offer")?;
                 plain(reason, "A reason", 2000)
+            }
+            Self::AnswerDeferred { id, decision, text } => {
+                word(id, "deferred request")?;
+                if !matches!(decision.as_str(), "allow" | "deny" | "answer") {
+                    return Err("Allow, deny or answer it.".into());
+                }
+                if decision == "answer" && text.trim().is_empty() {
+                    return Err("Write the answer.".into());
+                }
+                plain(text, "An answer", 4000)
             }
             Self::Release { task: id } | Self::Retry { task: id } => task(*id),
             Self::DecideProposal {
@@ -831,6 +852,13 @@ impl TeamAction {
                 put("allow", json!(allow));
                 if !allow && !reason.is_empty() {
                     put("reason", json!(reason));
+                }
+            }
+            Self::AnswerDeferred { id, decision, text } => {
+                put("id", json!(id));
+                put("decision", json!(decision));
+                if !text.trim().is_empty() {
+                    put("text", json!(text.trim()));
                 }
             }
             Self::Release { task } | Self::Retry { task } => put("task", json!(task)),

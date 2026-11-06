@@ -342,6 +342,10 @@ pub(crate) enum Step {
     /// Task 95: the lead's stall as this tick sees it: raised, repeated (a new
     /// round), updated or cleared (None).
     LeadStall { stall: Option<LeadStall> },
+    /// Task 97: the member's (or the lead's) native request waited past the
+    /// team's `defer_minutes`: answer it safely and queue it for the owner.
+    /// `question` is its `id:hash`.
+    Defer { member: String, question: String },
     /// U56: a pending task pinned to a stuck, stopped or offline member says so
     /// in its waits.
     WaitOnMember { task: u32, member: String, reason: String },
@@ -608,6 +612,18 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             && launching.insert(member.id.clone())
         {
             steps.push(Step::Launch { member: member.id.clone() });
+        }
+    }
+    // Task 97: a native request nobody answered for `defer_minutes` is
+    // answered safely and queued for the owner, once per request.
+    if team.settings.defer_minutes > 0 {
+        let after = team.settings.defer_minutes as f64 * 60.0;
+        for member in team.members.iter().filter(|member| member.state != MemberState::Removed && member.session.is_some()) {
+            let Some(pending) = &member.pending else { continue };
+            let key = format!("{}:{}", pending.question_id, pending.question_hash);
+            if pending.card["can_answer"] != false && now - pending.at >= after && !member.deferred.contains(&key) {
+                steps.push(Step::Defer { member: member.id.clone(), question: key });
+            }
         }
     }
     // H6: a swapped lead is briefed once, also while the team runs.
@@ -2753,6 +2769,24 @@ pub(crate) fn classify(output: &anyhow::Result<Output>) -> Sent {
     // hgs reports every possibly delivered input as uncertain; ssh exits 255
     // when the connection, not hgs, failed.
     if stderr.to_lowercase().contains("uncertain") || output.status.code() != Some(1) {
+        Sent::Uncertain(stderr)
+    } else {
+        Sent::Refused(stderr)
+    }
+}
+
+/// Task 97: an `hgs answer` outcome, as conservatively as a send: success is
+/// an answer that reached the session, exit 1 without "uncertain" one refused
+/// before anything was typed, anything else may have arrived.
+pub(crate) fn classify_answer(output: &anyhow::Result<Output>) -> Sent {
+    let output = match output {
+        Ok(output) => output,
+        Err(error) => return Sent::Uncertain(error.to_string()),
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if output.status.success() {
+        Sent::Delivered
+    } else if stderr.to_lowercase().contains("uncertain") || output.status.code() != Some(1) {
         Sent::Uncertain(stderr)
     } else {
         Sent::Refused(stderr)
@@ -5486,6 +5520,91 @@ fn allow_safe(store: &mut Store, team: &Team, member_id: &str, pending: &Pending
     })
 }
 
+/// Task 97: answers the member's request with its safe choice and queues it
+/// for the owner. The team record reserves it first (`member.deferred`), then
+/// the queue does; neither is undone, so an unknown delivery is never sent
+/// again. An answer that reached the session closes the request in the team.
+fn defer_request(store: &mut Store, team: &Team, member_id: &str, question: &str) -> anyhow::Result<()> {
+    let member = team.member(member_id).context("unknown member")?;
+    let Some(pending) = member.pending.clone().filter(|pending| format!("{}:{}", pending.question_id, pending.question_hash) == question) else {
+        return Ok(());
+    };
+    let session = member.session.clone().context("the member has no session")?;
+    change(store, &team.id, |team, _| {
+        let found = team.members.iter_mut().find(|found| found.id == member_id).context("unknown member")?;
+        anyhow::ensure!(!found.deferred.iter().any(|known| known == question), "already deferred");
+        found.deferred.push(question.to_owned());
+        let excess = found.deferred.len().saturating_sub(50);
+        found.deferred.drain(..excess);
+        Ok(())
+    })?;
+    let origin = super::owner_queue::Origin { session: &session, team: Some(team), member: member_id };
+    let Some(entry) = super::owner_queue::defer(&origin, &pending, now())? else { return Ok(()) };
+    let role = team.role_of(member_id);
+    change(store, &team.id, |team, events| {
+        let found = team.members.iter_mut().find(|found| found.id == member_id).context("unknown member")?;
+        if entry.delivery == "answered" {
+            let (tool, command) = found.permission.as_ref().map(|asked| (asked["tool"].clone(), asked["command"].clone())).unwrap_or_default();
+            if found.pending.as_ref().is_some_and(|asked| asked.question_id == pending.question_id) {
+                found.pending = None;
+            }
+            if found.permission.as_ref().is_some_and(|asked| asked["question_id"] == pending.question_id.as_str()) {
+                found.permission = None;
+            }
+            let decision = if entry.safe == "deny" { "deny" } else { "answer" };
+            found.permission_answers.push(json!({"question_id":pending.question_id,"decision":decision,"by":"owner queue","at":now(),
+                "reason":super::owner_queue::AWAY_MESSAGE,"tool":tool,"command":command,"deferred":entry.id}));
+            let excess = found.permission_answers.len().saturating_sub(20);
+            found.permission_answers.drain(..excess);
+        }
+        events.push(Event::new("request_deferred", json!({"member":role,"question_id":pending.question_id,"kind":entry.kind,
+            "safe":entry.safe,"delivery":entry.delivery,"notice":entry.notice,"id":entry.id})));
+        Ok(())
+    })
+}
+
+/// Task 97: the ordinary sessions the owner turned the queue on for. A
+/// session that asks is read at most every 20 seconds; a team's session is
+/// its team's to defer.
+pub(crate) fn defer_watched(teams: &[Team], sessions: &[Seen]) {
+    let watched = super::owner_queue::watched();
+    if watched.is_empty() {
+        return;
+    }
+    for found in sessions.iter().filter(|found| found.live && found.asking) {
+        let Some(minutes) = super::owner_queue::minutes_for(&watched, &found.host, &found.name) else { continue };
+        let in_team = teams.iter().any(|team| {
+            team.members.iter().any(|member| member.session.as_ref().is_some_and(|session| session.host == found.host && session.name == found.name))
+        });
+        if in_team {
+            continue;
+        }
+        let key = format!("watched|{}|{}", found.host, found.name);
+        {
+            let mut checked = PERMISSION_CHECKED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+            if checked.get(&key).is_some_and(|at| now() - at < 20.0) {
+                continue;
+            }
+            checked.insert(key, now());
+        }
+        let output = match hgs(&found.host, &["inspect", &found.name, "--skip-processes"], None, Duration::from_secs(45)) {
+            Ok(output) if output.status.success() => output,
+            Ok(_) => continue,
+            Err(error) => {
+                eprintln!("hgs team worker: {}: {error}", found.name);
+                continue;
+            }
+        };
+        let Ok(record) = serde_json::from_slice::<Value>(&output.stdout) else { continue };
+        let cards = record["pending_questions"].as_array().cloned().unwrap_or_default();
+        let session = SessionRef { host: found.host.clone(), name: found.name.clone(), run_id: found.run_id.clone(),
+            conversation_id: found.conversation_id.clone() };
+        if let Err(error) = super::owner_queue::tick_session(&session, minutes, &cards, now()) {
+            eprintln!("hgs team worker: {}: owner queue: {error}", found.name);
+        }
+    }
+}
+
 /// Hands the lead its own task without a message (C1): the attempt exists, so
 /// `hgs team current` names it and the inbox lists it to report and accept.
 fn lead_hand_out(store: &mut Store, team_id: &str, task_id: u32) -> anyhow::Result<()> {
@@ -6901,6 +7020,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             }
             Ok(())
         }),
+        Step::Defer { member, question } => defer_request(store, team, member, question),
         Step::LeadStall { stall } => change(store, &team.id, |team, events| {
             if let Some((kind, data)) = super::lead_stall::event(team.lead_stall.as_ref(), stall.as_ref(), now()) {
                 events.push(Event::new(kind, data));
@@ -7081,7 +7201,9 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
                 || team.members.iter().any(|member| member.limit_resume)
         })
         .collect();
-    if teams.is_empty() {
+    // Task 97: an ordinary session the owner turned the queue on for keeps the
+    // worker reading it.
+    if teams.is_empty() && super::owner_queue::watched().is_empty() {
         return Ok(false);
     }
     let output = match listing(|| hgs("", &["ls", "--json", "--no-archives"], None, LIST_TIMEOUT)) {
@@ -7100,6 +7222,7 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
         }
     }
     let teams: Vec<Team> = teams.iter().filter_map(|t| store.load(&t.id).ok().flatten()).collect();
+    defer_watched(&teams, &sessions);
     for team in &teams {
         for step in steps_with(team, &sessions, now(), Some(&listed)) {
             if let Err(error) = run_step(store, team, &step, host) {
@@ -8012,6 +8135,9 @@ mod dispatcher_stall;
 #[cfg(test)]
 #[path = "tests/dispatcher_lead_stall.rs"]
 mod dispatcher_lead_stall;
+#[cfg(test)]
+#[path = "tests/dispatcher_owner_queue.rs"]
+mod dispatcher_owner_queue;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_areas.rs"]

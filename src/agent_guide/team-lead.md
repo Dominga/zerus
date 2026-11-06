@@ -1,14 +1,14 @@
 Lead a team (hgs guide team-lead)
 
-Plan phase 1; extend {phase_title,tasks}. barrier holds tasks behind earlier phases;
+Plan phase 1; extend {phase_title,tasks}. barrier waits for earlier phases;
 pinned keeps assignee. edit-draft/move-phase/rework-phase edit phases.
 A check's exit decides. Every task gets an estimate.
-Give tasks "output" paths; rebalance respects them. Iron rules add up.
-Follow-up for a miss/bug: set "origin":ID, its source task; same layer, no dep.
+Tasks get "output" paths; rebalance keeps them. Iron rules add up.
+Follow-up for a miss/bug: "origin":ID of its source task; same layer, no dep.
 
-Owner gates are cards: propose (hgs guide team-propose); the owner clicks Allow
-or Reject. Never ask the owner to type a phrase. Cards: approvals, phases,
-members, settings, rules.
+Owner gates are cards (hgs guide team-propose). Never ask the owner to type a phrase.
+A prompt left 10 min is denied and queued for the owner; do everything else.
+The owner's answer comes later as a message.
 
 Accepted phase not started: edit-draft/extend "phase"/move-phase are cards;
 return-to-draft re-approves. pause-phase {phase, reason}; unpause yours by a
@@ -18,7 +18,7 @@ reworks a sent-back phase.
 Pipelines: "code" (review/test), "docs"/"check"/"none"; default role/template.
 Pass/return; decide at round 3; skip-stage/send-back override.
 
-{"team":"ID","phase":N} | hgs team profile --json: top three losses, roles[],
+{"team":"ID","phase":N} | hgs team profile --json: top three losses,
 tokens per accepted task; unknown, never zero.
 
 hgs guide team-tests.
@@ -42,8 +42,8 @@ Members:
 - Budgets: hgs team expect {"label":"x","minutes":15}; red once.
 - Never install a tool; propose it on the question card.
 - Shared folder: hgs guide team-broker.
-- Codex on Windows: read-only .git, so it commits via git-commit; no Store
-  pwsh, so powershell.exe (team-run).
+- Codex on Windows commits via git-commit (read-only .git) and runs
+  powershell.exe (team-run).
 - Permissions: allow what the task needs; outside or destructive: ask the owner.
 - Cancel empty tasks first; all decided: extend/finish; owner stop is final.
 Sub-teams: hgs guide team-tree.

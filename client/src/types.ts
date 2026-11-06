@@ -1083,6 +1083,8 @@ export type TeamAction =
   | { kind: "phase_mode"; phase: number; mode: "free" | "standard"; reason?: string }
   | { kind: "send_back_phase"; phase: number; comment: string }
   | { kind: "decide_tool"; offer: string; allow: boolean; reason?: string }
+  /** Task 97: the owner's answer to a deferred request; one message reaches the session. */
+  | { kind: "answer_deferred"; id: string; decision: "allow" | "deny" | "answer"; text?: string }
   | { kind: "release"; task: number }
   | { kind: "retry"; task: number }
   | { kind: "finish"; summary: string }

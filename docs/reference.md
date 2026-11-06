@@ -2161,6 +2161,57 @@ clears as soon as the lead works again, the decisions are taken or fall back
 under the threshold, the team stops running, or the setting is 0. The feed
 records `lead_stalled` (raised or a new round) and `lead_stall_cleared`.
 
+### The owner's question queue
+
+A native permission prompt or question that nobody answers does not freeze a
+team while the owner is away. When a request of a team's lead or member has
+waited `Settings.defer_minutes` (10 by default, 0 turns it off, at most 1440;
+only the owner changes it), the dispatcher answers it with the safe choice
+and queues it for the owner:
+
+- a permission gets its one-time Deny, never Allow and never a persistent
+  rule; one without a one-time Deny is left on the screen;
+- an agent's own question (Claude's AskUserQuestion, a Codex or Kimi question)
+  gets its recommended option (an option marked recommended, or whose label
+  says "(Recommended)"), else its first; an optional Codex question is skipped;
+- folder trust, updates, resumes, permission modes and a request only the
+  Terminal takes are queued but never answered.
+
+The answer goes through `hgs answer` with the exact run, conversation,
+question id and hash. It is reserved first, in the member's `deferred` list and
+in the queue (`teams/owner-queue.json` under the state root, at most 500
+entries, answered ones kept seven days), and neither reservation is undone: an
+answer whose delivery is unknown is recorded as `uncertain` and never sent
+again. After an answer that arrived, the session gets one guarded message:
+"The owner is away; this request is queued for them. Continue with work that
+does not need it, or do it yourself." The member's record keeps the answer
+`by: "owner queue"` and the feed records `request_deferred`.
+
+The queue's waiting entries are Waiting for you > Deferred: kind `deferred`,
+id `deferred/<id>`, action `answer_deferred`, with the request's exact text,
+its session, team and member, when it was asked and what Zerus did; the
+desktops notify each once. On the phone, a team's entries are
+`mobile_attention` items `{"question_id":"owner-deferred:<id>","question_hash",
+"kind":"owner_deferred","team","team_name","request","since"}` on its lead's
+`hgs ls --json` row (members' notifications are muted), an ordinary session's
+on its own row; the mobile connector keeps them beside its question cards.
+
+The owner answers with `{"id","decision":"allow"|"deny"|"answer","text",
+"by":"human"} | hgs team answer-deferred --json` (the desktops send the same).
+Zerus never replays the tool: the session gets one guarded message, "The owner
+now allows <request>: you may run it again.", "The owner denies <request>: do
+not run it; ...", or "The owner answers your question (<question>): <text>".
+A message refused before it reached the session may be answered again; one
+sent, or whose delivery is unknown, is never sent again. `{"limit":N} | hgs
+team deferred --json` lists the entries, newest first, and the watched
+sessions.
+
+An ordinary session is never deferred unless the owner turns it on:
+`{"session":NAME,"host":ALIAS,"minutes":N,"by":"human"} | hgs team
+defer-session --json` (0 turns it off; at most 100 sessions). The team worker
+then reads such a session while it asks, at most every 20 seconds, and keeps
+running for it. A session of a team follows its team's setting.
+
 ### The profile of the work: losses, spans and unknown
 
 `hgs team profile` reads a scope after the work: where its time and tokens

@@ -157,6 +157,7 @@ result.
 | **Rebalancing** | A free member of the right role takes a ready task; a task for a role goes to a member whose models allow it. |
 | **Stuck and crashed members** | A member that stops without a report, or crashes, is noticed; a member waiting for your answer or for its Background work is not a stop. With `restart_crashed` it is restarted at most three times an hour, then held for the lead. |
 | **Stalled lead** | When the lead's reports, questions or permissions wait past `lead_stall_minutes` (20 by default) and the lead does not work on them, you are told on the team bar, in Waiting for you, on the desktop and on the phone, at most once an hour, until it moves. |
+| **Owner question queue** | A lead's or member's permission prompt or question left unanswered for `defer_minutes` (10 by default) is denied (or given the agent's recommended option) and queued for you under Waiting for you > Deferred; the session keeps working, and your later answer reaches it as one message. |
 | **Budgets** | A member may declare a time budget; the lead hears once when it is exceeded. |
 | **Sub-teams** | A task may be delegated to a sub-team with its own lead, members and plan; its summary returns as the parent task's report. |
 | **Model servers** | A computer on the network can serve models through an OpenAI- or Anthropic-compatible API; New session can start an agent on this computer wired to it, never changing your global configuration. |

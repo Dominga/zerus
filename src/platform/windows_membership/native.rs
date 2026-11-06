@@ -18,6 +18,7 @@ use windows_sys::Win32::{
     },
 };
 
+mod child;
 mod handles;
 
 type QuerySystem = unsafe extern "system" fn(i32, *mut c_void, u32, *mut u32) -> i32;

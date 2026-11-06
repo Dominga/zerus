@@ -30,8 +30,8 @@ Every action takes --dir DIR, --team TEAM (the owner's override) and --json.
 Never install a tool: Zerus offers a missing one to the owner (Waiting for
 you). Propose it on the question card and work without it.
 
-.zerus/tests.toml: [map], [full] (where, policy), [retries], [budgets],
-[isolation], [build_cache], [merge_queue], [resources.NAME] and [[provider]]
-(name, kind cargo|ctest|pytest|unittest|gradle|npm|command, root, sources,
-tests, manual, elsewhere, affected build|paths|all, [[provider.paths]],
-command, widen, build_dir); every field: docs/reference.md, Affected tests.
+Windows private-store fixtures use owner_only_dir on a missing tempdir child;
+existing ACLs stay unchanged. Never repair Temp or weaken privacy checks.
+
+All .zerus/tests.toml fields (providers, isolation, budgets, retries, build cache
+and merge queue): docs/reference.md, Affected tests.

@@ -226,8 +226,16 @@ fn reference(config: &Config, args: &[String], who: &Actor) -> Result<Reference>
     })
 }
 
+/// New replica subfolders inherit this root's private Windows ACL.
+pub(crate) fn replica_root(config: &Config) -> std::io::Result<std::path::PathBuf> {
+    let root = config.state.join("replica");
+    #[cfg(windows)]
+    crate::platform::private_dir(&root)?;
+    Ok(root)
+}
+
 fn store(config: &Config, project_id: &str) -> Result<ProjectStore> {
-    ProjectStore::open(&config.state.join("replica"), project_id).map_err(fail)
+    ProjectStore::open(&replica_root(config).map_err(fail)?, project_id).map_err(fail)
 }
 
 /// This computer and the swarm members it verified itself, by SSH alias.
@@ -633,7 +641,7 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
     } else { None };
     let store = match wait {
         None => store(config, project_id)?,
-        Some(wait) => ProjectStore::open_within(&config.state.join("replica"), project_id, wait)
+        Some(wait) => ProjectStore::open_within(&replica_root(config).map_err(fail)?, project_id, wait)
             .map_err(fail)?
             .ok_or_else(|| fail("the project's tasks are busy; try again"))?,
     };

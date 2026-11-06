@@ -5767,7 +5767,12 @@ eight conversations per session, and follow `hgs rename`.
 
 Private stores (read marks, the analytics store, the approval journal, the
 history index, voice storage and the Windows mobile configuration) are checked
-before use. A store that is this user's, lies in the hgs state or configuration
+before use. On Windows, each missing directory created for private storage gets
+a protected, inheritable DACL granting only the current user FullControl. New
+files inside it inherit that protection. Existing directories keep their ACLs,
+including a directory another process creates during the creation race; private
+directory creation does not silently repair them or relax the privacy check.
+A store that is this user's, lies in the hgs state or configuration
 folder and is only too open (another tool added a group to its ACL, or Unix mode
 bits wider than 0600/0700) is made private again in place: on Windows a
 protected DACL granting this user FullControl through a handle that never

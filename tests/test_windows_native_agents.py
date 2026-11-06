@@ -1136,6 +1136,22 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
         projects = tomllib.loads((self.agent_home / 'config.toml').read_text(encoding='utf-8'))['projects']
         self.assertEqual({path.lower() for path, value in projects.items() if value['trust_level'] == 'trusted'},
                          {str(target).lower()})
+        # Windows 0.167 opens a separate sandbox NUX after folder consent,
+        # even with this fixture's YOLO launch. Trust succeeded; the following
+        # chooser must still block input. Never set up a sandbox in this test.
+        notice = 'Set up the Codex agent sandbox'
+        self.until('the separate Windows sandbox setup chooser', lambda: notice in self.capture(name))
+        blocked = self.hgs('send', name, '--json', input=json.dumps(self.message(self.row(name), MESSAGES[0])), rc=None)
+        self.assertNotEqual(blocked.returncode, 0, blocked.stdout)
+        self.assertIn('terminal has a draft, dialog, or unrecognized prompt', blocked.stderr)
+        self.assertEqual(api.requests(self.api_root), [])
+        self.assertFalse(any(q.get('source') == 'codex_folder_trust'
+                             for q in self.inspect(name).get('pending_questions', [])))
+        # This is the fixture user's Terminal action, not an app trust answer
+        # or a sandbox/Administrator choice. The same process then takes input.
+        self.keys(name, {'named': 'Escape'})
+        self.until('sandbox setup dismissed in Terminal', lambda: notice not in self.capture(name))
+        self.assertIsNone(tomllib.loads((self.agent_home / 'config.toml').read_text(encoding='utf-8')).get('windows', {}).get('sandbox'))
         self.deliver(name, MESSAGES[0])
 
     def test_explicit_folder_cancel_keeps_trust_unchanged(self):

@@ -309,6 +309,7 @@ fn current_directory(
 }
 
 mod custody_io;
+mod file_users;
 mod handles;
 #[cfg(windows)]
 mod native;

@@ -6716,6 +6716,61 @@ a module compiles in); `[full]` `where` (`here`, `ci`, `runner`), `policy`
 `resources`, `platforms`, `budget_minutes`, `budget_lines`, `reuse` (`auto`,
 `inputs`, `binary`, `never`), `disabled`.
 
+CTest providers may also declare optional `configure`, `build` and `probe`
+command strings. `configure` and `build` are required together when preparation
+is enabled; `probe` is optional. These stages run only in the **local merge
+queue**. Providers without preparation retain the existing behavior; remote
+runners are unchanged.
+
+The queue reads the provider from the merged checkout. It first runs `probe`,
+then runs `configure` only when the provider's `build_dir/CMakeCache.txt` is
+missing. It always runs `build` before CTest, including for an existing build
+folder. An incremental build therefore uses the merged sources instead of
+running old binaries. Probe, configuration, build, CTest and any retries share
+one existing suite deadline and bounded output capture. Configuration/build
+failures after a successful probe fail the suite and follow ordinary merge
+rollback, with a `build` flag and no flaky-test retry. A probe failure, missing probe executable or unresolved placeholder
+records `not_run` with a bounded `not run here: SUITE runs on ...; reason` message.
+It remains an untested range, never a pass or a green result eligible for reuse.
+
+Stage commands expand `{build_dir}` relative to the provider's `root`. In the
+build stage, `{targets}` means `--target` followed by the selected CMake target
+names. A whole-provider `(all)` selection expands it to nothing, so the default
+build includes a newly added test even if the previous map did not name it.
+That fallback may build other default targets too. CTest test names and CMake
+binary target names need not match: the existing map already records their
+relationship. The CTest command keeps its existing test-name selection.
+
+Named placeholders such as `{qt_prefix}`, `{cc}`, `{cxx}`, `{python}` and
+`{toolchain}` obtain their values only from the local file
+`.zerus/tests.local.toml`. The file is ignored by Git; if `git ls-files` finds it
+tracked, Zerus refuses it. Unknown providers, keys or malformed values are also
+refused. Its only provider tables are `vars` and `env`, for example:
+
+```toml
+[provider.tray.vars]
+python = "python3"
+toolchain = ""
+cc = "cc"
+cxx = "c++"
+qt_prefix = "/example/sdk/qt"
+
+[provider.tray.env]
+QT_QPA_PLATFORM = "offscreen"
+QT_QUICK_BACKEND = "software"
+```
+
+Use the local machine's actual SDK and compiler values. On Windows the local
+`toolchain` value can invoke `scripts/ci/msvc-env.py`. Local `env` entries replace
+the entire variable; they perform no expansion. Have the toolchain wrapper
+prepend the selected Qt kit's `bin` directory to `PATH` before invoking tools,
+or supply the complete `PATH` through local `env` for CTest. Local
+values cannot replace command strings or the reserved `build_dir`/`targets`
+placeholders. The local file is limited to 64 KiB, with at most 64 vars and 64
+environment entries per provider, and is excluded from exported project
+configuration. Commit portable recipes and placeholders, never machine paths.
+
+
 #### What the team enforces (U62)
 
 A member runs only the tests the task's change touches (`hgs test affected`)

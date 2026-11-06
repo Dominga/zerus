@@ -1869,6 +1869,9 @@ fn dependencies_text(team: &Team, task: &Task, local_host: &str) -> String {
         .filter_map(|found| dependency_attempt(found).map(|attempt| (found, attempt)))
         .collect();
     let mut text = String::new();
+    for found in task.deps.iter().filter_map(|dep| team.task(dep.task)).filter(|task| task.archived.is_some()).take(DEPENDENCY_LIMIT) {
+        text += &format!("#{} {}: archived report: {} | hgs team status --json\n", found.id, found.title, json!({"team":team.id,"task":found.id}));
+    }
     let mut used = 0usize;
     for (index, (found, attempt)) in listed.iter().enumerate() {
         if index == DEPENDENCY_LIMIT {
@@ -1896,8 +1899,8 @@ fn dependencies_text(team: &Team, task: &Task, local_host: &str) -> String {
         text += &report.text.chars().take(shown).collect::<String>();
         if shown < total {
             text += &format!(
-                "\n[cut: shown {shown} of {total} characters; full report: hgs team status --json, task #{}]\n",
-                found.id
+                "\n[cut: shown {shown} of {total} characters; full report: {} | hgs team status --json]\n",
+                json!({"team":team.id,"task":found.id})
             );
         } else {
             text.push('\n');

@@ -862,7 +862,7 @@ fn extend_limits_are_refused_clearly() {
     )
     .unwrap_err()
     .to_string();
-    assert_eq!(error, "A team has at most 500 tasks (it has 500)");
+    assert_eq!(error, "A team has at most 500 live tasks (it has 500)");
     let mut team = running_team();
     team.phases = (0..100).map(|i| Phase { n: i + 2, state: PhaseState::Approved, ..Default::default() }).collect();
     let error = extend(
@@ -874,7 +874,21 @@ fn extend_limits_are_refused_clearly() {
     )
     .unwrap_err()
     .to_string();
-    assert_eq!(error, "A team has at most 100 phases");
+    assert_eq!(error, "A team has at most 100 live phases");
+}
+
+#[test]
+fn archived_tasks_and_phases_do_not_consume_live_limits() {
+    let mut team = running_team();
+    team.tasks.extend((3..=1002).map(|id| Task { id, phase: 2, title: format!("Closed {id}"),
+        status: TaskStatus::Accepted, archived: Some(Default::default()), ..Default::default() }));
+    team.phases = (2..=102).map(|n| Phase { n, state: PhaseState::Approved,
+        archived: Some(Default::default()), ..Default::default() }).collect();
+    team.last_archived_task = 1002;
+    let added = extend(&mut team, &json!({"tasks":[{"id":1003,"title":"New work","assignee":"dev"}]}),
+        &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
+    assert_eq!(added["tasks"], json!([1003]));
+    assert_eq!(team.tasks.iter().filter(|task| task.archived.is_none()).count(), 3);
 }
 
 #[test]
@@ -1038,7 +1052,7 @@ fn extend_refuses_dependencies_on_cancelled_or_rejected_tasks() {
 }
 
 #[test]
-fn cancelling_a_draft_phases_last_task_discards_the_phase() {
+fn cancelling_a_draft_phases_last_archived_task_discards_the_phase() {
     let mut team = running_team();
     let mut events = Vec::new();
     let none = BTreeSet::new();

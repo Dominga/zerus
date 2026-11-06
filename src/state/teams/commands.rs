@@ -10,14 +10,14 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|integrate-build|start-ahead|full-tests|test|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|archive-phases|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|integrate-build|start-ahead|full-tests|test|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "move-task", "add-to-phase", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
     // U63 (owner, 2026-10-31): a phase's pause and the owner's acceptance.
     "pause-phase", "unpause-phase", "phase-acceptance", "accept-phase", "send-back-phase",
     "rework-phase", "reports-to", "sub-lead", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
-    "archive", "report", "ask", "reply", "hold", "release", "accept", "reject", "skip-stage", "send-back", "reassign", "take-over", "cancel",
+    "archive", "archive-phases", "report", "ask", "reply", "hold", "release", "accept", "reject", "skip-stage", "send-back", "reassign", "take-over", "cancel",
     "retry", "check", "expect", "swap-member", "use-last-reply", "relaunch", "add-member", "scale", "drain", "pause-member", "resume-member", "remove-member", "settings", "finding",
     "draft", "propose", "close-phase", "integrate-build", "start-ahead", "full-tests",
 ];
@@ -657,6 +657,11 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
         let ready: BTreeSet<u32> = plan::ready(team).into_iter().collect();
         let now = super::super::now();
         for (task, value) in team.tasks.iter().zip(tasks) {
+            if let Some(archived) = &task.archived {
+                *value = super::model::task_stub(task);
+                value["timing"] = archived.timing.clone();
+                continue;
+            }
             // U37: the task's working time and its waits, one number for every
             // client.
             value["timing"] = super::timing::timing(team, task, now);
@@ -1033,7 +1038,13 @@ fn session_account(member: &Member) -> String {
 /// task's state, without descriptions, reports or the feed. The list never
 /// reads the live session listing: the desktop polls it often (C1).
 fn summary(team: &Team, include_cancelled: bool) -> Value {
-    let count = |status: TaskStatus| team.tasks.iter().filter(|task| task.status == status).count();
+    let count = |status: TaskStatus| {
+        let live = team.tasks.iter().filter(|task| task.archived.is_none() && task.status == status).count();
+        live + match status {
+            TaskStatus::Accepted => team.archive_totals.accepted, TaskStatus::Rejected => team.archive_totals.rejected,
+            TaskStatus::Cancelled => team.archive_totals.cancelled, _ => 0,
+        }
+    };
     // U58: the dashboard hides cancelled tasks and the phases whose tasks are
     // all cancelled, unless it asks for them.
     let cancelled: BTreeSet<u32> = team
@@ -1078,7 +1089,7 @@ fn summary(team: &Team, include_cancelled: bool) -> Value {
         .filter(|p| include_cancelled || !cancelled.contains(&p.n))
         .map(|p| json!({"n":p.n,"order":p.order,"title":p.title,"barrier":p.barrier,
             "state":if cancelled.contains(&p.n) { json!("cancelled") } else { json!(p.state) },"tasks":p.tasks,
-            "note":p.note,"rejection":p.rejection,
+            "note":p.note,"rejection":p.rejection,"archived":p.archived,
             // U63: the phase's pause and who accepts it.
             "pause":p.pause,"acceptance":p.acceptance}))
         .collect();
@@ -4225,6 +4236,19 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         }
         "status" => {
             let store = Store::open(false)?;
+            if input["archived_phases"].as_bool() == Some(true) {
+                let cursor = input["cursor"].as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
+                return store.archived_phases(text(input,"team"), cursor, input["limit"].as_i64().unwrap_or(PAGE));
+            }
+            if let Some(phase) = input.get("archived_phase") {
+                let phase = phase.as_u64().and_then(|n| u32::try_from(n).ok()).context("A phase number is required")?;
+                let cursor = input["cursor"].as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(0);
+                return store.archived_tasks(text(input,"team"), phase, cursor, input["limit"].as_i64().unwrap_or(PAGE));
+            }
+            if let Some(task) = input.get("task") {
+                let task = task.as_u64().and_then(|task| u32::try_from(task).ok()).filter(|task| *task > 0).context("A positive task id is required")?;
+                return store.task(text(input, "team"), task);
+            }
             let team = store.load(text(input, "team"))?.context("Unknown team")?;
             let finished = matches!(team.status, TeamStatus::Done | TeamStatus::Stopped);
             // Only a finished team reads the live listing, for its members left

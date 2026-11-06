@@ -79,7 +79,9 @@ pub fn details_invocation(target: &Target, archive_id: Option<&str>) -> Invocati
     }
 }
 
-/// One bounded child inspection when it opens. The CLI verifies roster membership.
+/// One bounded child inspection when it opens: `hgs inspect NAME ... --agent
+/// ID`, the CLI's child option since its first release (and the Qt client's).
+/// The CLI verifies roster membership.
 pub fn subagent_identity_invocation(
     target: &Target,
     archive_id: Option<&str>,
@@ -95,7 +97,7 @@ pub fn subagent_identity_invocation(
         return None;
     }
     let mut call = details_invocation(target, archive_id);
-    call.args.extend(["--subagent".into(), agent_id.into()]);
+    call.args.extend(["--agent".into(), agent_id.into()]);
     Some(call)
 }
 
@@ -340,7 +342,7 @@ mod tests {
                 "--skip-processes",
                 "--archive",
                 "a1",
-                "--subagent",
+                "--agent",
                 "child"
             ]
         );

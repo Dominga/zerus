@@ -18,6 +18,10 @@ const FAMILIES: &[&str] = &[
     "window-geometry",
     "session-splitter",
     "project-folder-splitter",
+    // Task 102.
+    "mobile-local-services",
+    "new-session-folder-mode",
+    "voice-device-hint",
 ];
 
 #[derive(Default, Serialize, Deserialize)]
@@ -261,6 +265,12 @@ fn matches(family: &str, key: &str) -> bool {
         "window-geometry" => key == "sessions/geometry",
         "session-splitter" => key == "workspace/splitter",
         "project-folder-splitter" => key == "workspace/projectFolderSplit",
+        "mobile-local-services" => matches!(
+            key,
+            "mobile/localRelay" | "mobile/localRelayPort" | "mobile/runConnector"
+        ),
+        "new-session-folder-mode" => key == "workspace/launchWorktree",
+        "voice-device-hint" => key == "speech/microphone",
         _ => false,
     }
 }
@@ -269,11 +279,36 @@ fn target(key: &str) -> &str {
     match key {
         "sessions/geometry" => super::geometry::KEY,
         "workspace/splitter" => "workspace/sessionsWidth",
+        "workspace/launchWorktree" => super::NEW_SESSION_FOLDER_MODE,
+        "speech/microphone" => super::MICROPHONE_HINT,
         _ => key,
     }
 }
 
 fn converted(key: &str, value: &QtValue) -> Result<Value, &'static str> {
+    // Task 102: Qt writes "auto" or "none"; anything but "none" is Auto,
+    // as its dialog reads it (NewSessionDialog.cpp:259).
+    if key == "workspace/launchWorktree" {
+        let mode = if value.to_text().trim() == "none" {
+            "none"
+        } else {
+            "auto"
+        };
+        return Ok(Value::from(mode));
+    }
+    // Qt keeps a QAudioDevice id, which names no device of the client's: its
+    // name is kept instead, and an id this computer no longer knows imports
+    // nothing (Null is skipped).
+    if key == "speech/microphone" {
+        return Ok(crate::voice_device::qt_microphone_name(&value.to_text())
+            .map_or(Value::Null, Value::from));
+    }
+    if key == "mobile/localRelayPort" {
+        return match value.to_long() {
+            (port, true) if (1..=65535).contains(&port) => Ok(Value::from(port)),
+            _ => Err("invalid relay port"),
+        };
+    }
     if key == crate::row_preferences::KEY {
         return crate::row_preferences::from_qt(value).ok_or("invalid packed row-density keys");
     }
@@ -439,6 +474,9 @@ pub(super) fn apply(
             }
         };
         for (key, value) in values {
+            if value.is_null() {
+                continue;
+            }
             candidate.values.entry(key).or_insert(value);
         }
         journal

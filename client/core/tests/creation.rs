@@ -197,7 +197,8 @@ fn a_folder_launch_crosses_a_durable_barrier_before_every_step() {
             host: String::new(),
             agent: "codex".into(),
             account: "a".into(),
-            terminal: true
+            terminal: true,
+            folder_mode: String::new(),
         }
     );
     driver.flush();

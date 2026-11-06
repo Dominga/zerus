@@ -6,11 +6,12 @@ import { Icon } from "../lib/icons";
 import type { Inspection } from "../../store/terminationCleanup";
 import { terminationCleanupInspect } from "../../bridge";
 import { cleanup, cleanupDialog, closeCleanup, keepCleanup, checkCleanup, removeCleanup, emptyConsents, type CleanupRow } from "../../store/terminationCleanup";
+import { activityLabel } from "../../store/backgroundTasks";
 import { anyCleanupRestore, cleanupRestoring, restoreCleanupRow } from "../../store/cleanupNotices";
 import { tr } from "../../i18n";
 import { ForceStopDialog } from "../sessions/ForceStopDialog";
 
-const labels = { removed: "Removed", kept: "Kept", review: "Review", unknown: "Unknown", ready: "Ready", checking: tr("Checking…"), removing: tr("Checking again and removing…"), stopping: tr("Stopping programs…") };
+const labels = { removed: "Removed", kept: "Kept", review: "Review", unknown: "Unknown", ready: "Ready", checking: activityLabel("checking"), removing: activityLabel("removing"), stopping: activityLabel("stopping") };
 /** setup-batch-cleanup, Terminate variant. Opening displays recorded outcomes. */
 export default function WorktreeCleanup() {
   let dialog!: HTMLDialogElement;

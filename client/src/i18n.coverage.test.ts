@@ -40,6 +40,7 @@ const DYNAMIC_FILES: Record<string, string> = {
   "./ui/screens/settings/Keyboard.tsx": "the shortcut registry's command titles and groups",
   "./store/goTo.ts": "its own section table and the shortcut registry's command titles and groups",
   "./store/archive.ts": "its own notice constant",
+  "./store/backgroundTasks.ts": "its own activity table",
   "./store/composer.ts": "its own error constants and the draft store's refused-save constant; other core status text keeps its source form",
   "./store/contentSearch.ts": "its own notice constant",
   "./store/creations.ts": "the creations-ui notice constant",

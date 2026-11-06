@@ -23,11 +23,12 @@ impl Index {
         }
         let connection = Connection::open(path).map_err(|error| LoreError(format!("{}: {error}", path.display())))?;
         connection.execute_batch(
-            "PRAGMA journal_mode=WAL;
+            r#"PRAGMA journal_mode=WAL;
              CREATE TABLE IF NOT EXISTS records(
                id TEXT PRIMARY KEY, kind TEXT, area TEXT, title TEXT, body TEXT, refs TEXT);
              CREATE VIRTUAL TABLE IF NOT EXISTS words USING fts5(id UNINDEXED, title, body, refs, tokenize='porter');
-             PRAGMA user_version=1;",
+             CREATE VIRTUAL TABLE IF NOT EXISTS terms USING fts5(id UNINDEXED, toks, tokenize="unicode61 tokenchars '_./:-'");
+             PRAGMA user_version=1;"#,
         ).map_err(|error| LoreError(format!("index: {error}")))?;
         Ok(Self { connection })
     }
@@ -37,6 +38,7 @@ impl Index {
         let tx = self.connection.transaction().map_err(|error| LoreError(format!("index: {error}")))?;
         tx.execute("DELETE FROM records", []).ok();
         tx.execute("DELETE FROM words", []).ok();
+        tx.execute("DELETE FROM terms", []).ok();
         for record in records {
             let id = record.get("id").and_then(Value::as_str).unwrap_or_default();
             let kind = record.get("kind").and_then(Value::as_str).unwrap_or_default();
@@ -48,6 +50,8 @@ impl Index {
                 params![id, kind, area, title, body, refs]).map_err(|error| LoreError(format!("index: {error}")))?;
             tx.execute("INSERT INTO words(id,title,body,refs) VALUES (?1,?2,?3,?4)",
                 params![id, title, body, refs]).map_err(|error| LoreError(format!("index: {error}")))?;
+            tx.execute("INSERT INTO terms(id,toks) VALUES (?1,?2)", params![id, terms_of(record)])
+                .map_err(|error| LoreError(format!("index: {error}")))?;
         }
         tx.commit().map_err(|error| LoreError(format!("index: {error}")))
     }
@@ -64,6 +68,7 @@ impl Index {
         if rebuild {
             tx.execute("DELETE FROM records", []).ok();
             tx.execute("DELETE FROM words", []).ok();
+        tx.execute("DELETE FROM terms", []).ok();
             tx.execute("DELETE FROM fingerprints", []).ok();
         }
         let mut known = std::collections::BTreeMap::new();
@@ -91,6 +96,8 @@ impl Index {
             tx.execute("DELETE FROM words WHERE id=?1", params![id]).map_err(|error| LoreError(format!("index: {error}")))?;
             tx.execute("INSERT INTO words(id,title,body,refs) VALUES (?1,?2,?3,?4)",
                 params![id, title, body, refs]).map_err(|error| LoreError(format!("index: {error}")))?;
+            tx.execute("INSERT INTO terms(id,toks) VALUES (?1,?2)", params![id, terms_of(record)])
+                .map_err(|error| LoreError(format!("index: {error}")))?;
             tx.execute("INSERT OR REPLACE INTO fingerprints(id,hash) VALUES (?1,?2)", params![id, hash])
                 .map_err(|error| LoreError(format!("index: {error}")))?;
             sync.changed += 1;
@@ -98,6 +105,7 @@ impl Index {
         for id in known.keys().filter(|id| !current.contains(*id)) {
             tx.execute("DELETE FROM records WHERE id=?1", params![id]).ok();
             tx.execute("DELETE FROM words WHERE id=?1", params![id]).ok();
+            tx.execute("DELETE FROM terms WHERE id=?1", params![id]).ok();
             tx.execute("DELETE FROM fingerprints WHERE id=?1", params![id]).ok();
             sync.removed += 1;
         }
@@ -126,6 +134,50 @@ impl Index {
         Ok((rows.filter_map(Result::ok).collect(), false))
     }
 
+    /// Combined text search: FTS5 words and identifier terms fused by RRF,
+    /// plus a phrase bonus when the whole query appears. No vectors.
+    pub fn search_all(&self, query: &str, limit: usize) -> Result<(Vec<Hit>, bool), LoreError> {
+        let words = self.fts("words", &fts_query(query), limit)?;
+        let terms = self.fts("terms", &terms_query(query), limit)?;
+        let mut fused = rrf(&words, &terms, limit);
+        let needle = query.to_lowercase();
+        for hit in &mut fused {
+            let text: Option<String> = self.connection.query_row(
+                "SELECT records.title || ' ' || records.body FROM records WHERE id=?1",
+                params![hit.id], |row| row.get(0)).ok();
+            if text.is_some_and(|text| text.to_lowercase().contains(&needle)) { hit.score += 0.5; }
+        }
+        // Python's phrase rule: markup and quotes are ignored, whitespace is
+        // one space. A record holding the whole query word for word jumps.
+        let needle = flat(query);
+        if needle.chars().count() >= 12 {
+            let mut statement = self.connection.prepare("SELECT id,title,body FROM records")
+                .map_err(|error| LoreError(format!("index: {error}")))?;
+            let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+                .map_err(|error| LoreError(format!("index: {error}")))?;
+            for row in rows.flatten() {
+                if flat(&format!("{} {}", row.1, row.2)).contains(&needle) {
+                    match fused.iter_mut().find(|hit| hit.id == row.0) {
+                        Some(hit) => hit.score += 0.5,
+                        None => fused.push(Hit { id: row.0, title: row.1, score: 0.5 }),
+                    }
+                }
+            }
+        }
+        fused.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.id.cmp(&b.id)));
+        fused.truncate(limit);
+        Ok((fused, false))
+    }
+
+    fn fts(&self, table: &str, query: &str, limit: usize) -> Result<Vec<Hit>, LoreError> {
+        if query.is_empty() { return Ok(Vec::new()); }
+        let sql = format!("SELECT records.id, records.title, bm25({table}) FROM {table} JOIN records ON records.id={table}.id WHERE {table} MATCH ?1 ORDER BY bm25({table}) LIMIT ?2");
+        let mut statement = self.connection.prepare(&sql).map_err(|error| LoreError(format!("index: {error}")))?;
+        let rows = statement.query_map(params![query, limit as i64], |row| {
+            Ok(Hit { id: row.get(0)?, title: row.get(1)?, score: -(row.get::<_, f64>(2)? as f32) })
+        }).map_err(|error| LoreError(format!("index: {error}")))?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
     /// Records whose refs name `file`, for `lore for <file>`.
     pub fn for_file(&self, file: &str, limit: usize) -> Result<Vec<Hit>, LoreError> {
         let mut statement = self.connection.prepare(
@@ -155,10 +207,17 @@ pub fn rrf(a: &[Hit], b: &[Hit], limit: usize) -> Vec<Hit> {
 
 /// A safe FTS5 query: every word is a quoted phrase, so punctuation in an
 /// error string is a literal, never syntax.
+fn terms_query(query: &str) -> String {
+    query.split(|c: char| !(c.is_alphanumeric() || "_./:-".contains(c)))
+        .filter(|token| token.chars().count() >= 3)
+        .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
+        .collect::<Vec<_>>().join(" OR ")
+}
 fn fts_query(query: &str) -> String {
-    query.split_whitespace().filter(|word| !word.is_empty())
+    query.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| word.chars().count() >= 2)
         .map(|word| format!("\"{}\"", word.replace('"', "\"\"")))
-        .collect::<Vec<_>>().join(" ")
+        .collect::<Vec<_>>().join(" OR ")
 }
 
 fn fingerprint(record: &Value) -> String {
@@ -168,6 +227,32 @@ fn fingerprint(record: &Value) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+fn terms_of(record: &Value) -> String {
+    let mut out = String::new();
+    if let Some(map) = record.as_object() {
+        for key in ["title", "signals", "symptom", "cause", "fix", "check", "question", "choice", "reason", "what", "body", "steps"] {
+            if let Some(value) = map.get(key) {
+                for text in strings(value) {
+                    for token in text.split(|c: char| !(c.is_alphanumeric() || "_./:-".contains(c))) {
+                        if token.chars().count() >= 3 { out.push_str(token); out.push('\n'); }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn strings(value: &Value) -> Vec<String> {
+    match value {
+        Value::String(text) => vec![text.clone()],
+        Value::Array(items) => items.iter().flat_map(strings).collect(),
+        _ => Vec::new(),
+    }
+}
+fn flat(text: &str) -> String {
+    text.to_lowercase().replace(['`', '*', '«', '»', '"', '\''], "").split_whitespace().collect::<Vec<_>>().join(" ")
+}
 fn body(record: &Value) -> String {
     let mut text = String::new();
     if let Some(map) = record.as_object() {
@@ -244,5 +329,14 @@ mod tests {
         assert_eq!((removed.changed, removed.removed), (1, 1)); // restore one, remove b
     }
 }
+
+
+
+
+
+
+
+
+
 
 

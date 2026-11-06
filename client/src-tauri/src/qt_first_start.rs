@@ -5,6 +5,7 @@
 //! private-store notices already raised (task 75). Each file is written only
 //! when it does not exist yet; Qt's store is never written.
 use std::path::Path;
+use zerus_client_core::drafts;
 use zerus_client_core::private_notices;
 use zerus_client_core::settings::QtStore;
 use zerus_client_core::wsl_mapping::Presets;
@@ -17,6 +18,8 @@ pub const PRESETS_FILE: &str = "wsl-path-mappings.json";
 pub struct Imported {
     pub presets: Option<usize>,
     pub notices: Option<usize>,
+    /// Task 103: Qt's task-board form drafts taken into the draft store.
+    pub forms: Option<usize>,
 }
 
 /// Reads Qt's store once when a destination is missing and writes what it
@@ -24,23 +27,25 @@ pub struct Imported {
 pub fn import(dir: &Path, seed: Option<QtStore>) -> Imported {
     let presets = dir.join(PRESETS_FILE);
     let notices = dir.join(private_notices::FILE);
+    let forms = dir.join(drafts::DIR).join(drafts::QT_FORMS_MARKER);
     let Some(store) = seed else {
         return Imported::default();
     };
-    if presets.exists() && notices.exists() {
+    if presets.exists() && notices.exists() && forms.exists() {
         return Imported::default();
     }
     let snapshot = match store.snapshot() {
         Ok(Some(snapshot)) => snapshot,
         Ok(None) => return Imported::default(),
         Err(error) => {
-            eprintln!("zerus-client: Qt store not read for presets and notices: {error}");
+            eprintln!("zerus-client: Qt store not read for presets, notices and forms: {error}");
             return Imported::default();
         }
     };
     Imported {
         presets: Presets::new(presets).seed_from_qt(&snapshot.values),
         notices: private_notices::seed_from_qt(&notices, &snapshot.values),
+        forms: drafts::import_qt_forms(&dir.join(drafts::DIR), &snapshot.values),
     }
 }
 
@@ -111,7 +116,8 @@ launchWorktree=none\r\n";
             imported,
             Imported {
                 presets: Some(1),
-                notices: Some(2)
+                notices: Some(2),
+                forms: Some(0)
             }
         );
         let presets = Presets::new(data.join(PRESETS_FILE));
@@ -169,10 +175,98 @@ launchWorktree=none\r\n";
             imported,
             Imported {
                 presets: Some(64),
-                notices: Some(512)
+                notices: Some(512),
+                forms: Some(0)
             }
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), ini);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const FORMS_INI: &str = "[teams]\r\n\
+hideFinished=true\r\n\
+heat\\team-one=time\r\n\
+\r\n\
+[tasks/titleDraft/project-fixture]\r\n\
+11111111-1111-4111-8111-111111111111=\"Draft title\"\r\n\
+\r\n\
+[tasks/newCard/project-fixture]\r\n\
+title=\"New card title\"\r\n\
+\r\n\
+[tasks/noteDraft/project-fixture]\r\n\
+22222222-2222-4222-8222-222222222222=\"Legacy note\"\r\n";
+
+    fn form(store: &drafts::DraftStore, key: &str) -> String {
+        let (tx, rx) = std::sync::mpsc::channel();
+        store.load(key, move |value| {
+            let _ = tx.send(value);
+        });
+        rx.recv().unwrap().draft.draft.text
+    }
+
+    /// Task 103: Qt's task-board forms become drafts in the store the task
+    /// board reads, once; its INI is only read.
+    #[test]
+    fn the_first_start_imports_qt_s_task_forms_once_and_never_the_ini() {
+        let dir = scratch("forms");
+        let ini = dir.join("hgs-tray.ini");
+        std::fs::write(&ini, FORMS_INI).unwrap();
+        let data = dir.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let imported = import(&data, Some(QtStore::Ini(ini.clone())));
+        assert_eq!(imported.forms, Some(3));
+        let store = drafts::DraftStore::open(data.join(drafts::DIR));
+        assert_eq!(
+            form(
+                &store,
+                "tasks/titleDraft/project-fixture/11111111-1111-4111-8111-111111111111"
+            ),
+            "Draft title"
+        );
+        assert_eq!(
+            form(&store, "tasks/newCard/project-fixture/title"),
+            "New card title"
+        );
+        assert_eq!(
+            form(
+                &store,
+                "task-comment\nproject-fixture\n22222222-2222-4222-8222-222222222222"
+            ),
+            "Legacy note"
+        );
+        // The client's own files win: a second start imports nothing.
+        assert_eq!(
+            import(&data, Some(QtStore::Ini(ini.clone()))),
+            Imported::default()
+        );
+        assert_eq!(std::fs::read_to_string(&ini).unwrap(), FORMS_INI);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_existing_draft_wins_over_qt_s_form_and_a_replay_reads_nothing() {
+        let dir = scratch("forms-own");
+        let ini = dir.join("hgs-tray.ini");
+        std::fs::write(&ini, FORMS_INI).unwrap();
+        let data = dir.join("data");
+        let store = drafts::DraftStore::open(data.join(drafts::DIR));
+        let key = "tasks/titleDraft/project-fixture/11111111-1111-4111-8111-111111111111";
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut own = drafts::StoredDraft::default();
+        own.draft.text = "My own title".into();
+        store.save_durable(key, own, move |saved| {
+            let _ = tx.send(saved);
+        });
+        rx.recv().unwrap().unwrap();
+        assert_eq!(
+            import(&data, Some(QtStore::Ini(ini.clone()))).forms,
+            Some(2)
+        );
+        assert_eq!(form(&store, key), "My own title");
+        // No Qt store (a replay, the dev identity): nothing is read.
+        let replay = dir.join("replay");
+        assert_eq!(import(&replay, None), Imported::default());
+        assert!(!replay.join(drafts::DIR).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

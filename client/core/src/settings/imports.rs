@@ -22,6 +22,8 @@ const FAMILIES: &[&str] = &[
     "mobile-local-services",
     "new-session-folder-mode",
     "voice-device-hint",
+    // Task 103.
+    "teams-view-preferences",
 ];
 
 #[derive(Default, Serialize, Deserialize)]
@@ -271,6 +273,13 @@ fn matches(family: &str, key: &str) -> bool {
         ),
         "new-session-folder-mode" => key == "workspace/launchWorktree",
         "voice-device-hint" => key == "speech/microphone",
+        // Task 103: the two plain Teams switches and Qt's per-team heat and
+        // plan mode choices, which become one bounded JSON map each.
+        "teams-view-preferences" => {
+            matches!(key, "teams/hideFinished" | "ui/catalogHideUnusedRoles")
+                || key.starts_with("teams/heat/")
+                || key.starts_with("teams/planMode/")
+        }
         _ => false,
     }
 }
@@ -390,6 +399,72 @@ fn project_vivid(
     Ok(values)
 }
 
+/// Task 103: Qt's Teams view preferences. The two flags keep their own keys;
+/// its per-team heat and plan choices are bounded maps of team -> mode, so a
+/// team's list never becomes a settings key of its own.
+fn teams_view(
+    contents: &Contents,
+    entries: &[(&String, &QtValue)],
+    handled_keys: &BTreeSet<String>,
+) -> Result<Map<String, Value>, &'static str> {
+    const MAX_TEAMS: usize = 512;
+    const MAX_TEXT: usize = 64 * 1024;
+    let part = |team: &str| {
+        !team.is_empty()
+            && team.len() <= 256
+            && !team
+                .chars()
+                .any(|c| c.is_control() || c == '/' || c == '\\')
+    };
+    let mut flags = Map::new();
+    let mut heat = Map::new();
+    let mut plan = Map::new();
+    for (key, value) in entries.iter().copied() {
+        if matches!(
+            key.as_str(),
+            "teams/hideFinished" | "ui/catalogHideUnusedRoles"
+        ) {
+            let on = super::checked_qt_flag(value).ok_or("invalid preference flag")?;
+            if !contents.values.contains_key(key) && !handled_keys.contains(key) {
+                flags.insert(key.clone(), Value::Bool(on));
+            }
+        } else if let Some(team) = key.strip_prefix("teams/heat/") {
+            if !part(team) {
+                return Err("invalid heat team");
+            }
+            let mode = value.to_text();
+            if !matches!(mode.as_str(), "time" | "tokens") {
+                return Err("invalid heat mode");
+            }
+            heat.insert(team.to_owned(), Value::String(mode));
+        } else if let Some(team) = key.strip_prefix("teams/planMode/") {
+            if !part(team) {
+                return Err("invalid plan team");
+            }
+            let mode = value.to_text();
+            if !matches!(mode.as_str(), "free" | "standard") {
+                return Err("invalid plan mode");
+            }
+            plan.insert(team.to_owned(), Value::String(mode));
+        }
+    }
+    if heat.len() > MAX_TEAMS || plan.len() > MAX_TEAMS {
+        return Err("too many team preferences");
+    }
+    let mut values = flags;
+    for (key, map) in [("teams/heatModes", heat), ("teams/planModes", plan)] {
+        if map.is_empty() || contents.values.contains_key(key) || handled_keys.contains(key) {
+            continue;
+        }
+        let text = Value::Object(map).to_string();
+        if text.len() > MAX_TEXT {
+            return Err("team preferences too large");
+        }
+        values.insert(key.into(), Value::String(text));
+    }
+    Ok(values)
+}
+
 pub(super) fn apply(
     contents: &mut Contents,
     store: &QtStore,
@@ -434,6 +509,8 @@ pub(super) fn apply(
                 }
                 _ => Ok(Map::new()),
             }
+        } else if *family == "teams-view-preferences" {
+            teams_view(contents, &entries, &handled_keys)
         } else {
             entries
                 .iter()

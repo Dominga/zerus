@@ -8,6 +8,7 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QSet>
+#include <utility>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <algorithm>
@@ -30,6 +31,7 @@ TeamWaitingFeed::TeamWaitingFeed(TeamController *teams, QObject *parent) : QObje
     // Teams change at the pace of agents; a minute is soon enough for a banner.
     m_poll.setInterval(30000);
     QObject::connect(&m_poll, &QTimer::timeout, this, [this] { refresh(); });
+    if (teams) QObject::connect(teams, &TeamController::decided, this, &TeamWaitingFeed::decided);
 }
 
 void TeamWaitingFeed::setActive(bool active)
@@ -42,11 +44,15 @@ void TeamWaitingFeed::setActive(bool active)
 
 void TeamWaitingFeed::refresh()
 {
-    if (!m_teams || m_inFlight) return;
+    if (!m_teams) return;
+    // Task 107: one read at a time; asked again meanwhile, the read in flight
+    // may predate a decision, so its answer is dropped and a new one starts.
+    if (m_inFlight) { m_again = true; return; }
     m_inFlight = true;
     const quint64 read = ++m_read;
     m_teams->call(QStringLiteral("waiting"), QJsonObject{{"limit", MaxItems}}, [this, read](bool ok, const QJsonObject &result, const QString &) {
         m_inFlight = false;
+        if (std::exchange(m_again, false)) { refresh(); return; }
         // A failed read keeps what is shown; the next one tries again.
         if (!ok || read != m_read) return;
         // #706: the same list again redraws no banner and writes no setting.
@@ -87,6 +93,43 @@ void TeamWaitingFeed::answered(const TeamWaitingPage::Item &item)
     emit dropped(item.id);
     emit withdrawn(tokens);
     emit changed();
+}
+
+QStringList TeamWaitingFeed::decidedIds(const QList<TeamWaitingPage::Item> &items, const QString &team,
+                                        const QString &operation, const QJsonObject &input)
+{
+    QStringList ids;
+    const int phase = input.value("phase").toInt(), task = input.value("task").toInt();
+    const QString proposal = input.value("proposal").toString();
+    for (const auto &item : items) {
+        if (item.team != team) continue;
+        bool done = false;
+        if (operation == QLatin1String("decide-proposal"))
+            done = !proposal.isEmpty() && (item.proposal == proposal || item.id == team + QStringLiteral("/owner_word_asked/proposal-") + proposal);
+        else if (operation == QLatin1String("approve-phase") || operation == QLatin1String("discard-phase"))
+            done = item.kind == QLatin1String("phase_draft") && phase > 0 && item.phase == phase;
+        else if (operation == QLatin1String("accept-phase") || operation == QLatin1String("send-back-phase"))
+            done = item.kind == QLatin1String("phase_acceptance") && phase > 0 && item.phase == phase;
+        else if (operation == QLatin1String("release"))
+            done = item.kind == QLatin1String("task_waits_owner") && task > 0 && item.task == task;
+        else if (operation == QLatin1String("accept") || operation == QLatin1String("reject") || operation == QLatin1String("send-back"))
+            done = item.action == QLatin1String("decide_report") && task > 0 && item.task == task;
+        if (done) ids << item.id;
+    }
+    return ids;
+}
+
+void TeamWaitingFeed::decided(const QString &team, const QString &operation, const QJsonObject &input)
+{
+    const auto ids = decidedIds(m_items, team, operation, input);
+    for (const auto &id : ids) {
+        const auto found = std::find_if(m_items.cbegin(), m_items.cend(), [&id](const TeamWaitingPage::Item &item) { return item.id == id; });
+        // A copy: answered() erases from m_items, which a reference would point into.
+        if (found != m_items.cend()) answered(TeamWaitingPage::Item(*found));
+    }
+    // One read at once, whatever the change: the store has it now.
+    m_last = {};
+    refresh();
 }
 
 TeamWaitingBanner::TeamWaitingBanner(TeamWaitingFeed *feed, QWidget *parent) : QWidget(parent), m_feed(feed)

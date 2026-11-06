@@ -151,9 +151,12 @@ void TeamController::act(const QString &operation, QJsonObject input, const Done
     m_retryIds.insert(key, requestId);
     input.insert("request_id", requestId);
     const quint64 request = m_client->requestTeam({}, operation, input);
-    m_actions.insert(request, [this, key, done](bool ok, const QString &message) {
+    m_actions.insert(request, [this, key, done, operation, input](bool ok, const QString &message) {
         if (ok) m_retryIds.remove(key);
         if (done) done(ok, message);
+        // Task 107: only a confirmed change; a refused or unknown one keeps
+        // what waits, with the caller's reason.
+        if (ok) emit decided(input.value("team").toString(m_watch), operation, input);
     });
 }
 
@@ -200,7 +203,17 @@ void TeamController::call(const QString &operation, QJsonObject input, const Rep
         input.insert("by", "human");
         input.insert("request_id", QUuid::createUuid().toString(QUuid::WithoutBraces));
     }
-    m_calls.insert(m_client->requestTeam({}, operation, input, timeoutMs), done);
+    if (!change) {
+        m_calls.insert(m_client->requestTeam({}, operation, input, timeoutMs), done);
+        return;
+    }
+    // Task 107: a confirmed change is announced after its caller heard it.
+    m_calls.insert(m_client->requestTeam({}, operation, input, timeoutMs),
+                   [this, done, operation, input](bool ok, const QJsonObject &result, const QString &error) {
+        if (done) done(ok, result, error);
+        if (ok && !operation.startsWith(QLatin1String("catalog ")))
+            emit decided(input.value("team").toString(m_watch), operation, input);
+    });
 }
 
 void TeamController::refreshCatalog()

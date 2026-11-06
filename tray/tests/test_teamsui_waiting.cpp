@@ -10,6 +10,7 @@
 #include "TeamAttentionNotices.h"
 #include "TeamAttentionWatch.h"
 #include "TeamConversation.h"
+#include "TeamProposalCard.h"
 #include "TeamTaskCard.h"
 #include "TeamWaitingBanner.h"
 #include "TeamWaitingPage.h"
@@ -142,6 +143,7 @@ class TestTeamsUiWaiting : public QObject, public TeamsUiFixture {
 private slots:
     void waitingToolOffersAreAnsweredInPlace();
     void aLeadsQuestionIsAnsweredFromWaitingForYou();
+    void aConfirmedDecisionLeavesWaitingAtOnceAndARefusedOneStays();
     void initTestCase()
     {
         setUpCase();
@@ -981,8 +983,8 @@ void TestTeamsUiWaiting::proposalsAreAcceptedOrRejectedOnce()
     QVERIFY(input["accept"].toBool());
     QCOMPARE(input["expected_hash"].toString(), QStringLiteral("h2"));
     QVERIFY(!input.contains("reason"));
-    // Until the store has taken it, the card's buttons stay off.
-    QTRY_VERIFY(cardOf("p2") && !cardOf("p2")->findChild<QPushButton *>("teamProposalAllow")->isEnabled());
+    // Task 107: confirmed by hgs, the card leaves at once, before the store's read.
+    QTRY_VERIFY(!cardOf("p2"));
     // A remove asks too.
     armConfirm(&panel, false);
     cardOf("p3")->findChild<QPushButton *>("teamProposalAllow")->click();
@@ -2536,3 +2538,101 @@ void TestTeamsUiWaiting::aStalledLeadShowsOnTheTeamBarAndNotifiesEachRound()
 
 QTEST_MAIN(TestTeamsUiWaiting)
 #include "test_teamsui_waiting.moc"
+
+// Task 107 (owner, 2026-11-06: proposals already allowed stayed in "4 wait
+// for you" with Answer for minutes): hgs's receipt of a decision takes the
+// card out of the lead's cards, the banner, its count and its notification
+// at once, before any read; a read already in flight, which predates the
+// decision, never shows it again; a refused decision keeps it with why.
+void TestTeamsUiWaiting::aConfirmedDecisionLeavesWaitingAtOnceAndARefusedOneStays()
+{
+    Settings::remove(TeamWaitingNotices::kSetting);
+    const auto restore = qScopeGuard([this] {
+        Settings::remove(TeamWaitingNotices::kSetting);
+        QFile::remove(script() + ".waitingslow");
+        QFile::remove(script() + ".proposalrefuse");
+    });
+    QFile::remove(script() + ".waitingslow");
+    QFile::remove(script() + ".proposalrefuse");
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    const auto team = answerTeam();
+    setTeam(team);
+    const auto items = answerItems(now);
+    QVERIFY(writeWaiting(script() + ".waiting", items));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamWaitingFeed feed(&controller);
+    feed.setInterval(600000);   // no poll: every read here is asked for
+    QSignalSpy withdrawn(&feed, &TeamWaitingFeed::withdrawn), dropped(&feed, &TeamWaitingFeed::dropped);
+    feed.setActive(true);
+    QTRY_COMPARE(feed.items().size(), 7);
+    const QString p1 = "team-1/owner_word_asked/proposal-p1", p2 = "team-1/owner_word_asked/proposal-p2";
+    const auto listed = [&feed](const QString &id) {
+        return std::any_of(feed.items().cbegin(), feed.items().cend(), [&id](const TeamWaitingPage::Item &item) { return item.id == id; });
+    };
+    // The lead's cards, as SessionsWindow wires them.
+    const auto parsed = Teams::parse(team);
+    TeamProposalCards cards;
+    cards.decide = [&controller](const QJsonObject &input, const TeamProposalCards::Done &done) { controller.act("decide-proposal", input, done); };
+    cards.setTeam(&parsed);
+    QCOMPARE(cards.count(), 2);
+    cards.resize(700, 500); cards.show();
+    const auto card = [&cards](const QString &proposal) -> QFrame * {
+        for (auto *frame : cards.findChildren<QFrame *>("teamProposalCard")) if (frame->isVisible() && frame->property("proposal") == proposal) return frame;
+        return nullptr;
+    };
+    QTRY_VERIFY(card("p1") && card("p2"));
+    // A read that predates the decision is still on its way, listing p1.
+    QVERIFY(FakeCli::replace(script() + ".waitingslow", "2"));
+    feed.refresh();
+    // The store takes the decision: later reads no longer list p1.
+    QJsonArray after = items; after.removeAt(0);
+    QVERIFY(writeWaiting(script() + ".waiting", after));
+    card("p1")->findChild<QPushButton *>("teamProposalAllow")->click();
+    QTRY_COMPARE(calls(script(), "decide-proposal").size(), 1);
+    // At once, before any read answered: out of the cards, the banner and its count.
+    QTRY_VERIFY(!listed(p1));
+    const auto seen = [&] {
+        QStringList out;
+        for (const auto &signal : std::as_const(dropped)) out << signal.first().toString();
+        for (const auto &call : calls(script(), "decide-proposal")) out << QStringLiteral("decide:") + call["proposal"].toString();
+        return out.join(QLatin1Char(' '));
+    };
+    QVERIFY2(feed.items().size() == 6 && feed.total() == 6, qPrintable(seen()));
+    QVERIFY2(dropped.count() == 1 && dropped.first().first().toString() == p1, qPrintable(seen()));
+    QCOMPARE(withdrawn.count(), 1);
+    QTRY_VERIFY(!card("p1"));
+    QCOMPARE(cards.count(), 1);
+    // An older team read still listing the proposal does not bring the card back.
+    cards.setTeam(&parsed);
+    QCOMPARE(cards.count(), 1);
+    QVERIFY(!card("p1"));
+    // The read in flight lands and the read after it: p1 never comes back.
+    QFile::remove(script() + ".waitingslow");
+    QElapsedTimer watch; watch.start();
+    while (watch.elapsed() < 3500) { QTest::qWait(100); QVERIFY(!listed(p1)); }
+    QCOMPARE(feed.items().size(), 6);
+    // Refused: p2 stays, on its card with the reason, and in the banner.
+    QVERIFY(FakeCli::replace(script() + ".proposalrefuse", "hgs: The plan changed since the warning"));
+    card("p2")->findChild<QLineEdit *>("teamProposalDenyReason")->setText("Not now");
+    card("p2")->findChild<QPushButton *>("teamProposalDeny")->click();
+    QTRY_VERIFY(card("p2") && card("p2")->findChild<QLabel *>() && [&] {
+        for (auto *label : card("p2")->findChildren<QLabel *>()) if (label->text().contains("The plan changed since the warning")) return true;
+        return false;
+    }());
+    QTest::qWait(300);
+    QVERIFY(listed(p2));
+    QCOMPARE(feed.items().size(), 6);
+    QCOMPARE(dropped.count(), 1);
+    // What else a confirmed change decides: a phase by its number, a report or
+    // a held task by its id; another team's or a change that names none, nothing.
+    QList<TeamWaitingPage::Item> all;
+    for (const auto &value : items) all << TeamWaitingPage::parse(value.toObject());
+    QCOMPARE(TeamWaitingFeed::decidedIds(all, "team-1", "approve-phase", {{"phase", 2}}), QStringList{"team-1/phase_draft/2"});
+    QCOMPARE(TeamWaitingFeed::decidedIds(all, "team-1", "accept", {{"task", 1}}), QStringList{"team-1/report_escalated/1"});
+    QCOMPARE(TeamWaitingFeed::decidedIds(all, "team-1", "release", {{"task", 2}}), QStringList{"team-1/task_waits_owner/2"});
+    QCOMPARE(TeamWaitingFeed::decidedIds(all, "team-1", "decide-proposal", {{"proposal", "p2"}}), QStringList{p2});
+    QVERIFY(TeamWaitingFeed::decidedIds(all, "team-2", "decide-proposal", {{"proposal", "p2"}}).isEmpty());
+    QVERIFY(TeamWaitingFeed::decidedIds(all, "team-1", "hold", {{"task", 2}}).isEmpty());
+    QVERIFY(TeamWaitingFeed::decidedIds(all, "team-1", "approve-phase", {{"phase", 9}}).isEmpty());
+}

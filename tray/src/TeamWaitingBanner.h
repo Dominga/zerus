@@ -36,6 +36,16 @@ public:
     // once (dropped), and its notifications, the waiting one and the team
     // attention one that covers it, are withdrawn.
     void answered(const TeamWaitingPage::Item &item);
+    // Task 107: a change hgs confirmed (TeamController::decided). The items it
+    // decided leave at once as answered() does; then one read starts at
+    // once, and a read already in flight, which may predate the change, is
+    // dropped instead of showing them again.
+    void decided(const QString &team, const QString &operation, const QJsonObject &input);
+    // The ids of `items` a confirmed `operation` with `input` decided: a
+    // proposal by its id, a draft or a waiting phase by its number, a held or
+    // reported task by its id. Other changes decide nothing by themselves.
+    static QStringList decidedIds(const QList<TeamWaitingPage::Item> &items, const QString &team,
+                                  const QString &operation, const QJsonObject &input);
 signals:
     void changed();
     // A desktop notification: the tray shows it; a click opens the team.
@@ -50,6 +60,9 @@ private:
     QJsonObject m_last;   // #706: an unchanged read changes nothing
     quint64 m_read = 0;
     bool m_inFlight = false;
+    // A read was asked for while one ran: that one's answer is dropped and a
+    // new read starts when it lands (task 107).
+    bool m_again = false;
 };
 
 // The banner: hidden while nothing waits, its margins included (an outer

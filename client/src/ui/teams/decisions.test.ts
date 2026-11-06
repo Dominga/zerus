@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import {
+import { decidedWaiting,
   ProposalCards, WaitingAnswer, WaitingNotices, acceptanceSummary, act, noticeToken, proposalCards, proposalKindLabel, toolOffer,
   waitingActionLabel, waitingAge, waitingCount, waitingKindIcon, waitingKindLabel, approves, opensCard, type DecisionPort, type QuestionChoice,
 } from "./decisions";
 import { choiceButtons, confirmButtons, createConfirmer } from "../../store/teamConfirm";
-import type { TeamCall, TeamConfirmation, TeamMemberView, TeamProposalView, TeamTaskView, TeamView, TeamWaitingItem } from "../../types";
+import type { TeamAction, TeamCall, TeamConfirmation, TeamMemberView, TeamProposalView, TeamTaskView, TeamView, TeamWaitingItem } from "../../types";
 
 // Every owner decision path of Qt's tray/tests/test_teamsui_waiting.cpp, on
 // the pure model the Team tab and Waiting for you draw (task 11). Each test
@@ -158,8 +158,8 @@ describe("proposal cards", () => {
     await cards.answer("p2", true);
     expect(f.sent).toHaveLength(2);
     expect(f.sent[1].action).toEqual({ kind: "decide_proposal", proposal: "p2", accept: true, expected_hash: "h2" });
-    // Until the store has taken it, the card stays off and a second click sends nothing.
-    expect(card(cards, "p2")!.sending).toBe(true);
+    // Task 107: confirmed by hgs, the card leaves at once; it cannot be sent twice.
+    expect(card(cards, "p2")).toBeUndefined();
     expect(await cards.answer("p2", true)).toBeUndefined();
     expect(f.sent).toHaveLength(2);
     // A remove asks too.
@@ -270,7 +270,8 @@ describe("proposal cards", () => {
       expect(f.sent).toHaveLength(before + 1);
       expect(f.sent.at(-1)!.action).toEqual({ kind: "decide_proposal", proposal: id, accept: true, expected_hash: `h${n + 1}` });
       expect(f.sent.at(-1)!.team).toBe("team-1");
-      expect(card(cards, id)!.sending).toBe(true);
+      // Task 107: confirmed by hgs, the card leaves at once.
+      expect(card(cards, id)).toBeUndefined();
     }
     expect(f.asked.map((asked) => asked.title)).toEqual(["Drain member?", "Drain member?"]);
     cards.setReason("p99", "keep six");
@@ -631,5 +632,50 @@ describe("reports", () => {
     f.refuse.set("accept", "hgs: Task #1 was decided meanwhile");
     await decision.accept(rows[0]);
     expect(decision.notice).toBe("Task #1 was decided meanwhile");
+  });
+});
+
+describe("a confirmed decision leaves at once (task 107)", () => {
+  it("Allow takes the card out before any read; a refused one keeps it with why", async () => {
+    const f = fake(answerTeam({
+      proposals: [
+        proposal({ id: "p1", kind: "add-member", member: { role: "Designer", agent: "claude", model: "sonnet" } }),
+        proposal({ id: "p2", kind: "add-member", member: { role: "Writer", agent: "claude", model: "haiku" } }),
+      ],
+    }));
+    const cards = cardsOf(f);
+    expect(cards.cards().map((state) => state.card.id)).toEqual(["p1", "p2"]);
+    await cards.answer("p1", true);
+    expect(card(cards, "p1")).toBeUndefined();
+    // An older read still listing p1 does not bring the card back.
+    cards.setTeam(f.team);
+    expect(card(cards, "p1")).toBeUndefined();
+    f.refuse.set("decide_proposal", "hgs: The plan changed since the warning");
+    await cards.answer("p2", true);
+    expect(card(cards, "p2")?.sending).toBe(false);
+    expect(card(cards, "p2")?.notice).toContain("The plan changed since the warning");
+  });
+
+  it("matches what a confirmed action decided in Waiting for you, as Qt does", () => {
+    const item = (id: string, kind: string, action: string, detail: Record<string, unknown> = {}, proposal: unknown = null, team = "t1") =>
+      ({ id: `${team}/${kind}/${id}`, kind, team, team_name: "Live", title: id, action, since: 1, proposal, detail });
+    const items = [
+      item("proposal-p1", "owner_word_asked", "decide_proposal", {}, "p1"),
+      item("proposal-p2", "owner_word_asked", "decide_proposal", {}, "p2"),
+      item("2", "phase_draft", "approve_phase", { phase: 2 }),
+      item("3", "phase_acceptance", "accept_phase", { phase: 3 }),
+      item("1", "report_escalated", "decide_report", { task: 1 }),
+      item("2", "task_waits_owner", "release_task", { task: 2 }),
+      item("proposal-p1", "owner_word_asked", "decide_proposal", {}, "p1", "t2"),
+    ];
+    const decided = (action: TeamAction, team = "t1") => decidedWaiting(items, { team, action });
+    expect(decided({ kind: "decide_proposal", proposal: "p1", accept: true, expected_hash: "h1" })).toEqual(["t1/owner_word_asked/proposal-p1"]);
+    expect(decided({ kind: "approve", phase: 2 })).toEqual(["t1/phase_draft/2"]);
+    expect(decided({ kind: "accept_phase", phase: 3 })).toEqual(["t1/phase_acceptance/3"]);
+    expect(decided({ kind: "accept", task: 1 })).toEqual(["t1/report_escalated/1"]);
+    expect(decided({ kind: "release", task: 2 })).toEqual(["t1/task_waits_owner/2"]);
+    expect(decided({ kind: "hold", task: 2, reason: "later" } as TeamAction)).toEqual([]);
+    expect(decided({ kind: "accept_phase", phase: 9 })).toEqual([]);
+    expect(decided({ kind: "decide_proposal", proposal: "p1", accept: true, expected_hash: "h1" }, "t3")).toEqual([]);
   });
 });

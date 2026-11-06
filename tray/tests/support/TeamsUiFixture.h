@@ -815,6 +815,10 @@ elif a[:2]==['team','waiting']:
  import os
  if os.path.exists(__file__+'.waitingrefuse'):print(open(__file__+'.waitingrefuse').read(),file=sys.stderr);sys.exit(1)
  items=json.load(open(__file__+'.waiting')) if os.path.exists(__file__+'.waiting') else []
+ # Task 107: `.waitingslow` (seconds) answers late with the list as it was read.
+ if os.path.exists(__file__+'.waitingslow'):
+  import time
+  time.sleep(float(open(__file__+'.waitingslow').read().strip() or 0))
  items.sort(key=lambda i:(-i['since'],i['id']))
  c=body.get('before');start=0
  if c:start=next((n for n,i in enumerate(items) if i['since']<c['since'] or (i['since']==c['since'] and i['id']>c['id'])),len(items))

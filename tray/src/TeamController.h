@@ -110,6 +110,11 @@ signals:
     void showCancelledChanged();
     // Task 101: stale() or staleError() changed.
     void staleChanged();
+    // Task 107: hgs confirmed a change (`act` or a changing `call`), with the
+    // team it named, its operation and its input. What waits for the owner
+    // and the cards it decided leave at once (TeamWaitingFeed::decided),
+    // before any read.
+    void decided(const QString &team, const QString &operation, const QJsonObject &input);
 private:
     void markStale(QString &slot, const QString &error);
     void markFresh(QString &slot, QDateTime &readAt);

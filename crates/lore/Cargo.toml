@@ -1,0 +1,30 @@
+[package]
+name = "lore"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.99"
+license = "MIT"
+description = "Project and team memory: the CodeLore implementation in Rust (RustCodeLore)"
+publish = false
+
+[dependencies]
+# The model runs in this process on the CPU: no Ollama, no ONNX runtime.
+candle-core = "0.11"
+candle-nn = "0.11"
+candle-transformers = "0.11"
+# The same version candle-core builds against; fancy-regex keeps oniguruma's C
+# build out of this crate.
+tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+ureq = { version = "3.4", default-features = false, features = ["rustls", "platform-verifier"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.dev.package."*"]
+# The model's forward pass in a debug test build is otherwise minutes per
+# batch; its dependencies are optimized while this crate stays debuggable.
+opt-level = 2

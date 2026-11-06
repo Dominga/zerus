@@ -15,12 +15,7 @@ sandbox, in the member's own folder, with a bounded time and output:
   git-merge-lead             git merge --no-edit the lead's branch, in your
                              own worktree or clone, never a shared team folder
   git-commit {message, paths?}  Zerus commits your work on your branch
-  cmake-configure {source?, build_dir?, generator?, config?, preset?}
-                             any CMake project (default . into build)
-  cmake-build {build_dir?, config?, targets?}  cmake --build
-  ctest {build_dir?, config?, tests? | regex?}  one result per test
-  msbuild-build {project, config?, platform?, targets?}  .sln or project
-  vstest {tests, filter?}    test assemblies; one result per test
+  cmake-*, ctest, msbuild-build, vstest: hgs guide team-cpp
 On Windows the Qt templates load Visual Studio and Qt; do not wrap them in
 your own vcvars batch. Shots stay in your folder: name their path in the report.
 Codex on Windows: .git is read-only; commit with git-commit, use powershell.exe.
@@ -31,8 +26,7 @@ Use a new request_id for every run; --wait returns the exit code when ready
 (90 s), without it "queued". Ask again with the same request_id to read the
 result; it never runs the command twice. Values are typed; a path outside your
 folder or a shell metacharacter is refused. The owner may turn the set off or
-add fixed templates. A project's .zerus/tests.toml may declare [[template]]
-entries with typed params; each runs once the owner accepted its content.
+add fixed templates.
 A pipeline stage (review or test) hand-out names your stage attempt: answer
 with a verdict (hgs team report --json); edit none of its files. Command and
 land stages are Zerus'. A role's context_before_task may compact or clear your

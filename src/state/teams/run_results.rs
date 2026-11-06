@@ -75,6 +75,7 @@ pub(crate) struct Report {
 }
 
 impl Report {
+    #[cfg(test)]
     pub(crate) fn total(&self) -> u64 {
         self.passed + self.failed + self.skipped + self.errors
     }

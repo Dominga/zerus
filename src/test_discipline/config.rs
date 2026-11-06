@@ -194,6 +194,8 @@ impl Default for TestsConfig {
             resources: std::collections::BTreeMap::new(),
             providers: Vec::new(),
             tools: Vec::new(),
+            templates: Vec::new(),
+            build_broker: None,
         }
     }
 }

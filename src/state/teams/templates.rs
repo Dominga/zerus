@@ -2536,7 +2536,7 @@ mod tests {
         assert!(plan("vstest", &json!({"tests":["notes.txt"]}), dir.path()).is_err());
     }
 
-    fn project(dir: &Path, templates: &str) {
+    fn project_file(dir: &Path, templates: &str) {
         std::fs::create_dir_all(dir.join(".zerus")).unwrap();
         std::fs::write(dir.join(".zerus").join("tests.toml"), format!("version = 1\n{templates}")).unwrap();
     }
@@ -2573,7 +2573,7 @@ kind = "path"
         let state = temp();
         settings_override(Some(state.path().join("templates.json")));
         let _restore = scopeguard(|| settings_override(None));
-        project(dir.path(), PROJECT_TEMPLATE);
+        project_file(dir.path(), PROJECT_TEMPLATE);
         std::fs::write(dir.path().join("Makefile"), "").unwrap();
         let error = plan("make-target", &json!({"targets":["all"]}), dir.path()).unwrap_err().to_string();
         assert!(error.contains("waits for the owner's acceptance"), "{error}");
@@ -2593,7 +2593,7 @@ kind = "path"
         assert_eq!(timeout_in("make-target", dir.path()), 900);
         assert_eq!(report_path(dir.path(), "make-target"), Some((dir.path().join("out/report.xml"), super::super::run_results::Format::Junit)));
         // A changed template waits again.
-        project(dir.path(), &PROJECT_TEMPLATE.replace("program = \"make\"", "program = \"gmake\""));
+        project_file(dir.path(), &PROJECT_TEMPLATE.replace("program = \"make\"", "program = \"gmake\""));
         assert!(plan("make-target", &json!({"targets":["core"]}), dir.path()).unwrap_err().to_string().contains("waits for the owner's acceptance"));
         // A built-in id is never a project's.
         assert!(plan("cmake-build", &json!({}), dir.path()).is_ok());
@@ -2626,10 +2626,10 @@ kind = "path"
         // In a tests file, an invalid one makes the file refuse to load, so it
         // is never listed for acceptance.
         let dir = temp();
-        project(dir.path(), "[[template]]\nid = \"x\"\nprogram = \"make\"\nargs = [\"{nope}\"]\n");
+        project_file(dir.path(), "[[template]]\nid = \"x\"\nprogram = \"make\"\nargs = [\"{nope}\"]\n");
         assert!(crate::test_discipline::config::load(dir.path(), None).unwrap_err().to_string().contains("without declaring"));
         // [build_broker] no longer makes the file unreadable (task 84).
-        project(dir.path(), "[build_broker]\nenabled = true\nmode = \"snapshot\"\n");
+        project_file(dir.path(), "[build_broker]\nenabled = true\nmode = \"snapshot\"\n");
         assert!(crate::test_discipline::config::load(dir.path(), None).is_ok());
     }
 

@@ -3723,7 +3723,7 @@ reads everything the record binds again:
   - a certified member must be recorded with the store it answered from;
   - an uncertified member must be recorded with no replica;
   - a member without a record of its current enrolment refuses
-    (`member_store_changed`), and so does a damaged record file
+    (`member_unobserved`), and so does a damaged record file
     (`members_unreadable`). The records only refuse; their absence is never
     taken as "nothing changed";
 - the hold, for a first attempt;
@@ -3731,7 +3731,13 @@ reads everything the record binds again:
   schema.
 
 Anything changed refuses it with its reason, and the caller proves the
-fence afresh. Only the attempt writer writes a certificate. `--check` reports
+fence afresh. Only the attempt writer writes a certificate, and never one
+that its reuse would refuse: inside the proof's final admission, under the
+catalog lock that every member record write takes, each direct member must
+already agree with the proof by the same rules, or nothing is written. So
+the writer first records each direct member's verified hello (the swarm's
+replica pass does). With that setup a fresh proof's certificate is reused at
+once and on every later attempt, until something it binds changes. `--check` reports
 `certificate` (`valid`, or the first `reason`) and never writes one. A
 certificate is a schema-barrier record only: never consent and never send
 authority.

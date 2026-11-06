@@ -855,6 +855,23 @@ impl Proof {
         deadline: Instant,
         then: impl FnOnce(&mut Admitted<'_>, &mut TaskDoc) -> Result<R>,
     ) -> Result<std::result::Result<R, Closed>> {
+        self.admit_in(config, deadline, |_, admitted, task| {
+            then(admitted, task).map(Ok)
+        })
+    }
+
+    /// `admit`, with `then` also given the catalog it holds locked, and able
+    /// to refuse in the same critical section.
+    fn admit_in<R>(
+        &self,
+        config: &Config,
+        deadline: Instant,
+        then: impl FnOnce(
+            &LockedStore,
+            &mut Admitted<'_>,
+            &mut TaskDoc,
+        ) -> Result<std::result::Result<R, Closed>>,
+    ) -> Result<std::result::Result<R, Closed>> {
         let Some(catalog) = LockedStore::load_until(config, deadline)? else {
             return closed(None, "busy");
         };
@@ -894,12 +911,55 @@ impl Proof {
         if !holds {
             return closed(None, "changed_version");
         }
-        let result = then(&mut admitted, &mut task)?;
+        let result = then(&catalog, &mut admitted, &mut task)?;
         drop(admitted);
         drop(store);
         drop(catalog);
-        Ok(Ok(result))
+        Ok(result)
     }
+}
+
+/// Whether this computer's member records (C2's) agree with `nodes`, the
+/// nodes a proof certified with the store each answered from, for every
+/// direct member of `catalog` (held locked: every record write takes that
+/// lock). The records only refuse, and their absence is no evidence
+/// (desktop-u on #1471):
+/// - a damaged, oversized or irregular record file: `members_unreadable`;
+/// - a direct member with no record of its current enrolment:
+///   `member_unobserved` (zerus-j1wjh: the attempt writer observes every
+///   direct member before it certifies);
+/// - a certified member recorded with another store or with no replica, or
+///   one recorded with a replica but not certified: `member_store_changed`.
+///
+/// An indirect member's store is not observable offline (the documented
+/// boundary). `None` when every direct member agrees.
+fn members_disagree(
+    config: &Config,
+    catalog: &LockedStore,
+    nodes: &BTreeMap<String, String>,
+) -> Option<Closed> {
+    let refused = |node: Option<&str>, reason| {
+        Some(Closed {
+            node: node.map(str::to_owned),
+            reason,
+        })
+    };
+    let Ok(records) = super::replica_members::read_strict(config) else {
+        return refused(None, "members_unreadable");
+    };
+    for (alias, peer) in &catalog.data.peers {
+        let Some(record) = records.get(alias).filter(|record| record.node == peer.node) else {
+            return refused(Some(&peer.node), "member_unobserved");
+        };
+        let agrees = match nodes.get(&peer.node) {
+            Some(store) => !record.no_replica && record.store.as_deref() == Some(store.as_str()),
+            None => record.no_replica,
+        };
+        if !agrees {
+            return refused(Some(&peer.node), "member_store_changed");
+        }
+    }
+    None
 }
 
 /// The certificate's format; a record in another one is not reused.
@@ -1005,6 +1065,13 @@ impl Proof {
     /// earlier one for the task, by an atomic rename.
     /// Its caller is the attempt writer (activation); nothing writes a
     /// certificate before then, and `--check` only reads one.
+    ///
+    /// Never a record that its reuse would refuse (zerus-j1wjh): every direct
+    /// member must already be observed, in C2's records, with the store it
+    /// answered the proof from (`members_disagree`), or nothing is written.
+    /// The caller therefore records each direct member's verified hello (the
+    /// swarm's replica pass does) before it certifies; then the certificate
+    /// is reused offline until something it binds changes.
     #[allow(dead_code)]
     pub(crate) fn certify(
         &self,
@@ -1039,8 +1106,11 @@ impl Proof {
         if bytes.len() as u64 > CERTIFICATE_BYTES {
             return closed(None, "certificate_oversized");
         }
-        self.admit(config, deadline, |admitted, _| {
+        self.admit_in(config, deadline, |catalog, admitted, _| {
             use std::io::Write;
+            if let Some(refused) = members_disagree(config, catalog, &self.nodes) {
+                return Ok(Err(refused));
+            }
             let path = certificate_path(admitted.dir(), &self.task);
             std::fs::create_dir_all(path.parent().expect("a fence folder"))?;
             // A fresh file only: whatever was left at the partial path goes,
@@ -1059,7 +1129,7 @@ impl Proof {
             file.write_all(&bytes)?;
             drop(file);
             std::fs::rename(&partial, &path)?;
-            Ok(certificate.clone())
+            Ok(Ok(certificate.clone()))
         })
     }
 }
@@ -1072,8 +1142,8 @@ impl Proof {
 /// - this computer's membership view, which an enrolment, a disconnection or
 ///   a new catalog machine changes;
 /// - this computer's store and replica root;
-/// - every certified member's last observed store (C2's records, used only
-///   to invalidate: a different or unknown store refuses);
+/// - every direct member, by C2's records (`members_disagree`): used only
+///   to invalidate, a missing record or a different store refuses;
 /// - the hold, for a task that records no attempt yet;
 /// - the task: holding the certified version, with `fence_ready`.
 ///
@@ -1122,28 +1192,9 @@ pub(crate) fn admit_certified<R>(
     {
         return closed(Some(&node), "changed_identity");
     }
-    // The swarm's member records only refuse, and their absence is no
-    // evidence (desktop-u on #1471): a damaged record file refuses, and so
-    // does every direct member without a record of its current enrolment.
-    // Each one's record must agree with the certificate both ways: a
-    // certified member with the store it answered from, or one recorded with
-    // no replica and not certified. An indirect member's store is not
-    // observable offline (the documented boundary).
-    let Ok(records) = super::replica_members::read_strict(config) else {
-        return closed(None, "members_unreadable");
-    };
-    for (alias, peer) in &catalog.data.peers {
-        let record = records.get(alias).filter(|record| record.node == peer.node);
-        let agrees = match (record, certificate.nodes.get(&peer.node)) {
-            (Some(record), Some(store)) => {
-                !record.no_replica && record.store.as_deref() == Some(store.as_str())
-            }
-            (Some(record), None) => record.no_replica,
-            (None, _) => false,
-        };
-        if !agrees {
-            return closed(Some(&peer.node), "member_store_changed");
-        }
+    // Every direct member still as certified, by C2's records.
+    if let Some(refused) = members_disagree(config, &catalog, &certificate.nodes) {
+        return Ok(Err(refused));
     }
     let held = store.project()?.cutover_hold().is_some_and(|hold| hold.on);
     let Some(mut admitted) = store.admit_until(deadline) else {
@@ -1737,14 +1788,21 @@ mod tests {
             .unwrap()
             .1
             .unwrap();
+        observe_direct(members, "a");
         let certificate = proof.certify(config, soon()).unwrap().unwrap();
-        // A swarm sync's verified hello records each direct member's store.
+        (task.uuid().to_owned(), certificate)
+    }
+
+    /// What the swarm's replica pass does before the attempt writer
+    /// certifies (zerus-j1wjh): each direct member's verified hello recorded
+    /// at `name`.
+    fn observe_direct(members: &Members, name: &str) {
+        let config = &members.configs[name];
         for alias in &config.peers {
             let hello = transport::hello(&members.configs[alias], false).unwrap();
             let observed = super::super::replica_members::Observed::of(&members.ids[alias], &hello);
             super::super::replica_members::seen(config, alias, &observed, 1).unwrap();
         }
-        (task.uuid().to_owned(), certificate)
     }
 
     fn record_path(members: &Members, uuid: &str) -> std::path::PathBuf {
@@ -1981,7 +2039,7 @@ mod tests {
         let missing = refused(&members);
         assert_eq!(
             (missing.node.as_deref(), missing.reason),
-            (Some(members.ids["b"].as_str()), "member_store_changed")
+            (Some(members.ids["b"].as_str()), "member_unobserved")
         );
         // A record of b written before b's enrolment changed is not b's.
         let observed = super::super::replica_members::Observed::of(
@@ -1997,7 +2055,7 @@ mod tests {
         let mut records: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
         records["b"]["node"] = json!("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee");
         std::fs::write(&file, serde_json::to_vec(&records).unwrap()).unwrap();
-        assert_eq!(refused(&members).reason, "member_store_changed");
+        assert_eq!(refused(&members).reason, "member_unobserved");
         // A member recorded with no replica must not be certified.
         records["b"]["node"] = json!(members.ids["b"]);
         records["b"]["no_replica"] = json!(true);
@@ -2259,6 +2317,137 @@ mod tests {
         let members = chain_abc();
         let (uuid, _) = certified(&members);
         rewrite(&members, &uuid, |_| {});
+        assert_eq!(reuse(&members, &uuid), (Ok(()), 1));
+    }
+
+    /// zerus-j1wjh (review-win-c on #1471): a certificate is written only
+    /// when its reuse would accept it right away. A direct member not yet
+    /// observed, observed with another store, or recorded with no replica,
+    /// and a damaged record file, each refuse before anything is written.
+    /// After the writer's setup (every direct member observed), a fresh
+    /// prove, certify and reuse admits with no network, and keeps admitting.
+    #[test]
+    fn certify_writes_only_what_its_reuse_accepts() {
+        let proved = |members: &Members| {
+            let task = floored(members, "a");
+            let net = InProcess::new(members, Faults::default());
+            let proof = prove(&members.configs["a"], &net, "p", task.uuid(), soon())
+                .unwrap()
+                .1
+                .unwrap();
+            (task.uuid().to_owned(), proof)
+        };
+        let unwritten = |members: &Members, uuid: &str| {
+            assert!(!record_path(members, uuid).exists(), "nothing was written");
+            assert_eq!(reuse(members, uuid).0.unwrap_err().reason, "no_certificate");
+        };
+        let b = |members: &Members| Some(members.ids["b"].clone());
+        let record_b = |members: &Members, replica: Value| {
+            let observed = super::super::replica_members::Observed::of(
+                &members.ids["b"],
+                &json!({ "replica": replica }),
+            );
+            super::super::replica_members::seen(&members.configs["a"], "b", &observed, 7).unwrap();
+        };
+        // Not yet observed: the fresh sequence review-win-c ran.
+        let members = chain_abc();
+        let (uuid, proof) = proved(&members);
+        let refused = proof
+            .certify(&members.configs["a"], soon())
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            refused,
+            Closed {
+                node: b(&members),
+                reason: "member_unobserved"
+            }
+        );
+        unwritten(&members, &uuid);
+        // Observed with another store than b answered the proof from.
+        record_b(
+            &members,
+            json!({"protocol": PROTOCOL, "task_schema": TASK_SCHEMA,
+                   "store": "77777777-7777-4777-8777-777777777777"}),
+        );
+        let refused = proof
+            .certify(&members.configs["a"], soon())
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            refused,
+            Closed {
+                node: b(&members),
+                reason: "member_store_changed"
+            }
+        );
+        unwritten(&members, &uuid);
+        // Recorded with no replica although b confirmed the proof.
+        let observed = super::super::replica_members::Observed::of(&members.ids["b"], &json!({}));
+        super::super::replica_members::seen(&members.configs["a"], "b", &observed, 8).unwrap();
+        let refused = proof
+            .certify(&members.configs["a"], soon())
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            refused,
+            Closed {
+                node: b(&members),
+                reason: "member_store_changed"
+            }
+        );
+        unwritten(&members, &uuid);
+        // A damaged record file.
+        let file = members.configs["a"]
+            .dir
+            .join("swarm")
+            .join(super::super::replica_members::FILE);
+        std::fs::write(&file, b"{damaged").unwrap();
+        let refused = proof
+            .certify(&members.configs["a"], soon())
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            refused,
+            Closed {
+                node: None,
+                reason: "members_unreadable"
+            }
+        );
+        unwritten(&members, &uuid);
+        // The writer's setup: every direct member observed (c, reached only
+        // through b, has no record here). Then certify, and reuse at once.
+        std::fs::remove_file(&file).unwrap();
+        observe_direct(&members, "a");
+        let certificate = proof
+            .certify(&members.configs["a"], soon())
+            .unwrap()
+            .unwrap();
+        assert!(certificate.nodes.contains_key(&members.ids["c"]));
+        assert_eq!(reuse(&members, &uuid), (Ok(()), 1));
+        assert_eq!(
+            reuse(&members, &uuid),
+            (Ok(()), 1),
+            "once per task, not once per use"
+        );
+        // A later observation of b with another store retires it.
+        record_b(
+            &members,
+            json!({"protocol": PROTOCOL, "task_schema": TASK_SCHEMA,
+                   "store": "77777777-7777-4777-8777-777777777777"}),
+        );
+        assert_eq!(
+            reuse(&members, &uuid).0.unwrap_err().reason,
+            "member_store_changed"
+        );
+        // Observing before the proof serves as well as after it.
+        let members = chain_abc();
+        observe_direct(&members, "a");
+        let (uuid, proof) = proved(&members);
+        proof
+            .certify(&members.configs["a"], soon())
+            .unwrap()
+            .unwrap();
         assert_eq!(reuse(&members, &uuid), (Ok(()), 1));
     }
 

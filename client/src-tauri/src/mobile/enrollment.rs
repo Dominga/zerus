@@ -187,7 +187,7 @@ impl Inner {
         let pending = answer.workspace.pending.is_some();
         let stopped_target =
             (!pending && !answer.connected && answer.notice == core::DRAINING).then_some(target);
-        if self.page().workspace_answered(Ok(answer.workspace)) {
+        if self.answered(Ok(answer.workspace)) {
             self.phones();
         }
         (self.notify)();
@@ -242,6 +242,7 @@ pub fn mobile_workspace_apply(mobile: State<'_, Mobile>, handle: String) -> Resu
     let (connector, config) = workspace_runtime();
     let result = match plan.intent {
         Intent::Enroll(request) => {
+            mobile.0.enrollment_disarm(&plan.target);
             core::enroll(&connector, &config, &plan.target, &request, &plan.computer)
         }
         Intent::Check(local) => core::check(&connector, &config, &plan.target, local),

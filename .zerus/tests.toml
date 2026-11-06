@@ -175,6 +175,14 @@ kind = "cargo"
 root = "crates/watch-protocol"
 sources = ["crates/watch-protocol/**"]
 
+# RustCodeLore (docs/lore.md): its own package and lock; the ported CodeLore
+# suite is tests/python_suite.rs.
+[[provider]]
+name = "lore"
+kind = "cargo"
+root = "crates/lore"
+sources = ["crates/lore/**"]
+
 # The Qt desktop: CMake's link lists and the include graph name the files each
 # test binary uses. The build folder is this checkout's; the owner may move it.
 [[provider]]

@@ -16,7 +16,7 @@ pub struct Fixed(pub Vec<Vec<f32>>);
 impl Embeddings for Fixed {
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, LoreError> {
         if texts.len() > self.0.len() {
-            return Err(LoreError("the fixed embedding corpus is too small".into()));
+            return Err(LoreError::new("the fixed embedding corpus is too small"));
         }
         Ok(self.0[..texts.len()].to_vec())
     }

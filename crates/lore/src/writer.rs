@@ -25,10 +25,10 @@ pub struct Writer {
 impl Writer {
     /// Takes `.lore.lock`, waiting up to 30 s; the holder is recorded in it.
     pub fn acquire(root: &Path, who: &str) -> Result<Self> {
-        std::fs::create_dir_all(root).map_err(|error| LoreError(format!("{}: {error}", root.display())))?;
+        std::fs::create_dir_all(root).map_err(|error| LoreError::new(format!("{}: {error}", root.display())))?;
         let path = root.join(".lore.lock");
         let mut file = OpenOptions::new().read(true).write(true).create(true).open(&path)
-            .map_err(|error| LoreError(format!("{}: {error}", path.display())))?;
+            .map_err(|error| LoreError::new(format!("{}: {error}", path.display())))?;
         let started = Instant::now();
         loop {
             match file.try_lock_exclusive() {
@@ -36,7 +36,7 @@ impl Writer {
                 Err(_) if started.elapsed() < Duration::from_secs(30) => std::thread::sleep(Duration::from_millis(50)),
                 Err(_) => {
                     let holder = read_holder(&mut file).unwrap_or_default();
-                    return Err(LoreError(format!(
+                    return Err(LoreError::new(format!(
                         "another writer holds the store ({holder}); nothing was written")));
                 }
             }
@@ -65,12 +65,12 @@ impl Writer {
     /// Adds a validated record; duplicates and invalid records are refused.
     pub fn add(&self, store: &Store, relative: &str, record: Value, areas: &[String], new: bool) -> Result<()> {
         let errors = validate(&record, areas, None);
-        if !errors.is_empty() { return Err(LoreError(errors.join("\n"))); }
+        if !errors.is_empty() { return Err(LoreError::with("refused, nothing was written", errors)); }
         let records = store.read(relative).unwrap_or_default();
         if !new {
             let duplicate = Self::duplicate(&records, &record);
             if let Some(same) = duplicate.same {
-                return Err(LoreError(format!("the record repeats {same}; pass --new to add it anyway")));
+                return Err(LoreError::new(format!("the record repeats {same}; pass --new to add it anyway")));
             }
         }
         store.add(relative, record)
@@ -82,17 +82,17 @@ impl Writer {
         let relative = format!("lore/plans/{plan}.jsonl");
         let mut records = store.read(&relative)?;
         let Some(position) = records.iter().position(|record| record.get("id").and_then(Value::as_str) == Some(id)) else {
-            return Err(LoreError(format!("no item {id} in plan {plan}")));
+            return Err(LoreError::new(format!("no item {id} in plan {plan}")));
         };
         let old = records[position].get("status").and_then(Value::as_str).unwrap_or_default().to_owned();
         let allowed = matches!(status, "done" | "dropped" | "superseded" | "deferred" | "open");
-        if !allowed { return Err(LoreError(format!("unknown item status {status}"))); }
+        if !allowed { return Err(LoreError::new(format!("unknown item status {status}"))); }
         if old == "open" || old == "deferred" {
             // free to any status
         } else if status == "open" && fields.get("reason").and_then(Value::as_str).is_some_and(|r| !r.is_empty()) {
             // reopening needs a reason
         } else {
-            return Err(LoreError(format!("item {id} is {old}; only reopen with a reason")));
+            return Err(LoreError::new(format!("item {id} is {old}; only reopen with a reason")));
         }
         let record = &mut records[position];
         for key in ["commits", "reason", "decided_by", "superseded_by", "outcome"] {
@@ -101,7 +101,7 @@ impl Writer {
         record["status"] = json!(status);
         for (key, value) in fields { record[key] = value.clone(); }
         let errors = validate(record, areas, None);
-        if !errors.is_empty() { return Err(LoreError(errors.join("\n"))); }
+        if !errors.is_empty() { return Err(LoreError::with("refused, nothing was written", errors)); }
         store.write(&relative, &records)
     }    /// A plan closes only when none of its items is open or deferred.
     pub fn close_plan(store: &Store, plan: &str, outcome: &str, areas: &[String]) -> Result<()> {
@@ -110,13 +110,13 @@ impl Writer {
         let open = records.iter().skip(1).any(|item| {
             matches!(item.get("status").and_then(Value::as_str), Some("open" | "deferred"))
         });
-        if open { return Err(LoreError(format!("plan {plan} still has open items"))); }
-        let Some(plan_record) = records.first_mut() else { return Err(LoreError(format!("plan {plan} is missing"))); };
+        if open { return Err(LoreError::new(format!("plan {plan} still has open items"))); }
+        let Some(plan_record) = records.first_mut() else { return Err(LoreError::new(format!("plan {plan} is missing"))); };
         plan_record["status"] = json!("closed");
         plan_record["outcome"] = json!(outcome);
         plan_record["updated"] = json!(plan_record.get("updated").cloned().unwrap_or(json!("")));
         let errors = validate(plan_record, areas, None);
-        if !errors.is_empty() { return Err(LoreError(errors.join("\n"))); }
+        if !errors.is_empty() { return Err(LoreError::with("refused, nothing was written", errors)); }
         store.write(&relative, &records)
     }
 }

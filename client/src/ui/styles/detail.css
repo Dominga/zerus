@@ -81,6 +81,10 @@
   .act-virtual-spacer { overflow-anchor: none; }
   .act-virtual-row { position: relative; width: 100%; }
   .act-col [id^="item-"] { scroll-margin-top: 10px; }
+  /* An unbroken run (a JSON line, a long URL) wraps inside its card. Not anywhere:
+     that also shrinks min-content, squeezing header labels and table columns.
+     Code blocks are white-space: pre, so they keep their own horizontal scroller. */
+  .act-msg, .act-thinking, .act-tools, .act-notice { overflow-wrap: break-word; }
   .act-msg { border-radius: var(--z-radius-lg); padding: 9px 14px 11px; background: var(--z-color-tile); border-left: 3px solid var(--z-color-border); animation: rise var(--z-motion-slow) var(--ease) both; }
   .act-msg.k-user { background: var(--z-color-bubble); border-left-color: var(--z-color-accent-muted); white-space: pre-wrap; }
   .act-msg.k-agent { border-left-color: var(--z-color-accent); }
@@ -146,7 +150,7 @@
   .act-tools.open .chev { rotate: 90deg; }
   .act-tools-head .act-time { margin-left: auto; }
   .act-tool-cmd { padding: 4px 0 0 18px; color: var(--z-color-muted); font-size: var(--fs-xs); }
-  .act-tool-lines { padding: 6px 0 2px 18px; color: var(--z-color-text-3); font-size: var(--fs-xs); display: grid; gap: 2px; animation: fadeIn var(--z-motion-base) both; }
+  .act-tool-lines { padding: 6px 0 2px 18px; color: var(--z-color-text-3); font-size: var(--fs-xs); display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; animation: fadeIn var(--z-motion-base) both; }
   .act-live { display: flex; align-items: center; gap: 8px; padding: 6px 2px; font-size: var(--fs-sm); color: var(--z-color-muted); }
   .typing { display: inline-flex; gap: 3px; }
   .typing i { width: 5px; height: 5px; border-radius: 50%; background: var(--z-color-accent); animation: pulse 1.05s ease-in-out infinite; }
@@ -156,7 +160,7 @@
   .act-notice { padding: 8px 12px; border-radius: var(--z-radius-lg); background: var(--z-color-violet-bg); border-left: 3px solid var(--z-color-violet); font-size: var(--fs-sm); display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
   .act-notice .row { width: 100%; }
   .act-notice svg { color: var(--z-color-violet); }
-  .act-notice-body { color: var(--z-color-text-2); animation: fadeIn var(--z-motion-base) both; }
+  .act-notice-body { max-width: 100%; color: var(--z-color-text-2); animation: fadeIn var(--z-motion-base) both; }
   /* Voice and round-video messages (VoicePlayerImage.h geometry). */
   .act-msg.media { white-space: normal; }
   .act-msg.media header { margin-bottom: 0; }

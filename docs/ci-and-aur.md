@@ -1603,8 +1603,11 @@ the release CLI, desktop and portable build; both jobs are required by the suite
 gate. Host, client, package and installer-survival checks still test the release
 binaries in the packaging job.
 
-Do not dispatch a manual full CI matrix while PR CI already tests that exact SHA.
-Use the existing run, or select only a missing platform. Main CI regression also
+Do not start a second full matrix, including candidate verification, while
+another full matrix already tests that exact SHA. Before a manual candidate or
+full CI dispatch, check the resolved source (the `Resolve commit` job), wait for
+an existing full run, or select only a missing platform where appropriate.
+An existing PR run is not a substitute for the release's own required gate. Main CI regression also
 observes exact-SHA upstream-main Stable/Nightly candidate verification before
 starting: an active (or already successful) verify in an active candidate run
 suppresses only the duplicate regression scheduling. This observation is read-only

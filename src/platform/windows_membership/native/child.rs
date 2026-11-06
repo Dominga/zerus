@@ -65,6 +65,14 @@ impl Read for Pipe {
         }
     }
 }
+impl io::Write for Pipe {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        io::Write::write(&mut self.0, bytes)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        io::Write::flush(&mut self.0)
+    }
+}
 fn pipe(child_reads: bool) -> io::Result<(Pipe, OwnedHandle)> {
     let (mut read, mut write) = (ptr::null_mut(), ptr::null_mut());
     // SAFETY: two writable slots. Both new handles start non-inheritable.
@@ -228,6 +236,8 @@ pub(super) struct Attempt {
     output: Option<[Pipe; 2]>,
     until: Instant,
     refusal: Option<Refusal>,
+    #[cfg(test)]
+    stdout_in_original: usize,
 }
 impl Drop for Attempt {
     fn drop(&mut self) {
@@ -328,6 +338,8 @@ impl Attempt {
             output: Some([output, error]),
             until,
             refusal: None,
+            #[cfg(test)]
+            stdout_in_original: inherited[1] as usize,
         };
         original.refusal = original.admit(expected).err();
         Ok(original)
@@ -375,6 +387,38 @@ impl Attempt {
     #[cfg(test)]
     pub(super) fn id(&self) -> u32 {
         self.child.pid
+    }
+    /// Test-only copy of our OWN helper's known inherited stdout writer. This
+    /// is never an observed process/socket/File handle or a PID-selected copy.
+    #[cfg(test)]
+    pub(super) fn hold_original_stdout(&self) -> io::Result<OwnedHandle> {
+        use windows_sys::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS};
+        self.selected
+            .revalidate()
+            .and_then(|()| self.selected.matches_process(&self.child.process))?;
+        if self.exit()?.is_some() {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        let mut copy = ptr::null_mut();
+        // SAFETY: original retained process object, exact known pipe handle
+        // inherited by this private probe at creation. It has not been offered
+        // input or closed stdout. Copy only that owned writer into this test.
+        if unsafe {
+            DuplicateHandle(
+                self.child.process.as_raw_handle(),
+                self.stdout_in_original as HANDLE,
+                GetCurrentProcess(),
+                &mut copy,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: successful DuplicateHandle transferred this one OWNED copy.
+        Ok(unsafe { OwnedHandle::from_raw_handle(copy) })
     }
     pub(super) fn exit(&self) -> io::Result<Option<u32>> {
         self.child.wait(Duration::ZERO)

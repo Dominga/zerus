@@ -308,7 +308,9 @@ fn current_directory(
     Ok(Directory { utf16, handle })
 }
 
+mod custody_input;
 mod custody_io;
+mod custody_output;
 mod file_users;
 mod handles;
 #[cfg(windows)]

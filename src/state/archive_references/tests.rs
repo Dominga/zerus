@@ -191,6 +191,10 @@ fn isolated_reference_probe() {
             let mut foreign = record("44444444-4444-4444-8444-444444444444", &target);
             foreign["worktree_owner"]["id"] = json!("foreign-owner");
             put(&foreign);
+            // Preserve every legacy UUID spelling accepted by archive::path,
+            // including the braced form (longer than a canonical UUID).
+            let braced = record("{55555555-5555-4555-8555-555555555555}", &target);
+            put(&braced);
             // Same mutable label, distinct durable archive/session identities.
             assert_eq!(original["name"], legacy["name"]);
             if case == "routed" {
@@ -200,8 +204,8 @@ fn isolated_reference_probe() {
                 );
             }
             reconcile();
-            assert_eq!(related(&target).unwrap(), vec![original, legacy]);
-            assert_eq!(metadata().unwrap().len(), 4);
+            assert_eq!(related(&target).unwrap(), vec![original, legacy, braced]);
+            assert_eq!(metadata().unwrap().len(), 5);
             if case == "routed" {
                 assert_eq!(
                     database()

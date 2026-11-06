@@ -393,7 +393,7 @@ fn snapshot(until: Instant, target: Option<&Path>) -> Result<Snapshot> {
         let base = target.trim_end_matches(std::path::MAIN_SEPARATOR);
         let prefix = format!("{base}{}", std::path::MAIN_SEPARATOR);
         let upper = format!("{base}{}", char::from(std::path::MAIN_SEPARATOR as u8 + 1));
-        let mut query=db.prepare("SELECT DISTINCT substr(id,1,37) AS selected_id FROM archive_reference_paths WHERE folder=? OR (folder>=? AND folder<?) ORDER BY selected_id LIMIT 5001").map_err(fail)?;
+        let mut query=db.prepare("SELECT DISTINCT substr(id,1,65) AS selected_id FROM archive_reference_paths WHERE folder=? OR (folder>=? AND folder<?) ORDER BY selected_id LIMIT 5001").map_err(fail)?;
         let selected = query
             .query_map(params![target, prefix, upper], |r| r.get::<_, String>(0))
             .map_err(fail)?

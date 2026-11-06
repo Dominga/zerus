@@ -59,6 +59,8 @@ vi.mock("../../bridge", () => ({
   // The session side panel's Tasks tab reads task details through the bridge.
   onExitFlush: vi.fn(async () => () => {}), acknowledgeExitFlush: vi.fn(async () => {}),
   readTaskDetails: vi.fn(async () => null),
+  // Task 107: the Teams store listens for a decision made on a card.
+  onTeamDecided: vi.fn(async () => () => {}),
   // The fork's Claude app dialog and SocratiCode panel (task 70) read through the bridge.
   claudeAppSessions: vi.fn(() => new Promise(() => {})), claudeAppResume: vi.fn(() => new Promise(() => {})),
   socraticodeStatus: vi.fn(() => new Promise(() => {})), socraticodeAct: vi.fn(() => new Promise(() => {})),

@@ -1291,11 +1291,16 @@ impl Worker {
                 continue;
             }
             let tag = text(operation, "tag");
-            let reason = match ended.code {
+            let mut reason = match ended.code {
                 Some(code) => format!("Session {tag} ended before it appeared (exit code {code})."),
                 None => format!("Session {tag} ended before it appeared."),
-            } + "\n"
-                + &ended.output.chars().take(4000).collect::<String>();
+            };
+            if ended.code.is_none() && ended.diagnostic_code == creation::SUPERVISOR_REPORT_MISSING {
+                reason.push('\n');
+                reason.push_str(creation::SUPERVISOR_REPORT_MISSING_DETAIL);
+            }
+            reason.push('\n');
+            reason.extend(ended.output.chars().take(4000));
             let effects = self.queue.ended(&id, &ended.launch_id, &reason);
             self.effects(effects);
         }
@@ -3500,6 +3505,44 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_supervisor_report_is_explained_without_inventing_code_or_output() {
+        let fake = Fake::new();
+        let host = fake.host();
+        let id = admitted(&host, plan());
+        state(&host, &id, "confirming");
+        let launch = text(&operation(&host, &id), "launch_id").to_owned();
+        check(
+            &host,
+            &fake,
+            &id,
+            BindingListing {
+                online: true,
+                sessions: Vec::new(),
+                ended_launches: vec![creation::EndedLaunch {
+                    launch_id: launch.clone(),
+                    diagnostic_code: creation::SUPERVISOR_REPORT_MISSING.into(),
+                    ..Default::default()
+                }],
+            },
+        );
+        state(&host, &id, "failed");
+        let value = operation(&host, &id);
+        let error = text(&value, "error");
+        assert!(error.contains(creation::SUPERVISOR_REPORT_MISSING_DETAIL));
+        assert!(!error.contains("exit code"));
+        assert_eq!(
+            value["previous_launches"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap(),
+            &json!(launch)
+        );
+        assert_eq!(value["launch_dispatched"], false);
+        fake.stop(host);
+    }
+
+    #[test]
     fn a_retired_launch_cannot_bind_the_retried_creation() {
         let fake = Fake::new();
         let host = fake.host();
@@ -3550,6 +3593,7 @@ mod tests {
                 name: "codex/repo/created".into(),
                 code,
                 output: "é".repeat(4001),
+                diagnostic_code: String::new(),
             };
             check(
                 &host,

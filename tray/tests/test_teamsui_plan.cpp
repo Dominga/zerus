@@ -132,6 +132,7 @@ private slots:
     void switchToFreeOpensOneDialogBoundToTheRequest();
     void freePhaseReadsIdleBuildsAndClosesOnConfirmation();
     void ownerSwitchesOnePhaseThroughItsDialog();
+    void phaseHeadersShowTheirModeLiveAndLockFromTheirHeader();
     void planEditKeepsTheRoadmap();
     void planEditsWaitForTheFullPlan();
     void workAheadSwitchAndBadge();
@@ -1590,6 +1591,65 @@ void TestTeamsUiPlan::switchToFreeOpensOneDialogBoundToTheRequest()
 // a confirmation dialog (Cancel focused, Cancel sends nothing), from the phase's
 // menu or, for the free phase, the header; the lead's card for one phase names
 // it and says what the lock keeps.
+// Task #59: every phase a switch reaches shows its own mode in its header, and
+// the badge follows hgs: a standard running phase reads Standard, the same
+// phase reads Free once hgs says so. The free phase locks back from its own
+// header through the same dialog (Cancel focused, Cancel sends nothing).
+void TestTeamsUiPlan::phaseHeadersShowTheirModeLiveAndLockFromTheirHeader()
+{
+    auto running = phasedTeam();
+    running["plan_mode"] = "standard";
+    running["phase_modes"] = QJsonObject{{"1", "standard"}, {"2", "standard"}, {"3", "standard"}};
+    setTeam(running);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1400, 860); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    const auto modeOf = [&](int phase) -> QString {
+        auto *scroll = phaseScrollOf(&workspace, phase);
+        if (!scroll) return QStringLiteral("(no phase)");
+        auto *badge = scroll->findChild<QWidget *>("teamPhaseMode");
+        return badge ? badge->property("mode").toString() : QString();
+    };
+    QTRY_COMPARE(modeOf(2), QStringLiteral("standard"));
+    // The badge follows hgs: phase 2 is now the free phase.
+    auto free = freeTeam();
+    free["phase_modes"] = QJsonObject{{"1", "standard"}, {"2", "free"}};
+    setTeam(free);
+    QTRY_VERIFY(([&] { controller.refresh(); return modeOf(2) == QLatin1String("free"); })());
+    QVERIFY(workspace.findChild<QWidget *>("teamHeaderPlanMode"));
+    // Its own header offers the lock; the dialog asks first and Cancel sends nothing.
+    QTRY_VERIFY(phaseScrollOf(&workspace, 2)->findChild<QPushButton *>("teamPhaseLock"));
+    const auto lockFromHeader = [&] {
+        auto *lock = phaseScrollOf(&workspace, 2)->findChild<QPushButton *>("teamPhaseLock");
+        QVERIFY(lock);
+        lock->click();
+    };
+    lockFromHeader();
+    QTRY_VERIFY(workspace.findChild<QDialog *>("teamPhaseModeDialog"));
+    auto *dialog = workspace.findChild<QDialog *>("teamPhaseModeDialog");
+    QCOMPARE((QPair<int, QString>(dialog->property("phase").toInt(), dialog->property("mode").toString())), (QPair<int, QString>(2, "standard")));
+    QVERIFY(dialog->findChild<QPushButton *>("teamPhaseModeCancel")->isDefault());
+    dialog->findChild<QPushButton *>("teamPhaseModeCancel")->click();
+    QTRY_VERIFY(!workspace.findChild<QDialog *>("teamPhaseModeDialog"));
+    QTest::qWait(80);
+    QCOMPARE(calls(script(), "phase-mode").size(), 0);
+    lockFromHeader();
+    QTRY_VERIFY(workspace.findChild<QDialog *>("teamPhaseModeDialog"));
+    workspace.findChild<QDialog *>("teamPhaseModeDialog")->findChild<QPushButton *>("teamPhaseModeConfirm")->click();
+    QTRY_COMPARE(calls(script(), "phase-mode").size(), 1);
+    const auto input = calls(script(), "phase-mode").first();
+    QCOMPARE((QPair<int, QString>(input["phase"].toInt(), input["mode"].toString())), (QPair<int, QString>(2, "standard")));
+    // Back to standard in hgs: the badge reads Standard again.
+    setTeam(running);
+    QTRY_VERIFY(([&] { controller.refresh(); return modeOf(2) == QLatin1String("standard"); })());
+}
+
 void TestTeamsUiPlan::ownerSwitchesOnePhaseThroughItsDialog()
 {
     auto running = phasedTeam();

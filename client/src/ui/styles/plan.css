@@ -203,3 +203,7 @@
 .pt-stage-returned, .pt-stage-failed { color: var(--z-color-danger); }
 .pt-stage-waiting, .pt-stage-delivered { color: var(--z-color-accent); }
 .pt-card { background: color-mix(in srgb, var(--pt-tone) calc(var(--heat, 0) * 18%), var(--z-color-surface)); }
+/* Task #59: a phase's and the team's planning mode (Qt's Free and Standard badges). */
+.pt-chip-free { color: var(--z-color-violet); border-color: color-mix(in srgb, var(--z-color-violet) 45%, transparent); }
+.pt-chip-standard { color: var(--z-color-text-3); }
+.team-phase-mode, .team-mode { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }

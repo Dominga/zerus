@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TeamActions, allDecided, freeMode, phaseModeConfirmation, phaseModeSwitch, type ActTeam } from "./actions";
+import { TeamActions, allDecided, freeMode, phaseModeChip, phaseModeConfirmation, phaseModeSwitch, teamModeBadge, type ActTeam } from "./actions";
 import { proposalText } from "./decisions";
 import type { DecisionPort } from "./decisions";
 import type { TeamCall, TeamConfirmation, TeamProposalView } from "../../types";
@@ -79,5 +79,28 @@ describe("a phase's mode", () => {
     const card = (change: unknown) => ({ id: "p7", kind: "switch-plan-mode", by: "Lead", at: 0, reason: "", hash: "h", summary: "", lines: [], change, member: null, mode: "standard" }) as unknown as TeamProposalView;
     expect(proposalText(team() as never, card({ phase: 2 }))).toBe("Switch phase 2 to standard planning");
     expect(proposalText(team() as never, card(null))).toBe("Switch to standard planning");
+  });
+});
+
+// Task #59: the phase header and the team bar show the mode hgs reports, live:
+// each view of the team is drawn from the latest status read.
+describe("the mode badges", () => {
+  it("a running phase reads Standard, the free phase Free, a draft or done phase nothing", () => {
+    expect(phaseModeChip(team(), 2)).toMatchObject({ mode: "standard", text: "Standard mode" });
+    expect(phaseModeChip(team(), 1)).toBeUndefined();
+    expect(phaseModeChip(team(), 3)).toBeUndefined();
+    const free = team({ free_phase: 2, phases: team().phases.map((p) => (p.n === 2 ? { ...p, mode: "free" } : p)) });
+    expect(phaseModeChip(free, 2)).toMatchObject({ mode: "free", text: "Free mode" });
+    // An older hgs without phase modes: no Standard chip to guess.
+    expect(phaseModeChip(team({ phase_modes_known: false }), 2)).toBeUndefined();
+  });
+
+  it("the team bar names the free phase and follows the next read", () => {
+    expect(teamModeBadge(team())).toMatchObject({ mode: "standard", text: "Standard mode", phase: 0 });
+    const free = team({ free_phase: 2 });
+    expect(teamModeBadge(free)).toMatchObject({ mode: "free", text: "Free mode: phase 2", phase: 2 });
+    expect(phaseModeSwitch(free, 2)).toMatchObject({ mode: "standard", text: "Switch to standard…" });
+    expect(teamModeBadge(team({ status: "planning" }))).toBeUndefined();
+    expect(teamModeBadge(team({ phase_modes_known: false, plan_mode: "free" }))).toMatchObject({ mode: "free", text: "Free mode" });
   });
 });

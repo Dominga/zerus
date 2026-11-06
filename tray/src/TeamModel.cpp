@@ -539,6 +539,12 @@ Team parse(const QJsonObject &v)
         member.models = parseModelChoices(m.value("models"));
         member.contextBeforeTask = str(m, "context_before_task");
         member.draining = m.value("draining").toBool();
+        if (m.value("input_block").isObject()) {
+            const auto block = m.value("input_block").toObject();
+            member.inputRefusals = block.value("count").toInt();
+            member.inputReason = str(block, "reason");
+            member.inputRaised = block.value("raised").toBool();
+        }
         member.lead = member.id == team.lead;
         if (member.lead && member.role.isEmpty()) member.role = tr("Lead");
         team.members.append(member);
@@ -1198,6 +1204,11 @@ Status memberStatus(const Team &team, const Member &member, const Live &live)
     if (attempt && attempt->state == "unconfirmed")
         return make("unconfirmed", tr("Delivery unconfirmed"), tr("Unconfirmed"), Tone::Danger, current->id, true);
     if (attempt && attempt->noReport) return make("no_report", tr("No report"), tr("No report"), Tone::Warn, current->id, true);
+    // Task 98: its Terminal refuses hand-outs (a draft, a dialog or an unknown prompt).
+    if (member.inputRefusals > 0)
+        return make("input_blocked", tr("Terminal refused %1 hand-outs: %2").arg(member.inputRefusals)
+                                         .arg(member.inputReason.isEmpty() ? tr("a draft or dialog") : member.inputReason),
+                    tr("Blocked"), Tone::Warn, current ? current->id : 0, true);
     // A3: a question to the lead leaves the attempt open and pauses the work.
     if (attempt && attempt->openQuestion())
         return make("asking", tr("Waiting for your answer"), tr("Answer"), Tone::Warn, current->id, true);

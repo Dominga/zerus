@@ -134,6 +134,11 @@ struct Member {
     QString contextBeforeTask;
     // U49: it finishes its open work, takes nothing new and then leaves.
     bool draining = false;
+    // Task 98: hand-outs its Terminal refused in a row (a draft, a dialog or an
+    // unknown prompt), hgs's reason, and whether the lead and you were told.
+    int inputRefusals = 0;
+    QString inputReason;
+    bool inputRaised = false;
     QJsonObject json() const;
 };
 

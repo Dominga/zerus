@@ -2775,6 +2775,131 @@ pub(crate) fn classify(output: &anyhow::Result<Output>) -> Sent {
     }
 }
 
+/// Task 98: hgs's refusal of input while the composer holds a draft, a
+/// dialog or an unrecognized prompt.
+pub(crate) const DRAFT_REFUSAL: &str = "terminal has a draft, dialog, or unrecognized prompt";
+
+/// Task 98: the last non-empty lines of a Terminal screen, its colors and
+/// cursor codes removed, each at most 200 characters.
+pub(crate) fn last_lines(screen: &str, count: usize) -> Vec<String> {
+    let mut plain = String::with_capacity(screen.len());
+    let mut chars = screen.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            match chars.peek() {
+                Some('[') => {
+                    chars.next();
+                    while let Some(next) = chars.next() {
+                        if ('@'..='~').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    while let Some(next) = chars.next() {
+                        if next == '\u{7}' || next == '\\' {
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    chars.next();
+                }
+            }
+            continue;
+        }
+        if ch == '\n' || !ch.is_control() {
+            plain.push(ch);
+        }
+    }
+    let lines: Vec<String> = plain
+        .lines()
+        .map(|line| line.trim_end())
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.chars().take(200).collect())
+        .collect();
+    lines[lines.len().saturating_sub(count)..].to_vec()
+}
+
+/// Task 98: a hand-out the member's composer refused. Zerus's own leftover
+/// paste (the draft `hgs send` recorded right after it pasted) is finished
+/// once with its Enter; anything else is counted and, at
+/// `InputBlock::RAISE_AFTER` refusals, raised once to the lead and the owner
+/// with the screen's last lines. A delivery ends the episode.
+fn input_blocked(store: &mut Store, team_id: &str, member_id: &str, session: &SessionRef, outcome: &Sent) -> anyhow::Result<()> {
+    let team = store.load(team_id)?.with_context(|| format!("Unknown team {team_id}"))?;
+    let member = team.member(member_id).context("unknown member")?;
+    let refused = match outcome {
+        Sent::Refused(error) if error.contains(DRAFT_REFUSAL) => error.clone(),
+        Sent::Delivered if member.input_block.is_some() => {
+            return change(store, team_id, |team, events| {
+                let role = team.role_of(member_id);
+                if let Some(found) = team.members.iter_mut().find(|found| found.id == member_id) {
+                    if found.input_block.take().is_some_and(|block| block.raised) {
+                        events.push(Event::new("input_unblocked", json!({"member":role})));
+                    }
+                }
+                Ok(())
+            });
+        }
+        _ => return Ok(()),
+    };
+    let request = json!({"request_id":uuid::Uuid::new_v4().to_string(),"action":"submit_own_paste",
+        "expected_run_id":session.run_id,"expected_conversation_id":session.conversation_id});
+    let finished = hgs(&session.host, &["terminal", &session.name, "--json"], Some(&request), Duration::from_secs(60));
+    let receipt: Value = finished
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| serde_json::from_slice(&output.stdout).ok())
+        .unwrap_or_default();
+    let own = receipt["status"].as_str().filter(|status| matches!(*status, "submitted" | "uncertain")).map(str::to_owned);
+    let count = member.input_block.as_ref().map_or(0, |block| block.count) + u32::from(own.is_none());
+    let raise = own.is_none() && count >= InputBlock::RAISE_AFTER && !member.input_block.as_ref().is_some_and(|block| block.raised);
+    let screen = if raise {
+        let snapshot = json!({"request_id":uuid::Uuid::new_v4().to_string(),"action":"snapshot",
+            "expected_run_id":session.run_id,"expected_conversation_id":session.conversation_id});
+        hgs(&session.host, &["terminal", &session.name, "--json"], Some(&snapshot), Duration::from_secs(30))
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
+            .map(|answer| last_lines(answer["screen"].as_str().unwrap_or_default(), 12))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let reason = refused.lines().next().unwrap_or_default().split(" [trace:").next().unwrap_or_default().trim().to_owned();
+    change(store, team_id, |team, events| {
+        let role = team.role_of(member_id);
+        let found = team.members.iter_mut().find(|found| found.id == member_id).context("unknown member")?;
+        let at = now();
+        match own.as_deref() {
+            Some("submitted") => {
+                found.input_block = None;
+                events.push(Event::new("own_paste_finished", json!({"member":role,"delivery":receipt["delivery"]})));
+            }
+            Some(_) => {
+                // The Enter may have gone: never sent again; counted as before.
+                let block = found.input_block.get_or_insert_with(|| InputBlock { since: at, ..Default::default() });
+                block.own_paste = receipt["delivery"].as_str().unwrap_or("unknown").to_owned();
+                block.at = at;
+                events.push(Event::new("own_paste_uncertain", json!({"member":role,"delivery":receipt["delivery"],"error":receipt["error"]})));
+            }
+            None => {
+                let block = found.input_block.get_or_insert_with(|| InputBlock { since: at, ..Default::default() });
+                block.count = count;
+                block.at = at;
+                block.reason = reason.clone();
+                if raise {
+                    block.raised = true;
+                    block.screen = screen.clone();
+                    events.push(Event::new("input_blocked", json!({"member":role,"count":count,"reason":reason})));
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
 /// Task 97: an `hgs answer` outcome, as conservatively as a send: success is
 /// an answer that reached the session, exit 1 without "uncertain" one refused
 /// before anything was typed, anything else may have arrived.
@@ -4437,6 +4562,9 @@ fn hand_out_now(
         text += &git_continuation(&folder, since);
     }
     let outcome = send(&session, &attempt_id, &text);
+    if let Err(error) = input_blocked(store, team_id, member_id, &session, &outcome) {
+        eprintln!("hgs team worker: {member_id}: blocked input: {error}");
+    }
     change(store, team_id, |team, events| {
         let task = team.task_mut(task_id).context("unknown task")?;
         let Some(attempt) = task.attempts.iter_mut().find(|a| a.id == attempt_id && a.state == AttemptState::Delivering) else {
@@ -4641,6 +4769,9 @@ fn stage_hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &st
     }
     let (run_id, text) = message.context("no stage message")?;
     let outcome = send(&session, &run_id, &text);
+    if let Err(error) = input_blocked(store, team_id, member_id, &session, &outcome) {
+        eprintln!("hgs team worker: {member_id}: blocked input: {error}");
+    }
     change(store, team_id, |team, events| {
         let Some(task) = team.task_mut(task_id) else { return Ok(()) };
         let pinned = task.pipeline_run.as_ref().and_then(|run| run.open_run()).and_then(|run| task.pipeline_run.as_ref()?.stages.get(run.stage)).map(|stage| stage.member.clone()).unwrap_or_default();
@@ -8138,6 +8269,9 @@ mod dispatcher_lead_stall;
 #[cfg(test)]
 #[path = "tests/dispatcher_owner_queue.rs"]
 mod dispatcher_owner_queue;
+#[cfg(test)]
+#[path = "tests/dispatcher_input_block.rs"]
+mod dispatcher_input_block;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_areas.rs"]

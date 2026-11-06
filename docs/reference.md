@@ -2674,6 +2674,37 @@ shown (`hgs terminal <session> --json` with `"action":"draft"`, then
 `"action":"submit_draft"` and its `draft_hash`; a replayed request ID returns
 its receipt and presses nothing). Your own message stays in its field. HGS
 never types into, edits or clears the draft.
+
+A delivery of Zerus's own can leave its paste behind: `hgs send` pasted the
+message, then its Enter did not go (an idle compaction, a banner or a dialog
+came first), so the composer shows the paste, for example
+`[Pasted text #17 +62 lines]`, and refuses every later message. Right after
+each paste `hgs send` reads the composer's draft; when its Enter fails, the
+receipt keeps `pasted_draft_hash` and the session record `unsent_paste`
+(`request_id`, `draft_hash`, `run_id`, `conversation_id`, `at`). The record
+forgets it when a later message finds the composer empty.
+`{"request_id","action":"submit_own_paste","expected_run_id",
+"expected_conversation_id"} | hgs terminal <session> --json` presses Enter only
+while the composer holds exactly that paste in the same run and conversation
+(its draft hash binds run, conversation, pane, process and draft text). It
+forgets the paste before the Enter goes, so it never presses twice, and a
+draft the person typed or changed never matches ("The Terminal draft is not a
+paste Zerus delivered; nothing was sent"). A finished paste marks its own
+delivery's receipt `submitted` with `finished_by`.
+
+In a team, a hand-out (or a stage hand-out) refused for a draft, dialog or
+unrecognized prompt first asks `submit_own_paste`. When the paste was Zerus's,
+it is finished (`own_paste_finished` in the feed) and the next tick hands the
+task out again; an uncertain Enter is never repeated (`own_paste_uncertain`).
+Anything else is counted in `member.input_block` (`since`, `at`, `count`,
+`reason`, `screen`, `raised`). From the third such refusal the lead's inbox and
+the owner's attention list hold one `input_blocked` item with the Terminal's
+last twelve lines (colors removed) and what to do: open the member's Terminal
+and submit or clear the draft, close any dialog and return to an empty prompt.
+Waiting for you lists it with action `open_terminal`; the member cards in Qt
+and Zerus Next show "Terminal refused N hand-outs" with hgs's reason. Zerus
+never submits that draft. The next delivered hand-out ends the episode
+(`input_unblocked`).
 Uncertain interruption is not repeated. Stop notices name the original session
 and computer even if you navigate away. If the turn has already ended or is
 waiting for input, no interruption is sent and no action is needed; Zerus refreshes

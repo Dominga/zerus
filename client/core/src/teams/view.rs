@@ -276,6 +276,12 @@ pub struct MemberView {
     pub iron_rules: Vec<String>,
     pub minutes_without_progress: u64,
     pub host_shared: bool,
+    /// Task 98: hand-outs its Terminal refused in a row (a draft, a dialog or
+    /// an unknown prompt), hgs's reason, and whether the lead and the owner
+    /// were told.
+    pub input_refusals: u64,
+    pub input_reason: String,
+    pub input_raised: bool,
     /// Task 11: the member's pending question or permission request as hgs
     /// sends it (`members[].question`, at most [`DETAIL_BYTES`]): its id,
     /// hash, tool, command, reason and the card's own allow and deny ids.
@@ -584,6 +590,9 @@ fn member(value: &Value, lead: &str) -> MemberView {
         iron_rules: lines(value, "iron_rules", TEXT_CHARS),
         minutes_without_progress: count(value, "minutes_without_progress"),
         host_shared: flag(value, "host_shared"),
+        input_refusals: value.get("input_block").map_or(0, |block| count(block, "count")),
+        input_reason: value.get("input_block").map_or_else(String::new, |block| text(block, "reason", LINE_CHARS)),
+        input_raised: value.get("input_block").is_some_and(|block| flag(block, "raised")),
         permission: bounded(
             value
                 .get("question")

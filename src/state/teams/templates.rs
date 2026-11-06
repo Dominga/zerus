@@ -204,7 +204,7 @@ pub(crate) const BUILTIN: &[Template] = &[
         id: "ue-test",
         summary: "UnrealEditor-Cmd runs automation tests headless and exports a report (-nullrhi -unattended -ExecCmds)",
         program: "{engine}/Engine/Binaries/Win64/UnrealEditor-Cmd.exe",
-        args: &["{project}", "-nullrhi", "-unattended", "-ExecCmds=Automation RunTests {filters};Quit", "-ReportExportPath=.zerus-team/results/unreal"],
+        args: &["{project}", "-nullrhi", "-unattended", "-saveddir=.zerus-team/ue/Saved", "-abslog=.zerus-team/ue/Unreal.log", "-ExecCmds=Automation RunTests {filters};Quit", "-ReportExportPath=.zerus-team/results/unreal"],
         params: &[param("engine", Kind::Path), param("project", Kind::Path), optional("filters", Kind::Text), optional("files", Kind::Paths)],
         timeout_secs: 3600,
     },    // Task 85 (owner, 2026-11-06: builds and tests of any stack): any CMake
@@ -1416,6 +1416,12 @@ fn template_environment(plan: &Plan, folder: &Path) -> Vec<(String, String)> {
         if std::env::var_os("QT_QPA_FONTDIR").is_none() {
             env.push(("QT_QPA_FONTDIR".into(), "C:/Windows/Fonts".into()));
         }
+    }
+    if plan.template == "ue-test" {
+        let ue = folder.join(".zerus-team").join("ue");
+        let _ = std::fs::create_dir_all(ue.join("Saved"));
+        let _ = std::fs::create_dir_all(ue.join("DDC"));
+        env.push(("UE-LocalDataCachePath".into(), ue.join("DDC").display().to_string()));
     }
     if matches!(plan.template.as_str(), "py-test" | "cython-build") {
         let python = folder.join(".zerus-team").join("python");
@@ -2837,7 +2843,12 @@ kind = "path"
         assert!(test.program.ends_with("UnrealEditor-Cmd.exe"));
         assert!(test.argv.contains(&"-ExecCmds=Automation RunTests Project.Game;Quit".to_owned()));
         assert!(test.argv.contains(&"-nullrhi".to_owned()) && test.argv.contains(&"-unattended".to_owned()));
+        assert!(test.argv.contains(&"-saveddir=.zerus-team/ue/Saved".to_owned()));
+        assert!(test.argv.contains(&"-abslog=.zerus-team/ue/Unreal.log".to_owned()));
         assert!(plan("ue-build", &json!({"engine":"../UE","project":"Game.uproject","target":"Game"}), dir.path()).is_err());
     }
 }
+
+
+
 

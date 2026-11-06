@@ -25,7 +25,7 @@ impl Index {
         connection.execute_batch(
             r#"PRAGMA journal_mode=WAL;
              CREATE TABLE IF NOT EXISTS records(
-               id TEXT PRIMARY KEY, kind TEXT, area TEXT, title TEXT, body TEXT, refs TEXT);
+               id TEXT PRIMARY KEY, kind TEXT, area TEXT, title TEXT, body TEXT, refs TEXT, signals TEXT);
              CREATE VIRTUAL TABLE IF NOT EXISTS words USING fts5(id UNINDEXED, signals, title, body, refs, tokenize='porter unicode61 tokenchars ''_''');
              CREATE VIRTUAL TABLE IF NOT EXISTS terms USING fts5(id UNINDEXED, toks, tokenize="unicode61 tokenchars '_./:-'");
              PRAGMA user_version=1;"#,
@@ -46,8 +46,8 @@ impl Index {
             let title = record.get("title").and_then(Value::as_str).unwrap_or_default();
             let body = body(record);
             let refs = refs(record);
-            tx.execute("INSERT OR REPLACE INTO records VALUES (?1,?2,?3,?4,?5,?6)",
-                params![id, kind, area, title, body, refs]).map_err(|error| LoreError(format!("index: {error}")))?;
+            tx.execute("INSERT OR REPLACE INTO records VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![id, kind, area, title, body, refs, signals(record)]).map_err(|error| LoreError(format!("index: {error}")))?;
             tx.execute("INSERT INTO words(id,signals,title,body,refs) VALUES (?1,?2,?3,?4,?5)",
                 params![id, signals(record), title, body, refs]).map_err(|error| LoreError(format!("index: {error}")))?;
             tx.execute("INSERT INTO terms(id,toks) VALUES (?1,?2)", params![id, terms_of(record)])
@@ -91,8 +91,8 @@ impl Index {
             let title = record.get("title").and_then(Value::as_str).unwrap_or_default();
             let body = body(record);
             let refs = refs(record);
-            tx.execute("INSERT OR REPLACE INTO records VALUES (?1,?2,?3,?4,?5,?6)",
-                params![id, kind, area, title, body, refs]).map_err(|error| LoreError(format!("index: {error}")))?;
+            tx.execute("INSERT OR REPLACE INTO records VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![id, kind, area, title, body, refs, signals(record)]).map_err(|error| LoreError(format!("index: {error}")))?;
             tx.execute("DELETE FROM words WHERE id=?1", params![id]).map_err(|error| LoreError(format!("index: {error}")))?;
             tx.execute("INSERT INTO words(id,signals,title,body,refs) VALUES (?1,?2,?3,?4,?5)",
                 params![id, signals(record), title, body, refs]).map_err(|error| LoreError(format!("index: {error}")))?;
@@ -147,10 +147,33 @@ impl Index {
                 params![hit.id], |row| row.get(0)).ok();
             if text.is_some_and(|text| text.to_lowercase().contains(&needle)) { hit.score += 0.5; }
         }
-        // Python's phrase rule: markup and quotes are ignored, whitespace is
+        // Python's signal_hits: a linear scan, not FTS. A signal that the
+        // query holds, or that holds the query, dominates RRF.
+        let query_lower = query.to_lowercase();
+        let query_trimmed = query.trim().to_lowercase();
+        let mut signal_statement = self.connection.prepare("SELECT id,title,signals FROM records")
+            .map_err(|error| LoreError(format!("index: {error}")))?;
+        let signal_rows = signal_statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+            .map_err(|error| LoreError(format!("index: {error}")))?;
+        for row in signal_rows.flatten() {
+            let mut best = 0usize;
+            for signal in row.2.lines().map(str::trim).filter(|signal| !signal.is_empty()) {
+                let signal_lower = signal.to_lowercase();
+                let hit = (signal.chars().count() >= 6 && query_lower.contains(&signal_lower))
+                    || (query_trimmed.chars().count() >= 8 && signal_lower.contains(&query_trimmed));
+                if hit && signal.chars().count() > best { best = signal.chars().count(); }
+            }
+            if best > 0 {
+                let bonus = 1.0 + best as f32 / 1000.0;
+                match fused.iter_mut().find(|hit| hit.id == row.0) {
+                    Some(hit) => hit.score += bonus,
+                    None => fused.push(Hit { id: row.0, title: row.1, score: bonus }),
+                }
+            }
+        }        // Python's phrase rule: markup and quotes are ignored, whitespace is
         // one space. A record holding the whole query word for word jumps.
         let needle = flat(query);
-        if needle.chars().count() >= 12 {
+        if needle.chars().count() >= 16 {
             let mut statement = self.connection.prepare("SELECT id,title,body FROM records")
                 .map_err(|error| LoreError(format!("index: {error}")))?;
             let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
@@ -215,8 +238,12 @@ fn terms_query(query: &str) -> String {
         .collect::<Vec<_>>().join(" OR ")
 }
 fn fts_query(query: &str) -> String {
+    let mut seen = std::collections::BTreeSet::new();
     query.split(|c: char| !(c.is_alphanumeric() || c == '_'))
         .filter(|word| word.chars().count() >= 2)
+        .map(str::to_lowercase)
+        .filter(|word| seen.insert(word.clone()))
+        .take(64)
         .map(|word| format!("\"{}\"", word.replace('"', "\"\"")))
         .collect::<Vec<_>>().join(" OR ")
 }
@@ -340,6 +367,9 @@ mod tests {
         assert_eq!((removed.changed, removed.removed), (1, 1)); // restore one, remove b
     }
 }
+
+
+
 
 
 

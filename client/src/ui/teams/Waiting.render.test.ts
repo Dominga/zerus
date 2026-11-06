@@ -20,6 +20,7 @@ const proposals = "\0waiting-render-proposals";
 const noticesStore = "\0waiting-render-store-notices";
 const sections = "\0waiting-render-sections";
 const uiStore = "\0waiting-render-ui";
+const catalog = "\0waiting-render-catalog";
 let server: ViteDevServer | undefined;
 let renderPage: (view: TeamWaitingView) => string;
 let renderBanner: (view: TeamWaitingView) => string;
@@ -55,6 +56,10 @@ function fixture(): TeamWaitingItem[] {
     item("disk_low", "open_disk", "C: has 8 GB free, below its threshold", { drive: "C:" }, "", "This computer"),
     item("deferred", "answer_deferred", "Deferred permission of Backend: Bash: cargo test --locked",
       { deferred: "d1", request: "permission", text: "Bash: cargo test --locked", session: "codex/x/dev", outcome: "Zerus denied it for now" }, "", "codex/x/dev"),
+    item("permission_escalated", "open_terminal", "Tester waits in its Terminal: a dialog Zerus cannot answer",
+      { member: "tester", member_id: "tester", session: "claude/p/tester" }),
+    item("input_blocked", "open_terminal", "Backend's Terminal refused 3 hand-outs",
+      { member: "backend", member_id: "backend", session: "codex/p/backend", count: 3 }),
     item("test_full_run", "open_team", "Run the full test suite? About 1 h 20 min", {}),
     item("test_quarantine", "open_team", "e2e is quarantined as flaky (2 episodes)", {}),
   ];
@@ -71,6 +76,7 @@ function control(found: TeamWaitingItem): string {
     "decide_report", "release_task", "retry_task", "finish"].includes(found.action)) return "Answer";
   if (found.action === "resume_team") return "Resume team";
   if (found.action === "open_disk") return "Open Build folders";
+  if (found.action === "open_terminal") return "Open Terminal";
   return "Open team";
 }
 
@@ -82,7 +88,7 @@ beforeAll(async () => {
     plugins: [{
       name: "waiting-render-mocks", enforce: "pre",
       resolveId(id, importer) {
-        if ([entry, stores, translations, bridge, notices, settings, proposals, noticesStore, sections, uiStore].includes(id)) return id;
+        if ([entry, stores, translations, bridge, notices, settings, proposals, noticesStore, sections, uiStore, catalog].includes(id)) return id;
         if (importer?.endsWith("/ui/teams/Waiting.tsx") || importer?.endsWith("/ui/teams/ProposalCards.tsx") || importer?.endsWith("/ui/teams/decisions.ts")) {
           if (id === "../../i18n") return translations;
           if (id === "../../bridge") return bridge;
@@ -91,6 +97,7 @@ beforeAll(async () => {
           if (id === "../../store/notices") return noticesStore;
           if (id === "../../store/teamConfirm") return settings;
           if (id === "../../store/ui") return uiStore;
+          if (id === "../../store/catalog") return catalog;
           if (id === "../screens/settings/sections") return sections;
           if (importer?.endsWith("/ui/teams/Waiting.tsx") && id === "./ProposalCards") return proposals;
         }
@@ -116,6 +123,7 @@ beforeAll(async () => {
         if (id === uiStore) return `export const setPage = () => {};
           export const setSelectedKey = () => {};
           export const setDetailTab = () => {};`;
+        if (id === catalog) return `export const orderedRows = () => [];`;
         if (id === proposals) return `export const windowPort = { send: async () => ({outcome: "failed"}) };
           export const ProposalCardList = () => null;
           export const useModel = (make) => { const model = make(() => {});
@@ -155,7 +163,7 @@ describe("Waiting for you and the Activity strip (task 116)", () => {
   it("the strip shows the count and the newest item, and each kind answers in its row", () => {
     const items = fixture();
     const all = renderBanner({ items, total: items.length, more: false, next: null });
-    expect(all).toContain("16 wait for you");
+    expect(all).toContain("18 wait for you");
     expect(all).toContain(items[0].title.replace(/&/g, "&amp;"));
     expect(all).toContain("Show all");
     // The single item the strip shows is a full row with its own answer.

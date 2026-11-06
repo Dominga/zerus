@@ -2,6 +2,7 @@ import { For, Match, Show, Switch, createEffect, createSignal, onCleanup, onMoun
 import { tr } from "../../i18n";
 import { Icon } from "../lib/icons";
 import { toast } from "../../store/notices";
+import { orderedRows } from "../../store/catalog";
 import { answeredWaiting, memberRow, showWaiting, teams, waiting } from "../../store/teams";
 import { teamsWaitingOlder } from "../../bridge";
 import { waitingNotices } from "../../store/waitingNotices";
@@ -33,6 +34,18 @@ export function openTeam(item: TeamWaitingItem) {
   setPage("sessions");
   setSelectedKey(row.key);
   setDetailTab("team");
+}
+
+/** Task 116: a request only a member's Terminal takes (task 98's blocked
+ * composer, a terminal-only permission) opens that session's Terminal, its
+ * home view, in one click from the strip and the page. */
+export function openTerminal(item: TeamWaitingItem) {
+  const session = typeof item.detail?.session === "string" ? item.detail.session : "";
+  const row = session ? orderedRows().find((found) => found.name === session) : undefined;
+  if (!row) { toast(tr("Open Terminal"), tr("That session is not on the session list.")); return; }
+  setPage("sessions");
+  setSelectedKey(row.key);
+  setDetailTab("terminal");
 }
 
 /** Notifies each new item once while Waiting for you is shown. */
@@ -257,6 +270,9 @@ function Row(props: { item: TeamWaitingItem; compact?: boolean }) {
         <Show when={approves(item().action)}><Approve item={item()} /></Show>
         <Show when={opensCard(item().action)}>
           <button class="btn small" classList={{ primary: !open() }} onClick={(event) => { event.stopPropagation(); setOpen(!open()); }}>{open() ? tr("Close") : tr("Answer")}</button>
+        </Show>
+        <Show when={item().action === "open_terminal"}>
+          <button class="btn small" data-waiting-terminal onClick={(event) => { event.stopPropagation(); openTerminal(item()); }}>{tr("Open Terminal")}</button>
         </Show>
         <Show when={item().team}>
           <button class="btn small ghost" onClick={(event) => { event.stopPropagation(); openTeam(item()); }}>{tr("Open team")}</button>

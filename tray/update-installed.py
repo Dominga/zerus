@@ -11,8 +11,9 @@ tray/install.sh runs this whenever its build differs from the installed GUI.
 1. Copy the build into a unique folder beside the installed GUI.
 2. If the installed GUI is running, quit it the way its Quit action does:
    SIGTERM when the process handles it (current builds flush drafts on that
-   signal), otherwise the tray menu over D-Bus on Linux or the quit event on
-   macOS. A GUI that does not quit keeps running and nothing is replaced.
+   signal; on macOS, the running image of an installed client bundle),
+   otherwise the tray menu over D-Bus on Linux or the quit event on macOS.
+   A GUI that does not quit keeps running and nothing is replaced.
 3. Move the installed GUI aside into that folder and the new GUI into place.
    No GUI is deleted, and the one rollback copy
    (~/.local/share/hgs/desktop-previous) does not change, until the new GUI
@@ -280,9 +281,18 @@ def socket_path(pid):
     return None
 
 
-def handles_sigterm(pid):
+def handles_sigterm(pid, installed):
     if MAC:
-        return False  # not observable here; the quit event works for every build
+        # Not observable here, but every client bundle (ZerusGUI) quits on
+        # SIGTERM through the page and draft flush of its Quit
+        # (client/src-tauri/src/signals.rs), and the signal reaches exactly
+        # this pid. The quit event names the bundle ID instead, which the
+        # service's notification host shares (zerus-ov867). Another image,
+        # such as an older Qt build without the handler, keeps the event.
+        try:
+            return gui_kind(bundle_info(installed)) == 'tauri' and running_image_matches(pid, installed)
+        except (OSError, subprocess.CalledProcessError):
+            return False
     for line in Path(f'/proc/{pid}/status').read_text().splitlines():
         if line.startswith('SigCgt:'):
             return bool(int(line.split()[1], 16) & (1 << (signal.SIGTERM - 1)))
@@ -334,7 +344,7 @@ def menu_quit(pid):
 
 
 def quit_gui(pid, installed):
-    if handles_sigterm(pid):
+    if handles_sigterm(pid, installed):
         os.kill(pid, signal.SIGTERM)
     elif MAC:
         run(['osascript', '-e', f'ignoring application responses\ntell application id "{LABEL}" to quit\nend ignoring'])
@@ -1482,7 +1492,12 @@ def main():
                 raise UpdateError('Qt installation is retired; build Zerus Next. Nothing was replaced.')
             return update(*args.paths)
     except (UpdateError, subprocess.SubprocessError) as error:
-        print(f'hgs-tray update failed: {error}', file=sys.stderr)
+        # A failed command says why on its standard error (zerus-ov867).
+        detail = getattr(error, 'stderr', None) or ''
+        if isinstance(detail, bytes):
+            detail = detail.decode(errors='replace')
+        message = f'{str(error).rstrip(".")}: {detail.strip()}' if detail.strip() else error
+        print(f'hgs-tray update failed: {message}', file=sys.stderr)
         return 1
     print(usage, file=sys.stderr)
     return 2

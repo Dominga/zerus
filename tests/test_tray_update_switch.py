@@ -26,6 +26,7 @@ spec.loader.exec_module(updater)
 # The real ones, for the cases that fail them from inside.
 BUILD_INFO = updater.build_info
 GUI_PIDS = updater.gui_pids
+QUIT_GUI = updater.quit_gui
 
 TEST_ID = 'com.example.zerus-switch-test'
 DEFAULTS = '''#!{python}
@@ -316,6 +317,46 @@ class GuiProcesses(unittest.TestCase):
             self.assertEqual(updater.gui_pids(gui), [started['gui']])
 
 
+class QuitGui(Fixture):
+    """How the running GUI is asked to quit on macOS (zerus-ov867): the quit
+    event names the bundle ID, which the service's notification host shares."""
+
+    def setUp(self):
+        super().setUp()
+        self.installed = self.root / 'Applications/hgs-tray.app'
+        self.asked = []
+        def run(args, **kwargs):
+            self.asked.append(('event', args[0]))
+            return ''
+        stubs = {'MAC': True, 'run': run, 'gui_pids': lambda installed: [],
+                 'alive': lambda pid: not self.asked}
+        for name, value in stubs.items():
+            patcher = mock.patch.object(updater, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def quit(self, image):
+        with mock.patch.object(updater, 'running_image_matches', image), \
+                mock.patch.object(updater.os, 'kill', lambda pid, number: self.asked.append((pid, number))):
+            updater.quit_gui(12214, self.installed)
+        return self.asked
+
+    def test_the_installed_client_gets_sigterm_at_its_own_pid(self):
+        shutil.copytree(self.bundle('client-1', 'tauri'), self.installed)
+        self.assertEqual(self.quit(lambda pid, installed: pid == 12214), [(12214, updater.signal.SIGTERM)])
+
+    def test_any_other_image_keeps_the_quit_event(self):
+        def lsof_failed(pid, installed):
+            raise subprocess.CalledProcessError(1, ['lsof'])
+        for kind, image in (('tauri', lambda pid, installed: False), ('tauri', lsof_failed),
+                            ('qt', lambda pid, installed: True)):
+            with self.subTest(kind=kind, image=image):
+                shutil.rmtree(self.installed, ignore_errors=True)
+                shutil.copytree(self.bundle(kind, kind), self.installed)
+                self.asked.clear()
+                self.assertEqual(self.quit(image), [('event', 'osascript')])
+
+
 class SlotAndRestore(Fixture):
     def setUp(self):
         super().setUp()
@@ -506,6 +547,23 @@ class UpdateFlow(Flow):
         self.assertEqual(self.events, ['quit', ('start', 'client-2')])
         self.assertTrue(self.running, 'the new GUI keeps running')
         self.assertEqual((self.variant(self.installed), self.variant(self.slot)), ('client-2', 'client-1'))
+
+    def test_a_failed_quit_event_reports_its_reason_and_replaces_nothing(self):
+        self.install('client-1', 'tauri', self.installed)
+        reason = 'execution error: a synthetic osascript failure (-1)'
+        def run(args, **kwargs):
+            if args[0] == 'osascript':
+                raise subprocess.CalledProcessError(1, args, output='', stderr=reason + '\n')
+            return ''
+        errors = io.StringIO()
+        argv = ['update-installed.py', str(self.bundle('client-2', 'tauri')), str(self.installed)]
+        with mock.patch.multiple(updater, run=run, quit_gui=QUIT_GUI, running_image_matches=lambda pid, installed: False), \
+                mock.patch.object(sys, 'argv', argv), mock.patch.object(sys, 'stderr', errors):
+            self.assertEqual(updater.main(), 1)
+        self.assertTrue(errors.getvalue().startswith("hgs-tray update failed: Command '['osascript'"), errors.getvalue())
+        self.assertTrue(errors.getvalue().endswith(f'returned non-zero exit status 1: {reason}\n'), errors.getvalue())
+        self.assertEqual(self.variant(self.installed), 'client-1')
+        self.assertTrue(self.running)
 
     def test_stopped_pair_refresh_failure_cannot_report_success_or_start_gui(self):
         self.running = False

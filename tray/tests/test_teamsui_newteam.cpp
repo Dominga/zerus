@@ -14,6 +14,7 @@
 #include "TeamNewDialog.h"
 #include "TeamNewTab.h"
 #include "TeamTemplateList.h"
+#include <QScopeGuard>
 
 namespace {
 
@@ -73,6 +74,7 @@ private slots:
     void cleanup() { tearDown(); }
     void newTeamStartsTheLeadWithTheTemplate();
     void newTeamOffersEachAgentsModels();
+    void newTeamTabOffersDeepSeeksModels();
     void newTeamRowErrorsKeepAnOpenListOpen();
     void newTeamTabKeepsAMemberListOpenUntilItCloses();
     void newTeamMaxMembersStepsUpAndDown();
@@ -84,6 +86,9 @@ private slots:
     void draftDiscardAsksAndCanStopTheLead();
     void draftUpdateRetriesAStaleRevision();
     void draftCreateSavesFirstAndShowsBlockersInRed();
+    void draftShowsEveryLeadEditAroundTheOwnersSave();
+    void draftRefusedSaveKeepsTheOwnersFieldAndSaysSo();
+    void draftCreateRefusalAndMemberLimitAreShown();
     void templatesAreCompactWithSearchAndFavourites();
     void templateListHidesItsOldRowsAtOnce();
     void dialogTemplateListAppliesOnlyWhenChosen();
@@ -860,6 +865,252 @@ void TestTeamsUiNewteam::draftCreateSavesFirstAndShowsBlockersInRed()
     QCOMPARE(sent.at(0)["action"].toString(), QStringLiteral("update"));
     QCOMPARE(sent.at(0)["set"].toObject()["settings"].toObject()["max_members"].toInt(), 7);
     QCOMPARE(sent.last()["action"].toString(), QStringLiteral("create"));
+}
+
+// Task #18 (owner, 2026-11-05): a draft the lead started and filled outside the
+// form opens with all its fields, and every later lead edit through `hgs team
+// draft` reaches the open form: name, goal, addendum, members, tasks and
+// settings. The owner's save that lands on a revision the lead wrote meanwhile
+// (refused as stale, then sent again) no longer hides that revision's fields.
+void TestTeamsUiNewteam::draftShowsEveryLeadEditAroundTheOwnersSave()
+{
+    // Reads every second, so a held read does not start a process per frame.
+    TeamNewTab::setDraftPollInterval(1000);
+    const auto restore = qScopeGuard([] { TeamNewTab::setDraftPollInterval(100); });
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.refreshCatalog();
+    QTRY_VERIFY(controller.catalogReady());
+    QTemporaryDir folder;
+    const QString path = QDir::toNativeSeparators(folder.path());
+    auto started = draftTeam(path, 3, {});
+    started["settings"] = QJsonObject{{"folder_policy", "shared"}, {"approval", "auto"}, {"max_members", 4}, {"report_timeout_seconds", 120}};
+    setTeam(started);
+    TeamNewTab tab(&controller, &client, {{QString(), "this computer", true}},
+                   TeamNewTab::Coordinator{"claude/checkout/coord", "claude", "Opus", "", path, "msi", "Ready", false}, "Checkout");
+    tab.resize(1300, 860); tab.show();
+    tab.openDraft("draft-1");
+    auto *name = tab.findChild<QLineEdit *>("teamNewName");
+    auto *goal = tab.findChild<QPlainTextEdit *>("teamNewGoal");
+    auto *protocol = tab.findChild<QPlainTextEdit *>("teamNewProtocol");
+    auto *max = tab.findChild<QSpinBox *>("teamNewMaxMembers");
+    auto *review = tab.findChild<QCheckBox *>("teamNewReview");
+    auto *summary = tab.findChild<QLabel *>("teamNewSummary");
+    // Started outside the form: its current fields, nothing sent.
+    QTRY_COMPARE(name->text(), QStringLiteral("Checkout redesign"));
+    QCOMPARE(goal->toPlainText(), QStringLiteral("Redesign checkout: address form and tests"));
+    QCOMPARE(protocol->toPlainText(), QStringLiteral("Plan in waves of two"));
+    QTRY_COMPARE(tab.findChildren<QFrame *>("teamNewMemberRow").size(), 2);
+    QTRY_COMPARE(tab.findChildren<QFrame *>("teamNewPlanTask").size(), 2);
+    QCOMPARE(max->value(), 4);
+    QVERIFY(!review->isChecked());
+    QVERIFY(tab.pendingFields().isEmpty());
+    // The lead changes every field: the open form follows.
+    auto lead = started;
+    lead["name"] = "Checkout v3";
+    lead["goal"] = "Ship the address form first";
+    lead["lead_protocol"] = "One wave";
+    auto members = lead["members"].toArray();
+    members.append(QJsonObject{{"id", "tester"}, {"role", "Tester"}, {"agent", "claude"}, {"folder", "shared"}, {"state", "not_created"}});
+    lead["members"] = members;
+    auto tasks = lead["tasks"].toArray();
+    tasks.append(QJsonObject{{"id", 3}, {"title", "Address form tests"}, {"assignee", "tester"}, {"status", "draft"}});
+    lead["tasks"] = tasks;
+    lead["settings"] = QJsonObject{{"folder_policy", "shared"}, {"approval", "review"}, {"max_members", 5}, {"report_timeout_seconds", 120}};
+    lead["draft"] = QJsonObject{{"revision", 4}, {"unseen", QJsonArray{"name", "goal", "members", "tasks"}}};
+    setTeam(lead);
+    QTRY_COMPARE(name->text(), QStringLiteral("Checkout v3"));
+    QCOMPARE(goal->toPlainText(), QStringLiteral("Ship the address form first"));
+    QCOMPARE(protocol->toPlainText(), QStringLiteral("One wave"));
+    QTRY_COMPARE(tab.findChildren<QFrame *>("teamNewMemberRow").size(), 3);
+    QTRY_COMPARE(tab.findChildren<QFrame *>("teamNewPlanTask").size(), 3);
+    QCOMPARE(max->value(), 5);
+    QVERIFY(review->isChecked());
+    QVERIFY(calls(script(), "draft").isEmpty());   // reading changes nothing
+    // The lead writes revision 5 while the reads are held; the owner's edit,
+    // sent against 4, is refused as stale and saved at 5 as revision 6.
+    QVERIFY(FakeCli::replace(script() + ".statushold", "1"));
+    QTest::qWait(1500);   // every read already started has read the old answer
+    auto later = lead;
+    later["goal"] = "Ship the card form too";
+    later["draft"] = QJsonObject{{"revision", 5}, {"unseen", QJsonArray{"goal"}}};
+    setTeam(later);
+    QVERIFY(FakeCli::replace(script() + ".draftrev", "5"));
+    max->setValue(6);
+    QTRY_VERIFY(tab.pendingFields().isEmpty());
+    const auto updates = calls(script(), "draft");
+    QCOMPARE(updates.size(), 2);
+    QCOMPARE(updates.at(0)["revision"].toInt(), 4);
+    QCOMPARE(updates.at(1)["revision"].toInt(), 5);
+    QCOMPARE(updates.at(1)["set"].toObject().keys(), QStringList{"settings"});
+    // What hgs holds now: the lead's revision 5 with the owner's limit.
+    auto saved = later;
+    auto settings = saved["settings"].toObject(); settings["max_members"] = 6; saved["settings"] = settings;
+    saved["draft"] = QJsonObject{{"revision", 6}, {"unseen", QJsonArray{"goal"}}};
+    setTeam(saved);
+    QFile::remove(script() + ".statushold");
+    // Revision 6 was named by the owner's own save, yet the lead's goal of
+    // revision 5 shows: a save never stands in for reading the draft.
+    QTRY_COMPARE(goal->toPlainText(), QStringLiteral("Ship the card form too"));
+    QCOMPARE(max->value(), 6);
+    QTRY_VERIFY(summary->text().contains("rev 6"));
+    QVERIFY(!summary->text().contains("Not saved"));
+}
+
+// Task #18: a save hgs refuses is named in the footer with the fields it
+// keeps; the lead's edits of the other fields show, the owner's unsaved field
+// is never overwritten, Create team says why it did not create, and the owner
+// can drop the unsaved field for the lead's version.
+void TestTeamsUiNewteam::draftRefusedSaveKeepsTheOwnersFieldAndSaysSo()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.refreshCatalog();
+    QTRY_VERIFY(controller.catalogReady());
+    QTemporaryDir folder;
+    const QString path = QDir::toNativeSeparators(folder.path());
+    setTeam(draftTeam(path, 3, {}));
+    TeamNewTab tab(&controller, &client, {{QString(), "this computer", true}},
+                   TeamNewTab::Coordinator{"claude/checkout/coord", "claude", "Opus", "", path, "msi", "Ready", false}, "Checkout");
+    tab.resize(1300, 860); tab.show();
+    tab.openDraft("draft-1");
+    auto *name = tab.findChild<QLineEdit *>("teamNewName");
+    auto *goal = tab.findChild<QPlainTextEdit *>("teamNewGoal");
+    auto *summary = tab.findChild<QLabel *>("teamNewSummary");
+    auto *useLead = tab.findChild<QPushButton *>("teamNewUseLead");
+    auto *create = tab.findChild<QPushButton *>("teamNewCreate");
+    QTRY_COMPARE(name->text(), QStringLiteral("Checkout redesign"));
+    QVERIFY(!useLead->isVisible());
+    QVERIFY(FakeCli::replace(script() + ".draftrefuse", "hgs: The draft store is busy"));
+    name->setText("Owner name"); emit name->textEdited(name->text());
+    QTRY_VERIFY2(summary->text().contains("Not saved (name): hgs: The draft store is busy"), qPrintable(summary->text()));
+    QTRY_VERIFY(useLead->isVisible());
+    // The lead writes meanwhile: its goal shows, the owner's name stays.
+    auto lead = draftTeam(path, 4, {"goal"});
+    lead["name"] = "Lead name"; lead["goal"] = "Lead goal";
+    setTeam(lead);
+    QTRY_COMPARE(goal->toPlainText(), QStringLiteral("Lead goal"));
+    QCOMPARE(name->text(), QStringLiteral("Owner name"));
+    QTRY_VERIFY2(summary->text().contains("except your unsaved name"), qPrintable(summary->text()));
+    // Create team saves first; the refused save is why it did not create.
+    QVERIFY(create->isEnabled());
+    create->click();
+    QTRY_VERIFY2(summary->text().contains("Not created: the draft did not save first: hgs: The draft store is busy"), qPrintable(summary->text()));
+    QCOMPARE(create->text(), QStringLiteral("Create team"));
+    for (const auto &c : calls(script(), "draft")) QVERIFY(c["action"].toString() != QStringLiteral("create"));
+    // The owner takes the lead's version: nothing is left to send.
+    useLead->click();
+    QTRY_COMPARE(name->text(), QStringLiteral("Lead name"));
+    QVERIFY(tab.pendingFields().isEmpty());
+    QTRY_VERIFY(!summary->text().contains("Not saved"));
+    QVERIFY(!useLead->isVisible());
+}
+
+// Task #18: a create hgs refuses shows its reason in the form, and the member
+// limit is a preflight error that blocks Create team, as the create refuses it.
+void TestTeamsUiNewteam::draftCreateRefusalAndMemberLimitAreShown()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.refreshCatalog();
+    QTRY_VERIFY(controller.catalogReady());
+    QTemporaryDir folder;
+    const QString path = QDir::toNativeSeparators(folder.path());
+    setTeam(draftTeam(path, 3, {}));
+    TeamNewTab tab(&controller, &client, {{QString(), "this computer", true}},
+                   TeamNewTab::Coordinator{"claude/checkout/coord", "claude", "Opus", "", path, "msi", "Ready", false}, "Checkout");
+    QString created;
+    tab.created = [&](const QString &team) { created = team; };
+    tab.resize(1300, 860); tab.show();
+    tab.openDraft("draft-1");
+    auto *summary = tab.findChild<QLabel *>("teamNewSummary");
+    auto *preflight = tab.findChild<QLabel *>("teamNewPreflight");
+    auto *create = tab.findChild<QPushButton *>("teamNewCreate");
+    QTRY_VERIFY(create->isEnabled());
+    QVERIFY(FakeCli::replace(script() + ".createrefuse", "hgs: The owner confirms the wider permissions first"));
+    create->click();
+    QTRY_VERIFY2(summary->text().contains("Not created: hgs: The owner confirms the wider permissions first"), qPrintable(summary->text()));
+    QVERIFY(created.isEmpty());
+    QCOMPARE(tab.draftId(), QStringLiteral("draft-1"));
+    QTRY_VERIFY(create->isEnabled());
+    QCOMPARE(create->text(), QStringLiteral("Create team"));
+    // The lead adds one member too many: the preflight names it as an error.
+    const QString limit = QStringLiteral("3 members besides the lead, over the team limit of 2 (the lead is not counted)");
+    setTeam(draftTeam(path, 4, {}, QJsonArray{QJsonObject{{"kind", "members"}, {"text", limit}}}));
+    QTRY_VERIFY2(preflight->text().contains("Preflight: 1 error"), qPrintable(preflight->text()));
+    QVERIFY(!preflight->text().contains("Preflight: ok"));
+    QVERIFY(preflight->toolTip().contains(limit));
+    QVERIFY(!create->isEnabled());
+    QCOMPARE(create->toolTip(), QStringLiteral("Fix 1 preflight error"));
+    // Without the refusal the fixed draft creates.
+    QFile::remove(script() + ".createrefuse");
+    setTeam(draftTeam(path, 5, {}));
+    QTRY_VERIFY(create->isEnabled());
+    create->click();
+    QTRY_COMPARE(created, QStringLiteral("draft-1"));
+}
+
+// Task #19 (owner, 2026-11-05): the New team tab's member rows offer each
+// account's model catalog from `account model-settings`, DeepSeek's too:
+// a DeepSeek row lists deepseek-flash as dsh names it, and picking it is the
+// member's model.
+void TestTeamsUiNewteam::newTeamTabOffersDeepSeeksModels()
+{
+    const auto model = [](const QString &id, const QString &label) {
+        return QJsonObject{{"id", id}, {"label", label}, {"effort_options", QJsonArray{"off", "low", "high", "max"}}};
+    };
+    const QJsonObject catalogs{
+        {"native-codex", QJsonArray{model("gpt-5.5", "GPT-5.5")}},
+        {"native-kimi", QJsonArray{model("kimi-code/k3.1-pro", "K3.1 Pro")}},
+        {"native-dsh", QJsonArray{model("deepseek-official/deepseek-flash", "DeepSeek-V4.1-Flash (DeepSeek)"),
+                                  model("deepseek-official/deepseek-v4-pro", "DeepSeek-V4-Pro (DeepSeek)")}},
+    };
+    QVERIFY(FakeCli::replace(script() + ".models", QJsonDocument(catalogs).toJson(QJsonDocument::Compact)));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.refreshCatalog();
+    QTRY_VERIFY(controller.catalogReady());
+    QTemporaryDir folder;
+    const QString path = QDir::toNativeSeparators(folder.path());
+    TeamNewTab tab(&controller, &client, {{QString(), "this computer", true}},
+                   TeamNewTab::Coordinator{"claude/checkout/coord", "claude", "Opus", "", path, "msi", "Ready", false}, "Checkout");
+    tab.resize(1400, 900); tab.show();
+    QVERIFY(chooseTemplate(&tab, "feature"));
+    QTRY_COMPARE(tab.findChildren<QFrame *>("teamNewMemberRow").size(), 2);
+    const auto models = [&](int row) {
+        QStringList ids;
+        auto *box = tab.findChildren<QFrame *>("teamNewMemberRow").at(row)->findChild<QComboBox *>("teamNewModel");
+        for (int i = 0; i < box->count(); ++i) ids << box->itemData(i).toString();
+        return ids;
+    };
+    // Each account's catalog, once read; the Codex row lists its model.
+    QTRY_VERIFY2(models(0).contains("gpt-5.5"), qPrintable(models(0).join(", ")));
+    QTRY_VERIFY(models(1).contains("kimi-code/k3.1-pro"));
+    // The backend row switches to DeepSeek: its account's models follow.
+    auto *agent = tab.findChildren<QFrame *>("teamNewMemberRow").at(0)->findChild<QComboBox *>("teamNewAgent");
+    agent->setCurrentIndex(agent->findData("dsh"));
+    emit agent->activated(agent->currentIndex());
+    QTRY_VERIFY2(models(0).contains("deepseek-official/deepseek-flash"), qPrintable(models(0).join(", ")));
+    auto *box = tab.findChildren<QFrame *>("teamNewMemberRow").at(0)->findChild<QComboBox *>("teamNewModel");
+    QVERIFY(box->isEnabled());
+    const int flash = box->findData("deepseek-official/deepseek-flash");
+    QCOMPARE(box->itemData(flash, Qt::ToolTipRole).toString(), QStringLiteral("DeepSeek-V4.1-Flash (DeepSeek)"));
+    box->setCurrentIndex(flash);
+    // The pick is the member's model, sent with Start planning's first save.
+    QTRY_COMPARE(tab.findChildren<QFrame *>("teamNewMemberRow").at(0)->findChild<QComboBox *>("teamNewModel")->currentText(),
+                 QStringLiteral("deepseek-official/deepseek-flash"));
+    // No account list was lost to the model replies on the shared client.
+    // Task 46: every row's account box is found on the tab, and the pointer is
+    // checked before use (a missing one crashed the whole suite).
+    const auto accounts = tab.findChildren<QComboBox *>("teamNewAccount");
+    QVERIFY(accounts.size() >= 2);
+    for (auto *account : accounts) {
+        QVERIFY(account);
+        QVERIFY(account->count() >= 1);
+    }
+    auto *account = tab.findChildren<QFrame *>("teamNewMemberRow").at(1)->findChild<QComboBox *>("teamNewAccount");
+    QVERIFY(account);
+    QVERIFY(account->count() >= 1);
 }
 
 // F6: many templates in a compact list with a search field and favourites; the

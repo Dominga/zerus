@@ -62,3 +62,21 @@ pub(crate) fn muted_member_sessions() -> BTreeSet<(String, String)> {
     members.retain(|key| !leads.contains(key));
     members
 }
+
+/// P4: the team an agent session belongs to names its project: the team's
+/// `project_id`, else its project label, else its folder. A member worktree is
+/// not a catalog session, so `hgs task` reads this before giving up.
+pub(crate) fn project_for_session(session: &str) -> Option<(String, String, String)> {
+    let store = store::Store::open(false).ok()?;
+    let teams = store.active_teams(1000).ok()?;
+    for team in teams {
+        let matches = team
+            .members
+            .iter()
+            .any(|member| member.session.as_ref().is_some_and(|found| found.name == session));
+        if matches {
+            return Some((team.project_id, team.project, team.folder));
+        }
+    }
+    None
+}

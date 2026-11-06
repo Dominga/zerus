@@ -160,6 +160,8 @@ pub const KEYS: &[Key] = &[
     key("workspace/launchAgent", Kind::Text("")),
     key("workspace/launchOpenTerminal", Kind::Flag(false)),
     key("workspace/launchAccounts", Kind::Text("")),
+    // Task 74: Qt's SessionLeads JSON object, by session identity.
+    key("workspace/sessionLeads", Kind::Text("")),
     // A first-G3 family import handles this separately from the old seed.
     Key {
         name: "workspace/allSwarmProjects",
@@ -282,6 +284,24 @@ pub const KEYS: &[Key] = &[
     // so the switch seeds the owner's choice.
     key("extensions/socraticode", Kind::Flag(true)),
     key("socraticode/nativeQdrant", Kind::Flag(false)),
+    // The Team tab's dividers (task 9): the side column's width beside the
+    // canvas, and the members' share of it above the coordinator, in percent.
+    client(
+        "client/teamSideWidth",
+        Kind::Whole {
+            default: 420,
+            min: 340,
+            max: 900,
+        },
+    ),
+    client(
+        "client/teamMembersShare",
+        Kind::Whole {
+            default: 45,
+            min: 15,
+            max: 85,
+        },
+    ),
 ];
 
 /// The setting called `name`: a listed key, a shortcut override, or one of

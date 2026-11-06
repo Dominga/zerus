@@ -89,6 +89,7 @@ private slots:
     void taskCardOffersActionsByStatus();
     void attemptStatesShowPhaseIcons();
     void taskCardAnswersQuestionsAndHolds();
+    void ownerAnswersAMemberQuestionOnceFromTheCardAndThePanel();
     void memberQueueListsCurrentAndReturned();
     void ownerActionsCarryNoAgentMarkers();
     void leftoverMembersAreShownApart();
@@ -276,6 +277,91 @@ void TestTeamsUiMembers::attemptStatesShowPhaseIcons()
     workspace.findChild<QPushButton *>("teamWorkspaceAnswerQuestion")->click();
     QTRY_VERIFY(dynamic_cast<TeamTaskCard *>(workspace.findChild<QWidget *>("teamWorkspaceDrawer"))
                 && dynamic_cast<TeamTaskCard *>(workspace.findChild<QWidget *>("teamWorkspaceDrawer"))->task() == 15);
+}
+
+// Task 55 (owner, 2026-11-06: q41 of task #51 showed "Waiting for your
+// answer", Answer… and an "Answer Frontend…" field with Send, yet no answer
+// went out). Every poll rebuilt the card, so what the owner typed was gone by
+// Send. Now the answer survives polls, goes out once as `reply` from the
+// task card and from the side panel, a refusal says why on the question,
+// and a decided task's question says it is closed instead of offering a field.
+void TestTeamsUiMembers::ownerAnswersAMemberQuestionOnceFromTheCardAndThePanel()
+{
+    setTeam(deliveryTeam());
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    panel.resize(420, 1200); panel.show();
+    workspace.resize(1500, 900); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-2");
+    workspace.showTeam("team-2");
+    // The team view's Answer opens the task card with the cursor in the field.
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamWorkspaceAnswerQuestion"));
+    workspace.activateWindow(); QVERIFY(QTest::qWaitForWindowActive(&workspace));
+    workspace.findChild<QPushButton *>("teamWorkspaceAnswerQuestion")->click();
+    auto *drawer = dynamic_cast<TeamTaskCard *>(workspace.findChild<QWidget *>("teamWorkspaceDrawer"));
+    QVERIFY(drawer);
+    const auto field = [](QWidget *host) -> QLineEdit * {
+        for (auto *edit : host->findChildren<QLineEdit *>("teamAnswerText")) if (edit->isVisible() && edit->property("question") == "q1") return edit;
+        return nullptr;
+    };
+    const auto sendOf = [](QWidget *host) -> QPushButton * {
+        for (auto *b : host->findChildren<QPushButton *>("teamAnswerSend")) if (b->isVisible() && b->property("question") == "q1") return b;
+        return nullptr;
+    };
+    QTRY_VERIFY(drawer->task() == 15 && field(drawer));
+    QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(field(drawer)));
+    QTest::keyClicks(field(drawer), "Yes, keep it.");
+    // The poll that used to drop the answer: the text and the focus stay.
+    controller.refresh(); TestWait::settle();
+    QTRY_VERIFY(field(drawer) && field(drawer)->text() == QStringLiteral("Yes, keep it."));
+    QCOMPARE(drawer->answerDraft("q1"), QStringLiteral("Yes, keep it."));
+    QTRY_COMPARE(QApplication::focusWidget(), static_cast<QWidget *>(field(drawer)));
+    // Send, twice: one reply, for this team, while it is on its way.
+    sendOf(drawer)->click();
+    if (auto *again = sendOf(drawer)) again->click();
+    QTRY_COMPARE(calls(script(), "reply").size(), 1);
+    auto sent = calls(script(), "reply").first();
+    QCOMPARE(sent["team"].toString(), QStringLiteral("team-2"));
+    QCOMPARE(sent["question"].toString(), QStringLiteral("q1"));
+    QCOMPARE(sent["text"].toString(), QStringLiteral("Yes, keep it."));
+    QCOMPARE(sent["by"].toString(), QStringLiteral("human"));
+    TestWait::settle();
+    QCOMPARE(calls(script(), "reply").size(), 1);
+    // The side panel: Answer… opens its card; a refusal says why on the
+    // question and the owner may send again.
+    { QFile refuse(script() + ".replyrefuse"); QVERIFY(refuse.open(QIODevice::WriteOnly)); refuse.write("hgs: Question q1 was already answered"); }
+    panel.openTask(15);
+    QTRY_VERIFY(field(&panel));
+    field(&panel)->setText("Second answer");
+    emit field(&panel)->textEdited(field(&panel)->text());
+    sendOf(&panel)->click();
+    QTRY_COMPARE(calls(script(), "reply").size(), 2);
+    QTRY_VERIFY(panel.findChild<QLabel *>("teamAnswerError"));
+    QCOMPARE(panel.findChild<QLabel *>("teamAnswerError")->text(), QStringLiteral("Not sent: Question q1 was already answered"));
+    QTRY_VERIFY(sendOf(&panel) && sendOf(&panel)->isEnabled());
+    QCOMPARE(field(&panel)->text(), QStringLiteral("Second answer"));
+    QFile::remove(script() + ".replyrefuse");
+    // A decided task's question cannot be answered: it says so, no field.
+    auto decided = deliveryTeam();
+    auto tasks = decided["tasks"].toArray();
+    for (int i = 0; i < tasks.size(); ++i) {
+        auto task = tasks[i].toObject();
+        if (task["id"].toInt() == 15) { task["status"] = "cancelled"; tasks[i] = task; }
+    }
+    decided["tasks"] = tasks;
+    TeamTaskCard card;
+    card.resize(440, 900); card.show();
+    QList<QString> acted;
+    card.act = [&](const QString &op, const QJsonObject &) { acted << op; };
+    card.setTask(parse(decided), 15, live, true);
+    QVERIFY(card.findChild<QLabel *>("teamAnswerClosed"));
+    QVERIFY(card.findChild<QLabel *>("teamAnswerClosed")->text().contains("decided"));
+    QVERIFY(!card.findChild<QLineEdit *>("teamAnswerText") && !card.findChild<QPushButton *>("teamAnswerSend"));
+    QVERIFY(acted.isEmpty());
 }
 
 void TestTeamsUiMembers::taskCardAnswersQuestionsAndHolds()
@@ -1156,6 +1242,13 @@ void TestTeamsUiMembers::hierarchyInTeamViewsAndMemberCards()
     child["members"] = childMembers;
     const auto parsedChild = Teams::parse(child);
     QCOMPARE(TeamUi::subtreeImpact(parsed, {parsed, parsedChild}), qMakePair(1, 3));
+    // Task 52: a listed team names only its parent; the walk reaches the
+    // grandchild through it, and the whole tree is counted.
+    auto grandchild = child;
+    grandchild["id"] = "grandchild-team";
+    grandchild["parent"] = QJsonObject{{"team", "child-team"}, {"task", 1}};
+    const auto parsedGrandchild = Teams::parse(grandchild);
+    QCOMPARE(TeamUi::subtreeImpact(parsed, {parsed, parsedChild, parsedGrandchild}), qMakePair(2, 6));
     QTimer::singleShot(50, [] {
         for (auto *widget : QApplication::topLevelWidgets())
             if (auto *box = qobject_cast<QMessageBox *>(widget))

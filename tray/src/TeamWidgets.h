@@ -943,6 +943,7 @@ public:
     // G3: where a task landed; a dead-end sits below the tasks others need.
     QRectF nodeRect(int id) const { return m_rects.value(id); }
     QMap<int, QList<int>> edges;   // task -> its dependencies
+    QMap<int, int> origins;        // task -> the task it was spawned from
     QSet<QPair<int, int>> soft;    // (dependency, task) edges that need only In progress
     QSet<int> cycle, emphasis;     // emphasis: Show what blocks
     std::function<QSet<int>(int)> chain;
@@ -1696,6 +1697,25 @@ protected:
                     p.setPen(Qt::NoPen); p.setBrush(m_c.danger); p.drawEllipse(mid, 7, 7);
                     p.setPen(QPen(Qt::white, 1.5)); p.drawLine(mid + QPointF(-3, -3), mid + QPointF(3, 3)); p.drawLine(mid + QPointF(-3, 3), mid + QPointF(3, -3));
                 }
+            }
+            // Task 61: a follow-up's origin is a dashed violet link with an
+            // open head, drawn apart from the dependency edges; it never waits.
+            for (auto it = origins.cbegin(); it != origins.cend(); ++it) {
+                const int from = anchor(it.value()), to = anchor(it.key());
+                if (!from || !to || from == to) continue;
+                const QRectF a = m_rects.value(from), b = m_rects.value(to);
+                if (a.isNull() || b.isNull()) continue;
+                QPainterPath path;
+                const double x1 = a.right(), y1 = a.center().y(), x2 = b.left(), y2 = b.center().y();
+                const double bend = qMax(24.0, qAbs(x2 - x1) / 2.0);
+                path.moveTo(x1, y1);
+                path.cubicTo(x1 + bend, y1, x2 - bend, y2, x2, y2);
+                p.setPen(QPen(m_c.violet, 1.6, Qt::DashLine)); p.setBrush(Qt::NoBrush);
+                p.drawPath(path);
+                const QLineF tail(path.pointAtPercent(1), path.pointAtPercent(.96));
+                QLineF wing1 = tail; wing1.setLength(6); wing1.setAngle(tail.angle() + 35);
+                QLineF wing2 = tail; wing2.setLength(6); wing2.setAngle(tail.angle() - 35);
+                p.drawLine(wing1); p.drawLine(wing2);
             }
             if (const int from = m_dragFrom ? m_dragFrom : m_connectFrom; from && m_rects.contains(from)) {
                 p.setPen(QPen(m_c.accent, 1.6, Qt::DashLine)); p.drawLine(out(m_rects[from]), m_dragAt / zoom);
@@ -2510,24 +2530,30 @@ inline QWidget *iconSegmented(const QList<std::tuple<QString, QString, QString>>
 }
 
 // G1: how many sub-teams and sessions a tree action reaches (the team itself
-// is not counted; the list is the controller's current teams).
+// is not counted; the list is the controller's current teams). Task 52: a
+// listed team names only its parent (`team list` has no children), so the
+// walk takes a team's children from its own record and from every team whose
+// parent it is, and reaches every level of the tree.
 inline QPair<int, int> subtreeImpact(const Team &team, const QList<Team> &all)
 {
     int subteams = 0, sessions = 0;
-    QSet<QString> seen;
-    std::function<void(const Team &)> walk = [&](const Team &current) {
-        for (const auto &child : current.children) {
-            if (seen.contains(child.team)) continue;
-            seen.insert(child.team);
+    QSet<QString> seen{team.id};
+    std::function<void(const QString &, const QList<Subteam> &)> walk = [&](const QString &id, const QList<Subteam> &children) {
+        QStringList ids;
+        for (const auto &child : children) ids << child.team;
+        for (const auto &candidate : all) if (candidate.parent.known && candidate.parent.team == id) ids << candidate.id;
+        for (const auto &child : ids) {
+            if (child.isEmpty() || seen.contains(child)) continue;
+            seen.insert(child);
             ++subteams;
-            for (const auto &candidate : all) if (candidate.id == child.team) {
+            for (const auto &candidate : all) if (candidate.id == child) {
                 for (const auto &member : candidate.members) if (!member.session.isEmpty()) ++sessions;
-                walk(candidate);
+                walk(candidate.id, candidate.children);
                 break;
             }
         }
     };
-    walk(team);
+    walk(team.id, team.children);
     return {subteams, sessions};
 }
 

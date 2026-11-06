@@ -637,7 +637,7 @@ fn swapping_a_member_keeps_its_work_and_continues_the_open_attempt() {
     let error = apply(&mut team, "swap-member", &json!({"member":"dev"}), &Actor::Member("lead".into()), &none, &mut events)
         .unwrap_err()
         .to_string();
-    assert_eq!(error, "Only you swap a member; the lead needs your word");
+    assert_eq!(error, "Only you swap a member; the lead needs your word: propose {\"kind\":\"swap-member\"} as a card (hgs guide team-propose); the owner allows it with a click");
 }
 
 #[test]
@@ -986,4 +986,73 @@ fn a_draft_changes_one_member_and_sets_the_plan_mode() {
     assert_eq!(team.plan_mode_offer, Some(PlanMode::Free));
     update(&mut team, 4, json!({"plan_mode":"free"}), &Actor::Human).unwrap();
     assert_eq!((team.plan_mode, team.plan_mode_offer), (PlanMode::Free, None));
+}
+
+/// Task #18 (owner, 2026-11-05): the New team form's first save is accepted as
+/// it sends it (the form's four settings only, its members and template tasks);
+/// a draft over its member limit is a preflight error and its create is refused
+/// naming the limit, never "Preflight: ok" beside a create that does nothing.
+#[test]
+fn a_draft_over_its_member_limit_is_refused_at_create_and_by_the_preflight() {
+    let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+    team.status = TeamStatus::Draft;
+    team.draft = Some(Draft { revision: 1, ..Default::default() });
+    let none = BTreeSet::new();
+    let members: Vec<Value> = (1..=3)
+        .map(|n| {
+            json!({"id":format!("dev-{n}"),"role":"Backend","agent":"claude","account":"","model":"","effort":"","permissions":"",
+                   "computer":"","folder":"shared","prompt":"Build it."})
+        })
+        .collect();
+    let set = json!({"goal":"Ship","addendum":"","members":members,
+        "tasks":[{"id":1,"title":"Plan","assignee":"lead","deps":[]},{"id":2,"title":"Build","assignee":"dev-1","deps":[{"task":1,"kind":"hard"}]}],
+        "settings":{"folder_policy":"auto","approval":"review","phase_approval":"auto","max_members":2}});
+    apply(&mut team, "draft", &json!({"action":"update","revision":1,"set":set}), &Actor::Human, &none, &mut Vec::new()).unwrap();
+    let validation = plan::validate(&team, &none);
+    assert!(
+        validation.errors.iter().any(|finding| finding.kind == "members" && finding.text.contains("over the team limit of 2")),
+        "{:?}",
+        validation.errors
+    );
+    assert!(validation.warnings.iter().all(|finding| finding.kind != "members"), "{:?}", validation.warnings);
+    let error = apply(&mut team, "draft", &json!({"action":"create"}), &Actor::Human, &none, &mut Vec::new()).unwrap_err().to_string();
+    assert!(error.contains("over the team limit of 2"), "{error}");
+    assert_eq!(team.status, TeamStatus::Draft);
+    // One member fewer: the same draft creates.
+    apply(&mut team, "draft", &json!({"action":"update","revision":2,"set":{"members":{"dev-3":null}}}), &Actor::Human, &none, &mut Vec::new()).unwrap();
+    let value = apply(&mut team, "draft", &json!({"action":"create"}), &Actor::Human, &none, &mut Vec::new()).unwrap();
+    assert_eq!(value["status"], "planning", "{value}");
+}
+
+/// Task #26: team 33fbafeb's lead drafted the catalog's Reviewer with its
+/// role's folder, `read_only`, and the draft was refused with "A member is
+/// invalid" and an example, naming no field; the reviewer had to be made
+/// shared. `read_only` is the shared folder with no own checkout, and a value
+/// the draft refuses names its member and its field.
+#[test]
+fn a_draft_member_takes_the_catalogs_read_only_folder_and_a_refusal_names_the_field() {
+    let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+    team.status = TeamStatus::Draft;
+    team.draft = Some(Draft { revision: 1, ..Default::default() });
+    team.settings.folder_policy = FolderPolicy::Auto;
+    let none = BTreeSet::new();
+    let mut events = Vec::new();
+    let lead = Actor::Member("lead".into());
+    let reviewer = json!({"action":"update","revision":1,"set":{"members":[
+        {"id":"merger","role":"Reviewer & Merger","agent":"claude","model":"claude-sonnet-5-5","folder":"read_only"}]}});
+    apply(&mut team, "draft", &reviewer, &lead, &none, &mut events).unwrap();
+    assert_eq!(team.member("merger").unwrap().folder, MemberFolder::Shared, "no own checkout");
+    // Written back, the folder reads as the shared folder it is.
+    assert_eq!(serde_json::to_value(team.member("merger").unwrap()).unwrap()["folder"], "shared");
+    // A folder the catalog does not know names the member and the field.
+    let revision = team.draft.as_ref().unwrap().revision;
+    let unknown = json!({"action":"update","revision":revision,"set":{"members":[
+        {"id":"merger","role":"Reviewer","agent":"claude","folder":"readonly"}]}});
+    let error = apply(&mut team, "draft", &unknown, &lead, &none, &mut events).unwrap_err().to_string();
+    assert!(error.contains("A member \"merger\" is invalid: field \"folder\": unknown variant `readonly`"), "{error}");
+    assert!(error.contains("`read_only`") || error.contains("`shared`"), "the accepted values are named: {error}");
+    // So does a task field.
+    let task = json!({"action":"update","revision":revision,"set":{"tasks":[{"id":1,"title":"Review","assignee":"merger","deps":"1"}]}});
+    let error = apply(&mut team, "draft", &task, &lead, &none, &mut events).unwrap_err().to_string();
+    assert!(error.contains("A task \"1\" is invalid: field \"deps\""), "{error}");
 }

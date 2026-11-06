@@ -24,7 +24,7 @@ vi.mock("../../bridge", () => ({
   sessionFileExternal: calls.external,
   onSessionFileChanged: calls.changed,
 }));
-vi.mock("../../store/ui", () => ({ toast: vi.fn() }));
+vi.mock("../../store/ui", () => ({ toast: vi.fn(), subagentOpen: () => undefined }));
 
 import { actOnSessionFile, closeSessionFile, downloadSessionFile, saveSessionFile, openExternal, openSessionFile, sessionFile } from "./sessionFiles";
 

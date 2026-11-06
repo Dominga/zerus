@@ -38,9 +38,12 @@ QMap<int, int> computeLayers(const Team &team)
         if (active.contains(id)) return -1;
         active.insert(id);
         int level = 0;
-        if (const auto *task = team.task(id))
+        if (const auto *task = team.task(id)) {
             for (const auto &dep : task->deps)
                 if (ids.contains(dep.task)) { const int d = visit(dep.task); if (d >= 0) level = qMax(level, d + 1); }
+            // Task #60: a follow-up sits at least in its origin's layer, as hgs places it.
+            if (task->origin > 0 && task->origin != id && ids.contains(task->origin)) { const int d = visit(task->origin); if (d >= 0) level = qMax(level, d); }
+        }
         active.remove(id);
         depth[id] = level;
         return level;
@@ -574,6 +577,7 @@ Team parse(const QJsonObject &v)
         for (const auto &c : t.value("criteria").toArray()) task.criteria.append(c.toString());
         for (const auto &d : t.value("deps").toArray()) task.deps.append({d.toObject().value("task").toInt(), str(d.toObject(), "kind") == "soft"});
         task.phaseBuild = t.value("phase_build").toBool();
+        task.origin = qMax(0, t.value("origin").toInt());
         if (t.value("hold").isObject()) {
             // A5: parked by the lead or by you until `release`.
             const auto h = t.value("hold").toObject();
@@ -851,6 +855,13 @@ Team parse(const QJsonObject &v)
         for (const auto &id : f.value("running").toArray()) free.running.append(id.toInt());
         free.accepted = f.value("accepted").toInt(); free.acceptedSince = f.value("accepted_since").toInt();
         free.lastBuildAt = f.value("last_build_at").toDouble(); free.closePending = f.value("close_pending").toInt();
+    }
+    // Task #58: the mode of every phase.
+    if (v.value("phase_modes").isObject()) {
+        team.phaseModesKnown = true;
+        const auto modes = v.value("phase_modes").toObject();
+        for (auto it = modes.begin(); it != modes.end(); ++it)
+            if (it.key().toInt() > 0 && it.value().isString()) team.phaseModes.insert(it.key().toInt(), it.value().toString());
     }
     // hgs derives both; a team file without them (an older hgs) gets the same
     // answer from the tasks and the phase records.
@@ -1361,6 +1372,9 @@ QString proposalText(const Team &team, const Team::Proposal &proposal)
     for (const auto *key : {"agent", "model", "effort", "account"})
         if (const auto value = object.value(QLatin1String(key)).toString(); !value.isEmpty()) how << value;
     const auto change = proposal.change.toObject();
+    // Task #21: a card for an owner-gated operation says what hgs wrote for
+    // it (relaunch, scale, drain, approvals, phase changes, settings, rules).
+    if (change.contains(QLatin1String("op")) && !change.value("summary").toString().isEmpty()) return change.value("summary").toString();
     if (proposal.kind == "add-member") {
         const auto members = proposedMembers(proposal);
         if (members.size() > 1) return tr("Add %1 members").arg(members.size());
@@ -1376,7 +1390,12 @@ QString proposalText(const Team &team, const Team::Proposal &proposal)
         return how.isEmpty() ? tr("Swap %1 to a new session with the same settings").arg(role) : tr("Swap %1 to %2").arg(role, how.join(QStringLiteral(", ")));
     }
     if (proposal.kind == "next-goal") return tr("Next goal: %1").arg(proposal.goal.section('\n', 0, 0).left(120));
-    if (proposal.kind == "switch-plan-mode") return proposal.mode == "standard" ? tr("Switch to standard planning") : tr("Switch to free planning");
+    if (proposal.kind == "switch-plan-mode") {
+        // Task #58: a card that names a phase switches that phase only.
+        if (const int phase = change.value("phase").toInt(); phase > 0)
+            return proposal.mode == "standard" ? tr("Switch phase %1 to standard planning").arg(phase) : tr("Switch phase %1 to free planning").arg(phase);
+        return proposal.mode == "standard" ? tr("Switch to standard planning") : tr("Switch to free planning");
+    }
     // U57: tasks for a running phase, tasks to cancel, a phase to discard.
     if (proposal.kind == "add-to-phase") {
         const int count = int(change.value("tasks").toArray().size());
@@ -1404,6 +1423,11 @@ QStringList proposalChanges(const Team &team, const Team::Proposal &proposal)
 {
     QStringList lines;
     const auto change = proposal.change.toObject();
+    // Task #21: the lines hgs wrote for an owner-operation card, as they are.
+    if (change.contains(QLatin1String("op"))) {
+        for (const auto &line : change.value("lines").toArray()) if (!line.toString().isEmpty()) lines << line.toString();
+        return lines;
+    }
     const auto taskLine = [&team](int id) {
         const auto *task = team.task(id);
         return task ? tr("#%1 %2 (%3)").arg(id).arg(task->title, statusLabel(task->status)) : tr("#%1").arg(id);
@@ -2221,6 +2245,16 @@ FeedLine feedLine(const Team &team, const QJsonObject &event)
     else if (k == "notice_unconfirmed") { t = tr("Report for %1 may not have reached the Lead").arg(ref); line.tone = Tone::Warn; }
     else if (k == "member_started") t = tr("Session started · %1").arg(d.value("session").toString());
     else if (k == "launch_failed") { t = tr("Session failed to start: %1").arg(d.value("error").toString()); line.tone = Tone::Danger; }
+    // Task 52: a start that waits for its host (task 22), and a member woken
+    // when its own team run settled (task 36).
+    else if (k == "launch_waiting") {
+        t = tr("The host is still starting; starting again (%1 of %2)").arg(d.value("wait").toInt()).arg(d.value("of").toInt());
+        line.tone = Tone::Muted;
+    }
+    else if (k == "run_settled_woken") {
+        if (d.value("delivered").toBool(true)) t = tr("Woke %1: its run settled · %2%3").arg(d.value("member").toString(), ref, attempt);
+        else { t = tr("Its run settled, but waking %1 was refused · %2%3").arg(d.value("member").toString(), ref, attempt); line.tone = Tone::Warn; }
+    }
     else if (k == "relaunch") t = tr("Start %1 again").arg(d.value("member").toString());
     else if (k == "member_paused") t = tr("Paused %1").arg(d.value("member").toString());
     else if (k == "member_resumed") t = tr("Resumed %1").arg(d.value("member").toString());

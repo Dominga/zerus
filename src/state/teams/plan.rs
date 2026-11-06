@@ -118,6 +118,12 @@ pub(crate) fn layers(tasks: &[Task]) -> BTreeMap<u32, u32> {
                 }
                 d = d.max(depth(tasks, ids, back, memo, dep.task) + 1);
             }
+            // Task #60: a follow-up sits at least in its origin's layer, as if
+            // it had the origin's dependencies, without depending on the
+            // origin. The memo's 0 for a task in progress ends an origin loop.
+            if let Some(origin) = task.origin.filter(|origin| *origin != id && ids.contains(origin)) {
+                d = d.max(depth(tasks, ids, back, memo, origin));
+            }
         }
         memo.insert(id, d);
         d
@@ -915,6 +921,17 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
                 ));
             }
         }
+        // Task #60: a follow-up's origin is a task of this team.
+        if let Some(origin) = task.origin {
+            if origin == task.id || team.task(origin).is_none() {
+                found.errors.push(finding(
+                    "origin",
+                    Some(task.id),
+                    None,
+                    format!("#{} {}: its origin #{} is not another task of the team", task.id, task.title, origin),
+                ));
+            }
+        }
     }
     let cycles = cycle_tasks(&team.tasks);
     if !cycles.is_empty() {
@@ -958,9 +975,11 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
             ),
         ));
     }
+    // Owner, 2026-11-05 (task #18): a limit the create refuses is an error of
+    // the preflight, never a warning beside "Preflight: ok".
     let count = team.capped_members();
     if count > team.settings.max_members {
-        found.warnings.push(finding(
+        found.errors.push(finding(
             "members",
             None,
             None,
@@ -1386,11 +1405,12 @@ mod tests {
         t.settings.max_members = 0;
         let found = validate(&t, &BTreeSet::from(["msi-old".to_owned()]));
         let kinds: Vec<&str> = found.errors.iter().map(|f| f.kind).collect();
-        assert_eq!(kinds, vec!["assignee", "dependency", "cycle"]);
+        // Task #18: over the member limit is an error, as the create refuses it.
+        assert_eq!(kinds, vec!["assignee", "dependency", "cycle", "members"]);
         assert_eq!(found.errors[2].tasks, vec![2, 3]);
         let warnings: Vec<&str> = found.warnings.iter().map(|f| f.kind).collect();
         // Feedback 13: members without an account are named too.
-        assert_eq!(warnings, vec!["offline", "account", "members"]);
+        assert_eq!(warnings, vec!["offline", "account"]);
         // Cancelled tasks need no assignee.
         t.tasks[0].status = Cancelled;
         assert!(validate(&t, &BTreeSet::new()).errors.iter().all(|f| f.task != Some(1)));

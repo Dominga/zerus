@@ -215,31 +215,42 @@ fn parse_member(value: &Value) -> anyhow::Result<Member> {
 /// itself, the accepted fields and an example.
 fn parse_member_as(value: &Value, what: &str, example: &str) -> anyhow::Result<Member> {
     let mut member: Member = super::strict::parse(value, &[], what, example)?;
-    member.iron_rules = super::super::iron_rules::validate(&json!(member.iron_rules))?;
-    member.id = member_id(&member.id)?;
-    member.role = clean_text(&member.role, 60, "A role")?;
-    ensure!(!member.agent.is_empty(), "Member {} needs an agent", member.id);
+    // Task #26: every refusal names the member and the field.
+    let who = format!("{what} \"{}\"", member.id);
+    let field = |name: &str| {
+        let who = who.clone();
+        let name = name.to_owned();
+        move |error: anyhow::Error| anyhow::anyhow!("{who}: field \"{name}\": {error:#}")
+    };
+    member.iron_rules = super::super::iron_rules::validate(&json!(member.iron_rules)).map_err(field("iron_rules"))?;
+    member.id = member_id(&member.id).map_err(field("id"))?;
+    member.role = clean_text(&member.role, 60, "A role").map_err(field("role"))?;
+    ensure!(!member.agent.is_empty(), "{who}: field \"agent\" is required, such as \"claude\"");
     // C3: `permissions` is the launch mode, the profile an agent's mode.
     ensure!(
         member.permissions.is_empty() || ["auto", "bypass"].contains(&member.permissions.as_str()),
-        "A permissions mode is auto or bypass"
+        "{who}: field \"permissions\" is auto or bypass, not \"{}\"",
+        member.permissions
     );
     ensure!(
         member.permissions_profile.is_empty() || ["read", "write", "build", "commit", "network"].contains(&member.permissions_profile.as_str()),
-        "A permissions profile is read, write, build, commit or network"
+        "{who}: field \"permissions_profile\" is read, write, build, commit or network, not \"{}\"",
+        member.permissions_profile
     );
     // U46: opt-in; empty inherits the role, "none" overrides it with none.
     ensure!(
         matches!(member.context_before_task.as_str(), "" | "none" | "compact" | "clear"),
-        "A context before a task is none, compact or clear"
+        "{who}: field \"context_before_task\" is none, compact or clear, not \"{}\"",
+        member.context_before_task
     );
     member.launch_id.clear();
     member.error.clear();
+    member.host_waits = 0;
     member.inbox = Inbox::default();
     if !member.parent.is_empty() {
-        member.parent = member_id(&member.parent)?;
+        member.parent = member_id(&member.parent).map_err(field("parent"))?;
     }
-    member.prompt = clean_text(&member.prompt, 8000, "A role prompt")?;
+    member.prompt = clean_text(&member.prompt, 8000, "A role prompt").map_err(field("prompt"))?;
     // N3: copy the role's prompt blocks now; a later catalog edit changes no
     // running team mid-phase. An old member loaded from the store keeps None.
     if member.prompt_snapshot.is_none() {
@@ -249,7 +260,8 @@ fn parse_member_as(value: &Value, what: &str, example: &str) -> anyhow::Result<M
     if member.models.is_empty() {
         member.models = super::catalog::models_for(&member.role);
     }
-    super::models::check_choices(&member.models)?;
+    super::models::check_choices(&member.models).map_err(field("models"))?;
+    super::dispatcher::sandbox_folder(&mut member);
     member.state = match member.session {
         Some(_) => MemberState::Active,
         None => MemberState::NotCreated,
@@ -328,13 +340,20 @@ fn clean_output(paths: &mut Vec<String>) -> anyhow::Result<()> {
 
 fn parse_task(value: &Value) -> anyhow::Result<Task> {
     let mut task: Task = super::strict::parse(value, &[], "A task", super::strict::TASK_EXAMPLE)?;
-    ensure!(task.id > 0, "Task numbers start at 1");
-    task.title = clean_text(&task.title, 200, "A task title")?;
-    ensure!(!task.title.trim().is_empty(), "Task #{} needs a title", task.id);
-    task.description = clean_text(&task.description, 20_000, "A task description")?;
-    clean_output(&mut task.output)?;
+    // Task #26: every refusal names the task and the field.
+    let who = format!("Task #{}", task.id);
+    let field = |name: &str| {
+        let who = who.clone();
+        let name = name.to_owned();
+        move |error: anyhow::Error| anyhow::anyhow!("{who}: field \"{name}\": {error:#}")
+    };
+    ensure!(task.id > 0, "A task's field \"id\": task numbers start at 1");
+    task.title = clean_text(&task.title, 200, "A task title").map_err(field("title"))?;
+    ensure!(!task.title.trim().is_empty(), "{who}: field \"title\" is required");
+    task.description = clean_text(&task.description, 20_000, "A task description").map_err(field("description"))?;
+    clean_output(&mut task.output).map_err(field("output"))?;
     // U58: a task for a role keeps the role's text clean too.
-    task.role = clean_text(&task.role, 60, "A task role")?;
+    task.role = clean_text(&task.role, 60, "A task role").map_err(field("role"))?;
     // C5: a check carries its exact command and expected exit code; a plan
     // task may not hide one.
     match task.kind {
@@ -343,12 +362,11 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
                 .check
                 .as_mut()
                 .with_context(|| format!("Task #{} is a check: add \"check\":{{\"command\":\"...\"}}", task.id))?;
-            check.command = clean(check.command.trim(), 2000, "A check command")?;
-            ensure!(!check.command.is_empty(), "Task #{} is a check: its command is empty", task.id);
+            check.command = clean(check.command.trim(), 2000, "A check command").map_err(field("check.command"))?;
+            ensure!(!check.command.is_empty(), "{who}: field \"check.command\" is empty");
             ensure!(
                 (1..=1440).contains(&check.timeout_minutes),
-                "Task #{}: a check waits 1 to 1440 minutes",
-                task.id
+                "{who}: field \"check.timeout_minutes\": a check waits 1 to 1440 minutes"
             );
         }
         TaskKind::Task => {
@@ -356,20 +374,22 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
         }
     }
     for criterion in &mut task.criteria {
-        *criterion = clean_text(criterion, 500, "An acceptance criterion")?;
+        *criterion = clean_text(criterion, 500, "An acceptance criterion").map_err(field("criteria"))?;
     }
     let mut seen = BTreeSet::new();
     task.deps.retain(|dep| seen.insert(dep.task));
-    ensure!(task.deps.iter().all(|dep| dep.task != task.id), "Task #{} depends on itself", task.id);
+    ensure!(task.deps.iter().all(|dep| dep.task != task.id), "{who}: field \"deps\": the task depends on itself");
+    // Task #60: a follow-up names the task it came from, never itself.
+    ensure!(task.origin.is_none_or(|origin| origin != task.id && origin > 0), "{who}: field \"origin\": a follow-up names another task as its origin");
     // U27: the lane the task is drawn in; its number and label are bounded and
     // it changes nothing about hand-out.
     if let Some(lane) = task.lane.as_mut() {
-        clean_lane(lane, task.id)?;
+        clean_lane(lane, task.id).map_err(field("lane"))?;
     }
     // Owner 2026-10-31: the lead's estimate is in minutes; a task without one
     // gets Zerus' own from the per-computer history when it is shown.
     if let Some(minutes) = task.estimate_minutes {
-        ensure!((1.0..=1440.0).contains(&minutes), "Task #{}: an estimate is 1 to 1440 minutes", task.id);
+        ensure!((1.0..=1440.0).contains(&minutes), "{who}: field \"estimate_minutes\": an estimate is 1 to 1440 minutes");
         task.estimate_minutes = Some(minutes.round());
         task.estimate_source = "lead".into();
     } else {
@@ -387,9 +407,9 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
     // U36: the plan names a preset; Zerus snapshots it when the task is
     // assigned, so a request can never carry its own run.
     task.pipeline_run = None;
-    check_pipeline(&task.pipeline)?;
+    check_pipeline(&task.pipeline).map_err(field("pipeline"))?;
     // U45: the models allowed for the task and a role instead of an assignee.
-    super::models::check_task(&mut task)?;
+    super::models::check_task(&mut task).map_err(field("models"))?;
     Ok(task)
 }
 
@@ -545,10 +565,7 @@ fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
     for value in input["tasks"].as_array().into_iter().flatten() {
         let mut task = parse_task(value)?;
         // The plan may queue tasks of later phases; phase 1 stays the default.
-        task.phase = match value["phase"].as_u64() {
-            None => 1,
-            Some(phase) => u32::try_from(phase).ok().filter(|phase| *phase > 0).context("A task phase is a number from 1")?,
-        };
+        task.phase = task_phase(value)?;
         ensure!(tasks.iter().all(|t: &Task| t.id != task.id), "Task #{} is used twice", task.id);
         tasks.push(task);
     }
@@ -710,7 +727,7 @@ fn approve(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Str
             || parent_approves(team, actor)
             || owner_word.is_some()
             || (team.settings.approval == Approval::Auto && actor.is_lead(team)),
-        "The lead approves only on the owner's word: pass \"owner_word\" with the owner's sentence"
+        "The lead approves only on the owner's word: propose {{\"kind\":\"approve\"}} as a card (hgs guide team-propose); the owner allows it with a click"
     );
     // U59: choosing at the start is the owner's own act, no proposal needed. A
     // lead's approval or an older client that sends no mode keeps standard.
@@ -758,6 +775,68 @@ fn mark_decided(task: &mut Task) {
 }
 
 /// The approval new phases wait for: their own setting, else the plan's.
+/// The phase a plan or a draft gives a task: its "phase", 1 when it names none.
+fn task_phase(value: &Value) -> anyhow::Result<u32> {
+    match value.get("phase").filter(|phase| !phase.is_null()) {
+        None => Ok(1),
+        Some(phase) => phase
+            .as_u64()
+            .and_then(|phase| u32::try_from(phase).ok())
+            .filter(|phase| *phase > 0)
+            .context("A task phase is a number from 1"),
+    }
+}
+
+/// Task 23: a draft's phases 2..N, as `plan` keeps them: the phases the draft
+/// lists ({n, title, barrier}; `listed` when this update sets them, else the
+/// ones it has) and every phase a task names, each a Draft phase in order with
+/// its tasks. Team 33fbafeb: the draft's tasks named phases 1, 2 and 3, and
+/// the created team had all of them in phase 1.
+fn draft_phases(team: &mut Team, listed: Option<&Value>, by: &str) -> anyhow::Result<()> {
+    let approval = phase_approval(team);
+    let mut phases: Vec<Phase> = match listed {
+        None => team.phases.clone(),
+        Some(value) => {
+            let mut phases: Vec<Phase> = Vec::new();
+            for value in value.as_array().context("Phases are a list of {\"n\",\"title\",\"barrier\"}")? {
+                let n = value["n"]
+                    .as_u64()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .filter(|n| *n >= 2)
+                    .context("A planned phase is numbered from 2")?;
+                ensure!(phases.iter().all(|phase| phase.n != n), "Phase {n} is used twice");
+                let old = team.phases.iter().find(|old| old.n == n);
+                phases.push(Phase {
+                    n,
+                    title: clean(value["title"].as_str().unwrap_or_default().trim(), 120, "A phase title")?,
+                    barrier: value["barrier"].as_bool() == Some(true),
+                    // A phase the draft had keeps its place and its proposer.
+                    order: old.map_or(0, |old| old.order()),
+                    added_by: old.map_or_else(|| by.to_owned(), |old| old.added_by.clone()),
+                    added_at: old.map_or_else(now, |old| old.added_at),
+                    ..Default::default()
+                });
+            }
+            phases
+        }
+    };
+    let named: BTreeSet<u32> = team.tasks.iter().map(|task| task.phase).filter(|phase| *phase > 1).collect();
+    for n in named {
+        if phases.iter().all(|phase| phase.n != n) {
+            phases.push(Phase { n, added_by: by.to_owned(), added_at: now(), ..Default::default() });
+        }
+    }
+    phases.sort_by_key(|phase| (if phase.order == 0 { u32::MAX } else { phase.order }, phase.n));
+    for (index, phase) in phases.iter_mut().enumerate() {
+        phase.order = index as u32 + 2;
+        phase.approval = approval;
+        phase.state = PhaseState::Draft;
+        phase.tasks = team.tasks.iter().filter(|task| task.phase == phase.n).map(|task| task.id).collect();
+    }
+    team.phases = phases;
+    Ok(())
+}
+
 fn phase_approval(team: &Team) -> Approval {
     team.settings.phase_approval.unwrap_or(team.settings.approval)
 }
@@ -864,6 +943,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
         }
         if let Some(folder) = update.get("folder") {
             member.folder = serde_json::from_value(folder.clone()).context("A folder is shared, worktree or clone")?;
+            super::dispatcher::sandbox_folder(member);
         }
         if let Some(directory) = update.get("directory") {
             member.directory = clean(directory.as_str().unwrap_or_default(), 500, "A directory")?;
@@ -880,7 +960,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
             let profile = profile.as_str().unwrap_or_default().to_owned();
             ensure!(
                 profile.is_empty() || ["read", "write", "build", "commit", "network"].contains(&profile.as_str()),
-                "A permissions profile is read, write, build, commit or network"
+                "Member \"{id}\": field \"permissions_profile\" is read, write, build, commit or network, not \"{profile}\""
             );
             if profile_rank(&profile) > profile_rank(&member.permissions_profile) {
                 widen.push(json!({"member":id,"from":member.permissions_profile,"to":profile}));
@@ -892,7 +972,10 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
         if let Some(context) = update.get("context_before_task") {
             ensure!(matches!(actor, Actor::Human), "Only you set a member's context before a task");
             let context = context.as_str().unwrap_or_default().to_owned();
-            ensure!(matches!(context.as_str(), "" | "none" | "compact" | "clear"), "A context before a task is none, compact or clear");
+            ensure!(
+                matches!(context.as_str(), "" | "none" | "compact" | "clear"),
+                "Member \"{id}\": field \"context_before_task\" is none, compact or clear, not \"{context}\""
+            );
             member.context_before_task = context;
         }
         // #581 N6, spec 2: the owner edits the models a member may switch
@@ -950,7 +1033,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-pub(crate) const OWNER_SETTINGS: [&str; 21] = [
+pub(crate) const OWNER_SETTINGS: [&str; 22] = [
     "approval",
     "phase_approval",
     "max_members",
@@ -971,6 +1054,8 @@ pub(crate) const OWNER_SETTINGS: [&str; 21] = [
     "restart_crashed",
     // U56: only the owner lets the lead restart a stuck member.
     "lead_restarts_stuck",
+    // Task 24: only the owner lets Zerus interrupt a member's revoked work.
+    "interrupt_revoked",
     // #752: only the owner turns the build broker on.
     "build_broker",
     // U62: the owner's override of the project's test configuration.
@@ -993,7 +1078,10 @@ fn ensure_lead_settings(old: &Settings, new: &Settings, actor: &Actor, on_word: 
         if field == "max_members" && on_word {
             continue;
         }
-        ensure!(old.get(field) == new.get(field), "Only you change the team's {field}");
+        ensure!(
+            old.get(field) == new.get(field),
+            "Only you change the team's {field}: propose it, {{\"kind\":\"settings\",\"settings\":{{\"{field}\":...}},\"reason\":\"...\"}} | hgs team propose --json, and the owner allows it with a click"
+        );
     }
     Ok(())
 }
@@ -1055,7 +1143,8 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
     let approval = if urgent { Approval::Auto } else { phase_approval(team) };
     // U59: a free team's open phase takes the tasks as they come, with no new
     // phase and no approval; they run as added.
-    let free_open = (team.plan_mode == PlanMode::Free && target.is_none()).then(|| open_phase(team));
+    // Task #58: the phase that plans in free mode, whichever it is.
+    let free_open = if target.is_none() { free_phase(team) } else { None };
     // Several drafts may queue, in order; a phase added while an earlier one is
     // still a Draft is a Draft too, whatever the approval says (F9). U58: tasks
     // added to an accepted phase are Pending, not Draft.
@@ -1160,7 +1249,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
                 rejection.reworked_at = Some(now());
             }
         }
-        events.push(Event::new("phase_edited", json!({"by":by,"phase":n,"diff":{"added":ids}})));
+        events.push(Event::new("phase_edited", with_origins(json!({"by":by,"phase":n,"diff":{"added":ids}}), team, &ids)));
         return Ok(json!({"status":"edited","phase":n,"tasks":ids,"validation":validation,"renumbered":renumbered_json(&renumbered)}));
     }
     if let Some(n) = free_open {
@@ -1168,7 +1257,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
         if let Some(at) = team.phases.iter().position(|phase| phase.n == n) {
             team.phases[at].tasks.extend(ids.iter().copied());
         }
-        events.push(Event::new("phase_edited", json!({"by":by,"phase":n,"diff":{"added":ids},"free":true})));
+        events.push(Event::new("phase_edited", with_origins(json!({"by":by,"phase":n,"diff":{"added":ids},"free":true}), team, &ids)));
         return Ok(json!({"status":"added","phase":n,"tasks":ids,"validation":validation,"renumbered":renumbered_json(&renumbered)}));
     }
     team.phases.push(Phase {
@@ -1199,7 +1288,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
     });
     events.push(Event::new(
         "phase_added",
-        json!({"by":by,"phase":n,"title":title,"tasks":ids.len(),"barrier":barrier,"approval":approval}),
+        with_origins(json!({"by":by,"phase":n,"title":title,"tasks":ids.len(),"barrier":barrier,"approval":approval}), team, &ids),
     ));
     Ok(json!({"status":"added","phase":n,"tasks":ids,"approval":approval,"validation":validation,"renumbered":renumbered_json(&renumbered)}))
 }
@@ -1390,9 +1479,35 @@ fn renumber_new_tasks(team: &Team, tasks: &mut [Task]) -> anyhow::Result<BTreeMa
                 ),
             }
         }
+        // Task #60: an origin among the new tasks moves with them (#754); any
+        // other names a task of the plan.
+        if let Some(origin) = task.origin {
+            match numbers.get(&origin) {
+                Some(number) => task.origin = Some(*number),
+                None => ensure!(
+                    team.task(origin).is_some(),
+                    "Task #{} names #{} as its origin, which is neither in the plan nor among the new tasks",
+                    task.id,
+                    origin
+                ),
+            }
+        }
         task.id = numbers[&task.id];
     }
     Ok(numbers.into_iter().filter(|(old, new)| old != new).collect())
+}
+
+/// Task #60: the feed's record of the added tasks' origins ({"12": 7}), kept
+/// in the history beside the event; an event with no follow-up is unchanged.
+fn with_origins(mut payload: Value, team: &Team, ids: &[u32]) -> Value {
+    let origins: serde_json::Map<String, Value> = ids
+        .iter()
+        .filter_map(|id| team.task(*id).and_then(|task| task.origin).map(|origin| (id.to_string(), json!(origin))))
+        .collect();
+    if !origins.is_empty() {
+        payload["origins"] = Value::Object(origins);
+    }
+    payload
 }
 
 /// The changed numbers as the receipts name them: {"747": 760}.
@@ -1434,7 +1549,7 @@ fn add_to_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
     let running = plan::phase_summary(team).iter().any(|phase| phase["n"].as_u64() == Some(u64::from(n)) && phase["state"] == "running");
     ensure!(running, "Phase {n} is not running; add the task to a draft phase or extend the plan");
     let word = verified_word(input)?;
-    ensure!(!actor.is_lead(team) || word.is_some(), "The lead adds a task to a running phase only on your word: pass \"owner_word\"");
+    ensure!(!actor.is_lead(team) || word.is_some(), "The lead adds a task to a running phase only on your word: propose {{\"kind\":\"add-to-phase\"}} as a card (hgs guide team-propose); the owner allows it with a click");
     let at = now();
     team.pending_additions.retain(|pending| addition_fresh(pending, at));
     let by = actor.label(team);
@@ -1492,7 +1607,7 @@ fn add_to_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
             ensure!(typed == "add" || typed == n.to_string(), "Type \"add\" or \"{n}\" to confirm the addition");
             typed
         }
-        (None, _) => bail!("The lead adds a task to a running phase only on your word: pass \"owner_word\""),
+        (None, _) => bail!("The lead adds a task to a running phase only on your word: propose {{\"kind\":\"add-to-phase\"}} as a card (hgs guide team-propose); the owner allows it with a click"),
     };
     let pending = team.pending_additions.remove(found);
     // #754: the plan may have grown since the warning: the tasks move on to the
@@ -1511,8 +1626,12 @@ fn add_to_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
     let health = plan::phase_health(team, n);
     events.push(Event::new(
         "phase_tasks_added",
-        json!({"by":by,"phase":n,"tasks":ids,"request":pending.request,"confirm":confirmation,
-            "critical_path":health.critical_path,"parallelism":health.parallelism}),
+        with_origins(
+            json!({"by":by,"phase":n,"tasks":ids,"request":pending.request,"confirm":confirmation,
+                "critical_path":health.critical_path,"parallelism":health.parallelism}),
+            team,
+            &ids,
+        ),
     ));
     Ok(json!({"status":"added","phase":n,"tasks":ids,"validation":validation,"renumbered":renumbered_json(&renumbered)}))
 }
@@ -1533,7 +1652,7 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
         // Section 9.3: a parent lead approves its sub-team's phases.
         ensure!(
             matches!(actor, Actor::Human) || parent_approves(team, actor) || owner_word.is_some(),
-            "The lead approves a phase only on the owner's word: pass \"owner_word\""
+            "The lead approves a phase only on the owner's word: propose {{\"kind\":\"approve-phase\"}} as a card (hgs guide team-propose); the owner allows it with a click"
         );
     }
     ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
@@ -1564,7 +1683,7 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
         } else if accepted {
             ensure!(
                 matches!(actor, Actor::Human) || parent_approves(team, actor) || owner_word.is_some(),
-                "Only you discard an accepted phase; the lead does it on your word: pass \"owner_word\""
+                "Only you discard an accepted phase; the lead does it on your word: propose {{\"kind\":\"discard-phase\"}} as a card (hgs guide team-propose); the owner allows it with a click"
             );
         }
     }
@@ -1636,9 +1755,13 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
             .filter_map(|id| team.task(*id).map(|task| json!({"id":id,"title":task.title})))
             .collect();
         team.tasks.retain(|task| !wanted.contains(&task.id));
-        // A surviving task cannot depend on a discarded one (F285).
+        // A surviving task cannot depend on a discarded one (F285), nor keep
+        // it as its origin (task #60).
         for task in &mut team.tasks {
             task.deps.retain(|dep| !wanted.contains(&dep.task));
+            if task.origin.is_some_and(|origin| wanted.contains(&origin)) {
+                task.origin = None;
+            }
         }
         events.push(Event::new(
             "phase_discarded",
@@ -1742,7 +1865,7 @@ fn ensure_owner_or_word(team: &Team, actor: &Actor, input: &Value, n: u32, what:
     ensure!(actor.is_lead(team), "Only the lead or you change phase {n}");
     ensure!(
         verified_word(input)?.is_some(),
-        "The lead {what} only on the owner's word: pass \"owner_word\" with the owner's sentence naming phase {n} and the change"
+        "The lead {what} only on the owner's word: propose the change of phase {n} as a card (hgs guide team-propose); the owner allows it with a click"
     );
     Ok(())
 }
@@ -1807,7 +1930,7 @@ fn unpause_phase(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec
         ensure!(!pause.owner, "The owner paused phase {n}; only the owner removes that pause");
         ensure!(
             team.settings.lead_removes_own_pause || owner_word.is_some(),
-            "The lead removes its pause of phase {n} only on the owner's word: pass \"owner_word\" with the owner's sentence naming phase {n} (the owner may set lead_removes_own_pause)"
+            "The lead removes its pause of phase {n} only on the owner's word: propose {{\"kind\":\"unpause-phase\",\"phase\":{n}}} as a card (hgs guide team-propose); the owner allows it with a click (the owner may set lead_removes_own_pause)"
         );
     }
     let by = actor.label(team);
@@ -1896,7 +2019,7 @@ pub(crate) fn settle_acceptance(team: &mut Team, events: &mut Vec<Event>) {
 /// does it on the owner's word naming the phase. The phase is Done, and the
 /// phases after it may start.
 fn accept_phase_as_owner(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
-    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only you accept a phase; the lead does it on your word");
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only you accept a phase; the lead does it on your word: propose {{\"kind\":\"accept-phase\"}} as a card (hgs guide team-propose); the owner allows it with a click");
     ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
     let n = phase_number(input)?;
     let at = team.phases.iter().position(|phase| phase.n == n).with_context(|| format!("Unknown phase {n}"))?;
@@ -1952,7 +2075,7 @@ fn return_to_draft(team: &mut Team, input: &Value, actor: &Actor, events: &mut V
     ensure!(owner_word.is_none() || actor.is_lead(team), "Only the lead acts on the owner's word");
     ensure!(
         matches!(actor, Actor::Human) || parent_approves(team, actor) || owner_word.is_some(),
-        "Only you return a phase to a draft; the lead does it on your word: pass \"owner_word\""
+        "Only you return a phase to a draft; the lead does it on your word: propose {{\"kind\":\"return-to-draft\"}} as a card (hgs guide team-propose); the owner allows it with a click"
     );
     ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
     let n = phase_number(input)?;
@@ -2055,6 +2178,7 @@ fn send_back(team: &mut Team, op: &str, input: &Value, actor: &Actor, events: &m
                             at: at_now,
                             notice: Notice::Pending,
                             refused: 0,
+                            ..Default::default()
                         });
                     }
                     task.status = TaskStatus::Draft;
@@ -2293,12 +2417,150 @@ pub(crate) fn open_phase(team: &Team) -> u32 {
         .unwrap_or(1)
 }
 
+/// Task #58 (owner, 2026-11-06): the phase that takes tasks as they come, if
+/// any: the open phase when it plans in free mode (its own mode, else the
+/// team's), else the running phase the owner opened to free planning. At most
+/// one phase is free at a time, so `extend` always knows where tasks go.
+pub(crate) fn free_phase(team: &Team) -> Option<u32> {
+    let open = open_phase(team);
+    if team.phase_mode(open) == PlanMode::Free {
+        return Some(open);
+    }
+    // Only a phase's own mode counts here: an older phase that merely reads
+    // the team's mode never reopens once the open phase was locked.
+    team.phases
+        .iter()
+        .rev()
+        .filter(|phase| phase.state == PhaseState::Approved)
+        .map(|phase| phase.n)
+        .chain(std::iter::once(1))
+        .find(|n| team.phase_modes.get(n) == Some(&PlanMode::Free))
+}
+
+/// Task #58: the mode of every phase the team has (phase 1, the records and
+/// any phase a task names), by number, for status, the list and the watch.
+pub(crate) fn phase_modes_view(team: &Team) -> Value {
+    let numbers: BTreeSet<u32> = std::iter::once(1)
+        .chain(team.tasks.iter().map(|task| task.phase))
+        .chain(team.phases.iter().filter(|phase| phase.state != PhaseState::Discarded).map(|phase| phase.n))
+        .collect();
+    Value::Object(numbers.into_iter().map(|n| (n.to_string(), json!(team.phase_mode(n)))).collect())
+}
+
+/// U59/task #58: the owner's close of a free phase (`close-phase`, or its
+/// build accepted): the team continues in standard mode, as U59 closes it, and
+/// the phase drops a mode of its own, so it reads standard and a later switch
+/// of the team's mode reaches it again. Unlike `phase-mode`, which changes one
+/// phase only, this is the team's U59 close.
+fn close_free_phase(team: &mut Team, n: u32) {
+    team.phase_modes.remove(&n);
+    team.plan_mode = PlanMode::Standard;
+}
+
+/// Task #58 (owner, 2026-11-06): switches one phase between free and standard
+/// planning; every other phase keeps its mode and the team's own mode stays
+/// the default of phases without one. The owner switches directly
+/// (`phase-mode`), the lead only through a `switch-plan-mode` card naming the
+/// phase.
+///
+/// Standard -> free opens a running phase (approved, or phase 1): new tasks
+/// join it as they come and run as added; while it is free it is never done by
+/// itself and no queued phase starts behind it. Only one phase is free at a
+/// time.
+///
+/// Free -> standard locks an accepted phase: its tasks keep their state and
+/// run on, and no new task joins it without a plan edit (`extend` with its
+/// phase, which asks the owner for an accepted phase). Its open build task
+/// stays an ordinary task of the phase (the phase is done only when it is
+/// decided) and no longer closes anything; a pending close of the phase ends
+/// with the lock, which is that close (`close_pending` in the receipt and the
+/// event).
+pub(crate) fn switch_phase_mode(
+    team: &mut Team,
+    n: u32,
+    mode: PlanMode,
+    by: &str,
+    proposal: &str,
+    reason: &str,
+    events: &mut Vec<Event>,
+) -> anyhow::Result<Value> {
+    ensure!(
+        matches!(team.status, TeamStatus::Running | TeamStatus::Paused),
+        "Only a running or paused team switches a phase's mode"
+    );
+    // Phase 1 is the approved initial plan and has no record.
+    let state = match team.phases.iter().find(|phase| phase.n == n) {
+        Some(record) => record.state,
+        None if n == 1 => PhaseState::Approved,
+        None => bail!("Unknown phase {n}"),
+    };
+    let word = |mode: PlanMode| if mode == PlanMode::Free { "free" } else { "standard" };
+    ensure!(team.phase_mode(n) != mode, "Phase {n} already plans in {} mode", word(mode));
+    let mut build = None;
+    let mut close_pending = None;
+    match mode {
+        PlanMode::Free => {
+            ensure!(
+                state == PhaseState::Approved,
+                "Phase {n} is not running: only a running phase opens for tasks as they come"
+            );
+            if let Some(open) = free_phase(team).filter(|open| *open != n) {
+                bail!("Phase {open} already takes tasks as they come; switch it to standard first");
+            }
+            team.phase_modes.insert(n, PlanMode::Free);
+        }
+        PlanMode::Standard => {
+            ensure!(state.is_accepted(), "Phase {n} is not accepted: a draft has no mode to lock");
+            team.phase_modes.insert(n, PlanMode::Standard);
+            build = team
+                .tasks
+                .iter()
+                .find(|task| task.phase == n && task.phase_build && !task.status.finished())
+                .map(|task| task.id);
+            if team.free_close_pending == Some(n) {
+                close_pending = team.free_close_pending.take();
+            }
+        }
+    }
+    let proposal = (!proposal.is_empty()).then_some(proposal);
+    events.push(Event::new(
+        "phase_mode_switched",
+        json!({"by":by,"phase":n,"mode":mode,"proposal":proposal,"reason":reason,"build":build,"close_pending":close_pending}),
+    ));
+    Ok(json!({"status":"switched","phase":n,"mode":mode,"build":build,"close_pending":close_pending,
+        "phase_modes":phase_modes_view(team)}))
+}
+
+/// U59/task #58: what Allow on a `switch-plan-mode` card applies: with a phase
+/// in its change, that phase's mode; without one, the team's own mode (U59).
+pub(crate) fn apply_mode_proposal(
+    team: &mut Team,
+    change: &Value,
+    mode: &str,
+    id: &str,
+    reason: &str,
+    events: &mut Vec<Event>,
+) -> anyhow::Result<Value> {
+    let wanted = if mode == "free" { PlanMode::Free } else { PlanMode::Standard };
+    if let Some(n) = change.get("phase").filter(|phase| !phase.is_null()) {
+        let n = n.as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0).context("Not a phase number")?;
+        return switch_phase_mode(team, n, wanted, "You", id, reason, events);
+    }
+    // U59: the team's mode. The open phase follows it with every phase that
+    // has no mode of its own, so the switch reaches the running work.
+    team.plan_mode = wanted;
+    let open = open_phase(team);
+    team.phase_modes.remove(&open);
+    if wanted == PlanMode::Standard {
+        // Task #58: back to standard leaves no phase free.
+        team.phase_modes.retain(|_, mode| *mode != PlanMode::Free);
+    }
+    events.push(Event::new("plan_mode_switched", json!({"by":"You","mode":mode,"proposal":id,"reason":reason})));
+    Ok(json!({"status":"switched","plan_mode":mode}))
+}
+
 /// The accepted phases (phase 1 included) whose tasks are all finished.
 fn phases_done(team: &Team) -> BTreeSet<u32> {
-    // U59: a free team's open phase is never done by itself.
-    if team.plan_mode == PlanMode::Free {
-        return BTreeSet::new();
-    }
     let mut numbers: BTreeSet<u32> = team.tasks.iter().map(|task| task.phase).collect();
     // U63: a phase that requires the owner's acceptance is done once accepted.
     numbers.retain(|n| {
@@ -2308,19 +2570,27 @@ fn phases_done(team: &Team) -> BTreeSet<u32> {
             })
     });
     numbers.retain(|n| team.tasks.iter().filter(|task| task.phase == *n).all(|task| task.status.finished()));
+    // U59: a free phase is never done by itself (task #58: whichever phase it is).
+    if let Some(free) = free_phase(team) {
+        numbers.remove(&free);
+    }
     numbers
 }
 
 /// U25: a phase whose tasks all ended says so once, and a queued phase starts
 /// once every earlier phase is finished.
 fn advance_phases(team: &mut Team, done_before: &BTreeSet<u32>, events: &mut Vec<Event>) {
-    if !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) || team.plan_mode == PlanMode::Free {
-        // U59: a free phase never closes by itself and no phase starts behind it.
+    if !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
         return;
     }
     for n in phases_done(team).difference(done_before) {
         let title = team.phases.iter().find(|phase| phase.n == *n).map(|phase| phase.title.clone()).unwrap_or_default();
         events.push(Event::new("phase_done", json!({"phase":n,"title":title})));
+    }
+    if free_phase(team).is_some() {
+        // U59: a free phase never closes by itself and no phase starts behind
+        // it (task #58: the free phase is never in the done set above).
+        return;
     }
     let mut order: Vec<usize> = (0..team.phases.len()).filter(|at| team.phases[*at].state == PhaseState::Queued).collect();
     order.sort_by_key(|at| (team.phases[*at].order(), team.phases[*at].n));
@@ -2405,6 +2675,10 @@ fn renumber_drafts(team: &mut Team) -> Value {
             if let Some(new) = map.get(&dep.task) {
                 dep.task = *new;
             }
+        }
+        // Task #60: the follow-up's link follows its origin's new number.
+        if let Some(new) = task.origin.and_then(|origin| map.get(&origin)) {
+            task.origin = Some(*new);
         }
     }
     // The phases stay in their display order; the renumbered drafts are the
@@ -2533,7 +2807,7 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
         if let Some(value) = value.get("title") {
             let old = task.title.clone();
             task.title = clean_text(value.as_str().unwrap_or_default().trim(), 200, "A task title")?;
-            ensure!(!task.title.is_empty(), "Task #{id} needs a title");
+            ensure!(!task.title.is_empty(), "Task #{id}: field \"title\" is required");
             if old != task.title {
                 changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"title","from":old,"to":task.title}));
             }
@@ -2571,15 +2845,38 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
         }
         if let Some(value) = value.get("deps") {
             let old: Vec<String> = task.deps.iter().map(|dep| format!("#{}", dep.task)).collect();
-            task.deps = serde_json::from_value(value.clone()).context("Invalid dependencies")?;
+            task.deps = serde_json::from_value(value.clone()).map_err(|error| {
+                anyhow::anyhow!("Task #{id}: field \"deps\": {error}; a dependency is {{\"task\":1}} or {{\"task\":1,\"kind\":\"soft\"}}")
+            })?;
             let mut seen = BTreeSet::new();
             task.deps.retain(|dep| seen.insert(dep.task));
-            ensure!(task.deps.iter().all(|dep| dep.task != id), "Task #{id} depends on itself");
+            ensure!(task.deps.iter().all(|dep| dep.task != id), "Task #{id}: field \"deps\": the task depends on itself");
             let new: Vec<String> = task.deps.iter().map(|dep| format!("#{}", dep.task)).collect();
             if old != new {
                 changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"deps","from":old.join(", "),"to":new.join(", ")}));
             }
             fields.push("deps");
+        }
+        // Task #60: the follow-up's origin; null removes it. Validation below
+        // refuses a task the team does not have.
+        if let Some(value) = value.get("origin") {
+            let old = task.origin;
+            task.origin = match value {
+                Value::Null => None,
+                other => Some(
+                    other
+                        .as_u64()
+                        .and_then(|origin| u32::try_from(origin).ok())
+                        .filter(|origin| *origin > 0)
+                        .with_context(|| format!("Task #{id}: field \"origin\": a task number, or null to remove it"))?,
+                ),
+            };
+            ensure!(task.origin != Some(id), "Task #{id}: field \"origin\": a follow-up names another task as its origin");
+            if old != task.origin {
+                let name = |origin: Option<u32>| origin.map(|origin| format!("#{origin}")).unwrap_or_default();
+                changes.push(json!({"kind":"changed","task":id,"title":task.title,"field":"origin","from":name(old),"to":name(task.origin)}));
+            }
+            fields.push("origin");
         }
         if let Some(assignee) = assignee {
             if task.assignee != assignee {
@@ -2604,7 +2901,7 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
                 Value::Null => None,
                 _ => {
                     let minutes = value.as_f64().context("estimate_minutes is a number of minutes or null")?;
-                    ensure!((1.0..=1440.0).contains(&minutes), "Task #{id}: an estimate is 1 to 1440 minutes");
+                    ensure!((1.0..=1440.0).contains(&minutes), "Task #{id}: field \"estimate_minutes\": an estimate is 1 to 1440 minutes");
                     Some(minutes.round())
                 }
             };
@@ -2658,7 +2955,8 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
             let lane = if value.is_null() {
                 None
             } else {
-                let mut lane: super::model::Lane = serde_json::from_value(value.clone()).context("Invalid lane")?;
+                let mut lane: super::model::Lane =
+                    serde_json::from_value(value.clone()).map_err(|error| anyhow::anyhow!("Task #{id}: field \"lane\": {error}"))?;
                 clean_lane(&mut lane, id)?;
                 Some(lane)
             };
@@ -2794,6 +3092,42 @@ fn close_questions(task: &mut Task) {
     }
 }
 
+/// Task 24: the member and number of the task's attempt still being worked on
+/// (sent or delivered, not yet reported), read before a revoke ends it.
+fn working_attempt(task: &Task) -> Option<(String, u32)> {
+    task.open_attempt()
+        .filter(|attempt| matches!(attempt.state, AttemptState::Delivering | AttemptState::Delivered | AttemptState::Unconfirmed))
+        .map(|attempt| (attempt.member.clone(), attempt.n))
+}
+
+/// Task 24: a member still working on an attempt that left it hears it at
+/// once, through the #511 N3 stop notice (phase 0); the dispatcher sends it as
+/// soon as the session runs, and interrupts a busy turn first when the owner
+/// set interrupt_revoked. Team 33fbafeb: task 4 was reassigned from core while
+/// core built it, nobody told core, and its next task waited for that turn.
+fn tell_revoked(team: &mut Team, task: u32, working: Option<(String, u32)>, reason: String) {
+    let Some((member, attempt)) = working else { return };
+    if member.is_empty() || member == team.lead {
+        return;
+    }
+    let title = team.task(task).map(|found| found.title.clone()).unwrap_or_default();
+    team.stops.push(StopNotice {
+        id: uuid::Uuid::new_v4().to_string(),
+        task,
+        title,
+        member,
+        attempt,
+        phase: 0,
+        reason,
+        at: now(),
+        notice: Notice::Pending,
+        interrupt: team.settings.interrupt_revoked,
+        ..Default::default()
+    });
+    let excess = team.stops.len().saturating_sub(20);
+    team.stops.drain(..excess);
+}
+
 /// The task's open attempt must be revoked before another starts. The
 /// dispatcher interrupts the old worker separately.
 fn revoke(task: &mut Task, why: &str) -> Option<u32> {
@@ -2815,8 +3149,8 @@ fn revoke(task: &mut Task, why: &str) -> Option<u32> {
 /// lead to extend it or finish it.
 pub(crate) fn all_decided(team: &Team) -> bool {
     // U59: an empty queue in free mode is idle, not done: the team waits for
-    // tasks to be added to its open phase.
-    if team.plan_mode == PlanMode::Free {
+    // tasks to be added to its open phase (task #58: any free phase).
+    if free_phase(team).is_some() {
         return false;
     }
     !team.tasks.is_empty() && team.tasks.iter().all(|task| task.status.finished())
@@ -3484,7 +3818,7 @@ fn swap_member(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<E
     ensure!(
         matches!(actor, Actor::Human)
             || (actor.is_lead(team) && input["roster_word"].as_bool() == Some(true)),
-        "Only you swap a member; the lead needs your word"
+        "Only you swap a member; the lead needs your word: propose {{\"kind\":\"swap-member\"}} as a card (hgs guide team-propose); the owner allows it with a click"
     );
     ensure!(
         matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
@@ -3601,8 +3935,14 @@ fn swap_one(team: &mut Team, input: &Value, id: &str, keep_session: bool, actor:
         } else {
             member.launch_after_swap = false;
         }
+        // Task #28 (5): a member swapped to DeepSeek before it has a folder
+        // gets a clone, not the worktree its old agent had.
+        if member.session.is_none() {
+            super::dispatcher::sandbox_folder(member);
+        }
         member.launch_id.clear();
         member.error.clear();
+        member.host_waits = 0;
         member.seen = None;
         member.settings_applied = false;
         member.pending = None;
@@ -3811,7 +4151,31 @@ fn ask(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -
         })
         .collect();
     let target = |task: usize| team.tasks[task].id;
-    let (task, asked) = match given {
+    // Task #29: a named attempt (or stage run) must be the work the question
+    // is filed on. Before, a member proven by its session could name any id:
+    // it was ignored and the question went to whatever was open.
+    let named = text(input, "attempt").trim().to_owned();
+    let id_of = |task: usize, asked: &AskTarget| match asked {
+        AskTarget::Attempt(attempt) => team.tasks[task].attempts[*attempt].id.clone(),
+        AskTarget::Stage(run) => {
+            team.tasks[task].pipeline_run.as_ref().and_then(|pipeline| pipeline.runs.get(*run)).map(|run| run.id.clone()).unwrap_or_default()
+        }
+    };
+    let by_attempt = (!named.is_empty() && given.is_none())
+        .then(|| {
+            open.iter()
+                .map(|(task, attempt)| (*task, AskTarget::Attempt(*attempt)))
+                .chain(stages.iter().map(|(task, run)| (*task, AskTarget::Stage(*run))))
+                .find(|(task, asked)| id_of(*task, asked) == named)
+        })
+        .flatten();
+    ensure!(
+        named.is_empty() || given.is_some() || by_attempt.is_some(),
+        "Attempt {named} is not your open attempt or stage; your task and attempt: hgs team current --json"
+    );
+    let (task, asked) = match (by_attempt, given) {
+        (Some(found), _) => found,
+        (None, given) => match given {
         Some(id) => {
             let found = open
                 .iter()
@@ -3829,7 +4193,15 @@ fn ask(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -
                 bail!("You have {} open pieces of work: {}; name one with \"task\"", tasks.len(), tasks.join(", "));
             }
         },
+        },
     };
+    if !named.is_empty() {
+        ensure!(
+            id_of(task, &asked) == named,
+            "Attempt {named} is not your open attempt or stage on task #{}; your task and attempt: hgs team current --json",
+            target(task)
+        );
+    }
     let question = next_question(team);
     let role = team.role_of(member);
     let task_id = team.tasks[task].id;
@@ -4082,6 +4454,15 @@ fn finding(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Str
         "urgent" => {
             let mut quick = input.clone();
             quick["urgent"] = json!(true);
+            // Task #60: the fix of a finding is a follow-up of the task that
+            // caused it (else the one whose report filed it), unless it names
+            // its own origin.
+            let source = team.findings[at].task.or(Some(team.findings[at].from_task)).filter(|id| team.task(*id).is_some());
+            if let (Some(source), Some(tasks)) = (source, quick["tasks"].as_array_mut()) {
+                for task in tasks.iter_mut().filter(|task| task.is_object() && task.get("origin").is_none_or(Value::is_null)) {
+                    task["origin"] = json!(source);
+                }
+            }
             extend(team, &quick, actor, offline, events)?;
             "urgent"
         }
@@ -4168,6 +4549,7 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
             ensure!(revision == state.revision, "Draft revision is {} now; read it again", state.revision);
             let set = input["set"].as_object().context("A draft update names the fields to set")?;
             let mut changed = Vec::new();
+            let mut phases_changed = false;
             for (field, value) in set {
                 if !human && state.owner_edited.contains(field) {
                     bail!("Owner changed {field}");
@@ -4233,14 +4615,26 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                         team.members = members;
                     }
                     "tasks" => {
+                        // Task 23: each task keeps the phase it names, as in a plan.
                         let tasks: Vec<Task> = value
                             .as_array()
                             .context("Tasks are a list")?
                             .iter()
-                            .map(parse_task)
+                            .map(|value| {
+                                let mut task = parse_task(value)?;
+                                task.phase = task_phase(value)?;
+                                Ok(task)
+                            })
                             .collect::<anyhow::Result<Vec<_>>>()?;
+                        for (index, task) in tasks.iter().enumerate() {
+                            ensure!(tasks[..index].iter().all(|t| t.id != task.id), "Task #{} is used twice", task.id);
+                        }
                         team.tasks = tasks;
+                        phases_changed = true;
                     }
+                    // Task 23: the phases 2..N the tasks name, with their titles
+                    // and barriers, as in a plan.
+                    "phases" => phases_changed = true,
                     // Feedback 7: the plan mode is set in the draft too: the
                     // owner chooses it, the lead offers it.
                     "plan_mode" => {
@@ -4254,10 +4648,14 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                     }
                     "plan_mode_reason" => team.plan_mode_reason = clean(value.as_str().unwrap_or_default().trim(), 500, "A plan mode reason")?,
                     other => bail!(
-                        "A draft sets name, goal, addendum, settings, members, tasks, plan_mode or plan_mode_reason, not {other}"
+                        "A draft sets name, goal, addendum, settings, members, tasks, phases, plan_mode or plan_mode_reason, not {other}"
                     ),
                 }
                 changed.push(field.clone());
+            }
+            if phases_changed {
+                let by = actor.label(team);
+                draft_phases(team, set.get("phases"), &by)?;
             }
             if human {
                 for field in &changed {
@@ -4295,6 +4693,14 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                 validation.errors.len(),
                 validation.errors.iter().map(|finding| finding.text.as_str()).collect::<Vec<_>>().join("; ")
             );
+            // Task 23: the draft's phases 2..N become the team's Draft phases,
+            // approved in order; a listed phase without tasks is refused as in
+            // a plan.
+            let by = actor.label(team);
+            draft_phases(team, None, &by)?;
+            if let Some(empty) = team.phases.iter().find(|phase| phase.tasks.is_empty()) {
+                bail!("Phase {} has no tasks: give it tasks or remove it from the draft's phases", empty.n);
+            }
             let approve = input["approve"].as_bool() == Some(true);
             if approve {
                 ensure!(
@@ -4373,6 +4779,7 @@ pub(crate) fn next_team(team: &Team, goal: &str, name: &str, live: &[super::disp
         // N8: none of the session-bound state of the old team follows.
         member.launch_id.clear();
         member.error.clear();
+        member.host_waits = 0;
         member.settings_applied = false;
         member.asked.clear();
         member.pending = None;
@@ -4417,18 +4824,30 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
     let kind = text(input, "kind").to_owned();
     ensure!(
         ["add-member", "remove-member", "swap-member", "next-goal", "switch-plan-mode",
-         "add-to-phase", "cancel-tasks", "discard-phase", "question", "switch-setting"].contains(&kind.as_str()),
-        "A proposal adds or removes members, adds tasks to a running phase, cancels tasks, discards a phase, starts the next goal, switches the plan mode or a setting, or asks you a question"
+         "add-to-phase", "cancel-tasks", "discard-phase", "question", "switch-setting", "iron-rules"].contains(&kind.as_str())
+            || OWNER_OPS.contains(&kind.as_str()),
+        "A proposal is one of: add-member, remove-member, swap-member, next-goal, switch-plan-mode, add-to-phase, cancel-tasks, discard-phase, question, switch-setting, iron-rules, {}",
+        OWNER_OPS.join(", ")
     );
     let reason = clean(text(input, "reason").trim(), 2000, "A proposal reason")?;
     // #740: a question carries its own words; any other proposal its reason.
     ensure!(!reason.is_empty() || kind == "question", "A proposal needs its reason");
     // U59: a plan-mode proposal names the mode.
     let mut mode = String::new();
+    // Task #58: a plan-mode proposal that names a phase switches that phase only.
+    let mut mode_phase = None;
     if kind == "switch-plan-mode" {
         let requested = text(input, "mode").to_owned();
         ensure!(matches!(requested.as_str(), "free" | "standard"), "A plan-mode proposal names free or standard");
         mode = requested;
+        if let Some(value) = input.get("phase").filter(|value| !value.is_null()) {
+            let n = value
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .filter(|n| *n > 0)
+                .context("A plan-mode proposal's phase is a phase number")?;
+            mode_phase = Some(n);
+        }
     }
     // U57: the exact change the owner's card shows and Allow applies.
     let change = match kind.as_str() {
@@ -4461,8 +4880,26 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
             let phase = input["phase"].as_u64().context("The discard-phase proposal names its phase")?;
             json!({"phase":phase})
         }
+        "switch-plan-mode" => match mode_phase {
+            Some(n) => json!({"phase":n}),
+            None => Value::Null,
+        },
         "question" => question_change(input)?,
         "swap-member" => swap_change(team, input)?,
+        // Task #21: an owner-gated operation the owner allows with a click.
+        op if OWNER_OPS.contains(&op) => owner_op_change(team, op, input)?,
+        "iron-rules" => iron_rules_change(input)?,
+        // Task #21: the owner settings beyond the build broker go through the
+        // settings operation the card names.
+        "switch-setting" if text(input, "setting") != "build_broker" && OWNER_VALUE_SETTINGS.contains(&text(input, "setting")) => {
+            let setting = text(input, "setting").to_owned();
+            ensure!(input.get("value").is_some_and(|value| !value.is_null()), "A switch proposal names its value");
+            let mut settings = serde_json::Map::new();
+            settings.insert(setting, input["value"].clone());
+            let change = owner_op_change(team, "settings", &json!({"settings":settings}))?;
+            json!({"setting":text(input, "setting"),"value":input["value"],"op":"settings","input":change["input"],
+                   "summary":change["summary"],"lines":change["lines"]})
+        }
         "switch-setting" => {
             // #752: a switch card names one owner setting the lead may propose
             // and the value Allow sets.
@@ -4494,6 +4931,14 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
         let mut trial = team.clone();
         let mut ignored = Vec::new();
         run_proposal(&mut trial, &kind, &member, &change, &mode, "", "", &BTreeSet::new(), &mut ignored)
+            .map_err(|error| anyhow::anyhow!("Allow could not apply this proposal: {error:#}"))?;
+    }
+    // Task #21: an owner operation is tried as the owner's own request.
+    if OWNER_OPS.contains(&kind.as_str()) {
+        let mut trial = team.clone();
+        let mut value = change["input"].clone();
+        value["team"] = json!(team.id);
+        apply(&mut trial, &kind, &value, &Actor::Human, &BTreeSet::new(), &mut Vec::new())
             .map_err(|error| anyhow::anyhow!("Allow could not apply this proposal: {error:#}"))?;
     }
     let id = format!("p{}", team.proposals.len() + 1);
@@ -4693,15 +5138,18 @@ fn run_proposal(team: &mut Team, kind: &str, member: &Value, change: &Value, mod
             let phase = change["phase"].as_u64().context("The discard-phase proposal carries its phase")?;
             apply(team, "discard-phase", &json!({"phase":phase}), &Actor::Human, offline, events)?
         }
-        "switch-plan-mode" => {
-            team.plan_mode = if mode == "free" { PlanMode::Free } else { PlanMode::Standard };
-            events.push(Event::new(
-                "plan_mode_switched",
-                json!({"by":"You","mode":mode,"proposal":id,"reason":reason}),
-            ));
-            json!({"status":"switched","plan_mode":mode})
+        "switch-plan-mode" => apply_mode_proposal(team, change, mode, id, reason, events)?,
+        "switch-setting" if change["op"] == "settings" => {
+            let mut value = change["input"].clone();
+            value["team"] = json!(team.id);
+            apply(team, "settings", &value, &Actor::Human, offline, events)?
         }
         "switch-setting" => switch_setting(team, change, id, reason, events)?,
+        op if OWNER_OPS.contains(&op) => {
+            let mut value = change["input"].clone();
+            value["team"] = json!(team.id);
+            apply(team, op, &value, &Actor::Human, offline, events)?
+        }
         _ => bail!("A next-goal proposal is accepted with hgs team next-goal"),
     };
     Ok(result)
@@ -4709,6 +5157,177 @@ fn run_proposal(team: &mut Team, kind: &str, member: &Value, change: &Value, mod
 
 /// #752: the owner settings a lead may propose to switch, each a flag.
 pub(crate) const SWITCHES: [&str; 1] = ["build_broker"];
+
+/// Task #21 (owner, 2026-11-05): every operation the lead may run only on the
+/// owner's word is also a proposal kind. The card shows the exact change; the
+/// owner's Allow runs it as the owner's own `hgs team <op>`, once, under the
+/// proposal's request id; Reject changes nothing. A typed word stays accepted
+/// as a fallback, but no flow needs one.
+pub(crate) const OWNER_OPS: [&str; 14] = [
+    "relaunch",
+    "scale",
+    "drain",
+    "approve",
+    "approve-phase",
+    "return-to-draft",
+    "edit-draft",
+    "move-phase",
+    "unpause-phase",
+    "phase-acceptance",
+    "accept-phase",
+    "extend",
+    "settings",
+    // U62: one full test run, bound to its release.
+    "full-tests",
+];
+
+/// Task #21: owner settings a switch card sets through the settings operation
+/// (besides the build broker's flag).
+pub(crate) const OWNER_VALUE_SETTINGS: [&str; 3] = ["base_branch", "full_tests", "max_members"];
+
+/// The request fields a card never carries: who asks, its identity and any
+/// owner word, which the owner's Allow replaces.
+const CARD_RESERVED: [&str; 13] = [
+    "kind", "reason", "team", "request_id", "by", "attempt", "input", "owner_word", "owner_word_checked", "owner_word_event",
+    "owner_word_change", "owner_word_count", "roster_word",
+];
+
+/// Task #21: the change of an owner-operation card: the operation, its input
+/// (`"input":{...}`, or the proposal's own fields), and what the card says.
+fn owner_op_change(team: &Team, op: &str, input: &Value) -> anyhow::Result<Value> {
+    let mut given = match input.get("input") {
+        Some(Value::Object(fields)) => Value::Object(fields.clone()),
+        Some(other) if !other.is_null() => bail!("A proposal's \"input\" is the operation's request object"),
+        _ => {
+            let mut fields = input.as_object().cloned().unwrap_or_default();
+            fields.retain(|key, _| !CARD_RESERVED.contains(&key.as_str()));
+            Value::Object(fields)
+        }
+    };
+    if let Some(fields) = given.as_object_mut() {
+        fields.retain(|key, _| !CARD_RESERVED.contains(&key.as_str()));
+        // A team revision moves with every change, the proposal's own too;
+        // the phase operations read "revision" as their own and keep it.
+        if !matches!(op, "edit-draft" | "move-phase" | "discard-phase" | "extend") {
+            fields.remove("revision");
+        }
+    }
+    if op == "settings" {
+        ensure!(given.get("settings").is_some_and(Value::is_object) || given.get("members_update").is_some(),
+            "A settings proposal names \"settings\" (or \"members_update\"), such as {{\"kind\":\"settings\",\"settings\":{{\"max_members\":8}},\"reason\":\"...\"}}");
+    }
+    let (summary, lines) = describe_owner_op(team, op, &given);
+    Ok(json!({"op":op,"input":given,"summary":summary,"lines":lines}))
+}
+
+/// Task #21: what an owner-operation card says, in words the owner reads at a
+/// glance: the title and the lines under it.
+fn describe_owner_op(team: &Team, op: &str, input: &Value) -> (String, Vec<String>) {
+    let member = |key: &str| {
+        let id = text(input, key);
+        if id.is_empty() { "a member".to_owned() } else if team.member(id).is_some() { team.name_of(id) } else { id.to_owned() }
+    };
+    let n = input["phase"].as_u64().unwrap_or_default();
+    let phase = |n: u64| match team.phases.iter().find(|found| u64::from(found.n) == n).map(|found| found.title.trim().to_owned()) {
+        Some(title) if !title.is_empty() => format!("phase {n} ({title})"),
+        _ => format!("phase {n}"),
+    };
+    let mut lines = Vec::new();
+    let title = match op {
+        "relaunch" => format!("Relaunch {}", member("member")),
+        "drain" if input["draining"].as_bool() == Some(false) => format!("Keep {} (stop its drain)", member("member")),
+        "drain" => {
+            lines.push("It finishes its open work, takes nothing new, then its session is paused and it leaves the team.".to_owned());
+            format!("Drain {}", member("member"))
+        }
+        "scale" => {
+            let what: Vec<&str> = ["agent", "model", "effort", "account"].iter().map(|key| text(input, key)).filter(|value| !value.is_empty()).collect();
+            let count = input["count"].as_u64().unwrap_or_default();
+            if !what.is_empty() {
+                lines.push(what.join(", "));
+            }
+            format!("Add {count} × {}", text(input, "role").trim())
+        }
+        "approve" => {
+            lines.push(format!("{} tasks, {} members", team.tasks.len(), team.capped_members()));
+            "Approve the plan and run it".to_owned()
+        }
+        "approve-phase" => format!("Approve {}", phase(n)),
+        "return-to-draft" => format!("Return {} to a draft", phase(n)),
+        "edit-draft" => {
+            let changed = input["tasks_update"].as_array().map(Vec::len).unwrap_or_default();
+            if changed > 0 {
+                lines.push(format!("{changed} task changes"));
+            }
+            format!("Change {}", phase(n))
+        }
+        "move-phase" => format!("Move {} {}", phase(n), text(input, "position")).trim().to_owned(),
+        "unpause-phase" => format!("Remove the pause of {}", phase(n)),
+        "phase-acceptance" => format!("{} is accepted by {}", phase(n), input["acceptance"].as_str().unwrap_or("the default")),
+        "accept-phase" => {
+            if !text(input, "comment").is_empty() {
+                lines.push(text(input, "comment").chars().take(300).collect());
+            }
+            format!("Accept {}", phase(n))
+        }
+        "extend" => {
+            for task in input["tasks"].as_array().into_iter().flatten().take(20) {
+                lines.push(text(task, "title").chars().take(200).collect());
+            }
+            let count = input["tasks"].as_array().map(Vec::len).unwrap_or_default();
+            if n > 0 { format!("Add {count} tasks to {}", phase(n)) } else { format!("Add a phase of {count} tasks") }
+        }
+        "full-tests" if text(input, "release").trim().is_empty() || input["revoke"].as_bool() == Some(true) => {
+            "Revoke the full test run".to_owned()
+        }
+        "full-tests" => format!("Allow one full test run for {}", text(input, "release").trim()),
+        "settings" => {
+            let old = serde_json::to_value(&team.settings).unwrap_or_default();
+            for (field, value) in input["settings"].as_object().into_iter().flatten() {
+                let before = &old[field];
+                lines.push(if before.is_null() { format!("{field}: {value}") } else { format!("{field}: {before} → {value}") });
+            }
+            for update in input["members_update"].as_array().into_iter().flatten() {
+                let name = member_name(team, text(update, "id"));
+                for (field, value) in update.as_object().into_iter().flatten().filter(|(key, _)| *key != "id") {
+                    lines.push(format!("{name}: {field}: {value}"));
+                }
+            }
+            "Change the team's settings".to_owned()
+        }
+        other => other.to_owned(),
+    };
+    (title, lines)
+}
+
+fn member_name(team: &Team, id: &str) -> String {
+    if team.member(id).is_some() { team.name_of(id) } else { id.to_owned() }
+}
+
+/// Task #21: a card for the project's or a member session's iron rules
+/// (`hgs rules set`), checked now and set by the owner's Allow.
+fn iron_rules_change(input: &Value) -> anyhow::Result<Value> {
+    let mut given = match input.get("input") {
+        Some(Value::Object(fields)) => Value::Object(fields.clone()),
+        _ => {
+            let mut fields = input.as_object().cloned().unwrap_or_default();
+            fields.retain(|key, _| !CARD_RESERVED.contains(&key.as_str()));
+            Value::Object(fields)
+        }
+    };
+    if let Some(fields) = given.as_object_mut() {
+        fields.retain(|key, _| !CARD_RESERVED.contains(&key.as_str()));
+    }
+    let scope = text(&given, "scope").to_owned();
+    ensure!(matches!(scope.as_str(), "project" | "session"), "An iron-rules proposal names its scope, project or session");
+    let rules = super::super::iron_rules::validate(&given["rules"])?;
+    ensure!(given["expected_revision"].as_u64().is_some(), "An iron-rules proposal names the expected_revision it read");
+    let target = if scope == "project" { text(&given, "project").to_owned() } else { text(&given, "name").to_owned() };
+    ensure!(!target.is_empty(), "An iron-rules proposal names its project or session");
+    let summary = if scope == "project" { format!("Set the project's iron rules ({target})") } else { format!("Set the iron rules of {target}") };
+    let lines: Vec<String> = if rules.is_empty() { vec!["No rules".to_owned()] } else { rules.clone() };
+    Ok(json!({"op":"iron-rules","input":given,"summary":summary,"lines":lines}))
+}
 
 /// #752: Allow of a switch card sets the one setting it names.
 pub(crate) fn switch_setting(team: &mut Team, change: &Value, id: &str, reason: &str, events: &mut Vec<Event>) -> anyhow::Result<Value> {
@@ -4850,10 +5469,10 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
         team.last_build_at = Some(now());
         team.free_accepted_since_build = 0;
         if let Some(n) = team.free_close_pending.take() {
-            team.plan_mode = PlanMode::Standard;
+            close_free_phase(team, n);
             events.push(Event::new("free_phase_closed", json!({"by":label,"phase":n,"build":true})));
         }
-    } else if accept && team.plan_mode == PlanMode::Free {
+    } else if accept && team.task(id).is_some_and(|task| free_phase(team) == Some(task.phase)) {
         team.free_accepted_since_build += 1;
     } else if !accept && phase_build {
         if let Some(n) = team.free_close_pending.take() {
@@ -4903,6 +5522,7 @@ fn reassign(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
     let role = team.role_of(target);
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!task.status.finished(), "Task #{id} is already decided");
+    let working = working_attempt(task).filter(|(member, _)| member != target);
     let revoked = revoke(task, "reassigned");
     task.assignee = target.to_owned();
     task.pinned = true;
@@ -4915,6 +5535,7 @@ fn reassign(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
     if task.status != TaskStatus::Draft {
         task.status = TaskStatus::Pending;
     }
+    tell_revoked(team, id, working, format!("it was reassigned to {role}"));
     events.push(Event::new("reassigned", json!({"by":label,"task":id,"to":role,"revoked_attempt":revoked})));
     Ok(json!({"status":"reassigned","task":id,"revoked_attempt":revoked}))
 }
@@ -5025,9 +5646,11 @@ fn take_over(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Eve
     ensure!(matches!(actor, Actor::Human), "Only you can take over a task");
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!task.status.finished() && task.status != TaskStatus::Draft, "Task #{id} cannot be taken over now");
+    let working = working_attempt(task);
     let revoked = revoke(task, "taken over");
     task.assignee.clear();
     task.status = TaskStatus::InProgress;
+    tell_revoked(team, id, working, "the owner took it over".into());
     events.push(Event::new("taken_over", json!({"by":"You","task":id,"revoked_attempt":revoked})));
     Ok(json!({"status":"in_progress","task":id,"revoked_attempt":revoked}))
 }
@@ -5051,11 +5674,13 @@ fn cancel(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
         Some("queued") => task.merge = None,
         _ => {}
     }
+    let working = working_attempt(task);
     let revoked = revoke(task, "cancelled");
     let phase = task.phase;
     let phase_build = task.phase_build;
     task.status = TaskStatus::Cancelled;
     task.fresh_retry = false;
+    tell_revoked(team, id, working, "it was cancelled".into());
     // #759: the tasks it held start once their other dependencies are done;
     // the event and the lead's inbox name them for a re-plan.
     let released = super::plan::waiting_on(team, id);
@@ -5242,8 +5867,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         "integrate-build" => {
             ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you start the phase build");
             ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
-            ensure!(team.plan_mode == PlanMode::Free, "The build task belongs to a free phase");
-            let n = open_phase(team);
+            let n = free_phase(team).context("The build task belongs to a free phase")?;
             let id = add_build_task(team, n, &actor.label(team), events)?;
             Ok(json!({"status":"build_added","phase":n,"task":id}))
         }
@@ -5294,12 +5918,32 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             ));
             Ok(json!({"status":if undo {"undone"} else {"started"},"phase":n,"start_ahead":!undo}))
         }
+        // Task #58 (owner, 2026-11-06): the owner switches one phase between
+        // free and standard planning; the lead asks with a switch-plan-mode
+        // card naming the phase.
+        "phase-mode" => {
+            ensure!(
+                matches!(actor, Actor::Human),
+                "Only you switch a phase's mode; the lead proposes it (kind switch-plan-mode with its phase)"
+            );
+            let n = phase_number(input)?;
+            let mode = match text(input, "mode") {
+                "free" => PlanMode::Free,
+                "standard" => PlanMode::Standard,
+                _ => bail!("A phase's mode is free or standard"),
+            };
+            let reason = clean(text(input, "reason").trim(), 2000, "A reason")?;
+            switch_phase_mode(team, n, mode, "You", "", &reason, events)
+        }
         "close-phase" => {
             ensure!(matches!(actor, Actor::Human), "Only you close a free phase");
-            ensure!(team.plan_mode == PlanMode::Free, "The team is not planning in free mode");
+            let n = free_phase(team).context("The team is not planning in free mode")?;
             ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
             let reason = clean(text(input, "reason").trim(), 2000, "A close reason")?;
-            let n = open_phase(team);
+            // Task #58: a close that names its phase names the free one.
+            if let Some(named) = input.get("phase").and_then(Value::as_u64) {
+                ensure!(named == u64::from(n), "Phase {named} is not the free phase; phase {n} is");
+            }
             // (b) a phase whose work still runs is not closed; the running ids
             // are named so the owner or the lead knows what waits.
             let running: Vec<u32> = team
@@ -5323,7 +5967,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
                 events.push(Event::new("free_phase_close_pending", json!({"phase":n,"build":build})));
                 return Ok(json!({"status":"close_pending","phase":n,"build":build}));
             }
-            team.plan_mode = PlanMode::Standard;
+            close_free_phase(team, n);
             team.free_close_pending = None;
             events.push(Event::new("free_phase_closed", json!({"by":"You","phase":n,"reason":reason})));
             Ok(json!({"status":"closed","phase":n,"plan_mode":"standard","build_at":team.last_build_at}))
@@ -5338,7 +5982,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
                 matches!(actor, Actor::Human)
                     || (actor.is_lead(team)
                         && (input["roster_word"].as_bool() == Some(true) || (team.settings.lead_restarts_stuck && stuck))),
-                "Only you relaunch a member; the lead needs your word, or the owner's setting lead_restarts_stuck for a stuck member (hgs team settings with {{\"lead_restarts_stuck\":true}})"
+                "Only you relaunch a member; the lead proposes {{\"kind\":\"relaunch\",\"member\":\"ID\"}} as a card (hgs guide team-propose); the owner allows it with a click, or the owner's setting lead_restarts_stuck for a stuck member (hgs team settings with {{\"lead_restarts_stuck\":true}})"
             );
             let id = member_id;
             let by = actor.label(team);
@@ -5350,12 +5994,14 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
                 // and the owner has the same route.
                 member.restart_pending = true;
                 member.error.clear();
+                member.host_waits = 0;
                 member.launch_id.clear();
                 events.push(Event::new("member_restart_requested", json!({"by":by,"member":id})));
                 return Ok(json!({"status":"relaunching","member":id}));
             }
             ensure!(member.session.is_none() && !member.error.is_empty(), "This member's session did not fail to start");
             member.error.clear();
+            member.host_waits = 0;
             member.launch_id.clear();
             events.push(Event::new("relaunch", json!({"by":"You","member":id})));
             Ok(json!({"status":"relaunch","member":id}))
@@ -5525,7 +6171,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             ensure!(
                 matches!(actor, Actor::Human)
                     || (actor.is_lead(team) && input["roster_word"].as_bool() == Some(true)),
-                "Only you remove a member; the lead needs your word"
+                "Only you remove a member; the lead needs your word: propose {{\"kind\":\"remove-member\"}} as a card (hgs guide team-propose); the owner allows it with a click"
             );
             let id = text(input, "member").to_owned();
             ensure!(id != team.lead, "The lead cannot be removed");
@@ -5701,6 +6347,14 @@ mod ops_phases;
 #[cfg(test)]
 #[path = "tests/ops_phase_control.rs"]
 mod ops_phase_control;
+
+#[cfg(test)]
+#[path = "tests/ops_phase_modes.rs"]
+mod ops_phase_modes;
+
+#[cfg(test)]
+#[path = "tests/ops_origin.rs"]
+mod ops_origin;
 
 #[cfg(test)]
 #[path = "tests/ops_tasks.rs"]

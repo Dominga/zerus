@@ -281,6 +281,55 @@ fn adding_a_member_whose_folder_breaks_the_policy_is_refused() {
     });
 }
 
+/// Task #48: in a sandbox every refused store write is the sandbox's, whatever
+/// the error says (Codex's other user meets a private-folder check, not a
+/// read-only database), so the member's request waits in its folder.
+#[test]
+fn a_sandbox_queues_whatever_blocked_its_write() {
+    let error = anyhow::anyhow!("Missing team store parent: the folder is not private to this user");
+    assert!(!super::read_only(&error), "outside a sandbox an unrelated error is the error");
+    crate::platform::set_test_sandboxed(Some(true));
+    let queued = super::read_only(&error);
+    crate::platform::set_test_sandboxed(None);
+    assert!(queued);
+}
+
+/// Task #28 (5): team 33fbafeb's dsh member asked for a worktree got one; its
+/// sandbox could not write the git metadata (in the main checkout's `.git`),
+/// and the preflight only warned. A dsh member's own folder is a clone now,
+/// under the worktree policy too; another agent keeps its worktree.
+#[test]
+fn a_deepseek_member_given_a_worktree_gets_a_clone() {
+    use crate::state::teams::model::{FolderPolicy, MemberFolder};
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open(true).unwrap();
+        let mut team = running_team();
+        team.settings.folder_policy = FolderPolicy::Worktree;
+        let id = team.id.clone();
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+        run(
+            "add-member",
+            &json!({"request_id":"22222222-2222-4222-8222-222222222222","team":id,"by":"human",
+                "member":{"id":"ui2","role":"Frontend","agent":"dsh","model":"deepseek-flash","folder":"worktree"}}),
+            false,
+        )
+        .unwrap();
+        run(
+            "add-member",
+            &json!({"request_id":"33333333-3333-4333-8333-333333333333","team":id,"by":"human",
+                "member":{"id":"ops","role":"Ops","agent":"codex","folder":"worktree"}}),
+            false,
+        )
+        .unwrap();
+        let saved = Store::open(false).unwrap().load(&id).unwrap().unwrap();
+        assert_eq!(saved.member("ui2").unwrap().folder, MemberFolder::Clone);
+        assert_eq!(saved.member("ops").unwrap().folder, MemberFolder::Worktree);
+        let found = super::super::plan::validate(&saved, &Default::default());
+        assert!(!found.warnings.iter().any(|finding| finding.text.contains("cannot write its git metadata")), "{:?}", found.warnings);
+    });
+}
+
 /// N39/F1.3: extend keeps a folder or policy mismatch instead of dropping
 /// it (it names no task), so the phase that cannot run is not added.
 #[test]
@@ -1832,6 +1881,15 @@ fn a_full_test_run_needs_the_teams_policy_or_the_owners_grant() {
     use crate::state::teams::model::{FullTests, FullTestsGrant};
     assert!(super::full_test_run("cargo-test", &json!({})));
     assert!(!super::full_test_run("cargo-test", &json!({"filter":"teams"})));
+    // Task 53: the request hgs test affected prints for a client crate is
+    // narrowed by its filters; without filters (skips or a manifest alone,
+    // or only empty filters) it is still the whole suite.
+    let printed = json!({"filters":["teams::tests::","teams::catalog_edit::"],"skips":["teams::tests::slow"],"manifest":["client/core/Cargo.toml"]});
+    assert!(!super::full_test_run("cargo-test", &printed));
+    assert!(super::full_test_run("cargo-test", &json!({"manifest":["client/core/Cargo.toml"]})));
+    assert!(super::full_test_run("cargo-test", &json!({"skips":["teams::"],"manifest":["client/core/Cargo.toml"]})));
+    assert!(super::full_test_run("cargo-test", &json!({"filters":[],"manifest":["client/core/Cargo.toml"]})));
+    assert!(super::full_test_run("cargo-test", &json!({"filters":[" "]})));
     assert!(!super::full_test_run("qt-test", &json!({"suite":"test_teams"})));
     assert!(super::full_test_run("android-test", &json!({})));
     assert!(!super::full_test_run("cargo-build", &json!({})));
@@ -1871,7 +1929,7 @@ fn a_proposal_allow_could_not_apply_is_refused_when_made() {
         "tasks":[{"id":2,"title":"Follow-up","assignee":"dev","deps":[1]}]});
     let error = ops::apply(&mut team, "propose", &bare, &lead, &BTreeSet::new(), &mut Vec::new()).unwrap_err();
     let error = format!("{error:#}");
-    assert!(error.contains("Allow could not apply") && error.contains("A task is invalid"), "{error}");
+    assert!(error.contains("Allow could not apply") && error.contains("A task \"2\" is invalid: field \"deps\""), "{error}");
     assert!(team.proposals.is_empty(), "nothing was proposed");
     // Unknown work is refused too.
     let unknown = json!({"kind":"cancel-tasks","reason":"drop","tasks":[99]});

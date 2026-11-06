@@ -1,0 +1,98 @@
+// The Teams plan view's inputs. The team, member, task and phase shapes have
+// ONE definition in client/src/types.ts, the core's compact view models; this
+// module aliases them and adds the plan graph and New team's draft shapes.
+import type { TeamMemberView, TeamPhaseView, TeamTaskView } from "../../types";
+
+export type { TeamPipelineRun, TeamView } from "../../types";
+export type TaskView = TeamTaskView;
+export type PhaseView = TeamPhaseView;
+export type MemberView = TeamMemberView;
+export type DepView = TeamTaskView["deps"][number];
+
+export interface GraphNode {
+  id: number;
+  title: string;
+  status: string;
+  assignee: string;
+  role: string;
+  phase: number;
+  layer: number;
+  ready: boolean;
+  in_cycle: boolean;
+  /** Task #60: the task it was spawned from, when the graph has it (a link, not an edge). */
+  origin?: number | null;
+}
+
+export interface GraphEdge {
+  from: number;
+  to: number;
+  hard: boolean;
+}
+
+export interface PlanGraph {
+  team: string;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  layers: number;
+}
+
+export interface FindingView {
+  severity: string;
+  code: string;
+  text: string;
+  task?: number;
+  member?: string;
+}
+
+export interface ValidationView {
+  errors: FindingView[];
+  warnings: FindingView[];
+}
+
+export interface DraftView {
+  revision: number;
+  unseen: string[];
+  owner_edited: string[];
+}
+
+export interface DraftMember {
+  id: string;
+  role: string;
+  agent: string;
+  model: string;
+  effort: string;
+  account: string;
+  permissions: string;
+  computer: string;
+  folder: string;
+  prompt: string;
+  lead: boolean;
+  session: SessionView | null;
+}
+
+export interface NewTeamView {
+  team: string;
+  name: string;
+  goal: string;
+  addendum: string;
+  folder: string;
+  settings: Record<string, unknown>;
+  members: DraftMember[];
+  tasks: TaskView[];
+  draft: DraftView;
+  validation: ValidationView;
+  updated: number;
+}
+
+export interface SessionView {
+  host: string;
+  name: string;
+  run_id: string;
+  conversation_id: string;
+}
+
+export type TeamSettings = Record<string, unknown>;
+
+// Task 47: the team action, call and outcome have one definition, in
+// client/src/types.ts, for the one core enum.
+export type { TeamAction, TeamCall, TeamConfirmation, TeamOutcome } from "../../types";

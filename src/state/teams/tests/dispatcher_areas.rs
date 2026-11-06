@@ -32,3 +32,9 @@ mod dispatcher_stage_land;
 
 #[path = "dispatcher_work_ahead.rs"]
 mod dispatcher_work_ahead;
+
+#[path = "dispatcher_revoked.rs"]
+mod dispatcher_revoked;
+
+#[path = "dispatcher_run_settled.rs"]
+mod dispatcher_run_settled;

@@ -14,6 +14,7 @@ Change the draft (lead or owner), carrying the revision you read:
   {"action":"update","request_id":"UUID","team":"ID","revision":N,
    "set":{"name":"...","goal":"...","addendum":"...","settings":{...},
           "members":[...],"tasks":[...]}} | hgs team draft --json
+Set "phases" ({"n","title","barrier"}) and task "phase" as in a plan.
 A field the owner edited after you last read the draft is refused ("Owner
 changed members"): read the draft again. The owner's update marks the field
 owner_edited and drops it from unseen; your get answers the marks it cleared

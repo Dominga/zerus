@@ -10,7 +10,7 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|integrate-build|start-ahead|full-tests|test|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|phase-mode|integrate-build|start-ahead|full-tests|test|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "move-task", "add-to-phase", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
@@ -20,6 +20,8 @@ const MUTATIONS: &[&str] = &[
     "archive", "report", "ask", "reply", "hold", "release", "accept", "reject", "skip-stage", "send-back", "reassign", "take-over", "cancel",
     "retry", "check", "expect", "swap-member", "use-last-reply", "relaunch", "add-member", "scale", "drain", "pause-member", "resume-member", "remove-member", "settings", "finding",
     "draft", "propose", "close-phase", "integrate-build", "start-ahead", "full-tests",
+    // Task #58: the owner switches one phase between free and standard planning.
+    "phase-mode",
 ];
 
 fn text<'a>(input: &'a Value, key: &str) -> &'a str {
@@ -599,6 +601,8 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
             if let Some(health) = validation.phases_health.get(&phase.n.to_string()) {
                 value["health"] = json!(health);
             }
+            // Task #58: the mode the phase plans in (its own, else the team's).
+            value["mode"] = json!(team.phase_mode(phase.n));
         }
     }
     value["layers"] = json!(plan::layers(&team.tasks));
@@ -609,6 +613,9 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
     // U59: the plan mode (standard or free) the team's phase runs in, and the
     // free phase's own state for the plan header.
     value["plan_mode"] = json!(team.plan_mode);
+    // Task #58: every phase's own mode, phase 1 included; `plan_mode` stays
+    // the team's default for a phase without one.
+    value["phase_modes"] = ops::phase_modes_view(team);
     // U62 (#715): the full-run policy and the owner's one-time grant.
     value["full_tests"] = json!(team.settings.full_tests);
     value["full_tests_grant"] = json!(team.full_tests_grant);
@@ -616,8 +623,7 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
     // approval chooses one of the two.
     value["plan_mode_offer"] = json!(team.plan_mode_offer);
     value["plan_mode_reason"] = json!(team.plan_mode_reason);
-    if team.plan_mode == super::model::PlanMode::Free {
-        let n = ops::open_phase(team);
+    if let Some(n) = ops::free_phase(team) {
         let tasks: Vec<&super::model::Task> = team.tasks.iter().filter(|task| task.phase == n).collect();
         let running: Vec<u32> = tasks.iter().filter(|task| !task.status.finished()).map(|task| task.id).collect();
         let accepted = tasks.iter().filter(|task| task.status == TaskStatus::Accepted).count();
@@ -1080,11 +1086,15 @@ fn summary(team: &Team, include_cancelled: bool) -> Value {
             "state":if cancelled.contains(&p.n) { json!("cancelled") } else { json!(p.state) },"tasks":p.tasks,
             "note":p.note,"rejection":p.rejection,
             // U63: the phase's pause and who accepts it.
-            "pause":p.pause,"acceptance":p.acceptance}))
+            "pause":p.pause,"acceptance":p.acceptance,
+            // Task #58: the mode the phase plans in.
+            "mode":team.phase_mode(p.n)}))
         .collect();
     json!({
         "id":team.id,"name":team.name,"status":team.status,"project":team.project,"folder":team.folder,
         "plan_mode":team.plan_mode,
+        // Task #58: every phase's mode, phase 1 included.
+        "phase_modes":ops::phase_modes_view(team),
         "lead":team.lead,"members":members,"tasks":tasks,"phases":phases,
         "accepted":count(TaskStatus::Accepted),"submitted":count(TaskStatus::Submitted),
         "in_review":count(TaskStatus::InReview),"in_test":count(TaskStatus::InTest),
@@ -1096,6 +1106,10 @@ fn summary(team: &Team, include_cancelled: bool) -> Value {
         // U57: the lead's open proposals (at most 50), so the lead's session
         // window shows their cards from the polled list.
         "proposals":open_proposals(team),
+        // Task 52: the parent task of a sub-team, so a client walks the whole
+        // team tree from the list (a tree action's impact); null for a team
+        // with no parent.
+        "parent":team.parent.as_ref().map(|parent| json!({"team":parent.team,"task":parent.task})),
     })
 }
 
@@ -1198,7 +1212,7 @@ fn draft_get_in(store: &mut Store, input: &Value) -> anyhow::Result<Value> {
     // Feedback 2026-11-04 (5): the answer carries what the draft holds, so the
     // lead and the owner can check what was saved.
     let fields = json!({"name":team.name,"goal":team.goal,"addendum":team.lead_protocol,"settings":team.settings,
-        "members":team.members,"tasks":team.tasks,"plan_mode":team.plan_mode,"plan_mode_offer":team.plan_mode_offer,
+        "members":team.members,"tasks":team.tasks,"phases":team.phases,"plan_mode":team.plan_mode,"plan_mode_offer":team.plan_mode_offer,
         "plan_mode_reason":team.plan_mode_reason});
     Ok(json!({"draft":draft,"revision":draft.revision,"unseen":draft.unseen,"owner_edited":cleared,"preflight":validation,"fields":fields}))
 }
@@ -1805,20 +1819,30 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
         "switch-plan-mode" => {
             // U59: the desktop's dialog decides through this path; the switch
             // applies only the mode the proposal names.
+            // Task #58: a card that names a phase switches that phase only.
             let mode = team.proposals[at]["mode"].as_str().unwrap_or_default().to_owned();
-            let asked = team.proposals[at]["reason"].clone();
-            store.mutate(None, &team_id, None, |team, events| {
-                team.plan_mode = if mode == "free" { super::model::PlanMode::Free } else { super::model::PlanMode::Standard };
-                events.push(Event::new("plan_mode_switched", json!({"by":"You","mode":mode,"proposal":id,"reason":asked})));
-                Ok(Value::Null)
-            })?;
-            json!({"status":"switched","plan_mode":mode})
+            let asked = team.proposals[at]["reason"].as_str().unwrap_or_default().to_owned();
+            store.mutate(None, &team_id, None, |team, events| ops::apply_mode_proposal(team, &change, &mode, &id, &asked, events))?
         }
+        // Task #21: a switch card for base_branch, full_tests or max_members
+        // runs the settings change it names, as the owner's own.
+        "switch-setting" if change["op"] == "settings" => owner_card(&team_id, "settings", &change, &operation_request)?,
         "switch-setting" => {
             // #752: the owner's Allow sets the one setting the card names.
             let change = team.proposals[at]["change"].clone();
             let asked = team.proposals[at]["reason"].as_str().unwrap_or_default().to_owned();
             store.mutate(None, &team_id, None, |team, events| super::ops::switch_setting(team, &change, &id, &asked, events))?
+        }
+        // Task #21: an owner-gated operation runs as the owner's own
+        // `hgs team <op>`: the same checks, adoption, budgets and side
+        // effects, under the proposal's request id, so a retried Allow replays
+        // its receipt and never applies the change twice.
+        op if ops::OWNER_OPS.contains(&op) => owner_card(&team_id, op, &change, &operation_request)?,
+        "iron-rules" => {
+            let mut value = change["input"].clone();
+            value["request_id"] = json!(operation_request);
+            value["by"] = json!("human");
+            super::super::iron_rules::run("set", &value)?
         }
         other => bail!("Unknown proposal kind {other}"),
     };
@@ -1828,10 +1852,30 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
             proposal["decided_at"] = json!(super::super::now());
             proposal["note"] = json!(reason);
         }
-        events.push(Event::new("proposal_decided", json!({"proposal":id,"accept":true,"kind":kind})));
+        // Task #21: the audit names the operation, what the card showed and the
+        // request it ran under, as a typed word's quote did.
+        let mut detail = json!({"proposal":id,"accept":true,"kind":kind});
+        if let Some(op) = change["op"].as_str() {
+            detail["op"] = json!(op);
+            detail["summary"] = change["summary"].clone();
+            detail["request"] = json!(operation_request);
+        }
+        events.push(Event::new("proposal_decided", detail));
         Ok(Value::Null)
     })?;
     Ok(json!({"status":"accepted","proposal":id,"kind":kind,"result":result}))
+}
+
+/// Task #21: an allowed owner-operation card: the operation with the input
+/// the card shows, as the owner's own request with the proposal's request id.
+/// The caller is the owner (decide-proposal proved it), so no word is read.
+fn owner_card(team_id: &str, op: &str, change: &Value, request: &str) -> anyhow::Result<Value> {
+    let mut value = change["input"].clone();
+    ensure!(value.is_object(), "The proposal carries its operation's input");
+    value["team"] = json!(team_id);
+    value["request_id"] = json!(request);
+    value["by"] = json!("human");
+    run(op, &value, false)
 }
 
 /// N8: a sub-team's create input cannot set an owner-only setting.
@@ -3104,6 +3148,12 @@ fn queues_instead(op: &str) -> bool {
 /// The team's files refuse writes here: SQLite opened them read-only, or the
 /// system denies access (in any language: Windows localizes its message).
 fn read_only(error: &anyhow::Error) -> bool {
+    // Task #48: in a sandbox (Low integrity, or Codex's other user) every
+    // refused write is the sandbox's, whatever the error says (a private
+    // folder check, a localized message): the request waits in the folder.
+    if crate::platform::sandboxed() {
+        return true;
+    }
     let text = format!("{error:#}").to_lowercase();
     ["readonly", "read-only", "access is denied", "permission denied", "os error 5)", "os error 13)", "unable to open database"]
         .iter()
@@ -3175,6 +3225,40 @@ fn queue_write(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         "status":"queued", "request_id":request_id, "path":path.to_string_lossy(),
         "note":"The team worker has not applied it in 30 s; it stays queued in the member's folder."
     })))
+}
+
+/// Task #28: a sandboxed member's own request to the team worker - `run`
+/// (`hgs run`) or `read` (a host read) - waits in its folder as a report does
+/// (U20). The member is the one whose session `caller` is (a dsh member by
+/// the conversation its harness exports) in a team that runs; the worker
+/// applies the request on its next tick. Returns the folder, where the
+/// worker's outcome appears, and that outcome when the request was answered.
+pub(crate) fn queue_for_sandbox(caller: &Value, op: &str, request_id: &str, input: &Value) -> anyhow::Result<(std::path::PathBuf, Option<Value>)> {
+    ensure!(matches!(op, "session-run" | "read"), "Unknown sandbox request {op}");
+    ensure!(super::store::canonical_uuid(request_id), "A canonical request_id is required");
+    let store = Store::open(false)?;
+    let teams = store.active_teams(ACTIVE_TEAMS)?;
+    let (team, member_id) = teams
+        .iter()
+        .filter(|team| matches!(team.status, TeamStatus::Running | TeamStatus::Paused))
+        .find_map(|team| calling_member(team, caller).filter(|member| *member != team.lead).map(|member| (team, member)))
+        .context("The sandbox blocks this here, and only a member of a running team can ask the team worker to do it")?;
+    let member = team.member(&member_id).context("Unknown member")?;
+    let folder = member_outbox_folder(team, member)?;
+    if let Some(result) = super::outbox::result(&folder, request_id) {
+        return Ok((folder, Some(result)));
+    }
+    let request = json!({"op":op, "request_id":request_id, "team":team.id, "member":member_id, "input":input});
+    match super::outbox::request(&folder, request_id) {
+        Some(queued) => ensure!(
+            queued["op"] == request["op"] && queued["input"] == request["input"],
+            "request_id {request_id} already queues another request; use a new request_id"
+        ),
+        None => {
+            super::outbox::push(&folder, &request)?;
+        }
+    }
+    Ok((folder, None))
 }
 
 /// The teams a finished team's `left_running` looks at: only the ones that
@@ -3396,12 +3480,15 @@ fn check_roster_word(
         object.remove("roster_word");
     }
     // The sentence is the request's `owner_word` object, as `approve` takes it.
+    // Task #21: the owner allows a roster change with a click on a card; a
+    // typed word is only a fallback, never asked for.
+    let card = card_hint(op, filled);
     let word_input = input.get("owner_word").filter(|word| word.is_object()).with_context(|| {
-        format!("The lead changes the roster only on your word: pass \"owner_word\" with the owner's sentence, such as \"{}\"", rule.expect)
+        format!("The lead changes the roster only on your word: propose it, {card} | hgs team propose --json, and you allow it with a click (a quoted \"owner_word\" stays a fallback)")
     })?;
-    // U56: the refusal names a sentence that would pass.
+    // U56: the refusal names the card that would pass.
     let word = verify(team, word_input, &rule, super::super::now()).with_context(|| {
-        format!("The lead changes the roster only on your word: quote your own sentence of the last 30 minutes that says \"{}\"; without it, propose the change (F8)", rule.expect)
+        format!("None of your messages of the last 30 minutes is your word for this change; the lead proposes it instead, {card} | hgs team propose --json, and you allow it with a click")
     })?;
     // U32/N7: a count word ("add two backends") authorizes that many adds and
     // the cap grows by one for each; every other word pays for one change.
@@ -3439,7 +3526,10 @@ fn check_roster_word(
         ensure!(said == asked, "The owner's sentence names {said} members, not {asked}; quote a sentence naming the count");
         (1, format!("scaling {role} by {asked}"))
     } else if op == "drain" {
-        (1, "draining the member".to_owned())
+        // Task #21: one message may name several members; it pays once for each.
+        (1, format!("draining {}", text(filled, "member")))
+    } else if matches!(op, "relaunch" | "remove-member") && !super::owner_word::says_everyone(&word.text) {
+        (1, format!("{} {}", if op == "relaunch" { "relaunching" } else { "removing" }, text(filled, "member")))
     } else if matches!(op, "relaunch" | "swap-member") && super::owner_word::says_everyone(&word.text) {
         // Feedback 16: "перезапусти их" pays for one relaunch (or swap) of
         // each member, never more than the team has.
@@ -3458,6 +3548,20 @@ fn check_roster_word(
     filled["owner_word_event"] = json!(word.event);
     filled["roster_word"] = Value::Bool(true);
     Ok(())
+}
+
+/// Task #21: the proposal that asks the owner for this roster change.
+fn card_hint(op: &str, input: &Value) -> String {
+    let member = text(input, "member");
+    match op {
+        "relaunch" | "drain" | "remove-member" => format!("{{\"kind\":\"{op}\",\"member\":\"{member}\",\"reason\":\"...\"}}"),
+        "swap-member" => format!("{{\"kind\":\"swap-member\",\"member\":\"{member}\",\"account\":\"...\",\"reason\":\"...\"}}"),
+        "add-member" => "{\"kind\":\"add-member\",\"member\":{...},\"reason\":\"...\"}".to_owned(),
+        "scale" => format!("{{\"kind\":\"scale\",\"role\":\"{}\",\"agent\":\"{}\",\"count\":{},\"reason\":\"...\"}}",
+            text(input, "role"), text(input, "agent"), input["count"].as_u64().unwrap_or(1)),
+        "settings" => "{\"kind\":\"settings\",\"settings\":{\"max_members\":...},\"reason\":\"...\"}".to_owned(),
+        other => format!("{{\"kind\":\"{other}\",\"reason\":\"...\"}}"),
+    }
 }
 
 /// U29: fills the verified owner word of an addition to a running phase for
@@ -3479,7 +3583,7 @@ fn check_phase_word(
     let word = input
         .get("owner_word")
         .filter(|word| word.is_object())
-        .with_context(|| format!("The lead adds a task to a running phase only on your word: pass \"owner_word\" with the owner's sentence, such as \"add a task to phase {phase}\""))?;
+        .with_context(|| format!("The lead adds a task to a running phase only on your word: propose it, {{\"kind\":\"add-to-phase\",\"phase\":{phase},\"tasks\":[...],\"reason\":\"...\"}} | hgs team propose --json, and the owner allows it with a click"))?;
     let (kind, after, change) = match input["confirm"].as_str().filter(|id| !id.is_empty()) {
         None => (super::owner_word::PhaseWord::Request, 0.0, "the request to add to a running phase"),
         Some(id) => {
@@ -3874,8 +3978,14 @@ fn running_note(request_id: &str) -> Value {
 /// filter, binary or package and the Android unit tests run everything.
 fn full_test_run(template: &str, args: &Value) -> bool {
     let empty = |key: &str| text(args, key).is_empty();
+    // Task 53: the run hgs test affected prints for a crate names its tests in
+    // `filters` (with skips and the crate's manifest), not in `filter`: a
+    // non-empty filters list narrows the run. Skips or a manifest alone do not.
+    let filters = args["filters"].as_array().is_some_and(|filters| {
+        filters.iter().any(|filter| filter.as_str().is_some_and(|filter| !filter.trim().is_empty()))
+    });
     match template {
-        "cargo-test" => empty("filter") && empty("bin") && empty("package"),
+        "cargo-test" => empty("filter") && empty("bin") && empty("package") && !filters,
         "android-test" => true,
         _ => false,
     }
@@ -3903,13 +4013,13 @@ fn check_full_run(team: &Team, folder: &std::path::Path) -> anyhow::Result<bool>
     if !granted || policy == FullTests::Never {
         let estimate = full_estimate(folder, team);
         bail!(
-            "This is a full test run ({estimate}). The team's full_tests is {}: ask the owner for one run bound to a release, then set it with {} | hgs team full-tests --json, or the owner sets \"full_tests\":\"allowed\".",
+            "This is a full test run ({estimate}). The team's full_tests is {}: propose one run bound to a release, {} | hgs team propose --json, and the owner allows it with a click (or sets \"full_tests\":\"allowed\").",
             match policy {
                 FullTests::Never => "\"never\"",
                 FullTests::Ask => "\"ask\"",
                 FullTests::Allowed => "\"allowed\"",
             },
-            json!({"request_id":"<new UUID>","team":team.id,"release":"<release>"})
+            json!({"request_id":"<new UUID>","team":team.id,"kind":"full-tests","release":"<release>","reason":"<why>"})
         );
     }
     Ok(true)
@@ -4326,11 +4436,14 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 let caller = if parent_lead { Actor::ParentLead } else { actor(&team, op, &filled)? };
                 let auto_plan = op == "approve" && team.settings.approval == Approval::Auto;
                 if matches!(&caller, Actor::Member(member) if *member == team.lead) && !auto_plan {
-                    // U56: a refusal names the sentence this approval expects.
+                    // U56/task #21: a refusal names the card this approval is.
                     let phase = (op == "approve-phase").then(|| input["phase"].as_u64().and_then(|n| u32::try_from(n).ok())).flatten();
-                    let sentence = super::owner_word::approval_sentence(phase);
+                    let card = match phase {
+                        Some(n) => format!("{{\"kind\":\"approve-phase\",\"phase\":{n},\"reason\":\"...\"}}"),
+                        None => "{\"kind\":\"approve\",\"reason\":\"...\"}".to_owned(),
+                    };
                     let word = input.get("owner_word").filter(|word| word.is_object()).with_context(|| {
-                        format!("The lead approves only on the owner's word: pass \"owner_word\" with the owner's sentence, which says {sentence}")
+                        format!("The lead approves only with the owner's approval: propose it, {card} | hgs team propose --json, and the owner allows it with a click")
                     })?;
                     let verified = super::owner_word::verify(&team, word, phase, super::super::now())?;
                     if let Some(used) = team.owner_word_used(verified.event) {

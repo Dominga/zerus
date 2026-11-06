@@ -277,6 +277,83 @@ fn prune_rejected(folder: &Path, age: impl Fn(SystemTime) -> Duration) {
     prune(&mut files, age);
 }
 
+/// Task #28 (2): the host reads a sandboxed member may ask the worker for.
+/// Its shell cannot reach the session host (Low integrity, and DeepSeek's
+/// confined token opens no named pipe), so these few reads run for it outside
+/// the sandbox: `hgs ls` and `hgs inspect <session>`, with options that only
+/// shape the answer. Nothing here writes, sends, starts or attaches; the
+/// sandbox already reads every file these reads read, so they disclose
+/// nothing new. `--read-observation`, which records a read, is not one.
+/// Task #34: `hgs task list` and `hgs task get` of a named project too (the
+/// worker is not the member's session, so "your own project" means nothing
+/// there); every other task command changes something and stays closed.
+pub(crate) fn sandbox_read_allowed(argv: &[String]) -> bool {
+    let words: Vec<&str> = argv.iter().map(String::as_str).collect();
+    match words.as_slice() {
+        ["task", "list", options @ ..] => task_options(options, &["--stage"], false),
+        ["task", "get", reference, options @ ..] => {
+            plain(reference) && task_options(options, &["--history-limit", "--history-before"], reference.contains('/'))
+        }
+        ["ls", options @ ..] => options.iter().all(|option| matches!(*option, "--json" | "--local" | "--no-archives")),
+        ["inspect", name, options @ ..] => {
+            let name_ok = !name.is_empty()
+                && name.chars().count() <= 300
+                && !name.starts_with('-')
+                && !name.starts_with('@')
+                && !name.chars().any(char::is_control);
+            let mut rest = options.iter();
+            let mut options_ok = true;
+            while let Some(option) = rest.next() {
+                options_ok &= match *option {
+                    "--skip-processes" => true,
+                    "--after" => rest.next().is_some_and(|value| !value.is_empty() && value.len() <= 18 && value.bytes().all(|b| b.is_ascii_digit())),
+                    _ => false,
+                };
+            }
+            name_ok && options_ok
+        }
+        _ => false,
+    }
+}
+
+/// A value a brokered read passes on: a name, never an option or a control.
+fn plain(value: &str) -> bool {
+    !value.is_empty() && value.chars().count() <= 200 && !value.starts_with('-') && !value.starts_with('@') && !value.chars().any(char::is_control)
+}
+
+/// A task read's options: `--json`, `--project P` and the `valued` ones, each
+/// once with a plain value; the project must be named, by `--project` or (for
+/// `get`) by a `PROJECT/T-xxxxxx` reference.
+fn task_options(options: &[&str], valued: &[&str], named: bool) -> bool {
+    let mut named = named;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut rest = options.iter();
+    while let Some(option) = rest.next() {
+        if !seen.insert(*option) {
+            return false;
+        }
+        match *option {
+            "--json" => {}
+            "--project" => {
+                if !rest.next().is_some_and(|value| plain(value)) {
+                    return false;
+                }
+                named = true;
+            }
+            option if valued.contains(&option) => {
+                if !rest.next().is_some_and(|value| plain(value)) {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    named
+}
+
+/// The most a brokered read answers with; a larger listing is cut and says so.
+pub(crate) const READ_STDOUT: usize = 8 * 1024 * 1024;
+
 /// The outcome the worker wrote, when it has.
 pub(crate) fn result(folder: &Path, request_id: &str) -> Option<Value> {
     fs::read(result_path(folder, request_id)).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -313,6 +390,31 @@ mod tests {
 
     fn request(id: &str, op: &str) -> Value {
         json!({"op":op,"request_id":id,"team":"t","member":"dev","attempt":"A1","input":{"text":"Done"}})
+    }
+
+    /// Task #28 (2): only reads, and only with options that shape them.
+    #[test]
+    fn a_sandbox_asks_only_for_host_reads() {
+        let argv = |words: &[&str]| words.iter().map(|word| (*word).to_owned()).collect::<Vec<_>>();
+        for allowed in [&["ls"][..], &["ls", "--json"], &["ls", "--json", "--local", "--no-archives"],
+            &["inspect", "dsh/Zerus/zerus-next-for-the-fork-qa"], &["inspect", "claude/p/t", "--skip-processes", "--after", "42"]] {
+            assert!(sandbox_read_allowed(&argv(allowed)), "{allowed:?}");
+        }
+        // Task #34: task reads of a named project; nothing that changes a task.
+        for allowed in [&["task", "list", "--project", "RogueDod"][..], &["task", "list", "--project", "RogueDod", "--stage", "todo", "--json"],
+            &["task", "get", "RogueDod/T-abc123"], &["task", "get", "T-abc123", "--project", "RogueDod", "--history-limit", "20"]] {
+            assert!(sandbox_read_allowed(&argv(allowed)), "{allowed:?}");
+        }
+        for refused in [&["task", "list"][..], &["task", "get", "T-abc123"], &["task", "list", "--project"], &["task", "list", "--project", "-x"],
+            &["task", "list", "--project", "P", "--project", "Q"], &["task", "add", "--project", "P"], &["task", "report", "P/T-1"],
+            &["task", "stage", "P/T-1", "done"], &["task", "get", "P/T-1", "--set"], &["task", "send", "P/T-1"]] {
+            assert!(!sandbox_read_allowed(&argv(refused)), "{refused:?}");
+        }
+        for refused in [&[][..], &["send", "claude/p/t"], &["ls", "--json", "--prune"], &["inspect"], &["inspect", "--after"],
+            &["inspect", "claude/p/t", "--read-observation"], &["inspect", "claude/p/t", "--after", "-1"],
+            &["inspect", "@peer"], &["launch", "claude"], &["run", "--json"], &["team", "report", "--json"]] {
+            assert!(!sandbox_read_allowed(&argv(refused)), "{refused:?}");
+        }
     }
 
     #[test]

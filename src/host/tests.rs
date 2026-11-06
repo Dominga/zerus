@@ -8,7 +8,7 @@ use super::{
     client::{ClientError, Connection, Event},
     link::{memory_pair, write_json, Link},
     protocol::{
-        Attach, Attached, Captured, ConsoleEvidence, ConsoleProcess, Control, CreateSession,
+        Attach, Attached, CallerSession, Captured, ConsoleEvidence, ConsoleProcess, Control, CreateSession,
         Created, Done, EnvValue, ErrorBody, ErrorCode, Grown, Hello, HelloAnswer, HelloReply,
         InputClaim, InputReady, Integrity, Key, Kind, LaunchState, Listed, Op, PaneDetails,
         Protocols, Resolved, Role, Signal, Size, SupervisorOp, SupervisorRegistration, Target,
@@ -3021,4 +3021,41 @@ mod terminal_backend {
         drop(stream);
         host.join().unwrap();
     }
+}
+
+/// Task #33: a process a Git Bash wrapper started in a session is not the
+/// session's descendant any more (the wrapper's process ended), but it is
+/// still in the session's job. The host names that session for the
+/// connection's own client, with its run marker; a process outside every
+/// session hears not_found.
+#[test]
+fn the_host_names_the_session_whose_job_holds_the_asking_process() {
+    let (host, launcher) = new_host();
+    let mut client = connect(&host);
+    let _: Created = client.call(create("launch-a", "claude/p/a")).unwrap();
+    let _: Created = client.call(create("launch-b", "claude/p/b")).unwrap();
+    client
+        .call::<Done>(Op::SetEnvironment {
+            target: pane("claude/p/a"),
+            name: RUN_MARKER.into(),
+            value: Some("run-a".into()),
+        })
+        .unwrap();
+    lock(&launcher.program(0).members).push(4242);
+    let found: CallerSession = connect_as(&host, 4242, Role::Cli).call(Op::CallerSession).unwrap();
+    assert_eq!(
+        found,
+        CallerSession {
+            session: "$0".into(),
+            name: "claude/p/a".into(),
+            pane: "%0".into(),
+            run_marker: "run-a".into(),
+        }
+    );
+    // A session's root process is its own.
+    let root: CallerSession = connect_as(&host, 1001, Role::Cli).call(Op::CallerSession).unwrap();
+    assert_eq!((root.name.as_str(), root.run_marker.as_str()), ("claude/p/b", ""));
+    // Outside every session.
+    let outside = connect_as(&host, 5555, Role::Cli).call::<CallerSession>(Op::CallerSession).unwrap_err();
+    assert_eq!(outside.code, ErrorCode::NotFound);
 }

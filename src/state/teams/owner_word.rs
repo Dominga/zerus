@@ -290,13 +290,16 @@ pub(crate) fn verify_roster(team: &Team, input: &Value, rule: &WordRule, now: f6
     let session = lead.session.as_ref().context("The lead has no session to check the owner's word in")?;
     let db = super::super::journal::event_db().map_err(|error| anyhow::anyhow!("The session events are unavailable: {error}"))?;
     let earlier = earlier_name(session);
-    verify_scan(&db, &session.name, &session.conversation_id, &earlier, text, now, rule_scan(rule, true))
+    // Task #21 (owner, 2026-11-05): the lead quotes words of the owner's
+    // message ("relaunch hgs" from "relaunch hgs, relaunch ui2"); the whole
+    // message no longer has to match. The checks still read the whole message.
+    verify_scan(&db, &session.name, &session.conversation_id, &earlier, text, now, rule_scan(rule, false))
 }
 
 /// The fixture-testable roster check.
 #[cfg(test)]
 pub(crate) fn verify_roster_in(db: &Connection, name: &str, conversation: &str, text: &str, rule: &WordRule, now: f64) -> anyhow::Result<OwnerWord> {
-    verify_scan(db, name, conversation, "", text, now, rule_scan(rule, true))
+    verify_scan(db, name, conversation, "", text, now, rule_scan(rule, false))
 }
 
 fn rule_scan(rule: &WordRule, exact: bool) -> ScanOptions<'_> {
@@ -685,6 +688,12 @@ fn event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, String, String)>
     Ok((row.get(0)?, row.get(1)?, row.get(2)?))
 }
 
+/// Task #21 (owner, 2026-11-05): the scan reads the main session's messages
+/// only, as the `events_main_messages` partial index keeps them; tool calls
+/// and subagent events no longer push the owner's message out of the last
+/// 200 rows. The words stay exactly the index's, so SQLite uses it.
+const MAIN_MESSAGES: &str = " AND COALESCE(json_extract(payload, '$.agent_id'), '') IN ('', 'main') AND json_extract(payload, '$.type') IN ('UserPromptSubmit','UserPromptQueued','UserMessage','TurnStarted','QuestionAnswered','AgentMessage','Stop')";
+
 fn verify_scan(
     db: &Connection,
     name: &str,
@@ -704,13 +713,13 @@ fn verify_scan(
     // conversation filter stays in SQL, on the events_session index.
     let use_earlier = !earlier.is_empty() && !conversation.is_empty();
     let mut statement = if conversation.is_empty() {
-        db.prepare("SELECT seq, conversation, payload FROM events WHERE name = ?1 ORDER BY seq DESC LIMIT 200")
+        db.prepare(&format!("SELECT seq, conversation, payload FROM events WHERE name = ?1{MAIN_MESSAGES} ORDER BY seq DESC LIMIT 200"))
     } else if use_earlier {
-        db.prepare(
-            "SELECT seq, conversation, payload FROM events WHERE name IN (?1, ?2) AND conversation = ?3 ORDER BY seq DESC LIMIT 200",
-        )
+        db.prepare(&format!(
+            "SELECT seq, conversation, payload FROM events WHERE name IN (?1, ?2) AND conversation = ?3{MAIN_MESSAGES} ORDER BY seq DESC LIMIT 200",
+        ))
     } else {
-        db.prepare("SELECT seq, conversation, payload FROM events WHERE name = ?1 AND conversation = ?2 ORDER BY seq DESC LIMIT 200")
+        db.prepare(&format!("SELECT seq, conversation, payload FROM events WHERE name = ?1 AND conversation = ?2{MAIN_MESSAGES} ORDER BY seq DESC LIMIT 200"))
     }
     .context("The session events cannot be read")?;
     let rows = if conversation.is_empty() {
@@ -720,6 +729,10 @@ fn verify_scan(
     } else {
         statement.query_map([name, conversation], event_row).context("The session events cannot be read")?
     };
+    // Task #21: a quote that is a whole message names that message, even when
+    // a newer message contains it; a part of a message is taken only when no
+    // message is the whole quote.
+    let mut partial: Option<OwnerWord> = None;
     for row in rows {
         let (seq, event_conversation, payload) = row.context("The session events cannot be read")?;
         if !conversation.is_empty() && event_conversation != conversation {
@@ -787,17 +800,25 @@ fn verify_scan(
         if !said {
             continue;
         }
-        if if options.exact { detail.trim() != text.trim() } else { !detail.contains(text) } {
+        let whole = detail.trim() == text.trim();
+        if !whole && (options.exact || !detail.contains(text)) {
             continue;
         }
         if !options.needed.iter().all(|value| needed_in(&lowered, value)) {
             continue;
         }
-        return Ok(OwnerWord { text: detail.to_owned(), at, event: seq });
+        let word = OwnerWord { text: detail.to_owned(), at, event: seq };
+        if whole {
+            return Ok(word);
+        }
+        partial.get_or_insert(word);
+    }
+    if let Some(word) = partial {
+        return Ok(word);
     }
     // U56: the refusal names the sentence this operation expects.
     anyhow::bail!(
-        "The owner's word is not in the lead session's last 30 minutes: quote the owner's own sentence that says {}",
+        "The owner's word is not in the lead session's last 30 minutes (expected words like {}); propose the change instead (hgs guide team-propose) and the owner allows it with a click",
         options.expect
     )
 }
@@ -1236,5 +1257,35 @@ mod tests {
         let db = database();
         add(&db, "claude/x/lead", "c1", prompt(2000.0, "Please add 2 backend members to the roster"));
         verify_roster_in(&db, "claude/x/lead", "c1", "Please add 2 backend members to the roster", &rule, 2010.0).unwrap();
+    }
+
+    /// Task #21 (owner, 2026-11-05): "relaunch hgs, relaunch ui2" authorizes
+    /// each relaunch it names with the lead quoting just that part, and a
+    /// member the message does not name is still refused.
+    #[test]
+    fn one_message_names_several_relaunches_and_each_quote_is_part_of_it() {
+        let db = database();
+        add(&db, "claude/x/lead", "c1", prompt(2000.0, "relaunch hgs, relaunch ui2"));
+        for (quote, id) in [("relaunch hgs", "hgs"), ("relaunch ui2", "ui2"), ("relaunch hgs, relaunch ui2", "ui2")] {
+            verify_roster_in(&db, "claude/x/lead", "c1", quote, &member_rule(RELAUNCH_VERBS, id, "Frontend"), 2010.0)
+                .unwrap_or_else(|error| panic!("{quote}: {error}"));
+        }
+        assert!(verify_roster_in(&db, "claude/x/lead", "c1", "relaunch hgs", &member_rule(RELAUNCH_VERBS, "core", "Backend"), 2010.0).is_err());
+        // A quote that is not in the message is not the owner's word.
+        assert!(verify_roster_in(&db, "claude/x/lead", "c1", "relaunch core", &member_rule(RELAUNCH_VERBS, "hgs", "Frontend"), 2010.0).is_err());
+    }
+
+    /// Task #21: the owner's message is found behind more than 200 tool and
+    /// subagent events of the lead's session.
+    #[test]
+    fn the_owners_message_is_found_behind_many_tool_events() {
+        let db = database();
+        add(&db, "claude/x/lead", "c1", prompt(2000.0, "relaunch hgs"));
+        for n in 0..450 {
+            let tool = serde_json::json!({"type":"PostToolUse","at":2001.0 + f64::from(n) / 100.0,"agent_id":"","detail":"relaunch hgs"});
+            add(&db, "claude/x/lead", "c1", tool);
+            add(&db, "claude/x/lead", "c1", serde_json::json!({"type":"UserPromptSubmit","at":2001.0,"agent_id":"sub-1","detail":"x"}));
+        }
+        verify_roster_in(&db, "claude/x/lead", "c1", "relaunch hgs", &member_rule(RELAUNCH_VERBS, "hgs", "Frontend"), 2010.0).unwrap();
     }
 }

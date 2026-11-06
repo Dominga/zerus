@@ -1,7 +1,7 @@
 import { desktopService } from "./desktopService";
 import { batch, createEffect, createRoot, createSignal, on, untrack } from "solid-js";
 import { activityPort, composerTab, inspectSubagentActivity, processesFollow, processesShown, windowVisibility } from "../bridge";
-import { applyBatch, catalog, computerFresh, computerOffline, onReplaced, orderedRows, setDraftKeys } from "./catalog";
+import { applyBatch, catalog, computerFresh, computerOffline, onReplaced, orderedRows, rowId, setDraftKeys } from "./catalog";
 import { composer } from "./composer";
 import { sessionModels, bindModelNotice } from "./sessionModels";
 import { bindForkSession } from "./sessionForks";
@@ -10,7 +10,8 @@ import { terminal } from "./terminal";
 import { flag, num } from "./settings";
 import { bindActivity, bindSelection, followedFor, notify, updating } from "./actions";
 import { observeMarks } from "./marks";
-import { createActivity } from "./activity";
+import { createActivity, type ActivityPort } from "./activity";
+import { teams } from "./teams";
 import { createSubagentActivity } from "./subagentActivity";
 import { archive } from "./archive";
 import { applyGrouping } from "./organization";
@@ -29,7 +30,35 @@ import type { Batch, ComposerEvent } from "../types";
 // without an archive id); store/archiveActivity.ts reads its recorded
 // Activity.
 
-export const activity = createActivity(activityPort);
+/**
+ * The Activity port of the two live follows: the selected session's and the
+ * Team tab's coordinator (task 9). Both may show one session in turn, and the
+ * desktop runs follow and unfollow as they come, possibly out of order: an
+ * unfollow waits while the other follow still shows that session, and a
+ * follow waits for that session's unfollow in flight.
+ */
+const unfollowing = new Map<string, Promise<void>>();
+function sharedPort(others: () => readonly (string | undefined)[]): ActivityPort {
+  return {
+    follow: (request) => {
+      const pending = unfollowing.get(rowId(request.computer, request.key));
+      return pending ? pending.then(() => activityPort.follow(request)) : activityPort.follow(request);
+    },
+    unfollow: (computer, key) => {
+      const id = rowId(computer, key);
+      if (others().includes(id)) return Promise.resolve();
+      const done: Promise<void> = activityPort.unfollow(computer, key).catch(() => {}).finally(() => { if (unfollowing.get(id) === done) unfollowing.delete(id); });
+      unfollowing.set(id, done);
+      return done;
+    },
+  };
+}
+
+export const activity = createActivity(sharedPort(() => [coordinatorActivity.target()?.id, designerActivity.target()?.id]));
+/** The Team tab's coordinator conversation, when the coordinator is not the selected session. */
+export const coordinatorActivity = createActivity(sharedPort(() => [activity.target()?.id, designerActivity.target()?.id]));
+/** Task #44: the Team designer's conversation on its page, when it is not the selected session. */
+export const designerActivity = createActivity(sharedPort(() => [activity.target()?.id, coordinatorActivity.target()?.id]));
 bindActivity(activity);
 bindModelNotice((message) => notify("error", message, true));
 bindSelection(() => ({ key: selectedKey(), subagent: subagentOpen() }));
@@ -69,7 +98,8 @@ export function receive(b: Batch) {
     archive.applyGroups(b.groups ?? []);
   });
   observeMarks(b);
-  if (b.activity.length) activity.applyActivity(b.activity);
+  if (b.activity.length) { activity.applyActivity(b.activity); coordinatorActivity.applyActivity(b.activity); designerActivity.applyActivity(b.activity); }
+  if (b.teams?.length) teams.apply(b.teams);
   if (b.tasks?.length) tasks.apply(b.tasks);
   if (b.processes_view) processes.apply(b.processes_view);
   if (b.composer) composer.receive(b.composer);
@@ -109,7 +139,8 @@ createRoot(() => {
   // The detail tab that shows: behind Terminal a failed read waits Qt's
   // background interval (Settings > Processes), which Rust reads when told.
   createEffect(on(() => [detailTab(), num("processes/backgroundSeconds"), num("processes/activeSeconds")] as const, ([tab]) => {
-    void composerTab(tab === "taskview" ? "native" : tab).catch(() => {});
+    // The Team tab shows the coordinator's conversation (and, for the lead, its composer).
+    void composerTab(tab === "taskview" ? "native" : tab === "team" ? "activity" : tab).catch(() => {});
   }));
 });
 

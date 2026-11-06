@@ -5,6 +5,7 @@ import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, 
 import type { CreatedWorktree, CreationAction, CreationAdmission, CreationCard, CreationEvent, FolderOut, LaunchAccounts, LaunchChoices, LaunchPlan, LaunchStart, MachineMeta, NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
+import type { Text } from "./text";
 import { emptyUpdatesView, type UpdateChannel, type UpdatesView } from "./types";
 
 // The one path from the Rust side to the stores. The frontend asks for the next
@@ -36,6 +37,7 @@ export async function followTasks(project: string | null): Promise<void> {
   await invoke("tasks_follow", { project });
 }
 
+
 export const taskEditorOpen = (target: import("./store/taskEditor").TaskEditorTarget) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_open", { ...target });
 export const taskEditorEdit = (input: Pick<import("./store/taskEditor").TaskEditorView, "handle" | "rev" | "text" | "position" | "anchor">) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_edit", { input });
 export const taskEditorPick = (handle: number, start: number, end: number) => desktop<import("./store/taskEditor").TaskEditorView>("task_editor_pick", { handle, start, end });
@@ -59,6 +61,56 @@ export const taskFormSubmit = (input: import("./store/taskForms").FormSubmit) =>
 export const taskFormCancel = (kind: import("./store/taskForms").FormKind, handle: number, rev: number) => desktop<import("./store/taskEditor").TaskEditorView<import("./store/taskForms").FormKind>>("task_form_cancel", { kind, handle, rev });
 export const assignTask = (project: string, task: string, target: { computer: string; name: string; run_id: string; conversation_id: string } | null, catalogKey: string | null, sessionId: string | null, mode?: "session" | "subagent" | "new_session") => desktop<void>("task_assign", { input: { project, task, target, catalog_key: catalogKey, session_id: sessionId, mode: mode ?? null } });
 export const readTaskDetails = (project: string, task: string, before: string | null) => desktop<unknown>("task_details", { project, task, before });
+/**
+ * Teams (src-tauri teams.rs): what one computer reads - its team list, Waiting
+ * for you, at most one team and the catalog. The core keeps one follow per
+ * computer, so only the store's one owner (store/teams.ts) calls this, with
+ * every view's needs merged; nothing stops reading it.
+ */
+export const teamsFollow = (computer: ComputerId, follow: import("./store/teamsView").TeamsFollow) =>
+  inTauri() ? invoke<void>("teams_follow", { computer, list: follow.list, waiting: follow.waiting, team: follow.team, catalog: follow.catalog }) : Promise.resolve();
+/** One guarded owner action on a team (core action.rs); the outcome says whether it was applied, refused, unknown or must be confirmed first. The core runs `hgs team`, the webview never does. */
+export const teamAction = (call: import("./types").TeamCall) =>
+  inTauri() ? invoke<import("./types").TeamOutcome>("team_action", { call }) : Promise.reject(new Error("Teams need the desktop app."));
+/**
+ * Task #44: Qt's catalog editor. Core keeps the working copy and checks every
+ * edit against the schema; the webview never parses or builds a catalog.
+ */
+const teamsOnly = <T,>(command: string, args: Record<string, unknown>) =>
+  inTauri() ? invoke<T>(command, args) : Promise.reject(new Error("Teams need the desktop app."));
+export const catalogEditorSchema = () => teamsOnly<import("./types").CatalogSchema>("catalog_editor_schema", {});
+export const catalogEditorLoad = (computer: ComputerId) => teamsOnly<import("./types").CatalogEditorView>("catalog_editor_load", { computer });
+export const catalogEditorEdit = (computer: ComputerId, edit: import("./types").CatalogEdit) => teamsOnly<import("./types").CatalogEditorView>("catalog_editor_edit", { computer, edit });
+export const catalogEditorRevert = (computer: ComputerId) => teamsOnly<import("./types").CatalogEditorView>("catalog_editor_revert", { computer });
+export const catalogEditorSave = (computer: ComputerId, requestId: string | null) => teamsOnly<import("./types").TeamOutcome>("catalog_editor_save", { computer, requestId });
+export const catalogEditorResetRules = (computer: ComputerId, requestId: string | null) => teamsOnly<import("./types").TeamOutcome>("catalog_editor_reset_rules", { computer, requestId });
+export const catalogEditorImpact = (computer: ComputerId, kind: import("./types").CatalogKind, id: string) => teamsOnly<import("./types").CatalogRemoveImpact>("catalog_editor_impact", { computer, kind, id });
+export const catalogEditorExport = (computer: ComputerId) => teamsOnly<string | null>("catalog_editor_export", { computer });
+export const catalogEditorImport = (computer: ComputerId) => teamsOnly<import("./types").CatalogEditorView | null>("catalog_editor_import", { computer });
+export const catalogRoute = (computer: ComputerId, goal: string) => teamsOnly<Record<string, unknown>>("catalog_route", { computer, goal });
+/** Task 50: the models a catalog role's account offers (its account, or the agent's native one); empty outside the desktop app. */
+export const teamRoleModels = (computer: ComputerId, agent: string, account: string) =>
+  inTauri() ? invoke<{ id: string; label: string; effort_options: string[] }[]>("team_role_models", { computer, agent, account }) : Promise.resolve([]);
+/** Task 11: reads one team once, as an answer in Waiting for you does before it sends. */
+export const teamRead = (computer: ComputerId, team: string) =>
+  inTauri() ? invoke<import("./types").TeamView>("team_read", { computer, team }) : Promise.reject(new Error("Teams need the desktop app."));
+/** Reads the watched team's feed page before the oldest event shown; false when there is none to read. */
+export const teamsOlder = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_older", { computer }) : Promise.resolve(false);
+/** Task 75: why this process is sandboxed, null on a normal desktop. */
+export const sandboxCheck = () => inTauri() ? invoke<string | null>("sandbox_check") : Promise.resolve(null);
+/** Task 69: moves one local session to another account after the owner confirms. */
+export const sessionSwitchAccount = (session: string, account: string, request: string) =>
+  inTauri() ? invoke<Record<string, unknown>>("session_switch_account", { session, account, request }) : Promise.reject(new Error("Accounts need the desktop app."));
+/** Task 51: loads the next older Waiting page; false when there is none. */
+export const teamsWaitingOlder = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_waiting_older", { computer }) : Promise.resolve(false);
+/** Task 51: raises or clears Waiting item notifications through the native notifier. */
+export const teamWaitingNotify = (raised: { token: string; title: string; body: string }[], cleared: string[]) =>
+  inTauri() ? invoke<void>("team_waiting_notify", { raised, cleared }) : Promise.resolve();
+/** Task 41/32: asks the core to read the watched team's profile. */
+export const teamsProfile = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_profile", { computer }) : Promise.resolve(false);
+/** Task 41: the Tests mode's queue and one bounded result page through the core. */
+export const teamTests = (computer: ComputerId, team: string, before: number | null) =>
+  inTauri() ? invoke<import("./types").TeamTestsView>("team_tests", { computer, team, before }) : Promise.reject(new Error("Teams need the desktop app."));
 export const openTaskAttachment = (path: string) => desktop<string | null>("task_attachment_open", { path });
 
 /** `next_batch` answers with raw JSON bytes (`ipc::Response`), so large batches skip script evaluation. */
@@ -474,7 +526,97 @@ export interface AccountModelCatalog {
   defaults: {model:string;effort:string}; provider_defaults: {model:string;effort:string}; effort_supported:boolean;
 }
 export interface AccountEditValues {label?:string;mode?:string;model?:string;effort?:string}
-export interface AccountEditView { handle: string; kind: AccountEditKind; label: string; machine: string; provider: string; permission_mode?:string; permission_detail?:string; models?:AccountModelCatalog|null }
+export interface AccountEditView { handle: string; kind: AccountEditKind; label: string; machine: string; provider: string; permission_mode?:string; permission_detail?:string; models?:AccountModelCatalog|null; permissions?:PermissionEditor|null }
+/** Task 68: the native permission catalog as client/core projects it (Qt's PermissionCatalog). */
+export interface PermissionOption { value: string; label: string; description: string }
+export interface PermissionChoice { label: Text; value: string; tooltip: Text; explanation: Text; bypass: boolean; unavailable: boolean; editor: boolean }
+export interface PermissionEditorRow { id: string; label: Text; description: Text; selected: string; unknown: boolean; unavailable: boolean; options: PermissionOption[] }
+export interface PermissionEditor { harness: string; choices: PermissionChoice[]; initial: string; saved_mode: string; selected: Record<string, string>; malformed: boolean; reset_label: Text; source_note: Text }
+export interface PermissionCheck { mode: string; summary: Text; choice_label: Text; problem: Text; rows: PermissionEditorRow[] }
+/** The core's answer about one native selection of an open permissions dialog. */
+export async function accountPermissionCheck(handle: string, selection: Record<string, string>): Promise<PermissionCheck> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("account_permission_check", { handle, selection });
+}
+/** Task 68: one project's or one exact session's iron rules (client/core iron_rules). */
+export type RulesTarget = { scope: "project"; project: string } | { scope: "session"; name: string; run_id: string; conversation_id: string };
+export type RulesOp = { op: "read" } | { op: "save"; rules: string[]; expected_revision: number; request_id?: string };
+export interface RulesCall { computer: ComputerId; target: RulesTarget; op: RulesOp }
+export type RulesOutcome =
+  | { outcome: "done"; view: { rules: string[]; revision: number }; request_id?: string }
+  | { outcome: "unsupported"; detail: Text }
+  | { outcome: "failed"; detail: Text; request_id?: string }
+  | { outcome: "uncertain"; detail: Text; request_id: string };
+/** Task 67: this computer's model servers (client/core model_servers over `hgs model-server`). */
+export interface ModelServer {
+  name: string; base_url: string; kind: string; ssh: string; has_key: boolean; up_minutes: number; contexts: unknown;
+  status: string[]; up: string[]; down: string[]; logs: string[]; read_only: boolean; agent_url: string; models_url: string;
+  status_text: string; up_text: string; down_text: string; logs_text: string;
+}
+export interface ModelServerModel { name: string; state: string; label: Text; since: number; usable: boolean; can_down: boolean; can_up: boolean }
+export interface ModelServerStatus {
+  error: string; detail: string; error_label: Text; problem: Text; source: string; models: ModelServerModel[];
+  free: number; total: number; memory: Text; low: boolean; used: number; raw: string[]; running: number; active: string[];
+}
+export interface ModelServerOutcome { text: Text; error: boolean }
+export interface ModelServerUpStart { started: boolean; id: string; limit_ms: number; outcome: ModelServerOutcome | null }
+export interface ModelServerUpPoll { running: boolean; outcome: ModelServerOutcome | null }
+export interface ModelServerLogs { lines: string[]; truncated: boolean }
+export interface ModelServerForm { was: string; name: string; base_url: string; kind: string; ssh: string; key_change: "" | "replace" | "remove"; key: string; status: string; up: string; down: string; logs: string }
+export interface ModelServerTest { tone: "ok" | "warn" | "error"; text: Text; raw: string[] }
+const desktopOnly = <T>(run: () => Promise<T>): Promise<T> => (inTauri() ? run() : Promise.reject(new Error(DESKTOP_ONLY)));
+export const modelServersList = () => desktopOnly(() => invoke<ModelServer[]>("model_servers_list"));
+export const modelServerStatus = (server: string) => desktopOnly(() => invoke<ModelServerStatus>("model_server_status", { server }));
+export const modelServerUp = (server: string, model: string) => desktopOnly(() => invoke<ModelServerUpStart>("model_server_up", { server, model }));
+export const modelServerUpResult = (server: string, model: string, id: string, expired: boolean) =>
+  desktopOnly(() => invoke<ModelServerUpPoll>("model_server_up_result", { server, model, id, expired }));
+export const modelServerSessions = (server: string) => desktopOnly(() => invoke<Record<string, string[]>>("model_server_sessions", { server }));
+export const modelServerDown = (server: string, model: string) => desktopOnly(() => invoke<Text | null>("model_server_down", { server, model }));
+export const modelServerLogs = (server: string, model: string) => desktopOnly(() => invoke<ModelServerLogs>("model_server_logs", { server, model }));
+export const modelServerSave = (form: ModelServerForm) => desktopOnly(() => invoke<ModelServer[]>("model_server_save", { form }));
+export const modelServerDelete = (name: string) => desktopOnly(() => invoke<ModelServer[]>("model_server_delete", { name }));
+export const modelServerTest = (form: ModelServerForm, what: "api" | "status") => desktopOnly(() => invoke<ModelServerTest>("model_server_test", { form, what }));
+export const modelServerTestLogs = (form: ModelServerForm, model: string) => desktopOnly(() => invoke<ModelServerTest>("model_server_test_logs", { form, model }));
+export const modelServerSession = (agent: string, folder: string, tag: string, server: string, model: string) =>
+  desktopOnly(() => invoke<void>("model_server_session", { agent, folder, tag, server, model }));
+/** Task 73: WSL path mapping and WSL file open (client/core wsl_mapping). Errors are core Text. */
+export interface WslFields { windows_root: string; mount_root: string; workspace_id: string }
+export interface WslTarget { alias: string; machine_id: string; distribution: string; user: string; environment: string; saved: WslFields }
+export interface WslOpened { handle: string; target: WslTarget }
+export interface WslMapped { windows: string; wsl: string; canonical: string }
+export interface WslFilePreview { wsl: string; windows: string; sha256: string }
+export interface WslScope { session: string; run_id: string; conversation_id: string; path: string; archive_id?: string; agent_id?: string }
+export async function wslMappingOpen(alias: string): Promise<WslOpened> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("wsl_mapping_open", { alias });
+}
+export async function wslMappingPreview(handle: string, source: string, fields: WslFields): Promise<WslMapped> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("wsl_mapping_preview", { handle, source, fields });
+}
+export async function wslMappingUse(handle: string, source: string, fields: WslFields, remember: boolean): Promise<string> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("wsl_mapping_use", { handle, source, fields, remember });
+}
+export async function wslFileOpen(alias: string, scope: WslScope): Promise<WslOpened> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("wsl_file_open", { alias, scope });
+}
+export async function wslFilePreview(handle: string, fields: WslFields): Promise<WslFilePreview> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("wsl_file_preview", { handle, fields });
+}
+export async function wslFileOpenOriginal(handle: string, fields: WslFields, remember: boolean): Promise<Text> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("wsl_file_open_original", { handle, fields, remember });
+}
+export async function wslDialogClose(handle: string): Promise<void> {
+  if (inTauri()) await invoke("wsl_dialog_close", { handle });
+}
+export async function ironRules(call: RulesCall): Promise<RulesOutcome> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("iron_rules", { call });
+}
 export interface AccountEditResult { notices: string[]; errors: string[] }
 export async function accountEditOpen(account: string, profile: string, kind: AccountEditKind): Promise<AccountEditView> {
   if (!inTauri()) throw new Error(DESKTOP_ONLY);
@@ -788,6 +930,9 @@ export const updatesOpen = (target: "release" | "download" | "instructions") =>
   inTauri() ? invoke<void>("updates_open", { target }) : Promise.reject(UPDATES_DESKTOP_ONLY);
 export const updatesCopyCommand = () => inTauri() ? invoke<void>("updates_copy_command") : Promise.reject(UPDATES_DESKTOP_ONLY);
 export const updatesRestart = () => inTauri() ? invoke<void>("updates_restart") : Promise.reject(UPDATES_DESKTOP_ONLY);
+/** WhiteWh fork, task #63: the fork channel's Check now and the confirmed replacement. */
+export const forkUpdatesCheck = () => inTauri() ? invoke<void>("fork_updates_check") : Promise.reject(UPDATES_DESKTOP_ONLY);
+export const forkUpdatesConfirm = () => inTauri() ? invoke<void>("fork_updates_confirm") : Promise.reject(UPDATES_DESKTOP_ONLY);
 export const updatesFixLoginItem = (restart: boolean) => inTauri() ? invoke<string | null>("updates_fix_login_item", { restart }) : Promise.reject(UPDATES_DESKTOP_ONLY);
 /** `updates-changed`: the native worker's latest snapshot; resolves once listening. */
 export const onUpdates = (listener: (view: UpdatesView) => void) => onEvent<UpdatesView>("updates-changed", listener);

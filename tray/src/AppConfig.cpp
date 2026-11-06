@@ -120,6 +120,17 @@ QString AppConfig::resolveHgsPath(const QString &configured, const QString &appl
     const QFileInfo bundled(QDir(applicationDir).filePath(QStringLiteral("hgs.exe")));
     if (bundled.isFile())
         return bundled.absoluteFilePath();
+    // WhiteWh fork, task #65: the Qt fallback in a fork zip's qt folder uses the
+    // CLI of its build (the folder above, with build-info.json), whose ConPTY
+    // pair sits next to it.
+    const QDir app(applicationDir);
+    if (app.dirName().compare(QLatin1String("qt"), Qt::CaseInsensitive) == 0) {
+        QDir build(app);
+        if (build.cdUp() && QFileInfo(build.filePath(QStringLiteral("build-info.json"))).isFile()) {
+            const QFileInfo parent(build.filePath(QStringLiteral("hgs.exe")));
+            if (parent.isFile()) return QDir::cleanPath(parent.absoluteFilePath());
+        }
+    }
     const QString found = QStandardPaths::findExecutable(QStringLiteral("hgs"));
     return found.isEmpty() ? QStringLiteral("hgs") : found;
 }

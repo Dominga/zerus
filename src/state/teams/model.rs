@@ -193,6 +193,11 @@ pub(crate) struct Settings {
     /// U56: the lead may interrupt or relaunch a stuck member; the owner sets it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lead_restarts_stuck: bool,
+    /// Task 24: a member still working on an attempt that a reassign, a
+    /// take-over or a cancel revoked has its turn interrupted once, before its
+    /// stop notice; off by default, only the owner sets it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupt_revoked: bool,
     /// U63 (owner, 2026-10-31): the lead removes its own phase pause by
     /// itself; off by default, when it needs the owner's word.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -315,6 +320,7 @@ impl Default for Settings {
             restart_crashed: true,
             stuck_minutes: 0,
             lead_restarts_stuck: false,
+            interrupt_revoked: false,
             lead_removes_own_pause: false,
             phase_acceptance: PhaseAcceptance::Lead,
             build_broker: false,
@@ -356,7 +362,11 @@ pub(crate) enum MemberFolder {
     /// A full clone with its own `.git`, so commit, merge and fetch work
     /// inside a sandboxed member's folder (B4/B6).
     Clone,
+    /// Task #26: the catalog's `read_only` folder (Architect, Reviewer,
+    /// Security, Researcher) is the shared folder with no own checkout, as
+    /// the desktop already reads it; a draft or plan member may name it.
     #[default]
+    #[serde(alias = "read_only")]
     Shared,
 }
 
@@ -446,6 +456,12 @@ pub(crate) struct Member {
     /// until you relaunch it.
     #[serde(default)]
     pub error: String,
+    /// Task 22: starts that failed only because the DeepSeek host was still
+    /// starting. The dispatcher starts the member again by itself, at most
+    /// `HOST_WAITS` times, before it records the error; a start or a
+    /// relaunch clears it.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub host_waits: u32,
     /// The role's instructions from the catalog, given with every task.
     #[serde(default)]
     pub prompt: String,
@@ -1400,6 +1416,16 @@ pub(crate) struct Attempt {
     /// The member's turn ended long enough ago without a report.
     #[serde(default)]
     pub no_report: bool,
+    /// Task 36 (audit P8): the Zerus build the member's session was seen
+    /// Building on for this attempt (a claimed `hgs team run`, or `hgs run`):
+    /// its request id, or "build" when the listing names none. While it is
+    /// set and the build has settled, the finished turn is not captured: the
+    /// member is woken once to read the result and go on.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub awaited_run: String,
+    /// What that build runs, for the wake message.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub awaited_label: String,
     /// The newest session event the dispatcher read for this attempt when the
     /// listing's `last_event_at` did not advance (a DeepSeek session's native
     /// tool events, #628). It keeps the silent check from reading the session
@@ -1485,6 +1511,12 @@ pub(crate) struct Task {
     pub criteria: Vec<String>,
     #[serde(default)]
     pub deps: Vec<Dependency>,
+    /// Task #60 (owner, 2026-11-06): the task this one was added for (a missed
+    /// item or a bug it produced), in the same team. Unlike `deps` it never
+    /// blocks or gates: the task is placed at least in its origin's layer and
+    /// carries the link. Absent on tasks without one and on older records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<u32>,
     #[serde(default)]
     pub assignee: String,
     /// The lead or you chose this member: Zerus does not give the task to
@@ -2084,6 +2116,12 @@ pub(crate) struct Team {
     /// default and every stored team deserializes as standard.
     #[serde(default, skip_serializing_if = "PlanMode::is_standard")]
     pub plan_mode: PlanMode,
+    /// Task #58 (owner, 2026-11-06): the mode of each phase that has its own,
+    /// by phase number (phase 1 included, which has no record). A phase not
+    /// named here plans in the team's `plan_mode`, so a team stored before
+    /// this field reads its mode on every phase, and a new phase starts in it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub phase_modes: std::collections::BTreeMap<u32, PlanMode>,
     /// U62: the owner's one-time permission for one full test run, bound to a
     /// release; the next full run uses it once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2235,7 +2273,9 @@ pub(crate) struct Team {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_additions: Vec<PendingAddition>,
     /// #511 N3: members to tell that their worked-ahead attempt was revoked
-    /// with its phase, newest last, at most 20.
+    /// with its phase, newest last, at most 20. Task 24: also a member whose
+    /// attempt in progress was revoked by a reassign, a take-over or a cancel
+    /// (phase 0).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stops: Vec<StopNotice>,
     /// U51: the owner's intake keys; the key itself is never stored, only its
@@ -2271,9 +2311,21 @@ pub(crate) struct StopNotice {
     /// Refused sends so far; after ten it is left unconfirmed for the lead.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub refused: u32,
+    /// Task 24: the owner's interrupt_revoked held when the attempt was
+    /// revoked: a busy session is interrupted once before the notice.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupt: bool,
+    /// Task 24: that interrupt was asked for; it is never repeated.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
 }
 
 impl Team {
+    /// Task #58: the mode phase `n` plans in: its own, else the team's.
+    pub(crate) fn phase_mode(&self, n: u32) -> PlanMode {
+        self.phase_modes.get(&n).copied().unwrap_or(self.plan_mode)
+    }
+
     /// U26: the change an already-spent owner word paid for, if any.
     pub(crate) fn owner_word_used(&self, event: i64) -> Option<String> {
         self.used_owner_words
@@ -2284,6 +2336,7 @@ impl Team {
 
     /// U32/N7: how many times that word has paid for a change so far (a stored
     /// word without the count paid once).
+    #[cfg(test)]
     pub(crate) fn owner_word_uses(&self, event: i64) -> usize {
         self.used_owner_words
             .iter()
@@ -2296,10 +2349,17 @@ impl Team {
     /// a count word ("add two backends") authorizes that many adds, every other
     /// word one change.
     pub(crate) fn owner_word_allowed_again(&self, event: i64, allowed: usize, change: &str) -> bool {
-        match self.owner_word_used(event) {
-            None => true,
-            Some(used) => used == change && self.owner_word_uses(event) < allowed.max(1),
+        let spent: Vec<&serde_json::Value> = self.used_owner_words.iter().filter(|used| used["event"].as_i64() == Some(event)).collect();
+        if spent.is_empty() {
+            return true;
         }
+        if let Some(same) = spent.iter().find(|used| used["change"].as_str() == Some(change)) {
+            return (same["uses"].as_u64().unwrap_or(1) as usize) < allowed.max(1);
+        }
+        // Task #21 (owner, 2026-11-05): "relaunch hgs, relaunch ui2" pays once
+        // for each member it names (the name check ran on the whole message);
+        // a word never pays for a change of another kind.
+        member_change(change) && spent.iter().all(|used| used["change"].as_str().is_some_and(member_change))
     }
 
     /// U58: one sentence naming a member and its tasks pays for both changes,
@@ -2314,7 +2374,13 @@ impl Team {
     }
 
     pub(crate) fn record_owner_word(&mut self, event: i64, change: &str) {
-        if let Some(used) = self.used_owner_words.iter_mut().find(|used| used["event"].as_i64() == Some(event)) {
+        // Task #21: a word that paid for several members keeps one record each.
+        let per_member = member_change(change);
+        if let Some(used) = self
+            .used_owner_words
+            .iter_mut()
+            .find(|used| used["event"].as_i64() == Some(event) && (!per_member || used["change"].as_str() == Some(change)))
+        {
             used["uses"] = serde_json::json!(used["uses"].as_u64().unwrap_or(1) + 1);
         } else {
             self.used_owner_words.push(serde_json::json!({"event":event,"change":change,"uses":1}));
@@ -2430,6 +2496,12 @@ impl Team {
 /// An estimate source of "none" is the default and is not stored.
 fn no_estimate_source(source: &str) -> bool {
     source.is_empty() || source == "none"
+}
+
+/// Task #21: a roster change about one named member ("relaunching hgs"); one
+/// owner message naming several members pays once for each of them.
+fn member_change(change: &str) -> bool {
+    ["relaunching ", "removing ", "draining "].iter().any(|prefix| change.strip_prefix(prefix).is_some_and(|rest| !rest.is_empty() && rest != "the members"))
 }
 
 #[cfg(test)]
@@ -2729,4 +2801,3 @@ mod tests {
         assert!(!attempt.questions[0].open());
     }
 }
-

@@ -174,6 +174,8 @@ mod tests {
     fn the_lead_protocol_says_every_task_gets_an_estimate() {
         let lead = TOPICS.iter().find(|(name, _)| *name == "team-lead").unwrap().1;
         assert!(lead.contains("Every task gets an estimate"), "{lead}");
+        // Task #60: follow-ups name their origin.
+        assert!(lead.contains("\"origin\":ID") && lead.contains("no dep"), "{lead}");
     }
 
     /// U63 (owner, 2026-10-31): the lead protocol says an accepted phase that
@@ -185,9 +187,26 @@ mod tests {
         assert!(lead.contains("Accepted phase not started"), "{lead}");
         assert!(lead.contains("return-to-draft re-approves"), "{lead}");
         assert!(lead.contains("pause-phase {phase, reason}"), "{lead}");
-        assert!(lead.contains("accept-phase (owner's word)"), "{lead}");
+        assert!(lead.contains("accept-phase (a card)"), "{lead}");
         let tree = TOPICS.iter().find(|(name, _)| *name == "team-tree").unwrap().1;
         assert!(tree.contains("hgs team sub-lead"), "{tree}");
+    }
+
+    /// Task #21 (owner, 2026-11-05): the lead proposes every owner-gated change
+    /// as a card and never asks the owner to type a phrase.
+    #[test]
+    fn the_lead_proposes_owner_gates_and_never_asks_for_a_phrase() {
+        let lead = TOPICS.iter().find(|(name, _)| *name == "team-lead").unwrap().1;
+        assert!(lead.contains("Owner gates are cards") && lead.contains("Never ask the owner to type a phrase"), "{lead}");
+        assert!(!lead.contains("owner_word") && !lead.contains("owner's sentence"), "{lead}");
+        let propose = TOPICS.iter().find(|(name, _)| *name == "team-propose").unwrap().1;
+        assert!(propose.contains("Never ask the owner to type a phrase"), "{propose}");
+        for kind in crate::state::teams::ops::OWNER_OPS {
+            assert!(propose.contains(kind), "team-propose omits {kind}");
+        }
+        for kind in ["\"relaunch\"", "\"iron-rules\"", "base_branch", "full_tests", "max_members"] {
+            assert!(propose.contains(kind), "team-propose omits {kind}");
+        }
     }
 
     #[test]

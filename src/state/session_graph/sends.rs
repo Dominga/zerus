@@ -41,19 +41,82 @@ fn token_record() -> Option<Value> {
     if !process_alive(&record) || record["state"] == "archived" {
         return None;
     }
+    proven(record)
+}
+
+/// The record when this process belongs to its session: a descendant of its
+/// owner, or (task #33) in that very session by the host's word.
+fn proven(record: Value) -> Option<Value> {
     let owner = u32::try_from(record["pid"].as_u64()?).ok()?;
+    if descends_from(owner) {
+        return Some(record);
+    }
+    // Task #33: a Git Bash wrapper (`bash -c`, `env`, `timeout`, `xargs`, ...)
+    // ends a Windows process between the session and this one, so the walk
+    // stops at a dead PID. The session host then names the session whose job
+    // holds this process, by the PID the kernel gives the host; the record the
+    // environment names must be that very session and run. The environment
+    // alone never proves it (H7): a leaked HGS_SESSION names another session.
+    host_vouches(&record).then_some(record)
+}
+
+/// Whether this process is `owner` or descends from it through live
+/// processes of this user.
+fn descends_from(owner: u32) -> bool {
     let mut pid = std::process::id();
     for _ in 0..64 {
-        let process = crate::platform::process_identity(pid)?;
+        let Some(process) = crate::platform::process_identity(pid) else { return false };
         if pid == owner {
-            return Some(record);
+            return true;
         }
         if process.parent == 0 || process.parent == pid {
-            break;
+            return false;
         }
         pid = process.parent;
     }
-    None
+    false
+}
+
+/// Task #33: the host's answer for this process matches `record`: its name,
+/// its pane and its run marker, which the launch set to the record's run.
+fn host_vouches(record: &Value) -> bool {
+    host_session().is_some_and(|found| vouched(record, &found))
+}
+
+fn vouched(record: &Value, found: &crate::host::protocol::CallerSession) -> bool {
+    let run = string(record, "run_id");
+    !run.is_empty()
+        && found.run_marker == run
+        && found.name == string(record, "name")
+        && !found.pane.is_empty()
+        && found.pane == string(record, "pane")
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's session host answer; Some(None) is "outside every session".
+    static HOST_SESSION: std::cell::RefCell<Option<Option<crate::host::protocol::CallerSession>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_host_session(found: Option<Option<crate::host::protocol::CallerSession>>) {
+    HOST_SESSION.with(|value| *value.borrow_mut() = found);
+}
+
+fn host_session() -> Option<crate::host::protocol::CallerSession> {
+    #[cfg(test)]
+    if let Some(found) = HOST_SESSION.with(|value| value.borrow().clone()) {
+        return found;
+    }
+    #[cfg(windows)]
+    {
+        super::super::backend::host::HOST.caller_session()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
 }
 
 /// The calling agent's own binding under its current name, proven like a
@@ -301,4 +364,111 @@ pub(super) fn coverage() -> anyhow::Result<Value> {
         value["unknown_deliveries"]=json!(open(true)?.query_row("SELECT count(*) FROM sends WHERE at>=?1 AND json_extract(payload,'$.status')<>'submitted'",[now()-30.0*24.0*3600.0],|r|r.get::<_,i64>(0))?);
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod caller_proof_tests {
+    use super::*;
+    use crate::host::protocol::CallerSession;
+
+    fn record(owner: u32) -> Value {
+        json!({"name":"claude/p/core","run_id":"830f440e-c015-40cf-9779-a7afa1e46bba","pane":"%7","pid":owner})
+    }
+
+    fn answer(name: &str, pane: &str, run: &str) -> CallerSession {
+        CallerSession { session: "$7".into(), name: name.into(), pane: pane.into(), run_marker: run.into() }
+    }
+
+    fn with_host<T>(found: Option<CallerSession>, body: impl FnOnce() -> T) -> T {
+        set_test_host_session(Some(found));
+        let result = body();
+        set_test_host_session(None);
+        result
+    }
+
+    /// Task #33: a broken chain is proven only by the host naming this exact
+    /// session, pane and run. A leaked HGS_SESSION (H7: the host names another
+    /// session, or the same name under another run) and a process outside
+    /// every session stay refused.
+    #[test]
+    fn only_the_hosts_word_for_this_very_session_proves_a_broken_chain() {
+        // A PID that is no ancestor of this test: the chain does not reach it.
+        let stranger = u32::MAX - 7;
+        let run = "830f440e-c015-40cf-9779-a7afa1e46bba";
+        assert!(with_host(Some(answer("claude/p/core", "%7", run)), || proven(record(stranger))).is_some());
+        for found in [
+            None,
+            Some(answer("claude/p/other", "%9", "another-run")),
+            Some(answer("claude/p/core", "%7", "an-older-run")),
+            Some(answer("claude/p/core", "%8", run)),
+            Some(answer("claude/p/core", "", run)),
+        ] {
+            assert!(with_host(found.clone(), || proven(record(stranger))).is_none(), "{found:?}");
+        }
+        // A record without a run never matches an empty marker.
+        let mut bare = record(stranger);
+        bare["run_id"] = json!("");
+        assert!(with_host(Some(answer("claude/p/core", "%7", "")), || proven(bare)).is_none());
+        // An intact chain needs no host at all.
+        assert!(with_host(None, || proven(record(std::process::id()))).is_some());
+    }
+
+    /// The helper side of the test below: run through Git Bash's `env`, as the
+    /// audit ran `env hgs run --list --json`.
+    #[test]
+    fn wrapped_chain_helper() {
+        let Some(owner) = std::env::var("HGS_TEST_CHAIN_OWNER").ok().and_then(|owner| owner.parse::<u32>().ok()) else { return };
+        let descends = descends_from(owner);
+        let run = "830f440e-c015-40cf-9779-a7afa1e46bba";
+        let proven = with_host(Some(answer("claude/p/core", "%7", run)), || proven(record(owner))).is_some();
+        println!("descends={descends} proven={proven}");
+    }
+
+    /// Task #29 P1 / task #33: in a Claude session `env hgs run --list --json`
+    /// (or bash -c, nohup, timeout, xargs, sh -c, npx -c) was refused as
+    /// "run it from inside a Zerus session". Bash forks for `env`, and the
+    /// fork's exec of a Cygwin program ends that Windows process, so the chain
+    /// from hgs never reaches the session. Here the test process is the
+    /// session's owner and Git Bash runs `env <helper>; true`: the chain breaks
+    /// exactly so, and the host's answer proves the helper.
+    #[cfg(windows)]
+    #[test]
+    fn a_process_started_through_git_bash_env_is_proven_by_the_host() {
+        let Some(bash) = git_bash() else { return };
+        let exe = std::env::current_exe().unwrap();
+        let helper = "state::session_graph::sends::caller_proof_tests::wrapped_chain_helper";
+        let run = |wrapped: bool| {
+            let mut command = if wrapped {
+                let exe = exe.display().to_string().replace('\\', "/");
+                let mut command = Command::new(&bash);
+                command.arg("-c").arg(format!("env '{exe}' {helper} --exact --nocapture --test-threads=1; true"));
+                command
+            } else {
+                let mut command = Command::new(&exe);
+                command.args([helper, "--exact", "--nocapture", "--test-threads=1"]);
+                command
+            };
+            let output = command
+                .env("HGS_TEST_CHAIN_OWNER", std::process::id().to_string())
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
+        let direct = run(false);
+        assert!(direct.contains("descends=true proven=true"), "{direct}");
+        let wrapped = run(true);
+        assert!(wrapped.contains("descends=false"), "the wrapper broke the chain as in the audit: {wrapped}");
+        assert!(wrapped.contains("proven=true"), "{wrapped}");
+    }
+
+    /// Git for Windows' bash.exe, found next to git.
+    #[cfg(windows)]
+    fn git_bash() -> Option<std::path::PathBuf> {
+        let output = Command::new("git").arg("--exec-path").output().ok()?;
+        let exec = std::path::PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        // <git>/mingw64/libexec/git-core -> <git>/bin/bash.exe
+        let bash = exec.parent()?.parent()?.parent()?.join("bin").join("bash.exe");
+        bash.is_file().then_some(bash)
+    }
 }

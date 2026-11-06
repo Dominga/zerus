@@ -66,6 +66,9 @@ pub(crate) struct Seen {
     /// #511 N1: a build Zerus runs for the session (`hgs run`, or a claimed
     /// `hgs team run` in its folder) is work, as the listing's `build` says.
     pub building: bool,
+    /// Task 36: that build's request id and label, empty when not building.
+    pub build_run: String,
+    pub build_label: String,
     /// The MCP servers and services it runs, which are not Background work
     /// (G7).
     pub services: Vec<SeenService>,
@@ -211,6 +214,8 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 background,
                 work,
                 building: record["build"].is_object(),
+                build_run: record["build"]["request_id"].as_str().unwrap_or_default().to_owned(),
+                build_label: record["build"]["label"].as_str().unwrap_or_default().to_owned(),
                 services,
                 asking: live && matches!(field("phase"), "question" | "input" | "approval"),
                 last_event_at: record["last_event_at"].as_f64(),
@@ -314,6 +319,14 @@ pub(crate) enum Step {
     /// Gives the member the lead's answer as a message (A3).
     AnswerQuestion { task: u32, question: String },
     TurnEnded { task: u32, at: f64, reply: String },
+    /// Task 36: the member's session is Building on its own run during the
+    /// attempt: remember the run, so its end is noticed.
+    RunAwaited { task: u32, run: String, label: String },
+    /// Task 36: the awaited run settled. `wake`: the member's turn is over
+    /// (the session is quiet), so it is told once to read the result and go
+    /// on, and its finished turn is not captured; otherwise the member already
+    /// works again and the run is only forgotten.
+    RunSettled { task: u32, wake: bool },
     /// The capture gate was seen open: the report timeout counts from here (C2).
     GateOpen { task: u32 },
     /// A question or Background work holds a finished turn: the timeout
@@ -398,6 +411,9 @@ pub(crate) enum Step {
     /// #511 N3: tell a member its worked-ahead attempt was revoked with its
     /// phase, so it stops.
     TellStop { stop: String },
+    /// Task 24: interrupts a member's busy turn once before its stop notice
+    /// (the owner's interrupt_revoked).
+    InterruptStop { stop: String },
 }
 
 /// U18: the lead's turn has ended and it can take a message, also while its own
@@ -646,6 +662,26 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 {
                     // A1: delivered and never started; Zerus re-sends nothing.
                     steps.push(Step::StartLate { task: task.id });
+                }
+            }
+            // Task 36 (audit P8): a member that ends its turn while its own
+            // Zerus build runs is not done: nothing would tell it when the run
+            // settles, and the quiet session would turn into a captured
+            // "waiting for my build" or No report. The run it waits on is
+            // remembered; once it settles with the turn over, the member is
+            // woken once and this tick captures nothing.
+            if let Some(found) = found.filter(|found| found.live) {
+                if found.building {
+                    let run = if found.build_run.is_empty() { "build".to_owned() } else { found.build_run.clone() };
+                    if attempt.awaited_run != run {
+                        steps.push(Step::RunAwaited { task: task.id, run, label: found.build_label.clone() });
+                    }
+                } else if !attempt.awaited_run.is_empty() {
+                    let wake = capture_open(found) && attempt.open_question().is_none();
+                    steps.push(Step::RunSettled { task: task.id, wake });
+                    if wake {
+                        continue;
+                    }
                 }
             }
             // A2/C2: the capture gate. A turn end is recorded only for a quiet
@@ -1089,10 +1125,17 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     }
     // #511 N3: a member whose worked-ahead attempt was revoked hears it once,
     // as soon as its session runs; the message waits behind its turn.
+    // Task 24: so does a member whose attempt in progress was reassigned,
+    // taken over or cancelled; with the owner's interrupt_revoked its busy turn
+    // is interrupted once first, so it stops at once and takes its next task.
     for stop in team.stops.iter().filter(|stop| stop.notice == Notice::Pending) {
-        if team.member(&stop.member).and_then(|member| session_of(member, seen)).is_some_and(|found| found.live) {
-            steps.push(Step::TellStop { stop: stop.id.clone() });
+        let Some(found) = team.member(&stop.member).and_then(|member| session_of(member, seen)).filter(|found| found.live) else {
+            continue;
+        };
+        if stop.interrupt && !stop.interrupted && !found.free {
+            steps.push(Step::InterruptStop { stop: stop.id.clone() });
         }
+        steps.push(Step::TellStop { stop: stop.id.clone() });
     }
     // U47/U48: a started stage command ends while the team is paused too; a
     // new one starts only while it runs.
@@ -2746,6 +2789,18 @@ pub(crate) fn default_folder(agent: &str) -> MemberFolder {
     }
 }
 
+/// Task #28 (5): a sandboxed dsh member cannot write a worktree's git
+/// metadata (it lives in the main checkout's `.git`, outside the sandbox), so
+/// its own folder is a clone whatever asked for a worktree: a role default, a
+/// template, the New team form or the worktree policy, which a clone also
+/// meets. Before, the preflight only warned and the member could not commit.
+/// An adopted session keeps the folder it works in.
+pub(crate) fn sandbox_folder(member: &mut Member) {
+    if member.agent == "dsh" && member.folder == MemberFolder::Worktree && member.session.is_none() {
+        member.folder = MemberFolder::Clone;
+    }
+}
+
 /// The folder the member works in, computed without creating anything: the
 /// team's (or its own) folder, or the worktree/clone path a writing member
 /// gets.
@@ -3037,7 +3092,13 @@ fn file_in_project(team: &Team, computer: &str, session: &SessionRef) {
 /// The folder the member works in: the team's (or its own) folder, or a new
 /// worktree or clone of it, created now.
 fn member_folder(team: &Team, member: &Member) -> anyhow::Result<String> {
-    member_folder_with(team, member, &|host, args| hgs(host, args, None, Duration::from_secs(300)))
+    member_folder_with(team, member, &|host, args| {
+        // Task 20: `worktrees create --clone` of a large repository takes
+        // minutes on Windows (its clone step alone may take 25); the
+        // catalog reads stay short.
+        let minutes = if args.get(1) == Some(&"create") { 40 } else { 5 };
+        hgs(host, args, None, Duration::from_secs(minutes * 60))
+    })
 }
 
 /// `member_folder` with the `hgs` call it makes (`run(computer, args)`), so the
@@ -3071,15 +3132,22 @@ fn member_folder_with(team: &Team, member: &Member, run: &dyn Fn(&str, &[&str]) 
     }
     // C12: the member's own worktree or clone from an earlier start (a
     // relaunch, a swap) is used again; any other folder there is refused.
+    // Task 20: a clone whose create ran out of time after `git clone` has no
+    // branch of the member's yet; `worktrees create` finishes it (and checks
+    // there that it is such a clone) instead of the member failing again.
+    let clone = member.folder == MemberFolder::Clone;
     if remote {
         if let Some(found) = remote_checkout(run, &member.computer, &destination)? {
+            let unfinished = clone && !found.is_empty() && found != branch;
             anyhow::ensure!(
-                found == branch,
+                found == branch || unfinished,
                 "{destination} already exists on {} and is not this member's folder ({})",
                 member.computer,
                 if found.is_empty() { "no checkout of its own".to_owned() } else { format!("on {found}, not {branch}") }
             );
-            return Ok(destination);
+            if !unfinished {
+                return Ok(destination);
+            }
         }
     } else if Path::new(&destination).exists() {
         // A failed create may leave its empty reservation: it goes.
@@ -3087,13 +3155,22 @@ fn member_folder_with(team: &Team, member: &Member, run: &dyn Fn(&str, &[&str]) 
         if empty {
             std::fs::remove_dir(&destination)?;
         } else {
-            if let Some(problem) = folder_problem(&destination, &folder, Some(&branch)) {
+            let Some(problem) = folder_problem(&destination, &folder, Some(&branch)) else {
+                return Ok(destination);
+            };
+            let unfinished = clone
+                && folder_problem(&destination, &folder, None).is_none()
+                && git_at(&destination, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_none();
+            if !unfinished {
                 anyhow::bail!("{destination} already exists and is not this member's folder: {problem}");
             }
-            return Ok(destination);
         }
     }
-    let mut args: Vec<&str> = vec!["worktrees", "create", "--path", &folder, "--branch", &branch, "--destination", &destination, "--base", "HEAD", "--json"];
+    // Task 20: the member's branch starts from the team's base branch when
+    // one is set (U48), else from the HEAD of the team's folder (the lead's
+    // branch), never from a clone's default branch.
+    let base = if team.settings.base_branch.is_empty() { "HEAD".to_owned() } else { team.settings.base_branch.clone() };
+    let mut args: Vec<&str> = vec!["worktrees", "create", "--path", &folder, "--branch", &branch, "--destination", &destination, "--base", &base, "--json"];
     if member.folder == MemberFolder::Clone {
         args.insert(2, "--clone");
     }
@@ -3198,12 +3275,16 @@ pub(crate) fn agent_args(agent: &str, model: &str, effort: &str) -> Vec<String> 
     args
 }
 
-/// DeepSeek's model is provider/model; a bare name keeps the session's own.
+/// A DeepSeek member's model and effort, after its session starts: the model as
+/// `provider/model` or a bare id (`deepseek-flash`) hgs resolves (task #19).
 fn apply_settings(member: &Member) -> anyhow::Result<()> {
     let session = member.session.as_ref().context("no session")?;
     let mut input = json!({"request_id":uuid::Uuid::new_v4().to_string(),"expected_run_id":session.run_id,
         "expected_conversation_id":session.conversation_id});
-    if member.model.contains('/') {
+    // Task #19: only a DeepSeek member gets its settings this way; hgs takes
+    // its model as `provider/model` or as the bare id one provider offers
+    // (`deepseek-flash`), which was dropped before.
+    if !member.model.is_empty() {
         input["model"] = json!(member.model);
     }
     if !member.effort.is_empty() {
@@ -3327,6 +3408,18 @@ mod set_aside_tests {
         assert_eq!(set_aside_replaced(&member).unwrap().as_deref(), Some("set aside codex/x/dev"));
         set_test_set_aside(None);
     }
+}
+
+/// Task 22: how many times a member is started again by itself when its
+/// DeepSeek host was still starting. Each start waits for the host (dsh's own
+/// bound), so a host that never answers fails once after about four of them.
+pub(crate) const HOST_WAITS: u32 = 3;
+
+/// Task 22: the start failed only because the DeepSeek host it started (or
+/// another start of it) did not answer yet. The host keeps starting on its
+/// own, so the next start finds it up.
+pub(crate) fn host_still_starting(error: &str) -> bool {
+    error.contains("DeepSeek host is still starting")
 }
 
 fn launch(team: &Team, member: &Member) -> anyhow::Result<()> {
@@ -3876,6 +3969,17 @@ fn task_waits(team: &mut Team, task_id: u32, member_id: &str, step: &PrepareStep
 /// #511 N3: the message that tells a member to stop a worked-ahead attempt
 /// Zerus revoked with its phase.
 pub(crate) fn stop_text(team: &Team, stop: &StopNotice) -> String {
+    // Task 24: an attempt in progress that a reassign, a take-over or a
+    // cancel revoked (no phase).
+    if stop.phase == 0 {
+        return format!(
+            "[Zerus team \u{b7} from: Zerus \u{b7} task: #{} \u{b7} stop]\n\
+             Stop working on task #{} {}: {}, so Zerus revoked your attempt {}. \
+             Stop the builds, tests and commands you started for it, do not report it and commit nothing more for it. \
+             Your next task comes in its own message (team {}).",
+            stop.task, stop.task, stop.title, stop.reason, stop.attempt, team.name
+        );
+    }
     format!(
         "[Zerus team \u{b7} from: Zerus \u{b7} task: #{} \u{b7} stop]\n\
          Stop working on task #{} {}: {}, so Zerus revoked your attempt {} that worked ahead of it. \
@@ -3912,6 +4016,34 @@ fn tell_stop(store: &mut Store, team: &Team, id: &str) -> anyhow::Result<()> {
                 events.push(Event::new("stop_unconfirmed", json!({"task":stop.task,"member":role,"attempt":stop.attempt,"error":error})));
             }
         }
+        Ok(())
+    })
+}
+
+/// Task 24: interrupts the busy turn of a member whose attempt was revoked,
+/// once (the owner's interrupt_revoked); the stop notice follows. A failed
+/// interrupt is recorded and not repeated: the notice still reaches the member.
+fn interrupt_stop(store: &mut Store, team: &Team, id: &str) -> anyhow::Result<()> {
+    let Some(stop) = team.stops.iter().find(|stop| stop.id == id && stop.notice == Notice::Pending && stop.interrupt && !stop.interrupted).cloned() else {
+        return Ok(());
+    };
+    let Some(session) = team.member(&stop.member).and_then(|member| member.session.clone()) else { return Ok(()) };
+    let input = json!({"run_id":session.run_id,"conversation_id":session.conversation_id});
+    let outcome = hgs(&session.host, &["interrupt", &session.name, "--json"], Some(&input), Duration::from_secs(60));
+    let error = match &outcome {
+        Ok(output) if output.status.success() => String::new(),
+        Ok(output) => String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        Err(error) => error.to_string(),
+    };
+    change(store, &team.id, |team, events| {
+        let role = team.role_of(&stop.member);
+        if let Some(found) = team.stops.iter_mut().find(|found| found.id == stop.id) {
+            found.interrupted = true;
+        }
+        events.push(Event::new(
+            "revoked_interrupted",
+            json!({"task":stop.task,"member":role,"attempt":stop.attempt,"ok":error.is_empty(),"error":error}),
+        ));
         Ok(())
     })
 }
@@ -5035,6 +5167,63 @@ fn tell_lead_start_late(store: &mut Store, team: &Team, task_id: u32) -> anyhow:
         let found = team.task_mut(task_id).and_then(|t| t.attempts.iter_mut().find(|a| a.id == attempt.id)).context("unknown attempt")?;
         found.told_lead.push("start_late".to_owned());
         events.push(Event::new("lead_told", json!({"member":role,"task":task_id,"kind":"start_late"})));
+        Ok(())
+    })
+}
+
+/// Task 36: the message that wakes a member whose own run settled after its
+/// turn ended.
+pub(crate) fn run_settled_text(task: &Task, attempt: &Attempt) -> String {
+    let what = if attempt.awaited_label.is_empty() { "build".to_owned() } else { format!("build ({})", attempt.awaited_label) };
+    let read = if attempt.awaited_run == "build" {
+        "Read its result".to_owned()
+    } else {
+        format!("Read its result (ask again with request_id {})", attempt.awaited_run)
+    };
+    format!(
+        "[Zerus team] Your {what} for task #{} {} has finished. {read}, then go on with the task and finish it with hgs team report (attempt {}). Zerus does not take a reply that only says you are waiting as your report.",
+        task.id, task.title, attempt.id
+    )
+}
+
+/// Task 36: the awaited run settled. With the member's turn over it is woken
+/// once and its finished turn starts again: the report timeout counts anew
+/// from the wake, so a member that still does nothing gets No report then.
+fn run_settled(store: &mut Store, team: &Team, task_id: u32, wake: bool) -> anyhow::Result<()> {
+    let task = team.task(task_id).context("unknown task")?;
+    let attempt = task.attempts.last().context("no attempt")?;
+    if attempt.state != AttemptState::Delivered || attempt.awaited_run.is_empty() {
+        return Ok(());
+    }
+    let run = attempt.awaited_run.clone();
+    let mut sent = None;
+    if wake {
+        let session = team.member(&attempt.member).and_then(|m| m.session.clone()).context("the member has no session")?;
+        let notice = uuid::Uuid::new_v4().to_string();
+        sent = Some(send(&session, &notice, &run_settled_text(task, attempt)));
+    }
+    let role = team.role_of(&attempt.member);
+    change(store, &team.id, |team, events| {
+        let Some(attempt) = team.task_mut(task_id).and_then(|t| t.attempts.last_mut()) else { return Ok(()) };
+        if attempt.state != AttemptState::Delivered || attempt.awaited_run != run {
+            return Ok(());
+        }
+        attempt.awaited_run.clear();
+        attempt.awaited_label.clear();
+        if let Some(sent) = sent {
+            // Woken once, whatever the delivery: a refused wake leaves the
+            // finished turn to the usual capture.
+            if !matches!(sent, Sent::Refused(_)) {
+                attempt.turn_ended_at = None;
+                attempt.turn_reply.clear();
+                attempt.report_ready_at = None;
+                attempt.blocked_since = None;
+            }
+            events.push(Event::new(
+                "run_settled_woken",
+                json!({"member":role,"task":task_id,"attempt":attempt.n,"run":run,"delivered":!matches!(sent, Sent::Refused(_))}),
+            ));
+        }
         Ok(())
     })
 }
@@ -6497,9 +6686,34 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                 Err(error) => Err(error),
             };
             if let Err(error) = launched {
+                let error = error.to_string();
+                // Task 22: a host that is still starting is waited for: the
+                // member is started again on a later tick (a new launch id;
+                // nothing was saved for this one), with no error and no inbox
+                // item, until HOST_WAITS such starts have failed.
+                let waits = found.host_waits;
+                if host_still_starting(&error) && waits < HOST_WAITS {
+                    change(store, &team.id, |team, events| {
+                        let role = team.role_of(member);
+                        if let Some(record) = team.members.iter_mut().find(|m| m.id == *member && m.session.is_none()) {
+                            record.launch_id.clear();
+                            record.host_waits = waits + 1;
+                        }
+                        events.push(Event::new(
+                            "launch_waiting",
+                            json!({"member":role,"reason":error,"wait":waits + 1,"of":HOST_WAITS}),
+                        ));
+                        Ok(())
+                    })?;
+                    return Ok(());
+                }
+                let error = if host_still_starting(&error) {
+                    format!("{error} (started {} times while the DeepSeek host was starting; it did not answer)", waits + 1)
+                } else {
+                    error
+                };
                 // U54: a failed post-swap launch keeps `launch_after_swap`, so a
                 // relaunch starts it at once; the error names its fix.
-                let error = error.to_string();
                 let error = if swapped {
                     format!("{error}; fix the folder or the old session, then hgs team relaunch starts it at once")
                 } else {
@@ -6509,6 +6723,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                     if let Some(found) = team.members.iter_mut().find(|m| m.id == *member && m.session.is_none()) {
                         found.error = error.clone();
                         found.launch_after_swap = swapped;
+                        found.host_waits = 0;
                     }
                     events.push(Event::new("launch_failed", json!({"member":team.role_of(member),"error":error})));
                     Ok(())
@@ -6517,6 +6732,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                 change(store, &team.id, |team, _| {
                     if let Some(found) = team.members.iter_mut().find(|m| m.id == *member && m.session.is_none()) {
                         found.launch_after_swap = false;
+                        found.host_waits = 0;
                     }
                     Ok(())
                 })?;
@@ -6554,6 +6770,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::StageStalled { task, run, reason } => stall_stage_command(store, team, *task, run, reason),
         Step::StageSilent { task, run } => stage_silent_command(store, team, *task, run),
         Step::TellStop { stop } => tell_stop(store, team, stop),
+        Step::InterruptStop { stop } => interrupt_stop(store, team, stop),
         Step::Rebalanced { tasks } => tell_lead_rebalanced(store, team, tasks),
         Step::TurnEnded { task, at, reply } => change(store, &team.id, |team, _| {
             if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
@@ -6567,6 +6784,16 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             }
             Ok(())
         }),
+        Step::RunAwaited { task, run, label } => change(store, &team.id, |team, _| {
+            if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
+                if attempt.state == AttemptState::Delivered {
+                    attempt.awaited_run = run.clone();
+                    attempt.awaited_label = label.clone();
+                }
+            }
+            Ok(())
+        }),
+        Step::RunSettled { task, wake } => run_settled(store, team, *task, *wake),
         Step::GateOpen { task } => change(store, &team.id, |team, _| {
             // An old record (or a reopened gate): the timeout starts now (C2).
             if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
@@ -6930,6 +7157,14 @@ fn take_outbox_with(
             if request["member"].as_str() != Some(member.id.as_str()) && shares_folder(team, &request, seen, &found.cwd) {
                 continue;
             }
+            // Task #28: a sandboxed member's own `hgs run` and its host reads.
+            if matches!(request["op"].as_str(), Some("session-run" | "read")) {
+                let outcome = sandbox_request(member, folder, &request);
+                if let Err(error) = super::outbox::settle(folder, &request, &outcome) {
+                    eprintln!("hgs team worker: {}: outbox {}: {error}", team.name, path.display());
+                }
+                continue;
+            }
             if request["op"] == "run" {
                 match start_run(store, team, member, folder, &request, spawn) {
                     // A refusal is answered now; a claim needs no answer - the
@@ -6957,6 +7192,54 @@ fn take_outbox_with(
         }
     }
     Ok(())
+}
+
+/// Task #28: what the worker does for a sandboxed member that its sandbox
+/// cannot. `session-run` records and starts the member's `hgs run` as its
+/// session's work, at the sandbox's Low integrity (`builds::start_for_sandbox`);
+/// `read` answers one host read the sandbox cannot reach
+/// (`outbox::sandbox_read_allowed`). The folder proves the member (U20); a
+/// refusal is the answer, never a retry.
+fn sandbox_request(member: &Member, folder: &Path, request: &Value) -> Value {
+    let id = request["request_id"].as_str().unwrap_or_default();
+    let refused = |error: String| json!({"status":"refused","request_id":id,"error":error});
+    let Some(session) = member.session.as_ref().filter(|session| session.host.is_empty()) else {
+        return refused("the member has no session on this computer".into());
+    };
+    match request["op"].as_str() {
+        Some("session-run") => {
+            let session = json!({"name":session.name,"run_id":session.run_id,"conversation_id":session.conversation_id});
+            // Task #48: a Codex member's run keeps Codex's sandbox, any
+            // other sandboxed member's Low integrity.
+            let sandbox = if member.agent == "codex" { super::super::builds::Sandbox::Codex } else { super::super::builds::Sandbox::Low };
+            super::super::builds::start_for_sandbox(id, &request["input"], session, folder, sandbox).unwrap_or_else(refused)
+        }
+        _ => {
+            let argv: Vec<String> =
+                request["input"]["argv"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+            if !super::outbox::sandbox_read_allowed(&argv) {
+                return refused(format!("a sandbox asks only for hgs ls and hgs inspect, not: hgs {}", argv.join(" ")));
+            }
+            let words: Vec<&str> = argv.iter().map(String::as_str).collect();
+            match hgs("", &words, None, Duration::from_secs(45)) {
+                Ok(output) => {
+                    let mut stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                    let truncated = stdout.len() > super::outbox::READ_STDOUT;
+                    if truncated {
+                        let mut end = super::outbox::READ_STDOUT;
+                        while !stdout.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        stdout.truncate(end);
+                    }
+                    let stderr: String = String::from_utf8_lossy(&output.stderr).chars().take(64 * 1024).collect();
+                    json!({"status":"ran","request_id":id,"exit":output.status.code().unwrap_or(1),"stdout":stdout,
+                        "stderr":stderr,"truncated":truncated})
+                }
+                Err(error) => refused(format!("{error:#}")),
+            }
+        }
+    }
 }
 
 /// N1: the branch the lead's own folder is on: what a member merges. It is read
@@ -7661,6 +7944,10 @@ mod dispatcher_stages;
 #[cfg(test)]
 #[path = "tests/dispatcher_restart.rs"]
 mod dispatcher_restart;
+
+#[cfg(test)]
+#[path = "tests/dispatcher_host_start.rs"]
+mod dispatcher_host_start;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_delivery.rs"]

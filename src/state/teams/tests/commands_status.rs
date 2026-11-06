@@ -319,6 +319,39 @@ fn status_shows_the_plan_mode_and_the_free_phases_state() {
     assert!(value["free_phase"].is_null());
 }
 
+/// Task #58: status and the list carry each phase's mode: its own, else the
+/// team's; the free phase is the one whose own mode is free.
+#[test]
+fn status_and_the_list_carry_each_phases_mode() {
+    use super::super::model::{Phase, PhaseState, PlanMode, Task, TaskStatus};
+    let mut team = Team {
+        id: "t".into(),
+        name: "T".into(),
+        lead: "lead".into(),
+        status: TeamStatus::Running,
+        tasks: vec![
+            Task { id: 1, title: "A".into(), assignee: "dev".into(), phase: 1, status: TaskStatus::Accepted, ..Default::default() },
+            Task { id: 2, title: "B".into(), assignee: "dev".into(), phase: 2, status: TaskStatus::InProgress, ..Default::default() },
+        ],
+        phases: vec![Phase { n: 2, order: 2, state: PhaseState::Approved, tasks: vec![2], ..Default::default() }],
+        ..Default::default()
+    };
+    team.phase_modes.insert(2, PlanMode::Free);
+    let value = view_with(&team, &[], None);
+    assert_eq!(value["plan_mode"], "standard", "the team's own mode stays the default");
+    assert_eq!(value["phase_modes"], json!({"1":"standard","2":"free"}));
+    assert_eq!(value["phases"][0]["mode"], "free");
+    assert_eq!((value["free_phase"]["phase"].as_u64(), value["free_phase"]["running"].clone()), (Some(2), json!([2])));
+    let listed = summary(&team, true);
+    assert_eq!(listed["phase_modes"], json!({"1":"standard","2":"free"}));
+    assert_eq!(listed["phases"][0]["mode"], "free");
+    // An old record without phase modes reads the team's mode on every phase.
+    team.phase_modes.clear();
+    team.plan_mode = PlanMode::Free;
+    assert_eq!(view_with(&team, &[], None)["phase_modes"], json!({"1":"free","2":"free"}));
+    assert_eq!(summary(&team, true)["phases"][0]["mode"], "free");
+}
+
 #[test]
 fn status_shows_the_owners_phase_states_and_the_stuck_scope() {
     // U25: Build runs, Polish was sent back, Ship waits for the owner.
@@ -939,6 +972,10 @@ fn a_parent_task_shows_its_subteam_and_the_team_lists_its_children() {
     assert_eq!(view["children"], json!([{"team":"child","name":"Child","status":"running","done":1,"total":2}]));
     // The parent's plan health counts only its own tasks.
     assert_eq!(view["health"]["tasks"], 1);
+    // Task 52: the list names each team's parent task, so a client walks the
+    // tree from the list; a team with no parent says null.
+    assert_eq!(summary(&child, true)["parent"], json!({"team":parent.id,"task":1}));
+    assert_eq!(summary(&parent, true)["parent"], json!(null));
 }
 
 #[test]

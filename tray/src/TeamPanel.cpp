@@ -64,6 +64,7 @@ TeamPanel::TeamPanel(TeamController *controller, QWidget *parent) : QWidget(pare
     layout->addWidget(m_stack);
     m_card->back = [this] { m_openTask = 0; render(); };
     m_card->act = [this](const QString &operation, const QJsonObject &input) { act(operation, input); };
+    m_card->actThen = [this](const QString &operation, const QJsonObject &input, const TeamTaskCard::Done &done) { act(operation, input, done); };
     m_card->openTask = [this](int task) { openTask(task); };
     m_card->openTeam = [this](const QString &team) { m_controller->watch(team); };
     m_card->openSession = [this](const QString &host, const QString &session) { if (openSession) openSession(host, session); };
@@ -1025,7 +1026,7 @@ QWidget *TeamPanel::problemActions(const Team &team, const Member &member, const
         wait->setToolTip(tr("Open attempts are not revoked; the member continues when its computer answers"));
     } else if (status.kind == "asking") {
         // A3: the answer field is in the task card.
-        add(tr("Answer…"), "teamAnswerQuestion", true, [this, id = task ? task->id : 0] { if (id) openTask(id); });
+        add(tr("Answer…"), "teamAnswerQuestion", true, [this, id = task ? task->id : 0] { if (id) { m_card->requestAnswerFocus(); openTask(id); } });
     } else if (status.kind == "answer") {
         add(tr("Go to question"), "teamGoToQuestion", true, [this, host, session] { if (openSession) openSession(host, session); });
     } else if (status.kind == "failed") {
@@ -1160,6 +1161,7 @@ QWidget *TeamPanel::tasks(const Team &team, bool narrow)
             if (dep.soft && !team.allHard) view->soft.insert({dep.task, task.id});
         }
     }
+    for (const auto &task : team.tasks) if (task.origin > 0) view->origins[task.id] = task.origin;
     QMap<int, int> localLayer;
     if (grouped) for (const auto &band : view->bands) {
         if (band.collapsed) continue;
@@ -1274,3 +1276,6 @@ QWidget *TeamPanel::feed(const Team &team)
     } else if (shown) v->addWidget(label(tr("Beginning of team history"), c.muted, 11));
     return box;
 }
+
+
+

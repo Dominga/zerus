@@ -1147,16 +1147,37 @@ each other's entries); `qt-build` sets the launcher first in a build folder
 configured without it. A tool not found on `PATH` (or in cargo's bin folder)
 is named at the start of the run's output and the run builds without it.
 
+A build or test template (`cargo-build`, `cargo-test`, `cargo-clippy`,
+`qt-configure`, `qt-build`, `qt-test`) that fails with MSVC's C1083 "Cannot open
+compiler generated file ... Permission denied" or D8050 "failed to get command
+line into debug records" runs once more. These are the failures real-time
+scanning (Microsoft Defender) gives a compiler in a folder it scans. The run's
+output names the folder and asks for its build outputs (`.ci-build`, `target`)
+to be excluded from scanning. No other failure is retried, and a commit or
+merge never is.
+
 Start builds and long tests through Zerus so they show as work:
 `hgs team run` for a team member's templates (`hgs guide team-run`), and
 `hgs run --json [--wait]` with `{request_id, label, command, cwd?,
 timeout_minutes?}` for any session (`hgs guide run`). `hgs run` names the
-calling session by its process ancestry, runs the command in `sh -c` (`cmd /C`
-on Windows) in a detached runner with its whole process tree stopped after the
+calling session by its process ancestry, or a DeepSeek session by the
+conversation its harness exports as `DSH_SESSION_ID`, runs the command in
+`sh -c` (`cmd /C` on Windows) in a detached runner with its whole process tree stopped after the
 timeout (30 minutes by default, at most 240), keeps the last 4000 characters of
 output and records the run under the session; the same `request_id` never runs
 twice, and asking again reads its state. `hgs run --list --json` lists the
 session's newest runs.
+
+On Windows a Git Bash wrapper (`bash -c`, `env`, `nohup`, `timeout`, `xargs`,
+`sh -c`, `npx -c`) ends a Windows process between the session and hgs, so the
+process ancestry stops at a process that no longer exists. hgs then asks the
+session host which session's job holds it (`caller_session`): the host answers
+for the connection's own client, by the process ID the kernel gives it, and
+the session, pane and run marker must be exactly those of the record that
+`HGS_SESSION` and `HGS_RUN_ID` name. A leaked or stale session environment
+therefore never names the caller, and a process outside every session is still
+refused. A host from before this question answers `unsupported`, and the caller
+stays unproven as before.
 
 A job the session started otherwise makes it wait only while it waits for it. A
 long-lived process it does not wait for, such as a dev server, a watcher or a
@@ -1461,13 +1482,19 @@ leads and tasks are parsed strictly: an unknown field is refused with its name,
 the accepted fields and an example, and a wrong type with serde's reason. A
 task's text is `description`. A member without `account` starts on its
 computer's default account for its agent, which the preflight names.
-`max_members` counts the members besides the lead.
+`max_members` counts the members besides the lead; more members than that is a
+preflight error, so a plan, an approval and a draft's create are refused with it.
 
 `draft get` answers the draft's `fields` (name, goal, addendum, settings,
-members, tasks and plan mode). A draft update sets only the fields it names;
+members, tasks, phases and plan mode). A draft update sets only the fields it names;
 `members` is a list that replaces them all or an object of changes by member
 id, where null removes a member and a new id adds one. `plan_mode` is a draft
 field: the owner chooses it and the lead offers it with `plan_mode_reason`.
+A draft's tasks keep their `phase` and its `phases` list phases 2..N
+(`{"n":2,"title":"...","barrier":true}`), as a plan's do; a phase a task names
+but the list leaves out is kept untitled. Create keeps them all as Draft phases
+in order, which the owner approves one after another; a listed phase without
+tasks is refused.
 
 A swap card names, for each member, what changes (`agent`, `model`, `effort`,
 `account`, `prompt` or `session`), or `"fresh": true` for a new session with
@@ -1552,6 +1579,38 @@ addition that is already gone (confirmed, replaced, expired or declined)
 changes nothing and succeeds, also when the phase no longer runs. An Allow on
 the lead's add-to-phase proposal warns and confirms at once; when its
 confirmation fails, its warning is declined, so no addition is left waiting.
+
+### Follow-ups: a task's origin
+
+A task added because of something missed or a bug carries `origin`, the task
+that produced it, in the same team (task #60, owner 2026-11-06):
+
+```json
+{"request_id":"<uuid>","team":"<id>","tasks":[{"id":14,"title":"Fix the empty cart crash",
+ "assignee":"dev","origin":9}]}
+```
+
+`origin` is accepted wherever a request carries tasks: `plan`, `extend`,
+`add-to-phase` and its proposal card, `intake`, and `edit-draft`'s
+`tasks_update` (`"origin":null` removes it). It is distinct from `deps`: it
+never blocks or gates hand-out, it only places the task at least in its
+origin's layer, as if the task had the origin's dependencies without depending
+on the origin itself; dependencies that reach further place it further. A task
+without deps and with an origin therefore sits beside its origin, not in the
+first layer. An origin that names no task of the team, or the task itself, is
+refused (`"Task #14 names #99 as its origin, which is neither in the plan nor
+among the new tasks"`; validation reports `kind` `origin`). It follows
+renumbering: new tasks numbered otherwise (#754) and drafts renumbered after a
+discard (F285) keep their link, and a task whose origin was discarded loses it.
+An urgent fix filed from a finding takes the finding's task as its origin
+unless it names one.
+
+Status and the list carry each task's `origin`; `layers` place it; the feed's
+`phase_added`, `phase_edited` and `phase_tasks_added` carry `origins`
+(`{"14":9}`) for the added tasks that have one, and an `edit-draft` change of
+it is recorded with `field` `origin`. A record stored before the field has no
+origin and reads as before. The desktop shows "Spawned from #9" on the task and
+"from #9" on its card; the follow-ups of a task are listed on its card.
 
 ### Task pipelines and stage verdicts
 
@@ -1648,7 +1707,70 @@ build. Switching mid-plan is the owner's decision, bound to the request:
 The proposal answer carries `hash`, the SHA-256 of the kind, mode and reason. A
 missing or different `expected_hash` is refused ("reload the dialog and answer
 again"). Allow sets `plan_mode` and emits `plan_mode_switched`; Deny keeps
-standard, keeps the reason and emits `plan_mode_denied` for the lead.
+standard, keeps the reason and emits `plan_mode_denied` for the lead. A card
+without a phase switches the team's mode: the open phase and every phase
+without a mode of its own follow it, and a switch to standard leaves no phase
+free.
+
+#### The mode of one phase
+
+The mode is a property of each phase (task #58, owner 2026-11-06). A phase
+plans in its own mode when it has one, else in the team's `plan_mode`, which
+stays the default: a team stored before phase modes reads its mode on every
+phase, and a new phase starts in it. Status and the polled team list carry
+`phase_modes`, every phase's mode by number (phase 1 included), and each
+`phases` item its `mode`; the watch's team rows carry `plan_mode` and
+`phase_modes`, the phases that have a mode of their own:
+
+```json
+{"plan_mode":"standard","phase_modes":{"1":"standard","2":"free"},
+ "phases":[{"n":2,"state":"approved","mode":"free"}],
+ "free_phase":{"phase":2,"state":"open","running":[7],"accepted":3,
+  "accepted_since":1,"last_build_at":null,"close_pending":null}}
+```
+
+The owner switches one phase directly, with one guarded operation; the lead
+only proposes it, with a `switch-plan-mode` card that names the phase:
+
+```sh
+{"request_id":"<uuid>","team":"<id>","phase":2,"mode":"free","reason":"..."} |
+  hgs team phase-mode --json
+{"request_id":"<uuid>","team":"<id>","kind":"switch-plan-mode","mode":"standard",
+ "phase":2,"reason":"ready for the release"} | hgs team propose --json
+```
+
+A lead's `phase-mode` is refused ("Only you switch a phase's mode; the lead
+proposes it"). The card's `change` is `{"phase":2}`, covered by its hash, and
+it is checked when it is made: a phase that cannot switch is refused at once.
+Allow applies exactly that switch. Both answer
+`{"status":"switched","phase":2,"mode":"free","build":null,"close_pending":null,
+"phase_modes":{...}}` and emit `phase_mode_switched` (`by`, `phase`, `mode`,
+`proposal`, `reason`, `build`, `close_pending`). Every other phase keeps its
+mode.
+
+- Standard to free opens a running phase (approved, or phase 1) for tasks as
+  they come: `extend` without a phase adds to it with no new phase and no
+  approval, its empty queue is idle and never done, and no queued phase starts
+  behind it. One phase is free at a time: opening another while one is free is
+  refused ("Phase 2 already takes tasks as they come; switch it to standard
+  first"). The free phase is the open (latest running) phase when it plans in
+  free mode, else the running phase whose own mode is free; `integrate-build`
+  and `close-phase` act on it.
+- Free to standard locks an accepted phase. Its tasks keep their state and run
+  on; no new task joins it without a plan edit (`extend` with its `phase`,
+  which asks the owner for an accepted phase); a new `extend` plans a new
+  phase. The lock resolves the free phase's own work explicitly: an open build
+  task stays an ordinary task of the phase, handed out and decided like any
+  other, and the phase is done only when it is decided; accepting it still sets
+  `last_build_at` but closes nothing. A pending close of the phase ends with
+  the lock, which is that close: `free_close_pending` clears and the receipt
+  and the event name it as `close_pending`, with the build as `build`.
+- A draft has no mode to switch; a switch to the mode the phase already has is
+  refused.
+
+`close-phase` keeps U59's close: the free phase drops a mode of its own and the
+team continues in standard mode; a request that names `phase` must name the
+free one.
 
 Every proposal is checked when the lead makes it, on a copy of the team, by the
 code Allow runs: one Allow could not apply (a task the plan cannot parse, work
@@ -1667,6 +1789,35 @@ option or the owner's own words; the proposal becomes `answered` with `answer`,
 and the lead's inbox carries it with the question. Waiting for you lists the
 question and answers it in place, as it does a lead's own open AskUserQuestion
 (`hgs team answer` with the question's id and hash).
+
+Every change the lead may make only with the owner's consent is a card the
+owner answers with Allow or Reject (task #21, owner 2026-11-05); no flow needs a
+typed sentence. Besides the kinds above, a proposal's kind may be one of the
+owner-gated operations `relaunch`, `scale`, `drain`, `approve`, `approve-phase`,
+`return-to-draft`, `edit-draft`, `move-phase`, `unpause-phase`,
+`phase-acceptance`, `accept-phase`, `extend`, `settings` and `full-tests`, with
+the operation's own fields beside `kind` and `reason` (or in `"input":{...}`):
+
+```sh
+{"request_id":"<uuid>","team":"<id>","kind":"relaunch","member":"hgs",
+ "reason":"its session failed to start"} | hgs team propose --json
+{"request_id":"<uuid>","team":"<id>","kind":"settings","settings":{"max_members":8},
+ "reason":"two more testers"} | hgs team propose --json
+```
+
+The proposal's `change` keeps `op`, the checked `input`, and the `summary` and
+`lines` the card shows. Allow runs that operation as the owner's own `hgs team
+<op>` (the same checks, adoption, budgets and side effects) under the
+proposal's stored request id, so a retried Allow answers its receipt and never
+applies the change twice; Reject changes nothing. `proposal_decided` names the
+`op`, the `summary` and the `request` it ran under, beside the operation's own
+events by You. A `switch-setting` card also sets `base_branch`, `full_tests` or
+`max_members` through the settings operation, and `iron-rules` (with `scope`
+project or session, its `project` or session `name`, run and conversation ids,
+`rules` and `expected_revision`) sets those rules as `hgs rules set` does. A
+typed owner word stays a fallback: its quote may be part of the owner's
+message, one message pays once for each member it names, and the check reads
+the lead session's main messages, not its last 200 events of any kind.
 
 Integration and a build are ordinary lead tasks, not a phase barrier. The owner
 or the lead adds the build for the open phase (`hgs team integrate-build`) and
@@ -1883,6 +2034,18 @@ A draining member may finish its own reserved rework before leaving. Explicit
 reassignment clears the rework reservation and its wait age. Returning an
 unstarted phase to a draft also clears rework reservations. Member-wait inbox
 items exclude held rework and members available to take it.
+
+A reassign, a take-over or a cancel of a task whose attempt its member is still
+working on (sent or delivered, not reported) tells that member at once: one
+`[Zerus team · from: Zerus · task: #N · stop]` message names the task and why it
+left, asks it to stop the builds, tests and commands it started for it, not to
+report it and to commit nothing more for it (`stop_told`). It is sent as soon as the
+session runs, also while it is busy: an agent that reads messages mid-turn stops
+at once, others when the turn ends, and the member's next task then goes out
+without a message from the lead. With the owner's team setting
+`interrupt_revoked` (off by default; the lead cannot change it) a busy turn is
+interrupted once before the message (`revoked_interrupted`). A reported
+attempt, or a reassign to the same member, sends nothing.
 
 Tasks may declare `"output":["src/api.rs","src/protocol/"]`: repository-relative
 files or directories, with a directory covering all paths beneath it. Plan,
@@ -4156,6 +4319,15 @@ to save a choice. Omit effort to inherit the selected model's provider default;
 pass `--model ''` to return to provider settings. Revisions prevent overwriting
 another account edit made while the dialog was open.
 
+A DeepSeek account's catalog comes from its running host. Without one, it is
+what the composed profile configures (`dsh --profile hgs --dump-config`, which
+starts no host): the `models` of the `llm-deepseek` entry, or else the installed
+transport's bundled models, each named as dsh names it (for example
+`deepseek-official/deepseek-flash`, DeepSeek-V4.1-Flash). The answer then
+carries `"source":"dsh-profile"`. New team's member rows offer these models, and
+a DeepSeek member's model is applied after its session starts, as
+`provider/model` or as a bare id (`deepseek-flash`) that one provider offers.
+
 Accounts collects provider profiles from connected machines. Verified provider
 account ID, or email with organization, groups the same account across hosts;
 matching display names alone do not. Providers, organizations and conflicting
@@ -5324,6 +5496,75 @@ inbox — says `the DeepSeek sandbox needs full control of <folder>` with the
 one-line fix `icacls "<folder>" /grant *<SID>:(OI)(CI)F`. A member never repairs
 ACLs itself: it reports the exact error to the Lead.
 
+**DeepSeek members whose host is starting.** One DeepSeek host serves every
+DeepSeek session of a user on a computer. A start launches it when none runs
+and waits 35 s for it to answer; a later start that finds a host launched
+recently and still running waits for that one instead of launching a second.
+When a member's start fails only with `DeepSeek host is still starting`, the
+dispatcher starts the member again by itself (a `launch_waiting` event, no
+error, no inbox item), up to three times. If the host still does not answer,
+the member fails once with that reason and the number of starts, and the
+Lead's inbox shows it; any other start failure is reported at once. A relaunch
+starts the count again.
+
+**Members' clones.** A clone member's folder is made by `hgs worktrees create
+--clone`: a full `git clone --local --no-hardlinks` of the team's repository (no
+hard links, because the folder's ACL grant would reach the source's files), then
+the member's branch, started from the team's base branch when one is set, else
+from the HEAD of the team's folder. The clone has its own 25-minute deadline and
+the checkout of the branch its own 10 minutes, so a large repository on Windows
+no longer fails with `Git operation cancelled or timed out`. When the clone
+finished but the branch was not made, the clone is kept: starting the member
+again finishes it (fetching the base when it moved on), provided the folder is a
+clone of this repository with no changes and without that branch. Any other
+folder there is refused, never changed.
+
+**DeepSeek members in their sandbox.** On Windows a DeepSeek member's shell runs
+in DeepSeek's sandbox at Low integrity. It reads Zerus state but may not write
+it, and the session host keeps it out (a sandboxed caller hears
+`this process runs in a sandbox below the session host's integrity level`).
+Such a member still does its work through its own folder, where its sandbox
+writes, and the team worker applies what it leaves there on its next tick
+(about three seconds):
+
+- `hgs team report`, `ask`, `commit` and `hgs team run` wait there as before.
+- `hgs run` waits there too. The worker records the run as the member
+  session's work, so the session is Building, and starts it at Low integrity
+  with its temporary files in `<folder>/.zerus-team/tmp`: a member's run never
+  runs above its sandbox. `--wait` and `--list` read the run's record as for
+  any session.
+- `hgs ls`, `hgs inspect <session>` (with `--skip-processes` or
+  `--after N`), and `hgs task list` or `hgs task get` of a named project
+  (`--project P` or `PROJECT/T-xxxxxx`) are answered by the worker, which runs
+  the read outside the sandbox and leaves the output in the folder. These reads write, send, start
+  and attach nothing, and the sandbox already reads every file they read.
+  Every other command, such as `send`, `launch` or `attach`, stays closed to a
+  sandbox.
+
+**Codex members on Windows.** Codex's Windows sandbox runs a member's commands
+as its own local user (`CodexSandboxOffline`). That user reads the hgs state but
+may write none of it, and may not read the owner's configuration
+(`~/.config/hgs`), which stays the owner's only. hgs recognizes such a process
+because the state belongs to another user and the configuration is unreadable.
+It then loads no configuration (no peers) and takes the same ways as a DeepSeek
+sandbox: team calls, `hgs run` and the reads above wait in the member's folder
+for the team worker. The member is the session its inherited `HGS_SESSION` and
+`HGS_RUN_ID` name; only the folder the request is written to proves it. A Codex
+member's `hgs run` runs in `codex sandbox` on its own folder, never above it:
+the command must start in that folder. Codex keeps `.git` read-only, so its
+commits go through the `git-commit` template.
+
+This needs a running team: a sandboxed DeepSeek session outside a team is told
+so. `hgs self` answers a DeepSeek tool command from the binding of its
+`DSH_SESSION_ID`, in or outside a sandbox. The worker runs a member's `hgs run` at Low integrity but outside
+DeepSeek's own confinement, so the run, like any Low process, may use the
+network and named pipes of Low processes.
+
+A DeepSeek member's own folder is a clone: a worktree's git metadata lives in
+the main checkout's `.git`, which its sandbox may not write. A worktree asked
+for it (by a role, a template, the New team form or the worktree policy, which
+a clone also meets) becomes a clone; an adopted session keeps its folder.
+
 **DeepSeek session-log upload.** Zerus starts and resumes DeepSeek sessions with
 the official session-log upload off, unless the owner turns the block off in
 Settings. The promise is checked, not assumed: a session whose own records still
@@ -6239,6 +6480,24 @@ supervises the worker; a client that sees `false` runs one `hgs swarm get`,
 which restarts an outdated worker as before. Writes, including the first
 `swarm initialize`, stay with `hgs swarm`.
 
+The `team` topic follows every team of the computer's team store:
+`{"op":"subscribe","topic":"team"}`, one per stream. Its rows are keyed like
+the organization's: `team:<id>` is the team's head `{id, name, lead, status,
+revision, updated}`, and `teams` is `{count, truncated}`. Every change of a team
+(a command, the dispatcher, a member's report) raises its `revision`, so a
+client reads a team again with `hgs team status`, `inbox` and `events` when its
+revision moved instead of polling them. At most 1000 heads go out, the most
+recently changed first; `truncated` says more exist. A worker thread reads them
+with one indexed query and never writes. It reads again when a stat of the
+store or its rollback journal changes and at least every 30 s, at most once a
+second. The first rows go out as a paged `snapshot`, a later change as one
+`delta` of the changed rows and removed keys. A delta the client is too far
+behind to take becomes `gap` (`overflow`) and a fresh snapshot once it caught
+up. A read that fails, such as a store held by a writer, sends a non-fatal
+`team_failed`. A peer whose `hello` does not list `team` answers the
+subscription with `unsupported_topic`; read its teams with `hgs team` as
+before.
+
 The stream checks its sources every 250 ms. It stats the bindings, read marks,
 notification preferences, waits, launches, renames, name routes, the archive
 folder and the DeepSeek and OpenCode bindings, and holds a read-only connection
@@ -6275,7 +6534,13 @@ selected one first, then shown rows, at most 64, instead of starting
 `git-status` for each every 15 s. A followed value counts as checked every 15 s
 while the stream follows it; its remote's age keeps counting, so a remote shows
 verified for at most 60 s after its check. Refused folders, and all folders of
-a computer whose stream is not live, are polled as before. Listings are applied at most every
+a computer whose stream is not live, are polled as before. When the stream
+offers the `team` topic, the Team tab's reads of that computer (the team list,
+Waiting, and the watched team's status, inbox and feed) run when a team's
+revision moved, plus once a minute, instead of every 3 s; until the topic's
+first complete snapshot, after a `gap` or `team_failed`, while the stream is
+down, and on a peer without the topic they are polled every 3 s as before.
+Listings are applied at most every
 2 s, Activity within 50 ms. A stream that fails or stays silent for 30 s
 restarts after 5 s, 15 s, 60 s and then every 5 minutes, and the desktop polls
 meanwhile. `ZERUS_EVENT_STREAM=0` or the setting `dataPlane/eventStream=false`
@@ -6344,7 +6609,9 @@ enforced: a team without a configuration keeps today's flow.
   `bin`, `manifest` (another crate), `filters` and `skips` (up to 512 each),
   `qt-test` with `suites` run one after another in the same run and
   `functions` as `suite:function` (a plain name, or `function:datatag`, with
-  one suite).
+  one suite). A Qt test runs with `QT_FORCE_STDERR_LOGGING=1`: without a
+  console QtTest would log to the debugger, and the run's tail keeps each
+  suite's own lines (`FAIL!`, `Totals`).
 - `hgs test durations --record LOG --provider NAME` keeps the slowest measured
   time per target from CTest, QtTest, Cargo (and libtest JSON), unittest or
   pytest output, or a JSON object of test ids to seconds.
@@ -6551,7 +6818,10 @@ The full run happens only before a release: the owner hears its estimate from
 run. A team setting `full_tests` says who may start one (`never`, `ask` or
 `allowed`; `ask` by default), and the owner may grant one run bound to a
 release; `hgs team run` refuses a full-suite template without that grant and
-names the estimate and the command that asks. `hgs team status` shows the
+names the estimate and the command that asks. A `cargo-test` is the full suite
+only when it names no `filter`, `bin`, `package` and no non-empty `filters`:
+the request `hgs test affected` prints for a crate (its `filters`, `skips` and
+`manifest`) is narrowed; `skips` or a `manifest` alone are not. `hgs team status` shows the
 policy and an active grant. Zerus computes a task's affected set from its own
 diff and accepts its report only with that set green on the merging commit. Every
 test is weighed by real need, speed first (owner, 2026-10-31): a run earns

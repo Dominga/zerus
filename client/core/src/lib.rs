@@ -8,6 +8,7 @@
 //! and the "Event stream" section of `docs/reference.md`.
 
 pub mod account_actions;
+pub mod account_switch;
 pub mod actions;
 pub mod analytics;
 pub mod approvals;
@@ -30,14 +31,17 @@ pub mod end_action;
 pub mod external_file;
 pub mod file_download;
 pub mod fleet;
+pub mod fork_update;
 pub mod fsx;
 pub mod input_queue;
+pub mod iron_rules;
 pub mod launch;
 pub mod legacy;
 pub mod linux_notify;
 pub mod local_messages;
 pub mod machine;
 pub mod machine_connections;
+pub mod model_servers;
 pub mod macos_notify;
 pub mod maintenance;
 pub mod marks;
@@ -83,6 +87,7 @@ pub mod task_start;
 pub mod task_view;
 pub mod tasks;
 pub mod tasks_write;
+pub mod teams;
 pub mod terminal;
 pub mod terminal_launch;
 pub mod termination_cleanup;
@@ -100,6 +105,7 @@ pub mod worktree_overview;
 pub mod worktree_policy;
 pub mod worktree_review;
 pub mod worktrees;
+pub mod wsl_mapping;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -121,6 +127,7 @@ pub use state::{ActivityState, CatalogState};
 pub use stream::{StreamEvent, StreamHandle, Timing};
 pub use swarm::grouping::{GroupOut, GroupingOut, HeaderOut, SyncView};
 pub use tasks::{TasksState, TasksUpdate};
+pub use teams::{TeamAction, TeamCall, TeamOutcome, TeamsFollow, TeamsPoller, TeamsUpdate};
 pub use view::ViewRow;
 pub use zerus_watch_protocol::SessionRef;
 
@@ -276,6 +283,19 @@ pub enum Change {
         computer: ComputerId,
         update: OrganizationUpdate,
     },
+    /// A Teams view of the computer, keyed as [`teams::model`] says; see [`teams`].
+    Teams {
+        computer: ComputerId,
+        key: String,
+        update: TeamsUpdate,
+    },
+    /// Task 8: the team revisions of the computer's watch stream (its `team`
+    /// topic), or None while it gives none: the Teams poller of the computer
+    /// then polls. It never reaches the webview.
+    TeamHeads {
+        computer: ComputerId,
+        heads: Option<std::sync::Arc<teams::Heads>>,
+    },
 }
 
 impl Change {
@@ -289,7 +309,9 @@ impl Change {
             | Self::Processes { computer, .. }
             | Self::Tasks { computer, .. }
             | Self::Machine { computer, .. }
-            | Self::Organization { computer, .. } => computer,
+            | Self::Organization { computer, .. }
+            | Self::Teams { computer, .. }
+            | Self::TeamHeads { computer, .. } => computer,
         }
     }
 }

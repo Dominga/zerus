@@ -68,6 +68,7 @@ fn compatible_adapter(ping: &Value) -> bool {
 const BRIDGE: &str = include_str!("../dsh/bridge.mjs");
 const COMMAND_GUARD: &str = include_str!("../dsh/command-guard.mjs");
 const CONFIG_PRESETS: &str = include_str!("../dsh/config-presets.mjs");
+const CONFIG_MODELS: &str = include_str!("../dsh/config-models.mjs");
 fn bindings() -> PathBuf {
     root().join("dsh/bindings")
 }
@@ -132,7 +133,9 @@ fn catalog_models(catalog: &Value) -> Vec<Value> {
         })
         .collect()
 }
-/// The native account's model catalog through its resident host, never a host start.
+/// The native account's model catalog through its resident host, never a host
+/// start. Task #19: without a running host, the models the composed profile
+/// configures ([`config_models`]), named as the host names them.
 pub(crate) fn account_models(home: &Path) -> Value {
     let record = json!({"agent_home":home});
     match rpc(&record, "catalog", json!({})) {
@@ -142,7 +145,89 @@ pub(crate) fn account_models(home: &Path) -> Value {
             models.truncate(64);
             json!({"models":models,"truncated":truncated})
         }
-        Err(error) => json!({"models":[],"truncated":false,"reason":error}),
+        Err(error) => match cached_config_models(home) {
+            Ok(mut models) if !models.is_empty() => {
+                let truncated = models.len() > 64;
+                models.truncate(64);
+                json!({"models":models,"truncated":truncated,"source":"dsh-profile"})
+            }
+            _ => json!({"models":[],"truncated":false,"reason":error}),
+        },
+    }
+}
+
+/// Task #19: the composed profile's configuration is read again after this
+/// long; account listings and the New team form ask repeatedly.
+const MODELS_CACHE_SECONDS: f64 = 15.0;
+static MODELS_CACHE: std::sync::Mutex<Option<(String, f64, Vec<Value>)>> = std::sync::Mutex::new(None);
+
+fn cached_config_models(home: &Path) -> Result<Vec<Value>> {
+    let key = home.display().to_string();
+    if let Ok(cache) = MODELS_CACHE.lock() {
+        if let Some((cached, at, models)) = cache.as_ref() {
+            if cached == &key && now() - *at < MODELS_CACHE_SECONDS {
+                return Ok(models.clone());
+            }
+        }
+    }
+    let models = config_models(home)?;
+    if let Ok(mut cache) = MODELS_CACHE.lock() {
+        *cache = Some((key, now(), models.clone()));
+    }
+    Ok(models)
+}
+
+/// Task #19: the models the composed profile's API-key route (`deepseek-official`)
+/// offers: the `models` its `llm-deepseek` entry configures, else the
+/// installed transport's bundled catalog, resolved by the transport itself
+/// (`dsh --profile hgs --dump-config`, which starts no host). Never a guess:
+/// a profile or harness that cannot be read gives an error.
+fn config_models(home_dir: &Path) -> Result<Vec<Value>> {
+    let dump = composed_config_dump(home_dir)?;
+    let text = String::from_utf8(dump).map_err(|_| "The DeepSeek Harness reported an unreadable profile".to_owned())?;
+    let mut request = json!({"dump":text});
+    if let Some(root) = dsh_package_root() {
+        request["packageRoot"] = json!(root.to_string_lossy().into_owned());
+    }
+    let value = node_json(CONFIG_MODELS, &request, Duration::from_secs(5), 64 * 1024)?;
+    Ok(profile_models(&value))
+}
+
+/// The helper's models in the host catalog's shape: `provider/model` ids and
+/// `Name (DeepSeek)` labels, the official route's group name.
+fn profile_models(value: &Value) -> Vec<Value> {
+    value["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|model| !string(model, "provider").is_empty() && !string(model, "id").is_empty())
+        .take(256)
+        .map(|model| {
+            let name = if string(model, "name").is_empty() { string(model, "id") } else { string(model, "name") };
+            json!({
+                "id":format!("{}/{}",string(model,"provider"),string(model,"id")),
+                "label":format!("{name} (DeepSeek)"),
+                "effort_options":model["efforts"].as_array().cloned().unwrap_or_default(),
+                "default_effort":model["defaultEffort"].clone(),
+            })
+        })
+        .collect()
+}
+
+/// Task #19: a model named without its provider (`deepseek-flash`, as a team
+/// member or the owner may name it) is the one catalog group that has it;
+/// None when no group or several do.
+fn qualified_model(catalog: &Value, model: &str) -> Option<String> {
+    let groups: Vec<&str> = catalog["groups"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|group| group["models"].as_array().is_some_and(|models| models.iter().any(|entry| entry["id"] == model)))
+        .map(|group| string(group, "id"))
+        .collect();
+    match groups.as_slice() {
+        [group] if !group.is_empty() => Some(format!("{group}/{model}")),
+        _ => None,
     }
 }
 /// One configured permission preset the installed harness actually offers.
@@ -700,6 +785,52 @@ fn exchange(path: &Path, request: &str, read_timeout: Duration) -> Result<String
         Err(_) => Err("Native request delivery uncertain: the DeepSeek host did not answer in time".into()),
     }
 }
+/// How long a host start waits for the native host to answer.
+const HOST_START_SECONDS: u64 = 35;
+
+/// Task 22: the pid of a host an earlier start launched that is still running
+/// and was launched within `within` (the time of `host.pid`), so it may only be
+/// slow to answer. A start finding one waits for it instead of launching a
+/// second host beside it. An old pid file or an ended process is no host.
+fn starting_host(dir: &Path, within: Duration) -> Option<u32> {
+    let path = dir.join("host.pid");
+    let pid: u32 = fs::read_to_string(&path).ok()?.trim().parse().ok()?;
+    let age = fs::metadata(&path).ok()?.modified().ok()?.elapsed().unwrap_or_default();
+    if age > within {
+        return None;
+    }
+    // A host this process launched that has ended stays a zombie, which still
+    // looks alive, until it is reaped; another process's pid is left alone.
+    #[cfg(unix)]
+    if let Ok(id) = libc::pid_t::try_from(pid) {
+        let mut status = 0;
+        if id > 0 && unsafe { libc::waitpid(id, &mut status, libc::WNOHANG) } == id {
+            return None;
+        }
+    }
+    crate::platform::process_alive(pid).then_some(pid)
+}
+
+/// Task 22: waits for a host that is starting to answer; `still` says whether
+/// it is still worth waiting for (its process runs).
+fn wait_for_host(record: &Value, deadline: Instant, still: &mut dyn FnMut() -> Result<bool>) -> Result<()> {
+    while Instant::now() < deadline {
+        if let Ok(value) = rpc(record, "ping", json!({})) {
+            if value["protocol"] == 1 {
+                return Ok(());
+            }
+        }
+        if !still()? {
+            return Err(format!(
+                "Official DeepSeek host failed to start. Private log: {}",
+                host_dir(record).join("host.log").display()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err("DeepSeek host is still starting; retry opening the session".into())
+}
+
 fn ensure_host(record: &Value) -> Result<bool> {
     let dir = host_dir(record);
     private_dir(&dir)?;
@@ -716,6 +847,14 @@ fn ensure_host(record: &Value) -> Result<bool> {
         Ok(_) => return Err("The running DeepSeek host is not responding; it has been left running. Retry when it recovers".into()),
         Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused) => {},
         Err(e) => return Err(format!("Cannot check the native host: {e}")),
+    }
+    // Task 22: an earlier start's host that has not opened its endpoint yet
+    // is waited for, never doubled by a second host.
+    let recent = Duration::from_secs(4 * HOST_START_SECONDS);
+    if let Some(pid) = starting_host(&dir, recent) {
+        let deadline = Instant::now() + Duration::from_secs(HOST_START_SECONDS);
+        wait_for_host(record, deadline, &mut || Ok(crate::platform::process_alive(pid)))?;
+        return Ok(running_host_block_stale(&dir));
     }
     let version = dsh_command().and_then(|mut command| command.arg("--version").output()).map_err(|_| {
         format!("Install the official harness: npm install -g @deepseek-ai/dsh@{VERSION}")
@@ -797,22 +936,9 @@ fn ensure_host(record: &Value) -> Result<bool> {
     // HGS process must not stop conversations.
     let mut child = crate::platform::spawn_detached(&mut command).map_err(|e| e.to_string())?;
     atomic(&dir.join("host.pid"), &child.id().to_string())?;
-    let deadline = Instant::now() + Duration::from_secs(35);
-    while Instant::now() < deadline {
-        if let Ok(value) = rpc(record, "ping", json!({})) {
-            if value["protocol"] == 1 {
-                return Ok(false);
-            }
-        }
-        if child.try_wait().map_err(|e| e.to_string())?.is_some() {
-            return Err(format!(
-                "Official DeepSeek host failed to start. Private log: {}",
-                dir.join("host.log").display()
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    Err("DeepSeek host is still starting; retry opening the session".into())
+    let deadline = Instant::now() + Duration::from_secs(HOST_START_SECONDS);
+    wait_for_host(record, deadline, &mut || Ok(child.try_wait().map_err(|e| e.to_string())?.is_none()))?;
+    Ok(false)
 }
 
 /// N17: whether a host that was already running was started without the block
@@ -2549,6 +2675,14 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                 } else {
                     string(&request, "model")
                 };
+                // Task #19: a bare model id takes the one provider that offers it.
+                let selected = if selected.contains('/') {
+                    selected.to_owned()
+                } else {
+                    let catalog = rpc(&record, "catalog", json!({}))?;
+                    qualified_model(&catalog, selected).ok_or("Choose a native provider and model")?
+                };
+                let selected = selected.as_str();
                 let (provider, model) = selected
                     .split_once('/')
                     .ok_or("Choose a native provider and model")?;
@@ -3436,6 +3570,72 @@ mod permissions_compat_tests {
 mod account_model_tests {
     use super::*;
 
+    /// Task #19: the profile's models in the host catalog's shape, as the New
+    /// team form and `account model-settings` show them.
+    #[test]
+    fn profile_models_take_the_host_catalogs_ids_and_labels() {
+        let helper = json!({"ok":true,"models":[
+            {"provider":"deepseek-official","id":"deepseek-flash","name":"DeepSeek-V4.1-Flash","efforts":["off","low","high","max"],"defaultEffort":"high"},
+            {"provider":"deepseek-official","id":"deepseek-v4-pro","name":"","efforts":["off"],"defaultEffort":"off"},
+            {"provider":"","id":"stray"}
+        ]});
+        let models = profile_models(&helper);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0], json!({"id":"deepseek-official/deepseek-flash","label":"DeepSeek-V4.1-Flash (DeepSeek)",
+            "effort_options":["off","low","high","max"],"default_effort":"high"}));
+        assert_eq!(models[1]["label"], "deepseek-v4-pro (DeepSeek)");
+    }
+
+    /// Task #19: a bare model id is the one provider group that offers it.
+    #[test]
+    fn a_bare_model_takes_the_one_provider_that_offers_it() {
+        let catalog = json!({"groups":[
+            {"id":"deepseek-official","models":[{"id":"deepseek-flash"},{"id":"deepseek-v4-pro"}]},
+            {"id":"deepseek-account","models":[{"id":"deepseek-v4-pro"}]}
+        ]});
+        assert_eq!(qualified_model(&catalog, "deepseek-flash").as_deref(), Some("deepseek-official/deepseek-flash"));
+        assert_eq!(qualified_model(&catalog, "deepseek-v4-pro"), None, "two providers offer it");
+        assert_eq!(qualified_model(&catalog, "gpt-5"), None);
+        assert_eq!(qualified_model(&json!({}), "deepseek-flash"), None);
+    }
+
+    /// Task #19: the installed harness's own catalog for the API-key route:
+    /// its bundled models without a `models` entry, the configured list with
+    /// one, `off` alone with thinking disabled; never a computed value.
+    #[test]
+    fn the_profile_catalog_is_the_installed_transports() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let Some(root) = dsh_package_root() else { return };
+        let ask = |dump: &str| {
+            node_json(
+                CONFIG_MODELS,
+                &json!({"dump":dump,"packageRoot":root.to_string_lossy().into_owned()}),
+                Duration::from_secs(20),
+                64 * 1024,
+            )
+        };
+        let row = "- id: llm-deepseek\n  name: '@deepseek-ai/dsh-llm-deepseek-api-key'\n";
+        let agent = "- id: agent\n  name: '@deepseek-ai/dsh-agent'\n";
+        let Ok(bundled) = ask(&format!("{agent}{row}")) else { return };
+        let models = profile_models(&bundled);
+        let flash = models.iter().find(|model| model["id"] == "deepseek-official/deepseek-flash").expect("the bundled catalog offers deepseek-flash");
+        assert!(flash["label"].as_str().unwrap().ends_with(" (DeepSeek)"), "{flash}");
+        assert!(flash["effort_options"].as_array().unwrap().contains(&json!("high")), "{flash}");
+        // A configured list replaces the bundled one; a later layer merges.
+        let custom = format!(
+            "{row}  config:\n    models:\n      - id: deepseek-flash\n        name: Flash here\n{row}  config:\n    thinking: disabled\n"
+        );
+        let configured = profile_models(&ask(&custom).unwrap());
+        assert_eq!(configured, vec![json!({"id":"deepseek-official/deepseek-flash","label":"Flash here (DeepSeek)",
+            "effort_options":["off"],"default_effort":"off"})]);
+        // A disabled route offers nothing; a computed list is never guessed.
+        assert_eq!(ask(&format!("{row}  disabled: true\n")).unwrap_err(), "provider");
+        assert_eq!(ask(&format!("{row}  config:\n    models: !!js 'ctx.models'\n")).unwrap_err(), "computed");
+        assert_eq!(ask(agent).unwrap_err(), "provider");
+    }
+
     #[test]
     fn native_catalog_projects_provider_models_and_efforts() {
         let catalog = json!({"groups":[{"id":"deepseek","name":"DeepSeek","models":[
@@ -3502,6 +3702,35 @@ mod notification_tests {
         // U22: the block overlay disables the shipped plugin; off leaves dsh alone.
         let blocked = host_overlay(Path::new("state/bridge.mjs"), Path::new("state/socket"), true).to_string();
         assert!(blocked.contains("session-log-deepseek") && blocked.contains("\"enabled\":false"), "{blocked}");
+    }
+
+    /// Task 22: a start that finds the host an earlier start launched still
+    /// running, and launched recently, waits for it instead of launching a
+    /// second host; an ended process or an old pid file is no such host.
+    #[test]
+    fn a_recently_launched_running_host_is_waited_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let within = Duration::from_secs(140);
+        assert_eq!(starting_host(dir.path(), within), None, "no pid file");
+        let pid = dir.path().join("host.pid");
+        std::fs::write(&pid, std::process::id().to_string()).unwrap();
+        assert_eq!(starting_host(dir.path(), within), Some(std::process::id()));
+        // Launched long ago: a pid that may belong to anything now.
+        let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(&pid).unwrap().set_modified(old).unwrap();
+        assert_eq!(starting_host(dir.path(), within), None);
+        // An ended process.
+        let mut ended = if cfg!(windows) {
+            std::process::Command::new("cmd").args(["/C", "exit 0"]).spawn().unwrap()
+        } else {
+            std::process::Command::new("true").spawn().unwrap()
+        };
+        let id = ended.id();
+        ended.wait().unwrap();
+        std::fs::write(&pid, id.to_string()).unwrap();
+        assert_eq!(starting_host(dir.path(), within), None);
+        std::fs::write(&pid, "not a pid").unwrap();
+        assert_eq!(starting_host(dir.path(), within), None);
     }
 
     /// N17: a host that was already running keeps the block state it started

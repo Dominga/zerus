@@ -401,6 +401,41 @@ fn the_switch_dialog_switches_the_plan_mode_through_decide_proposal() {
     assert!(store.events("t", None, 50).unwrap().to_string().contains("plan_mode_switched"));
 }
 
+/// Task #58: a switch card naming a phase switches that phase only, through
+/// the same decide-proposal; the owner's direct switch is one guarded op.
+#[test]
+fn a_phase_switch_card_and_the_owners_op_switch_one_phase() {
+    use super::super::model::PlanMode;
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+    let mut team = running_team();
+    let lead = Actor::Member("lead".into());
+    let input = json!({"kind":"switch-plan-mode","mode":"free","phase":1,"reason":"support requests"});
+    ops::apply(&mut team, "propose", &input, &lead, &BTreeSet::new(), &mut Vec::new()).unwrap();
+    let hash = team.proposals[0]["hash"].as_str().unwrap().to_owned();
+    store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+    let receipt = decide_proposal_in(&mut store, &json!({"team":"t","proposal":"p1","accept":true,"expected_hash":hash}), &Actor::Human).unwrap();
+    assert_eq!(receipt["status"], "accepted", "{receipt}");
+    assert_eq!((receipt["result"]["phase"].as_u64(), receipt["result"]["mode"].as_str()), (Some(1), Some("free")));
+    let stored = store.load("t").unwrap().unwrap();
+    assert_eq!((stored.plan_mode, stored.phase_mode(1)), (PlanMode::Standard, PlanMode::Free));
+    assert!(store.events("t", None, 50).unwrap().to_string().contains("phase_mode_switched"));
+    // The owner locks it back with one guarded op; the same request id
+    // answers its receipt again and never switches twice.
+    let request = json!({"team":"t","request_id":"22222222-2222-4222-8222-222222222222","phase":1,"mode":"standard"});
+    let first = store.mutate(Some(("22222222-2222-4222-8222-222222222222", &request)), "t", None, |team, events| {
+        ops::apply(team, "phase-mode", &request, &Actor::Human, &BTreeSet::new(), events)
+    })
+    .unwrap();
+    let again = store.mutate(Some(("22222222-2222-4222-8222-222222222222", &request)), "t", None, |team, events| {
+        ops::apply(team, "phase-mode", &request, &Actor::Human, &BTreeSet::new(), events)
+    })
+    .unwrap();
+    assert_eq!(first["mode"], "standard", "{first}");
+    assert_eq!(again["mode"], first["mode"], "{again}");
+    assert_eq!(store.load("t").unwrap().unwrap().phase_mode(1), PlanMode::Standard);
+}
+
 #[test]
 fn an_accepted_swap_proposal_runs_with_its_fields() {
     // C8: the spec's shape (member id plus section 5 fields) is kept by
@@ -520,4 +555,109 @@ fn an_extend_with_taken_numbers_takes_the_next_free_ones() {
     assert_eq!(receipt["renumbered"], json!({"1":2,"9":3}), "{receipt}");
     assert_eq!(team.task(2).unwrap().title, "Docs");
     assert_eq!(team.task(3).unwrap().deps.iter().map(|dep| dep.task).collect::<Vec<_>>(), vec![2]);
+}
+
+/// Task #21 (owner, 2026-11-05): every owner-gated operation is a card. The
+/// lead proposes it, the card names the change, the owner's Allow runs it
+/// once as the owner's own request (a replay applies nothing twice) and a
+/// Reject changes nothing; the audit names the operation and its request.
+#[test]
+fn owner_operation_cards_run_once_on_allow_and_never_on_reject() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        super::live_sessions_override(Some(Vec::new()));
+        super::set_test_caller_identities(Some((None, None, None)));
+        let _worker = hold_worker_lock();
+        let mut store = Store::open(true).unwrap();
+        let mut team = running_team();
+        // A member whose session failed to start: the one a relaunch is for.
+        team.members.push(Member { id: "ops".into(), role: "Ops".into(), agent: "claude".into(), error: "launch failed".into(), ..Default::default() });
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+        let propose = |store: &mut Store, proposal: Value| -> anyhow::Result<(String, String)> {
+            let receipt = store.mutate(None, "t", None, |team, events| ops::apply(team, "propose", &proposal, &Actor::Member("lead".into()), &BTreeSet::new(), events))?;
+            Ok((receipt["proposal"].as_str().unwrap().to_owned(), receipt["hash"].as_str().unwrap().to_owned()))
+        };
+        let allow = |store: &mut Store, id: &str, hash: &str, accept: bool| {
+            decide_proposal_in(
+                store,
+                &json!({"team":"t","proposal":id,"accept":accept,"by":"human","expected_hash":hash,"request_id":"66666666-6666-4666-8666-666666666666"}),
+                &Actor::Human,
+            )
+        };
+        // Relaunch: the card names the member; Allow clears its start error.
+        let (id, hash) = propose(&mut store, json!({"kind":"relaunch","member":"ops","reason":"it failed to start"})).unwrap();
+        let card = store.load("t").unwrap().unwrap().proposals.iter().find(|p| p["id"] == id.as_str()).unwrap().clone();
+        assert_eq!(card["change"]["op"], "relaunch", "{card}");
+        assert_eq!(card["change"]["summary"], "Relaunch ops (Ops)", "{card}");
+        let receipt = allow(&mut store, &id, &hash, true).unwrap();
+        assert_eq!(receipt["status"], "accepted", "{receipt}");
+        let team = store.load("t").unwrap().unwrap();
+        assert!(team.member("ops").unwrap().error.is_empty());
+        // A replayed Allow answers the stored state and relaunches nothing again.
+        assert_eq!(allow(&mut store, &id, &hash, true).unwrap()["status"], "accepted");
+        let events = store.events("t", None, 200).unwrap();
+        let items = events["items"].as_array().unwrap();
+        assert_eq!(items.iter().filter(|event| event["kind"] == "relaunch").count(), 1, "{events}");
+        let decided = items.iter().find(|event| event["kind"] == "proposal_decided" && event["detail"]["proposal"] == id.as_str()).expect("no decision");
+        assert_eq!((decided["detail"]["op"].as_str(), decided["detail"]["summary"].as_str()), (Some("relaunch"), Some("Relaunch ops (Ops)")), "{decided}");
+        assert!(decided["detail"]["request"].as_str().is_some_and(|request| !request.is_empty()), "{decided}");
+        // Settings: an owner-only limit, as a settings card and as a switch card.
+        let (id, hash) = propose(&mut store, json!({"kind":"settings","settings":{"max_members":9},"reason":"more hands"})).unwrap();
+        let card = store.load("t").unwrap().unwrap().proposals.iter().find(|p| p["id"] == id.as_str()).unwrap().clone();
+        assert!(card["change"]["lines"][0].as_str().unwrap_or_default().contains("max_members: 6 → 9"), "{card}");
+        allow(&mut store, &id, &hash, true).unwrap();
+        assert_eq!(store.load("t").unwrap().unwrap().settings.max_members, 9);
+        let (id, hash) = propose(&mut store, json!({"kind":"switch-setting","setting":"base_branch","value":"main","reason":"land on main"})).unwrap();
+        allow(&mut store, &id, &hash, true).unwrap();
+        assert_eq!(store.load("t").unwrap().unwrap().settings.base_branch, "main");
+        // Scale and drain run as the owner's own.
+        let (id, hash) = propose(&mut store, json!({"kind":"scale","role":"Tester","agent":"claude","count":2,"reason":"tests lag"})).unwrap();
+        allow(&mut store, &id, &hash, true).unwrap();
+        let team = store.load("t").unwrap().unwrap();
+        assert_eq!(team.members.iter().filter(|member| member.role == "Tester").count(), 2);
+        let (id, hash) = propose(&mut store, json!({"kind":"drain","member":"dev","reason":"done soon"})).unwrap();
+        allow(&mut store, &id, &hash, true).unwrap();
+        assert!(store.load("t").unwrap().unwrap().member("dev").unwrap().draining);
+        // Reject changes nothing and the card stays decided.
+        let before = store.load("t").unwrap().unwrap().settings.max_members;
+        let (id, hash) = propose(&mut store, json!({"kind":"settings","settings":{"max_members":3},"reason":"smaller"})).unwrap();
+        assert_eq!(allow(&mut store, &id, &hash, false).unwrap()["status"], "rejected");
+        let team = store.load("t").unwrap().unwrap();
+        assert_eq!(team.settings.max_members, before);
+        assert_eq!(team.proposals.iter().find(|p| p["id"] == id.as_str()).unwrap()["state"], "rejected");
+        // A card Allow could not apply is refused when the lead proposes it.
+        let error = propose(&mut store, json!({"kind":"relaunch","member":"dev","reason":"x"})).unwrap_err().to_string();
+        assert!(error.contains("Allow could not apply"), "{error}");
+        let error = propose(&mut store, json!({"kind":"settings","reason":"x"})).unwrap_err().to_string();
+        assert!(error.contains("settings proposal names"), "{error}");
+    });
+    super::live_sessions_override(None);
+    super::set_test_caller_identities(None);
+}
+
+/// Task #21: the plan approval is a card too; Allow runs the planned team.
+#[test]
+fn a_plan_approval_card_runs_the_team() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        super::live_sessions_override(Some(Vec::new()));
+        super::set_test_caller_identities(Some((None, None, None)));
+        let _worker = hold_worker_lock();
+        let mut store = Store::open(true).unwrap();
+        let (mut team, _) = ops::create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude","session":{"name":"claude/x/lead","run_id":"r0"}}})).unwrap();
+        ops::apply(&mut team, "plan", &json!({"members":[{"id":"dev","role":"Backend","agent":"codex"}],"tasks":[{"id":1,"title":"API","assignee":"dev"}]}),
+            &Actor::Member("lead".into()), &BTreeSet::new(), &mut Vec::new()).unwrap();
+        assert_eq!(team.status, TeamStatus::Planning);
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+        let receipt = store
+            .mutate(None, "t", None, |team, events| ops::apply(team, "propose", &json!({"kind":"approve","reason":"the plan is ready"}), &Actor::Member("lead".into()), &BTreeSet::new(), events))
+            .unwrap();
+        let (id, hash) = (receipt["proposal"].as_str().unwrap().to_owned(), receipt["hash"].as_str().unwrap().to_owned());
+        assert_eq!(store.load("t").unwrap().unwrap().status, TeamStatus::Planning, "proposing changes nothing");
+        let receipt = decide_proposal_in(&mut store, &json!({"team":"t","proposal":id,"accept":true,"by":"human","expected_hash":hash}), &Actor::Human).unwrap();
+        assert_eq!(receipt["status"], "accepted", "{receipt}");
+        assert_eq!(store.load("t").unwrap().unwrap().status, TeamStatus::Running);
+    });
+    super::live_sessions_override(None);
+    super::set_test_caller_identities(None);
 }

@@ -189,6 +189,29 @@ fn matches(request:&Value,panel:&Panel)->bool {
     targets.iter().all(|target|text.contains(&compact(target)))
 }
 
+/// The native "Read outside the working directories" panel can appear without
+/// a PermissionRequest hook (auto mode), so no pending request names it. Its
+/// known title, question and four native options plus the Read(path) row are
+/// enough to form the request a tool-approval card answers; every answer is
+/// checked against this same panel again (`snapshot`).
+fn native_read_request(screen:&str)->Option<Value> {
+    let panel=parse(screen)?;
+    if panel.title.trim()!="Read outside the working directories"
+        ||panel.question.trim()!="Allow this read outside the working directories?" {return None;}
+    const EXPECTED:[&str;4]=["Yes, and keep allowing any reads outside the working directories",
+        "No, and block reads outside the working directories from now on",
+        "No, and ask again next time","Yes, but ask again next time"];
+    let labels:Vec<String>=panel.labels.iter().map(|text|label(text)).collect();
+    if labels.len()!=EXPECTED.len()||labels.iter().zip(EXPECTED).any(|(label,want)|label!=want) {return None;}
+    let body=panel.body.iter().filter(|row|!rule(row,'╌')).map(String::as_str).collect::<String>();
+    let start=body.find("Read(")?+5;
+    let end=body[start..].find(')')?+start;
+    let path=body[start..end].trim();
+    if path.is_empty() {return None;}
+    let request=json!({"tool_name":"Read","tool_input":{"file_path":path}});
+    matches(&request,&panel).then_some(request)
+}
+
 fn summary(request:&Value)->String {
     let input=&request["tool_input"];
     let target=["command","file_path","notebook_path","url","path","pattern"].iter()
@@ -265,8 +288,25 @@ fn build(record:&Value,screen:Option<&str>)->Option<(Value,Option<Panel>)> {
         card["answer_unavailable_reason"]=json!("This child tool request needs review in Terminal.");
         return Some((card,panel));
     }
-    if !eligible(record) {return None;}
-    build_request(record,screen,request(record)?,&record["pending_approval_at"],"")
+    if eligible(record) {
+        if let Some(request)=request(record) {
+            return build_request(record,screen,request,&record["pending_approval_at"],"");
+        }
+    }
+    // Auto mode can show a known native panel without the PermissionRequest
+    // hook; then no pending approval exists to name the request, and the panel
+    // itself does. A pending request of another kind is never read from the
+    // screen this way.
+    let screen=screen?;
+    if !["input","approval","working","tool"].contains(&string(record,"phase")) {return None;}
+    if record.get("pending_approval").is_some() {return None;}
+    let request=native_read_request(screen)?;
+    let at=record["attention_started"].as_f64().map_or(record["last_event_at"].clone(),|at|json!(at));
+    let (mut card,panel)=build_request_seen(record,Some(screen),&request,&at,"",false)?;
+    // No native request identity exists, so automatic approvals must never
+    // take this card; only the owner may answer the verified panel.
+    card["screen_only_request"]=json!(true);
+    Some((card,panel))
 }
 
 /// The exact shell command of a Bash or PowerShell request, for a team's safe
@@ -278,7 +318,11 @@ fn shell_input(card:&mut Value,request:&Value) {
 }
 
 fn build_request(record:&Value,screen:Option<&str>,request:&Value,at:&Value,child_request_id:&str)->Option<(Value,Option<Panel>)> {
-    if screen.is_some_and(|screen|!visible(screen)) {return None;}
+    build_request_seen(record,screen,request,at,child_request_id,true)
+}
+
+fn build_request_seen(record:&Value,screen:Option<&str>,request:&Value,at:&Value,child_request_id:&str,seen_required:bool)->Option<(Value,Option<Panel>)> {
+    if seen_required&&screen.is_some_and(|screen|!visible(screen)) {return None;}
     let tool=string(request,"tool_name");
     let panel=screen.and_then(parse);
     let problem=match &panel {
@@ -572,6 +616,15 @@ pub(super) fn terminal_card(record:&Value,cards:&[Value])->Option<Value> {
         .or_else(||if cards.is_empty() {terminal_choice(record,screen.as_deref()?)} else {None})
 }
 
+/// The hint under Claude's unnumbered choosers: "Enter to confirm · Esc to
+/// <what Esc does>", such as "cancel", or "keep browser tools off" under
+/// "Claude in Chrome extension detected" (task 2). Any other footer, or one
+/// with more keys, is not this chooser.
+pub(super) fn confirm_hint(row:&str)->bool {
+    row.trim().strip_prefix("Enter to confirm · Esc to ")
+        .is_some_and(|what|!what.trim().is_empty()&&!what.contains('·'))
+}
+
 /// A chooser whose options are not numbered and that Claude closes with Enter
 /// or Esc, such as "Review proposed auto-mode setup" (owner, 2026-10-28). The
 /// options are the rows right above the hint, exactly one marked `❯`; a bar
@@ -579,7 +632,7 @@ pub(super) fn terminal_card(record:&Value,cards:&[Value])->Option<Value> {
 fn hinted_choice(screen:&str)->Option<Chooser> {
     let rows:Vec<String>=screen.lines().map(|r|r.trim().trim_start_matches(['│','▌','▎','▍','┃']).trim().to_owned()).collect();
     let last=rows.iter().rposition(|r|!r.is_empty())?;
-    if rows[last]!="Enter to confirm · Esc to cancel" {return None;}
+    if !confirm_hint(&rows[last]) {return None;}
     let end=rows[..last].iter().rposition(|r|!r.is_empty())?;
     let start=rows[..=end].iter().rposition(|r|r.is_empty())?+1;
     let options=&rows[start..=end];
@@ -1626,6 +1679,34 @@ pub(super) fn reconcile(record:Value)->Value {
         assert_eq!(parse(&BASH.replace(" ❯ 1. Yes","   1. Yes").replace("   4. No"," ❯ 4. No")).unwrap().selected,3);
     }
 
+    #[test] fn windows_read_outside_without_a_hook_is_an_answerable_tool_approval() {
+        // The real Windows card at 2026-11-05 17:49:21 (attachment
+        // message-40hhyN/01-Screenshot_2.png) showed this path and these four
+        // options with no PermissionRequest; the fixture keeps that text in
+        // the Windows normal-screen layout.
+        let screen=include_str!("../../tests/fixtures/claude-read-outside-windows.txt");
+        let r=json!({"agent":"claude","phase":"input","run_id":"run","conversation_id":"conversation",
+            "pane":"%1","pid":1,"process_start":"1","attention_started":20.0,"last_event_at":21.0,"active_tools":{}});
+        let q=card(&r,screen);
+        assert_eq!((q["source"].clone(),q["can_answer"].clone(),q["answer_transport"].clone(),q["approval_choices"].clone()),
+            (json!("claude_tool_approval"),json!(true),json!("claude_tui"),json!(true)));
+        assert_eq!(q["questions"][0]["question"],"Allow this read outside the working directories?");
+        assert_eq!(options(&q),[("Yes, and keep allowing any reads outside the working directories","broader"),
+            ("No, and block reads outside the working directories from now on","broader"),
+            ("No, and ask again next time","once"),("Yes, but ask again next time","once")].map(|(l,s)|(l.to_owned(),s.to_owned())));
+        assert!(string(&q["questions"][0],"body").contains("01-Screenshot_2.png"));
+        assert!(string(&q["questions"][0],"body").contains("Read outside the working directories"));
+        assert_eq!(q["screen_only_request"],true);
+        assert!(snapshot(&r,screen).is_some());
+        // The same panel with the waiting hook keeps the existing answerable card.
+        let hooked=record("Read",json!({"file_path":r"C:\Users\whitl\.local\state\hgs\sessions\attachments\message-40hhyN\01-Screenshot_2.png"}));
+        let hooked=card(&hooked,screen);
+        assert_eq!((hooked["source"].clone(),hooked["can_answer"].clone()),(json!("claude_tool_approval"),json!(true)));
+        assert!(hooked.get("screen_only_request").is_none());
+        // A different question is not this known panel.
+        assert!(native_read_request(&screen.replace("Allow this read outside the working directories?","Do you want to proceed?")).is_none());
+    }
+
     #[test] fn mismatched_or_unreadable_panels_stay_visible_for_terminal() {
         let other=card(&record("Read",json!({"file_path":"/home/user/other.png"})),OUTSIDE);
         assert_eq!(other["can_answer"],false);assert!(options(&other).is_empty());
@@ -1900,5 +1981,34 @@ mod hinted_choice_tests {
         assert!(hinted_choice(&SETUP.replace("Enter to confirm · Esc to cancel", "Esc to cancel")).is_none());
         assert!(hinted_choice(&SETUP.replace("   Discard and exit", " ❯ Discard and exit")).is_none());
         assert!(hinted_choice(&SETUP.replace("   Discard and exit\n", "")).is_none());
+    }
+    // Task 2: Claude Code 2.1.318's "Claude in Chrome extension detected"
+    // panel, whose Esc keeps browser tools off.
+    const CHROME: &str = include_str!("../../tests/fixtures/claude-chrome-detected.txt");
+    #[test]
+    fn a_chooser_whose_esc_does_something_else_has_its_options() {
+        let (title, body, options) = hinted_choice(CHROME).unwrap();
+        assert_eq!(title, "Claude in Chrome extension detected");
+        assert!(body.starts_with("Claude will use your Chrome browser by default") && body.ends_with("with /chrome"), "{body}");
+        assert!(!body.contains("use my browser"), "{body}");
+        assert_eq!(options.iter().map(|(label, _)| label.as_str()).collect::<Vec<_>>(), ["Yes, use my browser", "No, keep browser tools off"]);
+        // After the first turn it is a read-only Terminal card with both options.
+        let record = json!({"agent":"claude","run_id":"run","conversation_id":"conversation","last_event_at":20,"phase":"idle"});
+        let card = choice_card(&record, CHROME, hinted_choice(CHROME).unwrap()).unwrap();
+        assert_eq!((card["source"].clone(), card["can_answer"].clone()), (json!("claude_terminal_choice"), json!(false)));
+        let labels: Vec<_> = card["questions"][0]["options"].as_array().unwrap().iter().map(|option| option["label"].clone()).collect();
+        assert_eq!(labels, [json!("Yes, use my browser"), json!("No, keep browser tools off")]);
+        assert_eq!(card["questions"][0]["question"], "Claude in Chrome extension detected");
+    }
+    #[test]
+    fn only_the_enter_to_confirm_esc_to_hint_marks_this_chooser() {
+        assert!(confirm_hint("Enter to confirm · Esc to cancel") && confirm_hint(" Enter to confirm · Esc to keep browser tools off "));
+        for footer in ["Esc to keep browser tools off", "Enter to confirm · Esc to", "Enter to confirm · Esc to  ",
+            "Enter to select · Esc to cancel", "Enter to confirm · Esc to cancel · Tab to amend",
+            "Enter to select · ↑/↓ to navigate · Esc to cancel", "Press Enter to confirm · Esc to cancel", "Ordinary output"] {
+            assert!(!confirm_hint(footer), "{footer}");
+            let screen = CHROME.replace("Enter to confirm · Esc to keep browser tools off", footer);
+            assert!(hinted_choice(&screen).is_none(), "{footer}");
+        }
     }
 }

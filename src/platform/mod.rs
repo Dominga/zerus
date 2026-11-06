@@ -24,6 +24,78 @@ mod windows;
 #[cfg(windows)]
 pub use windows::*;
 
+/// Task #28: whether this process runs in a sandbox below Medium integrity
+/// (a DeepSeek member's confined shell on Windows). It reads Zerus state, but
+/// writes and the session host stay closed to it, so its `hgs run` and its
+/// host reads go through the member's folder to the team worker instead.
+/// Never on Unix, where agent sandboxes have no integrity levels.
+pub fn sandboxed() -> bool {
+    #[cfg(test)]
+    if let Some(forced) = SANDBOXED.with(std::cell::Cell::get) {
+        return forced;
+    }
+    #[cfg(windows)]
+    {
+        crate::host::token::below_medium() || foreign_sandbox()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// Task #48: whether this process runs as another user than the owner of the
+/// hgs state, and may not read the owner's hgs configuration: Codex's Windows
+/// sandbox (`CodexSandboxOffline`, at Medium integrity). Such a process reads
+/// the state but writes none of it, so its member calls go through its folder
+/// to the team worker, as a DeepSeek sandbox's do. Both signs are needed: the
+/// owner always reads its own configuration. Never on Unix.
+pub fn foreign_sandbox() -> bool {
+    #[cfg(windows)]
+    {
+        static FOREIGN_SANDBOX: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *FOREIGN_SANDBOX.get_or_init(|| {
+            let Some(home) = home() else { return false };
+            let state = env::var_os("HGS_STATE_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(below(&home, ".local/state/hgs/sessions")));
+            let config = env::var_os("HGS_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(below(&home, ".config/hgs")));
+            owned_by_another_user(&state)
+                && std::fs::read_dir(&config).is_err_and(|error| error.kind() == io::ErrorKind::PermissionDenied)
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+
+
+#[cfg(test)]
+thread_local! {
+    static SANDBOXED: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// A test's stand-in for this process's sandbox, on this thread.
+#[cfg(test)]
+pub(crate) fn set_test_sandboxed(sandboxed: Option<bool>) {
+    SANDBOXED.with(|value| value.set(sandboxed));
+}
+
+/// Task #28: lowers this process to Low integrity before it starts a
+/// sandboxed member's run, so the run keeps the member's sandbox level.
+pub fn lower_to_low_integrity() -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        crate::host::token::lower_current_to_low()
+    }
+    #[cfg(not(windows))]
+    {
+        Err(io::Error::other("integrity levels exist only on Windows"))
+    }
+}
+
 /// A completed process roster may still contain protected Linux processes whose
 /// paths the OS refuses to disclose. Keep these separate from readable paths:
 /// they require personal confirmation, never automatic cleanup authority.

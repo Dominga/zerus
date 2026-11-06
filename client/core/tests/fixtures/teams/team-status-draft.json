@@ -1,0 +1,2281 @@
+{
+ "approved_at": 1793890977.660748,
+ "approved_by": "You",
+ "attention": [],
+ "brief": "sent",
+ "brief_id": "63e7bbc2-ecfc-4abb-8901-716c1bad4ea1",
+ "checks": [],
+ "children": [],
+ "created": 1793889715.3499734,
+ "cycle": [],
+ "findings": {
+  "items": [],
+  "next_cursor": null
+ },
+ "findings_summary": {
+  "deferred": 0,
+  "open": {
+   "critical": 0,
+   "later": 0,
+   "normal": 0
+  }
+ },
+ "folder": "C:\\work\\example",
+ "full_tests": "ask",
+ "full_tests_grant": null,
+ "goal": "Synthetic goal text.",
+ "health": {
+  "chain": 5,
+  "critical_path": 9,
+  "fan_in": [],
+  "parallelism": 2.111111111111111,
+  "per_member": {
+   "core": {
+    "on_critical_path": 0,
+    "tasks": 2
+   },
+   "hgs": {
+    "on_critical_path": 0,
+    "tasks": 1
+   },
+   "merger": {
+    "on_critical_path": 1,
+    "tasks": 4
+   },
+   "qa": {
+    "on_critical_path": 1,
+    "tasks": 2
+   },
+   "ui1": {
+    "on_critical_path": 0,
+    "tasks": 2
+   },
+   "ui2": {
+    "on_critical_path": 0,
+    "tasks": 8
+   }
+  },
+  "starved": [
+   {
+    "blocking": [
+     1,
+     2,
+     5,
+     6,
+     7
+    ],
+    "member": "ui1",
+    "minutes": 2,
+    "role": "Frontend (SolidJS)"
+   }
+  ],
+  "tasks": 19,
+  "totals": {
+   "decided": 8,
+   "tasks": 27
+  },
+  "warnings": [
+   "(9) lane weights differ by more than a third: 1 to 10",
+   "(12) task #27 makes the reviewer implement",
+   "starved: ui1 (Frontend (SolidJS)) idle 2 min without a ready task; Open: #1, #2, #5, #6, #7"
+  ],
+  "widest_ready": 7
+ },
+ "hosts": [
+  {
+   "agent": "dsh",
+   "members": [
+    "ui2",
+    "qa"
+   ],
+   "pid": 27696,
+   "started": 1793891443.8229566
+  }
+ ],
+ "id": "33fbafeb-8291-4eda-a00c-6e1448ec6f20",
+ "inbox": {
+  "told": [
+   "build_broker",
+   "proposal:p1",
+   "proposal:p2",
+   "proposal:p3",
+   "report:25:12919b40-81fa-43f7-b07d-55982c998299:0",
+   "report:4:82f8818e-8a9f-4158-93b5-dffcdc23530c:0"
+  ],
+  "told_at": 1793895084.7238245
+ },
+ "layers": {
+  "1": 0,
+  "10": 2,
+  "11": 3,
+  "12": 3,
+  "13": 4,
+  "14": 5,
+  "15": 1,
+  "16": 3,
+  "17": 5,
+  "18": 0,
+  "19": 0,
+  "2": 0,
+  "20": 0,
+  "21": 0,
+  "22": 0,
+  "23": 0,
+  "24": 0,
+  "25": 0,
+  "26": 0,
+  "27": 1,
+  "3": 0,
+  "4": 0,
+  "5": 1,
+  "6": 1,
+  "7": 2,
+  "8": 1,
+  "9": 2
+ },
+ "lead": "lead",
+ "lead_protocol": "Synthetic lead_protocol text.",
+ "members": [
+  {
+   "account": "",
+   "activity": "idle",
+   "agent": "claude",
+   "branch": "whitewh/main",
+   "computer": "",
+   "directory": "",
+   "effort": "",
+   "error": "",
+   "folder": "shared",
+   "folder_path": "C:\\work\\example",
+   "host_shared": false,
+   "id": "lead",
+   "launch_id": "",
+   "minutes_without_progress": 0,
+   "model": "",
+   "outside_project": false,
+   "permission_answers": [],
+   "permissions": "",
+   "phase": "idle",
+   "project": "D:/Tools/Zerus",
+   "prompt": "Synthetic prompt text.",
+   "question": null,
+   "queue": [],
+   "role": "Lead",
+   "seen": {
+    "at": 1793890980.6679094,
+    "live": true
+   },
+   "seen_activity": "idle",
+   "seen_event_at": 1793895170.6921225,
+   "seen_phase": "idle",
+   "services": [
+    {
+     "command": "C:\\work\\example",
+     "name": "cmd",
+     "since": 1793886487.7922368
+    }
+   ],
+   "session": {
+    "conversation_id": "0322c402-bf9b-4bd7-81fa-680f6c0ff926",
+    "host": "",
+    "name": "claude/Zerus/work-6926cceb",
+    "run_id": "d98bb419-557a-4725-a017-214ecd23595d"
+   },
+   "session_account": "claude-57584158dd",
+   "stage_queue": [],
+   "state": "active",
+   "stuck": null
+  },
+  {
+   "account": "claude-57584158dd",
+   "activity": "busy",
+   "agent": "claude",
+   "branch": "team/33fbafeb/core",
+   "computer": "",
+   "directory": "",
+   "effort": "high",
+   "error": "",
+   "folder": "worktree",
+   "folder_path": "C:\\work\\example",
+   "host_shared": false,
+   "id": "core",
+   "launch_id": "290c1ad7-fdda-4c6d-b644-4d49721d2e4c",
+   "minutes_without_progress": 0,
+   "model": "claude-opus-5-5",
+   "outside_project": false,
+   "permission_answers": [],
+   "permissions": "",
+   "phase": "working",
+   "project": "D:/Tools/Zerus",
+   "prompt": "Synthetic prompt text.",
+   "question": null,
+   "queue": [
+    {
+     "phase": "working",
+     "task": 6
+    }
+   ],
+   "quieted": "da483eda-a37c-45ae-b97b-2645ad6d98a1",
+   "role": "Tauri core (Rust)",
+   "seen": {
+    "at": 1793891013.1345098,
+    "live": true
+   },
+   "seen_activity": "busy",
+   "seen_event_at": 1793895174.6132865,
+   "seen_phase": "working",
+   "session": {
+    "conversation_id": "da483eda-a37c-45ae-b97b-2645ad6d98a1",
+    "host": "",
+    "name": "claude/Zerus-team-33fbafeb-core/zerus-next-for-the-fork-core",
+    "run_id": "830f440e-c015-40cf-9779-a7afa1e46bba"
+   },
+   "session_account": "claude-57584158dd",
+   "stage_queue": [],
+   "state": "active",
+   "stuck": null
+  },
+  {
+   "account": "",
+   "activity": "",
+   "agent": "dsh",
+   "branch": "team/33fbafeb/hgs",
+   "computer": "",
+   "directory": "",
+   "effort": "high",
+   "error": "",
+   "folder": "clone",
+   "folder_path": "C:\\work\\example",
+   "host_shared": false,
+   "id": "hgs",
+   "launch_id": "",
+   "minutes_without_progress": null,
+   "model": "deepseek-flash",
+   "outside_project": false,
+   "permission_answers": [],
+   "permissions": "",
+   "phase": "",
+   "project": "D:/Tools/Zerus-team-33fbafeb-hgs",
+   "prompt": "Synthetic prompt text.",
+   "question": null,
+   "queue": [],
+   "role": "hgs CLI (DeepSeek)",
+   "session": null,
+   "session_account": "",
+   "stage_queue": [],
+   "state": "not_created",
+   "stuck": null
+  },
+  {
+   "account": "claude-57584158dd",
+   "activity": "idle",
+   "agent": "claude",
+   "branch": "team/33fbafeb/ui1",
+   "computer": "",
+   "directory": "",
+   "effort": "medium",
+   "error": "",
+   "folder": "worktree",
+   "folder_path": "C:\\work\\example",
+   "host_shared": false,
+   "id": "ui1",
+   "launch_id": "09e1671f-e482-4294-9008-806c6a4c3dd2",
+   "minutes_without_progress": 3,
+   "model": "claude-opus-5-5",
+   "outside_project": false,
+   "permission_answers": [],
+   "permissions": "",
+   "phase": "idle",
+   "project": "D:/Tools/Zerus",
+   "prompt": "Synthetic prompt text.",
+   "question": null,
+   "queue": [],
+   "quieted": "70cd50d6-7548-482b-96f0-20841337f979",
+   "role": "Frontend (SolidJS)",
+   "seen": {
+    "at": 1793891013.1497102,
+    "live": true
+   },
+   "seen_activity": "idle",
+   "seen_event_at": 1793895037.1170156,
+   "seen_phase": "idle",
+   "services": [
+    {
+     "command": "C:\\work\\example",
+     "name": "socraticode",
+     "since": 1793891002.3166735
+    },
+    {
+     "command": "C:\\work\\example",
+     "name": "cmd",
+     "since": 1793891002.3506415
+    }
+   ],
+   "session": {
+    "conversation_id": "70cd50d6-7548-482b-96f0-20841337f979",
+    "host": "",
+    "name": "claude/Zerus-team-33fbafeb-ui1/zerus-next-for-the-fork-ui1",
+    "run_id": "72ddd41c-fa88-49b5-8301-ca9220aca1be"
+   },
+   "session_account": "claude-57584158dd",
+   "stage_queue": [],
+   "starved_since": 1793895094.9159694,
+   "state": "active",
+   "stuck": null
+  },
+  {
+   "account": "",
+   "activity": "busy",
+   "agent": "dsh",
+   "asked": [
+    "705b6614-911a-498f-bd54-449d03fe7426:6e63394585a0bc0c14afee1dcdde08ab3dd44b137eb3aa47c82bfa7c012a04ba",
+    "b1d1843c-2337-4597-9699-7467b5c35b6f:f80bd6c28ce2247d72c58d4d3dfb49008562950e4343587f0af5b3de137e43f9"
+   ],
+   "branch": "team/33fbafeb/ui2",
+   "computer": "",
+   "directory": "",
+   "effort": "high",
+   "error": "",
+   "folder": "clone",
+   "folder_path": "C:\\work\\example",
+   "host_shared": true,
+   "id": "ui2",
+   "launch_id": "e4a9393d-b271-4e66-b5af-ae521c7b5c2f",
+   "minutes_without_progress": 1,
+   "model": "deepseek-flash",
+   "outside_project": false,
+   "permission_answers": [
+    {
+     "at": 1793892131.639394,
+     "by": "lead",
+     "command": "Synthetic command text.",
+     "decision": "allow",
+     "question_id": "705b6614-911a-498f-bd54-449d03fe7426",
+     "reason": "",
+     "tool": "Approval required"
+    },
+    {
+     "at": 1793892271.9756165,
+     "by": "lead",
+     "command": "Synthetic command text.",
+     "decision": "deny",
+     "question_id": "b1d1843c-2337-4597-9699-7467b5c35b6f",
+     "reason": "",
+     "tool": "Approval required"
+    }
+   ],
+   "permissions": "",
+   "phase": "working",
+   "project": "D:/Tools/Zerus-team-33fbafeb-ui2",
+   "prompt": "Synthetic prompt text.",
+   "question": null,
+   "queue": [
+    {
+     "phase": "working",
+     "task": 1
+    }
+   ],
+   "quieted": "session-f1e13b40-302a-4c2d-a1b4-ceaf301fe327",
+   "role": "Frontend (DeepSeek)",
+   "seen": {
+    "at": 1793891522.3585067,
+    "live": true
+   },
+   "seen_activity": "busy",
+   "seen_event_at": 1793895128.325,
+   "seen_phase": "working",
+   "session": {
+    "conversation_id": "session-f1e13b40-302a-4c2d-a1b4-ceaf301fe327",
+    "host": "",
+    "name": "dsh/Zerus-team-33fbafeb-ui2/zerus-next-for-the-fork-ui2",
+    "run_id": "e3c295e0-c27e-4e68-8600-31873b556cca"
+   },
+   "session_account": "",
+   "settings_applied": true,
+   "stage_queue": [],
+   "state": "active",
+   "stuck": null
+  },
+  {
+   "account": "claude-57584158dd",
+   "activity": "",
+   "agent": "claude",
+   "branch": "whitewh/main",
+   "computer": "",
+   "directory": "",
+   "effort": "high",
+   "error": "",
+   "folder": "shared",
+   "folder_path": "C:\\work\\example",
+   "host_shared": false,
+   "id": "merger",
+   "launch_id": "",
+   "minutes_without_progress": null,
+   "model": "claude-sonnet-5-5",
+   "outside_project": false,
+   "permission_answers": [],
+   "permissions": "",
+   "phase": "",
+   "project": "D:/Tools/Zerus",
+   "prompt": "You are the Reviewer and Merger of this team. For each task: read the members' branches the task names against the documents and contracts it names; report findings by severity with file:line. A blocking finding stops you: report it and merge nothing. Otherwise merge each branch into main with --no-ff, resolve conflicts, run the checks the task names on main, push main, and report the merge commits. You change no source code except conflict resolution. Finish every task with `hgs team report` (hgs guide team).\n\nIn this team 'main' is the integration branch merge/upstream-2026-11-05, checked out at C:\\work\\example",
+   "prompt_snapshot": {
+    "notes": {},
+    "prompt_off": [],
+    "prompt_order": [],
+    "protocol_extra": "",
+    "task_template": ""
+   },
+   "question": null,
+   "queue": [],
+   "role": "Reviewer & Merger",
+   "session": null,
+   "session_account": "claude-57584158dd",
+   "stage_queue": [],
+   "state": "not_created",
+   "stuck": null
+  },
+  {
+   "account": "",
+   "activity": "busy",
+   "agent": "dsh",
+   "branch": "whitewh/main",
+   "computer": "",
+   "directory": "",
+   "effort": "high",
+   "error": "",
+   "folder": "shared",
+   "folder_path": "C:\\work\\example",
+   "host_shared": true,
+   "id": "qa",
+   "launch_id": "6ce62ab7-5c38-426b-aed7-c6c5aefe20de",
+   "minutes_without_progress": 1,
+   "model": "deepseek-flash",
+   "outside_project": false,
+   "permission_answers": [],
+   "permissions": "",
+   "phase": "working",
+   "project": "D:/Tools/Zerus",
+   "prompt": "Synthetic prompt text.",
+   "question": null,
+   "queue": [
+    {
+     "phase": "working",
+     "task": 5
+    }
+   ],
+   "quieted": "session-10e9dd92-4a7a-49be-a139-da281115f842",
+   "role": "QA tester (Windows, DeepSeek)",
+   "seen": {
+    "at": 1793895128.096145,
+    "live": true
+   },
+   "seen_activity": "busy",
+   "seen_event_at": 1793895138.569,
+   "seen_phase": "working",
+   "session": {
+    "conversation_id": "session-10e9dd92-4a7a-49be-a139-da281115f842",
+    "host": "",
+    "name": "dsh/Zerus/zerus-next-for-the-fork-qa",
+    "run_id": "ba3d8c92-041c-4e14-81b2-b2e63f0e7ee7"
+   },
+   "session_account": "",
+   "settings_applied": true,
+   "stage_queue": [],
+   "state": "active",
+   "stuck": null
+  }
+ ],
+ "name": "Zerus Next for the fork",
+ "pending_phase": null,
+ "phase_summary": [
+  {
+   "acceptance": "lead",
+   "auto": false,
+   "barrier": false,
+   "done": 8,
+   "health_line": "path 9 \u00b7 par 2.1 \u00b7 2 warnings",
+   "n": 1,
+   "pause": null,
+   "start_ahead": false,
+   "state": "running",
+   "status": "in_work",
+   "title": "Phase 1",
+   "total": 27
+  }
+ ],
+ "phases": null,
+ "phases_health": {
+  "1": {
+   "chain": 5,
+   "critical_path": 9,
+   "fan_in": [],
+   "parallelism": 2.111111111111111,
+   "per_member": {
+    "core": {
+     "on_critical_path": 0,
+     "tasks": 2
+    },
+    "hgs": {
+     "on_critical_path": 0,
+     "tasks": 1
+    },
+    "merger": {
+     "on_critical_path": 1,
+     "tasks": 4
+    },
+    "qa": {
+     "on_critical_path": 1,
+     "tasks": 2
+    },
+    "ui1": {
+     "on_critical_path": 0,
+     "tasks": 2
+    },
+    "ui2": {
+     "on_critical_path": 0,
+     "tasks": 8
+    }
+   },
+   "tasks": 19,
+   "totals": {
+    "decided": 8,
+    "tasks": 27
+   },
+   "warnings": [
+    "(9) lane weights differ by more than a third: 1 to 10",
+    "(12) task #27 makes the reviewer implement"
+   ],
+   "widest_ready": 7
+  }
+ },
+ "plan_mode": "standard",
+ "plan_mode_offer": null,
+ "plan_mode_reason": "",
+ "project": "ZERUS",
+ "project_id": "02fdf8fc-8a76-4b7d-8e8e-abeee524f80f",
+ "proposals": [],
+ "ready": [
+  2,
+  19,
+  23,
+  26
+ ],
+ "revision": 612,
+ "settings": {
+  "all_hard": false,
+  "approval": "review",
+  "background_red_minutes": 30,
+  "blocked_timeout_seconds": 1800,
+  "folder_policy": "lead",
+  "inbox_interval_seconds": 120,
+  "max_members": 6,
+  "remind_lead_minutes": 15,
+  "remind_owner_minutes": 60,
+  "remind_owner_permission_minutes": 10,
+  "report_timeout_seconds": 120,
+  "restart_crashed": true,
+  "start_timeout_seconds": 180
+ },
+ "status": "draft",
+ "stuck_scope": [
+  1,
+  2,
+  5,
+  6,
+  7,
+  8,
+  9,
+  10,
+  11,
+  12,
+  13,
+  14,
+  15,
+  16,
+  17,
+  19,
+  23,
+  26,
+  27
+ ],
+ "tasks": [
+  {
+   "assignee": "ui2",
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [],
+   "description": "On Windows the panel arrives as the generic read-only claude_terminal_choice card ('Answer this in Terminal.', src/state/claude_approval.rs:629) although the parser knows it (fixture OUTSIDE, answerable through claude_tui in tests). Find why the tool-approval path builds no card for a real Windows session (pending_approval missing in auto mode, visible() or parse() on the Windows screen, or matches() with a C:\\work\\example",
+   "estimate_minutes": 180.0,
+   "estimate_source": "lead",
+   "estimate_spent_minutes": 1.0,
+   "estimate_text": "180 min",
+   "id": 1,
+   "output": [
+    "src/state/claude_approval.rs",
+    "tests/fixtures"
+   ],
+   "phase": 1,
+   "pinned": true,
+   "status": "draft",
+   "timing": {
+    "attempts": [
+     {
+      "from": 1793895138.408736,
+      "lead_s": 0,
+      "member": "ui2",
+      "member_s": 10,
+      "n": 1,
+      "state": "delivered",
+      "to": null,
+      "worked_s": 50
+     }
+    ],
+    "running_since": 1793895138.408736,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 0,
+     "member_s": 4161
+    },
+    "worked_s": 50
+   },
+   "title": "Route Claude's 'Read outside the working directories' approval on Windows as an answerable card",
+   "waits": {
+    "for": "member",
+    "on": [
+     "ui2 (Frontend (DeepSeek))"
+    ],
+    "unblock": "wait for ui2 (Frontend (DeepSeek))"
+   }
+  },
+  {
+   "assignee": "ui2",
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "cargo test passes"
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 120.0,
+   "estimate_source": "lead",
+   "estimate_text": "120 min",
+   "id": 2,
+   "output": [
+    "src/state/claude_approval.rs",
+    "tests/fixtures"
+   ],
+   "phase": 1,
+   "pinned": true,
+   "status": "draft",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 0,
+     "member_s": 4211
+    },
+    "worked_s": 0
+   },
+   "title": "Recognise Claude choosers whose Esc hint is not 'Esc to cancel' (Claude in Chrome panel)",
+   "waits": {
+    "for": "member",
+    "on": [
+     "ui2 (Frontend (DeepSeek))"
+    ],
+    "unblock": "wait for ui2 (Frontend (DeepSeek))"
+   }
+  },
+  {
+   "assignee": "ui1",
+   "criteria": [
+    "Synthetic criteria text.",
+    "Answerable cards are unchanged",
+    "Synthetic criteria text."
+   ],
+   "decided_by": "lead",
+   "decision_reason": "Synthetic decision_reason text.",
+   "deps": [],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 90.0,
+   "estimate_source": "lead",
+   "estimate_text": "90 min",
+   "id": 3,
+   "output": [
+    "tray/src/QuestionCard*",
+    "client/src/ui/sessions/QuestionCard.tsx"
+   ],
+   "phase": 1,
+   "status": "draft",
+   "timing": {
+    "attempts": [
+     {
+      "from": 1793891018.4709299,
+      "lead_s": 21,
+      "member": "ui1",
+      "member_s": 5,
+      "n": 1,
+      "state": "reported",
+      "to": 1793891653.251821,
+      "worked_s": 635
+     }
+    ],
+    "running_since": null,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 21,
+     "member_s": 41
+    },
+    "worked_s": 635
+   },
+   "title": "A read-only question card never looks answerable (Qt and Tauri)"
+  },
+  {
+   "assignee": "ui2",
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": "lead",
+   "decision_reason": "Synthetic decision_reason text.",
+   "deps": [],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 150.0,
+   "estimate_source": "lead",
+   "estimate_text": "150 min",
+   "id": 4,
+   "output": [
+    "client/README.md"
+   ],
+   "phase": 1,
+   "pinned": true,
+   "status": "draft",
+   "timing": {
+    "attempts": [
+     {
+      "from": 1793891018.4791448,
+      "lead_s": 0,
+      "member": "core",
+      "member_s": 5,
+      "n": 1,
+      "state": "revoked",
+      "to": 1793891537.967026,
+      "worked_s": 519
+     },
+     {
+      "from": 1793891551.9654,
+      "lead_s": 917,
+      "member": "ui2",
+      "member_s": 14,
+      "n": 2,
+      "state": "reported",
+      "to": 1793895084.3843563,
+      "worked_s": 2630
+     }
+    ],
+    "running_since": null,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 917,
+     "member_s": 55
+    },
+    "worked_s": 3149
+   },
+   "title": "Tauri client dev build runs on this Windows computer beside the Qt GUI"
+  },
+  {
+   "assignee": "qa",
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 4
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 90.0,
+   "estimate_source": "lead",
+   "estimate_spent_minutes": 1.0,
+   "estimate_text": "90 min",
+   "id": 5,
+   "phase": 1,
+   "status": "draft",
+   "timing": {
+    "attempts": [
+     {
+      "from": 1793895184.8869376,
+      "lead_s": 0,
+      "member": "qa",
+      "member_s": 46,
+      "n": 1,
+      "state": "delivered",
+      "to": null,
+      "worked_s": 3
+     }
+    ],
+    "running_since": 1793895184.8869376,
+    "waits": {
+     "deps_s": 4121,
+     "lead_s": 0,
+     "member_s": 86
+    },
+    "worked_s": 3
+   },
+   "title": "Smoke-test the Tauri client on Windows against Qt and list gaps",
+   "waits": {
+    "for": "member",
+    "on": [
+     "qa (QA tester (Windows, DeepSeek))"
+    ],
+    "unblock": "wait for qa (QA tester (Windows, DeepSeek))"
+   }
+  },
+  {
+   "assignee": "core",
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "No parsing in the webview"
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 4
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 360.0,
+   "estimate_source": "lead",
+   "estimate_spent_minutes": 1.0,
+   "estimate_text": "360 min",
+   "id": 6,
+   "output": [
+    "client/core/src/teams",
+    "client/src-tauri/src"
+   ],
+   "phase": 1,
+   "status": "draft",
+   "timing": {
+    "attempts": [
+     {
+      "from": 1793895117.1573308,
+      "lead_s": 0,
+      "member": "core",
+      "member_s": 12,
+      "n": 1,
+      "state": "delivered",
+      "to": null,
+      "worked_s": 71
+     }
+    ],
+    "running_since": 1793895117.1573308,
+    "waits": {
+     "deps_s": 4121,
+     "lead_s": 0,
+     "member_s": 18
+    },
+    "worked_s": 71
+   },
+   "title": "Teams read model in client/core: bounded polling of hgs team reads into view models",
+   "waits": {
+    "for": "member",
+    "on": [
+     "core (Tauri core (Rust))"
+    ],
+    "unblock": "wait for core (Tauri core (Rust))"
+   }
+  },
+  {
+   "assignee": "core",
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 6
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 300.0,
+   "estimate_source": "lead",
+   "estimate_text": "300 min",
+   "id": 7,
+   "output": [
+    "client/core/src/teams",
+    "client/src-tauri/src"
+   ],
+   "phase": 1,
+   "status": "draft",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 4211,
+     "lead_s": 0,
+     "member_s": 0
+    },
+    "worked_s": 0
+   },
+   "title": "Teams actions through guarded hgs team calls",
+   "waits": {
+    "for": "deps",
+    "on": [
+     6
+    ],
+    "unblock": "accept #6"
+   }
+  },
+  {
+   "assignee": "hgs",
+   "criteria": [
+    "Synthetic criteria text.",
+    "docs/reference.md Event stream updated"
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 1
+    },
+    {
+     "kind": "hard",
+     "task": 2
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 240.0,
+   "estimate_source": "lead",
+   "estimate_text": "240 min",
+   "id": 8,
+   "output": [
+    "src/watch",
+    "docs/reference.md"
+   ],
+   "phase": 1,
+   "status": "draft",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 4211,
+     "lead_s": 0,
+     "member_s": 0
+    },
+    "worked_s": 0
+   },
+   "title": "hgs watch: a team topic so the client stops polling team reads",
+   "waits": {
+    "for": "deps",
+    "on": [
+     1,
+     2
+    ],
+    "unblock": "accept #1"
+   }
+  },
+  {
+   "assignee": "ui1",
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 6
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 420.0,
+   "estimate_source": "lead",
+   "estimate_text": "420 min",
+   "id": 9,
+   "output": [
+    "client/src/ui/teams"
+   ],
+   "phase": 1,
+   "status": "draft",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 4211,
+     "lead_s": 0,
+     "member_s": 0
+    },
+    "worked_s": 0
+   },
+   "title": "Team tab: members column and coordinator conversation with an owner-movable divider",
+   "waits": {
+    "for": "deps",
+    "on": [
+     6
+    ],
+    "unblock": "accept #6"
+   }
+  },
+  {
+   "assignee": "ui2",
+   "criteria": [
+    "Graph and cards match the prototype",
+    "Virtualized for large plans",
+    "vitest covers dependency highlighting"
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 6
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 420.0,
+   "estimate_source": "lead",
+   "estimate_text": "420 min",
+   "id": 10,
+   "output": [
+    "client/src/ui/teams"
+   ],
+   "phase": 1,
+   "status": "draft",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 4211,
+     "lead_s": 0,
+     "member_s": 0
+    },
+    "worked_s": 0
+   },
+   "title": "Plan view: task cards, dependency graph and phases",
+   "waits": {
+    "for": "deps",
+    "on": [
+     6
+    ],
+    "unblock": "accept #6"
+   }
+  },
+  {
+   "assignee": "ui1",
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 7
+    },
+    {
+     "kind": "hard",
+     "task": 9
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 360.0,
+   "estimate_source": "lead",
+   "estimate_text": "360 min",
+   "id": 11,
+   "output": [
+    "client/src/ui/teams"
+   ],
+   "phase": 1,
+   "status": "draft",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 4211,
+     "lead_s": 0,
+     "member_s": 0
+    },
+    "worked_s": 0
+   },
+   "title": "Reports, proposals and waiting: Accept/Reject, proposal cards, Use last reply, Waiting page and notices",
+   "waits": {
+    "for": "deps",
+    "on": [
+     7,
+     9
+    ],
+    "unblock": "accept #7"
+   }
+  },
+  {
+   "assignee": "ui2",
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 7
+    },
+    {
+     "kind": "hard",
+     "task": 10
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 360.0,
+   "estimate_source": "lead",
+   "estimate_text": "360 min",
+   "id": 12,
+   "output": [
+    "client/src/ui/teams"
+   ],
+   "phase": 1,
+   "status": "draft",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 4211,
+     "lead_s": 0,
+     "member_s": 0
+    },
+    "worked_s": 0
+   },
+   "title": "New team tab and team settings",
+   "waits": {
+    "for": "deps",
+    "on": [
+     7,
+     10
+    ],
+    "unblock": "accept #7"
+   }
+  },
+  {
+   "assignee": "ui2",
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 12
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 300.0,
+   "estimate_source": "lead",
+   "estimate_text": "300 min",
+   "id": 13,
+   "output": [
+    "client/src/ui/teams"
+   ],
+   "phase": 1,
+   "status": "draft",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 4211,
+     "lead_s": 0,
+     "member_s": 0
+    },
+    "worked_s": 0
+   },
+   "title": "Team catalog editor and designer page",
+   "waits": {
+    "for": "deps",
+    "on": [
+     12
+    ],
+    "unblock": "accept #12"
+   }
+  },
+  {
+   "assignee": "qa",
+   "criteria": [
+    "Synthetic criteria text.",
+    "No action ran twice or silently failed"
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 9
+    },
+    {
+     "kind": "hard",
+     "task": 10
+    },
+    {
+     "kind": "hard",
+     "task": 11
+    },
+    {
+     "kind": "hard",
+     "task": 12
+    },
+    {
+     "kind": "hard",
+     "task": 13
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 180.0,
+   "estimate_source": "lead",
+   "estimate_text": "180 min",
+   "id": 14,
+   "phase": 1,
+   "status": "draft",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 4211,
+     "lead_s": 0,
+     "member_s": 0
+    },
+    "worked_s": 0
+   },
+   "title": "Teams parity check on Windows: Tauri against Qt",
+   "waits": {
+    "for": "deps",
+    "on": [
+     9,
+     10,
+     11,
+     12,
+     13
+    ],
+    "unblock": "accept #9"
+   }
+  },
+  {
+   "assignee": "merger",
+   "criteria": [
+    "Findings by severity with file:line",
+    "Merge commits listed",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 1
+    },
+    {
+     "kind": "hard",
+     "task": 2
+    },
+    {
+     "kind": "hard",
+     "task": 3
+    },
+    {
+     "kind": "hard",
+     "task": 4
+    },
+    {
+     "kind": "hard",
+     "task": 18
+    },
+    {
+     "kind": "hard",
+     "task": 19
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 60.0,
+   "estimate_source": "lead",
+   "estimate_text": "60 min",
+   "id": 15,
+   "phase": 1,
+   "status": "draft",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 4211,
+     "lead_s": 0,
+     "member_s": 0
+    },
+    "worked_s": 0
+   },
+   "title": "Review and merge phase 1 into merge/upstream-2026-11-05 (tasks 1, 2, 3, 4)",
+   "waits": {
+    "for": "deps",
+    "on": [
+     1,
+     2,
+     19
+    ],
+    "unblock": "accept #1"
+   }
+  },
+  {
+   "assignee": "merger",
+   "criteria": [
+    "Findings by severity with file:line",
+    "Merge commits listed",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 6
+    },
+    {
+     "kind": "hard",
+     "task": 7
+    },
+    {
+     "kind": "hard",
+     "task": 8
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 90.0,
+   "estimate_source": "lead",
+   "estimate_text": "90 min",
+   "id": 16,
+   "phase": 1,
+   "status": "draft",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 4211,
+     "lead_s": 0,
+     "member_s": 0
+    },
+    "worked_s": 0
+   },
+   "title": "Review and merge phase 2 into merge/upstream-2026-11-05 (tasks 6, 7, 8)",
+   "waits": {
+    "for": "deps",
+    "on": [
+     6,
+     7,
+     8
+    ],
+    "unblock": "accept #6"
+   }
+  },
+  {
+   "assignee": "merger",
+   "criteria": [
+    "Findings by severity with file:line",
+    "Merge commits listed",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 9
+    },
+    {
+     "kind": "hard",
+     "task": 10
+    },
+    {
+     "kind": "hard",
+     "task": 11
+    },
+    {
+     "kind": "hard",
+     "task": 12
+    },
+    {
+     "kind": "hard",
+     "task": 13
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 120.0,
+   "estimate_source": "lead",
+   "estimate_text": "120 min",
+   "id": 17,
+   "phase": 1,
+   "status": "draft",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 4211,
+     "lead_s": 0,
+     "member_s": 0
+    },
+    "worked_s": 0
+   },
+   "title": "Review and merge phase 3 into merge/upstream-2026-11-05 (tasks 9, 10, 11, 12, 13)",
+   "waits": {
+    "for": "deps",
+    "on": [
+     9,
+     10,
+     11,
+     12,
+     13
+    ],
+    "unblock": "accept #9"
+   }
+  },
+  {
+   "assignee": "core",
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "The cause is named in the report",
+    "Synthetic criteria text."
+   ],
+   "decided_by": "lead",
+   "decision_reason": "Synthetic decision_reason text.",
+   "deps": [],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 180.0,
+   "estimate_source": "lead",
+   "estimate_text": "180 min",
+   "id": 18,
+   "output": [
+    "tray/src/TeamNewTab.cpp",
+    "tray/tests"
+   ],
+   "phase": 1,
+   "pinned": true,
+   "status": "draft",
+   "timing": {
+    "attempts": [
+     {
+      "from": 1793891423.792969,
+      "lead_s": 190,
+      "member": "core",
+      "member_s": 5,
+      "n": 1,
+      "state": "reported",
+      "to": 1793892959.4960768,
+      "worked_s": 1369
+     }
+    ],
+    "running_since": null,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 190,
+     "member_s": 446
+    },
+    "worked_s": 1369
+   },
+   "title": "The New team form shows the lead's draft edits (Qt), so the owner can press Create team"
+  },
+  {
+   "assignee": "ui2",
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 150.0,
+   "estimate_source": "lead",
+   "estimate_text": "150 min",
+   "id": 19,
+   "output": [
+    "src/state/effort.rs",
+    "tray/src/TeamNewTab.cpp"
+   ],
+   "phase": 1,
+   "pinned": true,
+   "status": "draft",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 0,
+     "member_s": 4211
+    },
+    "worked_s": 0
+   },
+   "title": "DeepSeek members and sessions offer DeepSeek's models (New team shows only 'default')",
+   "waits": {
+    "for": "member",
+    "on": [
+     "ui2 (Frontend (DeepSeek))"
+    ],
+    "unblock": "wait for ui2 (Frontend (DeepSeek))"
+   }
+  },
+  {
+   "added_late": {
+    "at": 1793891317.5657983,
+    "by": "You",
+    "confirm": "add",
+    "request": ""
+   },
+   "assignee": "ui1",
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": "lead",
+   "decision_reason": "Synthetic decision_reason text.",
+   "deps": [],
+   "description": "Owner, 2026-11-05 ('we already fixed this bug'): hgs and ui2 (DeepSeek, folder clone) of this team failed to start with 'hgs: Git operation cancelled or timed out'. The clones of C:\\work\\example",
+   "estimate_minutes": 150.0,
+   "estimate_source": "lead",
+   "estimate_text": "150 min",
+   "id": 20,
+   "output": [
+    "src/state/worktrees.rs",
+    "src/state/teams"
+   ],
+   "phase": 1,
+   "pinned": true,
+   "status": "draft",
+   "timing": {
+    "attempts": [
+     {
+      "from": 1793891693.852713,
+      "lead_s": 29,
+      "member": "ui1",
+      "member_s": 12,
+      "n": 1,
+      "state": "reported",
+      "to": 1793892761.2710218,
+      "worked_s": 1067
+     }
+    ],
+    "running_since": null,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 29,
+     "member_s": 716
+    },
+    "worked_s": 1067
+   },
+   "title": "A clone member of a large repository starts on Windows instead of 'Git operation cancelled or timed out'"
+  },
+  {
+   "added_late": {
+    "at": 1793891493.7734165,
+    "by": "You",
+    "confirm": "add",
+    "request": ""
+   },
+   "assignee": "core",
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": "lead",
+   "decision_reason": "Synthetic decision_reason text.",
+   "deps": [],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 480.0,
+   "estimate_source": "lead",
+   "estimate_text": "480 min",
+   "id": 21,
+   "output": [
+    "src/state/teams",
+    "tray/src/Team*",
+    "docs"
+   ],
+   "phase": 1,
+   "status": "draft",
+   "timing": {
+    "attempts": [
+     {
+      "from": 1793893005.538318,
+      "lead_s": 46,
+      "member": "core",
+      "member_s": 11,
+      "n": 1,
+      "state": "reported",
+      "to": 1793894763.6614647,
+      "worked_s": 1758
+     }
+    ],
+    "running_since": null,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 46,
+     "member_s": 2028
+    },
+    "worked_s": 1758
+   },
+   "title": "URGENT: every owner's-word gate becomes a confirmation dialog (Allow/Reject), never a typed sentence"
+  },
+  {
+   "added_late": {
+    "at": 1793891758.4664462,
+    "by": "You",
+    "confirm": "add",
+    "request": ""
+   },
+   "assignee": "ui1",
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": "lead",
+   "decision_reason": "Synthetic decision_reason text.",
+   "deps": [],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 150.0,
+   "estimate_source": "lead",
+   "estimate_text": "150 min",
+   "id": 22,
+   "output": [
+    "src/state/teams",
+    "src/dsh"
+   ],
+   "phase": 1,
+   "pinned": true,
+   "status": "draft",
+   "timing": {
+    "attempts": [
+     {
+      "from": 1793892803.3559265,
+      "lead_s": 56,
+      "member": "ui1",
+      "member_s": 14,
+      "n": 1,
+      "state": "reported",
+      "to": 1793893509.015446,
+      "worked_s": 706
+     }
+    ],
+    "running_since": null,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 56,
+     "member_s": 1826
+    },
+    "worked_s": 706
+   },
+   "title": "A DeepSeek member that hits 'DeepSeek host is still starting' starts once the host is up, without a relaunch"
+  },
+  {
+   "added_late": {
+    "at": 1793891758.4664462,
+    "by": "You",
+    "confirm": "add",
+    "request": ""
+   },
+   "assignee": "ui2",
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 120.0,
+   "estimate_source": "lead",
+   "estimate_text": "120 min",
+   "id": 23,
+   "output": [
+    "src/state/teams"
+   ],
+   "phase": 1,
+   "pinned": true,
+   "status": "draft",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 0,
+     "member_s": 4211
+    },
+    "worked_s": 0
+   },
+   "title": "Draft task phases survive Create team",
+   "waits": {
+    "for": "member",
+    "on": [
+     "ui2 (Frontend (DeepSeek))"
+    ],
+    "unblock": "wait for ui2 (Frontend (DeepSeek))"
+   }
+  },
+  {
+   "added_late": {
+    "at": 1793891758.4664462,
+    "by": "You",
+    "confirm": "add",
+    "request": ""
+   },
+   "assignee": "ui1",
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": "lead",
+   "decision_reason": "Synthetic decision_reason text.",
+   "deps": [],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 150.0,
+   "estimate_source": "lead",
+   "estimate_text": "150 min",
+   "id": 24,
+   "output": [
+    "src/state/teams"
+   ],
+   "phase": 1,
+   "pinned": true,
+   "status": "draft",
+   "timing": {
+    "attempts": [
+     {
+      "from": 1793893549.6882172,
+      "lead_s": 63,
+      "member": "ui1",
+      "member_s": 10,
+      "n": 1,
+      "state": "reported",
+      "to": 1793894489.8918862,
+      "worked_s": 940
+     }
+    ],
+    "running_since": null,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 63,
+     "member_s": 2572
+    },
+    "worked_s": 940
+   },
+   "title": "A reassigned task stops in the old member's session"
+  },
+  {
+   "added_late": {
+    "at": 1793891758.4664462,
+    "by": "You",
+    "confirm": "add",
+    "request": ""
+   },
+   "assignee": "ui1",
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": "lead",
+   "decision_reason": "Synthetic decision_reason text.",
+   "deps": [],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 90.0,
+   "estimate_source": "lead",
+   "estimate_text": "90 min",
+   "id": 25,
+   "output": [
+    "src/state/teams"
+   ],
+   "phase": 1,
+   "pinned": true,
+   "status": "draft",
+   "timing": {
+    "attempts": [
+     {
+      "from": 1793894565.574854,
+      "lead_s": 72,
+      "member": "ui1",
+      "member_s": 28,
+      "n": 1,
+      "state": "reported",
+      "to": 1793895026.4640212,
+      "worked_s": 461
+     }
+    ],
+    "running_since": null,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 72,
+     "member_s": 3588
+    },
+    "worked_s": 461
+   },
+   "title": "Team commands retry a busy team database instead of failing with 'database is locked'"
+  },
+  {
+   "added_late": {
+    "at": 1793891758.4664462,
+    "by": "You",
+    "confirm": "add",
+    "request": ""
+   },
+   "assignee": "ui2",
+   "criteria": [
+    "Synthetic criteria text.",
+    "Synthetic criteria text."
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 90.0,
+   "estimate_source": "lead",
+   "estimate_text": "90 min",
+   "id": 26,
+   "output": [
+    "src/state/teams"
+   ],
+   "phase": 1,
+   "pinned": true,
+   "status": "draft",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 0,
+     "lead_s": 0,
+     "member_s": 4211
+    },
+    "worked_s": 0
+   },
+   "title": "A draft accepts every member setting the catalog allows (folder read_only) and refuses only with the exact field",
+   "waits": {
+    "for": "member",
+    "on": [
+     "ui2 (Frontend (DeepSeek))"
+    ],
+    "unblock": "wait for ui2 (Frontend (DeepSeek))"
+   }
+  },
+  {
+   "added_late": {
+    "at": 1793891758.4664462,
+    "by": "You",
+    "confirm": "add",
+    "request": ""
+   },
+   "assignee": "merger",
+   "criteria": [
+    "Synthetic criteria text.",
+    "Merge commits listed",
+    "Batch run results attached"
+   ],
+   "decided_by": null,
+   "decision_reason": "",
+   "deps": [
+    {
+     "kind": "hard",
+     "task": 18
+    },
+    {
+     "kind": "hard",
+     "task": 20
+    },
+    {
+     "kind": "hard",
+     "task": 21
+    },
+    {
+     "kind": "hard",
+     "task": 22
+    },
+    {
+     "kind": "hard",
+     "task": 23
+    },
+    {
+     "kind": "hard",
+     "task": 24
+    },
+    {
+     "kind": "hard",
+     "task": 25
+    },
+    {
+     "kind": "hard",
+     "task": 26
+    }
+   ],
+   "description": "Synthetic description text.",
+   "estimate_minutes": 180.0,
+   "estimate_source": "lead",
+   "estimate_text": "180 min",
+   "id": 27,
+   "phase": 1,
+   "status": "draft",
+   "timing": {
+    "attempts": [],
+    "running_since": null,
+    "waits": {
+     "deps_s": 4211,
+     "lead_s": 0,
+     "member_s": 0
+    },
+    "worked_s": 0
+   },
+   "title": "Review the reliability fixes with their regression tests, then merge and test them as one batch",
+   "waits": {
+    "for": "deps",
+    "on": [
+     23,
+     26
+    ],
+    "unblock": "accept #23"
+   }
+  }
+ ],
+ "template": "",
+ "templates": {
+  "enabled": true,
+  "items": [
+   {
+    "args": [
+     "+{toolchain}",
+     "build",
+     "--locked",
+     "--package={package}"
+    ],
+    "id": "cargo-build",
+    "params": [
+     {
+      "kind": "identifier",
+      "name": "toolchain",
+      "required": false
+     },
+     {
+      "kind": "identifier",
+      "name": "package",
+      "required": false
+     },
+     {
+      "kind": "paths",
+      "name": "files",
+      "required": false
+     }
+    ],
+    "program": "cargo",
+    "source": "builtin",
+    "summary": "Synthetic summary text.",
+    "timeout_secs": 1800
+   },
+   {
+    "args": [
+     "+{toolchain}",
+     "test",
+     "--locked",
+     "--package={package}",
+     "--bin={bin}",
+     "{filter}"
+    ],
+    "id": "cargo-test",
+    "params": [
+     {
+      "kind": "identifier",
+      "name": "toolchain",
+      "required": false
+     },
+     {
+      "kind": "identifier",
+      "name": "package",
+      "required": false
+     },
+     {
+      "kind": "identifier",
+      "name": "bin",
+      "required": false
+     },
+     {
+      "kind": "identifier",
+      "name": "filter",
+      "required": false
+     },
+     {
+      "kind": "identifiers",
+      "name": "filters",
+      "required": false
+     },
+     {
+      "kind": "identifiers",
+      "name": "skips",
+      "required": false
+     },
+     {
+      "kind": "paths",
+      "name": "manifest",
+      "required": false
+     },
+     {
+      "kind": "paths",
+      "name": "files",
+      "required": false
+     }
+    ],
+    "program": "cargo",
+    "source": "builtin",
+    "summary": "Synthetic summary text.",
+    "timeout_secs": 1800
+   },
+   {
+    "args": [
+     "+{toolchain}",
+     "clippy",
+     "--locked",
+     "--all-targets",
+     "--package={package}",
+     "--",
+     "-D",
+     "warnings"
+    ],
+    "id": "cargo-clippy",
+    "params": [
+     {
+      "kind": "identifier",
+      "name": "toolchain",
+      "required": false
+     },
+     {
+      "kind": "identifier",
+      "name": "package",
+      "required": false
+     },
+     {
+      "kind": "paths",
+      "name": "files",
+      "required": false
+     }
+    ],
+    "program": "cargo",
+    "source": "builtin",
+    "summary": "Synthetic summary text.",
+    "timeout_secs": 1800
+   },
+   {
+    "args": [
+     "-S",
+     "tray",
+     "-B",
+     ".ci-build/gui",
+     "-G",
+     "Ninja",
+     "-DCMAKE_BUILD_TYPE=Release"
+    ],
+    "id": "qt-configure",
+    "params": [
+     {
+      "kind": "paths",
+      "name": "files",
+      "required": false
+     }
+    ],
+    "program": "cmake",
+    "source": "builtin",
+    "summary": "Synthetic summary text.",
+    "timeout_secs": 600
+   },
+   {
+    "args": [
+     "--build",
+     ".ci-build/gui"
+    ],
+    "id": "qt-build",
+    "params": [
+     {
+      "kind": "identifiers",
+      "name": "targets",
+      "required": false
+     },
+     {
+      "kind": "paths",
+      "name": "files",
+      "required": false
+     }
+    ],
+    "program": "cmake",
+    "source": "builtin",
+    "summary": "Synthetic summary text.",
+    "timeout_secs": 3600
+   },
+   {
+    "args": [],
+    "id": "qt-test",
+    "params": [
+     {
+      "kind": "identifier",
+      "name": "suite",
+      "required": false
+     },
+     {
+      "kind": "identifiers",
+      "name": "suites",
+      "required": false
+     },
+     {
+      "kind": "identifiers",
+      "name": "functions",
+      "required": false
+     },
+     {
+      "kind": "identifier",
+      "name": "shots",
+      "required": false
+     },
+     {
+      "kind": "paths",
+      "name": "files",
+      "required": false
+     }
+    ],
+    "program": ".ci-build/gui/{suite}",
+    "source": "builtin",
+    "summary": "Synthetic summary text.",
+    "timeout_secs": 1800
+   },
+   {
+    "args": [
+     "-p",
+     "mobile/android",
+     ":app:testDebugUnitTest",
+     "--no-daemon"
+    ],
+    "id": "android-test",
+    "params": [],
+    "program": "mobile/android/gradlew",
+    "source": "builtin",
+    "summary": "Synthetic summary text.",
+    "timeout_secs": 3600
+   },
+   {
+    "args": [
+     "-E",
+     "rm",
+     "-rf"
+    ],
+    "id": "clean-build",
+    "params": [
+     {
+      "kind": "paths",
+      "name": "paths",
+      "required": true
+     }
+    ],
+    "program": "cmake",
+    "source": "builtin",
+    "summary": "Synthetic summary text.",
+    "timeout_secs": 600
+   },
+   {
+    "args": [
+     "merge",
+     "--no-edit"
+    ],
+    "id": "git-merge-lead",
+    "params": [],
+    "program": "git",
+    "source": "builtin",
+    "summary": "Synthetic summary text.",
+    "timeout_secs": 300
+   },
+   {
+    "args": [
+     "team",
+     "commit",
+     "--json"
+    ],
+    "id": "git-commit",
+    "params": [
+     {
+      "kind": "text",
+      "name": "message",
+      "required": true
+     },
+     {
+      "kind": "paths",
+      "name": "paths",
+      "required": false
+     }
+    ],
+    "program": "hgs",
+    "source": "builtin",
+    "summary": "Synthetic summary text.",
+    "timeout_secs": 300
+   }
+  ]
+ },
+ "updated": 1793895184.912795,
+ "used_owner_words": [
+  {
+   "change": "the roster change",
+   "event": 120358,
+   "uses": 1
+  },
+  {
+   "change": "the roster change",
+   "event": 120422,
+   "uses": 1
+  }
+ ],
+ "validation": {
+  "errors": [
+   {
+    "kind": "members",
+    "text": "7 members besides the lead, over the team limit of 6 (the lead is not counted)"
+   }
+  ],
+  "warnings": [
+   {
+    "kind": "account",
+    "text": "2 members start on their computer's default account"
+   }
+  ]
+ },
+ "waiting_for_lead": false,
+ "draft": {
+  "revision": 9,
+  "unseen": [
+   "members",
+   "goal"
+  ],
+  "owner_edited": [
+   "settings"
+  ]
+ }
+}

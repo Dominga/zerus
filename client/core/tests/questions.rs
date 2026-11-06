@@ -838,9 +838,21 @@ fn read_only_cards_disable_their_options() {
     raw["can_answer"] = json!(false);
     let form = question(raw);
     let view = card(&form, &AnswerDraft::default(), &ctx());
+    assert!(view.read_only);
     assert!(view.forms[0].options.iter().all(|option| !option.enabled));
+    assert!(view.forms[0].options.iter().any(|option| option.visible));
+    assert!(view.forms.iter().all(|form| !form.mode_visible
+        && form.other.as_ref().is_none_or(|other| !other.visible)
+        && form.text.as_ref().is_none_or(|text| !text.visible)));
     assert!(!view.submit.visible);
     assert_eq!(view.status.english(), "Answer this request in Terminal.");
+    // An answerable card keeps its controls.
+    let answerable = card(&approval_choices(), &AnswerDraft::default(), &ctx());
+    assert!(!answerable.read_only);
+    assert!(answerable.forms[0]
+        .options
+        .iter()
+        .all(|option| option.enabled));
     assert!(!AnswerDraft::default().apply(
         &form,
         Edit::Option {

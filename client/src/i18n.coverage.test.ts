@@ -75,6 +75,7 @@ const DYNAMIC_FILES: Record<string, string> = {
   "./ui/sessions/selection-live.ts": "the machine-batch menu constant",
   "./ui/sessions/selection.ts": "its own action text table",
   "./ui/sessions/selection-ui.ts": "the selection hint constant",
+  "./ui/teams/TeamCatalogEditor.tsx": "its own tab and add tables and the core catalog schema's closed field labels, hints and choices",
 };
 
 const SOURCES = import.meta.glob(["./**/*.ts", "./**/*.tsx", "!./**/*.test.ts", "!./i18n.ts"], { query: "?raw", import: "default", eager: true }) as Record<string, string>;

@@ -56,7 +56,7 @@ fn the_lead_approves_only_on_the_owners_checked_word() {
     .unwrap();
     // F13: without the owner's sentence the lead cannot approve the plan.
     let refused = approve(&mut team, &json!({}), &Actor::Member("lead".into()), &none, &mut events).unwrap_err().to_string();
-    assert_eq!(refused, "The lead approves only on the owner's word: pass \"owner_word\" with the owner's sentence");
+    assert_eq!(refused, "The lead approves only on the owner's word: propose {\"kind\":\"approve\"} as a card (hgs guide team-propose); the owner allows it with a click");
     let word = json!({"text":"plan approved, go ahead","at":1000.0,"event":2});
     let approved = approve(
         &mut team,
@@ -96,7 +96,7 @@ fn the_lead_approves_only_on_the_owners_checked_word() {
     )
     .unwrap_err()
     .to_string();
-    assert_eq!(refused, "The lead approves a phase only on the owner's word: pass \"owner_word\"");
+    assert_eq!(refused, "The lead approves a phase only on the owner's word: propose {\"kind\":\"approve-phase\"} as a card (hgs guide team-propose); the owner allows it with a click");
     let opened = apply(
         &mut team,
         "approve-phase",
@@ -193,7 +193,7 @@ fn a_wider_profile_waits_for_the_owner() {
     )
     .unwrap_err()
     .to_string();
-    assert_eq!(error, "A permissions profile is read, write, build, commit or network");
+    assert_eq!(error, "A member \"dev\": field \"permissions_profile\" is read, write, build, commit or network, not \"root\"");
     // C3: `permissions` stays the launch mode; bypass is accepted.
     let (mut bypass, _) = create("t3", &json!({"name":"T3","lead":{"id":"lead","agent":"claude"}})).unwrap();
     plan(
@@ -214,7 +214,7 @@ fn a_wider_profile_waits_for_the_owner() {
     )
     .unwrap_err()
     .to_string();
-    assert_eq!(error, "A permissions mode is auto or bypass");
+    assert_eq!(error, "A member \"dev\": field \"permissions\" is auto or bypass, not \"root\"");
 }
 
 #[test]
@@ -349,6 +349,36 @@ fn settings_change_planning_members_and_keep_a_widening_for_the_owner() {
 }
 
 #[test]
+fn a_settings_card_names_each_changed_member_field_with_its_value() {
+    let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+    let mut events = Vec::new();
+    plan(
+        &mut team,
+        &json!({"members":[{"id":"dev","role":"Backend","agent":"claude"}],"tasks":[{"id":1,"title":"A","assignee":"dev"}]}),
+        &Actor::Human,
+        &mut events,
+    )
+    .unwrap();
+    let (title, lines) = describe_owner_op(
+        &team,
+        "settings",
+        &json!({"members_update":[{"id":"dev","role":"API","folder":"clone","permissions_profile":"commit"}],
+            "settings":{"report_timeout_seconds":90}}),
+    );
+    assert_eq!(title, "Change the team's settings");
+    for (field, value) in [("role", "API"), ("folder", "clone"), ("permissions_profile", "commit")] {
+        assert!(
+            lines.iter().any(|line| line.contains(field) && line.contains(value)),
+            "{field}={value} is in {lines:?}"
+        );
+    }
+    assert!(
+        !lines.iter().any(|line| line.ends_with(": role, folder, permissions_profile")),
+        "the fields alone are not enough: {lines:?}"
+    );
+}
+
+#[test]
 fn only_the_owner_sets_a_members_context_before_a_task() {
     let (mut team, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
     let mut events = Vec::new();
@@ -369,7 +399,7 @@ fn only_the_owner_sets_a_members_context_before_a_task() {
     let error = set(&mut team, &Actor::Member("lead".into()), "clear").unwrap_err().to_string();
     assert_eq!(error, "Only you set a member's context before a task");
     let error = set(&mut team, &Actor::Human, "sometimes").unwrap_err().to_string();
-    assert_eq!(error, "A context before a task is none, compact or clear");
+    assert_eq!(error, "Member \"dev\": field \"context_before_task\" is none, compact or clear, not \"sometimes\"");
     // Empty inherits the role again; "none" overrides a role's action.
     set(&mut team, &Actor::Human, "").unwrap();
     assert_eq!(team.member("dev").unwrap().context_before_task, "");

@@ -30,8 +30,14 @@ import { rememberRecentSession } from "./ui/sessions/goTo";
 import { updateCommands, updates } from "./store/updates";
 import { openUpdates } from "./store/desk";
 import { SessionUsageStrip } from "./ui/components/SessionUsageStrip";
-import { fleetRefresh, type BridgeMode } from "./bridge";
+import { fleetRefresh, sandboxCheck, type BridgeMode } from "./bridge";
 import { installUiLanguage, tr, uiLanguage } from "./i18n";
+import { WaitingPage } from "./ui/teams/Waiting";
+import { NewTeamPage } from "./ui/teams/NewTeamPage";
+import { CatalogPage } from "./ui/teams/CatalogPage";
+import { TeamDesigner } from "./ui/teams/TeamDesigner";
+import { ModelServersScreen } from "./ui/screens/ModelServers";
+import { TeamConfirmDialog } from "./ui/teams/TeamConfirmDialog";
 
 // The client shell: the rail, the pages and the status bar.
 const WorktreeCleanup = lazy(() => import("./ui/screens/WorktreeCleanup"));
@@ -149,6 +155,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
   ];
   onMount(() => {
     const off = [installShortcutRouter(), ...commands.map(([id, run]) => onCommand(id, run))];
+    void sandboxCheck().then((reason) => { if (reason) toast(tr("Zerus is sandboxed"), reason, "error", true); }).catch(() => undefined);
     onCleanup(() => off.forEach((undo) => undo()));
   });
   return (
@@ -168,12 +175,18 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
           <Match when={page() === "accounts"}><Suspense><AccountsScreen /></Suspense></Match>
           <Match when={page() === "projects"}><ProjectsScreen /></Match>
           <Match when={page() === "settings"}><Suspense><SettingsScreen /></Suspense></Match>
+          <Match when={page() === "waiting"}><WaitingPage /></Match>
+          <Match when={page() === "newteam"}><NewTeamPage /></Match>
+          <Match when={page() === "catalog"}><CatalogPage /></Match>
+          <Match when={page() === "designer"}><TeamDesigner onClose={() => setPage("sessions")} /></Match>
+          <Match when={page() === "modelservers"}><ModelServersScreen /></Match>
         </Switch>
       </main>
       <StatusBar mode={props.mode} />
       <MenuLayer />
       <Toasts />
       <ActionDialogs />
+      <TeamConfirmDialog />
       <Show when={cleanupDialog()}><Suspense><WorktreeCleanup /></Suspense></Show>
       <Show when={worktreeReviewDialog()}><Suspense><WorktreeReviewDialog /></Suspense></Show>
       <Show when={taskAssignmentPopover()}><Suspense><TaskAssignmentPopover /></Suspense></Show>

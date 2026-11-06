@@ -49,6 +49,9 @@ mod exit_flush;
 mod external_open;
 #[cfg(feature = "live")]
 mod files;
+// WhiteWh fork, task #63: the fork's update channel.
+#[cfg(feature = "live")]
+mod fork_updates;
 mod identity;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod instance;
@@ -61,6 +64,13 @@ mod login_item;
 #[cfg(target_os = "macos")]
 mod macos_notification_diagnostics;
 mod metrics;
+mod sandbox;
+
+/// Task 75: why this process is a sandbox, None on a normal desktop.
+#[tauri::command]
+fn sandbox_check() -> Option<String> {
+    sandbox::reason()
+}
 #[cfg(feature = "live")]
 mod mobile;
 #[cfg(feature = "live")]
@@ -115,6 +125,8 @@ mod task_settings;
 #[cfg(feature = "live")]
 mod task_start;
 #[cfg(feature = "live")]
+mod teams;
+#[cfg(feature = "live")]
 mod terminal;
 #[cfg(feature = "live")]
 mod termination_cleanup;
@@ -129,6 +141,8 @@ mod window_geometry;
 #[cfg(feature = "live")]
 mod window_layer;
 mod window_visibility;
+mod wsl_mapping;
+mod model_servers;
 #[cfg(any(windows, test))]
 mod windows_shell;
 #[cfg(feature = "live")]
@@ -619,6 +633,17 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     }
                 }
                 app.manage(speech_settings::SpeechPage::default());
+                // Task #6: the Teams views' reads; a replay runs no hgs.
+                app.manage(teams::Teams::new(replay));
+                // Task 73: Map Windows path… and Open mapped Windows original….
+                app.manage(wsl_mapping::WslDialogs::new(dir.join("wsl-path-mappings.json"), replay));
+                // Task 67: the Model servers tab and Settings > Model servers.
+                app.manage(model_servers::ModelServers::new(replay));
+                // Task 8: a stream's team heads reach the computer's poller.
+                let heads_app = app.handle().clone();
+                app.state::<commands::AppState>().pump().on_team_heads(std::sync::Arc::new(move |computer, heads| {
+                    heads_app.state::<teams::Teams>().heads(computer, heads);
+                }));
                 app.manage(termination_cleanup::TerminationCleanup::default());
                 app.manage(worktree_cleanup::WorktreeCleanup::default());
                 app.manage(recovery::start(app.handle()));
@@ -984,8 +1009,16 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 #[cfg(windows)]
                 {
                     let conf = desk::tray_conf();
-                    platform::windows::tray::install(app.handle(), conf.as_deref())?;
                     let identity = app.state::<identity::Identity>().inner().clone();
+                    // A dev build still works without a notification area (a
+                    // remote session or an Explorer that is not up yet); the
+                    // installed switch keeps its tray as the only way back.
+                    if let Err(error) = platform::windows::tray::install(app.handle(), conf.as_deref()) {
+                        if identity.is_switch() {
+                            return Err(error.into());
+                        }
+                        eprintln!("zerus-client: no notification-area icon: {error}");
+                    }
                     let posts = !desktop_service::mode() && (!identity.is_switch() || app.try_state::<desktop_ownership::NativeReady>().is_some()) && identity.notifications(identity::flag("ZERUS_CLIENT_NOTIFICATIONS"), replay);
                     let switch = identity.is_switch();
                     let attention = posts.then(|| {
@@ -1005,6 +1038,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     }
                 }
                 app.manage(updates::start(app.handle()));
+                // WhiteWh fork, task #63: a fork build checks its own feed.
+                fork_updates::start(app.handle());
                 if menu_bar {
                     lifecycle::start_fleet(|| app.state::<commands::AppState>().start_source());
                 }
@@ -1432,6 +1467,46 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         session_folders::session_folder_open,
         actions::inspect_subagent_activity,
         commands::tasks_follow,
+        teams::teams_follow,
+        teams::teams_older,
+        teams::teams_waiting_older,
+        teams::team_waiting_notify,
+        teams::teams_spans,
+        teams::teams_profile,
+        teams::team_tests,
+        teams::team_action,
+        teams::team_read,
+        teams::team_role_models,
+        teams::iron_rules,
+        wsl_mapping::wsl_mapping_open,
+        wsl_mapping::wsl_mapping_preview,
+        wsl_mapping::wsl_mapping_use,
+        wsl_mapping::wsl_file_open,
+        wsl_mapping::wsl_file_preview,
+        wsl_mapping::wsl_file_open_original,
+        wsl_mapping::wsl_dialog_close,
+        model_servers::model_servers_list,
+        model_servers::model_server_status,
+        model_servers::model_server_up,
+        model_servers::model_server_up_result,
+        model_servers::model_server_sessions,
+        model_servers::model_server_down,
+        model_servers::model_server_logs,
+        model_servers::model_server_save,
+        model_servers::model_server_delete,
+        model_servers::model_server_test,
+        model_servers::model_server_test_logs,
+        model_servers::model_server_session,
+        teams::catalog_editor_schema,
+        teams::catalog_editor_load,
+        teams::catalog_editor_edit,
+        teams::catalog_editor_revert,
+        teams::catalog_editor_save,
+        teams::catalog_editor_reset_rules,
+        teams::catalog_editor_impact,
+        teams::catalog_editor_export,
+        teams::catalog_editor_import,
+        teams::catalog_route,
         task_details::task_details,
         task_details::task_assign,
         task_details::task_board_action,
@@ -1508,9 +1583,12 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         screens::screen_visible,
         screens::session_usage,
         screens::accounts_view,
+        screens::session_switch_account,
+        sandbox_check,
         screens::account_edits::account_edit_open,
         screens::account_edits::account_edit_apply,
         screens::account_edits::account_edit_close,
+        screens::account_edits::account_permission_check,
         screens::account_edits::setup::account_setup_open,
         screens::account_edits::setup::account_setup_apply,
         screens::account_edits::setup::account_setup_close,
@@ -1636,6 +1714,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         updates::updates_copy_command,
         updates::updates_restart,
         updates::updates_fix_login_item,
+        fork_updates::fork_updates_check,
+        fork_updates::fork_updates_confirm,
         #[cfg(feature = "media")]
         voice::voice_open,
         #[cfg(feature = "media")]
@@ -1745,6 +1825,20 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         true => "index.html".to_owned(),
         false => format!("index.html?{}", query.join("&")),
     };
+    // WebView2's default user data folder is LocalAppData, which an agent
+    // process can be denied; the app's own data directory is the one it may
+    // write (Decision 5). Keep it beside the client's other data.
+    #[cfg(windows)]
+    let webview_data = {
+        let path = crate::data_dir(app).join("webview2");
+        if let Err(error) = std::fs::create_dir_all(&path) {
+            return Err(tauri::Error::Io(std::io::Error::new(
+                error.kind(),
+                format!("WebView2 data directory {}: {error}", path.display()),
+            )));
+        }
+        path
+    };
     #[allow(unused_mut)]
     let mut builder = WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App(page.into()))
         .on_navigation(app_navigation_allowed)
@@ -1763,7 +1857,16 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
                 builder.with_webview_configuration(platform::macos::webview_configuration(mtm));
         }
     }
-    let window = builder.build()?;
+    #[cfg(windows)]
+    {
+        builder = builder.data_directory(webview_data);
+    }
+    let window = builder.build().map_err(|error| {
+        tauri::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("WebView2 window creation: {error}"),
+        ))
+    })?;
     #[cfg(feature = "live")]
     if let Some(store) = app.try_state::<settings::Store>() {
         window_geometry::attach(&window, store.0.clone());

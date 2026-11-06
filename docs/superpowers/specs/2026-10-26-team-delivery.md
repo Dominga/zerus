@@ -64,6 +64,15 @@ If the member works again (not idle, or a newer reply), `turn_ended_at` and
 `"report":{"captured":true,...}`; old captured reports keep their text prefix
 and `captured` false.
 
+A Zerus build of the member's own (a claimed `hgs team run` in its folder, or
+`hgs run`) holds the gate while it runs (#511 N1). Task 36 (audit P8): the
+attempt remembers that run (`awaited_run`, `awaited_label`). When it settles
+while the member's turn is over, nothing is captured: the member is woken once
+with a message naming the run, the task and its attempt, and its finished turn
+starts again, so `report_timeout_seconds` counts from the wake. A member that
+still does nothing after the wake gets the usual capture or No report; one
+that waited inside its turn (`--wait`) is not woken.
+
 ## 4. Questions to the lead (A3)
 
 From the member's session:

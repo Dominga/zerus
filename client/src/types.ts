@@ -1,4 +1,5 @@
 import type { Text } from "./text";
+import type { DraftMember } from "./ui/teams/types";
 // The batch the Rust side returns from `next_batch` (zerus-client-core
 // `Batch`, snake_case JSON). Rows arrive as compact view rows projected in
 // Rust; the webview never sees raw watch frames.
@@ -219,6 +220,8 @@ export interface Batch {
   processes_view?: ProcessesView;
   /** Notices and Terminal requests that arrived after their call, at most 16. */
   composer_events?: ComposerEvent[];
+  /** The Teams views that changed (core batch.rs `TeamsOut`), at most one per computer and key. */
+  teams?: TeamsOut[];
 }
 
 /** A row of the Processes tab (processes.rs `RowView`). */
@@ -275,7 +278,7 @@ export const emptyBatch = (): Batch => ({ upserts: [], removes: [], replaces: []
 /** A batch with nothing to apply. A composer view or a draft key set is content: Rust sends each once. */
 export const isEmptyBatch = (b: Batch) =>
   !b.upserts.length && !b.removes.length && !b.replaces.length && !b.computers.length && !b.machines?.length && !b.activity.length
-  && !b.desktop_service && !b.tasks?.length && !b.groups?.length && !b.grouping && !b.processes_view && !b.composer && !b.draft_keys && !b.composer_events?.length;
+  && !b.desktop_service && !b.tasks?.length && !b.groups?.length && !b.grouping && !b.processes_view && !b.composer && !b.draft_keys && !b.composer_events?.length && !b.teams?.length;
 
 /** One Activity event as `inspect` returns it; unknown fields are kept. */
 export interface ActivityEvent {
@@ -359,6 +362,8 @@ export interface Details {
   /** Null when the inspection does not report it. */
   terminal_supported?: boolean | null;
   terminal_attach_supported?: boolean | null;
+  /** Task 75: this computer's refused private stores, with their fix. */
+  private_stores?: { path: string; reason: string; fix: string }[];
 }
 
 /** A read mark whose delivery is still pending (client/core `readmarks.rs`). */
@@ -756,7 +761,9 @@ export interface FormView { id: string; tab: Text; prompt: string; body: string;
   mode: Text; mode_visible: boolean; options: OptionView[]; other: OptionView | null; text: TextView | null }
 export interface QueueNav { previous: boolean; next: boolean; previous_tip: Text; next_tip: Text }
 export interface CardView { heading: Text; progress: Text | null; pending: Text | null; pending_tip: Text; nav: QueueNav | null; tabs_visible: boolean;
-  page: number; forms: FormView[]; status: Text; status_error: boolean; available: boolean; locked: boolean; review: boolean; created_at: number;
+  page: number; forms: FormView[]; status: Text; status_error: boolean; available: boolean; locked: boolean;
+  /** Only Terminal can answer it: the options are a plain list and Open Terminal is the primary action. */
+  read_only: boolean; review: boolean; created_at: number;
   submit: ButtonView; approve: ButtonView; deny: ButtonView; skip: ButtonView; previous: ButtonView; next: ButtonView; retry: boolean; skip_tip: Text; retry_tip: Text }
 /**
  * `revision` grows when the card is built again (a new card, a changed form,
@@ -873,6 +880,14 @@ export interface UpdatesView {
   version: string;
   /** A source or unknown dev-app installation shows status in Settings only. */
   quiet: boolean;
+  /** WhiteWh fork, task #63: the fork's own update channel; absent outside a fork build. */
+  fork?: ForkUpdatesView | null;
+}
+
+/** WhiteWh fork, task #63: the fork channel (core `fork_update::ForkView`). */
+export interface ForkUpdatesView {
+  supported: boolean; automatic: boolean; repository: string; installed_build: number; running_commit: string;
+  status: Text; busy: boolean; offered_build: number; offered_commit: string; ready_build: number; installing: boolean;
 }
 
 export const emptyUpdatesView = (): UpdatesView => ({
@@ -896,3 +911,257 @@ export const emptyUpdatesView = (): UpdatesView => ({
   version: "",
   quiet: false,
 });
+
+// ---------------------------------------------------------------------------
+// Teams (client/core/src/teams/view.rs): the projected views the Team tab
+// shows. The webview never reads an hgs team reply itself.
+
+/** One Teams view of a computer: `list`, `waiting`, `team:<id>`, `feed:<id>`, `inbox:<id>`... */
+export interface TeamsOut {
+  computer: ComputerId;
+  key: string;
+  /** The view's name, `failed` ({code, message}; the view keeps what it showed) or `ended` (no longer followed). */
+  kind: string;
+  payload: unknown;
+}
+
+/** A member's session; `host` is empty on the team's own computer. */
+export interface TeamSessionView { host: string; name: string; run_id: string; conversation_id: string }
+
+export interface TeamListedMember { id: string; role: string; agent: string; state: string; lead: boolean; session: TeamSessionView | null }
+
+export interface TeamSummary {
+  id: string; name: string; status: string; project: string; folder: string; plan_mode: string; lead: string;
+  members: TeamListedMember[]; tasks: number; accepted: number; submitted: number; in_review: number; in_test: number;
+  attention: number; open_proposals: number; waiting_for_lead: boolean; pending_phase: number | null; updated: number; revision: number;
+  /** Task 52: the team whose task this sub-team came from ("" for none); the tree is walked by it. */
+  parent?: string;
+  /** Task #58: the phases that plan in free mode. */
+  free_phases?: number[];
+}
+
+export interface TeamList { teams: TeamSummary[]; truncated: boolean }
+
+export interface TeamMemberView {
+  id: string; role: string; agent: string; model: string; effort: string; account: string; computer: string; folder: string;
+  /** `not_created`, `active`, `paused`, `removed`... */
+  state: string;
+  /** What its session does now (`busy`, `idle`...), and the hand-off phase (`working`, `asking`...). */
+  activity: string; phase: string; error: string; lead: boolean; session: TeamSessionView | null;
+  /** Seen live at the last listing; null: never seen. */
+  live: boolean | null; stuck: boolean; question: boolean;
+  /** Its open task first, then the tasks returned to it. */
+  queue: number[]; minutes_without_progress: number; host_shared: boolean;
+  /** The owner's mandatory additions to the member's rules. */
+  iron_rules?: string[];
+  /** Task 11: the pending question or permission request as hgs sends it (`members[].question`), null without one. */
+  permission?: TeamMemberQuestion | null;
+}
+
+/** A member's pending question (`members[].question`): its id and hash, what it asks and the card's allow and deny ids. */
+export interface TeamMemberQuestion {
+  question_id?: string; question_hash?: string; expected_question_hash?: string; tool?: string; command?: string; reason?: string;
+  asked_at?: number; answered_at?: number; answer?: { question_id?: string; allow?: string; deny?: string } | string;
+  questions?: { id: string; header?: string; question?: string; multi_select?: boolean; allow_other?: boolean; options?: { id: string; label: string; description?: string }[] }[];
+  subagent_confirmation?: boolean;
+}
+
+export interface TeamTaskView {
+  id: number; title: string; status: string; assignee: string; phase: number; deps: { task: number; hard: boolean }[];
+  estimate_minutes: number; attempts: number;
+  /** The newest attempt's state (`delivering`, `delivered`, `unconfirmed`, `reported`...), empty without one. */
+  attempt_state: string; decided_by: string; pinned: boolean; output: string[]; waits: string;
+  /** Task 11: the newest attempt's id, and whether its member got no report in. */
+  attempt_id?: string; no_report?: boolean;
+  /** Task 40: held by the owner, its pipeline and the run's stages and open stage, a sub-team. */
+  held?: boolean; pipeline?: string; pipeline_run?: TeamPipelineRun | null; subteam?: boolean;
+  /** Task 52: the delegated sub-team's id, named by Cancel's and Reassign's question. */
+  subteam_team?: string;
+  /** Task 55: the newest attempt's open questions to the lead; the owner answers them too. */
+  questions?: { id: string; text: string; at: number }[];
+  /** Task #60: the task this follow-up was spawned from; never a dependency. */
+  origin?: number | null;
+}
+
+/** A task's pipeline run (core PipelineRunView). */
+export interface TeamPipelineRun {
+  name: string; accept: string; round: number; max_rounds: number; stages: string[];
+  open: { stage: number; kind: string; member: string; state: string } | null;
+}
+
+export interface TeamProfileLoss {
+  kind: string; task: number; seconds: number; tokens: number | null;
+}
+
+export interface TeamProfileRole {
+  key: string; kind: string; accepted: number; attempts: number; returned: number;
+  tokens_per_accepted: number | null;
+}
+
+export interface TeamProfileView {
+  team: string; elapsed_s: number | null; worked_s: number | null; tasks: number; accepted: number;
+  tokens: number | null; tokens_partial: boolean;
+  losses: TeamProfileLoss[]; roles: TeamProfileRole[];
+}
+
+export interface TeamTestPending {
+  id: string; suite: string; asked_by: string; state: string; task: number; forced: boolean;
+  started: number; seconds: number; reason: string;
+}
+
+export interface TeamTestRun {
+  id: string; suite: string; status: string; asked_by: string; task: number; at: number;
+  duration_ms: number; recorded_ms: number; runner: string; excerpt: string;
+  flags: string[]; reused_from: string; due: boolean; over_budget: boolean;
+}
+
+export interface TeamTestsView {
+  team: string; queue: TeamTestPending[]; runs: TeamTestRun[]; next: number | null;
+}
+
+export interface TeamPhaseView {
+  n: number; title: string; state: string; status: string; done: number; total: number; barrier: boolean; auto: boolean;
+  acceptance: string; paused: boolean; health: string;
+  /** Task #58: the mode the phase plans in, "standard" or "free"; "" from an older hgs. */
+  mode?: string;
+}
+
+export interface TeamFinding { kind: string; text: string; task: number | null; member: string }
+
+export interface TeamView {
+  id: string; name: string; status: string; project: string; folder: string; goal: string; plan_mode: string; lead: string;
+  revision: number; created: number; updated: number; waiting_for_lead: boolean; pending_phase: number | null;
+  /** Task #58: the phase that takes tasks as they come, and whether hgs sends each phase's mode. */
+  free_phase?: number | null; phase_modes_known?: boolean;
+  settings: Record<string, unknown>; members: TeamMemberView[]; tasks: TeamTaskView[]; phases: TeamPhaseView[];
+  proposals: TeamProposalView[];
+  attention: unknown[];
+  /** Task 11: additions to a running phase that wait for the owner (`pending_additions`). */
+  additions?: TeamAddition[];
+  /** Task 40: permission widenings Approve & Run confirms, and the direct sub-teams. */
+  widenings?: { member?: string; role?: string; from?: string; to?: string }[];
+  children?: { team: string; name?: string; status?: string }[];
+  validation: { errors: TeamFinding[]; warnings: TeamFinding[] };
+  health: { critical_path: number; parallelism: number; warnings: string[] };
+  ready: number[]; cycle: number[]; draft: { revision: number; unseen: string[]; owner_edited: string[] } | null; truncated: boolean;
+}
+
+/** An open proposal: `summary` and `lines` are what hgs wrote for an owner-gated operation, else the kind and nothing. */
+export interface TeamProposalView {
+  id: string; kind: string; by: string; at: number; reason: string; hash: string; summary: string; lines: string[];
+  /** The exact change and the proposed member (null when over the core's bound). */
+  change?: unknown; member?: unknown; goal?: string; mode?: string;
+}
+
+export interface TeamAddition { id: string; phase?: number; by?: string; request?: string; tasks?: { id?: number; title?: string }[] }
+
+/** One thing that waits for the owner (`hgs team waiting`); `detail` is the whole item as hgs lists it. */
+export interface TeamWaitingItem {
+  id: string; kind: string; team: string; team_name: string; title: string; action: string; since: number; proposal: unknown;
+  detail?: Record<string, unknown> | null;
+}
+
+export interface TeamWaitingView { items: TeamWaitingItem[]; total: number; more: boolean; next?: Record<string, unknown> | null }
+
+/** The owner's confirmation of a team action, worded by the core. */
+export interface TeamConfirmation { name: string; title: string; text: string; action: string }
+/** Task 52: a question with several answers (Qt's subteamChoice); Cancel is always added last and focused. */
+export interface TeamChoice { name: string; title: string; text: string; choices: { id: string; text: string; danger?: boolean }[] }
+
+/**
+ * A team action (client/core/src/teams/action.rs `TeamAction`), by its kind:
+ * the one definition for the Team tab, Waiting for you, New team, settings and
+ * the catalog (task 47).
+ */
+export type TeamAction =
+  | { kind: "approve"; phase?: number | null; plan_mode?: string | null; confirm_widening?: boolean; alongside?: boolean }
+  | { kind: "accept"; task: number; reason?: string; manual?: boolean }
+  | { kind: "reject"; task: number; reason: string; hold?: boolean; fresh?: boolean }
+  | { kind: "decide_proposal"; proposal: string; accept: boolean; expected_hash: string; reason?: string; answer?: string }
+  | { kind: "use_last_reply"; task: number; attempt: string }
+  | { kind: "answer"; member: string; question_id: string; expected_question_hash: string; answers: unknown[] }
+  | { kind: "add_to_phase"; phase: number; confirm: string; confirmation?: string; decline?: boolean }
+  | { kind: "accept_phase"; phase: number }
+  | { kind: "phase_mode"; phase: number; mode: "free" | "standard"; reason?: string }
+  | { kind: "send_back_phase"; phase: number; comment: string }
+  | { kind: "decide_tool"; offer: string; allow: boolean; reason?: string }
+  | { kind: "release"; task: number }
+  | { kind: "retry"; task: number }
+  | { kind: "finish"; summary: string }
+  | { kind: "reply"; question: string; text: string }
+  | { kind: "reassign"; task: number; member: string; subteam?: string | null }
+  | { kind: "take_over"; task: number }
+  | { kind: "cancel"; task: number; subteam?: string | null }
+  | { kind: "pause" }
+  | { kind: "resume" }
+  | { kind: "stop" }
+  | { kind: "archive" }
+  | { kind: "discard" }
+  | { kind: "hold"; task: number; reason: string }
+  | { kind: "skip_stage"; task: number; reason: string }
+  | { kind: "send_back"; task: number; reason: string }
+  | { kind: "move_task"; task: number; phase: number; revision?: number | null }
+  | { kind: "draft_start"; folder: string; name?: string; lead: DraftMember; project?: string; project_id?: string; template?: string }
+  | { kind: "draft_update"; revision: number; set: Record<string, unknown> }
+  | { kind: "draft_seen"; fields: string[] }
+  | { kind: "draft_create"; approve?: boolean; confirm_widening?: boolean }
+  | { kind: "draft_discard"; stop_lead?: boolean; reason?: string }
+  | { kind: "settings"; settings: Record<string, unknown>; members_update?: unknown[] }
+  | { kind: "catalog_propose"; change: Record<string, unknown> }
+  | { kind: "catalog_decide"; proposal: string; decision: "keep" | "reject" | "undo" }
+  | { kind: "catalog_apply" }
+  | { kind: "catalog_discard" }
+  | { kind: "catalog_set"; version: number; catalog: Record<string, unknown> }
+  | { kind: "catalog_designer"; folder: string; goal: string; agent?: string; model?: string; effort?: string; project?: string };
+
+/** Task #44: one kind of catalog item (core catalog_edit.rs `Kind`). */
+export type CatalogKind = "role" | "template" | "rule" | "pipeline";
+/** The catalog's list of each kind. */
+export type CatalogList = "roles" | "templates" | "routing" | "pipelines";
+/** One field Qt's catalog editor shows (core `FieldSpec`); the webview translates its label and hint. */
+export interface CatalogFieldSpec {
+  name: string;
+  label: string;
+  hint: string;
+  type: "text" | "multiline" | "number" | "bool" | "choice" | "words" | "list";
+  min?: number;
+  max?: number;
+  options?: [string, string][];
+  fields?: CatalogFieldSpec[];
+}
+export type CatalogSchema = Record<CatalogList, CatalogFieldSpec[]>;
+/** The working copy as the editors show it (core `CatalogEditorView`); core checks every edit. */
+export interface CatalogEditorView {
+  version: number;
+  builtin: boolean;
+  roles: Record<string, unknown>[];
+  templates: Record<string, unknown>[];
+  routing: Record<string, unknown>[];
+  pipelines: Record<string, unknown>[];
+  planning_rules: string;
+  unsaved: number;
+  edited: Partial<Record<CatalogList, string[]>>;
+}
+export type CatalogEdit =
+  | { op: "set"; kind: CatalogKind; id: string; field: string; value: unknown }
+  | { op: "add"; kind: CatalogKind }
+  | { op: "duplicate"; kind: CatalogKind; id: string }
+  | { op: "remove"; kind: CatalogKind; id: string }
+  | { op: "move"; kind: CatalogKind; id: string; by: number }
+  | { op: "planning_rules"; text: string };
+/** What deleting an item takes with it (core `RemoveImpact`). */
+export interface CatalogRemoveImpact { name: string; templates: string[]; pipelines: string[]; emptied: string[] }
+
+/**
+ * One call (core `TeamCall`): the computer ("" is this one), the team (empty
+ * for a draft start, a tool offer or the catalog), its name for the
+ * confirmation, whether the owner confirmed it, and the request id of an
+ * earlier attempt sent again.
+ */
+export interface TeamCall { computer?: ComputerId; team?: string; team_name?: string; action: TeamAction; confirmed?: boolean; request_id?: string | null }
+
+export type TeamOutcome =
+  | { outcome: "done"; receipt: Record<string, unknown>; request_id: string }
+  | { outcome: "failed"; detail: string; request_id: string }
+  | { outcome: "uncertain"; detail: string; request_id: string }
+  | { outcome: "confirm"; confirmation: TeamConfirmation };

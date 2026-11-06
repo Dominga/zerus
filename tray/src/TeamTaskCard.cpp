@@ -1,5 +1,6 @@
 #include "Settings.h"
 #include "TeamTaskCard.h"
+#include <QApplication>
 #include "TeamStages.h"
 #include "TeamTests.h"
 #include "TeamWidgets.h"
@@ -230,6 +231,19 @@ void TeamTaskCard::rebuild()
     // A3: open questions to the lead. The attempt stays open until one is
     // answered, and the answer goes out once as `reply`.
     const auto questions = openQuestions(*task);
+    // Task 55: the answer field being typed in keeps its text, cursor and
+    // focus across this rebuild (every poll rebuilds the card).
+    QString focusedQuestion; int focusedCursor = -1;
+    if (auto *edit = qobject_cast<QLineEdit *>(QApplication::focusWidget()); edit && isAncestorOf(edit) && edit->objectName() == QLatin1String("teamAnswerText")) {
+        focusedQuestion = edit->property("question").toString(); focusedCursor = edit->cursorPosition();
+    }
+    QLineEdit *firstAnswer = nullptr;
+    // Answers of questions that are gone (answered elsewhere) are forgotten.
+    {
+        QSet<QString> open; for (const auto &asked : questions) open.insert(asked.id);
+        for (auto it = m_answering.begin(); it != m_answering.end();) it = open.contains(*it) ? std::next(it) : m_answering.erase(it);
+        for (auto it = m_answerErrors.begin(); it != m_answerErrors.end();) it = open.contains(it.key()) ? std::next(it) : m_answerErrors.erase(it);
+    }
     if (!questions.isEmpty()) {
         section(tr("Questions"));
         for (const auto &asked : questions) {
@@ -278,23 +292,71 @@ void TeamTaskCard::rebuild()
                 v->addWidget(box);
                 continue;
             }
+            // Task 55: a decided task's question is closed: hgs refuses an
+            // answer, so the card says so instead of offering a field.
+            if (task->finished()) {
+                auto *closed = label(tr("Task #%1 is decided, so this question is closed; nobody can answer it any more.").arg(task->id), c.text3, 11, false, "teamAnswerClosed");
+                closed->setWordWrap(true);
+                b->addWidget(closed);
+                v->addWidget(box);
+                continue;
+            }
+            const bool sending = m_answering.contains(asked.id);
+            if (const QString error = m_answerErrors.value(asked.id); !error.isEmpty()) {
+                auto *refused = label(tr("Not sent: %1").arg(error), c.danger, 11, false, "teamAnswerError");
+                refused->setWordWrap(true);
+                b->addWidget(refused);
+            }
             auto *answerRow = row(6);
-            auto *edit = new QLineEdit; edit->setObjectName("teamAnswerText"); edit->setProperty("question", asked.id);
+            auto *edit = new QLineEdit(m_answers.value(asked.id)); edit->setObjectName("teamAnswerText"); edit->setProperty("question", asked.id);
             edit->setPlaceholderText(tr("Answer %1…").arg(m_team.roleOf(task->assignee)));
+            edit->setMaxLength(4000);
+            edit->setEnabled(!sending);
+            QObject::connect(edit, &QLineEdit::textEdited, this, [this, id = asked.id](const QString &text) { m_answers.insert(id, text); });
             answerRow->addWidget(edit, 1);
-            auto *send = button(tr("Send"), "teamAnswerSend", true);
+            auto *send = button(sending ? tr("Sending…") : tr("Send"), "teamAnswerSend", true);
             send->setProperty("question", asked.id);
+            send->setEnabled(!sending && (actThen || act));
             send->setToolTip(tr("Send this answer to %1; it reaches the member as a message").arg(m_team.roleOf(task->assignee)));
             QObject::connect(send, &QPushButton::clicked, this, [this, edit, id = asked.id] {
+                if (m_answering.contains(id)) return;
                 const auto answer = edit->text().trimmed();
                 if (answer.isEmpty()) { edit->setFocus(); return; }
-                if (act) act("reply", {{"question", id}, {"text", answer}});
+                m_answers.insert(id, edit->text());
+                m_answerErrors.remove(id);
+                const QJsonObject input{{"question", id}, {"text", answer}};
+                if (!actThen) { if (act) act("reply", input); return; }
+                // Once: the field and Send wait for hgs's answer; a refusal
+                // says why on this question and lets the owner send again.
+                m_answering.insert(id);
+                QPointer<TeamTaskCard> self(this);
+                actThen("reply", input, [self, id](bool ok, const QString &message) {
+                    if (!self) return;
+                    if (ok) self->m_answers.remove(id);
+                    else {
+                        self->m_answering.remove(id);
+                        QString why = message.trimmed();
+                        while (why.startsWith(QLatin1String("hgs: "))) why = why.mid(5).trimmed();
+                        self->m_answerErrors.insert(id, why.isEmpty() ? tr("hgs refused without a reason") : why);
+                    }
+                    QTimer::singleShot(0, self, [self] { if (self) self->rebuild(); });
+                });
+                QTimer::singleShot(0, this, [self] { if (self) self->rebuild(); });
             });
             QObject::connect(edit, &QLineEdit::returnPressed, send, &QPushButton::click);
             answerRow->addWidget(send);
             b->addLayout(answerRow);
+            if (sending) b->addWidget(label(tr("Sending your answer; it reaches %1 once.").arg(m_team.roleOf(task->assignee)), c.text3, 11, false, "teamAnswerSending"));
+            if (!firstAnswer && !sending) firstAnswer = edit;
+            if (focusedQuestion == asked.id && !sending) {
+                QTimer::singleShot(0, edit, [edit, focusedCursor] { edit->setFocus(Qt::OtherFocusReason); edit->setCursorPosition(focusedCursor); });
+            }
             v->addWidget(box);
         }
+    }
+    if (m_focusAnswer && firstAnswer) {
+        m_focusAnswer = false;
+        QTimer::singleShot(0, firstAnswer, [firstAnswer] { firstAnswer->setFocus(Qt::OtherFocusReason); });
     }
     // U17: the stored answers of the attempt as one summary line, opened to all
     // of them; the choice is kept for the team, the task and the attempt.
@@ -400,6 +462,12 @@ void TeamTaskCard::rebuild()
     for (const auto &t : m_team.tasks) for (const auto &d : t.deps) if (d.task == task->id) blocks << t.id;
     linkRow(tr("Depends on"), deps, soft);
     linkRow(tr("Blocks"), blocks, {});
+    // Task #60: the task this follow-up was spawned from, and the follow-ups
+    // spawned from this one; neither waits for the other.
+    QList<int> spawned;
+    for (const auto &t : m_team.tasks) if (t.origin == task->id) spawned << t.id;
+    if (task->origin > 0) linkRow(tr("Spawned from"), {task->origin}, {});
+    linkRow(tr("Follow-ups"), spawned, {});
     // Owner 2026-10-31 (#746): the estimate and, once it works, the time
     // spent against it; over it in the warning color.
     if (task->estimateKnown()) {

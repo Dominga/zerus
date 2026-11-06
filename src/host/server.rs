@@ -101,6 +101,14 @@ pub(crate) fn serve_connection<L: Launcher>(
                     }
                 }
             }
+            // Task #33: answered for this connection's own client, whose
+            // process ID the kernel gave at authentication; never for a PID
+            // a request names.
+            Op::CallerSession => {
+                if !answer(host.caller_session(pid)) {
+                    return;
+                }
+            }
             op => {
                 if !answer(host.request(op)) {
                     return;

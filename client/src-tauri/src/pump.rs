@@ -44,10 +44,16 @@ struct Inner {
     mirror: Mirror,
     grouping: Grouping,
     tap: Option<Tap>,
+    /// Task 8: where a computer's stream team heads go (the Teams pollers).
+    team_heads: Option<TeamHeadsHook>,
     terminations: terminations::Terminations,
     service: Option<zerus_client_core::desktop::service::Snapshot>,
     service_changed: bool,
 }
+
+/// Task 8: receives a computer's stream team heads (None: poll).
+pub type TeamHeadsHook =
+    Arc<dyn Fn(&ComputerId, Option<Arc<zerus_client_core::teams::Heads>>) + Send + Sync>;
 
 /// Shared by the drain thread and the commands.
 #[derive(Clone, Default)]
@@ -177,8 +183,22 @@ impl Pump {
         self.0 .0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Task 8: hands each computer's stream team heads to `hook` (the Teams
+    /// pollers); they never reach the webview.
+    pub fn on_team_heads(&self, hook: TeamHeadsHook) {
+        self.lock().team_heads = Some(hook);
+    }
+
     /// Queues one change and wakes a parked `take`.
     pub fn push(&self, change: Change) {
+        if let Change::TeamHeads { computer, heads } = change {
+            // Called without the pump's lock: the hook takes the pollers'.
+            let hook = self.lock().team_heads.clone();
+            if let Some(hook) = hook {
+                hook(&computer, heads);
+            }
+            return;
+        }
         let mut inner = self.lock();
         if let Some(tap) = &inner.tap {
             tap(&change);
@@ -881,7 +901,9 @@ impl Mirror {
             Change::Organization { .. }
             | Change::Activity { .. }
             | Change::Processes { .. }
-            | Change::Tasks { .. } => {}
+            | Change::Tasks { .. }
+            | Change::Teams { .. }
+            | Change::TeamHeads { .. } => {}
         }
     }
 

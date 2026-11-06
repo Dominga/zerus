@@ -229,6 +229,18 @@ impl TaskDoc {
         Ok(Some(self.facts_of(&attempt)?.0))
     }
 
+    /// Every recorded attempt's origin and its own phase, by attempt ID, as
+    /// the execution projects each one: only an input's own submitted
+    /// receipt makes it Submitted or later, and a rebound record is Unknown.
+    pub fn attempt_phases(&self) -> Result<std::collections::BTreeMap<String, (Origin, Phase)>> {
+        let (attempts, events) = self.execution_records()?;
+        let (phases, _) = execution::phases(&attempts, &events);
+        Ok(phases
+            .into_iter()
+            .map(|(attempt, (phase, ..))| (attempt.id.clone(), (attempt.origin, phase)))
+            .collect())
+    }
+
     /// The facts about `attempt`: those bound to this exact record, and those
     /// about another record written under its ID (`AttemptEvent::of`).
     fn facts_of(&self, attempt: &Attempt) -> Result<(Vec<EventKind>, Vec<EventKind>)> {
@@ -1699,6 +1711,42 @@ mod tests {
             view.session,
             view.execution.unwrap().current.unwrap().executor
         );
+    }
+
+    #[test]
+    fn each_attempt_keeps_its_own_phase_for_the_history() {
+        // A reopen's note shows its own attempt's phase (A4): Unknown while
+        // reserved, Submitted only by its own receipt, NotStarted when its
+        // input was never admitted, whatever the task's current attempt is.
+        let phase = |task: &TaskDoc, id: &str| task.attempt_phases().unwrap().get(id).copied();
+        let reviewed = || {
+            let mut task = task();
+            assert!(task.attempt_phases().unwrap().is_empty());
+            send(&mut task, ONE, "api");
+            assert_eq!(phase(&task, ONE), Some((Origin::Send, Phase::Unknown)));
+            settle(&mut task, ONE);
+            task.record_report("Done", &agent("api"), 21).unwrap();
+            let reopen = native("api");
+            task.reserve_attempt(TWO, Origin::Reopen, &run("api"), reopen, &Actor::Person, 22)
+                .unwrap();
+            task
+        };
+        let mut task = reviewed();
+        assert_eq!(phase(&task, ONE), Some((Origin::Send, Phase::Ready)));
+        assert_eq!(phase(&task, TWO), Some((Origin::Reopen, Phase::Unknown)));
+        settle(&mut task, TWO);
+        assert_eq!(phase(&task, TWO), Some((Origin::Reopen, Phase::Submitted)));
+        assert_eq!(phase(&task, THREE), None);
+        let mut refused = reviewed();
+        refused
+            .settle_attempt(TWO, Settlement::NotAdmitted, &Actor::Person, 23)
+            .unwrap();
+        assert_eq!(
+            phase(&refused, TWO),
+            Some((Origin::Reopen, Phase::NotStarted))
+        );
+        // The current execution is still the delivered send, in review.
+        assert_eq!(current(&refused).id, ONE);
     }
 
     #[test]

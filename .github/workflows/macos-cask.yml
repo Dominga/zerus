@@ -12,7 +12,7 @@ on:
         type: string
         required: true
       reuse_unsigned:
-        description: Reuse this run's parallel, credential-free Dev bundle after its CI gate
+        description: Reuse this run's parallel, credential-free bundle after its qualification gate
         type: boolean
         default: false
       verify_installation:
@@ -66,7 +66,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Bind the parallel candidate to this exact Dev run
+      - name: Bind the parallel candidate to this exact run
         if: inputs.reuse_unsigned
         env:
           CHANNEL: ${{ inputs.channel }}
@@ -76,9 +76,14 @@ jobs:
         run: |
           python3 - <<'PY'
           import os, pathlib
-          assert os.environ['CHANNEL'] == 'dev' and os.environ['EVENT_NAME'] == 'push'
-          expected = pathlib.Path('DEV_VERSION').read_text().strip() + '-dev.' + os.environ['RUN_NUMBER']
-          assert os.environ['RELEASE'] == expected, 'Unsigned candidate version differs from this Dev run.'
+          channel = os.environ['CHANNEL']
+          if channel == 'dev':
+              assert os.environ['EVENT_NAME'] == 'push', 'Dev reuse requires its trusted main push.'
+              expected = pathlib.Path('DEV_VERSION').read_text().strip() + '-dev.' + os.environ['RUN_NUMBER']
+          else:
+              assert channel == 'stable' and os.environ['EVENT_NAME'] == 'workflow_dispatch', 'Stable reuse requires its manual candidate run.'
+              expected = pathlib.Path('VERSION').read_text().strip()
+          assert os.environ['RELEASE'] == expected, 'Unsigned candidate version differs from this exact run.'
           PY
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:

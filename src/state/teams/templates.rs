@@ -2981,7 +2981,9 @@ kind = "path"
     }
 
     /// Against the real registry with reg.exe: every launcher engine this computer
-    /// lists resolves to a folder that exists. Nothing to check where none is installed.
+    /// lists gives its directory as plain data (no type token), and the ones still
+    /// installed give a folder that exists (a version may stay registered after its
+    /// folder is gone). Nothing to check where none is registered.
     #[cfg(windows)]
     #[test]
     fn the_registry_of_this_computer_gives_its_launcher_engines() {
@@ -2989,12 +2991,16 @@ kind = "path"
         let output = Command::new(Path::new(&system).join("System32").join("reg.exe")).args(["query", "HKLM\\SOFTWARE\\EpicGames\\Unreal Engine"]).output().unwrap();
         let text = String::from_utf8_lossy(&output.stdout).into_owned();
         let versions: Vec<&str> = text.lines().filter_map(|line| line.trim().rsplit('\\').next()).filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.')).collect();
+        let (mut found, mut present) = (0, 0);
         for version in versions {
             let key = format!("SOFTWARE\\EpicGames\\Unreal Engine\\{version}");
             if let Some(dir) = SystemRegistry.value("HKLM", &key, "InstalledDirectory") {
-                assert!(!dir.starts_with("REG_") && Path::new(&dir).is_dir(), "{version}: {dir}");
+                assert!(!dir.starts_with("REG_") && !dir.starts_with(char::is_whitespace), "{version}: {dir}");
+                found += 1;
+                present += usize::from(Path::new(&dir).is_dir());
             }
         }
+        assert!(found == 0 || present > 0, "no registered engine folder exists ({found} registered)");
     }
 
     struct FakeRegistry(std::collections::BTreeMap<(String,String,String),String>);

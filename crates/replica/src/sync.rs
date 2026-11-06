@@ -222,7 +222,12 @@ fn includes(theirs: &Version, ours: &Version) -> bool {
 }
 
 impl ProjectStore {
-    /// The project IDs stored below `root`.
+    /// The project IDs stored below `root`. A project is named by its
+    /// folder's `project-id`, read without waiting or following a link and
+    /// within its bound (zerus-iih7g), and only when that ID is valid and is
+    /// the one the folder is named after. Any other folder's identity is
+    /// unknown: it is not listed (never taken for another project) and
+    /// nothing in it is changed.
     pub fn stored(root: &Path) -> Result<Vec<String>> {
         let entries = match fs::read_dir(root) {
             Ok(entries) => entries,
@@ -231,7 +236,18 @@ impl ProjectStore {
         };
         let mut out = Vec::new();
         for entry in entries {
-            if let Ok(id) = fs::read_to_string(entry?.path().join("project-id")) {
+            let folder = entry?.path();
+            let read = crate::store::read_identity(
+                &folder.join("project-id"),
+                crate::store::PROJECT_ID_BYTES,
+            );
+            let Ok(Some(bytes)) = read else { continue };
+            let Ok(id) = String::from_utf8(bytes) else {
+                continue;
+            };
+            let named = folder.file_name().and_then(|name| name.to_str())
+                == Some(format!("{:x}", Sha256::digest(id.as_bytes())).as_str());
+            if named && !id.is_empty() && !id.chars().any(char::is_control) {
                 out.push(id);
             }
         }
@@ -1215,6 +1231,52 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// zerus-iih7g: a project is listed only by a `project-id` that is a
+    /// regular file within its bound, readable without waiting, holding a
+    /// valid ID its folder is named after. Any other folder stays unknown:
+    /// it is not listed and nothing in it changes.
+    #[cfg(unix)]
+    #[test]
+    fn only_a_folder_s_own_project_id_lists_it() {
+        let root = tempfile::tempdir().unwrap();
+        for id in ["kept", "fifo", "linked", "other", "large"] {
+            drop(ProjectStore::open(root.path(), id).unwrap());
+        }
+        let folder = |id: &str| {
+            root.path()
+                .join(format!("{:x}", Sha256::digest(id.as_bytes())))
+        };
+        let place = |id: &str| folder(id).join("project-id");
+        fs::remove_file(place("fifo")).unwrap();
+        let name = std::ffi::CString::new(place("fifo").as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        fs::remove_file(place("linked")).unwrap();
+        std::os::unix::fs::symlink(place("kept"), place("linked")).unwrap();
+        fs::write(place("other"), b"kept").unwrap();
+        let bound = crate::store::PROJECT_ID_BYTES as usize;
+        fs::write(place("large"), "x".repeat(bound + 1)).unwrap();
+        // Folders named after what they hold, which is still not a project:
+        // past the bound, empty, or with a control character.
+        for id in ["y".repeat(bound + 1), String::new(), "a\nb".to_owned()] {
+            fs::create_dir(folder(&id)).unwrap();
+            fs::write(place(&id), &id).unwrap();
+        }
+        let listed = {
+            let root = root.path().to_owned();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(ProjectStore::stored(&root).unwrap());
+            });
+            rx.recv_timeout(Duration::from_secs(20))
+                .expect("waited on an irregular project-id")
+        };
+        assert_eq!(listed, ["kept"]);
+        // Nothing was rewritten.
+        assert_eq!(fs::read(place("other")).unwrap(), b"kept");
+        assert!(fs::symlink_metadata(place("linked")).unwrap().is_symlink());
+        assert!(!fs::symlink_metadata(place("fifo")).unwrap().is_file());
     }
 
     fn damaged_beside_a_pre_attempt_peer() -> (tempfile::TempDir, ProjectStore, String, Vec<u8>) {

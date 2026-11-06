@@ -3571,7 +3571,12 @@ away from it. After restoring a replica root from a backup or copying it to
 another computer, delete its `store-id` file so a new one is created: other
 computers then see a changed store, and the cutover proof (which binds each
 member's verified computer and store) stays closed for it until a fresh,
-complete inventory with it.
+complete inventory with it. Zerus creates `store-id` only where nothing is
+(or an empty file an interrupted first creation left); one it cannot read
+without waiting, that is not a regular file, or that holds anything but one
+canonical identity is refused and kept, never replaced, until a person
+removes it. A project folder is listed only by its own `project-id`: a
+regular file holding the valid ID the folder is named after.
 
 The damaged entries of `task list` (and its pages) say what is known here,
 read only: `kept: true` with `kept_reason` (`marked` for a copy cut over

@@ -641,6 +641,33 @@ pub(crate) fn read_regular(path: &Path) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// The most a `store-id` may hold: its writers write a canonical UUID and a
+/// newline (37 bytes), and a read trims surrounding whitespace.
+const STORE_ID_BYTES: u64 = 1024;
+/// The most a `project-id` may hold: the project ID itself, which `opening`
+/// refuses past 128 bytes, written exactly.
+pub(crate) const PROJECT_ID_BYTES: u64 = 128;
+
+/// A small identity file read whole without waiting (`open_regular`), at
+/// most `limit` bytes (zerus-iih7g): `None` only when nothing is at its path.
+/// Anything else that is not a regular file within the limit (a FIFO, a
+/// device, a link, even a dangling one, or a larger file) is an error, so an
+/// identity that cannot be read is never taken for a missing one.
+pub(crate) fn read_identity(path: &Path, limit: u64) -> std::io::Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    let file = match open_regular(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(std::io::Error::other("larger than an identity"));
+    }
+    Ok(Some(bytes))
+}
+
 /// The intact blocks with their end offsets, and whether the whole input was
 /// intact. A short, empty or mismatched block ends the list.
 pub(crate) fn blocks(bytes: &[u8]) -> (Vec<(&[u8], usize)>, bool) {
@@ -686,20 +713,40 @@ impl ProjectStore {
     fn store_id_with(root: &Path, deadline: Option<Instant>) -> Result<Option<String>> {
         private_dir(root)?;
         let path = root.join("store-id");
+        // The identity, or none when there is none yet: nothing at its path,
+        // or an empty file, which the first writer (create, then one write)
+        // left when it stopped between the two, before any identity was
+        // written. Anything else that is not a canonical UUID within the
+        // bound, readable without waiting, is an identity that cannot be
+        // known (zerus-iih7g): refused and kept, never replaced by another.
         let read = |path: &Path| -> Result<Option<String>> {
-            match fs::read_to_string(path) {
-                Ok(text) => Ok(Some(text.trim().to_owned()).filter(|id| ids::is_uuid(id))),
-                Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-                Err(error) => Err(error.into()),
+            let unknown = |why: &str| {
+                Error::failed(format!(
+                    "this computer's replica identity ({}) {why}; it is kept, and a new one is \
+                     made only after a person removes it",
+                    path.display()
+                ))
+            };
+            let bytes = match read_identity(path, STORE_ID_BYTES) {
+                Ok(None) => return Ok(None),
+                Ok(Some(bytes)) if bytes.is_empty() => return Ok(None),
+                Ok(Some(bytes)) => bytes,
+                Err(error) => return Err(unknown(&format!("cannot be read: {error}"))),
+            };
+            let text = String::from_utf8(bytes).map_err(|_| unknown("is not text"))?;
+            let id = text.trim();
+            if !ids::is_uuid(id) {
+                return Err(unknown("is not a canonical identity"));
             }
+            Ok(Some(id.to_owned()))
         };
         if let Some(id) = read(&path)? {
             return Ok(Some(id));
         }
-        // Creating it, or replacing a malformed one, is one step across
-        // processes: under this lock the file is read again, and only then
-        // written whole (an atomic replace), so a creator never replaces
-        // another's identity and nothing reads a partial one.
+        // Creating it is one step across processes: under this lock the file
+        // is read again, and only then written whole (an atomic replace), so
+        // a creator never replaces another's identity and nothing reads a
+        // partial one.
         let lock = private_options()
             .create(true)
             .truncate(false)
@@ -2500,8 +2547,10 @@ mod tests {
     }
 
     /// review-n on #1432: two first hellos at once agree on one store
-    /// identity; a creator under the lock is never replaced by another, and
-    /// a malformed one is replaced once.
+    /// identity, and a creator under the lock is never replaced by another.
+    /// zerus-iih7g: an identity that cannot be known is refused and kept,
+    /// never replaced; only an empty file (the first writer's create before
+    /// its one write) is created as if missing.
     #[test]
     fn concurrent_first_hellos_agree_on_one_store_identity() {
         let dir = tempfile::tempdir().unwrap();
@@ -2533,11 +2582,68 @@ mod tests {
         assert_eq!(one, two);
         assert_eq!(ProjectStore::store_id(&root).unwrap(), one);
         assert!(ids::is_uuid(&one));
-        // A malformed identity is replaced once, and then kept.
-        fs::write(root.join("store-id"), b"not an identity").unwrap();
-        let replaced = ProjectStore::store_id(&root).unwrap();
-        assert!(ids::is_uuid(&replaced) && replaced != one);
-        assert_eq!(ProjectStore::store_id(&root).unwrap(), replaced);
+        // An empty identity file is created once, and then kept.
+        let path = root.join("store-id");
+        fs::write(&path, b"").unwrap();
+        let created = ProjectStore::store_id(&root).unwrap();
+        assert!(ids::is_uuid(&created) && created != one);
+        assert_eq!(ProjectStore::store_id(&root).unwrap(), created);
+        // Any other identity that is not canonical is refused, untouched,
+        // by the untimed and the timed read alike.
+        let soon = Instant::now() + Duration::from_secs(5);
+        let refused = |bytes: &[u8], what: &str| {
+            fs::write(&path, bytes).unwrap();
+            let error = ProjectStore::store_id(&root).unwrap_err().to_string();
+            assert!(error.contains("is kept"), "{what}: {error}");
+            assert!(ProjectStore::store_id_until(&root, soon).is_err(), "{what}");
+            assert_eq!(fs::read(&path).unwrap(), bytes, "{what}");
+        };
+        refused(b"not an identity", "malformed");
+        refused(&created.as_bytes()[..20], "cut short");
+        refused(&[0xff, 0xfe], "not text");
+        refused(
+            &format!("{created}{}", " ".repeat(2000)).into_bytes(),
+            "past the bound",
+        );
+        fs::write(&path, format!("  {created}\r\n")).unwrap();
+        assert_eq!(ProjectStore::store_id(&root).unwrap(), created);
+    }
+
+    /// zerus-iih7g: a FIFO or a link, even a dangling one, at the identity's
+    /// place is refused without waiting and is never replaced.
+    #[cfg(unix)]
+    #[test]
+    fn an_irregular_store_identity_is_refused_without_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("replica");
+        let path = root.join("store-id");
+        let id = ProjectStore::store_id(&root).unwrap();
+        let elsewhere = dir.path().join("elsewhere");
+        fs::write(&elsewhere, format!("{id}\n")).unwrap();
+        let check = |what: &str| {
+            let root = root.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(ProjectStore::store_id(&root).map_err(|e| e.to_string()));
+            });
+            let read = rx
+                .recv_timeout(Duration::from_secs(20))
+                .expect("waited on an irregular identity");
+            assert!(read.unwrap_err().contains("is kept"), "{what}");
+            assert!(
+                !fs::symlink_metadata(&path).unwrap().is_file(),
+                "{what} was replaced"
+            );
+        };
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &path).unwrap();
+        check("a link to a valid identity");
+        fs::remove_file(&elsewhere).unwrap();
+        check("a dangling link");
+        fs::remove_file(&path).unwrap();
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        check("a FIFO");
     }
 
     /// The cutover status counts marks within a strict budget, and past it

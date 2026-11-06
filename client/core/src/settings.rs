@@ -279,6 +279,11 @@ pub const KEYS: &[Key] = &[
             max: 4096,
         },
     ),
+    // WhiteWh fork: optional extensions (tray/src/Extensions.h). A fork build
+    // turns them on by default; the client is the fork's. Both names are Qt's,
+    // so the switch seeds the owner's choice.
+    key("extensions/socraticode", Kind::Flag(true)),
+    key("socraticode/nativeQdrant", Kind::Flag(false)),
     // The Team tab's dividers (task 9): the side column's width beside the
     // canvas, and the members' share of it above the coordinator, in percent.
     client(

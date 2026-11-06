@@ -1167,3 +1167,16 @@ export const projectCloneStatus = (id: string) => desktop<import("./ui/screens/P
 export const projectCloneClose = (id: string) => desktop<void>("project_clone_close", {id});
 export const projectCloneStep = (id: string, step: "begin" | "check" | "retire", source: {url: string; parent: string; name: string}) => desktop<import("./ui/screens/ProjectCloneDialog").CloneView>("project_clone_step", {id, step, source});
 export const projectCloneUse = (id: string, project: string | null, name: string) => desktop<{outcome: EditOutcome; project: string; folder: string}>("project_clone_use", {id, project, name});
+
+// WhiteWh fork: the Claude desktop app's sessions and the SocratiCode panel
+// (src-tauri/src/claude_app.rs, src-tauri/src/socraticode.rs). The replies are
+// the core's typed projections; the webview parses no hgs JSON.
+
+/** `hgs [@host] claude-app ls`, with each session's folder match for `folder`. */
+export const claudeAppSessions = (host: string, folder: string) => desktop<import("./store/claudeApp").ClaudeAppView>("claude_app_sessions", { host, folder });
+/** `hgs [@host] claude-app resume ID -n NAME --launch-id ID -d [--force]`; resolves with the launch id. */
+export const claudeAppResume = (host: string, session: string, name: string, force: boolean) => desktop<string>("claude_app_resume", { host, session, name, force });
+/** `hgs [@host] socraticode status PATH --qdrant native|docker`. */
+export const socraticodeStatus = (host: string, path: string, native: boolean) => desktop<import("./store/socraticode").SocratiCodePanel>("socraticode_status", { host, path, native });
+/** One of `install`, `install-qdrant`, `start`, `stop` or `connect`. */
+export const socraticodeAct = (action: import("./store/socraticode").SocratiCodeVerb, host: string, path: string, native: boolean) => desktop<import("./store/socraticode").Acted>("socraticode_act", { host, path, action, native });

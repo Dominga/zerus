@@ -18,6 +18,7 @@ pub mod attention_store;
 pub mod batch;
 pub mod cache;
 pub mod child_environment;
+pub mod claude_app;
 #[cfg(windows)]
 mod conpty;
 pub mod content_search;
@@ -70,6 +71,7 @@ pub mod session_file_reference;
 pub mod session_usage;
 pub mod settings;
 pub mod shell;
+pub mod socraticode;
 pub mod source;
 pub mod speech_settings;
 pub mod state;

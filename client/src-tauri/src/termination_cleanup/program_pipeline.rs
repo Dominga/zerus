@@ -154,6 +154,17 @@ fn publish(
     id: String,
     stopped: Result<programs::Stopped, String>,
 ) {
+    let stopped = match stopped {
+        Ok(stopped)
+            if stopped
+                .report()
+                .is_ok_and(|report| report.state == StopState::Complete) =>
+        {
+            finish_cleanup(inner, app, id, stopped);
+            return;
+        }
+        other => other,
+    };
     let mut m = lock(&inner.model);
     let Some(job) = m.jobs.iter_mut().find(|j| j.id == id) else {
         return;
@@ -327,4 +338,75 @@ pub(super) fn force_cancel(
     job.programs = Some(ProgramJob::Stopped(Box::new((*offer).cancel())));
     changed(app, &mut m);
     Ok(m.view())
+}
+
+fn finish_cleanup(inner: Arc<Inner>, app: AppHandle, id: String, stopped: programs::Stopped) {
+    {
+        let mut model = lock(&inner.model);
+        let Some(job) = model.jobs.iter_mut().find(|job| job.id == id) else {
+            return;
+        };
+        job.busy = true;
+        job.phase = "removing";
+        changed(&app, &mut model);
+    }
+    // No model lock across native preparation, child I/O, deletion or join.
+    // Taking Stopped consumes the only live Remove continuation. Every result,
+    // including a lost reply, ends this pipeline; there is no automatic retry.
+    let result = stopped.cleanup().and_then(|mut removal| {
+        while removal.current() {
+            if removal.try_retire()? {
+                let report = removal.report().cloned().map_err(str::to_owned);
+                // The read-only holder closes only AFTER the mutating helper,
+                // descendants, all readers and its loan physically retire.
+                removal.close()?;
+                return report;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = removal.close();
+        Err(crate::desktop_service::termination_outcome::UNCONFIRMED.into())
+    });
+    let mut model = lock(&inner.model);
+    let Some(job) = model.jobs.iter_mut().find(|job| job.id == id) else {
+        return;
+    };
+    job.busy = false;
+    job.phase = "checking";
+    job.programs = None;
+    use zerus_client_core::worktree_programs::cleanup::State;
+    let removed = result
+        .as_ref()
+        .is_ok_and(|report| report.state == State::Removed);
+    for entry in &mut job.cleanup.entries {
+        entry.status = Some(match &result {
+            Ok(report) if report.state == State::Removed => Status::Removed,
+            Ok(report) if report.state == State::Kept => Status::Kept,
+            _ => Status::Unconfirmed,
+        });
+        entry.detail = match &result {
+            Ok(report) if report.state == State::Removed => String::new(),
+            Ok(report) if report.state == State::Kept => zerus_client_core::source!(
+                "The working folder changed or is still in use. Review it before removing it."
+            )
+            .into(),
+            _ => zerus_client_core::source!(
+                "Removal could not be confirmed. Check the original result before continuing."
+            )
+            .into(),
+        };
+    }
+    if removed {
+        let labels: Vec<_> = job
+            .cleanup
+            .entries
+            .iter()
+            .map(|entry| leaf(entry.row["path"].as_str().unwrap_or("")))
+            .collect();
+        model.jobs.retain(|job| job.id != id);
+        for label in labels {
+            let _ = app.emit("termination-folder-removed", label);
+        }
+    }
+    changed(&app, &mut model);
 }

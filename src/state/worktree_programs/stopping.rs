@@ -28,7 +28,7 @@ fn live(until: Instant) -> Result<()> {
 }
 /// Bounded setup read, not a blocking read_to_end dependent on an untrusted
 /// pipe's EOF. Input must be one closed envelope followed by physical EOF.
-fn read(until: Instant) -> Result<Vec<u8>> {
+pub(super) fn read(until: Instant) -> Result<Vec<u8>> {
     let fd = io::stdin().as_raw_fd();
     let mut bytes = Vec::new();
     loop {
@@ -157,6 +157,7 @@ fn scope(config: &crate::config::Config, intent: &Intent, loan: &Borrowed) -> Re
             &[
                 &config.dir,
                 &config.state,
+                &PathBuf::from(&manifest.capture.common_dir),
                 &std::env::current_dir().map_err(fail)?,
             ],
             loan.deadline(),
@@ -173,8 +174,10 @@ fn execute(config: &crate::config::Config, intent: &Intent, envelope: &Value) ->
         return Err(INVALID.into());
     }
     let loan = Borrowed::acquire(intent, Instant::now() + Duration::from_secs(15)).map_err(fail)?;
-    scope(config, intent, &loan)?;
-    let completion = completed::observe(&config.state, &intent.input, loan.deadline())?;
+    scope(config, intent, &loan)
+        .map_err(|error| format!("Original program-stop scope unavailable: {error}"))?;
+    let completion = completed::observe(&config.state, &intent.input, loan.deadline())
+        .map_err(|error| format!("Original Terminate completion unavailable: {error}"))?;
     let rows = loan.programs(intent).map_err(fail)?;
     originals(&intent.input, &rows)?;
     // All slow preparation precedes this original two-second canonical proof.
@@ -382,6 +385,40 @@ mod tests {
         io::{BufRead, Write},
         process::{Child, Command, Stdio},
     };
+    // ShutdownGuard's process-wide signal bit is intentionally sticky after
+    // a stop. The production helper installs it in a fresh process. Match that
+    // lifecycle here; never reset a live suite's cancellation state or lengthen
+    // the native phase just because another unit test sent a synthetic signal.
+    fn isolated_signal_case(leaf: &str) -> bool {
+        const KEY: &str = "ZERUS_TEST_PROGRAM_STOP_BODY";
+        let case = format!("state::worktree_programs::stopping::tests::{leaf}");
+        if std::env::var(KEY).ok().as_deref() == Some(&case) {
+            assert_eq!(crate::platform::shutdown_signal(), 0);
+            return false;
+        }
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        child
+            .args([&case, "--exact", "--test-threads=1"])
+            .env(KEY, &case);
+        let (status, output, errors) = crate::platform::run_bounded(
+            &mut child,
+            [64 << 10, 64 << 10],
+            Instant::now() + Duration::from_secs(10),
+            &|| false,
+        )
+        .expect("isolated original signal fixture");
+        assert!(
+            status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output),
+            String::from_utf8_lossy(&errors)
+        );
+        assert!(
+            String::from_utf8_lossy(&output).contains("test result: ok. 1 passed"),
+            "the exact native fixture must run once"
+        );
+        true
+    }
     struct Process {
         child: Child,
         output: io::BufReader<std::process::ChildStdout>,
@@ -501,6 +538,11 @@ for line in sys.stdin:
     }
     #[test]
     fn normal_stop_never_escalates_and_force_is_a_new_original_with_the_same_process_pin() {
+        if isolated_signal_case(
+            "normal_stop_never_escalates_and_force_is_a_new_original_with_the_same_process_pin",
+        ) {
+            return;
+        }
         // Real signal worker mechanism, synthetic checks. This does NOT claim
         // a canonical native confirmation or end-to-end helper authentication.
         let mut process = Process::new();
@@ -548,6 +590,11 @@ for line in sys.stdin:
     }
     #[test]
     fn outside_replaced_cancelled_or_changed_originals_never_receive_a_signal() {
+        if isolated_signal_case(
+            "outside_replaced_cancelled_or_changed_originals_never_receive_a_signal",
+        ) {
+            return;
+        }
         for case in 0..4 {
             let mut process = Process::new();
             let (scope, mut input) = process.data();
@@ -594,6 +641,11 @@ for line in sys.stdin:
     }
     #[test]
     fn a_lost_result_after_the_first_signal_is_unknown_and_never_a_no_effect_refusal() {
+        if isolated_signal_case(
+            "a_lost_result_after_the_first_signal_is_unknown_and_never_a_no_effect_refusal",
+        ) {
+            return;
+        }
         let first = Process::new();
         let second = Process::new();
         let (process, outside) = if first.child.id() < second.child.id() {
@@ -641,6 +693,10 @@ for line in sys.stdin:
 
     #[test]
     fn the_final_proof_check_and_complete_original_list_are_not_optional() {
+        if isolated_signal_case("the_final_proof_check_and_complete_original_list_are_not_optional")
+        {
+            return;
+        }
         let mut process = Process::new();
         let (scope, input) = process.data();
         let mut attempted = false;

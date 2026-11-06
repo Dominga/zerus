@@ -141,6 +141,85 @@ fn every_binding_the_native_peer_and_the_original_root_are_independent() {
 }
 
 #[test]
+fn final_cleanup_loans_require_the_exact_retired_stop_phase_and_a_new_binding() {
+    let (_dir, mut holder, input, request) = holder();
+    let cleanup = zerus_client_core::worktree_programs::cleanup::Input {
+        request_id: uuid(),
+        stop: Box::new(input.clone()),
+    };
+    let mut original = Fixture::start("original");
+    let mut final_child = Fixture::start("original");
+    assert!(
+        holder
+            .arm_cleanup(&cleanup, final_child.original(), 1000, until())
+            .is_err(),
+        "a new holder never adopts a stop phase from a stored input"
+    );
+    holder
+        .arm(&input, original.original(), 1000, until())
+        .unwrap();
+    assert!(
+        holder
+            .arm_cleanup(&cleanup, final_child.original(), 1000, until())
+            .is_err(),
+        "neither an active helper nor its unretired loan is omitted"
+    );
+    original.expect_loan(&input.manifest, &Request::decode(&request).unwrap());
+    holder.lend(&original.socket, &request).unwrap();
+    assert!(holder.joined(&request).is_err());
+    original.release_loan();
+    holder.joined(&request).unwrap();
+    let binding = Request::for_cleanup(&holder.pipeline, &cleanup);
+    holder
+        .arm_cleanup(&cleanup, final_child.original(), 1000, until())
+        .unwrap();
+    assert!(
+        holder.lend(&final_child.socket, &request).is_err(),
+        "retired stop binding cannot borrow the removal phase"
+    );
+    final_child.expect_loan(&input.manifest, &binding);
+    holder
+        .lend(&final_child.socket, &binding.bytes().unwrap())
+        .unwrap();
+    assert!(holder
+        .lend(&final_child.socket, &binding.bytes().unwrap())
+        .is_err());
+    assert!(holder.joined(&binding.bytes().unwrap()).is_err());
+    final_child.release_loan();
+    holder.joined(&binding.bytes().unwrap()).unwrap();
+    assert!(
+        holder
+            .arm_cleanup(
+                &cleanup,
+                Fixture::start("original").original(),
+                1000,
+                until()
+            )
+            .is_err(),
+        "a retired removal phase can never borrow again"
+    );
+    let mut another = cleanup.clone();
+    another.request_id = uuid();
+    assert!(
+        holder
+            .arm_cleanup(
+                &another,
+                Fixture::start("original").original(),
+                1000,
+                until()
+            )
+            .is_err(),
+        "a NEW UUID does not permit another removal loan"
+    );
+    assert!(
+        holder.observe(1001, until()).is_err(),
+        "status must not reopen a terminal removal phase"
+    );
+    // These are native custody controls only. No Complete stop receipt,
+    // Remove continuation, cleanup proof or deletion is created by this test.
+}
+
+#[test]
 fn cancellation_expiry_and_failed_transfer_keep_the_old_mutation_charged() {
     for expired in [false, true] {
         let (_dir, mut holder, input, request) = holder();

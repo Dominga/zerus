@@ -70,7 +70,14 @@ pub(super) fn git_holding(
     deadline: Instant,
     lock: Option<&fs::File>,
 ) -> std::result::Result<Vec<u8>, GitError> {
-    if mobile_stopped() || Instant::now() >= deadline {
+    git_holding_cancellable(cwd, args, deadline, lock, &|| false)
+}
+/// The private native continuation can add cancellation, never waive an
+/// existing guard or replace the original Git/deletion deadline.
+pub(super) fn git_holding_cancellable(
+    cwd: &Path, args: &[&str], deadline: Instant, lock: Option<&fs::File>, cancelled: &impl Fn() -> bool,
+) -> std::result::Result<Vec<u8>, GitError> {
+    if mobile_stopped() || cancelled() || Instant::now() >= deadline {
         return Err(error("timeout", "Git operation cancelled or timed out"));
     }
     let mut command = Command::new("git");
@@ -118,7 +125,7 @@ pub(super) fn git_holding(
     // checkout hook or filter can outlive Git: on timeout the whole operation
     // stops instead of writing on after an error was reported.
     let (status, out, err) =
-        crate::platform::run_bounded(&mut command, [MAX_OUTPUT, 8192], deadline, &mobile_stopped)
+        crate::platform::run_bounded(&mut command, [MAX_OUTPUT, 8192], deadline, &|| mobile_stopped() || cancelled())
             .map_err(|failure| match failure {
                 crate::platform::RunError::Spawn(e) => error(
                     if e.kind() == io::ErrorKind::NotFound {
@@ -382,6 +389,22 @@ pub(super) fn catalog_until(path: &Path, refresh: bool, deadline: Instant) -> Va
 
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let action = args.first().map(String::as_str);
+    if action == Some("program-cleanup-status") {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let value = super::worktree_programs::cleanup_status(&args[1..])?;
+            println!("{}", serde_json::to_string(&value).map_err(|e| e.to_string())?);
+            return Ok(0);
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        return Err("Native program cleanup is unavailable on this computer".into());
+    }
+    if action == Some("program-cleanup") {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        return super::worktree_programs::cleanup(&args[1..]);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        return Err("Native program cleanup is unavailable on this computer".into());
+    }
     if action == Some("program-stop-status") {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {

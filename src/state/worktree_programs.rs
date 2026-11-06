@@ -9,6 +9,8 @@ const INVALID: &str =
     "The working folder or its programs changed. Review the original session again.";
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod cleaning;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod holding;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod stopping;
@@ -19,10 +21,27 @@ mod completed;
 // checkout source are separate; a journal row can never reconstruct them.
 #[allow(dead_code)]
 mod journal;
+mod removal_journal;
 pub(crate) use journal::Claim as ProgramStopClaim;
+pub(crate) use removal_journal::Claim as ProgramRemovalClaim;
+
+pub(super) fn cleanup_original_current(
+    state: &Path,
+    input: &wire::stop::Input,
+    until: Instant,
+) -> Result<()> {
+    completed::observe(state, input, until).map(|_| ())
+}
 
 pub(super) fn stop_status(args: &[String]) -> Result<Value> {
     stopping::status(args)
+}
+
+pub(super) fn cleanup_status(args: &[String]) -> Result<Value> {
+    cleaning::status(args)
+}
+pub(super) fn cleanup(args: &[String]) -> Result<i32> {
+    cleaning::run(args)
 }
 
 pub(super) fn stop(args: &[String]) -> Result<i32> {

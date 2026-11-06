@@ -94,12 +94,27 @@ pub(super) struct Reference {
     pub(super) owner: String,
 }
 
+enum ProcessReview {
+    Ordinary(std::result::Result<crate::platform::WorktreeProcesses, String>),
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    NativeObjects {
+        path: PathBuf,
+        checkout: zerus_client_core::worktree_programs::DirectoryId,
+        programs: Vec<zerus_client_core::worktree_programs::Program>,
+        until: Instant,
+    },
+}
+impl ProcessReview {
+    fn has_permission_denials(&self) -> bool {
+        matches!(self, Self::Ordinary(Ok(rows)) if !rows.unreadable.is_empty())
+    }
+}
 struct Context {
     common: PathBuf,
     /// (display name, full ref) of the main checkout's branch and origin/HEAD.
     bases: Vec<(String, String)>,
     /// Other processes' current directories, or why they cannot be read.
-    processes: std::result::Result<crate::platform::WorktreeProcesses, String>,
+    processes: ProcessReview,
     bindings: Vec<Reference>,
     bindings_complete: bool,
     archives: Vec<Reference>,
@@ -216,6 +231,14 @@ pub(super) fn bindings() -> Result<Vec<Reference>> {
 }
 
 fn context(common: &Path, trees: &[Value], deadline: Instant) -> Context {
+    context_with_processes(common, trees, deadline, None)
+}
+fn context_with_processes(
+    common: &Path,
+    trees: &[Value],
+    deadline: Instant,
+    native: Option<ProcessReview>,
+) -> Context {
     let mut bases = Vec::new();
     if let Some(main) = trees.first().filter(|tree| tree["kind"] == "main") {
         if let Some(branch) = main["branch"].as_str().filter(|b| !b.is_empty()) {
@@ -236,12 +259,18 @@ fn context(common: &Path, trees: &[Value], deadline: Instant) -> Context {
     let records = bindings();
     let bindings_complete = records.is_ok();
     let bindings = records.unwrap_or_default();
-    let mut archives=Vec::new();
-    let archives_complete=archive::visit_bounded(deadline,|record|{archives.push(reference(&record));Ok(())}).is_ok();
+    let mut archives = Vec::new();
+    let archives_complete = archive::visit_bounded(deadline, |record| {
+        archives.push(reference(&record));
+        Ok(())
+    })
+    .is_ok();
     Context {
         common: common.to_path_buf(),
         bases,
-        processes: crate::platform::worktree_processes(deadline),
+        processes: native.unwrap_or_else(|| {
+            ProcessReview::Ordinary(crate::platform::worktree_processes(deadline))
+        }),
         bindings,
         bindings_complete,
         archives,
@@ -586,7 +615,30 @@ fn uses(references: &[Reference], path: &Path) -> Vec<String> {
 fn occupants(path: &Path, context: &Context, row: &mut Value, reasons: &mut Vec<Value>) {
     // Without the running processes' folders, nothing may count as unused.
     let mut samples: Vec<_> = match &context.processes {
-        Ok(processes) => {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        ProcessReview::NativeObjects {
+            path: original,
+            checkout,
+            programs,
+            until,
+        } => {
+            if path != original || Instant::now() >= *until {
+                reasons.push(reason(
+                    "processes_unavailable",
+                    "The original native process review changed or expired.",
+                ));
+                Vec::new()
+            } else {
+                row["native_process_scope"] = json!(checkout);
+                // Actual object-based observations, already bound to the held
+                // original Scope/holder descriptor. No aggregate PID is erased.
+                programs
+                    .iter()
+                    .map(|program| (program.pid, program.label.as_str()))
+                    .collect()
+            }
+        }
+        ProcessReview::Ordinary(Ok(processes)) => {
             row["process_coverage"] = json!({
                 "abi": zerus_client_core::worktree_review::PERMISSION_DENIALS_ABI,
                 "complete": processes.membership_complete,
@@ -600,11 +652,14 @@ fn occupants(path: &Path, context: &Context, row: &mut Value, reasons: &mut Vec<
                     plural(processes.unreadable.len(), "process")
                 )));
             }
-            processes.paths.iter()
+            processes
+                .paths
+                .iter()
                 .filter(|(_, cwd, _)| inside(cwd, path))
+                .map(|(pid, _, name)| (*pid, name.as_str()))
                 .collect()
         }
-        Err(error) => {
+        ProcessReview::Ordinary(Err(error)) => {
             reasons.push(reason(
                 "processes_unavailable",
                 format!("{error}, so a program may still use this folder."),
@@ -612,19 +667,19 @@ fn occupants(path: &Path, context: &Context, row: &mut Value, reasons: &mut Vec<
             Vec::new()
         }
     };
-    samples.sort_by_key(|(pid, _, _)| *pid);
-    samples.dedup_by_key(|(pid, _, _)| *pid);
+    samples.sort_by_key(|(pid, _)| *pid);
+    samples.dedup_by_key(|(pid, _)| *pid);
     row["process_count"] = json!(samples.len());
     row["processes"] = json!(samples
         .iter()
         .take(MAX_SAMPLES)
-        .map(|(pid, _, name)| json!({"pid":pid,"command":name}))
+        .map(|(pid, name)| json!({"pid":pid,"command":name}))
         .collect::<Vec<_>>());
     if !samples.is_empty() {
         let names: Vec<_> = samples
             .iter()
             .take(MAX_SAMPLES)
-            .map(|(pid, _, name)| format!("{name} ({pid})"))
+            .map(|(pid, name)| format!("{name} ({pid})"))
             .collect();
         reasons.push(reason(
             "processes",
@@ -1024,7 +1079,7 @@ fn assess(tree: &Value, trees: &[Value], context: &Context, total: Instant) -> V
     let discard_offered = row["discard_fingerprint"].as_str().is_some_and(|s| !s.is_empty());
     let codes: Vec<&str> = reasons.iter().map(|r| string(r, "code")).collect();
     let changed = codes.iter().any(|code| matches!(*code, "changes" | "untracked"));
-    if context.processes.as_ref().is_ok_and(|p| !p.unreadable.is_empty())
+    if context.processes.has_permission_denials()
         && codes.contains(&"processes_unavailable")
         && codes.iter().all(|code| *code == "processes_unavailable"
             || (discard_offered && matches!(*code, "changes" | "untracked")))
@@ -1050,7 +1105,10 @@ enum Settled {
 /// What a removal left, from a fresh worktree list and a no-follow check of
 /// the folder. A missing registration alone never proves complete deletion.
 fn settle(common: &Path, path: &Path) -> Settled {
-    let (trees, partial) = match list(common, common, Instant::now() + Duration::from_secs(5)) {
+    settle_until(common, path, Instant::now() + Duration::from_secs(5))
+}
+fn settle_until(common: &Path, path: &Path, until: Instant) -> Settled {
+    let (trees, partial) = match list(common, common, until) {
         Ok(listed) => listed,
         Err(e) => return Settled::Unknown(e.detail),
     };
@@ -1230,10 +1288,7 @@ fn leftover(
         "sessions":row["sessions"],"reasons":stable,"root":row["root_identity"]})));
     // The same narrow manual exception as worktree removal: a complete scan
     // whose only uncertainty is processes with unreadable folders.
-    if context
-        .processes
-        .as_ref()
-        .is_ok_and(|p| !p.unreadable.is_empty())
+    if context.processes.has_permission_denials()
         && reasons.len() == 1
         && reasons[0]["code"] == "processes_unavailable"
     {
@@ -1557,6 +1612,42 @@ pub(super) fn program_stop_check(
 }
 
 pub(super) fn review(path: &Path, only: Option<&Path>, total: Instant) -> Value {
+    review_with_processes(path, only, total, None)
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)] // Read-only prerequisite; the private executing adapter follows.
+pub(super) fn program_cleanup_review(
+    intent: &zerus_client_core::worktree_programs::cleanup::Intent,
+    loan: &crate::platform::worktree_membership::objects::loan::borrower::Borrowed,
+) -> Result<Value> {
+    loan.current_cleanup(intent)
+        .map_err(|error| error.to_string())?;
+    let programs = loan
+        .programs_cleanup(intent)
+        .map_err(|error| error.to_string())?;
+    let scope = ProcessReview::NativeObjects {
+        path: PathBuf::from(&intent.input.stop.manifest.capture.root),
+        checkout: loan.scope().identity().clone(),
+        programs,
+        until: loan.deadline(),
+    };
+    let result = review_with_processes(
+        Path::new(&intent.input.stop.manifest.capture.common_dir),
+        Some(Path::new(&intent.input.stop.manifest.capture.root)),
+        loan.deadline(),
+        Some(scope),
+    );
+    loan.current_cleanup(intent)
+        .map_err(|error| error.to_string())?;
+    Ok(result)
+}
+
+fn review_with_processes(
+    path: &Path,
+    only: Option<&Path>,
+    total: Instant,
+    native: Option<ProcessReview>,
+) -> Value {
     let machine = crate::config::Config::load()
         .map(|c| c.host().to_owned())
         .unwrap_or_default();
@@ -1576,7 +1667,7 @@ pub(super) fn review(path: &Path, only: Option<&Path>, total: Instant) -> Value 
         let common = crate::platform::canonical(text(common))
             .map_err(|e| error("metadata_error", e.to_string()))?;
         let (trees, partial) = list(&path, &common, step(total, 3))?;
-        let context = context(&common, &trees, step(total, 3));
+        let context = context_with_processes(&common, &trees, step(total, 3), native);
         let wanted = only.map(|only| (only.to_path_buf(), resolved(only)));
         let mut reviewed = 0;
         let mut cut = false;
@@ -2324,7 +2415,170 @@ pub(super) fn remove_with_review(args: &[String]) -> (Result<Value>, bool, Optio
     (result, attempted, observed)
 }
 
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+struct ProgramCleanupAdapter<'a, 'claim> {
+    never: std::convert::Infallible,
+    marker: std::marker::PhantomData<(&'a (), &'claim ())>,
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+impl ProgramCleanupAdapter<'_, '_> {
+    fn request_id(&self) -> &str {
+        match self.never {}
+    }
+    fn deadline(&self) -> Instant {
+        match self.never {}
+    }
+    fn current(&self) -> Result<()> {
+        match self.never {}
+    }
+    fn review(&self) -> Result<Value> {
+        match self.never {}
+    }
+    fn capture(&self) -> &zerus_client_core::termination_cleanup::Capture {
+        match self.never {}
+    }
+    fn final_check(&self, _: &Value) -> Result<()> {
+        match self.never {}
+    }
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct ProgramCleanupAdapter<'a, 'claim> {
+    config: &'a crate::config::Config,
+    intent: &'a zerus_client_core::worktree_programs::cleanup::Intent,
+    loan: &'a crate::platform::worktree_membership::objects::loan::borrower::Borrowed,
+    permit: &'a crate::desktop::program_cleanup::ProgramCleanupPermit<'claim>,
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl ProgramCleanupAdapter<'_, '_> {
+    fn request_id(&self) -> &str {
+        self.intent.request_id()
+    }
+    fn capture(&self) -> &zerus_client_core::termination_cleanup::Capture {
+        &self.intent.input.stop.manifest.capture
+    }
+    fn deadline(&self) -> Instant {
+        self.loan.deadline()
+    }
+    fn current(&self) -> Result<()> {
+        if self.permit.intent() != self.intent {
+            return Err("The original removal scope changed".into());
+        }
+        self.permit.current().map_err(|error| error.to_string())?;
+        self.loan
+            .current_cleanup(self.intent)
+            .map_err(|error| error.to_string())?;
+        super::worktree_programs::cleanup_original_current(
+            &self.config.state,
+            &self.intent.input.stop,
+            self.deadline(),
+        )?;
+        program_stop_check(self.capture(), self.deadline())
+    }
+    fn review(&self) -> Result<Value> {
+        self.current()?;
+        let value = program_cleanup_review(self.intent, self.loan)?;
+        self.current()?;
+        Ok(value)
+    }
+    fn final_check(&self, expected: &Value) -> Result<()> {
+        self.current()?;
+        // The fresh census itself can be slow. Repeat the guarded file/owner/
+        // session assessment AFTER it, rather than letting that I/O create a
+        // window in which changed ignored data inherits an older fingerprint.
+        let data = program_cleanup_review(self.intent, self.loan)?;
+        let row = data["worktrees"]
+            .as_array()
+            .and_then(|rows| rows.first())
+            .ok_or("The working folder changed")?;
+        if data["state"] != "ok"
+            || row["fingerprint"] != expected["fingerprint"]
+            || !zerus_client_core::worktree_review::exit_cleanup_ready(row)
+        {
+            return Err("The working folder changed or is still in use; review it again".into());
+        }
+        self.loan
+            .current_cleanup(self.intent)
+            .map_err(|error| error.to_string())?;
+        self.permit.current().map_err(|error| error.to_string())?;
+        if Instant::now() >= self.deadline() || crate::platform::shutdown_signal() != 0 {
+            return Err("The original removal was cancelled or expired".into());
+        }
+        Ok(())
+    }
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn remove_program_cleanup(
+    config: &crate::config::Config,
+    intent: &zerus_client_core::worktree_programs::cleanup::Intent,
+    loan: &crate::platform::worktree_membership::objects::loan::borrower::Borrowed,
+    permit: &crate::desktop::program_cleanup::ProgramCleanupPermit<'_>,
+) -> (Result<Value>, bool, Option<Value>) {
+    use zerus_client_core::termination_cleanup::{Cleanup, Entry, Step};
+    let mut attempted = false;
+    let mut observed = None;
+    let result = (|| {
+        let adapter = ProgramCleanupAdapter {
+            config,
+            intent,
+            loan,
+            permit,
+        };
+        let capture = adapter.capture();
+        let data = adapter.review()?;
+        let entry = Entry::terminated(
+            "",
+            &capture.machine,
+            &capture.root,
+            &capture.common_dir,
+            &capture.owner_id,
+            None,
+        )
+        .ok_or("The original removal scope changed")?;
+        let mut plan = Cleanup::after_termination(vec![entry]);
+        if !matches!(plan.step(), Step::Review { .. }) {
+            return Err("The original removal is unavailable".into());
+        }
+        let Step::Remove { removal, .. } = plan.reviewed("", &capture.common_dir, Ok(&data)) else {
+            observed = data["worktrees"]
+                .as_array()
+                .and_then(|rows| rows.first())
+                .cloned();
+            return Err("The working folder needs a fresh review".into());
+        };
+        if removal.delete_branch
+            || !removal.discard_fingerprint.is_empty()
+            || !removal.process_fingerprint.is_empty()
+            || !removal.preserve_archive_restore
+        {
+            return Err("The original removal scope changed".into());
+        }
+        let invocation = zerus_client_core::worktree_review::remove_invocation(
+            &zerus_client_core::ComputerId(String::new()),
+            &removal,
+            &intent.input.request_id,
+        );
+        if invocation.args.get(..2) != Some(&["worktrees".into(), "remove".into()]) {
+            return Err("The original removal scope changed".into());
+        }
+        let mut args = invocation.args[2..].to_vec();
+        args.extend(["--owner-id".into(), capture.owner_id.clone()]);
+        remove_inner(&args, &mut attempted, &mut observed, Some(&adapter))
+    })();
+    (result, attempted, observed)
+}
+
 fn remove(args: &[String], attempted: &mut bool, observed: &mut Option<Value>) -> Result<Value> {
+    remove_inner(args, attempted, observed, None)
+}
+fn remove_inner(
+    args: &[String], attempted: &mut bool, observed: &mut Option<Value>,
+    native: Option<&ProgramCleanupAdapter<'_, '_>>,
+) -> Result<Value> {
+    let deadline = |seconds| {
+        let ordinary = Instant::now() + Duration::from_secs(seconds);
+        native.map_or(ordinary, |adapter| ordinary.min(adapter.deadline()))
+    };
+
     const USAGE: &str = "usage: hgs worktrees remove --path WORKTREE --common-dir DIR --fingerprint HASH [--ignored-fingerprint HASH] [--process-fingerprint HASH] [--delete-branch] [--request-id ID] [--json]";
     let mut options = BTreeMap::new();
     let mut delete_branch = false;
@@ -2370,6 +2624,16 @@ fn remove(args: &[String], attempted: &mut bool, observed: &mut Option<Value>) -
             .ok_or_else(|| format!("{key} is required"))
     };
     let target = Path::new(required("--path")?);
+    if let Some(adapter) = native {
+        adapter.current()?;
+        if automatic || periodic || delete_branch || !preserve_restore
+            || options.contains_key("--discard-fingerprint") || options.contains_key("--process-fingerprint")
+            || target != Path::new(&adapter.capture().root)
+            || options.get("--common-dir").copied() != Some(adapter.capture().common_dir.as_str())
+            || options.get("--owner-id").copied() != Some(adapter.capture().owner_id.as_str())
+            || options.get("--request-id").copied() != Some(adapter.request_id())
+        { return Err("The original removal scope changed".into()); }
+    }
     if preserve_restore && delete_branch { return Err("Exit cleanup preserves the retained worktree branch".into()); }
     if periodic && !automatic { return Err("Periodic cleanup requires automatic safety checks".into()); }
     let common = Path::new(required("--common-dir")?);
@@ -2382,7 +2646,7 @@ fn remove(args: &[String], attempted: &mut bool, observed: &mut Option<Value>) -
     let actual = git(
         &common,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        Instant::now() + Duration::from_secs(5),
+        deadline(5),
     )
     .map_err(|e| e.detail)?;
     if crate::platform::canonical(text(actual)).ok().as_ref() != Some(&common) {
@@ -2397,7 +2661,7 @@ fn remove(args: &[String], attempted: &mut bool, observed: &mut Option<Value>) -
         let own = git(
             target,
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-            Instant::now() + Duration::from_secs(5),
+            deadline(5),
         )
         .map(text)
         .ok()
@@ -2418,7 +2682,7 @@ fn remove(args: &[String], attempted: &mut bool, observed: &mut Option<Value>) -
     )
     .open(cache.with_extension("lock"))
     .map_err(|e| e.to_string())?;
-    let waited = Instant::now() + Duration::from_secs(if automatic { 1 } else { 10 });
+    let waited = deadline(if automatic { 1 } else { 10 });
     while guard.try_lock_exclusive().is_err() {
         if Instant::now() >= waited {
             return Err(
@@ -2435,15 +2699,14 @@ fn remove(args: &[String], attempted: &mut bool, observed: &mut Option<Value>) -
     // One lock order: repository, then session writer. No lifecycle caller holds
     // the writer lock while entering cleanup. A new binding cannot race removal.
     let _state_lock = storage::writer_until(
-        Instant::now() + Duration::from_secs(if automatic { 1 } else { 10 }),
+        deadline(if automatic { 1 } else { 10 }),
     )?
     .ok_or("Session state is busy. Review cleanup after the current operation finishes.")?;
 
-    let data = review(
-        &common,
-        Some(target),
-        Instant::now() + Duration::from_secs(if automatic { 5 } else { 20 }),
-    );
+    let data = match native {
+        Some(adapter) => adapter.review()?,
+        None => review(&common, Some(target), deadline(if automatic { 5 } else { 20 })),
+    };
     if data["state"] != "ok" {
         return Err(format!(
             "Cannot review the repository: {}",
@@ -2585,15 +2848,25 @@ fn remove(args: &[String], attempted: &mut bool, observed: &mut Option<Value>) -
         command.push("--force");
     }
     command.extend(["--", &spelling]);
+    if let Some(adapter) = native {
+        if let Err(error) = adapter.final_check(&row) {
+            // This exact phase has not invoked deletion. Keep the automatic
+            // queue fenced, but do not leave a false possible-deletion record.
+            let _ = super::worktree_maintenance::settle_removal(&removal, None);
+            return Err(error);
+        }
+    }
     *attempted = true;
-    let removed = git_holding(
-        &common,
-        &command,
-        Instant::now() + Duration::from_secs(if automatic { 3 } else { 300 }),
-        Some(&lock),
-    );
+    let removed = if native.is_some() {
+        super::worktrees::git_holding_cancellable(&common, &command, deadline(300), Some(&lock), &|| crate::platform::shutdown_signal() != 0)
+    } else {
+        git_holding(&common, &command, deadline(if automatic { 3 } else { 300 }), Some(&lock))
+    };
     let _ = fs::remove_file(&cache);
-    let settled = settle(&common, &path);
+    let settled = match native {
+        Some(_) => settle_until(&common, &path, deadline(5)),
+        None => settle(&common, &path),
+    };
     let _ = match &settled {
         Settled::Removed | Settled::Registered => {
             super::worktree_maintenance::settle_removal(&removal, None)
@@ -2650,7 +2923,7 @@ fn remove(args: &[String], attempted: &mut bool, observed: &mut Option<Value>) -
             match git(
                 &common,
                 &["branch", "-d", "--", &branch],
-                Instant::now() + Duration::from_secs(10),
+                deadline(10),
             ) {
                 Ok(_) => deleted = true,
                 Err(e) => branch_error = json!(e.detail),
@@ -2671,6 +2944,44 @@ fn remove(args: &[String], attempted: &mut bool, observed: &mut Option<Value>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_object_review_never_erases_known_use_or_treats_wrong_scope_as_clear() {
+        // Projection controls use synthetic DATA. Native holder/FD/cwd and
+        // process identity are exercised by the real membership/loan controls.
+        let root = Path::new("/fixture/generated");
+        for (observed, expired, programs) in [
+            (root, false, vec![zerus_client_core::worktree_programs::Program {
+                pid: 41, birth: "original-birth".into(), label: "holder with another open file".into(),
+            }]),
+            (Path::new("/fixture/another"), false, vec![]),
+            (root, true, vec![]),
+        ] {
+            let context = Context {
+                common: "/fixture/repository/.git".into(), bases: vec![],
+                processes: ProcessReview::NativeObjects {
+                    path: observed.into(),
+                    checkout: zerus_client_core::worktree_programs::DirectoryId { device: 1, inode: 2, mount: "native-mount".into() },
+                    programs, until: if expired { Instant::now() } else { Instant::now() + Duration::from_secs(5) },
+                },
+                bindings: vec![], bindings_complete: true, archives: vec![], archives_complete: true,
+            };
+            let mut row = json!({});
+            let mut reasons = vec![];
+            occupants(root, &context, &mut row, &mut reasons);
+            let projected = finish(row, reasons, vec![]);
+            assert_eq!(projected["verdict"], "blocked");
+            if observed == root && !expired {
+                assert_eq!(projected["process_count"], 1);
+                assert_eq!(projected["processes"][0]["pid"], 41);
+                assert_eq!(projected["reasons"][0]["code"], "processes");
+            } else {
+                assert_eq!(projected["reasons"][0]["code"], "processes_unavailable");
+            }
+            assert!(projected["process_fingerprint"].is_null());
+        }
+    }
 
     #[test]
     fn explicit_denial_proof_revalidates_current_native_coverage_before_its_v2_binding() {
@@ -2706,10 +3017,10 @@ mod tests {
         let file = dir.path().join("open-original");
         fs::write(&file, "fixture").unwrap();
         let context = Context { common: dir.path().into(), bases: vec![],
-            processes: Ok(crate::platform::WorktreeProcesses {
+            processes: ProcessReview::Ordinary(Ok(crate::platform::WorktreeProcesses {
                 paths: vec![(7, file, "known-holder".into())],
                 unreadable: vec![crate::platform::UnreadableWorktreeProcess { pid:7, identity:"original-birth".into(), command:"known-holder".into(),
-                    cwd:true, executable:false, files:false, invocation_ancestor:false }], membership_complete:true }),
+                    cwd:true, executable:false, files:false, invocation_ancestor:false }], membership_complete:true })),
             bindings:vec![], bindings_complete:true, archives:vec![], archives_complete:true };
         let mut row = json!({}); let mut reasons = vec![];
         occupants(dir.path(), &context, &mut row, &mut reasons);
@@ -2788,7 +3099,7 @@ mod tests {
         let context = Context {
             common: common.clone(),
             bases: Vec::new(),
-            processes: Ok(Default::default()),
+            processes: ProcessReview::Ordinary(Ok(Default::default())),
             bindings: Vec::new(),
             bindings_complete: true,
             archives: Vec::new(),

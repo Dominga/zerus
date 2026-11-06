@@ -133,7 +133,7 @@ mod worktree_inspection;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod worktree_programs;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) use worktree_programs::ProgramStopClaim;
+pub(crate) use worktree_programs::{ProgramRemovalClaim, ProgramStopClaim};
 mod worktree_lifecycle;
 mod worktree_lock;
 mod worktree_maintenance;

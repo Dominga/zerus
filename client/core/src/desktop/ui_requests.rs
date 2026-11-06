@@ -25,6 +25,9 @@ pub enum Request {
     WorktreeProgramStop {
         intent: Box<crate::worktree_programs::invocation::Intent>,
     },
+    WorktreeProgramCleanup {
+        intent: Box<crate::worktree_programs::cleanup::Intent>,
+    },
     CreationClone {
         intent: Box<super::creation_clone::Intent>,
     },
@@ -110,6 +113,7 @@ impl Request {
     pub fn id(&self) -> &str {
         match self {
             Self::WorktreeProgramStop { intent } => intent.request_id(),
+            Self::WorktreeProgramCleanup { intent } => intent.request_id(),
             Self::CreationClone { intent } => &intent.clone_request_id,
             Self::CreationWorktree { intent } => &intent.worktree_request_id,
             Self::CreationLaunch { intent } => &intent.launch_id,
@@ -133,6 +137,7 @@ impl Request {
     pub fn operation(&self) -> &'static str {
         match self {
             Self::WorktreeProgramStop { .. } => "worktree_program_stop",
+            Self::WorktreeProgramCleanup { .. } => "worktree_program_cleanup",
             Self::CreationClone { .. } => "creation_clone",
             Self::CreationWorktree { .. } => "creation_worktree",
             Self::CreationLaunch { .. } => "creation_launch",
@@ -156,6 +161,7 @@ impl Request {
     fn valid(&self) -> bool {
         match self {
             Self::WorktreeProgramStop { intent } => intent.valid(),
+            Self::WorktreeProgramCleanup { intent } => intent.valid(),
             Self::CreationClone { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::CreationWorktree { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::CreationLaunch { intent } => intent.as_ref().clone().verify().is_ok(),
@@ -318,6 +324,10 @@ impl Cache {
         }
         if let Request::WorktreeProgramStop { intent } = &envelope.request {
             if ownership_mode != Some(intent.input.source.mode()) {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+        } else if let Request::WorktreeProgramCleanup { intent } = &envelope.request {
+            if ownership_mode != Some(intent.input.stop.source.mode()) {
                 return Err(io::ErrorKind::PermissionDenied.into());
             }
         } else if let Request::DesktopOwnership { action, .. } = &envelope.request {
@@ -500,6 +510,15 @@ impl Responder {
                 let mode = intent.input.source.mode();
                 if self.ownership_mode.get() != Some(&mode)
                     || self.configuration.get() != Some(&intent.input.manifest.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(mode)
+            }
+            Request::WorktreeProgramCleanup { intent } => {
+                let mode = intent.input.stop.source.mode();
+                if self.ownership_mode.get() != Some(&mode)
+                    || self.configuration.get() != Some(&intent.input.stop.manifest.configuration)
                 {
                     return Err(io::ErrorKind::PermissionDenied.into());
                 }

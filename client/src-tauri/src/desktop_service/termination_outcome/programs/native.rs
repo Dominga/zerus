@@ -118,12 +118,12 @@ impl NativeContext {
     pub(super) fn executable(&self) -> &std::path::Path {
         self.image.executable()
     }
-    pub(super) fn prepare_stop(&self, request: Request) -> Result<Registration, String> {
+    pub(super) fn prepare_request(&self, request: Request) -> Result<Registration, String> {
         if !self.current() {
             return Err(UNCONFIRMED.into());
         }
         self.source
-            .prepare_program_stop(request)
+            .prepare_program_request(request)
             .map_err(str::to_owned)
     }
     fn same_context(&self) -> bool {
@@ -147,10 +147,20 @@ impl NativeContext {
         &self,
         command: &mut Command,
     ) -> std::io::Result<(Child, Option<NativeChild>)> {
+        self.spawn_with_custody(command, None)
+    }
+    pub(super) fn spawn_with_custody(
+        &self,
+        command: &mut Command,
+        custody: Option<&Arc<run::custody::InheritedLock>>,
+    ) -> std::io::Result<(Child, Option<NativeChild>)> {
         if !self.current() {
             return Err(std::io::ErrorKind::PermissionDenied.into());
         }
         self.image.before_spawn(command)?;
+        if let Some(custody) = custody {
+            custody.inherit(command)?;
+        }
         let mut child = command.spawn()?;
         let identity = self.image.observe_custody_child(&mut child).ok();
         if identity.is_none() || !self.same_context() {

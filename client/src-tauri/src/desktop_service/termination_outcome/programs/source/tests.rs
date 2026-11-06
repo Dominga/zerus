@@ -45,6 +45,11 @@ const MUTATOR: &str = r#"#!/usr/bin/python3
 import os,pathlib,time
 root=pathlib.Path(__file__).parent
 if os.fork()==0:
+    if (root/'program-close-stdio').exists():
+        os.setsid()
+        for fd in (0,1,2):
+            null=os.open('/dev/null',os.O_RDWR);os.dup2(null,fd)
+            if null>2:os.close(null)
     (root/'program-reader-started').write_text('started')
     until=time.monotonic()+20
     while not (root/'program-release').exists() and time.monotonic()<until:time.sleep(.005)
@@ -100,137 +105,173 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
     }
     let _process = crate::PROCESS_TREE.read().unwrap();
     tauri::async_runtime::block_on(async {
-        let f = fixture(json!({}));
-        let (service, _cache) = connected(&f).await;
-        let actions = crate::actions::Actions::new(f.0.join("marks"));
-        let key = crate::actions::Lane::key(&capture().target, &Action::Terminate);
-        let hold = actions.begin(key.clone(), &Action::Terminate).unwrap();
-        let context = Context::new_supported(service.clone(), Arc::new(hold)).unwrap();
-        let manifest = manifest();
-        let pipeline = uuid::Uuid::new_v4().to_string();
-        let input = stop::Input {
-            request_id: uuid::Uuid::new_v4().to_string(),
-            confirmation_id: uuid::Uuid::new_v4().to_string(),
-            source: stop::Source::Service {
-                epoch: context.scope.service_epoch.clone(),
-            },
-            original: serde_json::to_string(&json!({"request_id":uuid::Uuid::new_v4().to_string(),
+        for closed_stdio in [false, true] {
+            let f = fixture(json!({}));
+            let (service, _cache) = connected(&f).await;
+            let actions = crate::actions::Actions::new(f.0.join("marks"));
+            let key = crate::actions::Lane::key(&capture().target, &Action::Terminate);
+            let hold = actions.begin(key.clone(), &Action::Terminate).unwrap();
+            let context = Context::new_supported(service.clone(), Arc::new(hold)).unwrap();
+            let manifest = manifest();
+            let pipeline = uuid::Uuid::new_v4().to_string();
+            let input = stop::Input {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                confirmation_id: uuid::Uuid::new_v4().to_string(),
+                source: stop::Source::Service {
+                    epoch: context.scope.service_epoch.clone(),
+                },
+                original: serde_json::to_string(
+                    &json!({"request_id":uuid::Uuid::new_v4().to_string(),
                 "action":"terminate","expected_run_id":manifest.capture.target.run_id,
-                "expected_conversation_id":manifest.capture.target.conversation_id}))
-            .unwrap(),
-            manifest: manifest.clone(),
-            archive_id: uuid::Uuid::new_v4().to_string(),
-            stop: stop::Kind::Normal,
-        };
-        let binding = custody::Binding::for_input(&pipeline, &input);
-        fs::write(
-            f.0.join("program-manifest"),
-            serde_json::to_vec(&manifest).unwrap(),
-        )
-        .unwrap();
-        fs::write(f.0.join("program-binding"), binding.bytes().unwrap()).unwrap();
-        executable(&f.0.join("holder"), OWNER);
-        executable(&f.0.join("mutator"), MUTATOR);
-        let mut owner = Owner::begin(
-            &f.0.join("holder"),
-            Control::Open {
-                pipeline: pipeline.clone(),
-                discovery: Discovery {
-                    capture: manifest.capture.clone(),
-                },
-            },
-            manifest.configuration.clone(),
-            context.environment.clone(),
-            context.clone(),
-            Arc::new(Command::spawn),
-        )
-        .unwrap();
-        let not_after = owner.deadline();
-        let Reply::Ready { holder, socket, .. } = owner.ready().unwrap() else {
-            panic!("Ready")
-        };
-        owner
-            .arm(
-                &input,
-                NativeChild {
-                    pid: 99999,
-                    parent: std::process::id(),
-                    birth: "fixture-data".into(),
-                    audit: None,
-                },
-                Instant::now() + Duration::from_secs(10),
+                "expected_conversation_id":manifest.capture.target.conversation_id}),
+                )
+                .unwrap(),
+                manifest: manifest.clone(),
+                archive_id: uuid::Uuid::new_v4().to_string(),
+                stop: stop::Kind::Normal,
+            };
+            let binding = custody::Binding::for_input(&pipeline, &input);
+            fs::write(
+                f.0.join("program-manifest"),
+                serde_json::to_vec(&manifest).unwrap(),
             )
             .unwrap();
-        let source = Arc::new(Source {
-            context: Arc::new(Origin::Service(context)),
-            owner: Mutex::new(owner),
-            manifest,
-            pipeline,
-            holder,
-            socket,
-            not_after,
-            normal_consumed: AtomicBool::new(false),
-            closed: AtomicBool::new(false),
-        });
-        let (mut mutation, resources) = Mutation::new(source.clone(), &input);
-        let loan = resources.clone();
-        let weak = Arc::downgrade(&resources);
-        let _release = Release(f.0.clone());
-        let inv = Invocation {
-            args: Vec::new(),
-            stdin: None,
-            timeout: Duration::from_secs(5),
-            request_id: None,
-        };
-        // The actual runner, not a Boolean/read receipt, owns these references.
-        let result = run::run_accounted_frozen(
-            &f.0.join("mutator"),
-            &inv,
-            source.context.environment(),
-            1024,
-            &AtomicBool::new(false),
-            resources,
-            Command::spawn,
-        )
-        .unwrap();
-        assert!(matches!(result, Exit::Code { code: 0, .. }));
-        assert!(!mutation.try_retire().unwrap());
-        assert_eq!(
-            fs::read_to_string(f.0.join("program-controls")).unwrap(),
-            "arm\n"
-        );
-        fs::write(f.0.join("program-release"), b"release").unwrap();
-        eventually(
-            "actual mutator readers joined, only the original loan remains",
-            || weak.strong_count() == 1,
-        )
-        .await;
-        assert!(
-            !mutation.try_retire().unwrap(),
-            "a mutator-owned loan also prevents Force admission"
-        );
-        drop(loan);
-        assert!(mutation.try_retire().unwrap());
-        assert!(
-            mutation.try_retire().unwrap(),
-            "retirement is idempotent, never a new phase"
-        );
-        assert_eq!(
-            fs::read_to_string(f.0.join("program-controls")).unwrap(),
-            "arm\njoined\n"
-        );
-        assert!(
-            actions.begin(key.clone(), &Action::Terminate).is_none(),
-            "the identified read-only source remains charged"
-        );
-        source.close().unwrap();
-        assert!(
-            !source.current(),
-            "closed original custody cannot become current again"
-        );
-        drop(mutation);
-        drop(source);
-        assert!(actions.begin(key, &Action::Terminate).is_some());
-        service.join().await.unwrap();
+            fs::write(f.0.join("program-binding"), binding.bytes().unwrap()).unwrap();
+            executable(&f.0.join("holder"), OWNER);
+            executable(&f.0.join("mutator"), MUTATOR);
+            let mut owner = Owner::begin(
+                &f.0.join("holder"),
+                Control::Open {
+                    pipeline: pipeline.clone(),
+                    discovery: Discovery {
+                        capture: manifest.capture.clone(),
+                    },
+                },
+                manifest.configuration.clone(),
+                context.environment.clone(),
+                context.clone(),
+                Arc::new(Command::spawn),
+            )
+            .unwrap();
+            let not_after = owner.deadline();
+            let Reply::Ready { holder, socket, .. } = owner.ready().unwrap() else {
+                panic!("Ready")
+            };
+            owner
+                .arm(
+                    &input,
+                    NativeChild {
+                        pid: 99999,
+                        parent: std::process::id(),
+                        birth: "fixture-data".into(),
+                        audit: None,
+                    },
+                    Instant::now() + Duration::from_secs(10),
+                )
+                .unwrap();
+            let source = Arc::new(Source {
+                context: Arc::new(Origin::Service(context)),
+                owner: Mutex::new(owner),
+                manifest,
+                pipeline,
+                holder,
+                socket,
+                not_after,
+                normal_consumed: AtomicBool::new(false),
+                closed: AtomicBool::new(false),
+            });
+            let (mut mutation, resources) = Mutation::new(source.clone(), &input);
+            if closed_stdio {
+                fs::write(f.0.join("program-close-stdio"), b"closed").unwrap();
+            }
+            let inherited = resources.descendants.clone();
+            let mut loan = Some(resources.clone());
+            let weak = Arc::downgrade(&resources);
+            let _release = Release(f.0.clone());
+            let inv = Invocation {
+                args: Vec::new(),
+                stdin: None,
+                timeout: Duration::from_secs(5),
+                request_id: None,
+            };
+            // The actual runner, not a Boolean/read receipt, owns these references.
+            let result = run::run_accounted_frozen(
+                &f.0.join("mutator"),
+                &inv,
+                source.context.environment(),
+                1024,
+                &AtomicBool::new(false),
+                resources,
+                move |command| {
+                    inherited.inherit(command)?;
+                    command.spawn()
+                },
+            )
+            .unwrap();
+            assert!(matches!(result, Exit::Code { code: 0, .. }));
+            assert!(!mutation.try_retire().unwrap());
+            assert_eq!(
+                fs::read_to_string(f.0.join("program-controls")).unwrap(),
+                "arm\n"
+            );
+            if closed_stdio {
+                eventually(
+                    "the original child and all stdio readers have actually ended",
+                    || weak.strong_count() == 1,
+                )
+                .await;
+                drop(loan.take());
+                assert!(
+                    !mutation.try_retire().unwrap(),
+                    "the detached original descendant still holds the phase despite closed stdio"
+                );
+                assert_eq!(
+                    fs::read_to_string(f.0.join("program-controls")).unwrap(),
+                    "arm\n"
+                );
+            }
+            fs::write(f.0.join("program-release"), b"release").unwrap();
+            if !closed_stdio {
+                eventually(
+                    "actual mutator readers joined, only the original loan remains",
+                    || weak.strong_count() == 1,
+                )
+                .await;
+                assert!(
+                    !mutation.try_retire().unwrap(),
+                    "a mutator-owned loan also prevents Force admission"
+                );
+            }
+            drop(loan.take());
+            {
+                let observed = std::cell::RefCell::new(&mut mutation);
+                eventually(
+                    "the independent original descendant custody has physically settled",
+                    || observed.borrow_mut().try_retire().unwrap(),
+                )
+                .await;
+            }
+            assert!(
+                mutation.try_retire().unwrap(),
+                "retirement is idempotent, never a new phase"
+            );
+            assert_eq!(
+                fs::read_to_string(f.0.join("program-controls")).unwrap(),
+                "arm\njoined\n"
+            );
+            assert!(
+                actions.begin(key.clone(), &Action::Terminate).is_none(),
+                "the identified read-only source remains charged"
+            );
+            source.close().unwrap();
+            assert!(
+                !source.current(),
+                "closed original custody cannot become current again"
+            );
+            drop(mutation);
+            drop(source);
+            assert!(actions.begin(key, &Action::Terminate).is_some());
+            service.join().await.unwrap();
+        }
     });
 }

@@ -16,6 +16,7 @@ const REQUIRED: i32 =
     libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
 const IMAGE_BYTES: u64 = 256 << 20;
 const COMMAND: [&str; 3] = ["worktrees", "program-stop", "--json"];
+const CLEANUP_COMMAND: [&str; 3] = ["worktrees", "program-cleanup", "--json"];
 #[derive(PartialEq, Eq)]
 struct Object {
     device: u64,
@@ -84,6 +85,14 @@ impl OwnImage {
     /// The only production constructor takes no identity/image selector.
     /// It is usable only in the exact new stdio entry, not frontend-request.
     pub(super) fn capture(until: Instant) -> Result<Self> {
+        Self::capture_command(until, &COMMAND)
+    }
+    pub(super) fn capture_cleanup(until: Instant) -> Result<Self> {
+        Self::capture_command(until, &CLEANUP_COMMAND)
+    }
+    // Expected argv is selected only by the two fixed native entry points.
+    // No request/body field can select self mode, PID, FD, path or image.
+    fn capture_command(until: Instant, command: &'static [&'static str; 3]) -> Result<Self> {
         deadline(until)?;
         let args = std::env::args_os()
             .skip(1)
@@ -94,7 +103,11 @@ impl OwnImage {
             })
             .collect::<Result<Vec<_>>>()?;
         ensure!(
-            exact_command(&args),
+            if command == &COMMAND {
+                exact_command(&args)
+            } else {
+                args.iter().map(String::as_str).eq(command.iter().copied())
+            },
             "unexpected program-stop helper command"
         );
         let pid = std::process::id();

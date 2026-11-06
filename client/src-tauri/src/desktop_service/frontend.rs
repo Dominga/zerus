@@ -21,6 +21,8 @@ pub enum Operation {
     TerminationOutcome,
     #[serde(skip)] // Closed native original helper only.
     WorktreeProgramStop,
+    #[serde(skip)] // Only the live native Remove continuation; never renderer JSON.
+    WorktreeProgramCleanup,
     #[serde(skip)] // Native Files controller only, never caller-chosen paths.
     CacheMaintenance,
     #[serde(skip)] // Native creation owner only; never generic policy dispatch or receipts.
@@ -60,6 +62,7 @@ impl Operation {
             Request::CacheMaintenance { .. } => Self::CacheMaintenance,
             Request::TerminationOutcome { .. } => Self::TerminationOutcome,
             Request::WorktreeProgramStop { .. } => Self::WorktreeProgramStop,
+            Request::WorktreeProgramCleanup { .. } => Self::WorktreeProgramCleanup,
             Request::CreationClone { .. } => Self::CreationClone,
             Request::CreationWorktree { .. } => Self::CreationWorktree,
             Request::CreationLaunch { .. } => Self::CreationLaunch,
@@ -83,6 +86,7 @@ impl Operation {
             Self::CacheMaintenance => "cache_maintenance",
             Self::TerminationOutcome => "termination_outcome",
             Self::WorktreeProgramStop => "worktree_program_stop",
+            Self::WorktreeProgramCleanup => "worktree_program_cleanup",
             Self::CreationClone => "creation_clone",
             Self::CreationWorktree => "creation_worktree",
             Self::CreationLaunch => "creation_launch",
@@ -603,6 +607,7 @@ fn submission_ready(snapshot: &Snapshot, request: &Request) -> bool {
             | Request::CompactToSend { .. }
             | Request::TaskStartReconcile { .. }
             | Request::WorktreeProgramStop { .. }
+            | Request::WorktreeProgramCleanup { .. }
             | Request::TerminationOutcome { .. }
     ) {
         return false;
@@ -758,6 +763,7 @@ fn lookup(
             | Request::CompactToSend { .. }
             | Request::TaskStartReconcile { .. }
             | Request::WorktreeProgramStop { .. }
+            | Request::WorktreeProgramCleanup { .. }
             | Request::TerminationOutcome { .. }
     ) {
         return Err("frontend_receipt_unconfirmed");
@@ -802,6 +808,7 @@ fn lookup_receipt(request: &Request, id: &str, value: Value) -> Result<Receipt, 
             | Request::CompactToSend { .. }
             | Request::TaskStartReconcile { .. }
             | Request::WorktreeProgramStop { .. }
+            | Request::WorktreeProgramCleanup { .. }
             | Request::TerminationOutcome { .. }
     ) {
         return Err("frontend_receipt_unconfirmed");
@@ -870,6 +877,7 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
             | Request::CompactToSend { .. }
             | Request::TaskStartReconcile { .. }
             | Request::WorktreeProgramStop { .. }
+            | Request::WorktreeProgramCleanup { .. }
             | Request::TerminationOutcome { .. }
     ) {
         // Their separate consumers validate different receipts and completion rules.
@@ -941,6 +949,7 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
         | Request::CompactToSend { .. }
         | Request::TaskStartReconcile { .. }
         | Request::WorktreeProgramStop { .. }
+        | Request::WorktreeProgramCleanup { .. }
         | Request::TerminationOutcome { .. } => return None,
         Request::AutomaticApprovals { enabled, .. } => {
             if value["op"] != "automatic_approvals" || value["enabled"] != *enabled {

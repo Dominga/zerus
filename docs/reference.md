@@ -2882,6 +2882,44 @@ known use, sessions and file protections still refuse removal. Generic backgroun
 maintenance remains conservative; retained results never reconstruct this
 original confirmation or retry an unknown removal.
 
+For a local Linux or macOS native confirmation, a selected CLI that supports
+`worktree-program-stop-v1` and `worktree-program-cleanup-v1` can also stop the
+programs proven to use that generated checkout. The dialog lists the complete
+bounded native manifest before **Stop and remove folder** is confirmed. This
+includes editors and terminals the person opened there. Only those original
+process identities are eligible: immediately before each signal, Zerus checks
+their native birth/pin and current cwd or open-file membership in the same held
+checkout. Newly discovered or replaced programs require fresh review. Programs
+needed to verify and settle the operation, and their protected ancestors, are
+never signalled. Pause, native Stop, manual cleanup and background maintenance
+retain their existing scope.
+
+The original Terminate UUID and exact successful archive receipt precede a
+separate, durably reserved program-stop UUID. Normal stop sends TERM with a
+15-second phase bound and never escalates automatically. If verified original
+programs survive, **Force stop…** opens a new native confirmation listing the
+currently surviving originals, with a new UUID. It becomes available only after
+the previous mutating helper, descendants, pipes and loans physically settle.
+Missing or uncertain outcomes cannot create a Force offer. The original selected
+CLI, configuration, environment, Actions claim and checkout/ancestor handles
+remain held across both confirmations, within one original five-minute custody
+bound. Neither a deadline nor a returned status proves drain.
+
+After a known Complete stop and actual mutation retirement, that same live
+Remove continuation may open one final cleanup phase, with its own UUID. It
+reuses the guarded cleanup engine: fresh file, ownership, session and known-use
+checks still apply; the branch and archive restore identity stay. Only the
+original read-only holder's one proven root descriptor is omitted from process
+use accounting. Another descriptor, cwd use or any other process still counts.
+The holder remains charged independently; it has no stop or deletion verb.
+Cleanup returns Removed, Kept or Unknown once. A lost or partial deletion stays
+Unknown, with original-ID status lookup only; a restart, reconnect or a new UUID
+cannot reconstruct the continuation or repeat it. The new fixed stdio helper
+commands accept only their current canonical native parent's original-child
+proof, never renderer, manual or background requests. If the selected route
+cannot support this pipeline, removal remains available through the existing
+separately guarded folder review rather than an alternate CLI selection.
+
 A checkout with uncommitted or untracked files can also have such access
 denials. Its review then offers both consents (`discardable_with_process_consent`
 beside the discard and process fingerprints, while `discardable` stays false for

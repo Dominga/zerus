@@ -126,11 +126,36 @@ fn connect(path: &str, until: Instant) -> io::Result<UnixStream> {
     Ok(stream)
 }
 
+#[derive(Clone, PartialEq)]
+enum Original {
+    Stop(Intent),
+    Cleanup(zerus_client_core::worktree_programs::cleanup::Intent),
+}
+impl Original {
+    fn valid(&self) -> bool {
+        match self {
+            Self::Stop(i) => i.valid(),
+            Self::Cleanup(i) => i.valid(),
+        }
+    }
+    fn custody(&self) -> Intent {
+        match self {
+            Self::Stop(i) => i.clone(),
+            Self::Cleanup(i) => i.custody(),
+        }
+    }
+    fn binding(&self) -> Binding {
+        match self {
+            Self::Stop(i) => Binding::for_input(&i.pipeline, &i.input),
+            Self::Cleanup(i) => Binding::for_cleanup(&i.pipeline, &i.input),
+        }
+    }
+}
 pub(crate) struct Borrowed {
     scope: Scope,
     holder: Peer,
     stream: UnixStream,
-    original: Intent,
+    original: Original,
     holder_root_descriptor: i32,
     until: Instant,
 }
@@ -139,10 +164,24 @@ impl Borrowed {
     /// data. Kernel credentials/birth/image pinning independently establish
     /// this socket peer; NONE of that supplies stop/Force consent.
     pub(crate) fn acquire(intent: &Intent, until: Instant) -> io::Result<Self> {
-        if !intent.valid() {
+        let result = Self::acquire_original(Original::Stop(intent.clone()), until)?;
+        result.current(intent)?;
+        Ok(result)
+    }
+    pub(crate) fn acquire_cleanup(
+        intent: &zerus_client_core::worktree_programs::cleanup::Intent,
+        until: Instant,
+    ) -> io::Result<Self> {
+        let result = Self::acquire_original(Original::Cleanup(intent.clone()), until)?;
+        result.current_cleanup(intent)?;
+        Ok(result)
+    }
+    fn acquire_original(original: Original, until: Instant) -> io::Result<Self> {
+        if !original.valid() {
             return Err(invalid());
         }
         let until = until.min(Instant::now() + Duration::from_millis(PHASE_MILLIS));
+        let intent = original.custody();
         let holder = &intent.holder;
         let peer = Peer::pin(
             holder.pid,
@@ -153,7 +192,7 @@ impl Borrowed {
         )?;
         let stream = connect(&intent.socket, until)?;
         peer.current(&stream, until)?;
-        let binding = Binding::for_input(&intent.pipeline, &intent.input);
+        let binding = original.binding();
         transport::send(
             &stream,
             &binding.bytes().map_err(io::Error::other)?,
@@ -168,11 +207,11 @@ impl Borrowed {
             scope,
             holder: peer,
             stream,
-            original: intent.clone(),
+            original,
             holder_root_descriptor,
             until,
         };
-        result.current(intent)?;
+        result.current_native()?;
         Ok(result)
     }
     pub(crate) fn programs(
@@ -197,10 +236,37 @@ impl Borrowed {
         &self.scope
     }
     pub(crate) fn current(&self, intent: &Intent) -> io::Result<()> {
-        check(self.until)?;
-        if intent != &self.original {
+        if !matches!(&self.original, Original::Stop(original) if original == intent) {
             return Err(invalid());
         }
+        self.current_native()
+    }
+    pub(crate) fn current_cleanup(
+        &self,
+        intent: &zerus_client_core::worktree_programs::cleanup::Intent,
+    ) -> io::Result<()> {
+        if !matches!(&self.original, Original::Cleanup(original) if original == intent) {
+            return Err(invalid());
+        }
+        self.current_native()
+    }
+    pub(crate) fn programs_cleanup(
+        &self,
+        intent: &zerus_client_core::worktree_programs::cleanup::Intent,
+    ) -> io::Result<Vec<zerus_client_core::worktree_programs::Program>> {
+        self.current_cleanup(intent)?;
+        let rows = crate::platform::worktree_membership::programs_borrowed(
+            &self.scope,
+            &self.holder,
+            &self.stream,
+            self.holder_root_descriptor,
+            self.until,
+        )?;
+        self.current_cleanup(intent)?;
+        Ok(rows)
+    }
+    fn current_native(&self) -> io::Result<()> {
+        check(self.until)?;
         self.holder.current(&self.stream, self.until)?;
         self.scope.current(self.until)?;
         self.holder.current(&self.stream, self.until)?;

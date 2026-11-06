@@ -219,6 +219,35 @@ fn serve(config: &crate::config::Config, input: RawFd, out: &mut impl Write) -> 
                         },
                     )?;
                 }
+                Control::ArmCleanup {
+                    input,
+                    borrower,
+                    deadline_millis,
+                    ..
+                } => {
+                    if owner(&manifest.capture)?["id"] != manifest.capture.owner_id {
+                        return Err(INVALID.into());
+                    }
+                    let deadline =
+                        until.min(custody::clock::restore(deadline_millis).map_err(failed)?);
+                    let original = Peer::pin(
+                        borrower.pid,
+                        &borrower.birth,
+                        borrower.parent,
+                        borrower.audit.as_ref(),
+                        deadline,
+                    )
+                    .map_err(failed)?;
+                    holder
+                        .arm_cleanup(&input, original, now() as u64, deadline)
+                        .map_err(failed)?;
+                    emit(
+                        out,
+                        &Reply::Armed {
+                            binding: Binding::for_cleanup(&pipeline, &input),
+                        },
+                    )?;
+                }
                 Control::Joined { binding } => {
                     holder
                         .joined(&binding.bytes().map_err(failed)?)

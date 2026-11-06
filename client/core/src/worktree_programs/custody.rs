@@ -107,6 +107,12 @@ pub enum Control {
         borrower: NativeChild,
         deadline_millis: u64,
     },
+    ArmCleanup {
+        pipeline: String,
+        input: Box<super::cleanup::Input>,
+        borrower: NativeChild,
+        deadline_millis: u64,
+    },
     Observe {
         pipeline: String,
         observation: String,
@@ -123,6 +129,7 @@ impl Control {
         match self {
             Self::Open { pipeline, .. }
             | Self::Arm { pipeline, .. }
+            | Self::ArmCleanup { pipeline, .. }
             | Self::Observe { pipeline, .. }
             | Self::Close { pipeline } => pipeline,
             Self::Joined { binding } => &binding.pipeline,
@@ -144,6 +151,17 @@ impl Control {
                         && Binding::for_input(pipeline, input).valid()
                 }
                 Self::Joined { binding } => binding.valid(),
+                Self::ArmCleanup {
+                    pipeline,
+                    input,
+                    borrower,
+                    deadline_millis,
+                } => {
+                    input.valid()
+                        && borrower.valid()
+                        && *deadline_millis > 0
+                        && Binding::for_cleanup(pipeline, input).valid()
+                }
                 Self::Observe {
                     pipeline,
                     observation,

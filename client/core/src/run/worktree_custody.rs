@@ -395,6 +395,34 @@ impl Owner {
             _ => self.fail(Error::Invalid),
         }
     }
+    /// The distinct deletion phase still loans DATA only. The native owner
+    /// must retain its original Remove continuation; neither this call nor the
+    /// old stop result supplies consent to the independent cleanup helper.
+    pub fn arm_cleanup(
+        &mut self,
+        input: &crate::worktree_programs::cleanup::Input,
+        borrower: NativeChild,
+        until: Instant,
+    ) -> Result<(), Error> {
+        if self.armed.is_some() {
+            return self.fail(Error::Unsettled);
+        }
+        let deadline_millis = wire::clock::freeze(until).map_err(|_| Error::Expired)?;
+        let binding = Binding::for_cleanup(&self.pipeline, input);
+        self.armed = Some(binding.clone()); // No late/missing ACK can reopen it.
+        match self.exchange(
+            Control::ArmCleanup {
+                pipeline: self.pipeline.clone(),
+                input: Box::new(input.clone()),
+                borrower,
+                deadline_millis,
+            },
+            until,
+        )? {
+            Reply::Armed { binding: accepted } if accepted == binding => Ok(()),
+            _ => self.fail(Error::Invalid),
+        }
+    }
     /// The same native owner may obtain a fresh LIST after the old mutator has
     /// actually retired. This is data only, never fresh stop/Force permission.
     pub fn observe(&mut self, until: Instant) -> Result<crate::worktree_programs::Manifest, Error> {

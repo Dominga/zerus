@@ -58,19 +58,15 @@ impl Origin {
             Self::Native(c) => c.executable(),
         }
     }
-    fn prepare_stop(
-        &self,
-        intent: zerus_client_core::worktree_programs::invocation::Intent,
-    ) -> Result<Registration, String> {
+    fn prepare_phase(&self, phase: &Phase, source: &Source) -> Result<Registration, String> {
+        let input = phase.stop();
         if !self.current()
-            || intent.input.source != self.scope()
-            || intent.input.manifest.configuration != self.configuration()
+            || input.source != self.scope()
+            || input.manifest.configuration != self.configuration()
         {
             return Err(UNCONFIRMED.into());
         }
-        let request = Request::WorktreeProgramStop {
-            intent: Box::new(intent),
-        };
+        let request = phase.request(source);
         match self {
             Self::Service(c) => c
                 .service
@@ -80,7 +76,7 @@ impl Origin {
                 .ok_or(UNCONFIRMED)?
                 .prepare_ui_request(uuid::Uuid::new_v4().to_string(), request)
                 .map_err(|_| UNCONFIRMED.into()),
-            Self::Native(c) => c.prepare_stop(request),
+            Self::Native(c) => c.prepare_request(request),
         }
     }
     fn check_stop_capability(&self) -> Result<(), String> {
@@ -100,12 +96,16 @@ impl Origin {
             Self::Native(c) => c.read(args, 256 << 10)?,
         };
         let text = std::str::from_utf8(&bytes).map_err(|_| UNCONFIRMED)?;
-        if !text
-            .lines()
-            .any(|line| line.trim() == zerus_client_core::worktree_programs::stop::HELP_MARKER)
-            || !self.current()
-        {
-            return Err("termination_program_stop_unavailable".into());
+        // Offer the combined pipeline only when THIS retained image exposes
+        // both closed kinds. A working stop command cannot attest deletion
+        // support on a different/later helper or justify an ordinary fallback.
+        for marker in [
+            zerus_client_core::worktree_programs::stop::HELP_MARKER,
+            zerus_client_core::worktree_programs::cleanup::HELP_MARKER,
+        ] {
+            if !text.lines().any(|line| line.trim() == marker) || !self.current() {
+                return Err("termination_program_stop_unavailable".into());
+            }
         }
         Ok(())
     }
@@ -113,9 +113,16 @@ impl Origin {
         &self,
         command: &mut std::process::Command,
     ) -> std::io::Result<(Child, Option<NativeChild>)> {
+        self.spawn_with_custody(command, None)
+    }
+    fn spawn_with_custody(
+        &self,
+        command: &mut std::process::Command,
+        custody: Option<&Arc<run::custody::InheritedLock>>,
+    ) -> std::io::Result<(Child, Option<NativeChild>)> {
         match self {
-            Self::Service(c) => c.spawn_program_child(command),
-            Self::Native(c) => c.spawn(command),
+            Self::Service(c) => c.spawn_program_child(command, custody),
+            Self::Native(c) => c.spawn_with_custody(command, custody),
         }
     }
 }
@@ -235,11 +242,15 @@ impl Context {
     fn spawn_program_child(
         &self,
         command: &mut std::process::Command,
+        custody: Option<&Arc<run::custody::InheritedLock>>,
     ) -> std::io::Result<(Child, Option<NativeChild>)> {
         if !self.current() {
             return Err(std::io::ErrorKind::PermissionDenied.into());
         }
         self.image.before_spawn(command)?;
+        if let Some(custody) = custody {
+            custody.inherit(command)?;
+        }
         let mut child = command.spawn()?;
         let identity = self.image.observe_custody_child(&mut child).ok();
         if identity.is_none() || !self.same_context() {
@@ -411,7 +422,39 @@ impl Source {
         self: &Arc<Self>,
         input: zerus_client_core::worktree_programs::stop::Input,
     ) -> Result<StopAttempt, String> {
-        use zerus_client_core::worktree_programs::{invocation::Intent, stop::Report};
+        let (bytes, mutation) = self.run_phase(Phase::Stop(Box::new(input.clone())))?;
+        let result = bytes.and_then(|bytes| {
+            zerus_client_core::worktree_programs::stop::Report::decode(&bytes, &input)
+                .map_err(|_| UNCONFIRMED.into())
+        });
+        Ok(StopAttempt {
+            input,
+            result,
+            mutation,
+        })
+    }
+    pub(super) fn run_cleanup(
+        self: &Arc<Self>,
+        input: zerus_client_core::worktree_programs::cleanup::Input,
+    ) -> Result<CleanupAttempt, String> {
+        let (bytes, mutation) = self.run_phase(Phase::Cleanup(input.clone()))?;
+        let result = bytes.and_then(|bytes| {
+            zerus_client_core::worktree_programs::cleanup::Report::decode(&bytes, &input)
+                .map_err(|_| UNCONFIRMED.into())
+        });
+        Ok(CleanupAttempt {
+            input,
+            result,
+            mutation,
+        })
+    }
+    // Only the two private typed continuations can select one of these fixed
+    // kinds. No renderer/JSON program, mode, PID or image selects execution.
+    fn run_phase(
+        self: &Arc<Self>,
+        phase: Phase,
+    ) -> Result<(Result<Vec<u8>, String>, Mutation), String> {
+        let input = phase.stop();
         if !self.current()
             || input.source != self.context.scope()
             || input.manifest.capture != self.manifest.capture
@@ -426,25 +469,20 @@ impl Source {
         }
         let until =
             (Instant::now() + Duration::from_millis(custody::PHASE_MILLIS)).min(self.not_after);
-        let intent = Intent {
-            input: Box::new(input.clone()),
-            pipeline: self.pipeline.clone(),
-            holder: self.holder.clone(),
-            socket: self.socket.clone(),
-        };
-        let registration = self.context.prepare_stop(intent)?;
+        let registration = self.context.prepare_phase(&phase, self)?;
         let bytes = serde_json::to_vec(registration.envelope()).map_err(|_| UNCONFIRMED)?;
         if bytes.len() > custody::FRAME_BYTES {
             return Err(UNCONFIRMED.into());
         }
-        let (mutation, charge) = Mutation::new(self.clone(), &input);
+        let (mutation, charge) = Mutation::bound(self.clone(), phase.binding(self))?;
+        let inherited = charge.descendants.clone();
         mutation.armed.store(false, Ordering::Release);
         let armed = mutation.armed.clone();
         let resource: Arc<dyn Send + Sync> = Arc::new((charge, registration.resources()));
         let rejected = Arc::new(AtomicBool::new(false));
         let refusal = rejected.clone();
         let selected = self.clone();
-        let frozen = input.clone();
+        let frozen = phase.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let finished = Arc::new(AtomicBool::new(false));
         let observe_stop = stop.clone();
@@ -465,10 +503,10 @@ impl Source {
             })
             .map_err(|_| UNCONFIRMED)?;
         let invocation = Invocation {
-            args: vec!["worktrees".into(), "program-stop".into(), "--json".into()],
+            args: vec!["worktrees".into(), phase.command().into(), "--json".into()],
             stdin: Some(bytes),
             timeout: until.saturating_duration_since(Instant::now()),
-            request_id: Some(input.request_id.clone()),
+            request_id: Some(phase.request_id().to_owned()),
         };
         #[cfg(target_os = "macos")]
         let invocation = run::rendezvous::prepare(&invocation);
@@ -482,15 +520,21 @@ impl Source {
             &stop,
             resource,
             move |command| {
-                let (mut child, native) = selected.context.spawn(command)?;
+                let (mut child, native) = selected
+                    .context
+                    .spawn_with_custody(command, Some(&inherited))?;
                 let mut refused = native.is_none() || !registration.bind_original(&child);
                 if !refused {
                     armed.store(true, Ordering::Release); // missing ACK cannot reopen a phase
-                    refused = selected
-                        .owner
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .arm(&frozen, native.expect("original observed child"), until)
+                    refused = frozen
+                        .arm(
+                            &mut selected
+                                .owner
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner),
+                            native.expect("original observed child"),
+                            until,
+                        )
                         .is_err();
                 }
                 if refused || !selected.current() {
@@ -506,17 +550,13 @@ impl Source {
             match exit {
                 Ok(Exit::Code {
                     code: 0, stdout, ..
-                }) => Report::decode(&stdout, &input).map_err(|_| UNCONFIRMED.into()),
+                }) => Ok(stdout),
                 _ => Err(UNCONFIRMED.into()),
             }
         } else {
             Err(UNCONFIRMED.into())
         };
-        Ok(StopAttempt {
-            input,
-            result,
-            mutation,
-        })
+        Ok((result, mutation))
     }
 }
 
@@ -526,41 +566,119 @@ pub(super) struct StopAttempt {
     pub(super) mutation: Mutation,
 }
 
+pub(super) struct CleanupAttempt {
+    pub(super) input: zerus_client_core::worktree_programs::cleanup::Input,
+    pub(super) result: Result<zerus_client_core::worktree_programs::cleanup::Report, String>,
+    pub(super) mutation: Mutation,
+}
+#[derive(Clone)]
+enum Phase {
+    Stop(Box<zerus_client_core::worktree_programs::stop::Input>),
+    Cleanup(zerus_client_core::worktree_programs::cleanup::Input),
+}
+impl Phase {
+    fn stop(&self) -> &zerus_client_core::worktree_programs::stop::Input {
+        match self {
+            Self::Stop(input) => input,
+            Self::Cleanup(input) => &input.stop,
+        }
+    }
+    fn request_id(&self) -> &str {
+        match self {
+            Self::Stop(input) => &input.request_id,
+            Self::Cleanup(input) => &input.request_id,
+        }
+    }
+    fn command(&self) -> &'static str {
+        match self {
+            Self::Stop(_) => "program-stop",
+            Self::Cleanup(_) => "program-cleanup",
+        }
+    }
+    fn binding(&self, source: &Source) -> custody::Binding {
+        match self {
+            Self::Stop(input) => custody::Binding::for_input(&source.pipeline, input),
+            Self::Cleanup(input) => custody::Binding::for_cleanup(&source.pipeline, input),
+        }
+    }
+    fn request(&self, source: &Source) -> Request {
+        match self {
+            Self::Stop(input) => Request::WorktreeProgramStop {
+                intent: Box::new(zerus_client_core::worktree_programs::invocation::Intent {
+                    input: input.clone(),
+                    pipeline: source.pipeline.clone(),
+                    holder: source.holder.clone(),
+                    socket: source.socket.clone(),
+                }),
+            },
+            Self::Cleanup(input) => Request::WorktreeProgramCleanup {
+                intent: Box::new(zerus_client_core::worktree_programs::cleanup::Intent {
+                    input: Box::new(input.clone()),
+                    pipeline: source.pipeline.clone(),
+                    holder: source.holder.clone(),
+                    socket: source.socket.clone(),
+                }),
+            },
+        }
+    }
+    fn arm(
+        &self,
+        owner: &mut Owner,
+        child: NativeChild,
+        until: Instant,
+    ) -> Result<(), custody::Error> {
+        match self {
+            Self::Stop(input) => owner.arm(input, child, until),
+            Self::Cleanup(input) => owner.arm_cleanup(input, child, until),
+        }
+    }
+}
+
 // Each mutating call will own a fresh instance. The read-only Source/holder is
 // retained here but is NOT counted as that call's mutating reader/loan charge.
 struct MutatorResources {
+    descendants: Arc<run::custody::InheritedLock>,
     _source: Arc<Source>,
 }
 pub(super) struct Mutation {
     source: Arc<Source>,
     binding: custody::Binding,
     resources: Weak<MutatorResources>,
+    descendants: super::descendants::Probe,
     retired: bool,
     armed: Arc<AtomicBool>,
 }
 impl Mutation {
     /// A private native call obtains this while arming its ORIGINAL helper;
     /// this bookkeeping is not the one-shot native stop/Force permit.
+    #[cfg(test)]
     fn new(
         source: Arc<Source>,
         input: &zerus_client_core::worktree_programs::stop::Input,
     ) -> (Self, Arc<MutatorResources>) {
+        let binding = custody::Binding::for_input(&source.pipeline, input);
+        Self::bound(source, binding).unwrap()
+    }
+    fn bound(
+        source: Arc<Source>,
+        binding: custody::Binding,
+    ) -> Result<(Self, Arc<MutatorResources>), String> {
+        let hold: Arc<dyn Send + Sync> = source.clone();
+        let (descendants, inherited) =
+            super::descendants::Probe::new(hold).map_err(|_| UNCONFIRMED)?;
         let charge = Arc::new(MutatorResources {
+            descendants: inherited,
             _source: source.clone(),
         });
         let mutation = Self {
-            binding: custody::Binding::for_input(
-                // This is the already-armed phase's exact pipeline binding.
-                // The caller checks it against the holder when arming.
-                &source.pipeline,
-                input,
-            ),
+            binding,
             source,
             resources: Arc::downgrade(&charge),
+            descendants,
             retired: false,
             armed: Arc::new(AtomicBool::new(true)),
         };
-        (mutation, charge)
+        Ok((mutation, charge))
     }
     pub(super) fn try_retire(&mut self) -> Result<bool, String> {
         if self.retired {
@@ -568,7 +686,7 @@ impl Mutation {
         }
         // A parsed result, process exit, socket close or release ACK cannot
         // bypass these actual owned pipe/worker/loan resource references.
-        if self.resources.upgrade().is_some() {
+        if self.resources.upgrade().is_some() || !self.descendants.drained() {
             return Ok(false);
         }
         if self.armed.load(Ordering::Acquire) {

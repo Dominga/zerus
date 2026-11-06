@@ -923,18 +923,19 @@ pub(crate) struct NativeSource {
 }
 #[allow(dead_code)]
 impl NativeSource {
-    pub(crate) fn prepare_program_stop(
+    pub(crate) fn prepare_program_request(
         &self,
         request: zerus_client_core::desktop::ui_requests::Request,
     ) -> Result<zerus_client_core::desktop::ui_requests::Registration, &'static str> {
-        let zerus_client_core::desktop::ui_requests::Request::WorktreeProgramStop { intent } =
-            &request
-        else {
-            return Err("worktree_programs_native_request_invalid");
+        use zerus_client_core::desktop::ui_requests::Request;
+        let input = match &request {
+            Request::WorktreeProgramStop { intent } => &intent.input,
+            Request::WorktreeProgramCleanup { intent } => &intent.input.stop,
+            _ => return Err("worktree_programs_native_request_invalid"),
         };
         if !self.route_current()
-            || intent.input.manifest.configuration != self.original.configuration
-            || intent.input.source
+            || input.manifest.configuration != self.original.configuration
+            || input.source
                 != (zerus_client_core::worktree_programs::stop::Source::Native {
                     request_id: self.original.request_id.clone(),
                     journal: self.original.journal.clone(),

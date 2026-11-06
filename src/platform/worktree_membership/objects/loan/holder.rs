@@ -43,6 +43,7 @@ pub(crate) struct Holder {
     phase: Option<Phase>,
     source: Option<Source>,
     observations: usize,
+    cleanup_used: bool,
 }
 impl Holder {
     /// The original Scope is MOVED here before confirmation; no serialized
@@ -75,6 +76,7 @@ impl Holder {
             phase: None,
             source: None,
             observations: 0,
+            cleanup_used: false,
         })
     }
     fn open(&mut self, until: Instant) -> io::Result<Instant> {
@@ -93,7 +95,11 @@ impl Holder {
     /// them. An unretired mutator blocks observation for Force, even after EOF.
     pub(crate) fn observe(&mut self, now: u64, until: Instant) -> io::Result<Manifest> {
         let until = self.open(until)?;
-        if self.phase.is_some() || self.observations >= MAX_PHASES || !self.original.valid(now) {
+        if self.cleanup_used
+            || self.phase.is_some()
+            || self.observations >= MAX_PHASES
+            || !self.original.valid(now)
+        {
             return Err(invalid());
         }
         self.observations += 1;
@@ -120,9 +126,38 @@ impl Holder {
         now: u64,
         until: Instant,
     ) -> io::Result<()> {
+        let binding = Request::for_input(&self.pipeline, input);
+        self.arm_bound(input, binding, borrower, now, until)
+    }
+    pub(crate) fn arm_cleanup(
+        &mut self,
+        input: &zerus_client_core::worktree_programs::cleanup::Input,
+        borrower: Peer,
+        now: u64,
+        until: Instant,
+    ) -> io::Result<()> {
+        if !input.valid() || !self.used.contains(&input.stop.request_id) {
+            return Err(invalid());
+        }
+        let binding = Request::for_cleanup(&self.pipeline, input);
+        self.arm_bound(&input.stop, binding, borrower, now, until)?;
+        // Terminal even if delivery/result is lost. No later stop, Force,
+        // observation loan or new removal UUID can reopen this pipeline.
+        self.cleanup_used = true;
+        Ok(())
+    }
+    fn arm_bound(
+        &mut self,
+        input: &Input,
+        binding: Request,
+        borrower: Peer,
+        now: u64,
+        until: Instant,
+    ) -> io::Result<()> {
         let until = self.open(until)?;
         let manifest = &input.manifest;
-        if self.phase.is_some()
+        if self.cleanup_used
+            || self.phase.is_some()
             || self.used.len() >= MAX_PHASES
             || !input.valid()
             || !manifest.valid(now)
@@ -131,7 +166,10 @@ impl Holder {
             || manifest.boot != self.original.boot
             || manifest.checkout != self.original.checkout
             || !self.original.contains_originals(&manifest.programs)
-            || self.used.contains(&input.request_id)
+            || !binding.valid()
+            || binding.pipeline != self.pipeline
+            || binding.manifest != manifest.binding()
+            || self.used.contains(&binding.request)
             || self.source.as_ref().is_some_and(|old| old != &input.source)
             || borrower.exited()?
         {
@@ -142,9 +180,9 @@ impl Holder {
         if self.source.is_none() {
             self.source = Some(input.source.clone());
         }
-        self.used.insert(input.request_id.clone());
+        self.used.insert(binding.request.clone());
         self.phase = Some(Phase {
-            request: Request::for_input(&self.pipeline, input),
+            request: binding,
             borrower,
             until,
             spent: false,

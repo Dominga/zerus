@@ -362,6 +362,26 @@ impl Stopped {
             input,
         })
     }
+    /// Only the still-live original Remove continuation, after an exact Complete
+    /// stop AND actual retirement, can open the distinct deletion phase once.
+    pub(crate) fn cleanup(mut self) -> Result<Removal, String> {
+        if !self.current()
+            || self.report().map_err(str::to_owned)?.state != State::Complete
+            || !self.try_retire()?
+        {
+            return Err(UNCONFIRMED.into());
+        }
+        let attempt = self.continuation.source.run_cleanup(
+            zerus_client_core::worktree_programs::cleanup::Input {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                stop: Box::new(self.attempt.input),
+            },
+        )?;
+        Ok(Removal {
+            continuation: self.continuation,
+            attempt,
+        })
+    }
     pub(crate) fn close(&self) -> Result<(), String> {
         self.continuation.close()
     }
@@ -401,5 +421,37 @@ impl ForceOffer {
     }
     pub(crate) fn close(&self) -> Result<(), String> {
         self.previous.close()
+    }
+}
+
+/// Never serialized or reconstructed. Holds the SAME original Source/Actions
+/// and the distinct cleanup helper/pipe lifetime until physical retirement.
+pub(crate) struct Removal {
+    continuation: Continuation,
+    attempt: super::source::CleanupAttempt,
+}
+impl Removal {
+    pub(crate) fn current(&self) -> bool {
+        self.continuation.current()
+    }
+    pub(crate) fn try_retire(&mut self) -> Result<bool, String> {
+        self.attempt.mutation.try_retire()
+    }
+    pub(crate) fn close(&self) -> Result<(), String> {
+        self.continuation.close()
+    }
+    pub(crate) fn report(
+        &self,
+    ) -> Result<&zerus_client_core::worktree_programs::cleanup::Report, &str> {
+        self.attempt
+            .result
+            .as_ref()
+            .map_err(String::as_str)
+            .and_then(|report| {
+                report
+                    .valid(&self.attempt.input)
+                    .then_some(report)
+                    .ok_or(UNCONFIRMED)
+            })
     }
 }

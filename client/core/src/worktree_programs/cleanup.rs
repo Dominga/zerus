@@ -89,6 +89,56 @@ impl Intent {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum State {
+    Removed,
+    Kept,
+    Unknown,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reason {
+    NotAdmitted,
+    Changed,
+    Programs,
+    Unconfirmed,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Report {
+    pub request_id: String,
+    pub binding: String,
+    pub state: State,
+    pub reason: Option<Reason>,
+}
+impl Report {
+    pub fn valid(&self, input: &Input) -> bool {
+        input.valid()
+            && self.request_id == input.request_id
+            && self.binding == input.binding()
+            && match self.state {
+                State::Removed => self.reason.is_none(),
+                State::Kept => matches!(
+                    self.reason,
+                    Some(Reason::NotAdmitted | Reason::Changed | Reason::Programs)
+                ),
+                State::Unknown => self.reason == Some(Reason::Unconfirmed),
+            }
+    }
+    pub fn decode(bytes: &[u8], input: &Input) -> Result<Self, &'static str> {
+        if bytes.len() > super::MAX_BYTES {
+            return Err("program_cleanup_result_oversized");
+        }
+        let result: Self =
+            serde_json::from_slice(bytes).map_err(|_| "program_cleanup_result_invalid")?;
+        result
+            .valid(input)
+            .then_some(result)
+            .ok_or("program_cleanup_result_invalid")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,6 +171,42 @@ mod tests {
         assert!(Input::decode(&vec![b' '; custody::FRAME_BYTES]).is_err());
     }
     #[test]
+    fn final_cleanup_results_keep_unknown_terminal_and_bind_every_original() {
+        let input = input();
+        for (state, reason) in [
+            (State::Removed, None),
+            (State::Kept, Some(Reason::Changed)),
+            (State::Unknown, Some(Reason::Unconfirmed)),
+        ] {
+            let report = Report {
+                request_id: input.request_id.clone(),
+                binding: input.binding(),
+                state,
+                reason,
+            };
+            let bytes = serde_json::to_vec(&report).unwrap();
+            assert_eq!(Report::decode(&bytes, &input).unwrap(), report);
+            let mut other = input.clone();
+            other.stop.archive_id = uuid::Uuid::new_v4().to_string();
+            assert!(Report::decode(&bytes, &other).is_err());
+        }
+        for (state, reason) in [
+            (State::Removed, Some(Reason::Changed)),
+            (State::Kept, None),
+            (State::Kept, Some(Reason::Unconfirmed)),
+            (State::Unknown, None),
+            (State::Unknown, Some(Reason::Changed)),
+        ] {
+            assert!(!Report {
+                request_id: input.request_id.clone(),
+                binding: input.binding(),
+                state,
+                reason
+            }
+            .valid(&input));
+        }
+    }
+    #[test]
     fn retired_stop_binding_is_never_the_cleanup_loan_binding() {
         let input = input();
         let pipeline = uuid::Uuid::new_v4().to_string();
@@ -130,5 +216,34 @@ mod tests {
         assert_eq!(original.manifest, cleanup.manifest);
         assert_ne!(original.request, cleanup.request);
         assert_ne!(original.input, cleanup.input);
+    }
+    #[test]
+    fn cleanup_custody_frames_are_closed_and_never_decode_as_another_stop() {
+        let input = input();
+        let frame = custody::Control::ArmCleanup {
+            pipeline: uuid::Uuid::new_v4().to_string(),
+            input: Box::new(input),
+            borrower: custody::NativeChild {
+                pid: 41,
+                parent: 40,
+                birth: "original-birth".into(),
+                audit: None,
+            },
+            deadline_millis: 100,
+        };
+        let bytes = frame.encode().unwrap();
+        assert_eq!(custody::Control::decode(&bytes).unwrap(), frame);
+        for (field, replacement) in [
+            ("op", serde_json::json!("arm")),
+            ("deadline_millis", serde_json::json!(0)),
+            ("force", serde_json::json!(true)),
+        ] {
+            let mut changed = serde_json::to_value(&frame).unwrap();
+            changed[field] = replacement;
+            assert!(
+                custody::Control::decode(&serde_json::to_vec(&changed).unwrap()).is_err(),
+                "{field}"
+            );
+        }
     }
 }

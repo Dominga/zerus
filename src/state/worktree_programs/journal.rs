@@ -32,7 +32,7 @@ struct Link {
 
 pub(super) struct Store {
     parent: Directory,
-    directory: Directory,
+    pub(super) directory: Directory,
 }
 pub(crate) struct Claim {
     store: Store,
@@ -59,7 +59,7 @@ fn sync(directory: &Directory) -> Result<()> {
     }
     directory.verify()
 }
-fn exists(directory: &Directory, leaf: &str) -> Result<bool> {
+pub(super) fn exists(directory: &Directory, leaf: &str) -> Result<bool> {
     let leaf = CString::new(leaf).map_err(io)?;
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
     if unsafe {
@@ -80,7 +80,7 @@ fn exists(directory: &Directory, leaf: &str) -> Result<bool> {
         Err(io(error))
     }
 }
-fn read(directory: &Directory, leaf: &str, cap: usize) -> Result<Option<Vec<u8>>> {
+pub(super) fn read(directory: &Directory, leaf: &str, cap: usize) -> Result<Option<Vec<u8>>> {
     if !exists(directory, leaf)? {
         return Ok(None);
     }
@@ -98,7 +98,7 @@ fn read(directory: &Directory, leaf: &str, cap: usize) -> Result<Option<Vec<u8>>
     directory.verify()?;
     Ok(Some(bytes))
 }
-fn write<T: serde::Serialize>(
+pub(super) fn write<T: serde::Serialize>(
     directory: &Directory,
     leaf: &str,
     value: &T,
@@ -148,7 +148,7 @@ impl Store {
         store.current()?;
         Ok(Some(store))
     }
-    fn current(&self) -> Result<()> {
+    pub(super) fn current(&self) -> Result<()> {
         self.parent.verify()?;
         self.directory.verify()?;
         if !self.parent.private()? || !self.directory.private()? {
@@ -212,7 +212,7 @@ impl Store {
         }
         Ok(Some((input, report)))
     }
-    fn group(&self, input: &Input) -> Result<File> {
+    pub(super) fn group(&self, input: &Input) -> Result<File> {
         let scope = (
             &input.manifest.configuration,
             &input.manifest.capture.machine,
@@ -416,14 +416,14 @@ impl Claim {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use zerus_client_core::{
         termination_cleanup::Capture,
         worktree_programs::{DirectoryId, Manifest, Program},
         Target,
     };
-    fn input() -> Input {
+    pub(in crate::state::worktree_programs) fn input() -> Input {
         let id = "11111111-1111-4111-8111-111111111111";
         let capture = Capture {
             target: Target {

@@ -176,6 +176,12 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
                 let mut found = item(team, "permission_escalated", &format!("{member}-terminal"), summary, at, "open_terminal");
                 found["member"] = json!(member);
                 found["member_id"] = attention["member_id"].clone();
+                // Task 113: once raised, the session and the screen's last lines.
+                for key in ["escalated", "raised_at", "minutes", "screen", "session", "host", "tool", "reason"] {
+                    if !attention[key].is_null() {
+                        found[key] = attention[key].clone();
+                    }
+                }
                 out.push(found);
             }
             // N17: a replan pauses the team for the owner's word on the proposal.

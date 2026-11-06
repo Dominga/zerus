@@ -15,7 +15,9 @@
 //! The builds are this test binary copied as `hgs-tray.exe`: started with no
 //! arguments it runs this one test, which sees its name and acts as the
 //! build: it stays (writing its pid) or exits at once, as `stub-mode` says.
-//! The helpers show their banner on screen while they run (~1.5 minutes).
+//! The helpers run with `-Quiet` (task 114: never passed by the updaters), so
+//! no banner shows and every build starts without a window; the test checks
+//! that no window of theirs appeared while they ran (~1.5 minutes).
 #![cfg(windows)]
 
 use sha2::{Digest, Sha256};
@@ -139,11 +141,77 @@ fn stage(updater: &mut ForkUpdater, number: u64, commit: &str, zip: &Path) {
     assert_eq!(updater.ready_build(), number, "{}", updater.view().status.english());
 }
 
-/// Runs a helper to its end, as it runs once Zerus quits.
-fn run_helper(program: &Path, args: &[String]) -> std::process::Output {
+/// Visible top-level windows that the helper or a build under `root` shows:
+/// the banner ("Zerus update"), any window of the helper or of a build's
+/// image, and a console window titled with a build's path (task 114).
+fn helper_windows(helper: u32, root: &Path) -> Vec<String> {
+    use windows_sys::Win32::Foundation::{HWND, LPARAM};
+    use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible};
+    unsafe extern "system" fn each(hwnd: HWND, list: LPARAM) -> windows_sys::core::BOOL {
+        let list = unsafe { &mut *(list as *mut Vec<(u32, String)>) };
+        if unsafe { IsWindowVisible(hwnd) } != 0 {
+            let mut pid = 0;
+            unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+            let mut title = [0u16; 512];
+            let length = unsafe { GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32) };
+            list.push((pid, String::from_utf16_lossy(&title[..length.max(0) as usize])));
+        }
+        1
+    }
+    let image = |pid: u32| -> String {
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            return String::new();
+        }
+        let mut path = [0u16; 1024];
+        let mut size = path.len() as u32;
+        let ok = unsafe { QueryFullProcessImageNameW(process, 0, path.as_mut_ptr(), &mut size) } != 0;
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(process) };
+        if ok { String::from_utf16_lossy(&path[..size as usize]) } else { String::new() }
+    };
+    let mut windows: Vec<(u32, String)> = Vec::new();
+    unsafe { EnumWindows(Some(each), &mut windows as *mut _ as LPARAM) };
+    let root = root.to_string_lossy().to_lowercase();
+    windows
+        .into_iter()
+        .filter(|(pid, title)| {
+            *pid == helper
+                || title == "Zerus update"
+                || title.to_lowercase().contains(&root)
+                || image(*pid).to_lowercase().starts_with(&root)
+        })
+        .map(|(pid, title)| format!("pid {pid}: {title:?}"))
+        .collect()
+}
+
+/// Runs a helper to its end, as it runs once Zerus quits, but with `-Quiet`:
+/// no window of the helper or of the builds it starts may appear.
+fn run_helper(program: &Path, args: &[String], root: &Path) -> std::process::Output {
     let started = Instant::now();
-    let output = Command::new(program).args(args).current_dir(std::env::temp_dir()).stdin(Stdio::null()).output().unwrap();
+    let child = Command::new(program)
+        .args(args)
+        .arg("-Quiet")
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let helper = child.id();
+    let waiter = std::thread::spawn(move || child.wait_with_output().unwrap());
+    let mut shown = Vec::new();
+    while !waiter.is_finished() {
+        for window in helper_windows(helper, root) {
+            if !shown.contains(&window) {
+                shown.push(window);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let output = waiter.join().unwrap();
     assert!(started.elapsed() < Duration::from_secs(240), "the helper finished");
+    assert!(shown.is_empty(), "a quiet helper showed windows: {shown:?}");
     output
 }
 
@@ -172,7 +240,7 @@ fn qt_install(root: &Path, number: u64, commit: &str, zip: &Path) -> std::proces
     let script = root.join(format!("qt-helper-{number}.ps1"));
     std::fs::write(&script, qt_helper(true)).unwrap();
     let command = fork_update::helper_command(&layout, &script, gone_pid(), &qt.unpacked(), number, &system_root(), &std::env::temp_dir());
-    run_helper(&command.program, &command.args)
+    run_helper(&command.program, &command.args, root)
 }
 
 #[test]
@@ -222,7 +290,12 @@ fn qt_installed_layout_hands_over_to_tauri_and_back() {
 
     // 3. Rollback to the Qt build by hand: current back to app-100 starts it.
     junction(&root.join("current"), &root.join("app-100"));
-    Command::new(root.join("current").join("hgs-tray.exe")).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW: the stand-in build never shows a console.
+        Command::new(root.join("current").join("hgs-tray.exe")).creation_flags(0x0800_0000)
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    }
     assert!(running(&root.join("app-100")).is_some(), "the Qt build runs after the rollback");
     stop(&root.join("app-100"));
     junction(&root.join("current"), &root.join("app-101"));
@@ -236,7 +309,8 @@ fn qt_installed_layout_hands_over_to_tauri_and_back() {
     let script = root.join("tauri-helper-102.ps1");
     let command = tauri.start_install(&script, gone_pid(), &system_root(), &std::env::temp_dir()).unwrap();
     assert_eq!(std::fs::read_to_string(&script).unwrap(), qt_helper(true), "the Tauri app writes the Qt helper");
-    let output = run_helper(&command.program, &command.args);
+    assert!(!command.args.iter().any(|arg| arg.eq_ignore_ascii_case("-Quiet")), "the updater never asks for quiet");
+    let output = run_helper(&command.program, &command.args, &root);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(current(&root), "app-102");
     assert_eq!(fork_update::source_commit(&root.join("current")), TAURI_2);

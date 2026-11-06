@@ -2441,6 +2441,28 @@ defer-session --json` (0 turns it off; at most 100 sessions). The team worker
 then reads such a session while it asks, at most every 20 seconds, and keeps
 running for it. A session of a team follows its team's setting.
 
+#### A request only the Terminal takes is raised to the owner
+
+A member's request that Zerus cannot answer (`can_answer` false: a Kimi
+approval whose panel Zerus cannot verify, Kimi's Edit and Write approvals, a
+request behind another one) is never a quiet wait. The owner sees it at once
+(Waiting for you, kind `permission_escalated`, action `open_terminal`) and the
+lead's inbox names it. Once it has waited `defer_minutes` (10 when the queue is
+off), the dispatcher raises it once (task 113): it reads the member's Terminal
+(`hgs terminal NAME --json`, action `snapshot`) and keeps the last 12 non-blank
+lines in the member's `terminal_escalation`, bound to that request's id. The
+owner's item then adds `escalated`, `raised_at`, `minutes`, `session`, `host`,
+`tool`, `reason` and `screen`; the lead's `hgs ls --json` row carries one
+`mobile_attention` alert `{"question_id":"team-terminal-prompt:<team>:<member>:<question>",
+"question_hash","kind":"team_terminal_prompt","team","team_name","member",
+"member_id","session","host","tool","screen","action":"open_terminal",
+"action_label":"Open Terminal","since"}` with the screen's last six lines (at
+most 120 characters each); the mobile connector keeps it beside its question
+cards. The lead's starved-member message lists every member that waits in a
+Terminal, with its session, minutes and request. The escalation goes with its
+request (feed `terminal_prompt_raised`, `terminal_prompt_cleared`); Zerus never
+answers it.
+
 ### The profile of the work: losses, spans and unknown
 
 `hgs team profile` reads a scope after the work: where its time and tokens
@@ -3277,6 +3299,16 @@ record Kimi is still writing, a line that is not a JSON object with one string
 type, an interaction record without its ID or of a kind Kimi does not write,
 or a repeated request ID keeps the approval read-only. Types and IDs are
 compared as decoded JSON.
+Kimi Code 2.5 (task 113) writes the same wire records and draws the same
+rows; in fullscreen mode (`tui_mode = "fullscreen"`) it docks the panel: its
+body is one column narrower (the scrollbar's) and shows at most six rows, and a
+longer body adds ` · shift+↑/↓ scroll` to the key hint. Zerus reads both
+layouts row by row; a scrolled body, a panel without the keyboard (`esc back
+to approval`) or a narrow one stays read-only and says why. A request of the
+running turn whose tool call Kimi's PreToolUse hook has not reported to Zerus
+still shows its exact command, read-only with **Open Terminal**, and becomes
+answerable once the hook reports it; one older than the turn, or after it
+ended, shows nothing.
 Experimental and off by default: an empty file
 `~/.config/hgs/kimi-unverified-edit-approvals` (in `HGS_CONFIG_DIR` when set)
 also lets Zerus answer Kimi's **Edit** and **Write** approvals, from Activity

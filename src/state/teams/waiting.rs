@@ -26,7 +26,9 @@ pub(crate) struct Waiting {
     pub build: Option<Value>,
     /// Task 95: the lead stalled: the phone's alert item for the lead's row
     /// (`mobile_attention`), one per notification round.
-    pub alert: Option<Value>,
+    /// Task 95's stalled-lead alert and task 113's raised Terminal-only
+    /// requests of the team's members, all on the lead's row.
+    pub alerts: Vec<Value>,
     /// Task 97: the team, so the owner queue finds its lead's row.
     pub team: String,
 }
@@ -49,11 +51,16 @@ pub(crate) fn reasons(teams: &[Team], now: f64) -> Vec<Waiting> {
                     "job":budget.job.as_ref().map(|job| json!({"command":job.command,"since":job.since}))})
             });
             let build = if lead { None } else { team_build(team, member, now) };
-            let alert = team
+            let mut alerts: Vec<Value> = team
                 .lead_stall
                 .as_ref()
                 .filter(|_| lead && team.status == TeamStatus::Running)
-                .map(|stall| super::lead_stall::mobile_item(team, stall));
+                .map(|stall| super::lead_stall::mobile_item(team, stall))
+                .into_iter()
+                .collect();
+            if lead {
+                alerts.extend(team.members.iter().filter_map(|member| super::terminal_prompt::mobile_item(team, member)));
+            }
             out.push(Waiting {
                 name: session.name.clone(),
                 conversation_id: session.conversation_id.clone(),
@@ -61,7 +68,7 @@ pub(crate) fn reasons(teams: &[Team], now: f64) -> Vec<Waiting> {
                 reason,
                 budget,
                 build,
-                alert,
+                alerts,
                 team: team.id.clone(),
             });
         }

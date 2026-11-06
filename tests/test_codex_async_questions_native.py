@@ -16,6 +16,7 @@ import test_codex_update
 
 PROMPT = 'Ask questions with the tool now.'
 CALL = 'call_native_question'
+COLLAB_PROMPT = 'Coordinate the private child question.'
 QUESTIONS = [dict(title='Which option?', options=['One', 'Two']), dict(title='Any notes?')]
 # Taller than an unviewed 80x24 pane and than both CI geometries (95x47, 110x35).
 TALL = [dict(title=' '.join(['Before releasing, which channel should this build target, given that stable needs '
@@ -51,6 +52,9 @@ class Provider(http.server.BaseHTTPRequestHandler):
                  for part in item.get('content') or [] if isinstance(part, dict)]
         tools = offered((body.get('tools') or []) + [tool for item in items if item.get('type') == 'additional_tools'
                                                      for tool in item.get('tools') or []])
+        if self.server.collaboration and (texts[-1:] == [COLLAB_PROMPT]
+                or body.get('model') == 'gpt-6.1-sol' and 'send_message' in tools):
+            return self.collaborate(body, items, texts, tools)
         answering = any(item.get('type') == 'function_call_output' and item.get('call_id') == CALL for item in items)
         self.server.requests.append(dict(texts=texts, tools=tools, answering=answering))
         if not answering and texts and texts[-1] == PROMPT and 'request_user_input_async' in tools:
@@ -78,6 +82,46 @@ class Provider(http.server.BaseHTTPRequestHandler):
         self.wfile.write(('event: ' + kind + '\ndata: ' + json.dumps(dict(type=kind, **data)) + '\n\n').encode())
         self.wfile.flush()
 
+    def collaborate(self, body, items, texts, tools):
+        """A real native child asks its parent, and only its parent answers."""
+        child = body.get('model') == 'gpt-6.1-sol'
+        outputs = {item.get('call_id') for item in items if item.get('type') == 'function_call_output'}
+        self.server.requests.append(dict(texts=texts, tools=tools, answering=False,
+                                         child=child, outputs=sorted(outputs)))
+        def call(name, ident, arguments):
+            return dict(type='function_call', id=ident, call_id=ident, namespace='collaboration',
+                        name=name, arguments=json.dumps(arguments), status='completed')
+        def message(text):
+            return dict(type='message', id='msg_collaboration', role='assistant', status='completed',
+                        content=[dict(type='output_text', text=text, annotations=[])])
+        if child:
+            if 'child_question' not in outputs:
+                item = call('send_message', 'child_question', dict(target='/root', message='Parent: choose One or Two?'))
+            else:
+                self.server.child_question.set()
+                self.server.parent_answer.wait(10)
+                item = message('The parent chose Two; no question for the person.')
+        elif 'spawn_question_child' not in outputs:
+            item = call('spawn_agent', 'spawn_question_child', dict(task_name='question_child',
+                message='Ask the parent which option to use.', model='gpt-6.1-sol', fork_turns='none'))
+        elif 'parent_answer' not in outputs:
+            self.server.child_question.wait(10)
+            item = call('send_message', 'parent_answer', dict(target='question_child', message='Use Two.'))
+        else:
+            self.server.parent_answer.set()
+            self.server.release.wait(120)
+            item = message('Collaboration fixture complete.')
+        response = dict(id='resp_collaboration', object='response', status='completed', output=[item],
+                        usage=dict(input_tokens=1, output_tokens=5, total_tokens=6))
+        try:
+            self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
+            self.emit('response.created', response=dict(response, status='in_progress', output=[]))
+            self.emit('response.output_item.added', output_index=0, item=dict(item, status='in_progress'))
+            self.emit('response.output_item.done', output_index=0, item=item)
+            self.emit('response.completed', response=response)
+        except OSError:
+            pass
+
 
 @unittest.skipUnless(os.environ.get('HGS_CODEX_TEST_BIN'), 'Set HGS_CODEX_TEST_BIN for the isolated native Codex question test')
 class NativeCodexAsyncQuestions(unittest.TestCase):
@@ -89,12 +133,15 @@ class NativeCodexAsyncQuestions(unittest.TestCase):
     fail = native.NativeCodexClear.fail
     wait_for = test_codex_update.NativeCodexUpdate.wait_for
     inspect = synthetic.CodexAsync.inspect
-    native_features = 'send_message_to_user_async=true\n'
+    native_features = 'send_message_to_user_async=true\nmulti_agent_v2=true\n'
+    native_model = 'gpt-6-astra'
     questions = QUESTIONS
 
     def setUp(self):
         self.server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Provider)
         self.server.requests, self.server.release = [], threading.Event()
+        self.server.collaboration = False
+        self.server.child_question, self.server.parent_answer = threading.Event(), threading.Event()
         self.server.questions = self.questions
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
@@ -181,7 +228,59 @@ class NativeCodexAsyncQuestions(unittest.TestCase):
         replay, _ = self.answer(first, payload['answers'][0], payload['request_id'])
         self.assertEqual(replay, receipt)
         self.finish([self.reply(first, 'Two')])
-        self.assertEqual(sorted(self.cards()), self.ids[1:])
+        # Native turn completion closes the unanswered sibling as well; it is
+        # not a user answer. Tool acceptance alone kept both cards pending above.
+        self.assertEqual(self.cards(), {})
+
+    def test_turn_completion_retires_unanswered_questions_without_sending_an_answer(self):
+        old = self.cards()[self.ids[0]]
+        self.assertEqual(sorted(self.cards()), self.ids)
+        self.server.release.set()
+        self.wait_for(lambda: 'Fixture turn complete.' in self.screen() and 'to answer' not in self.screen())
+        self.wait_for(lambda: not self.cards())
+        self.assertEqual(synthetic.CodexAsync.optional(self)['count'], 0)
+        result, _ = synthetic.CodexAsync.answer(self, old, dict(question_id='q_0', text='Too late'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('no longer pending', result.stderr)
+        self.assertEqual(self.replies(), [])
+        messages = self.inspect()['provider_messages']
+        self.assertTrue(any(message.get('detail', '').startswith('Closed\n') for message in messages))
+        self.assertFalse(any(message.get('detail', '').startswith('Answered\n') for message in messages))
+
+    def test_native_interrupt_retires_questions_without_inventing_an_answer(self):
+        self.assertEqual(sorted(self.cards()), self.ids)
+        self.tmux('send-keys', '-t', self.pane, 'C-c')
+        self.wait_for(lambda: 'to answer' not in self.screen())
+        self.wait_for(lambda: not self.cards())
+        self.assertEqual(synthetic.CodexAsync.optional(self)['count'], 0)
+        self.assertEqual(self.replies(), [])
+
+    def test_native_child_question_and_parent_answer_never_ask_the_person(self):
+        self.server.release.set()
+        self.wait_for(lambda: 'Fixture turn complete.' in self.screen() and not self.cards())
+        self.server.release.clear()
+        self.server.collaboration = True
+        self.tmux('send-keys', '-t', self.pane, '-l', COLLAB_PROMPT)
+        self.wait_for(lambda: COLLAB_PROMPT in self.screen())
+        self.tmux('send-keys', '-t', self.pane, 'Enter')
+        self.wait_for(lambda: self.server.parent_answer.is_set())
+        self.assertTrue(self.server.child_question.is_set(), self.server.requests)
+        self.assertTrue(any(row.get('child') and 'child_question' in row.get('outputs', [])
+                            for row in self.server.requests), self.server.requests)
+        child_headers = []
+        for path in (self.native_home / 'sessions').rglob('rollout-*.jsonl'):
+            with path.open() as stream:
+                header = json.loads(stream.readline(256 * 1024))
+            source = header.get('payload', {}).get('source')
+            if isinstance(source, dict) and 'subagent' in source:
+                child_headers.append(source['subagent']['thread_spawn']['parent_thread_id'])
+        self.assertEqual(child_headers, [self.conversation_id])
+        self.assertEqual(self.cards(), {})
+        self.assertEqual(synthetic.CodexAsync.optional(self)['count'], 0)
+        self.assertEqual(self.replies(), [])
+        self.server.release.set()
+        self.wait_for(lambda: 'Collaboration fixture complete.' in self.screen())
+        self.assertEqual(self.cards(), {})
 
     def test_other_and_free_form_answers_follow_the_panel(self):
         self.open_panel()

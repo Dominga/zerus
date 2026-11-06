@@ -617,11 +617,28 @@ fn value_of(params: &[Param], args: &Value, name: &str, folder: &Path) -> anyhow
 /// Task 86: the project's own interpreter, never created or synced. uv,
 /// poetry and plain venvs all live in `.venv` or `venv`; a project without one
 /// is refused with the reason.
-fn interpreter(folder: &Path) -> anyhow::Result<String> {
+fn interpreter(folder: &Path) -> anyhow::Result<(String, Vec<String>)> {
     for candidate in [".venv/Scripts/python.exe", ".venv/bin/python", "venv/Scripts/python.exe", "venv/bin/python"] {
         if folder.join(candidate).is_file() {
-            return Ok(candidate.to_owned());
+            return Ok((candidate.to_owned(), Vec::new()));
         }
+    }
+    // uv and poetry own their environment: use their runner, never create one.
+    if folder.join("uv.lock").is_file() {
+        return Ok(("uv".into(), vec!["run".into(), "python".into()]));
+    }
+    if folder.join("poetry.lock").is_file() {
+        let output = Command::new("poetry").args(["env", "info", "-p"]).current_dir(folder).output();
+        if let Ok(output) = output {
+            if output.status.success() {
+                let root = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+                let python = if cfg!(windows) { format!("{root}/Scripts/python.exe") } else { format!("{root}/bin/python") };
+                if Path::new(&python).is_file() {
+                    return Ok((python, Vec::new()));
+                }
+            }
+        }
+        bail!("poetry.lock has no Poetry environment; run `poetry env use` yourself; Zerus never creates or syncs one");
     }
     bail!("No project Python environment: create .venv with uv, poetry or venv first; Zerus never creates or syncs one")
 }
@@ -661,12 +678,12 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
         }
         return Ok(Plan { template: "git-commit".to_owned(), program: "hgs".into(), argv: vec!["team".into(), "commit".into(), "--json".into()], commit: Some(json!({"message":message,"paths":paths})), more: Vec::new() });
     }
-    let mut program = if matches!(template.id, "py-test" | "cython-build") {
-        let python = interpreter(folder)?;
+    let (mut program, prefix) = if matches!(template.id, "py-test" | "cython-build") {
+        let (python, prefix) = interpreter(folder)?;
         if template.id == "py-test" { let _ = std::fs::create_dir_all(folder.join(".zerus-team").join("python")); }
-        python
+        (python, prefix)
     } else {
-        template.program.to_owned()
+        (template.program.to_owned(), Vec::new())
     };
     let mut argv = Vec::new();
     for raw in template.args {
@@ -695,6 +712,7 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
         if keep {
             argv.push(element);
         }    }
+    argv.splice(0..0, prefix);
     // qt-test names its binaries itself (below).
     for placeholder in placeholders(&program).into_iter().filter(|_| template.id != "qt-test") {
         let Some(Words::One(word)) = value_of(template.params, args, &placeholder, folder)? else {
@@ -2043,10 +2061,18 @@ mod tests {
         assert!(!py.argv.iter().any(|arg| arg.starts_with("-m=")));
         let cy = plan("cython-build", &json!({"sources":["a.pyx"]}), dir.path()).unwrap();
         assert_eq!(cy.argv, ["setup.py", "build_ext", "--inplace", "a.pyx"]);
+        let uvdir = temp();
+        std::fs::write(uvdir.path().join("uv.lock"), "").unwrap();
+        let uv = plan("py-test", &json!({}), uvdir.path()).unwrap();
+        assert_eq!(uv.program, "uv");
+        assert_eq!(&uv.argv[..2], ["run", "python"]);
         let empty = temp();
         assert!(plan("py-test", &json!({}), empty.path()).is_err());
     }
 }
+
+
+
 
 
 

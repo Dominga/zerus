@@ -66,6 +66,9 @@ class Mobile(test_tasks.DeliveryFixture):
         self.assertIn("no task", self.mobile("mobile-send", unknown, ok=False)["error"])
 
     def test_a_send_that_could_not_record_is_uncertain(self):
+        # The legacy route pastes first: a record that then fails is
+        # uncertain. The person's hold keeps this unfloored task on it.
+        self.hgs("cutover", "--project", "orchard", "--hold", "on")
         task = self.add("Add rate limiting")
         self.hgs("comment", task["ref"], text="A first comment writes its updates file.")
         tasks = self.state / "replica" / hashlib.sha256(b"project-1").hexdigest() / "tasks"
@@ -79,6 +82,25 @@ class Mobile(test_tasks.DeliveryFixture):
         self.assertTrue(answer.get("uncertain"), answer)
         self.assertTrue(answer["error"].startswith("the prompt was sent, but the task could not record it"), answer)
         self.wait_received("Add rate limiting")
+
+    def test_a_send_whose_attempt_cannot_be_saved_sends_nothing(self):
+        # C3 activation: the attempt is saved before any input, so a task
+        # that cannot be written sends nothing; that is no uncertainty.
+        task = self.add("Add rate limiting")
+        self.hgs("comment", task["ref"], text="A first comment writes its updates file.")
+        tasks = self.state / "replica" / hashlib.sha256(b"project-1").hexdigest() / "tasks"
+        updates = tasks / (task["uuid"] + ".updates")
+        updates.chmod(0o400)
+        try:
+            answer = self.mobile("mobile-send", self.send_request(task), ok=False)
+        finally:
+            updates.chmod(0o600)
+        self.assertNotIn("uncertain", answer)
+        self.assertIn("Permission denied", answer["error"])
+        self.assertEqual(self.received(), "")
+        # The floor's write-ahead mark was written before the failed save, so
+        # this copy is now kept for review, never read as one without it.
+        self.assertIn("could not be read", self.hgs("get", task["ref"], ok=False))
 
     def test_a_phone_cancels_a_task(self):
         task = self.add("Add rate limiting")

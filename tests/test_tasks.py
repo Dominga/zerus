@@ -673,8 +673,8 @@ class DeliveryFixture(Fixture):
         self.hgs("settings", "--project", "orchard", "--set", text=json.dumps(settings))
 
 class TaskDelivery(DeliveryFixture):
-    def message(self, task, text, mode="send", identity=None, dispatch=None, **kw):
-        return self.hgs("message", task["ref"], "--content-json", "--mode", mode,
+    def message(self, task, text, mode="send", identity=None, dispatch=None, extra=(), **kw):
+        return self.hgs("message", task["ref"], "--content-json", "--mode", mode, *extra,
                         "--request-id", identity or str(uuid.uuid4()), "--expect-dispatch", dispatch or task.get("dispatch_id") or "",
                         text=json.dumps(dict(text=text, attachments=[])), **kw)
 
@@ -714,6 +714,111 @@ class TaskDelivery(DeliveryFixture):
         self.assertEqual(changed["task"]["stage"], "active")
         self.assertEqual(changed["task"]["session"]["session_id"], task["session"]["session_id"])
         self.wait_received("Please revise")
+
+    def reviewed(self, text):
+        task = self.add(text, "--target", self.name)
+        self.hgs("send", task["ref"]); self.confirm()
+        self.as_agent("report", task["ref"], text="Result for review")
+        return self.hgs("get", task["ref"])["task"]
+
+    def notes(self, task, identity):
+        log = self.hgs("get", task["ref"])["task"]["log"]
+        return [e for e in log if e["kind"] == "message" and e.get("request_id") == identity]
+
+    def test_a_managed_reopen_is_an_attempt_with_its_note(self):
+        # desktop-u's (b): the person's text is a note bound to the reopen's
+        # ID, saved with the reopen attempt in one admission; the receipt
+        # settles it (Active, resumed). Repeating that ID is read only: one
+        # note, the original receipt, never another paste; other text under
+        # it refuses.
+        task = self.reviewed("A managed reopen")
+        self.assertEqual(self.execution(task)["attempts"], 1)
+        # The send's own attempt ID is not a reopen's: another intent, even
+        # with a note of the same text under that ID.
+        sent_id = self.execution(task)["current"]["id"]
+        self.assertIn("another intent", self.message(task, "Please revise it", mode="reopen", identity=sent_id, ok=False))
+        other = self.add("Its note and plan share an ID", "--target", self.name)
+        shared = str(uuid.uuid4())
+        self.message(other, "Same words", mode="note", identity=shared)
+        self.confirm()
+        self.assertEqual(self.hgs("start-deliver", other["ref"], text=json.dumps(self.start_plan(other, id=shared)))["state"], "submitted")
+        self.confirm()
+        self.as_agent("report", other["ref"], text="Result for review")
+        other = self.hgs("get", other["ref"])["task"]
+        self.assertIn("another intent", self.message(other, "Same words", mode="reopen", identity=shared, ok=False))
+        identity = str(uuid.uuid4())
+        changed = self.message(task, "Please revise it", mode="reopen", identity=identity)
+        self.assertEqual((changed["attempt"]["id"], changed["attempt"]["state"]), (identity, "submitted"))
+        self.assertEqual(changed["task"]["stage"], "active")
+        self.assertEqual(changed["message"]["delivery"]["state"], "note")
+        self.wait_received("Please revise it"); self.confirm()
+        execution = self.execution(task)
+        self.assertEqual((execution["attempts"], execution["current"]["origin"]), (2, "reopen"))
+        log = self.hgs("get", task["ref"])["task"]["log"]
+        self.assertEqual(log[-1]["kind"], "resumed")
+        again = self.message(task, "Please revise it", mode="reopen", identity=identity)
+        self.assertEqual(again["attempt"]["state"], "submitted")
+        self.assertEqual(len(self.notes(task, identity)), 1)
+        self.assertEqual(self.received().count("Please revise it"), 1)
+        self.assertIn("another intent", self.message(task, "Other text", mode="reopen", identity=identity, ok=False))
+
+    def test_a_managed_reopen_refused_before_input_keeps_its_note_in_review(self):
+        # desktop-u's (b) with (a): refused before any input, the reopen is
+        # not admitted; its note stays, the task stays in review, and no
+        # resumed entry is written. A new reopen sends it.
+        task = self.reviewed("Reopened too early")
+        other = self.add("Holds the input", "--target", self.name)
+        self.hgs("send", other["ref"])
+        # The agent has not confirmed that input yet.
+        record = json.loads(self.record_path.read_text())
+        record["last_event_at"] = record["input_pending_at"] - 1
+        self.record_path.write_text(json.dumps(record))
+        identity = str(uuid.uuid4())
+        refused = self.message(task, "Revise after the other", mode="reopen", identity=identity)
+        self.assertEqual(refused["attempt"]["state"], "refused")
+        self.assertIn("previous input has not been confirmed", refused["attempt"]["error"])
+        current = self.hgs("get", task["ref"])["task"]
+        self.assertEqual(current["stage"], "review")
+        self.assertNotIn("resumed", [e["kind"] for e in current["log"]])
+        self.assertEqual(len(self.notes(task, identity)), 1)
+        execution = self.execution(task)
+        self.assertEqual(execution["attempts"], 2)
+        self.assertNotEqual(execution["current"]["id"], identity, "never started, never current")
+        self.assertEqual(self.received().count("Revise after the other"), 0)
+        self.confirm()
+        self.assertEqual(self.message(task, "Revise after the other", mode="reopen", identity=identity)["attempt"]["state"],
+                         "refused", "the same ID is never sent again")
+        self.assertEqual(self.received().count("Revise after the other"), 0)
+        sent = self.message(task, "Revise it now", mode="reopen")
+        self.assertEqual((sent["attempt"]["state"], sent["task"]["stage"]), ("submitted", "active"))
+
+    def test_an_unknown_managed_reopen_holds_the_task_and_never_resends(self):
+        # An unknown reopen keeps its note but sets neither Active nor
+        # resumed, and it holds the task: a later reopen cannot even be
+        # prepared, so it is only kept as a comment that was not delivered,
+        # with no attempt and no input.
+        task = self.reviewed("An unknown reopen")
+        identity = str(uuid.uuid4())
+        receipts = self.state / "input_receipts"
+        receipts.chmod(0o500)
+        self.addCleanup(receipts.chmod, 0o700)
+        unknown = self.message(task, "Maybe delivered", mode="reopen", identity=identity)
+        receipts.chmod(0o700)
+        self.assertEqual(unknown["attempt"]["state"], "uncertain")
+        current = self.hgs("get", task["ref"])["task"]
+        self.assertEqual(current["stage"], "review")
+        self.assertNotIn("resumed", [e["kind"] for e in current["log"]])
+        self.assertEqual(len(self.notes(task, identity)), 1)
+        for extra in ((), ("--recover-only",)):
+            again = self.message(task, "Maybe delivered", mode="reopen", identity=identity, extra=extra)
+            self.assertEqual(again["attempt"]["state"], "uncertain")
+        later = str(uuid.uuid4())
+        current = self.hgs("get", task["ref"])["task"]
+        refused = self.message(current, "A later revision", mode="reopen", identity=later)
+        self.assertEqual(refused["message"]["delivery"]["state"], "failed")
+        self.assertNotIn("attempt", refused)
+        self.assertEqual((self.execution(task)["attempts"], self.hgs("get", task["ref"])["task"]["stage"]), (2, "review"))
+        self.assertEqual(self.received().count("Maybe delivered") + self.received().count("A later revision"), 0)
 
     def test_unknown_feedback_is_recovered_without_another_paste(self):
         task = self.add("Task for crash recovery", "--target", self.name)
@@ -818,6 +923,10 @@ class TaskDelivery(DeliveryFixture):
         self.assertEqual(handed["receipt"]["status"], "submitted")
         entry = new["log"][-1]
         self.assertEqual((entry["kind"], entry["text"], entry["request_id"]), ("sent", "handoff", handed["receipt"]["request_id"]))
+        # C3 activation A3: the handoff is the task's attempt, settled by its receipt.
+        current = self.execution(task)["current"]
+        self.assertEqual((current["id"], current["origin"], current["phase"]),
+                         (handed["receipt"]["request_id"], "handoff", "submitted"))
         self.wait_received("Check the new owner")
         self.assertIn("only the task's current session", self.hgs("handoff", task["ref"], "--session", "codex/another", session="codex/source", ok=False))
         report = json.loads(self.as_agent("report", task["ref"], "--json", text="Ownership checked."))
@@ -1015,6 +1124,463 @@ class TaskDelivery(DeliveryFixture):
         recovered = self.hgs("start-deliver", task["ref"], "--recover-only", text=json.dumps(plan))
         self.assertEqual((recovered["state"], recovered["task"]["stage"]), ("submitted", "active"))
         self.assertEqual(self.received().count("Recover native acknowledgement"), 1)
+
+    def execution(self, task):
+        return self.hgs("get", task["ref"])["task"].get("execution") or {}
+
+    def test_a_start_reserves_one_attempt_and_settles_it_from_its_receipt(self):
+        # zerus-cg5h.4 C3 activation A2: a lone computer's bootstrap gate is
+        # satisfied, so the Start floors the task, proves the fence and
+        # reserves ONE attempt under the plan's own ID before the input; its
+        # receipt settles it. A repeat or a recovery only reads that receipt.
+        task = self.add("An attempted start", "--target", self.name)
+        plan = self.start_plan(task)
+        sent = self.hgs("start-deliver", task["ref"], text=json.dumps(plan))
+        self.assertEqual((sent["state"], sent["task"]["stage"]), ("submitted", "active"))
+        self.wait_received("An attempted start")
+        execution = self.execution(task)
+        self.assertEqual((execution["attempts"], execution["current"]["id"], execution["current"]["phase"]),
+                         (1, plan["id"], "submitted"))
+        status = self.hgs("cutover", "--project", "orchard")
+        self.assertEqual((status["phase"], status["cut_over_tasks"]), ("active", 1))
+        for extra in ((), ("--recover-only",)):
+            again = self.hgs("start-deliver", task["ref"], *extra, text=json.dumps(plan))
+            self.assertEqual(again["state"], "submitted")
+        self.assertEqual(self.received().count("An attempted start"), 1)
+        self.assertEqual(self.execution(task)["attempts"], 1)
+
+    def test_a_start_refused_before_any_input_is_not_admitted_and_never_resent(self):
+        # desktop-u's (a): the exact submission witnessed that the payload was
+        # never offered (the previous input is not confirmed yet), so the
+        # attempt is settled as not admitted: refused, nothing pasted. That ID
+        # is never sent again; a new plan sends it once the session is ready.
+        first = self.add("Holds the input", "--target", self.name)
+        second = self.add("Waits behind it", "--target", self.name)
+        later = self.start_plan(second)
+        self.assertEqual(self.hgs("start-deliver", first["ref"], text=json.dumps(self.start_plan(first)))["state"],
+                         "submitted")
+        refused = self.hgs("start-deliver", second["ref"], text=json.dumps(later))
+        self.assertEqual(refused["state"], "refused")
+        self.assertIn("previous input has not been confirmed", refused["error"])
+        execution = self.execution(second)
+        self.assertEqual((execution["attempts"], execution["current"]["id"], execution["current"]["phase"]),
+                         (1, later["id"], "not_started"))
+        self.assertEqual(self.hgs("get", second["ref"])["task"]["stage"], "todo")
+        self.confirm()
+        for extra in ((), ("--recover-only",)):
+            again = self.hgs("start-deliver", second["ref"], *extra, text=json.dumps(later))
+            self.assertNotEqual(again["state"], "submitted", again)
+        self.assertEqual(self.received().count("Waits behind it"), 0)
+        sent = self.hgs("start-deliver", second["ref"], text=json.dumps(self.start_plan(second)))
+        self.assertEqual(sent["state"], "submitted")
+        self.wait_received("Waits behind it")
+        self.assertEqual(self.execution(second)["attempts"], 2)
+
+    def test_a_start_whose_receipt_marker_cannot_be_written_stays_unknown(self):
+        # desktop-u's (a): a failure while writing the input's receipt marker
+        # may have published it, so the delivery is unknown, never "not
+        # admitted"; neither a repeat nor --recover-only submits it, even with
+        # no receipt at all, and a new plan is refused while it is unknown.
+        warm = self.add("Warms the receipts", "--target", self.name)
+        self.assertEqual(self.hgs("start-deliver", warm["ref"], text=json.dumps(self.start_plan(warm)))["state"],
+                         "submitted")
+        self.confirm()
+        task = self.add("Its marker fails", "--target", self.name)
+        plan = self.start_plan(task)
+        receipts = self.state / "input_receipts"
+        receipts.chmod(0o500)
+        self.addCleanup(receipts.chmod, 0o700)
+        unknown = self.hgs("start-deliver", task["ref"], text=json.dumps(plan))
+        receipts.chmod(0o700)
+        self.assertEqual(unknown["state"], "uncertain", unknown)
+        self.assertEqual((self.execution(task)["current"]["id"], self.execution(task)["current"]["phase"]),
+                         (plan["id"], "unknown"))
+        for extra in ((), ("--recover-only",)):
+            again = self.hgs("start-deliver", task["ref"], *extra, text=json.dumps(plan))
+            self.assertEqual(again["state"], "uncertain")
+        self.assertEqual(self.received().count("Its marker fails"), 0)
+        current = self.hgs("get", task["ref"])["task"]
+        self.assertIn("unknown", self.hgs("start-plan", task["ref"], text=json.dumps(dict(
+            schema=1, id=str(uuid.uuid4()), stage_at=current["stage_at"], target=current["target"],
+            selection=plan["selection"])), ok=False))
+        # Had that input arrived, its own receipt alone settles the attempt.
+        native = subprocess.run([str(HGS), "send", self.name, "--json"], input=json.dumps(plan["request"], separators=(",", ":"), ensure_ascii=False),
+                                env=self.env, text=True, capture_output=True, timeout=30)
+        self.assertEqual(native.returncode, 0, native.stderr)
+        recovered = self.hgs("start-deliver", task["ref"], "--recover-only", text=json.dumps(plan))
+        self.assertEqual((recovered["state"], recovered["task"]["stage"]), ("submitted", "active"))
+        self.assertEqual(self.execution(task)["current"]["phase"], "submitted")
+        self.assertEqual(self.received().count("Its marker fails"), 1)
+
+    def test_a_start_cut_after_its_input_is_unknown_and_never_resent(self):
+        # desktop-u's (a): a failure after the receipt marker (here the
+        # writer is killed just after the paste) leaves the delivery unknown;
+        # a repeat and --recover-only read its receipt and never paste again.
+        task = self.add("Cut after the paste", "--target", self.name)
+        plan = self.start_plan(task)
+        shim = "#!/usr/bin/env python3\nimport os,signal,subprocess,sys\na=sys.argv[1:]\n"
+        shim += "r=subprocess.run([" + repr(TMUX) + ",'-S'," + repr(str(self.socket)) + ",'-f','/dev/null',*a])\n"
+        shim += "if a and a[0]=='paste-buffer': os.kill(os.getppid(),signal.SIGKILL)\nsys.exit(r.returncode)\n"
+        self.script("tmux", shim)
+        self.hgs("start-deliver", task["ref"], text=json.dumps(plan), ok=False)
+        self.wait_received("Cut after the paste")
+        self.script("tmux", '#!/bin/sh\nexec ' + TMUX + ' -S "' + str(self.socket) + '" -f /dev/null "$@"\n')
+        for extra in ((), ("--recover-only",)):
+            again = self.hgs("start-deliver", task["ref"], *extra, text=json.dumps(plan))
+            self.assertEqual(again["state"], "uncertain")
+        self.assertEqual(self.received().count("Cut after the paste"), 1)
+        self.assertEqual((self.execution(task)["current"]["id"], self.execution(task)["current"]["phase"]),
+                         (plan["id"], "unknown"))
+
+    def held(self, *args, text=None, session=None):
+        """`hgs task ARGS` held between its freeze and its admission (debug
+        builds only: HGS_TEST_ATTEMPT_PAUSE). Returns its release."""
+        folder = self.root / ("pause-" + str(uuid.uuid4()))
+        folder.mkdir()
+        env = dict(self.env, HGS_TEST_ATTEMPT_PAUSE=str(folder))
+        if session:
+            env.update(HGS_SESSION=session, HGS_RUN_ID=self.agent(session))
+        proc = subprocess.Popen([str(HGS), "task", *args], env=env, text=True, stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc.stdin.write(text or "")
+        proc.stdin.close()
+        self.addCleanup(lambda: proc.poll() is None and ((folder / "release").touch(), proc.wait(timeout=30)))
+        until = time.monotonic() + 15
+        while not (folder / "ready").exists():
+            if proc.poll() is not None:
+                self.fail("ended before its admission: " + proc.stderr.read())
+            self.assertLess(time.monotonic(), until)
+            time.sleep(.005)
+        def release():
+            (folder / "release").touch()
+            out = proc.stdout.read()
+            err = proc.stderr.read()
+            proc.wait(timeout=30)
+            return proc.returncode, out, err
+        return release
+
+    def test_a_target_changed_while_frozen_is_never_sent(self):
+        # review-win-c and desktop-u on #1519 (zerus-frehz): the task changes
+        # between the freeze and the final admission: its target for a send
+        # or a Start, its stage for a reopen (Done is reopened too, so only
+        # the frozen stage time tells), its stage for a handoff. Every path
+        # refuses it there and sends nothing.
+        self.agent("codex/other")
+        retarget = lambda task: self.hgs("target", task["ref"], "codex/other")
+        # CLI send.
+        task = self.add("FROZEN_SEND", "--target", self.name)
+        release = self.held("send", task["ref"], "--json")
+        retarget(task)
+        code, _, err = release()
+        self.assertNotEqual(code, 0)
+        self.assertIn("changed", err)
+        self.assertEqual(self.execution(task).get("attempts", 0), 0)
+        # CLI send, the stage only: still sendable from Backlog, yet not as frozen.
+        task = self.add("FROZEN_STAGE", "--target", self.name)
+        release = self.held("send", task["ref"], "--json")
+        self.hgs("stage", task["ref"], "backlog")
+        code, _, err = release()
+        self.assertNotEqual(code, 0)
+        self.assertIn("changed", err)
+        # Start.
+        task = self.add("FROZEN_START", "--target", self.name)
+        release = self.held("start-deliver", task["ref"], "--json", text=json.dumps(self.start_plan(task)))
+        retarget(task)
+        code, out, _ = release()
+        self.assertEqual((code, json.loads(out)["state"]), (0, "refused"))
+        # Reopen.
+        task = self.reviewed("FROZEN_REOPEN")
+        identity = str(uuid.uuid4())
+        release = self.held("message", task["ref"], "--content-json", "--mode", "reopen", "--request-id", identity,
+                            "--expect-dispatch", task["dispatch_id"], "--json",
+                            text=json.dumps(dict(text="FROZEN_REOPEN_TEXT", attachments=[])))
+        self.hgs("stage", task["ref"], "done")
+        code, _, err = release()
+        self.assertNotEqual(code, 0)
+        self.assertIn("changed", err)
+        self.assertEqual(self.notes(task, identity), [])
+        # Handoff, by the task's own agent.
+        task = self.add("FROZEN_HANDOFF", "--start", session="codex/source")
+        release = self.held("handoff", task["ref"], "--session", self.name, "--json", session="codex/source")
+        self.hgs("cancel", task["ref"], "--reason", "Stop")
+        code, _, err = release()
+        self.assertNotEqual(code, 0)
+        for text in ("FROZEN_SEND", "FROZEN_STAGE", "FROZEN_START", "FROZEN_REOPEN_TEXT", "FROZEN_HANDOFF"):
+            self.assertNotIn(text, self.received())
+
+    def test_the_agent_limit_is_counted_again_in_the_final_admission(self):
+        # review-win-c and desktop-u on #1519 (zerus-v3rtj): an agent's
+        # start frozen under the limit is refused once another start used it
+        # meanwhile; the count is taken in the final admission.
+        self.settings(agents_other=True, agent_limit=1)
+        first = self.add("LIMIT_FIRST", "--target", self.name)
+        second = self.add("LIMIT_SECOND", "--target", self.name)
+        release = self.held("send", first["ref"], "--json", session="codex/actor")
+        self.hgs("send", second["ref"], "--json", session="codex/actor")
+        self.wait_received("LIMIT_SECOND"); self.confirm()
+        code, _, err = release()
+        self.assertNotEqual(code, 0)
+        self.assertIn("per hour", err)
+        self.assertNotIn("LIMIT_FIRST", self.received())
+        self.assertEqual(self.execution(first).get("attempts", 0), 0)
+
+    def test_a_possibly_delivered_agent_start_holds_the_limit(self):
+        # desktop-u on #1519: an agent's reserved start whose delivery is
+        # unknown may already have arrived, so it holds the hourly capacity
+        # from its reservation; another agent start is refused.
+        warm = self.add("WARMS_THE_RECEIPTS", "--target", self.name)
+        self.hgs("send", warm["ref"]); self.confirm()
+        self.settings(agents_other=True, agent_limit=1)
+        unknown = self.add("MAYBE_DELIVERED", "--target", self.name)
+        receipts = self.state / "input_receipts"
+        receipts.chmod(0o500)
+        self.addCleanup(receipts.chmod, 0o700)
+        self.assertIn("delivery uncertain", self.hgs("send", unknown["ref"], session="codex/actor", ok=False))
+        receipts.chmod(0o700)
+        self.assertEqual(self.execution(unknown)["current"]["phase"], "unknown")
+        other = self.add("NOT_WITHIN_THE_LIMIT", "--target", self.name)
+        self.assertIn("per hour", self.hgs("send", other["ref"], session="codex/actor", ok=False))
+        self.assertNotIn("NOT_WITHIN_THE_LIMIT", self.received())
+
+    def test_an_uncountable_task_refuses_an_agent_start(self):
+        # review-win-c on #1519 R2: the final admission's count fails closed.
+        # A charged task that cannot be read is no evidence of zero starts,
+        # and an irregular file at a task's place (a FIFO) never makes the
+        # count wait: the agent's start is refused, and nothing is sent. A
+        # person's start counts nothing and goes on.
+        self.settings(agents_other=True, agent_limit=1)
+        tasks = self.state / "replica" / hashlib.sha256(b"project-1").hexdigest() / "tasks"
+        first = self.add("UNCOUNTED_FIRST", "--target", self.name)
+        charged = self.add("UNCOUNTED_CHARGED", "--target", self.name)
+        release = self.held("send", first["ref"], "--json", session="codex/actor")
+        self.hgs("send", charged["ref"], "--json", session="codex/actor")
+        self.wait_received("UNCOUNTED_CHARGED"); self.confirm()
+        snapshot = tasks / (charged["uuid"] + ".loro")
+        snapshot.chmod(0)
+        try:
+            code, _, err = release()
+        finally:
+            snapshot.chmod(0o600)
+        self.assertNotEqual(code, 0)
+        self.assertIn("cannot be counted", err)
+        self.assertNotIn("UNCOUNTED_FIRST", self.received())
+        # A FIFO named as a task's file (other commands that list every
+        # task are not this fix's; the task and settings come first).
+        self.settings(agents_other=True, agent_limit=5)
+        late = self.add("UNCOUNTED_LATE", "--target", self.name)
+        fifo = tasks / (str(uuid.uuid4()) + ".loro")
+        os.mkfifo(fifo)
+        self.addCleanup(lambda: fifo.unlink(missing_ok=True))
+        # By its UUID: a short ID is found by reading every task, which the
+        # FIFO would hold (zerus-r75ru, not the quota count).
+        ref = "orchard/" + late["uuid"]
+        began = time.monotonic()
+        refused = self.hgs("send", ref, session="codex/actor", ok=False)
+        self.assertLess(time.monotonic() - began, 17)
+        self.assertIn("cannot be counted", refused)
+        self.assertNotIn("UNCOUNTED_LATE", self.received())
+        self.assertEqual(self.hgs("send", ref)["task"]["stage"], "active")
+        self.wait_received("UNCOUNTED_LATE")
+
+    def test_the_legacy_route_counts_a_possible_agent_start_too(self):
+        # desktop-u on #1519 R2: the legacy route's limit counts the tasks as
+        # saved, reservations included, never the index's sent history
+        # alone. An agent's unknown reservation holds the capacity, so its
+        # legacy send of an unfloored task under the hold is refused.
+        warm = self.add("LEGACY_QUOTA_WARM", "--target", self.name)
+        self.hgs("send", warm["ref"]); self.confirm()
+        self.settings(agents_other=True, agent_limit=1)
+        unknown = self.add("LEGACY_QUOTA_UNKNOWN", "--target", self.name)
+        receipts = self.state / "input_receipts"
+        receipts.chmod(0o500)
+        self.addCleanup(receipts.chmod, 0o700)
+        self.assertIn("delivery uncertain", self.hgs("send", unknown["ref"], session="codex/actor", ok=False))
+        receipts.chmod(0o700)
+        self.hgs("cutover", "--project", "orchard", "--hold", "on")
+        legacy = self.add("LEGACY_QUOTA_FRESH", "--target", self.name)
+        self.assertIn("per hour", self.hgs("send", legacy["ref"], session="codex/actor", ok=False))
+        self.assertNotIn("LEGACY_QUOTA_FRESH", self.received())
+        self.assertFalse(self.execution(legacy).get("attempts"))
+
+    def test_a_counted_task_with_broken_updates_refuses_an_agent_start(self):
+        # review-win-c on #1519 R3: a counted task whose updates log does not
+        # frame or import whole is unknown evidence, never fewer starts.
+        self.settings(agents_other=True, agent_limit=1)
+        self.hgs("cutover", "--project", "orchard", "--hold", "on")
+        delivered = self.add("BROKEN_UPDATES_DELIVERED", "--target", self.name)
+        later = self.add("BROKEN_UPDATES_LATER", "--target", self.name)
+        self.hgs("send", delivered["ref"], "--json", session="codex/actor")
+        self.wait_received("BROKEN_UPDATES_DELIVERED"); self.confirm()
+        updates = self.state / "replica" / hashlib.sha256(b"project-1").hexdigest() / "tasks" / (delivered["uuid"] + ".updates")
+        updates.write_bytes(b"garbage" + updates.read_bytes())
+        refused = self.hgs("send", later["ref"], session="codex/actor", ok=False)
+        self.assertIn("cannot be counted", refused)
+        self.assertNotIn("BROKEN_UPDATES_LATER", self.received())
+
+    def test_an_unreadable_receipt_after_a_start_is_uncertain(self):
+        # review-win-c on #1519 R2 (zerus-hhxn5): a receipt that cannot be
+        # read after a possible delivery is unknown evidence, never
+        # "nothing was sent": a repeat and --recover-only answer uncertain,
+        # on the managed and the legacy route, and nothing is pasted again.
+        task = self.add("RECEIPT_MANAGED", "--target", self.name)
+        plan = self.start_plan(task)
+        self.assertEqual(self.hgs("start-deliver", task["ref"], text=json.dumps(plan))["state"], "submitted")
+        self.wait_received("RECEIPT_MANAGED"); self.confirm()
+        (self.state / "input_receipts" / (plan["id"] + ".json")).write_text("{corrupt")
+        for extra in ((), ("--recover-only",)):
+            again = self.hgs("start-deliver", task["ref"], *extra, text=json.dumps(plan))
+            self.assertEqual(again["state"], "uncertain", again)
+        self.hgs("cutover", "--project", "orchard", "--hold", "on")
+        legacy = self.add("RECEIPT_LEGACY", "--target", self.name)
+        plan = self.start_plan(legacy)
+        self.assertEqual(self.hgs("start-deliver", legacy["ref"], text=json.dumps(plan))["state"], "submitted")
+        self.wait_received("RECEIPT_LEGACY"); self.confirm()
+        self.assertFalse(self.execution(legacy).get("attempts"))
+        receipt = self.state / "input_receipts" / (plan["id"] + ".json")
+        original = json.loads(receipt.read_text())
+        # Unreadable JSON, or JSON that is not a whole receipt (review-win-c
+        # on #1519 R3: `{}`, a missing or mistyped field, another schema).
+        malformed = ("{corrupt", "{}", "null", "[]", json.dumps(dict(original, digest=None)),
+                     json.dumps({k: v for k, v in original.items() if k != "name"}),
+                     json.dumps(dict(original, status="lost")), json.dumps(dict(original, first_message="no")))
+        for body in malformed:
+            receipt.write_text(body)
+            for extra in ((), ("--recover-only",)):
+                again = self.hgs("start-deliver", legacy["ref"], *extra, text=json.dumps(plan))
+                self.assertEqual(again["state"], "uncertain", (body, again))
+        # A whole receipt of other content is another request's: refused.
+        receipt.write_text(json.dumps(dict(original, digest="0" * 64)))
+        self.assertEqual(self.hgs("start-deliver", legacy["ref"], text=json.dumps(plan))["state"], "refused")
+        self.assertEqual((self.received().count("RECEIPT_MANAGED"), self.received().count("RECEIPT_LEGACY")), (1, 1))
+
+    def test_the_agent_limit_bounds_a_frozen_handoff_too(self):
+        self.settings(agents_other=True, agent_limit=1)
+        task = self.add("LIMIT_HANDOFF", "--start", session="codex/source")
+        other = self.add("LIMIT_OTHER", "--target", self.name)
+        release = self.held("handoff", task["ref"], "--session", self.name, "--json", session="codex/source")
+        self.hgs("send", other["ref"], "--json", session="codex/source")
+        self.wait_received("LIMIT_OTHER"); self.confirm()
+        code, _, err = release()
+        self.assertNotEqual(code, 0)
+        self.assertIn("per hour", err)
+        self.assertNotIn("LIMIT_HANDOFF", self.received())
+
+    def test_a_reopen_obeys_the_project_s_agent_rules(self):
+        # desktop-u on #1519 (zerus-wvzdk): a managed reopen runs the
+        # project's agent rules in its final admission, as a send does: an
+        # agent may not reopen another session's task when the project keeps
+        # agents to their own.
+        self.settings(agents_other=False)
+        task = self.reviewed("OUTSIDER_TASK")
+        self.agent("codex/outsider")
+        identity = str(uuid.uuid4())
+        refused = self.message(task, "OUTSIDER_TEXT", mode="reopen", identity=identity,
+                               session="codex/outsider", ok=False)
+        self.assertIn("only in their own session", refused)
+        current = self.hgs("get", task["ref"])["task"]
+        self.assertEqual(current["stage"], "review")
+        self.assertNotIn("resumed", [e["kind"] for e in current["log"]])
+        self.assertEqual(self.notes(task, identity), [])
+        self.assertNotIn("OUTSIDER_TEXT", self.received())
+
+    def test_a_start_id_reused_for_another_body_is_refused(self):
+        # desktop-u on #1519 (zerus-f5q49): an ID answers only for its own
+        # request. After a managed Start, the same ID with a changed body is
+        # refused, repeated or recovered; on the legacy route too, its
+        # recorded history answers only when its receipt shows this request.
+        def tampered(plan):
+            return dict(plan, request=dict(plan["request"], text=plan["request"]["text"] + " CHANGED_BODY"))
+        task = self.add("ORIGINAL_BODY", "--target", self.name)
+        plan = self.start_plan(task)
+        self.assertEqual(self.hgs("start-deliver", task["ref"], text=json.dumps(plan))["state"], "submitted")
+        self.wait_received("ORIGINAL_BODY"); self.confirm()
+        for extra in ((), ("--recover-only",)):
+            out = self.hgs("start-deliver", task["ref"], *extra, text=json.dumps(tampered(plan)))
+            self.assertEqual(out["state"], "refused", out)
+        # The legacy route: the person's hold keeps this unfloored task on it.
+        self.hgs("cutover", "--project", "orchard", "--hold", "on")
+        legacy = self.add("LEGACY_BODY", "--target", self.name)
+        plan = self.start_plan(legacy)
+        self.assertEqual(self.hgs("start-deliver", legacy["ref"], text=json.dumps(plan))["state"], "submitted")
+        self.wait_received("LEGACY_BODY")
+        self.assertEqual(self.execution(legacy)["attempts"], 0)
+        for extra in ((), ("--recover-only",)):
+            out = self.hgs("start-deliver", legacy["ref"], *extra, text=json.dumps(tampered(plan)))
+            self.assertEqual(out["state"], "refused", out)
+        self.assertNotIn("CHANGED_BODY", self.received())
+
+    def test_a_held_lock_refuses_within_the_one_budget(self):
+        # review-win-c on #1519 (zerus-9gzdp): every lock wait from the
+        # command's entry counts against its one 15-second budget: a held
+        # project or catalog lock refuses it as busy, and nothing is sent.
+        task = self.add("LOCK_BUDGET", "--target", self.name)
+        plan = self.start_plan(task)
+        project = self.state / "replica" / hashlib.sha256(b"project-1").hexdigest() / ".lock"
+        catalog = self.root / "config" / "swarm" / "catalog.lock"
+        cases = (
+            (project, ["start-deliver", task["ref"], "--json"], json.dumps(plan)),
+            (catalog, ["start-deliver", task["ref"], "--json"], json.dumps(plan)),
+            (project, ["send", task["ref"], "--json"], None),
+        )
+        for path, args, text in cases:
+            with path.open("a") as held:
+                fcntl.flock(held, fcntl.LOCK_EX)
+                began = time.monotonic()
+                result = subprocess.run([str(HGS), "task", *args], input=text, env=self.env, text=True,
+                                        capture_output=True, timeout=40)
+                took = time.monotonic() - began
+                fcntl.flock(held, fcntl.LOCK_UN)
+            self.assertNotEqual(result.returncode, 0, (args, result.stdout))
+            self.assertIn("busy", result.stderr)
+            self.assertLess(took, 17, args)
+        self.assertNotIn("LOCK_BUDGET", self.received())
+        self.assertEqual(self.execution(task).get("attempts", 0), 0)
+
+    def test_a_frozen_start_is_refused_when_its_business_binding_changed(self):
+        # desktop-u's condition 2: the reservation re-renders the frozen
+        # request against the task as admitted; a new queued message, an
+        # edited requirement or another target refuses it, and nothing is
+        # reserved or sent. A fresh plan then starts it.
+        changes = (
+            lambda task: self.message(task, "A late clarification", mode="queue"),
+            lambda task: self.hgs("edit", task["ref"], text="A changed requirement"),
+            lambda task: self.hgs("target", task["ref"], "any"),
+        )
+        for index, change in enumerate(changes):
+            task = self.add("Frozen start %d" % index, "--target", self.name)
+            plan = self.start_plan(task)
+            change(task)
+            refused = self.hgs("start-deliver", task["ref"], text=json.dumps(plan))
+            self.assertEqual(refused["state"], "refused", refused)
+            self.assertEqual(self.execution(task).get("attempts", 0), 0)
+            self.assertEqual(self.hgs("get", task["ref"])["task"]["stage"], "todo")
+        self.assertEqual(self.received(), "")
+        task = self.add("Started afresh", "--target", self.name)
+        plan = self.start_plan(task)
+        self.message(task, "Known before the plan", mode="queue")
+        self.assertEqual(self.hgs("start-deliver", task["ref"], text=json.dumps(plan))["state"], "refused")
+        sent = self.hgs("start-deliver", task["ref"], text=json.dumps(self.start_plan(task)))
+        self.assertEqual(sent["state"], "submitted")
+        self.wait_received("Known before the plan")
+
+    def test_a_held_floored_task_is_cutting_over_never_legacy(self):
+        # A task that took its floor stays off the legacy route: with the
+        # person's hold on, its first attempt is refused as cutting over and
+        # nothing is sent; cleared, it starts through its attempt.
+        task = self.add("Floored, then held", "--target", self.name)
+        plan = self.start_plan(task)
+        self.hgs("rename", task["ref"], text="Floored, then held again")
+        self.assertEqual(self.hgs("start-deliver", task["ref"], text=json.dumps(plan))["state"], "refused")
+        self.assertEqual(self.hgs("cutover", "--project", "orchard")["cut_over_tasks"], 1, "the floor stays")
+        self.hgs("cutover", "--project", "orchard", "--hold", "on")
+        held = self.hgs("start-deliver", task["ref"], text=json.dumps(self.start_plan(task)))
+        self.assertEqual(held["state"], "cutting_over")
+        self.assertIn("held", held["error"])
+        self.assertEqual(self.received(), "")
+        self.hgs("cutover", "--project", "orchard", "--hold", "off", "--confirm")
+        sent = self.hgs("start-deliver", task["ref"], text=json.dumps(self.start_plan(task)))
+        self.assertEqual(sent["state"], "submitted")
+        self.wait_received("Floored, then held again")
 
     def test_cancel_execution_pins_dispatch_and_executor_and_keeps_reason_literal(self):
         task = self.add("Refactor the parser", "--target", self.name)

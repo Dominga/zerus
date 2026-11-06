@@ -26,7 +26,8 @@ const FILE: &str = "task-index-v1.sqlite3";
 /// 2: the histories of recently read tasks as well (slice B). 3: rows and
 /// history headers carry the task's execution (zerus-cg5h.4), so rows cached
 /// without it are built again rather than mixed with rows that have it.
-const ROWS: i64 = 3;
+/// 4: history entries naming an attempt carry its origin and phase (A4).
+const ROWS: i64 = 4;
 /// The index's version: its rows' shape and the replica's mark format, since
 /// a row remembers whether its task loaded, which the mark decides. An index
 /// made under another mark rule (before the seal, for one) is built again.
@@ -826,14 +827,6 @@ impl<'a> Index<'a> {
             |r| r.get(0),
         )?;
         Ok(Some(count as usize + 1))
-    }
-
-    /// How many tasks agents started since `since` (Unix milliseconds).
-    pub(super) fn agent_starts_since(&self, since: i64) -> Outcome<usize> {
-        let count: i64 = self
-            .db
-            .query_row("SELECT count(*) FROM sends WHERE at >= ?1", [since], |r| r.get(0))?;
-        Ok(count as usize)
     }
 
     /// One chronological page of task `uuid`'s history, `None` when the

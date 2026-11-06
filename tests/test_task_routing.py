@@ -166,6 +166,10 @@ class TaskRouting(unittest.TestCase):
         self.assertEqual((there["stage"], there["session"]["host"]), ("active", ""))
         entry = next(e for e in there["log"] if e["kind"] == "sent")
         self.assertEqual(entry["actor"]["kind"], "person")
+        # C3 activation: b has not seen a's replica yet, so its bootstrap
+        # gate is positively open: the legacy route, no floor, no attempt.
+        execution = there["execution"]
+        self.assertEqual((execution["attempts"], execution["current"]["legacy"]), (0, True), execution)
         calls = (self.root / "calls").read_text()
         self.assertIn("b task send " + task["uuid"] + " --project project-1", calls)
 

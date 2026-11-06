@@ -160,8 +160,6 @@ fn pages_hold_the_documents_rows_in_each_stage_s_order() {
     assert!(listed["text"].as_str().unwrap().len() <= TEXT_BYTES);
     assert_eq!(listed["text_truncated"], json!(true));
     // Lookups answer as the store does.
-    assert_eq!(index.agent_starts_since(0).unwrap(), store.agent_starts_since(0).unwrap());
-    assert_eq!(index.agent_starts_since(i64::MAX).unwrap(), 0);
     for task in &tasks {
         let stage = task.stage().unwrap();
         let place = tasks.iter().filter(|t| t.stage().unwrap() == stage).position(|t| t.uuid() == task.uuid()).unwrap() + 1;

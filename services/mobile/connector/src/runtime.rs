@@ -1232,15 +1232,16 @@ fn attention_cards(detail: &Value, key: &(String, String, String)) -> Option<Val
     ))
 }
 
-/// The connector's question cards, after the row's own team alerts (task 95:
-/// hgs puts a stalled lead's `team_lead_stall` item on the lead's row). Only
-/// those alerts are kept: every other row item is the cards' to replace.
+/// The connector's question cards, after the row's own Zerus alerts (task 95:
+/// a stalled lead's `team_lead_stall` item on the lead's row; task 97: an
+/// `owner_deferred` request of the owner queue). Only those alerts are kept:
+/// every other row item is the cards' to replace.
 fn merge_attention(row: Option<&Value>, cards: &Value) -> Value {
     let mut merged: Vec<Value> = row
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter(|item| item.get("kind").and_then(Value::as_str) == Some("team_lead_stall"))
+        .filter(|item| matches!(item.get("kind").and_then(Value::as_str), Some("team_lead_stall" | "owner_deferred")))
         .cloned()
         .collect();
     merged.extend(cards.as_array().into_iter().flatten().cloned());
@@ -1258,6 +1259,9 @@ mod attention_merge_tests {
         let cards = json!([{"question_id":"q1","question_hash":"h1"}]);
         let merged = merge_attention(Some(&json!([alert.clone(), stale])), &cards);
         assert_eq!(merged, json!([alert, {"question_id":"q1","question_hash":"h1"}]));
+        // Task 97: a deferred request of the owner queue is kept as well.
+        let deferred = json!({"question_id":"owner-deferred:ab","question_hash":"d","kind":"owner_deferred"});
+        assert_eq!(merge_attention(Some(&json!([deferred.clone()])), &cards), json!([deferred, {"question_id":"q1","question_hash":"h1"}]));
         // Without a team alert the cards replace the row's items, as before.
         assert_eq!(merge_attention(Some(&json!([{"question_id":"old","question_hash":"o"}])), &cards), cards);
         assert_eq!(merge_attention(None, &cards), cards);

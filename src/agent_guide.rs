@@ -198,6 +198,8 @@ mod tests {
     fn the_lead_proposes_owner_gates_and_never_asks_for_a_phrase() {
         let lead = TOPICS.iter().find(|(name, _)| *name == "team-lead").unwrap().1;
         assert!(lead.contains("Owner gates are cards") && lead.contains("Never ask the owner to type a phrase"), "{lead}");
+        // Task 97: a deferred prompt never stops the lead.
+        assert!(lead.contains("denied and queued for the owner; do everything else"), "{lead}");
         assert!(!lead.contains("owner_word") && !lead.contains("owner's sentence"), "{lead}");
         let propose = TOPICS.iter().find(|(name, _)| *name == "team-propose").unwrap().1;
         assert!(propose.contains("Never ask the owner to type a phrase"), "{propose}");

@@ -171,6 +171,7 @@ private slots:
     void proposalsSwapsLimitsAndHostsRead();
     void feedLinesSpeakOfStartsQuestionsAndHolds();
     void aFollowUpReadsItsOriginAndSitsInItsLayer();
+    void aMemberCardNamesItsRefusedHandOuts();
     void feedLinesSpeakOfRosterChanges();
     void aRunningTeamIsStuckWhenNothingCanMove();
     void feedLinesAndChains();
@@ -2301,6 +2302,31 @@ void TestTeams::visibleShapeIgnoresWhatOnlyTicks()
     QCOMPARE(agedMinutes(warning, 1000, 1000 + 125), QStringLiteral("starved: QA idle 7 min without a ready task; Open: #4 (also 14 min)"));
     QCOMPARE(agedMinutes(QStringLiteral("timeout 30 s, 2 minutes"), 1000, 1600), QStringLiteral("timeout 30 s, 2 minutes"));
     QCOMPARE(agedMinutes(warning, 0, 1600), warning);
+}
+
+// Task 98: a member whose Terminal refuses hand-outs says how many and why.
+void TestTeams::aMemberCardNamesItsRefusedHandOuts()
+{
+    auto value = checkout();
+    auto members = value["members"].toArray();
+    for (int i = 0; i < members.size(); ++i) {
+        auto member = members[i].toObject();
+        if (member["id"] == QStringLiteral("reviewer"))
+            member["input_block"] = QJsonObject{{"since", 100.0}, {"at", 160.0}, {"count", 4}, {"raised", true},
+                                                {"reason", "terminal has a draft, dialog, or unrecognized prompt"}};
+        members[i] = member;
+    }
+    value["members"] = members;
+    const auto team = parse(value);
+    const auto *reviewer = team.member("reviewer");
+    QCOMPARE(reviewer->inputRefusals, 4);
+    QVERIFY(reviewer->inputRaised);
+    const auto status = memberStatus(team, *reviewer, live(*reviewer));
+    QCOMPARE(status.kind, QStringLiteral("input_blocked"));
+    QCOMPARE(status.text, QStringLiteral("Terminal refused 4 hand-outs: terminal has a draft, dialog, or unrecognized prompt"));
+    QVERIFY(status.problem);
+    // Without refusals the card is as before.
+    QCOMPARE(memberStatus(parse(checkout()), *parse(checkout()).member("reviewer"), live(*reviewer)).kind, QStringLiteral("idle"));
 }
 
 QTEST_MAIN(TestTeams)

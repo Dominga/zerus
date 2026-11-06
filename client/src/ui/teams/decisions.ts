@@ -435,6 +435,7 @@ export function waitingKindLabel(item: Pick<TeamWaitingItem, "kind" | "action">)
     case "test_quarantine": return tr("Flaky tests");
     case "phase_acceptance": return tr("Phase acceptance");
     case "lead_stalled": return tr("Lead stalled");
+    case "deferred": return tr("Deferred");
     default: return item.kind;
   }
 }
@@ -452,13 +453,14 @@ export function waitingKindIcon(kind: string): string {
     case "tool_missing": return "terminal";
     case "test_full_run": return "refresh-cw";
     case "lead_stalled": return "triangle-alert";
+    case "deferred": return "clock";
     default: return "triangle-alert";
   }
 }
 
 /** Opens a card to answer in place. */
 export const opensCard = (action: string) =>
-  ["decide_proposal", "confirm_addition", "answer_permission", "decide_tool", "accept_phase"].includes(action);
+  ["decide_proposal", "confirm_addition", "answer_permission", "decide_tool", "accept_phase", "answer_deferred"].includes(action);
 /** Approves with the team view's question. */
 export const approves = (action: string) => action === "approve_phase" || action === "approve_plan";
 
@@ -624,7 +626,7 @@ export class WaitingAnswer {
 
   /** Opens the card: the team as it is now, and what the owner sees of it. */
   async open() {
-    if (this.item.action === "decide_tool" || !opensCard(this.item.action)) return;
+    if (this.item.action === "decide_tool" || this.item.action === "answer_deferred" || !opensCard(this.item.action)) return;
     const team = await this.read();
     if (!team) return;
     const stale = staleReason(this.item, team);
@@ -717,6 +719,17 @@ export class WaitingAnswer {
     return this.send({ kind: "decide_tool", offer: fields.offer, allow, ...(!allow && reason.trim() ? { reason: reason.trim() } : {}) }, false);
   }
 
+  /**
+   * Task 97: the owner's answer to a deferred request: Allow or Deny a
+   * permission, or the owner's words to a question. hgs sends the session one
+   * message; the tool is never replayed.
+   */
+  answerDeferred(decision: "allow" | "deny" | "answer", text = "") {
+    const id = deferredRequest(this.item).id;
+    if (!id || (decision === "answer" && !text.trim())) return Promise.resolve(undefined);
+    return this.send({ kind: "answer_deferred", id, decision, ...(text.trim() ? { text: text.trim() } : {}) }, false);
+  }
+
   /** A held task, a step Zerus could not take, a finished team. */
   release() { return this.send({ kind: "release", task: waitingFields(this.item).task }, false); }
   retry() { return this.send({ kind: "retry", task: waitingFields(this.item).task }, false); }
@@ -739,6 +752,32 @@ export class WaitingAnswer {
 }
 
 /** The tool offer's card texts. */
+/** Task 97: a deferred request as its card shows it. */
+export interface DeferredRequest {
+  id: string; permission: boolean; text: string; session: string; outcome: string;
+  questions: { id: string; question: string; options: { id: string; label: string }[] }[];
+}
+
+export function deferredRequest(item: TeamWaitingItem): DeferredRequest {
+  const detail = obj(item.detail);
+  const questions = Array.isArray(detail.questions) ? detail.questions : [];
+  return {
+    id: str(detail.deferred), permission: str(detail.request) === "permission", text: str(detail.text), session: str(detail.session),
+    outcome: str(detail.outcome),
+    questions: questions.map((raw) => {
+      const asked = obj(raw);
+      const options = Array.isArray(asked.options) ? asked.options : [];
+      return { id: str(asked.id), question: str(asked.question),
+        options: options.map((option) => ({ id: str(obj(option).id), label: str(obj(option).label) })) };
+    }),
+  };
+}
+
+/** Task 97: Waiting for you > Deferred: the requests Zerus answered safely for the absent owner. */
+export function splitDeferred(items: readonly TeamWaitingItem[]) {
+  return { waiting: items.filter((item) => item.kind !== "deferred"), deferred: items.filter((item) => item.kind === "deferred") };
+}
+
 export function toolOffer(item: TeamWaitingItem) {
   const fields = waitingFields(item);
   const failed = fields.state === "failed";

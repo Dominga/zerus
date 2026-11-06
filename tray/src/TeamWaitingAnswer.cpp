@@ -24,7 +24,8 @@ const QString additionPrefix = QStringLiteral("/owner_word_asked/addition-");
 bool TeamWaitingAnswer::opensCard(const QString &action)
 {
     return action == QLatin1String("decide_proposal") || action == QLatin1String("confirm_addition") || action == QLatin1String("answer_permission")
-           || action == QLatin1String("decide_tool") || action == QLatin1String("accept_phase");
+           || action == QLatin1String("decide_tool") || action == QLatin1String("accept_phase")
+           || action == QLatin1String("answer_deferred");
 }
 
 bool TeamWaitingAnswer::approves(const QString &action)
@@ -77,7 +78,7 @@ TeamWaitingAnswer::TeamWaitingAnswer(TeamController *teams, const Item &item, bo
         };
     }
     // #742: a tool's offer has no team to read; the item carries all of it.
-    if (opensCard(item.action) && item.action != QLatin1String("decide_tool")) read([](const Team *) {});
+    if (opensCard(item.action) && item.action != QLatin1String("decide_tool") && item.action != QLatin1String("answer_deferred")) read([](const Team *) {});
     else render();
 }
 
@@ -379,6 +380,84 @@ void TeamWaitingAnswer::sendTool(bool allow)
     });
 }
 
+void TeamWaitingAnswer::sendDeferred(const QString &decision, const QString &text)
+{
+    if (busy() || m_done || !m_teams || m_item.deferred.isEmpty()) return;
+    if (decision == QLatin1String("answer") && text.trimmed().isEmpty()) return;
+    m_notice.clear();
+    QJsonObject input{{"id", m_item.deferred}, {"decision", decision}};
+    if (!text.trimmed().isEmpty()) input.insert("text", text.trimmed());
+    m_sending = true; render();
+    QPointer<TeamWaitingAnswer> guard(this);
+    m_teams->act(QStringLiteral("answer-deferred"), input, [guard](bool ok, const QString &message) {
+        if (!guard) return;
+        guard->m_sending = false;
+        if (!ok) { guard->m_notice = message; guard->render(); return; }
+        guard->finish();
+    });
+}
+
+void TeamWaitingAnswer::renderDeferred(const Colors &c, bool waiting)
+{
+    auto *box = new QFrame; box->setObjectName("teamWaitingDeferred");
+    box->setProperty("deferred", m_item.deferred);
+    box->setStyleSheet(QStringLiteral("QFrame#teamWaitingDeferred{background:%1;border:1px solid %2;border-radius:7px;}")
+                           .arg(alpha(c.warn, .08).name(QColor::HexArgb), alpha(c.warn, .40).name(QColor::HexArgb)));
+    auto *v = new QVBoxLayout(box); v->setContentsMargins(8, 5, 8, 6); v->setSpacing(3);
+    v->addWidget(label(m_item.session, c.text3, 10, false, "teamWaitingDeferredSession"));
+    auto *text = label(m_item.text, c.fg, 11, false, "teamWaitingDeferredText");
+    text->setFont(NewSessionDense::mono(11));
+    text->setWordWrap(true); text->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    v->addWidget(text);
+    if (!m_item.outcome.isEmpty()) v->addWidget(label(m_item.outcome, c.text2, 11, false, "teamWaitingDeferredOutcome"));
+    auto *how = label(tr("Your answer reaches the session as one message; nothing runs again by itself."), c.text3, 10, false, "teamWaitingDeferredHow");
+    how->setWordWrap(true);
+    v->addWidget(how);
+    const bool permission = m_item.request == QLatin1String("permission");
+    if (!permission) {
+        for (const auto &value : m_item.questions) {
+            const auto asked = value.toObject();
+            auto *question = label(asked["question"].toString(), c.fg, 11, true, "teamWaitingDeferredQuestion");
+            question->setWordWrap(true);
+            v->addWidget(question);
+            auto *options = row(6);
+            for (const auto &option : asked["options"].toArray()) {
+                const QString choice = option.toObject()["label"].toString();
+                auto *pick = button(choice, "teamWaitingDeferredOption");
+                pick->setEnabled(!waiting);
+                QObject::connect(pick, &QPushButton::clicked, this, [this, choice] { sendDeferred(QStringLiteral("answer"), choice); });
+                options->addWidget(pick);
+            }
+            options->addStretch();
+            v->addLayout(options);
+        }
+    }
+    auto *answers = row(6);
+    auto *words = new QLineEdit(m_reason); words->setObjectName("teamWaitingDeferredWords");
+    words->setPlaceholderText(permission ? tr("A note for the session (optional)") : tr("Your answer"));
+    words->setMaxLength(4000); words->setEnabled(!waiting);
+    QObject::connect(words, &QLineEdit::textChanged, this, [this](const QString &typed) { m_reason = typed; });
+    answers->addWidget(words, 1);
+    if (permission) {
+        auto *deny = button(tr("Deny"), "teamWaitingDeferredDeny"); deny->setProperty("danger", true);
+        deny->setToolTip(tr("The session hears that you deny it"));
+        auto *allow = button(tr("Allow"), "teamWaitingDeferredAllow", true);
+        allow->setToolTip(tr("The session hears it may run it again; nothing runs by itself"));
+        deny->setEnabled(!waiting); allow->setEnabled(!waiting);
+        QObject::connect(deny, &QPushButton::clicked, this, [this] { sendDeferred(QStringLiteral("deny"), m_reason); });
+        QObject::connect(allow, &QPushButton::clicked, this, [this] { sendDeferred(QStringLiteral("allow"), m_reason); });
+        answers->addWidget(deny); answers->addWidget(allow);
+    } else {
+        auto *send = button(tr("Answer"), "teamWaitingDeferredAnswer", true);
+        send->setEnabled(!waiting);
+        QObject::connect(send, &QPushButton::clicked, this, [this] { sendDeferred(QStringLiteral("answer"), m_reason); });
+        QObject::connect(words, &QLineEdit::returnPressed, this, [this] { sendDeferred(QStringLiteral("answer"), m_reason); });
+        answers->addWidget(send);
+    }
+    v->addLayout(answers);
+    m_layout->addWidget(box);
+}
+
 void TeamWaitingAnswer::finish()
 {
     m_done = true;
@@ -459,6 +538,11 @@ void TeamWaitingAnswer::render()
     }
     // A card of a decided proposal never shows again (its own late render).
     if (m_cards && (m_done || !stale.isEmpty())) m_cards->setTeam(nullptr);
+    if (m_item.action == QLatin1String("answer_deferred")) {
+        if (!m_done) renderDeferred(c, waiting);
+        if (parentWidget()) setVisible(hasContent());
+        return;
+    }
     if (m_item.action == QLatin1String("decide_tool")) {
         if (!m_done) renderTool(c, waiting);
         if (parentWidget()) setVisible(hasContent());

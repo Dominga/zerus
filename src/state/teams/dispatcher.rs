@@ -342,6 +342,10 @@ pub(crate) enum Step {
     /// Task 95: the lead's stall as this tick sees it: raised, repeated (a new
     /// round), updated or cleared (None).
     LeadStall { stall: Option<LeadStall> },
+    /// Task 97: the member's (or the lead's) native request waited past the
+    /// team's `defer_minutes`: answer it safely and queue it for the owner.
+    /// `question` is its `id:hash`.
+    Defer { member: String, question: String },
     /// U56: a pending task pinned to a stuck, stopped or offline member says so
     /// in its waits.
     WaitOnMember { task: u32, member: String, reason: String },
@@ -608,6 +612,18 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             && launching.insert(member.id.clone())
         {
             steps.push(Step::Launch { member: member.id.clone() });
+        }
+    }
+    // Task 97: a native request nobody answered for `defer_minutes` is
+    // answered safely and queued for the owner, once per request.
+    if team.settings.defer_minutes > 0 {
+        let after = team.settings.defer_minutes as f64 * 60.0;
+        for member in team.members.iter().filter(|member| member.state != MemberState::Removed && member.session.is_some()) {
+            let Some(pending) = &member.pending else { continue };
+            let key = format!("{}:{}", pending.question_id, pending.question_hash);
+            if pending.card["can_answer"] != false && now - pending.at >= after && !member.deferred.contains(&key) {
+                steps.push(Step::Defer { member: member.id.clone(), question: key });
+            }
         }
     }
     // H6: a swapped lead is briefed once, also while the team runs.
@@ -2759,6 +2775,149 @@ pub(crate) fn classify(output: &anyhow::Result<Output>) -> Sent {
     }
 }
 
+/// Task 98: hgs's refusal of input while the composer holds a draft, a
+/// dialog or an unrecognized prompt.
+pub(crate) const DRAFT_REFUSAL: &str = "terminal has a draft, dialog, or unrecognized prompt";
+
+/// Task 98: the last non-empty lines of a Terminal screen, its colors and
+/// cursor codes removed, each at most 200 characters.
+pub(crate) fn last_lines(screen: &str, count: usize) -> Vec<String> {
+    let mut plain = String::with_capacity(screen.len());
+    let mut chars = screen.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            match chars.peek() {
+                Some('[') => {
+                    chars.next();
+                    while let Some(next) = chars.next() {
+                        if ('@'..='~').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    while let Some(next) = chars.next() {
+                        if next == '\u{7}' || next == '\\' {
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    chars.next();
+                }
+            }
+            continue;
+        }
+        if ch == '\n' || !ch.is_control() {
+            plain.push(ch);
+        }
+    }
+    let lines: Vec<String> = plain
+        .lines()
+        .map(|line| line.trim_end())
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.chars().take(200).collect())
+        .collect();
+    lines[lines.len().saturating_sub(count)..].to_vec()
+}
+
+/// Task 98: a hand-out the member's composer refused. Zerus's own leftover
+/// paste (the draft `hgs send` recorded right after it pasted) is finished
+/// once with its Enter; anything else is counted and, at
+/// `InputBlock::RAISE_AFTER` refusals, raised once to the lead and the owner
+/// with the screen's last lines. A delivery ends the episode.
+fn input_blocked(store: &mut Store, team_id: &str, member_id: &str, session: &SessionRef, outcome: &Sent) -> anyhow::Result<()> {
+    let team = store.load(team_id)?.with_context(|| format!("Unknown team {team_id}"))?;
+    let member = team.member(member_id).context("unknown member")?;
+    let refused = match outcome {
+        Sent::Refused(error) if error.contains(DRAFT_REFUSAL) => error.clone(),
+        Sent::Delivered if member.input_block.is_some() => {
+            return change(store, team_id, |team, events| {
+                let role = team.role_of(member_id);
+                if let Some(found) = team.members.iter_mut().find(|found| found.id == member_id) {
+                    if found.input_block.take().is_some_and(|block| block.raised) {
+                        events.push(Event::new("input_unblocked", json!({"member":role})));
+                    }
+                }
+                Ok(())
+            });
+        }
+        _ => return Ok(()),
+    };
+    let request = json!({"request_id":uuid::Uuid::new_v4().to_string(),"action":"submit_own_paste",
+        "expected_run_id":session.run_id,"expected_conversation_id":session.conversation_id});
+    let finished = hgs(&session.host, &["terminal", &session.name, "--json"], Some(&request), Duration::from_secs(60));
+    let receipt: Value = finished
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| serde_json::from_slice(&output.stdout).ok())
+        .unwrap_or_default();
+    let own = receipt["status"].as_str().filter(|status| matches!(*status, "submitted" | "uncertain")).map(str::to_owned);
+    let count = member.input_block.as_ref().map_or(0, |block| block.count) + u32::from(own.is_none());
+    let raise = own.is_none() && count >= InputBlock::RAISE_AFTER && !member.input_block.as_ref().is_some_and(|block| block.raised);
+    let screen = if raise {
+        let snapshot = json!({"request_id":uuid::Uuid::new_v4().to_string(),"action":"snapshot",
+            "expected_run_id":session.run_id,"expected_conversation_id":session.conversation_id});
+        hgs(&session.host, &["terminal", &session.name, "--json"], Some(&snapshot), Duration::from_secs(30))
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
+            .map(|answer| last_lines(answer["screen"].as_str().unwrap_or_default(), 12))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let reason = refused.lines().next().unwrap_or_default().split(" [trace:").next().unwrap_or_default().trim().to_owned();
+    change(store, team_id, |team, events| {
+        let role = team.role_of(member_id);
+        let found = team.members.iter_mut().find(|found| found.id == member_id).context("unknown member")?;
+        let at = now();
+        match own.as_deref() {
+            Some("submitted") => {
+                found.input_block = None;
+                events.push(Event::new("own_paste_finished", json!({"member":role,"delivery":receipt["delivery"]})));
+            }
+            Some(_) => {
+                // The Enter may have gone: never sent again; counted as before.
+                let block = found.input_block.get_or_insert_with(|| InputBlock { since: at, ..Default::default() });
+                block.own_paste = receipt["delivery"].as_str().unwrap_or("unknown").to_owned();
+                block.at = at;
+                events.push(Event::new("own_paste_uncertain", json!({"member":role,"delivery":receipt["delivery"],"error":receipt["error"]})));
+            }
+            None => {
+                let block = found.input_block.get_or_insert_with(|| InputBlock { since: at, ..Default::default() });
+                block.count = count;
+                block.at = at;
+                block.reason = reason.clone();
+                if raise {
+                    block.raised = true;
+                    block.screen = screen.clone();
+                    events.push(Event::new("input_blocked", json!({"member":role,"count":count,"reason":reason})));
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Task 97: an `hgs answer` outcome, as conservatively as a send: success is
+/// an answer that reached the session, exit 1 without "uncertain" one refused
+/// before anything was typed, anything else may have arrived.
+pub(crate) fn classify_answer(output: &anyhow::Result<Output>) -> Sent {
+    let output = match output {
+        Ok(output) => output,
+        Err(error) => return Sent::Uncertain(error.to_string()),
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if output.status.success() {
+        Sent::Delivered
+    } else if stderr.to_lowercase().contains("uncertain") || output.status.code() != Some(1) {
+        Sent::Uncertain(stderr)
+    } else {
+        Sent::Refused(stderr)
+    }
+}
+
 pub(crate) fn send(session: &SessionRef, request_id: &str, text: &str) -> Sent {
     let input = json!({"request_id":request_id,"expected_run_id":session.run_id,
         "expected_conversation_id":session.conversation_id,"text":text});
@@ -4404,6 +4563,9 @@ fn hand_out_now(
         text += &git_continuation(&folder, since);
     }
     let outcome = send(&session, &attempt_id, &text);
+    if let Err(error) = input_blocked(store, team_id, member_id, &session, &outcome) {
+        eprintln!("hgs team worker: {member_id}: blocked input: {error}");
+    }
     change(store, team_id, |team, events| {
         let task = team.task_mut(task_id).context("unknown task")?;
         let Some(attempt) = task.attempts.iter_mut().find(|a| a.id == attempt_id && a.state == AttemptState::Delivering) else {
@@ -4609,6 +4771,9 @@ fn stage_hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &st
     }
     let (run_id, text) = message.context("no stage message")?;
     let outcome = send(&session, &run_id, &text);
+    if let Err(error) = input_blocked(store, team_id, member_id, &session, &outcome) {
+        eprintln!("hgs team worker: {member_id}: blocked input: {error}");
+    }
     change(store, team_id, |team, events| {
         let Some(task) = team.task_mut(task_id) else { return Ok(()) };
         let pinned = task.pipeline_run.as_ref().and_then(|run| run.open_run()).and_then(|run| task.pipeline_run.as_ref()?.stages.get(run.stage)).map(|stage| stage.member.clone()).unwrap_or_default();
@@ -5486,6 +5651,91 @@ fn allow_safe(store: &mut Store, team: &Team, member_id: &str, pending: &Pending
         }
         Ok(())
     })
+}
+
+/// Task 97: answers the member's request with its safe choice and queues it
+/// for the owner. The team record reserves it first (`member.deferred`), then
+/// the queue does; neither is undone, so an unknown delivery is never sent
+/// again. An answer that reached the session closes the request in the team.
+fn defer_request(store: &mut Store, team: &Team, member_id: &str, question: &str) -> anyhow::Result<()> {
+    let member = team.member(member_id).context("unknown member")?;
+    let Some(pending) = member.pending.clone().filter(|pending| format!("{}:{}", pending.question_id, pending.question_hash) == question) else {
+        return Ok(());
+    };
+    let session = member.session.clone().context("the member has no session")?;
+    change(store, &team.id, |team, _| {
+        let found = team.members.iter_mut().find(|found| found.id == member_id).context("unknown member")?;
+        anyhow::ensure!(!found.deferred.iter().any(|known| known == question), "already deferred");
+        found.deferred.push(question.to_owned());
+        let excess = found.deferred.len().saturating_sub(50);
+        found.deferred.drain(..excess);
+        Ok(())
+    })?;
+    let origin = super::owner_queue::Origin { session: &session, team: Some(team), member: member_id };
+    let Some(entry) = super::owner_queue::defer(&origin, &pending, now())? else { return Ok(()) };
+    let role = team.role_of(member_id);
+    change(store, &team.id, |team, events| {
+        let found = team.members.iter_mut().find(|found| found.id == member_id).context("unknown member")?;
+        if entry.delivery == "answered" {
+            let (tool, command) = found.permission.as_ref().map(|asked| (asked["tool"].clone(), asked["command"].clone())).unwrap_or_default();
+            if found.pending.as_ref().is_some_and(|asked| asked.question_id == pending.question_id) {
+                found.pending = None;
+            }
+            if found.permission.as_ref().is_some_and(|asked| asked["question_id"] == pending.question_id.as_str()) {
+                found.permission = None;
+            }
+            let decision = if entry.safe == "deny" { "deny" } else { "answer" };
+            found.permission_answers.push(json!({"question_id":pending.question_id,"decision":decision,"by":"owner queue","at":now(),
+                "reason":super::owner_queue::AWAY_MESSAGE,"tool":tool,"command":command,"deferred":entry.id}));
+            let excess = found.permission_answers.len().saturating_sub(20);
+            found.permission_answers.drain(..excess);
+        }
+        events.push(Event::new("request_deferred", json!({"member":role,"question_id":pending.question_id,"kind":entry.kind,
+            "safe":entry.safe,"delivery":entry.delivery,"notice":entry.notice,"id":entry.id})));
+        Ok(())
+    })
+}
+
+/// Task 97: the ordinary sessions the owner turned the queue on for. A
+/// session that asks is read at most every 20 seconds; a team's session is
+/// its team's to defer.
+pub(crate) fn defer_watched(teams: &[Team], sessions: &[Seen]) {
+    let watched = super::owner_queue::watched();
+    if watched.is_empty() {
+        return;
+    }
+    for found in sessions.iter().filter(|found| found.live && found.asking) {
+        let Some(minutes) = super::owner_queue::minutes_for(&watched, &found.host, &found.name) else { continue };
+        let in_team = teams.iter().any(|team| {
+            team.members.iter().any(|member| member.session.as_ref().is_some_and(|session| session.host == found.host && session.name == found.name))
+        });
+        if in_team {
+            continue;
+        }
+        let key = format!("watched|{}|{}", found.host, found.name);
+        {
+            let mut checked = PERMISSION_CHECKED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+            if checked.get(&key).is_some_and(|at| now() - at < 20.0) {
+                continue;
+            }
+            checked.insert(key, now());
+        }
+        let output = match hgs(&found.host, &["inspect", &found.name, "--skip-processes"], None, Duration::from_secs(45)) {
+            Ok(output) if output.status.success() => output,
+            Ok(_) => continue,
+            Err(error) => {
+                eprintln!("hgs team worker: {}: {error}", found.name);
+                continue;
+            }
+        };
+        let Ok(record) = serde_json::from_slice::<Value>(&output.stdout) else { continue };
+        let cards = record["pending_questions"].as_array().cloned().unwrap_or_default();
+        let session = SessionRef { host: found.host.clone(), name: found.name.clone(), run_id: found.run_id.clone(),
+            conversation_id: found.conversation_id.clone() };
+        if let Err(error) = super::owner_queue::tick_session(&session, minutes, &cards, now()) {
+            eprintln!("hgs team worker: {}: owner queue: {error}", found.name);
+        }
+    }
 }
 
 /// Hands the lead its own task without a message (C1): the attempt exists, so
@@ -6903,6 +7153,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             }
             Ok(())
         }),
+        Step::Defer { member, question } => defer_request(store, team, member, question),
         Step::LeadStall { stall } => change(store, &team.id, |team, events| {
             if let Some((kind, data)) = super::lead_stall::event(team.lead_stall.as_ref(), stall.as_ref(), now()) {
                 events.push(Event::new(kind, data));
@@ -7083,7 +7334,9 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
                 || team.members.iter().any(|member| member.limit_resume)
         })
         .collect();
-    if teams.is_empty() {
+    // Task 97: an ordinary session the owner turned the queue on for keeps the
+    // worker reading it.
+    if teams.is_empty() && super::owner_queue::watched().is_empty() {
         return Ok(false);
     }
     let output = match listing(|| hgs("", &["ls", "--json", "--no-archives"], None, LIST_TIMEOUT)) {
@@ -7103,6 +7356,7 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
         }
     }
     let teams: Vec<Team> = teams.iter().filter_map(|t| store.load(&t.id).ok().flatten()).collect();
+    defer_watched(&teams, &sessions);
     for team in &teams {
         for step in steps_with(team, &sessions, now(), Some(&listed)) {
             if let Err(error) = run_step(store, team, &step, host) {
@@ -8046,6 +8300,12 @@ mod dispatcher_stall;
 #[cfg(test)]
 #[path = "tests/dispatcher_lead_stall.rs"]
 mod dispatcher_lead_stall;
+#[cfg(test)]
+#[path = "tests/dispatcher_owner_queue.rs"]
+mod dispatcher_owner_queue;
+#[cfg(test)]
+#[path = "tests/dispatcher_input_block.rs"]
+mod dispatcher_input_block;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_areas.rs"]

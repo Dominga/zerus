@@ -1164,11 +1164,19 @@ fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, held: bool) 
     let _ = attachments.keep();
     record["input_pending_at"] = json!(submitted_at);
     record["input_pending_request"] = json!(request_id);
+    // Task 98: the composer was empty, so an earlier delivery's leftover
+    // paste is gone.
+    if let Some(fields) = record.as_object_mut() {
+        fields.remove("unsent_paste");
+    }
     if let Err(error) = write(&mut record) {
         cleanup();
         return Err(error);
     }
     let pane = string(&record, "pane");
+    // Task 98: the composer's draft right after our own paste. When the Enter
+    // does not go, this hash is how Zerus later knows the leftover is its own.
+    let mut pasted_draft: Option<String> = None;
     let result: Result<()> = (|| {
         terminal.paste(&buffer, pane, backend::Paste::Composer)?;
         // Let bracketed-paste handlers finish before Enter. Never send a second
@@ -1178,6 +1186,9 @@ fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, held: bool) 
         if string(&record, "agent") == "codex" {
             settle_codex_paste(terminal, pane, &pasted);
         }
+        pasted_draft = super::terminal::read_draft(&record)
+            .ok()
+            .and_then(|(draft, hash)| draft.filter(|draft| !draft.trim().is_empty()).map(|_| hash));
         if !process_alive(&record) || !matches(&record, live()?.get(name)) {
             return Err("agent changed after paste".into());
         }
@@ -1189,6 +1200,9 @@ fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, held: bool) 
     })();
     cleanup();
     if let Err(error) = result {
+        if let Some(hash) = &pasted_draft {
+            record_unsent_paste(name, &receipt_path, &mut receipt, &request_id, hash);
+        }
         crate::analytics::adapters::delivery(&root, &record, &receipt, crate::analytics::adapters::Delivery::Uncertain);
         return Err(format!(
             "delivery uncertain: {error}; inspect Terminal before retrying"
@@ -1196,6 +1210,22 @@ fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, held: bool) 
     }
     crate::analytics::adapters::delivery(&root, &record, &receipt, crate::analytics::adapters::Delivery::Submitted);
     Ok(receipt)
+}
+
+/// Task 98: a delivery pasted but its Enter did not go: the receipt and the
+/// session record keep the composer's draft hash, so `hgs terminal`'s
+/// submit_own_paste can finish exactly this paste once. Best effort: a
+/// failure only leaves the leftover for the owner, as before.
+fn record_unsent_paste(name: &str, receipt_path: &Path, receipt: &mut Value, request_id: &str, hash: &str) {
+    receipt["pasted_draft_hash"] = json!(hash);
+    let _ = atomic(receipt_path, &receipt.to_string());
+    if let Ok(mut fresh) = read(name) {
+        if fresh["run_id"] == receipt["run_id"] && fresh["conversation_id"] == receipt["conversation_id"] {
+            fresh["unsent_paste"] = json!({"request_id":request_id,"draft_hash":hash,"run_id":receipt["run_id"],
+                "conversation_id":receipt["conversation_id"],"at":now()});
+            let _ = write(&mut fresh);
+        }
+    }
 }
 
 /// Codex on Windows reads console key events, not VT input, so the pseudoconsole

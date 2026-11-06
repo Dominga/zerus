@@ -133,6 +133,17 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
                 found["member_id"] = attention["member_id"].clone();
                 out.push(found);
             }
+            // Task 98: a member's composer refuses every hand-out; only its
+            // Terminal clears it.
+            "input_blocked" => {
+                let member = attention["member"].as_str().unwrap_or_default().to_owned();
+                let mut found = item(team, "input_blocked", &format!("{member}-{}", at as u64), summary, at, "open_terminal");
+                for key in ["member_id", "count", "reason", "screen", "session", "command"] {
+                    found[key] = attention[key].clone();
+                }
+                found["member"] = json!(member);
+                out.push(found);
+            }
             // Task 95: the lead stalled while its decisions wait. The round is
             // part of the id, so each round (at most hourly) is notified once
             // by the desktops, which notify a waiting id once.

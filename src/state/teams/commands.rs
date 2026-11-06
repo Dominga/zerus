@@ -10,7 +10,7 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|phase-mode|integrate-build|start-ahead|full-tests|test|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|phase-mode|integrate-build|start-ahead|full-tests|test|run|templates|safe-action|reports-to|sub-lead|deferred|answer-deferred|defer-session --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "move-task", "add-to-phase", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
@@ -3268,7 +3268,7 @@ fn active_team_records(store: &Store) -> anyhow::Result<Vec<Team>> {
 }
 
 /// The stored team list the desktop polls: no live session listing (C1).
-fn list_items(teams: &[Team], include_cancelled: bool) -> Value {
+pub(crate) fn list_items(teams: &[Team], include_cancelled: bool) -> Value {
     json!({"items":teams.iter().map(|team| summary(team, include_cancelled)).collect::<Vec<_>>()})
 }
 
@@ -4178,6 +4178,16 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
     if op == "decide-tool" {
         return crate::test_discipline::tools::decide(input);
     }
+    // Task 97: the owner's question queue spans teams and ordinary sessions.
+    if op == "answer-deferred" {
+        return super::owner_queue::answer(input);
+    }
+    if op == "defer-session" {
+        return super::owner_queue::watch(input);
+    }
+    if op == "deferred" {
+        return Ok(super::owner_queue::listing(input["limit"].as_u64()));
+    }
     match op {
         "create" => create(input),
         "answer" => answer(input),
@@ -4197,7 +4207,15 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         // U50: what waits for the owner across every team, read only.
         "waiting" => {
             // #742: a missing tool's offer waits for the owner with or without a team.
-            let tools = crate::test_discipline::tools::waiting_items();
+            let mut tools = crate::test_discipline::tools::waiting_items();
+            // Task 97: Waiting for you > Deferred, with or without a team; a
+            // watched ordinary session keeps the worker that defers it alive.
+            tools.extend(super::owner_queue::waiting_items());
+            if !super::owner_queue::watched().is_empty() {
+                if let Err(error) = super::dispatcher::ensure_worker() {
+                    eprintln!("hgs: the team dispatcher did not start: {error}");
+                }
+            }
             if !store::path().exists() {
                 let items = super::owner_waiting::sorted(tools);
                 let before = Some(&input["before"]).filter(|cursor| !cursor.is_null());

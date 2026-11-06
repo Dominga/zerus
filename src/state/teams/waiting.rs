@@ -27,6 +27,8 @@ pub(crate) struct Waiting {
     /// Task 95: the lead stalled: the phone's alert item for the lead's row
     /// (`mobile_attention`), one per notification round.
     pub alert: Option<Value>,
+    /// Task 97: the team, so the owner queue finds its lead's row.
+    pub team: String,
 }
 
 /// The reasons of every session of these teams, the lead's first.
@@ -60,6 +62,7 @@ pub(crate) fn reasons(teams: &[Team], now: f64) -> Vec<Waiting> {
                 budget,
                 build,
                 alert,
+                team: team.id.clone(),
             });
         }
     }

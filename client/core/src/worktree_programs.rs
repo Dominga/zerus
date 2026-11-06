@@ -6,6 +6,11 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
+pub mod cleanup;
+pub mod custody;
+pub mod invocation;
+pub mod stop;
+
 pub const ABI: &str = "worktree-programs-v1";
 pub const HELP_MARKER: &str = "Worktree programs ABI: worktree-programs-v1";
 pub const MAX_PROGRAMS: usize = 64;
@@ -139,10 +144,10 @@ impl Manifest {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     const UUID: &str = "11111111-1111-4111-8111-111111111111";
-    fn manifest() -> Manifest {
+    pub(crate) fn manifest() -> Manifest {
         Manifest {
             abi: ABI.into(),
             id: UUID.into(),

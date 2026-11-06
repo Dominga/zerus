@@ -52,7 +52,7 @@ export function targetOf(s: Pick<ActionRow, "computer" | "name" | "runId" | "con
 export interface Selection { key?: string; subagent?: string }
 
 export interface PerformOptions { quiet?: boolean; cleanupId?: string; delay?: EndReference; skipDelay?: boolean; noticeKey?: string }
-export type EndDriver = (row: ActionRow, action: Action, execute: (reference: EndReference, key: string) => Promise<Outcome>, current: () => boolean, remove: boolean) => Promise<Outcome | undefined>;
+export type EndDriver = (row: ActionRow, action: Action, execute: (reference: EndReference, key: string) => Promise<Outcome>, current: () => boolean, remove: boolean, cleanupId?: string) => Promise<Outcome | undefined>;
 
 export function createActions(
   catalog: Pick<CatalogState, "rows">,
@@ -139,7 +139,7 @@ export function createActions(
     }
     if (delayEnd && isEndAction(action) && !options.delay && !options.skipDelay) {
       const captured = snapshotOf(row);
-      const out = await delayEnd(captured, action, (delay, noticeKey) => perform(captured, action, { ...options, delay, noticeKey }), () => sameEnd(captured, catalog.rows[captured.key]), !!options.cleanupId);
+      const out = await delayEnd(captured, action, (delay, noticeKey) => perform(captured, action, { ...options, delay, noticeKey }), () => sameEnd(captured, catalog.rows[captured.key]), !!options.cleanupId, options.cleanupId);
       return out ?? failed(tr("Action cancelled."));
     }
     if (!options.delay && action.kind !== "interrupt" && updating(target.computer, target.name)) return failed("busy");
@@ -453,8 +453,12 @@ export function bindArchivedRows(lookup: (key: string) => Session | undefined) {
 const app = createActions(withArchived(appCatalog, (key) => archivedRow(key) ?? searchRow(key)), (computer) => !computerOffline(computer), () => selection(), appMarks, appBus,
   (out, row) => { void import("./cleanupNotices").then((m) => m.reportCleanup(out, row)).catch(() => {
     appBus.notify("warn", tr("Working folder kept for review."), false, sessionNoticeKey(row.computer, row.name), tr("Session archived"));
-  }); }, async (row, action, execute, current, remove) => {
+  }); }, async (row, action, execute, current, remove, cleanupId) => {
     const { endActions } = await import("./endActions");
-    return endActions.schedule([captureEnd(row, action)], ([ref], key) => execute(ref, key), { current, remove });
+    try {
+      return await endActions.schedule([captureEnd(row, action)], ([ref], key) => execute(ref, key), { current, remove, cleanupId });
+    } finally {
+      if (cleanupId) await bridge.terminationCleanupCancel(cleanupId).catch(() => {});
+    }
   });
 export const { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyIdentity, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices, dismiss, notify, clearNotice } = app;

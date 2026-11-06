@@ -143,7 +143,7 @@ fn accounted_read_cannot_release_input_if_scope_changes_during_observation() {
     });
 }
 
-fn fixture(config: Value) -> Fixture {
+pub(super) fn fixture(config: Value) -> Fixture {
     let f = Fixture::new(config);
     std::fs::remove_file(f.0.join("hgs")).unwrap();
     std::fs::write(
@@ -168,7 +168,7 @@ fn fixture(config: Value) -> Fixture {
     .unwrap();
     f
 }
-fn capture() -> Capture {
+pub(super) fn capture() -> Capture {
     Capture {
         target: Target {
             computer: String::new(),
@@ -182,7 +182,7 @@ fn capture() -> Capture {
         owner_id: "original-owner".into(),
     }
 }
-async fn connected(f: &Fixture) -> (Arc<Service>, CacheServer) {
+pub(super) async fn connected(f: &Fixture) -> (Arc<Service>, CacheServer) {
     let responder = responder();
     assert!(responder
         .configure_ownership_mode_once(zerus_client_core::desktop::ownership::Mode::Service));
@@ -340,6 +340,154 @@ fn one_original_is_retained_before_the_same_scoped_native_call() {
         }
     });
 }
+
+#[test]
+fn program_continuation_keeps_the_same_native_origin_and_claim_after_exact_done() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let actions = actions(&f);
+        let key = crate::actions::Lane::key(&capture().target, &Action::Terminate);
+        let hold = actions.begin(key.clone(), &Action::Terminate).unwrap();
+        let mut controller = confirm(service.clone(), Arc::new(Pending::default()))
+            .bind(Arc::new(hold))
+            .unwrap();
+        let invocation = controller.invocation().clone();
+        let image = controller.context.image.clone();
+        let connection = controller.context.routing.clone();
+        controller.retain().unwrap();
+        controller.begin_dispatch(&invocation).unwrap();
+        let (outcome, source) = controller.run_retaining_source(
+            &invocation,
+            std::time::Instant::now() + Duration::from_secs(60),
+        );
+        assert!(matches!(outcome, Outcome::Done { .. }));
+        let mut source = source.expect("exact original Done preserves custody, not permission");
+        assert!(Arc::ptr_eq(&source.context.image, &image));
+        assert!(Arc::ptr_eq(&source.context.routing, &connection));
+        assert!(same_invocation(source.invocation(), &invocation));
+        assert_eq!(source.capture(), &capture());
+        assert_eq!(source.archive(), "11111111-2222-4333-8444-555555555555");
+        assert!(source.current());
+        eventually("original native Terminate physically joined", || {
+            source.original_call_joined()
+        })
+        .await;
+        assert!(
+            actions.begin(key.clone(), &Action::Terminate).is_none(),
+            "pipeline retains the actual Actions claim after its first helper joins"
+        );
+        assert!(source.context.current());
+        source.expire();
+        assert!(
+            !source.current(),
+            "physical join does not renew the ORIGINAL holder deadline"
+        );
+        drop(source);
+        assert!(actions.begin(key, &Action::Terminate).is_some());
+        assert_eq!(effects(&calls(&f)).len(), 1);
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn program_continuation_does_not_treat_a_done_reply_as_physical_pipe_settlement() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    struct Release(PathBuf);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let _ = std::fs::write(self.0.join("termination-release"), b"release");
+        }
+    }
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({"termination_effect_completed_pipe":true}));
+        let _release = Release(f.0.clone());
+        let (service, _cache) = connected(&f).await;
+        let actions = actions(&f);
+        let key = crate::actions::Lane::key(&capture().target, &Action::Terminate);
+        let hold = actions.begin(key.clone(), &Action::Terminate).unwrap();
+        let mut controller = confirm(service.clone(), Arc::new(Pending::default()))
+            .bind(Arc::new(hold))
+            .unwrap();
+        let invocation = controller.invocation().clone();
+        controller.retain().unwrap();
+        controller.begin_dispatch(&invocation).unwrap();
+        let (outcome, source) = controller.run_retaining_source(
+            &invocation,
+            std::time::Instant::now() + Duration::from_secs(60),
+        );
+        assert!(matches!(outcome, Outcome::Done { .. }), "{outcome:?}");
+        let source = source.unwrap();
+        assert!(
+            !source.original_call_joined(),
+            "exit and parsed Done cannot settle an original output reader"
+        );
+        assert!(actions.begin(key.clone(), &Action::Terminate).is_none());
+        std::fs::write(f.0.join("termination-release"), b"release").unwrap();
+        eventually("actual original output reader EOF", || {
+            source.original_call_joined()
+        })
+        .await;
+        assert!(
+            actions.begin(key.clone(), &Action::Terminate).is_none(),
+            "readonly pipeline origin stays charged independently"
+        );
+        drop(source);
+        assert!(actions.begin(key, &Action::Terminate).is_some());
+        assert_eq!(effects(&calls(&f)).len(), 1);
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn program_continuation_never_reconstructs_an_origin_from_unknown_or_removed_outcomes() {
+    #[cfg(unix)]
+    if crate::test_context::non_agent() {
+        return;
+    }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        for config in [
+            json!({"termination_effect_lost":true}),
+            json!({"termination_effect_cleanup":"unknown"}),
+            json!({"termination_effect_cleanup":"removed"}),
+        ] {
+            let f = fixture(config);
+            let (service, _cache) = connected(&f).await;
+            let pending = Arc::new(Pending::default());
+            let mut controller = confirm(service.clone(), pending.clone())
+                .bind(Arc::new(()))
+                .unwrap();
+            let invocation = controller.invocation().clone();
+            controller.retain().unwrap();
+            controller.begin_dispatch(&invocation).unwrap();
+            let (_outcome, source) = controller.run_retaining_source(
+                &invocation,
+                std::time::Instant::now() + Duration::from_secs(60),
+            );
+            assert!(source.is_none());
+            assert!(Confirmation::new(
+                uuid::Uuid::new_v4().to_string(),
+                capture(),
+                selected(service.clone()),
+                pending
+            )
+            .is_err());
+            assert_eq!(effects(&calls(&f)).len(), 1);
+            service.join().await.unwrap();
+        }
+    });
+}
+
 #[test]
 fn corrupted_epoch_scope_or_changed_capture_never_dispatches_or_reoffers() {
     #[cfg(unix)]

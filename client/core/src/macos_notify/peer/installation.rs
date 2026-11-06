@@ -11,6 +11,7 @@ use std::{
 use objc2::rc::autoreleasepool;
 
 mod original_child;
+pub use original_child::OriginalChildIdentity;
 mod service;
 pub use service::{select_for_service, ChildObservation, ServiceSelection};
 
@@ -74,6 +75,14 @@ impl Selection {
         child: &mut std::process::Child,
     ) -> Result<(), Refusal> {
         original_child::observe(child, &self.original.service, || {
+            same_generation(&self.original, &snapshot()?)
+        })
+    }
+    pub(crate) fn observe_original_helper_identity(
+        &self,
+        child: &mut std::process::Child,
+    ) -> Result<OriginalChildIdentity, Refusal> {
+        original_child::observe_identity(child, &self.original.service, || {
             same_generation(&self.original, &snapshot()?)
         })
     }

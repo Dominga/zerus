@@ -2,9 +2,12 @@
 import json
 import os
 from pathlib import Path
+import select
 import shutil
 import subprocess
+import time
 import unittest
+import uuid
 
 import test_pause
 
@@ -80,6 +83,54 @@ class WorktreeLifecycle(test_pause.Harness):
         result=self.program_manifest(capture,cwd=self.project)
         self.assertNotEqual(result.returncode,0);self.assertIn('needed to settle',result.stderr)
         self.assertTrue(self.project.exists());self.assertEqual(self.archives(),[]);self.assertTrue(self.binding(name))
+
+    def test_program_holder_keeps_the_original_checkout_without_mutating_it_and_closes(self):
+        name=self.start('claude');capture=self.program_capture(name);pipeline=str(uuid.uuid4())
+        before=sorted(p.relative_to(self.project).as_posix() for p in self.project.rglob('*'))
+        child=subprocess.Popen([str(test_pause.HGS),'worktrees','program-holder','--json'],
+                               env=self.env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        try:
+            child.stdin.write((json.dumps({'op':'open','pipeline':pipeline,'discovery':{'capture':capture}})+'\n').encode())
+            child.stdin.flush()
+            # Read bounded native frames without relying on the live holder's EOF.
+            def read_frame():
+                deadline=time.monotonic()+10;frame=bytearray();cap=128*1024+4096
+                while not frame.endswith(b'\n') and len(frame)<=cap:
+                    remaining=deadline-time.monotonic()
+                    self.assertGreater(remaining,0,'the original holder did not publish its frame')
+                    self.assertTrue(select.select([child.stdout],[],[],remaining)[0],'holder readiness expired')
+                    chunk=os.read(child.stdout.fileno(),1)
+                    if not chunk:
+                        _,error=child.communicate(timeout=5)
+                        self.fail('holder exited before its frame: '+error.decode(errors='replace'))
+                    frame.extend(chunk)
+                self.assertLessEqual(len(frame),cap)
+                return json.loads(frame)
+            ready=read_frame();self.assertEqual(ready['op'],'ready');self.assertEqual(ready['pipeline'],pipeline)
+            self.assertEqual(ready['manifest']['capture'],capture)
+            self.assertEqual(ready['holder']['pid'],child.pid);self.assertEqual(ready['holder']['parent'],os.getpid())
+            self.assertTrue(Path(ready['socket']).is_socket());self.assertIsNone(child.poll())
+            self.assertEqual(before,sorted(p.relative_to(self.project).as_posix() for p in self.project.rglob('*')))
+            self.assertTrue(self.binding(name));self.assertEqual(self.archives(),[])
+            observation=str(uuid.uuid4())
+            child.stdin.write((json.dumps({'op':'observe','pipeline':pipeline,'observation':observation})+'\n').encode())
+            child.stdin.flush();observed=read_frame()
+            self.assertEqual(observed['op'],'observed');self.assertEqual(observed['observation'],observation)
+            self.assertEqual(observed['pipeline'],pipeline)
+            for field in ('capture','configuration','boot','checkout','issued','expires'):
+                self.assertEqual(observed['manifest'][field],ready['manifest'][field],field)
+            self.assertNotEqual(observed['manifest']['id'],ready['manifest']['id'])
+            self.assertTrue(self.binding(name));self.assertEqual(self.archives(),[])
+            child.stdin.write((json.dumps({'op':'close','pipeline':pipeline})+'\n').encode());child.stdin.flush()
+            stdout,stderr=child.communicate(timeout=10)
+            self.assertEqual(child.returncode,0,stderr.decode(errors='replace'))
+            self.assertEqual(json.loads(stdout),{'op':'closed','pipeline':pipeline})
+            self.assertFalse(Path(ready['socket']).exists())
+            self.assertTrue(self.project.is_dir());self.assertTrue(self.binding(name));self.assertEqual(self.archives(),[])
+        finally:
+            self.settle_program(child)
+            for stream in (child.stdin,child.stdout,child.stderr):
+                if stream:stream.close()
 
     def command(self,*args):
         result=subprocess.run([str(test_pause.HGS),*args],env=self.env,text=True,capture_output=True,timeout=40)

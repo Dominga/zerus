@@ -17,7 +17,11 @@ const MAX_OBJECTS: usize = 65_536;
 const MAX_DEPTH: usize = 128;
 const MAX_NAMES: usize = 8 << 20;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[allow(dead_code)] // Object transfer is used only by the closed live holder protocol.
+pub(crate) mod loan;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Object {
     pub device: u64,
     pub inode: u64,

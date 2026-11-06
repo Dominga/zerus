@@ -131,7 +131,7 @@ pub fn connector_program(hgs: &Path, client_dir: Option<&Path>) -> PathBuf {
 
 /// Exact selection for a local nested CLI: PATH alone cannot override an old
 /// connector beside the staged hgs. Never send this local path to a peer.
-const CONNECTOR_ENV: &str = "HGS_MOBILE_CONNECTOR";
+const CONNECTOR_ENV: &str = "ZERUS_CLIENT_MOBILE_CONNECTOR_PATH";
 
 #[cfg(any(windows, test))]
 fn phone_connector(hgs: &Path, call: &Invocation, directory: Option<&Path>) -> Option<String> {

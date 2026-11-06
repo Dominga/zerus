@@ -408,7 +408,7 @@ fn a_staged_phone_cli_receives_the_exact_connector_without_global_environment_ch
         &[("*", "echo '{\"nested\":true}'")],
     );
     let (stale, _) = stage.program("zerus-mobile-connector", &[("*", "echo stale; exit 9")]);
-    let (hgs, _) = stage.program("hgs", &[("*", "if [ -n \"${HGS_MOBILE_CONNECTOR+x}\" ]; then \"$HGS_MOBILE_CONNECTOR\" --workspace status; else \"$here/zerus-mobile-connector\" --workspace status; fi")]);
+    let (hgs, _) = stage.program("hgs", &[("*", "if [ -n \"${ZERUS_CLIENT_MOBILE_CONNECTOR_PATH+x}\" ]; then \"$ZERUS_CLIENT_MOBILE_CONNECTOR_PATH\" --workspace status; else \"$here/zerus-mobile-connector\" --workspace status; fi")]);
     let call = invocation(&["mobile", "phones", "--json"], Duration::from_secs(5));
     // Existing fallback really reaches the competing sibling.
     assert!(matches!(

@@ -51,9 +51,9 @@
   "workspace/projectFolderSplit": 230,
   "workspace/reduceMotion": false,
   "workspace/removeWorktreeAfterTermination": false,
+  "workspace/sessionLeads": "",
   "workspace/sessionsWidth": 310,
   "workspace/showCompletedSubagents": false,
   "workspace/theme": "system",
-  "workspace/usageIndicator": "rails",
-  "workspace/sessionLeads": ""
+  "workspace/usageIndicator": "rails"
 }

@@ -855,47 +855,60 @@ pub(super) fn task_reply(session: &zerus_replica::SessionKey, dispatch: &str, id
 /// Recovery is read-only, even when no receipt exists. Absence after a crash
 /// does not authorize another terminal submission.
 pub(super) fn task_reply_receipt(name: &str, request: &Value) -> Result<Option<Value>> {
-    let parsed: Request = serde_json::from_value(request.clone()).map_err(|e| e.to_string())?;
-    uuid::Uuid::parse_str(&parsed.request_id).map_err(|_| "invalid message identity")?;
-    let path = absolute_root()?.join("input_receipts").join(format!("{}.json", parsed.request_id));
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e.to_string()),
-    };
-    let receipt: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    let digest = format!("{:x}", Sha256::digest(request.to_string().as_bytes()));
-    if string(&receipt, "digest") != digest || string(&receipt, "name") != name {
-        return Err("message receipt identity or content does not match".into());
+    match task_reply_lookup(name, request)? {
+        Lookup::Absent => Ok(None),
+        Lookup::Found(receipt) => Ok(Some(receipt)),
+        Lookup::Other => Err("message receipt identity or content does not match".into()),
     }
-    Ok(Some(receipt))
 }
 
-/// The receipt of request `request_id` to `name` whose exact bytes hashed to
-/// `digest`, read only: an attempt's retained delivery binding recovers it
-/// without the original request (C3 A3). A receipt of other content or for
-/// another session is an error; none is `None`.
-pub(super) fn task_reply_receipt_bound(
-    name: &str,
-    request_id: &str,
-    digest: &str,
-) -> Result<Option<Value>> {
-    let request_id = uuid::Uuid::parse_str(request_id)
-        .map_err(|_| "invalid message identity")?
-        .to_string();
+/// What the receipt store holds for a request, read only (#1519 R2). A
+/// receipt that cannot be read or parsed is an error: after a possible
+/// delivery it is unknown, never "nothing was sent".
+pub(crate) enum Lookup {
+    Absent,
+    /// This exact request's receipt (its digest and name).
+    Found(Value),
+    /// A readable receipt of other content or for another session under the
+    /// same ID: this request was not the one it records.
+    Other,
+}
+
+pub(super) fn task_reply_lookup(name: &str, request: &Value) -> Result<Lookup> {
+    let parsed: Request = serde_json::from_value(request.clone()).map_err(|e| e.to_string())?;
+    uuid::Uuid::parse_str(&parsed.request_id).map_err(|_| "invalid message identity")?;
+    let digest = format!("{:x}", Sha256::digest(request.to_string().as_bytes()));
+    lookup(name, &parsed.request_id, &digest)
+}
+
+fn lookup(name: &str, request_id: &str, digest: &str) -> Result<Lookup> {
     let path = absolute_root()?
         .join("input_receipts")
         .join(format!("{request_id}.json"));
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Lookup::Absent),
         Err(e) => return Err(e.to_string()),
     };
     let receipt: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     if string(&receipt, "digest") != digest || string(&receipt, "name") != name {
-        return Err("message receipt identity or content does not match".into());
+        return Ok(Lookup::Other);
     }
-    Ok(Some(receipt))
+    Ok(Lookup::Found(receipt))
+}
+
+/// The receipt of request `request_id` to `name` whose exact bytes hashed to
+/// `digest`, read only: an attempt's retained delivery binding recovers it
+/// without the original request (C3 A3), typed as `task_reply_lookup`.
+pub(super) fn task_reply_receipt_bound(
+    name: &str,
+    request_id: &str,
+    digest: &str,
+) -> Result<Lookup> {
+    let request_id = uuid::Uuid::parse_str(request_id)
+        .map_err(|_| "invalid message identity")?
+        .to_string();
+    lookup(name, &request_id, digest)
 }
 
 pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Result<Value> {

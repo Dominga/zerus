@@ -479,11 +479,20 @@ fn find(store: &ProjectStore, reference: &str) -> Result<TaskDoc> {
 
 /// How many tasks agents started since `since` (Unix milliseconds), from the
 /// task index when it can answer.
-pub(super) fn agent_starts_since(store: &ProjectStore, since: i64) -> Result<usize> {
-    if let Some(Ok(count)) = index::Index::open(store).map(|index| index.agent_starts_since(since)) {
-        return Ok(count);
-    }
-    store.agent_starts_since(since).map_err(fail)
+pub(super) fn agent_starts_since(
+    store: &ProjectStore,
+    since: i64,
+    deadline: std::time::Instant,
+) -> Result<usize> {
+    // Every quota decision, legacy route included, counts the tasks as
+    // saved, reservations included, never the index's sent history alone;
+    // bounded, and failing closed (#1519 R2).
+    let mut admitted = store.admit_until(deadline).ok_or_else(|| fail(BUSY))?;
+    admitted.agent_starts_since(since, deadline).map_err(|error| {
+        fail(format!(
+            "this project's agent starts in the last hour cannot be counted ({error}); nothing was sent"
+        ))
+    })
 }
 
 pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
@@ -1169,8 +1178,17 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         "send" | "handoff" => {
             let (session, pin) = session.expect("a send has its session");
             destination = session.session.clone();
-            extra = send(&store, &mut task, project_name, session, pin, &who, action == "handoff")
-                .map_err(|e| refuse(e, &destination))?;
+            extra = send(
+                &store,
+                &mut task,
+                project_name,
+                session,
+                pin,
+                &who,
+                action == "handoff",
+                deadline,
+            )
+            .map_err(|e| refuse(e, &destination))?;
         }
         "cancel" => extra = cancel(&store, &machines, &mut task, project_name, cancellation::reason(args, guard)?, &who, None)?,
         _ => return Err(fail(USAGE)),
@@ -1370,6 +1388,7 @@ fn cancel_here(
 }
 
 /// Pastes the task prompt into its session on this computer.
+#[allow(clippy::too_many_arguments)]
 fn send(
     store: &ProjectStore,
     task: &mut TaskDoc,
@@ -1378,13 +1397,19 @@ fn send(
     pin: bool,
     who: &Actor,
     handoff: bool,
+    deadline: std::time::Instant,
 ) -> Result<Value> {
     // Everything that could stop the send from being recorded is checked
     // before the paste; only I/O can fail after it.
     if handoff { task.check_handoff(who).map_err(fail)?; } else { task.check_send().map_err(fail)?; }
     let view = task.view().map_err(fail)?;
     let settings = store.project().map_err(fail)?.settings();
-    let starts = agent_starts_since(store, now() - 3_600_000)?;
+    // Only an agent's start under a limit is counted.
+    let starts = if matches!(who, Actor::Agent(_)) && settings.agent_limit > 0 {
+        agent_starts_since(store, now() - 3_600_000, deadline)?
+    } else {
+        0
+    };
     settings
         .check_agent(who, &session, true, starts)
         .map_err(fail)?;

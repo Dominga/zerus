@@ -6,6 +6,7 @@
 //! request's own receipt settles it. A repeat, a restart or `--recover-only`
 //! reads the receipt and never submits.
 use super::*;
+use crate::state::ReceiptLookup;
 use crate::swarm::fence::{self, Admission, Closed};
 use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
@@ -158,8 +159,10 @@ const UNCONFIRMED: &str =
     "The task input was not confirmed. It is never sent again automatically; check the executor.";
 
 /// Recovery of an attempt already reserved under `id`: its request's
-/// receipt settles it, and anything else is uncertain. Never an input, even
-/// when no receipt exists (desktop-u's condition 4).
+/// receipt settles it, and anything else is uncertain, a receipt that cannot
+/// be read included (#1519 R2): after a possible delivery it is never
+/// "nothing was sent". Never an input, even when no receipt exists
+/// (desktop-u's condition 4).
 pub(super) fn recover(
     config: &Config,
     project: &str,
@@ -168,13 +171,15 @@ pub(super) fn recover(
     to: &SessionKey,
     request: &Value,
 ) -> Result<Delivered> {
-    let native = crate::state::task_reply_receipt(&to.session, request).map_err(fail)?;
-    match native {
-        Some(native) if native["status"] == "submitted" => {
+    match crate::state::task_reply_lookup(&to.session, request) {
+        Ok(ReceiptLookup::Found(native)) if native["status"] == "submitted" => {
             settle(config, project, uuid, id, &native)?;
             Ok(Delivered::Submitted(native))
         }
-        _ => Ok(Delivered::Uncertain(UNCONFIRMED.into())),
+        Ok(_) => Ok(Delivered::Uncertain(UNCONFIRMED.into())),
+        Err(error) => Ok(Delivered::Uncertain(format!(
+            "{UNCONFIRMED} Its receipt cannot be read: {error}"
+        ))),
     }
 }
 
@@ -242,16 +247,25 @@ pub(super) struct Frozen {
 /// The starts agents made in the project's last hour, counted inside the
 /// final admission from the tasks as saved, never a number read before the
 /// locks were dropped (zerus-v3rtj): only an agent's start under a limit
-/// needs it.
+/// needs it. A task that cannot be read whole, or the deadline, leaves the
+/// count unknown: the start is refused, never counted as none (#1519 R2).
 pub(super) fn admitted_starts(
     admitted: &mut zerus_replica::Admitted<'_>,
     who: &Actor,
     settings: &Settings,
-) -> anyhow::Result<usize> {
+    deadline: Instant,
+) -> std::result::Result<usize, String> {
     if !matches!(who, Actor::Agent(_)) || settings.agent_limit <= 0 {
         return Ok(0);
     }
-    Ok(admitted.agent_starts_since(now() - 3_600_000)?)
+    admitted
+        .agent_starts_since(now() - 3_600_000, deadline)
+        .map_err(|error| {
+            format!(
+                "this project's agent starts in the last hour cannot be counted ({error}); \
+                 nothing was sent"
+            )
+        })
 }
 
 /// Debug builds only, never compiled into a release image: a test holds a
@@ -293,9 +307,10 @@ pub(super) fn freeze(
         super::send_check(task)?;
     }
     let settings = store.project().map_err(fail)?.settings();
-    let starts = super::agent_starts_since(store, now() - 3_600_000)?;
+    // The hourly limit is counted in the final admission only: no scan of
+    // the project's tasks here, outside every bound (#1519 R2).
     let id = uuid::Uuid::new_v4().to_string();
-    let request = render(&settings, starts, task, project_name, to, pin, who, &id)?;
+    let request = render(&settings, 0, task, project_name, to, pin, who, &id)?;
     let view = task.view().map_err(fail)?;
     Ok(Frozen {
         id,
@@ -393,7 +408,10 @@ pub(super) fn send(
             }
         }
         let settings = admitted.project()?.settings();
-        let starts = admitted_starts(admitted, who, &settings)?;
+        let starts = match admitted_starts(admitted, who, &settings, deadline) {
+            Ok(starts) => starts,
+            Err(why) => return refuse("not_sendable", why),
+        };
         match render(
             &settings,
             starts,
@@ -496,13 +514,17 @@ pub(super) fn reopen_again(
         return Err(fail("this reopen's receipt is on another computer"));
     }
     let uuid = task.uuid().to_owned();
-    let receipt = crate::state::task_reply_receipt_bound(&delivery.name, id, &delivery.digest)
-        .map_err(fail)?;
+    let receipt = crate::state::task_reply_receipt_bound(&delivery.name, id, &delivery.digest);
     let (state, error) = match receipt {
-        Some(native) if native["status"] == "submitted" => {
+        Ok(ReceiptLookup::Found(native)) if native["status"] == "submitted" => {
             settle(config, &project.0, &uuid, id, &native)?;
             ("submitted", String::new())
         }
+        // A receipt that cannot be read is unknown evidence (#1519 R2).
+        Err(error) => (
+            "uncertain",
+            format!("{UNCONFIRMED} Its receipt cannot be read: {error}"),
+        ),
         _ => {
             let facts = task.attempt_facts(id).map_err(fail)?.unwrap_or_default();
             if facts.contains(&zerus_replica::execution::EventKind::NotStarted) {
@@ -579,7 +601,10 @@ pub(super) fn reopen(
         // The project's agent rules, as admitted, as for a send
         // (zerus-wvzdk): an agent may reopen only where it may start.
         let settings = admitted.project()?.settings();
-        let starts = admitted_starts(admitted, who, &settings)?;
+        let starts = match admitted_starts(admitted, who, &settings, deadline) {
+            Ok(starts) => starts,
+            Err(why) => return refuse("not_sendable", why),
+        };
         if let Err(error) = settings.check_agent(who, to, true, starts) {
             return refuse("not_sendable", error.to_string());
         }

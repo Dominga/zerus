@@ -1342,6 +1342,91 @@ class TaskDelivery(DeliveryFixture):
         self.assertIn("per hour", self.hgs("send", other["ref"], session="codex/actor", ok=False))
         self.assertNotIn("NOT_WITHIN_THE_LIMIT", self.received())
 
+    def test_an_uncountable_task_refuses_an_agent_start(self):
+        # review-win-c on #1519 R2: the final admission's count fails closed.
+        # A charged task that cannot be read is no evidence of zero starts,
+        # and an irregular file at a task's place (a FIFO) never makes the
+        # count wait: the agent's start is refused, and nothing is sent. A
+        # person's start counts nothing and goes on.
+        self.settings(agents_other=True, agent_limit=1)
+        tasks = self.state / "replica" / hashlib.sha256(b"project-1").hexdigest() / "tasks"
+        first = self.add("UNCOUNTED_FIRST", "--target", self.name)
+        charged = self.add("UNCOUNTED_CHARGED", "--target", self.name)
+        release = self.held("send", first["ref"], "--json", session="codex/actor")
+        self.hgs("send", charged["ref"], "--json", session="codex/actor")
+        self.wait_received("UNCOUNTED_CHARGED"); self.confirm()
+        snapshot = tasks / (charged["uuid"] + ".loro")
+        snapshot.chmod(0)
+        try:
+            code, _, err = release()
+        finally:
+            snapshot.chmod(0o600)
+        self.assertNotEqual(code, 0)
+        self.assertIn("cannot be counted", err)
+        self.assertNotIn("UNCOUNTED_FIRST", self.received())
+        # A FIFO named as a task's file (other commands that list every
+        # task are not this fix's; the task and settings come first).
+        self.settings(agents_other=True, agent_limit=5)
+        late = self.add("UNCOUNTED_LATE", "--target", self.name)
+        fifo = tasks / (str(uuid.uuid4()) + ".loro")
+        os.mkfifo(fifo)
+        self.addCleanup(lambda: fifo.unlink(missing_ok=True))
+        # By its UUID: a short ID is found by reading every task, which the
+        # FIFO would hold (zerus-r75ru, not the quota count).
+        ref = "orchard/" + late["uuid"]
+        began = time.monotonic()
+        refused = self.hgs("send", ref, session="codex/actor", ok=False)
+        self.assertLess(time.monotonic() - began, 17)
+        self.assertIn("cannot be counted", refused)
+        self.assertNotIn("UNCOUNTED_LATE", self.received())
+        self.assertEqual(self.hgs("send", ref)["task"]["stage"], "active")
+        self.wait_received("UNCOUNTED_LATE")
+
+    def test_the_legacy_route_counts_a_possible_agent_start_too(self):
+        # desktop-u on #1519 R2: the legacy route's limit counts the tasks as
+        # saved, reservations included, never the index's sent history
+        # alone. An agent's unknown reservation holds the capacity, so its
+        # legacy send of an unfloored task under the hold is refused.
+        warm = self.add("LEGACY_QUOTA_WARM", "--target", self.name)
+        self.hgs("send", warm["ref"]); self.confirm()
+        self.settings(agents_other=True, agent_limit=1)
+        unknown = self.add("LEGACY_QUOTA_UNKNOWN", "--target", self.name)
+        receipts = self.state / "input_receipts"
+        receipts.chmod(0o500)
+        self.addCleanup(receipts.chmod, 0o700)
+        self.assertIn("delivery uncertain", self.hgs("send", unknown["ref"], session="codex/actor", ok=False))
+        receipts.chmod(0o700)
+        self.hgs("cutover", "--project", "orchard", "--hold", "on")
+        legacy = self.add("LEGACY_QUOTA_FRESH", "--target", self.name)
+        self.assertIn("per hour", self.hgs("send", legacy["ref"], session="codex/actor", ok=False))
+        self.assertNotIn("LEGACY_QUOTA_FRESH", self.received())
+        self.assertFalse(self.execution(legacy).get("attempts"))
+
+    def test_an_unreadable_receipt_after_a_start_is_uncertain(self):
+        # review-win-c on #1519 R2 (zerus-hhxn5): a receipt that cannot be
+        # read after a possible delivery is unknown evidence, never
+        # "nothing was sent": a repeat and --recover-only answer uncertain,
+        # on the managed and the legacy route, and nothing is pasted again.
+        task = self.add("RECEIPT_MANAGED", "--target", self.name)
+        plan = self.start_plan(task)
+        self.assertEqual(self.hgs("start-deliver", task["ref"], text=json.dumps(plan))["state"], "submitted")
+        self.wait_received("RECEIPT_MANAGED"); self.confirm()
+        (self.state / "input_receipts" / (plan["id"] + ".json")).write_text("{corrupt")
+        for extra in ((), ("--recover-only",)):
+            again = self.hgs("start-deliver", task["ref"], *extra, text=json.dumps(plan))
+            self.assertEqual(again["state"], "uncertain", again)
+        self.hgs("cutover", "--project", "orchard", "--hold", "on")
+        legacy = self.add("RECEIPT_LEGACY", "--target", self.name)
+        plan = self.start_plan(legacy)
+        self.assertEqual(self.hgs("start-deliver", legacy["ref"], text=json.dumps(plan))["state"], "submitted")
+        self.wait_received("RECEIPT_LEGACY"); self.confirm()
+        self.assertFalse(self.execution(legacy).get("attempts"))
+        (self.state / "input_receipts" / (plan["id"] + ".json")).write_text("{corrupt")
+        for extra in ((), ("--recover-only",)):
+            again = self.hgs("start-deliver", legacy["ref"], *extra, text=json.dumps(plan))
+            self.assertEqual(again["state"], "uncertain", again)
+        self.assertEqual((self.received().count("RECEIPT_MANAGED"), self.received().count("RECEIPT_LEGACY")), (1, 1))
+
     def test_the_agent_limit_bounds_a_frozen_handoff_too(self):
         self.settings(agents_other=True, agent_limit=1)
         task = self.add("LIMIT_HANDOFF", "--start", session="codex/source")

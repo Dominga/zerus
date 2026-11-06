@@ -34,7 +34,7 @@ mod goals;
 mod hooks;
 pub(crate) mod hook_health;
 mod input;
-pub(crate) use input::Submission;
+pub(crate) use input::{Lookup as ReceiptLookup, Submission};
 mod input_queue;
 mod journal;
 mod kimi_cache_hint;
@@ -818,8 +818,12 @@ pub(crate) fn task_reply_receipt_bound(
     name: &str,
     request_id: &str,
     digest: &str,
-) -> Result<Option<Value>> {
+) -> Result<ReceiptLookup> {
     input::task_reply_receipt_bound(name, request_id, digest)
+}
+/// The receipt store's answer for `request`, typed (#1519 R2).
+pub(crate) fn task_reply_lookup(name: &str, request: &Value) -> Result<ReceiptLookup> {
+    input::task_reply_lookup(name, request)
 }
 pub(crate) fn task_reply_receipt(name: &str, request: &Value) -> Result<Option<Value>> {
     input::task_reply_receipt(name, request)

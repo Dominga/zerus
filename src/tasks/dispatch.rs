@@ -151,10 +151,11 @@ fn prepared(
         task.check_send().map_err(fail)?;
     }
     let settings = store.project().map_err(fail)?.settings();
-    let starts = super::agent_starts_since(store, now() - 3_600_000)?;
+    // A Start is the person's: the agents' hourly limit never applies, so
+    // nothing scans the project's tasks for it.
     rendered(
         &settings,
-        starts,
+        0,
         task,
         project_name,
         to,
@@ -300,10 +301,15 @@ pub(super) fn execute(config: &Config, action: &str, args: &[String]) -> Result<
             super::attempts::recover(config, &r.project.0, &uuid, &plan.id, &to, &plan.request)?;
         return delivered_result(config, &r.project.0, &uuid, delivered, &result);
     }
-    // A request whose ID another request's receipt holds is refused.
-    let receipt = match crate::state::task_reply_receipt(&to.session, &plan.request) {
-        Ok(receipt) => receipt,
-        Err(_) => return result("refused", ANOTHER, &task),
+    // A request whose ID another request's readable receipt holds is
+    // refused: it is not that request. A receipt that cannot be read is
+    // unknown evidence after a possible delivery: uncertain, never "nothing
+    // was sent" (#1519 R2, zerus-hhxn5).
+    let receipt = match crate::state::task_reply_lookup(&to.session, &plan.request) {
+        Ok(crate::state::ReceiptLookup::Absent) => None,
+        Ok(crate::state::ReceiptLookup::Found(receipt)) => Some(receipt),
+        Ok(crate::state::ReceiptLookup::Other) => return result("refused", ANOTHER, &task),
+        Err(_) => return result("uncertain", UNCERTAIN, &task),
     };
     // Legacy history: a recorded dispatch acknowledges its original identity
     // even if the task then moved to review, was cancelled or handed off,
@@ -360,7 +366,15 @@ pub(super) fn execute(config: &Config, action: &str, args: &[String]) -> Result<
                 }
                 let settings = admitted.project()?.settings();
                 // Counted here, never before the locks (zerus-v3rtj).
-                let starts = super::attempts::admitted_starts(admitted, &Actor::Person, &settings)?;
+                let starts = match super::attempts::admitted_starts(
+                    admitted,
+                    &Actor::Person,
+                    &settings,
+                    deadline,
+                ) {
+                    Ok(starts) => starts,
+                    Err(why) => return refuse("not_sendable", why),
+                };
                 match rendered(
                     &settings,
                     starts,

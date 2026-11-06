@@ -128,6 +128,19 @@ fn a_changed_relevant_body_is_never_overwritten_by_a_preloaded_record() {
 fn the_regular_reader_releases_original_files_and_its_private_vfs() {
     run("resources");
 }
+#[test]
+fn an_indexed_row_with_a_valid_digest_cannot_replace_its_authoritative_body() {
+    run("body-row");
+}
+#[test]
+fn ordinary_listing_repairs_reference_coverage_after_an_older_catalog_writer() {
+    run("old-catalog");
+}
+#[cfg(unix)]
+#[test]
+fn native_reference_opens_refuse_a_final_symlink_and_a_fifo() {
+    run("native-open");
+}
 #[cfg(unix)]
 #[test]
 fn an_in_place_rewrite_with_restored_mtime_invalidates_reference_coverage() {
@@ -194,6 +207,27 @@ fn isolated_reference_probe() {
     #[cfg(unix)]
     if let Some(which) = case.strip_prefix("native-") {
         use std::os::unix::ffi::OsStrExt;
+        if which == "open" {
+            let regular = root().join("regular-input");
+            fs::write(&regular, b"bounded native data").unwrap();
+            assert!(open(&regular).is_ok());
+            let link = root().join("input-link");
+            std::os::unix::fs::symlink(&regular, &link).unwrap();
+            assert!(
+                open(&link).is_err(),
+                "a final link is never regular native input"
+            );
+            let fifo = root().join("input-fifo");
+            let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+            fs::write(
+                std::env::var_os("HGS_TEST_ARCHIVE_READY").unwrap(),
+                b"ready",
+            )
+            .unwrap();
+            assert!(open(&fifo).is_err());
+            return;
+        }
         let swap = which.starts_with("swap-");
         let which = which.strip_prefix("swap-").unwrap_or(which);
         let suffix = if which == "catalog" || which == "writer" {
@@ -233,6 +267,86 @@ fn isolated_reference_probe() {
     }
     match case.as_str() {
         "resources" => native_reader::fixture_settles(),
+        "body-row" => {
+            let (expected, mut indexed, _) = entry(&database(), id).unwrap().unwrap();
+            indexed.cwd = target.join("indexed-only").to_string_lossy().into_owned();
+            // Keep the exact native version and recompute both digest and path
+            // rows. Only the authoritative body comparison can reject this.
+            store(&database(), &indexed, &expected).unwrap();
+            assert!(metadata().is_ok());
+            let mut calls = 0;
+            assert!(visit_related(until(), &target, "original-owner", |_| {
+                calls += 1;
+                Ok(())
+            })
+            .is_err());
+            assert_eq!(calls, 0);
+            assert_eq!(fs::read_to_string(&path).unwrap(), original.to_string());
+        }
+        "old-catalog" => {
+            let catalog = || drop(super::super::archive_catalog::catalog().unwrap());
+            // An upgraded catalog without the new reference stamp must make
+            // one ordinary reconciliation even if its search stamp is warm.
+            database()
+                .execute(
+                    "DELETE FROM catalog_meta WHERE key='archive_references_stamp'",
+                    [],
+                )
+                .unwrap();
+            database()
+                .execute("DELETE FROM archive_references", [])
+                .unwrap();
+            assert!(metadata().is_err());
+            catalog();
+            assert_eq!(related(&target).unwrap(), vec![original.clone()]);
+
+            let legacy_id = "22222222-2222-4222-8222-222222222222";
+            let mut legacy = record(legacy_id, &target);
+            legacy.as_object_mut().unwrap().remove("worktree_owner");
+            put(&legacy); // raw old writer: no new per-ID update
+            original["cwd"] = json!(target.join("changed"));
+            put(&original);
+            // The old executable warms only its search catalog. It knows
+            // nothing of references or their separate reconciliation stamp.
+            let stamp = || {
+                let m = fs::metadata(root().join("archives")).unwrap();
+                format!("{}:{:?}", m.len(), m.modified().unwrap())
+            };
+            let current = stamp();
+            database()
+                .execute(
+                    "INSERT OR REPLACE INTO catalog_meta VALUES('stamp',?)",
+                    [&current],
+                )
+                .unwrap();
+            assert!(metadata().is_err());
+            let directory = directory_stamp(&root().join("archives")).unwrap();
+            catalog();
+            assert_eq!(
+                directory_stamp(&root().join("archives")).unwrap(),
+                directory
+            );
+            assert_eq!(related(&target).unwrap(), vec![original.clone(), legacy]);
+            fs::remove_file(super::super::archive::path(legacy_id).unwrap()).unwrap();
+            let current = stamp();
+            database()
+                .execute(
+                    "UPDATE catalog_meta SET value=? WHERE key='stamp'",
+                    [&current],
+                )
+                .unwrap();
+            catalog();
+            assert_eq!(related(&target).unwrap(), vec![original]);
+            assert!(entry(&database(), legacy_id).unwrap().is_none());
+            let index = root().join("archive-catalog-v1.sqlite3");
+            let before = file_version(&index).unwrap();
+            catalog();
+            assert_eq!(
+                file_version(&index).unwrap(),
+                before,
+                "warm pages do not rewrite the index"
+            );
+        }
         "corrupt" | "paths" => {
             if case == "corrupt" {
                 database()

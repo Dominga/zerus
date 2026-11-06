@@ -296,11 +296,23 @@ class ProgramExecution(test_pause.Harness):
 
     def test_unrelated_archive_bodies_over_the_global_budget_do_not_block_original_cleanup(self):
         stop = self.original()
+        self.warm_archive_references()
         self.unrelated_archive_history(stop)
         historical = self.historical_archives(stop)
         unrelated = {p: hashlib.sha256(p.read_bytes()).hexdigest()
                      for p in (self.root / 'state/archives').glob('*.json')
                      if json.loads(p.read_text())['name'].startswith('claude/unrelated-history/')}
+        # An older CLI knows only the search stamp. Its ordinary refresh must
+        # not hide these new historical Restore references from the next CLI.
+        stat = (self.root / 'state/archives').stat()
+        seconds, nanos = divmod(stat.st_mtime_ns, 1_000_000_000)
+        stamp = f'{stat.st_size}:SystemTime {{ tv_sec: {seconds}, tv_nsec: {nanos} }}'
+        database = self.root / 'state/archive-catalog-v1.sqlite3'
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute("UPDATE catalog_meta SET value=? WHERE key='stamp'", (stamp,))
+            self.assertNotEqual(db.execute("SELECT value FROM catalog_meta WHERE key='archive_references_stamp'").fetchone()[0], stamp)
+            self.assertEqual(db.execute('SELECT count(*) FROM archive_references WHERE id=?',
+                                       (historical[0]['archive_id'],)).fetchone()[0], 0)
         self.warm_archive_references()
         # The original native continuation still has to prove its exact
         # termination/archive/owner. Unrelated body volume grants no bypass.

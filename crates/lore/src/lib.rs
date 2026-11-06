@@ -7,6 +7,7 @@ use std::path::Path;
 
 pub mod config;
 pub mod embed;
+pub mod index;
 pub mod schema;
 pub mod search;
 pub mod store;
@@ -66,5 +67,6 @@ pub fn object(record: &Value) -> &Map<String, Value> {
         EMPTY.get_or_init(Map::new)
     })
 }
+
 
 

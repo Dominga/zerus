@@ -114,6 +114,8 @@ CodexHooksTrust = observing('CodexHooksTrust', test_codex_hooks_trust.HooksTrust
 CodexUpdate = observing('CodexUpdate', test_codex_update.CodexUpdate, 'codex_update')
 CodexRateLimit = observing('CodexRateLimit', test_codex_rate_limit.CodexRateLimit, 'codex_rate_limit')
 CodexFolderTrust = observing('CodexFolderTrust', test_codex_trust.FolderTrust, 'codex_folder_trust')
+CodexFolderTrustOverview = observing('CodexFolderTrustOverview', test_codex_trust.FolderTrust,
+                                    'codex_folder_trust', lambda case: case.overview())
 KimiFolderTrust = observing('KimiFolderTrust', test_kimi_trust.FolderTrust, 'kimi_folder_trust')
 KimiCacheHint = observing('KimiCacheHint', test_kimi_cache_hint.CacheHint, 'kimi_cache_hint')
 KimiWire = observing('KimiWire', test_questions.Questions, 'kimi_wire')

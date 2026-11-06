@@ -64,6 +64,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import unittest
 import uuid
 
@@ -1083,6 +1084,44 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
         self.assertEqual(self.accepted(name, MESSAGES[0]), 1, self.describe())
         events = [event["type"] for event in self.inspect(name)["events"]]
         self.assertTrue({"SessionStart", "UserPromptSubmit", "Stop"} <= set(events), events)
+
+    def untrusted_folder(self, git=False):
+        config = self.agent_home / 'config.toml'
+        config.write_text(config.read_text(encoding='utf-8').split('[projects.', 1)[0], encoding='utf-8')
+        target = self.project.parent if git else self.project
+        (target / '.codex').mkdir()
+        (target / '.codex/config.toml').write_text('# Synthetic project, no hooks or commands.\n', encoding='utf-8')
+        if git:
+            subprocess.run(['git', 'init', '-q', str(target)], check=True, env=self.env, timeout=15)
+        name = self.launch('folder-trust', self.NO_HOOK_REVIEW)
+        card = self.card(name, 'codex_folder_trust')
+        self.assertNotIn('projects', tomllib.loads(config.read_text(encoding='utf-8')))
+        self.assertFalse(self.record(name).get('conversation_id'))
+        return name, card, target
+
+    def test_explicit_folder_trust_names_the_git_root_then_sends(self):
+        name, card, target = self.untrusted_folder(git=True)
+        question = card['questions'][0]
+        self.assertEqual(question['question'], 'Trust this Git repository?')
+        self.assertIn(str(target).lower(), question['options'][0]['description'].lower())
+        payload, receipt = self.answer(name, card, [dict(question_id='trust', selected_option_ids=['trust_0'], text='')])
+        self.assertEqual(self.json('answer', name, '--json', input=json.dumps(payload)), receipt)
+        projects = tomllib.loads((self.agent_home / 'config.toml').read_text(encoding='utf-8'))['projects']
+        self.assertEqual({path.lower() for path, value in projects.items() if value['trust_level'] == 'trusted'},
+                         {str(target).lower()})
+        self.deliver(name, MESSAGES[0])
+
+    def test_explicit_folder_cancel_keeps_trust_unchanged(self):
+        name, card, _ = self.untrusted_folder()
+        cancel = card['questions'][0]['options'][1]['label']
+        self.assertIn(cancel, ('Quit', 'Back to Agent Command Center'))
+        payload, receipt = self.answer(name, card, [dict(question_id='trust', selected_option_ids=['trust_1'], text='')])
+        self.assertEqual(self.json('answer', name, '--json', input=json.dumps(payload)), receipt)
+        if cancel == 'Back to Agent Command Center':
+            self.until('Back to the live command center', lambda: 'Agent command center' in self.capture(name))
+            self.assertEqual(self.row(name)['process_state'], 'running')
+        self.assertNotIn('projects', tomllib.loads((self.agent_home / 'config.toml').read_text(encoding='utf-8')))
+        self.assertFalse(self.record(name).get('conversation_id'))
 
     def test_clear_context_starts_a_new_conversation_in_the_same_agent(self):
         name = self.launch("clear", self.NO_HOOK_REVIEW)

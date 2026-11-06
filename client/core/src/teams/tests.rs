@@ -445,6 +445,61 @@ fn inbox_waiting_spans_and_profile_project_their_replies() {
     assert!(!profile.losses.is_empty() && !profile.roles.is_empty());
 }
 
+/// Task 82: the profile's task rows carry each task's lateness against the
+/// plan and its overrun against the estimate; a row without a baseline has
+/// no lateness, an unstarted task no overrun, an unknown schedule says so.
+#[test]
+fn profile_task_rows_carry_lateness_and_overrun() {
+    let value = json!({
+        "summary": {"tasks": 3},
+        "tasks": {"items": [
+            {"task": 3, "lateness": {"planned_start": 100.0, "planned_end": 700.0, "start_late_s": 1500, "inherited_s": 1200,
+                "own_s": 300, "end_late_s": null, "from": 2, "actual_start": 1600.0, "actual_end": null},
+             "overrun": {"estimate_s": 600, "work_s": 1020, "overrun_s": 420, "ratio": 1.7, "running": true}},
+            {"task": 4, "lateness": {"planned_start": 900.0, "start_late_s": 0, "inherited_s": 0, "own_s": 0, "from": null},
+             "overrun": {"not_started": true}},
+            {"task": 5, "lateness": {"start_late_s": null, "inherited_s": null, "own_s": null, "unknown": "estimate missing"},
+             "overrun": {"estimate_s": null, "work_s": 60, "overrun_s": null, "ratio": null}},
+            {"task": 6, "lateness": null, "overrun": {"not_started": true}}
+        ], "next_cursor": 6}
+    });
+    let profile = view::profile(TEAM, &value);
+    assert!(profile.task_rows_more);
+    let row = |id: u64| profile.task_rows.iter().find(|row| row.task == id).unwrap();
+    let three = row(3).lateness.clone().unwrap();
+    assert_eq!(
+        (
+            three.known,
+            three.own_s,
+            three.inherited_s,
+            three.from,
+            three.actual_start
+        ),
+        (true, 300, 1200, Some(2), Some(1600.0))
+    );
+    let over = row(3).overrun.clone().unwrap();
+    assert_eq!(
+        (
+            over.started,
+            over.known,
+            over.overrun_s,
+            over.ratio,
+            over.running
+        ),
+        (true, true, 420, 1.7, true)
+    );
+    let four = row(4).lateness.clone().unwrap();
+    assert_eq!((four.known, four.start_late_s, four.from), (true, 0, None));
+    assert!(!row(4).overrun.clone().unwrap().started);
+    let five = row(5).lateness.clone().unwrap();
+    assert_eq!(
+        (five.known, five.unknown.as_str()),
+        (false, "estimate missing")
+    );
+    assert!(!row(5).overrun.clone().unwrap().known);
+    assert!(row(6).lateness.is_none());
+}
+
 #[test]
 fn waiting_pages_append_new_items_in_order_and_stop_at_the_last() {
     let start = Instant::now();

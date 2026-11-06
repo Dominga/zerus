@@ -2211,11 +2211,11 @@ void TestTeamsUiWorkspace::aNarrowToolbarKeepsOnlyItsIcons()
     QVERIFY(!workspace.findChild<QWidget *>("teamWorkspaceHeatWide")->isVisible());
     QCOMPARE(heatMenu->toolTip(), QStringLiteral("Heat: Off"));
     QStringList choices; for (auto *action : heatMenu->menu()->actions()) choices << action->text();
-    QCOMPARE(choices, (QStringList{"Off", "Time lost", "Tokens"}));
+    QCOMPARE(choices, (QStringList{"Off", "Lateness", "Tokens"}));
     Settings::remove("teams/heat/team-1");
     heatMenu->menu()->actions().at(1)->trigger();
     QCOMPARE(TeamUi::heatMode("team-1"), QStringLiteral("time"));
-    QTRY_COMPARE(workspace.findChild<QPushButton *>("teamWorkspaceHeatMenu")->toolTip(), QStringLiteral("Heat: Time lost"));
+    QTRY_COMPARE(workspace.findChild<QPushButton *>("teamWorkspaceHeatMenu")->toolTip(), QStringLiteral("Heat: Lateness"));
     workspace.findChild<QPushButton *>("teamWorkspaceHeatMenu")->menu()->actions().at(0)->trigger();
     QCOMPARE(TeamUi::heatMode("team-1"), QStringLiteral("off"));
     QTRY_COMPARE(segment("teamWorkspaceFilter", "problems")->text(), QStringLiteral("Problems"));

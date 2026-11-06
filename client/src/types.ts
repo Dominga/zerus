@@ -992,6 +992,21 @@ export interface TeamProfileView {
   team: string; elapsed_s: number | null; worked_s: number | null; tasks: number; accepted: number;
   tokens: number | null; tokens_partial: boolean;
   losses: TeamProfileLoss[]; roles: TeamProfileRole[];
+  /** Task 82: each task's lateness against the plan and overrun against its estimate (the first page). */
+  task_rows: TeamProfileTask[]; task_rows_more: boolean;
+}
+
+export interface TeamProfileLateness {
+  known: boolean; unknown: string; planned_start: number | null; planned_end: number | null;
+  actual_start: number | null; actual_end: number | null; start_late_s: number; inherited_s: number; own_s: number; from: number | null;
+}
+
+export interface TeamProfileOverrun {
+  started: boolean; known: boolean; estimate_s: number; work_s: number; overrun_s: number; ratio: number; running: boolean;
+}
+
+export interface TeamProfileTask {
+  task: number; lateness: TeamProfileLateness | null; overrun: TeamProfileOverrun | null;
 }
 
 export interface TeamTestPending {

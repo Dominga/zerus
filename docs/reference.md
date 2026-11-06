@@ -2219,7 +2219,10 @@ time while they work on schedule.
   planned end of its hard dependencies and of its member's previous task (a
   barrier phase also of the lower phases), and never before the baseline's
   moment; its planned end is that plus its estimate. `lateness` is `{planned_start,
-  planned_end, start_late_s, inherited_s, own_s, end_late_s}`: `start_late_s`
+  planned_end, start_late_s, inherited_s, own_s, end_late_s, from, actual_start,
+  actual_end}` (task 82: `from` is the predecessor the inherited part comes
+  from, null without one; `actual_start` and `actual_end` are the moments
+  themselves, null until they happen): `start_late_s`
   is the actual start (or now, while the task has not started and is past its
   planned start) minus the planned start, never negative; `inherited_s` is the
   part of it that the tasks it was planned to follow are behind (they ended, or

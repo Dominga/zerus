@@ -159,7 +159,7 @@ static QJsonObject heatTeam()
     add(482, "Settings: confirm subagents", "backend2", "accepted", {479}, 1);
     add(483, "Integrate phase 38", "lead", "accepted", {474, 475, 515, 476, 480, 478, 477, 481, 482}, 2);
     add(484, "Review phase 38", "reviewer", "cancelled", {483}, 3);
-    add(485, "Test phase 38", "qa", "cancelled", {483}, 3);
+    add(485, "Test phase 38", "qa", "pending", {483}, 3);
     add(486, "Build phase 38", "lead", "cancelled", {484, 485}, 4);
     return QJsonObject{{"id", "team-1"}, {"name", "Teams v2: delivery and reports"}, {"status", "running"}, {"project", "Zerus"}, {"folder", "/work/zerus"},
                        {"lead", "lead"}, {"revision", 7}, {"created", 1000}, {"updated", 9000}, {"settings", QJsonObject{}},
@@ -199,6 +199,24 @@ static QJsonObject heatProfile(int leadWait = 7200)
         return QJsonObject{{"summary", QJsonObject{{"tasks", 14}, {"tokens", partial ? QJsonObject{{"total", 1800000}, {"partial", true}} : QJsonObject{{"unknown", true}}}}},
                            {"losses", QJsonObject{{list, QJsonObject{{"items", items}, {"next_cursor", next}, {"total", 17}}}}}};
     };
+    // Task 82: the task rows: lateness against the plan and overrun against
+    // the estimate. #483 is late by its own 2h 20m and 1h 16m from #482;
+    // #475 only inherits 20m from #474; #474 ran on time; #485, a later
+    // layer before its planned start, is on time and not started.
+    const auto late = [](int start, int inherited, int from) {
+        return QJsonObject{{"planned_start", 1000.0}, {"planned_end", 4600.0}, {"start_late_s", start}, {"inherited_s", inherited},
+                           {"own_s", start - inherited}, {"end_late_s", QJsonValue()}, {"from", from ? QJsonValue(from) : QJsonValue()},
+                           {"actual_start", start > 0 ? QJsonValue(1000.0 + start) : QJsonValue()}, {"actual_end", QJsonValue()}};
+    };
+    const auto over = [](int estimate, int work) {
+        return QJsonObject{{"estimate_s", estimate}, {"work_s", work}, {"overrun_s", work - estimate}, {"ratio", double(work) / estimate}, {"running", false}};
+    };
+    const QJsonArray rows{
+        QJsonObject{{"task", 474}, {"lateness", late(0, 0, 0)}, {"overrun", over(3600, 3600)}},
+        QJsonObject{{"task", 475}, {"lateness", late(1200, 1200, 474)}, {"overrun", over(3600, 2880)}},
+        QJsonObject{{"task", 482}, {"lateness", late(2400, 0, 0)}, {"overrun", over(1800, 5400)}},
+        QJsonObject{{"task", 483}, {"lateness", late(leadWait + 1200 + 4560, 4560, 482)}, {"overrun", over(3600, 6120)}},
+        QJsonObject{{"task", 485}, {"lateness", late(0, 0, 0)}, {"overrun", QJsonObject{{"not_started", true}}}}};
     QJsonArray first, second;
     for (int i = 0; i < time.size(); ++i) (i < 9 ? first : second).append(time.at(i));
     const QJsonArray tokens{
@@ -206,8 +224,9 @@ static QJsonObject heatProfile(int leadWait = 7200)
         loss("rework", 480, 2820, {{"attempt", 1}, {"cause", "returned"}, {"tokens", 236000}, {"cost_usd", .6}, {"share", .41}}),
         loss("rework", 481, 1200, {{"attempt", 1}, {"cause", "rejected"}, {"tokens", 98000}, {"cost_usd", .25}, {"share", .22}}),
         loss("long_test", 476, 2100, {{"tokens", 61000}, {"cost_usd", .15}})};
-    return QJsonObject{{"time", QJsonArray{page("by_time", first, QJsonObject{{"s", 2460}, {"id", "member_wait:477"}, {"page", 1}}, false),
-                                           page("by_time", second, QJsonValue(), false)}},
+    QJsonObject firstPage = page("by_time", first, QJsonObject{{"s", 2460}, {"id", "member_wait:477"}, {"page", 1}}, false);
+    firstPage["tasks"] = QJsonObject{{"items", rows}, {"next_cursor", QJsonValue()}};
+    return QJsonObject{{"time", QJsonArray{firstPage, page("by_time", second, QJsonValue(), false)}},
                        {"tokens", QJsonArray{page("by_tokens", tokens, QJsonValue(), true)}}};
 }
 
@@ -503,7 +522,7 @@ void TestTeamsUiProfile::heatTintsGraphAndBoardByTimeOrTokens()
     // #755: the choices are icons alone, named with their purpose in their
     // tooltips and accessible names.
     QTRY_VERIFY(heatButton(workspace.get(), "time") && heatButton(workspace.get(), "time")->text().isEmpty());
-    for (const auto &[value, name] : QList<std::pair<const char *, QString>>{{"off", "Off"}, {"time", "Time lost"}, {"tokens", "Tokens"}}) {
+    for (const auto &[value, name] : QList<std::pair<const char *, QString>>{{"off", "Off"}, {"time", "Lateness"}, {"tokens", "Tokens"}}) {
         auto *choice = heatButton(workspace.get(), value);
         QVERIFY2(choice->text().isEmpty() && !choice->icon().isNull(), value);
         QVERIFY2(choice->toolTip().startsWith(name + QLatin1Char('\n')), qPrintable(choice->toolTip()));
@@ -512,7 +531,7 @@ void TestTeamsUiProfile::heatTintsGraphAndBoardByTimeOrTokens()
     QVERIFY(!workspace->findChild<QWidget *>("teamHeatLegend"));
     QVERIFY(node(483).heat.isEmpty() && !node(483).heatFill.isValid());
     QCOMPARE(calls(script(), "profile").size(), profileCalls);
-    // Time lost: the plan's losses by time in two pages, without the
+    // Lateness: the plan's losses by time and the task rows in two pages, without the
     // sessions' tokens; the choice is this team's.
     heatButton(workspace.get(), "time")->click();
     QTRY_COMPARE(calls(script(), "profile").size(), profileCalls + 2);
@@ -524,33 +543,55 @@ void TestTeamsUiProfile::heatTintsGraphAndBoardByTimeOrTokens()
     QCOMPARE(asked.at(1)["after_time"].toObject()["id"].toString(), QStringLiteral("member_wait:477"));
     QCOMPARE(TeamUi::heatMode("team-1"), QStringLiteral("time"));
     QCOMPARE(TeamUi::heatMode("team-2"), QStringLiteral("off"));
-    QTRY_COMPARE(node(483).heat, QStringLiteral("lost 3h 56m"));
+    // Task 82: Lateness is measured against the plan, not every wait.
+    QTRY_COMPARE(node(483).heat, QStringLiteral("late 2h 20m (1h 16m from #482)"));
+    QVERIFY(asked.at(0)["after_task"].isUndefined() && asked.at(1)["after_task"].isUndefined());
     const auto c = TeamUi::colorsFor(true);
-    // The integration lost more than 2 h: the warmest tint, the loss in the
-    // heat color. A small loss is muted, a task without one says so untinted.
+    // Its own lateness is over 2 h: the warmest tint, the text in the heat
+    // color; the overrun is its own badge beside it, violet past x1.5.
     QCOMPARE(node(483).heatFill, TeamUi::heatFill(c, 1));
     QCOMPARE(node(483).heatColor, c.danger);
-    QCOMPARE(node(482).heat, QStringLiteral("lost 1h 47m"));
-    QCOMPARE(node(475).heat, QStringLiteral("lost 37m"));
-    QCOMPARE(node(475).heatColor, c.muted);
-    QVERIFY(node(475).heatFill.isValid() && node(475).heatFill != node(483).heatFill && node(475).heatFill != c.surface);
-    QCOMPARE(node(474).heat, QStringLiteral("no loss"));
+    QCOMPARE(node(483).heatBadge, QStringLiteral("x1.7"));
+    QCOMPARE(node(482).heat, QStringLiteral("late 40m"));
+    QVERIFY(node(482).heatFill.isValid() && node(482).heatFill != node(483).heatFill);
+    QCOMPARE(node(482).heatBadge, QStringLiteral("x3.0"));
+    QCOMPARE(node(482).heatBadgeColor, c.violet);
+    QVERIFY(node(483).heatBadgeColor != c.violet && node(483).heatBadgeColor != c.muted);
+    // Waiting on a predecessor that ran late: muted, "from #474", no tint.
+    QCOMPARE(node(475).heat, QStringLiteral("late 20m from #474"));
+    QVERIFY(!node(475).heatFill.isValid());
+    QCOMPARE(node(475).heatColor, c.dim);
+    QCOMPARE(node(475).heatBadge, QStringLiteral("x0.8"));
+    QCOMPARE(node(475).heatBadgeColor, c.muted);
+    QCOMPARE(node(474).heat, QStringLiteral("on time"));
     QVERIFY(!node(474).heatFill.isValid());
+    // The owner's case: a later-layer task before its planned start is cold,
+    // and an unstarted task has no overrun badge.
+    QCOMPARE(node(485).heat, QStringLiteral("on time"));
+    QVERIFY(!node(485).heatFill.isValid());
+    QVERIFY(node(485).heatBadge.isEmpty());
+    // A task with losses but no plan baseline: no lateness to show.
+    QVERIFY(node(515).heat.isEmpty() && !node(515).heatFill.isValid());
     // Cancelled work and the node's own lines: no tint; the working time
-    // gives way to the loss.
-    QVERIFY(node(484).heat.isEmpty() && !node(484).heatFill.isValid());
+    // gives way to the lateness.
+    QVERIFY(node(484).heat.isEmpty() && !node(484).heatFill.isValid() && node(484).heatBadge.isEmpty());
     QVERIFY(node(483).worked.isEmpty());
-    // The tooltip names the top loss and the next two.
+    // The tooltip: planned and actual moments, own and inherited lateness,
+    // the overrun and the causes.
     const QString tip = node(483).tooltip;
-    QVERIFY2(tip.contains("Lost 3h 56m to waits and rework\nTop loss: Waited for the lead (decision 1h 40m, questions 20m), 2h 00m"), qPrintable(tip));
-    QVERIFY2(tip.contains("Then: Waited for dependencies #474, #482 1h 16m; Merge conflict 40m"), qPrintable(tip));
-    QVERIFY2(node(515).tooltip.contains("Top loss: Folder held by #474, 41m"), qPrintable(node(515).tooltip));
-    QVERIFY2(node(478).tooltip.contains("Top loss: Waited for a permission (answered by You), 25m"), qPrintable(node(478).tooltip));
-    // The legend: the metric, the 0 to 2 h scale and the tint-only note.
+    QVERIFY2(tip.contains("Planned: start ") && tip.contains("Actual: start "), qPrintable(tip));
+    QVERIFY2(tip.contains("Late 3h 36m: own 2h 20m, 1h 16m from #482 (it ran late)"), qPrintable(tip));
+    QVERIFY2(tip.contains("Overrun: own work 1h 42m against a 1h 00m estimate (x1.7)"), qPrintable(tip));
+    QVERIFY2(tip.contains("Causes: Waited for the lead (decision 1h 40m, questions 20m) 2h 00m; Waited for dependencies #474, #482 1h 16m; Merge conflict 40m"), qPrintable(tip));
+    QVERIFY2(node(474).tooltip.contains("On schedule"), qPrintable(node(474).tooltip));
+    QVERIFY2(node(485).tooltip.contains("Actual: start not yet, end not yet") && node(485).tooltip.contains("Overrun: not started"), qPrintable(node(485).tooltip));
+    // The legend explains both measures: the lateness scale and the overrun's.
     auto *legend = workspace->findChild<QWidget *>("teamHeatLegend");
     QVERIFY(legend);
-    QCOMPARE(legend->findChild<QLabel *>("teamHeatMetric")->text(), QStringLiteral("Time lost: waits and rework"));
-    QCOMPARE(legend->findChild<QLabel *>("teamHeatEnd")->text(), QStringLiteral("2h or more"));
+    QCOMPARE(legend->findChild<QLabel *>("teamHeatMetric")->text(), QStringLiteral("Late against the plan: own lateness tints, inherited is muted (from #N)"));
+    QCOMPARE(legend->findChild<QLabel *>("teamHeatEnd")->text(), QStringLiteral("2h or more late"));
+    QCOMPARE(legend->findChild<QLabel *>("teamHeatOverrunLegend")->text(), QStringLiteral("Overrun, own work against the estimate:"));
+    QCOMPARE(legend->findChildren<QLabel *>("teamHeatOverrunSample").size(), 3);
     QVERIFY(legend->findChild<QWidget *>("teamHeatScale"));
     QCOMPARE(legend->findChild<QLabel *>("teamHeatNote")->text(), QStringLiteral("Tint only; the state icon and border stay."));
     const auto shoot = [&](const QString &name) {
@@ -575,20 +616,58 @@ void TestTeamsUiProfile::heatTintsGraphAndBoardByTimeOrTokens()
     view("board");
     QTRY_VERIFY(lost(483));
     QVERIFY(heatButton(workspace.get(), "time")->isChecked());
-    QCOMPARE(lost(483)->text(), QStringLiteral("lost 3h 56m"));
+    QCOMPARE(lost(483)->text(), QStringLiteral("late 2h 20m (1h 16m from #482)"));
     QVERIFY(lost(483)->font().bold());
     QVERIFY(card(483)->styleSheet().contains(TeamUi::heatFill(c, 1).name()));
     QVERIFY(card(474)->styleSheet().contains("background:" + c.surface.name()));
-    QCOMPARE(lost(474)->text(), QStringLiteral("no loss"));
-    QVERIFY(!lost(485));
+    QCOMPARE(lost(474)->text(), QStringLiteral("on time"));
+    // Task 82: the overrun badge sits beside the lateness, in words.
+    const auto badge = [&](int id) -> QLabel * { auto *frame = card(id); return frame ? frame->findChild<QLabel *>("teamHeatOverrun") : nullptr; };
+    QVERIFY(badge(483));
+    QCOMPARE(badge(483)->text(), QStringLiteral("+42m over 1h 00m"));
+    QCOMPARE(badge(475)->text(), QStringLiteral("within 1h 00m"));
+    // The badge never covers the lateness: beside it, or under it on a
+    // card too narrow for both.
+    QTRY_VERIFY(badge(483) && lost(483) && badge(483)->isVisible() && !badge(483)->geometry().intersects(lost(483)->geometry())
+                && (badge(483)->geometry().left() > lost(483)->geometry().right() || badge(483)->geometry().top() > lost(483)->geometry().bottom()));
+    QCOMPARE(lost(475)->text(), QStringLiteral("late 20m from #474"));
+    QVERIFY(card(475)->styleSheet().contains("background:" + c.surface.name()));
+    QCOMPARE(lost(485)->text(), QStringLiteral("on time"));
+    QVERIFY(card(485)->styleSheet().contains("background:" + c.surface.name()));
+    QVERIFY(!badge(485));
+    QVERIFY(!lost(484));
     QVERIFY(!card(483)->findChild<QLabel *>("teamBoardWorked"));
-    QVERIFY(card(483)->toolTip().contains("Top loss: Waited for the lead"));
+    QVERIFY(card(483)->toolTip().contains("Causes: Waited for the lead"));
     QTRY_VERIFY(([&] {
         auto *heat = lost(483);
         auto *role = card(483) ? card(483)->findChild<QWidget *>("teamBoardRole") : nullptr;
-        return heat && role && heat->geometry().left() > role->geometry().right();
+        // Task 82: the lateness has its own line under the role's.
+        return heat && role && heat->geometry().top() > role->geometry().bottom();
     })());
     shoot("u38-heat-board-time");
+    // Task 82: Layers takes the tint, the lateness and the badge too.
+    view("layers");
+    const auto layerRow = [&](int id) -> QFrame * {
+        for (auto *frame : workspace->findChildren<QFrame *>("teamLayerRow")) if (frame->property("task").toInt() == id) return frame;
+        return nullptr;
+    };
+    QTRY_VERIFY(layerRow(483) && layerRow(483)->findChild<QLabel *>("teamBoardHeat"));
+    QVERIFY(workspace->findChild<QWidget *>("teamHeatLegend"));
+    QCOMPARE(layerRow(483)->findChild<QLabel *>("teamBoardHeat")->text(), QStringLiteral("late 2h 20m (1h 16m from #482)"));
+    QCOMPARE(layerRow(483)->findChild<QLabel *>("teamHeatOverrun")->text(), QStringLiteral("+42m over 1h 00m"));
+    QVERIFY(layerRow(483)->styleSheet().contains(TeamUi::heatFill(c, 1).name()));
+    QVERIFY(layerRow(485)->styleSheet().contains("background:" + c.surface.name()));
+    shoot("t82-heat-layers-time");
+    // The task card shows the same two measures.
+    for (auto *frame : workspace->findChildren<QFrame *>("teamLayerRow"))
+        if (frame->property("task").toInt() == 483) { QTest::mouseClick(frame, Qt::LeftButton, {}, QPoint(40, 10)); break; }
+    QTRY_VERIFY(workspace->findChild<QWidget *>("teamCardHeat"));
+    auto *cardHeat = workspace->findChild<QWidget *>("teamCardHeat");
+    QCOMPARE(cardHeat->findChild<QLabel *>("teamBoardHeat")->text(), QStringLiteral("late 2h 20m (1h 16m from #482)"));
+    QCOMPARE(cardHeat->findChild<QLabel *>("teamHeatOverrun")->text(), QStringLiteral("+42m over 1h 00m"));
+    shoot("t82-heat-card-time");
+    view("board");
+    QTRY_VERIFY(lost(483));
     // Tokens: the losses by tokens, read with the sessions' tokens; the scale
     // ends at the largest task's and the unknown tokens are named.
     heatButton(workspace.get(), "tokens")->click();
@@ -597,6 +676,7 @@ void TestTeamsUiProfile::heatTintsGraphAndBoardByTimeOrTokens()
     QTRY_COMPARE(lost(482) ? lost(482)->text() : QString(), QStringLiteral("lost 1.2M tokens"));
     QCOMPARE(lost(480)->text(), QStringLiteral("lost 236k tokens"));
     QCOMPARE(lost(483)->text(), QStringLiteral("no loss"));
+    QVERIFY(!badge(483));
     QVERIFY(card(482)->styleSheet().contains(TeamUi::heatFill(c, 1).name()));
     QVERIFY2(lost(482)->toolTip().contains("Lost 1.2M tokens to rework and long tests\nTop loss: Rework: attempt 1 returned, 1.2M tokens, 58% of the task's tokens"),
              qPrintable(lost(482)->toolTip()));
@@ -609,8 +689,8 @@ void TestTeamsUiProfile::heatTintsGraphAndBoardByTimeOrTokens()
     QTRY_COMPARE(node(482).heat, QStringLiteral("lost 1.2M tokens"));
     QCOMPARE(node(476).heat, QStringLiteral("lost 61k tokens"));
     shoot("u38-heat-graph-tokens");
-    // Layers has no tint and no switch; the choice stays for Graph and Board.
-    view("layers");
+    // Tests has no tint and no switch; the choice stays for the views.
+    view("tests");
     QTRY_VERIFY(!workspace->findChild<QWidget *>("teamWorkspaceHeat"));
     QVERIFY(!workspace->findChild<QWidget *>("teamHeatLegend"));
     view("graph");
@@ -671,7 +751,7 @@ void TestTeamsUiProfile::aHeatReadThatDrawsTheSameRebuildsNothing()
         if (auto *view = graph()) for (const auto &n : view->nodes) if (n.id == id) return n;
         return TeamUi::TaskView::Node{};
     };
-    QTRY_COMPARE(node(483).heat, QStringLiteral("lost 3h 56m"));
+    QTRY_COMPARE(node(483).heat, QStringLiteral("late 2h 20m (1h 16m from #482)"));
     TestWait::settle();
     QPointer<QWidget> view = graph();
     QPointer<QWidget> legend = workspace.findChild<QWidget *>("teamHeatLegend");
@@ -690,15 +770,15 @@ void TestTeamsUiProfile::aHeatReadThatDrawsTheSameRebuildsNothing()
     reread(heatProfile());
     QVERIFY2(view && view == graph(), "the same profile rebuilt the Graph");
     QVERIFY(legend && legend == workspace.findChild<QWidget *>("teamHeatLegend"));
-    // The lead's wait on #483 grew by ten seconds: still "lost 3h 56m".
+    // #483 is ten seconds later: still "late 2h 20m".
     reread(heatProfile(7210));
-    QVERIFY2(view && view == graph(), "ten seconds no loss text shows rebuilt the Graph");
-    QCOMPARE(node(483).heat, QStringLiteral("lost 3h 56m"));
-    // Two minutes more: the loss reads 3h 58m, drawn again.
+    QVERIFY2(view && view == graph(), "ten seconds no lateness text shows rebuilt the Graph");
+    QCOMPARE(node(483).heat, QStringLiteral("late 2h 20m (1h 16m from #482)"));
+    // Two minutes more: it reads 2h 22m, drawn again.
     reread(heatProfile(7320));
     QTRY_VERIFY(!view || view != graph());
-    QTRY_COMPARE(node(483).heat, QStringLiteral("lost 3h 58m"));
-    QVERIFY2(node(483).tooltip.contains("Top loss: Waited for the lead (decision 1h 42m, questions 20m), 2h 02m"), qPrintable(node(483).tooltip));
+    QTRY_COMPARE(node(483).heat, QStringLiteral("late 2h 22m (1h 16m from #482)"));
+    QVERIFY2(node(483).tooltip.contains("Causes: Waited for the lead (decision 1h 42m, questions 20m) 2h 02m"), qPrintable(node(483).tooltip));
 }
 
 // U62 (#719): the profiler's timeline shows the team's test runs of the scope's

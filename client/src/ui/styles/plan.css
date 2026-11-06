@@ -163,13 +163,12 @@
 .pm-column-head, .pm-layer-head { display: flex; align-items: center; gap: 6px; padding: 7px 9px; border-bottom: 1px solid var(--z-color-divider); font-size: var(--fs-sm); }
 .pm-count { margin-left: auto; color: var(--z-color-muted); font-size: var(--fs-2xs); font-variant-numeric: tabular-nums; }
 .pm-column-body { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 6px; padding: 7px; }
-.pm-card { --heat: 0; display: flex; flex-direction: column; gap: 3px; width: 100%; padding: 6px 8px; border: 1px solid var(--z-color-card-border); border-left: 3px solid var(--pm-tone, var(--z-color-muted)); border-radius: 8px; background: color-mix(in srgb, var(--pm-tone, var(--z-color-muted)) calc(var(--heat) * 22%), var(--z-color-surface)); color: var(--z-color-text); text-align: left; font: inherit; cursor: pointer; }
+.pm-card { --heat: 0; display: flex; flex-direction: column; gap: 3px; width: 100%; padding: 6px 8px; border: 1px solid var(--z-color-card-border); border-left: 3px solid var(--pm-tone, var(--z-color-muted)); border-radius: 8px; background: color-mix(in srgb, var(--z-color-danger) calc(var(--heat) * 22%), var(--z-color-surface)); color: var(--z-color-text); text-align: left; font: inherit; cursor: pointer; }
 .pm-card:hover { border-color: var(--z-color-accent-muted); }
 .pm-card-line { display: flex; gap: 5px; align-items: baseline; min-width: 0; }
 .pm-card-meta { display: flex; gap: 6px; color: var(--z-color-muted); font-size: var(--fs-2xs); overflow: hidden; }
 .pm-id { color: var(--z-color-text-3); font-variant-numeric: tabular-nums; flex: none; }
 .pm-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-sm); }
-.pm-loss { color: var(--z-color-warn); }
 .pm-stages { display: flex; gap: 4px; flex-wrap: wrap; }
 .pm-stage { padding: 1px 5px; border-radius: 6px; background: var(--z-color-hover); color: var(--z-color-text-2); font-size: 9px; }
 .pm-stage-passed, .pm-stage-accepted { color: var(--z-color-status-ready); }
@@ -205,7 +204,20 @@
 .pt-stage-passed, .pt-stage-accepted { color: var(--z-color-status-ready); }
 .pt-stage-returned, .pt-stage-failed { color: var(--z-color-danger); }
 .pt-stage-waiting, .pt-stage-delivered { color: var(--z-color-accent); }
-.pt-card { background: color-mix(in srgb, var(--pt-tone) calc(var(--heat, 0) * 18%), var(--z-color-surface)); }
+/* Task 82: the heat tints by the task's own lateness against the plan, in the
+   danger colour; the overrun badge has its own scale, muted to violet. */
+.pt-card { background: color-mix(in srgb, var(--z-color-danger) calc(var(--heat, 0) * 20%), var(--z-color-surface)); }
+.pm-heat-line { display: inline-flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap; }
+.pm-late { font-size: 11px; font-weight: 600; white-space: nowrap; color: color-mix(in srgb, var(--z-color-danger) calc(var(--heat, 0) * 100%), var(--z-color-muted)); }
+.pm-late-muted { font-weight: 400; color: var(--z-color-dim); }
+.pm-overrun { --over: 0; font-size: 10px; font-weight: 600; white-space: nowrap; padding: 0 4px; border: 1px solid currentColor; border-radius: 4px;
+  color: color-mix(in srgb, var(--z-color-violet) calc(var(--over) * 100%), var(--z-color-muted));
+  background: color-mix(in srgb, var(--z-color-violet) calc(var(--over) * 14%), transparent); }
+.pm-heat-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 4px 12px 6px; font-size: 11px; color: var(--z-color-muted); }
+.pm-heat-scale { display: inline-flex; align-items: center; gap: 6px; }
+.pm-heat-ramp { display: inline-block; width: 80px; height: 8px; border-radius: 4px; border: 1px solid var(--z-color-card-border);
+  background: linear-gradient(to right, var(--z-color-surface), color-mix(in srgb, var(--z-color-danger) 20%, var(--z-color-surface))); }
+.pm-heat-note { color: var(--z-color-dim); }
 /* Task #59: a phase's and the team's planning mode (Qt's Free and Standard badges). */
 .pt-chip-free { color: var(--z-color-violet); border-color: color-mix(in srgb, var(--z-color-violet) 45%, transparent); }
 .pt-chip-standard { color: var(--z-color-text-3); }

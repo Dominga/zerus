@@ -135,6 +135,24 @@ fn a_member_busy_with_its_earlier_task_is_a_predecessor() {
     assert_eq!(numbers(&lateness(&team, team.task(3).unwrap(), T0 + 1100.0)), (Some(400), Some(400), Some(0), Some(0)));
 }
 
+/// Task 82: inherited lateness names the predecessor it comes from, and the
+/// row carries the actual start and end for the heat's tooltip.
+#[test]
+fn inherited_lateness_names_its_predecessor_and_the_actual_moments() {
+    // 1 (dev, 10 min) <- 2 (qa, 10 min): 1 ends 20 min late, so 2 starts late by it.
+    let mut team = stamped(vec![task(1, "dev", &[], Some(10.0)), task(2, "qa", &[1], Some(10.0))]);
+    accept(&mut team, 1, T0, T0 + 1800.0, T0 + 1800.0);
+    start(&mut team, 2, T0 + 1800.0);
+    let late = lateness(&team, team.task(2).unwrap(), T0 + 1900.0);
+    assert_eq!(numbers(&late).1, Some(1200), "{late}");
+    assert_eq!(late["from"], 1, "{late}");
+    assert_eq!(late["actual_start"], T0 + 1800.0);
+    assert!(late["actual_end"].is_null(), "still working: {late}");
+    let done = lateness(&team, team.task(1).unwrap(), T0 + 1900.0);
+    assert!(done["from"].is_null(), "own lateness names no predecessor: {done}");
+    assert_eq!((done["actual_start"].clone(), done["actual_end"].clone()), (json!(T0), json!(T0 + 1800.0)));
+}
+
 #[test]
 fn overrun_is_the_own_work_with_rework_minus_the_estimate() {
     let mut team = stamped(vec![task(1, "dev", &[], Some(10.0))]);

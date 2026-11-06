@@ -831,7 +831,9 @@ public:
         double estimate = -1; bool estimateKnown = false, timeOver = false;
         // U38: the heat tint's fill and the loss at the second line's end
         // (it takes the working time's place).
-        QColor heatFill, heatColor; QString heat; };
+        QColor heatFill, heatColor; QString heat;
+        // Task 82: the overrun badge beside it ("x1.7"), in its own colour.
+        QString heatBadge; QColor heatBadgeColor; };
     // A phase group as the plan, board and layers show it: the heading is
     // "Phase 2 · QA fixes · 3/5". A finished phase starts collapsed; its tasks
     // are in `tasks` but no node is built, and one summary node stands in.
@@ -1394,6 +1396,17 @@ protected:
         // U38: the loss sits at the line's end, bold in its heat color; the
         // texts before it keep to the room left of it.
         double end = r.right() - 8;
+        // Task 82: the overrun badge at the end, the lateness left of it.
+        if (!n.heatBadge.isEmpty()) {
+            QFont badge = font(); badge.setPixelSize(10); badge.setWeight(QFont::DemiBold);
+            const double w = qMin(double(QFontMetrics(badge).horizontalAdvance(n.heatBadge)) + 8, qMax(0.0, end - right));
+            const QRectF pill(end - w, line2 + 2, w, lineH - 4);
+            p.setPen(QPen(n.heatBadgeColor, 1)); p.setBrush(QColor(n.heatBadgeColor.red(), n.heatBadgeColor.green(), n.heatBadgeColor.blue(), 30));
+            p.drawRoundedRect(pill, 4, 4);
+            p.setFont(badge); p.setPen(n.heatBadgeColor);
+            p.drawText(pill, Qt::AlignCenter, QFontMetrics(badge).elidedText(n.heatBadge, Qt::ElideRight, int(w) - 4));
+            end -= w + 6;
+        }
         if (!n.heat.isEmpty()) {
             QFont heat = font(); heat.setPixelSize(11); heat.setWeight(n.heatFill.isValid() ? QFont::DemiBold : QFont::Normal);
             p.setFont(heat); p.setPen(n.heatColor);

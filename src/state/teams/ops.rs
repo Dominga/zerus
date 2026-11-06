@@ -211,6 +211,25 @@ fn parse_member(value: &Value) -> anyhow::Result<Member> {
     parse_member_as(value, "A member", super::strict::MEMBER_EXAMPLE)
 }
 
+/// Task #6: a permissions mode its agent does not have (Codex has no `auto`) is
+/// refused where it is set, never when the member cannot start. The member's
+/// `permissions` field is `auto`, `bypass` or empty (the agent's own mode).
+pub(crate) fn check_permission_mode(agent: &str, mode: &str) -> anyhow::Result<()> {
+    if mode.is_empty() {
+        return Ok(());
+    }
+    ensure!(["auto", "bypass"].contains(&mode), "must be auto or bypass, not \"{mode}\"");
+    if crate::accounts::validate_permission_mode(agent, mode).is_ok() {
+        return Ok(());
+    }
+    let takes: Vec<&str> = crate::accounts::permission_modes(agent).iter().copied().filter(|mode| *mode != "provider").collect();
+    let agent = super::dispatcher::agent_label(agent);
+    if takes.is_empty() {
+        bail!("{agent} takes its permissions from its own configuration, so the field stays empty");
+    }
+    bail!("{agent} has no \"{mode}\" permissions mode; it takes {}", takes.join(", "))
+}
+
 /// Owner feedback 2026-11-04 (9, 11): an unknown field or a wrong type names
 /// itself, the accepted fields and an example.
 fn parse_member_as(value: &Value, what: &str, example: &str) -> anyhow::Result<Member> {
@@ -227,11 +246,7 @@ fn parse_member_as(value: &Value, what: &str, example: &str) -> anyhow::Result<M
     member.role = clean_text(&member.role, 60, "A role").map_err(field("role"))?;
     ensure!(!member.agent.is_empty(), "{who}: field \"agent\" is required, such as \"claude\"");
     // C3: `permissions` is the launch mode, the profile an agent's mode.
-    ensure!(
-        member.permissions.is_empty() || ["auto", "bypass"].contains(&member.permissions.as_str()),
-        "{who}: field \"permissions\" is auto or bypass, not \"{}\"",
-        member.permissions
-    );
+    check_permission_mode(&member.agent, &member.permissions).map_err(field("permissions"))?;
     ensure!(
         member.permissions_profile.is_empty() || ["read", "write", "build", "commit", "network"].contains(&member.permissions_profile.as_str()),
         "{who}: field \"permissions_profile\" is read, write, build, commit or network, not \"{}\"",
@@ -247,6 +262,10 @@ fn parse_member_as(value: &Value, what: &str, example: &str) -> anyhow::Result<M
     member.error.clear();
     member.host_waits = 0;
     member.inbox = Inbox::default();
+    // Task #6: the dispatcher's pending changes are its own record, never an
+    // input field a plan or add-member could set.
+    member.prompt_change = None;
+    member.model_switch = None;
     if !member.parent.is_empty() {
         member.parent = member_id(&member.parent).map_err(field("parent"))?;
     }
@@ -897,9 +916,33 @@ fn ensure_draft_revision(team: &Team, input: &Value) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Task #6: the fields `members_update` takes. `clear_context_first` goes with
+/// a new `prompt`; agent, account and computer stay with Swap member.
+const MEMBER_UPDATE_FIELDS: [&str; 13] = [
+    "id",
+    "role",
+    "folder",
+    "directory",
+    "prompt",
+    "clear_context_first",
+    "model",
+    "effort",
+    "permissions",
+    "permissions_profile",
+    "context_before_task",
+    "models",
+    "iron_rules",
+];
+
+/// Task #6: the fields a member that already has a session takes, because they
+/// reach it from its next task or at its next start; the other fields of
+/// `MEMBER_UPDATE_FIELDS` need a member without one.
+const STATIC_MEMBER_FIELDS: [&str; 3] = ["role", "folder", "directory"];
+
 /// F1.5: the lead or owner changes a team's settings and its members in place.
-/// While Planning any member changes; a running team only members without a
-/// session. A wider permissions profile keeps the B5 confirmation.
+/// While Planning any member changes; a running team takes the fields that reach
+/// a member that has a session from its next task. A wider permissions profile
+/// keeps the B5 confirmation.
 fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you change the team's settings");
     ensure!(
@@ -919,21 +962,35 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
     let mut changed = Vec::new();
     let mut widen = Vec::new();
     for update in input["members_update"].as_array().into_iter().flatten() {
+        // Task #6: a field the operation does not take is refused by name, never
+        // dropped in silence; agent, account and computer stay with Swap member.
+        super::strict::check_keys(update, &MEMBER_UPDATE_FIELDS, "A member update", super::strict::MEMBER_UPDATE_EXAMPLE)?;
         let id = text(update, "id").to_owned();
         ensure!(!id.is_empty(), "A member update names its member");
-        let member = team.members.iter_mut().find(|member| member.id == id).with_context(|| format!("Unknown member {id}"))?;
-        // U46: the context before a task only changes the next hand-out, so the
-        // owner may set it on a running member that has a session too; every
-        // other field still changes only on a member without one. #581 N6: so
-        // does its model list (U45), which only the next switch reads.
-        let context_only = update.as_object().is_some_and(|fields| {
-            fields.keys().any(|key| key == "context_before_task" || key == "models"|| key == "iron_rules")
-                && fields.keys().all(|key| {
-                    key == "id" || key == "context_before_task" || key == "models"|| key == "iron_rules"
-                })
-        });
+        // Task #6: the clear is a checkbox for the new prompt, off by default.
+        let clear_first = match update.get("clear_context_first") {
+            Some(value) => Some(value.as_bool().with_context(|| format!("Member \"{id}\": field \"clear_context_first\" is true or false"))?),
+            None => None,
+        };
         ensure!(
-            planning || member.session.is_none() || context_only,
+            clear_first.is_none() || update.get("prompt").is_some(),
+            "Member \"{id}\": field \"clear_context_first\" goes with a new \"prompt\""
+        );
+        let member = team.members.iter_mut().find(|member| member.id == id).with_context(|| format!("Unknown member {id}"))?;
+        ensure!(member.state != MemberState::Removed, "Member \"{id}\" was removed");
+        // Task #6: the lead changes only a member's model and effort while the
+        // team runs; every other field is the owner's, as a settings card. The
+        // context action and the model list keep their own refusals below.
+        let lead_fields = ["id", "model", "effort", "context_before_task", "models"];
+        ensure!(
+            planning || matches!(actor, Actor::Human) || update.as_object().is_some_and(|fields| fields.keys().all(|key| lead_fields.contains(&key.as_str()))),
+            "The lead changes only a member's model and effort: propose {{\"kind\":\"settings\",\"members_update\":[...]}} as a card (hgs guide team-propose); the owner allows it with a click"
+        );
+        // Task #6: the live fields change a member that has a session too; the
+        // rest still needs a member without one.
+        let live = update.as_object().is_some_and(|fields| fields.keys().all(|key| !STATIC_MEMBER_FIELDS.contains(&key.as_str())));
+        ensure!(
+            planning || member.session.is_none() || live,
             "A running team changes only members without a session"
         );
         if let Some(rules) = update.get("iron_rules") {
@@ -952,7 +1009,59 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
             member.role = role;
         }
         if let Some(prompt) = update.get("prompt") {
-            member.prompt = clean(prompt.as_str().unwrap_or_default(), 8000, "A role prompt")?;
+            let prompt = clean(prompt.as_str().unwrap_or_default(), 8000, "A role prompt")?;
+            // Task #6: a start prompt that changes on a member that runs is sent
+            // to it as the message that replaces its earlier instructions, after
+            // the clear the owner asked for. The checkbox needs that new message.
+            let replacing = !planning && member.session.is_some() && prompt != member.prompt;
+            ensure!(
+                clear_first != Some(true) || replacing,
+                "Member \"{id}\": field \"clear_context_first\" needs a new \"prompt\" for a member that runs"
+            );
+            if replacing {
+                ensure!(
+                    clear_first != Some(true) || super::dispatcher::native_context(&member.agent, "clear"),
+                    "Member \"{id}\": {} has no clear-context action; leave \"clear_context_first\" off",
+                    super::dispatcher::agent_label(&member.agent)
+                );
+                // The review: a clear still waiting is kept, and the flag stays on
+                // when either edit asked for it; a clear whose send is in flight
+                // is done, so the newer prompt is a change of its own.
+                let before = member.prompt_change.take().unwrap_or_default();
+                let waiting = before.sent_at.is_none();
+                member.prompt_change = Some(PromptChange {
+                    clear_context: (waiting && before.clear_context) || clear_first == Some(true),
+                    clear: if waiting { before.clear } else { None },
+                    ..Default::default()
+                });
+            }
+            member.prompt = prompt;
+        }
+        if update.get("model").is_some() || update.get("effort").is_some() {
+            let model = update.get("model").map(|value| value.as_str().unwrap_or_default().trim().to_owned()).unwrap_or_else(|| member.model.clone());
+            let effort = update.get("effort").map(|value| value.as_str().unwrap_or_default().trim().to_owned()).unwrap_or_else(|| member.effort.clone());
+            ensure!(model.is_empty() || super::models::valid_name(&model), "Member \"{id}\": field \"model\" is a model id of at most 120 characters");
+            ensure!(effort.is_empty() || super::models::valid_name(&effort), "Member \"{id}\": field \"effort\" is an effort word of at most 120 characters");
+            // Task #6: a model or effort change reaches a running session before
+            // its next task; an agent that cannot switch takes it at its next
+            // start. The values its session ran before are kept for a refusal.
+            let can_switch = super::models::SWITCHING.contains(&member.agent.as_str());
+            if !planning && member.session.is_some() && can_switch && (model != member.model || effort != member.effort) {
+                let before = member.model_switch.take().unwrap_or_default();
+                let (from_model, from_effort) = if before.model.is_empty() {
+                    (member.model.clone(), member.effort.clone())
+                } else {
+                    (before.from_model, before.from_effort)
+                };
+                member.model_switch = Some(ModelSwitch { model: model.clone(), effort: effort.clone(), from_model, from_effort });
+            }
+            member.model = model;
+            member.effort = effort;
+        }
+        if let Some(permissions) = update.get("permissions") {
+            let permissions = permissions.as_str().unwrap_or_default().to_owned();
+            check_permission_mode(&member.agent, &permissions).map_err(|error| anyhow::anyhow!("Member \"{id}\": field \"permissions\": {error}"))?;
+            member.permissions = permissions;
         }
         if let Some(profile) = update.get("permissions_profile") {
             let profile = profile.as_str().unwrap_or_default().to_owned();
@@ -3699,6 +3808,7 @@ fn swap_one(team: &mut Team, input: &Value, id: &str, keep_session: bool, actor:
             // Feedback 14: the new session needs the old one's name.
             member.replaced = Some(old);
         }
+        let before_agent = member.agent.clone();
         let fields =
             [("agent", &mut member.agent), ("model", &mut member.model), ("effort", &mut member.effort), ("account", &mut member.account)];
         for (key, field) in fields {
@@ -3706,6 +3816,11 @@ fn swap_one(team: &mut Team, input: &Value, id: &str, keep_session: bool, actor:
                 *field = value.to_owned();
                 changed.push(key);
             }
+        }
+        // Task #6: the member's permissions mode must exist for the agent it now
+        // runs (Claude's auto is no mode for Codex).
+        if member.agent != before_agent {
+            check_permission_mode(&member.agent, &member.permissions).map_err(|error| anyhow::anyhow!("Member \"{id}\": field \"permissions\": {error}"))?;
         }
         // Feedback 12: a swap's role prompt was ignored; it changes now.
         if let Some(prompt) = input["prompt"].as_str().filter(|prompt| !prompt.trim().is_empty()) {
@@ -3724,6 +3839,10 @@ fn swap_one(team: &mut Team, input: &Value, id: &str, keep_session: bool, actor:
             member.session = session;
             member.launch_after_swap = member.session.is_none();
             member.state = if member.session.is_some() { MemberState::Active } else { MemberState::NotCreated };
+            // Task #6: a swapped session starts on its own values; the changes
+            // pending for the session it replaced do not follow it.
+            member.model_switch = None;
+            member.prompt_change = None;
         } else {
             member.launch_after_swap = false;
         }
@@ -5456,6 +5575,9 @@ fn cancel(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     let phase_build = task.phase_build;
     task.status = TaskStatus::Cancelled;
     task.fresh_retry = false;
+    // Task #6: a model switch left waiting on the cancelled task claims no
+    // member any more (its member's own edit is not held back by it).
+    task.prepare.retain(|step| step.step != "model");
     tell_revoked(team, id, working, "it was cancelled".into());
     // #759: the tasks it held start once their other dependencies are done;
     // the event and the lead's inbox name them for a re-plan.

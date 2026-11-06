@@ -30,3 +30,13 @@ One card swaps several members:
 Zerus pauses each replaced session and keeps it as <name>-replaced, so the new
 session takes the member's name. The owner's word may name them together
 ("relaunch them all"): one sentence then pays for each.
+
+While the team runs, hgs team settings takes its prompt, model, effort,
+permissions and settings:
+  {"team":"ID","members_update":[{"id":"dev","prompt":"...","model":"opus",
+   "effort":"high"}]}
+A model or effort change switches the member before its next task; a prompt
+change reaches it as one message marked "replaces previous instructions"
+("clear_context_first":true clears it first). agent, account and computer stay
+with Swap member. Only the owner changes a running member; the lead changes its
+model and effort.

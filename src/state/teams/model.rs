@@ -465,6 +465,15 @@ pub(crate) struct Member {
     /// The role's instructions from the catalog, given with every task.
     #[serde(default)]
     pub prompt: String,
+    /// Task #6: the start prompt changed while the member ran. The dispatcher
+    /// sends it as the message that replaces its earlier instructions and
+    /// clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_change: Option<PromptChange>,
+    /// Task #6: the model and effort its running session must still switch to.
+    /// The dispatcher switches before the member's next task and clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_switch: Option<ModelSwitch>,
     /// DeepSeek takes its model and effort after it starts; once tried, the
     /// dispatcher does not try again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -604,6 +613,48 @@ pub(crate) struct ModelChoice {
     pub model: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub effort: String,
+}
+
+/// Task #6: the model and effort a running member's session must still switch
+/// to. `members_update` records it; the dispatcher switches before the member's
+/// next task and clears it. The values the session ran before are kept, so a
+/// refused switch puts the member's model back where its session is.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct ModelSwitch {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub effort: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub from_model: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub from_effort: String,
+}
+
+/// Task #6: a member's start prompt changed while it ran. The dispatcher sends
+/// it as the message that replaces its earlier instructions, after the clear
+/// the owner asked for. `sent_at` is recorded before the message leaves, so a
+/// crash during the send leaves it uncertain instead of sending it again.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct PromptChange {
+    /// Clear the member's context before the message.
+    #[serde(default)]
+    pub clear_context: bool,
+    /// The clear it started, while its confirmation is pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clear: Option<PromptClear>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_at: Option<f64>,
+}
+
+/// Task #6: a clear started before a changed start prompt, recorded so a later
+/// tick - or a restarted worker - reads the same request instead of running it
+/// again.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct PromptClear {
+    pub request_id: String,
+    pub run_id: String,
+    pub conversation_id: String,
+    pub started_at: f64,
 }
 
 /// Spec 0: what a ready task waits for that Zerus could not do on its own (a

@@ -1560,6 +1560,36 @@ A refusal is never the owner's word: a sentence carrying a negation ("Don't
 remove backend2", "не надо добавлять второго тестера") authorizes no roster,
 scale, drain or phase change in either language.
 
+### Editing a member while the team runs
+
+`hgs team settings` with `members_update` changes one member per entry, and the
+operation takes only the fields it names: an unknown field is refused with its
+name, the fields it takes and an example, never dropped in silence. `agent`,
+`account` and `computer` stay with Swap member; `folder`, `directory` and `role`
+still need a member without a session.
+
+A member that runs takes its start `prompt`, `model`, `effort`, `permissions`,
+`permissions_profile`, `context_before_task`, `models` and `iron_rules` while the
+team runs. A model or effort change reaches its session before the member's next
+task (the same `hgs settings` switch U45 uses); an agent that cannot switch in
+place takes it at its next start, and a refused switch leaves the member on the
+model its session kept. A prompt change is sent once to the member as a message
+marked "replaces previous instructions", after the clear the owner asked for
+with `"clear_context_first": true` (off by default; the clear needs the agent's
+own clear action, so DeepSeek and OpenCode refuse it); an unanswered send is
+recorded uncertain and never replayed, and the next hand-out carries the new
+prompt as well. An edit made while a message is on its way stays for the next
+one. Permissions and the permissions profile are the mode the member's next
+start gets; its running session keeps its own. A swap to another session drops
+the changes still pending for the session it replaced.
+
+Only the owner changes a member while the team runs. The lead changes a member's
+`model` and `effort` directly; every other member field goes through the
+`{"kind":"settings","members_update":[...]}` card the owner allows. A permissions
+mode the member's agent does not have (Codex has no `auto`) is refused in `plan`,
+`add-member` and `members_update`, never accepted and left to fail when the
+member starts.
+
 ### Tasks added to a running phase
 
 A task joins a running phase only on the owner's word twice. The first

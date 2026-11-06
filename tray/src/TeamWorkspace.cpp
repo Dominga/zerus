@@ -1903,6 +1903,11 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
         b->setText(QString()); b->setFixedWidth(b->iconSize().width() + 16);
     }
     h->addWidget(views);
+    // Task 61: the origin link is not a dependency; name its dashed violet look.
+    if (m_view == "graph" || m_view == "layers") {
+        auto *legend = elided(tr("Dashed: spawned from"), c.violet, 11);
+        legend->setObjectName("teamOriginLegend"); h->addWidget(legend);
+    }
     const bool planning = team.status == "planning";
     if (planning) {
         auto *task = button(tr("+ Task"), "teamWorkspaceAddTask");
@@ -2071,6 +2076,7 @@ QWidget *TeamWorkspace::canvas(const Team &team)
             view->edges[task.id].append(d.task);
             if (d.soft && !team.allHard) view->soft.insert({d.task, task.id});
         }
+    for (const auto &task : team.tasks) if (task.origin > 0) view->origins[task.id] = task.origin;
     QList<int> order;
     const auto byLayer = layered(team);
     for (auto it = byLayer.cbegin(); it != byLayer.cend(); ++it) order += it.value();
@@ -3223,6 +3229,7 @@ QWidget *TeamWorkspace::phaseGraph(const Team &team, const PhaseGroup &group, co
         view->edges[id].append(d.task);
         if (d.soft && !team.allHard) view->soft.insert({d.task, id});
     }
+    for (int id : group.tasks) if (const auto *task = team.task(id); task && task->origin > 0) view->origins[id] = task->origin;
     const auto layers = phaseLayers(team, shown);
     QList<int> order = shown;
     std::stable_sort(order.begin(), order.end(), [&layers](int a, int b) { return layers.value(a) < layers.value(b); });
@@ -4720,3 +4727,6 @@ void TeamWorkspace::addMember(const Team &team)
     pop->show();
     placePopover();
 }
+
+
+

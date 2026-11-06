@@ -15,6 +15,9 @@ import "../styles/tasks.css";
 import { object, text } from "../screens/tasks-ui";
 import { homeShort, sessionAccount, sessionGoal, sessionPlan, usageRows } from "./inspector-data";
 import { machineCards } from "../../store/machines";
+import { SessionLeadPanel } from "./SessionLeadPanel";
+import { privateStoreNotices } from "../../store/privateStoreNotices";
+import { toast } from "../../store/notices";
 import { filterFolder, clearFolderFilter } from "../../store/folderFilter";
 import { of, sameKey, native } from "./paths";
 import type { BoundRow } from "./scope-filters";
@@ -77,6 +80,11 @@ function IronRulesCard(props: { session: Session }) {
 function Details() {
   const s = () => selected()!;
   const details = () => detailsFor(s(), !computerOffline(s().computer), followedFor(s().key));
+  createEffect(() => {
+    const view = details();
+    privateStoreNotices((notice) => toast(notice.title, notice.body, "error", true))
+      .observe(s().computer, s().machine, !computerOffline(s().computer), view?.private_stores ?? []);
+  });
   const identity = () => sessionIdentity(s(), details());
   const value = (v: string | undefined) => v || tr("Not reported");
   const rows = createMemo(() => usageRows(raw()));
@@ -102,6 +110,7 @@ function Details() {
     <Card id="details-session" title={tr("Session")}><Row icon="message-square" label={tr("name")} mono title={s().name}>{s().name}</Row><Row icon="monitor" label={tr("machine")}>{s().machine}</Row><Row icon="folder" label={tr("directory")} mono title={s().cwdPath}>{value(s().cwdPath)}</Row><Row icon="git-branch" label={tr("branch")}>{value(s().branch)}</Row><Row icon="layers" label={tr("project")}>{grouping().headers.find((p) => p.id === groupOf(s().key))?.name ?? tr("Not reported")}</Row><Row icon="clock" label={tr("last event")}>{s().updatedAt ? eventTimeOf(new Date(s().updatedAt! * 1000)) : tr("Not reported")}</Row><div class="hint">{tr("Activity stays on %1. Closing this window does not stop your agent.", s().machine)}</div></Card>
     <IronRulesCard session={s()} />
     <Card id="details-account" title={tr("Account")}><Row icon="user-round-cog" label={tr("account")} title={profileId() ? tr("Profile %1", profileId()) : undefined} tail={<Show when={account().tag}><span class="acct-pid tabular" title={tr("Profile %1", profileId())}>{account().tag}</span></Show>}>{accountText()}</Row><Row icon="hard-drive" label={tr("agent home")} mono title={home() || undefined}>{value(homeShort(home()))}</Row><Row icon="sparkles" label={tr("model")}>{value(s().model)} {s().effort}</Row></Card>
+    <Card id="details-lead" title={tr("Session lead")}><SessionLeadPanel /></Card>
     <Card id="details-usage" title={tr("Session usage")}><Show when={rows().length} fallback={<div class="hint">{tr("No native usage reported for this conversation yet.")}</div>}><table class="usage"><tbody><For each={rows()}>{([label, val]) => <tr><td>{label}</td><td class="tabular">{val}</td></tr>}</For></tbody></table><Show when={usage().costNote}><div class="hint">{usage().costNote}</div></Show><div class="hint">{usage().footer}</div></Show></Card>
     <Show when={!subagentOpen()}><div class="insp-foot"><span class="muted" title={context()?.tooltip}>{tr("Context: %1", context()?.text || tr("Not reported"))}</span><span class="grow" /><button class="btn small" title={clear()?.reason || undefined} disabled={!clear()?.enabled} onClick={() => composer.openClear()}>{clear()?.running ? tr("Clearing…") : tr("Clear session…")}</button></div></Show>
   </div>;

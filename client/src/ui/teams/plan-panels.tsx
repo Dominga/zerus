@@ -127,6 +127,9 @@ function Card(props: { placed: PlacedNode; heat?: number | null; loss?: string; 
         <Show when={task().assignee}><span>{task().assignee}</span></Show>
         <Show when={props.loss}><span class="pm-loss">{props.loss}</span></Show>
       </span>
+      <Show when={props.placed.task?.origin || props.placed.node.origin}>
+        {(origin) => <span class="pm-origin">{tr("Spawned from #%1", origin())}</span>}
+      </Show>
       <Show when={stageChips(props.placed.task?.pipeline_run).length > 0}>
         <span class="pm-stages">
           <For each={stageChips(props.placed.task?.pipeline_run)}>

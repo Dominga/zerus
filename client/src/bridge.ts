@@ -96,6 +96,11 @@ export const teamRead = (computer: ComputerId, team: string) =>
   inTauri() ? invoke<import("./types").TeamView>("team_read", { computer, team }) : Promise.reject(new Error("Teams need the desktop app."));
 /** Reads the watched team's feed page before the oldest event shown; false when there is none to read. */
 export const teamsOlder = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_older", { computer }) : Promise.resolve(false);
+/** Task 75: why this process is sandboxed, null on a normal desktop. */
+export const sandboxCheck = () => inTauri() ? invoke<string | null>("sandbox_check") : Promise.resolve(null);
+/** Task 69: moves one local session to another account after the owner confirms. */
+export const sessionSwitchAccount = (session: string, account: string, request: string) =>
+  inTauri() ? invoke<Record<string, unknown>>("session_switch_account", { session, account, request }) : Promise.reject(new Error("Accounts need the desktop app."));
 /** Task 51: loads the next older Waiting page; false when there is none. */
 export const teamsWaitingOlder = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_waiting_older", { computer }) : Promise.resolve(false);
 /** Task 51: raises or clears Waiting item notifications through the native notifier. */

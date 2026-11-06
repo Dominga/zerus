@@ -30,7 +30,7 @@ import { rememberRecentSession } from "./ui/sessions/goTo";
 import { updateCommands, updates } from "./store/updates";
 import { openUpdates } from "./store/desk";
 import { SessionUsageStrip } from "./ui/components/SessionUsageStrip";
-import { fleetRefresh, type BridgeMode } from "./bridge";
+import { fleetRefresh, sandboxCheck, type BridgeMode } from "./bridge";
 import { installUiLanguage, tr, uiLanguage } from "./i18n";
 import { WaitingPage } from "./ui/teams/Waiting";
 import { NewTeamPage } from "./ui/teams/NewTeamPage";
@@ -155,6 +155,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
   ];
   onMount(() => {
     const off = [installShortcutRouter(), ...commands.map(([id, run]) => onCommand(id, run))];
+    void sandboxCheck().then((reason) => { if (reason) toast(tr("Zerus is sandboxed"), reason, "error", true); }).catch(() => undefined);
     onCleanup(() => off.forEach((undo) => undo()));
   });
   return (

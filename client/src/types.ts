@@ -362,6 +362,8 @@ export interface Details {
   /** Null when the inspection does not report it. */
   terminal_supported?: boolean | null;
   terminal_attach_supported?: boolean | null;
+  /** Task 75: this computer's refused private stores, with their fix. */
+  private_stores?: { path: string; reason: string; fix: string }[];
 }
 
 /** A read mark whose delivery is still pending (client/core `readmarks.rs`). */

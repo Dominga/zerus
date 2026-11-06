@@ -10,6 +10,13 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PrivateStore {
+    pub path: String,
+    pub reason: String,
+    pub fix: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Details {
     pub run_id: String,
     pub conversation_id: String,
@@ -39,6 +46,9 @@ pub struct Details {
     /// inspection has no boolean.
     pub terminal_supported: Option<bool>,
     pub terminal_attach_supported: Option<bool>,
+    /// Task 75: this computer's refused private stores, with their fix.
+    #[serde(default)]
+    pub private_stores: Vec<PrivateStore>,
 }
 
 /// `hgs [@host] inspect NAME --after 0 --skip-processes [--archive ID]`, 5 s
@@ -223,12 +233,54 @@ pub fn parse_details(target: &Target, exit: Exit) -> Option<Details> {
         terminal_attach_supported: value
             .get("terminal_attach_supported")
             .and_then(Value::as_bool),
+        private_stores: value
+            .get("private_stores")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .take(128)
+                    .filter_map(|row| {
+                        let path = text(row, "path");
+                        if path.is_empty() {
+                            return None;
+                        }
+                        Some(PrivateStore {
+                            path,
+                            reason: text(row, "reason"),
+                            fix: text(row, "fix"),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refused_private_stores_keep_their_path_reason_and_fix() {
+        let target = Target {
+            computer: "".into(),
+            name: "claude/example/review".into(),
+            run_id: "run".into(),
+            conversation_id: "conversation".into(),
+        };
+        let details = parse_details(
+            &target,
+            Exit::Code {
+                code: 0,
+                stdout: br#"{"run_id":"run","conversation_id":"conversation","private_stores":[{"path":"C:\\state","reason":"not private","fix":"restore the ACL"},{"reason":"no path"}]}"#.to_vec(),
+                stderr: String::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(details.private_stores.len(), 1);
+        assert_eq!(details.private_stores[0].path, "C:\\state");
+        assert_eq!(details.private_stores[0].fix, "restore the ACL");
+    }
 
     #[test]
     fn fork_capability_survives_the_bounded_inspection_projection() {

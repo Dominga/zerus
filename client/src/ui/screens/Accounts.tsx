@@ -33,6 +33,7 @@ const closeManagement=()=>{accountManagement.close();accountSetup.close();accoun
 const clearManagementNotice=()=>{accountManagement.clearNotice();accountSetup.clearNotice();accountDistribution.clearNotice();};
 const openCatalog=(...args:Parameters<typeof accountManagement.open>)=>{accountSetup.close();accountDistribution.close();accountSetup.clearNotice();accountDistribution.clearNotice();return accountManagement.open(...args);};
 const AccountDefaultsDialog = lazy(() => import("./AccountDefaultsDialog"));
+const AccountPermissionsDialog = lazy(() => import("./AccountPermissionsDialog"));
 const AccountCatalogDialog = lazy(() => import("./AccountCatalogDialog"));
 
 const [selectedAccount, setSelectedAccount] = createSignal<string | undefined>();
@@ -121,6 +122,16 @@ function Detail(props: { a: Account }) {
   const m = () => memberOf(props.a, selectedProfile(), accountMachine())!;
   const [moreOpen, setMoreOpen] = createSignal(false);
   const [moreQuery, setMoreQuery] = createSignal("");
+  let moreButton: HTMLButtonElement | undefined, moreInput: HTMLInputElement | undefined;
+  const closeMore = () => { setMoreOpen(false); if (moreButton?.isConnected) moreButton.focus(); };
+  const toggleMore = () => {
+    if (moreOpen()) { closeMore(); return; }
+    setMoreQuery(""); setMoreOpen(true);
+    queueMicrotask(() => {
+      // Switching accounts can remove this popup before its opening settles.
+      if (moreOpen() && moreInput?.isConnected) moreInput.focus();
+    });
+  };
   const shown = () => visibleMembers(props.a, m().key);
   const nativeConfig = () => props.a.provider === "opencode";
   const defaultable = () => props.a.provider !== "dsh" && !nativeConfig();
@@ -129,6 +140,20 @@ function Detail(props: { a: Account }) {
   // The selected machine, with its profile tag when another profile shares it.
   const where = () => (tags().has(m().key) ? `${m().machine} (${tags().get(m().key)})` : m().machine);
   const choose = (key: string) => { setSelectedProfile(key); closeManagement(); clearManagementNotice(); };
+  const stepProfile = (event: KeyboardEvent & { currentTarget: HTMLDivElement }) => {
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    const rows = [...event.currentTarget.querySelectorAll<HTMLButtonElement>(".acct-mrow-pick")];
+    const at = rows.findIndex((row) => row === event.target);
+    // The adjacent Make default buttons keep their own keyboard behavior.
+    if (at < 0) return;
+    const next = event.key === "ArrowRight" || event.key === "ArrowDown" ? (at + 1) % rows.length
+      : event.key === "ArrowLeft" || event.key === "ArrowUp" ? (at + rows.length - 1) % rows.length
+      : event.key === "Home" ? 0 : event.key === "End" ? rows.length - 1 : undefined;
+    if (next === undefined) return;
+    event.preventDefault();
+    rows[next].click();
+    rows[next].focus();
+  };
   return (
     <div class="acct-detail">
       <div class="acct-title">
@@ -147,10 +172,10 @@ function Detail(props: { a: Account }) {
       <section class="acct-card box">
         <h3>{tr("Machines")}</h3>
         {/* One row per profile: the row chooses it; the default is a badge or a separate button beside it. */}
-        <div class="acct-mrows" classList={{ defaults: defaultable() }} role="radiogroup" aria-label={tr("Machine profile")}>
+        <div class="acct-mrows" classList={{ defaults: defaultable() }} role="radiogroup" aria-label={tr("Machine profile")} onKeyDown={stepProfile}>
           <For each={shown()}>{(x) => (
             <div class="acct-mrow" classList={{ on: x.key === m().key }}>
-              <button class="acct-mrow-pick" role="radio" aria-checked={x.key === m().key} onClick={() => choose(x.key)}>
+              <button class="acct-mrow-pick" role="radio" aria-checked={x.key === m().key} tabIndex={x.key === m().key ? 0 : -1} onClick={() => choose(x.key)}>
                 <MachineTile os={osOf(machineCards[x.host]?.platform)} state={x.online ? connectionOf(catalog.computers[x.host]?.status).tile : "offline"} size={22} />
                 <MachineLabel alias={x.machine} dimmed={!x.online} />
                 <ProfileTag tag={tags().get(x.key)} id={x.id} />
@@ -172,18 +197,18 @@ function Detail(props: { a: Account }) {
         <div class="row acct-mfoot">
           <Show when={props.a.members.length > shown().length}>
             <span class="acct-more-anchor">
-              <button class="btn small" aria-haspopup="dialog" aria-expanded={moreOpen()} onClick={() => { setMoreQuery(""); setMoreOpen(!moreOpen()); }}>
+              <button class="btn small" ref={moreButton} aria-haspopup="dialog" aria-expanded={moreOpen()} onClick={toggleMore}>
                 {tr("+%1 more", props.a.members.length - shown().length)}
               </button>
               <Show when={moreOpen()}>
                 <div class="acct-more" role="dialog" aria-label={tr("Machines with %1", props.a.label)}
-                  onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); setMoreOpen(false); } }}>
-                  <input class="field" type="search" placeholder={tr("Search %1 machines", props.a.members.length)} value={moreQuery()}
-                    onInput={(e) => setMoreQuery(e.currentTarget.value)} autofocus aria-label={tr("Search machines")} />
+                  onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeMore(); } }}>
+                  <input class="field" ref={moreInput} type="search" placeholder={tr("Search %1 machines", props.a.members.length)} value={moreQuery()}
+                    onInput={(e) => setMoreQuery(e.currentTarget.value)} aria-label={tr("Search machines")} />
                   <div class="acct-more-list">
                     <For each={matches()} fallback={<div class="dim acct-more-empty">{tr("No machine matches.")}</div>}>
                       {(x) => (
-                        <button class="acct-more-row" classList={{ on: x.key === m().key }} onClick={() => { choose(x.key); setMoreOpen(false); }}>
+                        <button class="acct-more-row" classList={{ on: x.key === m().key }} onClick={() => { choose(x.key); closeMore(); }}>
                           <MachineTile os={osOf(machineCards[x.host]?.platform)} state={x.online ? connectionOf(catalog.computers[x.host]?.status).tile : "offline"} size={22} />
                           <MachineLabel alias={x.machine} />
                           <ProfileTag tag={tags().get(x.key)} id={x.id} />
@@ -316,7 +341,7 @@ export function AccountsScreen() {
             <Show when={!view().no_hosts}>
               <Show when={view().snapshot} fallback={<div class="acct-loading"><div class="row"><Spinner /><span>{tr("Loading accounts…")}</span></div><p class="muted">{tr("Checking accounts across your machines.")}</p></div>}>
                 <Show when={visible().length} fallback={<p class="muted acct-none">{accountMachine() === "*" ? tr("No accounts.") : tr("No accounts on %1.", filterName())}</p>}>
-                  <Index each={visible()}>{(a) => <AccountRow a={a()} now={now()} />}</Index>
+                  <Index each={visible()}>{(a) => <div role="listitem"><AccountRow a={a()} now={now()} /></div>}</Index>
                 </Show>
                 <Show when={view().truncated > 0}><p class="dim acct-none">{tr("%1 more accounts are not shown.", view().truncated)}</p></Show>
               </Show>
@@ -340,7 +365,7 @@ export function AccountsScreen() {
       </main>
       <Show when={accountDistribution.prompt()}>{prompt=><Suspense><AccountDistributionDialog prompt={prompt()}/></Suspense>}</Show>
       <Show when={accountSetup.prompt()}>{prompt=><Suspense><AccountSetupDialog prompt={prompt()} busy={accountSetup.busy()} close={accountSetup.close} confirm={(values,handle)=>void accountSetup.confirm(values,handle)}/></Suspense>}</Show>
-      <Show when={accountManagement.prompt()}>{prompt=><Suspense><Switch><Match when={prompt().kind==="permissions" || prompt().kind==="model"}><AccountDefaultsDialog prompt={prompt()} close={accountManagement.close} confirm={(values,handle)=>void accountManagement.confirm(values,handle)}/></Match><Match when={true}><AccountCatalogDialog prompt={prompt()} close={accountManagement.close} confirm={(label,handle)=>void accountManagement.confirm(label,handle)}/></Match></Switch></Suspense>}</Show>
+      <Show when={accountManagement.prompt()}>{prompt=><Suspense><Switch><Match when={prompt().kind==="permissions" && prompt().permissions}>{editor=><AccountPermissionsDialog prompt={prompt()} editor={editor()} close={accountManagement.close} confirm={(values,handle)=>void accountManagement.confirm(values,handle)}/>}</Match><Match when={prompt().kind==="permissions" || prompt().kind==="model"}><AccountDefaultsDialog prompt={prompt()} close={accountManagement.close} confirm={(values,handle)=>void accountManagement.confirm(values,handle)}/></Match><Match when={true}><AccountCatalogDialog prompt={prompt()} close={accountManagement.close} confirm={(label,handle)=>void accountManagement.confirm(label,handle)}/></Match></Switch></Suspense>}</Show>
     </div>
   );
 }

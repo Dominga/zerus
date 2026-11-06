@@ -19,12 +19,14 @@ use crate::settings::Store;
 
 type Job = Box<dyn FnOnce() + Send>;
 
-/// The worker the folder's work runs on.
+/// The worker the folder's work runs on, and how its changes are made: the
+/// maintained production build records the folder's original index first
+/// (G3, `download_cache::evidence`); development and replay builds never do.
 #[derive(Clone)]
-pub struct Files(Arc<Mutex<Sender<Job>>>);
+pub struct Files(Arc<Mutex<Sender<Job>>>, download_cache::Writer);
 
 /// Starts the worker.
-pub fn start() -> Files {
+pub fn start(writer: download_cache::Writer) -> Files {
     let (jobs, queue) = mpsc::channel::<Job>();
     let started = std::thread::Builder::new()
         .name("download-cache".into())
@@ -36,10 +38,15 @@ pub fn start() -> Files {
     if let Err(error) = started {
         eprintln!("zerus-client: downloaded files: {error}");
     }
-    Files(Arc::new(Mutex::new(jobs)))
+    Files(Arc::new(Mutex::new(jobs)), writer)
 }
 
 impl Files {
+    /// The cache's changes for this build.
+    pub(crate) fn writer(&self) -> download_cache::Writer {
+        self.1
+    }
+
     /// Runs `work` on the worker and waits for it.
     pub(crate) fn run<T: Send + 'static>(
         &self,
@@ -133,10 +140,11 @@ async fn refresh(app: &AppHandle, files: &Files, change: Option<u64>) -> Result<
     let limit = limit(app);
     let path = root.clone();
     let worker = files.clone();
+    let writer = files.writer();
     let usage: Usage = tauri::async_runtime::spawn_blocking(move || {
         worker.run(move || {
             if !service_mode && limit > 0 {
-                download_cache::trim(&path, limit, now_ms())
+                writer.trim(&path, limit, now_ms())
             } else {
                 download_cache::usage(&path)
             }

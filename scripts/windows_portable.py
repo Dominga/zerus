@@ -17,7 +17,7 @@ UNPACKED_LIMIT = 500_000_000
 ENTRY_LIMIT = 10_000
 MANIFEST_LIMIT = 64 * 1024
 # Standard SPDX license and exception identifiers named by the SPDX documents
-# of the bundled Qt modules; packaging/windows/licenses holds a <ID>.txt for each.
+# of immutable old Qt modules. Read-only validation retains their archived names.
 QT_LICENSE_TEXTS = (
     "AFL-2.1", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "BSD-4-Clause", "BSD-Source-Code", "BSL-1.0", "CC0-1.0", "FTL",
     "GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "HPND", "HPND-sell-variant", "IJG", "ISC", "Imlib2",

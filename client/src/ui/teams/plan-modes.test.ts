@@ -5,6 +5,7 @@ import {
   boardColumns,
   formatSeconds,
   formatTokens,
+  heatSeed,
   heatShare,
   layerRows,
   lossText,
@@ -40,6 +41,15 @@ const profile: TeamProfileView = {
     { kind: "rework", task: 2, seconds: 30, tokens: 300 },
     { kind: "deps", task: 4, seconds: 15, tokens: null },
   ],
+  task_rows: [
+    { task: 2, lateness: { known: true, unknown: "", planned_start: 100, planned_end: 700, actual_start: 7300, actual_end: null,
+      start_late_s: 7200, inherited_s: 0, own_s: 7200, from: null }, overrun: null },
+    { task: 4, lateness: { known: true, unknown: "", planned_start: 100, planned_end: 700, actual_start: 3700, actual_end: null,
+      start_late_s: 4800, inherited_s: 1200, own_s: 3600, from: 2 }, overrun: null },
+    { task: 1, lateness: { known: true, unknown: "", planned_start: 100, planned_end: 700, actual_start: null, actual_end: null,
+      start_late_s: 1200, inherited_s: 1200, own_s: 0, from: 2 }, overrun: null },
+  ],
+  task_rows_more: false,
   roles: [
     { key: "Backend", kind: "role", accepted: 2, attempts: 3, returned: 1, tokens_per_accepted: 4000 },
     { key: "gpt", kind: "model", accepted: 1, attempts: 1, returned: 0, tokens_per_accepted: null },
@@ -95,10 +105,12 @@ describe("stages and heat", () => {
     ]);
   });
 
-  it("tints only tasks with a recorded loss, by the top loss", () => {
+  it("tints only tasks late by their own, against the 2 h scale (task 82)", () => {
     expect(heatShare(profile, 2)).toBe(1);
     expect(heatShare(profile, 4)).toBe(0.5);
+    // Late only by what it inherited from #2: untinted.
     expect(heatShare(profile, 1)).toBeNull();
+    expect(heatShare(profile, 5)).toBeNull();
     expect(lossText(profile, 2)).toBe("rework 30s");
   });
 });
@@ -122,5 +134,18 @@ describe("tests mode", () => {
     expect(runTime(45000)).toBe("45s");
     expect(testStatus("timed_out")).toBe("timed-out");
     expect(testStatus("passed")).toBe("passed");
+  });
+});
+
+describe("the move keeps Qt's Teams view preferences (task 103)", () => {
+  it("starts the Lateness switch from Qt's heat mode until this browser chooses", () => {
+    expect(heatSeed("team-one", null, '{"team-one":"time"}')).toBe(true);
+    expect(heatSeed("team-one", null, '{"team-one":"tokens"}')).toBe(true);
+    expect(heatSeed("team-one", null, '{"team-two":"time"}')).toBe(false);
+    expect(heatSeed("team-one", null, "{}")).toBe(false);
+    expect(heatSeed("team-one", null, "not json")).toBe(false);
+    // This browser's own stored choice always wins, on and off.
+    expect(heatSeed("team-one", "1", '{}')).toBe(true);
+    expect(heatSeed("team-one", "0", '{"team-one":"time"}')).toBe(false);
   });
 });

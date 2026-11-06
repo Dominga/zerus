@@ -138,6 +138,17 @@ void AccountSwitchChip::setLocked(const QString &reason)
     m_locked = reason; render();
 }
 
+bool AccountSwitchChip::canSwitch() const
+{
+    return m_allowed && !switching() && m_blocked.isEmpty() && m_locked.isEmpty() && switchable(m_provider);
+}
+
+void AccountSwitchChip::openList()
+{
+    if (!canSwitch()) return;
+    showList(); m_popover->showFor(this);
+}
+
 void AccountSwitchChip::setAllowed(bool allowed)
 {
     if (allowed == m_allowed) return;
@@ -203,7 +214,7 @@ void AccountSwitchChip::showList()
     const bool choosable = m_locked.isEmpty() && switchable(m_provider);
     for (const auto &option : std::as_const(m_options)) {
         auto *row = new QPushButton; row->setObjectName("sessionAccountOption"); row->setProperty("account", option.id);
-        row->setProperty("current", option.current); row->setCursor(Qt::PointingHandCursor); row->setMinimumHeight(42);
+        row->setProperty("current", option.current); row->setCursor(choosable && !option.current ? Qt::PointingHandCursor : Qt::ArrowCursor); row->setMinimumHeight(42);
         row->setEnabled(choosable && !option.current);
         row->setToolTip(option.tooltip); row->setAccessibleName(option.label + (option.current ? tr(" (current)") : QString()));
         row->setAccessibleDescription(option.usage);
@@ -246,8 +257,8 @@ void AccountSwitchChip::showConfirm(const Option &option)
                                 .arg(option.label, m_label));
     text->setObjectName("sessionAccountConfirmText"); text->setWordWrap(true);
     auto *buttons = new QHBoxLayout; buttons->addStretch(1);
-    auto *cancel = new QPushButton(tr("Cancel")); cancel->setObjectName("sessionAccountCancel");
-    auto *move = new QPushButton(tr("Move to %1").arg(option.label)); move->setObjectName("sessionAccountMove"); move->setDefault(true);
+    auto *cancel = new QPushButton(tr("Cancel")); cancel->setObjectName("sessionAccountCancel"); cancel->setDefault(true);
+    auto *move = new QPushButton(tr("Move to %1").arg(option.label)); move->setObjectName("sessionAccountMove"); move->setDefault(false);
     buttons->addWidget(cancel); buttons->addWidget(move);
     v->addWidget(title); v->addWidget(text); v->addLayout(buttons);
     m_pageLayout->addWidget(frame);
@@ -262,7 +273,7 @@ void AccountSwitchChip::showConfirm(const Option &option)
     });
     setTheme(m_dark);
     if (m_popover->isVisible()) m_popover->reposition();
-    move->setFocus(Qt::OtherFocusReason);
+    cancel->setFocus(Qt::OtherFocusReason);
 }
 
 void AccountSwitchChip::render()
@@ -275,7 +286,7 @@ void AccountSwitchChip::render()
         setTone(ChipTone::Neutral); setEnabled(false);
         return;
     }
-    setLabels(m_label);
+    setLabels(m_locked.isEmpty() ? m_label : tr("%1 (locked)").arg(m_label));
     QStringList detail{tr("Account: %1").arg(m_label)};
     const bool elsewhere = switching();   // another session's switch runs
     if (elsewhere) detail << tr("Another session is changing its account; wait for it.");
@@ -291,3 +302,5 @@ void AccountSwitchChip::render()
             : outcome.kind == Outcome::RolledBack || outcome.kind == Outcome::Uncertain ? ChipTone::Warning : ChipTone::Quiet);
     setEnabled(known && m_blocked.isEmpty() && !elsewhere);
 }
+
+

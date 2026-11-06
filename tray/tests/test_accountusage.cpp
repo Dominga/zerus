@@ -106,6 +106,32 @@ private slots:
         data["windows"]=QJsonArray{limitWindow(10080,6,165*3600,now)};
         QVERIFY(!AccountUsage::tooltip(data).contains("current pace"));
     }
+    void lockedChipNamesWhyAndCancelIsDefault() {
+        AccountSwitchChip chip;
+        chip.setSession("key","claude","native","Default");
+        AccountSwitch::Option nativeAccount; nativeAccount.id = "native"; nativeAccount.label = "Default"; nativeAccount.usage = "5h 10% used"; nativeAccount.current = true;
+        AccountSwitch::Option workAccount; workAccount.id = "work"; workAccount.label = "Work"; workAccount.usage = "7d 9% used";
+        chip.setOptions({nativeAccount, workAccount});
+        chip.setLocked(QStringLiteral("A member of team Checkout: its account changes with Swap member in the team's Members."));
+        QVERIFY(!chip.canSwitch());
+        QVERIFY(!chip.canSwitch());
+        QVERIFY(chip.fullLabel().contains(QStringLiteral("(locked)")));
+        chip.setLocked({});
+        chip.show();
+        QVERIFY(chip.canSwitch());
+        chip.openList();
+        QTRY_VERIFY(chip.accountPopover()->isVisible());
+        QPushButton *option = nullptr;
+        for (auto *row : chip.accountPopover()->findChildren<QPushButton *>("sessionAccountOption"))
+            if (row->property("account").toString() == "work") option = row;
+        QVERIFY(option && option->isEnabled());
+        option->click();
+        auto *cancel = chip.accountPopover()->findChild<QPushButton *>("sessionAccountCancel");
+        auto *move = chip.accountPopover()->findChild<QPushButton *>("sessionAccountMove");
+        QVERIFY(cancel && move);
+        QVERIFY(cancel->isDefault());
+        QVERIFY(!move->isDefault());
+    }
     void indicatorPreferenceDefaultsToRails() {
         using AccountUsage::Indicator;
         QSettings().remove("workspace/usageIndicator");QCOMPARE(AccountUsage::indicator(),Indicator::Rails);
@@ -307,3 +333,5 @@ private:
 };
 QTEST_MAIN(TestAccountUsage)
 #include "test_accountusage.moc"
+
+

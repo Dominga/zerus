@@ -19,6 +19,7 @@ private slots:
     void teamLeftoverStopAsksTheRealAction();
     void leadSessionHeaderCarriesTheTeam();
     void leadSessionAnswersAProposalOnItsCard();
+    void aBusyTeamStoreKeepsTheLeadsTeamAndItsCards();
     void modelServersRailButtonOnlyWithAServer();
     void teamAttentionReachesTheNotifications();
     void designerSessionDropsTheTeamHeader();
@@ -1108,3 +1109,77 @@ void TestSessionsWindow::designerSessionDropsTheTeamHeader()
 
 QTEST_MAIN(TestSessionsWindow)
 #include "test_sessionswindow_teams.moc"
+
+// Task 101 (owner, 2026-11-06, team 33fbafeb): with the Team tab open the
+// lead's session lost its team, its Team tab and what its team asks of it for
+// minutes, while the team store refused readers. Every polled team read now
+// fails as the busy store answers; the lead keeps its team header, the Team
+// tab, its proposal card and the workspace says the team is the last good read.
+void TestSessionsWindow::aBusyTeamStoreKeepsTheLeadsTeamAndItsCards()
+{
+    const QStringList keys{"workspace/skin", "workspace/theme", "workspace/organization", "workspace/inspectorVisible", "workspace/collapsedTeams"};
+    const auto restore = qScopeGuard([keys] { for (const auto &key : keys) removeSetting(key); });
+    QSettings().setValue("workspace/skin", "whitewh");
+    QSettings().setValue("workspace/theme", "dark");
+    setJsonSetting("workspace/organization", QJsonDocument(ReadmeShots::organization()).toJson(QJsonDocument::Compact));
+    QSettings().setValue("workspace/inspectorVisible", false);
+    const double now = QDateTime::currentSecsSinceEpoch();
+    const auto plain = ReadmeShots::fleet(now);
+    auto team = ReadmeShots::team(now);
+    team["proposals"] = QJsonArray{QJsonObject{{"id", "p1"}, {"kind", "add-member"}, {"by", "Lead"}, {"at", now - 120}, {"state", "open"},
+        {"hash", QStringLiteral("5d1c0e9a7b3f4c2d8e6a1b0c9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c")}, {"reason", "A designer for the receipt page"},
+        {"change", QJsonObject{{"members", QJsonArray{QJsonObject{{"id", "designer"}, {"role", "Designer"}, {"agent", "claude"}, {"model", "sonnet"}}}}}}}};
+    const QJsonObject data{{"inspect", ReadmeShots::conversations(plain, now)}, {"accounts", ReadmeShots::accounts(now)}, {"team", team},
+                           {"feed", ReadmeShots::feed(now)}, {"catalog", ReadmeShots::catalog()}, {"organization", ReadmeShots::organization()}};
+    const QString fixture = m_dir->filePath("hgs-team-busy");
+    QFile::remove(fixture + ".teamsbusy");
+    QVERIFY(FakeCli::install(fixture, ReadmeShots::program));
+    QVERIFY(FakeCli::replace(fixture + ".json", QJsonDocument(data).toJson(QJsonDocument::Compact)));
+    const auto calm = qScopeGuard([fixture] { QFile::remove(fixture + ".teamsbusy"); });
+    SessionsWindow window(FakeCli::program(fixture)); window.resize(1440, 900); window.setFleet(plain); window.show();
+    auto *controller = window.findChild<TeamController *>(); QVERIFY(controller);
+    QTRY_COMPARE_WITH_TIMEOUT(controller->teams().size(), 1, 10000);
+    window.showSession({}, "claude/orbit/checkout");
+    auto *details = window.findChild<QWidget *>("sessionDetailPanel"); QVERIFY(details);
+    // The header is rebuilt on each refresh: it is looked up every time.
+    const auto header = [details] { auto *shown = details->findChild<QWidget *>("teamHeaderStatus"); return shown && shown->isVisible(); };
+    QTRY_VERIFY_WITH_TIMEOUT(header(), 10000);
+    auto *tabs = window.findChild<QTabWidget *>("sessionDetailTabs"); QVERIFY(tabs);
+    const auto teamTab = [tabs] { for (int i = 0; i < tabs->count(); ++i) if (tabs->tabText(i) == "Team") return i; return -1; };
+    QVERIFY(teamTab() >= 0);
+    // What the team asks of its lead shows above the composer, in Activity.
+    auto *cards = window.findChild<QWidget *>("mainProposalCards"); QVERIFY(cards);
+    QTRY_VERIFY_WITH_TIMEOUT(cards->findChild<QFrame *>("teamProposalCard") && cards->findChild<QFrame *>("teamProposalCard")->isVisible(), 10000);
+    const int activity = tabs->currentIndex();
+    // The owner opens the Team tab.
+    tabs->setCurrentIndex(teamTab());
+    QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QWidget *>("teamPhaseGraph"), 10000);
+    QSignalSpy teamsChanged(controller, &TeamController::teamsChanged);
+    // The store turns busy: every list, status, events and inbox read fails.
+    QVERIFY(FakeCli::replace(fixture + ".teamsbusy", "0"));
+    QTRY_VERIFY_WITH_TIMEOUT(controller->stale(), 15000);
+    QTest::qWait(3500);   // at least one more poll that fails
+    QVERIFY(controller->stale());
+    QCOMPARE(teamsChanged.count(), 0);
+    QCOMPARE(controller->teams().size(), 1);
+    QVERIFY(controller->teamOfSession({}, "claude/orbit/checkout"));
+    QVERIFY(header());
+    QVERIFY(teamTab() >= 0);
+    QCOMPARE(tabs->tabText(tabs->currentIndex()), QStringLiteral("Team"));
+    QWidget *staleStrip = nullptr;
+    QTRY_VERIFY_WITH_TIMEOUT((staleStrip = window.findChild<QWidget *>("teamWorkspaceStale")) && staleStrip->isVisible(), 5000);
+    QVERIFY(window.findChild<QLabel *>("teamWorkspaceStaleText")->text().contains("database is locked"));
+    // Back in Activity while the store is still busy: the lead's card is there.
+    tabs->setCurrentIndex(activity);
+    QFrame *card = nullptr;
+    QTRY_VERIFY_WITH_TIMEOUT((card = cards->findChild<QFrame *>("teamProposalCard")) && card->isVisible(), 5000);
+    QCOMPARE(card->property("proposal").toString(), QStringLiteral("p1"));
+    QVERIFY(controller->stale());
+    // The store answers again: fresh, and the notice goes.
+    QFile::remove(fixture + ".teamsbusy");
+    QTRY_VERIFY_WITH_TIMEOUT(!controller->stale(), 15000);
+    tabs->setCurrentIndex(teamTab());
+    QTRY_VERIFY_WITH_TIMEOUT(!window.findChild<QWidget *>("teamWorkspaceStale"), 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(header(), 5000);
+    QVERIFY(teamTab() >= 0);
+}

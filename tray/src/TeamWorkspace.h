@@ -193,7 +193,9 @@ private:
     const TeamUi::Heat *heat(const Teams::Team &team);  // null while off, reading or refused
     QWidget *heatSwitch(const Teams::Team &team);
     QWidget *heatLegendRow(const Teams::Team &team);
-    void readHeat(const QString &team, const QString &metric, const QJsonValue &cursor, const std::shared_ptr<TeamUi::Heat> &into);
+    static bool heatView(const QString &view);   // task 82: Graph, Board and Layers
+    QWidget *heatCardLine(const Teams::Team &team, int task);   // task 82: the drawer card's lateness and overrun
+    void readHeat(const QString &team, const QString &metric, const QJsonValue &cursor, const std::shared_ptr<TeamUi::Heat> &into, const QJsonValue &tasks = QJsonValue());
     struct HeatRead {
         QString team;
         std::shared_ptr<TeamUi::Heat> heat;
@@ -221,6 +223,8 @@ private:
         return team.status == QLatin1String("planning") || team.status == QLatin1String("running") || team.status == QLatin1String("paused");
     }
     QWidget *errorStrip();
+    // Task 101: the team shown is the last good read; the latest one failed.
+    QWidget *staleStrip();
     // The team as the controller currently has it, by id (a poll may have
     // replaced the copy a widget was built with).
     const Teams::Team *currentTeam(const QString &id) const;

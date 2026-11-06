@@ -37,6 +37,25 @@ describe("Teams views", () => {
     });
   });
 
+  it("keep the lead's team when the list read fails, as Qt now does (task 101)", () => {
+    // Owner, 2026-11-06: in Qt a failed `team list` (the store busy: "hgs:
+    // database is locked") cleared every team, so the lead lost its team and
+    // its Team tab. Here a failed list keeps the last good one.
+    createRoot((dispose) => {
+      const store = createTeams({ follow: async () => {} });
+      store.apply([{ computer: "", key: "list", kind: "list", payload: list() }]);
+      const lead = { computer: "", name: "claude/p/lead" };
+      expect(store.teamOf(lead)?.id).toBe("t1");
+      store.apply([{ computer: "", key: "list", kind: "failed", payload: { code: "failed", message: "hgs: database is locked" } }]);
+      store.apply([{ computer: "", key: "list", kind: "failed", payload: { code: "timed_out", message: "timed out" } }]);
+      expect(store.teamOf(lead)?.id).toBe("t1");
+      expect(store.failure("", "list")).toBe("timed out");
+      store.apply([{ computer: "", key: "list", kind: "list", payload: list() }]);
+      expect([store.teamOf(lead)?.id, store.failure("", "list")]).toEqual(["t1", undefined]);
+      dispose();
+    });
+  });
+
   it("find a session's team by its member sessions, here and on the computer they name", () => {
     createRoot((dispose) => {
       const store = createTeams({ follow: async () => {} });

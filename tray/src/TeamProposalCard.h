@@ -63,6 +63,8 @@ private:
     };
     static QList<View> viewsOf(const Teams::Team &team);
     void render();
+    // Task 107: hgs confirmed this card's decision: it leaves at once.
+    void confirmed(const QString &id);
     QWidget *cardFor(const View &view, bool gone);
     void answer(const View &view, bool allow);
     // #740: a question's card: an option or the owner's own words, Answer.
@@ -83,5 +85,8 @@ private:
     QHash<QString, QString> m_notices;
     QHash<QString, QString> m_reasons;   // the typed Deny reasons, by proposal
     QSet<QString> m_sending;             // answered; until the store takes them
+    // Task 107: decided, confirmed by hgs: hidden at once, until the store
+    // no longer lists them.
+    QSet<QString> m_decided;
     bool m_dark = true, m_asking = false;
 };

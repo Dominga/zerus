@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
+import ru from "../i18n.ru.json";
 import { createRoot, createSignal } from "solid-js";
 import { createStore } from "solid-js/store";
 import {
   createOutputFollow, createProcesses, groupItem, nextSelection, processesTab, processTarget, runningCommandsEntry,
-  trackFollow, trackShown, visibleRows, type TreeKey,
+  summaryText, trackFollow, trackShown, visibleRows, type TreeKey,
 } from "./processes";
 import type { ProcessesView, ProcessRow, ProcessTarget } from "../types";
 import type { Session } from "../ui/sessions/types";
@@ -333,5 +334,15 @@ describe("Show running commands (SessionsWindow.cpp:5297-5299, 5463-5465)", () =
     online = false;
     entry.action!();
     expect(opened, "the computer went offline after the menu opened").toBe(1);
+  });
+});
+
+describe("the summary line (task 77)", () => {
+  it("translates the hub's fixed summaries and keeps a count summary as worded", () => {
+    expect(summaryText("Reading processes…")).toBe("Reading processes…");
+    expect(summaryText("No shell commands recorded yet")).toBe("No shell commands recorded yet");
+    expect(summaryText("1 live    2 active    1 unconfirmed    127 recorded")).toBe("1 live    2 active    1 unconfirmed    127 recorded");
+    expect(ru["Reading processes…"]).toBe("Чтение процессов…");
+    expect(ru["No shell commands recorded yet"]).toBeTruthy();
   });
 });

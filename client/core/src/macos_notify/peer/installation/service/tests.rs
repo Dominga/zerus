@@ -67,8 +67,8 @@ fn original_child_birth_is_native_and_a_reaped_handle_never_reenters_validation(
     child.0.kill().unwrap();
     child.0.wait().unwrap();
     // try_wait sees Child's cached terminal status, before any PID lookup.
-    assert!(matches!(birth(&mut child.0), Err(Refusal::Child)));
-    assert!(matches!(birth(&mut child.0), Err(Refusal::Child)));
+    assert!(matches!(birth(&mut child.0), Err(Refusal::ChildExited)));
+    assert!(matches!(birth(&mut child.0), Err(Refusal::ChildExited)));
 }
 
 #[test]

@@ -1,4 +1,5 @@
 //! Bounded original-correlation callback ingress. No activation or UI effect.
+use super::native_turn;
 use objc2::{
     define_class, msg_send,
     rc::Retained,
@@ -41,9 +42,11 @@ define_class!(
             _: &UNNotification,
             completion: &block2::DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
         ) {
-            completion.call((UNNotificationPresentationOptions::Banner
-                | UNNotificationPresentationOptions::List
-                | UNNotificationPresentationOptions::Sound,));
+            native_turn(|| {
+                completion.call((UNNotificationPresentationOptions::Banner
+                    | UNNotificationPresentationOptions::List
+                    | UNNotificationPresentationOptions::Sound,))
+            });
         }
         #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
         fn did_receive(
@@ -52,16 +55,18 @@ define_class!(
             response: &UNNotificationResponse,
             completion: &block2::DynBlock<dyn Fn()>,
         ) {
-            crate::macos_notification_diagnostics::response(
-                crate::macos_notification_diagnostics::Role::Host,
-                &response.actionIdentifier(),
-            );
-            if let Some(envelope) = envelope(response) {
-                if self.ivars().input.try_send(envelope).is_err() {
-                    self.ivars().failed.store(true, Ordering::Release);
+            native_turn(|| {
+                crate::macos_notification_diagnostics::response(
+                    crate::macos_notification_diagnostics::Role::Host,
+                    &response.actionIdentifier(),
+                );
+                if let Some(envelope) = envelope(response) {
+                    if self.ivars().input.try_send(envelope).is_err() {
+                        self.ivars().failed.store(true, Ordering::Release);
+                    }
                 }
-            }
-            completion.call(());
+                completion.call(());
+            });
         }
     }
 );
@@ -134,8 +139,10 @@ impl Installed {
 }
 impl Drop for Installed {
     fn drop(&mut self) {
-        UNUserNotificationCenter::currentNotificationCenter().setDelegate(None);
-        drop(self.delegate.take());
-        // Native in-flight references, if any, retain the same Ivars holds.
+        native_turn(|| {
+            UNUserNotificationCenter::currentNotificationCenter().setDelegate(None);
+            drop(self.delegate.take());
+            // Native in-flight references, if any, retain the same Ivars holds.
+        });
     }
 }

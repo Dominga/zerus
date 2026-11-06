@@ -38,11 +38,13 @@ fn parse(screen: &str) -> Option<Panel> {
     // followed by the ordinary composer or further output is not this panel.
     if end - start > 32
         || rows[start..=end].iter().any(|row| {
-            row.starts_with("› ")
-                && !row
-                    .strip_prefix("› ")
-                    .unwrap()
-                    .starts_with(|c: char| c.is_ascii_digit())
+            // An empty composer becomes a bare marker after trim_end.
+            *row == "›"
+                || (row.starts_with("› ")
+                    && !row
+                        .strip_prefix("› ")
+                        .unwrap()
+                        .starts_with(|c: char| c.is_ascii_digit()))
         })
     {
         return None;
@@ -179,7 +181,7 @@ pub(super) fn current(record: &Value) -> Option<Value> {
         return None;
     }
     let panel = parse(&kimi_tui_choice::capture(record).ok()?)?;
-    if !process_alive(record) || !matches(record, live().ok()?.get(string(record, "name"))) {
+    if !process_alive(record) || !matches(record, panes_of(&live().ok()?, record)) {
         return None;
     }
     input::checked_terminal(record, false).ok()?;

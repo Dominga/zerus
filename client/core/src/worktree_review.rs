@@ -189,7 +189,7 @@ pub fn local_data(row: &Value) -> bool {
 }
 
 /// A row's group: 0 cleanup candidates, 1 review work, 2 in use, 3 not
-/// checked, 4 main folders.
+/// checked, 4 main folders. Partially removed folders (5) are not review rows.
 pub fn category(row: &Value, verified: bool) -> u8 {
     if text(row, "kind") != "linked" {
         return 4;
@@ -229,6 +229,7 @@ pub fn category_name(category: u8) -> &'static str {
         1 => "Review work",
         2 => "In use",
         3 => "Not checked",
+        5 => "Partially removed",
         _ => "Main folders",
     }
 }
@@ -337,6 +338,9 @@ pub fn entries(count: u64) -> String {
 
 /// The lines that explain a removal decision.
 pub fn decision(row: &Value) -> Vec<String> {
+    if text(row, "kind") == "leftover" {
+        return leftover_decision(row);
+    }
     let mut lines = vec![format!("Code: {} (local Git refs).", integration(row))];
     if text(row, "verdict") == "missing" {
         lines.push(
@@ -393,8 +397,40 @@ pub fn decision(row: &Value) -> Vec<String> {
     lines
 }
 
+/// A folder whose removal stopped partway: what remains, the branch, and why
+/// it stays. Its notes say Git no longer tracks it.
+fn leftover_decision(row: &Value) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(bytes) = row["size"].as_f64() {
+        let bound = if row["size_complete"] == json!(true) {
+            ""
+        } else {
+            "≥ "
+        };
+        lines.push(format!("Remaining files: {bound}{}.", data_size(bytes)));
+    }
+    lines.push(
+        match row["branch_retained"].as_bool() {
+            Some(true) => "Branch: kept.",
+            Some(false) => "Branch: moved since the removal.",
+            None => "Branch: not checked.",
+        }
+        .into(),
+    );
+    for item in ["notes", "reasons"]
+        .iter()
+        .flat_map(|key| row[*key].as_array().into_iter().flatten())
+    {
+        lines.push(text(item, "message").into());
+    }
+    let mut seen = std::collections::HashSet::new();
+    lines.retain(|line| !line.is_empty() && seen.insert(line.clone()));
+    lines
+}
+
 /// A checkout blocked only because the OS hides some programs' folder paths:
-/// the user may accept that after checking.
+/// the user may accept that after checking. A surface without a discard
+/// consent (the repository Worktrees dialog) offers only this.
 pub fn process_reviewable(row: &Value) -> bool {
     let reasons = row["reasons"].as_array().cloned().unwrap_or_default();
     text(row, "kind") == "linked"
@@ -403,6 +439,76 @@ pub fn process_reviewable(row: &Value) -> bool {
         && text(&reasons[0], "code") == "processes_unavailable"
         && !text(row, "fingerprint").is_empty()
         && !text(row, "process_fingerprint").is_empty()
+        && (!local_data(row) || !text(row, "ignored_fingerprint").is_empty())
+}
+
+pub const PERMISSION_DENIALS_ABI: &str = "worktree-process-permission-denials-v1";
+pub const PERMISSION_DENIALS_PREFIX: &str = "permission-denials-only-v1:";
+
+/// Native complete-roster classification, not a consent or generic status code.
+/// Older helpers and an incomplete/error sample do not supply this evidence.
+pub fn permission_denials_complete(row: &Value) -> bool {
+    let coverage = &row["process_coverage"];
+    coverage["abi"] == PERMISSION_DENIALS_ABI
+        && coverage["complete"] == true
+        && coverage["open_files_checked"] == true
+        && row["unreadable_processes"].as_array().is_some_and(|rows| {
+            coverage["permission_denials"].as_u64() == Some(rows.len() as u64)
+                && rows.iter().all(|process| {
+                    process["pid"]
+                        .as_u64()
+                        .is_some_and(|pid| pid > 0 && pid <= u32::MAX as u64)
+                        && process["identity"]
+                            .as_str()
+                            .is_some_and(|id| !id.is_empty())
+                        && ["cwd", "executable", "files"]
+                            .iter()
+                            .all(|key| process[key].is_boolean())
+                        && ["cwd", "executable", "files"]
+                            .iter()
+                            .any(|key| process[key] == true)
+                })
+        })
+}
+
+/// Presentation/readiness for an already-confirmed native Remove origin only.
+/// Keep the original row/proof for the separate Root revalidation at the effect.
+pub fn without_permission_denials(row: &Value) -> Value {
+    let mut shown = row.clone();
+    shown["unreadable_processes"] = json!([]);
+    if let Some(reasons) = shown["reasons"].as_array_mut() {
+        reasons.retain(|reason| reason["code"] != "processes_unavailable");
+        if reasons.is_empty() && shown["verdict"] == "blocked" {
+            shown["verdict"] = json!("review");
+        }
+    }
+    shown
+}
+
+/// Changes the user may discard in a checkout some hidden programs might
+/// use: its removal needs both the discard and the process consent
+/// (zerus-k2ga), so only a surface that asks for both offers it (the cleanup
+/// with explicit consents). An older hgs never offers this.
+pub fn discardable_with_processes(row: &Value) -> bool {
+    let codes: Vec<_> = row["reasons"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|reason| text(reason, "code"))
+        .collect();
+    text(row, "kind") == "linked"
+        && text(row, "verdict") == "blocked"
+        && row["discardable_with_process_consent"] == json!(true)
+        && !text(row, "fingerprint").is_empty()
+        && !text(row, "discard_fingerprint").is_empty()
+        && !text(row, "process_fingerprint").is_empty()
+        && codes.contains(&"processes_unavailable")
+        && codes
+            .iter()
+            .any(|code| matches!(*code, "changes" | "untracked"))
+        && codes
+            .iter()
+            .all(|code| matches!(*code, "changes" | "untracked" | "processes_unavailable"))
         && (!local_data(row) || !text(row, "ignored_fingerprint").is_empty())
 }
 
@@ -1109,6 +1215,29 @@ pub fn inspected(
         return Err("Worktree inspection could not be verified. Refresh and try again.".into());
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod leftover_decision_tests {
+    use super::*;
+    #[test]
+    fn a_leftover_explains_what_remains_and_not_unsaved_work() {
+        let row = json!({"kind":"leftover","verdict":"partially_removed","size":4096,
+            "size_complete":false,"branch_retained":true,
+            "notes":[{"code":"partially_removed","message":"Git no longer tracks this folder, but files remain."}],
+            "reasons":[{"code":"sessions","message":"Zerus sessions use this folder."}]});
+        assert_eq!(
+            decision(&row),
+            [
+                "Remaining files: ≥ 4.00 KiB.",
+                "Branch: kept.",
+                "Git no longer tracks this folder, but files remain.",
+                "Zerus sessions use this folder."
+            ]
+        );
+        let unknown = json!({"kind":"leftover","branch_retained":null});
+        assert_eq!(decision(&unknown), ["Branch: not checked."]);
+    }
 }
 
 #[cfg(test)]

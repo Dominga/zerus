@@ -1,7 +1,6 @@
 /// <reference types="vitest/config" />
 import { defineConfig } from "vite";
 import solid from "vite-plugin-solid";
-import pkg from "./package.json" with { type: "json" };
 
 // A cross-origin isolated page gets precise timers (performance.now), which
 // the frame-pacing measurement needs; tauri.conf.json sets the same headers on
@@ -13,7 +12,6 @@ const ISOLATION = { "Cross-Origin-Opener-Policy": "same-origin", "Cross-Origin-E
 export default defineConfig({
   base: "./",
   plugins: [solid()],
-  define: { __APP_VERSION__: JSON.stringify(pkg.version) },
   clearScreen: false,
   server: {
     port: 1420,

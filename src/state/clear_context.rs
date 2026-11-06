@@ -127,6 +127,11 @@ pub(super) fn carry_fresh_start(previous: &Value, record: &mut Value) {
     {
         record["permission_override"] = mode.clone();
     }
+    if let Some(label) = previous.get("launch_label") { record["launch_label"] = label.clone(); }
+    // A clear starts another conversation of the same session, written where
+    // that session lives: a session in the ID layout stays there (P3a).
+    if let Some(id) = previous.get("session_id") { record["session_id"] = id.clone(); }
+    if let Some(layout) = previous.get("layout") { record["layout"] = layout.clone(); }
 }
 
 // Earlier conversations of this session's Activity, oldest first. Only
@@ -216,7 +221,8 @@ pub(super) fn observe_terminal(record: &mut Value) -> Result<bool> {
     if cleanup_pending(record) { return Ok(false); }
     // A resume awaiting its deferred SessionStart has no hook-confirmed idle
     // state: its exact process must still own the restored conversation.
-    let resumed = resume_clearable(record);
+    let resumed = resume_clearable(record) || (ended_terminal_resume(record)
+        && record["input_pending_at"].as_f64().unwrap_or(0.0) == 0.0);
     if !string(record,"restore_archive_id").is_empty() && restore_request(record).is_none() {
         return Ok(false);
     }
@@ -264,6 +270,41 @@ fn matching_resume_request(record: &Value) -> bool {
 /// pending resume. A generic end cannot reopen any input or clear path.
 pub(super) fn ending_resume(record: &Value) -> bool {
     resume_clearable(record) && matching_resume_request(record)
+}
+
+/// A main end of a pending ordinary resume is not proof of a clear. Retain
+/// its exact binding only; a reset panel or real clear successor must prove it.
+pub(super) fn ending_terminal_resume(record: &Value) -> bool {
+    resume_clearable(record) && record.get("clear_context_request").is_none()
+        && string(record,"restore_archive_id").is_empty() && !cleanup_pending(record) && !pause_active(record)
+}
+
+pub(super) fn ended_terminal_resume(record: &Value) -> bool {
+    let end = &record["session_end"];
+    let binding = &end["terminal_resume"];
+    resume_input::pending_binding(record)
+        && record.get("clear_context_request").is_none()
+        && string(record,"restore_archive_id").is_empty() && !cleanup_pending(record) && !pause_active(record)
+        && !telemetry::work_remains(record)
+        && binding.is_object() && record["pid"].as_u64().is_some_and(|pid| pid > 0)
+        && !string(record,"process_start").is_empty()
+        && !string(record,"run_id").is_empty() && end["run_id"] == record["run_id"]
+        && end["conversation_id"] == record["conversation_id"]
+        && record["created"].as_f64().is_some_and(|at| at > 0.0)
+        && end["at"].as_f64().is_some_and(|at| at >= record["created"].as_f64().unwrap_or(f64::INFINITY)
+            && at <= binding["event_at"].as_f64().unwrap_or(0.0))
+        && binding["event_at"].as_f64().is_some_and(|at| at > 0.0) && binding["event_at"] == record["last_event_at"]
+        && binding["pid"] == record["pid"] && binding["process_start"] == record["process_start"]
+        && binding["supervisor"] == record["supervisor"] && binding["transcript"] == record["transcript"]
+}
+
+/// Only an actually observed full reset can reopen the pending composer after
+/// this unrequested end. The end marker by itself grants no input authority.
+pub(super) fn observed_terminal_resume(record: &Value) -> bool {
+    let clear = &record["session_clear"];
+    ended_terminal_resume(record) && awaiting_start(record) && clear["source"] == "native_terminal"
+        && clear["at"].as_f64().is_some_and(|at| at > 0.0 && (at >= record["session_end"]["at"].as_f64().unwrap_or(f64::INFINITY)
+            || clear["at"] == record["session_end"]["terminal_resume"]["clear_at"]))
 }
 
 /// SessionEnd can precede Codex's deferred clear SessionStart. Only its exact
@@ -554,6 +595,9 @@ pub(super) fn resumed_start(record: &Value, event: &Value) -> bool {
             && restore_request(record).is_some_and(|request| archive::restore_source(record)
                 .is_ok_and(|archived| archived["run_id"] == request["restore_archive_run_id"]));
     }
+    // An unrequested main end needs the separate native caller/successor-file
+    // proof, even when inspection already observed its reset panel.
+    if ended_terminal_resume(record) { return false; }
     string(event,"source") == "clear"
         && pending
         && (awaiting_start(record) || record["clear_context_request"]["conversation_id"] == record["conversation_id"]
@@ -581,7 +625,7 @@ fn checked_chooser(name: &str, request: &Request) -> Result<Value> {
     if string(&record,"run_id")!=request.expected_run_id || string(&record,"conversation_id")!=request.expected_conversation_id {
         return Err("session identity changed; refresh before clearing".into());
     }
-    if !matches(&record,live()?.get(name)) || !process_alive(&record) {
+    if !matches(&record,panes_of(&live()?,&record)) || !process_alive(&record) {
         return Err("the exact agent process is no longer running; resume it explicitly".into());
     }
     if !dismissable(&record,true) {return Err("Claude is no longer waiting in a chooser; refresh before clearing".into());}
@@ -629,6 +673,9 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let name=&args[0];
     if opencode::exists(name) {return Err("OpenCode context reset is not supported by this adapter".into());}
     if dsh::exists(name) {return Err("This DeepSeek harness does not expose a native context reset. Use its native UI.".into());}
+    // zerus-ucck P3c: the request's identities select among sessions that
+    // share the label, before the first read.
+    expect(name, &request.expected_run_id, &request.expected_conversation_id)?;
     let mut guard=Some(lock(None)?);
     let current=read(name)?;
     // A resume before its deferred SessionStart is verified as for its first message.
@@ -651,7 +698,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if record["pending_settings"].is_object() {return Err("Wait for the pending model settings before clearing context".into());}
     let path=absolute_root()?.join("clear_receipts").join(format!("{uuid}.json"));
     if path.exists() {return Err("This clear was already attempted. Check Terminal before trying again".into());}
-    recovery::cancel_for_input(name)?;
+    recovery::cancel_for_input(&record)?;
     record["clear_context_request"]=json!({"request_id":request.request_id,"run_id":request.expected_run_id,
         "conversation_id":request.expected_conversation_id,"at":now()});
     if resuming && !string(&record,"restore_archive_id").is_empty() {
@@ -712,29 +759,45 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         Ok(())
     })();
     drop(guard); // SessionStart hooks must be able to commit the new identity.
-    result.map_err(|e:String|format!("Clear delivery uncertain: {e}. Check Terminal before retrying"))?;
-    let deadline=Instant::now()+Duration::from_secs(4);
-    let mut status="submitted";
-    loop {
-        let mut current=read(name)?;
-        if current["run_id"]!=record["run_id"] || current["pid"]!=record["pid"] {break;}
-        if !string(&current,"conversation_id").is_empty() && current["conversation_id"]!=record["conversation_id"] {
-            status="confirmed";break;
-        }
-        {
-            let _guard=lock(None)?;
-            current=read(name)?;
-            if current["run_id"]==record["run_id"] && current["pid"]==record["pid"]
-                && (observe_terminal(&mut current).unwrap_or(false) || awaiting_start(&current)) {
-                status="confirmed";break;
+
+    // From the typed command on, every error may follow input (zerus-1wchz).
+    let uncertain =
+        |e: String| format!("Clear delivery uncertain: {e}. Check Terminal before retrying");
+    result.map_err(uncertain)?;
+    let status = (|| -> Result<&str> {
+        let deadline = Instant::now() + Duration::from_secs(4);
+        loop {
+            let mut current = read(name)?;
+            if current["run_id"] != record["run_id"] || current["pid"] != record["pid"] {
+                return Ok("submitted");
             }
+            if !string(&current, "conversation_id").is_empty()
+                && current["conversation_id"] != record["conversation_id"]
+            {
+                return Ok("confirmed");
+            }
+            {
+                let _guard = lock(None)?;
+                current = read(name)?;
+                if current["run_id"] == record["run_id"]
+                    && current["pid"] == record["pid"]
+                    && (observe_terminal(&mut current).unwrap_or(false) || awaiting_start(&current))
+                {
+                    return Ok("confirmed");
+                }
+            }
+            if Instant::now() >= deadline {
+                return Ok("submitted");
+            }
+            std::thread::sleep(Duration::from_millis(80));
         }
-        if Instant::now()>=deadline {break;}
-        std::thread::sleep(Duration::from_millis(80));
-    }
+    })()
+    .map_err(uncertain)?;
     let receipt=json!({"request_id":request.request_id,"name":name,"run_id":request.expected_run_id,
         "conversation_id":request.expected_conversation_id,"status":status});
-    atomic(&path,&receipt.to_string())?;println!("{receipt}");Ok(0)
+    atomic(&path, &receipt.to_string()).map_err(uncertain)?;
+    println!("{receipt}");
+    Ok(0)
 }
 #[cfg(test)] mod tests {
     use super::*;
@@ -1021,24 +1084,77 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             assert!(!resume_input::pending(&changed),"request {key}");
         }
     }
+    #[test] fn an_unrequested_resume_end_grants_input_only_after_a_bound_reset() {
+        let mut record=json!({"agent":"codex","run_identity_version":1,"startup_kind":"resume","supervisor":{"pid":43,"start":"parent"},
+            "run_id":"run","conversation_id":"old","expected_id":"old","pid":42,"process_start":"native","created":1.0,
+            "transcript":"/fixture/old","activity":"unknown","phase":"unknown","last_event_at":0});
+        assert!(ending_terminal_resume(&record));
+        record["session_end"]=json!({"run_id":"run","conversation_id":"old","at":2.0,"terminal_resume":{
+            "event_at":2.1,"pid":42,"process_start":"native","supervisor":record["supervisor"],"transcript":"/fixture/old","clear_at":null}});
+        record["last_event_at"]=json!(2.1);
+        assert!(ended_terminal_resume(&record));
+        assert!(!resume_input::pending(&record),"an end alone cannot reopen the composer");
+        let ended=record.clone();
+        record["session_clear"]=json!({"at":3.0,"source":"native_terminal","run_id":"run","conversation_id":"old","awaiting_session_start":true});
+        assert!(observed_terminal_resume(&record));
+        assert!(resume_input::pending(&record));
+        assert!(!resumed_start(&record,&json!({"source":"clear"})),"the real successor still needs its native file proof");
+        let observed=record.clone();
+        for (key,value) in [("run_id",json!("other")),("pid",json!(44)),("process_start",json!("other")),
+            ("supervisor",json!({"pid":43,"start":"other"})),("transcript",json!("/fixture/copy")),
+            ("last_event_at",json!(2.2)),("error",json!("failed")),("restore_archive_id",json!("archive")),
+            ("restore_archive_cleanup",json!({})),("clear_context_request",Value::Null),
+            ("active_tools",json!({"tool":{"name":"Bash","started":1}})),("created",json!(4.0))] {
+            let mut wrong=observed.clone();wrong[key]=value;
+            assert!(!ended_terminal_resume(&wrong),"{key}");
+            assert!(!resume_input::pending(&wrong),"{key}");
+        }
+        for key in ["run_id","conversation_id","at","terminal_resume"] {
+            let mut wrong=observed.clone();wrong["session_end"].as_object_mut().unwrap().remove(key);
+            assert!(!ended_terminal_resume(&wrong),"{key}");
+        }
+        for (key,value) in [("at",json!(-1.0)),("at",json!(1.5)),("source",json!("other")),
+            ("run_id",json!("other")),("conversation_id",json!("other")),("awaiting_session_start",json!(false))] {
+            let mut wrong=observed.clone();wrong["session_clear"][key]=value;
+            assert!(!resume_input::pending(&wrong),"{key}");
+        }
+        // A reset observed before the real end survives only its hook-time anchor.
+        record["session_clear"]["at"]=json!(1.5);
+        record["session_end"]["terminal_resume"]["clear_at"]=json!(1.5);
+        assert!(observed_terminal_resume(&record));
+        record["session_clear"]["at"]=json!(1.4);assert!(!observed_terminal_resume(&record));
+        let mut requested=ended;requested["clear_context_request"]=json!({});
+        assert!(!ending_terminal_resume(&requested));assert!(!ended_terminal_resume(&requested));
+    }
+
     #[test] fn reset_panel_accepts_only_the_fixed_native_usage_notices() {
         let warning="⚠ Heads up, you have less than 10% of your weekly limit left. Run /status for a breakdown.";
         let footer="⚠ weekly limit: 10% left · resets at 11:22 PM on 7 Nov · /status";
-        let screen=format!(">_ OpenAI Codex (v0.166.0)\n/fixture\npermissions: default\n\n{warning}\n\n{footer}\n\n› Ask Codex to do anything\n\nGPT-6.1-Sol default · /fixture\n? for shortcuts");
-        assert!(codex_reset_panel(&screen,"/fixture"));
-        for changed in [screen.replace(warning,"⚠ An unknown warning"),screen.replace("10% left","101% left"),
-            screen.replace("11:22 PM","13:22 PM"),screen.replace("Run /status for a breakdown.","Approve this command."),
-            screen.replace("› Ask Codex to do anything","› my draft"),format!("Previous conversation\n{screen}")] {
-            assert!(!codex_reset_panel(&changed,"/fixture"),"{changed}");
+        // `/fixture` is rooted but not absolute on Windows. Use a drive-qualified
+        // directory there; exercise that spelling on Unix too, with both EOLs.
+        let folders: &[&str] = if cfg!(windows) { &[r"C:\fixture"] } else { &["/fixture",r"C:\fixture"] };
+        for cwd in folders {
+            for eol in ["\n","\r\n"] {
+                let screen=format!(">_ OpenAI Codex (v0.166.0)\n{cwd}\npermissions: default\n\n{warning}\n\n{footer}\n\n› Ask Codex to do anything\n\nGPT-6.1-Sol default · {cwd}\n? for shortcuts").replace('\n',eol);
+                assert!(codex_reset_panel(&screen,cwd),"{screen}");
+                for changed in [screen.replace(warning,"⚠ An unknown warning"),screen.replace("10% left","101% left"),
+                    screen.replace("11:22 PM","13:22 PM"),screen.replace("Run /status for a breakdown.","Approve this command."),
+                    screen.replace("› Ask Codex to do anything","› my draft"),format!("Previous conversation{eol}{screen}")] {
+                    assert!(!codex_reset_panel(&changed,cwd),"{changed}");
+                }
+                assert!(!codex_reset_panel(&screen,"fixture"),"relative working directory");
+            }
         }
     }
     #[test] fn fresh_starts_continue_the_activity_timeline_like_a_clear() {
-        let previous=json!({"run_id":"old-run","conversation_id":"second","cleared_conversations":["first"],"journal_name":"anchor","permission_override":"native:{\"mode\":\"acceptEdits\"}"});
+        let previous=json!({"run_id":"old-run","conversation_id":"second","cleared_conversations":["first"],"journal_name":"anchor","permission_override":"native:{\"mode\":\"acceptEdits\"}",
+            "launch_label":"codex/p/launched"});
         let mut record=json!({"run_id":"run","conversation_id":null});
         carry_fresh_start(&previous,&mut record);
         assert_eq!(earlier_conversations(&record),json!(["first","second"]));
         assert_eq!(record["journal_name"],"anchor");
         assert_eq!(record["permission_override"],"native:{\"mode\":\"acceptEdits\"}");
+        assert_eq!(record["launch_label"],"codex/p/launched");
         observe_start(&mut record,&json!({"session_id":"third","source":"startup"}));
         record["conversation_id"]=json!("third");
         assert!(record["fresh_from"].is_null());

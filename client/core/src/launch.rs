@@ -1292,6 +1292,10 @@ pub struct Choices {
     pub repository: Option<RepositoryChoice>,
     /// The failed creation this one replaces.
     pub predecessor: String,
+    /// Task 102: the person chose Auto or the folder itself in this dialog
+    /// (Qt's `m_worktreeChosen`); only then is the choice remembered.
+    #[serde(default)]
+    pub worktree_chosen: bool,
 }
 
 /// Background creation's plan, Qt's `creationRequested` object.
@@ -1334,6 +1338,10 @@ pub struct Plan {
     pub acquisition_confirmed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub predecessor: Option<String>,
+    /// Task 102: "auto" or "none" when the person chose it (Qt's
+    /// `worktree_choice`, NewSessionDialog.cpp:849); the next dialog's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_choice: Option<String>,
 }
 
 /// The plan for the form's choices (`start` with background creation): a
@@ -1374,6 +1382,14 @@ pub fn plan(choices: &Choices) -> Plan {
         repository: repository.is_some(),
         destination: (repository.is_none() && auto).then(|| choices.automatic_path.clone()),
         predecessor: (!choices.predecessor.is_empty()).then(|| choices.predecessor.clone()),
+        worktree_choice: choices.worktree_chosen.then(|| {
+            if choices.auto_preferred {
+                "auto"
+            } else {
+                "none"
+            }
+            .to_owned()
+        }),
         ..Plan::default()
     };
     if let Some(repository) = repository {

@@ -1,5 +1,6 @@
 import type { TeamPipelineRun, TeamProfileView, TeamTestsView } from "../../types";
 import type { PlacedNode } from "./plan";
+import { taskHeat } from "./heat";
 
 /** The plan's five modes, as Qt's TeamWorkspace toolbar names them. */
 export type PlanMode = "graph" | "board" | "layers" | "profile" | "tests";
@@ -77,14 +78,12 @@ export function stageChips(run: TeamPipelineRun | null | undefined): { kind: str
     }));
 }
 
-/** A task's share of the profile's largest recorded loss, 0..1; null when
- * the profile has no loss for it (the card stays untinted). */
+/** Task 82: a task's tint, 0..1, by its own lateness against the plan (2 h
+ * tints fully); null when it is not late by its own (inherited lateness, on
+ * schedule, or no baseline): the card stays untinted. */
 export function heatShare(profile: TeamProfileView | null | undefined, task: number): number | null {
-  if (!profile || profile.losses.length === 0) return null;
-  const top = Math.max(0, ...profile.losses.map((loss) => loss.seconds));
-  const found = profile.losses.filter((loss) => loss.task === task).reduce((sum, loss) => sum + loss.seconds, 0);
-  if (top <= 0 || found <= 0) return null;
-  return Math.min(1, found / top);
+  const heat = taskHeat(profile, task);
+  return heat && heat.tint > 0 ? heat.tint : null;
 }
 
 /** The loss text for a tile, or empty when unknown. */
@@ -141,4 +140,17 @@ export function runTime(ms: number): string {
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${(seconds % 60).toString().padStart(2, "0")}s`;
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60).toString().padStart(2, "0")}m`;
+}
+
+/** Task 103: what a team's Lateness switch starts with: this browser's own
+ * stored choice first, else Qt's imported heat mode (`teams/heatModes`, a
+ * bounded team -> "time" | "tokens" map from the settings store). */
+export function heatSeed(team: string, stored: string | null, modes: string): boolean {
+  if (stored !== null) return stored === "1";
+  try {
+    const map = JSON.parse(modes) as Record<string, unknown>;
+    return map[team] === "time" || map[team] === "tokens";
+  } catch {
+    return false;
+  }
 }

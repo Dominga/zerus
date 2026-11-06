@@ -18,12 +18,13 @@ export type MenuEntry =
   | { separator: true }
   | { heading: string };
 
-export type Page = "dashboard" | "sessions" | "projects" | "machines" | "accounts" | "settings" | "waiting" | "newteam" | "catalog" | "designer";
+export type Page = "dashboard" | "sessions" | "projects" | "machines" | "accounts" | "settings" | "waiting" | "newteam" | "catalog" | "designer" | "modelservers";
 export type StateFilter = "all" | "attention" | "active" | "paused" | "archived";
 /** The Zerus mark's motion; the owner chose the two-turn spin-up (2026-10-27). */
 export type LogoMotion = "spin";
 
-const params = new URLSearchParams(location.search);
+// A unit test in the node environment has no location: no query then.
+const params = new URLSearchParams(typeof location === "undefined" ? "" : location.search);
 
 const PAGES: Page[] = ["dashboard", "sessions", "projects", "machines", "accounts", "settings", "waiting"];
 // `?page=settings` opens a screen (headless screenshots), as in the mockup.

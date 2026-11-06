@@ -95,7 +95,7 @@ fn linux_and_windows_switches_seed_once_and_keep_the_clients_choices() {
         )
         .unwrap();
         fs::create_dir_all(qt.path().parent().unwrap()).unwrap();
-        let source = b"[workspace]\ntheme=dark\nlanguage=ru\n[automaticApprovals]\nenabled=true\n";
+        let source = b"[workspace]\ntheme=dark\nlanguage=ru\nskin=whitewh\ninspectorWidth=512\ninspectorOpen=true\ninspectorTab=details\n[automaticApprovals]\nenabled=true\n";
         fs::write(qt.path(), source).unwrap();
         let before = fs::metadata(qt.path()).unwrap().modified().unwrap();
         let path = base.join("com.hgdev.hgs-tray/settings.json");
@@ -107,6 +107,10 @@ fn linux_and_windows_switches_seed_once_and_keep_the_clients_choices() {
         let migrated = Settings::open(path.clone(), Some(qt.clone()));
         assert_eq!(migrated.get("workspace/theme"), "light");
         assert_eq!(migrated.get("workspace/language"), "ru");
+        assert_eq!(migrated.get("workspace/skin"), "whitewh");
+        assert_eq!(migrated.get("workspace/inspectorWidth"), 512);
+        assert_eq!(migrated.get("workspace/inspectorOpen"), true);
+        assert_eq!(migrated.get("workspace/inspectorTab"), "details");
         assert_eq!(migrated.get(QT_AUTOMATIC_APPROVALS), true);
         assert!(!migrated.flag("automaticApprovals/enabled"));
         assert_eq!(migrated.get("automaticApprovals/error"), "");
@@ -786,6 +790,85 @@ fn first_g3_families_import_once_after_the_switch_and_existing_next_values_win()
 }
 
 #[test]
+fn the_teams_view_preferences_import_once_and_existing_next_values_win() {
+    let scratch = Scratch::new("g3-teams-view");
+    let qt = scratch.0.join("qt.conf");
+    let bytes = b"[teams]\nhideFinished=true\nheat\\team-one=time\nheat\\team-two=tokens\nplanMode\\team-one=free\n[ui]\ncatalogHideUnusedRoles=true\n";
+    fs::write(&qt, bytes).unwrap();
+    let path = scratch.0.join("settings.json");
+    // The switch happened before this family existed: the old seed never
+    // repeats, so only the family can import these keys now.
+    legacy_switch(&path, json!({"teams/hideFinished": false}));
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert!(
+        !settings.flag("teams/hideFinished"),
+        "an existing Next value wins"
+    );
+    assert!(settings.flag("ui/catalogHideUnusedRoles"));
+    assert_eq!(
+        settings.text("teams/heatModes"),
+        r#"{"team-one":"time","team-two":"tokens"}"#
+    );
+    assert_eq!(settings.text("teams/planModes"), r#"{"team-one":"free"}"#);
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    // Qt's store is only read.
+    assert_eq!(fs::read(&qt).unwrap(), bytes);
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let record = &saved["g3"]["families"]["teams-view-preferences"];
+    assert_eq!(record["family"], "teams-view-preferences");
+    assert_eq!(
+        record["keys"],
+        json!([
+            "teams/heat/team-one",
+            "teams/heat/team-two",
+            "teams/hideFinished",
+            "teams/planMode/team-one",
+            "ui/catalogHideUnusedRoles"
+        ])
+    );
+    // A handled family imports nothing more, even from a changed source.
+    fs::write(&qt, b"[teams]\nhideFinished=false\nheat\\team-one=tokens\n").unwrap();
+    let again = Settings::open(path.clone(), Some(QtStore::Ini(qt)));
+    assert!(again.flag("ui/catalogHideUnusedRoles"));
+    assert_eq!(
+        again.text("teams/heatModes"),
+        r#"{"team-one":"time","team-two":"tokens"}"#
+    );
+    assert_eq!(again.text("teams/planModes"), r#"{"team-one":"free"}"#);
+    assert!(again.flush_within(FLUSH));
+}
+
+#[test]
+fn a_bad_teams_view_family_is_quarantined_without_partial_values() {
+    let scratch = Scratch::new("g3-teams-view-bad");
+    let qt = scratch.0.join("qt.conf");
+    let bytes =
+        b"[teams]\nhideFinished=true\nheat\\team-one=purple\n[ui]\ncatalogHideUnusedRoles=true\n";
+    fs::write(&qt, bytes).unwrap();
+    let path = scratch.0.join("settings.json");
+    legacy_switch(&path, json!({}));
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert!(
+        !settings.flag("teams/hideFinished"),
+        "no partial family is imported"
+    );
+    assert!(!settings.flag("ui/catalogHideUnusedRoles"));
+    assert_eq!(settings.text("teams/heatModes"), "{}");
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(saved["g3"]["families"]
+        .get("teams-view-preferences")
+        .is_none());
+    assert_eq!(
+        saved["g3"]["quarantine"]["teams-view-preferences"]["preserved_in"],
+        "source"
+    );
+    assert!(!saved.to_string().contains("purple"));
+}
+
+#[test]
 fn a_failed_family_is_quarantined_as_metadata_and_retries_without_partial_values() {
     let scratch = Scratch::new("g3-retry");
     let qt = scratch.0.join("qt.conf");
@@ -1048,15 +1131,17 @@ fn task_preferences_cover_existing_switches_but_never_reseed_an_old_handled_key(
 fn inspector_preferences_are_device_local_and_explicit_false_wins() {
     use zerus_client_core::settings::{default_value, effective, find};
     let open = find("workspace/inspectorOpen").unwrap();
-    assert!(!open.seeded);
+    assert!(open.seeded);
     assert_eq!(default_value(open.kind), json!("auto"));
     assert_eq!(effective(open.kind, Some(&json!(false))), json!(false));
     assert_eq!(effective(open.kind, Some(&json!(true))), json!(true));
     assert_eq!(effective(open.kind, Some(&json!("bad"))), json!("auto"));
     let width = find("workspace/inspectorWidth").unwrap();
-    assert!(!width.seeded);
+    assert!(width.seeded);
     assert_eq!(effective(width.kind, Some(&json!(100))), json!(240));
     assert_eq!(effective(width.kind, Some(&json!(2000))), json!(900));
+    assert!(find("workspace/inspectorTab").unwrap().seeded);
+    assert!(find("workspace/inspectorClosed").unwrap().seeded);
 }
 
 #[test]
@@ -1261,4 +1346,457 @@ fn malformed_splitter_is_unhandled_and_retry_is_family_atomic() {
     let settings = Settings::open(path, Some(QtStore::Ini(qt)));
     assert_eq!(settings.number("workspace/projectFolderSplit"), 320.0);
     assert!(settings.flush_within(FLUSH));
+}
+
+/// Task 102: the fork's mobile services, New session's folder mode and the
+/// microphone come over once on a client that switched before them, from a
+/// fixture INI as the fork's Qt writes it. Next's own values win, a Qt
+/// device id is never stored (an id this computer does not know gives no
+/// name either), a malformed port keeps its whole family out, and the INI
+/// is never written.
+#[test]
+fn task_102_families_import_once_and_the_ini_is_never_written() {
+    use zerus_client_core::settings::{MICROPHONE_HINT, NEW_SESSION_FOLDER_MODE};
+    let scratch = Scratch::new("t102-families");
+    let qt = scratch.0.join("hgs-tray.ini");
+    let bytes: &[u8] = b"[mobile]\r\nlocalRelay=true\r\nlocalRelayPort=9443\r\nrunConnector=false\r\n\r\n[speech]\r\nmicrophone=\"{0.0.1.00000000}.{00000000-0000-0000-0000-000000000000}\"\r\n\r\n[workspace]\r\nlaunchWorktree=none\r\n";
+    fs::write(&qt, bytes).unwrap();
+    let modified = fs::metadata(&qt).unwrap().modified().unwrap();
+    let path = scratch.0.join("settings.json");
+    legacy_switch(&path, json!({"workspace/theme":"light"}));
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert!(settings.flag("mobile/localRelay"));
+    assert_eq!(settings.number("mobile/localRelayPort"), 9443.0);
+    assert!(!settings.flag("mobile/runConnector"));
+    assert_eq!(settings.text(NEW_SESSION_FOLDER_MODE), "none");
+    assert_eq!(
+        settings.text("speech/microphone"),
+        "",
+        "a Qt device id is never stored"
+    );
+    assert!(
+        !settings.contains(MICROPHONE_HINT),
+        "an unknown endpoint gives no name"
+    );
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    assert_eq!(fs::read(&qt).unwrap(), bytes);
+    assert_eq!(fs::metadata(&qt).unwrap().modified().unwrap(), modified);
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for family in [
+        "mobile-local-services",
+        "new-session-folder-mode",
+        "voice-device-hint",
+    ] {
+        assert_eq!(saved["g3"]["families"][family]["family"], family);
+    }
+    // Handled: Qt's later change does not come over again.
+    fs::write(&qt, b"[workspace]\r\nlaunchWorktree=auto\r\n").unwrap();
+    let again = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert_eq!(again.text(NEW_SESSION_FOLDER_MODE), "none");
+    drop(again);
+    // Next's own choices win; anything but "none" is Auto; a bad port keeps
+    // the mobile family out (quarantined, its source untouched).
+    let path = scratch.0.join("settings-own.json");
+    legacy_switch(
+        &path,
+        json!({"mobile/runConnector": true, "newSession/folderMode": "none"}),
+    );
+    let qt = scratch.0.join("hgs-tray-other.ini");
+    let bytes: &[u8] = b"[mobile]\r\nlocalRelay=true\r\nlocalRelayPort=99999\r\n\r\n[workspace]\r\nlaunchWorktree=auto\r\n";
+    fs::write(&qt, bytes).unwrap();
+    let own = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert_eq!(own.text(NEW_SESSION_FOLDER_MODE), "none");
+    assert!(!own.flag("mobile/localRelay"));
+    assert_eq!(own.number("mobile/localRelayPort"), 8787.0);
+    assert!(own.flush_within(FLUSH));
+    drop(own);
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        saved["g3"]["quarantine"]["mobile-local-services"]["reason"],
+        "invalid relay port"
+    );
+    assert_eq!(fs::read(&qt).unwrap(), bytes);
+    let path = scratch.0.join("settings-auto.json");
+    legacy_switch(&path, json!({}));
+    let auto = Settings::open(path, Some(QtStore::Ini(qt)));
+    assert_eq!(auto.text(NEW_SESSION_FOLDER_MODE), "auto");
+}
+
+/// zerus-5wmh.66.5.3: Qt's side panel (shown, width, tab) imports once into
+/// Next's inspector keys; Next's own choices win and Qt is never written.
+#[test]
+fn inspector_panel_family_imports_once_and_next_choices_win() {
+    let scratch = Scratch::new("inspector-panel");
+    let qt = scratch.0.join("qt.ini");
+    let original =
+        b"[workspace]\ninspectorVisible=true\ninspectorWidth=600\ninspectorTab=2\n".to_vec();
+    fs::write(&qt, &original).unwrap();
+    let path = scratch.0.join("settings.json");
+    legacy_switch(&path, json!({}));
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert_eq!(settings.get("workspace/inspectorOpen"), json!(true));
+    assert_eq!(settings.number("workspace/inspectorWidth"), 600.0);
+    assert_eq!(settings.text("workspace/inspectorTab"), "worktrees");
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let family = &saved["g3"]["families"]["inspector-panel"];
+    assert_eq!(
+        family["keys"],
+        json!([
+            "workspace/inspectorTab",
+            "workspace/inspectorVisible",
+            "workspace/inspectorWidth"
+        ])
+    );
+    assert_eq!(family["sha256"], zerus_desktop_migration::sha256(&original));
+    assert_eq!(fs::read(&qt).unwrap(), original);
+    // Handled once: a later Qt change is never imported again.
+    fs::write(
+        &qt,
+        b"[workspace]\ninspectorVisible=false\ninspectorTab=0\n",
+    )
+    .unwrap();
+    let restarted = Settings::open(path, Some(QtStore::Ini(qt.clone())));
+    assert_eq!(restarted.get("workspace/inspectorOpen"), json!(true));
+    assert_eq!(restarted.text("workspace/inspectorTab"), "worktrees");
+    assert!(restarted.flush_within(FLUSH));
+    drop(restarted);
+    // Next's own choices win, a hidden panel included; Qt bounds its tab
+    // index and Next its width.
+    fs::write(
+        &qt,
+        b"[workspace]\ninspectorVisible=true\ninspectorWidth=5000\ninspectorTab=9\n",
+    )
+    .unwrap();
+    let own = scratch.0.join("own.json");
+    legacy_switch(&own, json!({"workspace/inspectorOpen": false}));
+    let kept = Settings::open(own, Some(QtStore::Ini(qt.clone())));
+    assert_eq!(kept.get("workspace/inspectorOpen"), json!(false));
+    assert_eq!(kept.number("workspace/inspectorWidth"), 900.0);
+    assert_eq!(kept.text("workspace/inspectorTab"), "tasks");
+    assert!(kept.flush_within(FLUSH));
+}
+
+/// #1239 review: Qt reads the tab with a 32-bit toInt(); a value outside it
+/// waits (the whole family) instead of importing a tab Qt never showed.
+#[test]
+fn an_inspector_tab_outside_qts_32_bit_domain_waits() {
+    let scratch = Scratch::new("inspector-tab-domain");
+    let qt = scratch.0.join("qt.ini");
+    let path = scratch.0.join("settings.json");
+    fs::write(
+        &qt,
+        b"[workspace]\ninspectorVisible=true\ninspectorTab=2147483648\n",
+    )
+    .unwrap();
+    legacy_switch(&path, json!({}));
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert!(!settings.contains("workspace/inspectorTab"));
+    assert!(!settings.contains("workspace/inspectorOpen"));
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        saved["g3"]["quarantine"]["inspector-panel"]["reason"],
+        "invalid inspector tab"
+    );
+    // The largest 32-bit index is one Qt bounds to its last tab.
+    fs::write(&qt, b"[workspace]\ninspectorTab=2147483647\n").unwrap();
+    let settings = Settings::open(path, Some(QtStore::Ini(qt)));
+    assert_eq!(settings.text("workspace/inspectorTab"), "tasks");
+    assert!(settings.flush_within(FLUSH));
+}
+
+#[test]
+fn a_malformed_inspector_value_leaves_the_whole_family_for_a_retry() {
+    let scratch = Scratch::new("inspector-retry");
+    let qt = scratch.0.join("qt.ini");
+    let path = scratch.0.join("settings.json");
+    fs::write(
+        &qt,
+        b"[workspace]\ninspectorVisible=true\ninspectorWidth=wide\n",
+    )
+    .unwrap();
+    legacy_switch(&path, json!({}));
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert!(!settings.contains("workspace/inspectorOpen"));
+    assert!(!settings.contains("workspace/inspectorWidth"));
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(saved["g3"]["families"].get("inspector-panel").is_none());
+    assert_eq!(
+        saved["g3"]["quarantine"]["inspector-panel"]["reason"],
+        "invalid inspector width"
+    );
+    fs::write(
+        &qt,
+        b"[workspace]\ninspectorVisible=true\ninspectorWidth=520\n",
+    )
+    .unwrap();
+    let settings = Settings::open(path, Some(QtStore::Ini(qt)));
+    assert_eq!(settings.get("workspace/inspectorOpen"), json!(true));
+    assert_eq!(settings.number("workspace/inspectorWidth"), 520.0);
+    assert!(settings.flush_within(FLUSH));
+}
+
+/// zerus-5wmh.66.5.3: the Migration report's Qt preferences section lists
+/// key names only: what imported, what kept a Next value, what waits to
+/// retry and why, and the Qt keys Next has no use for. Never a value.
+#[test]
+fn the_preference_report_names_keys_and_never_values() {
+    let scratch = Scratch::new("preference-report");
+    let qt = scratch.0.join("qt.ini");
+    fs::write(
+        &qt,
+        b"[workspace]\ninspectorVisible=true\ninspectorWidth=613\ninspectorTab=2\nsplitter=@ByteArray(bad)\n\
+          expandedSessions=secret-row\nworktreeCleanupDeleteBranches=true\n",
+    )
+    .unwrap();
+    let path = scratch.0.join("settings.json");
+    legacy_switch(&path, json!({"workspace/inspectorOpen": false}));
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert!(settings.flush_within(FLUSH));
+    let report = settings.preference_report();
+    let family = |name: &str| {
+        report["families"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["family"] == name)
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    let inspector = family("inspector-panel");
+    assert_eq!(inspector["state"], "imported");
+    assert_eq!(
+        inspector["imported"],
+        json!(["workspace/inspectorTab", "workspace/inspectorWidth"])
+    );
+    assert_eq!(inspector["kept"], json!(["workspace/inspectorVisible"]));
+    let splitter = family("session-splitter");
+    assert_eq!(splitter["state"], "waiting");
+    assert_eq!(splitter["reason"], "invalid Qt splitter");
+    assert_eq!(splitter["keys"], json!(["workspace/splitter"]));
+    assert_eq!(
+        report["unused"],
+        json!([
+            "workspace/expandedSessions",
+            "workspace/worktreeCleanupDeleteBranches"
+        ])
+    );
+    let text = report.to_string();
+    for value in ["613", "secret-row", "bad"] {
+        assert!(!text.contains(value), "{value} in {text}");
+    }
+    drop(settings);
+    // The report-only family is never a family row (no "no-consumer" label).
+    assert!(report["families"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|f| f["family"] != "no-consumer"));
+    // A family that waits records no outcome; it is reported from its quarantine.
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(saved["g3_outcome"].get("session-splitter").is_none());
+    assert!(saved["g3_outcome"].get("no-consumer").is_none());
+    // The same after a restart, from the saved journal.
+    let restarted = Settings::open(path, Some(QtStore::Ini(qt)));
+    assert_eq!(
+        restarted.preference_report()["families"],
+        report["families"]
+    );
+    assert!(restarted.flush_within(FLUSH));
+}
+
+/// #1243 review Q4: an install whose earlier families were all handled
+/// before the report existed still gains the "Not imported" keys, once,
+/// through the report-only no-consumer family.
+#[test]
+fn unused_qt_keys_are_reported_after_every_other_family_was_handled() {
+    let scratch = Scratch::new("preference-report-upgrade");
+    let qt = scratch.0.join("qt.ini");
+    fs::write(
+        &qt,
+        b"[workspace]\nexpandedSessions=row\nsessionsCollapsed=true\n",
+    )
+    .unwrap();
+    let path = scratch.0.join("settings.json");
+    legacy_switch(&path, json!({}));
+    let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    // As saved by a build without the report: every other family handled.
+    let mut saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    saved["g3"]["families"]
+        .as_object_mut()
+        .unwrap()
+        .remove("no-consumer");
+    fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let upgraded = Settings::open(path, Some(QtStore::Ini(qt)));
+    assert!(upgraded.flush_within(FLUSH));
+    assert_eq!(
+        upgraded.preference_report()["unused"],
+        json!(["workspace/expandedSessions", "workspace/sessionsCollapsed"])
+    );
+}
+
+/// zerus-5wmh.66.5.3.12: Qt's explicit sessions dock width imports once and
+/// wins over the legacy splitter, without replacing a width chosen in Next.
+#[test]
+fn the_explicit_sessions_dock_width_wins_over_the_legacy_splitter() {
+    let scratch = Scratch::new("sessions-width");
+    let qt = scratch.0.join("qt.ini");
+    let layout = String::from_utf8(qt_layout_ini()).unwrap();
+    let with_width = |width: &str| {
+        layout
+            .replace(
+                "[workspace]\n",
+                &format!("[workspace]\nsessionsWidth={width}\n"),
+            )
+            .into_bytes()
+    };
+    let width_of = |values: Value, families: Value, outcome: Value, bytes: &[u8]| {
+        fs::write(&qt, bytes).unwrap();
+        let path = scratch.0.join("settings.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "version": 1, "seed": {"source":"qt-ini", "at":1, "keys":["workspace/theme"]},
+                "values": values, "g3": {"version":1, "families": families, "quarantine": {}},
+                "g3_outcome": outcome,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let settings = Settings::open(path.clone(), Some(QtStore::Ini(qt.clone())));
+        assert!(settings.flush_within(FLUSH));
+        let width = settings.number("workspace/sessionsWidth");
+        let report = settings.preference_report();
+        drop(settings);
+        let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        fs::remove_file(&path).unwrap();
+        (width, report, saved)
+    };
+    let splitter = |bytes: &[u8]| {
+        json!({"session-splitter": {"version":1, "family":"session-splitter", "schema":1, "source":"qt-ini",
+            "source_path": qt.to_string_lossy(), "at":1, "keys":["workspace/splitter"],
+            "sha256": zerus_desktop_migration::sha256(bytes), "source_mtime_after_switch": null}})
+    };
+    let family = |report: &Value, name: &str| {
+        report["families"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["family"] == name)
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    let bytes = with_width("540");
+    // A new install: the dock width imports. The splitter neither imported
+    // nor kept a choice, since the width came from Qt in the same pass.
+    let (width, report, _) = width_of(json!({}), json!({}), json!({}), &bytes);
+    assert_eq!(width, 540.0);
+    assert_eq!(
+        family(&report, "sessions-width")["imported"],
+        json!(["workspace/sessionsWidth"])
+    );
+    let legacy = family(&report, "session-splitter");
+    assert_eq!(
+        (&legacy["imported"], &legacy["kept"]),
+        (&json!([]), &json!([]))
+    );
+    // A malformed splitter beside an imported dock width is neither kept nor waiting.
+    let malformed = String::from_utf8(bytes.clone())
+        .unwrap()
+        .lines()
+        .map(|line| {
+            if line.starts_with("splitter=") {
+                "splitter=@ByteArray(bad)".to_owned()
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let (width, report, saved) = width_of(json!({}), json!({}), json!({}), malformed.as_bytes());
+    assert_eq!(width, 540.0);
+    let legacy = family(&report, "session-splitter");
+    assert_eq!(
+        (&legacy["imported"], &legacy["kept"]),
+        (&json!([]), &json!([]))
+    );
+    assert!(saved["g3"]["quarantine"].get("session-splitter").is_none());
+    // The splitter import wrote the width from these same bytes: replaced,
+    // and its import no longer holds the width. A record from before
+    // outcomes has value equality as its only evidence.
+    for outcome in [
+        json!({"session-splitter": {"imported":["workspace/splitter"], "kept":[]}}),
+        json!({}),
+    ] {
+        let (width, report, saved) = width_of(
+            json!({"workspace/sessionsWidth": 380}),
+            splitter(&bytes),
+            outcome.clone(),
+            &bytes,
+        );
+        assert_eq!(width, 540.0, "{outcome}");
+        assert_eq!(
+            family(&report, "sessions-width")["imported"],
+            json!(["workspace/sessionsWidth"])
+        );
+        // No superseded "Imported earlier" splitter row, with or without an
+        // earlier outcome (probe PE).
+        let legacy = family(&report, "session-splitter");
+        assert_eq!(
+            (&legacy["imported"], &legacy["kept"]),
+            (&json!([]), &json!([])),
+            "{outcome}"
+        );
+        assert_eq!(
+            saved["g3_outcome"]["session-splitter"],
+            json!({"imported": [], "kept": []})
+        );
+    }
+    // The splitter recorded the person's own width (kept): never replaced,
+    // even when it equals the splitter's value (probe PB).
+    let (width, _, _) = width_of(
+        json!({"workspace/sessionsWidth": 380}),
+        splitter(&bytes),
+        json!({"session-splitter": {"imported":[], "kept":["workspace/splitter"]}}),
+        &bytes,
+    );
+    assert_eq!(width, 380.0);
+    // A width chosen in Next, or Qt bytes changed since that import: kept.
+    let (width, report, _) = width_of(
+        json!({"workspace/sessionsWidth": 600}),
+        splitter(&bytes),
+        json!({}),
+        &bytes,
+    );
+    assert_eq!(width, 600.0);
+    assert_eq!(
+        family(&report, "sessions-width")["kept"],
+        json!(["workspace/sessionsWidth"])
+    );
+    let (width, _, _) = width_of(
+        json!({"workspace/sessionsWidth": 380}),
+        splitter(b"[workspace]\n"),
+        json!({}),
+        &bytes,
+    );
+    assert_eq!(width, 380.0);
+    // Qt's 0 is its default: nothing imports and the splitter applies.
+    let (width, _, saved) = width_of(json!({}), json!({}), json!({}), &with_width("0"));
+    assert_eq!(width, 380.0);
+    assert!(saved["g3"]["families"].get("sessions-width").is_some());
+    // Outside Qt's 32-bit toInt(): the family waits.
+    let (_, _, saved) = width_of(json!({}), json!({}), json!({}), &with_width("2147483648"));
+    assert_eq!(
+        saved["g3"]["quarantine"]["sessions-width"]["reason"],
+        "invalid sessions width"
+    );
 }

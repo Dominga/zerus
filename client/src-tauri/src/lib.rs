@@ -17,6 +17,8 @@ mod approvals;
 mod child_environment;
 mod cli;
 mod clipboard;
+#[cfg(feature = "live")]
+mod claude_app;
 mod commands;
 #[cfg(feature = "live")]
 mod composer;
@@ -56,12 +58,20 @@ mod instance;
 #[cfg(windows)]
 #[path = "instance_windows.rs"]
 mod instance;
-mod lifecycle;
+#[doc(hidden)]
+pub mod lifecycle;
 #[cfg(feature = "live")]
 mod login_item;
 #[cfg(target_os = "macos")]
 mod macos_notification_diagnostics;
 mod metrics;
+mod sandbox;
+
+/// Task 75: why this process is a sandbox, None on a normal desktop.
+#[tauri::command]
+fn sandbox_check() -> Option<String> {
+    sandbox::reason()
+}
 #[cfg(feature = "live")]
 mod mobile;
 #[cfg(feature = "live")]
@@ -89,6 +99,7 @@ pub mod renderer;
 mod replay;
 #[cfg(feature = "live")]
 mod screens;
+mod selection_diagnostic;
 #[cfg(feature = "live")]
 mod session_files;
 #[cfg(feature = "live")]
@@ -98,9 +109,12 @@ pub mod settings;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod signals;
 #[cfg(feature = "live")]
+mod socraticode;
+#[cfg(feature = "live")]
 mod speech_settings;
 #[cfg(feature = "live")]
 mod startup_error;
+mod startup_log;
 #[cfg(feature = "live")]
 mod task_details;
 #[cfg(feature = "live")]
@@ -128,8 +142,15 @@ mod watchdog;
 #[cfg(feature = "live")]
 mod window_geometry;
 #[cfg(feature = "live")]
-mod window_layer;
+#[doc(hidden)]
+pub mod window_layer;
+#[doc(hidden)]
+pub mod window_theme;
 mod window_visibility;
+mod wsl_mapping;
+// Task 102: Qt's presets and raised notices, read once at the first start.
+mod qt_first_start;
+mod model_servers;
 #[cfg(any(windows, test))]
 mod windows_shell;
 #[cfg(feature = "live")]
@@ -183,12 +204,44 @@ fn drafts_root(data_dir: &std::path::Path, replay: bool) -> std::path::PathBuf {
 #[cfg(all(test, unix))]
 pub(crate) static PROCESS_TREE: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
+#[cfg(all(test, unix, feature = "live"))]
+mod test_context;
+
+/// Writes an executable test fixture without this process ever holding it
+/// open for writing. A test thread that forks while such a descriptor is open
+/// passes it to a child that has not exec'd yet, and running the file then
+/// fails with ETXTBSY (zerus-0b9f). The bytes go to a side file that never
+/// runs; a short-lived `cp` creates the executable, so its only writer has
+/// exited before anything runs it. An existing entry is removed first, so a
+/// fixture symlink to a checked-in script is never written through.
+#[cfg(all(test, unix))]
+pub(crate) fn write_executable(path: &std::path::Path, contents: impl AsRef<[u8]>) {
+    use std::os::unix::fs::PermissionsExt;
+    let name = path.file_name().expect("executable name").to_string_lossy();
+    let source = path.with_file_name(format!(".{name}.source"));
+    std::fs::write(&source, contents).unwrap();
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            panic!("cannot replace {}: {error}", path.display())
+        }
+        _ => {}
+    }
+    let status = std::process::Command::new("/bin/cp")
+        .arg(&source)
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "cannot write {}", path.display());
+    std::fs::remove_file(&source).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
 /// What `run` settled before the app starts.
 pub struct Startup {
     pub identity: identity::Identity,
     /// Started with `--sessions`, or a build that opens its window by default.
     pub opens_sessions: bool,
-    #[cfg(all(feature = "live", target_os = "linux"))]
+    #[cfg(all(feature = "live", any(target_os = "linux", windows)))]
     navigation: Option<zerus_client_core::desktop::activation::Target>,
     #[cfg(all(feature = "live", target_os = "linux"))]
     activation_token: Option<String>,
@@ -207,6 +260,11 @@ pub struct Startup {
         any(target_os = "linux", target_os = "macos", windows)
     ))]
     native_ownership: Option<desktop_ownership::NativeReady>,
+    #[cfg(all(
+        feature = "live",
+        any(target_os = "linux", target_os = "macos", windows)
+    ))]
+    native_recovery: Option<desktop_ownership::NativeRecovery>,
 }
 
 /// Parses Qt's command line and answers `--help`, `--version` and
@@ -214,7 +272,6 @@ pub struct Startup {
 /// activation to the running instance and returns, and runs the app.
 pub fn run() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
     let options = match cli::parse(&args) {
         Ok(cli::Command::Run(options)) => options,
         Ok(cli::Command::Help) => {
@@ -227,6 +284,8 @@ pub fn run() {
         }
         Ok(cli::Command::BuildInfo) => {
             #[cfg(any(target_os = "linux", windows))]
+            let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+            #[cfg(any(target_os = "linux", windows))]
             let info = cli::build_info_for(&cli::BUILD, &context.config().identifier);
             #[cfg(not(any(target_os = "linux", windows)))]
             let info = cli::build_info(&cli::BUILD);
@@ -236,6 +295,7 @@ pub fn run() {
         Ok(cli::Command::LoginItem { enabled }) => {
             #[cfg(all(windows, feature = "live"))]
             {
+                let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
                 let identity = identity::current(&context.config().identifier);
                 if !identity.is_switch() {
                     eprintln!("Login registration requires the installed Zerus identity");
@@ -264,14 +324,19 @@ pub fn run() {
             }
         }
         Err(error) => {
+            startup_log::record("failed", "invalid_arguments", None);
             eprint!("zerus-client: {error}\n\n{}", cli::usage());
             std::process::exit(2);
         }
     };
-    #[cfg(all(feature = "live", target_os = "linux"))]
+    startup_log::record("entered", "gui_entry", None);
+    startup_log::install_panic_hook();
+    let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    #[cfg(all(feature = "live", any(target_os = "linux", windows)))]
     let options = {
         let mut options = options;
         if let Err(error) = cli::take_navigation_environment(&mut options) {
+            startup_log::record("failed", "invalid_navigation_environment", None);
             eprint!("zerus-client: {error}\n\n{}", cli::usage());
             std::process::exit(2);
         }
@@ -289,6 +354,14 @@ pub fn run() {
     #[cfg(all(feature = "live", target_os = "linux"))]
     let activation_token = cli::take_activation_token(options.target.is_some());
     let identity = identity::current(&context.config().identifier);
+    #[cfg(all(
+        feature = "live",
+        any(target_os = "linux", target_os = "macos", windows)
+    ))]
+    desktop_service::prepare_mode(
+        identity.is_switch()
+            && !std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|value| !value.is_empty()),
+    );
     let opens_sessions = options.opens_sessions(identity.is_switch());
     #[cfg(all(
         feature = "live",
@@ -302,9 +375,17 @@ pub fn run() {
         any(target_os = "linux", target_os = "macos", windows)
     ))]
     let mut native_ownership = None;
+    #[cfg(all(
+        feature = "live",
+        any(target_os = "linux", target_os = "macos", windows)
+    ))]
+    let mut native_recovery = None;
+    #[cfg(all(windows, feature = "live"))]
+    let mut canonical_recovery = None;
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     let instance = match identity.instance_name(identity::flag("ZERUS_CLIENT_SINGLE_INSTANCE")) {
         None => {
+            startup_log::record("bypassed", "single_instance_not_requested", None);
             renderer::choose();
             None
         }
@@ -314,7 +395,7 @@ pub fn run() {
             } else {
                 instance::Activation::Show
             };
-            #[cfg(all(feature = "live", target_os = "linux"))]
+            #[cfg(all(feature = "live", any(target_os = "linux", windows)))]
             let activation = options
                 .target
                 .clone()
@@ -324,7 +405,8 @@ pub fn run() {
                 feature = "live",
                 any(target_os = "linux", target_os = "macos", windows)
             ))]
-            let (reply, responder) = desktop_hello::prepare(&identity);
+            #[cfg_attr(windows, allow(unused_mut))]
+            let (reply, mut responder, canonical) = desktop_hello::prepare(&identity);
             #[cfg(all(
                 feature = "live",
                 any(target_os = "linux", target_os = "macos", windows)
@@ -347,7 +429,18 @@ pub fn run() {
                     {
                         let settled = match desktop_hello::hold(identity.is_switch(), &responder) {
                             Ok(held) => held,
-                            Err(_) => {
+                            Err(desktop_hello::HoldRefusal::Takeover(failure)) => {
+                                startup_log::record(
+                                    "recovery",
+                                    "native_takeover_unconfirmed",
+                                    Some(failure.code),
+                                );
+                                responder = canonical.recover(&identity, &failure);
+                                native_recovery = Some(failure);
+                                (None, None)
+                            }
+                            Err(desktop_hello::HoldRefusal::Bootstrap) => {
+                                startup_log::record("failed", "desktop_startup_unconfirmed", None);
                                 eprintln!("zerus-client: desktop startup is unconfirmed; writers remain stopped");
                                 startup_error::show(context);
                                 return;
@@ -360,15 +453,27 @@ pub fn run() {
                     #[cfg(all(windows, feature = "live"))]
                     {
                         desktop_responder = Some(responder);
+                        canonical_recovery = Some(canonical);
                     }
                     Some(claimed)
                 }
                 instance::Claim::Forwarded => {
-                    eprintln!("zerus-client: already running");
                     return;
                 }
-                instance::Claim::Failed(error) => {
-                    eprintln!("zerus-client: cannot claim the socket: {error}");
+                instance::Claim::Duplicate(_) => return,
+                instance::Claim::Failed(_) => {
+                    std::process::exit(3);
+                }
+                // Nothing was forwarded to that server; say so instead of exiting silently.
+                #[cfg(all(windows, feature = "live"))]
+                instance::Claim::Untrusted => {
+                    startup_error::record("instance.claim", "activation_pipe_untrusted");
+                    startup_error::show_untrusted_pipe(context);
+                    return;
+                }
+                #[cfg(all(windows, not(feature = "live")))]
+                instance::Claim::Untrusted => {
+                    eprintln!("zerus-client: the activation pipe belongs to an untrusted process");
                     std::process::exit(3);
                 }
             }
@@ -385,15 +490,25 @@ pub fn run() {
         platform::windows::startup::prepare(&args, &identity.bundle_id);
         if identity.is_switch() && !replay && !desktop_service::mode() {
             if let Some(responder) = &desktop_responder {
-                native_ownership = match desktop_ownership::native_takeover(
+                native_ownership = match desktop_ownership::native_takeover_recoverable(
                     zerus_client_core::default_hgs(),
                     responder.clone(),
                 ) {
                     Ok(proof) => Some(proof),
-                    Err(code) => {
-                        eprintln!("zerus-client: native ownership takeover is unconfirmed: {code}");
-                        startup_error::show(context);
-                        return;
+                    Err(failure) => {
+                        startup_log::record(
+                            "recovery",
+                            "native_takeover_unconfirmed",
+                            Some(failure.code),
+                        );
+                        desktop_responder = Some(
+                            canonical_recovery
+                                .as_ref()
+                                .expect("claimed canonical responder")
+                                .recover(&identity, &failure),
+                        );
+                        native_recovery = Some(failure);
+                        None
                     }
                 };
             }
@@ -407,6 +522,7 @@ pub fn run() {
         .as_ref()
         .is_some_and(|proof| proof.helper().is_err())
     {
+        startup_log::record("failed", "native_ownership_helper_changed", None);
         eprintln!("zerus-client: native ownership helper changed before GUI startup");
         startup_error::show(context);
         return;
@@ -417,8 +533,23 @@ pub fn run() {
         context,
         Startup {
             identity,
-            opens_sessions,
-            #[cfg(all(feature = "live", target_os = "linux"))]
+            opens_sessions: opens_sessions || {
+                #[cfg(all(
+                    feature = "live",
+                    any(target_os = "linux", target_os = "macos", windows)
+                ))]
+                {
+                    native_recovery.is_some()
+                }
+                #[cfg(not(all(
+                    feature = "live",
+                    any(target_os = "linux", target_os = "macos", windows)
+                )))]
+                {
+                    false
+                }
+            },
+            #[cfg(all(feature = "live", any(target_os = "linux", windows)))]
             navigation: options.target,
             #[cfg(all(feature = "live", target_os = "linux"))]
             activation_token,
@@ -436,6 +567,11 @@ pub fn run() {
                 any(target_os = "linux", target_os = "macos", windows)
             ))]
             native_ownership,
+            #[cfg(all(
+                feature = "live",
+                any(target_os = "linux", target_os = "macos", windows)
+            ))]
+            native_recovery,
         },
     );
 }
@@ -459,7 +595,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
         any(target_os = "linux", target_os = "macos", windows)
     ))]
     let native_ownership = startup.native_ownership;
-    #[cfg(all(feature = "live", target_os = "linux"))]
+    #[cfg(all(feature = "live", any(target_os = "linux", windows)))]
     let navigation = startup.navigation;
     #[cfg(all(feature = "live", target_os = "linux"))]
     let activation_token = startup.activation_token;
@@ -492,6 +628,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
         )
         .manage(commands::AppState::default())
         .manage(window_visibility::Visibility::default())
+        .manage(window_theme::Theme::default())
         .manage(lifecycle::Lifecycle { menu_bar })
         .manage(exit_flush::ExitFlush::default());
     #[cfg(target_os = "macos")]
@@ -588,6 +725,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
             app.manage(identity);
             #[cfg(all(feature = "live", any(target_os = "linux", target_os = "macos", windows)))]
             if let Some(proof) = native_ownership { app.manage(proof); }
+            #[cfg(all(feature = "live", any(target_os = "linux", target_os = "macos", windows)))]
+            if let Some(recovery) = startup.native_recovery { app.manage(recovery); }
             #[cfg(feature = "live")]
             {
                 let dir = data_dir(app.handle());
@@ -598,6 +737,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 std::fs::create_dir_all(&dir)?;
                 let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
                 app.manage(settings::open(app.handle(), &dir, replay));
+                // Task 102: Qt's WSL presets and raised notices, once, before their readers.
+                qt_first_start::import(&dir, settings::seed_source(&app.state::<identity::Identity>().bundle_id, replay));
                 if desktop_service::mode() {
                     let source=desktop_notification_controls::Source::default();
                     let handle=app.handle().clone();
@@ -612,9 +753,13 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                         source:source.clone(),settings:app.state::<settings::Store>().0.clone()
                     });
                     app.manage(source);
+                    // The report shows the configured download folder's G3
+                    // evidence, resolved each time it is shown.
+                    let downloads_app = app.handle().clone();
                     if let Some(inputs) = desktop_service::retained_import::Inputs::native(
                         &app.state::<identity::Identity>().bundle_id, replay, dir.clone(),
                         app.state::<settings::Store>().0.clone(),
+                        std::sync::Arc::new(move || files::folder(&downloads_app)),
                     ) {
                         app.state::<commands::AppState>().set_retained_import_source(inputs);
                     }
@@ -622,6 +767,10 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(speech_settings::SpeechPage::default());
                 // Task #6: the Teams views' reads; a replay runs no hgs.
                 app.manage(teams::Teams::new(replay));
+                // Task 73: Map Windows path… and Open mapped Windows original….
+                app.manage(wsl_mapping::WslDialogs::new(dir.join("wsl-path-mappings.json"), replay));
+                // Task 67: the Model servers tab and Settings > Model servers.
+                app.manage(model_servers::ModelServers::new(replay));
                 // Task 8: a stream's team heads reach the computer's poller.
                 let heads_app = app.handle().clone();
                 app.state::<commands::AppState>().pump().on_team_heads(std::sync::Arc::new(move |computer, heads| {
@@ -630,7 +779,11 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(termination_cleanup::TerminationCleanup::default());
                 app.manage(worktree_cleanup::WorktreeCleanup::default());
                 app.manage(recovery::start(app.handle()));
-                app.manage(files::start());
+                // Only the maintained production build records the cache
+                // folder's original index before changing it (G3).
+                app.manage(files::start(zerus_client_core::download_cache::Writer {
+                    evidence: app.state::<identity::Identity>().records_evidence(replay),
+                }));
                 app.manage(analytics::start(app.handle()));
                 app.manage(worktree_policy::start(app.handle()));
                 app.manage(mobile::start(app.handle()));
@@ -670,7 +823,11 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(task_forms::TaskForms::default());
                 app.manage(task_start::TaskStarts::default());
                 app.manage(actions::ActivityReads::default());
-                app.manage(actions::Attention::new(dir.join(actions::attention_file(replay))));
+                let local_read_path = dir.join(actions::attention_file(replay));
+                app.manage(match app.state::<commands::AppState>().local_read_capture() {
+                    Some(capture) => actions::Attention::new_with_capture(local_read_path, Some(capture)),
+                    None => actions::Attention::new(local_read_path),
+                });
                 let pump = app.state::<commands::AppState>().pump();
                 app.manage(approvals::start(
                     pump.clone(),
@@ -702,7 +859,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     &app.state::<identity::Identity>().bundle_id, replay,
                 );
                 organization.seed_runs(qt_source.clone());
-                organization.recover_qt(qt_source,app.state::<settings::Store>().0.clone());
+                organization.recover_qt(qt_source.clone(),app.state::<settings::Store>().0.clone());
+                organization.import_legacy_projects(qt_source,app.state::<settings::Store>().0.clone());
                 // Before any start of the source (the menu bar's below, or the webview's).
                 app.state::<commands::AppState>().set_organization(organization.clone());
                 let screens = screens::Screens::tauri(app.handle().clone(), pump.clone());
@@ -721,19 +879,49 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(screens);
                 app.manage(newsession::NewSession::tauri(Some(dir.join(if replay {
                     "worktree-snapshots-replay.json"
-                } else { "worktree-snapshots.json" }))));
+                } else { "worktree-snapshots.json" })), app.state::<commands::AppState>().worktree_cache_capture()));
                 let creations = creations::start(app.handle(), &dir, replay, allowed);
                 app.state::<commands::AppState>().set_creations(creations.clone());
                 app.manage(creations);
                 app.manage(terminal::Terminals::new(zerus_client_core::default_hgs(), allowed));
                 // A replay never touches the real drafts either.
-                let drafts = std::sync::Arc::new(zerus_client_core::drafts::DraftStore::open(
-                    drafts_root(&dir, replay),
-                ));
-                // The switch build takes Qt's and the dev app's drafts once,
-                // as the store's first job (zerus-5wmh.13.1); the dev identity
-                // and a replay never import.
-                if app.state::<identity::Identity>().seeds_qt(replay) {
+                let seeds_qt = app.state::<identity::Identity>().seeds_qt(replay);
+                // Every switch-build run records Next's drafts first (G3,
+                // zerus-5wmh.66.5.2.1.2), in service mode or not: the capture
+                // is the store's first job, before the import and any load
+                // or save. Only service mode publishes its status and Retry.
+                let capture = zerus_client_core::migration::draft_preload::Capture::for_run(
+                    seeds_qt,
+                    app.state::<commands::AppState>().draft_capture(),
+                    &dir,
+                );
+                let drafts = std::sync::Arc::new(match &capture {
+                    Some(capture) => zerus_client_core::drafts::DraftStore::open_captured(
+                        drafts_root(&dir, replay),
+                        capture.clone(),
+                    ),
+                    None => zerus_client_core::drafts::DraftStore::open(drafts_root(&dir, replay)),
+                });
+                if let Some(capture) = &capture {
+                    // Weak: the store flushes when the app drops it.
+                    let store = std::sync::Arc::downgrade(&drafts);
+                    capture.hook_retry(std::sync::Arc::new(move || {
+                        if let Some(store) = store.upgrade() {
+                            store.retry_import();
+                        }
+                    }));
+                    // Saved drafts shows the status and Retry in every mode
+                    // (zerus-5wmh.66.5.2.1.2.1); it reads the status again
+                    // whenever it opens, so a change before this is not lost.
+                    let changed = app.handle().clone();
+                    capture.hook(std::sync::Arc::new(move || {
+                        let _ = tauri::Emitter::emit(&changed, "draft-capture-changed", ());
+                    }));
+                }
+                app.manage(composer::saved::DraftCapture(capture.clone()));
+                // Keep Next's existing interim draft import and writer fence.
+                // The core startup importer excludes Qt under the 0.48 policy.
+                if seeds_qt {
                     zerus_client_core::drafts::import_at_start(&drafts);
                 }
                 #[cfg(feature = "media")]
@@ -751,12 +939,9 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     })
                     .flatten()
                     .map(|now| (now, std::time::Instant::now()));
-                // Saved drafts reads Qt's store and the dev app's, never
-                // writing to them; a replay lists neither.
-                let qt_drafts = composer::qt_store(
-                    drafts.root(),
-                    (!replay).then(zerus_client_core::drafts::qt_root).flatten(),
-                );
+                // Qt drafts are not imported or offered for recovery. The
+                // existing Next dev stores are separate interim client data.
+                let qt_drafts = None;
                 let dev_drafts = if replay {
                     Vec::new()
                 } else {
@@ -850,6 +1035,74 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(task_executor::TaskExecutors::start(app.handle()));
                 let composers = app.state::<composer::Composers>();
                 app.state::<actions::Actions>().on_writes(composers.changed_hook());
+                // Sends the desktop service takes (deferred_send) on Linux and
+                // macOS in desktop-service mode; every other Send stays direct.
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                if desktop_service::mode() {
+                    let (sending, checking) = (app.handle().clone(), app.handle().clone());
+                    composers.set_deferred(composer::DeferredRoute {
+                        send: std::sync::Arc::new(move |session, checkpoint, stdin| {
+                            let service = sending.state::<commands::AppState>().desktop_service();
+                            desktop_service::deferred_send::call(
+                                service,
+                                session,
+                                checkpoint,
+                                stdin,
+                                &std::sync::atomic::AtomicBool::new(false),
+                            )
+                        }),
+                        check: std::sync::Arc::new(move |plan| {
+                            let service = checking.state::<commands::AppState>().desktop_service();
+                            desktop_service::deferred_send::check(service, plan)
+                        }),
+                    });
+                    // "Compact and continue" the service takes whole
+                    // (compact_to_send), the same way; every other one stays
+                    // direct.
+                    let (compacting, checking) = (app.handle().clone(), app.handle().clone());
+                    composers.set_compact(composer::CompactRoute {
+                        offer: std::sync::Arc::new(
+                            move |session, checkpoint, compaction, stdin, handing| {
+                                let service =
+                                    compacting.state::<commands::AppState>().desktop_service();
+                                desktop_service::compact_to_send::call(
+                                    service,
+                                    session,
+                                    checkpoint,
+                                    compaction,
+                                    stdin,
+                                    handing,
+                                    &std::sync::atomic::AtomicBool::new(false),
+                                )
+                            },
+                        ),
+                        check: std::sync::Arc::new(move |plan| {
+                            let service = checking.state::<commands::AppState>().desktop_service();
+                            desktop_service::compact_to_send::check(service, plan)
+                        }),
+                    });
+                    // Question answers the service takes (deferred_answer),
+                    // the same way; every other answer stays direct.
+                    let (answering, checking) = (app.handle().clone(), app.handle().clone());
+                    composers.set_answer_route(composer::AnswerRoute {
+                        send: std::sync::Arc::new(move |session, checkpoint, pinned, stdin| {
+                            let service =
+                                answering.state::<commands::AppState>().desktop_service();
+                            desktop_service::deferred_answer::call(
+                                service,
+                                session,
+                                checkpoint,
+                                pinned,
+                                stdin,
+                                &std::sync::atomic::AtomicBool::new(false),
+                            )
+                        }),
+                        check: std::sync::Arc::new(move |plan| {
+                            let service = checking.state::<commands::AppState>().desktop_service();
+                            desktop_service::deferred_answer::check(service, plan)
+                        }),
+                    });
+                }
                 // The composer's session part once a second (the cache chip)
                 // and the inspect fallback; it sleeps while no composer is open.
                 composers.start_ticker();
@@ -933,18 +1186,10 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     let attention = identity::notifier_runs(posts, bundled)
                         .then(|| {
                             let path = dir.join(desk::ATTENTION_FILE);
-                            // Qt's edges seed the switch bundle's first start
-                            // (Decision 11): its `attention/observed`, which the
-                            // defaults domain keeps as `attention.observed`.
-                            let switch = identity.is_switch();
-                            Box::new(move || {
-                                desk::Attention::load(path, || {
-                                    switch.then(|| platform::macos::qt_default_data("attention.observed")).flatten()
-                                })
-                            }) as desk::LoadAttention
+                            Box::new(move || desk::Attention::load(path, || None)) as desk::LoadAttention
                         });
                     let notifies = attention.is_some();
-                    desk::start(app.handle(), &pump, dir.clone(), desk::load_mode(&dir, conf.as_deref()), attention);
+                    desk::start(app.handle(), &pump, attention);
                     if desktop_service::mode() {
                         if let Some(sender) = desk::sender(app.handle()) {
                             app.state::<commands::AppState>().register_service_activation(std::sync::Arc::new(move |delivery| {
@@ -967,12 +1212,9 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     let switch = identity.is_switch();
                     let attention = posts.then(|| {
                         let path = dir.join(desk::ATTENTION_FILE);
-                        Box::new(move || desk::Attention::load(path, || {
-                            switch.then(|| platform::linux_notify::qt_values().ok().flatten()
-                                .and_then(|values| values.get("attention/observed").map(|v| v.to_text().into_bytes()))).flatten()
-                        })) as desk::LoadAttention
+                        Box::new(move || desk::Attention::load(path, || None)) as desk::LoadAttention
                     });
-                    desk::start(app.handle(), &pump, dir.clone(), desk::load_linux_mode(&dir, conf.as_deref()), attention);
+                    desk::start(app.handle(), &pump, attention);
                     if let Some(target) = navigation {
                         if let Some(sender) = desk::sender(app.handle()) {
                             let _ = sender.send(desk::DeskInput::Navigate { target, activation: activation_token });
@@ -1006,13 +1248,24 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     let switch = identity.is_switch();
                     let attention = posts.then(|| {
                         let path = dir.join(desk::ATTENTION_FILE);
-                        Box::new(move || desk::Attention::load(path, || {
-                            if !switch { return None; }
-                            zerus_client_core::settings::QtStore::here().and_then(|store| store.snapshot().ok().flatten())
-                                .and_then(|snapshot| snapshot.values.get("attention/observed").map(|v| v.to_text().into_bytes()))
-                        })) as desk::LoadAttention
+                        Box::new(move || desk::Attention::load(path, || None)) as desk::LoadAttention
                     });
-                    desk::start(app.handle(), &pump, dir.clone(), desk::load_windows_mode(&dir, conf.as_deref()), attention);
+                    desk::start(app.handle(), &pump, attention);
+                    // The service posts the toast and grants foreground; this GUI only routes the click.
+                    if desktop_service::mode() {
+                        if let Some(sender) = desk::sender(app.handle()) {
+                            app.state::<commands::AppState>().register_service_activation(std::sync::Arc::new(move |delivery| {
+                                let _ = sender.send(desk::DeskInput::ServiceClicked(Box::new(delivery)));
+                            })).map_err(std::io::Error::other)?;
+                        }
+                    }
+                    if let Some(target) = navigation {
+                        if let Some(sender) = desk::sender(app.handle()) {
+                            let _ = sender.send(desk::DeskInput::Navigate { target, activation: None });
+                        }
+                    }
+                    // Task 102: the chosen local relay and the connector, as Qt starts them.
+                    if !replay && !desktop_service::mode() { mobile::ensure_local_services(app.handle().clone()); }
                     if switch && !replay && !desktop_service::mode() {
                         match platform::windows::worker::Worker::start(zerus_client_core::default_hgs()) {
                             Ok(worker) => { app.manage(worker); }
@@ -1037,6 +1290,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
             }
             let display = display::display_name();
             if !display::headless_allowed(std::env::var("ZERUS_CLIENT_HEADLESS").is_ok_and(|v| v == "1"), display.as_deref()) {
+                startup_log::record("failed", "headless_display_unavailable", None);
                 eprintln!("zerus-client: ZERUS_CLIENT_HEADLESS=1 but the display is {display:?}, not an X server; no window opens (set GDK_BACKEND=x11)");
                 std::process::exit(3);
             }
@@ -1049,7 +1303,10 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 // An unattended measurement needs frames: keep its window in front
                 // and focused for the run, which ends by exiting the app.
                 if std::env::var("ZERUS_CLIENT_PERF").is_ok_and(|mode| mode == "auto") {
-                    if let Err(error) = window.set_always_on_top(true).and_then(|()| window.set_focus()) {
+                    // Perf-only, inside this gate: never the presentation path (clippy.toml).
+                    #[allow(clippy::disallowed_methods)]
+                    let front = window.set_always_on_top(true).and_then(|()| window.set_focus());
+                    if let Err(error) = front {
                         eprintln!("zerus-client perf: could not bring the window to the front: {error}");
                     }
                 }
@@ -1066,12 +1323,16 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
             Ok(())
         })
         .build(context)
+        .inspect_err(|error| {
+            startup_log::record("failed", "tauri_build", Some(&error.to_string()));
+        })
         .expect("Zerus Next failed to start");
     #[cfg(target_os = "macos")]
     lifecycle::prepare(&mut app, menu_bar, opens_sessions);
     app.run(|app, event| {
         lifecycle::on_event(app, &event);
     });
+    startup_log::record("exited", "event_loop_returned", None);
 }
 
 /// The Processes tab's hub (`processes.rs`): the topic through the data
@@ -1178,7 +1439,7 @@ fn forward_activations(
         .name("zerus-client-activations".into())
         .spawn(move || {
             for activation in activations {
-                #[cfg(all(feature = "live", target_os = "linux"))]
+                #[cfg(all(feature = "live", any(target_os = "linux", windows)))]
                 if let instance::Activation::Navigation(target) = activation {
                     if let Some(sender) = desk::sender(&app) {
                         let _ = sender.send(desk::DeskInput::Navigate {
@@ -1344,6 +1605,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::unfollow,
         commands::metrics,
         commands::perf_config,
+        commands::acceptance_selection,
         commands::save_perf,
         commands::perf_log,
         commands::smoke_log,
@@ -1355,20 +1617,32 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::perf_resize,
         desktop_service::desktop_service_mode,
         desktop_service::desktop_service_retry,
+        desktop_service::desktop_service_check_status,
+        desktop_service::desktop_service_refresh_status,
+        desktop_service::desktop_service_refresh,
         desktop_service::desktop_service_ownership_rearm,
         desktop_service::desktop_service_ownership_result,
+        desktop_service::desktop_service_mode_action,
+        desktop_service::desktop_service_first_choice,
         desktop_service::notification_controls::desktop_notification_preferences_set,
         desktop_service::notification_controls::desktop_notification_preferences_check,
         desktop_service::desktop_service_read_marks,
         desktop_service::desktop_service_automatic_approvals,
+        desktop_service::task_message_inputs::desktop_service_task_message_inputs,
+        desktop_service::task_message_inputs::desktop_service_task_message_input_release,
         desktop_service::frontend::desktop_service_maintenance_configure,
         desktop_service::frontend::desktop_service_maintenance_configuration,
         desktop_service::frontend::desktop_service_frontend_result,
         commands::build_info,
         commands::voice_support,
         renderer::renderer_frame,
+        window_theme::window_theme,
         content_search::content_search,
         content_search::cancel_content_search,
+        claude_app::claude_app_sessions,
+        claude_app::claude_app_resume,
+        socraticode::socraticode_status,
+        socraticode::socraticode_act,
         native_ui::runtime::native_ui_open,
         native_ui::runtime::native_ui_browser,
         native_ui::runtime::native_ui_retire,
@@ -1378,6 +1652,10 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         settings::skins::user_skin_import,
         settings::skins::user_skins_open,
         settings::settings_get,
+        settings::qt_upgrade_notice,
+        settings::qt_upgrade_notice_ack,
+        settings::settings_qt_preferences,
+        settings::settings_legacy_projects,
         settings::settings_set,
         desk::desk_take_pending,
         window_layer::window_layer_state,
@@ -1424,6 +1702,10 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         mobile::mobile_legacy_open,
         mobile::mobile_legacy_apply,
         mobile::mobile_legacy_close,
+        mobile::mobile_local_services,
+        mobile::mobile_local_relay,
+        qt_first_start::private_store_notices_known,
+        qt_first_start::private_store_notices_save,
         mobile::mobile_view,
         mobile::mobile_open,
         mobile::mobile_refresh_workspace,
@@ -1453,9 +1735,30 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         teams::teams_spans,
         teams::teams_profile,
         teams::team_tests,
+        teams::team_timeline,
         teams::team_action,
         teams::team_read,
         teams::team_role_models,
+        teams::iron_rules,
+        wsl_mapping::wsl_mapping_open,
+        wsl_mapping::wsl_mapping_preview,
+        wsl_mapping::wsl_mapping_use,
+        wsl_mapping::wsl_file_open,
+        wsl_mapping::wsl_file_preview,
+        wsl_mapping::wsl_file_open_original,
+        wsl_mapping::wsl_dialog_close,
+        model_servers::model_servers_list,
+        model_servers::model_server_status,
+        model_servers::model_server_up,
+        model_servers::model_server_up_result,
+        model_servers::model_server_sessions,
+        model_servers::model_server_down,
+        model_servers::model_server_logs,
+        model_servers::model_server_save,
+        model_servers::model_server_delete,
+        model_servers::model_server_test,
+        model_servers::model_server_test_logs,
+        model_servers::model_server_session,
         teams::catalog_editor_schema,
         teams::catalog_editor_load,
         teams::catalog_editor_edit,
@@ -1467,12 +1770,17 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         teams::catalog_editor_import,
         teams::catalog_route,
         task_details::task_details,
+        task_details::task_reference,
+        task_details::task_page,
+        task_details::task_attachment_read,
         task_details::task_assign,
         task_details::task_board_action,
         task_details::task_cancel_execution,
         task_start::task_start_open,
         task_start::task_start,
         task_start::task_start_release,
+        task_start::task_start_check,
+        task_start::task_start_discard_check,
         task_executor::task_executor_open,
         task_executor::task_executor_submit,
         task_executor::task_executor_release,
@@ -1532,6 +1840,9 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         organization::overview::worktree_overview_candidates,
         organization::overview::worktree_overview_close,
         organization::overview::worktree_overview_inspect,
+        organization::overview::worktree_leftover_open_folder,
+        organization::overview::worktree_leftover_keep,
+        organization::overview::worktree_leftover_delete,
         organization::clones::project_clone_open,
         organization::clones::project_clone_status,
         organization::clones::project_clone_step,
@@ -1542,9 +1853,12 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         screens::screen_visible,
         screens::session_usage,
         screens::accounts_view,
+        screens::session_switch_account,
+        sandbox_check,
         screens::account_edits::account_edit_open,
         screens::account_edits::account_edit_apply,
         screens::account_edits::account_edit_close,
+        screens::account_edits::account_permission_check,
         screens::account_edits::setup::account_setup_open,
         screens::account_edits::setup::account_setup_apply,
         screens::account_edits::setup::account_setup_close,
@@ -1595,6 +1909,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         terminal::terminal_drop,
         terminal::terminal_shown,
         composer::composer_open,
+        composer::composer_visibility,
         composer::composer_edit,
         composer::composer_pick,
         composer::composer_attach,
@@ -1640,6 +1955,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::saved::draft_conflicts,
         composer::saved::draft_recover,
         composer::saved::draft_restore,
+        composer::saved::draft_capture_status,
+        composer::saved::draft_capture_retry,
         composer::send::send_message,
         composer::queue::queue_send_now,
         composer::queue::send_push,
@@ -1708,6 +2025,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::tasks_follow,
         commands::metrics,
         commands::perf_config,
+        commands::acceptance_selection,
         commands::save_perf,
         commands::perf_log,
         commands::display_hz,
@@ -1718,6 +2036,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         commands::build_info,
         commands::voice_support,
         renderer::renderer_frame,
+        window_theme::window_theme,
         clipboard::copy_text,
         clipboard::copy_verbatim,
         desk_take_pending,
@@ -1764,6 +2083,7 @@ pub(crate) fn main_window(app: &AppHandle) -> Option<WebviewWindow> {
 /// macOS before the webview is built, Linux through its public settings API.
 pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     use tauri::Manager;
+    let generation = window_theme::register(app);
     // ZERUS_CLIENT_QUERY opens a given state (`select=<session name>`) for
     // headless screenshots and scripted measurements, as the mockup's URL
     // parameters do; ZERUS_CLIENT_PERF=auto adds `perf=auto`.
@@ -1801,8 +2121,15 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
         .title("Zerus Next")
         .visible(false)
+        .initialization_script(format!(
+            "Object.defineProperty(window, '__ZERUS_WINDOW_THEME__', {{value: {}}});",
+            serde_json::to_string(&generation).expect("window generation")
+        ))
         .inner_size(1440.0, 900.0)
         .min_inner_size(900.0, 560.0);
+    // Hidden until CSS supplies the exact native backgrounds. The initial
+    // fallback remains unseen even when the saved theme is light.
+    builder = builder.background_color(tauri::window::Color(22, 27, 33, 255));
     // Page rendering at the display rate, not near 60 fps: the preference is set
     // on the configuration before the webview exists (toggling a live page is
     // unreliable). The measurement's control run keeps WebKit's default.

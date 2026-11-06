@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { homeShort, sessionAccount } from "./inspector-data";
+import { homeShort, sessionAccount, sessionGoal } from "./inspector-data";
 import { usageOf } from "../../store/testing";
 import { emptyAccounts, type Account, type Profile } from "../../types";
 
@@ -59,5 +59,14 @@ describe("Inspector account", () => {
     expect(homeShort("/srv/agents/codex")).toBe("/srv/agents/codex");
     expect(homeShort("/homestead/user/.codex")).toBe("/homestead/user/.codex");
     expect(homeShort("")).toBe("");
+  });
+});
+
+describe("Activity goal caption", () => {
+  it("pursues only an active goal and labels native terminal statuses", () => {
+    for (const [status, caption] of Object.entries({ active: "Pursuing goal", complete: "Goal complete", paused: "Goal paused", blocked: "Goal blocked", usage_limited: "Usage limit reached", budget_limited: "Goal budget limit reached", unknown: "Goal" })) {
+      expect(sessionGoal({ goal: { objective: "Fixture objective", status } })).toMatchObject({ objective: "Fixture objective", status, caption });
+    }
+    expect(sessionGoal({ goal: null }).objective).toBe("");
   });
 });

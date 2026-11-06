@@ -3,6 +3,25 @@ use super::*;
 /// Explicit installer mode changes use the same agent refusal as native
 /// policy requests. This proves a caller boundary, never a service grant.
 pub(in crate::desktop) fn caller(scope: &Scope) -> Result<&'static str> {
+    Ok(capture(scope)?.0)
+}
+
+/// Routing evidence from the admitted native caller, never input authority.
+pub(in crate::desktop) fn observation(scope: &Scope) -> Result<(&'static str, Value)> {
+    let (source, process) = capture(scope)?;
+    let (machine, boot) = origin::native()?;
+    ensure!(process.current(), "installer consumer changed");
+    Ok((
+        source,
+        serde_json::json!({"machine":machine,"boot":boot,
+        "pid":process.pid,"birth":process.identity.birth}),
+    ))
+}
+
+#[path = "registration_origin.rs"]
+mod origin;
+
+fn capture(scope: &Scope) -> Result<(&'static str, Process)> {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::OpenOptionsExt;
     ensure!(
@@ -10,7 +29,7 @@ pub(in crate::desktop) fn caller(scope: &Scope) -> Result<&'static str> {
         "use the desktop user, without sudo"
     );
     ensure!(
-        ["HGS_SESSION", "HGS_RUN_ID"]
+        ["HGS_SESSION", "HGS_SESSION_ID", "HGS_RUN_ID"]
             .iter()
             .all(|name| std::env::var_os(name).is_none()),
         "agent session cannot change desktop mode; use Settings or a terminal outside Zerus"
@@ -30,7 +49,12 @@ pub(in crate::desktop) fn caller(scope: &Scope) -> Result<&'static str> {
         if unsafe { libc::isatty(tty.as_raw_fd()) } == 1
             && unsafe { libc::tcgetpgrp(tty.as_raw_fd()) } == unsafe { libc::getpgrp() }
         {
-            return Ok("interactive_terminal");
+            // The actual foreground process-group leader is the admitted
+            // terminal consumer. Never choose a renderer-supplied PID.
+            let group = unsafe { libc::tcgetpgrp(tty.as_raw_fd()) };
+            let process = Process::read(u32::try_from(group)?)?;
+            ensure!(process.current(), "installer terminal consumer changed");
+            return Ok(("interactive_terminal", process));
         }
     }
     #[cfg(target_os = "macos")]
@@ -41,7 +65,7 @@ pub(in crate::desktop) fn caller(scope: &Scope) -> Result<&'static str> {
         );
         if scope.selected_frontend(Path::new(&process.executable)) {
             ensure!(process.current(), "installer frontend changed");
-            return Ok("installed_frontend");
+            return Ok(("installed_frontend", process.clone()));
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -61,7 +85,7 @@ pub(in crate::desktop) fn caller(scope: &Scope) -> Result<&'static str> {
             let process = Process::read(pid)?;
             ensure!(process.current(), "installer caller changed");
             if scope.selected_frontend(Path::new(&process.executable)) {
-                return Ok("installed_frontend");
+                return Ok(("installed_frontend", process));
             }
             pid = process.identity.parent;
         }

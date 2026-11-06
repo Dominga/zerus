@@ -20,6 +20,27 @@ class Maintenance(Repository, unittest.TestCase):
         self.assertEqual(p.returncode==0,ok,p.stdout+p.stderr)
         return json.loads(p.stdout) if ok else p.stderr
 
+    def test_a_partial_automatic_removal_stays_unconfirmed_and_is_never_rescheduled(self):
+        if os.geteuid()==0:self.skipTest('root ignores directory permissions')
+        readonly=self.repo/'ro';readonly.mkdir();(readonly/'file').write_text('tracked\n')
+        self.git('-C',str(self.repo),'add','ro/file')
+        self.git('-C',str(self.repo),'-c','user.name=Fixture','-c','user.email=fixture@example.test','commit','-qm','ro')
+        tree=self.managed();(tree/'ro').chmod(0o555)
+        self.addCleanup(lambda:(tree/'ro').exists() and (tree/'ro').chmod(0o755))
+        self.save(after_session=False)
+        first=self.call('sweep','--json')
+        self.assertEqual(first['status'],'unconfirmed',first);self.assertIn('files remain',first['reason'])
+        database=self.root/'state/worktree-maintenance/queue.sqlite3'
+        with sqlite3.connect(database) as db:
+            checkouts=db.execute('SELECT status FROM checkouts').fetchall()
+            removals=db.execute('SELECT status FROM removals').fetchall()
+            db.execute('UPDATE checkouts SET next_check=0')
+        self.assertEqual(checkouts,[('unconfirmed',)]);self.assertEqual(removals,[('partial',)])
+        self.assertEqual((tree/'ro'/'file').read_text(),'tracked\n')
+        # An hour later the sweep still never selects it again.
+        self.assertEqual(self.call('sweep','--json')['status'],'waiting')
+        self.assertEqual((tree/'ro'/'file').read_text(),'tracked\n')
+
     def managed(self):
         tree=self.root/'managed'
         self.call('create','--path',str(self.repo),'--destination',str(tree),'--branch','session-work','--json')

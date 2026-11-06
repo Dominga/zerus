@@ -81,24 +81,83 @@ QString tokens(qint64 count)
     return QString::number(count);
 }
 
+const QList<KindStyle> &kindStyles()
+{
+    // Chosen by search over CIELAB (scratch script in task #79's report): the
+    // solid kinds also stay apart under deuteranopia and protanopia. Task 93
+    // (owner: "the green is too toxic"): calm colours, LCh chroma at most 45
+    // in dark and 55 in light (ChromaCapDark/Light), in the skin's own
+    // lightness bands, with work the skin's mint.
+    static const QList<KindStyle> styles{
+        {"work", "work", "", QColor("#7dd3b0"), QColor("#3f9f7b"), Qt::SolidPattern},
+        {"rework", "rework", "", QColor("#df9c77"), QColor("#83441d"), Qt::SolidPattern},
+        {"build", "build", "", QColor("#9f8347"), QColor("#8b6e28"), Qt::SolidPattern},
+        {"review", "stage", "review", QColor("#afa3e4"), QColor("#453e80"), Qt::SolidPattern},
+        {"test", "stage", "test", QColor("#0e90be"), QColor("#0e90be"), Qt::SolidPattern},
+        {"stage", "stage", "", QColor("#bcd2fe"), QColor("#2b6aae"), Qt::SolidPattern},
+        {"blocked", "question", "", QColor("#c26f6d"), QColor("#7f282d"), Qt::SolidPattern},
+        {"background", "background", "", QColor("#14acb0"), QColor("#078487"), Qt::SolidPattern},
+        {"delivery", "delivery", "", QColor("#868686"), QColor("#686868"), Qt::Dense5Pattern},
+        {"member", "member", "", QColor("#b96f97"), QColor("#792758"), Qt::BDiagPattern},
+        {"deps", "deps", "", QColor("#899d5d"), QColor("#354e03"), Qt::FDiagPattern},
+        {"lead", "lead", "", QColor("#fdc5ff"), QColor("#925fa0"), Qt::DiagCrossPattern},
+        {"folder_held", "folder_held", "", QColor("#fcd6b2"), QColor("#58432d"), Qt::HorPattern},
+        {"hold", "hold", "", QColor("#c1c1c1"), QColor("#314d38"), Qt::VerPattern},
+        {"stage_wait", "stage_wait", "", QColor("#59d6f5"), QColor("#174d5a"), Qt::CrossPattern}};
+    return styles;
+}
+
+QString kindKey(const QString &kind, const QString &stageKind)
+{
+    if (kind == "question" || kind == "permission" || kind == "stop" || kind == "no_report") return QStringLiteral("blocked");
+    if (kind == "delivery" || kind == "start_delay") return QStringLiteral("delivery");
+    if (kind == "stage") return stageKind == "review" || stageKind == "test" ? stageKind : QStringLiteral("stage");
+    return kind;
+}
+
+static const KindStyle *styleOf(const QString &kind, const QString &stageKind)
+{
+    const QString key = kindKey(kind, stageKind);
+    for (const auto &style : kindStyles()) if (style.key == key) return &style;
+    return nullptr;
+}
+
 QColor kindColor(const QString &kind, const QString &stageKind, bool dark)
 {
-    const auto &skin = WorkspaceSkin::active();
-    const auto t = [&](const char *name) { return WorkspaceSkin::color(skin, dark, QString::fromLatin1(name)); };
-    if (kind == "work") return dark ? QColor("#7dd3b0") : QColor("#3f9f7b");
-    if (kind == "rework") return t("warn");
-    if (kind == "build") return dark ? QColor("#56c8e0") : QColor("#137f95");
-    if (kind == "stage") {
-        if (stageKind == "review") return t("violet");
-        if (stageKind == "test") return t("folder");
-        return dark ? QColor("#56c8e0") : QColor("#137f95");
-    }
-    if (kind == "question" || kind == "permission" || kind == "stop" || kind == "no_report") return t("danger");
-    if (kind == "background") return dark ? QColor("#6fa8ff") : QColor("#2f66c9");
-    if (kind == "member") return t("folder");
-    if (kind == "lead") return t("violet");
-    if (kind == "delivery" || kind == "start_delay") return t("muted");
-    return t("dim");
+    if (const auto *style = styleOf(kind, stageKind)) return dark ? style->dark : style->light;
+    // Not recorded: the skin's dim text, which no kind uses.
+    return WorkspaceSkin::color(WorkspaceSkin::active(), dark, QStringLiteral("dim"));
+}
+
+Qt::BrushStyle kindPattern(const QString &kind, const QString &stageKind)
+{
+    const auto *style = styleOf(kind, stageKind);
+    return style ? style->pattern : Qt::SolidPattern;
+}
+
+QString keyName(const QString &key)
+{
+    if (key == "blocked") return QObject::tr("Blocked (question, permission or stop)");
+    if (key == "delivery") return QObject::tr("Delivery or start delay");
+    if (key == "stage") return QObject::tr("Other stage");
+    for (const auto &style : kindStyles()) if (style.key == key) return kindName(style.kind, style.stage);
+    return kindName(key, {});
+}
+
+double contrast(const QColor &a, const QColor &b)
+{
+    const auto luminance = [](const QColor &c) {
+        const auto lin = [](double v) { return v <= 0.04045 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4); };
+        return 0.2126 * lin(c.redF()) + 0.7152 * lin(c.greenF()) + 0.0722 * lin(c.blueF());
+    };
+    const double x = luminance(a), y = luminance(b);
+    return (std::max(x, y) + 0.05) / (std::min(x, y) + 0.05);
+}
+
+QColor labelOn(const QColor &fill)
+{
+    const QColor dark("#101418"), light("#ffffff");
+    return contrast(fill, dark) >= contrast(fill, light) ? dark : light;
 }
 
 QString kindName(const QString &kind, const QString &stageKind)
@@ -404,7 +463,7 @@ public:
         clampView(); m_paint = {}; setProperty("zoom", m_zoom); update();
     }
     void fit() { m_zoom = 1; m_start = m_model ? m_model->from : 0; m_paint = {}; setProperty("zoom", m_zoom); update(); }
-    static constexpr int Top = 34, Row = 52, Label = 210;
+    static constexpr int Top = 34, Row = LaneBands::Row, Label = 210;
     int heightFor() const { return m_model ? Top + Row * (2 + int(m_model->lanes.size()) + (m_model->tests.isEmpty() ? 0 : 1)) + 8 : 120; }
     int laneY(const QString &member) const
     {
@@ -493,7 +552,7 @@ protected:
             p.drawRoundedRect(r, 3, 3);
             if (span.task && span.task == m_selected) { p.setPen(QPen(c.fg, 2)); p.setBrush(Qt::NoBrush); p.drawRoundedRect(r.adjusted(-1, -1, 1, 1), 4, 4); }
             if (!text.isEmpty() && r.width() > 40) {
-                p.setFont(small); p.setPen(dashed ? c.fg : QColor(m_dark ? "#0f1a16" : "#ffffff"));
+                p.setFont(small); p.setPen(dashed ? c.fg : labelOn(fill));
                 p.drawText(r.adjusted(5, 0, -4, 0), Qt::AlignVCenter, QFontMetrics(small).elidedText(text, Qt::ElideRight, int(r.width()) - 9));
             }
         };
@@ -530,15 +589,21 @@ protected:
                     p.drawText(r.adjusted(5, 0, -4, 0), Qt::AlignVCenter, tr("idle %1").arg(duration(qint64(to - from))));
                 }
             }
-            for (const auto &span : lane.spans)
-                bar(span, span.kind == "build" ? y + 12 : y + 8, span.kind == "build" ? 14 : 22, kindColor(span.kind, span.stageKind, m_dark), false,
+            // Task #79: build and merge run beside the work, as a thin strip
+            // along the bottom of the lane; the work bar's title stays readable.
+            for (const auto &span : lane.spans) {
+                if (span.kind == "build") continue;
+                bar(span, y + LaneBands::WorkTop, LaneBands::WorkHeight, kindColor(span.kind, span.stageKind, m_dark), false,
                     span.kind == "work" || span.kind == "rework" ? label(span.task) : QString());
-            // The waits of its tasks: a hatched strip under the lane.
+            }
+            for (const auto &span : lane.spans)
+                if (span.kind == "build") bar(span, y + LaneBands::BuildTop, LaneBands::BuildHeight, kindColor("build", {}, m_dark), false, {});
+            // The waits of its tasks: a strip under the work, each kind its own hatch.
             for (const auto &span : lane.waits) {
                 if (!shown(span.from, span.to)) continue;
-                const QRectF r(x(span.from), y + 34, std::max(2.0, x(span.to) - x(span.from)), 7);
-                QBrush hatch(kindColor(span.kind, {}, m_dark), Qt::BDiagPattern);
-                p.setPen(QPen(alpha(kindColor(span.kind, {}, m_dark), .8), 1)); p.setBrush(hatch); p.drawRoundedRect(r, 2, 2);
+                const QRectF r(x(span.from), y + LaneBands::WaitTop, std::max(2.0, x(span.to) - x(span.from)), LaneBands::WaitHeight);
+                const QColor tone = kindColor(span.kind, span.stageKind, m_dark);
+                p.setPen(QPen(alpha(tone, .9), 1)); p.setBrush(QBrush(tone, kindPattern(span.kind, span.stageKind))); p.drawRoundedRect(r, 2, 2);
                 if (span.task == m_selected) { p.setPen(QPen(c.fg, 1.5)); p.setBrush(Qt::NoBrush); p.drawRoundedRect(r.adjusted(-1, -1, 1, 1), 2, 2); }
             }
             p.setPen(alpha(c.border, .5)); p.drawLine(12, y + Row - 1, width() - 12, y + Row - 1);
@@ -572,7 +637,14 @@ protected:
         if (at < 0 || at >= m_model->lanes.size()) return nullptr;
         if (lane) *lane = m_model->lanes[at].member;
         const int inRow = (point.y() - Top) % Row;
-        return inRow >= 32 ? hit(m_model->lanes[at].waits) : hit(m_model->lanes[at].spans);
+        const auto &spans = m_model->lanes[at].spans;
+        const auto pick = [&](bool build) -> const Span * {
+            for (const auto &span : spans)
+                if ((span.kind == QLatin1String("build")) == build && shown(span.from, span.to) && point.x() >= x(span.from) - 1 && point.x() <= x(span.to) + 1) return &span;
+            return nullptr;
+        };
+        if (inRow >= LaneBands::BuildTop - 2) return pick(true);
+        return inRow >= LaneBands::WaitTop - 1 ? hit(m_model->lanes[at].waits) : pick(false);
     }
     bool event(QEvent *event) override
     {
@@ -1008,21 +1080,28 @@ QWidget *TeamProfileView::timePage()
     card->setMaximumHeight(timeline->heightFor() + 18);
     v->addWidget(card, 1);
     // The legend.
-    auto *legend = new QWidget; auto *lh = new QHBoxLayout(legend); lh->setContentsMargins(4, 0, 4, 0); lh->setSpacing(12);
+    // Task #79: every kind with its own swatch (a wait's hatch as drawn);
+    // the items wrap to the next line instead of cutting their names.
+    auto *legend = new QWidget; legend->setObjectName("teamProfileLegend");
+    auto *lh = new FlowLayout(10); legend->setLayout(lh); lh->setContentsMargins(4, 0, 4, 0);
     lh->addWidget(label(tr("SPANS"), c.muted, 11, true));
-    const QList<std::pair<QString, QString>> kinds{{"work", ""}, {"rework", ""}, {"build", ""}, {"stage", "review"}, {"stage", "test"}, {"question", ""},
-                                                   {"delivery", ""}, {"member", ""}, {"deps", ""}, {"lead", ""}};
-    for (const auto &[kind, stage] : kinds) {
-        auto *swatch = new QLabel; QPixmap pixmap(14, 10); pixmap.fill(Qt::transparent);
+    for (const auto &style : kindStyles()) {
+        auto *item = new QWidget; item->setObjectName("teamProfileLegendItem"); item->setProperty("kind", style.key);
+        auto *ih = new QHBoxLayout(item); ih->setContentsMargins(0, 0, 0, 0); ih->setSpacing(5);
+        auto *swatch = new QLabel; QPixmap pixmap(16, 10); pixmap.fill(Qt::transparent);
         QPainter p(&pixmap); p.setRenderHint(QPainter::Antialiasing);
-        const bool wait = Waits.contains(kind) && kind != "delivery";
-        p.setPen(wait ? QPen(kindColor(kind, stage, m_dark), 1) : Qt::NoPen);
-        p.setBrush(wait ? QBrush(kindColor(kind, stage, m_dark), Qt::BDiagPattern) : QBrush(kindColor(kind, stage, m_dark)));
-        p.drawRoundedRect(QRectF(.5, .5, 13, 9), 2, 2); p.end();
+        const QColor tone = m_dark ? style.dark : style.light;
+        p.setPen(style.pattern == Qt::SolidPattern ? Qt::NoPen : QPen(tone, 1));
+        p.setBrush(QBrush(tone, style.pattern));
+        if (style.key == "build") p.drawRoundedRect(QRectF(.5, 5.5, 15, 4), 1.5, 1.5);   // the bottom strip, as drawn
+        else p.drawRoundedRect(QRectF(.5, .5, 15, 9), 2, 2);
+        p.end();
         swatch->setPixmap(pixmap);
-        lh->addWidget(swatch); lh->addWidget(label(kindName(kind, stage), c.text2, 11));
+        auto *name = label(keyName(style.key), c.text2, 11, false, "teamProfileLegendLabel");
+        name->setMinimumWidth(name->sizeHint().width());
+        ih->addWidget(swatch); ih->addWidget(name);
+        lh->addWidget(item);
     }
-    lh->addStretch(1);
     if (m_model.truncated) lh->addWidget(label(tr("Only the first %1 tasks are drawn").arg(Cache::MaxSpanPages * Cache::SpanPage), c.warn, 11, false, "teamProfileTruncated"));
     v->addWidget(legend);
     if (auto *estimates = estimatesCard()) v->addWidget(estimates);

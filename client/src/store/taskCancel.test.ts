@@ -2,7 +2,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { taskItem } from "../ui/screens/tasks-ui";
 const fixture = vi.hoisted(() => ({ project: "example", rows: [] as ReturnType<typeof taskItem>[] }));
 vi.mock("../bridge", () => ({ cancelTaskExecution: vi.fn().mockResolvedValue(null), taskBoardAction: vi.fn() }));
-vi.mock("./tasks", () => ({ tasks: { project: () => fixture.project, tasks: () => fixture.rows } }));
+vi.mock("./tasks", () => ({ tasks: { project: () => fixture.project, tasks: () => fixture.rows, find: (uuid: string) => fixture.rows.find((t) => t.uuid === uuid) } }));
 vi.mock("./actions", () => ({ notify: vi.fn() }));
 import { cancelTaskExecution } from "../bridge";
 import { notify } from "./actions";

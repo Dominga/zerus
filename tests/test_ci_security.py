@@ -455,7 +455,7 @@ class WorkflowSecurityTests(unittest.TestCase):
     def test_checks_gate_requires_exactly_the_selected_suites(self):
         gate = job((ROOT / ".github/workflows/checks.yml").read_text(), "gate")
         self.assertIn("needs: [source, quick, client-frontend, relay, connector, connector-macos, ios, android, client-native-linux, client-native-macos-core, client-native-macos-tauri, client-native-windows, cli, "
-                      "cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, arch, arch-package, mac-desktop, windows-desktop, windows-host]", gate)
+                      "cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, arch-package, windows-desktop, windows-host]", gate)
         self.assertIn("RUN_WINDOWS: ${{ needs.source.outputs.run_windows == 'true' }}", gate)
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
@@ -500,7 +500,6 @@ class WorkflowSecurityTests(unittest.TestCase):
             ({**base, "arch-package": "failure"}, "true", False), ({**base, "arch-package": "skipped"}, "true", False),
             ({**base, "arch-package": "cancelled"}, "true", False), (arch_skipped, "false", True),
             ({**arch_skipped, "arch-package": "success"}, "false", False),
-            ({**arch_skipped, "arch": "success"}, "false", False),
         ]:
             environment = {"RESULTS": json.dumps({name: {"result": value} for name, value in results.items()}),
                            "RUN_LINUX": "true", "RUN_ARCH": run_arch, "RUN_MACOS": "true", "RUN_IOS": "true", "RUN_WINDOWS": "true"}
@@ -653,7 +652,7 @@ class WorkflowSecurityTests(unittest.TestCase):
                      'run: python3 scripts/collect-licenses.py "$RUNNER_TEMP/rust-licenses"'):
             self.assertIn(line, quick)
         for name in ("quick", "relay", "connector", "connector-macos", "android", "client-native-linux", "client-native-macos-core",
-                     "client-native-macos-tauri", "client-native-windows", "cli", "cli-macos-debug", "arch", "arch-package", "mac-desktop", "windows-desktop", "windows-host"):
+                     "client-native-macos-tauri", "client-native-windows", "cli", "cli-macos-debug", "arch-package", "windows-desktop", "windows-host"):
             with self.subTest(job=name):
                 self.assertEqual(field(job(checks, name), "needs"), "source")
                 self.assertIn("ref: ${{ needs.source.outputs.commit }}", job(checks, name))
@@ -662,7 +661,7 @@ class WorkflowSecurityTests(unittest.TestCase):
             self.assertIn('ref: ${{ needs.source.outputs.commit }}', job(checks, name))
         # Builds use every runner vCPU; recipes leave the job count to Ninja.
         self.assertNotIn("CARGO_BUILD_JOBS", job(checks, "cli"))
-        for name, jobs in (("arch", 4), ("mac-desktop", 3), ("windows-desktop", 4)):
+        for name, jobs in (("windows-desktop", 4),):
             self.assertRegex(job(checks, name), rf"(?m)^      ZERUS_BUILD_JOBS: {jobs}$")
         for recipe in ("packaging/aur/zerus-git/PKGBUILD", "packaging/aur/zerus/PKGBUILD.in"):
             with self.subTest(recipe=recipe):
@@ -679,6 +678,9 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn('ZERUS_RELEASE_CHANNEL=dev', dev_package)
         self.assertIn('scripts/build-arch-package.sh --build-only', dev_package)
         self.assertNotIn('--build-only', job(checks, 'arch-package'))
+        # Its cold release build and full check() need headroom over a slow
+        # standard runner's 45 minutes (zerus-wnm5z).
+        self.assertEqual(field(job(checks, 'arch-package'), 'timeout-minutes'), '75')
 
     def test_relay_job_runs_every_mobile_service_module(self):
         relay = job((ROOT / ".github/workflows/checks.yml").read_text(), "relay")
@@ -805,8 +807,8 @@ class WorkflowSecurityTests(unittest.TestCase):
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
         names = ("source", "quick", "client-frontend", "relay", "connector", "connector-macos", "ios", "android", "client-native-linux", "client-native-macos-core", "client-native-macos-tauri", "client-native-windows",
-                 "cli", "cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "arch", "arch-package",
-                 "mac-desktop", "windows-desktop", "windows-host")
+                 "cli", "cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "arch-package",
+                 "windows-desktop", "windows-host")
         for run_macos, smoke_result, success in [("true", "success", True), ("true", "failure", False),
                                                  ("true", "skipped", False), ("false", "skipped", True),
                                                  ("false", "success", False)]:
@@ -849,8 +851,8 @@ class WorkflowSecurityTests(unittest.TestCase):
         script = re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", gate)[1]
         code = compile(textwrap.dedent(script), "workflow-checks-gate", "exec")
         names = ("source", "quick", "client-frontend", "relay", "connector", "connector-macos", "ios", "android", "client-native-linux", "client-native-macos-core", "client-native-macos-tauri", "client-native-windows",
-                 "cli", "cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "arch", "arch-package",
-                 "mac-desktop", "windows-desktop", "windows-host")
+                 "cli", "cli-macos-debug", "cli-macos-core", "cli-macos-native", "cli-macos", "arch-package",
+                 "windows-desktop", "windows-host")
         for run_ios, ios_result, success in [("true", "success", True), ("true", "failure", False),
                                                ("true", "skipped", False), ("true", "cancelled", False),
                                                ("false", "skipped", True), ("false", "success", False)]:
@@ -880,12 +882,11 @@ class WorkflowSecurityTests(unittest.TestCase):
 
     def test_arch_package_job_alone_produces_the_candidate_artifact(self):
         checks = (ROOT / ".github/workflows/checks.yml").read_text()
-        desktop, package = job(checks, "arch"), job(checks, "arch-package")
-        image = re.search(r"(?m)^      image: (archlinux@sha256:[0-9a-f]{64})$", desktop)[1]
-        for text in (desktop, package):
-            self.assertEqual(field(text, "if"), "needs.source.outputs.run_arch == 'true'")
-            self.assertIn(f"      image: {image}\n", text)
-        # Dev, nightly and release assembly take the package from this one artifact.
+        package = job(checks, "arch-package")
+        self.assertEqual(field(package, "if"), "needs.source.outputs.run_arch == 'true'")
+        self.assertRegex(package, r"(?m)^      image: archlinux@sha256:[0-9a-f]{64}$")
+        self.assertNotRegex(checks, r"(?m)^  (?:arch|mac-desktop):$")
+        self.assertNotIn("scripts/ci/gui.sh", checks)
         self.assertEqual(checks.count("name: arch-x86_64-"), 1)
         upload = next(step for step in self.checks_steps("arch-package") if "name: arch-x86_64-" in step)
         self.assertIn("\n        if: always()\n", upload)
@@ -895,16 +896,6 @@ class WorkflowSecurityTests(unittest.TestCase):
                      "runuser -u user -- python3 scripts/check-installed-package.py"):
             self.assertIn(line, package)
         self.assertLess(package.index("build-arch-package.sh"), package.index("name: arch-x86_64-"))
-        for line in ("ZERUS_DEV_BUILD_NUMBER", "build-arch-package.sh", "makepkg", "arch-x86_64"):
-            self.assertNotIn(line, desktop)
-        self.assertIn("name: arch-desktop-results\n          path: artifacts/test-results\n", desktop)
-        for name in ("arch", "mac-desktop"):
-            text = job(checks, name)
-            with self.subTest(job=name):
-                build = text.index("scripts/ci/gui.sh build")
-                self.assertLess(build, text.index("name: Save ccache"))
-                self.assertLess(text.index("name: Save ccache"), text.index("scripts/ci/gui.sh test"))
-                self.assertNotRegex(text, r"scripts/ci/gui\.sh(?! (?:build|test)\b)")
 
     def test_only_trusted_main_checks_request_cache_saves(self):
         self.assertIn("\n      save_caches: true\n", job(self.ci, "automatic"))
@@ -965,8 +956,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertLess(windows.index("npm run tauri -- build"), windows.index("name: Save Rust cache"))
 
     def test_compiler_caches_refresh_every_saving_run_and_rust_caches_do_not(self):
-        families = {"arch": "arch-ccache-v1-", "arch-package": "arch-package-ccache-v1-",
-                    "mac-desktop": "mac-desktop-ccache-v1-${{ runner.arch }}-"}
+        families = {"arch-package": "arch-package-ccache-v1-"}
         for name, family in families.items():
             text = job((ROOT / ".github/workflows/checks.yml").read_text(), name)
             restore, stats = self.checks_step(name, "ccache-restore"), self.checks_step(name, "ccache")
@@ -1048,6 +1038,39 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertLess(relay.index('name: Released HTTP'), retired)
         self.assertLess(retired, relay.index('docker build --tag zerus-relay-contract'))
         self.assertIn('name: Enforce the 256 MiB runtime envelope', relay)
+
+    def test_native_linux_disk_preparation_precedes_dependencies_and_preserves_checks(self):
+        native = job((ROOT / ".github/workflows/checks.yml").read_text(), "client-native-linux")
+        self.assertEqual(native.count("ubuntu-disk.py prepare"), 1)
+        self.assertNotIn("ubuntu-disk.py relay-before-image", native)
+        self.assertNotIn("CARGO_PROFILE_DEV_DEBUG", native)
+        self.assertNotIn("CARGO_PROFILE_TEST_DEBUG", native)
+        phases = ("after-native-checkout", "after-native-dependencies",
+                  "after-native-cache-restore", "after-native-checks")
+        indices = [native.index(f"ubuntu-disk.py report {phase}") for phase in phases]
+        self.assertEqual(indices, sorted(indices))
+        self.assertLess(indices[0], native.index("sudo apt-get update"))
+        self.assertLess(indices[0], native.index("ubuntu-disk.py prepare"))
+        self.assertLess(native.index("ubuntu-disk.py prepare"), native.index("sudo apt-get update"))
+        self.assertLess(native.index("rustup toolchain install"), indices[1])
+        self.assertLess(native.index("actions/cache/restore@"), indices[2])
+        self.assertLess(indices[2], native.index("bash scripts/ci/client-native.sh linux"))
+        self.assertIn("name: Disk usage after native checks\n        if: ${{ !cancelled() }}\n", native)
+        script = (ROOT / "scripts/ci/client-native.sh").read_text()
+        linux = script.split("    linux:all)\n", 1)[1].split("        ;;", 1)[0]
+        boundaries = (
+            ("presence_tests", "after-native-presence-tests"),
+            ("--manifest-path client/media/Cargo.toml --features video", "after-native-media-tests"),
+            ("--manifest-path client/src-tauri/Cargo.toml\n", "after-native-tauri-tests"),
+            ("--all-targets --features video -- -D warnings", "after-native-tauri-clippy"),
+            ("--all-targets --features linux-native-notify -- -D warnings", "before-native-core-test-linking"),
+            ("--features linux-native-notify linux_notify", "after-native-core-tests"),
+        )
+        for command, phase in boundaries:
+            with self.subTest(phase=phase):
+                self.assertLess(linux.index(command), linux.index(f"disk_checkpoint {phase}"))
+        self.assertLess(linux.index("disk_checkpoint before-native-core-test-linking"),
+                        linux.index("dbus-run-session -- cargo"))
 
     def test_historical_deepseek_lock_keeps_exact_registry_integrities(self):
         fixture = ROOT / "scripts/ci/dsh-fixture"
@@ -1259,7 +1282,7 @@ class WorkflowSecurityTests(unittest.TestCase):
                 if "ccache" in path:
                     # Compiler caches live outside the checkout entirely.
                     self.assertTrue(path.startswith(("/home/user/", "~/Library/Caches/", "${{ runner.temp }}/")), path)
-        for name in ("arch", "arch-package"):
+        for name in ("arch-package",):
             self.assertIn("      CCACHE_DIR: /home/user/.cache/ccache\n", job(checks, name))
         self.assertIn("CARGO_TARGET_DIR: ${{ github.workspace }}/target/windows-next",
                       job(checks, "windows-desktop"))

@@ -194,20 +194,47 @@ fn next_delay(delays: &[Value], attempt: usize) -> Option<f64> {
         _ => None,
     }
 }
-fn job_path(name: &str) -> PathBuf {
-    root()
-        .join("recovery/jobs")
-        .join(legacy_record_path(name).file_name().unwrap())
+/// A job file is keyed by its session's owner key (`storage::owner_key`),
+/// taken from the verified record or snapshot that the caller holds, never
+/// from a label or the command's selection (#1437 review). A worker keeps the
+/// key it observed, so a rename or a vanished record never moves its job to
+/// the label's other holder.
+fn job_path(owner: &str) -> PathBuf {
+    root().join("recovery/jobs").join(format!("{owner}.json"))
 }
-fn load_job(name: &str) -> Value {
-    read_json(&job_path(name)).unwrap_or(Value::Null)
+fn load_job(owner: &str) -> Value {
+    read_json(&job_path(owner)).unwrap_or(Value::Null)
 }
+fn owner(record: &Value) -> String {
+    storage::owner_key(record)
+}
+/// A legacy rename moves the job from the old label's key to the new one's.
 pub(super) fn rename_job(old: &str, new: &str, run_id: &str) -> Result<()> {
-    let mut job = load_job(old);
-    if !job.is_object() || job["identity"][0] != run_id {
+    let (from, to) = (storage::label_key(old), storage::label_key(new));
+    let Some(mut job) = renamed_job(&from, run_id) else {
         return Ok(());
-    }
+    };
     job["name"] = json!(new);
+    // Called inside the existing rename transaction's lock; replay is harmless.
+    atomic(&job_path(&to), &job.to_string())?;
+    fs::remove_file(job_path(&from)).map_err(|e| e.to_string())
+}
+/// A rename in place keeps the session's key; its job takes the new label.
+pub(super) fn rename_job_in_place(record: &Value, new: &str) -> Result<()> {
+    let key = owner(record);
+    let Some(mut job) = renamed_job(&key, string(record, "run_id")) else {
+        return Ok(());
+    };
+    job["name"] = json!(new);
+    atomic(&job_path(&key), &job.to_string())
+}
+/// `owner`'s job for `run_id`, stopped as uncertain when a rename caught it
+/// during delivery; None when it has none for that run.
+fn renamed_job(owner: &str, run_id: &str) -> Option<Value> {
+    let mut job = load_job(owner);
+    if !job.is_object() || job["identity"][0] != run_id {
+        return None;
+    }
     if job["state"] == "dispatching" {
         stop(
             &mut job,
@@ -215,12 +242,10 @@ pub(super) fn rename_job(old: &str, new: &str, run_id: &str) -> Result<()> {
             "Session renamed during delivery; inspect the agent",
         );
     }
-    // Called inside the existing rename transaction's lock; replay is harmless.
-    atomic(&job_path(new), &job.to_string())?;
-    fs::remove_file(job_path(old)).map_err(|e| e.to_string())
+    Some(job)
 }
-fn save_job(job: &Value) -> Result<()> {
-    let previous = load_job(string(job, "name"));
+fn save_job(job: &Value, owner: &str) -> Result<()> {
+    let previous = load_job(owner);
     let mut job = job.clone();
     let mut history = if previous["id"] == job["id"] {
         previous["history"].as_array().cloned().unwrap_or_default()
@@ -234,7 +259,7 @@ fn save_job(job: &Value) -> Result<()> {
         }
     }
     job["history"] = json!(history);
-    atomic(&job_path(string(&job, "name")), &job.to_string())?;
+    atomic(&job_path(owner), &job.to_string())?;
     crate::analytics::adapters::recovery(&root(), &job);
     Ok(())
 }
@@ -407,15 +432,17 @@ fn stop(job: &mut Value, state: &str, reason: &str) {
     job["reason"] = json!(reason);
     job["updated_at"] = json!(now());
 }
-pub(super) fn cancel_for_input(name: &str) -> Result<()> {
-    let mut job = load_job(name);
+/// New input to the session `record` cancels its automatic recovery.
+pub(super) fn cancel_for_input(record: &Value) -> Result<()> {
+    let key = owner(record);
+    let mut job = load_job(&key);
     if active(&job) {
         stop(
             &mut job,
             "cancelled",
             "New input cancelled automatic recovery",
         );
-        save_job(&job)?;
+        save_job(&job, &key)?;
     }
     Ok(())
 }
@@ -693,7 +720,7 @@ pub(super) fn enrich(record: &Value, output: &mut Value) {
             output[key] = v.clone();
         }
     }
-    let job = load_job(string(record, "name"));
+    let job = load_job(&owner(record));
     // Never show a previous conversation's countdown in a reused session row.
     if job.is_object()
         && job["identity"][0] == output["run_id"]
@@ -706,7 +733,7 @@ pub(super) fn enrich(record: &Value, output: &mut Value) {
 }
 
 pub(super) fn check_submission(record: &Value, id: &str) -> Result<()> {
-    let job = load_job(string(record, "name"));
+    let job = load_job(&owner(record));
     let p = policy()?;
     let s = journal::summary(record, true);
     let p = effective_policy(&p, override_for(&team_overrides(), &s));
@@ -724,7 +751,7 @@ pub(super) fn check_submission(record: &Value, id: &str) -> Result<()> {
 }
 
 pub(super) fn check_native_submission(snapshot: &Value) -> Result<()> {
-    let job = load_job(string(snapshot, "name"));
+    let job = load_job(&owner(snapshot));
     let p = effective_policy(&policy()?, override_for(&team_overrides(), snapshot));
     if job["state"] != "dispatching"
         || job["identity"] != identity(snapshot)
@@ -736,15 +763,16 @@ pub(super) fn check_native_submission(snapshot: &Value) -> Result<()> {
     Ok(())
 }
 
-fn observe() -> Result<Vec<Value>> {
+pub(super) fn observe() -> Result<Vec<Value>> {
     let panes = live()?;
     let mut snapshots = Vec::new();
     for record in records()? {
         let mut s = journal::summary(
             &record,
-            matches(&record, panes.get(string(&record, "name"))),
+            matches(&record, panes_of(&panes, &record)),
         );
-        for key in ["name", "agent", "run_id", "conversation_id"] {
+        // The record's own key goes with its observation (#1437 review).
+        for key in ["name", "agent", "run_id", "conversation_id", "session_id", "layout"] {
             s[key] = record[key].clone();
         }
         snapshots.push(s);
@@ -753,7 +781,7 @@ fn observe() -> Result<Vec<Value>> {
         if record["state"] == "running"
             && (record["native_recovery"].is_object()
                 || record["phase"] == "error"
-                || active(&load_job(string(&record, "name"))))
+                || active(&load_job(&owner(&record))))
         {
             if let Ok(s) = dsh::inspect(string(&record, "name"), None) {
                 snapshots.push(s);
@@ -787,12 +815,13 @@ fn tick() -> Result<()> {
         }
         let mut occupied = std::collections::BTreeSet::new();
         for s in &snapshots {
-            let job = load_job(string(s, "name"));
+            let job = load_job(&owner(s));
             if occupies(&job, s) {
                 occupied.insert(json!([s["agent"], s["account_id"]]).to_string());
             }
         }
         for s in snapshots {
+            let key = owner(&s);
             // H1: a team's request only wakes the session-limit class for this
             // session; everything else follows the shared policy.
             let requested = override_for(&overrides, &s);
@@ -800,7 +829,7 @@ fn tick() -> Result<()> {
                 continue;
             }
             let effective = effective_policy(&p, requested);
-            let old = load_job(string(&s, "name"));
+            let old = load_job(&key);
             let mut job = advance(old.clone(), &s, &effective, now());
             if job.is_null() {
                 if old.is_object() {
@@ -810,7 +839,7 @@ fn tick() -> Result<()> {
                             .join(format!("{}.json", string(&old, "id"))),
                         &old.to_string(),
                     )?;
-                    fs::remove_file(job_path(string(&s, "name"))).map_err(|e| e.to_string())?;
+                    fs::remove_file(job_path(&key)).map_err(|e| e.to_string())?;
                 }
                 if s["native_recovery"].is_object() {
                     dismisses.push(s.clone());
@@ -836,7 +865,7 @@ fn tick() -> Result<()> {
                 sends.push((s.clone(), job.clone()));
             }
             if job != old {
-                save_job(&job)?;
+                save_job(&job, &key)?;
             }
             if !active(&job) && s["native_recovery"].is_object() {
                 dismisses.push(s.clone());
@@ -859,7 +888,8 @@ fn tick() -> Result<()> {
             )
         };
         let _guard = lock(None)?;
-        let current = load_job(string(&s, "name"));
+        let key = owner(&s);
+        let current = load_job(&key);
         if current["id"] != job["id"] || current["state"] != "dispatching" {
             continue;
         }
@@ -894,22 +924,29 @@ fn tick() -> Result<()> {
                 );
             }
         }
-        save_job(&job)?;
+        save_job(&job, &key)?;
     }
     Ok(())
+}
+/// The owner key of a job file: its own stem, which outlives its record.
+fn stem(path: &Path) -> Option<String> {
+    path.file_stem().and_then(|stem| stem.to_str()).map(str::to_owned)
 }
 fn recover_interrupted_jobs() -> Result<()> {
     let _guard = lock(None)?;
     if let Ok(entries) = fs::read_dir(root().join("recovery/jobs")) {
         for entry in entries.flatten() {
-            if let Ok(mut job) = read_json(&entry.path()) {
+            let (Ok(mut job), Some(key)) = (read_json(&entry.path()), stem(&entry.path())) else {
+                continue;
+            };
+            {
                 if job["state"] == "dispatching" {
                     stop(
                         &mut job,
                         "uncertain",
                         "Recovery worker restarted during delivery; inspect the agent",
                     );
-                    save_job(&job)?;
+                    save_job(&job, &key)?;
                 }
             }
         }
@@ -966,10 +1003,12 @@ fn worker() -> Result<i32> {
 /// being replaced.
 #[cfg(windows)]
 fn ensure_worker() -> Result<()> {
+    crate::self_exec::ensure().map_err(|e| e.to_string())?;
     backend::host::HOST.supervise_recovery()
 }
 #[cfg(not(windows))]
 fn ensure_worker() -> Result<()> {
+    let executable = crate::self_exec::current().map_err(|e| e.to_string())?;
     // Policy refresh must not race the installed supervisor with a detached
     // executor. Starting an active unit preserves its PID and current delivery.
     #[cfg(target_os = "linux")]
@@ -984,7 +1023,7 @@ fn ensure_worker() -> Result<()> {
     }
     // Detached from both SSH and GUI lifetime; service installation additionally
     // restarts the worker after login. The worker lock handles competing GUIs.
-    let mut cmd = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
+    let mut cmd = Command::new(executable);
     cmd.args(["recovery", "worker"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1043,14 +1082,17 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
                 {
                     if let Ok(entries) = fs::read_dir(root().join("recovery/jobs")) {
                         for entry in entries.flatten() {
-                            if let Ok(mut job) = read_json(&entry.path()) {
+                            let (Ok(mut job), Some(key)) = (read_json(&entry.path()), stem(&entry.path())) else {
+                                continue;
+                            };
+                            {
                                 if active(&job) && !enabled(&p, string(&job, "class")) {
                                     stop(
                                         &mut job,
                                         "cancelled",
                                         "Automatic recovery disabled for this error class",
                                     );
-                                    save_job(&job)?;
+                                    save_job(&job, &key)?;
                                 }
                             }
                         }
@@ -1081,7 +1123,12 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         Some("action") if args.len() == 1 => {
             let request = stdin_json()?;
             let _guard = lock(None)?;
-            let mut job = load_job(string(&request, "name"));
+            // The job of the session this name reads as now; with no record
+            // there is no job to change.
+            let key = read(string(&request, "name"))
+                .map(|record| owner(&record))
+                .map_err(|_| "This scheduled recovery is no longer current; nothing was changed")?;
+            let mut job = load_job(&key);
             if job["id"] != request["id"] || job["state"] != "waiting" {
                 return Err(
                     "This scheduled recovery is no longer current; nothing was changed".into(),
@@ -1094,7 +1141,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
                 }
                 _ => return Err("Unknown recovery action".into()),
             }
-            save_job(&job)?;
+            save_job(&job, &key)?;
             println!("{job}");
         }
         _ => return Err("usage: hgs recovery get | set | sync | action | worker".into()),
@@ -1144,6 +1191,9 @@ fn scoped_action(request: Value) -> Result<()> {
         return Err("Unknown scoped recovery action".into());
     }
     let name = string(&request, "name");
+    // zerus-ucck P3c: the name arrives in the request, so it is resolved here:
+    // its identities select among sessions that share the label.
+    select_by(name, string(&request, "expected_run_id"), string(&request, "expected_conversation_id"))?;
     let directory = absolute_root()?.join("recovery_receipts");
     private_dir(&directory)?;
     let path = directory.join(format!("{}.json", string(&request, "request_id")));
@@ -1202,7 +1252,8 @@ fn scoped_action(request: Value) -> Result<()> {
             {
                 return Err("Normalized recovery session changed".into());
             }
-            let mut job = load_job(name);
+            let key = owner(&current);
+            let mut job = load_job(&key);
             if string(&current, "name") != name
                 || current["run_id"] != request["expected_run_id"]
                 || current["conversation_id"] != request["expected_conversation_id"]
@@ -1224,7 +1275,7 @@ fn scoped_action(request: Value) -> Result<()> {
                 _ => unreachable!(),
             }
             changed = true;
-            save_job(&job)?;
+            save_job(&job, &key)?;
             Ok(job)
         })();
         match outcome {
@@ -1251,6 +1302,18 @@ fn scoped_action(request: Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_image_refuses_before_service_activation() {
+        crate::self_exec::private_probe("state::recovery::tests::service_activation_probe");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "run by test_image_refuses_before_service_activation"]
+    fn service_activation_probe() {
+        crate::self_exec::probe_child("state::recovery::tests::service_activation_probe");
+        assert_eq!(ensure_worker().unwrap_err(), crate::self_exec::TEST_IMAGE);
+    }
     fn codex_copy(snapshot: &mut Value) {
         let original = failure_id(snapshot);
         snapshot["provider_error"]["source"] = json!("codex_native_log");

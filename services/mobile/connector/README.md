@@ -397,6 +397,33 @@ as Rust does. None survives a rollback to Python.
 - Both implementations take an exclusive `flock(2)` on `connector.lock`, so
   they never run on one journal at once, and `hgs status` reports either one as
   running.
+- Only this connector selects a session by its durable ID (zerus-ucck
+  P1c-2b). An explicit mutation adds `--session-id ID` right after the name:
+  `send`, `send_now`, `answer`, `interrupt`, `settings`, `clear_context` and
+  `compact_context`, and the scoped actions `pause`, `resume`, `rename`,
+  `fork`, `archive`, `forget`, `terminate` and `remove_queued`. The ID is the
+  `session_id` of the latest listing's row for the request's
+  `expected_run_id`.
+  - Every CLI on the call's path must list the markers. The CLI itself needs
+    `session-id-selector-v1`. A call through a mobile peer entry point (a peer
+    context, or a request routed to this computer) also needs
+    `mobile-peer-session-id-v1` on that CLI, and a peer's call needs it on the
+    gateway's CLI too.
+  - Restore, archived conversations, `process_stop`, `recovery_action`,
+    `set_mobile_delivery` and every read keep the name.
+  - Only the CLI's refusal of that exact ID while it resolves the ID, before
+    the command runs, becomes the failed receipt "native session changed;
+    refresh before action". That refusal is the whole standard error, one
+    line, with its exact status: 1 for `hgs: Session ID ID is OTHER, not NAME`
+    and `hgs: No live or saved session has ID ID`; 5 for `hgs: Several
+    sessions carry ID ID: NAMES`.
+  - Every other failure after the write began stays uncertain. That includes
+    `Session ID ID no longer names NAME`, which a command's later read can
+    also report after its effect. A peer hop reports the ambiguity with
+    status 1, so there it stays uncertain too.
+  - Phones, the relay, API v1, request identities and the journal are
+    unchanged. The Python connector keeps the name form, so a rollback only
+    drops the selection.
 
 ## Dependencies
 

@@ -787,6 +787,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_usageRefresh,&QPushButton::clicked,this,[this]{refreshAccountUsage(true);});
     connect(m_accountUsage,&QPushButton::clicked,this,[this]{
         const auto *entry=selected();if(!entry)return;
+        // Owner #83: the chip that shows usage also reaches the session's own switch.
+        if (m_composer->accountChip()->canSwitch()) { m_composer->accountChip()->openList(); return; }
         m_pages->setCurrentIndex(4);m_accountsPage->showAccount(entry->host,m_accountUsageData.value("id").toString());
     });
     m_meta->installEventFilter(this); m_title->installEventFilter(this);
@@ -1810,6 +1812,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // once each; the known ones are kept across restarts.
     m_teamNotices=std::make_shared<TeamAttentionNotices>(Settings::value("teams/attentionNotified").toStringList());
     connect(m_teams,&TeamController::watchedChanged,this,[this]{updateProposalCards();});
+    // Task 101: a failed read keeps the team; its strip says it is stale.
+    connect(m_teams,&TeamController::staleChanged,this,[this]{updateTeamPanel();});
     connect(m_teams,&TeamController::teamsChanged,this,[this]{
         const SlowEventLog::Scope scope(this,"teams changed");
         // U25 (spec 2.3): members other than the lead are muted by default.
@@ -5434,8 +5438,11 @@ void SessionsWindow::updateAccountChip(const Entry &entry, bool unavailable)
     chip->setOptions(AccountSwitch::options(m_sessionAccountDetailsProfiles, entry.host, s.cmd, AccountSwitch::accountOf(s.cmd, account), m_dark));
     // A team member's account changes only with swap-member (U53, U54).
     const auto *team = m_teams ? m_teams->teamOfSession(entry.host, s.name) : nullptr;
-    const bool member = team && QStringList{"planning", "running", "paused"}.contains(team->status);
-    chip->setLocked(member ? tr("A member of team %1: its account changes with Swap member in the team's Members.").arg(team->name) : QString());
+    const auto *member = team ? team->memberOfSession(entry.host, s.name) : nullptr;
+    // Owner #83: a member's account moves with Swap member; the lead's own
+    // session stays switchable here, since Swap member never applies to it.
+    const bool locked = team && QStringList{"planning", "running", "paused"}.contains(team->status) && member && !member->lead;
+    chip->setLocked(locked ? tr("A member of team %1: its account changes with Swap member in the team's Members.").arg(team->name) : QString());
     chip->setBlocked(accountSwitchBlockReason(entry));
 }
 
@@ -7588,7 +7595,14 @@ void SessionsWindow::updateTeamPanel()
                     Q_UNUSED(attempt);break;
                 }
             }
+            // Task 101: the last good read stays while hgs does not answer.
+            if(m_teams->stale()){
+                const auto at=m_teams->lastGoodRead();
+                text+=tr(" · <span style='color:%1;'>not refreshed since %2</span>").arg(m_dark?QStringLiteral("#d6b25e"):QStringLiteral("#8a6414"),
+                    at.isValid()?at.time().toString(QStringLiteral("HH:mm:ss")):tr("earlier"));
+            }
             m_teamStripText->setText(text);
+            m_teamStripText->setToolTip(m_teams->stale()?m_teams->staleError():QString());
             QColor fill(m_accent);fill.setAlphaF(m_dark?.10:.07);
             m_teamStrip->setStyleSheet(QStringLiteral("QFrame#teamStrip{background:%1;border:1px solid %2;border-radius:8px;} QPushButton#teamStripOpen{color:%3;border:none;background:transparent;}")
                 .arg(fill.name(QColor::HexArgb),[this]{QColor edge(m_accent);edge.setAlphaF(.45);return edge.name(QColor::HexArgb);}(),m_accent));
@@ -7914,3 +7928,4 @@ void SessionsWindow::startTeamDesigner(const QString &folder,const QString &goal
             timer->start();
         });
 }
+

@@ -3,7 +3,7 @@ use super::*;
 const CHILD: &str = "ZERUS_TEST_SILENT_WATCH_CLOCK";
 
 #[test]
-fn silent_watch_expires_and_explicit_retry_reconnects() {
+fn silent_watch_expires_and_automatically_reconnects_after_backoff() {
     let _process = crate::PROCESS_TREE.read().unwrap();
     let log_root = Fixture::new(json!({}));
     let log = fs::File::create(log_root.0.join("clock-child.log")).unwrap();
@@ -120,14 +120,16 @@ fn clock_child() {
         assert_eq!(
             watch_calls(&fixture.calls()),
             1,
-            "silence cannot replay a watch"
+            "the reconnect backoff has not elapsed"
         );
 
         fs::write(fixture.0.join("fixture.json"), "{}").unwrap();
-        service.retry(); // The normal explicit Retry opens one fresh watch.
-        observed("retry reconnects a fresh watch", &service, || {
-            service.snapshot().connected && watch_calls(&fixture.calls()) == 2
-        })
+        tokio::time::advance(Duration::from_millis(251)).await;
+        observed(
+            "backoff reconnects a fresh watch without Retry",
+            &service,
+            || service.snapshot().connected && watch_calls(&fixture.calls()) == 2,
+        )
         .await;
         tokio::time::resume();
         service.join().await.unwrap();

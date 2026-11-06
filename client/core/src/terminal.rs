@@ -220,10 +220,11 @@ pub fn attach_args(target: &Target) -> Vec<String> {
 pub fn attach_env(
     base: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Vec<(OsString, OsString)> {
-    const REMOVED: [&str; 7] = [
+    const REMOVED: [&str; 8] = [
         "TMUX",
         "TMUX_PANE",
         "HGS_SESSION",
+        "HGS_SESSION_ID",
         "HGS_RUN_ID",
         "HGS_TAB",
         "TERM",
@@ -231,7 +232,16 @@ pub fn attach_env(
     ];
     let mut env: Vec<(OsString, OsString)> = crate::child_environment::restored(base)
         .into_iter()
-        .filter(|(key, _)| !REMOVED.iter().any(|removed| key == removed))
+        // Windows names are case-insensitive.
+        .filter(|(key, _)| {
+            !REMOVED.iter().any(|removed| {
+                key == removed
+                    || (cfg!(windows)
+                        && key
+                            .to_str()
+                            .is_some_and(|key| key.eq_ignore_ascii_case(removed)))
+            })
+        })
         .collect();
     env.extend([
         ("HGS_TAB".into(), "0".into()),

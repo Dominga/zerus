@@ -2,7 +2,7 @@ import { desktopService } from "./desktopService";
 import { batch, createEffect, createRoot, createSignal, on, untrack } from "solid-js";
 import { activityPort, composerTab, inspectSubagentActivity, processesFollow, processesShown, windowVisibility } from "../bridge";
 import { applyBatch, catalog, computerFresh, computerOffline, onReplaced, orderedRows, rowId, setDraftKeys } from "./catalog";
-import { composer } from "./composer";
+import { composer, draftKey } from "./composer";
 import { sessionModels, bindModelNotice } from "./sessionModels";
 import { bindForkSession } from "./sessionForks";
 import { tasks } from "./tasks";
@@ -63,7 +63,8 @@ bindActivity(activity);
 bindModelNotice((message) => notify("error", message, true));
 bindSelection(() => ({ key: selectedKey(), subagent: subagentOpen() }));
 bindForkSession({
-  busy: (row) => sessionModels.changing() || (composer.view()?.key === `${row.computer}\n${row.name}` && (!!composer.view()?.sending || !!composer.view()?.waiting)),
+  busy: (row) => sessionModels.changing() || (composer.view()?.key === draftKey({ computer: row.computer, key: "", name: row.name, archive_id: null, session_id: row.archiveId ? null : row.sessionId ?? null })
+    && (!!composer.view()?.sending || !!composer.view()?.waiting)),
   terminal: () => { terminal.opened(); setDetailTab("terminal"); },
 });
 
@@ -124,12 +125,12 @@ createRoot(() => {
   // draft too; only its recorded Activity stays read-only (Qt selectSession).
   createEffect(on(() => {
     const s = selected();
-    return s ? JSON.stringify([s.computer, s.catalogKey, s.name, s.state === "archived" ? s.archiveId ?? "" : "", subagentOpen(), s.conversationId ?? ""]) : undefined;
+    return s ? JSON.stringify([s.computer, s.catalogKey, s.name, s.state === "archived" ? s.archiveId ?? "" : "", subagentOpen(), s.conversationId ?? "", s.sessionId ?? ""]) : undefined;
   }, (identity) => {
     const s = selected(), child = subagentOpen();
     const opened = composer.open(identity && s ? {
       computer: s.computer, key: s.catalogKey, name: s.name, archive_id: s.state === "archived" ? s.archiveId ?? null : null,
-      subagent: child ? { agent_id: child, parent_conversation_id: s.conversationId ?? "" } : undefined,
+      subagent: child ? { agent_id: child, parent_conversation_id: s.conversationId ?? "" } : undefined, session_id: s.sessionId ?? null,
     } : undefined);
     // The first new-run frame may be its only state. Rust must bind the
     // composer's followed key before that frame can reach its observer.

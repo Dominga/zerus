@@ -110,6 +110,13 @@ pub fn group_title(group: Group, live: bool) -> &'static str {
     }
 }
 
+/// Task 77: the summary while a followed session's first inventory is on its
+/// way. Qt's view gets the inventory with the inspection it already holds;
+/// the processes topic answers a few seconds after the follow (the lead's
+/// 127 commands took 3-10 s), and "No shell commands recorded yet" then
+/// claimed an empty history.
+pub const READING: &str = "Reading processes…";
+
 /// The summary line over normalized processes.
 pub fn summary(records: &[Value], live: bool) -> String {
     if records.is_empty() {

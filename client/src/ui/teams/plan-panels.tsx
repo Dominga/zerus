@@ -3,13 +3,14 @@ import type { JSX } from "solid-js";
 import { tr } from "../../i18n";
 import type { TeamProfileView, TeamTestsView } from "../../types";
 import type { PlacedNode } from "./plan";
+import { KIND_STYLES, keyName, lossKey, styleOf, swatchBackground } from "./profile-palette";
+import { taskHeat, type TaskHeat } from "./heat";
+import { skin } from "../../skin/runtime";
 import {
   boardColumns,
   formatSeconds,
   formatTokens,
-  heatShare,
   layerRows,
-  lossText,
   runTime,
   stageChips,
   stageName,
@@ -31,6 +32,9 @@ export function PlanModeBar(props: {
   includeCancelled: boolean;
   onMode: (mode: PlanMode) => void;
   onCancelled: (shown: boolean) => void;
+  /** Task 82: the lateness heat on Graph, Board and Layers. */
+  heat?: boolean;
+  onHeat?: (on: boolean) => void;
 }): JSX.Element {
   return (
     <div class="pm-modes" role="tablist" aria-label={tr("Plan view")}>
@@ -58,6 +62,12 @@ export function PlanModeBar(props: {
           />
           {tr("Show cancelled")}
         </label>
+        <Show when={props.onHeat}>
+          <label class="pm-check" title={tr("Tint each task by how late it is against the plan; its overrun shows beside it")}>
+            <input type="checkbox" class="pm-heat-toggle" checked={!!props.heat} onChange={(event) => props.onHeat?.(event.currentTarget.checked)} />
+            {tr("Lateness")}
+          </label>
+        </Show>
       </Show>
     </div>
   );
@@ -88,7 +98,7 @@ function lossLabel(kind: string): string {
   return kind;
 }
 
-function runStatusLabel(status: string): string {
+export function runStatusLabel(status: string): string {
   const kind = testStatus(status);
   if (kind === "passed") return tr("Passed");
   if (kind === "timed-out") return tr("Timed out");
@@ -106,14 +116,15 @@ function columnTitle(key: string): string {
   return tr("Cancelled");
 }
 
-function Card(props: { placed: PlacedNode; heat?: number | null; loss?: string; onOpen?: (id: number) => void }): JSX.Element {
+function Card(props: { placed: PlacedNode; heat?: TaskHeat | null; onOpen?: (id: number) => void }): JSX.Element {
   const task = () => props.placed.node;
   return (
     <button
       type="button"
       class={`pm-card pm-tone-${tone(task().status)}`}
-      style={props.heat != null ? { "--heat": String(props.heat) } : undefined}
+      style={props.heat ? { "--heat": String(props.heat.tint) } : undefined}
       data-task={task().id}
+      title={props.heat?.tip || undefined}
       onClick={() => props.onOpen?.(task().id)}
     >
       <span class="pm-card-line">
@@ -123,8 +134,11 @@ function Card(props: { placed: PlacedNode; heat?: number | null; loss?: string; 
       <span class="pm-card-meta">
         <span>{task().status || tr("pending")}</span>
         <Show when={task().assignee}><span>{task().assignee}</span></Show>
-        <Show when={props.loss}><span class="pm-loss">{props.loss}</span></Show>
       </span>
+      <Show when={props.placed.task?.origin || props.placed.node.origin}>
+        {(origin) => <span class="pm-origin">{tr("Spawned from #%1", origin())}</span>}
+      </Show>
+      <HeatLine heat={props.heat} />
       <Show when={stageChips(props.placed.task?.pipeline_run).length > 0}>
         <span class="pm-stages">
           <For each={stageChips(props.placed.task?.pipeline_run)}>
@@ -169,7 +183,7 @@ export function BoardView(props: {
             <div class="pm-column-body">
               <For each={column.nodes.slice(0, 200)}>
                 {(placed) => (
-                  <Card placed={placed} heat={heatShare(props.profile, placed.node.id)} loss={lossText(props.profile, placed.node.id)} onOpen={props.onOpen} />
+                  <Card placed={placed} heat={taskHeat(props.profile, placed.node.id)} onOpen={props.onOpen} />
                 )}
               </For>
               <Show when={column.nodes.length > 200}><p class="pm-more">{tr("%1 more not shown", column.nodes.length - 200)}</p></Show>
@@ -205,12 +219,70 @@ export function LayersView(props: {
             <header class="pm-layer-head"><b>{tr("Layer %1", row.layer)}</b><span class="pm-count">{row.nodes.length}</span></header>
             <div class="pm-layer-body">
               <For each={row.nodes.slice(0, 200)}>
-                {(placed) => <Card placed={placed} heat={heatShare(props.profile, placed.node.id)} loss={lossText(props.profile, placed.node.id)} onOpen={props.onOpen} />}
+                {(placed) => <Card placed={placed} heat={taskHeat(props.profile, placed.node.id)} onOpen={props.onOpen} />}
               </For>
             </div>
           </section>
         )}
       </For>
+    </div>
+  );
+}
+
+/** Task #79: a kind's swatch from the shared profile palette (a wait shows its hatch). */
+function Swatch(props: { kind?: string; strip?: boolean }): JSX.Element {
+  const style = () => (props.kind ? styleOf(props.kind) : undefined);
+  const dark = () => skin().appearance === "dark";
+  return <span class="pm-swatch" classList={{ strip: props.kind === "build", none: !style() }}
+    style={style() ? { background: swatchBackground(style()!, dark()), "border-color": dark() ? style()!.dark : style()!.light } : undefined} aria-hidden="true" />;
+}
+
+/** Task 82: a card's lateness and, beside it, its overrun badge in its own colour. */
+export function HeatLine(props: { heat?: TaskHeat | null; compact?: boolean }): JSX.Element {
+  return (
+    <Show when={props.heat && (props.heat.label || props.heat.badge)}>
+      <span class="pm-heat-line">
+        <Show when={props.heat!.label}>
+          <span class="pm-late" classList={{ "pm-late-muted": props.heat!.muted }}>{props.heat!.label}</span>
+        </Show>
+        <Show when={props.compact ? props.heat!.badgeCompact : props.heat!.badge}>
+          <span class="pm-overrun" style={{ "--over": String(props.heat!.over) }} title={props.heat!.badge}>
+            {props.compact ? props.heat!.badgeCompact : props.heat!.badge}
+          </span>
+        </Show>
+      </span>
+    </Show>
+  );
+}
+
+/** Task 82: what the heat shows: the lateness tint and its scale, and the overrun's own scale. */
+export function HeatLegend(props: { profile?: TeamProfileView | null }): JSX.Element {
+  return (
+    <div class="pm-heat-legend" aria-label={tr("Heat")}>
+      <span>{tr("Late against the plan: own lateness tints, inherited is muted (from #N)")}</span>
+      <span class="pm-heat-scale">
+        <span>0</span>
+        <i class="pm-heat-ramp" />
+        <span>{tr("2h or more late")}</span>
+      </span>
+      <span>{tr("Overrun, own work against the estimate:")}</span>
+      <For each={[0, 0.5, 1]}>
+        {(over) => <span class="pm-overrun" style={{ "--over": String(over) }}>{over >= 1 ? "x2+" : `x${(1 + over).toFixed(1)}`}</span>}
+      </For>
+      <Show when={!props.profile}><span class="pm-heat-note">{tr("Reading the profile…")}</span></Show>
+      <Show when={props.profile?.task_rows_more}>
+        <span class="pm-heat-note">{tr("Lateness of the first %n tasks", props.profile?.task_rows.length ?? 0)}</span>
+      </Show>
+    </div>
+  );
+}
+
+/** Task #79: every span kind of the profile, its name in full; the items wrap. */
+export function ProfileLegend(): JSX.Element {
+  return (
+    <div class="pm-legend" aria-label={tr("Span kinds")}>
+      <span class="pm-legend-title">{tr("SPANS")}</span>
+      <For each={KIND_STYLES}>{(style) => <span class="pm-legend-item" data-kind={style.key}><Swatch kind={style.key} /><span>{keyName(style.key)}</span></span>}</For>
     </div>
   );
 }
@@ -231,7 +303,8 @@ export function ProfilePanel(props: { profile?: TeamProfileView | null }): JSX.E
             <Show when={profile().losses.length > 0} fallback={<p class="pm-empty">{tr("No losses recorded")}</p>}>
               <For each={profile().losses.slice(0, 20)}>
                 {(loss) => (
-                  <div class="pm-loss-row">
+                  <div class="pm-loss-row" data-kind={lossKey(loss.kind) ?? ""}>
+                    <Swatch kind={lossKey(loss.kind)} />
                     <span class="pm-loss-kind">{lossLabel(loss.kind)}</span>
                     <Show when={loss.task > 0}><span class="pm-id">#{loss.task}</span></Show>
                     <span class="grow" />
@@ -241,6 +314,7 @@ export function ProfilePanel(props: { profile?: TeamProfileView | null }): JSX.E
                 )}
               </For>
             </Show>
+            <ProfileLegend />
             <h3>{tr("Roles")}</h3>
             <For each={profile().roles.slice(0, 50)}>
               {(role) => (

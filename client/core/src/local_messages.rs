@@ -224,10 +224,22 @@ impl LocalMessages {
     /// A send ended. Returns the detail the composer shows, empty on
     /// success.
     pub fn finished(&mut self, key: &str, request_id: &str, outcome: &Outcome) -> String {
+        self.finish(key, request_id, outcome, true)
+    }
+
+    /// `finished`, for a send whose uncertain detail is already a complete
+    /// line of its own (the desktop service's): it is shown as is, without
+    /// the [`uncertain_detail`] prefix of the direct path.
+    pub fn finished_as_is(&mut self, key: &str, request_id: &str, outcome: &Outcome) -> String {
+        self.finish(key, request_id, outcome, false)
+    }
+
+    fn finish(&mut self, key: &str, request_id: &str, outcome: &Outcome, prefix: bool) -> String {
         let detail = match outcome {
             Outcome::Done { .. } => String::new(),
             Outcome::Failed { detail } => detail.clone(),
-            Outcome::Uncertain { detail } => uncertain_detail(detail),
+            Outcome::Uncertain { detail } if prefix => uncertain_detail(detail),
+            Outcome::Uncertain { detail } => detail.clone(),
         };
         if self.rows.contains_key(key) {
             self.touch(key);
@@ -530,6 +542,24 @@ mod tests {
         messages.sending(KEY, "3", None, "hello", &[], "run-1", "conv-1", 102.0);
         assert_eq!(messages.rows(KEY).len(), 1);
         assert!(!messages.delete(KEY, "3"), "a sending row is not deleted");
+        // A complete uncertain line of its own is shown as is: still
+        // uncertain and never retried, without the direct path's prefix.
+        let line =
+            "Delivery is not confirmed by the desktop service. Check Terminal before retrying.";
+        let detail = messages.finished_as_is(
+            KEY,
+            "3",
+            &Outcome::Uncertain {
+                detail: line.into(),
+            },
+        );
+        assert_eq!(detail, line);
+        let row = &messages.rows(KEY)[0];
+        assert_eq!(
+            (row.status, row.uncertain, row.error.as_str()),
+            (Status::Error, true, line)
+        );
+        assert!(messages.retryable(KEY, "3", "run-1", "conv-1").is_none());
     }
 
     #[test]

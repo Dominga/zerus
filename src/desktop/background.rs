@@ -30,9 +30,25 @@ pub(super) struct Runtime {
     activations: activation::Router,
     drained: bool,
     stopping: bool,
+    #[cfg(windows)]
+    swarm: super::swarm_windows::Runtime,
     notifications: notification_service::Runtime,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     creation: super::creation_clone::Runtime,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    worktree: super::creation_worktree::Runtime,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    launch: super::creation_launch::Runtime,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    message: super::task_message::Runtime,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    send: super::deferred_send::Runtime,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    answer: super::deferred_answer::Runtime,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    compact: super::compact_to_send::Runtime,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    task_start: super::task_start_reconcile::Runtime,
 }
 
 /// The actor can replace only an already admitted background runtime after its
@@ -62,6 +78,20 @@ impl Runtime {
         let producer = broker.claim_internal()?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let creation = super::creation_clone::Runtime::new(config, epoch, owner.clone())?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let worktree = super::creation_worktree::Runtime::new(config, epoch, owner.clone())?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let launch = super::creation_launch::Runtime::new(config, epoch, owner.clone())?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let message = super::task_message::Runtime::new(config, epoch, owner.clone())?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let send = super::deferred_send::Runtime::new(config, epoch, owner.clone())?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let answer = super::deferred_answer::Runtime::new(config, epoch, owner.clone())?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let compact = super::compact_to_send::Runtime::new(config, epoch, owner.clone())?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let task_start = super::task_start_reconcile::Runtime::new(config, epoch, owner.clone())?;
         match fleet::Runtime::start(config, epoch) {
             Ok(fleet) => Ok(Self {
                 fleet,
@@ -75,9 +105,25 @@ impl Runtime {
                 activations: activation::Router::new(&location.configuration, epoch),
                 drained: false,
                 stopping: false,
+                #[cfg(windows)]
+                swarm: super::swarm_windows::Runtime::new(config, owner.clone()),
                 notifications: notification_service::Runtime::new(config, &location, epoch, owner),
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
                 creation,
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                worktree,
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                launch,
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                message,
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                send,
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                answer,
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                compact,
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                task_start,
             }),
             Err(error) => {
                 producer.close();
@@ -103,6 +149,8 @@ impl Runtime {
             let _ = self.poll_drain(store);
             return (Vec::new(), false);
         }
+        #[cfg(windows)]
+        self.swarm.poll();
         let fleet = &self.fleet;
         self.details.tick(
             &mut |computer, generation, controls| fleet.controls(computer, generation, controls),
@@ -119,6 +167,20 @@ impl Runtime {
                 Ok(change) => {
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                     self.creation.observe(&event);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.worktree.observe(&event);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.launch.observe(&event);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.message.observe(&event);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.send.observe(&event);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.answer.observe(&event);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.compact.observe(&event);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.task_start.observe(&event);
                     self.delivery.observe(store, &event);
                     self.maintenance.observe(store, &event);
                     if self.attention.enabled() {
@@ -139,6 +201,20 @@ impl Runtime {
                 Err(_) => {
                     #[cfg(any(target_os = "linux", target_os = "macos"))]
                     self.creation.reject(&event);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.worktree.reject(&event);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.launch.reject(&event);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.message.reject(&event);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.send.reject(&event);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.answer.reject(&event);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.compact.reject(&event);
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    self.task_start.reject(&event);
                     self.maintenance.reject(&event);
                     self.attention.reject_event(&event);
                     self.details.reject(&event, seq);
@@ -154,6 +230,20 @@ impl Runtime {
             .poll(store, &mut self.attention, &mut self.activations, seq);
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.creation.poll(store, self.notifications.handoff());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.worktree.poll(store, self.notifications.handoff());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.launch.poll(store, self.notifications.handoff());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.message.poll(store, self.notifications.handoff());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.send.poll(store, self.notifications.handoff());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.answer.poll(store, self.notifications.handoff());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.compact.poll(store, self.notifications.handoff());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.task_start.poll(store, self.notifications.handoff());
         // Disabled discovery must not accumulate permanent edge/baseline rows.
         // Enabling resets the baseline before later observations may post.
         if !self.notifications.ready() && self.attention.retiring() {
@@ -190,6 +280,66 @@ impl Runtime {
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"creation_clone_unsupported"});
         }
+        if authority.operation() == "creation_worktree" {
+            // Its Git binds the pinned common directory through /proc/self/fd,
+            // which only Linux offers; macOS refuses before admission.
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if cfg!(target_os = "linux") {
+                return self
+                    .worktree
+                    .frontend(store, authority, self.notifications.handoff());
+            }
+            return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"creation_worktree_unsupported"});
+        }
+        if authority.operation() == "creation_launch" {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            return self
+                .launch
+                .frontend(store, authority, self.notifications.handoff());
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"creation_launch_unsupported"});
+        }
+        if authority.operation() == "task_message" {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            return self
+                .message
+                .frontend(store, authority, self.notifications.handoff());
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"task_message_unsupported"});
+        }
+        // Linux and macOS answer it on its own streaming route; elsewhere
+        // there are no custody inputs.
+        if authority.operation() == "task_message_input_release" {
+            return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"task_message_input_release_unsupported"});
+        }
+        if authority.operation() == "deferred_send" {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            return self
+                .send
+                .frontend(store, authority, self.notifications.handoff());
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"deferred_send_unsupported"});
+        }
+        if authority.operation() == "deferred_answer" {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            return self
+                .answer
+                .frontend(store, authority, self.notifications.handoff());
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"deferred_answer_unsupported"});
+        }
+        if authority.operation() == "compact_to_send" {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            return self
+                .compact
+                .frontend(store, authority, self.notifications.handoff());
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"compact_to_send_unsupported"});
+        }
+        // A recognized native request is still not executing-kind admission.
+        if authority.operation() == "task_start_reconcile" {
+            return json!({"request_id":authority.id(),"accepted":false,"durable":false,"code":"task_start_reconcile_unsupported"});
+        }
         if authority.operation() == "automatic_approvals" {
             return self.delivery.frontend_request(store, authority);
         }
@@ -197,6 +347,60 @@ impl Runtime {
             return self.cache.frontend_request(store, authority);
         }
         self.maintenance.frontend_request(store, authority)
+    }
+    /// A reference-form task message: preparation runs off the actor and the
+    /// reply follows on `queue`.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn task_message_request(
+        &mut self,
+        store: &mut Store,
+        authority: super::ui_authority::Validated,
+        queue: Arc<Queue>,
+        seq: u64,
+    ) {
+        self.message
+            .frontend_reference(store, authority, self.notifications.handoff(), queue, seq)
+    }
+    /// The read-only listing of charged custody inputs; its page follows on
+    /// `queue`.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn task_message_inputs(
+        &mut self,
+        store: &Store,
+        request: &Value,
+        queue: Arc<Queue>,
+        seq: u64,
+    ) {
+        self.message.task_message_inputs(store, request, queue, seq)
+    }
+    /// One explicit release of a reviewed custody input; its reply follows
+    /// on `queue`.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn task_message_input_release(
+        &mut self,
+        store: &mut Store,
+        authority: super::ui_authority::Validated,
+        queue: Arc<Queue>,
+        seq: u64,
+    ) {
+        self.message.task_message_input_release(
+            store,
+            authority,
+            self.notifications.handoff(),
+            queue,
+            seq,
+        )
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn task_start_request(
+        &mut self,
+        store: &mut Store,
+        authority: super::ui_authority::Validated,
+        queue: Arc<Queue>,
+        seq: u64,
+    ) -> Result<()> {
+        self.task_start
+            .frontend(store, authority, self.notifications.handoff(), queue, seq)
     }
 
     pub fn details_open(&mut self, queue: &Arc<Queue>) -> Option<Value> {
@@ -213,11 +417,25 @@ impl Runtime {
     }
 
     pub fn decorate(&self, value: &mut Value) {
+        #[cfg(windows)]
+        {
+            value["swarm_runtime"] = self.swarm.status();
+            value["lifecycle"]["background"]["swarm"] = self.swarm.status();
+        }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             value["creation_clone_runtime"] = self.creation.status();
+            value["creation_worktree_runtime"] = self.worktree.status();
+            value["creation_launch_runtime"] = self.launch.status();
+            value["task_message_runtime"] = self.message.status();
+            value["deferred_send_runtime"] = self.send.status();
+            value["deferred_answer_runtime"] = self.answer.status();
+            value["compact_to_send_runtime"] = self.compact.status();
             value["lifecycle"]["background"]["operations"] =
                 value["creation_clone_runtime"].clone();
+            value["task_start_reconcile_runtime"] = self.task_start.status();
+            value["lifecycle"]["background"]["operations"]["task_start_reconcile"] =
+                self.task_start.status();
         }
         value["detail_subscriptions"] = self.details.status();
         value["attention_discovery"] = self.attention.status();
@@ -253,7 +471,12 @@ impl Runtime {
             value["lifecycle"]["background"]["approvals"]["code"].clone();
         value["lifecycle"]["background"]["delivery"] = delivery.clone();
         value["delivery_runtime"] = delivery.clone();
+        #[cfg(windows)]
+        let swarm_done = self.swarm.confirmed_drained();
+        #[cfg(not(windows))]
+        let swarm_done = true;
         value["ownership"] = if code == "drained"
+            && swarm_done
             && delivery["drained"] == true
             && self.maintenance.drained()
             && self.cache.drained()
@@ -299,15 +522,20 @@ impl Runtime {
         }
         self.notifications.publication_owner(store)
     }
-    pub fn revocation_epoch(&self, fallback: &str) -> String {
-        self.notifications
-            .writer_epoch()
-            .unwrap_or(fallback)
-            .to_owned()
+    pub fn captured_writer_epoch(&self) -> Option<String> {
+        self.notifications.writer_epoch().map(str::to_owned)
     }
 
     pub fn drained(&self) -> bool {
         self.drained
+    }
+    #[cfg(windows)]
+    pub fn restart_swarm(&self) -> Value {
+        if self.stopping || self.drained {
+            json!({"schema":1,"accepted":false,"code":"background_service_stopping"})
+        } else {
+            self.swarm.restart()
+        }
     }
 
     pub fn drain(&mut self, store: &mut Store, timeout: Duration) -> Result<()> {
@@ -322,8 +550,24 @@ impl Runtime {
         let cache_stop = self.cache.request_stop(store);
         self.attention.set_policy(attention::Policy::default());
         self.notifications.request_stop();
+        #[cfg(windows)]
+        self.swarm.request_stop();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.creation.request_stop();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.worktree.request_stop();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.launch.request_stop();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.message.request_stop();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.send.request_stop();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.answer.request_stop();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.compact.request_stop();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.task_start.request_stop();
         if let Some(presence) = &self.presence {
             presence.request_stop();
         }
@@ -352,6 +596,20 @@ impl Runtime {
             .poll(store, &mut self.attention, &mut self.activations, &mut seq);
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.creation.poll(store, self.notifications.handoff());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.worktree.poll(store, self.notifications.handoff());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.launch.poll(store, self.notifications.handoff());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.message.poll(store, self.notifications.handoff());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.send.poll(store, self.notifications.handoff());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.answer.poll(store, self.notifications.handoff());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.compact.poll(store, self.notifications.handoff());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.task_start.poll(store, self.notifications.handoff());
         if self.notifications.drained() {
             self.attention.request_stop();
         }
@@ -369,7 +627,19 @@ impl Runtime {
             && self.notifications.drained();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            self.drained = self.drained && self.creation.drained();
+            self.drained = self.drained
+                && self.creation.drained()
+                && self.worktree.drained()
+                && self.launch.drained()
+                && self.message.drained()
+                && self.send.drained()
+                && self.answer.drained()
+                && self.compact.drained()
+                && self.task_start.drained();
+        }
+        #[cfg(windows)]
+        {
+            self.drained = self.swarm.drained() && self.drained;
         }
         Ok(self.drained)
     }

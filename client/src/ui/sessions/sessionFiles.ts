@@ -11,12 +11,15 @@ import {
   sessionFileSave,
   type SessionFileView,
 } from "../../bridge";
-import { toast } from "../../store/ui";
+import { subagentOpen, toast } from "../../store/ui";
 import type { Session } from "./types";
 import { tr } from "../../i18n";
 
 const [sessionFile, setSessionFile] = createSignal<SessionFileView>();
 export { sessionFile };
+/** Task 73: the session and open subagent the dialog was opened for, fixed while it shows (Qt keeps the scope immutable across the nested modal). */
+const [fileOrigin, setFileOrigin] = createSignal<{ session: Session; agentId?: string }>();
+export { fileOrigin };
 
 let generation = 0;
 function apply(id: number, view: SessionFileView | null) {
@@ -33,6 +36,7 @@ export function openExternal(url: string) { void sessionFileExternal(url).catch(
 
 export function openSessionFile(session: Session, href: string) {
   const request = ++generation;
+  setFileOrigin({ session, agentId: subagentOpen() });
   const old = sessionFile();
   if (old) { setSessionFile(undefined); void sessionFileClose(old.id).catch(report); }
   void sessionFileDialog(session.computer, session.catalogKey, href, session.cwdPath || session.cwdCanonical).then((view) => {

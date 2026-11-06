@@ -182,16 +182,40 @@ class CliPhases(unittest.TestCase):
                 path=binaries/name
                 path.write_text('#!/bin/sh\n[ -z "${HGS_SHOULD_NOT_EXIST:-}" ] || exit 88\nprintf "%s:%s\\n" '+name+' "$*" >> "$CALL_LOG"\n')
                 path.chmod(0o755)
-            results={}
-            for phase in ('all','debug','remaining','unknown'):
-                log=root/(phase+'.log');env=dict(os.environ, PATH=str(binaries)+':/usr/bin:/bin', CALL_LOG=str(log), HGS_SHOULD_NOT_EXIST='contaminated')
-                result=subprocess.run([selected_bash,str(script),*([phase] if phase!='all' else [])],env=env,capture_output=True,text=True)
-                self.assertEqual(result.returncode, 2 if phase=='unknown' else 0,result.stderr)
-                results[phase]=log.read_text().splitlines() if log.exists() else []
-            debug=['python3:-','cargo:test --locked','cargo:build --locked','cargo:build --locked --example fake_agent']
-            remaining=['python3:-','bash:tests/test_hgs.sh','python3:scripts/ci/python-tests.py','cargo:build --release --locked']
-            self.assertEqual(results['debug'],debug);self.assertEqual(results['remaining'],remaining)
-            self.assertEqual(results['all'],debug+remaining[1:]);self.assertEqual(results['unknown'],[])
+            # Exercise both native branches without depending on the host.
+            uname=binaries/'uname'
+            uname.write_text('#!/bin/sh\nprintf "%s\\n" "$CLI_PHASE_TEST_SYSTEM"\n')
+            uname.chmod(0o755)
+            for system in ('Linux','Darwin'):
+                results={}
+                for phase in ('all','debug','remaining','unknown'):
+                    log=root/(system+'-'+phase+'.log')
+                    env=dict(os.environ, PATH=str(binaries)+':/usr/bin:/bin', CALL_LOG=str(log),
+                             CLI_PHASE_TEST_SYSTEM=system, HGS_SHOULD_NOT_EXIST='contaminated')
+                    result=subprocess.run([selected_bash,str(script),*([phase] if phase!='all' else [])],
+                                          env=env,capture_output=True,text=True)
+                    with self.subTest(system=system,phase=phase):
+                        self.assertEqual(result.returncode, 2 if phase=='unknown' else 0,result.stderr)
+                    results[phase]=log.read_text().splitlines() if log.exists() else []
+                debug=['python3:-','cargo:test --locked','cargo:build --locked']
+                native_cases=[
+                    'real_cli_recover_only_reconciles_the_original_receipt_and_never_falls_back_to_terminal_input',
+                    'real_cli_original_child_kill_and_revoke_never_release_input_or_replay_after_reopen',
+                ]
+                if system=='Linux':
+                    native_cases.append('real_cli_actor_sigkill_keeps_original_custody_and_restart_never_reconstructs_consent')
+                debug += ['cargo:test --locked --bin hgs desktop::task_start_reconcile::tests::'+case+
+                          ' -- --ignored --exact --test-threads=1' for case in native_cases]
+                debug.append('cargo:build --locked --example fake_agent')
+                remaining=['python3:-','bash:tests/test_hgs.sh',
+                           'cargo:+1.99.1 test --locked --test voice_recovery_fixture --no-run --target-dir target/speech-recovery --message-format=json',
+                           'python3:scripts/ci/speech-recovery-executable.py artifacts/test-results/speech-recovery-build.jsonl',
+                           'python3:scripts/ci/python-tests.py','cargo:build --release --locked']
+                with self.subTest(system=system):
+                    self.assertEqual(results['debug'],debug)
+                    self.assertEqual(results['remaining'],remaining)
+                    self.assertEqual(results['all'],debug+remaining[1:])
+                    self.assertEqual(results['unknown'],[])
 
 
 class WorkflowContracts(unittest.TestCase):
@@ -347,12 +371,12 @@ class WorkflowContracts(unittest.TestCase):
 
     def test_selected_and_full_suite_gate_requires_new_native_even_if_aggregate_is_faked_success(self):
         body=security.job(self.checks,'gate');code=compile(security.inline_python(body),'suite-results','exec')
-        mac=('cli-macos-debug','cli-macos-core','cli-macos-native','cli-macos','connector-macos','mac-desktop')
+        mac=('cli-macos-debug','cli-macos-core','cli-macos-native','cli-macos','connector-macos')
         always=('source','quick','client-frontend','relay','connector','android')
         for linux,macos in itertools.product((False,True),repeat=2):
             results={name:{'result':'success'} for name in always}
             results.update({name:{'result':'success' if macos else 'skipped'} for name in mac})
-            results.update({name:{'result':'skipped'} for name in ('arch','arch-package','ios','windows-host','windows-desktop')})
+            results.update({name:{'result':'skipped'} for name in ('arch-package','ios','windows-host','windows-desktop')})
             results['cli']={'result':'success' if linux else 'skipped'}
             results['client-native-linux']={'result':'success' if linux else 'skipped'}
             results['client-native-macos-core']={'result':'success' if macos else 'skipped'}

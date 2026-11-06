@@ -2,7 +2,7 @@ import { For, Show, createEffect, on } from "solid-js";
 import { Spinner } from "../components/Status";
 import { copyVerbatim } from "../../bridge";
 import { notify } from "../../store/actions";
-import { createOutputFollow, groupItem, processes } from "../../store/processes";
+import { createOutputFollow, groupItem, processes, summaryText } from "../../store/processes";
 import { setMenu } from "../../store/ui";
 import type { ProcessesView } from "../../types";
 import { tr } from "../../i18n";
@@ -34,7 +34,7 @@ function rowMenu(v: ProcessesView, at: { x: number; y: number }) {
   }] });
 }
 
-/** Copy command: the command as the agent ran it (Qt copies it verbatim). */
+/** Copy the recorded command or bounded preview verbatim, as Qt does. */
 async function copyCommand(command: string) {
   try { await copyVerbatim(command); } catch (error) { notify("error", typeof error === "string" ? error : String(error), true, undefined, tr("Not copied")); }
 }
@@ -72,7 +72,7 @@ export function ProcessesTab() {
         {(v) => (
           <>
             <div class="proc-summary">
-              <span class="proc-summary-text" title={v().summary_tooltip}>{v().summary}</span>
+              <span class="proc-summary-text" title={v().summary_tooltip}>{summaryText(v().summary)}</span>
               <Show when={v().busy}><Spinner size={12} /></Show>
               <span class="grow" />
               <button class="btn small danger" disabled={!v().stop.enabled} title={v().stop.tooltip} onClick={() => processes.stop()}>{v().stop.label}</button>

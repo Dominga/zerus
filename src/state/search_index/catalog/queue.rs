@@ -74,133 +74,32 @@ impl Store {
         self.catalog_schema()?;
         progress.pruned_paths = self.prune_catalog(budget, cancel)?;
         self.cleanup()?;
-        self.sweep(state, budget, &mut progress.ingestion, cancel)?;
+        let mut reader = metadata::Reader::default();
+        self.sweep(state, budget, &mut progress.ingestion, cancel, &mut reader)?;
         let last:i64=self.index.connection().query_row("SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='queue_cursor'),0)",[],|r|r.get(0)).map_err(|e|e.to_string())?;
         let mut rows = self.queue_page(last)?;
         if rows.is_empty() && last > 0 {
             rows = self.queue_page(0)?;
         }
         for (id, path, kind) in rows {
-            if !progress.ingestion.available(budget, cancel)
-                || budget.bytes - progress.ingestion.bytes < RECORD_BYTES + 1
-            {
+            if !progress.ingestion.available(budget, cancel) {
                 progress.ingestion.stopped = true;
                 break;
             }
-            let record = queued_record(state, &path, &kind, &mut progress.ingestion, budget);
-            let mut record = match record {
-                Ok(record) => record,
-                Err(_) => {
-                    // An invalid/missing staged file is not a verified source.
-                    // Keep a visible unavailable marker, not a fake empty match.
-                    self.skip_queued(id, false)?;
-                    self.queue_cursor(id)?;
-                    progress.visited_paths += 1;
-                    continue;
-                }
-            };
-            if kind == "archive" {
-                rename::normalize_archive(&mut record)?;
-            }
-            if record["rename_shadow"] == true {
-                self.skip_queued(id, true)?;
-                self.queue_cursor(id)?;
-                progress.visited_paths += 1;
-                continue;
-            }
-            if kind == "native" {
-                record["agent"] = json!("dsh");
-            }
-            let target = record_target(&record);
-            let source = match target.key() {
-                Ok(key) => key,
-                Err(_) => {
-                    self.skip_queued(id, false)?;
-                    self.queue_cursor(id)?;
-                    progress.visited_paths += 1;
-                    continue;
-                }
-            };
-            let identity = Identity {
-                name: target.name.clone(),
-                run_id: target.run_id.clone(),
-                conversation_id: target.conversation_id.clone(),
-                archive_id: target.archive_id.clone(),
-            };
-            let updated = record["updated"]
-                .as_f64()
-                .or_else(|| record["created"].as_f64())
-                .filter(|n| n.is_finite())
-                .unwrap_or(0.0);
-            self.index
-                .connection()
-                .execute(
-                    "UPDATE catalog_queue SET identity=?,source=?,updated=?,skipped=0 WHERE id=?",
-                    params![
-                        serde_json::to_string(&identity).map_err(|e| e.to_string())?,
-                        source,
-                        updated,
-                        id
-                    ],
-                )
-                .map_err(|e| e.to_string())?;
-            if kind == "native" {
-                // The native engine remains authoritative; the existing bounded
-                // query stays its fallback until an indexed adapter is admitted.
-                if self.index.register(&target).is_ok() {
-                    let _ = self.index.source_progress(&source, false, true);
-                }
-            } else {
-                let remaining = Budget {
-                    files: budget.files - progress.ingestion.files,
-                    directory_entries: budget.directory_entries.saturating_sub(
-                        progress
-                            .ingestion
-                            .directory_entries
-                            .max(progress.ingestion.locator_probes),
-                    ),
-                    records: budget.records - progress.ingestion.records,
-                    bytes: budget.bytes - progress.ingestion.bytes,
-                    deadline: budget.deadline,
-                };
-                let read = self.step(state, &[identity], &remaining, cancel)?;
-                progress.ingestion.files += read.files;
-                progress.ingestion.directory_entries += read.directory_entries;
-                progress.ingestion.locator_probes += read.locator_probes;
-                progress.ingestion.records += read.records;
-                progress.ingestion.bytes += read.bytes;
-                progress.ingestion.targets += read.targets;
-                progress.ingestion.stopped |= read.stopped;
-                progress.ingestion.errors.extend(read.errors);
-                progress.ingestion.errors.truncate(16);
-            }
-            let complete: Option<(bool, bool, bool)> = self
-                .index
-                .connection()
-                .query_row(
-                    "SELECT active,complete,unavailable FROM sources WHERE id=?",
-                    [&source],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
-                .optional()
-                .map_err(|e| e.to_string())?;
-            // Known unavailable histories are served by fallback. Unconsumed
-            // healthy cursors remain in the round-robin pending queue.
-            let done = complete
-                .is_some_and(|(active, complete, unavailable)| !active || complete || unavailable);
-            let fallback = kind != "archive"
-                || !complete.is_some_and(|(active, complete, unavailable)| {
-                    active && complete && !unavailable
-                });
-            self.index
-                .connection()
-                .execute(
-                    "UPDATE catalog_queue SET done=?,fallback=? WHERE id=?",
-                    params![done, fallback, id],
-                )
-                .map_err(|e| e.to_string())?;
-            self.queue_cursor(id)?;
-            progress.visited_paths += 1;
+            // One queued source is one step transaction: its identity, index
+            // rows, input cursor, progress and queue completion commit together.
+            let owned = self.begin_step()?;
+            let row = self.consume_row(
+                state,
+                (id, path, kind),
+                budget,
+                cancel,
+                &mut progress,
+                &mut reader,
+            );
+            let ended = self.end_step(owned);
+            row?;
+            ended?;
         }
         let catalog = self.catalog_status()?;
         let coverage = self.index.status().map_err(|e| e.to_string())?;
@@ -215,6 +114,141 @@ impl Store {
             && !coverage.evicted;
         self.index.catalog_ready(ready).map_err(|e| e.to_string())?;
         Ok(progress)
+    }
+
+    fn consume_row(
+        &mut self,
+        state: &Path,
+        (id, path, kind): (i64, PathBuf, String),
+        budget: &Budget,
+        cancel: &AtomicBool,
+        progress: &mut CatchupProgress,
+        reader: &mut metadata::Reader,
+    ) -> Result<()> {
+        let record = queued_record(state, &path, &kind, &mut progress.ingestion, budget, reader);
+        let mut record = match record {
+            Ok(metadata::Record::Ready(record)) => record,
+            Ok(metadata::Record::Deferred | metadata::Record::OverBudget) => {
+                progress.ingestion.stopped = true;
+                // Leave it pending, but let later bounded slices reach
+                // other paths even when this record needs a larger slice.
+                self.queue_cursor(id)?;
+                progress.visited_paths += 1;
+                return Ok(());
+            }
+            Err(_) => {
+                // An invalid/missing staged file is not a verified source.
+                // Keep a visible unavailable marker, not a fake empty match.
+                self.skip_queued(id, false)?;
+                self.queue_cursor(id)?;
+                progress.visited_paths += 1;
+                return Ok(());
+            }
+        };
+        if kind == "archive" {
+            rename::normalize_archive(&mut record)?;
+        }
+        if record["rename_shadow"] == true {
+            self.skip_queued(id, true)?;
+            self.queue_cursor(id)?;
+            progress.visited_paths += 1;
+            return Ok(());
+        }
+        if kind == "native" {
+            record["agent"] = json!("dsh");
+        }
+        let target = record_target(&record);
+        let source = match target.key() {
+            Ok(key) => key,
+            Err(_) => {
+                self.skip_queued(id, false)?;
+                self.queue_cursor(id)?;
+                progress.visited_paths += 1;
+                return Ok(());
+            }
+        };
+        let identity = Identity {
+            name: target.name.clone(),
+            run_id: target.run_id.clone(),
+            conversation_id: target.conversation_id.clone(),
+            archive_id: target.archive_id.clone(),
+        };
+        let updated = record["updated"]
+            .as_f64()
+            .or_else(|| record["created"].as_f64())
+            .filter(|n| n.is_finite())
+            .unwrap_or(0.0);
+        self.index
+            .connection()
+            .execute(
+                "UPDATE catalog_queue SET identity=?,source=?,updated=?,skipped=0 WHERE id=?",
+                params![
+                    serde_json::to_string(&identity).map_err(|e| e.to_string())?,
+                    source,
+                    updated,
+                    id
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        if kind == "native" {
+            // The native engine remains authoritative; the existing bounded
+            // query stays its fallback until an indexed adapter is admitted.
+            if self.index.register(&target).is_ok() {
+                let _ = self.index.source_progress(&source, false, true);
+            }
+        } else {
+            let remaining = Budget {
+                files: budget.files - progress.ingestion.files,
+                directory_entries: budget.directory_entries.saturating_sub(
+                    progress
+                        .ingestion
+                        .directory_entries
+                        .max(progress.ingestion.locator_probes),
+                ),
+                records: budget.records - progress.ingestion.records,
+                bytes: budget.bytes - progress.ingestion.bytes,
+                deadline: budget.deadline,
+            };
+            let read = self.step_with_reader(state, &[identity], &remaining, cancel, reader)?;
+            progress.ingestion.files += read.files;
+            progress.ingestion.directory_entries += read.directory_entries;
+            progress.ingestion.locator_probes += read.locator_probes;
+            progress.ingestion.records += read.records;
+            progress.ingestion.bytes += read.bytes;
+            progress.ingestion.targets += read.targets;
+            progress.ingestion.stopped |= read.stopped;
+            progress.ingestion.errors.extend(read.errors);
+            progress.ingestion.errors.truncate(16);
+        }
+        // Never mark the row done for index rows that SQLite rolled back.
+        self.step_open()?;
+        let complete: Option<(bool, bool, bool)> = self
+            .index
+            .connection()
+            .query_row(
+                "SELECT active,complete,unavailable FROM sources WHERE id=?",
+                [&source],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        // Known unavailable histories are served by fallback. Unconsumed
+        // healthy cursors remain in the round-robin pending queue.
+        let done = complete
+            .is_some_and(|(active, complete, unavailable)| !active || complete || unavailable);
+        let fallback = kind != "archive"
+            || !complete
+                .is_some_and(|(active, complete, unavailable)| active && complete && !unavailable);
+        self.index
+            .connection()
+            .execute(
+                "UPDATE catalog_queue SET done=?,fallback=? WHERE id=?",
+                params![done, fallback, id],
+            )
+            .map_err(|e| e.to_string())?;
+        self.queue_cursor(id)?;
+        progress.visited_paths += 1;
+        Ok(())
     }
 
     fn skip_queued(&self, id: i64, shadow: bool) -> Result<()> {
@@ -306,9 +340,10 @@ fn queued_record(
     kind: &str,
     progress: &mut Progress,
     budget: &Budget,
-) -> Result<Value> {
+    reader: &mut metadata::Reader,
+) -> Result<metadata::Record> {
     let parents = match kind {
-        "binding" => vec![state.to_owned(), state.join("bindings")],
+        "binding" => vec![state.to_owned(), state.join("bindings"), state.join("sessions")],
         "archive" => vec![state.join("archives")],
         "native" => vec![state.join("dsh/bindings")],
         _ => return Err("Unknown queued source kind".into()),
@@ -316,29 +351,17 @@ fn queued_record(
     if !parents.iter().any(|parent| path.parent() == Some(parent)) || !candidate(path, kind) {
         return Err("Queued source is outside this state configuration".into());
     }
-    progress.files += 1;
-    let file = crate::platform::no_follow(fs::OpenOptions::new().read(true))
-        .open(path)
-        .map_err(|_| "Queued source unavailable")?;
-    if !file.metadata().map_err(|e| e.to_string())?.is_file() {
-        return Err("Queued source is not a regular file".into());
-    }
-    let mut bytes = Vec::new();
-    file.take((RECORD_BYTES + 1).min(budget.bytes.saturating_sub(progress.bytes)) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-    progress.bytes += bytes.len();
-    if bytes.len() > RECORD_BYTES {
-        return Err("Queued source exceeds its metadata budget".into());
-    }
-    let record: Value = serde_json::from_slice(&bytes).map_err(|_| "Queued source is invalid")?;
+    let record = match reader.read(path, progress, budget, 0)? {
+        metadata::Record::Ready(record) => record,
+        other => return Ok(other),
+    };
     if !record.is_object() || (kind != "native" && record["version"] != 1) {
         return Err("Queued source is not a binding".into());
     }
     if kind == "native" && record["backend"] != "dsh" {
         return Err("Native source identity changed".into());
     }
-    Ok(record)
+    Ok(metadata::Record::Ready(record))
 }
 
 #[cfg(test)]

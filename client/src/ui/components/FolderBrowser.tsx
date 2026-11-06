@@ -4,6 +4,7 @@ import { composing } from "../lib/keys";
 import { platform } from "../../store/shortcuts";
 import { FolderBrowser, browserEnter, listMenu, promptEnter, type BrowserPlace, type FolderBrowserCalls, type FolderPrompt, type PromptPlace } from "./folder-browser";
 import "../styles/folder-browser.css";
+import { WslMappingDialog } from "./WslDialogs";
 import { tr } from "../../i18n";
 
 // The folder browser of another computer (tray/src/DirectoryDialog.cpp, the
@@ -71,6 +72,9 @@ export function FolderBrowserDialog(props: { computer: string; start: string; ca
   model.onChange = () => setVersion((v) => v + 1);
   const v = createMemo(() => { version(); return model.view(); });
   const [menu, setMenu] = createSignal<{ left: number; top: number }>();
+  // Task 73: Qt offers Map Windows path… only on a Windows desktop and for another computer (DirectoryDialog.cpp:71-95).
+  const wslOffered = () => platform === "windows" && props.computer !== "";
+  const [mapping, setMapping] = createSignal(false);
   let gone = false;
 
   onMount(() => {
@@ -227,6 +231,12 @@ export function FolderBrowserDialog(props: { computer: string; start: string; ca
             <button type="button" class="btn small" aria-label={tr("New folder dialog…")} data-tip={tr("New folder dialog…")} disabled={!v().dialogEnabled}
               onClick={() => model.newFolderDialog()}>{tr("Dialog…")}</button>
           </div>
+          <Show when={wslOffered()}>
+            <div class="row fb-actions">
+              <button type="button" class="btn small" disabled={!v().controlsEnabled || mapping()}
+                title={tr("Map a Windows path to this computer's WSL environment, then browse it")} onClick={() => setMapping(true)}>{tr("Map Windows path…")}</button>
+            </div>
+          </Show>
           <p class="fb-status" role="status">{v().status}</p>
         </div>
         <div class="dlg-foot">
@@ -256,6 +266,9 @@ export function FolderBrowserDialog(props: { computer: string; start: string; ca
           </div>
         )}</Show>
       </dialog>
+      <Show when={mapping()}>
+        <WslMappingDialog alias={props.computer} onUse={(path) => model.navigate(path)} refused={(text) => model.notice(text)} onClose={() => setMapping(false)} />
+      </Show>
       <Show when={v().prompt}>
         <PromptDialog prompt={() => v().prompt!} onName={(name) => model.setPromptName(name)} onCreate={() => model.confirmPrompt()} onCancel={() => model.cancelPrompt()} />
       </Show>

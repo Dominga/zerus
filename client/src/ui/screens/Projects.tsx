@@ -12,6 +12,7 @@ import { flag, num, setSetting, settingsLoaded } from "../../store/settings";
 import { setMenu, type MenuEntry } from "../../store/ui";
 import { PROJECT_EDITING } from "./reasons";
 import { machineCards } from "../../store/machines";
+import { IronRulesPanel } from "../sessions/IronRulesPanel";
 import { folderButton, folderExists, folderLaunch, folderMenuEntry, newSessionInFolder } from "../sessions/newsession-view";
 import { copy } from "../../store/actions";
 import { nextSort, showAskedProject, shownProjects, sortFolders, type Sort, type SortColumn } from "./projects-ui";
@@ -23,6 +24,8 @@ const ProjectCloneDialog = lazy(() => import("./ProjectCloneDialog"));
 const ProjectFolderDialog = lazy(() => import("./ProjectFolderDialog"));
 import { catalogName, createCatalogEdits } from "./project-catalog";
 import { tr } from "../../i18n";
+import { legacyProjectStatus } from "../../store/legacyProjects";
+import { POINTER_DRAG, pointerDrag } from "../lib/pointerDrag";
 
 // Projects (ProjectsDialog.cpp), ported from design/webui/src/screens/Projects.tsx:
 // the shared project catalog the Sessions list groups by (the organization
@@ -41,7 +44,7 @@ const disabled = (label: string, icon: string, hint: string): MenuEntry => ({ la
 const NO_FOLDER: Folder = { id: "", key: "", name: "", path: "", computer: "", machine: "" };
 
 /** InlineProjectName in the mockup: commit on Enter/blur, Escape reverts. */
-function ProjectName(props: { project: Project; enabled: boolean; rename(id: string, value: string): Promise<EditOutcome | undefined> | undefined }) {
+function ProjectName(props: { project: Project; enabled: boolean; describedBy?: string; rename(id: string, value: string): Promise<EditOutcome | undefined> | undefined }) {
   const [value, setValue] = createSignal(props.project.name);
   let editing: { id: string; name: string } | undefined;
   createEffect(() => { const p = props.project; if (!editing || p.id !== editing.id) { editing = undefined; setValue(p.name); } });
@@ -54,7 +57,7 @@ function ProjectName(props: { project: Project; enabled: boolean; rename(id: str
     setValue(name);
     void props.rename(started.id, name)?.then((result) => { if (!result || result.outcome === "refused") setValue(props.project.name); });
   };
-  return <input id="proj-name" class="field proj-name" maxLength={80} value={value()} readOnly={!props.enabled}
+  return <input id="proj-name" class="field proj-name" maxLength={80} value={value()} readOnly={!props.enabled} aria-describedby={props.describedBy}
     onFocus={() => { editing = { id: props.project.id, name: props.project.name }; }}
     onInput={(event) => setValue(event.currentTarget.value)} onBlur={commit}
     onKeyDown={(event) => {
@@ -117,7 +120,11 @@ export function ProjectsScreen() {
       void pending.then((result) => { if (result?.outcome === "refused" && moveFocus === saved) moveFocus = undefined; });
     }
   };
-  const editHint = () => organization.grouping().reason ?? undefined;
+  const editHint = () => {
+    const group = organization.grouping();
+    return group.ready ? undefined : legacyProjectStatus(group.reason ?? tr("Project sync is starting."));
+  };
+  const editDescription = () => editHint() ? "project-edit-readiness" : undefined;
   const [dragging, setDragging] = createSignal<string>();
   const [dropBefore, setDropBefore] = createSignal<string>();
   const endDrag = () => { setDragging(undefined); setDropBefore(undefined); };
@@ -126,12 +133,33 @@ export function ProjectsScreen() {
     event.preventDefault(); event.stopPropagation();
     void edits.drop(dragging()!, before); endDrag();
   };
+  /** The same reorder by a pointer drag where the webview gets no HTML5 drag events (lib/pointerDrag). */
+  const pointerReorder = (e: PointerEvent, id: string) => {
+    const list = (e.currentTarget as Element).closest<HTMLElement>(".proj-list");
+    if (!POINTER_DRAG || !list || !edits.canEdit(id)) return;
+    // Before an editable project, or the end of the list; nothing outside it.
+    const target = (x: number, y: number): { before?: string } | undefined => {
+      const el = document.elementFromPoint(x, y);
+      if (!el || !list.contains(el)) return;
+      const before = el.closest<HTMLElement>("li[data-id]")?.dataset.id;
+      return before && edits.canEdit(before) ? { before } : {};
+    };
+    const stop = () => { endDrag(); document.body.classList.remove("pointer-dragging"); };
+    pointerDrag(e, {
+      start: () => { setDragging(id); document.body.classList.add("pointer-dragging"); return true; },
+      move: (x, y) => setDropBefore(target(x, y)?.before),
+      drop: (x, y) => { const at = target(x, y); stop(); if (at) void edits.drop(id, at.before); },
+      cancel: stop,
+      scroller: () => list,
+    });
+  };
   // ProjectsDialog.cpp:520-522: the Folders button's New session… follows the selected folder.
   const launchFolder = () => selected() ?? NO_FOLDER;
   // Read again only for another folder or once this computer's identity arrives; the last answer shows meanwhile.
   const launchPlace = () => `${launchFolder().machine}\n${launchFolder().path}\n${machineCards[""]?.host ?? ""}`;
   const [launchExists] = createResource(launchPlace, () => folderExists(untrack(launchFolder)));
   const launchButton = () => folderButton(folderLaunch(launchFolder(), launchExists.latest), launchFolder().machine);
+  const launchReason = () => launchButton().disabled ? launchButton().tip : undefined;
   const launchSelected = () => { const p = project(), f = selected(); if (p && f) void newSessionInFolder(p.id, f); };
   showAskedProject(projectToShow, () => setProjectToShow(undefined), view, choose);
 
@@ -208,7 +236,7 @@ export function ProjectsScreen() {
         <header class="su-head">
           <h1>{tr("Projects")}</h1>
           <span class="grow" />
-          <button class="btn" disabled={!organization.grouping().ready} onClick={(e) => setOverviewOrigin(e.currentTarget)}><Icon name="folder-git-2" size={14} />{tr("Worktrees…")}</button>
+          <button class="btn" disabled={!organization.grouping().ready} aria-describedby={editDescription()} onClick={(e) => setOverviewOrigin(e.currentTarget)}><Icon name="folder-git-2" size={14} />{tr("Worktrees…")}</button>
           <button class="btn" disabled={!view().loaded} onClick={(e) => setSwarmOrigin({ element: e.currentTarget, connect: false })}><Icon name="network" size={14} />{tr("Swarm…")}</button>
         </header>
         <p class="muted proj-hint">{tr("Organize sessions and folders across your computers. A folder can be used by several projects.")}</p>
@@ -225,7 +253,8 @@ export function ProjectsScreen() {
           <label class="check" title={tr("Include projects on computers without a configured connection here.")}>
             <input type="checkbox" checked={allSwarm()} onChange={(e) => setAllSwarm(e.currentTarget.checked)} />{tr("All swarm projects")}
           </label>
-          <span class="muted" classList={{ danger: view().status_error }}>{view().status}</span>
+          <span class="muted" classList={{ danger: view().status_error }}>{legacyProjectStatus(view().status)}</span>
+          <Show when={editHint()}>{(reason) => <span id="project-edit-readiness" class="muted ell" role="status" title={reason()}>{reason()}</span>}</Show>
         </div>
 
         <div class="proj-split">
@@ -236,11 +265,11 @@ export function ProjectsScreen() {
               <For each={projects().map((p) => p.id)}>{(id) => {
                 const p = createMemo<Project>((last) => projects().find((p) => p.id === id) ?? last, untrack(() => projects().find((p) => p.id === id)!));
                 return (
-                <li role="option" aria-selected={p().id === project()?.id} classList={{ "drop-before": dropBefore() === p().id }}
+                <li role="option" data-id={p().id} aria-selected={p().id === project()?.id} classList={{ "drop-before": dropBefore() === p().id }}
                   onDragOver={(event) => { if (dragging() && edits.canEdit(p().id)) { event.preventDefault(); event.stopPropagation(); setDropBefore(p().id); } }} onDrop={(event) => drop(event, p().id)}>
                   <Show when={p().accessible} fallback={<div class="proj-item remote" title={p().name}><ProjectLabel project={p()} /></div>}>
                     <button class="proj-item" classList={{ on: p().id === project()?.id, dragging: dragging() === p().id }} data-id={p().id} tabindex={p().id === project()?.id ? 0 : -1}
-                      draggable={edits.canEdit(p().id)} onDragStart={(event) => { if (!edits.canEdit(p().id)) { event.preventDefault(); return; } setDragging(p().id); event.dataTransfer?.setData("application/x-zerus-project", p().id); if (event.dataTransfer) event.dataTransfer.effectAllowed = "move"; }} onDragEnd={endDrag}
+                      draggable={!POINTER_DRAG && edits.canEdit(p().id)} onPointerDown={(event) => pointerReorder(event, p().id)} onDragStart={(event) => { if (!edits.canEdit(p().id)) { event.preventDefault(); return; } setDragging(p().id); event.dataTransfer?.setData("application/x-zerus-project", p().id); if (event.dataTransfer) event.dataTransfer.effectAllowed = "move"; }} onDragEnd={endDrag}
                       title={`${p().is_default ? tr("%1, default project for sessions started outside Zerus", p().name) : p().name}\n${tr("Drag to reorder, or use Alt+Up / Alt+Down.")}`}
                       onClick={() => choose(p())} onContextMenu={(e) => listMenu(e, p().id)}>
                       <ProjectLabel project={p()} />
@@ -249,7 +278,7 @@ export function ProjectsScreen() {
                 </li>
               ); }}</For>
             </ul>
-            <button class="btn" disabled={!edits.enabled()} title={editHint()} onClick={(event) => edits.openNew(event.currentTarget)}><Icon name="plus" size={14} />{tr("New project…")}</button>
+            <button class="btn" disabled={!edits.enabled()} title={editHint()} aria-describedby={editDescription()} onClick={(event) => edits.openNew(event.currentTarget)}><Icon name="plus" size={14} />{tr("New project…")}</button>
           </aside>
 
           <Show when={project()}>{(p) => (
@@ -257,7 +286,7 @@ export function ProjectsScreen() {
               <div class="form-row">
                 <label for="proj-name">{tr("Name")}</label>
                 <div class="row">
-                  <ProjectName project={p()} enabled={edits.canEdit(p().id)} rename={edits.rename} />
+                  <ProjectName project={p()} enabled={edits.canEdit(p().id)} describedBy={editDescription()} rename={edits.rename} />
                   <span class="dim proj-id">{tr("ID")}</span>
                   <span class="mono proj-id-val" title={tr("Project ID")}>{p().id}</span>
                 </div>
@@ -270,16 +299,20 @@ export function ProjectsScreen() {
                 </div>
               </div>
               <label class="check proj-default" title={editHint()}>
-                <input type="checkbox" checked={p().is_default} disabled={defaultBusy() || !edits.canEdit(p().id)}
+                <input type="checkbox" checked={p().is_default} disabled={defaultBusy() || !edits.canEdit(p().id)} aria-describedby={editDescription()}
                   onChange={(event) => { const checked = event.currentTarget.checked; event.currentTarget.checked = p().is_default; if (checked && !p().is_default) void chooseDefault(p().id); }} />{tr("Default for sessions started outside Zerus")}
               </label>
+              <div class="form-row proj-rules">
+                <label>{tr("Iron rules")}</label>
+                <IronRulesPanel context={{ computer: "", project: p().id }} />
+              </div>
 
               <div class="proj-folders" style={{height: `${split()}px`}}>
                 <div class="row proj-fhead">
                   <h2 class="section-title">{tr("Folders")}</h2>
-                  <span class="grow" />
-                  <button class="btn small" disabled={!organization.grouping().ready} onClick={(e) => setCloneOrigin(e.currentTarget)}><Icon name="download" size={12} />{tr("Clone repository…")}</button>
-                  <button class="btn small" disabled={launchButton().disabled} title={launchButton().tip} onClick={launchSelected}><Icon name="plus" size={12} />{tr("New session…")}</button>
+                  <span id="project-folder-launch-reason" class="grow muted ell" role="status" title={launchReason()}>{launchReason()}</span>
+                  <button class="btn small" disabled={!organization.grouping().ready} aria-describedby={editDescription()} onClick={(e) => setCloneOrigin(e.currentTarget)}><Icon name="download" size={12} />{tr("Clone repository…")}</button>
+                  <button class="btn small" disabled={launchButton().disabled} title={launchButton().tip} aria-describedby={launchReason() ? "project-folder-launch-reason" : undefined} onClick={launchSelected}><Icon name="plus" size={12} />{tr("New session…")}</button>
                 </div>
                 <div class="su-tablewrap">
                   <table class="su-table proj-table">
@@ -297,9 +330,9 @@ export function ProjectsScreen() {
                   </table>
                 </div>
                 <div class="row proj-factions">
-                  <button class="btn small" disabled={!folderEdits.enabled(p().id)} onClick={(e) => void folderEdits.open(p().id, undefined, e.currentTarget)}>{tr("Add folder…")}</button>
-                  <button class="btn small" disabled={!folderEdits.enabled(p().id, selected()) || !selected()} onClick={(e) => { const f = selected(); if (f) void folderEdits.open(p().id, { ...f }, e.currentTarget); }}>{tr("Edit folder…")}</button>
-                  <button class="btn small" disabled={!folderEdits.enabled(p().id, selected()) || !selected()} title={tr("Remove this folder from the project. Files stay in place.")} onClick={() => { const f = selected(); if (f) void folderEdits.remove(p().id, { ...f }); }}>{tr("Remove folder")}</button>
+                  <button class="btn small" disabled={!folderEdits.enabled(p().id)} aria-describedby={editDescription()} onClick={(e) => void folderEdits.open(p().id, undefined, e.currentTarget)}>{tr("Add folder…")}</button>
+                  <button class="btn small" disabled={!folderEdits.enabled(p().id, selected()) || !selected()} aria-describedby={editDescription()} onClick={(e) => { const f = selected(); if (f) void folderEdits.open(p().id, { ...f }, e.currentTarget); }}>{tr("Edit folder…")}</button>
+                  <button class="btn small" disabled={!folderEdits.enabled(p().id, selected()) || !selected()} title={tr("Remove this folder from the project. Files stay in place.")} aria-describedby={editDescription()} onClick={() => { const f = selected(); if (f) void folderEdits.remove(p().id, { ...f }); }}>{tr("Remove folder")}</button>
                   <span class="grow" />
                   <button class="btn small" disabled={!selected() || selected()?.machine !== machineCards[""]?.host || launchButton().disabled} onClick={() => { const f = selected(); if (f) void folderEdits.openFolder(p().id, { ...f }); }}><Icon name="folder-open" size={12} />{tr("Open folder")}</button>
                 </div>
@@ -307,7 +340,7 @@ export function ProjectsScreen() {
               <div class="su-hsplit" role="separator" aria-orientation="horizontal" title={tr("Drag to resize folders and worktrees.")} onPointerDown={startSplit} />
               <Suspense><ProjectWorktrees folder={selected()} project={p().id} /></Suspense>
               <div class="row proj-foot">
-                <button class="btn danger" disabled={!edits.canEdit(p().id) || view().projects.filter((p) => p.accessible).length < 2} title={editHint()}
+                <button class="btn danger" disabled={!edits.canEdit(p().id) || view().projects.filter((p) => p.accessible).length < 2} title={editHint()} aria-describedby={editDescription()}
                   onClick={(event) => edits.openDelete(p().id, event.currentTarget)}><Icon name="trash" size={14} />{tr("Delete project…")}</button>
               </div>
             </section>

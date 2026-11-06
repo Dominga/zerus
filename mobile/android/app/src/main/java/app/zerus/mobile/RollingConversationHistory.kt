@@ -89,6 +89,8 @@ internal object AttachmentReceiptMatch {
     fun replaceable(receipt: Event, native: Event) = native.receiptRequestId.isBlank() &&
         (native.requestId.isBlank() || native.requestId == receipt.requestId)
     fun matches(receipt: Event, native: Event): Boolean {
+        // A receipt of this session never stands for a fork's inherited row.
+        if (native.inheritedFrom.isNotBlank()) return false
         val submitted = receipt.submittedText.trim()
         if (submitted.isBlank() || native.text.trim() != submitted) return false
         if (kotlin.math.abs(native.at - receipt.at) <= 10) return true
@@ -110,7 +112,7 @@ object EventHistoryCodec {
         .put("original_id", event.originalId).put("history_id", event.historyId).put("history_cursor", event.historyCursor)
         .put("history_epoch", event.historyEpoch).put("incoming_seq", event.incomingSeq ?: JSONObject.NULL)
         .put("original_ids", JSONArray(event.originalIds)).put("detail_truncated",event.detailTruncated)
-        .put("origin", event.origin).put("sender", event.sender).put("report", event.report)
+        .put("origin", event.origin).put("sender", event.sender).put("report", event.report).put("inherited_from", event.inheritedFrom)
         .put("voice", event.voice?.takeIf { it.state in VoiceProtocol.states }?.let(VoiceProtocol::json))
         .put("outgoing_id", event.outgoingId).put("attachments", JSONArray(event.attachments.map { file ->
             JSONObject().put("name", file.name).put("mime", file.mime).put("bytes", file.bytes).put("reference", file.reference).also {
@@ -135,7 +137,8 @@ object EventHistoryCodec {
                 (value.opt("incoming_seq") as? Number)?.toLong()?.takeIf { it >= 0 },
                 value.optJSONArray("original_ids")?.let { ids -> (0 until minOf(ids.length(),8)).mapNotNull { ids.opt(it) as? String } }.orEmpty(), value.optBoolean("detail_truncated"),
                 value.optJSONObject("voice")?.let(VoiceProtocol::message),
-                value.optString("origin").takeIf { it in ActivityNotices.origins }.orEmpty(), value.optString("sender"), value.optString("report"))
+                value.optString("origin").takeIf { it in ActivityNotices.origins }.orEmpty(), value.optString("sender"), value.optString("report"),
+                inheritedFrom = value.optString("inherited_from").take(512))
                 .let(ActivityNotices::cached)
         }
     }

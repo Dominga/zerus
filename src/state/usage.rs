@@ -22,7 +22,7 @@ fn sum(value: &Value, keys: &[&str]) -> Option<u64> {
     keys.iter()
         .try_fold(0u64, |total, key| total.checked_add(number(&value[*key])?))
 }
-fn buckets(source: &Value, provider: &str) -> Value {
+pub(super) fn buckets(source: &Value, provider: &str) -> Value {
     let mut out = json!({});
     match provider {
         "codex" => copy(
@@ -589,6 +589,19 @@ pub(super) fn read(record: &Value) -> Value {
 fn transcript(record: &Value) -> Result<(String, String, PathBuf, PathBuf)> {
     let provider = string(record, "agent");
     let id = string(record, "conversation_id");
+    if provider == "kimi" {
+        // Kimi's wire log timestamps every usage.record, so its history is the
+        // one `read` scans, in the same cache.
+        let path = questions::wire_paths(record)?
+            .into_iter()
+            .next()
+            .ok_or("No native usage yet")?;
+        let key = format!(
+            "cache-v2-{:x}",
+            Sha256::digest(json!([provider, id, path]).to_string().as_bytes())
+        );
+        return Ok((provider.to_owned(), id.to_owned(), path, root().join("usage-cache").join(format!("{key}.json"))));
+    }
     if !["codex", "claude"].contains(&provider) || uuid::Uuid::parse_str(id).is_err() {
         return Err("Native usage unavailable".into());
     }
@@ -638,6 +651,11 @@ pub(super) fn span_many(record: &Value, windows: &[(f64, f64)]) -> Value {
     };
     if windows.is_empty() || windows.iter().any(|(low, high)| !(low.is_finite() && high.is_finite() && *low > 0.0 && high > low)) {
         return unknown("A span needs two ordered moments");
+    }
+    if provider == "dsh" {
+        // dsh keeps no history: the span is the difference of the counter
+        // samples Zerus recorded at the window's ends.
+        return usage_samples::span(record, windows);
     }
     let (provider, id, path, cache) = match transcript(record) {
         Ok(found) => found,
@@ -1138,6 +1156,41 @@ mod tests {
     /// U38: no timestamped counters is unknown, never zero; a DeepSeek session's
     /// native counters are cumulative projections without a transcript, so a
     /// span of it is unknown too.
+    /// Kimi's wire log timestamps every usage.record, so a window of a Kimi
+    /// member's work is the sum of the requests inside it (task 78).
+    #[test]
+    fn a_kimi_span_sums_the_requests_inside_its_windows() {
+        let temp = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(temp.path(), || {
+            let home = temp.path().join("kimi-home");
+            let wire = home.join("sessions/workspace/session-k1/agents/main");
+            fs::create_dir_all(&wire).unwrap();
+            let request = |at: &str, input: u64, output: u64| {
+                json!({"type":"usage.record","agentId":"main","timestamp":at,"modelAlias":"k2",
+                    "usage":{"inputOther":input,"output":output,"inputCacheRead":1000,"inputCacheCreation":0}}).to_string() + "
+"
+            };
+            fs::write(
+                wire.join("wire.jsonl"),
+                request("2026-10-11T05:00:10Z", 10, 5) + &request("2026-10-11T05:01:10Z", 20, 6) + &request("2026-10-11T05:05:10Z", 40, 7),
+            )
+            .unwrap();
+            let record = json!({"agent":"kimi","name":"kimi/p/dev","conversation_id":"session-k1","agent_home":home.to_string_lossy()});
+            let at = |text: &str| moment(&json!(text));
+            let result = span_many(&record, &[(at("2026-10-11T05:00:00Z"), at("2026-10-11T05:02:00Z"))]);
+            assert_eq!(result["status"], "ok", "{result}");
+            let tokens = &result["providers"][0]["models"][0]["tokens"];
+            assert_eq!((tokens["uncached_input"].clone(), tokens["output"].clone()), (json!(30), json!(11)), "{result}");
+            // Two windows count only their own requests.
+            let two = span_many(&record, &[(at("2026-10-11T05:00:00Z"), at("2026-10-11T05:00:30Z")), (at("2026-10-11T05:04:00Z"), at("2026-10-11T05:06:00Z"))]);
+            assert_eq!(two["providers"][0]["models"][0]["tokens"]["uncached_input"], 50, "{two}");
+            // A session with no wire log is unknown, never zero.
+            let missing = json!({"agent":"kimi","name":"kimi/p/qa","conversation_id":"session-none","agent_home":home.to_string_lossy()});
+            let result = span_many(&missing, &[(1000.0, 2000.0)]);
+            assert_eq!(result["status"], "unknown", "{result}");
+        });
+    }
+
     #[test]
     fn a_span_without_counters_is_unknown_never_zero() {
         let temp = tempfile::tempdir().unwrap();

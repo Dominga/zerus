@@ -226,8 +226,17 @@ pub const CANCELLED_BY_USER: &str = "Pending send cancelled. Your draft is uncha
 pub const INTERRUPTED: &str = "Interrupted. Your draft was kept without sending.";
 const CHANGED: &str = "The session changed. Your draft was kept without sending.";
 const DRAFT_CHANGED: &str = "Draft changed. Send it when you are ready.";
-const NOT_READY: &str =
+/// A start-to-send given up at its time limit.
+pub const NOT_READY: &str =
     "The agent did not become ready. Check Terminal; your draft was kept without sending.";
+/// The CLI's compaction refusal for a resumed conversation the agent has not
+/// confirmed yet (`clear_context::unavailable`). It is reported only after
+/// every earlier blocker (not running, unsupported, no conversation, another
+/// request or blocker) has passed.
+pub const RESUME_UNCONFIRMED: &str = "The agent has not confirmed the resumed conversation yet";
+/// A compact-to-send given up at its time limit.
+pub const NOT_COMPACTED: &str =
+    "Compaction was not confirmed. Check Terminal; your draft was kept without sending.";
 /// How long a start may take before its message is given up.
 pub const START_LIMIT: f64 = 180.0;
 /// How long a compaction may take before its message is given up.
@@ -373,6 +382,11 @@ pub struct StartSend {
 }
 
 impl StartSend {
+    /// How this continuation starts its session.
+    pub fn choice(&self) -> StartChoice {
+        self.choice
+    }
+
     /// The answer to the start question. `current` is the session again and
     /// `draft_now` the composer's draft; the waiting text comes back with the
     /// continuation, or a notice when nothing starts.
@@ -508,20 +522,47 @@ impl StartSend {
                     .into(),
             );
         }
+        // Without a conversation (a fresh start, or a cleared one) Codex
+        // creates it only with the first message and reports no status
+        // before it, so the CLI's verified first-message prompt is the
+        // readiness, as for any send (`block_reason`); waiting for an idle
+        // status would never end (zerus-dhnd). The send names the empty
+        // conversation, never the cleared one.
+        let input_ready = if conversation.is_empty() {
+            flag(details, "first_message_can_send")
+        } else {
+            text(details, "phase") == "idle" && text(details, "activity") == "idle"
+        };
         let ready = flag(details, "tracked")
             && text(details, "runtime_state") == "live"
             && text(details, "process_state") == "running"
             && text(details, "error").is_empty()
-            && text(details, "phase") == "idle"
-            && text(details, "activity") == "idle"
+            && input_ready
             && !terminating
             && (text(details, "expected_id").is_empty()
-                || flag(details, "resume_message_can_send"))
-            && (!conversation.is_empty() || flag(details, "first_message_can_send"));
+                || flag(details, "resume_message_can_send"));
         if !ready {
             return Step::Idle;
         }
         if self.choice == StartChoice::ResumeCompact {
+            // Codex confirms a resumed conversation only with its next turn,
+            // and refuses native /compact until then: waiting for compaction
+            // would never end (zerus-le5s). Only when that is the refusal the
+            // CLI reports (so no earlier blocker holds, such as an unconfirmed
+            // compaction) and the resumed conversation already takes this
+            // message, it goes as is, to the same conversation; Codex compacts
+            // on its own when it needs to. Any other refusal still waits.
+            let unconfirmed = !text(details, "expected_id").is_empty()
+                && flag(details, "resume_message_can_send")
+                && !flag(details, "compact_context_supported")
+                && text(details, "compact_context_reason") == RESUME_UNCONFIRMED;
+            if unconfirmed && !conversation.is_empty() {
+                return Step::Send {
+                    run_id: run.into(),
+                    conversation_id: conversation.into(),
+                    compaction_id: None,
+                };
+            }
             if conversation.is_empty() || !flag(details, "compact_context_supported") {
                 return Step::Idle;
             }
@@ -678,9 +719,7 @@ impl CompactSend {
             );
         }
         if now - self.started > COMPACT_LIMIT {
-            return Step::Cancelled(
-                "Compaction was not confirmed. Check Terminal; your draft was kept without sending.".into(),
-            );
+            return Step::Cancelled(NOT_COMPACTED.into());
         }
         if *draft_now != self.draft {
             return Step::Cancelled(DRAFT_CHANGED.into());
@@ -733,7 +772,7 @@ impl CompactSend {
     /// The 2.5 s poll: past 600 s the message is given up.
     pub fn tick(&self, now: f64) -> Step {
         if now - self.started > COMPACT_LIMIT {
-            Step::Cancelled("Compaction was not confirmed. Check Terminal; your draft was kept without sending.".into())
+            Step::Cancelled(NOT_COMPACTED.into())
         } else {
             Step::Idle
         }
@@ -1167,6 +1206,187 @@ mod continuation_tests {
                 compaction_id: None
             }
         );
+    }
+
+    /// zerus-le5s: Codex resumed for Compact and resume, as `hgs inspect`
+    /// showed it: ready, but compaction refused until the resumed
+    /// conversation is confirmed, which only a new turn does.
+    fn resumed_unconfirmed() -> Value {
+        json!({"tracked": true, "run_id": "run-2", "conversation_id": "conv-1", "expected_id": "conv-1",
+               "runtime_state": "live", "process_state": "running", "phase": "idle", "activity": "idle",
+               "conversation_state": "unknown", "resume_message_can_send": true, "resume_message_reason": "",
+               "compact_context_supported": false,
+               "compact_context_reason": "The agent has not confirmed the resumed conversation yet"})
+    }
+
+    #[test]
+    fn compact_and_resume_sends_when_the_resumed_conversation_cannot_compact_yet() {
+        let mut start = begun(StartChoice::ResumeCompact);
+        // The message itself confirms the conversation; Codex compacts on its own.
+        assert_eq!(
+            start.inspected(&resumed_unconfirmed(), &draft(), false, false, 1.0),
+            Step::Send {
+                run_id: "run-2".into(),
+                conversation_id: "conv-1".into(),
+                compaction_id: None
+            }
+        );
+        // Not yet able to take the message: it waits, as before.
+        let mut unready = resumed_unconfirmed();
+        unready["resume_message_can_send"] = json!(false);
+        assert_eq!(
+            start.inspected(&unready, &draft(), false, false, 1.0),
+            Step::Idle
+        );
+        // A confirmed conversation that can compact still compacts first.
+        let mut confirmed = resumed_unconfirmed();
+        confirmed["expected_id"] = json!("");
+        confirmed["compact_context_supported"] = json!(true);
+        assert!(matches!(
+            start.inspected(&confirmed, &draft(), false, false, 1.0),
+            Step::Compact(..)
+        ));
+        // Compaction refused for another reason still waits, with the resume
+        // still pending too (review of #1220): an earlier blocker, such as an
+        // unconfirmed compaction, is what the CLI then reports.
+        let mut uncertain = resumed_unconfirmed();
+        uncertain["compact_context_request"] = json!({"status": "uncertain"});
+        uncertain["compact_context_reason"] =
+            json!("The last compaction was not confirmed. Check Terminal");
+        assert_eq!(
+            start.inspected(&uncertain, &draft(), false, false, 1.0),
+            Step::Idle
+        );
+        let mut busy = resumed_unconfirmed();
+        busy["compact_context_reason"] = json!("A subagent is still working");
+        assert_eq!(
+            start.inspected(&busy, &draft(), false, false, 1.0),
+            Step::Idle
+        );
+        // Without any reason given (an older CLI), it waits as before.
+        let mut silent = resumed_unconfirmed();
+        silent["compact_context_reason"] = json!("");
+        assert_eq!(
+            start.inspected(&silent, &draft(), false, false, 1.0),
+            Step::Idle
+        );
+        // No resume pending, another reason: waits.
+        let mut other = resumed_unconfirmed();
+        other["expected_id"] = json!("");
+        other["compact_context_reason"] = json!("A subagent is still working");
+        assert_eq!(
+            start.inspected(&other, &draft(), false, false, 1.0),
+            Step::Idle
+        );
+        // The exact guards stay: the same run, another conversation, a stop.
+        let mut same_run = resumed_unconfirmed();
+        same_run["run_id"] = json!("run-1");
+        assert_eq!(
+            start.inspected(&same_run, &draft(), false, false, 1.0),
+            Step::Idle
+        );
+        assert_eq!(
+            start.inspected(&resumed_unconfirmed(), &draft(), false, true, 1.0),
+            Step::Idle
+        );
+        let mut other = resumed_unconfirmed();
+        other["conversation_id"] = json!("conv-9");
+        other["expected_id"] = json!("conv-9");
+        assert!(matches!(
+            begun(StartChoice::ResumeCompact).inspected(&other, &draft(), false, false, 1.0),
+            Step::Cancelled(_)
+        ));
+    }
+
+    /// zerus-dhnd: Codex after Clear or Start fresh, as `hgs inspect` showed it.
+    /// It reports no status before its first message, which creates the
+    /// conversation.
+    fn cleared_codex() -> Value {
+        json!({"tracked": true, "run_id": "run-2", "conversation_id": null,
+               "runtime_state": "live", "process_state": "running",
+               "phase": "unknown", "activity": "unknown", "activity_summary": "Status unavailable",
+               "cleared_conversations": ["conv-1"],
+               "first_message_can_send": true, "first_message_reason": "",
+               "clear_context_supported": false, "clear_context_reason": "Wait for a confirmed conversation"})
+    }
+
+    #[test]
+    fn a_cleared_conversation_takes_the_waiting_message_as_its_first() {
+        for choice in [StartChoice::Fresh, StartChoice::Resume] {
+            let mut start = begun(choice);
+            // The first-message path, never the cleared conversation.
+            assert_eq!(
+                start.inspected(&cleared_codex(), &draft(), false, false, 1.0),
+                Step::Send {
+                    run_id: "run-2".into(),
+                    conversation_id: String::new(),
+                    compaction_id: None
+                },
+                "{choice:?}"
+            );
+            // Until the CLI verifies the native prompt, the message waits.
+            let mut unverified = cleared_codex();
+            unverified["first_message_can_send"] = json!(false);
+            assert_eq!(
+                start.inspected(&unverified, &draft(), false, false, 1.0),
+                Step::Idle
+            );
+            // A conversation of its own (a new one for Fresh, the saved one
+            // for Resume) still needs a confirmed idle status.
+            let mut opened = cleared_codex();
+            opened["conversation_id"] = json!(if choice == StartChoice::Fresh {
+                "conv-2"
+            } else {
+                "conv-1"
+            });
+            assert_eq!(
+                start.inspected(&opened, &draft(), false, false, 1.0),
+                Step::Idle
+            );
+            // The exact guards stay: the same run, a stop or another state.
+            let mut same_run = cleared_codex();
+            same_run["run_id"] = json!("run-1");
+            assert_eq!(
+                start.inspected(&same_run, &draft(), false, false, 1.0),
+                Step::Idle
+            );
+            assert_eq!(
+                start.inspected(&cleared_codex(), &draft(), false, true, 1.0),
+                Step::Idle
+            );
+            for (key, value) in [
+                ("tracked", json!(false)),
+                ("runtime_state", json!("ended")),
+                ("process_state", json!("exited")),
+                ("error", json!("synthetic failure")),
+                ("expected_id", json!("conv-1")),
+            ] {
+                let mut other = cleared_codex();
+                other[key] = value;
+                assert_eq!(
+                    start.inspected(&other, &draft(), false, false, 1.0),
+                    Step::Idle,
+                    "{key}"
+                );
+            }
+        }
+        // A fresh start that brings back the cleared conversation never sends.
+        let mut back = cleared_codex();
+        back["conversation_id"] = json!("conv-1");
+        back["phase"] = json!("idle");
+        back["activity"] = json!("idle");
+        assert!(matches!(
+            begun(StartChoice::Fresh).inspected(&back, &draft(), false, false, 1.0),
+            Step::Cancelled(_)
+        ));
+        // A running session in this state is sendable at once, as before.
+        let facts = BlockFacts {
+            online: true,
+            state: "running".into(),
+            cmd: "codex".into(),
+            ..BlockFacts::default()
+        };
+        assert_eq!(block_reason(&facts, Some(&cleared_codex())), None);
     }
 
     #[test]

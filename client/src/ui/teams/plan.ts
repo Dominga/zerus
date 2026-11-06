@@ -220,7 +220,19 @@ export function edgePath(from: PlacedNode, to: PlacedNode, rowTop: number): stri
   return `M ${sx} ${sy} C ${sx + bend} ${sy}, ${tx - bend} ${ty}, ${tx} ${ty}`;
 }
 
-/** The edges whose target is in one layer row, for that row's SVG. */
+/** The origin links whose target is in one layer row: a follow-up's source to
+ * its task, drawn apart from dependency edges and never waited for. */
+export function rowOrigins(phase: PlanPhase, row: PlanRow): { from: PlacedNode; to: PlacedNode; origin: number }[] {
+  if (row.kind !== "layer") return [];
+  const sources = new Map(phase.nodes.map((placed) => [placed.node.id, placed]));
+  const result: { from: PlacedNode; to: PlacedNode; origin: number }[] = [];
+  for (const to of row.nodes) {
+    const origin = (to.task?.origin ?? to.node.origin ?? 0) || 0;
+    const from = sources.get(origin);
+    if (origin > 0 && from && from.node.id !== to.node.id) result.push({ from, to, origin });
+  }
+  return result;
+}
 export function rowEdges(phase: PlanPhase, row: PlanRow): { edge: GraphEdge; from: PlacedNode; to: PlacedNode }[] {
   if (row.kind !== "layer") return [];
   const targets = new Map(row.nodes.map((placed) => [placed.node.id, placed]));

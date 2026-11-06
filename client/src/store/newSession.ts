@@ -300,8 +300,12 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
   /** The newest rows read for new limits; an older answer is dropped. */
   let usageRequest = 0;
 
-  // Worktrees and the prefill.
-  let autoPreferred = true;
+  // Worktrees and the prefill. Task 102: the folder mode chosen for the last
+  // started session is the default (Qt's workspace/launchWorktree): a
+  // generated worktree unless it was the folder itself.
+  let autoPreferred = context.remembered.folder_mode !== "none";
+  /** The person chose Auto or the folder itself here: only then is it remembered. */
+  let worktreeChosen = false;
   let worktreeCatalog: Json = {};
   const verified = new Map<string, Json>();
   let worktreeContext: string | undefined;
@@ -896,7 +900,7 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
       host: host(), machine: card?.host || host(), agent: agent(), account: account(), name, project: projectId(),
       project_name: projectRow()?.name ?? "", implicit_inbox: implicitInbox(), swarm, path: path(), auto_preferred: autoPreferred,
       automatic_available: false, branch, catalog: worktreeCatalog, automatic_path: "", listed_folder: listedKey() !== "", project_worktree: false,
-      model, effort: model ? oc.effort() : "", open_terminal: openTerminal,
+      model, effort: model ? oc.effort() : "", open_terminal: openTerminal, worktree_chosen: worktreeChosen,
       repository: repositorySource ? {
         url: fields?.url ?? url, parent: fields?.parent ?? "", name: fields?.name ?? "", destination: fields?.destination ?? "",
         created_path: "", new_project: isNewProject(), project_name: newProjectName.trim(),
@@ -1040,7 +1044,7 @@ function createDialog(deps: NewSessionDeps, context: NewSessionContext, init: { 
     setDestination,
     setRepositoryParent,
     setNewProjectName(text) { customProjectName = true; newProjectName = text.slice(0, 80); updateForm(); },
-    setAuto(on) { autoPreferred = on; updateForm(); },
+    setAuto(on) { autoPreferred = on; worktreeChosen = true; updateForm(); },
     chooseAccount,
     selectAccount: (id) => selectAccount(id),
     refreshAccounts,

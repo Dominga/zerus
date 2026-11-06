@@ -312,6 +312,10 @@ mod native_tests {
     use super::*;
     #[test]
     fn original_prepare_and_fresh_execute_survive_lost_replies_without_resubmission() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         tauri::async_runtime::block_on(async {
             // Real original CLI children/native cached evidence; fake actor

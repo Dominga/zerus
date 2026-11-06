@@ -12,6 +12,8 @@ const FALLBACK_REPLY_BYTES: usize = 5 << 20;
 enum SourceProof {
     Current(Value),
     Appended,
+    Deferred,
+    Unavailable,
 }
 
 pub(in crate::state) fn read(query: &str, limit: usize, cursor: Option<&str>) -> Result<Value> {
@@ -126,6 +128,7 @@ impl Store {
         let mut results = Vec::new();
         let mut scopes = search::ArchiveScopes::new();
         let mut progress = Progress::default();
+        let mut reader = metadata::Reader::default();
         let mut verified = BTreeMap::<String, Option<Value>>::new();
         let mut candidates = 0;
         let mut bytes = 2;
@@ -152,7 +155,7 @@ impl Store {
             }
             let key = hit.target.key().map_err(|e| e.to_string())?;
             if !verified.contains_key(&key) {
-                if budget.bytes.saturating_sub(progress.bytes) < RECORD_BYTES + 1 + 512
+                if budget.bytes.saturating_sub(progress.bytes) < 512
                     || budget.files.saturating_sub(progress.files) < 2
                 {
                     next = before;
@@ -164,10 +167,27 @@ impl Store {
                     conversation_id: hit.target.conversation_id.clone(),
                     archive_id: hit.target.archive_id.clone(),
                 };
-                let proof =
-                    self.verify_source(state, &identity, &key, &mut progress, budget, cancel);
+                let proof = binding(state, &identity, &mut progress, budget, &mut reader, 512)
+                    .and_then(|record| match record {
+                        metadata::Record::Ready(record) => {
+                            self.verify_source(record, &key, &mut progress, budget, cancel)
+                        }
+                        metadata::Record::Deferred => Ok(SourceProof::Deferred),
+                        metadata::Record::OverBudget => Ok(SourceProof::Unavailable),
+                    });
                 let target = match proof {
                     Ok(SourceProof::Current(target)) => Some(target),
+                    Ok(SourceProof::Deferred) => {
+                        next = before;
+                        break;
+                    }
+                    Ok(SourceProof::Unavailable) => {
+                        // Keep the source/queue pending for a future read with
+                        // another budget, but do not fence this page's cursor.
+                        self.revisit(&key)?;
+                        rejected += 1;
+                        None
+                    }
                     Ok(SourceProof::Appended) => {
                         self.revisit(&key)?;
                         rejected += 1;
@@ -242,14 +262,12 @@ impl Store {
 
     fn verify_source(
         &mut self,
-        state: &Path,
-        identity: &Identity,
+        record: Value,
         key: &str,
         progress: &mut Progress,
         budget: &Budget,
         cancel: &AtomicBool,
     ) -> Result<SourceProof> {
-        let record = binding(state, identity, progress, budget)?;
         let encoded: String = self
             .index
             .connection()

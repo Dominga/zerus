@@ -2598,8 +2598,10 @@ fn current_team<'a>(teams: &'a [Team], named: &str, mut member_of: impl FnMut(&T
 fn spans_view(input: &Value) -> anyhow::Result<Value> {
     use super::spans;
     let store = Store::open(false)?;
-    let team = store.load(text(input, "team"))?.context("Unknown team")?;
+    let mut team = store.load(text(input, "team"))?.context("Unknown team")?;
     let now = now();
+    // Task 94: a phase already running when baselines arrived gets its plan now.
+    super::baseline::backfill(&mut team, now);
     let limit = input["limit"].as_u64().map_or(spans::TASK_PAGE, |n| (n as usize).clamp(1, spans::TASK_PAGE));
     let mut chosen: Vec<&Task> = match input["task"].as_u64() {
         Some(id) => vec![team.task(id as u32).with_context(|| format!("Unknown task #{id}"))?],
@@ -2657,8 +2659,10 @@ fn spans_view(input: &Value) -> anyhow::Result<Value> {
 fn profile_view(input: &Value) -> anyhow::Result<Value> {
     use super::profile;
     let store = Store::open(false)?;
-    let team = store.load(text(input, "team"))?.context("Unknown team")?;
+    let mut team = store.load(text(input, "team"))?.context("Unknown team")?;
     let now = now();
+    // Task 94: a phase already running when baselines arrived gets its plan now.
+    super::baseline::backfill(&mut team, now);
     let read = input["tokens"].as_bool() != Some(false);
     let page = profile::Page {
         limit: input["limit"].as_u64().map_or(profile::LOSS_PAGE, |n| n as usize),
@@ -4689,3 +4693,4 @@ mod commands_status;
 #[cfg(test)]
 #[path = "tests/commands_other.rs"]
 mod commands_other;
+

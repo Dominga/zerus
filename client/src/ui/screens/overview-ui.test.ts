@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { connectionOf, fleetCards, overviewStats } from "../../store/overview";
 import { toSession } from "../../store/catalog";
 import { NOW, machineMeta, projected, rowOut, usageOf } from "../../store/testing";
-import { accountIdentity, accountTone, accountsNote, bytes, cpuFigure, level, memoryFigure, sampleNote, sessionsLabel } from "./overview-ui";
+import { accountIdentity, accountTone, accountsNote, bytes, cpuFigure, level, memoryFigure, metricsLoading, sampleNote, sessionsLabel } from "./overview-ui";
 import { emptyAccounts, type Account } from "../../types";
 
 const account = (extra: Partial<Account> = {}): Account => ({
@@ -43,6 +43,24 @@ describe("overview cards", () => {
     expect(sampleNote(undefined, connectionOf("unsupported"), NOW)).toBe("No sample yet");
     expect(sessionsLabel(1, 0)).toBe("1 session");
     expect(sessionsLabel(3, 2)).toBe("3 sessions, 2 need attention");
+  });
+
+  it("a computer still connecting reads its metrics instead of naming an old hgs or missing memory (task 72, F2)", () => {
+    const connecting = connectionOf("probing");
+    const empty = machineMeta("workstation", { cpu_percent: null, cpu_state: null, sampled_at: null, memory_total_bytes: null });
+    expect(metricsLoading(empty, connecting)).toBe(true);
+    expect(metricsLoading(undefined, connectionOf("live")), "no machine data yet").toBe(true);
+    expect(cpuFigure(empty, true).detail).toBe("Reading metrics…");
+    expect(memoryFigure(empty, true).detail).toBe("Reading metrics…");
+    expect(sampleNote(empty, connecting, NOW)).toBe("");
+    // The real conditions keep their words once the computer answered.
+    expect(metricsLoading(empty, connectionOf("live"))).toBe(false);
+    expect(cpuFigure(empty, false).detail).toBe("Update hgs for metrics");
+    expect(memoryFigure(empty, false).detail).toBe("Memory unavailable");
+    expect(sampleNote(undefined, connectionOf("unsupported"), NOW)).toBe("No sample yet");
+    // A computer that reconnects keeps its last values: they are not loading.
+    const sampled = machineMeta("studio", { cpu_percent: 42, sampled_at: NOW - 30 });
+    expect(metricsLoading(sampled, connectionOf("reconnecting"))).toBe(false);
   });
 
   it("word the account cards as Qt does", () => {

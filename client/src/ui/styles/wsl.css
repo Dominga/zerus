@@ -1,0 +1,8 @@
+/* Task 73: Map Windows path and Open mapped Windows original. Skin tokens only. */
+@layer components {
+  .wsl-dlg { width: min(680px, calc(100vw - 32px)); }
+  .wsl-dlg .dlg-body { display: flex; flex-direction: column; gap: 10px; }
+  .wsl-dlg .form-row .field { width: 100%; }
+  .wsl-target { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--z-color-text-2); }
+  .wsl-notice { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fs-sm); color: var(--z-color-text); }
+}

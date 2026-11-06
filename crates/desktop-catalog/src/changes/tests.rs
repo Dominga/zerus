@@ -345,3 +345,112 @@ fn an_empty_dirty_current_view_cannot_orphan_an_obsolete_journal() {
     let (views,items):(i64,i64)=db.query_row("SELECT (SELECT count(*) FROM desktop_catalog_change_views),items FROM desktop_catalog_change_totals",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
     assert_eq!((views, items), (1, 0));
 }
+fn reasoned(
+    seq: u64,
+    cursor: i64,
+    upsert: Vec<watch::CatalogItem>,
+    remove: Vec<(String, Option<&str>)>,
+) -> Frame {
+    let Frame {
+        v,
+        seq,
+        body: Body::Delta(mut frame),
+    } = delta(seq, cursor, upsert, vec![])
+    else {
+        unreachable!()
+    };
+    frame.remove = remove
+        .into_iter()
+        .map(|(key, reason)| watch::Removal {
+            key,
+            reason: reason.map(str::to_owned),
+        })
+        .collect();
+    Frame {
+        v,
+        seq,
+        body: Body::Delta(frame),
+    }
+}
+#[test]
+fn removals_keep_only_known_native_reasons() {
+    // zerus-ic13: a replacement paged into another native frame still says so.
+    let (mut db, source, seq) = populate(5);
+    let mark = watermark(&db, "peer").unwrap();
+    let removals = [
+        (item(0).key, Some("replaced")),
+        (item(1).key, Some("ended")),
+        (item(2).key, Some("unknown-future-reason")),
+        (item(3).key, None),
+    ];
+    put(
+        &mut db,
+        &source,
+        &reasoned(seq, 1, vec![], removals.to_vec()),
+    );
+    put(
+        &mut db,
+        &source,
+        &reasoned(
+            seq + 1,
+            2,
+            vec![item(5)],
+            vec![(item(4).key, Some("archived"))],
+        ),
+    );
+    let p = page(&db, &mark.scope, 0, None).unwrap();
+    let got: Vec<_> = p
+        .items
+        .iter()
+        .map(|c| (c.key.clone(), c.json.is_some(), c.reason.as_deref()))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (item(0).key, false, Some("replaced")),
+            (item(1).key, false, Some("ended")),
+            (item(2).key, false, None),
+            (item(3).key, false, None),
+            (item(4).key, false, Some("archived")),
+            (item(5).key, true, None),
+        ]
+    );
+}
+#[test]
+fn reason_migration_keeps_retained_removals_reasonless() {
+    let mut db = Connection::open_in_memory().unwrap();
+    crate::migrate_base(&db).unwrap();
+    super::migrate(&db).unwrap();
+    // Today's row writers store the approval flag (schema 22); the change
+    // journal under test still predates its reason column (schema 21).
+    crate::approvals::migrate(&db).unwrap();
+    begin_service(&mut db, "actor-1").unwrap();
+    let source = Source {
+        computer: "peer".into(),
+        service_epoch: "actor-1".into(),
+        incarnation: 1,
+        generation: 1,
+    };
+    connect(&mut db, &source, &hello()).unwrap();
+    put(&mut db, &source, &snapshot(2, 0, true, 0, vec![item(0)]));
+    let mark = watermark(&db, "peer").unwrap();
+    // Schema 13 cannot store a reason: the frame's reason is lost there.
+    db.execute(
+        "INSERT INTO desktop_catalog_changes(generation,revision,key,json,bytes) SELECT visible,1,?1,NULL,64 FROM desktop_catalog_sources WHERE computer='peer'",
+        [item(0).key],
+    )
+    .unwrap();
+    db.execute("UPDATE desktop_catalog_change_views SET head=1", [])
+        .unwrap();
+    migrate_reasons(&db).unwrap();
+    let p = page(&db, &mark.scope, 0, None).unwrap();
+    assert_eq!(p.items.len(), 1);
+    assert_eq!(
+        (p.items[0].json.as_deref(), p.items[0].reason.as_deref()),
+        (None, None)
+    );
+    assert!(
+        migrate_reasons(&db).is_err(),
+        "the leaf migration runs once"
+    );
+}

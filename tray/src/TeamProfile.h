@@ -63,9 +63,38 @@ struct Model {
                        const QJsonArray &tests = {});
 };
 
-// The kinds the timeline colors (legend order).
+// Task #79 (owner, 2026-11-06: "All colours must be clearly readable"): one
+// fixed palette, the same in every skin. Every kind has its own colour in
+// each theme (CIE76 distance of at least 24 between any two, at least 3:1
+// against every shipped lane background) and every wait its own hatch, so a
+// wait is told by its pattern too, not only by hue. The Tauri profile uses the
+// same table (client/src/ui/teams/profile-palette.ts).
+struct KindStyle {
+    QString key, kind, stage;       // stage: the stage kind of a "stage" span
+    QColor dark, light;
+    Qt::BrushStyle pattern;         // Qt::SolidPattern for a span, a hatch for a wait
+};
+// Every kind the timeline draws, in legend order.
+const QList<KindStyle> &kindStyles();
+// Task 93: no kind more saturated than this (CIE LCh chroma), dark and light.
+constexpr double ChromaCapDark = 45, ChromaCapLight = 55;
+// The palette key of a span: question, permission, stop and no_report are one
+// "blocked" kind, delivery and start_delay one "delivery" kind, and a stage
+// other than review or test one "stage" kind.
+QString kindKey(const QString &kind, const QString &stageKind);
 QColor kindColor(const QString &kind, const QString &stageKind, bool dark);
+Qt::BrushStyle kindPattern(const QString &kind, const QString &stageKind);
 QString kindName(const QString &kind, const QString &stageKind);
+// The name the legend gives a palette key.
+QString keyName(const QString &key);
+// WCAG contrast ratio of two colours.
+double contrast(const QColor &a, const QColor &b);
+// The text colour for a label on a bar of `fill`: near black or white, whichever reads better.
+QColor labelOn(const QColor &fill);
+// Where a lane draws, from the lane's top: the work bar (with its title), the
+// waits strip under it, and build and merge as a thin strip along the bottom,
+// never over the work bar.
+struct LaneBands { static constexpr int Row = 52, WorkTop = 8, WorkHeight = 22, WaitTop = 33, WaitHeight = 7, BuildTop = 43, BuildHeight = 5; };
 // "5h 30m", "26m", "45s".
 QString duration(qint64 seconds);
 // "1.09M", "846k", "512".

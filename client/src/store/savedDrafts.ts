@@ -1,7 +1,7 @@
 import { dayTime } from "../ui/lib/usage";
 import { batch, createSignal } from "solid-js";
 import { createStore, produce } from "solid-js/store";
-import type { ConflictsPage, DraftSource, SavedDraftDetail, SavedDraftItem, SavedDraftsPage } from "../types";
+import type { ConflictsPage, DraftCaptureStatus, DraftSource, SavedDraftDetail, SavedDraftItem, SavedDraftsPage } from "../types";
 import type { Session } from "../ui/sessions/types";
 import { folderOf } from "../ui/sessions/SessionCard";
 import { composer } from "./composer";
@@ -36,6 +36,25 @@ export const TEXTS = {
  * are left out.
  */
 export const replaceText = (key: string) => tr("Replace the unsent draft in %1 with the selected saved draft?", key.split("\n").filter(Boolean).join(" / "));
+
+/**
+ * What Saved drafts says about the drafts capture (zerus-5wmh.66.5.2.1.2.1),
+ * in service mode or not: refused saves, or a one-time import waiting for
+ * Retry, each with what Retry does (the Migration report's own hints). Retry
+ * never changes a recorded outcome.
+ */
+export function draftCaptureNotice(status: DraftCaptureStatus | null | undefined): { text: string; hint: string } | undefined {
+  if (!status) return undefined;
+  if (!status.writes) return {
+    text: trNoop("Drafts are not being saved because their earlier versions could not be recorded. Check the Zerus data folder, then retry."),
+    hint: trNoop("Check that the Zerus data folder is available and owned by your user. Retry records the earlier drafts before any draft is saved."),
+  };
+  if (status.paused) return {
+    text: trNoop("Importing drafts from Qt is paused because the earlier drafts could not be recorded. New drafts are saved."),
+    hint: trNoop("Retry imports the drafts from Qt. The earlier drafts stay unrecorded; Retry never records them later."),
+  };
+  return undefined;
+}
 
 /** Why a button is off; each shows as its tooltip. */
 export const REASONS = {
@@ -109,13 +128,14 @@ const emptySection = (): Section => ({ items: [], next: null, loading: false, lo
 /**
  * The catalog row a draft's session is (Qt's SessionsWindow::draftOwner):
  * none for an unknown or archived owner. The row of the key's host alias
- * wins; a subagent key names its machine instead.
+ * wins; a subagent key names its machine instead. A draft keyed by session
+ * ID belongs to the row with that ID, whatever its label is now.
  */
 export function draftOwnerRow(item: SavedDraftItem, rows: Iterable<Session>): Session | undefined {
   if (item.kind === "unknown" || item.archived || !item.session) return undefined;
   let named: Session | undefined;
   for (const s of rows) {
-    if (s.name !== item.session || s.state === "archived") continue;
+    if ((item.session_id ? s.sessionId !== item.session_id : s.name !== item.session) || s.state === "archived") continue;
     if (s.computer === item.computer) return s;
     if (item.computer && s.rawMachine === item.computer) named = s;
   }

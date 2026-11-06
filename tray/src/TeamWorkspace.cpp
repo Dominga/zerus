@@ -215,6 +215,7 @@ TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *p
     // The panel may outlive this workspace.
     m_panel->confirmClosed = [alive = QPointer<TeamWorkspace>(this)] { if (alive) alive->scheduleRender(); };
     m_drawer->reassign = [this](int task, const QPoint &global) { if (const auto *team = currentTeam(m_team)) m_panel->reassignMenu(*team, task, global); };
+    m_drawer->heatLine = [this](const Team &team, int task) { return heatCardLine(team, task); };
     // U62 (#719): the drawer's test runs, from the team's test database.
     m_drawer->readTestRuns = [this](int task, const TeamTaskCard::RunsRead &done) {
         m_teams->call(QStringLiteral("test"), {{"team", m_team}, {"action", "results"}, {"task", task}, {"limit", 20}},
@@ -230,6 +231,7 @@ TeamWorkspace::TeamWorkspace(TeamController *teams, TeamPanel *panel, QWidget *p
     // ages in place.
     QObject::connect(m_teams, &TeamController::teamsChanged, this, [this] { pollRender(); });
     QObject::connect(m_teams, &TeamController::showCancelledChanged, this, [this] { scheduleRender(); });
+    QObject::connect(m_teams, &TeamController::staleChanged, this, [this] { scheduleRender(); });
     QObject::connect(m_teams, &TeamController::watchedChanged, this, [this] {
         if (const auto *team = m_teams->watched()) Teams::AccountMove::observe(m_move, *team);
         renderAccountMove();
@@ -594,6 +596,7 @@ void TeamWorkspace::render()
         // C4: the owner's attention list is the first group of the side
         // column; the lead's inbox (C2) is a drawer under the canvas.
         if (!m_error.isEmpty()) tv->addWidget(errorStrip());
+        if (m_teams->stale()) tv->addWidget(staleStrip());
         // U25 (spec 5.7): Needs your answer, Team stuck and Plan problems are
         // collapsed lists at the top of the right column now.
         // The send-back form being typed in keeps the focus across the rebuild.
@@ -1696,6 +1699,24 @@ void TeamWorkspace::answerAttention(const QString &teamId, const QString &member
     render();
 }
 
+// Task 101: hgs did not answer the latest read (the team store was busy, or
+// the read passed its deadline); what shows is the last good read, kept
+// until a read answers again.
+QWidget *TeamWorkspace::staleStrip()
+{
+    const Colors c = colorsFor(m_dark);
+    auto *strip = new QFrame; strip->setObjectName("teamWorkspaceStale");
+    strip->setStyleSheet(QStringLiteral("QFrame#teamWorkspaceStale{background:%1;border-bottom:1px solid %2;}")
+                             .arg(alpha(c.warn, .08).name(QColor::HexArgb), alpha(c.warn, .4).name(QColor::HexArgb)));
+    auto *h = new QHBoxLayout(strip); h->setContentsMargins(12, 4, 12, 4); h->setSpacing(8);
+    const QDateTime at = m_teams->lastGoodRead();
+    const QString when = at.isValid() ? at.time().toString(QStringLiteral("HH:mm:ss")) : tr("earlier");
+    auto *text = label(tr("Showing the team as read at %1; reading again (%2)").arg(when, m_teams->staleError()), c.warn, 11);
+    text->setWordWrap(true); text->setObjectName("teamWorkspaceStaleText");
+    h->addWidget(text, 1);
+    return strip;
+}
+
 QWidget *TeamWorkspace::errorStrip()
 {
     const Colors c = colorsFor(m_dark);
@@ -1932,6 +1953,11 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
         b->setText(QString()); b->setFixedWidth(b->iconSize().width() + 16);
     }
     h->addWidget(views);
+    // Task 61: the origin link is not a dependency; name its dashed violet look.
+    if (m_view == "graph" || m_view == "layers") {
+        auto *legend = elided(tr("Dashed: spawned from"), c.violet, 11);
+        legend->setObjectName("teamOriginLegend"); h->addWidget(legend);
+    }
     const bool planning = team.status == "planning";
     if (planning) {
         auto *task = button(tr("+ Task"), "teamWorkspaceAddTask");
@@ -2100,6 +2126,7 @@ QWidget *TeamWorkspace::canvas(const Team &team)
             view->edges[task.id].append(d.task);
             if (d.soft && !team.allHard) view->soft.insert({d.task, task.id});
         }
+    for (const auto &task : team.tasks) if (task.origin > 0) view->origins[task.id] = task.origin;
     QList<int> order;
     const auto byLayer = layered(team);
     for (auto it = byLayer.cbegin(); it != byLayer.cend(); ++it) order += it.value();
@@ -2410,7 +2437,13 @@ QWidget *TeamWorkspace::board(const Team &team)
                 cardBox->setStyleSheet(QStringLiteral("QFrame#teamBoardCard{background:%1;border:1px solid %2;border-radius:9px;}")
                                            .arg(heatCardFill(heatOn, task, c).name(), edge.name()));
                 cardBox->setToolTip(lost->toolTip());
-                r->addWidget(lost);
+                // Task 82: the overrun badge beside the lateness; the pair
+                // wraps as one in the flowing line.
+                auto *pair = new QWidget; pair->setObjectName("teamBoardHeatPair");
+                auto *ph = new QHBoxLayout(pair); ph->setContentsMargins(0, 0, 0, 0); ph->setSpacing(6);
+                ph->addWidget(lost);
+                if (auto *badge = heatOverrunBadge(*heatOn, task, c)) ph->addWidget(badge);
+                r->addWidget(pair);
             }
             // U37: the working time right after it, in the same color and size;
             // a running one keeps the room it grows to and ticks with the board.
@@ -2721,6 +2754,20 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
     badge->setObjectName("teamPhaseBadge"); badge->setProperty("state", state); badge->setProperty("auto", autoDraft);
     if (autoDraft) badge->setToolTip(autoDraftTip(record->startAhead));
     h->addWidget(badge);
+    // Task #59: the phase's own mode, live from hgs, for a phase a switch
+    // reaches: the free one, or a running one (Standard).
+    if (team.phaseModesKnown && (freeOpen || state == QLatin1String("running") || team.phaseMode(group.n) == QLatin1String("free"))) {
+        const bool phaseFree = freeOpen || (team.freeMode() && team.freePhase.phase == group.n) || team.phaseMode(group.n) == QLatin1String("free");
+        if (phaseFree || state == QLatin1String("running")) {
+            auto *mode = new PhaseBadge(phaseFree ? tr("Free") : tr("Standard"), phaseFree ? c.violet : c.text3,
+                                        phaseFree ? QStringLiteral("plan_free") : QStringLiteral("plan_standard"), false);
+            mode->setObjectName("teamPhaseMode"); mode->setProperty("phase", group.n); mode->setProperty("mode", phaseFree ? "free" : "standard");
+            mode->setToolTip(phaseFree ? tr("Free planning: the phase stays open and takes tasks as they come until you close it")
+                                       : tr("Standard planning: the phase is planned, approved and closed with its build"));
+            mode->setAttribute(Qt::WA_TransparentForMouseEvents);
+            h->addWidget(mode);
+        }
+    }
     // U63 (owner, 2026-10-31): a paused accepted phase does not start until
     // the pause is removed; who paused it and why.
     const PhasePause pause = freeOpen ? PhasePause{} : phasePauseOf(team, group.n);
@@ -2928,6 +2975,16 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         auto *waits = label(text, c.dim, 11, false, "teamPhaseQueued"); waits->setAttribute(Qt::WA_TransparentForMouseEvents);
         h->addWidget(waits);
     }
+    // Task #59: the open free phase locks back to standard from its own
+    // header (it has no phase menu), through the same dialog.
+    if (freeOpen && team.phaseModesKnown && (team.status == "running" || team.status == "paused")) {
+        auto *lock = button(tr("Switch to standard…"), "teamPhaseLock"); lock->setProperty("ghost", true); lock->setProperty("phase", group.n);
+        lock->setToolTip(tr("Switch phase %1 to standard planning: its tasks stay, new work is planned in a new phase").arg(group.n));
+        QObject::connect(lock, &QPushButton::clicked, this, [this, id = team.id, phase = group.n] {
+            QTimer::singleShot(0, this, [this, id, phase] { if (const auto *t = currentTeam(id)) phaseModeDialog(*t, phase, false); });
+        });
+        h->addWidget(lock);
+    }
     // U39 (owner, 2026-10-28): an accepted phase can be discarded, or (U42)
     // returned to a draft, while its work has not started; hgs refuses it
     // otherwise and names the tasks.
@@ -2955,7 +3012,14 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
             addPhaseAcceptance(menu, id, phase);
             // Task #58: a running phase opens for tasks as they come; one
             // phase is free at a time.
-            if (current && current->phaseModesKnown) {
+            if (current && current->phaseModesKnown && current->freeMode() && current->freePhase.phase == phase) {
+                // Task #59: the free phase locks back from its own header too.
+                menu->addSeparator();
+                auto *lock = menu->addAction(tr("Switch to standard…")); lock->setObjectName("teamPhaseModeStandard");
+                QObject::connect(lock, &QAction::triggered, this, [this, id, phase] {
+                    QTimer::singleShot(0, this, [this, id, phase] { if (const auto *t = currentTeam(id)) phaseModeDialog(*t, phase, false); });
+                });
+            } else if (current && current->phaseModesKnown) {
                 menu->addSeparator();
                 auto *free = menu->addAction(tr("Switch to free planning…")); free->setObjectName("teamPhaseModeFree");
                 bool running = false;
@@ -3221,6 +3285,7 @@ QWidget *TeamWorkspace::phaseGraph(const Team &team, const PhaseGroup &group, co
         view->edges[id].append(d.task);
         if (d.soft && !team.allHard) view->soft.insert({d.task, id});
     }
+    for (int id : group.tasks) if (const auto *task = team.task(id); task && task->origin > 0) view->origins[id] = task->origin;
     const auto layers = phaseLayers(team, shown);
     QList<int> order = shown;
     std::stable_sort(order.begin(), order.end(), [&layers](int a, int b) { return layers.value(a) < layers.value(b); });
@@ -3376,7 +3441,6 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
             // U38: with the heat on, the loss takes the working time's place,
             // at the line's end; the activity label elides before it does.
             QLabel *lost = heatOn ? heatBoardLabel(*heatOn, *task, c) : nullptr;
-            if (lost) lost->setMinimumWidth(lost->sizeHint().width());
             // The same small activity label as the graph and the plain board
             // (a problem text wins).
             if (!problem) {
@@ -3391,13 +3455,23 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
                 }
             }
             if (!lost) addWorked(r2, *task, workedClock()(), c, "teamBoardWorked");
+            // Task 82: the overrun badge beside the lateness.
+            QLabel *overrunBadge = heatOn ? heatOverrunBadge(*heatOn, *task, c) : nullptr;
             r2->addStretch(1);
             if (problem) {
                 auto *why = elided(problemText(team, task->id), toneColor(c, problemsByTask.value(task->id)), 11); why->setObjectName("teamBoardProblem");
                 r2->insertWidget(r2->count() - 1, why, 3);
             }
-            if (lost) r2->addWidget(lost);
             b->addLayout(r2);
+            // Task 82: the lateness and the overrun badge beside it take a
+            // line of their own; a narrow card wraps the badge under it
+            // rather than covering the lateness.
+            if (lost || overrunBadge) {
+                auto *r3 = new FlowLayout(6);
+                if (lost) r3->addWidget(lost);
+                if (overrunBadge) r3->addWidget(overrunBadge);
+                b->addLayout(r3);
+            }
             if (stages) b->addWidget(stages);
                 if (auto *last = cv->count() > 0 ? cv->itemAt(cv->count() - 1) : nullptr; last && last->spacerItem())
                     cv->insertWidget(cv->count() - 1, cardBox);
@@ -3459,10 +3533,14 @@ QWidget *TeamWorkspace::layerRows(const Team &team, const QList<int> &ids)
         const auto mark = phaseMark(team, *task);
         auto *line = new ClickFrame; line->setObjectName("teamLayerRow"); line->setProperty("task", id); line->setCursor(Qt::PointingHandCursor);
         line->setMinimumHeight(30);
+        // Task 82: Layers takes the heat's tint, lateness and overrun too.
+        const Heat *heatOn = heat(team);
         line->setStyleSheet(QStringLiteral("QFrame#teamLayerRow{background:%1;border:1px %4 %2;border-radius:8px;} QFrame#teamLayerRow:hover{border-color:%3;}")
-                                .arg(c.surface.name(), problem ? toneColor(c, problemsByTask.value(id)).name() : c.cardBorder.name(), c.accent.name(),
+                                .arg(heatCardFill(heatOn, *task, c).name(), problem ? toneColor(c, problemsByTask.value(id)).name() : c.cardBorder.name(), c.accent.name(),
                                      task->status == "draft" ? QStringLiteral("dashed") : QStringLiteral("solid")));
-        line->setToolTip(QStringLiteral("#%1 %2 — %3").arg(id).arg(task->title, mark.tooltip.isEmpty() ? s.text : mark.tooltip));
+        QString lineTip = QStringLiteral("#%1 %2 — %3").arg(id).arg(task->title, mark.tooltip.isEmpty() ? s.text : mark.tooltip);
+        if (const QString tip = heatOn ? heatTip(*heatOn, *task) : QString(); !tip.isEmpty()) lineTip += QLatin1Char('\n') + tip;
+        line->setToolTip(lineTip);
         line->clicked = team.status == "planning" ? std::function<void()>([this, id] { if (const auto *t = currentTeam(m_team)) m_panel->editTask(*t, id); })
                                                   : std::function<void()>([this, id] { m_drawerTask = id; scheduleRender(); });
         auto *h = new QHBoxLayout(line); h->setContentsMargins(8, 4, 8, 4); h->setSpacing(8);
@@ -3480,7 +3558,11 @@ QWidget *TeamWorkspace::layerRows(const Team &team, const QList<int> &ids)
             // The same small activity label as the graph and the board.
             auto *a = label(activity, c.text3, 11); a->setObjectName("teamLayerActivity"); a->setProperty("liveTask", id); h->addWidget(a);
         }
-        addWorked(h, *task, workedClock()(), c, "teamLayerWorked");
+        QLabel *lateLabel = heatOn ? heatBoardLabel(*heatOn, *task, c) : nullptr;
+        if (lateLabel) {
+            h->addWidget(lateLabel);
+            if (auto *badge = heatOverrunBadge(*heatOn, *task, c)) h->addWidget(badge);
+        } else addWorked(h, *task, workedClock()(), c, "teamLayerWorked");
         const QString role = team.assigneeRole(*task, tr("You"));
         // U36: the stage chip line.
         if (auto *stages = stageLineWidget(team, *task, c)) { stages->setMaximumWidth(260); h->addWidget(stages, 2); }
@@ -4718,3 +4800,6 @@ void TeamWorkspace::addMember(const Team &team)
     pop->show();
     placePopover();
 }
+
+
+

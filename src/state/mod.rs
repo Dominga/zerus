@@ -52,6 +52,16 @@ mod provider_errors;
 mod recovery;
 mod service_worker;
 mod session_limits;
+pub(crate) mod session_id;
+mod session_index;
+mod labels;
+/// How every reader decides what the label index proves (zerus-ucck P3a);
+/// the native readers that need it outside this module run on Unix.
+#[cfg(unix)]
+pub(crate) use labels::prove as prove_label_index;
+/// How every reader of the ID layout checks a record's own identity.
+#[cfg(unix)]
+pub(crate) use storage::is_id_layout_record;
 mod provider_messages;
 mod processes;
 mod services;
@@ -78,6 +88,8 @@ mod search;
 pub(crate) mod search_index;
 pub(crate) mod session_graph;
 mod storage;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod task_reconcile;
 mod subagents;
 mod subagents_confirm;
 mod session_upload;
@@ -85,6 +97,7 @@ mod session_state;
 mod switch_account;
 mod builds;
 pub(crate) mod build_dirs;
+pub(crate) mod subagent_lifecycle;
 mod native_subagents;
 mod supervisor;
 mod tasks;
@@ -95,21 +108,45 @@ mod telemetry;
 mod terminate;
 mod untracked_shell;
 mod session_action;
-pub(crate) use session_action::status_machine as lifecycle_receipt_machine;
+pub(crate) use session_action::{
+    observe_original as observe_lifecycle_receipt, status_machine as lifecycle_receipt_machine,
+};
 mod shown_path;
 mod startup_choice;
 mod terminal;
 mod conversation_history;
 mod usage;
+mod usage_samples;
 mod workspace;
 mod git_status;
 pub(crate) mod repositories;
+mod launch_observation;
+/// Evidence about original launch `launch` under this process's own state
+/// root (`HGS_STATE_DIR` or its default), read within `deadline`. A root that
+/// cannot be resolved without creating it is Unknown.
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+pub(crate) fn observe_own_launch(
+    launch: &str,
+    deadline: std::time::Instant,
+) -> zerus_client_core::desktop::creation_launch::Observation {
+    match crate::platform::canonical(storage::root()) {
+        Ok(root) => launch_observation::observe(&root, launch, deadline),
+        Err(_) => zerus_client_core::desktop::creation_launch::Observation::Unknown,
+    }
+}
 mod worktrees;
 mod worktree_requests;
+// The creation worktree actor's only entry into the owned effect.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use {
+    worktree_requests::{create_owned as create_worktree_owned, original_receipt as worktree_request_receipt},
+    worktrees::{Control as WorktreeControl, Step as WorktreeStep},
+};
 mod worktree_cleanup;
 mod worktree_caches;
 mod worktree_inspection;
 mod worktree_lifecycle;
+mod worktree_lock;
 mod worktree_maintenance;
 
 /// Read the selected account's native catalog without starting an agent.
@@ -139,7 +176,7 @@ pub(crate) fn worktree_catalog_until(path: &std::path::Path, deadline: std::time
 mod launch_project;
 pub(crate) use launch_project::with_launch_binding;
 mod session_project;
-pub(crate) use session_project::with_session_project_binding;
+pub(crate) use session_project::{with_pinned_session_binding, with_session_project_binding, Pinned};
 pub(crate) mod launches;
 
 use serde_json::{json, Value};
@@ -225,7 +262,7 @@ pub(crate) fn account_context(name: &str) -> Result<Value> {
     let _guard = lock(None)?;
     let record = read(name)?;
     let snapshot = live()?;
-    if snapshot.contains_key(name) && !matches(&record, snapshot.get(name)) {
+    if terminal_live(&snapshot, &record)? && !matches(&record, panes_of(&snapshot, &record)) {
         return Err("Session account binding is no longer current.".into());
     }
     Ok(account_binding(&record))
@@ -465,7 +502,7 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
     // session would list twice (zerus-gd02). Archive reconciliation already
     // read both under this lock; the listing reuses those reads and releases
     // the lock before it summarizes the sessions.
-    let ((snapshot, names), (archived, bindings)) = if root().exists() {
+    let ((snapshot, mut names), (archived, bindings)) = if root().exists() {
         let _guard = lock(None)?;
         let (snapshot, names) = live_sessions()?;
         let saved = if include_archives { archive::reconcile_locked(&snapshot)? } else { (Vec::new(), archive::reconcile_active_locked(&snapshot)?) };
@@ -525,18 +562,25 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
             continue;
         }
         let name = string(&record, "name");
-        if let Some(index) = by_name.get(name) {
-            if matches(&record, snapshot.get(name)) {
+        // Live rows are the terminals' (P3b): a record finds its row by its
+        // own terminal, and that row then lists under the record's label.
+        // A row under its terminal name that is another session's never
+        // hides this one (#1445 review): it lists as saved below.
+        if let Some(index) = by_name.get(terminal_name(&record)) {
+            if matches(&record, panes_of(&snapshot, &record)) {
+                label_row(&mut sessions[*index], &record);
+                workspace::relabel(&mut names, terminal_name(&record), name);
                 live_row(&mut sessions[*index], record, &shared, &mut process_work)?;
+                continue;
             }
-            continue;
         }
         if string(&record, "conversation_id").is_empty() {
             continue;
         }
-        // A record whose name was reused by a different live pane is not a
-        // stopped session. Never offer its old identity as that pane's identity.
-        if snapshot.contains_key(name) {
+        // Only the session's own launch still starting keeps its saved row
+        // out; a terminal another session holds under its terminal name never
+        // hides it (#1445 review), nor does one that cannot be read.
+        if terminal_live(&snapshot, &record).unwrap_or(false) {
             continue;
         }
         let parts: Vec<&str> = name.splitn(3, '/').collect();
@@ -588,6 +632,20 @@ struct Shared<'a> {
 /// The row of a live session whose pane runs its saved binding `record`.
 /// `hgs watch` re-derives single rows through this same step
 /// (`watch_source::rows`).
+/// A live row of a terminal named otherwise than its session (P3b) lists
+/// under the session's label, as every other row does.
+fn label_row(session: &mut Value, record: &Value) {
+    let name = string(record, "name");
+    if string(session, "name") == name {
+        return;
+    }
+    let mut parts = name.splitn(3, '/');
+    session["cmd"] = json!(parts.next().unwrap_or(""));
+    session["project"] = json!(parts.next().filter(|s| !s.is_empty()));
+    session["tag"] = json!(parts.next().filter(|s| !s.is_empty()));
+    session["name"] = json!(name);
+}
+
 fn live_row(session: &mut Value, record: Value, shared: &Shared, process_work: &mut processes::WorkSample) -> Result<()> {
     // An approval answered in Terminal sends no hook.
     let record = claude_approval::reconcile(record);
@@ -678,14 +736,14 @@ pub fn find_requested_session(agent: &str, requested: &str) -> Result<Option<Str
             continue;
         }
         let name = string(&record, "name");
-        if snapshot.contains_key(name) && !matches(&record, snapshot.get(name)) {
+        if terminal_live(&snapshot, &record)? && !matches(&record, panes_of(&snapshot, &record)) {
             continue;
         }
         let confirmed = string(&record, "conversation_id") == requested;
         let pending = string(&record, "conversation_id").is_empty()
             && string(&record, "requested_id") == requested
             && string(&record, "expected_id") == requested
-            && if snapshot.contains_key(name) {
+            && if terminal_live(&snapshot, &record)? {
                 string(&record, "error").is_empty()
             } else {
                 attempts::retryable(&record, Some(requested))
@@ -712,11 +770,33 @@ pub fn startup_failure(name: &str) -> Result<Option<String>> {
 
 /// True means an exact confirmed binding; false is a matching pending request.
 /// A live name must still belong to the same pane/run, not merely an old record.
+/// The terminal session of the session `name` names (zerus-ucck P3b): its
+/// record's terminal, read through the command's selection. With no record,
+/// `name` itself names a terminal, as an untracked shell's does. A record
+/// that cannot be read is an error, never the label's terminal.
+pub(crate) fn terminal_of(name: &str) -> Result<String> {
+    if local_sessions().is_err() {
+        return Ok(name.to_owned());
+    }
+    // Presence without following a link (#1445 review): a record that is
+    // there but cannot be read, a dangling link included, refuses; and a
+    // selected record that vanished keeps the command's selection, so it
+    // refuses too, never routing to the label's terminal.
+    match std::fs::symlink_metadata(record_path(name)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            session_id::verify_absent(name)?;
+            Ok(name.to_owned())
+        }
+        Err(error) => Err(format!("{name}: {error}")),
+        Ok(_) => read(name).map(|record| terminal_name(&record).to_owned()),
+    }
+}
+
 pub fn check_requested_session(name: &str, agent: &str, requested: &str) -> Result<bool> {
     local_sessions()?;
     let _guard = lock(None)?;
     let snapshot = live()?;
-    if !record_path(name).exists() {
+    if !storage::label_taken(name) {
         return if snapshot.contains_key(name) {
             Err(format!(
                 "{name}: live session is not tracked; choose another name"
@@ -726,10 +806,10 @@ pub fn check_requested_session(name: &str, agent: &str, requested: &str) -> Resu
         };
     }
     let record = read(name)?;
-    let is_live = snapshot.contains_key(name);
+    let is_live = terminal_live(&snapshot, &record)?;
     if string(&record, "agent") != agent
         || !attempts::agent_home_matches(&record, agent)?
-        || (is_live && !matches(&record, snapshot.get(name)))
+        || (is_live && !matches(&record, panes_of(&snapshot, &record)))
     {
         return Err(format!("{name}: existing session belongs to a different or untracked context; choose another name"));
     }
@@ -785,26 +865,35 @@ pub(crate) fn reference_details(name: &str, archive: &str, agent: &str) -> Resul
     else { subagents::inspection(name, agent, archive) }
 }
 
-pub(crate) fn inspect_reference(reference: &crate::session_reference::Reference) -> Result<Value> {
+/// Whether `record` is the session a reference names: its provider, archive,
+/// conversation (or run, for a reference without one) and, when the
+/// reference carries one, its durable session ID.
+fn matches_reference(reference: &crate::session_reference::Reference, record: &Value) -> bool {
+    string(record, "name").split('/').next() == reference.name.split('/').next()
+        && string(record, "archive_id") == reference.archive
+        && (reference.session.is_empty() || string(record, "session_id") == reference.session)
+        && if reference.conversation.is_empty() {
+            string(record, "run_id") == reference.run && string(record, "conversation_id").is_empty()
+        } else { string(record, "conversation_id") == reference.conversation }
+}
+
+/// The current name of the one saved session a reference names, following
+/// renames: a resolution, never an authorisation (zerus-ucck P1c).
+pub(crate) fn resolve_reference(reference: &crate::session_reference::Reference) -> Result<String> {
     local_sessions()?;
-    let matches_reference = |record: &Value| {
-        string(record, "name").split('/').next() == reference.name.split('/').next()
-            && string(record, "archive_id") == reference.archive
-            && if reference.conversation.is_empty() {
-                string(record, "run_id") == reference.run && string(record, "conversation_id").is_empty()
-            } else { string(record, "conversation_id") == reference.conversation }
-    };
-    let name = {
-        let _guard = lock(None)?;
-        let mut candidates = if reference.archive.is_empty() { records()? } else { archive::records()? };
-        if reference.archive.is_empty() { candidates.extend(dsh::snapshots()?); candidates.extend(opencode::snapshots()?); }
-        let mut matching = candidates.iter().filter(|record| matches_reference(record));
-        let first = matching.next().ok_or("The referenced conversation is no longer bound to a saved session; it may have been cleared or forgotten")?;
-        if matching.next().is_some() { return Err("Ambiguous session reference: multiple saved bindings match this conversation".into()); }
-        string(first, "name").to_owned()
-    };
+    let _guard = lock(None)?;
+    let mut candidates = if reference.archive.is_empty() { records()? } else { archive::records()? };
+    if reference.archive.is_empty() { candidates.extend(dsh::snapshots()?); candidates.extend(opencode::snapshots()?); }
+    let mut matching = candidates.iter().filter(|record| matches_reference(reference, record));
+    let first = matching.next().ok_or("The referenced conversation is no longer bound to a saved session; it may have been cleared or forgotten")?;
+    if matching.next().is_some() { return Err("Ambiguous session reference: multiple saved bindings match this conversation".into()); }
+    Ok(string(first, "name").to_owned())
+}
+
+pub(crate) fn inspect_reference(reference: &crate::session_reference::Reference) -> Result<Value> {
+    let name = resolve_reference(reference)?;
     let parent = reference_details(&name, &reference.archive, "")?;
-    if !matches_reference(&parent) { return Err("Session identity changed while resolving its reference".into()); }
+    if !matches_reference(reference, &parent) { return Err("Session identity changed while resolving its reference".into()); }
     let mut output = if reference.agent.is_empty() { parent }
         else { reference_details(&name, &reference.archive, &reference.agent)? };
     if !reference.agent.is_empty() && output["parent_conversation_id"].as_str() != Some(reference.conversation.as_str()) {
@@ -842,8 +931,191 @@ pub(crate) fn task_bindings() -> Result<Vec<Value>> {
     task_bindings_in(&root())
 }
 
+/// How a session command carries the identities it expects (zerus-ucck P3c).
+pub(crate) enum LabelGuard {
+    /// It carries none: a label several sessions share is refused at once.
+    None,
+    /// Given on its command line: they select now.
+    Given { run: String, conversation: String },
+    /// They arrive with its request, read later: the choice waits for them
+    /// ([`expect`]), and every read of the label refuses until then.
+    Request,
+}
+
+/// A label resolution that refused (zerus-ucck P3a, P3c): its text, the
+/// ambiguity report's `--json` value when there is one, and its exit status.
+#[derive(Debug)]
+pub(crate) struct Unresolved {
+    pub text: String,
+    pub value: Option<Value>,
+    pub code: i32,
+}
+impl Unresolved {
+    fn ambiguous((text, value): (String, Value)) -> Self {
+        Self { text, value: Some(value), code: session_id::AMBIGUOUS }
+    }
+}
+
+/// zerus-ucck P3a: a label a command names without a selection, resolved
+/// among its candidates. A label whose only holder is in the ID layout selects
+/// that session, so every read of the label in this command reaches it. A
+/// label several sessions share is decided by the command's `guard` (P3c):
+/// its expected run, and conversation when given, select the one session that
+/// carries them; with none, or with several left, it is the ambiguity report,
+/// its text and its `--json` value, with exit status 5. A candidate set that
+/// cannot be proven complete is refused the same way, never settled on the
+/// label's first holder.
+pub(crate) fn resolve_label(name: &str, guard: LabelGuard) -> std::result::Result<(), Unresolved> {
+    labels::repair();
+    let candidates = labels::candidates(name)
+        .map_err(|text| Unresolved { text, value: None, code: session_id::AMBIGUOUS })?;
+    match (candidates.first, candidates.by_id.as_slice()) {
+        (_, []) => Ok(()),
+        (false, [only]) => {
+            session_id::select(name, string(only, "session_id"));
+            Ok(())
+        }
+        _ => {
+            let report = ambiguity_report(name, &candidates);
+            match guard {
+                LabelGuard::None => Err(Unresolved::ambiguous(report)),
+                LabelGuard::Given { run, conversation } => {
+                    match select_among(name, &run, &conversation, report).map_err(Unresolved::ambiguous)? {
+                        true => Ok(()),
+                        // None carries them: the stale refusal (exit 1), as
+                        // for one session that changed, never a resolution.
+                        false => Err(Unresolved { text: stale(name), value: None, code: 1 }),
+                    }
+                }
+                LabelGuard::Request => {
+                    session_id::defer(name, report.0, report.1);
+                    Ok(())
+                }
+            }
+        }
+    }
+}
+
+/// zerus-ucck P3c: for a command that is not resolved at dispatch, such as
+/// `hgs hooks NAME` or a scoped recovery action, the identities its request
+/// expects select among the sessions that share `name`, as at dispatch.
+pub(crate) fn select_by(name: &str, run: &str, conversation: &str) -> Result<()> {
+    resolve_label(name, LabelGuard::Given { run: run.into(), conversation: conversation.into() }).map_err(
+        |refusal| match refusal.code {
+            session_id::AMBIGUOUS => session_id::refuse((refusal.text, refusal.value.unwrap_or(Value::Null))),
+            _ => refusal.text,
+        },
+    )
+}
+
+/// zerus-ucck P3c: the identities a command's request expects, `run` and
+/// `conversation`, select among the sessions that share `name` when its
+/// ambiguity was deferred to them. Exactly one carrying them is selected
+/// with them. None carrying them is the stale refusal, as for one session
+/// that changed, and every later read of `name` refuses too (#1454 review).
+/// Several, or no identity at all, is the ambiguity report (exit status 5).
+/// Without a deferred ambiguity this does nothing.
+pub(crate) fn expect(name: &str, run: &str, conversation: &str) -> Result<()> {
+    let Some(report) = session_id::take_deferred(name) else {
+        return Ok(());
+    };
+    match select_among(name, run, conversation, report).map_err(session_id::refuse)? {
+        true => Ok(()),
+        false => Err(stale(name)),
+    }
+}
+
+/// The refusal when no session sharing `name` carries the identities a
+/// command expects.
+fn stale(name: &str) -> String {
+    session_id::selected()
+        .filter(|selection| selection.name == name)
+        .map_or_else(|| format!("{name} changed; refresh and retry"), |selection| selection.changed())
+}
+
+/// Selects among the sessions sharing `name` the one carrying the identities
+/// a command expects, keeping them with it (`session_id::select_guarded`):
+/// `true` when exactly one does. `false` when none does: the guarded selection
+/// then has no session ID, so every record under `name` is refused as changed
+/// (#1454 review). Several, or no identities at all, is the report.
+fn select_among(
+    name: &str,
+    run: &str,
+    conversation: &str,
+    report: (String, Value),
+) -> std::result::Result<bool, (String, Value)> {
+    if run.is_empty() && conversation.is_empty() {
+        return Err(report);
+    }
+    let candidates = labels::candidates(name).map_err(|error| (error, report.1.clone()))?;
+    let mut records = Vec::new();
+    if candidates.first {
+        records.push(storage::read_label(name).map_err(|error| (error, report.1.clone()))?);
+    }
+    records.extend(candidates.by_id);
+    let chosen: Vec<&Value> = records
+        .iter()
+        .filter(|record| {
+            (run.is_empty() || string(record, "run_id") == run)
+                && (conversation.is_empty() || string(record, "conversation_id") == conversation)
+        })
+        .collect();
+    match chosen.as_slice() {
+        [] => {
+            session_id::select_guarded(name, "", run, conversation);
+            Ok(false)
+        }
+        [one] => {
+            let id = Some(string(one, "session_id")).filter(|id| session_id::canonical(id)).unwrap_or_default();
+            session_id::select_guarded(name, id, run, conversation);
+            Ok(true)
+        }
+        _ => Err(report),
+    }
+}
+
+/// The ambiguity report of a label several sessions share: its text and its
+/// `--json` value.
+fn ambiguity_report(name: &str, candidates: &labels::Candidates) -> (String, Value) {
+    let snapshot = live().unwrap_or_default();
+    let state = |record: &Value| {
+        if matches(record, panes_of(&snapshot, record)) { "live" } else { "saved" }
+    };
+    let mut listed: Vec<Value> = Vec::new();
+    if candidates.first {
+        if let Ok(record) = storage::read_label(name) {
+            listed.push(json!({"session_id":record["session_id"],"run_id":record["run_id"],
+                "conversation_id":record["conversation_id"],"state":state(&record),
+                "cwd":record["cwd"],"created":record["created"]}));
+        }
+    }
+    for record in &candidates.by_id {
+        listed.push(json!({"session_id":record["session_id"],"run_id":record["run_id"],
+            "conversation_id":record["conversation_id"],"state":"saved",
+            "cwd":record["cwd"],"created":record["created"]}));
+    }
+    session_id::ambiguity(name, listed)
+}
+
+/// The durable session ID of this computer's live or saved session `name`,
+/// from its record or provider binding (zerus-ucck P2c); None for an archive,
+/// an ID-less record or no session.
+// The swarm's tests resolve their own sessions, never the real state.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn session_id_of(name: &str) -> Option<String> {
+    let record = record_path(name)
+        .exists()
+        .then(|| read(name).ok())
+        .flatten()
+        .or_else(|| dsh::binding(name).ok())
+        .or_else(|| opencode::binding(name).ok())?;
+    let id = string(&record, "session_id");
+    (session_id::canonical(id) && string(&record, "archive_id").is_empty()).then(|| id.to_owned())
+}
+
 /// The record fields task routing reads (`tasks::sessions`).
-const TASK_BINDING_FIELDS: [&str; 6] = ["name", "run_id", "launch_id", "journal_name", "legacy_shadow", "rename_shadow"];
+const TASK_BINDING_FIELDS: [&str; 7] =
+    ["name", "run_id", "launch_id", "journal_name", "launch_label", "legacy_shadow", "rename_shadow"];
 
 /// A saved record reduced to [`TASK_BINDING_FIELDS`]. Every other field, such
 /// as up to 128 shell jobs with their full command texts, is skipped while
@@ -883,7 +1155,8 @@ pub(crate) fn task_bindings_in(root: &Path) -> Result<Vec<Value>> {
     let limit = session_graph::MAX_RECORD;
     let mut bytes = Vec::new();
     let mut rows = Vec::new();
-    for directory in [root.to_owned(), root.join("bindings"), root.join("dsh/bindings"), root.join("opencode/bindings")] {
+    for name in storage::BINDING_DIRS {
+        let directory = root.join(name);
         let entries = match fs::read_dir(directory) {
             Ok(entries) => entries,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
@@ -892,7 +1165,9 @@ pub(crate) fn task_bindings_in(root: &Path) -> Result<Vec<Value>> {
         for entry in entries.flatten() {
             let path = entry.path();
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            if path.extension().is_none_or(|s| s != "json") || stem.len() != 64 || !stem.bytes().all(|c| c.is_ascii_hexdigit()) { continue; }
+            let hashed = stem.len() == 64 && stem.bytes().all(|c| c.is_ascii_hexdigit());
+            let named = match name { "dsh/bindings" | "opencode/bindings" => hashed, _ => storage::binding_stem(name, stem) };
+            if path.extension().is_none_or(|s| s != "json") || !named { continue; }
             let row = (|| -> Result<Option<Value>> {
                 let file = match crate::platform::no_follow(fs::OpenOptions::new().read(true)).open(&path) {
                     Ok(file) => file,
@@ -1171,13 +1446,10 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
                 return Ok(0);
             }
             let _guard = lock(None)?;
-            if record_path(&args[0]).exists() {
-                rename::remove_legacy(&read(&args[0])?)?;
-            }
-            match std::fs::remove_file(record_path(args.first().ok_or("missing session name")?)) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.to_string()),
+            let forgotten = record_path(&args[0]).exists().then(|| read(&args[0])).transpose()?;
+            if let Some(record) = &forgotten {
+                // Its own record, never its label's holder (P3a).
+                storage::remove_record(record)?;
             }
         }
         _ => return Err(format!("unknown state operation: {command}")),

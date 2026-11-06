@@ -311,6 +311,142 @@ pub fn mobile_delivery_set(app: AppHandle, mobile: State<'_, Mobile>, value: Str
     mobile.0.view(snapshot(&app).as_deref())
 }
 
+/// Task 102: the fork's Windows mobile services (Qt's
+/// WindowsMobileServices.h): a relay for this computer on 127.0.0.1 beside
+/// the bundled connector, and the connector started with Zerus.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct LocalServices {
+    /// Windows with the bundled connector: the options apply.
+    pub available: bool,
+    pub relay_bundled: bool,
+    pub relay: bool,
+    pub running: bool,
+    pub port: u16,
+    pub database: String,
+    pub connector: bool,
+}
+
+fn client_dir() -> Option<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+}
+
+fn user_home() -> Option<std::path::PathBuf> {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+
+fn local_view(app: &AppHandle) -> LocalServices {
+    use zerus_client_core::mobile::local_services;
+    let choices = local_services::choices(&app.state::<crate::settings::Store>().0);
+    let (connector, _) = workspace_runtime();
+    let bundled = local_services::bundled_relay(&default_hgs(), client_dir().as_deref());
+    let home = user_home();
+    let running = match (&bundled, &home) {
+        (Some(source), Some(home)) => {
+            local_services::running(&local_services::relay_copy(source, home), choices.port)
+        }
+        _ => false,
+    };
+    LocalServices {
+        available: cfg!(windows) && connector.is_file(),
+        relay_bundled: bundled.is_some(),
+        relay: choices.relay,
+        running,
+        port: choices.port,
+        database: home
+            .map(|home| {
+                local_services::database(&home)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .unwrap_or_default(),
+        connector: choices.connector,
+    }
+}
+
+/// The options' state, read when the Mobile section shows them.
+#[tauri::command(async)]
+pub fn mobile_local_services(app: AppHandle) -> LocalServices {
+    local_view(&app)
+}
+
+/// Run a relay on this computer: on starts it when none answers, off stops
+/// it, as Qt's switch does.
+#[tauri::command(async)]
+pub fn mobile_local_relay(app: AppHandle, on: bool) -> Result<LocalServices, String> {
+    use zerus_client_core::mobile::local_services;
+    app.state::<crate::settings::Store>()
+        .0
+        .set("mobile/localRelay", serde_json::json!(on))
+        .map_err(|error| error.to_string())?;
+    let choices = local_services::choices(&app.state::<crate::settings::Store>().0);
+    if on {
+        let source = local_services::bundled_relay(&default_hgs(), client_dir().as_deref())
+            .ok_or("No relay is bundled with this build.")?;
+        let home = user_home().ok_or("The home folder is unknown.")?;
+        let relay = local_services::relay_copy(&source, &home);
+        if !local_services::running(&relay, choices.port) {
+            local_services::start(&relay, &home, choices.port)
+                .map_err(|error| format!("The relay did not start: {error}"))?;
+        }
+    } else {
+        local_services::stop();
+    }
+    Ok(local_view(&app))
+}
+
+/// At Zerus start, off the UI thread (Qt's `ensureInBackground`): the chosen
+/// relay when none answers, then a configured connector that is not
+/// running, through its own management interface.
+pub fn ensure_local_services(app: AppHandle) {
+    if !cfg!(windows) {
+        return;
+    }
+    let started = std::thread::Builder::new()
+        .name("zerus-mobile-services".into())
+        .spawn(move || {
+            use zerus_client_core::mobile::{legacy::windows, local_services};
+            // A read waits for the store to load.
+            let settings = app.state::<crate::settings::Store>().0.clone();
+            let choices = local_services::choices(&settings);
+            let (connector, config) = workspace_runtime();
+            if !connector.is_file() {
+                return;
+            }
+            if let (Some(source), Some(home)) = (
+                local_services::bundled_relay(&default_hgs(), client_dir().as_deref()),
+                user_home(),
+            ) {
+                let relay = local_services::relay_copy(&source, &home);
+                let answering = choices.relay && local_services::running(&relay, choices.port);
+                if local_services::start_relay_now(&choices, true, answering) {
+                    if let Err(error) = local_services::start(&relay, &home, choices.port) {
+                        eprintln!("zerus-client: the local relay did not start: {error}");
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+            }
+            if !choices.connector || !config.is_file() {
+                return;
+            }
+            let status = windows::status(&connector, &config).ok();
+            if local_services::start_connector_now(&choices, true, status.as_ref()) {
+                if let Some(status) = status {
+                    if let Err(error) = windows::apply(&connector, &config, &status, "start", None)
+                    {
+                        eprintln!("zerus-client: the mobile connector did not start: {error:?}");
+                    }
+                }
+            }
+        });
+    if let Err(error) = started {
+        eprintln!("zerus-client: the mobile services were not checked: {error}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

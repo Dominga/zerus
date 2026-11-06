@@ -578,6 +578,9 @@ impl Store {
         let mut events = Vec::new();
         let mut receipt = change(&mut team, &mut events)?;
         let at = now();
+        // Task 81: a task of the approved plan gets its baseline schedule in the
+        // change that approves it or adds it.
+        super::baseline::stamp(&mut team, at);
         team.revision += 1;
         team.updated = at;
         write(&transaction, &team)?;

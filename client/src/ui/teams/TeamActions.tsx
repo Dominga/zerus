@@ -4,7 +4,7 @@ import { Icon } from "../lib/icons";
 import { teams } from "../../store/teams";
 import { useModel, windowPort } from "./ProposalCards";
 import {
-  TeamActions, barActions, barChips, finishSummary, formText, moreItems, openQuestions, phaseModeSwitch, questionClosed, stageName, subtreeImpact, taskButtons,
+  TeamActions, barActions, barChips, finishSummary, formText, moreItems, openQuestions, phaseModeChip, phaseModeSwitch, questionClosed, teamModeBadge, stageName, subtreeImpact, taskButtons,
   type ActTask, type ActTeam, type BarAction, type BarChip, type TaskForm,
 } from "./actions";
 import type { ComputerId } from "../../types";
@@ -44,12 +44,12 @@ function TextDialog(props: {
 export function PhaseModeControl(props: { computer: ComputerId; team: ActTeam; phase: number }) {
   const { model, tick } = useModel((changed) => new TeamActions(windowPort, () => ({ computer: props.computer, team: props.team }), changed));
   const read = () => (tick(), model);
-  const mode = () => props.team.phases.find((phase) => phase.n === props.phase)?.mode ?? "";
-  const free = () => (props.team.free_phase ?? 0) === props.phase || mode() === "free";
+  // Task #59: the phase's own mode, live from hgs: Free, or Standard for a running phase.
+  const chip = createMemo(() => phaseModeChip(props.team, props.phase));
   const switching = createMemo(() => phaseModeSwitch(props.team, props.phase));
   return (
-    <span class="team-phase-mode" data-phase-mode={free() ? "free" : mode() || "standard"} onClick={(event) => event.stopPropagation()}>
-      <Show when={free()}><span class="pt-chip pt-chip-free" title={tr("Free planning: the phase stays open and takes tasks as they come until you close it")}>{tr("Free")}</span></Show>
+    <span class="team-phase-mode" data-phase-mode={chip()?.mode ?? ""} onClick={(event) => event.stopPropagation()}>
+      <Show when={chip()}>{(shown) => <span class={`pt-chip pt-chip-${shown().mode}`} title={shown().tip}>{shown().text}</span>}</Show>
       <Show when={switching()}>{(shown) => (
         <button type="button" class="btn ghost small" data-action="phase-mode" data-mode={shown().mode}
           disabled={!shown().enabled || read().busy} title={shown().why || undefined}
@@ -57,6 +57,27 @@ export function PhaseModeControl(props: { computer: ComputerId; team: ActTeam; p
       )}</Show>
       <Show when={read().notice}><span class="danger team-phase-mode-notice" role="status">{read().notice}</span></Show>
     </span>
+  );
+}
+
+/** Task #59: the team bar's mode (Qt teamHeaderPlanMode) and, for the free phase, its lock back to standard. */
+export function TeamModeControl(props: { computer: ComputerId; team: ActTeam }) {
+  const badge = createMemo(() => teamModeBadge(props.team));
+  const lock = createMemo(() => { const b = badge(); return b && b.phase > 0 ? phaseModeSwitch(props.team, b.phase) : undefined; });
+  const { model, tick } = useModel((changed) => new TeamActions(windowPort, () => ({ computer: props.computer, team: props.team }), changed));
+  const read = () => (tick(), model);
+  return (
+    <Show when={badge()}>{(shown) => (
+      <span class="team-mode" data-mode={shown().mode}>
+        <span class={`pt-chip pt-chip-${shown().mode}`} title={shown().tip}>{shown().text}</span>
+        <Show when={lock()?.mode === "standard" ? lock() : undefined}>{(switching) => (
+          <button type="button" class="btn ghost small" data-action="phase-mode" data-mode="standard" disabled={!switching().enabled || read().busy}
+            title={tr("Switch phase %1 to standard planning: its tasks stay, new work is planned in a new phase", switching().phase)}
+            onClick={() => void model.phaseMode(switching().phase, "standard")}>{switching().text}</button>
+        )}</Show>
+        <Show when={read().notice}><span class="danger team-phase-mode-notice" role="status">{read().notice}</span></Show>
+      </span>
+    )}</Show>
   );
 }
 

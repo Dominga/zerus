@@ -84,6 +84,46 @@ fn ordinary_transcripts_composers_and_output_are_not_pending() {
         assert!(parse(&screen).is_none(), "{screen}");
     }
 }
+fn no_question_after_composer(panel: &str) {
+    for composer in ["› Ask Codex to do anything", "›", "› ", "›   ", "›	"] {
+        for footer in ["", "\n  ? for shortcuts\n"] {
+            let screen = format!("{panel}\n{composer}{footer}");
+            let question = parse(&screen).and_then(|panel| card(&record(), &panel));
+            assert!(
+                question.is_none(),
+                "a transcript quote became pending input: {screen}"
+            );
+        }
+    }
+}
+
+#[test]
+fn quoted_complete_panel_followed_by_an_empty_or_placeholder_composer_is_not_pending() {
+    no_question_after_composer(SCREEN);
+}
+
+#[test]
+fn quoted_changed_panel_followed_by_an_empty_or_placeholder_composer_is_not_pending() {
+    // Unfamiliar native text must still retain attention when actually active,
+    // but the same transcript text above a composer cannot block new messages.
+    let changed = SCREEN.replace("gpt-6-luna", "future-model");
+    let active = card(&record(), &parse(&changed).unwrap()).unwrap();
+    assert_eq!(active["can_answer"], false);
+    no_question_after_composer(&changed);
+}
+
+#[test]
+fn an_earlier_composer_does_not_hide_the_current_native_picker() {
+    for panel in [
+        SCREEN.to_owned(),
+        SCREEN.replace("gpt-6-luna", "future-model"),
+    ] {
+        let original = card(&record(), &parse(&panel).unwrap()).unwrap();
+        let screen = format!("›\nOld transcript text\n{panel}");
+        assert_eq!(card(&record(), &parse(&screen).unwrap()).unwrap(), original);
+    }
+}
+
 #[test]
 fn exact_panel_and_every_launch_identity_are_bound() {
     let panel = parse(SCREEN).unwrap();

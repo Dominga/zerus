@@ -4083,7 +4083,23 @@ fn templates_command(input: &Value) -> anyhow::Result<Value> {
             }
             Ok(super::templates::listed())
         }
-        other => bail!("templates action is get or set (got {other})"),
+        // Task 85: the project templates of a folder's .zerus/tests.toml, each
+        // with its content hash and whether the owner accepted it.
+        "project" => {
+            let folder = text(input, "folder");
+            ensure!(!folder.is_empty(), "Name the folder whose project templates to list");
+            Ok(json!({"items":super::templates::project_listed(std::path::Path::new(folder))?}))
+        }
+        // Task 85: the owner accepts project templates by their content hash;
+        // they run outside a member's sandbox, so an agent never accepts one.
+        "accept" => {
+            let (dsh, session, run) = caller_identities();
+            owner_caller(input, caller_record().is_some(), dsh.is_some(), session.is_some(), run.is_some())?;
+            let hashes: Vec<String> = input["hashes"].as_array().into_iter().flatten().filter_map(|hash| hash.as_str().map(str::to_owned)).collect();
+            ensure!(!hashes.is_empty(), "Name the content hashes to accept (hgs team templates --json '{{\"action\":\"project\",\"folder\":...}}' lists them)");
+            Ok(json!({"accepted":super::templates::accept_project(&hashes)?}))
+        }
+        other => bail!("templates action is get, set, project or accept (got {other})"),
     }
 }
 

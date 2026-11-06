@@ -1335,6 +1335,61 @@ output names the folder and asks for its build outputs (`.ci-build`, `target`)
 to be excluded from scanning. No other failure is retried, and a commit or
 merge never is.
 
+Builds and tests of any CMake or MSBuild project (task 85, the provider model
+of `docs/test-providers.md`) have their own templates beside the Qt ones:
+
+| Template | Arguments | Runs |
+|---|---|---|
+| `cmake-configure` | `source` (default `.`), `build_dir` (default `build`), `generator`, `config`, `preset` | `cmake -S source -B build_dir [-G generator] [-DCMAKE_BUILD_TYPE=config] [--preset preset]`, plus the build cache's launcher |
+| `cmake-build` | `build_dir`, `config`, `targets` | `cmake --build build_dir [--config config] [--target targets...]` |
+| `ctest` | `build_dir`, `config`, `tests` or `regex` | `ctest --test-dir build_dir --output-on-failure --output-junit <report> [-C config] [-R ^(tests)$ or regex]` |
+| `msbuild-build` | `project` (a `.sln` or project file), `config`, `platform`, `targets` | Visual Studio's MSBuild (vswhere), `/m /nologo /v:minimal [/p:Configuration] [/p:Platform] [/t:targets]` |
+| `vstest` | `tests` (assemblies), `filter` | `vstest.console tests /Logger:trx [/TestCaseFilter:filter]` |
+
+Every value is typed: a `source` or `build_dir` is a path inside the member's
+folder (it may not exist yet), a target or test name a plain word, a regex,
+generator, platform or filter one line of text. On Windows these templates load
+the Visual Studio environment as the Qt ones do, and the build cache and the
+scanning retry apply to them. `qt-configure` and `qt-build` are `cmake-configure`
+and `cmake-build` with this repository's fixed values; their argv is unchanged.
+
+`ctest` and `vstest` read their report (CTest's JUnit XML, VSTest's TRX, under
+`.zerus-team/results` in the member's folder, removed before each run) into one
+result per test: name, suite, `passed`/`failed`/`skipped`/`error`, duration and
+the first message, at most 5000 per run with failures first. The run's answer
+carries them as `report` (`results`, `passed`, `failed`, `skipped`, `errors`,
+`note`), and the failing names fill `failures` when the output named none. The
+exit code stays the verdict; a missing report is only a `note`.
+
+A project declares its own templates in `.zerus/tests.toml`, typed like the
+built-ins:
+
+```toml
+[[template]]
+id = "make-target"
+program = "make"
+args = ["-C", "src", "{targets}", "JOBS={jobs}"]
+timeout_secs = 900
+results = { format = "junit", path = "out/report.xml" }   # optional
+
+[[template.params]]
+name = "targets"
+kind = "identifiers"        # identifier, identifiers, text, path or paths
+required = true
+
+[[template.params]]
+name = "jobs"
+kind = "identifier"
+```
+
+The program is fixed; every placeholder is declared, a list is a whole
+argument, an absent optional value drops its argument, and an id never shadows
+a built-in. A project template runs outside the member's sandbox, so it runs
+only once the owner accepted its exact content: `hgs team templates --json`
+with `{"action":"project","folder":...}` lists a folder's templates with their
+content `hash` and `accepted`, and `{"action":"accept","hashes":[...],"by":"human"}`
+(the owner only) accepts them. A changed template waits again.
+
 Start builds and long tests through Zerus so they show as work:
 `hgs team run` for a team member's templates (`hgs guide team-run`), and
 `hgs run --json [--wait]` with `{request_id, label, command, cwd?,
@@ -2641,10 +2696,12 @@ On, a build template of a member runs in that member's snapshot,
   (`[build_cache]`) serves it as usual.
 - Builds of one build folder run one at a time: the folder's lock is the
   queue. The key is the tree, the template, its arguments and the toolchain's
-  version lines (`rustc -vV` and `cargo -V`, or `cmake --version`). A build
+  version lines (`rustc -vV` and `cargo -V`; `cmake --version` for the Qt,
+  CMake and ctest templates; `msbuild -version` for `msbuild-build` and
+  `vstest`). A build
   of the same key still running is waited for through a marker taken
   atomically. A finished result serves a check template (`cargo-test`,
-  `cargo-clippy`, `qt-test`) as its verdict for any member; a build
+  `cargo-clippy`, `qt-test`, `ctest`, `vstest`) as its verdict for any member; a build
   template's result serves only the member whose tree holds its outputs. The
   newest 64 results are kept in `.zerus-team/runs/broker-results.json`.
 - A failure in a file another member is changing is reported to both as an
@@ -2685,7 +2742,8 @@ build in its own build folder.
 enabled = true                 # false: the project vetoes the broker
 mode = "auto"                  # "shared", "snapshot"; auto: shared for Unreal
 ready_wait_s = 300             # shared mode: the wait for others' edits
-templates = ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test"]
+templates = ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test",
+             "cmake-configure", "cmake-build", "ctest", "msbuild-build", "vstest"]
 assets = ["Content"]           # folders linked whole, never copied
 link = ["ThirdParty"]          # untracked folders the build needs, linked
 copy_limit_mb = 4              # copies above this size are named in the note

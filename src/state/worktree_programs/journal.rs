@@ -34,10 +34,11 @@ pub(super) struct Store {
     parent: Directory,
     directory: Directory,
 }
-pub(super) struct Claim {
+pub(crate) struct Claim {
     store: Store,
     input: Input,
     _group: File,
+    consumed: std::sync::atomic::AtomicBool,
 }
 pub(super) enum Reservation {
     Fresh(Box<Claim>),
@@ -343,18 +344,56 @@ impl Store {
             store: self,
             input,
             _group: group,
+            consumed: std::sync::atomic::AtomicBool::new(false),
         })))
     }
 }
 
 impl Claim {
-    pub(super) fn input(&self) -> &Input {
+    pub(crate) fn input(&self) -> &Input {
         &self.input
     }
     /// This is not a stop permit. The original native owner must separately
     /// supply its one-shot permission and original held scope to the worker.
-    pub(super) fn current(&self) -> Result<()> {
-        self.store.current()
+    pub(crate) fn current(&self) -> Result<()> {
+        self.store.current()?;
+        let (original, report) = self.store.lookup(&self.input.request_id)?.ok_or(INVALID)?;
+        if original != self.input
+            || report.state != State::Unknown
+            || exists(
+                &self.store.directory,
+                &format!("{}.result.json", self.input.request_id),
+            )?
+        {
+            return Err(INVALID.into());
+        }
+        Ok(())
+    }
+    /// A process-local one-way fence only, NOT stop authority. Only the typed
+    /// native admission uses it, after checking the original proof. Recovery
+    /// never reconstructs Claim for an already-reserved UUID.
+    pub(crate) fn spend(&self) -> Result<()> {
+        self.consumed
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|_| "The original program-stop permission was already consumed".into())
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture(input: Input) -> (tempfile::TempDir, Self) {
+        // Real durable reservation, but synthetic request/native evidence.
+        use std::os::unix::fs::PermissionsExt;
+        let state = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(state.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let store = Store::open(state.path(), true).unwrap().unwrap();
+        let Reservation::Fresh(claim) = store.reserve(input, super::now() as u64).unwrap() else {
+            panic!("fresh private reservation")
+        };
+        (state, *claim)
     }
     pub(super) fn finish(self, report: Report) -> Result<Report> {
         if !report.valid(&self.input) || report.state == State::Started {
@@ -367,7 +406,11 @@ impl Claim {
             &report,
             wire::MAX_BYTES,
         )?;
-        self.current()?;
+        self.store.current()?;
+        let saved = self.store.lookup(&self.input.request_id)?.ok_or(INVALID)?;
+        if saved != (self.input, report.clone()) {
+            return Err(INVALID.into());
+        }
         Ok(report)
     }
 }
@@ -405,6 +448,9 @@ mod tests {
         Input {
             request_id: "33333333-3333-4333-8333-333333333333".into(),
             confirmation_id: "44444444-4444-4444-8444-444444444444".into(),
+            source: zerus_client_core::worktree_programs::stop::Source::Service {
+                epoch: "11111111-1111-4111-8111-111111111111".into(),
+            },
             archive_id: "55555555-5555-4555-8555-555555555555".into(),
             original,
             stop: Kind::Normal,
@@ -511,6 +557,17 @@ mod tests {
             .join(DIRECTORY)
             .join(format!("{}.original.json", input.request_id));
         let original = std::fs::read(&path).unwrap();
+        let mut changed_source: Original = serde_json::from_slice(&original).unwrap();
+        changed_source.input.source = zerus_client_core::worktree_programs::stop::Source::Service {
+            epoch: "99999999-9999-4999-8999-999999999999".into(),
+        };
+        assert!(changed_source.input.valid());
+        std::fs::write(&path, serde_json::to_vec(&changed_source).unwrap()).unwrap();
+        assert!(
+            store(state.path()).lookup(&input.request_id).is_err(),
+            "the first source epoch is covered too"
+        );
+        std::fs::write(&path, &original).unwrap();
         let mut bad: Original = serde_json::from_slice(&original).unwrap();
         bad.input.manifest.checkout.inode += 1;
         std::fs::write(&path, serde_json::to_vec(&bad).unwrap()).unwrap();

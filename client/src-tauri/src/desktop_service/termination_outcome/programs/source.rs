@@ -9,13 +9,61 @@ use zerus_client_core::worktree_programs::{
 };
 
 pub(crate) struct Source {
-    context: Arc<Context>,
+    context: Arc<Origin>,
     owner: Mutex<Owner>,
     manifest: Manifest,
     pipeline: String,
     holder: NativeChild,
     socket: String,
     not_after: Instant,
+}
+
+enum Origin {
+    Service(Arc<Context>),
+    Native(Arc<super::native::NativeContext>),
+}
+impl Origin {
+    fn scope(&self) -> zerus_client_core::worktree_programs::stop::Source {
+        match self {
+            Self::Service(c) => zerus_client_core::worktree_programs::stop::Source::Service {
+                epoch: c.scope.service_epoch.clone(),
+            },
+            Self::Native(c) => c.scope(),
+        }
+    }
+    fn current(&self) -> bool {
+        match self {
+            Self::Service(c) => c.current(),
+            Self::Native(c) => c.current(),
+        }
+    }
+    fn configuration(&self) -> &str {
+        match self {
+            Self::Service(c) => &c.scope.configuration,
+            Self::Native(c) => c.configuration(),
+        }
+    }
+    fn environment(&self) -> &FrozenEnvironment {
+        match self {
+            Self::Service(c) => &c.environment,
+            Self::Native(c) => c.environment(),
+        }
+    }
+    fn executable(&self) -> &std::path::Path {
+        match self {
+            Self::Service(c) => c.image.executable(),
+            Self::Native(c) => c.executable(),
+        }
+    }
+    fn spawn(
+        &self,
+        command: &mut std::process::Command,
+    ) -> std::io::Result<(Child, Option<NativeChild>)> {
+        match self {
+            Self::Service(c) => c.spawn_program_child(command),
+            Self::Native(c) => c.spawn(command),
+        }
+    }
 }
 
 impl Selected {
@@ -27,27 +75,46 @@ impl Selected {
         capture: &Capture,
         hold: Arc<dyn Send + Sync>,
     ) -> Result<Arc<Source>, String> {
+        Source::open(Arc::new(Origin::Service(self.0.with_hold(hold)?)), capture)
+    }
+}
+impl Source {
+    /// Only the actual guarded Native startup/takeover result constructs this
+    /// origin. Mode/status/receipt JSON cannot reconstruct it after restart.
+    pub(crate) fn native(
+        ready: &crate::desktop_ownership::NativeReady,
+        capture: &Capture,
+        hold: Arc<dyn Send + Sync>,
+    ) -> Result<Arc<Self>, String> {
+        // Refuse a remote route before even probing the local helper. A local
+        // SSH process is never adopted as a remote native custody holder.
         if !capture.target.computer.is_empty() {
             return Err("termination_programs_remote_custody_unavailable".into());
         }
-        let context = self.0.with_hold(hold)?;
+        let native = super::native::NativeContext::new(ready, hold)?;
+        Self::open(Arc::new(Origin::Native(native)), capture)
+    }
+    fn open(context: Arc<Origin>, capture: &Capture) -> Result<Arc<Self>, String> {
+        if !capture.target.computer.is_empty() {
+            return Err("termination_programs_remote_custody_unavailable".into());
+        }
         let pipeline = uuid::Uuid::new_v4().to_string();
         let original_holder = Arc::new(Mutex::new(None));
         let observed = original_holder.clone();
         let selected = context.clone();
         let mut owner = Owner::begin(
-            context.image.executable(),
+            context.executable(),
             Control::Open {
                 pipeline: pipeline.clone(),
                 discovery: Discovery {
                     capture: capture.clone(),
                 },
             },
-            context.scope.configuration.clone(),
-            context.environment.clone(),
+            context.configuration().into(),
+            context.environment().clone(),
             context.clone(),
             Arc::new(move |command| {
-                let (child, identity) = selected.spawn_program_child(command)?;
+                let (child, identity) = selected.spawn(command)?;
                 // Owner builds only the fixed help/holder commands. Help must
                 // also pass observation, but its exited identity is not reused.
                 if command.get_args().any(|arg| arg == "program-holder") {

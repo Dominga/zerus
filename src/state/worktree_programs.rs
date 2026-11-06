@@ -10,10 +10,14 @@ const INVALID: &str =
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod holding;
+// Exact historical completion/ownership DATA, never execution or drain proof.
+#[allow(dead_code)]
+mod completed;
 // Original data reservations/results only. The live native permit and held
 // checkout source are separate; a journal row can never reconstruct them.
 #[allow(dead_code)]
 mod journal;
+pub(crate) use journal::Claim as ProgramStopClaim;
 
 pub(super) fn hold(args: &[String]) -> Result<i32> {
     holding::run(args)

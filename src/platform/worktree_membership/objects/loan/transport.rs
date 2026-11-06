@@ -327,6 +327,10 @@ mod tests {
         let (sender, receiver) = UnixStream::pair().unwrap();
         assert!(receive(&receiver, Instant::now()).is_err());
         assert!(send(&sender, &vec![0; MAX_FRAME + 1], &[], until()).is_err());
+        // Another parallel fixture may be between fork and exec with a
+        // CLOEXEC copy. Shut down THIS endpoint to establish a kernel-closed
+        // peer independently of that temporary duplicate; Drop alone races it.
+        receiver.shutdown(std::net::Shutdown::Both).unwrap();
         drop(receiver);
         assert!(send(&sender, b"data", &[], until()).is_err());
     }

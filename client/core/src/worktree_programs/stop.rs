@@ -9,6 +9,44 @@ use serde::{Deserialize, Serialize};
 
 pub const INPUT_LIMIT: usize = 128 << 10;
 
+/// Original routing/ownership DATA. Native caller evidence and current Root
+/// ownership are checked independently; serializing a mode grants nothing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Source {
+    Service {
+        epoch: String,
+    },
+    Native {
+        request_id: String,
+        journal: Option<String>,
+        revision: u64,
+    },
+}
+impl Source {
+    pub fn mode(&self) -> crate::desktop::ownership::Mode {
+        match self {
+            Self::Service { .. } => crate::desktop::ownership::Mode::Service,
+            Self::Native { .. } => crate::desktop::ownership::Mode::Native,
+        }
+    }
+    pub fn valid(&self) -> bool {
+        match self {
+            Self::Service { epoch } => canonical_uuid(epoch),
+            Self::Native {
+                request_id,
+                journal,
+                revision,
+            } => {
+                canonical_uuid(request_id)
+                    && journal.as_deref().is_none_or(canonical_uuid)
+                    && *revision <= crate::desktop::ownership::MAX_REVISION
+                    && (journal.is_some() || *revision == 0)
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Kind {
@@ -24,6 +62,7 @@ pub enum Kind {
 pub struct Input {
     pub request_id: String,
     pub confirmation_id: String,
+    pub source: Source,
     pub manifest: Manifest,
     /// EXACT original scoped Terminate stdin, never a reconstructed request.
     pub original: String,
@@ -59,7 +98,8 @@ impl Input {
             &self.archive_id,
             &original.request_id,
         ];
-        self.manifest.valid(self.manifest.issued)
+        self.source.valid()
+            && self.manifest.valid(self.manifest.issued)
             && ids.iter().all(|id| canonical_uuid(id))
             && ids
                 .iter()
@@ -134,6 +174,7 @@ impl Input {
             && previous_request_id == &previous.request_id
             && previous_binding == &previous.binding()
             && self.original == previous.original
+            && self.source == previous.source
             && self.archive_id == previous.archive_id
             && self.manifest.capture == previous.manifest.capture
             && self.manifest.configuration == previous.manifest.configuration
@@ -242,6 +283,9 @@ pub(super) mod tests {
             manifest,
             request_id: "33333333-3333-4333-8333-333333333333".into(),
             confirmation_id: "44444444-4444-4444-8444-444444444444".into(),
+            source: Source::Service {
+                epoch: "11111111-1111-4111-8111-111111111111".into(),
+            },
             original: String::from_utf8(original).unwrap(),
             archive_id: "55555555-5555-4555-8555-555555555555".into(),
             stop: Kind::Normal,
@@ -262,6 +306,47 @@ pub(super) mod tests {
                 })
                 .collect(),
         }
+    }
+    #[test]
+    fn original_source_is_integrity_bound_data_and_force_cannot_change_it() {
+        let original = input();
+        let mut changed = original.clone();
+        changed.source = Source::Service {
+            epoch: "99999999-9999-4999-8999-999999999999".into(),
+        };
+        assert!(changed.valid());
+        assert_ne!(changed.binding(), original.binding());
+        changed.source = Source::Native {
+            request_id: "99999999-9999-4999-8999-999999999999".into(),
+            journal: None,
+            revision: 0,
+        };
+        assert!(changed.valid());
+        assert_ne!(changed.binding(), original.binding());
+        assert_eq!(
+            changed.source.mode(),
+            crate::desktop::ownership::Mode::Native
+        );
+        let old = report(&original);
+        changed.request_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into();
+        changed.confirmation_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into();
+        changed.manifest.id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc".into();
+        changed.stop = Kind::Force {
+            previous_request_id: original.request_id.clone(),
+            previous_binding: original.binding(),
+        };
+        assert!(!changed.follows(&original, &old));
+        changed.source = original.source.clone();
+        assert!(changed.follows(&original, &old));
+        let mut raw = serde_json::to_value(&original).unwrap();
+        raw.as_object_mut().unwrap().remove("source");
+        assert!(Input::decode(&serde_json::to_vec(&raw).unwrap()).is_err());
+        assert!(!Source::Native {
+            request_id: "99999999-9999-4999-8999-999999999999".into(),
+            journal: None,
+            revision: 1
+        }
+        .valid());
     }
     #[test]
     fn complete_input_and_original_bytes_are_bound_and_unknown_results_never_offer_force() {

@@ -111,6 +111,9 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
         let input = stop::Input {
             request_id: uuid::Uuid::new_v4().to_string(),
             confirmation_id: uuid::Uuid::new_v4().to_string(),
+            source: stop::Source::Service {
+                epoch: context.scope.service_epoch.clone(),
+            },
             original: serde_json::to_string(&json!({"request_id":uuid::Uuid::new_v4().to_string(),
                 "action":"terminate","expected_run_id":manifest.capture.target.run_id,
                 "expected_conversation_id":manifest.capture.target.conversation_id}))
@@ -159,7 +162,7 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
             )
             .unwrap();
         let source = Arc::new(Source {
-            context,
+            context: Arc::new(Origin::Service(context)),
             owner: Mutex::new(owner),
             manifest,
             pipeline,
@@ -181,7 +184,7 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
         let result = run::run_accounted_frozen(
             &f.0.join("mutator"),
             &inv,
-            &source.context.environment,
+            source.context.environment(),
             1024,
             &AtomicBool::new(false),
             resources,

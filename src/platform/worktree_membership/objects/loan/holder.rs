@@ -13,7 +13,7 @@ use zerus_client_core::{
     creation::canonical_uuid,
     worktree_programs::{
         custody::{Binding as Request, MAX_PHASES, RETENTION_SECONDS},
-        stop::Input,
+        stop::{Input, Source},
         Manifest,
     },
 };
@@ -40,6 +40,7 @@ pub(crate) struct Holder {
     closed: bool,
     used: BTreeSet<String>,
     phase: Option<Phase>,
+    source: Option<Source>,
 }
 impl Holder {
     /// The original Scope is MOVED here before confirmation; no serialized
@@ -70,6 +71,7 @@ impl Holder {
             closed: false,
             used: BTreeSet::new(),
             phase: None,
+            source: None,
         })
     }
     fn open(&mut self, until: Instant) -> io::Result<Instant> {
@@ -105,11 +107,15 @@ impl Holder {
             || manifest.checkout != self.original.checkout
             || !self.original.contains_originals(&manifest.programs)
             || self.used.contains(&input.request_id)
+            || self.source.as_ref().is_some_and(|old| old != &input.source)
             || borrower.exited()?
         {
             return Err(invalid());
         }
         self.scope.current(until)?;
+        if self.source.is_none() {
+            self.source = Some(input.source.clone());
+        }
         self.used.insert(input.request_id.clone());
         self.phase = Some(Phase {
             request: Request::for_input(&self.pipeline, input),

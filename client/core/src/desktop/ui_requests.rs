@@ -22,6 +22,9 @@ pub const LIFETIME: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
+    WorktreeProgramStop {
+        intent: Box<crate::worktree_programs::invocation::Intent>,
+    },
     CreationClone {
         intent: Box<super::creation_clone::Intent>,
     },
@@ -106,6 +109,7 @@ impl Request {
     }
     pub fn id(&self) -> &str {
         match self {
+            Self::WorktreeProgramStop { intent } => intent.request_id(),
             Self::CreationClone { intent } => &intent.clone_request_id,
             Self::CreationWorktree { intent } => &intent.worktree_request_id,
             Self::CreationLaunch { intent } => &intent.launch_id,
@@ -128,6 +132,7 @@ impl Request {
     }
     pub fn operation(&self) -> &'static str {
         match self {
+            Self::WorktreeProgramStop { .. } => "worktree_program_stop",
             Self::CreationClone { .. } => "creation_clone",
             Self::CreationWorktree { .. } => "creation_worktree",
             Self::CreationLaunch { .. } => "creation_launch",
@@ -150,6 +155,7 @@ impl Request {
     }
     fn valid(&self) -> bool {
         match self {
+            Self::WorktreeProgramStop { intent } => intent.valid(),
             Self::CreationClone { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::CreationWorktree { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::CreationLaunch { intent } => intent.as_ref().clone().verify().is_ok(),
@@ -310,7 +316,11 @@ impl Cache {
         if !envelope.valid() {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        if let Request::DesktopOwnership { action, .. } = &envelope.request {
+        if let Request::WorktreeProgramStop { intent } = &envelope.request {
+            if ownership_mode != Some(intent.input.source.mode()) {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+        } else if let Request::DesktopOwnership { action, .. } = &envelope.request {
             if ownership_mode != Some(action.mode()) {
                 return Err(io::ErrorKind::PermissionDenied.into());
             }
@@ -485,6 +495,15 @@ impl Responder {
                     return Err(io::ErrorKind::PermissionDenied.into());
                 }
                 Some(super::ownership::Mode::Service)
+            }
+            Request::WorktreeProgramStop { intent } => {
+                let mode = intent.input.source.mode();
+                if self.ownership_mode.get() != Some(&mode)
+                    || self.configuration.get() != Some(&intent.input.manifest.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(mode)
             }
             Request::TerminationOutcome { intent } => {
                 if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)

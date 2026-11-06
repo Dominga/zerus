@@ -16,6 +16,7 @@ fn input(root: &std::path::Path, checkout: DirectoryId) -> Input {
     let conversation = uuid();
     let termination = uuid();
     Input { request_id: uuid(), confirmation_id: uuid(), archive_id: uuid(), stop: Kind::Normal,
+        source:zerus_client_core::worktree_programs::stop::Source::Service {epoch:uuid()},
         original: serde_json::json!({"request_id":termination,"action":"terminate","expected_run_id":run,"expected_conversation_id":conversation}).to_string(),
         manifest: Manifest { abi: ABI.into(), id: uuid(), capture: Capture {
             target: zerus_client_core::Target { computer: String::new(), name: "codex/example/original".into(), run_id: run, conversation_id: conversation },
@@ -69,6 +70,14 @@ fn the_readonly_holder_lives_across_a_physically_retired_phase_but_never_reloans
         previous_request_id: input.request_id.clone(),
         previous_binding: input.binding(),
     };
+    let mut changed = fresh.clone();
+    changed.source = zerus_client_core::worktree_programs::stop::Source::Service { epoch: uuid() };
+    assert!(
+        holder
+            .arm(&changed, next.original(), 1000, until())
+            .is_err(),
+        "a fresh request cannot replace the original source"
+    );
     holder.arm(&fresh, next.original(), 1000, until()).unwrap();
     assert!(!holder.settled());
     assert!(holder.lend(&next.socket, &request).is_err());

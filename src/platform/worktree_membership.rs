@@ -176,6 +176,77 @@ mod tests {
             let _ = self.0.wait();
         }
     }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn actual_denied_cwd_is_omitted_while_a_readable_checkout_occupant_is_listed() {
+        use std::{
+            io::{BufRead, Read},
+            process::{Command, Stdio},
+            time::Duration,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        std::fs::write(root.join("held"), b"original").unwrap();
+        let mut denied=Child(Command::new("python3").args(["-I","-c",
+            "import ctypes,os,sys,time\nf=open('held','rb')\nassert ctypes.CDLL(None).prctl(4,0,0,0,0)==0\nprint('denied-ready',flush=True)\ntime.sleep(20)"])
+            .current_dir(&root).stdin(Stdio::null()).stdout(Stdio::piped()).spawn().unwrap());
+        let output = denied.0.stdout.take().unwrap();
+        // Bounded actual readiness, not a sleep or a guessed permission class.
+        let mut poll = libc::pollfd {
+            fd: std::os::fd::AsRawFd::as_raw_fd(&output),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(unsafe { libc::poll(&mut poll, 1, 5000) }, 1);
+        let mut line = String::new();
+        std::io::BufReader::new(output)
+            .take(128)
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(line, "denied-ready\n");
+        for leaf in ["cwd", "fd"] {
+            let path = PathBuf::from(format!("/proc/{}/{leaf}", denied.0.id()));
+            let error = if leaf == "cwd" {
+                std::fs::metadata(path).unwrap_err()
+            } else {
+                std::fs::read_dir(path).unwrap_err()
+            };
+            assert!(
+                super::denied(&error),
+                "the control must establish actual native denial: {error}"
+            );
+        }
+        let readable = Child(
+            Command::new("/bin/sleep")
+                .arg("20")
+                .current_dir(&root)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let until = Instant::now() + Duration::from_secs(5);
+        let scope = objects::Scope::open(&root, until).unwrap();
+        let inventory = scope.inventory(until).unwrap();
+        assert!(
+            !linux::member(
+                &PathBuf::from(format!("/proc/{}", denied.0.id())),
+                &inventory,
+                until
+            )
+            .unwrap(),
+            "this actual denied cwd must not count as membership"
+        );
+        let found = programs(&scope, until).unwrap();
+        assert!(
+            !found.iter().any(|p| p.pid == denied.0.id()),
+            "a denied read is not proven membership"
+        );
+        assert!(
+            found.iter().any(|p| p.pid == readable.0.id()),
+            "readable membership still protects the checkout"
+        );
+    }
     #[test]
     fn original_kernel_cwd_or_open_file_is_required_and_a_replacement_name_is_not_enough() {
         use std::{

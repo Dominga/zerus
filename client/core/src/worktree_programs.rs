@@ -7,6 +7,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 
 pub mod custody;
+pub mod invocation;
 pub mod stop;
 
 pub const ABI: &str = "worktree-programs-v1";

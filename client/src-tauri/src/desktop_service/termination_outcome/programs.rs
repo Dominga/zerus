@@ -6,6 +6,8 @@ use std::sync::Weak;
 use zerus_client_core::{termination_cleanup::Status, Outcome};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod native;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod source;
 
 struct OriginalCall {

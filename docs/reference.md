@@ -5144,6 +5144,60 @@ another command. Codex completion beyond the normal 8 MiB transcript window can
 be read incrementally up to 16 MiB per poll and cached privately. Completion needs
 the exact call ID in the verified conversation; absence of an event is not success.
 
+## Build folder cleanup
+
+Zerus removes the build folders it creates, automatically and only its own
+(task 108, owner 2026-11-06: a team filled two drives with about 50 GB of
+scratch cargo targets). hgs records each build folder a Zerus build uses in a
+bounded registry, `build-dirs.json` under the state root (at most 2000
+entries), with its team, task, member or session, a size estimate and its last
+use:
+
+- `hgs run`: cargo's `--target-dir` and `CARGO_TARGET_DIR`, and CMake's `-B`
+  and `--build` folders the command names (relative to its `cwd`; a folder
+  named through a variable is not guessed);
+- `hgs team run`: the template's `target` (beside each `manifest`) or
+  `.ci-build/gui`, recorded by the worker when it runs it;
+- the cargo targets and `.ci-build/*` CMake builds inside the member worktrees
+  and clones Zerus created (scanned at most hourly, three levels deep), and the
+  folders the last 200 `hgs run` records name.
+
+A recorded folder is Zerus's when a Zerus run created it, when it is inside a
+member folder Zerus created, or when an `hgs run` was told to use it outside
+any repository. A folder that existed inside a repository before Zerus used it
+is the person's: it is listed, never removed. Before each removal Zerus checks
+again that the folder is still a build output (a cargo target's
+`CACHEDIR.TAG`, or `CMakeCache.txt`, and no `.git`, `Cargo.toml`,
+`CMakeLists.txt` or `package.json`), that it is not a drive root, the home, the
+state folder or one of their parents, and that nothing uses it: no running
+`hgs run` names it or runs in it, no team run runs in its folder, cargo does not
+hold its `.cargo-lock`, and no file in it (two levels deep) was written in the
+last ten minutes. It is then renamed aside (Windows refuses that while a file
+in it is open; then nothing was removed) and deleted. A delete that fails after
+the rename leaves the folder in `review`: it is never tried again by itself.
+
+The policy is per computer, on by default: remove a recorded folder of Zerus's
+when its team is finished, stopped, archived or gone or its member removed,
+when it was unused for `unused_days` (7; its newest write counts as use), or
+oldest first while its drive's free space is under the larger of `free_gb`
+(50) and `free_percent` (10) of the drive. The team worker runs the pass on a
+thread of its own at most every ten minutes (measuring a few folders' sizes,
+each scan bounded to 200,000 entries or 3 s). A drive under its threshold is a
+Waiting-for-you item `disk/<drive>` (kind `disk_low`, action `open_disk`) with
+what Zerus's folders there hold.
+
+`hgs team disk --json` serves the Disk view and its actions:
+`{"action":"list","refresh":true?}` (the policy, the drives, the folders by
+team, what Zerus holds), `{"action":"clean","scope":"policy"|"all",
+"dry_run":true|false,"paths":[...],"by":"human"}` (a dry run decides and
+removes nothing; Clean now needs the owner and removes only folders of
+Zerus's that are not in use), `{"action":"policy","policy":{"enabled",
+"unused_days","free_gb","free_percent"},"by":"human"}` and
+`{"action":"forget","path","by":"human"}` for a folder in review the owner dealt
+with. Settings > Build folders in Qt and Zerus Next shows the policy, the
+drives, the folders per team with their state, a dry run and Clean now (with a
+confirmation, Cancel focused).
+
 ## Terminal, SSH and clipboard
 
 The built-in Terminal is a real PTY client attached to an existing tmux session,

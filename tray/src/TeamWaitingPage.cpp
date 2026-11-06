@@ -95,6 +95,7 @@ QString TeamWaitingPage::kindLabel(const QString &kind)
     if (kind == "phase_acceptance") return tr("Phase acceptance");   // U63
     if (kind == "lead_stalled") return tr("Lead stalled");   // task 95
     if (kind == "deferred") return tr("Deferred");   // task 97
+    if (kind == "disk_low") return tr("Disk space");   // task 108
     return kind;
 }
 
@@ -113,6 +114,7 @@ QString TeamWaitingPage::kindIcon(const QString &kind)
     if (kind == "phase_acceptance") return QStringLiteral("check-circle");
     if (kind == "lead_stalled") return QStringLiteral("attention");
     if (kind == "deferred") return QStringLiteral("clock");
+    if (kind == "disk_low") return QStringLiteral("attention");
     return QStringLiteral("warning");
 }
 
@@ -329,6 +331,12 @@ QWidget *TeamWaitingPage::rowFor(const Item &item)
         h->addWidget(toggle);
     }
     const auto go = [this, item] { if (openTeam && !item.team.isEmpty()) openTeam(item); };
+    // Task 108: a drive low on space opens Settings > Build folders.
+    if (item.action == QLatin1String("open_disk")) {
+        auto *disk = button(tr("Open Build folders"), "teamWaitingOpenDisk");
+        QObject::connect(disk, &QPushButton::clicked, frame, [this] { if (openDisk) openDisk(); });
+        h->addWidget(disk);
+    }
     if (!teamless) {
         auto *open = button(tr("Open team"), "teamWaitingOpen");
         if (inPlace) open->setProperty("ghost", true);

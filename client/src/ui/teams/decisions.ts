@@ -436,6 +436,7 @@ export function waitingKindLabel(item: Pick<TeamWaitingItem, "kind" | "action">)
     case "phase_acceptance": return tr("Phase acceptance");
     case "lead_stalled": return tr("Lead stalled");
     case "deferred": return tr("Deferred");
+    case "disk_low": return tr("Disk space");
     default: return item.kind;
   }
 }
@@ -454,6 +455,7 @@ export function waitingKindIcon(kind: string): string {
     case "test_full_run": return "refresh-cw";
     case "lead_stalled": return "triangle-alert";
     case "deferred": return "clock";
+    case "disk_low": return "hard-drive";
     default: return "triangle-alert";
   }
 }

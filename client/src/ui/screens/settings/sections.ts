@@ -10,6 +10,7 @@ import { FilesSection } from "./Files";
 import { AnalyticsSection } from "./Analytics";
 import { ApprovalsSection } from "./Approvals";
 import { WorktreesSection, refreshWorktrees } from "./Worktrees";
+import { DiskSection } from "./Disk";
 import { MobileSection } from "./Mobile";
 import { ProcessesSection } from "./Processes";
 import { AboutSection, refreshAbout } from "./About";
@@ -24,7 +25,7 @@ import { trNoop } from "../../../i18n";
 
 export type SectionId =
   | "appearance" | "sessions" | "teams" | "recovery" | "processes" | "updates" | "mobile" | "files"
-  | "worktrees" | "approvals" | "voice" | "keyboard" | "analytics" | "about";
+  | "worktrees" | "disk" | "approvals" | "voice" | "keyboard" | "analytics" | "about";
 
 export interface Section {
   id: SectionId;
@@ -51,6 +52,9 @@ export const SECTIONS: readonly Section[] = [
   // SessionsWindow.cpp:2235 appends the fork's Teams section after Settings'
   // own nav; Model servers follows but is not ported to the client yet.
   { id: "teams", label: "Teams", icon: "users", component: TeamsSection },
+  // Task 108: the build folders Zerus holds and their cleanup (Qt appends it
+  // after Model servers, which the client has not ported).
+  { id: "disk", label: trNoop("Build folders"), icon: "trash-2", component: DiskSection },
 ];
 
 /** The sections the client has so far, in Qt's order. */

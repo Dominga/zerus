@@ -142,6 +142,9 @@ fn start(input: &Value, wait: bool) -> Result<Value> {
     }
     private_dir(&dir())?;
     prune();
+    // Task 108: the build folders the command names are recorded for the
+    // cleanup, with whether this run creates them.
+    super::build_dirs::note_run(&command, &cwd, caller["name"].as_str().unwrap_or_default());
     let claim = json!({"request_id":id,"label":label,"command":command,"cwd":cwd.display().to_string(),
         "session":session_of(&caller),"started":now(),"timeout_secs":minutes * 60,"source":"hgs_run"});
     storage::atomic(&running_path(&id), &claim.to_string())?;
@@ -645,6 +648,20 @@ fn list() -> Result<Value> {
 
 /// Keeps the folder bounded: the oldest finished records go first; a claim no
 /// runner holds any more becomes a refused record.
+/// Task 108: the newest run records, finished and running, at most `limit`:
+/// their commands name the build folders runs were told to use.
+pub(super) fn records(limit: usize) -> Vec<Value> {
+    let Ok(entries) = fs::read_dir(dir()) else { return Vec::new() };
+    let mut found: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .take(MAX_RECORDS * 3)
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".json"))
+        .filter_map(|entry| Some((entry.metadata().and_then(|meta| meta.modified()).ok()?, entry.path())))
+        .collect();
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.into_iter().take(limit).filter_map(|(_, path)| read(&path)).collect()
+}
+
 fn prune() {
     let Ok(entries) = fs::read_dir(dir()) else { return };
     let at = now();

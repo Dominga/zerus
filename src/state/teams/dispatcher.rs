@@ -7373,6 +7373,9 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
             eprintln!("hgs team worker: {}: test queue: {error}", team.name);
         }
     }
+    // Task 108: the build folder cleanup, at most every ten minutes, on a
+    // thread of its own so removing gigabytes never holds up a tick.
+    crate::state::build_dirs::maintain_in_background(now());
     Ok(true)
 }
 
@@ -7582,6 +7585,24 @@ fn attempt_of(team: &Team, attempt: &str, member: &str) -> bool {
 fn run_outcome(team: &Team, member: &Member, folder: &Path, request: &Value) -> anyhow::Result<super::templates::Outcome> {
     let template = request["template"].as_str().unwrap_or_default();
     let args = request["args"].clone();
+    // Task 108: the build folder this run builds in is recorded for the
+    // cleanup; it is Zerus's when Zerus created the member's folder or the run
+    // creates it.
+    let zerus_folder = matches!(member.folder, MemberFolder::Worktree | MemberFolder::Clone)
+        && member_folder_path(team, member).is_ok_and(|mine| !mine.is_empty() && same_path(&mine, &folder.display().to_string()) && !same_path(&mine, &team.folder));
+    for (path, kind) in crate::state::build_dirs::template_folders(template, &args, folder) {
+        crate::state::build_dirs::note(crate::state::build_dirs::Use {
+            path,
+            kind,
+            origin: "team_run",
+            team: team.id.clone(),
+            team_name: team.name.clone(),
+            member: member.id.clone(),
+            task: request["task"].as_u64().unwrap_or(0) as u32,
+            session: member.session.as_ref().map(|session| session.name.clone()).unwrap_or_default(),
+            zerus_folder,
+        });
+    }
     let timeout = Duration::from_secs(super::templates::timeout_for(template));
     // U36: a test stage builds in the task's folder (or its checkout), with
     // its own temporary folder, only while the stage is open.

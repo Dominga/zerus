@@ -14,6 +14,7 @@
 #include "TeamTaskCard.h"
 #include "TeamWaitingBanner.h"
 #include "TeamWaitingPage.h"
+#include "TeamWaitingNotices.h"
 #include "TeamWorkspace.h"
 
 // G6: the team card, its header and the workspace bar carry two compact bars —
@@ -144,6 +145,7 @@ private slots:
     void waitingToolOffersAreAnsweredInPlace();
     void aLeadsQuestionIsAnsweredFromWaitingForYou();
     void aConfirmedDecisionLeavesWaitingAtOnceAndARefusedOneStays();
+    void aLowDriveOpensBuildFoldersAndItsNoticeNamesTheDrive();
     void initTestCase()
     {
         setUpCase();
@@ -2607,6 +2609,31 @@ void TestTeamsUiWaiting::deferredRequestsAreAnsweredUnderDeferred()
 }
 
 QTEST_MAIN(TestTeamsUiWaiting)
+// Task 109: a drive under its threshold waits for the owner as no team's item;
+// its row opens Settings > Build folders and its notice names the drive.
+void TestTeamsUiWaiting::aLowDriveOpensBuildFoldersAndItsNoticeNamesTheDrive()
+{
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    const QJsonObject low{{"id", "disk/D:"}, {"team", ""}, {"team_name", "D:"}, {"kind", "disk_low"}, {"since", now - 60},
+                          {"title", "Drive D: has 12.0 GB free, under 90.0 GB; Zerus's build folders there hold 31.0 GB"}, {"action", "open_disk"}};
+    QVERIFY(writeWaiting(script() + ".waiting", QJsonArray{low}));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamWaitingPage page(&controller);
+    int opened = 0;
+    page.openDisk = [&] { ++opened; };
+    page.resize(980, 520); page.show();
+    WAIT_VERIFY(page.findChild<QPushButton *>("teamWaitingOpenDisk"));
+    QCOMPARE(page.findChild<QPushButton *>("teamWaitingOpenDisk")->text(), QStringLiteral("Open Build folders"));
+    page.findChild<QPushButton *>("teamWaitingOpenDisk")->click();
+    QCOMPARE(opened, 1);
+    TeamWaitingNotices notices;
+    const auto fresh = notices.observe({{"disk/D:", "", "D:", "disk_low", low["title"].toString()}}, {}, true);
+    QCOMPARE(fresh.size(), 1);
+    QCOMPARE(fresh[0].title, QStringLiteral("Low disk space on D:"));
+    QCOMPARE(fresh[0].body, low["title"].toString());
+}
+
 #include "test_teamsui_waiting.moc"
 
 // Task 107 (owner, 2026-11-06: proposals already allowed stayed in "4 wait

@@ -7,6 +7,7 @@
 #include "ArchiveBrowser.h"
 #include "NativeSessionCapabilities.h"
 #include "SessionsWindow.h"
+#include "DiskSettings.h"
 #include "SlowEventLog.h"
 #include "AgentWorking.h"
 #include "EventStream.h"
@@ -2243,6 +2244,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_modelServerSettings=new ModelServerSettings(m_modelServers);
     m_modelServerSettings->machines=[this]{return m_fleet.peerNames();};
     m_modelServerSettingsSection=m_settingsPage->addSection(tr("Model servers"),m_modelServerSettings);
+    // Task 108: the build folders Zerus holds on this computer and their cleanup.
+    m_diskSettings=new DiskSettings(m_teams);
+    m_diskSettings->confirm=[this](const QString &name,const QString &title,const QString &text,const QString &action){return m_teamPanel->confirm(name,title,text,action);};
+    m_diskSettingsSection=m_settingsPage->addSection(tr("Build folders"),m_diskSettings);
     connect(m_modelServers,&ModelServers::Controller::changed,this,[this]{
         const bool any=m_modelServers->available();
         if(m_modelServersNav->isHidden()==any)m_modelServersNav->setVisible(any);
@@ -7879,6 +7884,7 @@ void SessionsWindow::showTeamWaiting()
     if(!m_teams)return;
     if(!m_teamWaitingPage){
         m_teamWaitingPage=new TeamWaitingPage(m_teams);m_teamWaitingPage->setDark(m_dark);
+        m_teamWaitingPage->openDisk=[this]{m_pages->setCurrentIndex(5);m_settingsPage->openSection(m_diskSettingsSection);m_diskSettings->refresh();};
         m_teamWaitingPage->openTeam=[this](const TeamWaitingPage::Item &item){
             m_pages->setCurrentIndex(0);showTeam(item.team);
             if(m_teamPanel&&m_teamPanel->openWorkspace)m_teamPanel->openWorkspace();

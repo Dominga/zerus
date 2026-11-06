@@ -57,6 +57,8 @@ public:
     void loadOlder();
     // A row's team: the window opens its Team tab (a draft phase unfolded).
     std::function<void(const Item &item)> openTeam;
+    // Task 108: a drive low on space opens Settings > Build folders.
+    std::function<void()> openDisk;
     // How many items wait, for the rail button's caption; -1 before the first read.
     std::function<void(int total)> countChanged;
     // #724: an item answered here; the window drops it from the banner and

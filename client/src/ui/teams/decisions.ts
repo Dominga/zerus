@@ -456,6 +456,9 @@ export function decidedWaiting(items: readonly TeamWaitingItem[], call: Pick<Tea
   }).map((item) => item.id);
 }
 
+/** Task 108/109: a drive low on space; its row opens Settings > Build folders. */
+export const opensDisk = (item: Pick<TeamWaitingItem, "action">) => item.action === "open_disk";
+
 /** The item's kind in words. */
 export function waitingKindLabel(item: Pick<TeamWaitingItem, "kind" | "action">): string {
   if (item.action === "decide_proposal") return tr("Proposal");
@@ -473,6 +476,7 @@ export function waitingKindLabel(item: Pick<TeamWaitingItem, "kind" | "action">)
     case "phase_acceptance": return tr("Phase acceptance");
     case "lead_stalled": return tr("Lead stalled");
     case "deferred": return tr("Deferred");
+    case "disk_low": return tr("Disk space");
     default: return item.kind;
   }
 }
@@ -491,6 +495,7 @@ export function waitingKindIcon(kind: string): string {
     case "test_full_run": return "refresh-cw";
     case "lead_stalled": return "triangle-alert";
     case "deferred": return "clock";
+    case "disk_low": return "hard-drive";
     default: return "triangle-alert";
   }
 }

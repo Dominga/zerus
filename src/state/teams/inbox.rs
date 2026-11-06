@@ -934,8 +934,14 @@ fn all_items(team: &Team) -> Vec<Item> {
             command: format!("{} | hgs team status --json", json!({"team":team.id})),
             detail: format!(
                 "Zerus cannot answer it, so neither can you: {} Tell the owner to open {name}'s Terminal and answer it there; \
-                 the member continues once it is answered.",
-                asked.card["answer_unavailable_reason"].as_str().unwrap_or("Answer it in Terminal.")
+                 the member continues once it is answered.{}",
+                asked.card["answer_unavailable_reason"].as_str().unwrap_or("Answer it in Terminal."),
+                // Task 113: after the defer time the owner has it with the screen.
+                if super::terminal_prompt::of(member).is_some_and(|(_, raised)| raised.is_some()) {
+                    " Zerus raised it to the owner with the screen and a phone alert."
+                } else {
+                    ""
+                }
             ),
         });
     }
@@ -1435,9 +1441,16 @@ pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
     for member in &team.members {
         let Some(asked) = &member.terminal_question else { continue };
         let name = team.name_of(&member.id);
-        out.push(json!({"kind":"permission_terminal","member":team.role_of(&member.id),"member_id":member.id,
+        let mut item = json!({"kind":"permission_terminal","member":team.role_of(&member.id),"member_id":member.id,
             "since":asked.at,"minutes":((now - asked.at).max(0.0) / 60.0).round() as u64,
-            "summary":format!("{name} waits for your answer in its Terminal: {}", terminal_title(asked))}));
+            "summary":format!("{name} waits for your answer in its Terminal: {}", terminal_title(asked))});
+        // Task 113: raised after the defer time, with the session and screen.
+        if let Some(Value::Object(fields)) = super::terminal_prompt::owner_fields(team, member, now) {
+            for (key, value) in fields {
+                item[key] = value;
+            }
+        }
+        out.push(item);
     }
     out.extend(phase_items);
     // U63 (owner, 2026-10-31): a phase ready for the owner's acceptance.

@@ -1,0 +1,93 @@
+{
+  "provenance": "Kimi Code 2.5.2 (@moonshot-ai/kimi-code, npm tarball sha1 f09aae1c1992f0afc3bc2ee43dbcd8490a9eef19). Rows drawn by its own approval panel rules (ApprovalPanelComponent, DockSection, renderShellDisplayBlock, appendWrappedLine) and wire records shaped as its durable InteractionRequestEvent and InteractionResolvedEvent; Kimi itself was not run (task 113).",
+  "version": "2.5.2",
+  "command": "cargo test --manifest-path client/src-tauri/Cargo.toml --locked -- seconds",
+  "scrolled_command": "echo step 1\necho step 2\necho step 3\necho step 4\necho step 5\necho step 6",
+  "wire": [
+    {
+      "type": "metadata",
+      "protocol_version": "1.4",
+      "created_at": 1784117053032
+    },
+    {
+      "type": "config.update",
+      "agentId": "main",
+      "patch": {
+        "model": "kimi-code/k3.1-pro"
+      }
+    },
+    {
+      "type": "tools.set_active_tools",
+      "agentId": "main",
+      "tools": [
+        "Bash",
+        "Read",
+        "Edit",
+        "Write"
+      ]
+    },
+    {
+      "type": "interaction.request",
+      "agentId": "main",
+      "id": "approval_0e6a",
+      "kind": "approval",
+      "toolCallId": "tool_9f1",
+      "request": {
+        "id": "approval_0e6a",
+        "sessionId": "session_fixture",
+        "agentId": "main",
+        "turnId": 3,
+        "toolCallId": "tool_9f1",
+        "toolName": "Bash",
+        "action": "Running: ls",
+        "display": {
+          "kind": "command",
+          "command": "ls",
+          "cwd": "D:/Workspace/example",
+          "description": "Run the second start tests",
+          "language": "bash"
+        }
+      },
+      "time": 1784117060000
+    },
+    {
+      "type": "interaction.resolved",
+      "agentId": "main",
+      "id": "approval_0e6a",
+      "response": {
+        "decision": "approved",
+        "scope": "once"
+      }
+    },
+    {
+      "type": "interaction.request",
+      "agentId": "main",
+      "id": "approval_7c2d",
+      "kind": "approval",
+      "toolCallId": "tool_a42",
+      "request": {
+        "id": "approval_7c2d",
+        "sessionId": "session_fixture",
+        "agentId": "main",
+        "turnId": 3,
+        "toolCallId": "tool_a42",
+        "toolName": "Bash",
+        "action": "Running: cargo test --manifest-path client/src-tauri/Cargo.…",
+        "display": {
+          "kind": "command",
+          "command": "cargo test --manifest-path client/src-tauri/Cargo.toml --locked -- seconds",
+          "cwd": "D:/Workspace/example",
+          "description": "Run the second start tests",
+          "language": "bash"
+        }
+      },
+      "time": 1784117070500
+    }
+  ],
+  "screens": {
+    "regular_80": " ● Running: cargo test --manifest-path client/src-tauri/Cargo.…\n\n ──────────────────────────────────────────────────────────────────────────────\n   ▶ Run this command?\n\n   cwd: D:/Workspace/example\n   $ cargo test --manifest-path client/src-tauri/Cargo.toml --locked -- seconds\n     Run the second start tests\n\n   ▶ 1. Approve once\n     2. Approve for this session\n     3. Reject\n     4. Reject with feedback\n\n   ↑/↓ select · 1/2/3/4 choose · ↵ confirm\n ──────────────────────────────────────────────────────────────────────────────\n\n  Ask When Needed  K3.1",
+    "docked_80": " ● Running: cargo test --manifest-path client/src-tauri/Cargo.…\n\n ──────────────────────────────────────────────────────────────────────────────\n   ▶ Run this command?\n\n   cwd: D:/Workspace/example\n   $ cargo test --manifest-path client/src-tauri/Cargo.toml --locked --\n     seconds\n     Run the second start tests\n\n   ▶ 1. Approve once\n     2. Approve for this session\n     3. Reject\n     4. Reject with feedback\n\n   ↑/↓ select · 1/2/3/4 choose · ↵ confirm\n ──────────────────────────────────────────────────────────────────────────────\n\n  Ask When Needed  K3.1",
+    "docked_scrolled_80": " ● Running: cargo test --manifest-path client/src-tauri/Cargo.…\n\n ──────────────────────────────────────────────────────────────────────────────\n   ▶ Run this command?\n\n   cwd: D:/Workspace/example\n   $ echo step 1\n   · echo step 2\n   · echo step 3\n   · echo step 4\n   · echo step 5\n\n   ▶ 1. Approve once\n     2. Approve for this session\n     3. Reject\n     4. Reject with feedback\n\n   ↑/↓ select · 1/2/3/4 choose · ↵ confirm · shift+↑/↓ scroll\n ──────────────────────────────────────────────────────────────────────────────\n\n  Ask When Needed  K3.1",
+    "unfocused_80": " ● Running: cargo test --manifest-path client/src-tauri/Cargo.…\n\n ──────────────────────────────────────────────────────────────────────────────\n   ▶ Run this command?\n\n   cwd: D:/Workspace/example\n   $ cargo test --manifest-path client/src-tauri/Cargo.toml --locked -- seconds\n     Run the second start tests\n\n   ▶ 1. Approve once\n     2. Approve for this session\n     3. Reject\n     4. Reject with feedback\n\n   esc back to approval\n ──────────────────────────────────────────────────────────────────────────────\n\n  Ask When Needed  K3.1"
+  }
+}

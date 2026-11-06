@@ -60,7 +60,7 @@ pub(super) fn decorate(sessions: &mut [Value]) {
         let key = format!("{}\n{}", text(session, "agent"), text(session, "account_home"));
         let ttl = accounts.entry(key).or_insert_with(|| cache_ttl(session, &observed)).clone();
         apply(session, ttl, team, at);
-        if let Some(alert) = team.and_then(|team| team.alert.as_ref()) {
+        for alert in team.map(|team| team.alerts.as_slice()).unwrap_or_default() {
             add_alert(session, alert);
         }
         let name = text(session, "name").to_owned();

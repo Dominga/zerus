@@ -36,6 +36,18 @@ const UNVERIFIED: &str =
     "Zerus cannot confirm that this is the only Kimi request waiting. Answer it in Terminal.";
 const NARROW: &str =
     "Kimi's approval does not show this whole request; enlarge Terminal or answer there";
+/// Task 113: Kimi 2.5's docked (fullscreen) panel shows at most six body rows
+/// and scrolls the rest.
+const DOCKED_BODY_ROWS: usize = 6;
+const SCROLL_HINT: &str = " · shift+↑/↓ scroll";
+const SCROLLED: &str =
+    "Kimi's approval scrolls this request, so Zerus cannot see all of it; answer it in Terminal";
+const UNFOCUSED: &str =
+    "Kimi's approval panel does not have the keyboard (it shows \"esc back to approval\"); answer it in Terminal";
+/// Task 113: the wire shows the request while this turn runs, but Kimi's
+/// PreToolUse hook has not reported its tool call to Zerus.
+const UNREPORTED: &str = "Kimi has not reported this tool call to Zerus (its PreToolUse hook did not reach Zerus), \
+so Zerus cannot tie the panel to it. Answer it in Terminal.";
 
 /// Owner, 2026-11-05: an opt-in, experimental flag. With this empty file in
 /// the configuration directory, Zerus also answers Kimi's Edit and Write
@@ -122,6 +134,15 @@ fn open(events: &[Value]) -> Open {
         }
     }
     open
+}
+
+/// Task 113: the request was made in the turn that runs now: the turn has
+/// not ended, and the request is no older than its start (two seconds of
+/// clock tolerance between Kimi's wire and Zerus's hook times).
+fn this_turn(record: &Value, event: &Value) -> bool {
+    let started = record["turn_started"].as_f64().unwrap_or(0.0);
+    let at = event["time"].as_f64().unwrap_or(0.0) / 1000.0;
+    record["main_done"] == false && started > 0.0 && at >= started - 2.0
 }
 
 fn active(record: &Value, call: &str, tool: &str) -> bool {
@@ -314,11 +335,14 @@ impl Shell<'_> {
     }
 
     /// The panel's rows above its choices, for a panel `width` cells wide:
-    /// rule, title, blank, the request, blank.
-    fn head(&self, width: usize) -> Result<Vec<String>> {
-        if width < HINT.chars().count() + 2 {
+    /// rule, title, blank, the request, blank. Kimi 2.5 docks the panel in
+    /// fullscreen mode: its body is one column narrower (the scrollbar's) and
+    /// shows at most `DOCKED_BODY_ROWS` rows (task 113).
+    fn head(&self, width: usize, docked: bool) -> Result<Vec<String>> {
+        if width < HINT.chars().count() + 2 + usize::from(docked) {
             return Err(NARROW.into());
         }
+        let body = width - usize::from(docked);
         let mut rows = vec!["─".repeat(width), format!("  ▶ {RUN}"), String::new()];
         if !self.cwd.is_empty() {
             rows.push(format!("  cwd: {}", self.cwd));
@@ -328,7 +352,7 @@ impl Shell<'_> {
         }
         for (index, line) in self.command.split('\n').enumerate() {
             let prefix = if index == 0 { "$" } else { "·" };
-            let wrapped = wrap(line, width - 4).ok_or(
+            let wrapped = wrap(line, body - 4).ok_or(
                 "Zerus cannot show this command exactly as Kimi draws it. Answer it in Terminal.",
             )?;
             for (part, text) in wrapped.iter().enumerate() {
@@ -344,8 +368,11 @@ impl Shell<'_> {
         }
         rows.push(String::new());
         // Kimi truncates a longer row, hiding the rest of the request.
-        if rows.iter().any(|row| row.chars().count() > width) {
+        if rows.iter().skip(3).any(|row| row.chars().count() > body) {
             return Err(NARROW.into());
+        }
+        if docked && rows.len() - 4 > DOCKED_BODY_ROWS {
+            return Err(SCROLLED.into());
         }
         Ok(rows)
     }
@@ -381,8 +408,14 @@ fn card(record: &Value, event: &Value) -> Option<Value> {
         || tool == "ExitPlanMode"
         || ["plan_review", "goal_start"].contains(&kind)
         || !display.is_object()
-        || !active(record, call, tool)
     {
+        return None;
+    }
+    // Task 113: a request of this running turn whose tool call Kimi's hook did
+    // not report is still shown, exactly, but only answered in Terminal; an
+    // older one is not shown at all.
+    let reported = active(record, call, tool);
+    if !reported && !this_turn(record, event) {
         return None;
     }
     let (body, problem) = match shell(request) {
@@ -390,6 +423,7 @@ fn card(record: &Value, event: &Value) -> Option<Value> {
         Err(_) if titled(request) => (format!("{TITLED_NOTE}\n\n{}", literal(request)), None),
         Err(problem) => (literal(request), Some(problem)),
     };
+    let problem = if reported { problem } else { Some(UNREPORTED.to_owned()) };
     let complete = body.chars().count() <= MAX_BODY_CHARS;
     let body = if complete {
         body
@@ -707,25 +741,34 @@ fn read(screen: &str, request: &Value) -> Result<Shown> {
         let Some((margin, width)) = rule(row) else {
             continue;
         };
-        let head = match shell.head(width) {
-            Ok(head) => head,
-            Err(error) => {
-                narrow = Some(error);
-                continue;
+        let regular = shell.head(width, false);
+        let docked = shell.head(width, true);
+        // A request that wraps alike in both layouts is the same panel.
+        let docked = if docked.as_ref().ok() == regular.as_ref().ok() { None } else { Some(docked) };
+        for head in std::iter::once(regular).chain(docked) {
+            let head = match head {
+                Ok(head) => head,
+                Err(error) => {
+                    narrow = Some(error);
+                    continue;
+                }
+            };
+            let drawn = head.iter().enumerate().all(|(index, expected)| {
+                rows.get(start + index).and_then(|row| inside(row, margin)) == Some(expected.as_str())
+            });
+            if let Some(shown) = drawn
+                .then(|| chooser(&rows[start + head.len()..], margin, width))
+                .flatten()
+            {
+                found.push(shown);
             }
-        };
-        let drawn = head.iter().enumerate().all(|(index, expected)| {
-            rows.get(start + index).and_then(|row| inside(row, margin)) == Some(expected.as_str())
-        });
-        if let Some(shown) = drawn
-            .then(|| chooser(&rows[start + head.len()..], margin, width))
-            .flatten()
-        {
-            found.push(shown);
         }
     }
+    let hint = |text: &str| rows.iter().any(|row| row.trim() == text);
     match found.len() {
         1 => Ok(found.pop().unwrap()),
+        0 if hint(&format!("{HINT}{SCROLL_HINT}")) => Err(SCROLLED.into()),
+        0 if hint("esc back to approval") => Err(UNFOCUSED.into()),
         0 if clipped(screen) => Err(NARROW.into()),
         0 if complete(screen) => Err(narrow.unwrap_or_else(|| {
             "The visible Kimi approval differs from this request; answer it in Terminal".into()
@@ -2201,5 +2244,80 @@ mod tests {
             logged["response"]["answers"][RUN],
             "Approve for this session"
         );
+    }
+
+    /// Task 113: Kimi 2.5.2's wire and approval panel, drawn by its own
+    /// rendering rules (see the fixture's provenance).
+    fn kimi_2_5_2() -> Value {
+        serde_json::from_str(include_str!("fixtures/kimi_approval_2_5_2.json")).unwrap()
+    }
+
+    #[test]
+    fn a_kimi_2_5_2_bash_approval_is_answerable_with_its_exact_command() {
+        let fixture = kimi_2_5_2();
+        let command = fixture["command"].as_str().unwrap();
+        let home = home(fixture["wire"].as_array().unwrap(), &[]);
+        let mut record = record(home.path());
+        record["active_tools"] = json!({"tool_a42":{"name":"Bash","started":1_784_117_070.0}});
+        let path = home.path().join("sessions/workspace/session_test/agents/main/wire.jsonl");
+        // Its whole wire reads, metadata and config records included, and
+        // only the newer request still waits.
+        let events = history(&path, MAX_MAIN_BYTES).unwrap();
+        let open = open(&events);
+        assert!(!open.ambiguous);
+        assert_eq!(open.pending.keys().collect::<Vec<_>>(), ["approval_7c2d"]);
+        let card = only(&record, &events);
+        assert_eq!((card["question_id"].clone(), card["tool_call_id"].clone()), (json!("approval_7c2d"), json!("tool_a42")));
+        let item = &card["questions"][0];
+        assert_eq!(item["allow_other"], true, "{card}");
+        assert_eq!(item["body"], format!("cwd: D:/Workspace/example\n$ {command}\nRun the second start tests"));
+        let request = &open.pending["approval_7c2d"]["request"];
+        // Regular mode draws the command on one row; fullscreen docks the
+        // panel and its body wraps one column earlier.
+        for screen in ["regular_80", "docked_80"] {
+            assert_eq!(read(fixture["screens"][screen].as_str().unwrap(), request), Ok(Shown::Choosing), "{screen}");
+        }
+        let shell = shell(request).unwrap();
+        assert_eq!(shell.head(78, false).unwrap()[4], format!("  $ {command}"));
+        assert_eq!(shell.head(78, true).unwrap()[5], "    seconds");
+        // A scrolled docked body or a panel without the keyboard says why.
+        assert_eq!(read(fixture["screens"]["docked_scrolled_80"].as_str().unwrap(), request), Err(SCROLLED.to_owned()));
+        assert_eq!(read(fixture["screens"]["unfocused_80"].as_str().unwrap(), request), Err(UNFOCUSED.to_owned()));
+        // A docked body over six rows is never drawn as complete.
+        let mut long = request.clone();
+        long["display"]["command"] = fixture["scrolled_command"].clone();
+        assert_eq!(super::shell(&long).unwrap().head(78, true), Err(SCROLLED.to_owned()));
+        assert!(super::shell(&long).unwrap().head(78, false).is_ok());
+    }
+
+    /// Task 113: a request of the running turn whose tool call Kimi's hook did
+    /// not report still reaches Zerus with its exact command, answered only
+    /// in Terminal; once reported it becomes answerable.
+    #[test]
+    fn a_request_of_this_turn_without_its_reported_tool_call_still_shows_its_command() {
+        let home = tempfile::tempdir().unwrap();
+        let reported = record(home.path());
+        let mut r = reported.clone();
+        r["active_tools"] = json!({});
+        r["main_done"] = json!(false);
+        r["turn_started"] = json!(1000.0);
+        let event = request("approval_a", "tool_bash", COMMAND);
+        let card = only(&r, std::slice::from_ref(&event));
+        let item = &card["questions"][0];
+        assert_eq!((card["can_answer"].clone(), item["allow_other"].clone()), (json!(false), json!(false)));
+        assert_eq!(string(&card, "answer_unavailable_reason"), UNREPORTED);
+        assert!(string(item, "body").contains("$ rm -rf build/cache"), "{card}");
+        let mut later = r.clone();
+        later["active_tools"] = reported["active_tools"].clone();
+        let answerable = only(&later, std::slice::from_ref(&event));
+        assert_eq!(answerable["questions"][0]["allow_other"], true);
+        assert_ne!(answerable["question_hash"], card["question_hash"]);
+        // Older than the running turn, after it ended, or with no turn known:
+        // not shown, as before.
+        for (key, value) in [("turn_started", json!(1010.0)), ("main_done", json!(true)), ("turn_started", Value::Null)] {
+            let mut stale = r.clone();
+            stale[key] = value;
+            assert!(recover(&stale, std::slice::from_ref(&event)).is_empty(), "{key}");
+        }
     }
 }

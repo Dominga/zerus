@@ -3969,7 +3969,7 @@ void TeamWorkspace::memberMenu(const Team &team, const Member &member, const QPo
         auto *relaunch = menu.addAction(tr("Relaunch"), this, [this, id = member.id] { m_panel->act("relaunch", {{"member", id}}); });
         const bool failed = member.session.isEmpty() && !member.error.isEmpty();
         relaunch->setEnabled(failed);
-        if (!failed) relaunch->setToolTip(tr("Starts automatically with its first task"));
+        if (!failed) relaunch->setToolTip(tr("Starts automatically with its first task or its reports"));
         // U49: more members of this role at once, and a drain: the member
         // finishes its open work, takes nothing new and then leaves.
         if (team.status == "planning" || team.status == "running" || team.status == "paused") {

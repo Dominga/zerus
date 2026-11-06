@@ -1545,7 +1545,7 @@ fn is_reference_call(command: &str, args: &[String]) -> bool {
 /// `notify` and `paste` are the tray's and tmux's own entry points, and
 /// `subagent retire` names its session second; they keep names only.
 const SESSION_COMMANDS: &[&str] = &[
-    "inspect", "reference", "processes", "send", "send-now", "history", "history-projection",
+    "inspect", "reference", "processes", "send", "send-now", "send-cancel", "history", "history-projection",
     "terminal", "session-action", "session-action-status", "compact-context", "clear-context",
     "interrupt", "attachment", "file-read", "answer", "read", "notifications", "fork", "effort",
     "settings", "schedules", "voice", "hooks", "a", "kill", "rename", "archive", "terminate",

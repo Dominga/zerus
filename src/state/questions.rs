@@ -454,7 +454,7 @@ fn observe_dispatch(name: &str) -> Result<i32> {
     if input.len() as u64 > MAX_PAYLOAD_BYTES {
         return Err("observation payload exceeds 128 KiB".into());
     }
-    let request: ObserveRequest = serde_json::from_slice(&input)
+    let request: ObserveRequest = serde_json::from_slice(crate::state::without_bom(&input))
         .map_err(|error| format!("invalid observation payload: {error}"))?;
     if request.expected_run_id.is_empty() || request.question_id.is_empty() {
         return Err("question identities are required".into());

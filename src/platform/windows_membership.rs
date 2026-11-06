@@ -308,6 +308,7 @@ fn current_directory(
     Ok(Directory { utf16, handle })
 }
 
+mod custody_io;
 mod handles;
 #[cfg(windows)]
 mod native;

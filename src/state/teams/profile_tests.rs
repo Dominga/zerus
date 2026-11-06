@@ -441,3 +441,44 @@ fn the_task_rows_carry_lateness_and_overrun() {
     let value = run(&team, &tokens(None), &Page { limit: 100, ..Default::default() });
     assert_eq!(value["summary"]["lateness"]["unknown"], 1);
 }
+
+/// A DeepSeek member has no native transcript: the tokens of its attempts are
+/// the difference of the counters Zerus sampled at the windows' ends, and a
+/// member whose counters were not sampled stays unknown, never zero.
+#[test]
+fn a_deepseek_members_attempts_get_their_tokens_from_counter_samples() {
+    use sha2::{Digest, Sha256};
+    let temp = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(temp.path(), || {
+        let name = "dsh/proj/dev";
+        let bindings = crate::state::storage::root().join("dsh/bindings");
+        std::fs::create_dir_all(&bindings).unwrap();
+        std::fs::write(
+            bindings.join(format!("{:x}.json", Sha256::digest(name.as_bytes()))),
+            json!({"backend":"dsh","agent":"dsh","name":name,"conversation_id":"session-A"}).to_string(),
+        )
+        .unwrap();
+        let counters = |uncached: u64, output: u64| json!({"tokenUsage":{"uncachedInputTokens":uncached,"outputTokens":output,"cacheReadTokens":uncached * 10}});
+        // dev's attempts run 115-400 and 505-900; the counters grow only while it works.
+        for (at, uncached, output) in [(115.0, 100, 50), (400.0, 400, 150), (505.0, 400, 150), (900.0, 900, 350)] {
+            crate::state::usage_samples::record(name, "session-A", at, &counters(uncached, output), true).unwrap();
+        }
+        let mut team = known();
+        team.members[1].agent = "dsh".into();
+        team.members[1].session = Some(SessionRef { name: name.into(), ..Default::default() });
+        let asks = asks(&timelines(&team, 5000.0), 5000.0);
+        let (read, capped) = read_tokens(&team, &asks);
+        assert!(!capped);
+        let first = read[&(1, "a1".to_owned())].expect("the first attempt has its tokens");
+        assert_eq!((first.uncached_input, first.output, first.total, first.cache_read), (300, 100, 400, 3000));
+        let second = read[&(1, "a2".to_owned())].expect("the second attempt has its tokens");
+        assert_eq!((second.uncached_input, second.output, second.total), (500, 200, 700));
+        // qa has no session here: its attempt stays unknown, not zero.
+        assert_eq!(read[&(2, "a1".to_owned())], None);
+        // The profile counts what is known and says the rest is partial.
+        let value = run(&team, &read, &Page { limit: 100, ..Default::default() });
+        assert_eq!((value["summary"]["tokens"]["total"].clone(), value["summary"]["tokens"]["partial"].clone()), (json!(1100), json!(true)));
+        let dev = value["members"].as_array().unwrap().iter().find(|member| member["member"] == "dev").unwrap();
+        assert_eq!(dev["tokens_per_accepted"], 1100, "{dev}");
+    });
+}

@@ -1505,6 +1505,9 @@ pub(crate) struct Baseline {
     /// member's previous task. Their delay is the task's inherited lateness.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub after: Vec<u32>,
+    /// Task 94: derived after the fact for a phase already running.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub backfilled: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -2826,3 +2829,4 @@ mod tests {
         assert!(!attempt.questions[0].open());
     }
 }
+

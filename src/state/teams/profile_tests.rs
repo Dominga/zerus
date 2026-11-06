@@ -417,8 +417,8 @@ fn idle_and_member_waits_use_the_members_busy_time_in_every_phase() {
 fn the_task_rows_carry_lateness_and_overrun() {
     let mut team = known();
     // #1 was planned 100-1000 (900 s), #2 after it, 1000-1900 (900 s).
-    team.tasks[0].baseline = Some(Baseline { at: 100.0, estimate_s: Some(900.0), start: Some(100.0), end: Some(1000.0), after: vec![] });
-    team.tasks[1].baseline = Some(Baseline { at: 100.0, estimate_s: Some(900.0), start: Some(1000.0), end: Some(1900.0), after: vec![1] });
+    team.tasks[0].baseline = Some(Baseline { at: 100.0, estimate_s: Some(900.0), start: Some(100.0), end: Some(1000.0), after: vec![], backfilled: false });
+    team.tasks[1].baseline = Some(Baseline { at: 100.0, estimate_s: Some(900.0), start: Some(1000.0), end: Some(1900.0), after: vec![1], backfilled: false });
     let value = run(&team, &tokens(None), &Page { limit: 100, ..Default::default() });
     let rows = value["tasks"]["items"].as_array().unwrap();
     let late = |row: &Value| {
@@ -441,3 +441,4 @@ fn the_task_rows_carry_lateness_and_overrun() {
     let value = run(&team, &tokens(None), &Page { limit: 100, ..Default::default() });
     assert_eq!(value["summary"]["lateness"]["unknown"], 1);
 }
+

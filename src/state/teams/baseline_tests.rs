@@ -200,7 +200,7 @@ fn a_baseline_is_fixed_once_kept_on_plan_edits_and_a_later_task_gets_its_own() {
         started.tasks = vec![task(1, "dev", &[], Some(10.0))];
         start(&mut started, 1, T0 - 50.0);
         stamp(&mut started, T0);
-        assert!(started.task(1).unwrap().baseline.is_none(), "a task already running has no planned start");
+        assert!(started.task(1).unwrap().baseline.is_none(), "fresh stamping skips a task already running");
     });
 }
 
@@ -247,3 +247,27 @@ fn the_store_fixes_a_baseline_in_the_change_that_approves_the_plan() {
         assert_eq!(store.load("t").unwrap().unwrap().task(1).unwrap().baseline, Some(one));
     });
 }
+
+#[test]
+fn a_phase_running_at_upgrade_is_backfilled_from_its_approval() {
+    let mut old = team(vec![task(1, "dev", &[], Some(10.0)), task(2, "qa", &[1], Some(20.0))]);
+    start(&mut old, 1, T0 + 100.0);
+    let temp = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(temp.path(), || backfill(&mut old, T0 + 300.0));
+    let one = old.task(1).unwrap().baseline.as_ref().unwrap();
+    assert!(one.backfilled);
+    assert_eq!(one.start, Some(T0));
+    assert_eq!(one.end, Some(T0 + 600.0));
+    let late = lateness(&old, old.task(1).unwrap(), T0 + 300.0);
+    assert_eq!(late["start_late_s"], 100);
+    let mut fresh = team(vec![task(1, "dev", &[], Some(10.0)), task(2, "qa", &[1], Some(20.0))]);
+    crate::state::with_test_state_root(temp.path(), || stamp(&mut fresh, T0));
+    for id in [1, 2] {
+        let a = old.task(id).unwrap().baseline.as_ref().unwrap();
+        let b = fresh.task(id).unwrap().baseline.as_ref().unwrap();
+        assert_eq!((a.start, a.end, a.after.clone()), (b.start, b.end, b.after.clone()));
+    }
+}
+
+
+

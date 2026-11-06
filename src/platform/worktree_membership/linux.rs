@@ -351,10 +351,22 @@ pub(super) fn programs_with_holder(
     holder: Option<&Custody<'_>>,
     deadline: Instant,
 ) -> io::Result<Vec<zerus_client_core::worktree_programs::Program>> {
+    collect_programs(inventory, holder, deadline, || fs::read_dir("/proc"))
+}
+
+// The production entry always supplies the complete fixed kernel roster.
+// Tests can exercise the same classifier with only their owned live subjects,
+// without assuming every unrelated process on the host stays inspectable.
+fn collect_programs(
+    inventory: &objects::Inventory,
+    holder: Option<&Custody<'_>>,
+    deadline: Instant,
+    entries: impl FnOnce() -> io::Result<fs::ReadDir>,
+) -> io::Result<Vec<zerus_client_core::worktree_programs::Program>> {
     let uid = unsafe { libc::getuid() };
     let invocation = ancestors(deadline)?;
     let mut rows = Vec::new();
-    for (count, entry) in fs::read_dir("/proc")?.enumerate() {
+    for (count, entry) in entries()?.enumerate() {
         if count >= 32_768 || Instant::now() >= deadline {
             return Err(limit());
         }
@@ -435,6 +447,15 @@ pub(super) fn programs_with_holder(
     }
     rows.sort_by_key(|row| row.pid);
     Ok(rows)
+}
+
+#[cfg(test)]
+pub(super) fn fixture_programs(
+    inventory: &objects::Inventory,
+    deadline: Instant,
+    roster: &Path,
+) -> io::Result<Vec<zerus_client_core::worktree_programs::Program>> {
+    collect_programs(inventory, None, deadline, || fs::read_dir(roster))
 }
 
 #[cfg(test)]

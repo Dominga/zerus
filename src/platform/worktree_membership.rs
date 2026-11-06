@@ -272,7 +272,7 @@ mod tests {
                 "the control must establish actual native denial: {error}"
             );
         }
-        let readable = Child(
+        let mut readable = Child(
             Command::new("/bin/sleep")
                 .arg("20")
                 .current_dir(&root)
@@ -293,7 +293,19 @@ mod tests {
             .unwrap(),
             "this actual denied cwd must not count as membership"
         );
-        let found = programs(&scope, until).unwrap();
+        // This control concerns the two genuine native subjects above, not
+        // readiness of the entire shared host. Keep their actual /proc reads,
+        // identity checks and aggregation; production still enumerates /proc.
+        let roster = tempfile::tempdir().unwrap();
+        for pid in [denied.0.id(), readable.0.id()] {
+            std::os::unix::fs::symlink(
+                format!("/proc/{pid}"),
+                roster.path().join(pid.to_string()),
+            )
+            .unwrap();
+        }
+        let found = linux::fixture_programs(&inventory, until, roster.path()).unwrap();
+        inventory.current(&scope, until).unwrap();
         assert!(
             !found.iter().any(|p| p.pid == denied.0.id()),
             "a denied read is not proven membership"
@@ -302,6 +314,16 @@ mod tests {
             found.iter().any(|p| p.pid == readable.0.id()),
             "readable membership still protects the checkout"
         );
+        // A missing read in an existing entry remains uncertainty, not an
+        // access denial or an empty roster. Do not "fix" the flake by skipping
+        // ENOENT while its entry still exists.
+        let entry = roster.path().join(readable.0.id().to_string());
+        std::fs::remove_file(&entry).unwrap();
+        std::fs::create_dir(&entry).unwrap();
+        let error = linux::fixture_programs(&inventory, until, roster.path()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(readable.0.try_wait().unwrap().is_none());
+        assert!(denied.0.try_wait().unwrap().is_none());
     }
     #[test]
     fn a_borrowers_own_pin_is_not_a_bypass_for_its_other_open_files() {

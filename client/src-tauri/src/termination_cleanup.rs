@@ -276,6 +276,8 @@ pub struct Row {
     can_force: bool,
     ready: bool,
     busy: bool,
+    /// What the job is doing right now, separate from the entry's outcome.
+    activity: Option<&'static str>,
     source: Option<Target>,
     notice: Option<String>,
     restore: Option<RestoreSource>,
@@ -545,6 +547,11 @@ impl Model {
                         && ready(entry)
                         && zerus_client_core::creation::canonical_uuid(&entry.machine),
                     busy: job.busy,
+                    activity: if restoring {
+                        Some("restoring")
+                    } else {
+                        job.busy.then_some(job.phase)
+                    },
                     source: job.source.clone(),
                     notice: matches!(entry.status, Some(Status::Kept | Status::Unconfirmed)).then(
                         || {
@@ -592,13 +599,16 @@ impl Model {
                     },
                 )
         });
-        let text = if cleaning {
+        // Running work has its own status bar item, so a held result always
+        // names itself here, even while another folder is still running.
+        let held = removed > 0 || kept > 0 || unknown > 0;
+        let only_kept = (kept == 1 && unknown == 0 && removed == 0)
+            .then(|| rows.iter().find(|r| matches!(r.status, "kept" | "review")))
+            .flatten();
+        let text = if cleaning && !held {
             "Cleaning working folders…".into()
-        } else if kept == 1 && unknown == 0 && removed == 0 {
-            format!(
-                "Folder kept: {}.",
-                rows.first().map(|r| r.label.as_str()).unwrap_or("")
-            )
+        } else if let Some(row) = only_kept {
+            format!("Folder kept: {}.", row.label)
         } else {
             // Only what the chip still holds: a finished removal has its own
             // notice, so a "0 removed" beside it would read as a contradiction.
@@ -1486,6 +1496,7 @@ mod tests {
         model.retain(&source(), MACHINE, &report, true);
         let view = model.view();
         assert_eq!(view.rows[0].status, "review");
+        assert_eq!(view.text, "Folder kept: work.");
         assert_eq!(
             view.rows[0].reason,
             "Not created by Zerus; review the folder manually"
@@ -1608,7 +1619,64 @@ mod tests {
         assert!(view.rows[1].can_check);
         assert_eq!(view.text, "Working folders: 1 kept  1 unknown");
         m.jobs[1].busy = true;
+        assert_eq!(m.view().text, "Working folders: 1 kept  1 unknown");
+    }
+    #[test]
+    fn a_running_folder_never_replaces_a_held_result_in_the_chip_text() {
+        let mut m = Model::default();
+        let mut running = job(None);
+        running.id = "running".into();
+        running.cleanup.entries[0].row = json!({"path":"/srv/example/running"});
+        running.busy = true;
+        m.jobs.push_back(running);
         assert_eq!(m.view().text, "Cleaning working folders…");
+
+        m.jobs.push_back(job(Some(Status::Kept)));
+        let view = m.view();
+        assert!(view.cleaning);
+        assert_eq!(
+            view.text, "Folder kept: work.",
+            "not the running folder's name"
+        );
+
+        m.jobs.back_mut().unwrap().cleanup.entries[0].status = Some(Status::Unconfirmed);
+        assert_eq!(m.view().text, "Working folders: 1 unknown");
+    }
+    #[test]
+    fn a_kept_result_past_the_row_cap_is_counted_rather_than_named() {
+        let m = Model {
+            overflow_kept: 1,
+            ..Model::default()
+        };
+        assert_eq!(m.view().text, "Working folders: 1 kept");
+    }
+    #[test]
+    fn activity_follows_the_running_job_and_stays_apart_from_its_outcome() {
+        let mut m = Model::default();
+        m.jobs.push_back(job(None));
+        assert_eq!(m.view().rows[0].activity, None, "not running");
+        m.jobs[0].busy = true;
+        for phase in ["checking", "removing", "stopping"] {
+            m.jobs[0].phase = phase;
+            assert_eq!(m.view().rows[0].activity, Some(phase));
+        }
+        m.jobs[0].cleanup.entries[0].status = Some(Status::Kept);
+        m.jobs[0].phase = "checking";
+        let view = m.view();
+        assert_eq!(view.rows[0].status, "kept");
+        assert_eq!(view.rows[0].activity, Some("checking"));
+        m.jobs[0].busy = false;
+        assert_eq!(m.view().rows[0].activity, None);
+    }
+    #[test]
+    fn a_restoring_row_reports_the_restore_and_not_a_cleanup_phase() {
+        let mut model = Model::default();
+        model.retain(&source(), MACHINE, &report("kept"), true);
+        model.jobs[0].busy = true;
+        model
+            .restoring
+            .insert(format!("{}\n{}", source().computer, ARCHIVE));
+        assert_eq!(model.view().rows[0].activity, Some("restoring"));
     }
     #[test]
     fn a_background_kept_folder_is_not_a_manual_removal_without_check_again() {

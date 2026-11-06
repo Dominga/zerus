@@ -1725,6 +1725,14 @@ outcomes, explicit discard, unknown non-replay, source-change refusal, inspectio
 Escape and Keep, with captures of the approved chip/dialog states. The fixture
 never deletes even its own synthetic worktree files.
 
+While a folder is being checked, removed or restored, the status bar shows
+**Background tasks** with a count, and its list names each folder and state. It
+reads the native cleanup store's `busy` and `activity` fields, so it needs no
+polling and ends only when the work has. It covers Terminate + Remove only and
+adds no retry or cancel. Kept and unknown results stay on the working-folder chip
+beside it. To check its placement, focus and dismissal in WebKit, serve Vite and run
+`client/scripts/menu-smoke.py --title "Zerus background tasks regression (synthetic)" --url http://127.0.0.1:<port>/scripts/background-tasks-smoke.html`.
+
 An archived session whose folder stays for review has a sticky **Session
 archived** notice with structured counts, **Review…** and **Restore session**.
 Restore rechecks the exact archive and physical computer, then uses the existing

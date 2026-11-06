@@ -3235,7 +3235,11 @@ background batches run sequentially. Closing the review does not cancel an
 accepted removal. The notice remains visible through the confirmed action and
 the actual folder-checking/removal phases. Result notices use the normal notice
 timeout; dismissing one does not discard the retained result. The status bar's
-working-folder entry still opens its review.
+working-folder entry still opens its review. While a folder is being checked,
+removed or restored, the status bar also shows **Background tasks** with a count.
+Its list names each folder and its current state, and offers the same review.
+It adds no cancel or retry, and goes away only when the work has really ended.
+A kept or unknown result stays on the working-folder entry while other folders run.
 
 The original folder is checked on its owning computer. A verified Zerus-created,
 clean, integrated checkout can be removed with tool-declared generated caches

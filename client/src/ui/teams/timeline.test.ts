@@ -123,7 +123,7 @@ describe("the profile's Time view (task 92)", () => {
     const choices = scopeChoices([phase(1, "done", "Teams first"), phase(2, "running")]);
     expect(choices.map((choice) => choice.value)).toEqual(["", "1", "2"]);
     expect(choices.map((choice) => choice.label)).toEqual(["The plan, every phase", "Phase 1: Teams first", "Phase 2"]);
-    expect(choices.some((choice) => /[·•]/.test(choice.label))).toBe(false);
+    expect(choices.some((choice) => new RegExp(`[${String.fromCharCode(0xb7, 0x2022)}]`).test(choice.label))).toBe(false);
   });
 
   it("lists the estimates with the largest overrun first", () => {

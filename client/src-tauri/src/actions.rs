@@ -24,9 +24,9 @@ use std::time::Duration;
 
 use tauri::State;
 mod local_read_capture;
-mod read_barrier;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod program_termination;
+mod read_barrier;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use program_termination::dispatch_program_termination;
 pub(crate) use read_barrier::{CapturedReads, FrozenReads};

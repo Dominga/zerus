@@ -94,6 +94,7 @@ mod subagents;
 mod subagents_confirm;
 mod session_upload;
 mod session_state;
+pub(crate) mod slow_calls;
 mod switch_account;
 mod builds;
 pub(crate) mod build_dirs;

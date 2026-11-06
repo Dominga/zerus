@@ -565,6 +565,10 @@ pub(crate) struct Followed {
     /// Why the last inspect failed (`m_inspectError`, the whole text); a
     /// state clears it.
     pub(crate) inspect_error: Option<String>,
+    /// Task 117: inspects that failed in a row (the retry's back-off), and
+    /// when the details last arrived (a read or a state frame).
+    pub(crate) failures: u32,
+    pub(crate) refreshed_at: Option<f64>,
     pub(crate) opened_at: f64,
     /// When the last inspect started (Qt's `m_inspectionAge`).
     pub(crate) inspected_at: f64,
@@ -1578,6 +1582,8 @@ impl Composers {
                 hub.followed.details = Some(details);
                 hub.followed.expiry = expiry;
                 hub.followed.inspect_error = None;
+                hub.followed.failures = 0;
+                hub.followed.refreshed_at = Some(self.now());
                 hub.followed.streamed = true;
                 true
             }

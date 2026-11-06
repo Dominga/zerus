@@ -11600,6 +11600,11 @@ Update and Restart applies it now: Zerus quits and opens again. Saved drafts, se
       <translation>Не удалось обновить активность: %1</translation>
     </message>
     <message>
+      <location filename="../src/SessionsWindow.cpp" line="2537" />
+      <source>Activity not refreshed since %1, retrying: %2</source>
+      <translation>Активность не обновлялась с %1, повторяем: %2</translation>
+    </message>
+    <message>
       <location filename="../src/SessionsWindow.cpp" line="1971" />
       <source>Session renamed. Refreshing…</source>
       <translation>Сессия переименована. Обновление…</translation>

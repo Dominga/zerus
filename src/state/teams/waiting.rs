@@ -10,7 +10,8 @@ use serde_json::{json, Value};
 const REPORTS_SHOWN: usize = 4;
 
 /// One team session's reason, and the budget its Background job runs under.
-#[derive(Clone, Debug, Default, PartialEq)]
+/// Task 117: kept as the last good answer for a read the store keeps busy.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Waiting {
     pub name: String,
     pub conversation_id: String,
@@ -24,10 +25,9 @@ pub(crate) struct Waiting {
     /// U30: the member's `hgs team run` still running in its folder: the
     /// session is Building.
     pub build: Option<Value>,
-    /// Task 95: the lead stalled: the phone's alert item for the lead's row
-    /// (`mobile_attention`), one per notification round.
-    /// Task 95's stalled-lead alert and task 113's raised Terminal-only
-    /// requests of the team's members, all on the lead's row.
+    /// The phone's alert items for the lead's row (`mobile_attention`): task
+    /// 95's stalled lead, one per notification round, and task 113's raised
+    /// Terminal-only requests of the team's members.
     pub alerts: Vec<Value>,
     /// Task 97: the team, so the owner queue finds its lead's row.
     pub team: String,

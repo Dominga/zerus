@@ -30,3 +30,7 @@ One card swaps several members:
 Zerus pauses each replaced session and keeps it as <name>-replaced, so the new
 session takes the member's name. The owner's word may name them together
 ("relaunch them all"): one sentence then pays for each.
+
+To see a member with your own eyes: hgs team look MEMBER (or
+{"member":"dev"} | hgs team look --json): its screen now, each source's
+view, the reconciled state (uncertain when they disagree) and what Zerus does next.

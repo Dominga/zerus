@@ -349,6 +349,14 @@ pub(crate) enum Step {
     /// Task 113: a request only the member's Terminal takes waited for the
     /// defer time: raised once to the owner and the phone with its screen.
     EscalateTerminal { member: String },
+    /// Task 139: a suspect member's sources compared, with a screen read;
+    /// `hooks` is what its session record said when the pass planned it.
+    Check { member: String, hooks: super::look::Hooks },
+    /// Task 139: a member no longer suspect drops its last check.
+    ClearCheck { member: String },
+    /// Task 139: the lead idles while decisions wait (task 95): it is told
+    /// once per round, with what waits.
+    TellLeadIdle,
     /// U56: a pending task pinned to a stuck, stopped or offline member says so
     /// in its waits.
     WaitOnMember { task: u32, member: String, reason: String },
@@ -791,6 +799,8 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     }
     // Each tick lists the sessions: a member's liveness is recorded when it
     // changes, so status derives `stopped` without a listing of its own (L3).
+    // Task 139: screens read this pass.
+    let mut checks = 0;
     for member in &team.members {
         let Some(session) = member.session.as_ref() else { continue };
         // L4: a member its computer does not list is offline, not stuck: clear a
@@ -899,6 +909,28 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 }
             } else if !stuck && member.stuck.is_some() {
                 steps.push(Step::Unstuck { member: member.id.clone() });
+            }
+            // Task 139: a suspect member's sources are compared, with its
+            // screen read off the tick, a few members at a time.
+            let hooks = super::look::Hooks {
+                live: found.live,
+                activity: found.activity.clone(),
+                phase: found.phase.clone(),
+                asking: found.asking,
+                background: found.background,
+                building: found.building,
+                tool: found.tool.clone(),
+                last_event_at: found.last_event_at,
+                quiet,
+                limit,
+            };
+            match super::look::due(team, member, &hooks, now) {
+                Some(true) if checks < super::look::MAX_CHECKS => {
+                    checks += 1;
+                    steps.push(Step::Check { member: member.id.clone(), hooks });
+                }
+                None if member.check.is_some() => steps.push(Step::ClearCheck { member: member.id.clone() }),
+                _ => {}
             }
         } else if member.stuck.is_some() {
             steps.push(Step::Unstuck { member: member.id.clone() });
@@ -1095,6 +1127,11 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         if stall != team.lead_stall {
             steps.push(Step::LeadStall { stall });
         }
+    }
+    // Task 139: an idle lead with decisions waiting is told itself, once a
+    // round, so nobody has to wake it by hand.
+    if team.lead_stall.as_ref().is_some_and(|stall| stall.reason == "idle" && !stall.lead_told) && lead_ready {
+        steps.push(Step::TellLeadIdle);
     }
     // N4: the sub-lead's reminder does not wait for the lead's turn to end -
     // only the lead's own reminder needs a lead that can take a message.
@@ -2954,6 +2991,121 @@ fn escalate_terminal(store: &mut Store, team: &Team, member_id: &str) -> anyhow:
             "tool":super::terminal_prompt::title(asked),"minutes":super::terminal_prompt::minutes(asked, at),
             "screen":!screen.is_empty()})));
         found.terminal_escalation = Some(TerminalEscalation { question_id: question.clone(), at, screen: screen.clone() });
+        Ok(())
+    })
+}
+
+/// Task 139: the members whose screens are being read, `team\nmember`.
+static CHECKING: std::sync::Mutex<BTreeSet<String>> = std::sync::Mutex::new(BTreeSet::new());
+
+/// Task 139: reads the member's screen and compares its sources. Off the tick:
+/// the read runs on its own thread (inline in tests, where hgs is faked per
+/// thread), at most `look::MAX_CHECKS` at a time, never twice for one member.
+fn check_member(store: &mut Store, team: &Team, member_id: &str, hooks: &super::look::Hooks) {
+    let Some(session) = team.member(member_id).and_then(|member| member.session.clone()) else { return };
+    let key = format!("{}\n{member_id}", team.id);
+    {
+        let mut checking = CHECKING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if checking.len() >= super::look::MAX_CHECKS || !checking.insert(key.clone()) {
+            return;
+        }
+    }
+    let (team_id, member_id, hooks) = (team.id.clone(), member_id.to_owned(), hooks.clone());
+    let done = key.clone();
+    let run = move |store: &mut Store| {
+        let screen = read_screen(&session);
+        let _ = apply_check(store, &team_id, &member_id, &hooks, screen.as_deref(), now());
+        CHECKING.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&done);
+    };
+    if cfg!(test) {
+        run(store);
+    } else {
+        let _ = std::thread::Builder::new().name("team-check".into()).spawn(move || {
+            if let Ok(mut store) = Store::open(true) {
+                run(&mut store);
+            } else {
+                CHECKING.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&key);
+            }
+        });
+    }
+}
+
+/// The member's Terminal as `hgs terminal NAME --json` snapshots it.
+pub(crate) fn read_screen(session: &SessionRef) -> Option<String> {
+    let snapshot = json!({"request_id":uuid::Uuid::new_v4().to_string(),"action":"snapshot",
+        "expected_run_id":session.run_id,"expected_conversation_id":session.conversation_id});
+    hgs(&session.host, &["terminal", &session.name, "--json"], Some(&snapshot), Duration::from_secs(20))
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
+        .and_then(|answer| answer["screen"].as_str().map(str::to_owned))
+}
+
+/// Compares the member's sources against `screen` and keeps the result; an
+/// uncertain member is told to the lead once per episode.
+pub(crate) fn apply_check(
+    store: &mut Store,
+    team_id: &str,
+    member_id: &str,
+    hooks: &super::look::Hooks,
+    screen: Option<&str>,
+    at: f64,
+) -> anyhow::Result<()> {
+    use super::look;
+    let team = store.load(team_id)?.context("unknown team")?;
+    let member = team.member(member_id).context("unknown member")?;
+    let lines = screen.map(|screen| last_lines(screen, 40)).unwrap_or_default();
+    let shown = screen.map(|_| look::classify(&member.agent, &lines));
+    let record = look::recorded_request(member);
+    let compared = look::compare(hooks, record.as_deref(), shown.as_ref().map(|(kind, detail)| (*kind, detail.as_str())));
+    let kept = lines[lines.len().saturating_sub(look::SCREEN_LINES)..].to_vec();
+    let check = look::next_check(member.check.as_ref(), &compared, kept, at);
+    let tell = check.state == "uncertain" && !check.told;
+    change(store, team_id, |team, events| {
+        let role = team.role_of(member_id);
+        let found = team.members.iter_mut().find(|found| found.id == member_id).context("unknown member")?;
+        let before = found.check.as_ref().map(|check| check.state.clone()).unwrap_or_default();
+        if check.state == "uncertain" && before != "uncertain" {
+            events.push(Event::new("member_uncertain", json!({"member":role,"disagree":check.disagree})));
+        } else if check.state == "agree" && before == "uncertain" {
+            events.push(Event::new("member_check_settled", json!({"member":role})));
+        }
+        found.check = Some(check.clone());
+        Ok(())
+    })?;
+    if tell {
+        let team = store.load(team_id)?.context("unknown team")?;
+        let member = team.member(member_id).context("unknown member")?.clone();
+        let Some(lead) = team.member(&team.lead).and_then(|lead| lead.session.clone()) else { return Ok(()) };
+        if matches!(send(&lead, &uuid::Uuid::new_v4().to_string(), &look::lead_text(&team, &member, &check, at)), Sent::Refused(_)) {
+            return Ok(());
+        }
+        change(store, team_id, |team, events| {
+            let role = team.role_of(member_id);
+            if let Some(found) = team.members.iter_mut().find(|found| found.id == member_id) {
+                if let Some(kept) = found.check.as_mut().filter(|kept| kept.since == check.since) {
+                    kept.told = true;
+                    events.push(Event::new("member_uncertain_told", json!({"member":role})));
+                }
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+/// Task 139: tells the idle lead, once a round, what decisions wait for it.
+fn tell_lead_idle(store: &mut Store, team: &Team) -> anyhow::Result<()> {
+    let Some(stall) = team.lead_stall.clone().filter(|stall| stall.reason == "idle" && !stall.lead_told) else { return Ok(()) };
+    let lead = team.member(&team.lead).and_then(|lead| lead.session.clone()).context("the lead has no session")?;
+    if matches!(send(&lead, &uuid::Uuid::new_v4().to_string(), &super::look::lead_idle_text(team, &stall, now())), Sent::Refused(_)) {
+        return Ok(());
+    }
+    change(store, &team.id, |team, events| {
+        if let Some(found) = team.lead_stall.as_mut().filter(|found| found.round == stall.round) {
+            found.lead_told = true;
+            events.push(Event::new("lead_idle_told", json!({"round":stall.round,"items":stall.items})));
+        }
         Ok(())
     })
 }
@@ -7243,6 +7395,20 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         }),
         Step::Defer { member, question } => defer_request(store, team, member, question),
         Step::EscalateTerminal { member } => escalate_terminal(store, team, member),
+        Step::Check { member, hooks } => {
+            check_member(store, team, member, hooks);
+            Ok(())
+        }
+        Step::ClearCheck { member } => change(store, &team.id, |team, events| {
+            let role = team.role_of(member);
+            if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
+                if found.check.take().is_some_and(|check| check.state == "uncertain") {
+                    events.push(Event::new("member_check_settled", json!({"member":role})));
+                }
+            }
+            Ok(())
+        }),
+        Step::TellLeadIdle => tell_lead_idle(store, team),
         Step::LeadStall { stall } => change(store, &team.id, |team, events| {
             if let Some((kind, data)) = super::lead_stall::event(team.lead_stall.as_ref(), stall.as_ref(), now()) {
                 events.push(Event::new(kind, data));
@@ -8420,6 +8586,9 @@ mod dispatcher_input_block;
 #[cfg(test)]
 #[path = "tests/dispatcher_terminal_prompt.rs"]
 mod dispatcher_terminal_prompt;
+#[cfg(test)]
+#[path = "tests/dispatcher_look.rs"]
+mod dispatcher_look;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_areas.rs"]

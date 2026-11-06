@@ -187,19 +187,75 @@ struct Reference {
 }
 
 fn reference(config: &Config, args: &[String], who: &Actor) -> Result<Reference> {
+    reference_by(config, args, who, None)
+}
+
+/// `reference`, its catalog reads within `entry` when given: the machines'
+/// identity and projects read there, and the agent's own project read by
+/// then (#1519 review: an attempt's whole entry counts against its budget).
+fn reference_by(
+    config: &Config,
+    args: &[String],
+    who: &Actor,
+    entry: Option<(&[(String, String)], std::time::Instant)>,
+) -> Result<Reference> {
     let value = args.first().ok_or_else(|| fail(USAGE))?;
     let (project_name, task) = match value.rsplit_once('/') {
         Some((project, task)) => (Some(project), task),
         None => (option(args, "--project")?, value.as_str()),
     };
-    let found = match project_name {
-        Some(name) => project(config, name)?,
-        None => own_project(config, who, "name the project: PROJECT/T-xxxxxx or --project P")?,
+    let missing = "name the project: PROJECT/T-xxxxxx or --project P";
+    let found = match (project_name, entry) {
+        (Some(name), None) => project(config, name)?,
+        (Some(name), Some((projects, _))) => project_in(projects, name)?,
+        (None, None) => own_project(config, who, missing)?,
+        (None, Some((_, deadline))) => {
+            let Actor::Agent(own) = who else {
+                return Err(fail(missing));
+            };
+            crate::swarm::session_project_until(config, &own.session, deadline)
+                .map_err(fail)?
+                .ok_or_else(|| fail(BUSY))?
+                .ok_or_else(|| {
+                    fail(format!(
+                        "{} belongs to no project; name one: PROJECT/T-xxxxxx or --project P",
+                        own.session
+                    ))
+                })?
+        }
     };
     Ok(Reference {
         project: found,
         task: task.to_owned(),
     })
+}
+
+/// An attempt command's entry, refused past its budget: nothing was sent.
+const BUSY: &str = "the project's tasks are busy past this command's budget; nothing was sent";
+
+/// This computer's machines and the catalog's projects, read in one catalog
+/// admission no later than `deadline`.
+fn entry_until(
+    config: &Config,
+    deadline: std::time::Instant,
+) -> Result<(Machines, Vec<(String, String)>)> {
+    let (here, projects) = crate::swarm::identity_and_projects_until(config, deadline)
+        .map_err(fail)?
+        .ok_or_else(|| fail(BUSY))?;
+    Ok((machines_for(config, here)?, projects))
+}
+
+/// The project's store, its lock waited for no later than `deadline`.
+fn store_until(
+    config: &Config,
+    project_id: &str,
+    deadline: std::time::Instant,
+) -> Result<ProjectStore> {
+    let wait = deadline.saturating_duration_since(std::time::Instant::now());
+    ProjectStore::open_within(&config.state.join("replica"), project_id, wait)
+        .map_err(fail)?
+        .filter(|_| std::time::Instant::now() < deadline)
+        .ok_or_else(|| fail(BUSY))
 }
 
 fn store(config: &Config, project_id: &str) -> Result<ProjectStore> {
@@ -217,7 +273,10 @@ struct Machines {
 }
 
 fn machines(config: &Config) -> Result<Machines> {
-    let here = crate::swarm::local_node_id(config).map_err(fail)?;
+    machines_for(config, crate::swarm::local_node_id(config).map_err(fail)?)
+}
+
+fn machines_for(config: &Config, here: String) -> Result<Machines> {
     #[cfg(unix)]
     let peers = crate::swarm::verified_bindings(config, &here);
     #[cfg(not(unix))]
@@ -898,13 +957,21 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         "rename" => Some(stdin_text("title")?.trim().to_owned()),
         _ => None,
     };
-    let machines = machines(config)?;
+    // A send or handoff reads the catalog and waits for the project within
+    // its one budget, from here (#1519 review, zerus-9gzdp).
+    let attempted = matches!(action, "send" | "handoff");
+    let (machines, projects) = if attempted {
+        let (machines, projects) = entry_until(config, deadline)?;
+        (machines, Some(projects))
+    } else {
+        (machines(config)?, None)
+    };
     let here = machines.here.as_str();
     let who = actor(here, args, matches!(action, "send" | "handoff" | "cancel"))?;
     if let Some(text) = &text {
         if action != "edit" || !text.is_empty() { agent_text(text, action, &who)?; }
     }
-    let r = reference(config, args, &who)?;
+    let r = reference_by(config, args, &who, projects.as_deref().map(|p| (p, deadline)))?;
     let (project_id, project_name) = (&r.project.0, &r.project.1);
     // An agent reads a refused send as "SESSION cannot take it now: …"; a paste
     // that happened is never reworded. A command another computer forwards
@@ -933,10 +1000,18 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         Some(worker)
     } else { None };
     let store = match wait {
+        None if attempted => store_until(config, project_id, deadline)?,
         None => store(config, project_id)?,
-        Some(wait) => ProjectStore::open_within(&config.state.join("replica"), project_id, wait)
-            .map_err(fail)?
-            .ok_or_else(|| fail("the project's tasks are busy; try again"))?,
+        Some(wait) => {
+            let wait = if attempted {
+                wait.min(deadline.saturating_duration_since(std::time::Instant::now()))
+            } else {
+                wait
+            };
+            ProjectStore::open_within(&config.state.join("replica"), project_id, wait)
+                .map_err(fail)?
+                .ok_or_else(|| fail("the project's tasks are busy; try again"))?
+        }
     };
     let mut task = find(&store, &r.task)?;
     if let Some(guard) = guard { guard.check(&task)?; }
@@ -1008,6 +1083,8 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
                 pin,
                 &who,
                 handoff,
+                &machines,
+                args,
                 deadline,
             )
             .map_err(|e| refuse(e, &to.session))?;

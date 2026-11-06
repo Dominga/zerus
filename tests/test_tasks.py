@@ -1232,6 +1232,199 @@ class TaskDelivery(DeliveryFixture):
         self.assertEqual((self.execution(task)["current"]["id"], self.execution(task)["current"]["phase"]),
                          (plan["id"], "unknown"))
 
+    def held(self, *args, text=None, session=None):
+        """`hgs task ARGS` held between its freeze and its admission (debug
+        builds only: HGS_TEST_ATTEMPT_PAUSE). Returns its release."""
+        folder = self.root / ("pause-" + str(uuid.uuid4()))
+        folder.mkdir()
+        env = dict(self.env, HGS_TEST_ATTEMPT_PAUSE=str(folder))
+        if session:
+            env.update(HGS_SESSION=session, HGS_RUN_ID=self.agent(session))
+        proc = subprocess.Popen([str(HGS), "task", *args], env=env, text=True, stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc.stdin.write(text or "")
+        proc.stdin.close()
+        self.addCleanup(lambda: proc.poll() is None and ((folder / "release").touch(), proc.wait(timeout=30)))
+        until = time.monotonic() + 15
+        while not (folder / "ready").exists():
+            if proc.poll() is not None:
+                self.fail("ended before its admission: " + proc.stderr.read())
+            self.assertLess(time.monotonic(), until)
+            time.sleep(.005)
+        def release():
+            (folder / "release").touch()
+            out = proc.stdout.read()
+            err = proc.stderr.read()
+            proc.wait(timeout=30)
+            return proc.returncode, out, err
+        return release
+
+    def test_a_target_changed_while_frozen_is_never_sent(self):
+        # review-win-c and desktop-u on #1519 (zerus-frehz): the task changes
+        # between the freeze and the final admission: its target for a send
+        # or a Start, its stage for a reopen (Done is reopened too, so only
+        # the frozen stage time tells), its stage for a handoff. Every path
+        # refuses it there and sends nothing.
+        self.agent("codex/other")
+        retarget = lambda task: self.hgs("target", task["ref"], "codex/other")
+        # CLI send.
+        task = self.add("FROZEN_SEND", "--target", self.name)
+        release = self.held("send", task["ref"], "--json")
+        retarget(task)
+        code, _, err = release()
+        self.assertNotEqual(code, 0)
+        self.assertIn("changed", err)
+        self.assertEqual(self.execution(task).get("attempts", 0), 0)
+        # CLI send, the stage only: still sendable from Backlog, yet not as frozen.
+        task = self.add("FROZEN_STAGE", "--target", self.name)
+        release = self.held("send", task["ref"], "--json")
+        self.hgs("stage", task["ref"], "backlog")
+        code, _, err = release()
+        self.assertNotEqual(code, 0)
+        self.assertIn("changed", err)
+        # Start.
+        task = self.add("FROZEN_START", "--target", self.name)
+        release = self.held("start-deliver", task["ref"], "--json", text=json.dumps(self.start_plan(task)))
+        retarget(task)
+        code, out, _ = release()
+        self.assertEqual((code, json.loads(out)["state"]), (0, "refused"))
+        # Reopen.
+        task = self.reviewed("FROZEN_REOPEN")
+        identity = str(uuid.uuid4())
+        release = self.held("message", task["ref"], "--content-json", "--mode", "reopen", "--request-id", identity,
+                            "--expect-dispatch", task["dispatch_id"], "--json",
+                            text=json.dumps(dict(text="FROZEN_REOPEN_TEXT", attachments=[])))
+        self.hgs("stage", task["ref"], "done")
+        code, _, err = release()
+        self.assertNotEqual(code, 0)
+        self.assertIn("changed", err)
+        self.assertEqual(self.notes(task, identity), [])
+        # Handoff, by the task's own agent.
+        task = self.add("FROZEN_HANDOFF", "--start", session="codex/source")
+        release = self.held("handoff", task["ref"], "--session", self.name, "--json", session="codex/source")
+        self.hgs("cancel", task["ref"], "--reason", "Stop")
+        code, _, err = release()
+        self.assertNotEqual(code, 0)
+        for text in ("FROZEN_SEND", "FROZEN_STAGE", "FROZEN_START", "FROZEN_REOPEN_TEXT", "FROZEN_HANDOFF"):
+            self.assertNotIn(text, self.received())
+
+    def test_the_agent_limit_is_counted_again_in_the_final_admission(self):
+        # review-win-c and desktop-u on #1519 (zerus-v3rtj): an agent's
+        # start frozen under the limit is refused once another start used it
+        # meanwhile; the count is taken in the final admission.
+        self.settings(agents_other=True, agent_limit=1)
+        first = self.add("LIMIT_FIRST", "--target", self.name)
+        second = self.add("LIMIT_SECOND", "--target", self.name)
+        release = self.held("send", first["ref"], "--json", session="codex/actor")
+        self.hgs("send", second["ref"], "--json", session="codex/actor")
+        self.wait_received("LIMIT_SECOND"); self.confirm()
+        code, _, err = release()
+        self.assertNotEqual(code, 0)
+        self.assertIn("per hour", err)
+        self.assertNotIn("LIMIT_FIRST", self.received())
+        self.assertEqual(self.execution(first).get("attempts", 0), 0)
+
+    def test_a_possibly_delivered_agent_start_holds_the_limit(self):
+        # desktop-u on #1519: an agent's reserved start whose delivery is
+        # unknown may already have arrived, so it holds the hourly capacity
+        # from its reservation; another agent start is refused.
+        warm = self.add("WARMS_THE_RECEIPTS", "--target", self.name)
+        self.hgs("send", warm["ref"]); self.confirm()
+        self.settings(agents_other=True, agent_limit=1)
+        unknown = self.add("MAYBE_DELIVERED", "--target", self.name)
+        receipts = self.state / "input_receipts"
+        receipts.chmod(0o500)
+        self.addCleanup(receipts.chmod, 0o700)
+        self.assertIn("delivery uncertain", self.hgs("send", unknown["ref"], session="codex/actor", ok=False))
+        receipts.chmod(0o700)
+        self.assertEqual(self.execution(unknown)["current"]["phase"], "unknown")
+        other = self.add("NOT_WITHIN_THE_LIMIT", "--target", self.name)
+        self.assertIn("per hour", self.hgs("send", other["ref"], session="codex/actor", ok=False))
+        self.assertNotIn("NOT_WITHIN_THE_LIMIT", self.received())
+
+    def test_the_agent_limit_bounds_a_frozen_handoff_too(self):
+        self.settings(agents_other=True, agent_limit=1)
+        task = self.add("LIMIT_HANDOFF", "--start", session="codex/source")
+        other = self.add("LIMIT_OTHER", "--target", self.name)
+        release = self.held("handoff", task["ref"], "--session", self.name, "--json", session="codex/source")
+        self.hgs("send", other["ref"], "--json", session="codex/source")
+        self.wait_received("LIMIT_OTHER"); self.confirm()
+        code, _, err = release()
+        self.assertNotEqual(code, 0)
+        self.assertIn("per hour", err)
+        self.assertNotIn("LIMIT_HANDOFF", self.received())
+
+    def test_a_reopen_obeys_the_project_s_agent_rules(self):
+        # desktop-u on #1519 (zerus-wvzdk): a managed reopen runs the
+        # project's agent rules in its final admission, as a send does: an
+        # agent may not reopen another session's task when the project keeps
+        # agents to their own.
+        self.settings(agents_other=False)
+        task = self.reviewed("OUTSIDER_TASK")
+        self.agent("codex/outsider")
+        identity = str(uuid.uuid4())
+        refused = self.message(task, "OUTSIDER_TEXT", mode="reopen", identity=identity,
+                               session="codex/outsider", ok=False)
+        self.assertIn("only in their own session", refused)
+        current = self.hgs("get", task["ref"])["task"]
+        self.assertEqual(current["stage"], "review")
+        self.assertNotIn("resumed", [e["kind"] for e in current["log"]])
+        self.assertEqual(self.notes(task, identity), [])
+        self.assertNotIn("OUTSIDER_TEXT", self.received())
+
+    def test_a_start_id_reused_for_another_body_is_refused(self):
+        # desktop-u on #1519 (zerus-f5q49): an ID answers only for its own
+        # request. After a managed Start, the same ID with a changed body is
+        # refused, repeated or recovered; on the legacy route too, its
+        # recorded history answers only when its receipt shows this request.
+        def tampered(plan):
+            return dict(plan, request=dict(plan["request"], text=plan["request"]["text"] + " CHANGED_BODY"))
+        task = self.add("ORIGINAL_BODY", "--target", self.name)
+        plan = self.start_plan(task)
+        self.assertEqual(self.hgs("start-deliver", task["ref"], text=json.dumps(plan))["state"], "submitted")
+        self.wait_received("ORIGINAL_BODY"); self.confirm()
+        for extra in ((), ("--recover-only",)):
+            out = self.hgs("start-deliver", task["ref"], *extra, text=json.dumps(tampered(plan)))
+            self.assertEqual(out["state"], "refused", out)
+        # The legacy route: the person's hold keeps this unfloored task on it.
+        self.hgs("cutover", "--project", "orchard", "--hold", "on")
+        legacy = self.add("LEGACY_BODY", "--target", self.name)
+        plan = self.start_plan(legacy)
+        self.assertEqual(self.hgs("start-deliver", legacy["ref"], text=json.dumps(plan))["state"], "submitted")
+        self.wait_received("LEGACY_BODY")
+        self.assertEqual(self.execution(legacy)["attempts"], 0)
+        for extra in ((), ("--recover-only",)):
+            out = self.hgs("start-deliver", legacy["ref"], *extra, text=json.dumps(tampered(plan)))
+            self.assertEqual(out["state"], "refused", out)
+        self.assertNotIn("CHANGED_BODY", self.received())
+
+    def test_a_held_lock_refuses_within_the_one_budget(self):
+        # review-win-c on #1519 (zerus-9gzdp): every lock wait from the
+        # command's entry counts against its one 15-second budget: a held
+        # project or catalog lock refuses it as busy, and nothing is sent.
+        task = self.add("LOCK_BUDGET", "--target", self.name)
+        plan = self.start_plan(task)
+        project = self.state / "replica" / hashlib.sha256(b"project-1").hexdigest() / ".lock"
+        catalog = self.root / "config" / "swarm" / "catalog.lock"
+        cases = (
+            (project, ["start-deliver", task["ref"], "--json"], json.dumps(plan)),
+            (catalog, ["start-deliver", task["ref"], "--json"], json.dumps(plan)),
+            (project, ["send", task["ref"], "--json"], None),
+        )
+        for path, args, text in cases:
+            with path.open("a") as held:
+                fcntl.flock(held, fcntl.LOCK_EX)
+                began = time.monotonic()
+                result = subprocess.run([str(HGS), "task", *args], input=text, env=self.env, text=True,
+                                        capture_output=True, timeout=40)
+                took = time.monotonic() - began
+                fcntl.flock(held, fcntl.LOCK_UN)
+            self.assertNotEqual(result.returncode, 0, (args, result.stdout))
+            self.assertIn("busy", result.stderr)
+            self.assertLess(took, 17, args)
+        self.assertNotIn("LOCK_BUDGET", self.received())
+        self.assertEqual(self.execution(task).get("attempts", 0), 0)
+
     def test_a_frozen_start_is_refused_when_its_business_binding_changed(self):
         # desktop-u's condition 2: the reservation re-renders the frozen
         # request against the task as admitted; a new queued message, an

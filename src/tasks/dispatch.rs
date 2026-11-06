@@ -10,6 +10,7 @@ const MAX_PLAN: u64 = 32 * 1024 * 1024;
 pub(super) const CHANGED: &str =
     "The task or executor changed. Nothing was sent. Refresh the task.";
 const UNCERTAIN: &str = "The previous start of this task may already have reached its executor.";
+const ANOTHER: &str = "This start's ID already belongs to another request. Nothing was sent.";
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -76,7 +77,7 @@ fn checked_selection(selection: &Selection) -> Result<()> {
     }
     Ok(())
 }
-fn normalized(target: &Target, machines: &Machines) -> Target {
+pub(super) fn normalized(target: &Target, machines: &Machines) -> Target {
     let resolve = |key: &SessionKey| {
         let mut key = machines.resolve(key).unwrap_or_else(|| key.clone());
         if !key.session_id.is_empty() {
@@ -195,14 +196,16 @@ pub(super) fn execute(config: &Config, action: &str, args: &[String]) -> Result<
     // The attempt's one budget counts from here (desktop-u's condition 1).
     let deadline = std::time::Instant::now() + super::attempts::BUDGET;
     let mut body = input()?;
-    let machines = machines(config)?;
+    // The catalog and the project's lock within that budget too (#1519
+    // review, zerus-9gzdp): a held lock refuses as busy, never waits on.
+    let (machines, projects) = super::entry_until(config, deadline)?;
     if actor(&machines.here, args, false)? != Actor::Person {
         return Err(fail(
             "task start plans are for the person's explicit desktop Start",
         ));
     }
-    let r = reference(config, args, &Actor::Person)?;
-    let mut store = store(config, &r.project.0)?;
+    let r = super::reference_by(config, args, &Actor::Person, Some((&projects, deadline)))?;
+    let mut store = super::store_until(config, &r.project.0, deadline)?;
     let mut task = store.find(&r.task).map_err(fail)?;
     let current = task.view().map_err(fail)?;
     let (selection, to) = if action == "start-plan" {
@@ -276,27 +279,49 @@ pub(super) fn execute(config: &Config, action: &str, args: &[String]) -> Result<
             "task":view(task,&r.project.1,false,&machines)?}),
         )
     };
-    // An already recorded dispatch acknowledges its original identity even if
-    // the task subsequently moved to review, was cancelled or handed off.
-    if current.log.iter().any(|e| {
-        e.kind == "sent"
-            && e.request_id.as_deref() == Some(plan.id.as_str())
-            && e.session
-                .as_ref()
-                .is_some_and(|s| s.machine == to.machine && s.session_id == to.session_id)
-    }) {
-        return result("submitted", "", &task);
-    }
-    // An attempt already reserved under this ID: only its request's own
+    // An attempt already reserved under this ID comes first (zerus-f5q49):
+    // it answers only for its own exact request, and only that request's
     // receipt settles it; nothing is submitted again (condition 4).
-    if task.attempt(&plan.id).map_err(fail)?.is_some() {
+    if let Some(attempt) = task.attempt(&plan.id).map_err(fail)? {
+        let native = super::attempts::native(&to, &plan.request);
+        let bound = attempt.delivery.as_ref().is_some_and(|d| {
+            d.machine == native.machine
+                && d.name == native.name
+                && d.run_id == native.run_id
+                && d.conversation_id == native.conversation_id
+                && d.digest == native.digest
+        });
+        if !bound {
+            return result("refused", ANOTHER, &task);
+        }
         let uuid = task.uuid().to_owned();
         drop(store);
         let delivered =
             super::attempts::recover(config, &r.project.0, &uuid, &plan.id, &to, &plan.request)?;
         return delivered_result(config, &r.project.0, &uuid, delivered, &result);
     }
-    let receipt = crate::state::task_reply_receipt(&to.session, &plan.request).map_err(fail)?;
+    // A request whose ID another request's receipt holds is refused.
+    let receipt = match crate::state::task_reply_receipt(&to.session, &plan.request) {
+        Ok(receipt) => receipt,
+        Err(_) => return result("refused", ANOTHER, &task),
+    };
+    // Legacy history: a recorded dispatch acknowledges its original identity
+    // even if the task then moved to review, was cancelled or handed off,
+    // but only for a task that is not managed, and only when that request's
+    // own receipt shows this exact request (zerus-f5q49).
+    let recorded = current.log.iter().any(|e| {
+        e.kind == "sent"
+            && e.request_id.as_deref() == Some(plan.id.as_str())
+            && e.session
+                .as_ref()
+                .is_some_and(|s| s.machine == to.machine && s.session_id == to.session_id)
+    });
+    if recorded && !task.execution_managed() {
+        return match &receipt {
+            Some(native) if native["status"] == "submitted" => result("submitted", "", &task),
+            _ => result("uncertain", UNCERTAIN, &task),
+        };
+    }
     let submitted = receipt.as_ref().is_some_and(|r| r["status"] == "submitted");
     if receipt.is_some() && !submitted || receipt.is_none() && flag(args, "--recover-only") {
         return result("uncertain", UNCERTAIN, &task);
@@ -305,8 +330,8 @@ pub(super) fn execute(config: &Config, action: &str, args: &[String]) -> Result<
         // A fresh, exact plan: the fence decides between its attempt and the
         // legacy route. No lock is held into it.
         let uuid = task.uuid().to_owned();
-        let starts = super::agent_starts_since(&store, now() - 3_600_000)?;
         drop(store);
+        super::attempts::pause(&plan.id);
         let detail = std::cell::RefCell::new(String::new());
         let admission =
             super::attempts::admit(config, &r.project.0, &uuid, deadline, |admitted, task| {
@@ -334,6 +359,8 @@ pub(super) fn execute(config: &Config, action: &str, args: &[String]) -> Result<
                     return refuse("not_sendable", error.to_string());
                 }
                 let settings = admitted.project()?.settings();
+                // Counted here, never before the locks (zerus-v3rtj).
+                let starts = super::attempts::admitted_starts(admitted, &Actor::Person, &settings)?;
                 match rendered(
                     &settings,
                     starts,

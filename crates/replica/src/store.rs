@@ -6,7 +6,7 @@
 //! Updates are folded into a fresh snapshot when they grow, and once when a
 //! task is accepted (its Done compaction). One process at a time holds a project.
 use crate::project::ProjectDoc;
-use crate::schema::{Actor, Stage};
+use crate::schema::Stage;
 use crate::task::TaskDoc;
 use crate::{ids, rank, Error, Result};
 use fs2::FileExt;
@@ -364,6 +364,19 @@ impl Admitted<'_> {
     /// admission.
     pub fn project(&self) -> Result<ProjectDoc> {
         self.store.project()
+    }
+
+    /// `ProjectStore::agent_starts_since`, counted inside this admission
+    /// from the tasks as saved: every reservation and save serialized by it
+    /// is counted, never a number read before it (#1519 review).
+    pub fn agent_starts_since(&mut self, since: i64) -> Result<usize> {
+        let mut count = 0;
+        for uuid in self.store.uuids()? {
+            if let Ok(task) = self.store.load_admitted(&uuid) {
+                count += task.agent_starts_since(since)?;
+            }
+        }
+        Ok(count)
     }
 }
 
@@ -1360,12 +1373,7 @@ impl ProjectStore {
         let (tasks, _) = self.tasks()?;
         let mut count = 0;
         for task in tasks {
-            count += task
-                .view()?
-                .log
-                .iter()
-                .filter(|e| e.kind == "sent" && e.at >= since && matches!(e.actor, Actor::Agent(_)))
-                .count();
+            count += task.agent_starts_since(since)?;
         }
         Ok(count)
     }
@@ -1374,7 +1382,7 @@ impl ProjectStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{SessionKey, Target};
+    use crate::schema::{Actor, SessionKey, Target};
     use crate::task::NewTask;
     use crate::ErrorKind;
 

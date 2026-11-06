@@ -14,10 +14,27 @@ pub(super) fn execute(config: &Config, args: &[String]) -> Result<Value> {
     let mode = option(args, "--mode")?
         .ok_or_else(|| fail("message needs --mode queue|send|reopen|note"))?;
     let dispatch = option(args, "--expect-dispatch")?.unwrap_or_default();
-    let machines = machines(config)?;
+    // A reopen reads the catalog and waits for the project within its one
+    // budget, from here (#1519 review, zerus-9gzdp).
+    let reopen = mode == "reopen";
+    let (machines, projects) = if reopen {
+        let (machines, projects) = super::entry_until(config, deadline)?;
+        (machines, Some(projects))
+    } else {
+        (machines(config)?, None)
+    };
     let who = actor(&machines.here, args, true)?;
-    let r = reference(config, args, &who)?;
-    let mut store = store(config, &r.project.0)?;
+    let r = super::reference_by(
+        config,
+        args,
+        &who,
+        projects.as_deref().map(|p| (p, deadline)),
+    )?;
+    let mut store = if reopen {
+        super::store_until(config, &r.project.0, deadline)?
+    } else {
+        store(config, &r.project.0)?
+    };
     let mut task = store.find(&r.task).map_err(fail)?;
     let mut before = task.view().map_err(fail)?;
     let existing = before
@@ -79,7 +96,13 @@ pub(super) fn execute(config: &Config, args: &[String]) -> Result<Value> {
         )
         .map_err(fail)?;
         let synced = crate::swarm::exchange_tasks(config, &alias, &r.project.0).is_ok();
-        return Ok(json!({"task":reply["task"],"message":reply["message"],"synced":synced}));
+        let mut out = json!({"task":reply["task"],"message":reply["message"],"synced":synced});
+        // A managed reopen's outcome, as the executor's computer settled it
+        // (zerus-10gmu).
+        if let Some(attempt) = reply.get("attempt") {
+            out["attempt"] = attempt.clone();
+        }
+        return Ok(out);
     }
     // C3 activation A3 (desktop-u's (b)): a reopen is an attempt. An ID that
     // names one is only recovered; a fresh reopen goes through the fence,
@@ -128,6 +151,7 @@ pub(super) fn execute(config: &Config, args: &[String]) -> Result<Value> {
                 dispatch,
                 to,
                 &frozen,
+                (&before.target, before.stage_at),
                 &who,
                 deadline,
             )?;

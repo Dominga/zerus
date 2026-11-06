@@ -228,12 +228,53 @@ pub(super) fn admit<R>(
 }
 
 /// A CLI send's or handoff's request, frozen before its admission: its ONE
-/// ID, its exact native request and the agent starts it was checked with.
+/// ID, its exact native request, and the task state it is bound to: its
+/// target, its stage time and its executor then (zerus-frehz). The rendered
+/// prompt does not carry the target, so it never proves that binding.
 pub(super) struct Frozen {
     pub id: String,
     pub request: Value,
-    starts: usize,
+    target: Target,
+    stage_at: i64,
+    session: Option<SessionKey>,
 }
+
+/// The starts agents made in the project's last hour, counted inside the
+/// final admission from the tasks as saved, never a number read before the
+/// locks were dropped (zerus-v3rtj): only an agent's start under a limit
+/// needs it.
+pub(super) fn admitted_starts(
+    admitted: &mut zerus_replica::Admitted<'_>,
+    who: &Actor,
+    settings: &Settings,
+) -> anyhow::Result<usize> {
+    if !matches!(who, Actor::Agent(_)) || settings.agent_limit <= 0 {
+        return Ok(0);
+    }
+    Ok(admitted.agent_starts_since(now() - 3_600_000)?)
+}
+
+/// Debug builds only, never compiled into a release image: a test holds a
+/// frozen request between its freeze and its admission, for a bounded time,
+/// to change the task in that window (#1519 review). It only waits: no lock
+/// is held, nothing is skipped, and the one budget keeps running.
+#[cfg(debug_assertions)]
+pub(super) fn pause(id: &str) {
+    let Some(folder) = std::env::var_os("HGS_TEST_ATTEMPT_PAUSE") else {
+        return;
+    };
+    let folder = std::path::PathBuf::from(folder);
+    if std::fs::write(folder.join("ready"), id).is_err() {
+        return;
+    }
+    let until = Instant::now() + Duration::from_secs(8);
+    while !folder.join("release").exists() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[cfg(not(debug_assertions))]
+pub(super) fn pause(_: &str) {}
 
 /// Freezes the request a `task send` or `task handoff` would submit to `to`,
 /// under the project lock the command holds, before any admission.
@@ -255,10 +296,13 @@ pub(super) fn freeze(
     let starts = super::agent_starts_since(store, now() - 3_600_000)?;
     let id = uuid::Uuid::new_v4().to_string();
     let request = render(&settings, starts, task, project_name, to, pin, who, &id)?;
+    let view = task.view().map_err(fail)?;
     Ok(Frozen {
         id,
         request,
-        starts,
+        target: view.target,
+        stage_at: view.stage_at,
+        session: view.session,
     })
 }
 
@@ -301,8 +345,11 @@ pub(super) fn send(
     pin: bool,
     who: &Actor,
     handoff: bool,
+    machines: &super::Machines,
+    args: &[String],
     deadline: Instant,
 ) -> Result<Option<Value>> {
+    pause(&frozen.id);
     let detail = std::cell::RefCell::new(String::new());
     let origin = if handoff {
         zerus_replica::execution::Origin::Handoff
@@ -322,10 +369,34 @@ pub(super) fn send(
         if let Err(error) = check {
             return refuse("not_sendable", error.message);
         }
+        // The task state and native destination it was frozen for
+        // (zerus-frehz): its target (before an agent's pin below), stage
+        // time and executor, and for a send the destination its target
+        // resolves to now.
+        let view = task.view()?;
+        let normalized = |target: &Target| super::dispatch::normalized(target, machines);
+        let resolved = |key: &Option<SessionKey>| {
+            key.as_ref()
+                .map(|k| machines.resolve(k).unwrap_or_else(|| k.clone()))
+        };
+        if normalized(&view.target) != normalized(&frozen.target)
+            || view.stage_at != frozen.stage_at
+            || resolved(&view.session) != resolved(&frozen.session)
+        {
+            return refuse("changed", super::dispatch::CHANGED.into());
+        }
+        if !handoff {
+            match super::send_session(task, args, who, machines) {
+                Ok((now, _)) if now.machine == to.machine && now.session_id == to.session_id => {}
+                Ok(_) => return refuse("changed", super::dispatch::CHANGED.into()),
+                Err(error) => return refuse("changed", error.message),
+            }
+        }
         let settings = admitted.project()?.settings();
+        let starts = admitted_starts(admitted, who, &settings)?;
         match render(
             &settings,
-            frozen.starts,
+            starts,
             task,
             project_name,
             to,
@@ -488,9 +559,11 @@ pub(super) fn reopen(
     dispatch: &str,
     to: &SessionKey,
     frozen: &Value,
+    bound: (&Target, i64),
     who: &Actor,
     deadline: Instant,
 ) -> Result<Option<Value>> {
+    pause(id);
     let detail = std::cell::RefCell::new(String::new());
     let admission = admit(config, &project.0, uuid, deadline, |admitted, task| {
         let refuse = |reason, why: String| {
@@ -498,6 +571,18 @@ pub(super) fn reopen(
             Ok(Err(Closed { node: None, reason }))
         };
         let view = task.view()?;
+        // The target and stage time it was frozen with (zerus-frehz).
+        let normalized = |target: &Target| super::dispatch::normalized(target, machines);
+        if normalized(&view.target) != normalized(bound.0) || view.stage_at != bound.1 {
+            return refuse("changed", super::dispatch::CHANGED.into());
+        }
+        // The project's agent rules, as admitted, as for a send
+        // (zerus-wvzdk): an agent may reopen only where it may start.
+        let settings = admitted.project()?.settings();
+        let starts = admitted_starts(admitted, who, &settings)?;
+        if let Err(error) = settings.check_agent(who, to, true, starts) {
+            return refuse("not_sendable", error.to_string());
+        }
         if !matches!(
             view.stage,
             zerus_replica::Stage::Review | zerus_replica::Stage::Done

@@ -1636,8 +1636,8 @@ an empty output directory. Build artifacts are ignored and are never committed t
 the application or AUR repositories.
 
 Once the repository variable `MACOS_CASKS_ENABLED` is `true`, the candidate run
-also builds the Apple Silicon bundle against the pinned official Qt, signs and
-notarizes it in the main-only `macos-signing` environment and installs the result
+also builds the Apple Silicon Zerus Next bundle, without Qt (`--gui tauri`), signs
+and notarizes it in the main-only `macos-signing` environment and installs the result
 through a local tap before assembly (`macos-cask.yml`). The candidate then uses
 release-info schema 2 and contains the `zerus-VERSION-macos-arm64.zip` asset and
 `homebrew/zerus.rb`. Until then, and with `-f macos_cask=false`, the candidate has

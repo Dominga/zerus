@@ -1367,7 +1367,12 @@ pub(crate) fn attention(team: &Team, now: f64) -> Vec<Value> {
     // The owner, 2026-11-05: a running team whose lead's session stopped has
     // nobody to read its reports or hand out its tasks; only the owner can
     // resume it (or restart_crashed does, on by default).
-    if team.status == TeamStatus::Running {
+    // Task 95: the lead stalled while its decisions wait: the owner's item
+    // names what it waits on; it covers a stopped lead too.
+    let stalled = super::lead_stall::attention(team, now);
+    let stalled_now = stalled.is_some();
+    out.extend(stalled);
+    if team.status == TeamStatus::Running && !stalled_now {
         if let Some(lead) = team.member(&team.lead).filter(|lead| lead.state == MemberState::Active && lead.session.is_some()) {
             if let Some(seen) = lead.seen.filter(|seen| !seen.live) {
                 out.push(json!({"kind":"lead_stopped","member":team.role_of(&lead.id),"member_id":lead.id,"since":seen.at,

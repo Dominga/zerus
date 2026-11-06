@@ -46,6 +46,8 @@ public:
         if (item.kind == QLatin1String("report")) return team.id + QStringLiteral("/report_escalated/%1").arg(item.task);
         if (item.kind == QLatin1String("permission")) return team.id + QStringLiteral("/permission_escalated/") + item.member;
         if (item.kind == QLatin1String("replan")) return team.id + QStringLiteral("/owner_word_asked/replan-");
+        // Task 95: the round is part of the id, so each round is one notice.
+        if (item.kind == QLatin1String("lead_stalled")) return team.id + QStringLiteral("/lead_stalled/%1-%2").arg(item.member).arg(qMax(1, item.round));
         return {};
     }
     static bool matches(const QString &waiting, const QString &id)

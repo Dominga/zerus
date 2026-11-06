@@ -8,6 +8,7 @@ pub(crate) mod dispatcher;
 pub(crate) mod estimates;
 pub(crate) mod inbox;
 pub(crate) mod isolation;
+pub(crate) mod lead_stall;
 pub(crate) mod model;
 pub(crate) mod models;
 pub(crate) mod ops;

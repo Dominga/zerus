@@ -28,8 +28,6 @@ pub(crate) enum Kind {
     Text,
     /// A list of paths inside the member's folder.
     Paths,
-    /// One path inside the member's folder (a project interpreter).
-    Path,
 }
 
 /// One typed placeholder.
@@ -134,11 +132,10 @@ pub(crate) const BUILTIN: &[Template] = &[
     // provider's job.
     Template {
         id: "py-test",
-        summary: "the project interpreter runs pytest (typed -k expression, -m mark and node names)",
-        program: "{python}",
-        args: &["-m", "pytest", "-q", "-k={filter}", "-m={mark}", "{tests}"],
+        summary: "the project .venv interpreter runs pytest (typed -k expression, -m mark and node names; JUnit XML in .zerus-team/python)",
+        program: "python",
+        args: &["-m", "pytest", "-q", "--junitxml=.zerus-team/python/junit.xml", "-k={filter}", "-m={mark}", "{tests}"],
         params: &[
-            param("python", Kind::Path),
             optional("filter", Kind::Text),
             optional("mark", Kind::Identifier),
             optional("tests", Kind::Identifiers),
@@ -147,10 +144,10 @@ pub(crate) const BUILTIN: &[Template] = &[
     },
     Template {
         id: "cython-build",
-        summary: "the project interpreter rebuilds the Cython extensions in place (setup.py build_ext --inplace)",
-        program: "{python}",
+        summary: "the project .venv interpreter rebuilds the Cython extensions in place (setup.py build_ext --inplace)",
+        program: "python",
         args: &["setup.py", "build_ext", "--inplace", "{sources}"],
-        params: &[param("python", Kind::Path), optional("sources", Kind::Paths)],
+        params: &[optional("sources", Kind::Paths)],
         timeout_secs: 1800,
     },    // Owner, 2026-10-28: QA ran the Android tests by hand, a permission each.
     Template {
@@ -588,12 +585,6 @@ fn value_of(params: &[Param], args: &Value, name: &str, folder: &Path) -> anyhow
             }
             Ok(Some(Words::One(text.to_owned())))
         }
-        Kind::Path => {
-            let path = value.as_str().unwrap_or_default();
-            check_path(path, name)?;
-            ensure!(folder.join(path).lexists(), "The template's path {path} does not exist in your folder");
-            Ok(Some(Words::One(path.to_owned())))
-        }
         Kind::Identifiers | Kind::Paths => {
             let list = match value {
                 Value::Null => Vec::new(),
@@ -623,6 +614,17 @@ fn value_of(params: &[Param], args: &Value, name: &str, folder: &Path) -> anyhow
     }
 }
 
+/// Task 86: the project's own interpreter, never created or synced. uv,
+/// poetry and plain venvs all live in `.venv` or `venv`; a project without one
+/// is refused with the reason.
+fn interpreter(folder: &Path) -> anyhow::Result<String> {
+    for candidate in [".venv/Scripts/python.exe", ".venv/bin/python", "venv/Scripts/python.exe", "venv/bin/python"] {
+        if folder.join(candidate).is_file() {
+            return Ok(candidate.to_owned());
+        }
+    }
+    bail!("No project Python environment: create .venv with uv, poetry or venv first; Zerus never creates or syncs one")
+}
 /// Validates a run request and builds the exact program and argv (U21). Nothing
 /// here reads a shell: every value is one argv element, or spliced as whole
 /// elements for the list placeholders.
@@ -659,7 +661,13 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
         }
         return Ok(Plan { template: "git-commit".to_owned(), program: "hgs".into(), argv: vec!["team".into(), "commit".into(), "--json".into()], commit: Some(json!({"message":message,"paths":paths})), more: Vec::new() });
     }
-    let mut program = template.program.to_owned();
+    let mut program = if matches!(template.id, "py-test" | "cython-build") {
+        let python = interpreter(folder)?;
+        if template.id == "py-test" { let _ = std::fs::create_dir_all(folder.join(".zerus-team").join("python")); }
+        python
+    } else {
+        template.program.to_owned()
+    };
     let mut argv = Vec::new();
     for raw in template.args {
         if let Some(name) = whole_placeholder(raw) {
@@ -909,6 +917,15 @@ fn template_environment(plan: &Plan, folder: &Path) -> Vec<(String, String)> {
         if std::env::var_os("QT_QPA_FONTDIR").is_none() {
             env.push(("QT_QPA_FONTDIR".into(), "C:/Windows/Fonts".into()));
         }
+    }
+    if matches!(plan.template.as_str(), "py-test" | "cython-build") {
+        let python = folder.join(".zerus-team").join("python");
+        let _ = std::fs::create_dir_all(python.join("pip-cache"));
+        let _ = std::fs::create_dir_all(python.join("pycache"));
+        let _ = std::fs::create_dir_all(python.join("pytest-cache"));
+        env.push(("PIP_CACHE_DIR".into(), python.join("pip-cache").display().to_string()));
+        env.push(("PYTHONPYCACHEPREFIX".into(), python.join("pycache").display().to_string()));
+        env.push(("PYTEST_ADDOPTS".into(), "-o cache_dir=.zerus-team/python/pytest-cache".into()));
     }
     if plan.template == "android-test" {
         env.push(("GRADLE_USER_HOME".into(), folder.join(".zerus-team").join("gradle").join("home").display().to_string()));
@@ -2015,17 +2032,24 @@ mod tests {
     #[test]
     fn python_and_cython_templates_take_typed_arguments() {
         let dir = temp();
-        std::fs::create_dir_all(dir.path().join(".venv")).unwrap();
-        std::fs::write(dir.path().join(".venv/python"), "").unwrap();
+        std::fs::create_dir_all(dir.path().join(".venv/Scripts")).unwrap();
+        std::fs::write(dir.path().join(".venv/Scripts/python.exe"), "").unwrap();
         std::fs::write(dir.path().join("a.pyx"), "cimport helper\n").unwrap();
-        let py = plan("py-test", &json!({"python":".venv/python","filter":"slow and not x","tests":["test_a.py::test_x"]}), dir.path()).unwrap();
-        assert!(py.program.ends_with(".venv/python"));
+        let py = plan("py-test", &json!({"filter":"slow and not x","tests":["test_a.py::test_x"]}), dir.path()).unwrap();
+        assert!(py.program.contains(".venv"));
         assert!(py.argv.contains(&"-k=slow and not x".to_owned()));
         assert!(py.argv.contains(&"test_a.py::test_x".to_owned()));
+        assert!(py.argv.contains(&"--junitxml=.zerus-team/python/junit.xml".to_owned()));
         assert!(!py.argv.iter().any(|arg| arg.starts_with("-m=")));
-        let cy = plan("cython-build", &json!({"python":".venv/python","sources":["a.pyx"]}), dir.path()).unwrap();
+        let cy = plan("cython-build", &json!({"sources":["a.pyx"]}), dir.path()).unwrap();
         assert_eq!(cy.argv, ["setup.py", "build_ext", "--inplace", "a.pyx"]);
-        assert!(plan("py-test", &json!({"python":"../python"}), dir.path()).is_err());
+        let empty = temp();
+        assert!(plan("py-test", &json!({}), empty.path()).is_err());
     }
 }
+
+
+
+
+
 

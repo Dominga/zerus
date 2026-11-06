@@ -988,8 +988,12 @@ fn real_fixture(submitted: bool) -> Fixture {
         let path = dir.join(format!("{}.json", f.intent.binding.key.request_id));
         // Existing native-receipt fixture: no terminal submission is performed
         // by setup. The real recover-only CLI must reconcile this exact record.
+        // Every field `submit_core` writes, `first_message` included: a receipt
+        // that does not decode whole is unknown evidence and settles nothing
+        // (#1519 R4, zerus-kpj4c).
         fs::write(&path,json!({"status":"submitted","name":"codex/private-task-start",
             "run_id":f.intent.binding.executor.run_id,"conversation_id":f.intent.binding.executor.conversation_id,
+            "first_message":f.intent.binding.executor.conversation_id.is_empty(),
             "request_id":f.intent.binding.key.request_id,"digest":operations::hash(plan["request"].to_string().as_bytes())}).to_string()).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
     }

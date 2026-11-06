@@ -142,7 +142,7 @@ class CodexAsync(unittest.TestCase):
         # An already-installed tail-only cache must be repaired automatically.
         cache.pop('scan_version');cache['items']={};cache_path.write_text(json.dumps(cache))
         result=self.inspect();self.assertEqual(result['pending_questions'][0]['question_id'],card['question_id'])
-        self.assertEqual(json.loads(cache_path.read_text())['scan_version'],2)
+        self.assertEqual(json.loads(cache_path.read_text())['scan_version'],3)
         # A durable local Skip survives reindexing, even for an old question.
         response,_=self.answer(card,dict(question_id='q_0',skip=True));self.assertEqual(response.returncode,0,response.stderr)
         cache=json.loads(cache_path.read_text());cache.pop('scan_version');cache_path.write_text(json.dumps(cache))

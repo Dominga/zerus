@@ -417,6 +417,7 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
         task.estimate_source = "none".into();
     }
     task.status = TaskStatus::Draft;
+    task.archived = None;
     // `plan` (and `create`'s planning tasks) always start phase 1; `extend`
     // sets the computed phase afterwards.
     task.phase = 1;
@@ -1138,8 +1139,8 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
     }
     let values = input["tasks"].as_array().filter(|tasks| !tasks.is_empty()).context("A phase needs at least one task")?;
     ensure!(values.len() <= 50, "A phase has at most 50 tasks");
-    ensure!(team.tasks.len() + values.len() <= 500, "A team has at most 500 tasks (it has {})", team.tasks.len());
-    ensure!(team.phases.len() < 100, "A team has at most 100 phases");
+    ensure!(team.tasks.iter().filter(|task| task.archived.is_none()).count() + values.len() <= 500, "A team has at most 500 live tasks (it has {})", team.tasks.iter().filter(|task| task.archived.is_none()).count());
+    ensure!(team.phases.iter().filter(|phase| phase.archived.is_none()).count() < 100, "A team has at most 100 live phases");
     // F10: with "phase": N the tasks join that draft phase instead of a new one.
     // U58: a queued or approved phase with no delivered attempt takes them too.
     let target = match input.get("phase") {
@@ -1192,7 +1193,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
     // numbers, and drafts close the gaps (F285). #754: tasks numbered otherwise
     // take those numbers, their dependencies with them.
     let renumbered = renumber_new_tasks(team, &mut tasks)?;
-    let last = team.tasks.iter().map(|task| task.id).max().unwrap_or(0);
+    let last = team.tasks.iter().map(|task| task.id).max().unwrap_or(0).max(team.last_archived_task);
     let next = last.checked_add(1).context("Task numbers are exhausted")?;
     let end = next.checked_add(tasks.len() as u32).context("Task numbers are exhausted")?;
     let wanted: BTreeSet<u32> = (next..end).collect();
@@ -1281,14 +1282,19 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
         return Ok(json!({"status":"edited","phase":n,"tasks":ids,"validation":validation,"renumbered":renumbered_json(&renumbered)}));
     }
     if let Some(n) = free_open {
-        // U59: the open phase's record takes the new tasks; no phase is added.
+        // U59: reuse the live phase, or start a new one after archived history.
         if let Some(at) = team.phases.iter().position(|phase| phase.n == n) {
             team.phases[at].tasks.extend(ids.iter().copied());
+        } else if n > 1 {
+            team.phases.push(Phase { n, title: title.clone(), state: PhaseState::Approved,
+                approval: Approval::Auto, tasks: ids.clone(), added_by: by.clone(), added_at: now(),
+                ..Default::default() });
         }
         events.push(Event::new("phase_edited", json!({"by":by,"phase":n,"diff":{"added":ids},"free":true})));
         return Ok(json!({"status":"added","phase":n,"tasks":ids,"validation":validation,"renumbered":renumbered_json(&renumbered)}));
     }
     team.phases.push(Phase {
+        archived: None,
         n,
         order,
         title: title.clone(),
@@ -1392,7 +1398,7 @@ fn intake_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
     }) {
         bail!("The key's urgent phase {} is still open; finish it before adding more", open.n);
     }
-    let last = team.tasks.iter().map(|task| task.id).max().unwrap_or(0);
+    let last = team.tasks.iter().map(|task| task.id).max().unwrap_or(0).max(team.last_archived_task);
     let next = last.checked_add(1).context("Task numbers are exhausted")?;
     let mut tasks = Vec::new();
     for (index, value) in values.iter().enumerate() {
@@ -1491,7 +1497,7 @@ fn renumber_new_tasks(team: &Team, tasks: &mut [Task]) -> anyhow::Result<BTreeMa
     for task in tasks.iter() {
         ensure!(given.insert(task.id), "Task #{} is given twice among the new tasks", task.id);
     }
-    let next = team.tasks.iter().map(|task| task.id).max().unwrap_or(0).checked_add(1).context("Task numbers are exhausted")?;
+    let next = team.tasks.iter().map(|task| task.id).max().unwrap_or(0).max(team.last_archived_task).checked_add(1).context("Task numbers are exhausted")?;
     let mut numbers = BTreeMap::new();
     for (index, task) in tasks.iter().enumerate() {
         let number = u32::try_from(index).ok().and_then(|index| next.checked_add(index)).context("Task numbers are exhausted")?;
@@ -1566,7 +1572,7 @@ fn add_to_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
     // The tasks as they would join: numbered on from the highest live id,
     // Pending in this phase; validated in place and put back.
     let check = |team: &mut Team, tasks: &[Task]| -> anyhow::Result<plan::Validation> {
-        let next = team.tasks.iter().map(|task| task.id).max().unwrap_or(0) + 1;
+        let next = team.tasks.iter().map(|task| task.id).max().unwrap_or(0).max(team.last_archived_task) + 1;
         let wanted: BTreeSet<u32> = (next..next + tasks.len() as u32).collect();
         ensure!(tasks.iter().map(|task| task.id).collect::<BTreeSet<u32>>() == wanted, "New tasks are numbered from #{next}");
         let first_new = team.tasks.len();
@@ -1580,7 +1586,7 @@ fn add_to_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
     let Some(confirm) = input["confirm"].as_str().filter(|id| !id.is_empty()) else {
         let values = input["tasks"].as_array().filter(|tasks| !tasks.is_empty()).context("Name at least one task to add")?;
         ensure!(values.len() <= ADDED_TASKS, "At most {ADDED_TASKS} tasks join a running phase at once");
-        ensure!(team.tasks.len() + values.len() <= 500, "A team has at most 500 tasks (it has {})", team.tasks.len());
+        ensure!(team.tasks.iter().filter(|task| task.archived.is_none()).count() + values.len() <= 500, "A team has at most 500 live tasks (it has {})", team.tasks.iter().filter(|task| task.archived.is_none()).count());
         let mut tasks = values.iter().map(parse_task).collect::<anyhow::Result<Vec<Task>>>()?;
         for task in &mut tasks {
             task.phase = n;
@@ -1996,6 +2002,9 @@ fn set_phase_acceptance(team: &mut Team, input: &Value, actor: &Actor, events: &
 
 /// The tasks of phase `n` by outcome, for the acceptance's summary.
 pub(crate) fn phase_outcome(team: &Team, n: u32) -> Value {
+    if let Some(phase) = team.phases.iter().find(|phase| phase.n == n).and_then(|phase| phase.archived.as_ref()) {
+        return json!({"accepted":phase.accepted,"rejected":phase.rejected,"cancelled":phase.cancelled});
+    }
     let count = |status: TaskStatus| team.tasks.iter().filter(|task| task.phase == n && task.status == status).count();
     json!({"accepted":count(TaskStatus::Accepted),"rejected":count(TaskStatus::Rejected),"cancelled":count(TaskStatus::Cancelled)})
 }
@@ -2350,7 +2359,7 @@ fn add_build_task(team: &mut Team, phase: u32, by: &str, events: &mut Vec<Event>
     );
     super::merge_queue::migrate_legacy_ranges(team);
     let build_merge_ranges = super::merge_queue::open_merge_ranges(team);
-    let id = team.tasks.iter().map(|task| task.id).max().unwrap_or(0) + 1;
+    let id = team.tasks.iter().map(|task| task.id).max().unwrap_or(0).max(team.last_archived_task) + 1;
     let assignee = if team.member(&team.lead).is_some() { team.lead.clone() } else { String::new() };
     // U62 (#760): the merge queue tested its merged range already; the build
     // checks only what came after. A suite the queue could not run here is
@@ -2413,15 +2422,23 @@ pub(crate) fn stuck_minutes(team: &Team) -> f64 {
     if minutes == 0 { 10.0 } else { f64::from(minutes) }
 }
 
-/// U59: the open phase of a free team: the latest approved phase, or phase 1
-/// (the approved initial plan) when no phase was extended yet.
+/// U59: the latest live approved phase, the implicit initial phase, or a new
+/// phase number after the archived history when no live phase remains.
 pub(crate) fn open_phase(team: &Team) -> u32 {
     team.phases
         .iter()
         .rev()
-        .find(|phase| phase.state == PhaseState::Approved)
+        .find(|phase| phase.state == PhaseState::Approved && phase.archived.is_none())
         .map(|phase| phase.n)
-        .unwrap_or(1)
+        .unwrap_or_else(|| {
+            if team.tasks.iter().any(|task| task.phase == 1 && task.archived.is_none()) {
+                return 1;
+            }
+            if team.archive_totals.phases == 0 && team.phases.iter().all(|phase| phase.archived.is_none()) {
+                return 1;
+            }
+            team.phases.iter().map(|phase| phase.n).max().map_or(1, |n| n.saturating_add(1))
+        })
 }
 
 /// The accepted phases (phase 1 included) whose tasks are all finished.
@@ -2502,7 +2519,7 @@ fn renumber_drafts(team: &mut Team) -> Value {
     let phase_map: Vec<(u32, u32)> =
         drafts.iter().enumerate().map(|(index, old)| (*old, last_number + 1 + index as u32)).collect();
     let mut task_map: Vec<(u32, u32)> = Vec::new();
-    let mut next = base + 1;
+    let mut next = base.max(team.last_archived_task) + 1;
     for old in &drafts {
         let Some(phase) = team.phases.iter().find(|phase| phase.n == *old) else { continue };
         let mut ids = phase.tasks.clone();
@@ -5620,6 +5637,10 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         "intake-key" => intake_key(team, input, actor, events),
         "edit-draft" => check_land_choices(team, input).and_then(|()| edit_draft(team, input, actor, offline, events)),
         "reports-to" | "sub-lead" => hierarchy(team, op, input, actor, events),
+        "archive-phases" => {
+            ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only you or the lead migrate closed phases");
+            Ok(json!({"status":"phases_archived"}))
+        }
         "move-phase" => move_phase(team, input, actor, events),
         "add-to-phase" => add_to_phase(team, input, actor, offline, events),
         "approve-phase" => decide_phase(team, input, actor, true, offline, events),

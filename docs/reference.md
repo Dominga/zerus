@@ -1619,6 +1619,69 @@ Git checkout, otherwise the changed files its report names. A `hold` preset
 implementer's next task in that folder waits; a `checkout` preset tests a
 detached checkout of the attempt's commits instead and frees it.
 
+### Closed phase records and task reads
+
+The team store (`teams/teams.sqlite3`) archives a phase after all its tasks
+are accepted, rejected or cancelled and the phase is closed: a lead-accepted
+phase closes on its last task decision; an owner-accepted phase must reach
+`done`. A phase with an untested merge range or a queued/testing merge entry
+stays live until its integration checks close. The open phase of a free-mode team is retained until it closes.
+Full task records, including attempts, reports, runs and questions, move to
+`team_task_archive` in the same transaction as their replacement in the live
+record. Original phase records are retained in `team_phase_archive`.
+
+The 500-task limit counts live, unarchived tasks. The 100-phase limit counts
+unarchived phases. Historical work consumes neither limit. The live record
+keeps the most recent 1,000 archived task stubs, with id, phase, title,
+assignee, final status, acceptance time, merge commit and frozen timing totals.
+This window bounds routine plan reads to hundreds of kilobytes of archived
+task metadata. A task stub leaves the live window when its phase header
+leaves, so no archived phase is presented as a recordless draft. The live record also keeps at most 200 archived phase headers,
+with counts, outcomes and closure time. Older headers and task lists are paged
+from the archive. Constant-size archive totals preserve the team's historical
+counts. Both windows use descending numeric IDs, so their membership is stable
+across repeated reads. Task IDs remain unique
+when stubs leave the window. Dependencies outside the window resolve through
+the archive's `(team, task)` primary key; existing dependency outcome rules
+still apply.
+
+Read one full task, live or archived, without returning the whole team:
+
+```sh
+printf '%s' '{"team":"ID","task":42}' | hgs team status --json
+```
+
+This response is the task object. The byte limit is 8 MiB per task; larger
+historical records remain intact and yield an explicit size-limit error.
+Normal `status --json` keeps its team view and never includes archived full
+histories or stubs outside the live window. Inbox report links name the
+per-task form.
+
+Read archived stubs for one phase with stable ascending task-ID pages (default
+and maximum 50 rows):
+
+```sh
+printf '%s' '{"team":"ID","archived_phase":3,"cursor":0,"limit":50}' | hgs team status --json
+```
+
+Read archived phase headers, including those outside the 200-header window,
+with `{"team":"ID","archived_phases":true,"cursor":0,"limit":50}` through the
+same status command. Its cursor is a phase number; task pages use task IDs.
+Both responses contain `items` and `next_cursor`; pass the latter as `cursor`.
+The `(team, phase)` primary key and `(team, phase, task)` index bound each page. New archived phases do not
+shift an older page. GUI clients can use these pages and per-task reads off
+the UI thread.
+
+Existing records migrate on their next successful mutation. To migrate one
+without changing its plan, the owner or lead sends `hgs team archive-phases
+--json` with `team` and a canonical `request_id`; retries are idempotent.
+The archive and live payload commit together or roll back together. The existing
+1 GiB (262144-page) store cap remains. If SQLite reports a full database,
+Zerus names `teams.sqlite3` and its cap, refuses the change and preserves the
+original readable record. Archive retention or export is a separate policy. Explicit
+edits of archived work restore only that phase, subject to the live 500-task
+limit and an 8 MiB phase-history read cap, and retain the original history.
+
 ### Reports and interim reports
 
 A member reports with `hgs team report --json` (`task`, `attempt`, `text`): the

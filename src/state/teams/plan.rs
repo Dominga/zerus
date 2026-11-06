@@ -648,7 +648,7 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
     // order; a phase without a record keeps its number as the order.
     let mut numbers: BTreeSet<u32> = team.tasks.iter().map(|task| task.phase).collect();
     numbers.extend(team.phases.iter().filter(|phase| phase.state != PhaseState::Discarded).map(|phase| phase.n));
-    numbers.insert(1);
+    if team.archive_totals.phases == 0 { numbers.insert(1); }
     let mut phases: Vec<(u32, u32)> = numbers
         .into_iter()
         .map(|n| (n, team.phases.iter().find(|phase| phase.n == n).map_or(n, |phase| phase.order())))
@@ -663,7 +663,8 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
             let record = team.phases.iter().find(|phase| phase.n == n);
             let tasks: Vec<&Task> = team.tasks.iter().filter(|task| task.phase == n).collect();
             let open = tasks.iter().filter(|task| !task.status.finished()).count();
-            let done = tasks.len() - open;
+            let total = record.and_then(|phase| phase.archived.as_ref()).map_or(tasks.len(), |phase| phase.tasks);
+            let done = total - open;
             let blocked = record.is_some_and(|phase| phase.barrier)
                 && team.tasks.iter().any(|task| task.phase < n && !task.status.finished());
             // U25: a queued phase waits for every earlier phase, barrier or not.
@@ -737,7 +738,7 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
                 "status": status,
                 "state": state,
                 "done": done,
-                "total": tasks.len(),
+                "total": total,
                 "barrier": record.is_some_and(|phase| phase.barrier),
                 // U61: a draft that Auto will accept at its first hand-out, and
                 // whether the lead started it ahead.
@@ -756,6 +757,9 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
 /// with its tasks unless the caller asks for cancelled work. A discarded phase
 /// keeps its own state, and a phase with no tasks is not cancelled.
 pub(crate) fn phase_cancelled(team: &Team, n: u32) -> bool {
+    if let Some(archived) = team.phases.iter().find(|phase| phase.n == n).and_then(|phase| phase.archived.as_ref()) {
+        return archived.tasks > 0 && archived.tasks == archived.cancelled;
+    }
     if team.phases.iter().find(|phase| phase.n == n).is_some_and(|phase| phase.state == PhaseState::Discarded) {
         return false;
     }

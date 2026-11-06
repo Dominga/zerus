@@ -153,7 +153,10 @@ impl Claim {
     #[cfg(test)]
     pub(crate) fn fixture(input: Input) -> (tempfile::TempDir, Box<Self>) {
         use std::os::unix::fs::PermissionsExt;
-        let state = tempfile::tempdir().unwrap();
+        // The no-follow store requires canonical ancestors; Darwin's TMPDIR
+        // commonly starts at the /var symlink. Create fixture state below the
+        // resolved parent, preserving the production pinning refusal.
+        let state = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         std::fs::set_permissions(state.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let stop = *input.stop.clone();
         let journal::Reservation::Fresh(claim) = journal::Store::open(state.path(), true)
@@ -247,7 +250,7 @@ mod tests {
     use std::fs;
     fn private() -> tempfile::TempDir {
         use std::os::unix::fs::PermissionsExt;
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
         directory
     }

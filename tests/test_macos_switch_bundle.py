@@ -76,7 +76,9 @@ class SwitchBundle(unittest.TestCase):
         self.assertEqual(SWITCH_INFO["CFBundleDisplayName"], installed_folder())
         self.assertIs(SWITCH_INFO["LSHasLocalizedDisplayName"], True)
         self.assertEqual(SWITCH_INFO["CFBundleName"], "Zerus")
-        self.assertIs(SWITCH_INFO["LSUIElement"], True)
+        # A regular app at launch, so Mission Control moves its window between
+        # Spaces; the menu-bar mode is the client's run-time policy (zerus-v5ft5).
+        self.assertNotIn("LSUIElement", SWITCH_INFO)
         self.assertEqual(SWITCH_INFO["ZerusGUI"], "tauri")
         protocol = (ROOT / "client/core/src/desktop/notifications.rs").read_text()
         abi = re.search(r'pub const ABI: &str = "([^"]+)";', protocol).group(1)
@@ -126,13 +128,13 @@ class SwitchBundle(unittest.TestCase):
 
     def test_the_tauri_profile_refuses_what_local_signing_would_refuse(self):
         with tempfile.TemporaryDirectory() as root, self.tools():
-            app = self.bundle(root, LSUIElement=False, ZerusGUI="qt")
+            app = self.bundle(root, LSUIElement=True, ZerusGUI="qt")
             (app / "Contents/Frameworks/Helper.dylib").parent.mkdir(parents=True)
             (app / "Contents/Frameworks/Helper.dylib").write_bytes(MACH_O)
             (app / "Contents/Resources/link").symlink_to("/usr")
             (app / "Contents/Resources/setup/com.hgdev.hgs-tray.plist").unlink()
             findings = check.tauri_bundle_findings(app, VERSION)
-        self.assertIn("Info.plist LSUIElement is False, expected True", findings)
+        self.assertIn("Info.plist sets LSUIElement; the switch bundle launches as a regular app", findings)
         self.assertIn("Info.plist ZerusGUI is 'qt', expected 'tauri'", findings)
         self.assertIn("Contents/Frameworks/Helper.dylib: nested code; the switch bundle has one executable", findings)
         self.assertIn("Contents/Resources/link: symbolic link", findings)

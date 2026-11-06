@@ -205,8 +205,11 @@ pub fn sync_policy(app: &AppHandle) {
 /// The policy the app launches with, set before the run loop starts (macOS
 /// menu-bar builds). tao makes every app a normal one when it finishes
 /// launching, before `setup` runs, so a hidden start would show a Dock icon
-/// first. Qt's bundle starts as a menu-bar app (`LSUIElement`,
-/// `tray/packaging/Info.plist:21`).
+/// first. The switch bundle no longer sets `LSUIElement` (zerus-v5ft5): an
+/// app that launches as a menu-bar agent keeps its window out of Mission
+/// Control's moves between desktop Spaces even while it is regular. A start
+/// without a window may therefore show the Dock icon briefly before this
+/// Accessory policy applies; that is the accepted trade-off.
 #[cfg(target_os = "macos")]
 pub fn prepare(app: &mut tauri::App, menu_bar: bool, opens_sessions: bool) {
     if menu_bar {

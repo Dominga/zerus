@@ -11,8 +11,11 @@
     <key>CFBundleDevelopmentRegion</key> <string>en</string>
     <key>CFBundleIconFile</key>          <string>hgs-zerus-swarm.icns</string>
     <key>CFBundleIconName</key>          <string>hgs-zerus-swarm</string>
-    <!-- A menu-bar app; the client shows a Dock icon while its window is open. -->
-    <key>LSUIElement</key>               <true/>
+    <!-- No LSUIElement (zerus-v5ft5): the bundle launches as a regular app, so
+         Mission Control moves its window between desktop Spaces as for any other
+         app. The client keeps the menu-bar-only mode at run time instead: an
+         Accessory policy whenever no window is open (lifecycle::prepare and
+         sync_policy). A start without a window may show the Dock icon briefly. -->
     <key>NSMicrophoneUsageDescription</key><string>Zerus records your voice when you start dictation and sends it to your selected speech computer for recognition.</string>
     <key>NSCameraUsageDescription</key><string>Zerus records video messages when you hold the video recording button.</string>
     <key>NSAppleEventsUsageDescription</key><string>Zerus opens your agent sessions in Terminal.</string>

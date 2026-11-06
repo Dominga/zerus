@@ -17,7 +17,7 @@ on:
         type: boolean
         default: true
       run_arch:
-        description: Build/test Arch desktop and pacman package
+        description: Build/test the Arch Next pacman package
         type: boolean
         default: true
       run_macos:

@@ -308,3 +308,73 @@ fn preview_frames_are_never_queued_and_mirroring_is_announced_once() {
     }
     driver.close();
 }
+
+/// zerus-ucck P2c-2: a voice draft left under the session's name key moves to
+/// its session ID key, once, before the driver loads it.
+#[test]
+fn a_voice_draft_under_the_name_key_moves_to_the_session_id_key() {
+    use zerus_client_core::drafts::{read_draft, StoredDraft};
+    let folder = Folder(std::env::temp_dir().join(format!(
+        "zerus-voice-driver-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )));
+    std::fs::create_dir_all(&folder.0).unwrap();
+    let hgs = folder.0.join("hgs");
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    std::os::unix::fs::symlink(manifest.join("tests/support/fake_hgs_voice.py"), &hgs).unwrap();
+    std::fs::write(
+        folder.0.join("config.json"),
+        json!({"help": "usage: hgs voice NAME --json\n", "reply": {"schema": 1, "features": [],
+            "computers": [{"machine_id": MACHINE, "name": "arch", "profiles": [{"id": "local", "available": true}]}]}})
+        .to_string(),
+    )
+    .unwrap();
+    let root = folder.0.join("drafts");
+    let drafts = Arc::new(DraftStore::open(root.clone()));
+    let legacy = "voice-message-draft\nlocal\nclaude/p/fix";
+    let moved = "voice-message-draft\nlocal\nid:3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+    let mut held = StoredDraft::default();
+    held.form_state
+        .insert("video".into(), json!({"seconds": 3}));
+    drafts.save_durable(legacy, held.clone(), |_| {});
+    drafts.flush();
+    let (sink, outs) = mpsc::channel();
+    let sink = Mutex::new(sink);
+    let next = AtomicU64::new(0);
+    let driver = VoiceDriver::start(
+        hgs,
+        Arc::clone(&drafts),
+        Box::new(FakeCapture {
+            events: Arc::new(Mutex::new(None)),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }),
+        Box::new(move |out| {
+            let _ = sink.lock().unwrap().send(out);
+        }),
+        Box::new(|_| {}),
+        move || id(next.fetch_add(1, Ordering::SeqCst) + 1),
+    );
+    driver.input(Input::Update {
+        target: Target {
+            key: "local\nid:3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f".into(),
+            legacy_key: "local\nclaude/p/fix".into(),
+            session: "claude/p/fix".into(),
+            run: "run-1".into(),
+            conversation: "conv-1".into(),
+            available: true,
+            ..Target::default()
+        },
+        input_visible: true,
+        preferences: Preferences::default(),
+    });
+    wait(
+        &outs,
+        |out| matches!(out, Out::Shown { shown } if shown.voice_enabled),
+    );
+    drafts.flush();
+    assert_eq!(read_draft(&root, legacy).draft, StoredDraft::default());
+    let here = read_draft(&root, moved).draft;
+    assert_eq!(here.form_state, held.form_state);
+    assert_eq!(here.session_label, "claude/p/fix");
+}

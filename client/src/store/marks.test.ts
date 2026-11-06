@@ -82,6 +82,51 @@ const REPLY = replyKey("", "claude", "conv-1");
 
 beforeEach(() => vi.restoreAllMocks());
 
+describe("local source readiness", () => {
+  it("refreshes local presentation without migrating or queuing a host read", async () => {
+    const port = fakePort(), storage = memoryStorage();
+    const store = createMarks(port, storage); await store.load();
+    const data = createCatalog(store);
+    data.applyBatch(batchOf({ replaces: [{ computer: "", rows: [rowOut()] }] }));
+    port.attentionMarks.mockResolvedValue({ marks: {}, replies: { [REPLY]: "r1" } });
+    port.pendingReadMarks.mockClear();
+    await store.reloadLocal();
+    expect(port.updateAttentionMarks).not.toHaveBeenCalled();
+    expect(port.queueReadMarks).not.toHaveBeenCalled();
+    expect(port.pendingReadMarks).not.toHaveBeenCalled();
+    expect(storage.list).toEqual([]);
+  });
+  it("does not replace a newer user change with a late readiness snapshot", async () => {
+    const f = await setup([rowOut()], fakePort(), memoryStorage([""]));
+    const stale = deferred<AttentionSnapshot>();
+    f.port.attentionMarks.mockImplementationOnce(() => stale.promise);
+    const reload = f.marks.reloadLocal(); await flush();
+    f.marks.markNeedsAttention(snapshotOf(f.row()));
+    f.port.attentionMarks.mockResolvedValue({ marks: { [REPLY]: { review: true, acknowledged: "" } }, replies: {} });
+    stale.resolve({ marks: {}, replies: {} }); await reload;
+    expect(f.marks.readState(f.row()).reviewLater).toBe(true);
+    expect(f.port.updateAttentionMarks).toHaveBeenCalledTimes(1);
+    expect(f.port.queueReadMarks).not.toHaveBeenCalled();
+  });
+
+  it("finishes a paused initial read before reloading the actual native model and bounds repeat requests", async () => {
+    const first = deferred<AttentionSnapshot>();
+    const ready = { marks: { [replyKey("", "claude", "conv-1")]: { review: true, acknowledged: "original" } }, replies: {} };
+    const port = fakePort(ready);
+    port.attentionMarks.mockImplementationOnce(() => first.promise);
+    const store = createMarks(port, memoryStorage([""]));
+    const initial = store.load();
+    const reload = store.reloadLocal();
+    expect(store.reloadLocal()).toBe(reload);
+    expect(port.attentionMarks).toHaveBeenCalledTimes(1);
+    first.resolve({ marks: {}, replies: {} });
+    await initial; await reload;
+    expect(port.attentionMarks.mock.calls.length).toBeLessThanOrEqual(3);
+    expect(store.writeOrder().marks).toEqual(Object.keys(ready.marks));
+    expect(port.updateAttentionMarks).not.toHaveBeenCalled();
+  });
+});
+
 describe("keys", () => {
   it("are Qt's: the reply key, else the name and created without a conversation", () => {
     expect(REPLY).toBe(JSON.stringify(["", "claude", "conv-1"]));
@@ -538,6 +583,78 @@ describe("persistence", () => {
     const b = await setup([rowOut()], fakePort({ marks: { [fallback]: { review: true, acknowledged: "" }, [keyOf()]: { review: false, acknowledged: "" } }, replies: {} }));
     expect(b.row().reviewLater).toBe(false);
     expect(b.port.updateAttentionMarks).toHaveBeenCalledWith({ [fallback]: null }, {});
+  });
+
+  // zerus-ucck P2c-2b, as core `marks::row_attention_key` and `fallback_keys`.
+  it("keys a row without a conversation by its session ID and moves the name's fallback mark to it", async () => {
+    const sid = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+    const byName = keyOf({ conversationId: "" });
+    const byId = JSON.stringify(["", "claude", `id:${sid}`]);
+    expect(fallbackKey({ computer: "", cmd: "claude", name: NAME, created: 1_790_000_000, sessionId: sid })).toBe(byId);
+    const a = await setup([rowOut({ conversation_id: null, reply_id: null, session_id: sid })],
+      fakePort({ marks: { [byName]: { review: true, acknowledged: "" } }, replies: {} }));
+    expect(a.row().reviewLater).toBe(true);
+    const again = batchOf({ upserts: [rowOut({ conversation_id: null, reply_id: null, session_id: sid })] });
+    a.receive(again);
+    expect(a.port.updateAttentionMarks).toHaveBeenCalledWith({ [byId]: { review: true, acknowledged: "" }, [byName]: null }, {});
+    // Another session with the same label and start time never takes it.
+    const b = await setup([rowOut({ conversation_id: null, reply_id: null, session_id: "7be01d44-6b7e-4c2a-9d1f-0a1b2c3d4e5f" })],
+      fakePort({ marks: { [byId]: { review: true, acknowledged: "" } }, replies: {} }));
+    expect(b.row().reviewLater).toBe(false);
+  });
+
+  it("mirrors pending read marks by session ID, so two sessions sharing a label keep their own", async () => {
+    const [ida, idb] = ["3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f", "7be01d44-6b7e-4c2a-9d1f-0a1b2c3d4e5f"];
+    const port = fakePort();
+    port.pendingReadMarks.mockResolvedValue([
+      mark({ run_id: "run-1", conversation_id: "conv-1", reply_id: "r1", session_id: ida }),
+      mark({ run_id: "run-2", conversation_id: "conv-2", reply_id: "r2", session_id: idb }),
+    ]);
+    const a = await setup([rowOut({ session_id: ida }), rowOut({ run_id: "run-2", conversation_id: "conv-2", reply_id: "r2", session_id: idb }, "run:b")], port);
+    expect(a.row().unreadReply).toBe(false);
+    expect(a.row("run:b").unreadReply).toBe(false);
+    // A snapshot that still lists B under a new label keeps its mark; one without A drops A's.
+    const renamed = rowOut({ name: "claude/sample-project/renamed", run_id: "run-2", conversation_id: "conv-2", reply_id: "r2", session_id: idb }, "run:b");
+    a.receive(batchOf({ replaces: [{ computer: "", rows: [renamed] }] }));
+    // The row is read again after the drop: its mark is still queued.
+    a.receive(batchOf({ upserts: [renamed] }));
+    expect(a.row("run:b").unreadReply).toBe(false);
+  });
+
+  // #1421 review: a renamed session's mark takes its new label in the mirror,
+  // as Rust's queue delivers it, and a downgraded peer's listing (no IDs)
+  // keeps it by that name.
+  it("relabels a renamed session's pending mark and keeps it for a listing without IDs", async () => {
+    const sid = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+    const port = fakePort();
+    port.pendingReadMarks.mockResolvedValue([mark({ session_id: sid })]);
+    const a = await setup([rowOut({ session_id: sid })], port);
+    expect(a.row().unreadReply).toBe(false);
+    const renamed = "claude/sample-project/renamed";
+    a.receive(batchOf({ upserts: [rowOut({ name: renamed, session_id: sid })] }));
+    expect(a.row().unreadReply).toBe(false);
+    // The peer's hgs is downgraded: its listing reports no IDs.
+    const older = rowOut({ name: renamed, session_id: undefined });
+    a.receive(batchOf({ replaces: [{ computer: "", rows: [older] }] }));
+    a.receive(batchOf({ upserts: [older] }));
+    expect(a.row().unreadReply).toBe(false);
+  });
+
+  it("keeps another session's name-keyed mark when a mark merges under an existing ID", async () => {
+    const sid = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+    const port = fakePort();
+    port.pendingReadMarks.mockResolvedValue([
+      mark({ session_id: sid, reply_id: "r0" }),
+      mark({ run_id: "run-0", conversation_id: "conv-0", reply_id: "r9" }),
+    ]);
+    const a = await setup([
+      { computer: "", key: "run:a", row: asking({ session_id: sid }) },
+      rowOut({ run_id: "run-0", conversation_id: "conv-0", reply_id: "r9" }, "run:old"),
+    ], port);
+    expect(a.row("run:old").unreadReply).toBe(false);
+    a.marks.markRead(snapshotOf(a.row()));
+    a.receive(batchOf({ upserts: [rowOut({ run_id: "run-0", conversation_id: "conv-0", reply_id: "r9" }, "run:old")] }));
+    expect(a.row("run:old").unreadReply).toBe(false);
   });
 
   it(`keeps the ${CAP} newest written entries of each map`, async () => {

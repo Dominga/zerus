@@ -149,7 +149,7 @@ fn children(record: &Value) -> Value {
     }
     let mut active = 0;
     let mut completed = if native_kimi { 0 } else { record["subagents_completed_pruned"].as_u64().unwrap_or(0) };
-    let mut unknown = 0;
+    let mut unknown = record["subagents_ended_pruned"].as_u64().unwrap_or(0);
     let mut previews = Vec::new();
     let mut roster = serde_json::Map::new();
     if let Some(children) = children {
@@ -162,7 +162,7 @@ fn children(record: &Value) -> Value {
                 "provider":child.get("provider").unwrap_or(&record["agent"]),"external":child["external"],"model":child["model"],"reply_id":child["reply_id"],
                 "detail":journal::clipped(&child["detail"],240),
                 "current_tool":string(child,"current_tool"),"updated":child["updated"],
-                "completion_source":child["completion_source"],"tracking_evidence":child["tracking_evidence"]}));
+                "completion_source":child["completion_source"],"tracking_evidence":child["tracking_evidence"],"process_state":child["process_state"]}));
             let state = if string(child, "display_state") == "unknown" {
                 "unknown"
             } else {
@@ -234,6 +234,20 @@ pub(super) fn summary(
 ) -> Value {
     let mut result = children(record);
     let live = string(activity, "runtime_state") == "live";
+    if !live {
+        let active = result["subagent_active_count"].as_u64().unwrap_or(0);
+        if active > 0 {
+            result["subagent_active_count"] = json!(0);
+            result["subagent_unknown_count"] = json!(result["subagent_unknown_count"].as_u64().unwrap_or(0)+active);
+            result["subagent_counts_complete"] = json!(false);
+        }
+        for child in result["subagents"].as_object_mut().into_iter().flat_map(|children|children.values_mut()) {
+            if child["state"] == "working" {child["display_state"] = json!("unknown");}
+        }
+        for child in result["subagent_previews"].as_array_mut().into_iter().flatten() {
+            if child["state"] == "working" {child["state"] = json!("unknown");}
+        }
+    }
     let busy = live && string(activity, "activity") == "busy";
     let phase = string(activity, "phase");
     let label = if !live {

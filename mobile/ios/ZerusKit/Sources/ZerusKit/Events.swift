@@ -31,12 +31,15 @@ public struct Event: Codable, Hashable, Sendable, Identifiable {
     public var origin: String?
     public var sender: String?
     public var report: String?
+    /// A fork's read-only row from the session it began from (that session's name); never incoming.
+    /// Optional so older cached rows still decode.
+    public var inheritedFrom: String?
 
     public init(id: String, role: String, text: String, time: String, at: Double = 0, requestId: String = "", attachments: [DisplayedAttachment] = [],
                 source: String = "", delivery: String = "", outgoingId: String = "", nativeType: String = "", submittedText: String = "",
                 originalId: String = "", historyId: String = "", historyCursor: String = "", historyEpoch: String = "", incomingSeq: Int64? = nil,
                 originalIds: [String] = [], detailTruncated: Bool = false, voice: VoiceMessage? = nil, deliveryState: String? = nil,
-                origin: String? = nil, sender: String? = nil, report: String? = nil) {
+                origin: String? = nil, sender: String? = nil, report: String? = nil, inheritedFrom: String? = nil) {
         self.id = id
         self.role = role
         self.text = text
@@ -61,6 +64,7 @@ public struct Event: Codable, Hashable, Sendable, Identifiable {
         self.origin = origin
         self.sender = sender
         self.report = report
+        self.inheritedFrom = inheritedFrom
     }
 
     /// The request of a row Zerus recorded itself: a delivery or voice receipt, or this phone's outbox. A native OpenCode
@@ -369,6 +373,8 @@ public enum AttachmentReceiptMatch {
     static let instruction = try! NSRegularExpression(pattern: #"(?:Inspect the attached image at|Read the attached file at) ("(?:[^"\\]|\\.)+")"#)
 
     public static func matches(_ receipt: Event, _ native: Event) -> Bool {
+        // A receipt of this session never stands for a fork's inherited row.
+        if !(native.inheritedFrom ?? "").isEmpty { return false }
         let submitted = receipt.submittedText.trimmingCharacters(in: .whitespacesAndNewlines)
         if submitted.isEmpty || native.text.trimmingCharacters(in: .whitespacesAndNewlines) != submitted { return false }
         if abs(native.at - receipt.at) <= 10 { return true }
@@ -405,17 +411,22 @@ public enum NativeEvents {
         func parse(_ value: JSONObject, _ streamArgument: String) -> Event? {
             let declared = value.string("history_stream")
             let stream = ["journal", "provider", "attachment", "voice"].contains(declared) ? declared : streamArgument
-            let type = value.string("type")
+            // A fork's inherited row carries its original type; older apps drop the unknown type.
+            let inheritedFrom = value.string("type") == "Inherited" ? value.string("inherited_from") : ""
+            if value.string("type") == "Inherited" && inheritedFrom.isEmpty { return nil }
+            let type = inheritedFrom.isEmpty ? value.string("type") : value.string("inherited_type")
             guard eventTypes.contains(type), inScope(value) else { return nil }
             let role = type == "QuestionAnswered" ? "You (answer)" : (userTypes.contains(type) ? "You" : "AgentMessage")
             // A native prompt the person did not write is a notice, as on desktop. Identities
             // keep the native role, so cached rows stay the same rows.
             let marked = value.string("origin")
-            let origin = ActivityNotices.origins.contains(marked) && userTypes.contains(type) ? marked : ""
+            let origin = inheritedFrom.isEmpty && ActivityNotices.origins.contains(marked) && userTypes.contains(type) ? marked : ""
             let shown = origin.isEmpty ? role : ActivityNotices.role
             let sourceValue = value.string("source")
             let source = sourceValue.isEmpty ? stream : sourceValue
-            let voice = source == "hgs_voice" ? value.object("voice").flatMap { try? VoiceProtocol.message($0) } : nil
+            // An inherited voice belongs to the source session: its text stays, but
+            // no voice card, playback or status acts on it through this fork.
+            let voice = source == "hgs_voice" && inheritedFrom.isEmpty ? value.object("voice").flatMap { try? VoiceProtocol.message($0) } : nil
             let files = value.objects("attachments").map { file -> DisplayedAttachment in
                 var index = -1
                 if case .int(let number)? = file["index"], let value = Int(exactly: number) { index = value }
@@ -453,18 +464,22 @@ public enum NativeEvents {
                 return nil
             }
             // A prompt Zerus sent to OpenCode names its request: OpenCode dates a queued prompt by its delivery, so text and time cannot match it.
+            // An inherited row is never this session's own send.
             var requestId = ""
-            if shown == "You" && ["hgs_delivery", "hgs_voice"].contains(source) { requestId = value.string("message_id") }
-            if shown == "You" && source == "opencode_native" && AttachmentPolicy.validId(value.string("request_id")) { requestId = value.string("request_id") }
+            if shown == "You" && inheritedFrom.isEmpty {
+                if ["hgs_delivery", "hgs_voice"].contains(source) { requestId = value.string("message_id") }
+                if source == "opencode_native" && AttachmentPolicy.validId(value.string("request_id")) { requestId = value.string("request_id") }
+            }
             return Event(id: historyId.isEmpty ? originalId : "history:\(historyId)", role: shown, text: text, time: value.string("at", "timestamp"), at: at,
                          requestId: requestId,
                          attachments: files, source: source, nativeType: type,
                          submittedText: source == "hgs_delivery" ? value.string("submitted_text") : "", originalId: originalId, historyId: historyId,
                          historyCursor: value.string("history_cursor"), historyEpoch: raw.string("history_epoch"), incomingSeq: incoming,
                          originalIds: originalIds, detailTruncated: value.bool("detail_truncated"), voice: voice,
-                         deliveryState: shown == "You" && QueuedDelivery.states.contains(value.string("delivery_state")) ? value.string("delivery_state") : nil,
+                         deliveryState: shown == "You" && inheritedFrom.isEmpty && QueuedDelivery.states.contains(value.string("delivery_state")) ? value.string("delivery_state") : nil,
                          origin: origin.isEmpty ? nil : origin, sender: origin == "peer_message" ? value.string("sender") : nil,
-                         report: origin.isEmpty ? nil : ActivityNotices.report(origin: origin, report: value.string("report")))
+                         report: origin.isEmpty ? nil : ActivityNotices.report(origin: origin, report: value.string("report")),
+                         inheritedFrom: inheritedFrom.isEmpty ? nil : inheritedFrom)
         }
         func replaces(_ provider: JSONObject, _ hook: JSONObject) -> Bool {
             provider.string("type") == "AgentMessage" && inScope(provider) && inScope(hook) && hook.string("type") == "Stop" &&

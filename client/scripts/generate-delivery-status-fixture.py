@@ -13,7 +13,7 @@ import uuid
 
 FIELDS = ('abi', 'configuration', 'epoch', 'generation', 'lifecycle', 'automatic_approvals', 'catalog_reads')
 LIFECYCLE_FIELDS = ('abi', 'configuration', 'epoch', 'generation', 'ipc_ready', 'phase', 'background')
-CASES = {'awaiting_handoff', 'disabled_but_ready', 'enabled', 'approval_degraded',
+CASES = {'passive', 'awaiting_handoff', 'disabled_but_ready', 'enabled', 'approval_degraded',
          'disabled_while_degraded', 'read_degraded', 'drained'}
 OUTPUT = Path(__file__).resolve().parents[1] / 'fixtures/desktop-delivery-status.json'
 

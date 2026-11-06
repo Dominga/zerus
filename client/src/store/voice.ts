@@ -23,7 +23,7 @@ export type VoiceInput = { kind: "update"; input_visible: boolean } | { kind: "p
   | { kind: "inserted"; token: number; inserted: "refused" };
 export type VoiceOut = { kind: "shown"; shown: VoiceShown } | { kind: "level"; rms: number; peak: number }
   | { kind: "preview"; mirrored: boolean } | { kind: "ask"; ask: VoiceAsk }
-  | { kind: "message"; key: string; message: unknown } | { kind: "insert"; token: number; text: string; id: string }
+  | { kind: "message"; key: string; message: unknown } | { kind: "insert"; token: number; text: string; id: string; revision: number }
   | { kind: "permission_recovery" | "pause_messages" | "stop_playback" }
   | { kind: "remember_profile"; profile: { machine_id?: string; profile_id?: string; profile_revision?: number } };
 export interface VoiceContext { handle: number; key: string; visible: boolean; revision?: string }

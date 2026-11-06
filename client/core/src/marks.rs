@@ -35,6 +35,45 @@ pub fn fallback_key(computer: &str, agent: &str, name: &str, created: i64) -> St
     serde_json::json!([computer, agent, name, created]).to_string()
 }
 
+/// The attention key of a row without a conversation whose listing reports a
+/// durable session ID (zerus-ucck P2c-2b): computer, agent and `id:<ID>`, so
+/// two sessions that share a label and start time never share a mark.
+pub fn session_fallback_key(computer: &str, agent: &str, session_id: &str) -> String {
+    serde_json::json!([computer, agent, format!("id:{session_id}")]).to_string()
+}
+
+/// [`attention_key`] for a row that may list a durable session ID: without a
+/// conversation, the session ID's fallback key.
+pub fn row_attention_key(
+    computer: &str,
+    agent: &str,
+    name: &str,
+    created: i64,
+    conversation: &str,
+    session_id: Option<&str>,
+) -> String {
+    match session_id {
+        Some(id) if conversation.is_empty() => session_fallback_key(computer, agent, id),
+        _ => attention_key(computer, agent, name, created, conversation),
+    }
+}
+
+/// The keys a row's mark may still sit under before it moves to
+/// [`row_attention_key`]: its session ID's fallback key, then the name's.
+pub fn fallback_keys(
+    computer: &str,
+    agent: &str,
+    name: &str,
+    created: i64,
+    session_id: Option<&str>,
+) -> Vec<String> {
+    session_id
+        .map(|id| session_fallback_key(computer, agent, id))
+        .into_iter()
+        .chain([fallback_key(computer, agent, name, created)])
+        .collect()
+}
+
 /// `attentionKey` (`FleetState.cpp:52-54`): the reply key, or the fallback
 /// key without a conversation.
 pub fn attention_key(
@@ -71,9 +110,14 @@ impl AttentionMarks {
     /// A missing or unreadable file gives no marks. A file over the cap keeps
     /// its newest entries.
     pub fn load(path: PathBuf) -> Self {
-        let file: File = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| decode_saved(&bytes).ok())
+        let bytes = std::fs::read(&path).ok();
+        Self::from_bytes(path, bytes.as_deref())
+    }
+    /// Same presentation decoder/cap over bytes already read by the native
+    /// source owner. None is an in-memory view, never a saved empty source.
+    pub fn from_bytes(path: PathBuf, bytes: Option<&[u8]>) -> Self {
+        let file: File = bytes
+            .and_then(|bytes| decode_saved(bytes).ok())
             .unwrap_or_default();
         let mut marks = Written::default();
         for (key, mark) in file.marks {
@@ -152,6 +196,14 @@ impl Contents {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+    pub(crate) fn encode_bounded(&self, limit: usize) -> io::Result<Vec<u8>> {
+        let mut out = crate::fsx::checkpoint::Bounded {
+            bytes: Vec::new(),
+            limit,
+        };
+        serde_json::to_writer(&mut out, &self.file)?;
+        Ok(out.bytes)
     }
 }
 

@@ -37,7 +37,7 @@ pub(in crate::desktop) struct Runtime {
     preferences: zerus_client_core::desktop::notification_control::Preferences,
     #[cfg(all(test, target_os = "linux"))]
     test_bus: Option<String>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     closed: super::closed::Runtime,
 }
 impl Runtime {
@@ -81,7 +81,7 @@ impl Runtime {
             preferences: Default::default(),
             #[cfg(all(test, target_os = "linux"))]
             test_bus: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", windows))]
             closed: super::closed::Runtime::new(config, location),
         }
     }
@@ -148,7 +148,6 @@ impl Runtime {
         )?;
         self.owner = preparation.owner();
         self.preparing = Some(preparation);
-        self.grant = Some(grant);
         // Both original OS exclusions are now held. The notification SDK is
         // independent of read/approval readiness; failure to select a native
         // host cannot revoke their separately configured service work.
@@ -156,15 +155,12 @@ impl Runtime {
             store.operation_undrained()? == 0,
             "original operation resources remain owned"
         );
-        ensure!(
-            self.grant.as_ref().unwrap().current(store)?,
-            "notification grant changed"
-        );
-        zerus_desktop_ledger::authorize(
-            &mut store.db,
-            self.grant.as_ref().unwrap().writer_epoch(),
-            &self.epoch,
-        )?;
+        ensure!(grant.current(store)?, "notification grant changed");
+        zerus_desktop_ledger::authorize(&mut store.db, grant.writer_epoch(), &self.epoch)?;
+        // Publish only an epoch actually committed to the durable writer.
+        // A failed admission must retain its physical preparation without
+        // lending an uncommitted grant to revocation or publication.
+        self.grant = Some(grant);
         Ok(())
     }
     fn attach(&mut self, store: &Store, prepared: preparation::Prepared) -> Result<()> {
@@ -255,7 +251,7 @@ impl Runtime {
                 (!self.recovering && native.fault().is_none()).then_some(native.outbox()),
                 seq,
             );
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", windows))]
             if !self.stopping && !self.recovering && native.ready() {
                 if let (Some(grant), Some(owner)) = (&self.grant, &self.owner) {
                     self.closed
@@ -291,9 +287,9 @@ impl Runtime {
                 .native
                 .as_ref()
                 .is_none_or(attachment::Runtime::drained);
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", windows))]
             let closed_done = self.closed.drained();
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", windows)))]
             let closed_done = true;
             if selected_done && native_done && closed_done {
                 self.native = None;
@@ -315,7 +311,7 @@ impl Runtime {
         self.error = Some(bounded(error));
         self.recovering = true;
         self.retry_at = None;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         self.closed.stop();
         if let Some(preparing) = &self.preparing {
             preparing.stop();
@@ -333,9 +329,9 @@ impl Runtime {
                 .native
                 .as_ref()
                 .is_none_or(attachment::Runtime::drained);
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", windows))]
             let closed_done = self.closed.drained();
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", windows)))]
             let closed_done = true;
             if !selected_done || !native_done || !closed_done {
                 return;
@@ -360,7 +356,7 @@ impl Runtime {
             self.retry_at = None;
             self.recovering = false;
             self.attempted = false;
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", windows))]
             {
                 self.closed = super::closed::Runtime::new(&self.config, &self.location);
             }
@@ -374,7 +370,7 @@ impl Runtime {
         self.recovering = false;
         self.error = None;
         self.retry_at = None;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         self.closed.stop();
         if let Some(preparing) = &self.preparing {
             preparing.stop();
@@ -397,7 +393,7 @@ impl Runtime {
         "recovering":self.recovering,"retry_in_ms":self.retry_at.map(|at| at.saturating_duration_since(Instant::now()).as_millis() as u64),
         "failed_attempts":self.failures,
         "selection":self.preparing.as_ref().map(preparation::Preparation::status),"attachment":self.native.as_ref().map(attachment::Runtime::status)});
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         let value = {
             let mut value = value;
             value["closed_frontend"] = self.closed.status();
@@ -409,6 +405,17 @@ impl Runtime {
 
 #[cfg(test)]
 impl Runtime {
+    pub(in crate::desktop) fn begin_blocked_for_test(
+        &mut self,
+        store: &mut Store,
+        release: std::sync::mpsc::Receiver<()>,
+    ) -> Result<()> {
+        self.begin_with(store, |_, location, _, service| {
+            Ok(preparation::Preparation::blocked_for_test(
+                service, location, release,
+            ))
+        })
+    }
     #[cfg(target_os = "linux")]
     pub(in crate::desktop) fn begin_on_test_bus(&mut self, store: &mut Store, address: String) {
         self.test_bus = Some(address.clone());

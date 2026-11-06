@@ -13,7 +13,7 @@ import { tr, trNoop } from "../../i18n";
 export type ActionRow = Pick<Session,
   | "key" | "computer" | "name" | "machine" | "cmd" | "state" | "tracked" | "resumable" | "activity" | "processState"
   | "archiveId" | "attention" | "unread" | "sharedRead" | "allowed" | "archiveReason" | "terminateReason" | "forgetReason" | "phase"
-  | "runId" | "conversationId" | "replyId" | "attentionSignature" | "created" | "fingerprint"
+  | "runId" | "conversationId" | "replyId" | "attentionSignature" | "created" | "fingerprint" | "sessionId"
   | "cwdPath" | "terminalSupported" | "terminalReported" | "terminalAttachSupported" | "terminalAttachReported"
   | "muted" | "sharedNotifications" | "notificationRevision" | "notificationConflict">;
 
@@ -298,6 +298,7 @@ export function detailsFromInspection(value: unknown): Details | undefined {
     resume_message_can_send: v.resume_message_can_send === true,
     fork_supported: v.fork_supported === true,
     fork_reason: text(v.fork_reason),
+    ...("fork_parent_id" in v ? { fork_parent_id: typeof v.fork_parent_id === "string" ? v.fork_parent_id : null } : {}),
     allowed_actions: Array.isArray(v.allowed_actions) ? v.allowed_actions.filter((a): a is string => typeof a === "string") : null,
     action_reasons: reasons,
     interrupt_supported: v.interrupt_supported === true,

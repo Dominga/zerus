@@ -2,8 +2,14 @@
 //! IPC readiness is independent of background writer ownership. Starting the
 //! passive kernel must never advertise workers which have not been started.
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(super) const ABI: &str = "desktop-lifecycle-v1";
+
+/// Whether this desktop process released, at startup, a console that Windows
+/// created for it alone (a logon-task start before Windows 11 24H2). Always
+/// false elsewhere: 24H2 and later give the service no console at all.
+pub(super) static CONSOLE_RELEASED: AtomicBool = AtomicBool::new(false);
 
 pub(super) fn unavailable(configuration: &str) -> Value {
     // A missing endpoint is not proof that every old process has exited.
@@ -20,6 +26,7 @@ pub(super) fn status(configuration: &str, epoch: &str, generation: u64) -> Value
         "configuration": configuration,
         "epoch": epoch,
         "generation": generation,
+        "console_released": CONSOLE_RELEASED.load(Ordering::Relaxed),
         "background": {
             "fleet": {"ready": false, "code": "not_started"},
             "presence": {"ready": false, "code": "not_started"},
@@ -58,6 +65,7 @@ mod tests {
         assert_eq!(value["configuration"], "configuration");
         assert_eq!(value["epoch"], "epoch-one");
         assert_eq!(value["generation"], 7);
+        assert_eq!(value["console_released"], false);
         for component in ["fleet", "presence", "reads", "attention", "approvals"] {
             assert_eq!(value["background"][component]["ready"], false);
             assert_eq!(value["background"][component]["code"], "not_started");

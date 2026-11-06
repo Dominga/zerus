@@ -336,6 +336,10 @@ impl Runtime {
                     &json!({"operation_id":original.operation_id,"configuration":original.configuration,
                     "root":original.root,"limit":limit,"revision":revision,"defer_ms":original.defer_ms,"policy_change":policy_change}),
                 )?;
+                // G3: only the maintained production build's passes record
+                // the folder's original index; development builds never do.
+                let evidence = permit.application()
+                    == zerus_client_core::download_cache::evidence::MAINTAINED_APPLICATION;
                 let tx = store
                     .db
                     .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -344,7 +348,7 @@ impl Runtime {
                 tx.commit()?;
                 if fresh {
                     ensure!(self.job.is_none(), "original cache worker still held");
-                    if self.spawn(original.clone()).is_err() {
+                    if self.spawn(original.clone(), evidence).is_err() {
                         let tx = store.db.transaction()?;
                         // spawn failed before returning an original thread.
                         ledger::finish_joined(&tx, &original, None)?;
@@ -400,7 +404,7 @@ impl Runtime {
             }
         }
     }
-    fn spawn(&mut self, original: ledger::Original) -> Result<()> {
+    fn spawn(&mut self, original: ledger::Original, evidence: bool) -> Result<()> {
         let cancel = Arc::new(AtomicBool::new(false));
         let stop = cancel.clone();
         let selected = original.clone();
@@ -427,6 +431,7 @@ impl Runtime {
                         selected.limit,
                         eligibility,
                         &stop,
+                        evidence,
                     )
                     .ok()?;
                     let frozen = prepared.binding().clone();
@@ -478,6 +483,7 @@ impl Runtime {
                             selected.limit,
                             now,
                             &stop,
+                            evidence,
                         ) {
                             Ok(current) => current,
                             Err(_) => return Some(kept),
@@ -679,6 +685,7 @@ mod tests;
 /// migration silently accept a partial/pre-existing table set.
 #[cfg(test)]
 pub(super) fn remove_from_downgraded_fixture(db: &rusqlite::Connection) {
+    super::attention::remove_retention_fixture(db);
     db.execute_batch("DROP TRIGGER desktop_cache_unknown_preserve; DROP TRIGGER desktop_cache_unknown_immutable;
         DROP TABLE desktop_cache_unknown; DROP TABLE desktop_cache_files; DROP TABLE desktop_cache_operations;
         DROP TABLE desktop_cache_roots;").unwrap();

@@ -1710,5 +1710,1273 @@
     "retry_tip": {
       "source": "Check the agent in Terminal before retrying to avoid submitting twice."
     }
+  },
+  {
+    "heading": {
+      "source": "Agent needs your answer"
+    },
+    "progress": {
+      "source": "%1 of %2 answered",
+      "args": [
+        {
+          "kind": "number",
+          "value": 0
+        },
+        {
+          "kind": "number",
+          "value": 1
+        }
+      ]
+    },
+    "pending": {
+      "source": "%1 pending",
+      "args": [
+        {
+          "kind": "number",
+          "value": 1
+        }
+      ]
+    },
+    "pending_tip": {
+      "source": "Questions waiting for an answer, including the questions shown in this card."
+    },
+    "nav": null,
+    "tabs_visible": false,
+    "page": 0,
+    "forms": [
+      {
+        "id": "q_0",
+        "tab": {
+          "source": "%1: %2",
+          "args": [
+            {
+              "kind": "number",
+              "value": 1
+            },
+            {
+              "kind": "verbatim",
+              "value": "Database"
+            }
+          ]
+        },
+        "prompt": "Which database?",
+        "body": "",
+        "markdown": true,
+        "monospace_body": false,
+        "multi": false,
+        "mode": {
+          "source": "Select one"
+        },
+        "mode_visible": true,
+        "options": [
+          {
+            "id": "pg",
+            "label": {
+              "source": "%1",
+              "args": [
+                {
+                  "kind": "verbatim",
+                  "value": "PostgreSQL"
+                }
+              ]
+            },
+            "description": {
+              "source": "%1",
+              "args": [
+                {
+                  "kind": "verbatim",
+                  "value": "The **server** one"
+                }
+              ]
+            },
+            "markdown": true,
+            "checked": false,
+            "enabled": false,
+            "visible": true
+          },
+          {
+            "id": "lite",
+            "label": {
+              "source": "%1",
+              "args": [
+                {
+                  "kind": "verbatim",
+                  "value": "SQLite"
+                }
+              ]
+            },
+            "description": {
+              "source": "%1",
+              "args": [
+                {
+                  "kind": "verbatim",
+                  "value": ""
+                }
+              ]
+            },
+            "markdown": false,
+            "checked": false,
+            "enabled": false,
+            "visible": true
+          }
+        ],
+        "other": {
+          "id": "",
+          "label": {
+            "source": "Other"
+          },
+          "description": {
+            "source": "Write your own answer"
+          },
+          "markdown": false,
+          "checked": false,
+          "enabled": false,
+          "visible": true
+        },
+        "text": {
+          "visible": false,
+          "enabled": false,
+          "value": "",
+          "placeholder": {
+            "source": "Write your answer…"
+          },
+          "accessible_name": {
+            "source": "Your answer to %1",
+            "args": [
+              {
+                "kind": "verbatim",
+                "value": "Which database?"
+              }
+            ]
+          },
+          "max_units": 4096,
+          "max_chars": 0
+        }
+      }
+    ],
+    "status": {
+      "source": "Answer sent. Waiting for the agent…"
+    },
+    "status_error": false,
+    "available": true,
+    "locked": true,
+    "review": false,
+    "created_at": 1.0,
+    "submit": {
+      "visible": true,
+      "enabled": false,
+      "label": {
+        "source": "Submit answer"
+      },
+      "review_label": null
+    },
+    "approve": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Approve once"
+      },
+      "review_label": {
+        "source": "Approve once"
+      }
+    },
+    "deny": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Deny"
+      },
+      "review_label": null
+    },
+    "skip": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Skip"
+      },
+      "review_label": null
+    },
+    "previous": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "← Back"
+      },
+      "review_label": null
+    },
+    "next": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Next →"
+      },
+      "review_label": null
+    },
+    "retry": false,
+    "skip_tip": {
+      "source": "Dismiss this optional question without sending an answer. The agent can continue."
+    },
+    "retry_tip": {
+      "source": "Check the agent in Terminal before retrying to avoid submitting twice."
+    }
+  },
+  {
+    "heading": {
+      "source": "Agent needs your answer"
+    },
+    "progress": {
+      "source": "%1 of %2 answered",
+      "args": [
+        {
+          "kind": "number",
+          "value": 0
+        },
+        {
+          "kind": "number",
+          "value": 1
+        }
+      ]
+    },
+    "pending": {
+      "source": "%1 pending",
+      "args": [
+        {
+          "kind": "number",
+          "value": 1
+        }
+      ]
+    },
+    "pending_tip": {
+      "source": "Questions waiting for an answer, including the questions shown in this card."
+    },
+    "nav": null,
+    "tabs_visible": false,
+    "page": 0,
+    "forms": [
+      {
+        "id": "q_0",
+        "tab": {
+          "source": "%1: %2",
+          "args": [
+            {
+              "kind": "number",
+              "value": 1
+            },
+            {
+              "kind": "verbatim",
+              "value": "Database"
+            }
+          ]
+        },
+        "prompt": "Which database?",
+        "body": "",
+        "markdown": true,
+        "monospace_body": false,
+        "multi": false,
+        "mode": {
+          "source": "Select one"
+        },
+        "mode_visible": true,
+        "options": [
+          {
+            "id": "pg",
+            "label": {
+              "source": "%1",
+              "args": [
+                {
+                  "kind": "verbatim",
+                  "value": "PostgreSQL"
+                }
+              ]
+            },
+            "description": {
+              "source": "%1",
+              "args": [
+                {
+                  "kind": "verbatim",
+                  "value": "The **server** one"
+                }
+              ]
+            },
+            "markdown": true,
+            "checked": false,
+            "enabled": false,
+            "visible": true
+          },
+          {
+            "id": "lite",
+            "label": {
+              "source": "%1",
+              "args": [
+                {
+                  "kind": "verbatim",
+                  "value": "SQLite"
+                }
+              ]
+            },
+            "description": {
+              "source": "%1",
+              "args": [
+                {
+                  "kind": "verbatim",
+                  "value": ""
+                }
+              ]
+            },
+            "markdown": false,
+            "checked": false,
+            "enabled": false,
+            "visible": true
+          }
+        ],
+        "other": {
+          "id": "",
+          "label": {
+            "source": "Other"
+          },
+          "description": {
+            "source": "Write your own answer"
+          },
+          "markdown": false,
+          "checked": false,
+          "enabled": false,
+          "visible": true
+        },
+        "text": {
+          "visible": false,
+          "enabled": false,
+          "value": "",
+          "placeholder": {
+            "source": "Write your answer…"
+          },
+          "accessible_name": {
+            "source": "Your answer to %1",
+            "args": [
+              {
+                "kind": "verbatim",
+                "value": "Which database?"
+              }
+            ]
+          },
+          "max_units": 4096,
+          "max_chars": 0
+        }
+      }
+    ],
+    "status": {
+      "source": "The desktop service is still sending this answer. Its result appears here when it finishes."
+    },
+    "status_error": false,
+    "available": true,
+    "locked": true,
+    "review": false,
+    "created_at": 1.0,
+    "submit": {
+      "visible": true,
+      "enabled": false,
+      "label": {
+        "source": "Submitting…"
+      },
+      "review_label": null
+    },
+    "approve": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Approve once"
+      },
+      "review_label": {
+        "source": "Approve once"
+      }
+    },
+    "deny": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Deny"
+      },
+      "review_label": null
+    },
+    "skip": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Skip"
+      },
+      "review_label": null
+    },
+    "previous": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "← Back"
+      },
+      "review_label": null
+    },
+    "next": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Next →"
+      },
+      "review_label": null
+    },
+    "retry": false,
+    "skip_tip": {
+      "source": "Dismiss this optional question without sending an answer. The agent can continue."
+    },
+    "retry_tip": {
+      "source": "Check the agent in Terminal before retrying to avoid submitting twice."
+    }
+  },
+  {
+    "heading": {
+      "source": "Agent needs your answer"
+    },
+    "progress": {
+      "source": "%1 of %2 answered",
+      "args": [
+        {
+          "kind": "number",
+          "value": 0
+        },
+        {
+          "kind": "number",
+          "value": 1
+        }
+      ]
+    },
+    "pending": {
+      "source": "%1 pending",
+      "args": [
+        {
+          "kind": "number",
+          "value": 1
+        }
+      ]
+    },
+    "pending_tip": {
+      "source": "Questions waiting for an answer, including the questions shown in this card."
+    },
+    "nav": null,
+    "tabs_visible": false,
+    "page": 0,
+    "forms": [
+      {
+        "id": "q_0",
+        "tab": {
+          "source": "%1: %2",
+          "args": [
+            {
+              "kind": "number",
+              "value": 1
+            },
+            {
+              "kind": "verbatim",
+              "value": "Database"
+            }
+          ]
+        },
+        "prompt": "Which database?",
+        "body": "",
+        "markdown": true,
+        "monospace_body": false,
+        "multi": false,
+        "mode": {
+          "source": "Select one"
+        },
+        "mode_visible": true,
+        "options": [
+          {
+            "id": "pg",
+            "label": {
+              "source": "%1",
+              "args": [
+                {
+                  "kind": "verbatim",
+                  "value": "PostgreSQL"
+                }
+              ]
+            },
+            "description": {
+              "source": "%1",
+              "args": [
+                {
+                  "kind": "verbatim",
+                  "value": "The **server** one"
+                }
+              ]
+            },
+            "markdown": true,
+            "checked": false,
+            "enabled": true,
+            "visible": true
+          },
+          {
+            "id": "lite",
+            "label": {
+              "source": "%1",
+              "args": [
+                {
+                  "kind": "verbatim",
+                  "value": "SQLite"
+                }
+              ]
+            },
+            "description": {
+              "source": "%1",
+              "args": [
+                {
+                  "kind": "verbatim",
+                  "value": ""
+                }
+              ]
+            },
+            "markdown": false,
+            "checked": false,
+            "enabled": true,
+            "visible": true
+          }
+        ],
+        "other": {
+          "id": "",
+          "label": {
+            "source": "Other"
+          },
+          "description": {
+            "source": "Write your own answer"
+          },
+          "markdown": false,
+          "checked": false,
+          "enabled": true,
+          "visible": true
+        },
+        "text": {
+          "visible": false,
+          "enabled": false,
+          "value": "",
+          "placeholder": {
+            "source": "Write your answer…"
+          },
+          "accessible_name": {
+            "source": "Your answer to %1",
+            "args": [
+              {
+                "kind": "verbatim",
+                "value": "Which database?"
+              }
+            ]
+          },
+          "max_units": 4096,
+          "max_chars": 0
+        }
+      }
+    ],
+    "status": {
+      "source": "The answer was not sent: the desktop service could not start it. The question may have changed. Your answer was kept, so you can submit it again."
+    },
+    "status_error": true,
+    "available": true,
+    "locked": false,
+    "review": false,
+    "created_at": 1.0,
+    "submit": {
+      "visible": true,
+      "enabled": false,
+      "label": {
+        "source": "Submit answer"
+      },
+      "review_label": null
+    },
+    "approve": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Approve once"
+      },
+      "review_label": {
+        "source": "Approve once"
+      }
+    },
+    "deny": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Deny"
+      },
+      "review_label": null
+    },
+    "skip": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Skip"
+      },
+      "review_label": null
+    },
+    "previous": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "← Back"
+      },
+      "review_label": null
+    },
+    "next": {
+      "visible": false,
+      "enabled": true,
+      "label": {
+        "source": "Next →"
+      },
+      "review_label": null
+    },
+    "retry": false,
+    "skip_tip": {
+      "source": "Dismiss this optional question without sending an answer. The agent can continue."
+    },
+    "retry_tip": {
+      "source": "Check the agent in Terminal before retrying to avoid submitting twice."
+    }
+  },
+  {
+    "heading": {
+      "source": "Agent needs your answer"
+    },
+    "progress": {
+      "source": "%1 of %2 answered",
+      "args": [
+        {
+          "kind": "number",
+          "value": 0
+        },
+        {
+          "kind": "number",
+          "value": 1
+        }
+      ]
+    },
+    "pending": {
+      "source": "%1 pending",
+      "args": [
+        {
+          "kind": "number",
+          "value": 1
+        }
+      ]
+    },
+    "pending_tip": {
+      "source": "Questions waiting for an answer, including the questions shown in this card."
+    },
+    "nav": null,
+    "tabs_visible": false,
+    "page": 0,
+    "forms": [
+      {
+        "id": "q_0",
+        "tab": {
+          "source": "%1: %2",
+          "args": [
+            {
+              "kind": "number",
+              "value": 1
+            },
+            {
+              "kind": "verbatim",
+              "value": "Database"
+            }
+          ]
+        },
+        "prompt": "Which database?",
+        "body": "",
+        "markdown": true,
+        "monospace_body": false,
+        "multi": false,
+        "mode": {
+          "source": "Select one"
+        },
+        "mode_visible": true,
+        "options": [
+          {
+            "id": "pg",
+            "label": {
+              "source": "%1",
+              "args": [
+                {
+                  "kind": "verbatim",
+                  "value": "PostgreSQL"
+                }
+              ]
+            },
+            "description": {
+              "source": "%1",
+              "args": [
+                {
+                  "kind": "verbatim",
+                  "value": "The **server** one"
+                }
+              ]
+            },
+            "markdown": true,
+            "checked": false,
+            "enabled": true,
+            "visible": true
+          },
+          {
+            "id": "lite",
+            "label": {
+              "source": "%1",
+              "args": [
+                {
+                  "kind": "verbatim",
+                  "value": "SQLite"
+                }
+              ]
+            },
+            "description": {
+              "source": "%1",
+              "args": [
+                {
+                  "kind": "verbatim",
+                  "value": ""
+                }
+              ]
+            },
+            "markdown": false,
+            "checked": false,
+            "enabled": true,
+            "visible": true
+          }
+        ],
+        "other": {
+          "id": "",
+          "label": {
+            "source": "Other"
+          },
+          "description": {
+            "source": "Write your own answer"
+          },
+          "markdown": false,
+          "checked": false,
+          "enabled": true,
+          "visible": true
+        },
+        "text": {
+          "visible": false,
+          "enabled": false,
+          "value": "",
+          "placeholder": {
+            "source": "Write your answer…"
+          },
+          "accessible_name": {
+            "source": "Your answer to %1",
+            "args": [
+              {
+                "kind": "verbatim",
+                "value": "Which database?"
+              }
+            ]
+          },
+          "max_units": 4096,
+          "max_chars": 0
+        }
+      }
+    ],
+    "status": {
+      "source": "The answer was not sent: it was refused before anything reached the agent. Your answer was kept, so you can submit it again."
+    },
+    "status_error": true,
+    "available": true,
+    "locked": false,
+    "review": false,
+    "created_at": 1.0,
+    "submit": {
+      "visible": true,
+      "enabled": false,
+      "label": {
+        "source": "Submit answer"
+      },
+      "review_label": null
+    },
+    "approve": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Approve once"
+      },
+      "review_label": {
+        "source": "Approve once"
+      }
+    },
+    "deny": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Deny"
+      },
+      "review_label": null
+    },
+    "skip": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Skip"
+      },
+      "review_label": null
+    },
+    "previous": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "← Back"
+      },
+      "review_label": null
+    },
+    "next": {
+      "visible": false,
+      "enabled": true,
+      "label": {
+        "source": "Next →"
+      },
+      "review_label": null
+    },
+    "retry": false,
+    "skip_tip": {
+      "source": "Dismiss this optional question without sending an answer. The agent can continue."
+    },
+    "retry_tip": {
+      "source": "Check the agent in Terminal before retrying to avoid submitting twice."
+    }
+  },
+  {
+    "heading": {
+      "source": "Agent needs your answer"
+    },
+    "progress": {
+      "source": "%1 of %2 answered",
+      "args": [
+        {
+          "kind": "number",
+          "value": 0
+        },
+        {
+          "kind": "number",
+          "value": 1
+        }
+      ]
+    },
+    "pending": {
+      "source": "%1 pending",
+      "args": [
+        {
+          "kind": "number",
+          "value": 1
+        }
+      ]
+    },
+    "pending_tip": {
+      "source": "Questions waiting for an answer, including the questions shown in this card."
+    },
+    "nav": null,
+    "tabs_visible": false,
+    "page": 0,
+    "forms": [
+      {
+        "id": "q_0",
+        "tab": {
+          "source": "%1: %2",
+          "args": [
+            {
+              "kind": "number",
+              "value": 1
+            },
+            {
+              "kind": "verbatim",
+              "value": "Database"
+            }
+          ]
+        },
+        "prompt": "Which database?",
+        "body": "",
+        "markdown": true,
+        "monospace_body": false,
+        "multi": false,
+        "mode": {
+          "source": "Select one"
+        },
+        "mode_visible": true,
+        "options": [
+          {
+            "id": "pg",
+            "label": {
+              "source": "%1",
+              "args": [
+                {
+                  "kind": "verbatim",
+                  "value": "PostgreSQL"
+                }
+              ]
+            },
+            "description": {
+              "source": "%1",
+              "args": [
+                {
+                  "kind": "verbatim",
+                  "value": "The **server** one"
+                }
+              ]
+            },
+            "markdown": true,
+            "checked": false,
+            "enabled": true,
+            "visible": true
+          },
+          {
+            "id": "lite",
+            "label": {
+              "source": "%1",
+              "args": [
+                {
+                  "kind": "verbatim",
+                  "value": "SQLite"
+                }
+              ]
+            },
+            "description": {
+              "source": "%1",
+              "args": [
+                {
+                  "kind": "verbatim",
+                  "value": ""
+                }
+              ]
+            },
+            "markdown": false,
+            "checked": false,
+            "enabled": true,
+            "visible": true
+          }
+        ],
+        "other": {
+          "id": "",
+          "label": {
+            "source": "Other"
+          },
+          "description": {
+            "source": "Write your own answer"
+          },
+          "markdown": false,
+          "checked": false,
+          "enabled": true,
+          "visible": true
+        },
+        "text": {
+          "visible": false,
+          "enabled": false,
+          "value": "",
+          "placeholder": {
+            "source": "Write your answer…"
+          },
+          "accessible_name": {
+            "source": "Your answer to %1",
+            "args": [
+              {
+                "kind": "verbatim",
+                "value": "Which database?"
+              }
+            ]
+          },
+          "max_units": 4096,
+          "max_chars": 0
+        }
+      }
+    ],
+    "status": {
+      "source": "Delivery is not confirmed by the desktop service. Check Terminal before retrying."
+    },
+    "status_error": true,
+    "available": true,
+    "locked": false,
+    "review": false,
+    "created_at": 1.0,
+    "submit": {
+      "visible": true,
+      "enabled": false,
+      "label": {
+        "source": "Submit answer"
+      },
+      "review_label": null
+    },
+    "approve": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Approve once"
+      },
+      "review_label": {
+        "source": "Approve once"
+      }
+    },
+    "deny": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Deny"
+      },
+      "review_label": null
+    },
+    "skip": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Skip"
+      },
+      "review_label": null
+    },
+    "previous": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "← Back"
+      },
+      "review_label": null
+    },
+    "next": {
+      "visible": false,
+      "enabled": true,
+      "label": {
+        "source": "Next →"
+      },
+      "review_label": null
+    },
+    "retry": true,
+    "skip_tip": {
+      "source": "Dismiss this optional question without sending an answer. The agent can continue."
+    },
+    "retry_tip": {
+      "source": "Check the agent in Terminal before retrying to avoid submitting twice."
+    }
+  },
+  {
+    "heading": {
+      "source": "Agent needs your answer"
+    },
+    "progress": {
+      "source": "%1 of %2 answered",
+      "args": [
+        {
+          "kind": "number",
+          "value": 0
+        },
+        {
+          "kind": "number",
+          "value": 1
+        }
+      ]
+    },
+    "pending": {
+      "source": "%1 pending",
+      "args": [
+        {
+          "kind": "number",
+          "value": 1
+        }
+      ]
+    },
+    "pending_tip": {
+      "source": "Questions waiting for an answer, including the questions shown in this card."
+    },
+    "nav": null,
+    "tabs_visible": false,
+    "page": 0,
+    "forms": [
+      {
+        "id": "q_0",
+        "tab": {
+          "source": "%1: %2",
+          "args": [
+            {
+              "kind": "number",
+              "value": 1
+            },
+            {
+              "kind": "verbatim",
+              "value": "Database"
+            }
+          ]
+        },
+        "prompt": "Which database?",
+        "body": "",
+        "markdown": true,
+        "monospace_body": false,
+        "multi": false,
+        "mode": {
+          "source": "Select one"
+        },
+        "mode_visible": true,
+        "options": [
+          {
+            "id": "pg",
+            "label": {
+              "source": "%1",
+              "args": [
+                {
+                  "kind": "verbatim",
+                  "value": "PostgreSQL"
+                }
+              ]
+            },
+            "description": {
+              "source": "%1",
+              "args": [
+                {
+                  "kind": "verbatim",
+                  "value": "The **server** one"
+                }
+              ]
+            },
+            "markdown": true,
+            "checked": false,
+            "enabled": true,
+            "visible": true
+          },
+          {
+            "id": "lite",
+            "label": {
+              "source": "%1",
+              "args": [
+                {
+                  "kind": "verbatim",
+                  "value": "SQLite"
+                }
+              ]
+            },
+            "description": {
+              "source": "%1",
+              "args": [
+                {
+                  "kind": "verbatim",
+                  "value": ""
+                }
+              ]
+            },
+            "markdown": false,
+            "checked": false,
+            "enabled": true,
+            "visible": true
+          }
+        ],
+        "other": {
+          "id": "",
+          "label": {
+            "source": "Other"
+          },
+          "description": {
+            "source": "Write your own answer"
+          },
+          "markdown": false,
+          "checked": false,
+          "enabled": true,
+          "visible": true
+        },
+        "text": {
+          "visible": false,
+          "enabled": false,
+          "value": "",
+          "placeholder": {
+            "source": "Write your answer…"
+          },
+          "accessible_name": {
+            "source": "Your answer to %1",
+            "args": [
+              {
+                "kind": "verbatim",
+                "value": "Which database?"
+              }
+            ]
+          },
+          "max_units": 4096,
+          "max_chars": 0
+        }
+      }
+    ],
+    "status": {
+      "source": "Delivery is not confirmed. Check Terminal before retrying. %1",
+      "args": [
+        {
+          "kind": "text",
+          "value": {
+            "source": "%1",
+            "args": [
+              {
+                "kind": "verbatim",
+                "value": "Answer transfer failed (exit 1)."
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "status_error": true,
+    "available": true,
+    "locked": false,
+    "review": false,
+    "created_at": 1.0,
+    "submit": {
+      "visible": true,
+      "enabled": false,
+      "label": {
+        "source": "Submit answer"
+      },
+      "review_label": null
+    },
+    "approve": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Approve once"
+      },
+      "review_label": {
+        "source": "Approve once"
+      }
+    },
+    "deny": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Deny"
+      },
+      "review_label": null
+    },
+    "skip": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "Skip"
+      },
+      "review_label": null
+    },
+    "previous": {
+      "visible": false,
+      "enabled": false,
+      "label": {
+        "source": "← Back"
+      },
+      "review_label": null
+    },
+    "next": {
+      "visible": false,
+      "enabled": true,
+      "label": {
+        "source": "Next →"
+      },
+      "review_label": null
+    },
+    "retry": true,
+    "skip_tip": {
+      "source": "Dismiss this optional question without sending an answer. The agent can continue."
+    },
+    "retry_tip": {
+      "source": "Check the agent in Terminal before retrying to avoid submitting twice."
+    }
   }
 ]

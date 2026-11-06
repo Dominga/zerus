@@ -108,6 +108,71 @@ fn bytes(value: &Value) -> Vec<u8> {
     serde_json::to_vec(value).unwrap()
 }
 
+fn shared_update_feed_contract() -> Value {
+    serde_json::from_str(include_str!("fixtures/update-feed-contract.json")).unwrap()
+}
+
+#[test]
+fn shared_update_feed_catalogs_match_the_producer_and_projection() {
+    let contract = shared_update_feed_contract();
+    assert_eq!(contract["schema"], 1);
+    for case in contract["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let channel = Channel::parse(case["channel"].as_str().unwrap()).unwrap();
+        let feed = parse_feed(&bytes(&case["catalog"]), channel);
+        let expected: Feed = serde_json::from_value(case["expected_feed"].clone()).unwrap();
+        assert!(feed.valid, "{name}");
+        assert_eq!(feed, expected, "{name}");
+        assert_eq!(
+            update_token(channel, &feed, true),
+            case["expected_update_token"].as_str().unwrap(),
+            "{name}"
+        );
+        assert!(update_token(channel, &feed, false).is_empty(), "{name}");
+    }
+}
+
+#[test]
+fn shared_update_feed_catalogs_keep_scope_and_downloads_closed() {
+    let contract = shared_update_feed_contract();
+    for case in contract["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let catalog = &case["catalog"];
+        let mut changed = catalog.clone();
+        changed["channel"] = json!("nightly");
+        assert!(
+            !parse_feed(&bytes(&changed), Channel::Stable).valid,
+            "{name}: channel identity"
+        );
+        for (field, value) in [
+            ("url", "https://updates.example.invalid/package.pkg.tar.zst"),
+            ("kind", "windows-portable"),
+        ] {
+            let mut changed = catalog.clone();
+            changed["artifacts"][0][field] = json!(value);
+            assert!(
+                !parse_feed(&bytes(&changed), Channel::Stable).valid,
+                "{name}: {field}"
+            );
+        }
+        if catalog.get("macos").is_some() {
+            let mut changed = catalog.clone();
+            changed["macos"]["qt_version"] = json!("6.x");
+            assert!(
+                !parse_feed(&bytes(&changed), Channel::Stable).valid,
+                "{name}: retained compatibility metadata"
+            );
+            let mut changed = catalog.clone();
+            changed["macos"]["downloads"][0]["url"] =
+                json!("https://updates.example.invalid/application.zip");
+            assert!(
+                !parse_feed(&bytes(&changed), Channel::Stable).valid,
+                "{name}: macOS origin"
+            );
+        }
+    }
+}
+
 #[test]
 fn stable_nightly_and_dev_catalogs_are_verified() {
     let stable = parse_feed(&bytes(&raw()), Channel::Stable);

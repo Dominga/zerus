@@ -960,6 +960,7 @@ mod version {
         command
             .env_remove("HGS_RUN_ID")
             .env_remove("HGS_SESSION")
+            .env_remove("HGS_SESSION_ID")
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .stdout(output.try_clone().map_err(|e| fail(e.to_string()))?);
@@ -1327,7 +1328,7 @@ fn track(name: String, token: String, mut event: Value, output: &mut impl std::i
     }
     let _guard = lock(None)?;
     let panes = live()?;
-    let own = read_run(&name, &token)?;
+    let own = read_own_run(&name, &token)?;
     let record = if continuations::foreign(own.as_ref(), sid) {
         continuations::owner(&event, sid, &panes)?
     } else {
@@ -1336,12 +1337,14 @@ fn track(name: String, token: String, mut event: Value, output: &mut impl std::i
     let Some(mut record) = record else {
         return Ok(0);
     };
-    if !matches(&record, panes.get(string(&record, "name"))) {
+    if !matches(&record, panes_of(&panes, &record)) {
         return Ok(0);
     }
     if let Some(scoped) = external_agents::route(&mut record, &event) {
+        if scoped["hgs_retired_external_hook"] == true { return Ok(0); }
         processes::observe(&mut record, &scoped);
         journal::update_activity(&mut record, &scoped);
+        subagent_lifecycle::reconcile(&mut record);
         if kind == "PermissionRequest" {
             let child = &mut record["subagents"][string(&scoped, "agent_id")];
             child["display_state"] = json!("approval");
@@ -1395,7 +1398,8 @@ fn track(name: String, token: String, mut event: Value, output: &mut impl std::i
         eprintln!("hgs is pausing this session; retry after resuming");
         return Ok(2);
     }
-    let successor = codex_clear_recovery::observe(&record, &event);
+    let successor = codex_clear_recovery::observe(&record, &event)
+        .or_else(|| codex_clear_recovery::terminal_start(&record, &event));
     let main_start = (kind == "SessionStart" && string(&event, "agent_id").is_empty()) || successor.is_some();
     let changed_conversation = main_start && sid != string(&record, "conversation_id");
     if main_start {
@@ -1441,6 +1445,8 @@ fn track(name: String, token: String, mut event: Value, output: &mut impl std::i
                 "prompt",
                 "last_message",
                 "subagents",
+                "subagent_retirements",
+                "subagents_ended_pruned",
                 "active_tools",
                 "last_error",
                 "subagent_groups",
@@ -1484,6 +1490,10 @@ fn track(name: String, token: String, mut event: Value, output: &mut impl std::i
     }
     let resumed_clear_end = kind == "SessionEnd" && string(&event, "agent_id").is_empty()
         && clear_context::ending_resume(&record);
+    let terminal_resume_end = kind == "SessionEnd" && string(&event,"agent_id").is_empty()
+        && clear_context::ending_terminal_resume(&record) && external_agents::main_codex_hook(&record);
+    let terminal_clear_at = if terminal_resume_end && clear_context::awaiting_start(&record)
+        && record["session_clear"]["source"] == "native_terminal" { record["session_clear"]["at"].clone() } else { Value::Null };
     if kind == "SessionEnd" && string(&event, "agent_id").is_empty() {
         record["session_end"] = json!({"reason": string(&event, "reason"), "at": now(),
             "run_id": record["run_id"], "conversation_id": sid});
@@ -1504,6 +1514,11 @@ fn track(name: String, token: String, mut event: Value, output: &mut impl std::i
         // process. Keep the exact deferred-start fence, never fabricate Ready.
         record["session_end"]["clear_request_id"] = record["clear_context_request"]["request_id"].clone();
         record["session_end"]["clear_event_at"] = record["last_event_at"].clone();
+    }
+    if terminal_resume_end {
+        record["session_end"]["terminal_resume"] = json!({"event_at":record["last_event_at"],
+            "pid":record["pid"],"process_start":record["process_start"],"supervisor":record["supervisor"],
+            "transcript":record["transcript"],"clear_at":terminal_clear_at});
     }
     compact_context::observe(&mut record, &event);
     questions::observe(&mut record, &event);

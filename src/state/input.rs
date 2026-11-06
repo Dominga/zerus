@@ -276,12 +276,15 @@ fn checked_input(
     conversation_id: &str,
     allow_working: bool,
 ) -> Result<Value> {
+    // zerus-ucck P3c: the request's identities select among sessions that
+    // share the label.
+    expect(name, run_id, conversation_id)?;
     let record = read(name)?;
     if string(&record, "run_id") != run_id || string(&record, "conversation_id") != conversation_id
     {
         return Err("session identity changed; refresh before sending".into());
     }
-    if !matches(&record, live()?.get(name)) || !process_alive(&record) {
+    if !matches(&record, panes_of(&live()?, &record)) || !process_alive(&record) {
         return Err("the exact agent process is no longer running; resume it explicitly".into());
     }
     if claude_approval::current(&record).is_some() {
@@ -655,6 +658,16 @@ fn codex_warning_footer(row: &str) -> bool {
         && matches!(tail, "warning · f2 to view" | "warnings · f2 to view")
 }
 
+/// Native 0.167 adds the agent-picker hint before the idle shortcuts hint.
+/// Accept only that fixed row and its optional existing warning indicator;
+/// arbitrary trailing content still cannot terminate a draft.
+fn codex_shortcuts_footer(plain: &str) -> bool {
+    let plain = plain.trim();
+    if plain.starts_with("? for shortcuts") { return true; }
+    let Some(tail) = plain.strip_prefix("← for agents · ? for shortcuts") else { return false; };
+    tail.is_empty() || (tail.starts_with(' ') && codex_warning_footer(tail))
+}
+
 fn codex_footer_model(record: &Value) -> Option<&str> {
     if let Some(model) = record["model"].as_str().filter(|model| !model.is_empty()) {
         return Some(model);
@@ -775,7 +788,7 @@ fn composer_empty_for_model(agent: &str, screen: &str, cursor_x: usize, cursor_y
                 return input_background || single_line_footer
                     || lines.last().is_some_and(|line| {
                         let plain: String = styled_row(line).iter().map(|(ch, _)| ch).collect();
-                        plain.trim_start().starts_with("? for shortcuts")
+                        codex_shortcuts_footer(&plain)
                     });
             }
         }
@@ -803,7 +816,8 @@ fn terminal_check(record: &Value, empty: bool, sending: bool) -> Result<()> {
     let terminal = backend::current();
     let claim = backend::InputClaim {
         pane,
-        name: string(record, "name"),
+        // The pane's session is the record's own terminal (P3b).
+        name: terminal_name(record),
         run_id: string(record, "run_id"),
         agent: string(record, "agent"),
         pid: record["pid"].as_u64(),
@@ -1034,15 +1048,23 @@ pub(super) fn task_reply_receipt(name: &str, request: &Value) -> Result<Option<V
 
 pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Result<Value> {
     // N34: a BOM is not part of the request or of its digest.
-    submit_with(name, crate::state::without_bom(input), recovery_id, false)
+    submit_with(name, crate::state::without_bom(input), recovery_id, false, false)
 }
 
 /// A held message, by its deliverer, through the same checks as any send.
 pub(super) fn submit_held(name: &str, input: &[u8]) -> Result<Value> {
-    submit_with(name, input, None, true)
+    submit_with(name, input, None, true, false)
 }
 
-fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, held: bool) -> Result<Value> {
+/// `submit` for a question's answer: it refuses, before any key, when pending
+/// model or effort settings would be typed into the terminal first. Only the
+/// answer's own paste may reach the pane, so a refusal proves nothing was
+/// sent.
+pub(super) fn submit_answer(name: &str, input: &[u8]) -> Result<Value> {
+    submit_with(name, input, None, false, true)
+}
+
+fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, held: bool, answer: bool) -> Result<Value> {
     // N34: a BOM is not part of the request or of its digest.
     let input = crate::state::without_bom(input);
     let request: Request =
@@ -1094,7 +1116,11 @@ fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, held: bool) 
         }
         checked => checked?,
     };
-    let mut record = effort::apply_pending(name, checked)?;
+    let record = checked;
+    if answer && effort::pending_applies(&record) {
+        return Err("model or effort settings would be typed first; answer this question in Terminal".into());
+    }
+    let mut record = effort::apply_pending(name, record)?;
     if let Some(id) = recovery_id { recovery::check_submission(&record, id)?; }
     checked_send_terminal(&record)?;
     let attachments_root = root.join("attachments");
@@ -1149,7 +1175,7 @@ fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, held: bool) 
     }
     if let Some(id) = recovery_id { recovery::check_submission(&read(name)?, id)?; }
     let submitted_at = now();
-    if recovery_id.is_none() { recovery::cancel_for_input(name)?; }
+    if recovery_id.is_none() { recovery::cancel_for_input(&record)?; }
     let mut receipt = json!({"request_id":request_id,"name":name,"run_id":request.expected_run_id,
         "conversation_id":string(&record,"conversation_id"),"first_message":string(&record,"conversation_id").is_empty(),"digest":digest,"status":"in_progress",
         "submitted_at":submitted_at,"submitted_text":text,"text":request.text.trim(),"attachments":paths,"transport":"terminal"});
@@ -1178,7 +1204,7 @@ fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, held: bool) 
         if string(&record, "agent") == "codex" {
             settle_codex_paste(terminal, pane, &pasted);
         }
-        if !process_alive(&record) || !matches(&record, live()?.get(name)) {
+        if !process_alive(&record) || !matches(&record, panes_of(&live()?, &record)) {
             return Err("agent changed after paste".into());
         }
         checked_terminal(&record, false)?;
@@ -1576,6 +1602,22 @@ mod tests {
             2
         ));
     }
+    #[test]
+    fn codex_0167_agents_shortcuts_footer_preserves_the_empty_composer_boundary() {
+        let screen = "\n\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n  GPT-6.1-Sol default · /fixture\n  ← for agents · ? for shortcuts                  ⚠ 4 warnings · f2 to view";
+        assert!(composer_empty("codex", screen, 2, 1));
+        for footer in ["← for agents · ? for shortcuts", "← for agents · ? for shortcuts   ⚠ 1 warning · f2 to view", "? for shortcuts"] {
+            assert!(composer_empty("codex", &screen.replace("← for agents · ? for shortcuts                  ⚠ 4 warnings · f2 to view", footer), 2, 1));
+        }
+        for footer in ["← for agents · ? for shortcuts draft", "← for agents · ? for shortcuts ⚠ 4 warnings · f2 to view draft", "← for agents · ? for shortcuts ⚠ 0 warnings · f2 to view", "← for agents · ? for shortcuts ⚠ 4 warnings · enter to approve", "← for agents · ? for shortcuts\n  more input", "← for agents · Approve command?"] {
+            assert!(!composer_empty("codex", &screen.replace("← for agents · ? for shortcuts                  ⚠ 4 warnings · f2 to view", footer), 2, 1), "{footer}");
+        }
+        for draft in ["", "retained draft", "\n  draft continuation"] {
+            assert!(!composer_empty("codex", &screen.replace("\x1b[2mAsk Codex to do anything\x1b[0m", draft), 2, 1));
+        }
+        assert!(!composer_empty("codex", screen, 3, 1));
+    }
+
     #[test]
     fn codex_warning_footer_does_not_turn_an_empty_queue_composer_into_a_draft() {
         // Codex 0.166's separate warning row can occupy the shortcuts row.

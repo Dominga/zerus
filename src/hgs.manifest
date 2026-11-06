@@ -2,7 +2,10 @@
 <!-- Embedded in hgs.exe by the MSVC linker (build.rs), as hgs-tray.manifest is in
      hgs-tray.exe. UTF-8 as the ANSI code page keeps non-ASCII arguments, paths and
      environment intact in the session host, supervisors and hooks; long paths
-     cover deep worktrees and attachment caches. -->
+     cover deep worktrees and attachment caches. A detached console allocation
+     policy (Windows 11 24H2 and later) gives hgs.exe no console window when its
+     starter has none, such as the logon task's desktop service or COM
+     activation; started from a terminal it still uses that terminal. -->
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
     <application>
@@ -14,6 +17,7 @@
     <windowsSettings>
       <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
       <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+      <consoleAllocationPolicy xmlns="http://schemas.microsoft.com/SMI/2024/WindowsSettings">detached</consoleAllocationPolicy>
     </windowsSettings>
   </application>
 </assembly>

@@ -8,6 +8,7 @@
   .drop-overlay span { color: light-dark(#167357, #8bdfc0); font-size: 16px; padding: 24px; text-align: center; }
   .detail-empty { margin: auto; text-align: center; color: var(--z-color-muted); }
   .detail-empty h2 { font-size: 21px; font-weight: 600; color: var(--z-color-text-2); margin-bottom: 8px; }
+  .detail-empty .btn.primary { margin-top: 16px; }
 
   .detail-head { padding: 8px 12px 4px; display: flex; flex-direction: column; gap: 4px; }
   .dh-row1 { display: flex; align-items: center; gap: 4px; min-width: 0; }
@@ -65,7 +66,7 @@
   .act-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; scroll-behavior: smooth; will-change: transform; }
   /* It takes the focus only from code (a toolbar chip that hides), as Qt's browser does; no ring. */
   .act-scroll:focus { outline: none; }
-  .act-col { position: relative; container: act-col / inline-size; box-sizing: border-box; min-height: 100%; width: min(var(--col), calc(100% - 32px)); margin: 0 auto; padding: 10px 0 18px; display: flex; flex-direction: column; gap: 10px; font-size: calc(var(--fs-base) * var(--content-scale, 1)); }
+  .act-col { position: relative; box-sizing: border-box; min-height: 100%; width: min(var(--col), calc(100% - 32px)); margin: 0 auto; padding: 10px 0 18px; display: flex; flex-direction: column; gap: 10px; font-size: calc(var(--fs-base) * var(--content-scale, 1)); }
   /* Column edges: 10 px handles just outside the column. A 2 px line shows on
      hover and while dragging; nothing else moves. */
   .col-edge { position: absolute; z-index: 1; top: 0; bottom: 0; left: -10px; width: 10px; cursor: ew-resize; touch-action: none; outline: none; }
@@ -83,6 +84,8 @@
   .act-msg { border-radius: var(--z-radius-lg); padding: 9px 14px 11px; background: var(--z-color-tile); border-left: 3px solid var(--z-color-border); animation: rise var(--z-motion-slow) var(--ease) both; }
   .act-msg.k-user { background: var(--z-color-bubble); border-left-color: var(--z-color-accent-muted); white-space: pre-wrap; }
   .act-msg.k-agent { border-left-color: var(--z-color-accent); }
+  /* A fork's history from the session it began from: read-only, muted. */
+  .act-msg.inherited, .act-tools.inherited, .act-thinking.inherited, .act-notice.inherited { opacity: .72; }
   .act-msg.k-receipt { background: transparent; border-left-color: var(--z-color-violet); padding: 6px 12px; font-size: var(--fs-sm); color: var(--z-color-text-3); }
   .act-msg header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; font-size: var(--fs-sm); }
   .act-msg header b { color: var(--z-color-accent); }
@@ -162,7 +165,9 @@
   .vm-state.issue { color: var(--z-color-danger); }
   .vm-row { display: flex; align-items: center; gap: 8px; margin: 8px 0 4px; }
   .vp { --played: var(--z-color-accent); --rest: color-mix(in srgb, var(--z-color-accent-muted) 75%, var(--z-color-muted));
-    flex: none; width: clamp(80px, calc(100cqw - 112px), 420px); height: 52px; display: grid; grid-template-columns: 44px minmax(0, 1fr); column-gap: 12px; }
+    /* The row excludes the message's 28 px padding and 3 px border. Keep the
+       same column-relative width without a query container around all Markdown. */
+    flex: none; width: clamp(80px, calc(100% - 81px), 420px); height: 52px; display: grid; grid-template-columns: 44px minmax(0, 1fr); column-gap: 12px; }
   .vp-btn { width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; background: var(--played); color: var(--z-color-accent-text); transition: background var(--z-motion-fast), scale var(--z-motion-fast); }
   .vp-btn:hover { background: var(--z-color-accent-hover); }
   .vp-btn:active { scale: .96; }
@@ -233,6 +238,8 @@
   .act-queue-text { max-height: 220px; overflow-y: auto; user-select: text; }
   .act-queue-message { margin-top: 8px; padding-left: 10px; border-left: 2px solid var(--z-color-accent-muted); }
   .act-queue-message + .act-queue-message { padding-top: 8px; border-top: 1px dashed var(--z-color-border); }
+  .act-held-files { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .act-held-note { margin: 8px 0 0; color: var(--z-color-muted); font-size: 12px; }
 
   /* Composer: toolbar 34, editor 76, action row 34. */
   .cmp-col { width: min(var(--col), calc(100% - 32px)); margin: 0 auto 10px; }
@@ -463,6 +470,9 @@
     border: 1px solid var(--z-color-divider); border-radius: var(--z-radius-md); background: var(--z-color-code-bg); font-size: calc(var(--fs-base) * .9); }
   .draft-message { font-size: var(--fs-xs); color: var(--z-color-text-2); }
   .draft-message.error { color: var(--z-color-danger); }
+  .draft-capture-notice { display: flex; align-items: center; gap: 8px; }
+  .draft-capture-text { flex: 1; min-width: 0; }
+  .draft-capture-text p { margin: 0; }
   .confirm-body { font-size: var(--fs-sm); line-height: 1.5; margin-bottom: 12px; color: var(--z-color-text-2); }
   .confirm-body p { line-height: 1.5; }
 

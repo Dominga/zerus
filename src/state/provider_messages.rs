@@ -20,6 +20,24 @@ fn transcript(record: &Value) -> Option<(&str, &str, PathBuf)> {
     (path.is_absolute() && path.file_name().is_some_and(|v| v.to_string_lossy().contains(id))).then_some((agent, id, path))
 }
 
+/// A fork's own messages begin when it was created. Older ones in its
+/// transcript are copies of the history it began from, which its Activity
+/// shows from the source session instead (zerus-b4qk).
+fn own_since(record: &Value) -> f64 {
+    if string(record, "fork_parent_id").is_empty() {
+        0.0
+    } else {
+        record["created"].as_f64().unwrap_or(0.0)
+    }
+}
+
+/// Only a message with a known time before the fork's creation is a copy.
+fn own(message: &Value, since: f64) -> bool {
+    !message["at"]
+        .as_f64()
+        .is_some_and(|at| at > 0.0 && at < since)
+}
+
 /// The first line of a transcript, at most 256 KiB; a Codex transcript must
 /// name the conversation in its `session_meta`.
 fn first_line(file: &mut File, agent: &str, id: &str) -> Result<Vec<u8>> {
@@ -85,12 +103,13 @@ pub(super) fn read(record: &Value) -> Result<Vec<Value>> {
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
     let mut messages: Vec<Value> = Vec::new();
+    let since = own_since(record);
     for (index, line) in bytes.split_inclusive(|b| *b == b'\n').enumerate() {
         if (offset > 0 && index == 0) || line.len() > LINE_BYTES || !line.ends_with(b"\n") {
             continue;
         }
         for message in line_messages(agent, id, line) {
-            if !repeated(&messages, &message) {
+            if own(&message, since) && !repeated(&messages, &message) {
                 messages.push(message);
             }
         }
@@ -127,6 +146,7 @@ pub(crate) struct Tail {
     // The bytes up to the next newline belong to a line read only in part.
     skipping: bool,
     recent: Vec<Value>,
+    since: f64,
 }
 
 impl Tail {
@@ -159,6 +179,7 @@ impl Tail {
             partial: Vec::new(),
             skipping,
             recent: Vec::new(),
+            since: own_since(record),
         })
     }
 
@@ -209,7 +230,7 @@ impl Tail {
             };
             if line.len() <= LINE_BYTES {
                 for message in line_messages(&self.agent, &self.conversation, line) {
-                    if !repeated(&self.recent, &message) {
+                    if own(&message, self.since) && !repeated(&self.recent, &message) {
                         self.recent.push(message.clone());
                         messages.push(message);
                     }
@@ -262,6 +283,66 @@ fn claude_thinking(event: &Value) -> Option<Value> {
 mod tests {
     use super::*;
     use std::fs;
+    /// zerus-b4qk: a fork's transcript lines dated before the fork was
+    /// created are copies of its source's history, which Activity shows from
+    /// the source; the fork's own lines, and every line of a non-fork, stay.
+    #[test]
+    fn a_forks_copied_history_is_not_shown_again() {
+        let temp = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let path = temp.path().join(format!("{id}.jsonl"));
+        let line = |uuid: &str, at: &str, text: &str| {
+            json!({"type":"assistant","uuid":uuid,"timestamp":at,"sessionId":id,
+                "message":{"role":"assistant","content":[{"type":"text","text":text}]}})
+            .to_string()
+                + "\n"
+        };
+        fs::write(
+            &path,
+            line("old", "2026-10-04T12:00:00Z", "Copied from the source.")
+                + &line("new", "2026-10-04T12:10:00Z", "The fork's own reply."),
+        )
+        .unwrap();
+        let created = search::timestamp(&json!("2026-10-04T12:05:00Z"));
+        let shown = |record: &Value| {
+            read(record)
+                .unwrap()
+                .iter()
+                .map(|m| m["detail"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        let fork = json!({"agent":"claude","conversation_id":id,"transcript":path,"fork_parent_id":"source","created":created});
+        assert_eq!(shown(&fork), ["The fork's own reply."]);
+        let mut plain = fork.clone();
+        plain.as_object_mut().unwrap().remove("fork_parent_id");
+        assert_eq!(
+            shown(&plain),
+            ["Copied from the source.", "The fork's own reply."]
+        );
+        // A followed fork skips a copy written after it opened, too.
+        use std::io::Write;
+        let mut tail = Tail::open(&fork).unwrap();
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(
+                (line("late-copy", "2026-10-04T11:00:00Z", "A late copy.")
+                    + &line("later", "2026-10-04T12:20:00Z", "Later own."))
+                    .as_bytes(),
+            )
+            .unwrap();
+        let TailRead::Messages(messages) = tail.read() else {
+            panic!("tail ended")
+        };
+        assert_eq!(
+            messages
+                .iter()
+                .map(|m| m["detail"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["Later own."]
+        );
+    }
     #[test]
     fn public_progress_and_claude_thinking_keep_separate_roles_without_private_payloads() {
         let temp = tempfile::tempdir().unwrap();

@@ -62,10 +62,11 @@ use windows_sys::{
         },
         System::{
             Console::{
-                GenerateConsoleCtrlEvent, GetConsoleMode, GetStdHandle, SetConsoleCtrlHandler,
-                SetConsoleMode, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT,
-                CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT, ENABLE_VIRTUAL_TERMINAL_PROCESSING,
-                STD_OUTPUT_HANDLE,
+                FreeConsole, GenerateConsoleCtrlEvent, GetConsoleMode, GetConsoleProcessList,
+                GetConsoleWindow, GetStdHandle, SetConsoleCtrlHandler, SetConsoleMode,
+                SetStdHandle, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT, CTRL_LOGOFF_EVENT,
+                CTRL_SHUTDOWN_EVENT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_ERROR_HANDLE,
+                STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
             },
             Diagnostics::ToolHelp::{
                 CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, Thread32First,
@@ -83,9 +84,10 @@ use windows_sys::{
             Threading::{
                 GetCurrentProcess, GetProcessTimes, OpenProcess, OpenProcessToken, OpenThread,
                 QueryFullProcessImageNameW, ResumeThread, TerminateProcess, WaitForSingleObject,
-                CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
-                CREATE_SUSPENDED, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-                PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, THREAD_SUSPEND_RESUME,
+                CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_CONSOLE, CREATE_NEW_PROCESS_GROUP,
+                CREATE_NO_WINDOW, CREATE_SUSPENDED, DETACHED_PROCESS, PROCESS_NAME_WIN32,
+                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+                THREAD_SUSPEND_RESUME,
             },
         },
         UI::Shell::CommandLineToArgvW,
@@ -589,6 +591,10 @@ impl Spawned {
     pub fn terminate(&self) {
         self.job.terminate();
     }
+    /// Independent of the original child's exit: descendants must drain too.
+    pub(crate) fn wait_tree(&self, timeout: Duration) -> io::Result<bool> {
+        self.job.0.wait_empty(timeout)
+    }
     /// `Child::wait_with_output`; the job ends with the call.
     pub fn wait_with_output(self) -> io::Result<Output> {
         let (child, _job) = self.into_parts();
@@ -607,6 +613,7 @@ impl ChildJob {
 /// in the job too. A child that cannot join is ended before it has run. The
 /// command keeps `flags` as its creation flags afterwards.
 fn spawn_contained(command: &mut Command, flags: u32) -> io::Result<Spawned> {
+    let flags = console_flags(flags, console_attached());
     let job = Job::new(Limits::CHILD)?;
     let spawned = command.creation_flags(CREATE_SUSPENDED | flags).spawn();
     command.creation_flags(flags);
@@ -666,6 +673,11 @@ fn resume(pid: u32) -> io::Result<()> {
 /// group, so a console Ctrl+C reaches it.
 pub fn spawn(command: &mut Command) -> io::Result<Spawned> {
     spawn_contained(command, 0)
+}
+/// A service helper has the same suspended/job admission as other children,
+/// without opening a console on the interactive desktop.
+pub(crate) fn spawn_hidden(command: &mut Command) -> io::Result<Spawned> {
+    spawn_contained(command, CREATE_NO_WINDOW)
 }
 /// `spawn` in a process group of its own: a console Ctrl+C for the caller does
 /// not reach it (`own_process_group`).
@@ -1540,6 +1552,61 @@ pub fn gui_env() -> Vec<String> {
     Vec::new()
 }
 
+/// The desktop service never keeps a console of its own: closing that window or
+/// Windows Terminal tab would end it. Windows 11 24H2 and later allocate none
+/// (`consoleAllocationPolicy` in src/hgs.manifest); earlier releases create one
+/// for a logon task, which is released here before startup. A console that
+/// another process shares, such as the terminal it was started from, is kept.
+///
+/// Standard handles that named the released console are cleared: Windows would
+/// reuse their numbers for files opened later, and output written through a
+/// stale handle would land in those files. Cleared, it is discarded, and
+/// inherited child streams are empty.
+pub fn release_private_console() -> bool {
+    let window = !unsafe { GetConsoleWindow() }.is_null();
+    let mut processes = [0u32; 2];
+    let attached = unsafe { GetConsoleProcessList(processes.as_mut_ptr(), processes.len() as u32) };
+    if !super::private_console(window, attached) {
+        return false;
+    }
+    let console = [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE].map(|which| {
+        let handle = unsafe { GetStdHandle(which) };
+        let mut mode = 0;
+        let named = !handle.is_null()
+            && handle != INVALID_HANDLE_VALUE
+            && unsafe { GetConsoleMode(handle, &mut mode) } != 0;
+        (which, named)
+    });
+    if unsafe { FreeConsole() } == 0 {
+        return false;
+    }
+    for (which, named) in console {
+        if named {
+            unsafe { SetStdHandle(which, std::ptr::null_mut()) };
+        }
+    }
+    true
+}
+/// Whether a console is attached to this process. The desktop service has none.
+fn console_attached() -> bool {
+    let mut processes = [0u32; 1];
+    (unsafe { GetConsoleProcessList(processes.as_mut_ptr(), processes.len() as u32) }) != 0
+}
+/// The creation flags for a child of this process: a console program started by
+/// a process without a console would otherwise get a console window of its own
+/// (ssh.exe, a remote watch), so it gets a hidden one unless the caller chose.
+fn console_flags(flags: u32, attached: bool) -> u32 {
+    if attached || flags & (CREATE_NEW_CONSOLE | CREATE_NO_WINDOW | DETACHED_PROCESS) != 0 {
+        flags
+    } else {
+        flags | CREATE_NO_WINDOW
+    }
+}
+/// `Command::spawn` without a console window, for children of the desktop service.
+pub fn spawn_windowless(command: &mut Command) -> io::Result<Child> {
+    command.creation_flags(CREATE_NO_WINDOW).spawn()
+}
+
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 /// The console delivers Ctrl+C and Ctrl+Break to every attached process. The
 /// child (ssh.exe) handles them; hgs only waits for its exit. When the console
@@ -2282,7 +2349,9 @@ mod process {
     pub fn current_directories() -> std::result::Result<Vec<(u32, PathBuf, String)>, String> {
         Err("Running processes cannot be inspected on this computer".into())
     }
-    pub fn worktree_processes(_deadline: std::time::Instant) -> std::result::Result<crate::platform::WorktreeProcesses, String> {
+    pub fn worktree_processes(
+        _deadline: std::time::Instant,
+    ) -> std::result::Result<crate::platform::WorktreeProcesses, String> {
         current_directories().map(Into::into)
     }
     /// Windows cannot list another process's open files without a driver; it can
@@ -2863,6 +2932,106 @@ mod tests {
         let file = member.join("inside.txt");
         fs::write(&file, "x").unwrap();
         assert!(missing_sandbox_rights(&file).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_child_of_a_process_without_a_console_gets_a_hidden_one() {
+        // A process with a console shares it (an interactive ssh, a terminal command).
+        assert_eq!(console_flags(0, true), 0);
+        assert_eq!(
+            console_flags(CREATE_NEW_PROCESS_GROUP, true),
+            CREATE_NEW_PROCESS_GROUP
+        );
+        // The desktop service has none: its children get no console window.
+        assert_eq!(console_flags(0, false), CREATE_NO_WINDOW);
+        assert_eq!(
+            console_flags(CREATE_NEW_PROCESS_GROUP, false),
+            CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+        );
+        // An explicit console choice stays the caller's.
+        for chosen in [CREATE_NEW_CONSOLE, CREATE_NO_WINDOW, DETACHED_PROCESS] {
+            assert_eq!(console_flags(chosen, false), chosen);
+        }
+    }
+
+    #[test]
+    fn a_released_private_console_leaves_no_stale_standard_handles() {
+        use std::{io::Write, os::windows::io::IntoRawHandle};
+        use windows_sys::Win32::System::Console::AllocConsole;
+        const CHILD: &str = "HGS_TEST_PRIVATE_CONSOLE_CHILD";
+        if let Some(folder) = env::var_os(CHILD) {
+            // A console this process alone uses, as Windows gives a logon task
+            // before 24H2, with the standard handles naming it.
+            unsafe { FreeConsole() };
+            assert_ne!(
+                unsafe { AllocConsole() },
+                0,
+                "{}",
+                io::Error::last_os_error()
+            );
+            let open = |name: &str| {
+                fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(name)
+                    .unwrap()
+                    .into_raw_handle()
+            };
+            let (input, output) = (open("CONIN$"), open("CONOUT$"));
+            for (which, handle) in [
+                (STD_INPUT_HANDLE, input),
+                (STD_OUTPUT_HANDLE, output),
+                (STD_ERROR_HANDLE, output),
+            ] {
+                assert_ne!(unsafe { SetStdHandle(which, handle) }, 0);
+            }
+            assert!(release_private_console());
+            for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+                assert!(
+                    unsafe { GetStdHandle(which) }.is_null(),
+                    "stale standard handle {which}"
+                );
+            }
+            // Files opened afterwards may get the old numbers; output never reaches them.
+            let folder = PathBuf::from(folder);
+            let files: Vec<fs::File> = (0..16)
+                .map(|n| fs::File::create(folder.join(format!("{n}.db"))).unwrap())
+                .collect();
+            println!("stale standard output");
+            eprintln!("stale standard error");
+            let _ = io::stdout().flush();
+            drop(files);
+            for n in 0..16 {
+                assert_eq!(
+                    fs::metadata(folder.join(format!("{n}.db"))).unwrap().len(),
+                    0
+                );
+            }
+            return;
+        }
+        let folder = tempfile::tempdir().unwrap();
+        let status = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "platform::windows::tests::a_released_private_console_leaves_no_stale_standard_handles",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, folder.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "{status}");
+        for n in 0..16 {
+            assert_eq!(
+                fs::metadata(folder.path().join(format!("{n}.db")))
+                    .unwrap()
+                    .len(),
+                0
+            );
+        }
     }
 
     #[test]
@@ -3522,7 +3691,10 @@ mod tests {
         assert!(metadata.is_dir());
         assert_eq!(file_identity(dir.path()), Some(identity));
         fs::write(dir.path().join("file"), b"x").unwrap();
-        assert_eq!(FileIdentity::at(dir.path()).unwrap().0.inode, identity.inode);
+        assert_eq!(
+            FileIdentity::at(dir.path()).unwrap().0.inode,
+            identity.inode
+        );
     }
 
     #[test]

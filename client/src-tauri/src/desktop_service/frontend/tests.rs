@@ -1,4 +1,9 @@
 use super::*;
+#[test]
+fn task_start_reconcile_is_not_a_renderer_policy_operation() {
+    assert!(serde_json::from_value::<Operation>(json!("task_start_reconcile")).is_err());
+}
+
 fn approval(enabled: bool) -> Request {
     Request::AutomaticApprovals {
         request_id: uuid::Uuid::new_v4().to_string(),
@@ -53,11 +58,12 @@ fn actual_root_status_controls_client_readiness_but_never_blocks_connected_disab
         "/../fixtures/desktop-delivery-status.json"
     )))
     .unwrap();
-    assert_eq!(cases.len(), 7);
+    assert_eq!(cases.len(), 8);
     for case in cases {
         let label = case["case"].as_str().unwrap();
         let status = &case["status"];
         let (reads, approvals, enabled) = match label {
+            "passive" => (false, false, Some(false)),
             "awaiting_handoff" => (false, false, None),
             "disabled_but_ready" | "read_degraded" => (label != "read_degraded", true, Some(false)),
             "enabled" => (true, true, Some(true)),
@@ -489,6 +495,10 @@ pub(crate) mod native {
     #[cfg(target_os = "linux")]
     #[test]
     fn degraded_root_status_still_uses_the_original_child_disable_route() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         let _process = crate::PROCESS_TREE.read().unwrap();
         tauri::async_runtime::block_on(async {
             let cases: Vec<Value> = serde_json::from_str(include_str!(concat!(
@@ -660,6 +670,10 @@ pub(crate) mod native {
     #[cfg(target_os = "linux")]
     #[test]
     fn original_child_registration_receipts_and_unknown_delivery_use_only_the_dedicated_route() {
+        #[cfg(unix)]
+        if crate::test_context::non_agent() {
+            return;
+        }
         const CHILD: &str = "ZERUS_FRONTEND_SENDER_FIXTURE";
         const TEST:&str="desktop_service::frontend::tests::native::original_child_registration_receipts_and_unknown_delivery_use_only_the_dedicated_route";
         if std::env::var_os(CHILD).is_none() {
@@ -1059,4 +1073,30 @@ fn cache_is_native_only_and_a_recorded_preparation_is_not_effect_admission() {
         panic!("lookup");
     };
     assert!(lookup.lookup); // original child/request is NEVER re-sent
+}
+
+#[test]
+fn a_native_ownership_read_is_not_generic_policy_or_a_durable_receipt() {
+    assert!(serde_json::from_value::<Operation>(json!("desktop_ownership_observe")).is_err());
+    let request = Request::DesktopOwnershipObserve {
+        query: Box::new(zerus_client_core::desktop::ownership::observation::Query {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            configuration: "a".repeat(64),
+            journal: uuid::Uuid::new_v4().to_string(),
+            owner_epoch: uuid::Uuid::new_v4().to_string(),
+            service_epoch: uuid::Uuid::new_v4().to_string(),
+            generation: 1,
+        }),
+    };
+    let frontend = Frontend::default();
+    assert!(
+        matches!(frontend.begin(Operation::DesktopOwnershipObserve, Some(request.clone())), Begin::Immediate(value) if value["code"] == "native_observation_required")
+    );
+    assert!(frontend.state.lock().unwrap().operations.is_empty());
+    assert!(checked(
+        &request,
+        json!({"request_id":request.id(),"accepted":true,"durable":true}),
+        false
+    )
+    .is_none());
 }

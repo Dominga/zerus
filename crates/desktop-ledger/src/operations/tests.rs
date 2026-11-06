@@ -86,6 +86,354 @@ fn submitted() -> Outcome {
 fn proof() -> VerifiedDrain {
     VerifiedDrain::from_owned_resources(true, true, true, true).unwrap()
 }
+
+fn refusal_transaction(db: &mut Connection) -> Transaction<'_> {
+    db.execute_batch("CREATE TABLE fixture_refusals(value TEXT)")
+        .unwrap();
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    tx.execute("INSERT INTO fixture_refusals VALUES('before')", [])
+        .unwrap();
+    tx
+}
+
+fn commit_refusal(tx: Transaction<'_>) {
+    tx.execute("INSERT INTO fixture_refusals VALUES('after')", [])
+        .unwrap();
+    tx.commit().unwrap();
+}
+
+fn assert_automatic_rollback(tx: Transaction<'_>, error: anyhow::Error) {
+    assert!(tx.is_autocommit());
+    assert!(error.is::<OuterTransactionRolledBack>());
+    assert!(error.to_string().contains("outer transaction rolled back"));
+    assert!(matches!(error.downcast_ref::<rusqlite::Error>(),
+        Some(rusqlite::Error::SqliteFailure(_, Some(message))) if message == "fixture automatic rollback"));
+    assert!(!format!("{error:#}").contains("no such savepoint"));
+    assert_eq!(
+        tx.query_row("SELECT count(*) FROM fixture_refusals", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0,
+        "the caller's earlier work rolled back too"
+    );
+    let second = protected_in(&tx, "hgs_test", || -> Result<()> {
+        panic!("an auto-rolled-back transaction must not reach another write")
+    })
+    .unwrap_err();
+    assert!(second.is::<OuterTransactionRolledBack>());
+    assert!(
+        tx.commit().is_err(),
+        "the outer commit cannot claim success"
+    );
+}
+
+#[test]
+fn admission_automatic_rollback_preserves_its_original_failure() {
+    let mut db = db();
+    db.execute_batch("CREATE TRIGGER refuse_admission AFTER INSERT ON desktop_operations BEGIN SELECT RAISE(ROLLBACK,'fixture automatic rollback'); END;").unwrap();
+    let f = fixture();
+    let binding: Binding = serde_json::from_value(f["binding"].clone()).unwrap();
+    let tx = refusal_transaction(&mut db);
+    let error = admit_in(
+        &tx,
+        &Admission {
+            admission_id: ADMISSION,
+            binding: &binding,
+            raw_record: f["raw_record"].as_str().unwrap().as_bytes(),
+            retained_input: f["retained_input"].as_str().unwrap().as_bytes(),
+            provenance: &Value::Null,
+            writer_epoch: WRITER,
+            service_epoch: SERVICE,
+        },
+    )
+    .unwrap_err();
+    assert_automatic_rollback(tx, error);
+    assert_eq!(totals(&db).unwrap().unsettled, 0);
+}
+
+#[test]
+fn reservation_automatic_rollback_preserves_its_original_failure() {
+    let mut db = db();
+    let original = put(&mut db, 0);
+    db.execute_batch("CREATE TRIGGER refuse_attempt AFTER INSERT ON desktop_operation_attempts BEGIN SELECT RAISE(ROLLBACK,'fixture automatic rollback'); END;").unwrap();
+    let tx = refusal_transaction(&mut db);
+    let error = reserve_in(&tx, &request(&original, 0)).err().unwrap();
+    assert_automatic_rollback(tx, error);
+    assert_eq!(totals(&db).unwrap().undrained, 0);
+}
+
+#[test]
+fn cleanup_failure_retains_the_body_error_and_reports_outer_rollback() {
+    let mut db = db();
+    let tx = refusal_transaction(&mut db);
+    let error = protected_in(&tx, "hgs_test", || -> Result<()> {
+        tx.execute_batch("RELEASE hgs_test")?;
+        anyhow::bail!("fixture body failure")
+    })
+    .unwrap_err();
+    assert!(error.is::<OuterTransactionRolledBack>());
+    assert_eq!(error.root_cause().to_string(), "fixture body failure");
+    assert!(format!("{error:#}").contains("operation savepoint cleanup failed"));
+    assert!(tx.is_autocommit());
+    assert!(tx.commit().is_err());
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM fixture_refusals", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn admission_error_cannot_survive_a_callers_refusal_commit() {
+    let mut db = db();
+    db.execute_batch("CREATE TRIGGER refuse_admission AFTER INSERT ON desktop_operations BEGIN SELECT RAISE(FAIL,'fixture'); END;").unwrap();
+    let f = fixture();
+    let binding: Binding = serde_json::from_value(f["binding"].clone()).unwrap();
+    let tx = refusal_transaction(&mut db);
+    assert!(admit_in(
+        &tx,
+        &Admission {
+            admission_id: ADMISSION,
+            binding: &binding,
+            raw_record: f["raw_record"].as_str().unwrap().as_bytes(),
+            retained_input: f["retained_input"].as_str().unwrap().as_bytes(),
+            provenance: &Value::Null,
+            writer_epoch: WRITER,
+            service_epoch: SERVICE,
+        }
+    )
+    .is_err());
+    assert_eq!(
+        tx.query_row("SELECT count(*) FROM desktop_operations", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    commit_refusal(tx);
+    assert_eq!(totals(&db).unwrap().unsettled, 0);
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM desktop_operations", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM fixture_refusals", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+}
+
+#[test]
+fn reservation_error_cannot_survive_a_callers_refusal_commit() {
+    let mut db = db();
+    let original = put(&mut db, 0);
+    db.execute_batch("CREATE TRIGGER refuse_attempt AFTER INSERT ON desktop_operation_attempts BEGIN SELECT RAISE(FAIL,'fixture'); END;").unwrap();
+    let tx = refusal_transaction(&mut db);
+    assert!(reserve_in(&tx, &request(&original, 0)).is_err());
+    assert_eq!(
+        tx.query_row("SELECT count(*) FROM desktop_operation_attempts", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    commit_refusal(tx);
+    assert_eq!(totals(&db).unwrap().undrained, 0);
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM desktop_operation_attempts", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM fixture_refusals", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+}
+
+#[test]
+fn deferred_and_read_transactions_cannot_upgrade_inside_storage_calls() {
+    let mut db = db();
+    let original = put(&mut db, 0);
+    let f = fixture();
+    let binding: Binding = serde_json::from_value(f["binding"].clone()).unwrap();
+    for read in [false, true] {
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .unwrap();
+        if read {
+            tx.query_row("SELECT count(*) FROM desktop_operations", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap();
+        }
+        let error = admit_in(
+            &tx,
+            &Admission {
+                admission_id: ADMISSION,
+                binding: &binding,
+                raw_record: f["raw_record"].as_str().unwrap().as_bytes(),
+                retained_input: f["retained_input"].as_str().unwrap().as_bytes(),
+                provenance: &serde_json::json!({"import":"fixture","evidence":"staged"}),
+                writer_epoch: WRITER,
+                service_epoch: SERVICE,
+            },
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("acquired main write transaction"));
+        assert!(reserve_in(&tx, &request(&original, 0))
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("acquired main write transaction"));
+        tx.commit().unwrap();
+    }
+    assert_eq!(totals(&db).unwrap().undrained, 0);
+}
+
+#[test]
+fn invalid_legacy_inputs_refuse_before_a_contended_writer_lock() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state.sqlite3");
+    let mut owner = Connection::open(&path).unwrap();
+    owner
+        .execute_batch("CREATE TABLE fixture(value TEXT)")
+        .unwrap();
+    let mut caller = Connection::open(&path).unwrap();
+    caller.busy_timeout(std::time::Duration::ZERO).unwrap();
+    let _held = owner
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    let f = fixture();
+    let binding: Binding = serde_json::from_value(f["binding"].clone()).unwrap();
+    for (id, raw, expected) in [
+        (
+            "bad",
+            f["raw_record"].as_str().unwrap().as_bytes(),
+            "invalid ledger UUID",
+        ),
+        (ADMISSION, &b"changed"[..], "frozen operation bytes changed"),
+    ] {
+        let error = admit(
+            &mut caller,
+            &Admission {
+                admission_id: id,
+                binding: &binding,
+                raw_record: raw,
+                retained_input: f["retained_input"].as_str().unwrap().as_bytes(),
+                provenance: &Value::Null,
+                writer_epoch: WRITER,
+                service_epoch: SERVICE,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), expected);
+    }
+    let original = Admitted {
+        operation_id: "a".repeat(64),
+        admission_id: ADMISSION.into(),
+        binding_sha256: "b".repeat(64),
+        revision: 1,
+    };
+    let mut invalid = request(&original, 0);
+    invalid.attempt_id = "bad".into();
+    assert_eq!(
+        reserve(&mut caller, &invalid).err().unwrap().to_string(),
+        "invalid ledger UUID"
+    );
+    invalid.attempt_id = id(100);
+    invalid.revision = 0;
+    assert_eq!(
+        reserve(&mut caller, &invalid).err().unwrap().to_string(),
+        "invalid operation revision"
+    );
+}
+
+#[test]
+fn actor_transaction_owns_admission_and_reservation_commit_or_rollback() {
+    for commit in [false, true] {
+        let mut db = db();
+        let f = fixture();
+        let binding: Binding = serde_json::from_value(f["binding"].clone()).unwrap();
+        let admission = Admission {
+            admission_id: ADMISSION,
+            binding: &binding,
+            raw_record: f["raw_record"].as_str().unwrap().as_bytes(),
+            retained_input: f["retained_input"].as_str().unwrap().as_bytes(),
+            provenance: &Value::Null,
+            writer_epoch: WRITER,
+            service_epoch: SERVICE,
+        };
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let original = admit_in(&tx, &admission).unwrap();
+        let request = request(&original, 0);
+        let reserved = reserve_in(&tx, &request).unwrap();
+        assert!(reserved.fresh);
+        assert_eq!(admit_in(&tx, &admission).unwrap(), original);
+        let duplicate = reserve_in(&tx, &request).unwrap();
+        assert!(!duplicate.fresh);
+        assert_eq!(duplicate.attempt, reserved.attempt);
+        assert_eq!(totals(&tx).unwrap().unsettled, 1);
+        assert_eq!(totals(&tx).unwrap().undrained, 1);
+        if commit {
+            tx.commit().unwrap();
+            let frozen = load(&db, &original.operation_id).unwrap();
+            assert_eq!(frozen.raw_record, admission.raw_record);
+            assert_eq!(frozen.retained_input, admission.retained_input);
+            assert!(!reserve(&mut db, &request).unwrap().fresh);
+        } else {
+            // A later native-guard refusal must discard the entire actor turn.
+            tx.rollback().unwrap();
+            assert!(load(&db, &original.operation_id).is_err());
+            assert_eq!(totals(&db).unwrap().unsettled, 0);
+            assert_eq!(totals(&db).unwrap().undrained, 0);
+        }
+    }
+}
+
+#[test]
+fn transaction_scoped_calls_keep_the_sql_revocation_fence() {
+    let mut db = db();
+    let f = fixture();
+    let binding: Binding = serde_json::from_value(f["binding"].clone()).unwrap();
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    crate::revoke(&tx, "fixture").unwrap();
+    assert!(admit_in(
+        &tx,
+        &Admission {
+            admission_id: ADMISSION,
+            binding: &binding,
+            raw_record: f["raw_record"].as_str().unwrap().as_bytes(),
+            retained_input: f["retained_input"].as_str().unwrap().as_bytes(),
+            provenance: &Value::Null,
+            writer_epoch: WRITER,
+            service_epoch: SERVICE,
+        }
+    )
+    .is_err());
+    tx.rollback().unwrap();
+    let original = put(&mut db, 0);
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    crate::revoke(&tx, "fixture").unwrap();
+    assert!(reserve_in(&tx, &request(&original, 0)).is_err());
+    assert_eq!(totals(&tx).unwrap().undrained, 0);
+    tx.rollback().unwrap();
+}
+
 #[test]
 fn shared_utf8_vector_preserves_each_distinct_digest_and_exact_body() {
     let mut db = db();

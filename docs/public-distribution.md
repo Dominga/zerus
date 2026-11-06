@@ -571,15 +571,12 @@ atomically replaced. Clients receive only `/downloads/<tag>/<name>` URLs.
 ```sh
 python3 -m unittest discover -s tests -p test_update_feed.py -v
 python3 -m unittest discover -s tests -p test_mobile_release.py -v
-bash scripts/ci/gui.sh
+(cd client && npm exec -- vitest run)
 ```
 
-The update controller, the Updates settings page and the update entries in the
-sessions window and tray menu are part of the regular desktop build, so the
-desktop script runs their checks with the rest of the Qt suite (see
-[CONTRIBUTING.md](../CONTRIBUTING.md)): `test_updates` covers the controller
-and `test_sessionswindow` the route from the sessions window to the Updates
-page. Deploy only the reviewed current-main GUI within the existing update
+The Next update controller, settings page and menu routes are covered by the
+client core/native/frontend suites documented in [CONTRIBUTING.md](../CONTRIBUTING.md).
+Deploy only the reviewed current-main GUI within the existing update
 authorization, with `tray/install.sh`, which replaces a running GUI through
 `tray/update-installed.py`. An older worktree GUI must not replace a newer
 desktop. Source commits, pushes and hosted CI dispatch remain separately

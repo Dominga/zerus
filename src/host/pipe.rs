@@ -223,6 +223,10 @@ fn load_timeout(slot: &AtomicU64) -> Option<Duration> {
 }
 
 impl PipeStream {
+    /// Retain this exact connection for the shared bounded server verifier.
+    pub(crate) fn verification_handle(&self) -> io::Result<OwnedHandle> {
+        self.0.handle.try_clone()
+    }
     fn new(handle: OwnedHandle) -> io::Result<Self> {
         Ok(Self(Arc::new(Shared {
             handle,
@@ -304,7 +308,7 @@ impl PipeStream {
     }
 
     /// The server process's ID, once its token shows this process's user.
-    fn verify_server(&self) -> Result<u32, ConnectError> {
+    pub(crate) fn verify_server(&self) -> Result<u32, ConnectError> {
         let unverified = |error: io::Error| {
             ConnectError::Refused(format!("cannot verify the session host: {error}"))
         };

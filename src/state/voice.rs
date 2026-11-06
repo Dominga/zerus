@@ -518,6 +518,9 @@ fn record(name: &str) -> Result<Value> {
     }
 }
 fn checked(name: &str, request: &Value) -> Result<Value> {
+    // zerus-ucck P3c: the request's identities select among sessions that
+    // share the label.
+    expect(name, string(request, "expected_run_id"), string(request, "expected_conversation_id"))?;
     let value = record(name)?;
     if value["run_id"] != request["expected_run_id"]
         || value["conversation_id"] != request["expected_conversation_id"]
@@ -821,7 +824,7 @@ fn current(job: &Value) -> Result<Value> {
     }
     let mut candidates = records()?.into_iter().filter(matches).collect::<Vec<_>>();
     // DSH bindings are separate; inspect only private bounded manifests.
-    for entry in ["dsh/bindings","opencode/bindings"].into_iter().flat_map(|directory| fs::read_dir(root().join(directory)))
+    for entry in ["dsh/bindings","opencode/bindings","dsh/sessions","opencode/sessions"].into_iter().flat_map(|directory| fs::read_dir(root().join(directory)))
         .flatten()
         .flatten()
         .take(10000)
@@ -1270,6 +1273,7 @@ fn worker() -> Result<i32> {
     }
 }
 fn ensure_worker() -> Result<()> {
+    let executable = crate::self_exec::current().map_err(err)?;
     #[cfg(target_os = "linux")]
     if home()
         .join(".config/systemd/user/hgs-voice.service")
@@ -1286,7 +1290,7 @@ fn ensure_worker() -> Result<()> {
     if crate::status::locked(&worker_lock()) || service_worker::waiting(&standby_lock()) {
         return Ok(());
     }
-    let mut cmd = Command::new(std::env::current_exe().map_err(err)?);
+    let mut cmd = Command::new(executable);
     cmd.args(["voice", "worker"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1299,6 +1303,18 @@ fn ensure_worker() -> Result<()> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_image_refuses_before_service_activation() {
+        crate::self_exec::private_probe("state::voice::tests::service_activation_probe");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "run by test_image_refuses_before_service_activation"]
+    fn service_activation_probe() {
+        crate::self_exec::probe_child("state::voice::tests::service_activation_probe");
+        assert_eq!(ensure_worker().unwrap_err(), crate::self_exec::TEST_IMAGE);
+    }
     const ID: &str = "11111111-1111-4111-8111-111111111111";
     #[test]
     fn video_acceptance_keeps_one_durable_media_identity_and_audio_fallback() {

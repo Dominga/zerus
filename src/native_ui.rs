@@ -25,7 +25,7 @@ use std::{
 const UNSUPPORTED: &str =
     "The native DeepSeek UI of another machine is not available from Windows yet; open it on that machine.";
 #[cfg(not(unix))]
-pub fn address(config: &Config, target: &str, name: &str) -> Result<String> {
+pub fn address(config: &Config, target: &str, name: &str, _selector: Option<&str>) -> Result<String> {
     if !target.is_empty() && !config.is_self(target) {
         return Err(Error::new(2, UNSUPPORTED));
     }
@@ -44,12 +44,12 @@ pub fn address(config: &Config, target: &str, name: &str) -> Result<String> {
     Ok(url)
 }
 #[cfg(not(unix))]
-pub fn open(config: &Config, target: &str, name: &str, dry: bool) -> Result<i32> {
+pub fn open(config: &Config, target: &str, name: &str, selector: Option<&str>, dry: bool) -> Result<i32> {
     if dry {
         println!("Open official DeepSeek UI for {name}");
         return Ok(0);
     }
-    let url = address(config, target, name)?;
+    let url = address(config, target, name, selector)?;
     // Explorer hands the URL to the default browser; its exit code says nothing.
     std::process::Command::new("explorer.exe")
         .arg(&url)
@@ -61,8 +61,10 @@ pub fn open(config: &Config, target: &str, name: &str, dry: bool) -> Result<i32>
 
 // Shared by the embedded view and external browser. The returned launch URL
 // is private; callers must never put it in ordinary session state or logs.
+// `selector` is a remote `--session-id`, which only a peer that lists the
+// selector receives and resolves itself; `name` may then be empty.
 #[cfg(unix)]
-pub fn address(config: &Config, target: &str, name: &str) -> Result<String> {
+pub fn address(config: &Config, target: &str, name: &str, selector: Option<&str>) -> Result<String> {
     if crate::wsl::profile(config, target).is_some() {
         return Err(Error::new(2, "Open the native UI in the selected WSL environment; this transport does not create SSH tunnels"));
     }
@@ -71,7 +73,17 @@ pub fn address(config: &Config, target: &str, name: &str) -> Result<String> {
         if target.starts_with('-') || target.chars().any(char::is_whitespace) {
             return Err(Error::new(1, "Invalid SSH target"));
         }
-        let command = format!("~/.local/bin/hgs __dsh-ui-url {}", platform::remote_quote(name));
+        let command = match selector {
+            Some(id) => {
+                let mut args = vec!["__dsh-ui-url".to_owned()];
+                if !name.is_empty() {
+                    args.push(name.to_owned());
+                }
+                args.extend(["--session-id".to_owned(), id.to_owned()]);
+                crate::cli::gated(&[crate::cli::Marker::Line(crate::cli::SELECTOR)], &args)
+            }
+            None => format!("~/.local/bin/hgs __dsh-ui-url {}", platform::remote_quote(name)),
+        };
         let out = platform::ssh()
             .args(crate::machines::ssh_options(config, target))
             .args([
@@ -93,6 +105,9 @@ pub fn address(config: &Config, target: &str, name: &str) -> Result<String> {
             .ok_or_else(|| Error::new(1, "Missing native UI address"))?
             .to_owned()
     } else {
+        if selector.is_some() {
+            return Err(Error::new(1, "A local session ID is resolved before the native UI"));
+        }
         crate::state::dsh::native_ui_url(name).map_err(|e| Error::new(1, e))?
     };
     let pattern =
@@ -165,12 +180,15 @@ pub fn address(config: &Config, target: &str, name: &str) -> Result<String> {
 }
 
 #[cfg(unix)]
-pub fn open(config: &Config, target: &str, name: &str, dry: bool) -> Result<i32> {
+pub fn open(config: &Config, target: &str, name: &str, selector: Option<&str>, dry: bool) -> Result<i32> {
     if dry {
-        println!("Open official DeepSeek UI for {name}");
+        match selector {
+            Some(id) => println!("Open official DeepSeek UI for session ID {id}"),
+            None => println!("Open official DeepSeek UI for {name}"),
+        }
         return Ok(0);
     }
-    let url = address(config, target, name)?;
+    let url = address(config, target, name, selector)?;
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else {

@@ -92,6 +92,14 @@ fn read(id: &str) -> Result<Option<Value>> {
     Ok(Some(value))
 }
 
+/// The original receipt for the worktree actor's read-only recovery. A
+/// missing or unreadable receipt never authorizes another request.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn original_receipt(id: &str) -> Result<Option<Value>> {
+    token(&["--request-id".into(), id.into()])?;
+    read(id)
+}
+
 fn lock(id: &str, create: bool) -> Result<File> {
     let mut options = OpenOptions::new();
     options
@@ -144,12 +152,38 @@ pub(super) fn control(action: &str, args: &[String]) -> Result<Value> {
     Ok(value)
 }
 
+/// Runs in-process here: no self-exec to guard.
 #[cfg(not(unix))]
 pub(super) fn create(args: &[String]) -> Result<Value> {
     create_direct(args)
 }
 
 fn create_direct(args: &[String]) -> Result<Value> {
+    create_receipt(args, None)
+}
+
+/// An owned (service) worktree request. The actor's Reserve check precedes
+/// the original receipt; the same receipt store means it is never replayed.
+#[cfg(unix)]
+#[cfg_attr(not(all(test, target_os = "linux")), allow(dead_code))] // Wired by the worktree actor.
+pub(crate) fn create_owned(
+    args: &[String],
+    control: &super::worktrees::Control<'_>,
+) -> Result<Value> {
+    // Git binds the pinned common directory through its own descriptor
+    // (/proc/self/fd), which only Linux offers. Elsewhere the owned effect is
+    // refused before its reservation, receipt or any effect.
+    if !cfg!(target_os = "linux") {
+        return Err("creation_worktree_unsupported".into());
+    }
+    (control.before)(super::worktrees::Step::Reserve)?;
+    create_receipt(args, Some(control))
+}
+
+fn create_receipt(
+    args: &[String],
+    control: Option<&super::worktrees::Control<'_>>,
+) -> Result<Value> {
     let id = token(args)?;
     let args: Vec<String> = args.iter().filter(|a| *a != "--receipt").cloned().collect();
     let fingerprint = format!(
@@ -179,23 +213,34 @@ fn create_direct(args: &[String]) -> Result<Value> {
     atomic(&folder().join(format!("{id}.json")), &receipt.to_string())?;
     CANCEL.with(|slot| *slot.borrow_mut() = Some(folder().join(format!("{id}.cancel"))));
     EFFECTS.with(|slot| slot.set(false));
-    let result = super::worktrees::create(&args);
+    let result = super::worktrees::create_with(&args, control);
     CANCEL.with(|slot| *slot.borrow_mut() = None);
     match result {
         Ok(value) => {
-            receipt["creation_owner"] = value["common_dir"]
-                .as_str()
-                .zip(value["path"].as_str())
-                .and_then(|(common, path)| {
-                    super::worktree_lifecycle::owned(Path::new(common), Path::new(path))
-                })
-                .unwrap_or(Value::Null);
+            // An owned creation returns its ownership evidence, verified under
+            // its own custody; it starts no plain Git lookup here.
+            if control.is_none() {
+                receipt["creation_owner"] = value["common_dir"]
+                    .as_str()
+                    .zip(value["path"].as_str())
+                    .and_then(|(common, path)| {
+                        super::worktree_lifecycle::owned(Path::new(common), Path::new(path))
+                    })
+                    .unwrap_or(Value::Null);
+            }
             for (key, value) in value.as_object().ok_or("Invalid worktree result")? {
                 receipt[key] = value.clone();
             }
         }
         Err(error) => {
-            receipt["status"] = json!("failed");
+            // After an owned creation's effects started, a refusal or identity
+            // failure leaves an uncertain checkout: never Created or Failed.
+            let effects = EFFECTS.with(std::cell::Cell::get);
+            receipt["status"] = json!(if control.is_some() && effects {
+                "unconfirmed"
+            } else {
+                "failed"
+            });
             receipt["detail"] = json!(error.chars().take(4096).collect::<String>());
         }
     }
@@ -217,6 +262,7 @@ fn image_proof(identity: crate::platform::FileIdentity) -> String {
 pub(super) fn create(args: &[String]) -> Result<Value> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
+    crate::self_exec::ensure().map_err(|e| e.to_string())?;
     #[cfg(target_os = "linux")]
     let executable = PathBuf::from("/proc/self/exe");
     #[cfg(not(target_os = "linux"))]
@@ -277,4 +323,732 @@ pub(super) fn worker(args: &[String]) -> Result<i32> {
         .write_all(&bytes)
         .map_err(|e| e.to_string())?;
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_image_refuses_the_worker_wrapper_before_self_exec() {
+        crate::self_exec::private_probe("state::worktree_requests::tests::worker_wrapper_probe");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "run by test_image_refuses_the_worker_wrapper_before_self_exec"]
+    fn worker_wrapper_probe() {
+        crate::self_exec::probe_child("state::worktree_requests::tests::worker_wrapper_probe");
+        let id = "11111111-1111-4111-8111-111111111111";
+        let args = ["--receipt", "--request-id", id, "--json"].map(String::from);
+        assert_eq!(
+            super::create(&args).unwrap_err(),
+            crate::self_exec::TEST_IMAGE
+        );
+        assert!(
+            !super::folder().exists(),
+            "no request receipt store is touched"
+        );
+    }
+
+    /// Runs inside the private probe, whose HOME/state are private: a real
+    /// repository fixture, the original custody lock and recorded steps.
+    #[cfg(target_os = "linux")]
+    fn owned(
+        before: impl Fn(super::super::worktrees::Step) -> super::Result<()>,
+    ) -> (
+        std::path::PathBuf,
+        std::path::PathBuf,
+        super::Result<serde_json::Value>,
+    ) {
+        use std::sync::{atomic::AtomicBool, Arc};
+        let root = std::path::PathBuf::from(std::env::var("TMPDIR").unwrap());
+        let repository = root.join("repo");
+        std::fs::create_dir(&repository).unwrap();
+        let destination = root.join("repo-zerus-example");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(root.join("custody.lock"))
+            .unwrap();
+        let custody: Arc<_> =
+            zerus_client_core::run::custody::InheritedLock::try_lock(file).unwrap();
+        let cancelled = AtomicBool::new(false);
+        let id = "22222222-2222-4222-8222-222222222222";
+        let args = [
+            "--path",
+            repository.to_str().unwrap(),
+            "--common-dir",
+            repository.join(".git").to_str().unwrap(),
+            "--branch",
+            "zerus-example",
+            "--base",
+            "HEAD",
+            "--destination",
+            destination.to_str().unwrap(),
+            "--request-id",
+            id,
+            "--json",
+        ]
+        .map(String::from);
+        let result = super::create_owned(
+            &args,
+            &super::super::worktrees::Control {
+                before: &before,
+                cancelled: &cancelled,
+                custody: &custody,
+            },
+        );
+        (
+            super::folder().join(format!("{id}.json")),
+            destination,
+            result,
+        )
+    }
+
+    /// A real repository with a commit, optionally tracking a local remote.
+    #[cfg(target_os = "linux")]
+    fn repository(root: &std::path::Path, tracked: bool) -> std::path::PathBuf {
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args([
+                    "-c",
+                    "user.name=fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{args:?}: {output:?}");
+        };
+        std::fs::create_dir_all(root).unwrap();
+        git(root, &["init", "-q", "-b", "main", "repo"]);
+        let repo = root.join("repo").canonicalize().unwrap();
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "fixture"]);
+        if tracked {
+            git(root, &["init", "-q", "--bare", "origin.git"]);
+            let origin = root.join("origin.git");
+            git(
+                &repo,
+                &["remote", "add", "origin", origin.to_str().unwrap()],
+            );
+            git(&repo, &["push", "-q", "origin", "main"]);
+            git(&repo, &["config", "branch.main.remote", "origin"]);
+            git(&repo, &["config", "branch.main.merge", "refs/heads/main"]);
+        }
+        repo
+    }
+
+    /// One owned creation with real Git through the direct test seam.
+    #[cfg(target_os = "linux")]
+    fn owned_git_create(
+        repo: &std::path::Path,
+        id: &str,
+        before: impl Fn(super::super::worktrees::Step) -> super::Result<()>,
+    ) -> (std::path::PathBuf, serde_json::Value) {
+        use std::sync::{atomic::AtomicBool, Arc};
+        let destination = repo.with_file_name("repo-zerus-owned");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(repo.with_file_name(format!("{id}.custody")))
+            .unwrap();
+        let custody: Arc<_> =
+            zerus_client_core::run::custody::InheritedLock::try_lock(file).unwrap();
+        let cancelled = AtomicBool::new(false);
+        let args = [
+            "--path",
+            repo.to_str().unwrap(),
+            "--common-dir",
+            repo.join(".git").to_str().unwrap(),
+            "--branch",
+            "zerus-owned",
+            "--base",
+            "HEAD",
+            "--destination",
+            destination.to_str().unwrap(),
+            "--request-id",
+            id,
+            "--json",
+        ]
+        .map(String::from);
+        super::super::repositories::OWNED_GIT_DIRECT.with(|direct| direct.set(true));
+        let receipt = super::create_owned(
+            &args,
+            &super::super::worktrees::Control {
+                before: &before,
+                cancelled: &cancelled,
+                custody: &custody,
+            },
+        )
+        .unwrap();
+        super::super::repositories::OWNED_GIT_DIRECT.with(|direct| direct.set(false));
+        (destination, receipt)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn config(repo: &std::path::Path, key: &str) -> Option<String> {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["config", "--get", key])
+            .output()
+            .unwrap();
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+    #[cfg(target_os = "linux")]
+    fn branch_exists(repo: &std::path::Path) -> bool {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["rev-parse", "--verify", "--quiet", "refs/heads/zerus-owned"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owned_creation_with_real_git_checks_every_step_and_its_pinned_objects() {
+        crate::self_exec::private_probe_with(
+            "state::worktree_requests::tests::owned_real_git_probe",
+            120,
+            96,
+        );
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "run by owned_creation_with_real_git_checks_every_step_and_its_pinned_objects"]
+    fn owned_real_git_probe() {
+        crate::self_exec::probe_child("state::worktree_requests::tests::owned_real_git_probe");
+        use super::super::worktrees::Step;
+        let base = std::path::PathBuf::from(std::env::var("TMPDIR").unwrap());
+        // Every scenario has its own original request UUID.
+        let next = std::cell::Cell::new(0u32);
+        let id = || {
+            next.set(next.get() + 1);
+            format!("{:08x}-1111-4111-8111-111111111111", next.get())
+        };
+
+        // Baseline: all six steps, the checkout, tracking and ownership.
+        // The repository's post-checkout hook runs once in the checkout, as
+        // `worktree add` runs it.
+        let calls = std::sync::Mutex::new(Vec::new());
+        let repo = repository(&base.join("baseline"), true);
+        let hook = repo.join(".git/hooks/post-checkout");
+        std::fs::write(&hook, "#!/bin/sh\necho \"$1 $2 $3\" >> post-checkout.log\n").unwrap();
+        std::fs::set_permissions(
+            &hook,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        let (destination, receipt) = owned_git_create(&repo, &id(), |step| {
+            calls.lock().unwrap().push(step);
+            Ok(())
+        });
+        assert_eq!(receipt["status"], "created", "{receipt}");
+        let head = receipt["head"].as_str().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(destination.join("post-checkout.log")).unwrap(),
+            format!("{} {head} 1\n", "0".repeat(head.len()))
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                Step::Reserve,
+                Step::Destination,
+                Step::Checkout,
+                Step::Verify,
+                Step::Track,
+                Step::Own
+            ]
+        );
+        assert!(destination.join(".git").is_file() && branch_exists(&repo));
+        assert_eq!(
+            config(&repo, "branch.zerus-owned.remote").as_deref(),
+            Some("origin")
+        );
+        assert!(receipt["creation_owner"]["id"].is_string(), "{receipt}");
+        let metadata =
+            std::path::PathBuf::from(receipt["creation_owner"]["metadata"].as_str().unwrap());
+        assert!(metadata.join("zerus-owner.json").is_file());
+
+        // A repository without an inherited upstream passes the same six
+        // checked steps; Track writes nothing there.
+        let calls = std::sync::Mutex::new(Vec::new());
+        let repo = repository(&base.join("no-upstream"), false);
+        let (destination, receipt) = owned_git_create(&repo, &id(), |step| {
+            calls.lock().unwrap().push(step);
+            Ok(())
+        });
+        assert_eq!(receipt["status"], "created", "{receipt}");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                Step::Reserve,
+                Step::Destination,
+                Step::Checkout,
+                Step::Verify,
+                Step::Track,
+                Step::Own
+            ]
+        );
+        assert!(destination.join(".git").is_file() && branch_exists(&repo));
+        assert!(config(&repo, "branch.zerus-owned.remote").is_none());
+        assert!(receipt["upstream"].is_null(), "{receipt}");
+        assert!(receipt["creation_owner"]["id"].is_string(), "{receipt}");
+
+        // A refused Track or Own leaves its write undone and the result unconfirmed.
+        for (name, refused) in [("track", Step::Track), ("own", Step::Own)] {
+            let repo = repository(&base.join(name), true);
+            let (destination, receipt) = owned_git_create(&repo, &id(), |step| {
+                if step == refused {
+                    Err("creation_lease_revoked".into())
+                } else {
+                    Ok(())
+                }
+            });
+            assert_eq!(receipt["status"], "unconfirmed", "{name}: {receipt}");
+            assert!(destination.join(".git").is_file(), "{name}: checkout kept");
+            assert_eq!(
+                config(&repo, "branch.zerus-owned.remote").is_some(),
+                refused == Step::Own,
+                "{name}: tracking written only after its own check"
+            );
+            assert!(
+                receipt.get("creation_owner").is_none_or(|v| v.is_null()),
+                "{name}"
+            );
+        }
+
+        // A replaced destination or parent before Checkout: nothing is checked
+        // out into the replacement, and the branch is never created.
+        for (name, swap_parent) in [("dest-swap", false), ("parent-swap", true)] {
+            let repo = repository(&base.join(name).join("inner"), false);
+            let (destination, receipt) = owned_git_create(&repo, &id(), |step| {
+                if step == Step::Checkout {
+                    let victim = if swap_parent {
+                        repo.parent().unwrap().to_path_buf()
+                    } else {
+                        repo.with_file_name("repo-zerus-owned")
+                    };
+                    let moved = victim.with_file_name("moved");
+                    std::fs::rename(&victim, &moved).unwrap();
+                    std::fs::create_dir(&victim).unwrap();
+                    if swap_parent {
+                        // Keep the repository reachable at its admitted path.
+                        std::fs::rename(moved.join("repo"), victim.join("repo")).unwrap();
+                    }
+                }
+                Ok(())
+            });
+            assert_eq!(receipt["status"], "unconfirmed", "{name}: {receipt}");
+            assert!(
+                !destination.join(".git").exists(),
+                "{name}: replacement untouched"
+            );
+            assert!(!branch_exists(&repo), "{name}: no branch");
+        }
+
+        // A redirected common directory before Checkout or Track: the
+        // foreign repository never receives the branch or tracking writes.
+        for (name, at) in [
+            ("common-checkout", Step::Checkout),
+            ("common-track", Step::Track),
+        ] {
+            let repo = repository(&base.join(name), true);
+            let foreign = repository(&base.join(name).join("foreign"), false);
+            let (_, receipt) = owned_git_create(&repo, &id(), |step| {
+                if step == at {
+                    std::fs::rename(repo.join(".git"), repo.join(".git-admitted")).unwrap();
+                    std::os::unix::fs::symlink(foreign.join(".git"), repo.join(".git")).unwrap();
+                }
+                Ok(())
+            });
+            assert_eq!(receipt["status"], "unconfirmed", "{name}: {receipt}");
+            assert!(
+                !branch_exists(&foreign),
+                "{name}: foreign repository untouched"
+            );
+            assert!(
+                config(&foreign, "branch.zerus-owned.remote").is_none(),
+                "{name}"
+            );
+        }
+
+        // A checkout replaced before Own is never reported as Created.
+        let repo = repository(&base.join("own-swap"), true);
+        let (destination, receipt) = owned_git_create(&repo, &id(), |step| {
+            if step == Step::Own {
+                let moved = destination_of(&repo).with_file_name("moved");
+                std::fs::rename(destination_of(&repo), &moved).unwrap();
+                std::fs::create_dir(destination_of(&repo)).unwrap();
+            }
+            Ok(())
+        });
+        assert_eq!(receipt["status"], "unconfirmed", "{receipt}");
+        assert!(
+            std::fs::read_dir(&destination).unwrap().next().is_none(),
+            "replacement stays empty"
+        );
+
+        // The common directory replaced after the checkout's final identity
+        // checks, before Git's own open: Git still writes only into the pinned
+        // object it holds, and the foreign repository is untouched.
+        let repo = repository(&base.join("common-late"), false);
+        let foreign = repository(&base.join("common-late").join("foreign"), false);
+        let (admitted, link, target) = (
+            repo.join(".git-admitted"),
+            repo.join(".git"),
+            foreign.join(".git"),
+        );
+        super::super::worktrees::BEFORE_OWNED_CHECKOUT.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::fs::rename(&link, &admitted).unwrap();
+                std::os::unix::fs::symlink(&target, &link).unwrap();
+            }))
+        });
+        let (_, receipt) = owned_git_create(&repo, &id(), |_| Ok(()));
+        assert_eq!(receipt["status"], "unconfirmed", "{receipt}");
+        assert!(!branch_exists(&foreign), "foreign repository untouched");
+        assert!(
+            !foreign.join(".git/worktrees").exists(),
+            "no foreign worktree entry"
+        );
+        assert!(
+            branch_in(&repo.join(".git-admitted")),
+            "the branch is in the pinned repository"
+        );
+
+        // The tree checkout runs after `worktree add`, with GIT_DIR and
+        // GIT_COMMON_DIR bound to the pinned entry and common directory. A
+        // common directory or entry replaced in between receives nothing.
+        for (name, swap_common) in [("tree-common", true), ("tree-entry", false)] {
+            let repo = repository(&base.join(name), false);
+            let foreign = repository(&base.join(name).join("foreign"), false);
+            let (git, foreign_git) = (repo.join(".git"), foreign.join(".git"));
+            super::super::worktrees::BEFORE_OWNED_TREE.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    if swap_common {
+                        std::fs::rename(&git, git.with_file_name(".git-admitted")).unwrap();
+                        // A prepared foreign entry at the same name.
+                        std::fs::create_dir_all(foreign_git.join("worktrees/-")).unwrap();
+                        std::os::unix::fs::symlink(&foreign_git, &git).unwrap();
+                    } else {
+                        let entry = git.join("worktrees/-");
+                        std::fs::rename(&entry, git.join("worktrees/moved-entry")).unwrap();
+                        std::fs::create_dir(&entry).unwrap();
+                    }
+                }))
+            });
+            let (destination, receipt) = owned_git_create(&repo, &id(), |_| Ok(()));
+            assert_eq!(receipt["status"], "unconfirmed", "{name}: {receipt}");
+            let (written, untouched) = if swap_common {
+                (
+                    repo.join(".git-admitted/worktrees/-"),
+                    foreign.join(".git/worktrees/-"),
+                )
+            } else {
+                (repo.join(".git/worktrees/moved-entry"), repo.join(".git/worktrees/-"))
+            };
+            assert!(written.join("index").is_file(), "{name}: pinned entry");
+            assert!(
+                std::fs::read_dir(&untouched).unwrap().next().is_none(),
+                "{name}: the replacement receives no index"
+            );
+            assert!(destination.join(".git").is_file(), "{name}: the checkout is kept");
+        }
+
+        // The common directory replaced while Git runs the tree checkout,
+        // after its setup: a smudge filter is the scheduling point. Git's
+        // files ref backend would resolve refs through the real path it took
+        // at startup, so a ref update here would land in the foreign
+        // repository, which has a branch of the same name. The checkout
+        // updates no ref, and the foreign repository receives nothing.
+        let root = base.join("tree-during");
+        let repo = repository(&root, false);
+        let foreign = repository(&root.join("foreign"), false);
+        let fixture = |dir: &std::path::Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args([
+                    "-c",
+                    "user.name=fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{args:?}: {output:?}");
+        };
+        fixture(
+            &foreign,
+            &["commit", "-q", "--allow-empty", "-m", "foreign"],
+        );
+        fixture(&foreign, &["branch", "zerus-owned"]);
+        std::fs::write(repo.join(".gitattributes"), "* filter=swap\n").unwrap();
+        std::fs::write(repo.join("file"), "content\n").unwrap();
+        fixture(&repo, &["add", ".gitattributes", "file"]);
+        fixture(&repo, &["commit", "-q", "-m", "filtered"]);
+        let (mark, script) = (root.join("swapped"), root.join("swap.sh"));
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nif [ ! -e '{mark}' ]; then : > '{mark}'; mv '{git}' '{git}-admitted' && ln -s '{foreign}' '{git}'; fi\nexec cat\n",
+                mark = mark.display(),
+                git = repo.join(".git").display(),
+                foreign = foreign.join(".git").display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        fixture(
+            &repo,
+            &["config", "filter.swap.smudge", script.to_str().unwrap()],
+        );
+        let tree = |dir: &std::path::Path| {
+            let mut found = std::collections::BTreeMap::new();
+            let mut pending = vec![dir.to_path_buf()];
+            while let Some(next) = pending.pop() {
+                for item in std::fs::read_dir(&next).unwrap() {
+                    let path = item.unwrap().path();
+                    let kind = std::fs::symlink_metadata(&path).unwrap();
+                    let content = if kind.is_dir() {
+                        pending.push(path.clone());
+                        Vec::new()
+                    } else if kind.is_symlink() {
+                        std::fs::read_link(&path)
+                            .unwrap()
+                            .into_os_string()
+                            .into_encoded_bytes()
+                    } else {
+                        std::fs::read(&path).unwrap()
+                    };
+                    found.insert(path, content);
+                }
+            }
+            found
+        };
+        let before = tree(&foreign.join(".git"));
+        let (destination, receipt) = owned_git_create(&repo, &id(), |_| Ok(()));
+        assert!(mark.exists(), "the swap ran inside the tree checkout");
+        assert_eq!(receipt["status"], "unconfirmed", "{receipt}");
+        assert_eq!(
+            tree(&foreign.join(".git")),
+            before,
+            "the foreign repository receives no ref, reflog or lock"
+        );
+        assert!(
+            repo.join(".git-admitted/worktrees/-/index").is_file(),
+            "the index is in the pinned entry"
+        );
+        assert_eq!(
+            std::fs::read_to_string(destination.join("file")).unwrap(),
+            "content\n",
+            "the work tree was checked out"
+        );
+
+        // Checkout pins the metadata entry it just made; Own writes only
+        // through that object. A replacement at the same path (even a full
+        // copy of Git's links), a changed backlink or an existing owner file
+        // leaves the result unconfirmed, and no owner file is ever overwritten.
+        for (name, swap, sentinel, backlink) in [
+            ("own-replaced", true, true, false),
+            ("own-replaced-copy", true, false, false),
+            ("own-existing-marker", false, true, false),
+            ("own-backlink-changed", false, false, true),
+        ] {
+            let repo = repository(&base.join(name), false);
+            let entry = repo.join(".git/worktrees/-");
+            let moved = entry.with_file_name("moved-entry");
+            let (_, receipt) = owned_git_create(&repo, &id(), |step| {
+                if step == Step::Own {
+                    if swap {
+                        std::fs::rename(&entry, &moved).unwrap();
+                        std::fs::create_dir(&entry).unwrap();
+                        // Only identity tells this copy from Git's entry.
+                        for file in ["gitdir", "HEAD", "commondir", "index"] {
+                            if moved.join(file).exists() {
+                                std::fs::copy(moved.join(file), entry.join(file)).unwrap();
+                            }
+                        }
+                    }
+                    if sentinel {
+                        std::fs::write(entry.join("zerus-owner.json"), "sentinel\n").unwrap();
+                    }
+                    if backlink {
+                        std::fs::write(entry.join("gitdir"), "/elsewhere/.git\n").unwrap();
+                    }
+                }
+                Ok(())
+            });
+            assert_eq!(receipt["status"], "unconfirmed", "{name}: {receipt}");
+            let owner = std::fs::read_to_string(entry.join("zerus-owner.json")).ok();
+            assert_eq!(
+                owner.as_deref(),
+                sentinel.then_some("sentinel\n"),
+                "{name}: never written or overwritten"
+            );
+            assert!(
+                !moved.join("zerus-owner.json").exists(),
+                "{name}: no owner file in the moved entry"
+            );
+            assert!(
+                receipt.get("creation_owner").is_none_or(|v| v.is_null()),
+                "{name}"
+            );
+        }
+    }
+    #[cfg(target_os = "linux")]
+    fn branch_in(git_dir: &std::path::Path) -> bool {
+        std::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(git_dir)
+            .args(["rev-parse", "--verify", "--quiet", "refs/heads/zerus-owned"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    }
+    #[cfg(target_os = "linux")]
+    fn destination_of(repo: &std::path::Path) -> std::path::PathBuf {
+        repo.with_file_name("repo-zerus-owned")
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_anchored_checkout_follows_the_pinned_destination_not_its_path() {
+        crate::self_exec::private_probe_with(
+            "state::worktree_requests::tests::anchored_checkout_probe",
+            120,
+            96,
+        );
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "run by an_anchored_checkout_follows_the_pinned_destination_not_its_path"]
+    fn anchored_checkout_probe() {
+        crate::self_exec::probe_child("state::worktree_requests::tests::anchored_checkout_probe");
+        use super::super::repositories::directory::Directory;
+        let base = std::path::PathBuf::from(std::env::var("TMPDIR").unwrap()).join("anchored");
+        let repo = repository(&base, false);
+        let foreign = repository(&base.join("foreign"), false);
+        let parent = Directory::open(&base.canonicalize().unwrap()).unwrap();
+        let pinned = parent
+            .create("checkout", ".zerus-worktree-fixture")
+            .unwrap();
+        let common = Directory::open(&repo.join(".git").canonicalize().unwrap()).unwrap();
+        // The admitted repository's own commit, read before any swap.
+        let head = String::from_utf8(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        // Both admitted objects move; other directories take their paths.
+        std::fs::rename(base.join("checkout"), base.join("moved")).unwrap();
+        std::fs::create_dir(base.join("checkout")).unwrap();
+        std::fs::rename(repo.join(".git"), repo.join(".git-moved")).unwrap();
+        std::os::unix::fs::symlink(foreign.join(".git"), repo.join(".git")).unwrap();
+        let git_dir = format!("--git-dir=/proc/self/fd/{}", common.descriptor());
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        super::super::repositories::OWNED_GIT_DIRECT.with(|direct| direct.set(true));
+        // Without the identity checks (which would refuse first), Git's own
+        // writes still land in both pinned objects, never at the replaced paths.
+        let result = super::super::repositories::owned_git_unverified_for_test(
+            &pinned,
+            &[&common],
+            Default::default(),
+            &[
+                git_dir.as_str(),
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "zerus-anchor",
+                "--",
+                ".",
+                head.trim(),
+            ],
+            &cancelled,
+        );
+        super::super::repositories::OWNED_GIT_DIRECT.with(|direct| direct.set(false));
+        assert!(
+            base.join("moved/.git").is_file(),
+            "checkout in the pinned object: {result:?}"
+        );
+        assert!(std::fs::read_dir(base.join("checkout"))
+            .unwrap()
+            .next()
+            .is_none());
+        let branch = |git_dir: &std::path::Path| {
+            std::process::Command::new("git")
+                .arg("--git-dir")
+                .arg(git_dir)
+                .args(["rev-parse", "--verify", "--quiet", "refs/heads/zerus-anchor"])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        };
+        assert!(branch(&repo.join(".git-moved")), "branch in the pinned repository");
+        assert!(!branch(&foreign.join(".git")), "foreign repository untouched");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owned_creation_checks_the_actor_before_its_receipt_and_never_runs_a_test_image() {
+        crate::self_exec::private_probe("state::worktree_requests::tests::owned_creation_probe");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "run by owned_creation_checks_the_actor_before_its_receipt_and_never_runs_a_test_image"]
+    fn owned_creation_probe() {
+        crate::self_exec::probe_child("state::worktree_requests::tests::owned_creation_probe");
+        use super::super::worktrees::Step;
+        // A refused Reserve leaves no receipt, store or destination.
+        let calls = std::sync::Mutex::new(Vec::new());
+        let (receipt, destination, result) = owned(|step| {
+            calls.lock().unwrap().push(step);
+            Err("creation_lease_revoked".into())
+        });
+        assert_eq!(result.unwrap_err(), "creation_lease_revoked");
+        assert_eq!(*calls.lock().unwrap(), [Step::Reserve]);
+        assert!(!super::folder().exists());
+        assert!(!destination.exists() && !receipt.exists());
+        std::fs::remove_dir(std::env::var("TMPDIR").unwrap() + "/repo").unwrap();
+        std::fs::remove_file(std::env::var("TMPDIR").unwrap() + "/custody.lock").unwrap();
+        // An admitted request writes its original receipt, then the Git worker
+        // refuses this unit image before any destination or checkout effect.
+        let calls = std::sync::Mutex::new(Vec::new());
+        let (receipt, destination, result) = owned(|step| {
+            calls.lock().unwrap().push(step);
+            Ok(())
+        });
+        let value = result.unwrap();
+        assert_eq!(value["status"], "failed", "{value}");
+        assert_eq!(value["detail"], crate::self_exec::TEST_IMAGE);
+        assert_eq!(value["effects_started"], false);
+        assert_eq!(*calls.lock().unwrap(), [Step::Reserve]);
+        assert!(!destination.exists());
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&receipt).unwrap()).unwrap();
+        assert_eq!(saved, value);
+        assert_eq!(Step::Own.ordinal(), 5);
+    }
 }

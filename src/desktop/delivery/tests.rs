@@ -1,5 +1,6 @@
 use super::*;
 use crate::desktop::{feed, store::Location};
+use rusqlite::params;
 use std::sync::{atomic::AtomicUsize, Mutex};
 use zerus_watch_protocol::CatalogItem;
 
@@ -131,9 +132,55 @@ impl Fixture {
             self.runtime.sources.native_fixture(&self.store, "");
         }
     }
+    /// A native source of many rows, in legacy pages of the largest size.
+    fn source_rows(&mut self, rows: Vec<CatalogItem>) {
+        self.source_rows_on("", rows);
+    }
+    /// `source_rows` for the computer `computer` ("" is this one).
+    fn source_rows_on(&mut self, computer: &str, rows: Vec<CatalogItem>) {
+        self.generation += 1;
+        let pages: Vec<Vec<CatalogItem>> = rows.chunks(128).map(<[_]>::to_vec).collect();
+        let mut packets = vec![feed::Packet::LegacyBegin {
+            computer: computer.into(),
+            generation: self.generation,
+            metadata: json!({"machine_id":"fixture"}),
+            rows: rows.len(),
+            pages: pages.len(),
+        }];
+        for (index, items) in pages.into_iter().enumerate() {
+            packets.push(feed::Packet::LegacyPage {
+                computer: computer.into(),
+                generation: self.generation,
+                index,
+                items,
+            });
+        }
+        packets.push(feed::Packet::LegacyComplete {
+            computer: computer.into(),
+            generation: self.generation,
+        });
+        for packet in packets {
+            self.feed
+                .apply(&mut self.store, &self.producer, &packet)
+                .unwrap();
+        }
+        self.runtime.sources.native_fixture(&self.store, computer);
+    }
     fn tick_until(&mut self, predicate: impl Fn(&Runtime) -> bool) {
+        self.poll_until(predicate, false);
+    }
+    /// Collect only the original jobs. Fairness fixtures advance discovery in
+    /// explicit scans; a loaded runner must not sneak in another scan during
+    /// collection and replace the completed jobs before the predicate sees it.
+    fn collect_until(&mut self, predicate: impl Fn(&Runtime) -> bool) {
+        self.poll_until(predicate, true);
+    }
+    fn poll_until(&mut self, predicate: impl Fn(&Runtime) -> bool, collect_only: bool) {
         let end = Instant::now() + Duration::from_secs(5);
         loop {
+            if collect_only {
+                self.runtime.scan_at = end;
+            }
             self.runtime.poll(&mut self.store);
             if predicate(&self.runtime) {
                 break;
@@ -283,6 +330,19 @@ fn actual_root_projection_is_consumed_by_the_client_without_ready_json_fixtures(
     let mut f = Fixture::new(quiet());
     let mut client = State::new(f.location.configuration.clone()).unwrap();
     let mut output = Vec::new();
+    // A passive service: no background runtime decorates its lifecycle, so
+    // all five components stay not_started (the Windows passive GUI state).
+    let passive = f.passive_projection();
+    client.status(&passive).unwrap();
+    assert!(client.snapshot().connected);
+    assert!(!client.snapshot().background_ready());
+    for component in ["fleet", "presence", "reads", "attention", "approvals"] {
+        assert_eq!(
+            passive["lifecycle"]["background"][component]["code"], "not_started",
+            "{component}"
+        );
+    }
+    output.push(json!({"case":"passive","status":passive}));
     let mut check = |case: &str, f: &Fixture, reads: bool, approvals: bool| {
         let value = f.projection();
         client.status(&value).unwrap();
@@ -902,4 +962,525 @@ fn persistence_retry_does_not_upgrade_an_original_incomplete_read_receipt() {
         serde_json::from_str::<reads::Outcome>(&result).unwrap(),
         reads::Outcome::Failed
     );
+}
+
+/// Idle sessions, then the fixture's approval row last (`claude/example/a`).
+fn idle_then_approval(idle: usize) -> Vec<CatalogItem> {
+    let mut rows: Vec<CatalogItem> = (0..idle)
+        .map(|n| {
+            let mut row = row();
+            row["name"] = json!(format!("claude/example/idle-{n}"));
+            row["phase"] = json!("working");
+            row["run_id"] = json!(format!("run-{n}"));
+            row["conversation_id"] = json!(format!("conversation-{n}"));
+            CatalogItem {
+                key: format!("run:run-{n}"),
+                row,
+            }
+        })
+        .collect();
+    rows.push(CatalogItem {
+        key: "run:run".into(),
+        row: row(),
+    });
+    rows
+}
+
+/// The sessions whose native inspection the runner was asked for.
+fn inspections() -> (Runner, Arc<Mutex<Vec<String>>>) {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = seen.clone();
+    let run: Runner = Arc::new(move |inv, _, _, _| {
+        assert!(inv.args.iter().any(|a| a == "inspect"));
+        record.lock().unwrap().extend(inv.args.iter().cloned());
+        Exit::TimedOut
+    });
+    (run, seen)
+}
+
+#[test]
+fn every_row_the_policy_accepts_is_in_the_approval_index() {
+    // zerus-5wmh.66.3.33: the index may hold more rows than the policy
+    // accepts, never fewer, so indexing changes no eligibility.
+    let (mut accepted, mut only_indexed) = (0, 0);
+    for provider in ["claude", "opencode", "dsh", "codex", ""] {
+        for phase in [
+            json!("approval"),
+            json!("input"),
+            json!("question"),
+            json!("working"),
+            Value::Null,
+        ] {
+            for child in [
+                None,
+                Some(json!({"phase":"approval"})),
+                Some(json!({"state":"approval"})),
+                Some(json!({"display_state":"approval"})),
+                Some(json!({"status":"Needs approval"})),
+                Some(json!({"phase":"working","status":"Running"})),
+            ] {
+                for (tracked, state) in [(true, "running"), (false, "running"), (true, "stopped")] {
+                    let mut row = row();
+                    row["cmd"] = json!(provider);
+                    row["phase"] = phase.clone();
+                    row["tracked"] = json!(tracked);
+                    row["state"] = json!(state);
+                    if let Some(child) = &child {
+                        row["subagents"] = json!({"agent-1": child});
+                    }
+                    let candidate =
+                        policy::candidate("", &zerus_client_core::view::row(&row)).is_some();
+                    let indexed = zerus_desktop_catalog::approvals::approval_phase(&row);
+                    assert!(!candidate || indexed, "{row}");
+                    accepted += usize::from(candidate);
+                    only_indexed += usize::from(indexed && !candidate);
+                }
+            }
+        }
+    }
+    assert!(
+        accepted > 0 && only_indexed > 0,
+        "{accepted} {only_indexed}"
+    );
+}
+
+#[test]
+fn an_approval_at_the_end_of_a_large_catalog_is_found_on_the_first_scan() {
+    // The one-page walk would reach the last of 20,001 rows after 157 scans.
+    let (run, seen) = inspections();
+    let mut f = Fixture::new(run);
+    f.active();
+    f.enabled(true);
+    f.source_rows(idle_then_approval(20_000));
+    f.scan();
+    f.tick_until(|r| r.jobs.is_empty());
+    let seen = seen.lock().unwrap();
+    assert!(seen.iter().any(|a| a == "claude/example/a"), "{seen:?}");
+    assert!(!seen.iter().any(|a| a.starts_with("claude/example/idle-")));
+}
+
+#[test]
+fn a_source_older_than_fresh_is_not_scanned_until_it_is_observed_again() {
+    // zerus-e04p, #1357 review: a source last observed more than FRESH ago,
+    // without a heartbeat, takes no part in discovery.
+    let (run, seen) = inspections();
+    let mut f = Fixture::new(run);
+    f.active();
+    f.enabled(true);
+    f.source_rows(idle_then_approval(1));
+    f.runtime.sources.age_fixture(Duration::from_secs(16));
+    f.scan();
+    f.tick_until(|r| r.jobs.is_empty());
+    assert!(seen.lock().unwrap().is_empty());
+    f.runtime.sources.heartbeat_fixture(&f.store);
+    f.scan();
+    f.tick_until(|r| r.jobs.is_empty());
+    assert!(seen.lock().unwrap().iter().any(|a| a == "claude/example/a"));
+}
+
+#[test]
+fn rows_stored_before_the_index_are_found_once_the_scan_backfills_them() {
+    let (run, seen) = inspections();
+    let mut f = Fixture::new(run.clone());
+    f.active();
+    f.enabled(true);
+    f.source_rows(idle_then_approval(300));
+    // An upgraded store: every row predates schema 22, then a restart.
+    f.store
+        .db
+        .execute_batch("UPDATE desktop_catalog_rows SET approval=NULL;")
+        .unwrap();
+    let mut restarted = Runtime::new(&f.runtime.epoch, f.runtime.approval_root.clone(), run);
+    restarted.sources.native_fixture(&f.store, "");
+    f.runtime = restarted;
+    f.scan();
+    f.tick_until(|r| r.jobs.is_empty());
+    assert!(seen.lock().unwrap().iter().any(|a| a == "claude/example/a"));
+    let pending: i64 = f
+        .store
+        .db
+        .query_row(
+            "SELECT count(*) FROM desktop_catalog_rows WHERE approval IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending, 0);
+    // The next scan finds nothing left and stops backfilling.
+    f.scan();
+    assert!(f.runtime.backfilled);
+}
+
+/// Rows the approval policy reads: `name` in `phase`, keyed by its run.
+fn named(name: &str, phase: &str, tracked: bool) -> CatalogItem {
+    let mut row = row();
+    row["name"] = json!(format!("claude/example/{name}"));
+    row["phase"] = json!(phase);
+    row["tracked"] = json!(tracked);
+    row["run_id"] = json!(format!("run-{name}"));
+    row["conversation_id"] = json!(format!("conversation-{name}"));
+    CatalogItem {
+        key: format!("run:run-{name}"),
+        row,
+    }
+}
+
+/// Idle rows first: the one-page catalog walk needs 32 scans to pass them,
+/// so within these tests only the approval-phase index reaches what follows.
+fn idle(count: usize) -> Vec<CatalogItem> {
+    (0..count)
+        .map(|n| named(&format!("idle-{n}"), "working", true))
+        .collect()
+}
+
+impl Fixture {
+    /// A live source's heartbeat, one scan with its inspections settled, then
+    /// a second passes: the 5 s inspection cooldown counts it. The heartbeat
+    /// keeps a test's sources current however slow the runner; without it,
+    /// more than `FRESH` of real time made every later scan skip them.
+    fn second(&mut self) {
+        self.runtime.sources.heartbeat_fixture(&self.store);
+        self.scan();
+        self.tick_until(|r| r.jobs.is_empty());
+        for (_, at) in self.runtime.recent.iter_mut() {
+            *at = at.checked_sub(Duration::from_secs(1)).unwrap_or(*at);
+        }
+    }
+}
+
+#[test]
+fn questions_that_need_manual_trust_cannot_keep_a_later_indexed_row_waiting() {
+    // Review of #1191: 96 flagged sessions whose native questions need manual
+    // trust, and only the fourth one's could be approved. With two approval
+    // slots, rows past the second of each indexed page were dropped while the
+    // pass moved on, and the same first rows came back as their cooldown ran
+    // out: the fourth row was never inspected. A pass now moves only past
+    // rows it inspected or decided.
+    let (run, seen) = inspections();
+    let mut f = Fixture::new(run);
+    f.active();
+    f.enabled(true);
+    let mut rows = idle(4_000);
+    rows.extend((0..96).map(|n| named(&format!("ask-{n}"), "approval", true)));
+    f.source_rows(rows);
+    for _ in 0..18 {
+        f.second();
+    }
+    let seen = seen.lock().unwrap();
+    assert!(seen.iter().any(|a| a == "claude/example/ask-3"), "{seen:?}");
+    // Two slots a scan, in pass order, each row once and none skipped (the
+    // two inspections of one scan run side by side, in either order).
+    let mut asked: Vec<usize> = seen
+        .iter()
+        .filter_map(|a| a.strip_prefix("claude/example/ask-")?.parse().ok())
+        .collect();
+    assert_eq!(asked.len(), 36, "{asked:?}");
+    asked.sort_unstable();
+    assert_eq!(asked, (0..36).collect::<Vec<_>>());
+    assert!(!seen.iter().any(|a| a.contains("/idle-")));
+}
+
+#[test]
+fn a_pass_ends_where_it_began_so_arrivals_cannot_hide_an_older_row() {
+    // Review of #1191: an older session entering approval behind the pass,
+    // while 16 new flagged rows arrive before every scan, was never found
+    // again: every page stayed full and the pass never wrapped. A pass now
+    // ends at the highest flagged row it started with.
+    let untracked = named("untracked-0", "approval", false).row;
+    assert!(zerus_desktop_catalog::approvals::approval_phase(&untracked));
+    assert!(policy::candidate("", &zerus_client_core::view::row(&untracked)).is_none());
+    let (run, seen) = inspections();
+    let mut f = Fixture::new(run);
+    f.active();
+    f.enabled(true);
+    let mut rows = idle(4_000);
+    rows.push(named("older", "working", true));
+    rows.extend((0..20).map(|n| named(&format!("untracked-{n}"), "approval", false)));
+    f.source_rows(rows);
+    f.second();
+    let generation: i64 = f
+        .store
+        .db
+        .query_row(
+            "SELECT generation FROM desktop_catalog_rows WHERE key='run:run-older'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    // The older session enters approval, keeping its row id.
+    let older = named("older", "approval", true).row.to_string();
+    f.store
+        .db
+        .execute(
+            "UPDATE desktop_catalog_rows SET json=?1,bytes=length(?1),approval=1
+             WHERE generation=?2 AND key='run:run-older'",
+            params![older, generation],
+        )
+        .unwrap();
+    let mut arrived = 20;
+    for _ in 0..4 {
+        // zerus-e04p: a loaded runner can spend more than FRESH between scans.
+        f.runtime.sources.age_fixture(Duration::from_secs(16));
+        for _ in 0..16 {
+            let row = named(&format!("untracked-{arrived}"), "approval", false);
+            let json = row.row.to_string();
+            f.store
+                .db
+                .execute(
+                    "INSERT INTO desktop_catalog_rows(generation,key,json,bytes,approval)
+                     VALUES(?1,?2,?3,length(?3),1)",
+                    params![generation, row.key, json],
+                )
+                .unwrap();
+            arrived += 1;
+        }
+        f.second();
+    }
+    let seen = seen.lock().unwrap();
+    assert!(seen.iter().any(|a| a == "claude/example/older"), "{seen:?}");
+}
+
+#[test]
+fn the_catalog_walk_still_gets_approval_slots_while_the_index_is_busy() {
+    // The index and the walk take turns to go first: a row only the walk
+    // sees (here, one whose flag is wrong) is inspected while 40 indexed
+    // rows would otherwise keep both approval slots for 20 scans.
+    let (run, seen) = inspections();
+    let mut f = Fixture::new(run);
+    f.active();
+    f.enabled(true);
+    let mut rows = vec![named("unflagged", "approval", true)];
+    rows.extend((0..40).map(|n| named(&format!("ask-{n}"), "approval", true)));
+    f.source_rows(rows);
+    f.store
+        .db
+        .execute(
+            "UPDATE desktop_catalog_rows SET approval=0 WHERE key='run:run-unflagged'",
+            [],
+        )
+        .unwrap();
+    for _ in 0..4 {
+        f.second();
+    }
+    let seen = seen.lock().unwrap();
+    assert!(
+        seen.iter().any(|a| a == "claude/example/unflagged"),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn every_source_leads_the_index_in_turn_whatever_the_walk_visits() {
+    // Review of #1191 R2: with two sources, the index's starting source and
+    // the walk-first turns changed every scan in step, so one source's index
+    // always came after its walk, which kept both slots with its first
+    // manual-only questions as their cooldown ran out: a-10 was never
+    // inspected. The index now moves to the next source only when it leads.
+    let (run, seen) = inspections();
+    let mut f = Fixture::new(run);
+    f.active();
+    f.enabled(true);
+    let rows = |prefix: &str| -> Vec<CatalogItem> {
+        (0..96)
+            .map(|n| named(&format!("{prefix}-{n}"), "approval", true))
+            .collect()
+    };
+    f.source_rows_on("", rows("a"));
+    f.source_rows_on("peer", rows("b"));
+    for _ in 0..60 {
+        f.second();
+    }
+    let seen = seen.lock().unwrap();
+    for name in ["claude/example/a-10", "claude/example/b-10"] {
+        assert!(seen.iter().any(|a| a == name), "{name}: {seen:?}");
+    }
+}
+
+/// Inspections that hold their approval slot until the test releases them:
+/// each call waits for its own release, after the scans `hold` asks for.
+struct Held {
+    /// Each held call: the scan it started in, its sequence and release.
+    calls: Mutex<Vec<(usize, usize, mpsc::Sender<()>)>>,
+    names: Mutex<Vec<String>>,
+    scan: AtomicUsize,
+    sequence: AtomicUsize,
+}
+impl Held {
+    fn runner() -> (Runner, Arc<Held>) {
+        let held = Arc::new(Held {
+            calls: Mutex::new(Vec::new()),
+            names: Mutex::new(Vec::new()),
+            scan: AtomicUsize::new(0),
+            sequence: AtomicUsize::new(0),
+        });
+        let record = held.clone();
+        let run: Runner = Arc::new(move |inv, _, cancel, _| {
+            assert!(inv.args.iter().any(|a| a == "inspect"));
+            if let Some(name) = inv.args.iter().find(|a| a.starts_with("claude/example/")) {
+                record.names.lock().unwrap().push(name.clone());
+            }
+            let (release, wait) = mpsc::channel();
+            let sequence = record.sequence.fetch_add(1, Ordering::SeqCst);
+            record.calls.lock().unwrap().push((
+                record.scan.load(Ordering::SeqCst),
+                sequence,
+                release,
+            ));
+            // This fixture holds by scan count, not wall time. Slow scheduling
+            // must not release a slot early; panic/drop still cancels it.
+            while !cancel.load(Ordering::Acquire) {
+                match wait.recv_timeout(Duration::from_millis(10)) {
+                    Err(mpsc::RecvTimeoutError::Timeout) => (),
+                    _ => break,
+                }
+            }
+            Exit::TimedOut
+        });
+        (run, held)
+    }
+
+    /// One-second scans: before each, the inspections held `hold(sequence)`
+    /// scans return and are collected; the cooldown counts the second.
+    fn scans(&self, f: &mut Fixture, count: usize, hold: impl Fn(usize) -> usize) {
+        for scan in 1..=count {
+            self.scan.store(scan, Ordering::SeqCst);
+            self.calls
+                .lock()
+                .unwrap()
+                .retain(|(at, sequence, release)| {
+                    if scan - at >= hold(*sequence) {
+                        let _ = release.send(());
+                        false
+                    } else {
+                        true
+                    }
+                });
+            let held = self.calls.lock().unwrap().len();
+            f.collect_until(|r| r.jobs.len() == held);
+            f.runtime.sources.heartbeat_fixture(&f.store);
+            f.scan();
+            // Every inspection the scan started has reached the runner.
+            let launched = f.runtime.jobs.len();
+            let until = Instant::now() + Duration::from_secs(5);
+            while self.calls.lock().unwrap().len() < launched {
+                assert!(Instant::now() < until, "a launched inspection never ran");
+                thread::sleep(Duration::from_millis(1));
+            }
+            for (_, at) in f.runtime.recent.iter_mut() {
+                *at = at.checked_sub(Duration::from_secs(1)).unwrap_or(*at);
+            }
+        }
+        for (_, _, release) in self.calls.lock().unwrap().drain(..) {
+            let _ = release.send(());
+        }
+        f.collect_until(|r| r.jobs.is_empty());
+    }
+}
+
+fn slow_rows(f: &mut Fixture) {
+    f.source_rows(
+        (0..96)
+            .map(|n| named(&format!("slow-{n}"), "approval", true))
+            .collect(),
+    );
+}
+
+#[test]
+fn collecting_released_inspections_never_performs_a_scheduled_scan() {
+    let (run, held) = Held::runner();
+    let mut f = Fixture::new(run);
+    f.active();
+    f.enabled(true);
+    slow_rows(&mut f);
+    f.scan();
+    let launched = f.runtime.jobs.len();
+    assert_eq!(launched, APPROVALS);
+    let until = Instant::now() + Duration::from_secs(5);
+    while held.calls.lock().unwrap().len() < launched {
+        assert!(Instant::now() < until, "the original inspections never ran");
+        thread::sleep(Duration::from_millis(1));
+    }
+    for (_, _, release) in held.calls.lock().unwrap().drain(..) {
+        release.send(()).unwrap();
+    }
+    // Make the interleaving exact: both original threads have returned before
+    // the actor's next turn. The regression must not depend on a lucky race
+    // between releasing a worker and its thread actually finishing.
+    let until = Instant::now() + Duration::from_secs(5);
+    while f.runtime.jobs.iter().any(|job| {
+        job.thread
+            .as_ref()
+            .is_none_or(|thread| !thread.is_finished())
+    }) {
+        assert!(
+            Instant::now() < until,
+            "the original threads never finished"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    // The same scheduling point reached after a loaded runner spends one
+    // second between explicit scans, without a machine-speed-dependent sleep.
+    f.runtime.scan_at = Instant::now();
+    f.collect_until(|r| r.jobs.is_empty());
+    assert_eq!(held.sequence.load(Ordering::SeqCst), launched);
+}
+
+#[test]
+fn slow_inspections_cannot_hand_every_admission_to_the_catalog_walk() {
+    // Review of #1191 R3: inspections that hold both slots for four scans.
+    // The turn flipped on every scan, busy or not, so each round of free
+    // slots fell on a walk-first scan and the walk re-asked slow-0 to slow-3
+    // as their cooldown ran out: slow-10 was never inspected. A turn now
+    // passes only on a scan with a free slot.
+    let (run, held) = Held::runner();
+    let mut f = Fixture::new(run);
+    f.active();
+    f.enabled(true);
+    slow_rows(&mut f);
+    held.scans(&mut f, 40, |_| 4);
+    let names = held.names.lock().unwrap();
+    assert!(
+        names.iter().any(|a| a == "claude/example/slow-10"),
+        "{names:?}"
+    );
+}
+
+#[test]
+fn staggered_inspections_share_admission_between_the_index_and_the_walk() {
+    // The two slots free on different scans (two and four scans held), but
+    // always on scans of the same parity, which a per-scan turn gave the walk.
+    let (run, held) = Held::runner();
+    let mut f = Fixture::new(run);
+    f.active();
+    f.enabled(true);
+    slow_rows(&mut f);
+    held.scans(&mut f, 60, |call| if call % 2 == 0 { 2 } else { 4 });
+    let names = held.names.lock().unwrap();
+    assert!(
+        names.iter().any(|a| a == "claude/example/slow-10"),
+        "{names:?}"
+    );
+}
+
+#[test]
+fn with_slow_inspections_every_source_still_leads_the_index_in_turn() {
+    // Leadership passes only on a scan that could admit, too: had busy
+    // index-first scans moved it on, the four held scans of every round
+    // would bring the same source back to lead each opportunity.
+    let (run, held) = Held::runner();
+    let mut f = Fixture::new(run);
+    f.active();
+    f.enabled(true);
+    let rows = |prefix: &str| -> Vec<CatalogItem> {
+        (0..96)
+            .map(|n| named(&format!("{prefix}-{n}"), "approval", true))
+            .collect()
+    };
+    f.source_rows_on("", rows("a"));
+    f.source_rows_on("peer", rows("b"));
+    held.scans(&mut f, 120, |_| 4);
+    let names = held.names.lock().unwrap();
+    for name in ["claude/example/a-10", "claude/example/b-10"] {
+        assert!(names.iter().any(|a| a == name), "{name}: {names:?}");
+    }
 }

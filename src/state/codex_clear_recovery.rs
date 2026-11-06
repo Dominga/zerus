@@ -1,4 +1,4 @@
-//! Recover a rejected clear successor only from a new real main hook and the
+//! Observe a clear successor only from a new real main hook and the
 //! original supervised Codex's actually open native rollout. Never replay input
 //! or fabricate a missing SessionStart event.
 use super::*;
@@ -30,6 +30,33 @@ pub(super) fn observe(record: &Value, event: &Value) -> Option<Successor> {
     {
         return None;
     }
+    prove(
+        record,
+        event,
+        record["clear_context_request"]["at"].as_f64()?,
+    )
+}
+
+/// A fresh, unrequested Terminal clear is separate from recovery of an old
+/// refusal. It needs the exact native end binding, the original open rollout,
+/// and a genuine clear SessionStart. Never synthesize a request for this path.
+pub(super) fn terminal_start(record: &Value, event: &Value) -> Option<Successor> {
+    if !clear_context::ended_terminal_resume(record)
+        || event["hook_event_name"] != "SessionStart"
+        || event["source"] != "clear"
+        || !string(event, "agent_id").is_empty()
+        || !external_agents::main_codex_hook(record)
+        || resume_input::owned(record).is_err()
+    {
+        return None;
+    }
+    // Native creation can precede the main end, so bind it to the original run
+    // rather than the later receipt time of that end.
+    let created = record["created"].as_f64().filter(|at| *at > 0.0)?;
+    prove(record, event, created)
+}
+
+fn prove(record: &Value, event: &Value, since: f64) -> Option<Successor> {
     let id = string(event, "session_id");
     if uuid::Uuid::parse_str(id).is_err() || id == string(record, "conversation_id") {
         return None;
@@ -85,7 +112,7 @@ pub(super) fn observe(record: &Value, event: &Value) -> Option<Successor> {
         || platform::canonical(string(meta, "cwd")).ok()? != cwd
         || (!string(event, "cwd").is_empty()
             && platform::canonical(string(event, "cwd")).ok()? != cwd)
-        || created < record["clear_context_request"]["at"].as_f64()?
+        || created < since
         || created > now() + 1.0
         || platform::holds_open(u32::try_from(pid).ok()?, &path).ok()? != platform::OpenFiles::Held
     {

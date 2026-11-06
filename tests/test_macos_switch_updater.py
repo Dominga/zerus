@@ -1,10 +1,11 @@
-"""On macOS: switch, client update and rollback with ad-hoc signed fake
+"""On macOS: switch, Next rollback and manual-only Qt retention with signed fake
 bundles (com.example.zerus-switch-test) in a fake HOME. lsregister is replaced
 by /usr/bin/true and `defaults` by a fixture, so neither LaunchServices nor a
 real settings domain changes. No GUI runs: quitting, starting and waiting are
 recorded stand-ins, so launchd and the real com.hgdev.hgs-tray agent are never
 reached, while codesign checks every copy for real."""
 import importlib.util
+from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -97,16 +98,34 @@ class MacSwitch(unittest.TestCase):
         self.assertEqual(updater.update(self.bundle('client-1', 'tauri'), self.installed), 0)
         slot = updater.ROLLBACK / 'hgs-tray.app'
         self.assertEqual((self.variant(self.installed), self.variant(slot)), ('client-1', 'qt'))
-        self.assertTrue(updater.SETTINGS_SNAPSHOT.exists(), 'the switch keeps Qt settings beside the Qt copy')
+        settings = updater.SETTINGS_SNAPSHOT.read_bytes()
+        self.assertEqual(plistlib.loads(settings), {'attention.observed': b'{}'})
+        self.assertEqual(updater.SETTINGS_SNAPSHOT.stat().st_mode & 0o777, 0o600)
+        legacy = updater.ROLLBACK.parent / 'desktop-qt-legacy'
+        self.assertEqual(list(legacy.glob('qt-*/hgs-tray.app')), [])
+        # Qt can remain in the first slot, but it is never an offered rollback.
+        with mock.patch.object(sys, 'argv', ['update-installed.py', '--rollback', str(self.installed)]), \
+                mock.patch.object(sys, 'stderr', new_callable=StringIO) as errors:
+            self.assertEqual(updater.main(), 1)
+        self.assertIn('Qt rollback is retired', errors.getvalue())
+        self.assertEqual(self.calls, ['quit', ('start', 'client-1')])
+        # The next verified Next replacement takes the usable rollback slot.
         self.assertEqual(updater.update(self.bundle('client-2', 'tauri'), self.installed), 0)
-        self.assertEqual((self.variant(self.installed), self.variant(slot)), ('client-2', 'qt'))
+        self.assertEqual((self.variant(self.installed), self.variant(slot)), ('client-2', 'client-1'))
+        [retired_qt] = legacy.glob('qt-*/hgs-tray.app')
+        self.assertEqual(self.variant(retired_qt), 'qt')
+        self.assertEqual(updater.SETTINGS_SNAPSHOT.read_bytes(), settings)
         with self.assertRaisesRegex(updater.UpdateError, 'Dev build 1413'):
             updater.update(self.bundle('unnumbered', 'tauri', number=0), self.installed)
         self.assertEqual(updater.roll_back_installed(self.installed), 0)
-        self.assertEqual((self.variant(self.installed), self.variant(slot)), ('qt', 'client-2'))
+        self.assertEqual((self.variant(self.installed), self.variant(slot)), ('client-1', 'client-2'))
         subprocess.run(['codesign', '--verify', '--deep', '--strict', str(self.installed)], check=True)
         subprocess.run(['codesign', '--verify', '--deep', '--strict', str(slot)], check=True)
-        self.assertEqual(self.calls, ['quit', ('start', 'client-1'), 'quit', ('start', 'client-2'), 'quit', ('start', 'qt')])
+        subprocess.run(['codesign', '--verify', '--deep', '--strict', str(retired_qt)], check=True)
+        self.assertEqual(list(legacy.glob('qt-*/hgs-tray.app')), [retired_qt])
+        self.assertEqual(self.variant(retired_qt), 'qt')
+        self.assertEqual(updater.SETTINGS_SNAPSHOT.read_bytes(), settings)
+        self.assertEqual(self.calls, ['quit', ('start', 'client-1'), 'quit', ('start', 'client-2'), 'quit', ('start', 'client-1')])
         self.assertEqual(list(self.installed.parent.glob('.hgs-tray-*')), [], 'nothing kept: every start was verified')
 
 

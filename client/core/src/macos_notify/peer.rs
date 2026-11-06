@@ -215,6 +215,12 @@ impl Attributes {
 }
 
 fn live_check(attributes: &Attributes, requirement: &OwnedCf) -> Result<(), Refusal> {
+    checked_live_code(attributes, requirement).map(drop)
+}
+
+// Keep the checked object local when a native caller also needs its CDHash.
+// Both callers use kSecGuestAttributeAudit; this is never a PID guest lookup.
+fn checked_live_code(attributes: &Attributes, requirement: &OwnedCf) -> Result<OwnedCf, Refusal> {
     let mut output = std::ptr::null_mut();
     // SAFETY: null selects the kernel host; a retained NSDictionary/CFDictionary
     // contains the exact copied audit data, and output storage is initialized.
@@ -239,7 +245,7 @@ fn live_check(attributes: &Attributes, requirement: &OwnedCf) -> Result<(), Refu
     if unsafe { SecCodeCheckValidity(code.as_ptr(), 0, requirement.as_ptr()) } != 0 {
         return Err(Refusal::LiveCodeRejected);
     }
-    Ok(())
+    Ok(code)
 }
 
 /// Observe live code against the exact caller-pinned requirement. No PID/path

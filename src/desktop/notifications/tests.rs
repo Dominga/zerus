@@ -238,7 +238,11 @@ fn callback_requires_delivered_exact_mapping_and_current_unwithdrawn_writer() {
         .is_some());
     assert!(f.host.emit(Event::Clicked(activation.clone())));
     assert_eq!(
-        f.outbox.poll(&mut f.store, Instant::now()),
+        f.outbox
+            .poll(&mut f.store, Instant::now())
+            .into_iter()
+            .map(|click| click.value)
+            .collect::<Vec<_>>(),
         vec![activation.clone()]
     );
     assert!(f.host.emit(Event::Closed(activation.clone())));
@@ -505,6 +509,48 @@ fn activation(dispatch: &Dispatch) -> Activation {
 }
 
 #[test]
+fn accepted_linux_click_survives_its_native_close_before_routing() {
+    let mut f = Fixture::new();
+    f.outbox.session.platform = Platform::Linux;
+    f.host.platform = Platform::Linux;
+    let (request, dispatch) = f.queued();
+    let native_id = NativeId::Linux {
+        bus_id: "a".repeat(32),
+        owner: ":1.4".into(),
+        id: 7,
+    };
+    let clicked = Activation {
+        request_id: request.request_id.clone(),
+        token: dispatch.command().action.token().into(),
+        native_id: native_id.clone(),
+        platform_context: Some(wire::PlatformContext::Wayland {
+            activation_token: "fixture-activation".into(),
+        }),
+    };
+    dispatch.finish(Outcome::Delivered { native_id });
+    f.outbox.poll(&mut f.store, Instant::now());
+    assert!(f.host.emit(Event::Clicked(clicked.clone())));
+    let mut closed = clicked.clone();
+    closed.platform_context = None;
+    assert!(f.host.emit(Event::Closed(closed)));
+    let clicks = f.outbox.poll(&mut f.store, Instant::now());
+    assert_eq!(clicks.len(), 1);
+    assert!(f
+        .outbox
+        .current_activation(&f.store, &clicked)
+        .unwrap()
+        .is_none());
+    let mut router = activation::Router::new(
+        &f.outbox.session.configuration,
+        &f.outbox.session.service_epoch,
+    );
+    assert!(router
+        .offer(&f.store, &f.outbox, clicks.into_iter().next().unwrap())
+        .unwrap());
+    assert!(router.needs_frontend());
+}
+
+#[test]
 fn early_close_settles_while_original_resources_still_hold_drain() {
     let mut f = Fixture::new();
     let (request, dispatch) = f.queued();
@@ -558,7 +604,11 @@ fn early_click_keeps_ephemeral_wayland_context_but_restoration_does_not() {
     dispatch.finish(Outcome::Delivered { native_id });
     assert!(f.host.emit(Event::Clicked(value.clone())));
     assert_eq!(
-        f.outbox.poll(&mut f.store, Instant::now()),
+        f.outbox
+            .poll(&mut f.store, Instant::now())
+            .into_iter()
+            .map(|click| click.value)
+            .collect::<Vec<_>>(),
         vec![value.clone()]
     );
     assert!(!f.outbox.operations_idle());
@@ -832,4 +882,265 @@ fn original_owner_lock_survives_endpoint_and_outbox_drop_until_callback_release(
     );
     drop(resources);
     assert!(location.existing_lock().unwrap().is_some());
+}
+
+#[test]
+fn native_close_after_click_admission_preserves_only_that_original_click() {
+    let mut f = Fixture::new();
+    let (request, dispatch) = f.queued();
+    let value = activation(&dispatch);
+    let outcome = delivered(dispatch.command());
+    dispatch.finish(outcome);
+    f.outbox.poll(&mut f.store, Instant::now());
+    assert!(f.host.emit(Event::Clicked(value.clone())));
+    let click = f.outbox.poll(&mut f.store, Instant::now()).pop().unwrap();
+    assert!(f.host.emit(Event::Closed(value.clone())));
+    assert!(f.outbox.poll(&mut f.store, Instant::now()).is_empty());
+    assert!(f
+        .outbox
+        .admitted_activation(&f.store, &click)
+        .unwrap()
+        .is_some());
+    assert!(f
+        .outbox
+        .current_activation(&f.store, &value)
+        .unwrap()
+        .is_none());
+    assert!(f.host.emit(Event::Clicked(value)));
+    assert!(
+        f.outbox.poll(&mut f.store, Instant::now()).is_empty(),
+        "a later raw callback cannot reuse the retired ID"
+    );
+    assert_eq!(f.state(&request), "delivered");
+}
+
+#[test]
+fn another_notifications_close_cannot_preserve_a_withdrawn_click() {
+    let mut f = Fixture::new();
+    let (first, first_dispatch) = f.queued();
+    let first_closed = activation(&first_dispatch);
+    let first_outcome = delivered(first_dispatch.command());
+    first_dispatch.finish(first_outcome);
+    let (second, second_dispatch) = f.queued();
+    let second_clicked = activation(&second_dispatch);
+    let second_outcome = delivered(second_dispatch.command());
+    second_dispatch.finish(second_outcome);
+    f.outbox.poll(&mut f.store, Instant::now());
+    f.store.db.execute("INSERT INTO desktop_attention_edges(logical,session,intent,identity,payload,blocked,bytes) SELECT 'fixture','fixture',id,identity,payload,0,0 FROM desktop_intents WHERE id=?1",[&second.intent_id]).unwrap();
+
+    assert!(f.host.emit(Event::Clicked(second_clicked.clone())));
+    let click = f.outbox.poll(&mut f.store, Instant::now()).pop().unwrap();
+    assert!(f.host.emit(Event::Closed(first_closed.clone())));
+    assert!(f.outbox.poll(&mut f.store, Instant::now()).is_empty());
+    assert!(f
+        .outbox
+        .current_activation(&f.store, &first_closed)
+        .unwrap()
+        .is_none());
+    assert!(f
+        .outbox
+        .current_activation(&f.store, &second_clicked)
+        .unwrap()
+        .is_some());
+
+    // PX: B's source stays live, so only exact native-close matching can
+    // prevent A's close from granting B the withdrawn-intent exception.
+    ledger::withdraw(&mut f.store.db, &second.intent_id, 1).unwrap();
+    let live: bool = f
+        .store
+        .db
+        .query_row(
+            "SELECT live=1 AND blocked=0 FROM desktop_attention_edges WHERE intent=?1",
+            [&second.intent_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(live);
+    let mut router = activation::Router::new(
+        &f.outbox.session.configuration,
+        &f.outbox.session.service_epoch,
+    );
+    assert!(!router.offer(&f.store, &f.outbox, click).unwrap());
+    assert!(!router.needs_frontend());
+    assert_eq!(f.state(&first), "delivered");
+    assert_eq!(f.state(&second), "delivered");
+}
+
+#[test]
+fn click_witness_overflow_drops_only_that_click_and_keeps_later_posts_available() {
+    let mut f = Fixture::new();
+    let (first, dispatch) = f.queued();
+    let value = activation(&dispatch);
+    let outcome = delivered(dispatch.command());
+    dispatch.finish(outcome);
+    f.outbox.poll(&mut f.store, Instant::now());
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        for _ in 0..EVENTS {
+            assert!(f.host.emit(Event::Clicked(value.clone())));
+        }
+        held.extend(f.outbox.poll(&mut f.store, Instant::now()));
+    }
+    assert_eq!(held.len(), EVENTS * 2);
+    assert!(f.host.emit(Event::Clicked(value.clone())));
+    assert!(f.outbox.poll(&mut f.store, Instant::now()).is_empty());
+    assert!(
+        f.outbox.available(),
+        "click pressure must not disable posting"
+    );
+    assert_eq!(f.outbox.status()["callbacks"], 0);
+    assert!(f.host.try_next().is_err());
+
+    drop(held);
+    assert!(
+        f.outbox.poll(&mut f.store, Instant::now()).is_empty(),
+        "a dropped overflow click is never retried"
+    );
+    assert!(f.host.emit(Event::Clicked(value)));
+    assert_eq!(f.outbox.poll(&mut f.store, Instant::now()).len(), 1);
+    let (next, dispatch) = f.queued();
+    let outcome = delivered(dispatch.command());
+    dispatch.finish(outcome);
+    f.outbox.poll(&mut f.store, Instant::now());
+    assert_eq!(f.state(&first), "delivered");
+    assert_eq!(f.state(&next), "delivered");
+}
+
+#[test]
+fn admitted_click_never_bypasses_policy_revision_blocking_or_writer_changes() {
+    for change in [
+        "withdraw_before_close",
+        "source_retired",
+        "source_removed",
+        "revision",
+        "blocked",
+        "writer",
+        "revoke",
+        "retire",
+        "stop",
+    ] {
+        let mut f = Fixture::new();
+        let (request, dispatch) = f.queued();
+        let value = activation(&dispatch);
+        let outcome = delivered(dispatch.command());
+        dispatch.finish(outcome);
+        f.outbox.poll(&mut f.store, Instant::now());
+        f.store.db.execute("INSERT INTO desktop_attention_edges(logical,session,intent,identity,payload,blocked,bytes) SELECT 'fixture','fixture',id,identity,payload,0,0 FROM desktop_intents WHERE id=?1",[&request.intent_id]).unwrap();
+        assert!(f.host.emit(Event::Clicked(value.clone())));
+        let click = f.outbox.poll(&mut f.store, Instant::now()).pop().unwrap();
+        if change == "withdraw_before_close" {
+            ledger::withdraw(&mut f.store.db, &request.intent_id, 1).unwrap();
+        }
+        assert!(f.host.emit(Event::Closed(value)));
+        assert!(f.outbox.poll(&mut f.store, Instant::now()).is_empty());
+        match change {
+            "source_retired" => {
+                f.store
+                    .db
+                    .execute("UPDATE desktop_attention_edges SET live=0", [])
+                    .unwrap();
+            }
+            "source_removed" => {
+                f.store
+                    .db
+                    .execute("DELETE FROM desktop_attention_edges", [])
+                    .unwrap();
+            }
+            "revision" => {
+                f.store
+                    .db
+                    .execute("UPDATE desktop_intents SET revision=2", [])
+                    .unwrap();
+            }
+            "blocked" => {
+                f.store
+                    .db
+                    .execute("UPDATE desktop_intents SET blocked=1", [])
+                    .unwrap();
+            }
+            "writer" => {
+                ledger::authorize(&mut f.store.db, &id(), &f.outbox.session.service_epoch).unwrap();
+            }
+            "revoke" => {
+                ledger::revoke(&f.store.db, "fixture").unwrap();
+            }
+            "retire" => f.outbox.retire(),
+            "stop" => f.outbox.request_stop(),
+            "withdraw_before_close" => (),
+            _ => unreachable!(),
+        }
+        assert!(
+            f.outbox
+                .admitted_activation(&f.store, &click)
+                .unwrap()
+                .is_none(),
+            "{change}"
+        );
+    }
+}
+
+#[test]
+fn click_source_query_failure_retains_the_callback_instead_of_losing_its_policy_binding() {
+    let mut f = Fixture::new();
+    let (_, dispatch) = f.queued();
+    let value = activation(&dispatch);
+    let outcome = delivered(dispatch.command());
+    dispatch.finish(outcome);
+    f.outbox.poll(&mut f.store, Instant::now());
+    f.store
+        .db
+        .execute_batch("ALTER TABLE desktop_attention_edges RENAME TO fixture_hidden_edges")
+        .unwrap();
+    assert!(f.host.emit(Event::Clicked(value)));
+    assert!(f.outbox.poll(&mut f.store, Instant::now()).is_empty());
+    assert_eq!(f.outbox.status()["callbacks"], 1);
+    assert!(f.outbox.admitted.is_empty());
+    f.store
+        .db
+        .execute_batch("ALTER TABLE fixture_hidden_edges RENAME TO desktop_attention_edges")
+        .unwrap();
+    assert_eq!(f.outbox.poll(&mut f.store, Instant::now()).len(), 1);
+    assert_eq!(f.outbox.status()["callbacks"], 0);
+}
+
+#[test]
+fn getter_failure_is_retained_as_its_original_refusal_without_a_retry() {
+    let mut f = Fixture::new();
+    let (request, dispatch) = f.queued();
+    dispatch.finish(Outcome::Refused {
+        code: Refusal::GetterFailed,
+    });
+    assert!(f.outbox.poll(&mut f.store, Instant::now()).is_empty());
+    assert_eq!(f.state(&request), "refused");
+    let raw: String = f
+        .store
+        .db
+        .query_row(
+            "SELECT receipt FROM desktop_attempts WHERE request_id=?1",
+            [&request.request_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let receipt: Receipt = serde_json::from_str(&raw).unwrap();
+    assert_eq!(receipt.binding.request_id, request.request_id);
+    assert_eq!(
+        receipt.outcome,
+        Outcome::Refused {
+            code: Refusal::GetterFailed
+        }
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&raw).unwrap()["outcome"]["code"],
+        "getter_failed"
+    );
+    assert!(matches!(
+        f.outbox
+            .offer(&mut f.store, request.clone(), Instant::now())
+            .unwrap(),
+        Offered::Existing(_)
+    ));
+    assert!(
+        f.host.try_next().is_err(),
+        "a retained getter refusal cannot replay the original post"
+    );
 }

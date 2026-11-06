@@ -5,7 +5,7 @@
 //! decides what reaches the status item (`tray/src/QuietTrayIcon.h`). Pure:
 //! the platform glue draws and shows it.
 use crate::marks::{self, Mark};
-use crate::readmarks::ReadMark;
+use crate::readmarks::{Queued, ReadMark};
 use crate::text::Text;
 use crate::{Change, ComputerId, ComputerStatus, ViewRow};
 use serde::{Deserialize, Serialize};
@@ -70,7 +70,8 @@ pub fn needs_attention(row: &ViewRow) -> bool {
 pub struct DeviceMarks {
     marks: BTreeMap<String, Mark>,
     replies: BTreeMap<String, String>,
-    /// Pending read marks by computer, then session name (`ReadMarks`' key).
+    /// Pending read marks by computer, then `ReadMarks`' key: `id:<session
+    /// ID>`, or the session name for a mark queued without one.
     pending: BTreeMap<String, BTreeMap<String, ReadMark>>,
 }
 
@@ -81,12 +82,32 @@ impl DeviceMarks {
         replies: BTreeMap<String, String>,
         pending: Vec<ReadMark>,
     ) -> Self {
+        let pending = pending
+            .into_iter()
+            .map(|mark| Queued {
+                mark,
+                session_id: None,
+            })
+            .collect();
+        Self::with_queued(marks, replies, pending)
+    }
+
+    /// From `AttentionMarks::snapshot` and `ReadMarks::queued`, keyed as the
+    /// queue keys them (zerus-ucck P2c-2b).
+    pub fn with_queued(
+        marks: BTreeMap<String, Mark>,
+        replies: BTreeMap<String, String>,
+        pending: Vec<Queued>,
+    ) -> Self {
         let mut by_computer: BTreeMap<String, BTreeMap<String, ReadMark>> = BTreeMap::new();
-        for mark in pending {
+        for queued in pending {
+            let part = queued
+                .session_id
+                .map_or_else(|| queued.mark.name.clone(), |id| format!("id:{id}"));
             by_computer
-                .entry(mark.computer.clone())
+                .entry(queued.mark.computer.clone())
                 .or_default()
-                .insert(mark.name.clone(), mark);
+                .insert(part, queued.mark);
         }
         Self {
             marks,
@@ -95,8 +116,27 @@ impl DeviceMarks {
         }
     }
 
-    fn queued(&self, computer: &str, name: &str) -> Option<&ReadMark> {
-        self.pending.get(computer)?.get(name)
+    /// `row`'s pending mark: under its session ID, or one its session left
+    /// under the name before the ID was known (`ReadMarks::found`). A row
+    /// that lists no ID (a peer whose hgs was downgraded) also finds one
+    /// queued under an ID for the same name, run and conversation.
+    fn queued(&self, computer: &str, row: &ViewRow) -> Option<&ReadMark> {
+        let by = self.pending.get(computer)?;
+        let id = row.session_id.as_deref();
+        id.and_then(|id| by.get(&format!("id:{id}")))
+            .or_else(|| by.get(&row.name))
+            .or_else(|| {
+                id.is_none().then(|| {
+                    by.iter().find_map(|(part, mark)| {
+                        (part.starts_with("id:")
+                            && mark.name == row.name
+                            && row.run_id.as_deref() == Some(mark.run_id.as_str())
+                            && row.conversation_id.as_deref()
+                                == Some(mark.conversation_id.as_str()))
+                        .then_some(mark)
+                    })
+                })?
+            })
     }
 }
 
@@ -123,21 +163,23 @@ pub fn read_state(computer: &ComputerId, row: &ViewRow, device: &DeviceMarks) ->
     let mark = if device.marks.is_empty() {
         None
     } else {
-        let key = marks::attention_key(
+        let id = row.session_id.as_deref();
+        let key = marks::row_attention_key(
             &computer.0,
             &row.agent,
             &row.name,
             row.created,
             conversation,
+            id,
         );
-        // A mark kept under the fallback key still applies until the
-        // frontend moves it (`FleetState.cpp:136-139`).
+        // A mark kept under a fallback key still applies until the frontend
+        // moves it (`FleetState.cpp:136-139`), also the name's fallback of a
+        // row that now lists its session ID.
         device.marks.get(&key).or_else(|| {
-            if conversation.is_empty() {
-                return None;
-            }
-            let fallback = marks::fallback_key(&computer.0, &row.agent, &row.name, row.created);
-            device.marks.get(&fallback)
+            marks::fallback_keys(&computer.0, &row.agent, &row.name, row.created, id)
+                .into_iter()
+                .filter(|fallback| *fallback != key)
+                .find_map(|fallback| device.marks.get(&fallback))
         })
     };
     let review_later = !archived && mark.is_some_and(|mark| mark.review);
@@ -156,7 +198,7 @@ pub fn read_state(computer: &ComputerId, row: &ViewRow, device: &DeviceMarks) ->
     } else {
         // A queued mark of this run and conversation reads the reply or the
         // attention until the host shows it.
-        let queued = device.queued(&computer.0, &row.name).filter(|queued| {
+        let queued = device.queued(&computer.0, row).filter(|queued| {
             !queued.run_id.is_empty()
                 && queued.run_id == row.run_id.as_deref().unwrap_or("")
                 && queued.conversation_id == conversation
@@ -331,20 +373,8 @@ pub enum Entry {
     /// "Restart to finish update".
     Restart,
     Separator,
-    /// A line that cannot be chosen: a computer's header or its state.
+    /// A line that cannot be chosen: a computer's sessions count or its state.
     Label(Text),
-    /// A session; `text` is what the entry shows, its name with `&` doubled.
-    Session {
-        computer: ComputerId,
-        key: String,
-        name: String,
-        text: Text,
-        running: bool,
-        /// First attached local client's TTY, captured with the session.
-        tty: String,
-    },
-    /// The "Open in" submenu with the chosen mode checked.
-    OpenIn(OpenMode),
     Refresh,
     Quit,
 }
@@ -355,16 +385,6 @@ pub fn escape(text: &str) -> String {
 }
 
 /// The text Qt shows for a session (`TrayMenu.cpp:23-31`).
-pub fn session_text(row: &ViewRow) -> Text {
-    let label = escape(&row.name);
-    match row.state.as_str() {
-        "paused" => crate::text!("%1%2", label, crate::text!("  (paused)")),
-        "stopped" => crate::text!("%1%2", label, crate::text!("  (stopped)")),
-        _ if row.notify.attached => Text::verbatim(format!("\u{25cf} {label}")),
-        _ => Text::verbatim(label),
-    }
-}
-
 /// The fleet as the menu bar sees it, kept from the core's changes, with
 /// this device's marks applied to its rows as `FleetState` applies them.
 #[derive(Clone, Debug, Default)]
@@ -421,7 +441,12 @@ impl Desk {
                 self.computers.remove(computer)?;
             }
             Change::Computer { computer, status } => {
-                self.entry(computer).status = *status;
+                let entry = self.entry(computer);
+                entry.status = *status;
+                // A completed service baseline is bounded upserts plus Live,
+                // not a second full Replace. Both current states follow a
+                // successful catalog; transport readiness alone is never Live.
+                entry.listed |= matches!(status, ComputerStatus::Live | ComputerStatus::Polled);
             }
             Change::Machine { computer, machine } => {
                 let entry = self.entry(computer);
@@ -569,8 +594,11 @@ impl Desk {
         lines
     }
 
-    /// The menu Qt builds, without Refresh.
-    pub fn menu(&self, mode: OpenMode) -> Vec<Entry> {
+    /// The menu: Open Zerus, an update's entries, one line per computer (how
+    /// many sessions it has, or its state) and Quit. It lists no sessions:
+    /// with their numbers a row each stopped being useful (the owner, 0.48.0),
+    /// and nothing builds or refreshes such rows.
+    pub fn menu(&self) -> Vec<Entry> {
         let mut menu = vec![Entry::Open];
         if let Some(version) = &self.update_version {
             menu.push(Entry::Update(version.clone()));
@@ -582,72 +610,29 @@ impl Desk {
         let local = self.local();
         let local_section = local.is_none_or(|computer| computer.local_sessions);
         if local_section {
-            let header = local
-                .and_then(|computer| computer.host.clone())
-                .filter(|host| !host.is_empty())
-                .map(|host| Text::verbatim(escape(&host)))
-                .unwrap_or_else(|| crate::text!("this box"));
-            menu.push(Entry::Label(header));
-            // Qt keys "polling…" on a non-empty host, which in practice comes from the
-            // same listing; keying on the listing never hides sessions when the host is empty.
-            match local.filter(|computer| computer.listed) {
-                None => menu.push(Entry::Label(crate::text!("polling…"))),
-                Some(computer) => sessions(&mut menu, &ComputerId::local(), computer),
-            }
+            menu.push(Entry::Label(
+                match local.filter(|computer| computer.listed) {
+                    Some(computer) => crate::text!("%1 here", computer.visible()),
+                    None => crate::text!("%1: polling…", crate::text!("this box")),
+                },
+            ));
         }
         let peers: Vec<(&str, &Computer)> = self.peers().collect();
         if !local_section && peers.is_empty() {
             menu.push(Entry::Label(crate::text!("No remote machines")));
         }
-        for (index, (alias, computer)) in peers.into_iter().enumerate() {
-            if local_section || index > 0 {
-                menu.push(Entry::Separator);
-            }
-            let alias_text = escape(alias);
-            menu.push(Entry::Label(Text::verbatim(alias_text.clone())));
-            if !computer.listed {
-                menu.push(Entry::Label(crate::text!("%1: polling…", alias_text)));
+        for (alias, computer) in peers {
+            let alias = escape(alias);
+            menu.push(Entry::Label(if !computer.listed {
+                crate::text!("%1: polling…", alias)
             } else if !computer.fresh() {
-                menu.push(Entry::Label(crate::text!("%1: unreachable", alias_text)));
+                crate::text!("%1: unreachable", alias)
             } else {
-                sessions(&mut menu, &ComputerId::from(alias), computer);
-            }
+                crate::text!("%1 on %2", computer.visible(), alias)
+            }));
         }
-        menu.extend([Entry::Separator, Entry::OpenIn(mode), Entry::Quit]);
+        menu.extend([Entry::Separator, Entry::Quit]);
         menu
-    }
-}
-
-/// A computer's sessions by name, or "no sessions" (`TrayMenu.cpp:178-195`).
-fn sessions(menu: &mut Vec<Entry>, computer: &ComputerId, state: &Computer) {
-    let mut rows: Vec<(&String, &ViewRow)> = state
-        .rows
-        .iter()
-        .filter(|(_, row)| row.state != "archived")
-        .collect();
-    if rows.is_empty() {
-        menu.push(Entry::Label(crate::text!("no sessions")));
-        return;
-    }
-    // The core does not carry hgs's listing order (Replace is key-sorted), so sessions
-    // sort by name, then key; a deliberate deviation from Qt's TrayMenu order.
-    rows.sort_by(|a, b| a.1.name.cmp(&b.1.name).then_with(|| a.0.cmp(b.0)));
-    for (key, row) in rows {
-        menu.push(Entry::Session {
-            computer: computer.clone(),
-            key: key.clone(),
-            name: row.name.clone(),
-            text: session_text(row),
-            running: row.state == "running",
-            tty: if computer == &ComputerId::local()
-                && row.state == "running"
-                && row.notify.attached
-            {
-                row.notify.client_tty.clone()
-            } else {
-                String::new()
-            },
-        });
     }
 }
 
@@ -801,6 +786,83 @@ mod tests {
             computer: ComputerId::from(computer),
             machine,
         });
+    }
+
+    #[test]
+    fn bounded_service_baselines_match_native_tray_counts_tooltip_badge_and_menu() {
+        let mut native = Desk::default();
+        let mut service = Desk::default();
+        for desk in [&mut native, &mut service] {
+            host(desk, "", "workstation", true);
+            status(desk, "", ComputerStatus::Reconnecting { attempt: 0 });
+            status(desk, "studio", ComputerStatus::Probing);
+        }
+        let mut muted = asking("claude/p/muted");
+        muted.muted = true;
+        let local = vec![
+            ("ask", asking("claude/p/ask")),
+            ("reply", older_reply("claude/p/reply")),
+            ("muted", muted),
+            ("old", row("claude/p/old", "archived")),
+        ];
+        let peer = vec![("peer", asking("claude/p/peer"))];
+        for (computer, rows) in [("", local), ("studio", peer), ("empty", vec![])] {
+            let id = ComputerId::from(computer);
+            native.observe(&Change::Replace {
+                computer: id.clone(),
+                rows: rows
+                    .iter()
+                    .map(|(k, r)| (k.to_string(), r.clone()))
+                    .collect(),
+            });
+            for (key, row) in rows {
+                service.observe(&Change::Upsert {
+                    computer: id.clone(),
+                    key: key.into(),
+                    row,
+                });
+            }
+            assert!(
+                service.computers().get(&id).is_none_or(|c| !c.listed),
+                "partial rows cannot finish a baseline"
+            );
+            for desk in [&mut native, &mut service] {
+                status(desk, computer, ComputerStatus::Live);
+            }
+        }
+        let same = |a: &Desk, b: &Desk| {
+            assert_eq!(a.total(), b.total());
+            assert_eq!(a.attention(), b.attention());
+            assert_eq!(a.face(), b.face());
+            assert_eq!(a.badge(), b.badge());
+            assert_eq!(tip(a), tip(b));
+            assert_eq!(a.menu(), b.menu());
+        };
+        same(&native, &service);
+        assert_eq!((service.total(), service.attention()), (4, 3));
+        assert_eq!(service.badge().as_deref(), Some("3"));
+        assert!(!tip(&service).contains("not polled"));
+        assert!(tip(&service).contains("0 on empty"));
+        let marks = DeviceMarks::new(
+            BTreeMap::new(),
+            BTreeMap::from([(marks::reply_key("", "claude", "conv-1"), "r1".into())]),
+            vec![],
+        );
+        for desk in [&mut native, &mut service] {
+            desk.set_marks(marks.clone());
+        }
+        same(&native, &service);
+        assert_eq!(service.attention(), 2, "device read marks still apply");
+        for desk in [&mut native, &mut service] {
+            status(desk, "studio", ComputerStatus::Reconnecting { attempt: 1 });
+        }
+        same(&native, &service);
+        assert_eq!((service.total(), service.attention()), (4, 1));
+        assert!(service.face().dot && tip(&service).contains("studio: unreachable"));
+        for desk in [&mut native, &mut service] {
+            status(desk, "studio", ComputerStatus::Live);
+        }
+        same(&native, &service);
     }
 
     #[test]
@@ -1218,7 +1280,7 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_lists_computers_and_sessions_in_qt_order() {
+    fn the_menu_lists_each_computer_on_one_line_and_no_sessions() {
         let mut desk = Desk::default();
         host(&mut desk, "", "arch&co", true);
         let mut attached = row("claude/R&D/main", "running");
@@ -1240,79 +1302,29 @@ mod tests {
             "win",
             ComputerStatus::Reconnecting { attempt: 1 },
         );
-        let local = ComputerId::local();
         assert_eq!(
-            desk.menu(OpenMode::Clipboard),
+            desk.menu(),
             vec![
                 Entry::Open,
                 Entry::Separator,
-                Entry::Label(Text::verbatim("arch&&co")),
-                Entry::Session {
-                    computer: local.clone(),
-                    key: "k1".into(),
-                    name: "claude/R&D/main".into(),
-                    text: Text::verbatim("\u{25cf} claude/R&&D/main"),
-                    running: true,
-                    tty: String::new(),
-                },
-                Entry::Session {
-                    computer: local,
-                    key: "k2".into(),
-                    name: "codex/p/zeta".into(),
-                    text: crate::text!("%1%2", "codex/p/zeta", crate::text!("  (stopped)")),
-                    running: false,
-                    tty: String::new(),
-                },
-                Entry::Separator,
-                Entry::Label(Text::verbatim("mac&&m")),
-                Entry::Label(crate::text!("no sessions")),
-                Entry::Separator,
-                Entry::Label(Text::verbatim("studio")),
+                Entry::Label(crate::text!("%1 here", 2usize)),
+                Entry::Label(crate::text!("%1 on %2", 0usize, "mac&&m")),
                 Entry::Label(crate::text!("%1: polling…", "studio")),
-                Entry::Separator,
-                Entry::Label(Text::verbatim("win")),
                 Entry::Label(crate::text!("%1: unreachable", "win")),
                 Entry::Separator,
-                Entry::OpenIn(OpenMode::Clipboard),
                 Entry::Quit,
             ]
         );
-    }
-
-    #[test]
-    fn only_a_running_attached_local_session_captures_its_terminal() {
-        let mut desk = Desk::default();
-        let mut attached = row("sh/sample-project", "running");
-        attached.notify.attached = true;
-        attached.notify.client_tty = "/dev/pts/7".into();
-        let mut saved = attached.clone();
-        saved.name = "sh/saved-project".into();
-        saved.state = "paused".into();
-        let mut detached = attached.clone();
-        detached.name = "sh/detached-project".into();
-        detached.notify.attached = false;
+        // A session changing changes no entry: the menu holds only counts.
+        let before = desk.menu();
+        let mut paused = row("codex/p/zeta", "paused");
+        paused.notify.attached = true;
         listed(
             &mut desk,
             "",
-            vec![
-                ("attached", attached.clone()),
-                ("saved", saved),
-                ("detached", detached),
-            ],
+            vec![("k2", paused), ("k1", row("claude/R&D/main", "running"))],
         );
-        listed(&mut desk, "peer", vec![("remote", attached)]);
-        let targets: BTreeMap<String, String> = desk
-            .menu(OpenMode::Automatic)
-            .into_iter()
-            .filter_map(|entry| match entry {
-                Entry::Session { key, tty, .. } => Some((key, tty)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(targets["attached"], "/dev/pts/7");
-        for key in ["saved", "detached", "remote"] {
-            assert_eq!(targets[key], "", "{key}");
-        }
+        assert_eq!(desk.menu(), before);
     }
 
     #[test]
@@ -1340,12 +1352,13 @@ mod tests {
     fn a_local_computer_that_has_not_answered_is_this_box_polling() {
         let desk = Desk::default();
         assert_eq!(
-            &desk.menu(OpenMode::Terminal)[..4],
-            &[
+            desk.menu(),
+            vec![
                 Entry::Open,
                 Entry::Separator,
-                Entry::Label(crate::text!("this box")),
-                Entry::Label(crate::text!("polling…")),
+                Entry::Label(crate::text!("%1: polling…", crate::text!("this box"))),
+                Entry::Separator,
+                Entry::Quit,
             ]
         );
     }
@@ -1356,13 +1369,12 @@ mod tests {
         host(&mut desk, "", "win", false);
         listed(&mut desk, "", vec![]);
         assert_eq!(
-            desk.menu(OpenMode::Terminal),
+            desk.menu(),
             vec![
                 Entry::Open,
                 Entry::Separator,
                 Entry::Label(crate::text!("No remote machines")),
                 Entry::Separator,
-                Entry::OpenIn(OpenMode::Terminal),
                 Entry::Quit,
             ]
         );
@@ -1381,26 +1393,6 @@ mod tests {
             Some(ComputerId::from("mac"))
         );
         assert!(desk.computers().is_empty());
-    }
-
-    #[test]
-    fn session_text_follows_qt_suffixes() {
-        assert_eq!(
-            session_text(&row("a/b", "paused")).english(),
-            "a/b  (paused)"
-        );
-        assert_eq!(
-            session_text(&row("a/b", "stopped")).english(),
-            "a/b  (stopped)"
-        );
-        assert_eq!(session_text(&row("a/b&c", "running")).english(), "a/b&&c");
-        let mut attached = row("a/b", "paused");
-        attached.notify.attached = true;
-        assert_eq!(
-            session_text(&attached).english(),
-            "a/b  (paused)",
-            "a saved session shows no attachment"
-        );
     }
 
     #[test]
@@ -1455,17 +1447,17 @@ mod tests {
         assert!(desk.set_updates(Some("0.47.0".into()), true));
         assert!(!desk.set_updates(Some("0.47.0".into()), true));
         assert_eq!(
-            &desk.menu(OpenMode::Terminal)[..5],
+            &desk.menu()[..5],
             &[
                 Entry::Open,
                 Entry::Update("0.47.0".into()),
                 Entry::Restart,
                 Entry::Separator,
-                Entry::Label(crate::text!("this box")),
+                Entry::Label(crate::text!("%1: polling…", crate::text!("this box"))),
             ]
         );
         assert!(desk.set_updates(None, false));
-        assert_eq!(desk.menu(OpenMode::Terminal)[1], Entry::Separator);
+        assert_eq!(desk.menu()[1], Entry::Separator);
     }
 
     #[test]
@@ -1486,5 +1478,100 @@ mod tests {
             "Linux modes are not macOS modes"
         );
         assert_eq!(OpenMode::Terminal.label(), "Terminal.app");
+    }
+
+    /// zerus-ucck P2c-2b: a row that lists a durable session ID reads its
+    /// attention mark under the ID's fallback key, or under the name's until
+    /// the frontend moves it, and its queued read mark under the ID. Another
+    /// session with the same label never takes either.
+    #[test]
+    fn a_row_with_a_session_id_reads_its_marks_by_id() {
+        use crate::readmarks::Queued;
+        let (id, other) = (
+            "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f",
+            "7be01d44-6b7e-4c2a-9d1f-0a1b2c3d4e5f",
+        );
+        let local = ComputerId::local();
+        let mut row = ViewRow {
+            name: "claude/p/a".into(),
+            agent: "claude".into(),
+            created: 5,
+            session_id: Some(id.into()),
+            ..ViewRow::default()
+        };
+        let review = |key: String| {
+            let mark = Mark {
+                review: true,
+                acknowledged: String::new(),
+            };
+            DeviceMarks::new(BTreeMap::from([(key, mark)]), BTreeMap::new(), Vec::new())
+        };
+        let by_id = review(marks::session_fallback_key("", "claude", id));
+        let by_name = review(marks::fallback_key("", "claude", "claude/p/a", 5));
+        assert!(read_state(&local, &row, &by_id).review_later);
+        assert!(
+            read_state(&local, &row, &by_name).review_later,
+            "until moved"
+        );
+        // The ID's key wins over a mark the name's key still holds.
+        let both = DeviceMarks::new(
+            BTreeMap::from([
+                (
+                    marks::session_fallback_key("", "claude", id),
+                    Mark::default(),
+                ),
+                (
+                    marks::fallback_key("", "claude", "claude/p/a", 5),
+                    Mark {
+                        review: true,
+                        acknowledged: String::new(),
+                    },
+                ),
+            ]),
+            BTreeMap::new(),
+            Vec::new(),
+        );
+        assert!(!read_state(&local, &row, &both).review_later);
+        row.session_id = Some(other.into());
+        assert!(
+            !read_state(&local, &row, &by_id).review_later,
+            "another session"
+        );
+        // A read mark queued for this run reads the reply until the host shows it.
+        row.session_id = Some(id.into());
+        row.run_id = Some("run-1".into());
+        row.conversation_id = Some("conv-1".into());
+        row.reply_id = Some("r1".into());
+        row.shared_read = true;
+        let queued = |session_id: Option<&str>| {
+            let mark = ReadMark {
+                computer: String::new(),
+                name: "claude/p/a".into(),
+                run_id: "run-1".into(),
+                conversation_id: "conv-1".into(),
+                reply_id: Some("r1".into()),
+                attention_signature: None,
+            };
+            let queued = Queued {
+                mark,
+                session_id: session_id.map(str::to_owned),
+            };
+            DeviceMarks::with_queued(BTreeMap::new(), BTreeMap::new(), vec![queued])
+        };
+        assert!(!read_state(&local, &row, &queued(Some(id))).unread_reply);
+        assert!(
+            !read_state(&local, &row, &queued(None)).unread_reply,
+            "queued by name"
+        );
+        assert!(read_state(&local, &row, &queued(Some(other))).unread_reply);
+        // #1421 review: a row that lists no ID (a downgraded peer) finds the
+        // mark queued under an ID for the same name, run and conversation.
+        row.session_id = None;
+        assert!(!read_state(&local, &row, &queued(Some(id))).unread_reply);
+        row.run_id = Some("run-2".into());
+        assert!(
+            read_state(&local, &row, &queued(Some(id))).unread_reply,
+            "another run"
+        );
     }
 }

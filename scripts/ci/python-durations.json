@@ -67,7 +67,6 @@
  "test_machines.Machines[2/2]": 1,
  "test_macos_bundle.MacosBundleName": 0,
  "test_macos_package.BundleChecks": 0,
- "test_macos_qt.PinnedQt": 0,
  "test_macos_setup.MacSetup": 3,
  "test_macos_signing.Signing": 0,
  "test_mobile_peers.MobilePeers[1/2]": 48,

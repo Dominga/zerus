@@ -106,15 +106,13 @@ fn checked_census(
         if !seen.insert(pid) {
             return Err(CensusFault::Duplicate);
         }
-        // PID 0 is the kernel's idle pseudo-process, not an openable process.
-        // It must have the kernel's zero birth. No named process is excluded.
-        if pid == 0 {
-            if created != 0 {
-                return Err(CensusFault::Creation);
-            }
-        } else if created == 0
-            || created > i64::MAX as u64
-            || result.insert(pid, Process { pid, created }).is_some()
+        // OpenProcess cannot open the kernel idle pseudo-process (PID 0).
+        // Its discarded birth is not a process lifetime to validate. Every
+        // real process still requires a positive, representable native birth.
+        if pid != 0
+            && (created == 0
+                || created > i64::MAX as u64
+                || result.insert(pid, Process { pid, created }).is_some())
         {
             return Err(CensusFault::Creation);
         }

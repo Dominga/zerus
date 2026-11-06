@@ -3872,6 +3872,8 @@ mod detach_tests {
     /// The helper side: it starts a ~30 s child the way `spawn_detached`
     /// does (without the breakaway a test job may forbid) and exits at once.
     #[test]
+    // This helper must exit before its child; the parent terminates that exact PID.
+    #[allow(clippy::zombie_processes)]
     fn detached_child_helper() {
         if std::env::var_os("HGS_TEST_DETACH_HELPER").is_none() {
             return;

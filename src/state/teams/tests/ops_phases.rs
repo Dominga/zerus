@@ -1502,7 +1502,7 @@ fn a_drafts_task_phases_survive_create_team() {
     apply(&mut team, "draft", &json!({"action":"update","revision":1,"set":{"members":[{"id":"dev","role":"Backend","agent":"claude"}]}}), &lead, &none, &mut events).unwrap();
     let tasks: Vec<Value> = (1..=6u32)
         .map(|id| {
-            let phase = (id + 1) / 2;
+            let phase = id.div_ceil(2);
             let mut task = json!({"id":id,"title":format!("Task {id}"),"assignee":"dev"});
             if phase > 1 {
                 task["phase"] = json!(phase);

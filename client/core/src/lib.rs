@@ -38,6 +38,7 @@ pub mod linux_notify;
 pub mod local_messages;
 pub mod machine;
 pub mod machine_connections;
+pub mod model_servers;
 pub mod macos_notify;
 pub mod maintenance;
 pub mod marks;

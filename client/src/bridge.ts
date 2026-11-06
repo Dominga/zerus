@@ -542,6 +542,38 @@ export type RulesOutcome =
   | { outcome: "unsupported"; detail: Text }
   | { outcome: "failed"; detail: Text; request_id?: string }
   | { outcome: "uncertain"; detail: Text; request_id: string };
+/** Task 67: this computer's model servers (client/core model_servers over `hgs model-server`). */
+export interface ModelServer {
+  name: string; base_url: string; kind: string; ssh: string; has_key: boolean; up_minutes: number; contexts: unknown;
+  status: string[]; up: string[]; down: string[]; logs: string[]; read_only: boolean; agent_url: string; models_url: string;
+  status_text: string; up_text: string; down_text: string; logs_text: string;
+}
+export interface ModelServerModel { name: string; state: string; label: Text; since: number; usable: boolean; can_down: boolean; can_up: boolean }
+export interface ModelServerStatus {
+  error: string; detail: string; error_label: Text; problem: Text; source: string; models: ModelServerModel[];
+  free: number; total: number; memory: Text; low: boolean; used: number; raw: string[]; running: number; active: string[];
+}
+export interface ModelServerOutcome { text: Text; error: boolean }
+export interface ModelServerUpStart { started: boolean; id: string; limit_ms: number; outcome: ModelServerOutcome | null }
+export interface ModelServerUpPoll { running: boolean; outcome: ModelServerOutcome | null }
+export interface ModelServerLogs { lines: string[]; truncated: boolean }
+export interface ModelServerForm { was: string; name: string; base_url: string; kind: string; ssh: string; key_change: "" | "replace" | "remove"; key: string; status: string; up: string; down: string; logs: string }
+export interface ModelServerTest { tone: "ok" | "warn" | "error"; text: Text; raw: string[] }
+const desktopOnly = <T>(run: () => Promise<T>): Promise<T> => (inTauri() ? run() : Promise.reject(new Error(DESKTOP_ONLY)));
+export const modelServersList = () => desktopOnly(() => invoke<ModelServer[]>("model_servers_list"));
+export const modelServerStatus = (server: string) => desktopOnly(() => invoke<ModelServerStatus>("model_server_status", { server }));
+export const modelServerUp = (server: string, model: string) => desktopOnly(() => invoke<ModelServerUpStart>("model_server_up", { server, model }));
+export const modelServerUpResult = (server: string, model: string, id: string, expired: boolean) =>
+  desktopOnly(() => invoke<ModelServerUpPoll>("model_server_up_result", { server, model, id, expired }));
+export const modelServerSessions = (server: string) => desktopOnly(() => invoke<Record<string, string[]>>("model_server_sessions", { server }));
+export const modelServerDown = (server: string, model: string) => desktopOnly(() => invoke<Text | null>("model_server_down", { server, model }));
+export const modelServerLogs = (server: string, model: string) => desktopOnly(() => invoke<ModelServerLogs>("model_server_logs", { server, model }));
+export const modelServerSave = (form: ModelServerForm) => desktopOnly(() => invoke<ModelServer[]>("model_server_save", { form }));
+export const modelServerDelete = (name: string) => desktopOnly(() => invoke<ModelServer[]>("model_server_delete", { name }));
+export const modelServerTest = (form: ModelServerForm, what: "api" | "status") => desktopOnly(() => invoke<ModelServerTest>("model_server_test", { form, what }));
+export const modelServerTestLogs = (form: ModelServerForm, model: string) => desktopOnly(() => invoke<ModelServerTest>("model_server_test_logs", { form, model }));
+export const modelServerSession = (agent: string, folder: string, tag: string, server: string, model: string) =>
+  desktopOnly(() => invoke<void>("model_server_session", { agent, folder, tag, server, model }));
 /** Task 73: WSL path mapping and WSL file open (client/core wsl_mapping). Errors are core Text. */
 export interface WslFields { windows_root: string; mount_root: string; workspace_id: string }
 export interface WslTarget { alias: string; machine_id: string; distribution: string; user: string; environment: string; saved: WslFields }

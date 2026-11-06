@@ -128,6 +128,7 @@ mod window_geometry;
 mod window_layer;
 mod window_visibility;
 mod wsl_mapping;
+mod model_servers;
 #[cfg(any(windows, test))]
 mod windows_shell;
 #[cfg(feature = "live")]
@@ -622,6 +623,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(teams::Teams::new(replay));
                 // Task 73: Map Windows path… and Open mapped Windows original….
                 app.manage(wsl_mapping::WslDialogs::new(dir.join("wsl-path-mappings.json"), replay));
+                // Task 67: the Model servers tab and Settings > Model servers.
+                app.manage(model_servers::ModelServers::new(replay));
                 // Task 8: a stream's team heads reach the computer's poller.
                 let heads_app = app.handle().clone();
                 app.state::<commands::AppState>().pump().on_team_heads(std::sync::Arc::new(move |computer, heads| {
@@ -1462,6 +1465,18 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         wsl_mapping::wsl_file_preview,
         wsl_mapping::wsl_file_open_original,
         wsl_mapping::wsl_dialog_close,
+        model_servers::model_servers_list,
+        model_servers::model_server_status,
+        model_servers::model_server_up,
+        model_servers::model_server_up_result,
+        model_servers::model_server_sessions,
+        model_servers::model_server_down,
+        model_servers::model_server_logs,
+        model_servers::model_server_save,
+        model_servers::model_server_delete,
+        model_servers::model_server_test,
+        model_servers::model_server_test_logs,
+        model_servers::model_server_session,
         teams::catalog_editor_schema,
         teams::catalog_editor_load,
         teams::catalog_editor_edit,

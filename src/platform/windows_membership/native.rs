@@ -26,6 +26,21 @@ struct Api {
     system: QuerySystem,
     process: QueryProcess,
 }
+#[derive(Clone, Copy, Debug)]
+enum CensusStage {
+    CreationBefore,
+    Table,
+    CreationAfter,
+}
+fn census_stage<T>(stage: CensusStage, result: Result<T>) -> Result<T> {
+    #[cfg(test)]
+    if result.is_err() {
+        eprintln!("native_census_stage={stage:?}");
+    }
+    #[cfg(not(test))]
+    let _ = stage;
+    result
+}
 impl Api {
     fn new() -> Result<Self> {
         // These layouts are admitted only for a native AMD64 caller. An ARM64
@@ -68,28 +83,44 @@ impl Api {
         // Validate the admitted native layout against a retained known kernel
         // object as well as the machine type, without excluding our own row.
         let own = unsafe { GetCurrentProcess() };
-        let before = creation(own).map_err(|_| Error::Incomplete)?;
-        let bytes = table(until, |buffer| {
-            let mut returned = 0;
-            // SAFETY: u64 storage is suitably aligned and fully writable.
-            let status = unsafe {
-                (self.system)(
-                    5,
-                    buffer.as_mut_ptr().cast(),
-                    (buffer.len() * 8) as u32,
-                    &mut returned,
-                )
-            };
-            (status, returned as usize)
+        let before = census_stage(CensusStage::CreationBefore, creation(own))
+            .map_err(|_| Error::Incomplete)?;
+        let bytes = census_stage(
+            CensusStage::Table,
+            table(until, |buffer| {
+                let mut returned = 0;
+                // SAFETY: u64 storage is suitably aligned and fully writable.
+                let status = unsafe {
+                    (self.system)(
+                        5,
+                        buffer.as_mut_ptr().cast(),
+                        (buffer.len() * 8) as u32,
+                        &mut returned,
+                    )
+                };
+                (status, returned as usize)
+            }),
+        )?;
+        let rows = checked_census(&bytes, until).map_err(|reason| {
+            // Failure-only unit diagnostics from THIS original table. No
+            // additional native query, raw row or production logging route.
+            #[cfg(test)]
+            eprintln!("native_census_refusal={reason:?}");
+            #[cfg(not(test))]
+            let _ = reason;
+            Error::Incomplete
         })?;
-        let rows = census(&bytes, until)?;
         if rows.get(&std::process::id())
             != Some(&Process {
                 pid: std::process::id(),
                 created: before,
             })
-            || creation(own).map_err(|_| Error::Incomplete)? != before
+            || census_stage(CensusStage::CreationAfter, creation(own))
+                .map_err(|_| Error::Incomplete)?
+                != before
         {
+            #[cfg(test)]
+            eprintln!("native_census_refusal=OriginalProcessBinding");
             return Err(Error::Incomplete);
         }
         live(until)?;

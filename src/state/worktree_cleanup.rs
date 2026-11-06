@@ -260,7 +260,7 @@ fn context_with_processes(
     let bindings_complete = records.is_ok();
     let bindings = records.unwrap_or_default();
     let mut archives = Vec::new();
-    let archives_complete = archive::visit_bounded(deadline, |record| {
+    let archives_complete = archive_references::visit_metadata(deadline, |record| {
         archives.push(reference(&record));
         Ok(())
     })

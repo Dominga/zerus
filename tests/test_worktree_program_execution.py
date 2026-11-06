@@ -5,6 +5,7 @@ loan and guarded Git engine. Cached native evidence is supplied by a fixture;
 this is not installed GUI confirmation or Mac/Windows acceptance.
 """
 import hashlib
+from contextlib import closing
 import fcntl
 import json
 import os
@@ -203,7 +204,9 @@ class ProgramExecution(test_pause.Harness):
         return child.returncode, output, error
 
     def test_the_exact_original_stop_then_final_cleanup_preserves_branch_and_archive(self):
-        stop = self.original()
+        self.assert_original_stop_and_cleanup(self.original())
+
+    def assert_original_stop_and_cleanup(self, stop):
         code, output, error = self.run_original('program-stop', stop)
         self.assertEqual(code, 0, output + error)
         report = json.loads(output)
@@ -224,6 +227,168 @@ class ProgramExecution(test_pause.Harness):
         self.holder.stdin = None
         out, err = self.holder.communicate(timeout=8)
         self.assertEqual(self.holder.returncode, 0, out + err)
+
+    def unrelated_archive_history(self, stop):
+        folder = self.root / 'state/archives'
+        template = json.loads((folder / (stop['archive_id'] + '.json')).read_text())
+        total = 0
+        for index in range(48):
+            archive = dict(template)
+            archive.update(archive_id=str(uuid.uuid4()),
+                           name='claude/unrelated-history/archive-' + str(index),
+                           session_id=str(uuid.uuid4()), run_id=str(uuid.uuid4()),
+                           conversation_id=str(uuid.uuid4()),
+                           cwd=str(self.root / ('old-folder-' + str(index))),
+                           launch_dir=str(self.root / ('old-folder-' + str(index))),
+                           worktree_owner=None, unrelated_fixture_padding='x' * (768 << 10))
+            path = folder / (archive['archive_id'] + '.json')
+            data = compact(archive).encode()
+            self.assertLess(len(data), 1 << 20)
+            path.write_bytes(data)
+            path.chmod(0o600)
+            total += len(data)
+        self.assertGreater(total, 32 << 20)
+        return total
+
+    def warm_archive_references(self):
+        # Ordinary archive browsing performs migration/reconciliation. The
+        # mutation guard itself must never rebuild unknown reference coverage.
+        result = subprocess.run([str(test_pause.HGS), 'archives', '--json'], env=self.env,
+                                input='{"limit":1}', text=True, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def historical_archives(self, stop):
+        folder = self.root / 'state/archives'
+        original = json.loads((folder / (stop['archive_id'] + '.json')).read_text())
+        archives = []
+        for tag in ('older', 'legacy'):
+            record = dict(original, archive_id=str(uuid.uuid4()), session_id=str(uuid.uuid4()),
+                          run_id=str(uuid.uuid4()), conversation_id=str(uuid.uuid4()),
+                          name='claude/p/' + tag, archived_at=1)
+            if tag == 'legacy':
+                record.pop('worktree_owner')
+            path = folder / (record['archive_id'] + '.json')
+            path.write_text(compact(record))
+            path.chmod(0o600)
+            archives.append(record)
+        return archives
+
+    def assert_restore_metadata(self, stop, historical):
+        folder = self.root / 'state/archives'
+        original = json.loads((folder / (stop['archive_id'] + '.json')).read_text())
+        expected = original['worktree_cleanup']
+        self.assertEqual(expected['status'], 'removal_pending')
+        self.assertEqual(expected['owner']['id'], stop['manifest']['capture']['owner_id'])
+        self.assertEqual(expected['branch'], 'session-work')
+        self.assertEqual(expected['head'], self.git('-C', str(self.repo), 'rev-parse', 'refs/heads/session-work'))
+        for record in historical:
+            saved = json.loads((folder / (record['archive_id'] + '.json')).read_text())
+            self.assertEqual(saved, dict(record, worktree_cleanup=expected), 'every compatible historical reference prepared durably')
+
+    def restore_historical(self, record):
+        self.hgs('resume', record['name'], '--archive', record['archive_id'], '--dry-run')
+        self.assertFalse(self.project.exists(), 'inspection cannot recreate the folder')
+        self.hgs('resume', record['name'], '--archive', record['archive_id'], '-d')
+        self.wait(lambda: self.binding(record['name']).get('conversation_id') == record['conversation_id']
+                  and not self.binding(record['name']).get('expected_id'))
+        self.assertEqual((self.project / 'tracked').read_text(), 'original')
+        self.assertEqual(self.git('-C', str(self.project), 'branch', '--show-current'), 'session-work')
+
+    def test_unrelated_archive_bodies_over_the_global_budget_do_not_block_original_cleanup(self):
+        stop = self.original()
+        self.unrelated_archive_history(stop)
+        historical = self.historical_archives(stop)
+        unrelated = {p: hashlib.sha256(p.read_bytes()).hexdigest()
+                     for p in (self.root / 'state/archives').glob('*.json')
+                     if json.loads(p.read_text())['name'].startswith('claude/unrelated-history/')}
+        self.warm_archive_references()
+        # The original native continuation still has to prove its exact
+        # termination/archive/owner. Unrelated body volume grants no bypass.
+        self.assert_original_stop_and_cleanup(stop)
+        self.assert_restore_metadata(stop, historical)
+        self.assertEqual({p: hashlib.sha256(p.read_bytes()).hexdigest() for p in unrelated}, unrelated)
+        self.restore_historical(historical[0])
+
+    def test_legacy_missing_owner_archive_remains_restorable_after_original_cleanup(self):
+        stop = self.original()
+        historical = self.historical_archives(stop)
+        self.warm_archive_references()
+        self.assert_original_stop_and_cleanup(stop)
+        self.assert_restore_metadata(stop, historical)
+        self.restore_historical(historical[1])
+
+    def test_incomplete_relevant_reference_index_keeps_the_checkout_without_rebuilding_it(self):
+        stop = self.original()
+        historical = self.historical_archives(stop)
+        self.warm_archive_references()
+        database = self.root / 'state/archive-catalog-v1.sqlite3'
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute('DELETE FROM archive_reference_paths WHERE id=?', (historical[0]['archive_id'],))
+        code, output, error = self.run_original('program-stop', stop)
+        self.assertEqual(code, 0, output + error)
+        self.assertEqual(json.loads(output)['state'], 'complete')
+        self.program.wait(timeout=5)
+        code, output, error = self.run_original('program-cleanup', dict(request_id=str(uuid.uuid4()), stop=stop))
+        self.assertEqual(code, 0, output + error)
+        self.assertEqual(json.loads(output)['state'], 'kept')
+        self.assertTrue(self.project.exists())
+        self.assertTrue(self.git('-C', str(self.repo), 'show-ref', 'refs/heads/session-work'))
+        with closing(sqlite3.connect(database)) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM archive_reference_paths WHERE id=?',
+                                        (historical[0]['archive_id'],)).fetchone()[0], 0)
+
+    def test_large_unrelated_history_never_substitutes_for_the_exact_original_archive(self):
+        stop = self.original()
+        self.unrelated_archive_history(stop)
+        self.warm_archive_references()
+        code, output, error = self.run_original('program-stop', stop)
+        self.assertEqual(code, 0, output + error)
+        self.assertEqual(json.loads(output)['state'], 'complete')
+        self.program.wait(timeout=5)
+        path = self.root / 'state/archives' / (stop['archive_id'] + '.json')
+        original = json.loads(path.read_text())
+        changed = dict(original)
+        changed['worktree_owner'] = dict(original['worktree_owner'], id=str(uuid.uuid4()))
+        path.write_text(compact(changed))
+        cleanup = dict(request_id=str(uuid.uuid4()), stop=stop)
+        code, output, error = self.run_original('program-cleanup', cleanup)
+        self.assertNotEqual(code, 0, output + error)
+        self.assertIn('proofs=0 ', error)
+        self.assertTrue(self.project.exists())
+        self.assertEqual(json.loads(path.read_text()), changed, 'no rewrite or archive adoption')
+        self.assertTrue(self.git('-C', str(self.repo), 'show-ref', 'refs/heads/session-work'))
+
+    def refuse_unavailable_original_archive(self, missing):
+        stop = self.original()
+        historical = self.historical_archives(stop)
+        self.warm_archive_references()
+        folder = self.root / 'state/archives'
+        retained = {folder / (row['archive_id'] + '.json'):
+                    (folder / (row['archive_id'] + '.json')).read_bytes() for row in historical}
+        code, output, error = self.run_original('program-stop', stop)
+        self.assertEqual(code, 0, output + error)
+        self.assertEqual(json.loads(output)['state'], 'complete')
+        self.program.wait(timeout=5)
+        original = folder / (stop['archive_id'] + '.json')
+        if missing:
+            original.unlink()
+        else:
+            original.write_text('{corrupt original')
+        code, output, error = self.run_original('program-cleanup', dict(request_id=str(uuid.uuid4()), stop=stop))
+        self.assertNotEqual(code, 0, output + error)
+        self.assertIn('proofs=0 ', error)
+        self.assertTrue(self.project.exists())
+        self.assertTrue(self.git('-C', str(self.repo), 'show-ref', 'refs/heads/session-work'))
+        self.assertEqual({path: path.read_bytes() for path in retained}, retained)
+        self.assertEqual(original.exists(), not missing)
+        if not missing:
+            self.assertEqual(original.read_text(), '{corrupt original')
+
+    def test_missing_original_archive_cannot_be_replaced_by_other_valid_references(self):
+        self.refuse_unavailable_original_archive(missing=True)
+
+    def test_corrupt_original_archive_cannot_be_replaced_by_other_valid_references(self):
+        self.refuse_unavailable_original_archive(missing=False)
 
     def test_a_configured_state_alias_keeps_the_same_native_scope_and_receipts(self):
         alias = self.root / 'selected-state'

@@ -3122,9 +3122,28 @@ of whether automatic provider-error recovery is enabled or the GUI is open. It
 imports at most 64 old ownership receipts and checks at most one queued worktree
 per 30-second round. An indexed private queue schedules retained worktrees for a
 later hourly check; it does not rescan project disks or journals. Archive metadata
-checks stream at most 5000 entries and 32 MiB within their deadline; incomplete
-coverage keeps automatic cleanup from removing the folder. Old removed receipts
-do not repopulate the queue once their Git metadata is gone.
+checks verify compact reference metadata against the complete native archive-file
+roster and exact file versions, at most 5000 entries and 32 MiB within their
+deadline. Ordinary archive catalog migration/reconciliation builds this metadata;
+archive writes,
+rewrites and removals maintain it. Missing, stale or corrupt coverage keeps the
+folder; cleanup never rebuilds it or interprets an omitted row as no reference.
+Before deletion, an indexed checkout query reads the relevant authoritative
+archive bodies within the same bounds and durably prepares Restore for every
+compatible reference, including older archives without an ownership field.
+Unrelated archive bodies and conversation journals do not consume this check's
+byte budget. Reference coverage is independent of search/label filtering, and an
+interrupted initial migration cannot publish complete coverage. Branch, head and
+ownership checks remain independent. Old removed receipts do not repopulate the
+queue once their Git metadata is gone.
+
+Reference reads bind a regular native catalog object before SQLite runs; its
+private read-only reader never reopens mutable paths or accesses SQLite sidecars.
+Unexpected sidecars or replacement refuse coverage within the original budget.
+Archive write hooks publish bounded per-ID native metadata updates without
+opening SQLite. Reads verify those updates against the current archive objects;
+ordinary catalog reconciliation absorbs them. Missing or corrupt updates never
+substitute for a stale base row.
 
 All automatic rules use fresh native checks under the repository/session locks.
 They preserve branches, changed/untracked files and **all ignored local data**,

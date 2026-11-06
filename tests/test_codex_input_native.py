@@ -200,6 +200,91 @@ class NativeCodexStartup(test_pause.Harness):
         self.assertEqual(json.loads(result.stdout)['status'], 'answered')
         self.deliver_first()
 
+    def test_resumed_and_restored_hook_review_blocks_input_until_the_person_answers(self):
+        def card():
+            return next((q for q in self.inspect().get('pending_questions', [])
+                         if q.get('source') == 'codex_hooks_trust'), None)
+
+        def answer(question):
+            record = self.binding(self.name)
+            payload = dict(request_id=str(uuid.uuid4()), expected_run_id=record['run_id'],
+                           expected_conversation_id=record.get('conversation_id') or '',
+                           question_id=question['question_id'], expected_question_hash=question['question_hash'],
+                           answers=[dict(question_id='hooks_trust', selected_option_ids=['trust'], text='')])
+            result = subprocess.run([str(test_pause.HGS), 'answer', self.name, '--json'],
+                                    input=json.dumps(payload), env=self.env, text=True,
+                                    capture_output=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr + '\n' + self.screen())
+
+        def message(text):
+            record = self.binding(self.name)
+            payload = dict(request_id=str(uuid.uuid4()), expected_run_id=record['run_id'],
+                           expected_conversation_id=record['conversation_id'], text=text)
+            return subprocess.run([str(test_pause.HGS), 'send', self.name, '--json'],
+                                  input=json.dumps(payload), env=self.env, text=True,
+                                  capture_output=True, timeout=20)
+
+        self.launch(trust=True)
+        initial = self.until('The initial native hook review must be explicit', card)
+        answer(initial)
+        self.deliver_first()
+        conversation = self.binding(self.name)['conversation_id']
+        hooks = self.native_home / 'hooks.json'
+        original = hooks.read_bytes()
+        stamp = hooks.stat().st_mtime_ns
+        previous = self.binding(self.name)['run_id']
+        self.hgs('pause', self.name)
+        self.hgs('resume', self.name, '-d')
+        self.until('The unchanged resume must reach its native composer', lambda:
+                   self.binding(self.name).get('run_id') != previous and '›' in self.screen()
+                   and 'Hooks need review' not in self.screen())
+        self.assertEqual((hooks.read_bytes(), hooks.stat().st_mtime_ns), (original, stamp))
+        self.assertIsNone(card(), 'An unchanged registration must not request trust again')
+        result = message('Synthetic unchanged-hook resume.')
+        self.assertEqual(result.returncode, 0, result.stderr + '\n' + self.screen())
+        self.until('The resumed turn must finish', lambda:
+                   self.binding(self.name).get('activity') == 'idle'
+                   and not self.binding(self.name).get('expected_id'))
+
+        for mode in ('resume', 'restore'):
+            with self.subTest(mode=mode):
+                previous = self.binding(self.name)['run_id']
+                self.hgs('pause', self.name)
+                # Change one of our fixture's existing definitions, not its
+                # executable or trust state. Codex must request new consent.
+                document = json.loads(hooks.read_text())
+                document['hooks']['SessionStart'][0]['hooks'][0]['timeout'] += 1
+                hooks.write_text(json.dumps(document, indent=2))
+                options = []
+                if mode == 'restore':
+                    self.hgs('archive', self.name)
+                    archived = next(json.loads(path.read_text())
+                                    for path in (self.root / 'state/archives').glob('*.json')
+                                    if json.loads(path.read_text()).get('name') == self.name)
+                    options = ['--archive', archived['archive_id']]
+                self.hgs('resume', self.name, *options, '-d')
+                self.until('The new original run must be bound', lambda:
+                           self.binding(self.name).get('run_id') not in (None, previous))
+                review = self.until('The saved conversation must expose its real hook review', card)
+                self.assertEqual(review['conversation_id'], conversation)
+                self.assertEqual(review['run_id'], self.binding(self.name)['run_id'])
+                self.assertNotEqual(review['question_hash'], initial['question_hash'])
+                result = message('MUST NOT ENTER THE HOOK TRUST DIALOG')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('hook trust review', result.stderr)
+                self.assertIn('› 1. Review hooks', self.screen())
+                self.assertFalse(any('MUST NOT ENTER' in text
+                                     for request in self.server.requests for text in request['texts']))
+                answer(review)  # This fixture's explicit decision; never automatic trust.
+                text = 'Synthetic after ' + mode + ' hook review.'
+                result = message(text)
+                self.assertEqual(result.returncode, 0, result.stderr + '\n' + self.screen())
+                self.until('The original resumed conversation must complete its turn', lambda:
+                           self.binding(self.name).get('activity') == 'idle'
+                           and not self.binding(self.name).get('expected_id'))
+                self.assertEqual(self.binding(self.name)['conversation_id'], conversation)
+                self.assertEqual(sum(row['texts'][-1:] == [text] for row in self.server.requests), 1)
+
     def untrusted(self, git=False):
         self.server.collaboration = False
         # A project config makes the ordinary folder a project in 0.167 too:

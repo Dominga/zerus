@@ -80,6 +80,10 @@ pub struct UpdatesView {
     pub version: String,
     /// A source or unknown dev-app installation keeps its status in Settings only.
     pub quiet: bool,
+    /// WhiteWh fork, task #63: the fork's own channel (crate::fork_updates),
+    /// absent outside a fork build's portable installation.
+    #[serde(default)]
+    pub fork: Option<zerus_client_core::fork_update::ForkView>,
 }
 
 #[derive(Clone)]
@@ -266,6 +270,7 @@ impl UpdatesView {
             login_item_deprioritized: state.login_item_deprioritized,
             version: state.feed.version.clone(),
             quiet: false,
+            fork: None,
         }
     }
 }
@@ -324,7 +329,14 @@ impl Updates {
         let state = lock(&self.0.state);
         let mut view = UpdatesView::from(&state, &self.0.build);
         view.quiet = quiet_prompts(self.0.dev_identity, &state.installation);
+        drop(state);
+        fork_view(&mut view);
         view
+    }
+
+    /// WhiteWh fork, task #63: the fork channel changed; the view goes out again.
+    pub(crate) fn refresh(&self) {
+        self.changed();
     }
 
     fn send(&self, request: Request) {
@@ -719,6 +731,9 @@ impl Updates {
         if !self.current(generation) {
             return;
         }
+        // WhiteWh fork, task #63: nothing upstream publishes replaces a fork
+        // build; its updates come from the fork's feed.
+        let newer = newer && !crate::fork_updates::fork_build();
         let token = {
             let mut current = lock(&self.0.state);
             current.available = newer;
@@ -1316,10 +1331,31 @@ pub fn updates_restart(app: AppHandle) -> Result<(), String> {
     restart_app(&app)
 }
 
+/// WhiteWh fork, task #63: elsewhere Restart installs the verified fork build.
 #[cfg(not(target_os = "macos"))]
 #[tauri::command]
-pub fn updates_restart() -> Result<(), String> {
+pub fn updates_restart(app: AppHandle) -> Result<(), String> {
+    if crate::fork_updates::ready() {
+        return crate::fork_updates::restart(&app);
+    }
     Err("Restart to finish update is available on macOS only.".into())
+}
+
+/// WhiteWh fork, task #63: the fork channel in the view. A fork build says
+/// where its updates come from instead of offering upstream's, and a verified
+/// fork build asks for Restart.
+fn fork_view(view: &mut UpdatesView) {
+    view.fork = crate::fork_updates::view();
+    if crate::fork_updates::fork_build() {
+        view.available = false;
+        view.download_label = None;
+        view.comparison = Some(zerus_client_core::text!(
+            "This is a WhiteWh fork build: its updates come from WhiteWh/zerus, and upstream releases do not replace it."
+        ));
+    }
+    if crate::fork_updates::ready() {
+        view.restart_required = true;
+    }
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]

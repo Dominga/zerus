@@ -47,6 +47,9 @@ mod exit_flush;
 mod external_open;
 #[cfg(feature = "live")]
 mod files;
+// WhiteWh fork, task #63: the fork's update channel.
+#[cfg(feature = "live")]
+mod fork_updates;
 mod identity;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod instance;
@@ -1025,6 +1028,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     }
                 }
                 app.manage(updates::start(app.handle()));
+                // WhiteWh fork, task #63: a fork build checks its own feed.
+                fork_updates::start(app.handle());
                 if menu_bar {
                     lifecycle::start_fleet(|| app.state::<commands::AppState>().start_source());
                 }
@@ -1674,6 +1679,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         updates::updates_copy_command,
         updates::updates_restart,
         updates::updates_fix_login_item,
+        fork_updates::fork_updates_check,
+        fork_updates::fork_updates_confirm,
         #[cfg(feature = "media")]
         voice::voice_open,
         #[cfg(feature = "media")]

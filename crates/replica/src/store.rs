@@ -6,7 +6,7 @@
 //! Updates are folded into a fresh snapshot when they grow, and once when a
 //! task is accepted (its Done compaction). One process at a time holds a project.
 use crate::project::ProjectDoc;
-use crate::schema::{Actor, Stage};
+use crate::schema::Stage;
 use crate::task::TaskDoc;
 use crate::{ids, rank, Error, Result};
 use fs2::FileExt;
@@ -358,6 +358,30 @@ impl Admitted<'_> {
     pub fn dir(&self) -> &Path {
         self.store.dir()
     }
+
+    /// The project document (its settings and hold), read inside this
+    /// admission. Read only: it neither loads a task nor enters another
+    /// admission.
+    pub fn project(&self) -> Result<ProjectDoc> {
+        self.store.project()
+    }
+
+    /// `ProjectStore::agent_starts_since`, counted inside this admission
+    /// from the tasks as saved: every reservation and save serialized by it
+    /// is counted, never a number read before it (#1519 review). It fails
+    /// closed and never waits: any task that cannot be read whole as
+    /// regular files (`counted`), and the deadline, are errors, never a
+    /// count of zero.
+    pub fn agent_starts_since(&mut self, since: i64, deadline: Instant) -> Result<usize> {
+        let mut count = 0;
+        for uuid in self.store.uuids()? {
+            if Instant::now() >= deadline {
+                return Err(Error::failed("the deadline passed while counting"));
+            }
+            count += self.store.counted(&uuid)?.agent_starts_since(since)?;
+        }
+        Ok(count)
+    }
 }
 
 pub struct ProjectStore {
@@ -572,6 +596,45 @@ thread_local! {
 
 /// The intact blocks with their end offsets, and whether the whole input was
 /// intact. A short, empty or mismatched block ends the list.
+/// The most one task file may hold for the agent-start count: a document is
+/// at most `MAX_DOCUMENT`, and its updates log grows until it is folded.
+const COUNTED_BYTES: u64 = 16 * crate::schema::MAX_DOCUMENT as u64;
+
+/// One task file, read whole without waiting (#1519 review): only a regular
+/// file, refused before it is opened otherwise; opened without following a
+/// final link or waiting for a FIFO's writer; the handle a regular file; at
+/// most `COUNTED_BYTES`. A missing file is `NotFound`.
+fn read_counted(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let irregular = || std::io::Error::other("not a regular file");
+    if !fs::symlink_metadata(path)?.is_file() {
+        return Err(irregular());
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT: a link is opened itself.
+        options.custom_flags(0x0020_0000);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(irregular());
+    }
+    let mut bytes = Vec::new();
+    file.take(COUNTED_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > COUNTED_BYTES {
+        return Err(std::io::Error::other("larger than a task file"));
+    }
+    Ok(bytes)
+}
+
 pub(crate) fn blocks(bytes: &[u8]) -> (Vec<(&[u8], usize)>, bool) {
     let mut out = Vec::new();
     let mut at = 0;
@@ -1002,6 +1065,49 @@ impl ProjectStore {
         })
     }
 
+    /// A task read only for the agent-start count, inside an admission:
+    /// every file of it read whole (`read_counted`), and a copy that holds
+    /// less than its mark is damaged. It writes nothing (no mark is raised).
+    fn counted(&self, uuid: &str) -> Result<TaskDoc> {
+        let mut task = TaskDoc::from_bytes(&read_counted(&self.snapshot_path(uuid))?)?;
+        if task.uuid() != uuid {
+            return Err(Error::failed("the task file does not match its name"));
+        }
+        // Every update block must frame and import whole: a broken or cut
+        // record is unknown evidence, never fewer starts (#1519 R3).
+        match read_counted(&self.updates_path(uuid)) {
+            Ok(bytes) => {
+                let (found, intact) = blocks(&bytes);
+                if !intact {
+                    return Err(Error::failed("the task's updates are not whole"));
+                }
+                for (payload, _) in found {
+                    if !task.import_block(payload) {
+                        return Err(Error::failed("an update of the task cannot be read"));
+                    }
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        match read_counted(&self.managed_path(uuid)) {
+            Ok(bytes) => {
+                let saved = Mark::unsealed(&bytes)
+                    .and_then(|mark| mark.version())
+                    .ok_or_else(|| Error::failed("the copy's mark cannot be read"))?;
+                if !task.current_vv().includes_vv(&saved) {
+                    return Err(Error::failed(
+                        "the copy holds less than this computer saved",
+                    ));
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        task.view()?;
+        Ok(task)
+    }
+
     fn load_admitted(&self, uuid: &str) -> Result<TaskDoc> {
         let mut task = TaskDoc::from_bytes(&fs::read(self.snapshot_path(uuid))?)?;
         if task.uuid() != uuid {
@@ -1353,12 +1459,7 @@ impl ProjectStore {
         let (tasks, _) = self.tasks()?;
         let mut count = 0;
         for task in tasks {
-            count += task
-                .view()?
-                .log
-                .iter()
-                .filter(|e| e.kind == "sent" && e.at >= since && matches!(e.actor, Actor::Agent(_)))
-                .count();
+            count += task.agent_starts_since(since)?;
         }
         Ok(count)
     }
@@ -1367,7 +1468,7 @@ impl ProjectStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{SessionKey, Target};
+    use crate::schema::{Actor, SessionKey, Target};
     use crate::task::NewTask;
     use crate::ErrorKind;
 
@@ -1410,6 +1511,114 @@ mod tests {
             .open(store.updates_path(task.uuid()))
             .unwrap();
         file.write_all(bytes).unwrap();
+    }
+
+    /// #1519 R2 (review-win-c): the agent-start count inside an admission
+    /// fails closed and never waits. It counts what it reads whole; a task
+    /// file it cannot read as a bounded regular file (a FIFO, a link, one
+    /// it may not read) or the deadline is an error, never a count of zero.
+    #[test]
+    fn the_admitted_agent_count_fails_closed_and_never_waits() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(root.path(), "p1").unwrap();
+        let agent = Actor::Agent(SessionKey {
+            machine: "m1".into(),
+            session: "codex/api".into(),
+            session_id: "launch_id:api".into(),
+        });
+        let mut task = new_task(&store, "V");
+        task.record_send(
+            &SessionKey {
+                machine: "m1".into(),
+                session: "codex/api".into(),
+                session_id: "launch_id:api".into(),
+            },
+            "legacy",
+            &agent,
+            5,
+        )
+        .unwrap();
+        store.save(&mut task).unwrap();
+        let soon = Instant::now() + Duration::from_secs(5);
+        let count = |store: &ProjectStore, deadline: Instant| {
+            store
+                .admit_until(Instant::now() + Duration::from_secs(5))
+                .unwrap()
+                .agent_starts_since(0, deadline)
+        };
+        assert_eq!(count(&store, soon).unwrap(), 1);
+        assert!(count(&store, Instant::now()).is_err(), "past the deadline");
+        // A FIFO named as another task's snapshot is refused, not waited on.
+        let fifo = store.snapshot_path("11111111-1111-4111-8111-111111111111");
+        let path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        #[cfg(unix)]
+        {
+            assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+            let began = Instant::now();
+            assert!(count(&store, soon).is_err());
+            assert!(began.elapsed() < Duration::from_secs(2));
+            fs::remove_file(&fifo).unwrap();
+            // A link in a task's place is not read through.
+            let snapshot = store.snapshot_path(task.uuid());
+            let elsewhere = root.path().join("elsewhere.loro");
+            fs::rename(&snapshot, &elsewhere).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, &snapshot).unwrap();
+            assert!(count(&store, soon).is_err());
+            fs::remove_file(&snapshot).unwrap();
+            fs::rename(&elsewhere, &snapshot).unwrap();
+        }
+        let _ = path;
+        assert_eq!(count(&store, soon).unwrap(), 1);
+        // Updates whose framing is broken, or cut short, are not counted as
+        // fewer starts: the count refuses (#1519 R3).
+        task.comment("an update", &Actor::Person, 6).unwrap();
+        store.save(&mut task).unwrap();
+        let updates = store.updates_path(task.uuid());
+        let whole = fs::read(&updates).unwrap();
+        assert_eq!(count(&store, soon).unwrap(), 1);
+        let mut broken = b"garbage".to_vec();
+        broken.extend_from_slice(&whole);
+        fs::write(&updates, &broken).unwrap();
+        assert!(count(&store, soon).is_err());
+        fs::write(&updates, &whole[..whole.len() - 1]).unwrap();
+        assert!(count(&store, soon).is_err());
+        fs::write(&updates, &whole).unwrap();
+        assert_eq!(count(&store, soon).unwrap(), 1);
+    }
+
+    /// desktop-u's fifth control on #1519 R3: an agent's start recorded
+    /// in a legacy task's updates, with one checksum bit flipped, is unknown
+    /// evidence: the count refuses, never reads it as no start.
+    #[test]
+    fn a_torn_legacy_charge_is_unknown_not_zero() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(root.path(), "p1").unwrap();
+        let to = SessionKey {
+            machine: "m1".into(),
+            session: "codex/api".into(),
+            session_id: "launch_id:api".into(),
+        };
+        let mut legacy = new_task(&store, "W");
+        store.save(&mut legacy).unwrap();
+        legacy
+            .record_send(&to, "legacy", &Actor::Agent(to.clone()), 5)
+            .unwrap();
+        store.save(&mut legacy).unwrap();
+        assert!(!store.managed_path(legacy.uuid()).exists());
+        let soon = Instant::now() + Duration::from_secs(5);
+        let count = |store: &ProjectStore| {
+            store
+                .admit_until(Instant::now() + Duration::from_secs(5))
+                .unwrap()
+                .agent_starts_since(0, soon)
+        };
+        assert_eq!(count(&store).unwrap(), 1);
+        let updates = store.updates_path(legacy.uuid());
+        let mut bytes = fs::read(&updates).unwrap();
+        assert!(bytes.len() > 8);
+        bytes[4] ^= 1;
+        fs::write(&updates, bytes).unwrap();
+        assert!(count(&store).is_err());
     }
 
     #[test]

@@ -828,14 +828,6 @@ impl<'a> Index<'a> {
         Ok(Some(count as usize + 1))
     }
 
-    /// How many tasks agents started since `since` (Unix milliseconds).
-    pub(super) fn agent_starts_since(&self, since: i64) -> Outcome<usize> {
-        let count: i64 = self
-            .db
-            .query_row("SELECT count(*) FROM sends WHERE at >= ?1", [since], |r| r.get(0))?;
-        Ok(count as usize)
-    }
-
     /// One chronological page of task `uuid`'s history, `None` when the
     /// entry `before` names is gone. The histories of the most recently read
     /// tasks are kept; another is read from its document once and replaces

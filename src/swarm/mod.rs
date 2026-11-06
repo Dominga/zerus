@@ -274,7 +274,28 @@ pub(crate) fn identity_and_projects_until(
 /// The live catalog project (ID, name) that this computer's session `name`
 /// belongs to, if any.
 pub(crate) fn session_project(config: &Config, name: &str) -> Result<Option<(String, String)>> {
-    let snapshot = LockedStore::load(config)?.snapshot(config);
+    session_project_in(&LockedStore::load(config)?.snapshot(config), config, name)
+}
+
+/// `session_project`, waiting for the catalog no later than `deadline`
+/// (#1519 review: an attempt's whole entry counts against its budget).
+/// None when it is busy past it.
+pub(crate) fn session_project_until(
+    config: &Config,
+    name: &str,
+    deadline: std::time::Instant,
+) -> Result<Option<Option<(String, String)>>> {
+    let Some(store) = LockedStore::load_until(config, deadline)? else {
+        return Ok(None);
+    };
+    session_project_in(&store.snapshot(config), config, name).map(Some)
+}
+
+fn session_project_in(
+    snapshot: &Value,
+    config: &Config,
+    name: &str,
+) -> Result<Option<(String, String)>> {
     // The snapshot names this computer's sessions "<this host>\n<session>".
     let member = format!("{}\n{name}", config.host());
     Ok(snapshot["organization"]["projects"]

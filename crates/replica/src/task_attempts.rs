@@ -107,6 +107,20 @@ impl TaskDoc {
 
     /// A path that starts an execution without an attempt refuses a task
     /// that records them.
+    /// Whether a send could reserve this task's next attempt now: its stage,
+    /// the hold and no attempt whose delivery is unknown. `reserve_attempt`
+    /// checks it again in its admission; the legacy guard is not part of it.
+    pub fn check_attempt_send(&self) -> Result<()> {
+        self.sendable()
+    }
+
+    /// Whether `actor` could hand this task off through its next attempt
+    /// now; `reserve_attempt` checks it again in its admission. The legacy
+    /// guard is not part of it.
+    pub fn check_attempt_handoff(&self, actor: &Actor) -> Result<()> {
+        self.handoffable(actor)
+    }
+
     pub(super) fn legacy_start(&self) -> Result<()> {
         if self.executes_attempts() {
             return Err(Error::new(
@@ -166,6 +180,53 @@ impl TaskDoc {
         self.upgrade_schema(execution::EXECUTION_TASK_SCHEMA)?;
         list.push(serde_json::to_string(&event)?)?;
         Ok(())
+    }
+
+    /// How many starts agents made of this task since `since` (Unix
+    /// milliseconds), charged from the reservation (#1519 review): every
+    /// send or handoff an agent reserved in that window counts once, settled
+    /// or not, unless it was positively never admitted (`not_started`): a
+    /// reservation whose delivery is unknown may already have delivered.
+    /// History an agent wrote that no attempt explains (a legacy start)
+    /// counts too; a settled attempt's own entry is not counted again.
+    pub fn agent_starts_since(&self, since: i64) -> Result<usize> {
+        let (attempts, _) = self.execution_records()?;
+        let mut count = 0;
+        for attempt in &attempts {
+            let starting = matches!(attempt.origin, Origin::Send | Origin::Handoff);
+            if attempt.at >= since && starting && matches!(attempt.actor, Actor::Agent(_)) {
+                let (own, _) = self.facts_of(attempt)?;
+                if !own.contains(&EventKind::NotStarted) {
+                    count += 1;
+                }
+            }
+        }
+        let attempted: std::collections::BTreeSet<&str> =
+            attempts.iter().map(|attempt| attempt.id.as_str()).collect();
+        count += self
+            .view()?
+            .log
+            .iter()
+            .filter(|e| {
+                e.kind == "sent"
+                    && e.at >= since
+                    && matches!(e.actor, Actor::Agent(_))
+                    && !e
+                        .request_id
+                        .as_deref()
+                        .is_some_and(|id| attempted.contains(id))
+            })
+            .count();
+        Ok(count)
+    }
+
+    /// What is recorded of attempt `id` itself: its own facts, in order;
+    /// `None` when no attempt is recorded under that ID.
+    pub fn attempt_facts(&self, id: &str) -> Result<Option<Vec<EventKind>>> {
+        let Some(attempt) = self.attempt(id)? else {
+            return Ok(None);
+        };
+        Ok(Some(self.facts_of(&attempt)?.0))
     }
 
     /// The facts about `attempt`: those bound to this exact record, and those
@@ -1543,6 +1604,65 @@ mod tests {
         d.import(&c.snapshot().unwrap()).unwrap();
         assert_eq!(d.held().unwrap().map(|a| a.id), Some(THREE.to_owned()));
         assert!(d.sendable().is_err());
+    }
+
+    /// #1519 review (zerus-v3rtj): an agent's start counts from its
+    /// reservation, while its delivery is unknown, and once settled it is
+    /// counted once, by its history entry; a person's start never counts.
+    #[test]
+    fn an_agent_start_counts_from_its_reservation_and_once() {
+        let mut task = task();
+        task.set_target(&Target::Session(run("api")), &Actor::Person, 2)
+            .unwrap();
+        assert_eq!(task.agent_starts_since(0).unwrap(), 0);
+        task.reserve_attempt(
+            ONE,
+            Origin::Send,
+            &run("api"),
+            native("api"),
+            &agent("api"),
+            10,
+        )
+        .unwrap();
+        assert_eq!(task.agent_starts_since(0).unwrap(), 1, "in flight");
+        assert_eq!(
+            task.agent_starts_since(11).unwrap(),
+            0,
+            "older than the window"
+        );
+        let receipt = receipt(&task, ONE);
+        task.settle_attempt(ONE, Settlement::Receipt(&receipt), &agent("api"), 20)
+            .unwrap();
+        assert_eq!(task.agent_starts_since(0).unwrap(), 1, "settled: once");
+        let mut person = self::task();
+        send(&mut person, TWO, "api");
+        assert_eq!(person.agent_starts_since(0).unwrap(), 0);
+        // Positively never admitted: released.
+        let mut refused = self::task();
+        refused
+            .set_target(&Target::Session(run("api")), &Actor::Person, 2)
+            .unwrap();
+        refused
+            .reserve_attempt(
+                ONE,
+                Origin::Send,
+                &run("api"),
+                native("api"),
+                &agent("api"),
+                10,
+            )
+            .unwrap();
+        assert_eq!(refused.agent_starts_since(0).unwrap(), 1);
+        refused
+            .settle_attempt(ONE, Settlement::NotAdmitted, &agent("api"), 11)
+            .unwrap();
+        assert_eq!(refused.agent_starts_since(0).unwrap(), 0);
+        // A legacy start an agent recorded counts.
+        let mut legacy = self::task();
+        legacy
+            .record_send(&run("api"), "legacy-send", &agent("api"), 12)
+            .unwrap();
+        assert_eq!(legacy.agent_starts_since(0).unwrap(), 1);
     }
 
     #[test]

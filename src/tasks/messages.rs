@@ -5,6 +5,8 @@ use super::*;
 use zerus_replica::TaskDelivery;
 
 pub(super) fn execute(config: &Config, args: &[String]) -> Result<Value> {
+    // A reopen's attempt has one budget from here (C3 A3).
+    let deadline = std::time::Instant::now() + super::attempts::BUDGET;
     let content = stdin_content(args)?;
     let files = content.attachments.unwrap_or_default();
     let id =
@@ -15,18 +17,20 @@ pub(super) fn execute(config: &Config, args: &[String]) -> Result<Value> {
     let machines = machines(config)?;
     let who = actor(&machines.here, args, true)?;
     let r = reference(config, args, &who)?;
-    let store = store(config, &r.project.0)?;
+    let mut store = store(config, &r.project.0)?;
     let mut task = store.find(&r.task).map_err(fail)?;
-    let before = task.view().map_err(fail)?;
+    let mut before = task.view().map_err(fail)?;
     let existing = before
         .log
         .iter()
-        .find(|e| e.kind == "message" && e.request_id.as_deref() == Some(id));
+        .find(|e| e.kind == "message" && e.request_id.as_deref() == Some(id))
+        .cloned();
     let recovering = existing.is_some();
     let missing_recovery = !recovering && flag(args, "--recover-only");
     let mut routing_error = None;
     let to = if matches!(mode, "send" | "reopen") {
         let key = existing
+            .as_ref()
             .and_then(|e| e.session.clone())
             .or(before.session.clone());
         // An existing reservation retains the original name/run, including after
@@ -77,6 +81,66 @@ pub(super) fn execute(config: &Config, args: &[String]) -> Result<Value> {
         let synced = crate::swarm::exchange_tasks(config, &alias, &r.project.0).is_ok();
         return Ok(json!({"task":reply["task"],"message":reply["message"],"synced":synced}));
     }
+    // C3 activation A3 (desktop-u's (b)): a reopen is an attempt. An ID that
+    // names one is only recovered; a fresh reopen goes through the fence,
+    // and only its explicit Legacy keeps the message path below.
+    if mode == "reopen" {
+        if task.attempt(id).map_err(fail)?.is_some() {
+            // No lock is held into its settlement.
+            drop(store);
+            return super::attempts::reopen_again(
+                config,
+                &machines,
+                &r.project,
+                &task,
+                id,
+                &content.text,
+                &files,
+            );
+        }
+        let fresh = existing.is_none() && !missing_recovery && routing_error.is_none();
+        // A request that cannot even be prepared sends nothing: the message
+        // path below keeps the comment as not delivered, as before.
+        let frozen = to.as_ref().filter(|_| fresh).and_then(|to| {
+            super::attempts::reopen_request(
+                &r.project.1,
+                &before,
+                id,
+                &content.text,
+                &files,
+                to,
+                dispatch,
+            )
+            .ok()
+            .map(|frozen| (to, frozen))
+        });
+        if let Some((to, frozen)) = frozen {
+            let uuid = task.uuid().to_owned();
+            drop(store);
+            let reopened = super::attempts::reopen(
+                config,
+                &machines,
+                &r.project,
+                &uuid,
+                id,
+                &content.text,
+                &files,
+                dispatch,
+                to,
+                &frozen,
+                &who,
+                deadline,
+            )?;
+            if let Some(out) = reopened {
+                return Ok(out);
+            }
+            // Legacy: read again; the message path below rechecks it all,
+            // and refuses a task that is managed by now.
+            store = super::store(config, &r.project.0)?;
+            task = store.load(&uuid).map_err(fail)?;
+            before = task.view().map_err(fail)?;
+        }
+    }
     let mut delivery = TaskDelivery {
         mode: mode.into(),
         stage: before.stage.as_str().into(),
@@ -100,7 +164,7 @@ pub(super) fn execute(config: &Config, args: &[String]) -> Result<Value> {
     } else if let Some(error) = &routing_error {
         refuse_delivery(&mut delivery, error);
     }
-    let request = if let Some(existing) = existing {
+    let request = if let Some(existing) = &existing {
         delivery = existing
             .delivery
             .clone()
@@ -111,10 +175,7 @@ pub(super) fn execute(config: &Config, args: &[String]) -> Result<Value> {
         }
         None
     } else if let Some(to) = to.as_ref().filter(|_| !missing_recovery && routing_error.is_none()) {
-        let worker = before.worker.as_ref().map(|w| format!("\nCoordinator: relay this feedback to the registered child {} only if its exact current identity still matches; otherwise explain why it cannot be delivered.", w.id)).unwrap_or_default();
-        delivery.prompt = format!("[Zerus task {}/{} message {id}]\n{}\n\n{}{}\n\n{}",
-            r.project.1, before.id, if mode == "reopen" { "The person requests changes. Continue this task." } else { "The person added task feedback." },
-            content.text, worker, format_args!("Read the task context with `hgs task get {}/{}` and report the result with `hgs task report {}/{}`.", r.project.1, before.id, r.project.1, before.id));
+        delivery.prompt = prompt(&r.project.1, &before.id, id, mode, &content.text, before.worker.as_ref());
         let attachments = files
             .iter()
             .map(serde_json::to_value)
@@ -199,4 +260,19 @@ fn refuse_delivery(delivery: &mut TaskDelivery, error: &str) {
     delivery.state = "failed".into();
     delivery.error = error.chars().take(1000).collect();
     delivery.run_id.clear(); delivery.conversation_id.clear(); delivery.prompt.clear(); delivery.submitted_id.clear();
+}
+
+/// The text a discussion message pastes into its task's session.
+pub(super) fn prompt(
+    project_name: &str,
+    task_id: &str,
+    id: &str,
+    mode: &str,
+    text: &str,
+    worker: Option<&zerus_replica::TaskWorker>,
+) -> String {
+    let worker = worker.map(|w| format!("\nCoordinator: relay this feedback to the registered child {} only if its exact current identity still matches; otherwise explain why it cannot be delivered.", w.id)).unwrap_or_default();
+    format!("[Zerus task {project_name}/{task_id} message {id}]\n{}\n\n{text}{worker}\n\n{}",
+        if mode == "reopen" { "The person requests changes. Continue this task." } else { "The person added task feedback." },
+        format_args!("Read the task context with `hgs task get {project_name}/{task_id}` and report the result with `hgs task report {project_name}/{task_id}`."))
 }

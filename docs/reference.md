@@ -3267,8 +3267,45 @@ replica did nothing before it. A task can also take a floor before its first
 attempt: a cutover record that keeps schema 7 the same way, so a reader that
 does not know attempts or the floor refuses to write it, while every path that would start
 it without an attempt refuses it as cutting over. A floor this version cannot
-read still counts. This version reads attempts and guards reports against the
-current execution; recording attempts and floors comes later.
+read still counts. This version reads attempts, guards reports against the
+current execution, and records attempts and floors through the attempt writer
+(below).
+
+The attempt writer (zerus-cg5h.4 S2b.2 C3 activation) is how every native task
+input now begins: the desktop's Start (`start-plan`/`start-deliver`),
+`task send`, `task handoff` and a reopen (`task message --mode reopen`). It
+runs on the computer whose session executes the task, which holds the input's
+receipts, within one 15-second budget counted from the command's entry:
+1. The request is frozen first: ONE request ID and the exact native request.
+2. With no lock held, the fence admits it: the task's certificate with no
+   network; otherwise, for a task with no floor yet, its first floor, which
+   is written only when the project's bootstrap gate is positively satisfied
+   (every eligible direct member recorded current, with a complete exchange,
+   the phase known, and the hold off); then a fresh proof.
+3. In the fence's final admission, and only there, the frozen request is
+   checked again against the task as admitted (its prompt, attachments,
+   queued messages, requirement, target, executor and settings): any change
+   refuses it, and nothing is reserved. Otherwise its attempt is reserved
+   under that ID and saved.
+4. Only then, with every lock released, the input is submitted once. Its own
+   submitted receipt settles the attempt, and the settlement never overwrites
+   a later stage or assignment.
+
+The outcome is explicit: `submitted`; `refused` (the request changed, or the
+input was refused before anything was offered to the terminal, which settles
+the attempt as not admitted; a new action with a new ID may send it);
+`cutting_over` (the fence, the hold or unknown bootstrap evidence; nothing was
+reserved or sent); or `uncertain` (the input may have arrived; it is never sent
+again). Repeating a request ID, a restart or `--recover-only` only reads that
+request's receipt and never submits, even when no receipt exists. Only a task
+positively without floor or attempt, whose bootstrap gate is positively open
+(a member not yet known current, or the person's hold), keeps the legacy route,
+checked again there; a task that may hold a floor or attempt is never sent
+that way. A reopen of a managed task keeps the person's text as a discussion
+note bound to its attempt's ID, saved together with that attempt; the note is
+not queued feedback and is never delivered by itself, and only the receipt
+moves the task back to In progress. Feedback to a task In progress
+(`--mode send`) stays an ordinary message.
 
 Plain `task list` still returns every task for existing clients. With `--stage`
 and `--limit` (1–200) it returns one page of that stage in the same order and
@@ -3345,7 +3382,8 @@ commands: `hgs task start-plan REF --project P --json` prepares an immutable
 native request without sending it, and `hgs task start-deliver REF --project P
 --json` delivers that exact plan. Preparation binds a fresh request UUID, the
 task's `stage_at` and target, and the selected host, session name, stable session
-ID, run ID and conversation ID. Delivery rechecks the task revision and executor
+ID, run ID and conversation ID. Delivery goes through the attempt writer: it
+rechecks the plan against the task and executor in the fence's final admission
 before entering the existing native input path. Peers without these commands
 refuse them; there is no fallback to an unguarded send.
 
@@ -3602,14 +3640,14 @@ this cannot read keeps the member eligible and the cutover open as an
 unknown protocol. It grants nothing and dispatches
 nothing. `--hold on` sets the project's cutover hold, a replicated value that
 names who set it and when (concurrent changes: the last writer wins). While on,
-no task of the project takes a new floor or a first attempt, where those are
-written (they come with the attempt writer); it never lowers anything, and a
+no task of the project takes a new floor or a first attempt (the attempt
+writer refuses them as cutting over); it never lowers anything, and a
 task that never cut over keeps the legacy Start. Only a person sets or clears it,
 and clearing it takes `--hold off --confirm`. A hold that cannot be read is
 on. Times are in milliseconds.
 
 `task cutover --project P --task T --check` reads the task's writer universe
-for the fence that the attempt writer will need (zerus-cg5h.4 S2b.2 C3), within
+for the fence that the attempt writer uses (zerus-cg5h.4 S2b.2 C3), within
 one 15-second budget counted once from the command's entry. This computer's
 identity, the project's name and lock, every call (from its spawn to its
 parsed answer) and the result all count against it, and nothing is reported

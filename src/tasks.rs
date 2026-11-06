@@ -18,6 +18,7 @@ use zerus_replica::{
 };
 
 mod answers;
+mod attempts;
 mod cancellation;
 mod cutover;
 mod dispatch;
@@ -887,6 +888,8 @@ fn change_within(config: &Config, action: &str, args: &[String], wait: Option<st
 }
 
 fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<std::time::Duration>, guard: Option<&cancellation::Guard>) -> Result<Value> {
+    // A send's or handoff's attempt has one budget from here (C3 A3).
+    let deadline = std::time::Instant::now() + attempts::BUDGET;
     let content = if action == "edit" || (action == "comment" && flag(args, "--content-json")) { Some(stdin_content(args)?) } else { None };
     let text = match action {
         "edit" => Some(content.as_ref().expect("edit content").text.clone()),
@@ -947,7 +950,7 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
     // A send or cancel for a session another computer runs happens there.
     let session = match action {
         "handoff" => {
-            task.check_handoff(&who).map_err(fail)?;
+            handoff_check(&task, &who)?;
             let name = option(args, "--session")?.ok_or_else(|| fail("handoff needs --session SESSION [--host ALIAS]"))?;
             let to = machines.target(machines.node(option(args, "--host")?)?, name, args)?;
             if task.session().as_ref() == Some(&to) { return Err(fail("choose another session for the handoff")); }
@@ -969,7 +972,7 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         // This computer's copy refuses first: a task it shows In progress, or
         // in a stage that is not sent, never reaches the other computer.
         if action == "send" {
-            task.check_send().map_err(|e| refuse(fail(e), &to))?;
+            send_check(&task).map_err(|e| refuse(e, &to))?;
         }
         let uuid = task.uuid().to_owned();
         drop(store);
@@ -983,6 +986,47 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         };
         return Ok(with_answer(&who, action, out, 0, &to));
     }
+    // C3 activation A3: a send or handoff goes through the fence's attempt
+    // admission; only its explicit `Legacy` keeps the paste below.
+    let (store, mut task) = match session
+        .clone()
+        .filter(|_| matches!(action, "send" | "handoff"))
+    {
+        Some((to, pin)) => {
+            let handoff = action == "handoff";
+            let frozen = attempts::freeze(&store, &task, project_name, &to, pin, &who, handoff)
+                .map_err(|e| refuse(e, &to.session))?;
+            let uuid = task.uuid().to_owned();
+            drop(store);
+            let sent = attempts::send(
+                config,
+                project_id,
+                project_name,
+                &uuid,
+                &frozen,
+                &to,
+                pin,
+                &who,
+                handoff,
+                deadline,
+            )
+            .map_err(|e| refuse(e, &to.session))?;
+            match sent {
+                Some(receipt) => {
+                    let task = self::store(config, project_id)?.load(&uuid).map_err(fail)?;
+                    let out = json!({"task": view(&task, project_name, guard.is_none(), &machines)?, "receipt": receipt});
+                    return Ok(with_answer(&who, action, out, 0, &to.session));
+                }
+                None => {
+                    let store = self::store(config, project_id)?;
+                    let mut task = store.load(&uuid).map_err(fail)?;
+                    enrich(&mut task, &machines)?;
+                    (store, task)
+                }
+            }
+        }
+        None => (store, task),
+    };
     let text = text.unwrap_or_default();
     let mut extra = json!({});
     let mut destination = String::new();
@@ -1090,6 +1134,27 @@ fn enrich(task: &mut TaskDoc, machines: &Machines) -> Result<()> {
 /// The session a send goes to, and whether it pins the task there: --session
 /// (with --host on another computer; an agent's choice also pins the task),
 /// the pinned session, or for an Any task the agent's own session.
+/// Whether the task could be sent now: a managed task through its next
+/// attempt (the legacy guard left out), any other as before.
+fn send_check(task: &TaskDoc) -> Result<()> {
+    if task.execution_managed() {
+        task.check_attempt_send()
+    } else {
+        task.check_send()
+    }
+    .map_err(fail)
+}
+
+/// Whether `who` could hand the task off now, as `send_check` for a send.
+fn handoff_check(task: &TaskDoc, who: &Actor) -> Result<()> {
+    if task.execution_managed() {
+        task.check_attempt_handoff(who)
+    } else {
+        task.check_handoff(who)
+    }
+    .map_err(fail)
+}
+
 fn send_session(task: &TaskDoc, args: &[String], who: &Actor, machines: &Machines) -> Result<(SessionKey, bool)> {
     let mut view = task.view().map_err(fail)?;
     if let Target::Session(pinned) = &view.target {

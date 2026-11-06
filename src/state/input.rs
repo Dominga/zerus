@@ -871,6 +871,33 @@ pub(super) fn task_reply_receipt(name: &str, request: &Value) -> Result<Option<V
     Ok(Some(receipt))
 }
 
+/// The receipt of request `request_id` to `name` whose exact bytes hashed to
+/// `digest`, read only: an attempt's retained delivery binding recovers it
+/// without the original request (C3 A3). A receipt of other content or for
+/// another session is an error; none is `None`.
+pub(super) fn task_reply_receipt_bound(
+    name: &str,
+    request_id: &str,
+    digest: &str,
+) -> Result<Option<Value>> {
+    let request_id = uuid::Uuid::parse_str(request_id)
+        .map_err(|_| "invalid message identity")?
+        .to_string();
+    let path = absolute_root()?
+        .join("input_receipts")
+        .join(format!("{request_id}.json"));
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
+    let receipt: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    if string(&receipt, "digest") != digest || string(&receipt, "name") != name {
+        return Err("message receipt identity or content does not match".into());
+    }
+    Ok(Some(receipt))
+}
+
 pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Result<Value> {
     submit_with(name, input, recovery_id, false)
 }
@@ -884,55 +911,204 @@ pub(super) fn submit_answer(name: &str, input: &[u8]) -> Result<Value> {
 }
 
 fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, answer: bool) -> Result<Value> {
+    submit_core(name, input, recovery_id, answer).map_err(|failure| match failure {
+        Failure::NotOffered(witness) => witness.reason.clone(),
+        Failure::Unknown(error) => error,
+    })
+}
+
+/// A live, closed witness that ONE exact request's payload was never offered
+/// to its terminal (C3 activation; desktop-u's (a)). Only `submit_core` mints
+/// one, inside the exact submission that observed it: under the input lock no
+/// receipt existed for the request's ID in this receipt store, and the
+/// submission refused before any settings key was typed and before the
+/// payload's receipt marker was written. Its fields bind it to that request;
+/// nothing reconstructs one from text, an exit status or a missing file.
+#[derive(Debug)]
+pub(crate) struct NotOffered {
+    request_id: String,
+    name: String,
+    run_id: String,
+    conversation_id: String,
+    digest: String,
+    receipts: PathBuf,
+    pub(crate) reason: String,
+}
+
+impl NotOffered {
+    /// Whether this witness is for exactly this request, submitted to `name`
+    /// with this run, conversation and payload digest.
+    pub(crate) fn binds(
+        &self,
+        request_id: &str,
+        name: &str,
+        run_id: &str,
+        conversation_id: &str,
+        digest: &str,
+    ) -> bool {
+        self.request_id == request_id
+            && self.name == name
+            && self.run_id == run_id
+            && self.conversation_id == conversation_id
+            && self.digest == digest
+            && self
+                .receipts
+                .ends_with(format!("input_receipts/{request_id}.json"))
+    }
+}
+
+/// What one exact task submission came to.
+pub(crate) enum Submission {
+    /// The request's exact submitted receipt.
+    Receipt(Value),
+    /// Positively never offered (`NotOffered`).
+    NotOffered(NotOffered),
+    /// Anything else: the payload may have reached the terminal.
+    Unknown(String),
+}
+
+/// `submit` for a task reply that must tell a refusal before any input from
+/// one that may have delivered it.
+pub(super) fn submit_witnessed(name: &str, input: &[u8]) -> Submission {
+    match submit_core(name, input, None, false) {
+        Ok(receipt) => Submission::Receipt(receipt),
+        Err(Failure::NotOffered(witness)) => Submission::NotOffered(*witness),
+        Err(Failure::Unknown(error)) => Submission::Unknown(error),
+    }
+}
+
+/// How a submission failed.
+enum Failure {
+    NotOffered(Box<NotOffered>),
+    Unknown(String),
+}
+
+/// What the receipt store already holds for a request ID, read under the
+/// input lock. Only a positively absent receipt lets a later refusal witness
+/// that nothing was offered; an existing one decides by itself.
+enum Existing {
+    Absent,
+    /// The exact submitted acknowledgement: replayed as is.
+    Submitted(Value),
+    /// Possibly delivered before (in progress), unreadable, corrupt, or
+    /// another payload under the same ID: never "not offered".
+    Unknown(String),
+}
+
+fn existing(receipt_path: &Path, digest: &str, name: &str) -> Existing {
+    match fs::symlink_metadata(receipt_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Existing::Absent,
+        Err(error) => return Existing::Unknown(error.to_string()),
+        Ok(_) => {}
+    }
+    let receipt = match fs::read_to_string(receipt_path)
+        .map_err(|e| e.to_string())
+        .and_then(|contents| serde_json::from_str::<Value>(&contents).map_err(|e| e.to_string()))
+    {
+        Ok(receipt) => receipt,
+        Err(error) => return Existing::Unknown(error),
+    };
+    if string(&receipt, "digest") != digest || string(&receipt, "name") != name {
+        return Existing::Unknown("request ID was already used for different content".into());
+    }
+    if receipt["status"] == "submitted" {
+        // Replay the exact durable acknowledgement. Reformatting parsed
+        // floats can round its subsecond timestamp differently.
+        return Existing::Submitted(receipt);
+    }
+    Existing::Unknown(
+        "delivery uncertain: this request may already be in Terminal; do not resend automatically"
+            .into(),
+    )
+}
+
+/// A refusal before the receipt marker: a witness that nothing was offered,
+/// unless pending settings may already have been typed, which leaves it
+/// unknown (desktop-u's (a)).
+fn before_input(typed: bool, witness: NotOffered) -> Failure {
+    if typed {
+        Failure::Unknown(witness.reason)
+    } else {
+        Failure::NotOffered(Box::new(witness))
+    }
+}
+
+fn submit_core(
+    name: &str,
+    input: &[u8],
+    recovery_id: Option<&str>,
+    answer: bool,
+) -> std::result::Result<Value, Failure> {
+    let unknown = Failure::Unknown;
     let request: Request =
-        serde_json::from_slice(input).map_err(|e| format!("invalid send payload: {e}"))?;
-    let files = validate(&request)?;
+        serde_json::from_slice(input).map_err(|e| unknown(format!("invalid send payload: {e}")))?;
+    let files = validate(&request).map_err(unknown)?;
     let digest = format!("{:x}", Sha256::digest(input));
     let request_id = uuid::Uuid::parse_str(&request.request_id)
         .unwrap()
         .to_string();
-    let root = absolute_root()?;
+    let root = absolute_root().map_err(unknown)?;
     let receipt_path = root
         .join("input_receipts")
         .join(format!("{request_id}.json"));
-    let _guard = lock(None)?;
-    if receipt_path.exists() {
-        let contents = fs::read_to_string(&receipt_path).map_err(|e| e.to_string())?;
-        let receipt: Value = serde_json::from_str(&contents).map_err(|e| e.to_string())?;
-        if string(&receipt, "digest") != digest || string(&receipt, "name") != name {
-            return Err("request ID was already used for different content".into());
-        }
-        if receipt["status"] == "submitted" {
-            // Replay the exact durable acknowledgement. Reformatting parsed
-            // floats can round its subsecond timestamp differently.
-            return Ok(receipt);
-        }
-        return Err("delivery uncertain: this request may already be in Terminal; do not resend automatically".into());
+    let _guard = lock(None).map_err(unknown)?;
+    match existing(&receipt_path, &digest, name) {
+        Existing::Absent => {}
+        Existing::Submitted(receipt) => return Ok(receipt),
+        Existing::Unknown(error) => return Err(unknown(error)),
     }
-    let record = checked_record(name, &request)?;
+    // From here no receipt existed for this ID. A refusal before any settings
+    // key and before the receipt marker witnesses that nothing was offered;
+    // once pending settings may have been typed, it is unknown.
+    let mut typed = false;
+    let refused = |typed: bool, reason: String| {
+        before_input(
+            typed,
+            NotOffered {
+                request_id: request_id.clone(),
+                name: name.to_owned(),
+                run_id: request.expected_run_id.clone(),
+                conversation_id: request.expected_conversation_id.clone(),
+                digest: digest.clone(),
+                receipts: receipt_path.clone(),
+                reason,
+            },
+        )
+    };
+    let record = checked_record(name, &request).map_err(|e| refused(typed, e))?;
     if answer && effort::pending_applies(&record) {
-        return Err("model or effort settings would be typed first; answer this question in Terminal".into());
+        return Err(refused(
+            typed,
+            "model or effort settings would be typed first; answer this question in Terminal"
+                .into(),
+        ));
     }
-    let mut record = effort::apply_pending(name, record)?;
-    if let Some(id) = recovery_id { recovery::check_submission(&record, id)?; }
-    checked_send_terminal(&record)?;
+    // Pending settings may be typed here, whatever this returns.
+    typed = effort::pending_applies(&record);
+    let mut record = effort::apply_pending(name, record).map_err(unknown)?;
+    if let Some(id) = recovery_id {
+        recovery::check_submission(&record, id).map_err(|e| refused(typed, e))?;
+    }
+    checked_send_terminal(&record).map_err(|e| refused(typed, e))?;
     let attachments_root = root.join("attachments");
-    private_dir(&attachments_root)?;
+    private_dir(&attachments_root).map_err(|e| refused(typed, e))?;
     let attachments = tempfile::Builder::new()
         .prefix("message-")
         .tempdir_in(attachments_root)
-        .map_err(|e| e.to_string())?;
-    crate::platform::restrict_dir(attachments.path()).map_err(|e| e.to_string())?;
+        .map_err(|e| refused(typed, e.to_string()))?;
+    crate::platform::restrict_dir(attachments.path()).map_err(|e| refused(typed, e.to_string()))?;
     let mut paths = Vec::new();
     for (index, (attachment, bytes)) in request.attachments.iter().zip(files.iter()).enumerate() {
         let path = attachments
             .path()
             .join(safe_filename(&attachment.name, index));
-        let mut file = crate::platform::private_open(OpenOptions::new().create_new(true).write(true))
-            .open(&path)
-            .map_err(|e| e.to_string())?;
-        file.write_all(bytes).map_err(|e| e.to_string())?;
-        file.sync_all().map_err(|e| e.to_string())?;
+        let mut file =
+            crate::platform::private_open(OpenOptions::new().create_new(true).write(true))
+                .open(&path)
+                .map_err(|e| refused(typed, e.to_string()))?;
+        file.write_all(bytes)
+            .map_err(|e| refused(typed, e.to_string()))?;
+        file.sync_all().map_err(|e| refused(typed, e.to_string()))?;
         paths.push(
             json!({"name":attachment.name,"mime":attachment.mime,"path":path,"bytes":bytes.len(),"reference":attachment.reference}),
         );
@@ -956,35 +1132,51 @@ fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, answer: bool
     };
     let buffer = format!("hgs-input-{request_id}");
     let terminal = backend::current();
-    if !terminal.stage(&buffer, pasted.as_bytes(), backend::StageErrors::Read)? {
-        return Err("could not stage terminal input; nothing was submitted".into());
+    // A staging error may leave a buffer loaded: unknown, never a witness.
+    if !terminal
+        .stage(&buffer, pasted.as_bytes(), backend::StageErrors::Read)
+        .map_err(unknown)?
+    {
+        return Err(refused(
+            typed,
+            "could not stage terminal input; nothing was submitted".into(),
+        ));
     }
     let cleanup = || terminal.discard(&buffer);
     // Recheck immediately before the first input byte. All concurrent hgs writes
     // share this lock; a crash/exit can still race the PTY, so receipts are durable.
     if let Err(error) = checked_record(name, &request).and_then(|r| checked_send_terminal(&r)) {
         cleanup();
-        return Err(error);
+        return Err(refused(typed, error));
     }
-    if let Some(id) = recovery_id { recovery::check_submission(&read(name)?, id)?; }
+    if let Some(id) = recovery_id {
+        let checked = read(name).and_then(|record| recovery::check_submission(&record, id));
+        if let Err(error) = checked {
+            cleanup();
+            return Err(refused(typed, error));
+        }
+    }
     let submitted_at = now();
-    if recovery_id.is_none() { recovery::cancel_for_input(&record)?; }
+    if recovery_id.is_none() {
+        recovery::cancel_for_input(&record).map_err(unknown)?;
+    }
     let mut receipt = json!({"request_id":request_id,"name":name,"run_id":request.expected_run_id,
         "conversation_id":string(&record,"conversation_id"),"first_message":string(&record,"conversation_id").is_empty(),"digest":digest,"status":"in_progress",
         "submitted_at":submitted_at,"submitted_text":text,"text":request.text.trim(),"attachments":paths,"transport":"terminal"});
     if let Some(target) = session_graph::target_receipt(&record) {
         receipt["graph_target"] = target;
     }
+    // The marker may be published even when its write reports an error.
     if let Err(error) = atomic(&receipt_path, &receipt.to_string()) {
         cleanup();
-        return Err(error);
+        return Err(unknown(error));
     }
     // Preserve attachments after any possible input: the agent may read them later.
     let _ = attachments.keep();
     record["input_pending_at"] = json!(submitted_at);
     if let Err(error) = write(&mut record) {
         cleanup();
-        return Err(error);
+        return Err(unknown(error));
     }
     let pane = string(&record, "pane");
     let result: Result<()> = (|| {
@@ -1008,9 +1200,9 @@ fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, answer: bool
     cleanup();
     if let Err(error) = result {
         crate::analytics::adapters::delivery(&root, &record, &receipt, crate::analytics::adapters::Delivery::Uncertain);
-        return Err(format!(
+        return Err(unknown(format!(
             "delivery uncertain: {error}; inspect Terminal before retrying"
-        ));
+        )));
     }
     crate::analytics::adapters::delivery(&root, &record, &receipt, crate::analytics::adapters::Delivery::Submitted);
     Ok(receipt)
@@ -1058,6 +1250,94 @@ fn paste_shown(screen: &str, pasted: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// desktop-u's (a): what the receipt store already holds decides by
+    /// itself. Only a positively absent receipt lets a later refusal witness
+    /// that nothing was offered; an in-progress, corrupt, unreadable or
+    /// mismatched one is unknown, and a submitted one is replayed.
+    #[test]
+    fn an_existing_receipt_decides_and_never_witnesses_no_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input_receipts").join("id.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        assert!(matches!(existing(&path, "d", "n"), Existing::Absent));
+        let write = |receipt: Value| fs::write(&path, receipt.to_string()).unwrap();
+        write(json!({"digest": "d", "name": "n", "status": "submitted"}));
+        assert!(
+            matches!(existing(&path, "d", "n"), Existing::Submitted(r) if r["status"] == "submitted")
+        );
+        for (receipt, digest, name) in [
+            (
+                json!({"digest": "d", "name": "n", "status": "in_progress"}),
+                "d",
+                "n",
+            ),
+            (
+                json!({"digest": "d", "name": "n", "status": "submitted"}),
+                "other",
+                "n",
+            ),
+            (
+                json!({"digest": "d", "name": "n", "status": "submitted"}),
+                "d",
+                "other",
+            ),
+        ] {
+            write(receipt);
+            assert!(matches!(
+                existing(&path, digest, name),
+                Existing::Unknown(_)
+            ));
+        }
+        fs::write(&path, b"{corrupt").unwrap();
+        assert!(matches!(existing(&path, "d", "n"), Existing::Unknown(_)));
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(matches!(existing(&path, "d", "n"), Existing::Unknown(_)));
+        // A store that cannot even be inspected is unknown, never absent.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::remove_dir(&path).unwrap();
+            let store = path.parent().unwrap();
+            fs::set_permissions(store, fs::Permissions::from_mode(0o000)).unwrap();
+            let inspected = existing(&path, "d", "n");
+            fs::set_permissions(store, fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(matches!(inspected, Existing::Unknown(_)));
+        }
+    }
+
+    /// A refusal before the marker is a witness only while no pending
+    /// setting may have been typed; after one may have, it is unknown.
+    #[test]
+    fn a_refusal_after_a_pending_setting_is_unknown() {
+        let witness = || NotOffered {
+            request_id: "id".into(),
+            name: "n".into(),
+            run_id: "r".into(),
+            conversation_id: "c".into(),
+            digest: "d".into(),
+            receipts: PathBuf::from("state/input_receipts/id.json"),
+            reason: "refused".into(),
+        };
+        assert!(
+            matches!(before_input(false, witness()), Failure::NotOffered(w) if w.binds("id", "n", "r", "c", "d"))
+        );
+        assert!(
+            matches!(before_input(true, witness()), Failure::Unknown(reason) if reason == "refused")
+        );
+        let bound = witness();
+        for (id, name, run, conversation, digest) in [
+            ("other", "n", "r", "c", "d"),
+            ("id", "other", "r", "c", "d"),
+            ("id", "n", "other", "c", "d"),
+            ("id", "n", "r", "other", "d"),
+            ("id", "n", "r", "c", "other"),
+        ] {
+            assert!(!bound.binds(id, name, run, conversation, digest));
+        }
+    }
+
     #[test]
     fn unread_settings_keys_wait_for_a_native_event() {
         let mut record = json!({"settings_unconfirmed_at": 10.0, "last_event_at": 9.0});

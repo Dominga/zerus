@@ -673,8 +673,8 @@ class DeliveryFixture(Fixture):
         self.hgs("settings", "--project", "orchard", "--set", text=json.dumps(settings))
 
 class TaskDelivery(DeliveryFixture):
-    def message(self, task, text, mode="send", identity=None, dispatch=None, **kw):
-        return self.hgs("message", task["ref"], "--content-json", "--mode", mode,
+    def message(self, task, text, mode="send", identity=None, dispatch=None, extra=(), **kw):
+        return self.hgs("message", task["ref"], "--content-json", "--mode", mode, *extra,
                         "--request-id", identity or str(uuid.uuid4()), "--expect-dispatch", dispatch or task.get("dispatch_id") or "",
                         text=json.dumps(dict(text=text, attachments=[])), **kw)
 
@@ -714,6 +714,111 @@ class TaskDelivery(DeliveryFixture):
         self.assertEqual(changed["task"]["stage"], "active")
         self.assertEqual(changed["task"]["session"]["session_id"], task["session"]["session_id"])
         self.wait_received("Please revise")
+
+    def reviewed(self, text):
+        task = self.add(text, "--target", self.name)
+        self.hgs("send", task["ref"]); self.confirm()
+        self.as_agent("report", task["ref"], text="Result for review")
+        return self.hgs("get", task["ref"])["task"]
+
+    def notes(self, task, identity):
+        log = self.hgs("get", task["ref"])["task"]["log"]
+        return [e for e in log if e["kind"] == "message" and e.get("request_id") == identity]
+
+    def test_a_managed_reopen_is_an_attempt_with_its_note(self):
+        # desktop-u's (b): the person's text is a note bound to the reopen's
+        # ID, saved with the reopen attempt in one admission; the receipt
+        # settles it (Active, resumed). Repeating that ID is read only: one
+        # note, the original receipt, never another paste; other text under
+        # it refuses.
+        task = self.reviewed("A managed reopen")
+        self.assertEqual(self.execution(task)["attempts"], 1)
+        # The send's own attempt ID is not a reopen's: another intent, even
+        # with a note of the same text under that ID.
+        sent_id = self.execution(task)["current"]["id"]
+        self.assertIn("another intent", self.message(task, "Please revise it", mode="reopen", identity=sent_id, ok=False))
+        other = self.add("Its note and plan share an ID", "--target", self.name)
+        shared = str(uuid.uuid4())
+        self.message(other, "Same words", mode="note", identity=shared)
+        self.confirm()
+        self.assertEqual(self.hgs("start-deliver", other["ref"], text=json.dumps(self.start_plan(other, id=shared)))["state"], "submitted")
+        self.confirm()
+        self.as_agent("report", other["ref"], text="Result for review")
+        other = self.hgs("get", other["ref"])["task"]
+        self.assertIn("another intent", self.message(other, "Same words", mode="reopen", identity=shared, ok=False))
+        identity = str(uuid.uuid4())
+        changed = self.message(task, "Please revise it", mode="reopen", identity=identity)
+        self.assertEqual((changed["attempt"]["id"], changed["attempt"]["state"]), (identity, "submitted"))
+        self.assertEqual(changed["task"]["stage"], "active")
+        self.assertEqual(changed["message"]["delivery"]["state"], "note")
+        self.wait_received("Please revise it"); self.confirm()
+        execution = self.execution(task)
+        self.assertEqual((execution["attempts"], execution["current"]["origin"]), (2, "reopen"))
+        log = self.hgs("get", task["ref"])["task"]["log"]
+        self.assertEqual(log[-1]["kind"], "resumed")
+        again = self.message(task, "Please revise it", mode="reopen", identity=identity)
+        self.assertEqual(again["attempt"]["state"], "submitted")
+        self.assertEqual(len(self.notes(task, identity)), 1)
+        self.assertEqual(self.received().count("Please revise it"), 1)
+        self.assertIn("another intent", self.message(task, "Other text", mode="reopen", identity=identity, ok=False))
+
+    def test_a_managed_reopen_refused_before_input_keeps_its_note_in_review(self):
+        # desktop-u's (b) with (a): refused before any input, the reopen is
+        # not admitted; its note stays, the task stays in review, and no
+        # resumed entry is written. A new reopen sends it.
+        task = self.reviewed("Reopened too early")
+        other = self.add("Holds the input", "--target", self.name)
+        self.hgs("send", other["ref"])
+        # The agent has not confirmed that input yet.
+        record = json.loads(self.record_path.read_text())
+        record["last_event_at"] = record["input_pending_at"] - 1
+        self.record_path.write_text(json.dumps(record))
+        identity = str(uuid.uuid4())
+        refused = self.message(task, "Revise after the other", mode="reopen", identity=identity)
+        self.assertEqual(refused["attempt"]["state"], "refused")
+        self.assertIn("previous input has not been confirmed", refused["attempt"]["error"])
+        current = self.hgs("get", task["ref"])["task"]
+        self.assertEqual(current["stage"], "review")
+        self.assertNotIn("resumed", [e["kind"] for e in current["log"]])
+        self.assertEqual(len(self.notes(task, identity)), 1)
+        execution = self.execution(task)
+        self.assertEqual(execution["attempts"], 2)
+        self.assertNotEqual(execution["current"]["id"], identity, "never started, never current")
+        self.assertEqual(self.received().count("Revise after the other"), 0)
+        self.confirm()
+        self.assertEqual(self.message(task, "Revise after the other", mode="reopen", identity=identity)["attempt"]["state"],
+                         "refused", "the same ID is never sent again")
+        self.assertEqual(self.received().count("Revise after the other"), 0)
+        sent = self.message(task, "Revise it now", mode="reopen")
+        self.assertEqual((sent["attempt"]["state"], sent["task"]["stage"]), ("submitted", "active"))
+
+    def test_an_unknown_managed_reopen_holds_the_task_and_never_resends(self):
+        # An unknown reopen keeps its note but sets neither Active nor
+        # resumed, and it holds the task: a later reopen cannot even be
+        # prepared, so it is only kept as a comment that was not delivered,
+        # with no attempt and no input.
+        task = self.reviewed("An unknown reopen")
+        identity = str(uuid.uuid4())
+        receipts = self.state / "input_receipts"
+        receipts.chmod(0o500)
+        self.addCleanup(receipts.chmod, 0o700)
+        unknown = self.message(task, "Maybe delivered", mode="reopen", identity=identity)
+        receipts.chmod(0o700)
+        self.assertEqual(unknown["attempt"]["state"], "uncertain")
+        current = self.hgs("get", task["ref"])["task"]
+        self.assertEqual(current["stage"], "review")
+        self.assertNotIn("resumed", [e["kind"] for e in current["log"]])
+        self.assertEqual(len(self.notes(task, identity)), 1)
+        for extra in ((), ("--recover-only",)):
+            again = self.message(task, "Maybe delivered", mode="reopen", identity=identity, extra=extra)
+            self.assertEqual(again["attempt"]["state"], "uncertain")
+        later = str(uuid.uuid4())
+        current = self.hgs("get", task["ref"])["task"]
+        refused = self.message(current, "A later revision", mode="reopen", identity=later)
+        self.assertEqual(refused["message"]["delivery"]["state"], "failed")
+        self.assertNotIn("attempt", refused)
+        self.assertEqual((self.execution(task)["attempts"], self.hgs("get", task["ref"])["task"]["stage"]), (2, "review"))
+        self.assertEqual(self.received().count("Maybe delivered") + self.received().count("A later revision"), 0)
 
     def test_unknown_feedback_is_recovered_without_another_paste(self):
         task = self.add("Task for crash recovery", "--target", self.name)
@@ -818,6 +923,10 @@ class TaskDelivery(DeliveryFixture):
         self.assertEqual(handed["receipt"]["status"], "submitted")
         entry = new["log"][-1]
         self.assertEqual((entry["kind"], entry["text"], entry["request_id"]), ("sent", "handoff", handed["receipt"]["request_id"]))
+        # C3 activation A3: the handoff is the task's attempt, settled by its receipt.
+        current = self.execution(task)["current"]
+        self.assertEqual((current["id"], current["origin"], current["phase"]),
+                         (handed["receipt"]["request_id"], "handoff", "submitted"))
         self.wait_received("Check the new owner")
         self.assertIn("only the task's current session", self.hgs("handoff", task["ref"], "--session", "codex/another", session="codex/source", ok=False))
         report = json.loads(self.as_agent("report", task["ref"], "--json", text="Ownership checked."))
@@ -1015,6 +1124,159 @@ class TaskDelivery(DeliveryFixture):
         recovered = self.hgs("start-deliver", task["ref"], "--recover-only", text=json.dumps(plan))
         self.assertEqual((recovered["state"], recovered["task"]["stage"]), ("submitted", "active"))
         self.assertEqual(self.received().count("Recover native acknowledgement"), 1)
+
+    def execution(self, task):
+        return self.hgs("get", task["ref"])["task"].get("execution") or {}
+
+    def test_a_start_reserves_one_attempt_and_settles_it_from_its_receipt(self):
+        # zerus-cg5h.4 C3 activation A2: a lone computer's bootstrap gate is
+        # satisfied, so the Start floors the task, proves the fence and
+        # reserves ONE attempt under the plan's own ID before the input; its
+        # receipt settles it. A repeat or a recovery only reads that receipt.
+        task = self.add("An attempted start", "--target", self.name)
+        plan = self.start_plan(task)
+        sent = self.hgs("start-deliver", task["ref"], text=json.dumps(plan))
+        self.assertEqual((sent["state"], sent["task"]["stage"]), ("submitted", "active"))
+        self.wait_received("An attempted start")
+        execution = self.execution(task)
+        self.assertEqual((execution["attempts"], execution["current"]["id"], execution["current"]["phase"]),
+                         (1, plan["id"], "submitted"))
+        status = self.hgs("cutover", "--project", "orchard")
+        self.assertEqual((status["phase"], status["cut_over_tasks"]), ("active", 1))
+        for extra in ((), ("--recover-only",)):
+            again = self.hgs("start-deliver", task["ref"], *extra, text=json.dumps(plan))
+            self.assertEqual(again["state"], "submitted")
+        self.assertEqual(self.received().count("An attempted start"), 1)
+        self.assertEqual(self.execution(task)["attempts"], 1)
+
+    def test_a_start_refused_before_any_input_is_not_admitted_and_never_resent(self):
+        # desktop-u's (a): the exact submission witnessed that the payload was
+        # never offered (the previous input is not confirmed yet), so the
+        # attempt is settled as not admitted: refused, nothing pasted. That ID
+        # is never sent again; a new plan sends it once the session is ready.
+        first = self.add("Holds the input", "--target", self.name)
+        second = self.add("Waits behind it", "--target", self.name)
+        later = self.start_plan(second)
+        self.assertEqual(self.hgs("start-deliver", first["ref"], text=json.dumps(self.start_plan(first)))["state"],
+                         "submitted")
+        refused = self.hgs("start-deliver", second["ref"], text=json.dumps(later))
+        self.assertEqual(refused["state"], "refused")
+        self.assertIn("previous input has not been confirmed", refused["error"])
+        execution = self.execution(second)
+        self.assertEqual((execution["attempts"], execution["current"]["id"], execution["current"]["phase"]),
+                         (1, later["id"], "not_started"))
+        self.assertEqual(self.hgs("get", second["ref"])["task"]["stage"], "todo")
+        self.confirm()
+        for extra in ((), ("--recover-only",)):
+            again = self.hgs("start-deliver", second["ref"], *extra, text=json.dumps(later))
+            self.assertNotEqual(again["state"], "submitted", again)
+        self.assertEqual(self.received().count("Waits behind it"), 0)
+        sent = self.hgs("start-deliver", second["ref"], text=json.dumps(self.start_plan(second)))
+        self.assertEqual(sent["state"], "submitted")
+        self.wait_received("Waits behind it")
+        self.assertEqual(self.execution(second)["attempts"], 2)
+
+    def test_a_start_whose_receipt_marker_cannot_be_written_stays_unknown(self):
+        # desktop-u's (a): a failure while writing the input's receipt marker
+        # may have published it, so the delivery is unknown, never "not
+        # admitted"; neither a repeat nor --recover-only submits it, even with
+        # no receipt at all, and a new plan is refused while it is unknown.
+        warm = self.add("Warms the receipts", "--target", self.name)
+        self.assertEqual(self.hgs("start-deliver", warm["ref"], text=json.dumps(self.start_plan(warm)))["state"],
+                         "submitted")
+        self.confirm()
+        task = self.add("Its marker fails", "--target", self.name)
+        plan = self.start_plan(task)
+        receipts = self.state / "input_receipts"
+        receipts.chmod(0o500)
+        self.addCleanup(receipts.chmod, 0o700)
+        unknown = self.hgs("start-deliver", task["ref"], text=json.dumps(plan))
+        receipts.chmod(0o700)
+        self.assertEqual(unknown["state"], "uncertain", unknown)
+        self.assertEqual((self.execution(task)["current"]["id"], self.execution(task)["current"]["phase"]),
+                         (plan["id"], "unknown"))
+        for extra in ((), ("--recover-only",)):
+            again = self.hgs("start-deliver", task["ref"], *extra, text=json.dumps(plan))
+            self.assertEqual(again["state"], "uncertain")
+        self.assertEqual(self.received().count("Its marker fails"), 0)
+        current = self.hgs("get", task["ref"])["task"]
+        self.assertIn("unknown", self.hgs("start-plan", task["ref"], text=json.dumps(dict(
+            schema=1, id=str(uuid.uuid4()), stage_at=current["stage_at"], target=current["target"],
+            selection=plan["selection"])), ok=False))
+        # Had that input arrived, its own receipt alone settles the attempt.
+        native = subprocess.run([str(HGS), "send", self.name, "--json"], input=json.dumps(plan["request"], separators=(",", ":"), ensure_ascii=False),
+                                env=self.env, text=True, capture_output=True, timeout=30)
+        self.assertEqual(native.returncode, 0, native.stderr)
+        recovered = self.hgs("start-deliver", task["ref"], "--recover-only", text=json.dumps(plan))
+        self.assertEqual((recovered["state"], recovered["task"]["stage"]), ("submitted", "active"))
+        self.assertEqual(self.execution(task)["current"]["phase"], "submitted")
+        self.assertEqual(self.received().count("Its marker fails"), 1)
+
+    def test_a_start_cut_after_its_input_is_unknown_and_never_resent(self):
+        # desktop-u's (a): a failure after the receipt marker (here the
+        # writer is killed just after the paste) leaves the delivery unknown;
+        # a repeat and --recover-only read its receipt and never paste again.
+        task = self.add("Cut after the paste", "--target", self.name)
+        plan = self.start_plan(task)
+        shim = "#!/usr/bin/env python3\nimport os,signal,subprocess,sys\na=sys.argv[1:]\n"
+        shim += "r=subprocess.run([" + repr(TMUX) + ",'-S'," + repr(str(self.socket)) + ",'-f','/dev/null',*a])\n"
+        shim += "if a and a[0]=='paste-buffer': os.kill(os.getppid(),signal.SIGKILL)\nsys.exit(r.returncode)\n"
+        self.script("tmux", shim)
+        self.hgs("start-deliver", task["ref"], text=json.dumps(plan), ok=False)
+        self.wait_received("Cut after the paste")
+        self.script("tmux", '#!/bin/sh\nexec ' + TMUX + ' -S "' + str(self.socket) + '" -f /dev/null "$@"\n')
+        for extra in ((), ("--recover-only",)):
+            again = self.hgs("start-deliver", task["ref"], *extra, text=json.dumps(plan))
+            self.assertEqual(again["state"], "uncertain")
+        self.assertEqual(self.received().count("Cut after the paste"), 1)
+        self.assertEqual((self.execution(task)["current"]["id"], self.execution(task)["current"]["phase"]),
+                         (plan["id"], "unknown"))
+
+    def test_a_frozen_start_is_refused_when_its_business_binding_changed(self):
+        # desktop-u's condition 2: the reservation re-renders the frozen
+        # request against the task as admitted; a new queued message, an
+        # edited requirement or another target refuses it, and nothing is
+        # reserved or sent. A fresh plan then starts it.
+        changes = (
+            lambda task: self.message(task, "A late clarification", mode="queue"),
+            lambda task: self.hgs("edit", task["ref"], text="A changed requirement"),
+            lambda task: self.hgs("target", task["ref"], "any"),
+        )
+        for index, change in enumerate(changes):
+            task = self.add("Frozen start %d" % index, "--target", self.name)
+            plan = self.start_plan(task)
+            change(task)
+            refused = self.hgs("start-deliver", task["ref"], text=json.dumps(plan))
+            self.assertEqual(refused["state"], "refused", refused)
+            self.assertEqual(self.execution(task).get("attempts", 0), 0)
+            self.assertEqual(self.hgs("get", task["ref"])["task"]["stage"], "todo")
+        self.assertEqual(self.received(), "")
+        task = self.add("Started afresh", "--target", self.name)
+        plan = self.start_plan(task)
+        self.message(task, "Known before the plan", mode="queue")
+        self.assertEqual(self.hgs("start-deliver", task["ref"], text=json.dumps(plan))["state"], "refused")
+        sent = self.hgs("start-deliver", task["ref"], text=json.dumps(self.start_plan(task)))
+        self.assertEqual(sent["state"], "submitted")
+        self.wait_received("Known before the plan")
+
+    def test_a_held_floored_task_is_cutting_over_never_legacy(self):
+        # A task that took its floor stays off the legacy route: with the
+        # person's hold on, its first attempt is refused as cutting over and
+        # nothing is sent; cleared, it starts through its attempt.
+        task = self.add("Floored, then held", "--target", self.name)
+        plan = self.start_plan(task)
+        self.hgs("rename", task["ref"], text="Floored, then held again")
+        self.assertEqual(self.hgs("start-deliver", task["ref"], text=json.dumps(plan))["state"], "refused")
+        self.assertEqual(self.hgs("cutover", "--project", "orchard")["cut_over_tasks"], 1, "the floor stays")
+        self.hgs("cutover", "--project", "orchard", "--hold", "on")
+        held = self.hgs("start-deliver", task["ref"], text=json.dumps(self.start_plan(task)))
+        self.assertEqual(held["state"], "cutting_over")
+        self.assertIn("held", held["error"])
+        self.assertEqual(self.received(), "")
+        self.hgs("cutover", "--project", "orchard", "--hold", "off", "--confirm")
+        sent = self.hgs("start-deliver", task["ref"], text=json.dumps(self.start_plan(task)))
+        self.assertEqual(sent["state"], "submitted")
+        self.wait_received("Floored, then held again")
 
     def test_cancel_execution_pins_dispatch_and_executor_and_keeps_reason_literal(self):
         task = self.add("Refactor the parser", "--target", self.name)

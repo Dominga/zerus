@@ -2,10 +2,13 @@
 //! private outbox, then delivers it once. Recovery only reads the original
 //! native receipt; no missing or uncertain receipt authorizes input.
 use super::*;
+use crate::swarm::fence::{Admission, Closed};
 use serde::{Deserialize, Serialize};
+use zerus_replica::execution::Origin;
 
 const MAX_PLAN: u64 = 32 * 1024 * 1024;
-const CHANGED: &str = "The task or executor changed. Nothing was sent. Refresh the task.";
+pub(super) const CHANGED: &str =
+    "The task or executor changed. Nothing was sent. Refresh the task.";
 const UNCERTAIN: &str = "The previous start of this task may already have reached its executor.";
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -139,18 +142,41 @@ fn prepared(
     selection: &Selection,
     request_id: &str,
 ) -> Result<Value> {
-    task.check_send().map_err(fail)?;
+    // A managed task's next attempt is reserved in the fence's admission,
+    // which checks it again: only the legacy route's guard is left out.
+    if task.execution_managed() {
+        task.check_attempt_send().map_err(fail)?;
+    } else {
+        task.check_send().map_err(fail)?;
+    }
     let settings = store.project().map_err(fail)?.settings();
+    let starts = super::agent_starts_since(store, now() - 3_600_000)?;
+    rendered(
+        &settings,
+        starts,
+        task,
+        project_name,
+        to,
+        selection,
+        request_id,
+    )
+}
+
+/// The native request for `task`, rendered for `to` under `settings`.
+fn rendered(
+    settings: &Settings,
+    starts: usize,
+    task: &TaskDoc,
+    project_name: &str,
+    to: &SessionKey,
+    selection: &Selection,
+    request_id: &str,
+) -> Result<Value> {
     settings
-        .check_agent(
-            &Actor::Person,
-            to,
-            true,
-            super::agent_starts_since(store, now() - 3_600_000)?,
-        )
+        .check_agent(&Actor::Person, to, true, starts)
         .map_err(fail)?;
     let (prompt, files) = dispatch_content(
-        &settings,
+        settings,
         &task.view().map_err(fail)?,
         project_name,
         matches!(task.view().map_err(fail)?.target, Target::Subagent { .. }),
@@ -166,6 +192,8 @@ fn prepared(
 }
 
 pub(super) fn execute(config: &Config, action: &str, args: &[String]) -> Result<Value> {
+    // The attempt's one budget counts from here (desktop-u's condition 1).
+    let deadline = std::time::Instant::now() + super::attempts::BUDGET;
     let mut body = input()?;
     let machines = machines(config)?;
     if actor(&machines.here, args, false)? != Actor::Person {
@@ -174,7 +202,7 @@ pub(super) fn execute(config: &Config, action: &str, args: &[String]) -> Result<
         ));
     }
     let r = reference(config, args, &Actor::Person)?;
-    let store = store(config, &r.project.0)?;
+    let mut store = store(config, &r.project.0)?;
     let mut task = store.find(&r.task).map_err(fail)?;
     let current = task.view().map_err(fail)?;
     let (selection, to) = if action == "start-plan" {
@@ -259,36 +287,117 @@ pub(super) fn execute(config: &Config, action: &str, args: &[String]) -> Result<
     }) {
         return result("submitted", "", &task);
     }
+    // An attempt already reserved under this ID: only its request's own
+    // receipt settles it; nothing is submitted again (condition 4).
+    if task.attempt(&plan.id).map_err(fail)?.is_some() {
+        let uuid = task.uuid().to_owned();
+        drop(store);
+        let delivered =
+            super::attempts::recover(config, &r.project.0, &uuid, &plan.id, &to, &plan.request)?;
+        return delivered_result(config, &r.project.0, &uuid, delivered, &result);
+    }
     let receipt = crate::state::task_reply_receipt(&to.session, &plan.request).map_err(fail)?;
     let submitted = receipt.as_ref().is_some_and(|r| r["status"] == "submitted");
     if receipt.is_some() && !submitted || receipt.is_none() && flag(args, "--recover-only") {
         return result("uncertain", UNCERTAIN, &task);
     }
     if !submitted {
-        // Only a fresh, exact plan reaches this branch. The desktop saved its
-        // reservation before this invocation and never repeats it as fresh.
-        let check = (|| {
-            if current.stage_at != plan.stage_at
-                || task.revision() != plan.revision
-                || normalized(&current.target, &machines) != normalized(&plan.target, &machines)
-            {
-                return Err(fail(CHANGED));
+        // A fresh, exact plan: the fence decides between its attempt and the
+        // legacy route. No lock is held into it.
+        let uuid = task.uuid().to_owned();
+        let starts = super::agent_starts_since(&store, now() - 3_600_000)?;
+        drop(store);
+        let detail = std::cell::RefCell::new(String::new());
+        let admission =
+            super::attempts::admit(config, &r.project.0, &uuid, deadline, |admitted, task| {
+                let refuse = |reason, why: String| {
+                    *detail.borrow_mut() = why;
+                    Ok(Err(Closed { node: None, reason }))
+                };
+                // The frozen plan's business binding, against the task as
+                // admitted (after the proof's imports) and the current
+                // executor, selection and settings (condition 2).
+                let current = task.view()?;
+                if current.stage_at != plan.stage_at
+                    || normalized(&current.target, &machines) != normalized(&plan.target, &machines)
+                {
+                    return refuse("changed", CHANGED.into());
+                }
+                match destination(task, &selection, &machines) {
+                    Ok(resolved)
+                        if resolved.machine == to.machine
+                            && resolved.session_id == to.session_id => {}
+                    Ok(_) => return refuse("changed", CHANGED.into()),
+                    Err(error) => return refuse("changed", error.message),
+                }
+                if let Err(error) = task.check_attempt_send() {
+                    return refuse("not_sendable", error.to_string());
+                }
+                let settings = admitted.project()?.settings();
+                match rendered(
+                    &settings,
+                    starts,
+                    task,
+                    &r.project.1,
+                    &to,
+                    &selection,
+                    &plan.id,
+                ) {
+                    Ok(request) if request == plan.request => {}
+                    Ok(_) => return refuse("changed", CHANGED.into()),
+                    Err(error) => return refuse("changed", error.message),
+                }
+                // ONE original ID, reserved and saved here (condition 3).
+                let native = super::attempts::native(&to, &plan.request);
+                if let Err(error) =
+                    task.reserve_attempt(&plan.id, Origin::Send, &to, native, &Actor::Person, now())
+                {
+                    return refuse("not_sendable", error.to_string());
+                }
+                admitted.save(task)?;
+                Ok(Ok(()))
+            })?;
+        let reload = || -> Result<TaskDoc> {
+            super::store(config, &r.project.0)?
+                .load(&uuid)
+                .map_err(fail)
+        };
+        match admission {
+            Admission::Reserved { .. } => {
+                let delivered = super::attempts::deliver(
+                    config,
+                    &r.project.0,
+                    &uuid,
+                    &plan.id,
+                    &to,
+                    &plan.request,
+                );
+                return delivered_result(config, &r.project.0, &uuid, delivered, &result);
             }
-            let resolved = destination(&task, &selection, &machines)?;
-            if resolved.machine != to.machine || resolved.session_id != to.session_id {
-                return Err(fail(CHANGED));
+            Admission::Refused(closed) => {
+                let (state, text) = super::attempts::refusal(&closed, &detail.borrow());
+                return result(state, &text, &reload()?);
             }
-            if prepared(&store, &task, &r.project.1, &to, &selection, &plan.id)? != plan.request {
-                return Err(fail(CHANGED));
+            Admission::Uncertain(error) => {
+                return result("uncertain", &format!("{UNCERTAIN} {error}"), &reload()?);
             }
-            Ok(())
-        })();
-        if let Err(error) = check {
-            return result("refused", &error.message, &task);
+            // Only this outcome keeps the legacy route (condition 5).
+            Admission::Legacy(_) => {}
         }
-        if let Err(error) = crate::state::submit_task_reply(&to.session, &plan.request) {
-            return result("uncertain", &error, &task);
-        }
+        store = super::store(config, &r.project.0)?;
+        task = store.load(&uuid).map_err(fail)?;
+        let current = task.view().map_err(fail)?;
+        return legacy(
+            &store,
+            &mut task,
+            &current,
+            &plan,
+            &selection,
+            &to,
+            &machines,
+            &r.project.1,
+            &result,
+        );
     }
     // Receipt settlement never rewrites a later stage or assignment. It still
     // reports that the original request was delivered, allowing its exact
@@ -306,4 +415,142 @@ pub(super) fn execute(config: &Config, action: &str, args: &[String]) -> Result<
             .map_err(|e| fail(format!("{SENT_UNRECORDED}: {e}")))?;
     }
     result("submitted", "", &task)
+}
+
+/// The reply for an attempt's delivery, with the task as it is now.
+fn delivered_result(
+    config: &Config,
+    project: &str,
+    uuid: &str,
+    delivered: super::attempts::Delivered,
+    result: &dyn Fn(&str, &str, &TaskDoc) -> Result<Value>,
+) -> Result<Value> {
+    let task = super::store(config, project)?.load(uuid).map_err(fail)?;
+    match delivered {
+        super::attempts::Delivered::Submitted(_) => result("submitted", "", &task),
+        super::attempts::Delivered::NotAdmitted(reason) => result("refused", &reason, &task),
+        super::attempts::Delivered::Uncertain(text) => result("uncertain", &text, &task),
+    }
+}
+
+/// The legacy route, kept only for a task the fence positively left on it
+/// (`Admission::Legacy`): the exact plan checked again under the project
+/// lock, then its one submission and the history it always wrote.
+#[allow(clippy::too_many_arguments)]
+fn legacy(
+    store: &ProjectStore,
+    task: &mut TaskDoc,
+    current: &zerus_replica::TaskView,
+    plan: &Plan,
+    selection: &Selection,
+    to: &SessionKey,
+    machines: &Machines,
+    project_name: &str,
+    result: &dyn Fn(&str, &str, &TaskDoc) -> Result<Value>,
+) -> Result<Value> {
+    let check = (|| {
+        // The legacy guard first: a task managed since the fence chose this
+        // route is refused here, never pasted (desktop-u's condition 5).
+        task.check_send().map_err(fail)?;
+        if current.stage_at != plan.stage_at
+            || task.revision() != plan.revision
+            || normalized(&current.target, machines) != normalized(&plan.target, machines)
+        {
+            return Err(fail(CHANGED));
+        }
+        let resolved = destination(task, selection, machines)?;
+        if resolved.machine != to.machine || resolved.session_id != to.session_id {
+            return Err(fail(CHANGED));
+        }
+        if prepared(store, task, project_name, to, selection, &plan.id)? != plan.request {
+            return Err(fail(CHANGED));
+        }
+        Ok(())
+    })();
+    if let Err(error) = check {
+        return result("refused", &error.message, task);
+    }
+    if let Err(error) = crate::state::submit_task_reply(&to.session, &plan.request) {
+        return result("uncertain", &error, task);
+    }
+    if task.check_send().is_ok() {
+        task.record_send(to, &plan.id, &Actor::Person, now())
+            .map_err(fail)?;
+        task.record_queued_messages(&plan.id, &Actor::Person, now())
+            .map_err(fail)?;
+        store
+            .save(task)
+            .map_err(|e| fail(format!("{SENT_UNRECORDED}: {e}")))?;
+    }
+    result("submitted", "", task)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// desktop-u's condition 5: the legacy route checks the task again, and
+    /// refuses one that took a floor since the fence chose that route: it is
+    /// cutting over, never prepared or pasted.
+    #[test]
+    fn the_legacy_route_refuses_a_task_managed_since_the_fence_chose_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(dir.path(), "p").unwrap();
+        let mut task = TaskDoc::create(zerus_replica::NewTask {
+            project: "p",
+            id: &store.unused_short_id().unwrap(),
+            text: "Add rate limiting",
+            stage: Stage::Todo,
+            target: Target::Any,
+            author: Actor::Person,
+            rank: "V",
+            now: 1,
+        })
+        .unwrap();
+        assert!(task.floor().unwrap());
+        store.save(&mut task).unwrap();
+        let current = task.view().unwrap();
+        let selection = Selection {
+            host: String::new(),
+            name: "codex/api".into(),
+            session_id: "run_id:r".into(),
+            run_id: "r".into(),
+            conversation_id: "c".into(),
+        };
+        let to = SessionKey {
+            machine: "node-here".into(),
+            session: "codex/api".into(),
+            session_id: "run_id:r".into(),
+        };
+        let plan = Plan {
+            schema: 1,
+            id: "11111111-1111-4111-8111-111111111111".into(),
+            project: "p".into(),
+            task: task.uuid().into(),
+            stage_at: current.stage_at,
+            target: current.target.clone(),
+            revision: task.revision(),
+            selection: selection.clone(),
+            session: to.clone(),
+            request: json!({}),
+        };
+        let machines = Machines {
+            here: "node-here".into(),
+            selves: vec![],
+            peers: BTreeMap::new(),
+            bindings: vec![],
+        };
+        let result = |state: &str, error: &str, _: &TaskDoc| -> Result<Value> {
+            Ok(json!({"state": state, "error": error}))
+        };
+        let out = legacy(
+            &store, &mut task, &current, &plan, &selection, &to, &machines, "orchard", &result,
+        )
+        .unwrap();
+        assert_eq!(out["state"], "refused");
+        assert!(
+            out["error"].as_str().unwrap().contains("cutting over"),
+            "{out}"
+        );
+    }
 }

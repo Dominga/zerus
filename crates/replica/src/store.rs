@@ -358,6 +358,13 @@ impl Admitted<'_> {
     pub fn dir(&self) -> &Path {
         self.store.dir()
     }
+
+    /// The project document (its settings and hold), read inside this
+    /// admission. Read only: it neither loads a task nor enters another
+    /// admission.
+    pub fn project(&self) -> Result<ProjectDoc> {
+        self.store.project()
+    }
 }
 
 pub struct ProjectStore {

@@ -34,6 +34,7 @@ mod goals;
 mod hooks;
 pub(crate) mod hook_health;
 mod input;
+pub(crate) use input::Submission;
 mod input_queue;
 mod journal;
 mod kimi_cache_hint;
@@ -807,6 +808,18 @@ pub(crate) fn prepare_task_reply(session: &zerus_replica::SessionKey, dispatch: 
 }
 pub(crate) fn submit_task_reply(name: &str, request: &Value) -> Result<Value> {
     input::submit(name, request.to_string().as_bytes(), None)
+}
+/// `submit_task_reply` for an attempt's input: an exact submitted receipt,
+/// a live witness that the payload was never offered, or unknown.
+pub(crate) fn submit_task_reply_witnessed(name: &str, request: &Value) -> input::Submission {
+    input::submit_witnessed(name, request.to_string().as_bytes())
+}
+pub(crate) fn task_reply_receipt_bound(
+    name: &str,
+    request_id: &str,
+    digest: &str,
+) -> Result<Option<Value>> {
+    input::task_reply_receipt_bound(name, request_id, digest)
 }
 pub(crate) fn task_reply_receipt(name: &str, request: &Value) -> Result<Option<Value>> {
     input::task_reply_receipt(name, request)

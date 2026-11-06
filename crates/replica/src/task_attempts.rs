@@ -107,6 +107,20 @@ impl TaskDoc {
 
     /// A path that starts an execution without an attempt refuses a task
     /// that records them.
+    /// Whether a send could reserve this task's next attempt now: its stage,
+    /// the hold and no attempt whose delivery is unknown. `reserve_attempt`
+    /// checks it again in its admission; the legacy guard is not part of it.
+    pub fn check_attempt_send(&self) -> Result<()> {
+        self.sendable()
+    }
+
+    /// Whether `actor` could hand this task off through its next attempt
+    /// now; `reserve_attempt` checks it again in its admission. The legacy
+    /// guard is not part of it.
+    pub fn check_attempt_handoff(&self, actor: &Actor) -> Result<()> {
+        self.handoffable(actor)
+    }
+
     pub(super) fn legacy_start(&self) -> Result<()> {
         if self.executes_attempts() {
             return Err(Error::new(
@@ -166,6 +180,15 @@ impl TaskDoc {
         self.upgrade_schema(execution::EXECUTION_TASK_SCHEMA)?;
         list.push(serde_json::to_string(&event)?)?;
         Ok(())
+    }
+
+    /// What is recorded of attempt `id` itself: its own facts, in order;
+    /// `None` when no attempt is recorded under that ID.
+    pub fn attempt_facts(&self, id: &str) -> Result<Option<Vec<EventKind>>> {
+        let Some(attempt) = self.attempt(id)? else {
+            return Ok(None);
+        };
+        Ok(Some(self.facts_of(&attempt)?.0))
     }
 
     /// The facts about `attempt`: those bound to this exact record, and those

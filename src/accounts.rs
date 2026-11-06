@@ -1094,10 +1094,10 @@ pub fn supervisor_shell(shell: &str) -> (&str, &'static str) {
 /// supervisor and native arguments. The empty hint exclusion list is explicit.
 #[cfg(unix)]
 pub fn supervisor_script(shell: &str, environment: &[String]) -> String {
-    let arguments = if Path::new(shell)
+    let fish = Path::new(shell)
         .file_name()
-        .is_some_and(|name| name == "fish")
-    {
+        .is_some_and(|name| name == "fish");
+    let arguments = if fish {
         "\"$argv[1]\" --run $argv[2..-1]"
     } else {
         "\"$0\" --run \"$@\""
@@ -1105,7 +1105,12 @@ pub fn supervisor_script(shell: &str, environment: &[String]) -> String {
     if environment.is_empty() {
         return format!("exec {arguments}");
     }
-    format!("exec env {} {arguments}", platform::join(environment))
+    let assignments = if fish {
+        platform::remote_join(environment)
+    } else {
+        platform::join(environment)
+    };
+    format!("exec env {assignments} {arguments}")
 }
 
 /// The account variables a resumed or forked session's supervisor starts with

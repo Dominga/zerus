@@ -1545,7 +1545,7 @@ fn is_reference_call(command: &str, args: &[String]) -> bool {
 /// `notify` and `paste` are the tray's and tmux's own entry points, and
 /// `subagent retire` names its session second; they keep names only.
 const SESSION_COMMANDS: &[&str] = &[
-    "inspect", "reference", "processes", "send", "send-now", "send-cancel", "history", "history-projection",
+    "inspect", "reference", "processes", "send", "send-now", "send-cancel", "switch-account", "history", "history-projection",
     "terminal", "session-action", "session-action-status", "compact-context", "clear-context",
     "interrupt", "attachment", "file-read", "answer", "read", "notifications", "fork", "effort",
     "settings", "schedules", "voice", "hooks", "a", "kill", "rename", "archive", "terminate",
@@ -1609,7 +1609,7 @@ const REQUEST_GUARDED: &[&str] = &[
 const FLAG_GUARDED: &[&str] = &["fork", "terminate", "resume", "processes", "reference", "a"];
 /// It carries none: a label several sessions share is refused (exit 5).
 #[cfg_attr(not(test), allow(dead_code))]
-const UNGUARDED: &[&str] = &["inspect", "kill", "rename", "archive", "pause", "native-ui", "__dsh-ui-url"];
+const UNGUARDED: &[&str] = &["inspect", "kill", "rename", "archive", "pause", "native-ui", "__dsh-ui-url", "send-cancel", "switch-account"];
 /// It finds its own session and is not resolved here: `hooks` through `ids/`
 /// and its request's identities, `session-action-status` through its receipts.
 #[cfg_attr(not(test), allow(dead_code))]

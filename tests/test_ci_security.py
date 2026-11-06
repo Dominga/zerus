@@ -1586,7 +1586,7 @@ class WorkflowSecurityTests(unittest.TestCase):
             with self.subTest(change=change):
                 self.assertFalse(runs(**change))
 
-    def assemble_runs(self, workflow, verify, macos, enabled, requested=True):
+    def assemble_runs(self, workflow, verify, macos, enabled, requested=True, source="success"):
         expression = field(job(workflow, "assemble"), "if")
         self.assertIn("!cancelled()", expression)
         expression = expression.replace("&&", " and ").replace("||", " or ")
@@ -1595,7 +1595,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         return bool(eval(expression, {"__builtins__": {}}, {
             "cancelled": lambda: False, "inputs": SimpleNamespace(macos_cask=requested),
             "vars": SimpleNamespace(MACOS_CASKS_ENABLED="true" if enabled else ""),
-            "needs": SimpleNamespace(verify=SimpleNamespace(result=verify), gate=SimpleNamespace(result=verify), macos=SimpleNamespace(result=macos)),
+            "needs": SimpleNamespace(verify=SimpleNamespace(result=verify), gate=SimpleNamespace(result=verify), macos=SimpleNamespace(result=macos), source=SimpleNamespace(result=source)),
         }))
 
     def test_casks_are_built_only_once_signing_is_enabled(self):
@@ -1618,13 +1618,52 @@ class WorkflowSecurityTests(unittest.TestCase):
                                              (requested, enabled, result))
                         self.assertFalse(self.assemble_runs(workflow, "failure", "skipped", enabled, requested))
 
+    def test_release_parallel_source_and_install_jobs_cannot_bypass_sealing(self):
+        workflow = (ROOT / '.github/workflows/release.yml').read_text()
+        source = job(workflow, 'source')
+        self.assertEqual(field(source, 'needs'), 'version')
+        self.assertEqual(field(source, 'cache-mode'), 'none')
+        self.assertNotIn('secrets.', source)
+        self.assertNotIn('actions/cache', source)
+        self.assertIn('--source-only', source)
+        assemble = job(workflow, 'assemble')
+        self.assertEqual(field(assemble, 'needs'), '[verify, source, macos]')
+        self.assertIn('--source-check artifacts/release-source', assemble)
+        self.assertIn('--binary-only --defer-seal', assemble)
+        self.assertNotIn('scripts/seal-release.py', assemble)
+        for result in ('failure', 'cancelled', 'skipped'):
+            self.assertFalse(self.assemble_runs(workflow, 'success', 'success', True, source=result))
+        self.assertIn('verify_installation: false', job(workflow, 'macos'))
+        install = job(workflow, 'cask-install')
+        self.assertEqual(field(install, 'needs'), 'macos')
+        self.assertEqual(field(install, 'uses'), './.github/workflows/macos-cask-install.yml')
+        seal = job(workflow, 'seal')
+        self.assertEqual(field(seal, 'needs'), '[assemble, cask-install]')
+        self.assertIn('scripts/seal-release.py dist', seal)
+        # Evaluate the real workflow predicate for every terminal result and
+        # optional-cask setting; a failed selected install can never seal.
+        expression = field(seal, 'if').replace('needs.cask-install', 'needs.install')
+        expression = expression.replace('&&', ' and ').replace('||', ' or ')
+        expression = re.sub(r'!(?!=)', 'not ', expression)
+        for assembled, installed, wanted, cancelled in product(
+                ('success', 'failure', 'cancelled', 'skipped'),
+                ('success', 'failure', 'cancelled', 'skipped'), (True, False), (True, False)):
+            actual = bool(eval(expression, {'__builtins__': {}}, {
+                'cancelled': lambda: cancelled,
+                'inputs': SimpleNamespace(macos_cask=wanted),
+                'vars': SimpleNamespace(MACOS_CASKS_ENABLED='true'),
+                'needs': SimpleNamespace(assemble=SimpleNamespace(result=assembled), install=SimpleNamespace(result=installed)),
+            }))
+            self.assertEqual(actual, not cancelled and assembled == 'success' and
+                             (installed == 'success' or (installed == 'skipped' and not wanted)))
+
     def test_release_draft_survives_a_skipped_cask(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         expression = field(job(workflow, "draft"), "if")
         # Without a status function GitHub adds success() over the whole chain,
         # which would skip the draft whenever the optional cask was skipped.
         self.assertIn("!cancelled()", expression)
-        self.assertIn("needs.assemble.result == 'success'", expression)
+        self.assertIn("needs.seal.result == 'success'", expression)
         self.assertIn("inputs.create_draft", expression)
 
     def test_tap_deploy_key_is_only_available_to_the_publishers(self):

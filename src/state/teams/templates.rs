@@ -28,6 +28,8 @@ pub(crate) enum Kind {
     Text,
     /// A list of paths inside the member's folder.
     Paths,
+    /// One path inside the member's folder (a project interpreter).
+    Path,
 }
 
 /// One typed placeholder.
@@ -127,7 +129,30 @@ pub(crate) const BUILTIN: &[Template] = &[
         ],
         timeout_secs: 1800,
     },
-    // Owner, 2026-10-28: QA ran the Android tests by hand, a permission each.
+    // Task 86: the project's own interpreter runs pytest; typed -k/-m and node
+    // names, never a shell string. JUnit XML and per-test rows stay the
+    // provider's job.
+    Template {
+        id: "py-test",
+        summary: "the project interpreter runs pytest (typed -k expression, -m mark and node names)",
+        program: "{python}",
+        args: &["-m", "pytest", "-q", "-k={filter}", "-m={mark}", "{tests}"],
+        params: &[
+            param("python", Kind::Path),
+            optional("filter", Kind::Text),
+            optional("mark", Kind::Identifier),
+            optional("tests", Kind::Identifiers),
+        ],
+        timeout_secs: 1800,
+    },
+    Template {
+        id: "cython-build",
+        summary: "the project interpreter rebuilds the Cython extensions in place (setup.py build_ext --inplace)",
+        program: "{python}",
+        args: &["setup.py", "build_ext", "--inplace", "{sources}"],
+        params: &[param("python", Kind::Path), optional("sources", Kind::Paths)],
+        timeout_secs: 1800,
+    },    // Owner, 2026-10-28: QA ran the Android tests by hand, a permission each.
     Template {
         id: "android-test",
         summary: "the Android unit tests (gradlew :app:testDebugUnitTest) with Gradle's home and cache in your folder",
@@ -562,6 +587,12 @@ fn value_of(params: &[Param], args: &Value, name: &str, folder: &Path) -> anyhow
                 check_message(text)?;
             }
             Ok(Some(Words::One(text.to_owned())))
+        }
+        Kind::Path => {
+            let path = value.as_str().unwrap_or_default();
+            check_path(path, name)?;
+            ensure!(folder.join(path).lexists(), "The template's path {path} does not exist in your folder");
+            Ok(Some(Words::One(path.to_owned())))
         }
         Kind::Identifiers | Kind::Paths => {
             let list = match value {
@@ -1344,7 +1375,7 @@ mod tests {
         }
         // The set the owner asked for, by id.
         let ids: Vec<&str> = BUILTIN.iter().map(|template| template.id).collect();
-        assert_eq!(ids, ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test", "android-test", "clean-build", "git-merge-lead", "git-commit"]);
+        assert_eq!(ids, ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test", "py-test", "cython-build", "android-test", "clean-build", "git-merge-lead", "git-commit"]);
     }
 
     // Run by hand on a Windows machine with Visual Studio (cargo test -- --ignored).
@@ -1980,4 +2011,21 @@ mod tests {
         std::fs::write(gui.join("CMakeCache.txt"), "CMAKE_CXX_COMPILER_LAUNCHER:STRING=C:/tools/ccache.exe\n").unwrap();
         assert_eq!(configured_launcher(dir.path()).as_deref(), Some("C:/tools/ccache.exe"));
     }
+
+    #[test]
+    fn python_and_cython_templates_take_typed_arguments() {
+        let dir = temp();
+        std::fs::create_dir_all(dir.path().join(".venv")).unwrap();
+        std::fs::write(dir.path().join(".venv/python"), "").unwrap();
+        std::fs::write(dir.path().join("a.pyx"), "cimport helper\n").unwrap();
+        let py = plan("py-test", &json!({"python":".venv/python","filter":"slow and not x","tests":["test_a.py::test_x"]}), dir.path()).unwrap();
+        assert!(py.program.ends_with(".venv/python"));
+        assert!(py.argv.contains(&"-k=slow and not x".to_owned()));
+        assert!(py.argv.contains(&"test_a.py::test_x".to_owned()));
+        assert!(!py.argv.iter().any(|arg| arg.starts_with("-m=")));
+        let cy = plan("cython-build", &json!({"python":".venv/python","sources":["a.pyx"]}), dir.path()).unwrap();
+        assert_eq!(cy.argv, ["setup.py", "build_ext", "--inplace", "a.pyx"]);
+        assert!(plan("py-test", &json!({"python":"../python"}), dir.path()).is_err());
+    }
 }
+

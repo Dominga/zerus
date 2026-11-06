@@ -1200,14 +1200,17 @@ pub(crate) enum Admission<R> {
 /// catalog lock, which every membership change and member record write
 /// takes, then the project lock). It never reads the status's `closed`,
 /// which a project with no floor yet always leaves empty.
-/// - `Satisfied`: the phase is known (the bounded count finished), the hold
-///   reads off, the member records read strictly, and every eligible direct
+/// - `Satisfied`: the phase is known (the bounded count finished within the
+///   one deadline), the hold reads off, the member records read strictly,
+///   and every eligible direct
 ///   member (all but one genuinely recorded with no replica) is recorded
 ///   for its current enrolment with protocol 1, task schema 7 or later, a
 ///   valid store and a complete exchange of the project.
 /// - `Open`: positively not: the hold is on, or a member is known not
 ///   current (`swarm::cutover_open`'s reason).
-/// - `Unknown`: the count, the records or an enrolment cannot be read.
+/// - `Unknown`: the count, the project's hold, the records or an
+///   enrolment cannot be read: unknown evidence is never taken as absent,
+///   and never opens the legacy route (review-win-c on #1517).
 enum Bootstrap {
     Satisfied,
     Open(Closed),
@@ -1224,20 +1227,30 @@ fn bootstrap(
     store: &ProjectStore,
     project: &str,
     scan: usize,
+    deadline: Instant,
 ) -> Bootstrap {
     let refused = |node: Option<&str>, reason| Closed {
         node: node.map(str::to_owned),
         reason,
     };
-    if !matches!(store.cut_over_within(scan, SCAN_TIME), Ok(Some(_))) {
-        return Bootstrap::Unknown(refused(None, "scan_budget"));
+    // The count is bounded by what is left of the one deadline, never a
+    // fresh allowance (review-win-c on #1517): it runs under the locks.
+    if !matches!(
+        store.cut_over_within(scan, SCAN_TIME.min(left(deadline))),
+        Ok(Some(_))
+    ) {
+        let reason = if left(deadline).is_zero() {
+            "deadline"
+        } else {
+            "scan_budget"
+        };
+        return Bootstrap::Unknown(refused(None, reason));
     }
-    // A hold that cannot be read is on.
-    let held = store
-        .project()
-        .map_or(true, |doc| doc.cutover_hold().is_some_and(|hold| hold.on));
-    if held {
-        return Bootstrap::Open(refused(None, "held"));
+    let hold = store.project().ok().map(|doc| doc.stored_cutover_hold());
+    match hold {
+        Some(Ok(Some(hold))) if hold.on => return Bootstrap::Open(refused(None, "held")),
+        Some(Ok(_)) => {}
+        _ => return Bootstrap::Unknown(refused(None, "hold_unreadable")),
     }
     let Ok(records) = super::replica_members::read_strict(config) else {
         return Bootstrap::Unknown(refused(None, "members_unreadable"));
@@ -1301,7 +1314,7 @@ fn floor_scanning(
     let Some(store) = ProjectStore::open_within(&root, project, left(deadline))? else {
         return busy();
     };
-    let gate = bootstrap(config, &catalog, &store, project, scan);
+    let gate = bootstrap(config, &catalog, &store, project, scan, deadline);
     let Some(mut admitted) = store.admit_until(deadline) else {
         return busy();
     };
@@ -3171,6 +3184,47 @@ mod tests {
             floor_within(a, "p", task.uuid(), soon()).unwrap(),
             Floor::Managed
         );
+    }
+
+    /// review-win-c on #1517: the bootstrap gate's count is bounded by what
+    /// is left of the one deadline, never a fresh allowance; and a project
+    /// document or hold that cannot be read is unknown evidence: refused,
+    /// never `Legacy`, and no floor.
+    #[test]
+    fn the_bootstrap_gate_keeps_the_deadline_and_refuses_an_unreadable_hold() {
+        let members = chain_abc();
+        let a = &members.configs["a"];
+        let task = unfloored(&members, "a");
+        synced(&members, "a");
+        {
+            let catalog = LockedStore::load(a).unwrap();
+            let store = ProjectStore::open(&a.state.join("replica"), "p").unwrap();
+            assert!(matches!(
+                bootstrap(a, &catalog, &store, "p", SCAN_ENTRIES, soon()),
+                Bootstrap::Satisfied
+            ));
+            let spent = Instant::now();
+            let late = bootstrap(a, &catalog, &store, "p", SCAN_ENTRIES, spent);
+            assert!(matches!(
+                late,
+                Bootstrap::Unknown(Closed {
+                    reason: "deadline",
+                    ..
+                })
+            ));
+        }
+        let store = ProjectStore::open(&a.state.join("replica"), "p").unwrap();
+        std::fs::write(store.dir().join("project.loro"), b"not a project").unwrap();
+        drop(store);
+        let runs = std::cell::Cell::new(0);
+        let net = counted(&members, Faults::default());
+        let admitted =
+            admit_attempt(a, &net, "p", task.uuid(), soon(), send(FIRST, &runs)).unwrap();
+        assert_eq!(outcome(admitted), ("hold_unreadable", None, false));
+        assert_eq!((net.calls.get(), runs.get()), (0, 0));
+        assert!(!held(&members, "a", task.uuid())
+            .unwrap()
+            .execution_managed());
     }
 
     /// A business change refused through the certificate ends there: no

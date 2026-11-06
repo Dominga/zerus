@@ -6,7 +6,7 @@ import { coordinatorActivity, activity } from "../../store/session";
 import { memberRow, showCatalog, showTeam, teams } from "../../store/teams";
 import { SHARE, SIDE, dragShare, dragSide, teamLayout, type TeamLayout } from "../../store/teamLayout";
 import { selected, setDetailTab, setSelectedKey } from "../../store/ui";
-import { teamTests, teamsProfile } from "../../bridge";
+import { teamTests, teamTimeline, teamsProfile } from "../../bridge";
 import { PlanView } from "./PlanView";
 import { TeamCatalogEditor } from "./TeamCatalogEditor";
 import { TeamSettingsDialog } from "./TeamSettingsDialog";
@@ -118,6 +118,7 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
                 profile={profile()}
                 tests={tests()}
                 onLoadProfile={() => { void teamsProfile(props.computer); }}
+                loadTimeline={(phase) => teamTimeline(props.computer, props.team.id, phase)}
                 onLoadTests={loadTests}
                 taskActions={(id) => {
                   const task = props.team.tasks.find((candidate) => candidate.id === id);

@@ -18,6 +18,10 @@ pub const FEED_PAGE: u64 = 50;
 pub const WAITING_PAGE: u64 = 100;
 /// Tasks one spans page reads (`hgs team spans` caps it at its own page).
 pub const SPANS_PAGE: u64 = 50;
+/// Task 92: losses one scoped profile read ranks (Qt's Cache::LossPage).
+pub const PROFILE_LOSS_PAGE: u64 = 20;
+/// Task 92: test runs the Time view reads for its window (Qt's Cache::TestPage).
+pub const TEST_WINDOW_PAGE: u64 = 100;
 /// The longest team id a read names.
 pub const TEAM_ID_BYTES: usize = 64;
 
@@ -52,6 +56,23 @@ pub enum TeamRead {
     /// Task 41: `team test` with `{team, action:"results", limit, before?}`:
     /// one page of test results, newest first.
     TestResults { team: String, before: Option<f64> },
+    /// Task 92: `team profile` with `{team, limit, phase?}` for the Time view:
+    /// a phase's profile, or the plan's without `phase` (Qt's Cache::load).
+    ScopedProfile { team: String, phase: Option<u64> },
+    /// Task 92: `team spans` with `{team, limit, phase?, after?}`: one page
+    /// of the scope's task timelines (Qt's Cache::spans).
+    ScopedSpans {
+        team: String,
+        phase: Option<u64>,
+        after: u64,
+    },
+    /// Task 92: `team test` with `{team, action:"results", limit, from?,
+    /// before?}`: the test runs of the Time view's window, one page.
+    TestWindow {
+        team: String,
+        from: Option<f64>,
+        before: Option<f64>,
+    },
 }
 
 impl TeamRead {
@@ -63,10 +84,10 @@ impl TeamRead {
             Self::Events { .. } => "events",
             Self::Inbox { .. } => "inbox",
             Self::Waiting { .. } => "waiting",
-            Self::Spans { .. } => "spans",
-            Self::Profile { .. } => "profile",
+            Self::Spans { .. } | Self::ScopedSpans { .. } => "spans",
+            Self::Profile { .. } | Self::ScopedProfile { .. } => "profile",
             Self::Catalog | Self::CatalogRoute { .. } => "catalog",
-            Self::TestQueue { .. } | Self::TestResults { .. } => "test",
+            Self::TestQueue { .. } | Self::TestResults { .. } | Self::TestWindow { .. } => "test",
         }
     }
 
@@ -79,6 +100,9 @@ impl TeamRead {
             | Self::Spans { team, .. }
             | Self::Profile { team } => Some(team),
             Self::TestQueue { team } | Self::TestResults { team, .. } => Some(team),
+            Self::ScopedProfile { team, .. }
+            | Self::ScopedSpans { team, .. }
+            | Self::TestWindow { team, .. } => Some(team),
             Self::List | Self::Waiting { .. } | Self::Catalog | Self::CatalogRoute { .. } => None,
         }
     }
@@ -117,6 +141,34 @@ impl TeamRead {
                 }
                 request
             }
+            Self::ScopedProfile { team, phase } => {
+                let mut request = json!({"team": team, "limit": PROFILE_LOSS_PAGE});
+                if let Some(phase) = phase.filter(|phase| *phase > 0) {
+                    request["phase"] = json!(phase);
+                }
+                request
+            }
+            Self::ScopedSpans { team, phase, after } => {
+                let mut request = json!({"team": team, "limit": SPANS_PAGE});
+                if let Some(phase) = phase.filter(|phase| *phase > 0) {
+                    request["phase"] = json!(phase);
+                }
+                if *after > 0 {
+                    request["after"] = json!(after);
+                }
+                request
+            }
+            Self::TestWindow { team, from, before } => {
+                let mut request =
+                    json!({"team": team, "action": "results", "limit": TEST_WINDOW_PAGE});
+                if let Some(from) = from.filter(|at| *at > 0.0) {
+                    request["from"] = json!(from);
+                }
+                if let Some(before) = before.filter(|at| *at > 0.0) {
+                    request["before"] = json!(before);
+                }
+                request
+            }
         }
     }
 
@@ -127,10 +179,12 @@ impl TeamRead {
                 &[("items", true)]
             }
             Self::Status { .. } => &[("id", false), ("members", true), ("tasks", true)],
-            Self::Spans { .. } => &[("tasks", true)],
-            Self::Profile { .. } => &[],
+            Self::Spans { .. } | Self::ScopedSpans { .. } => &[("tasks", true)],
+            Self::Profile { .. } | Self::ScopedProfile { .. } => &[],
             Self::Catalog | Self::CatalogRoute { .. } => &[],
-            Self::TestQueue { .. } | Self::TestResults { .. } => &[("items", true)],
+            Self::TestQueue { .. } | Self::TestResults { .. } | Self::TestWindow { .. } => {
+                &[("items", true)]
+            }
         }
     }
 }
@@ -179,7 +233,10 @@ pub fn invocation(computer: &ComputerId, read: &TeamRead) -> Result<Invocation, 
         args.extend(["team".to_owned(), "catalog".to_owned(), "get".to_owned(), "--json".to_owned()]);
     } else if matches!(read, &TeamRead::CatalogRoute { .. }) {
         args.extend(["team".to_owned(), "catalog".to_owned(), "route".to_owned(), "--json".to_owned()]);
-    } else if matches!(read, &TeamRead::TestQueue { .. }) || matches!(read, &TeamRead::TestResults { .. }) {
+    } else if matches!(
+        read,
+        &TeamRead::TestQueue { .. } | &TeamRead::TestResults { .. } | &TeamRead::TestWindow { .. }
+    ) {
         args.extend(["team".to_owned(), "test".to_owned(), "--json".to_owned()]);
     } else {
         args.extend(["team".to_owned(), read.op().to_owned(), "--json".to_owned()]);

@@ -36,6 +36,7 @@ import { WaitingPage } from "./ui/teams/Waiting";
 import { NewTeamPage } from "./ui/teams/NewTeamPage";
 import { CatalogPage } from "./ui/teams/CatalogPage";
 import { TeamDesigner } from "./ui/teams/TeamDesigner";
+import { connected, connectionError as hasConnectionError, statusSummary } from "./ui/status-summary";
 import { ModelServersScreen } from "./ui/screens/ModelServers";
 import { TeamConfirmDialog } from "./ui/teams/TeamConfirmDialog";
 
@@ -80,12 +81,11 @@ function LoginItemButton() {
 
 function StatusBar(props: { mode: () => BridgeMode | "starting" }) {
   const computers = createMemo(() => Object.values(catalog.computers));
-  const connected = (status: string) => status === "live" || status === "polled";
-  const live = createMemo(() => computers().filter((c) => connected(c.status)).length);
   const problems = createMemo(() => computers().filter((c) => !connected(c.status)));
   const label = (id: string) => id || tr("this computer");
-  const connectionError = createMemo(() => problems().some((c) => c.status !== "probing"));
-  const summary = createMemo(() => tr("%1 of %2 machines connected", live(), computers().length) + (problems().length ? tr(", %1 offline", problems().map((c) => label(c.id)).join(", ")) : ""));
+  // Task 72 (F1): a computer still connecting is said to be connecting, never offline.
+  const connectionError = createMemo(() => hasConnectionError(computers()));
+  const summary = createMemo(() => statusSummary(computers(), label));
   return (
     <footer class="statusbar">
       <Show when={computers().length} fallback={<span>{props.mode() === "starting" ? tr("Starting…") : tr("Connecting…")}</span>}>

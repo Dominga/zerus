@@ -164,6 +164,7 @@ void TeamTaskCard::rebuild()
     meta->addWidget(new Pill(role, roleColor(role, m_dark)));
     meta->addStretch();
     v->addLayout(meta);
+    if (QWidget *heat = heatLine ? heatLine(m_team, task->id) : nullptr) v->addWidget(heat);
     // U36: the pipeline: its flow, where the open stage works, what it holds
     // and every round with its verdict and findings.
     if (auto *pipeline = pipelineSection(m_team, *task, c, m_dark)) v->addWidget(pipeline);

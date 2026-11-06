@@ -652,6 +652,42 @@ fn calls_probe_the_help_first_and_word_failures_as_qt_does() {
         read.answer(answer(0, b"{}")).unwrap_err(),
         "Computer returned invalid analytics data."
     );
+    // Task 72 (F4): hgs on Windows has no local speech service and refuses
+    // every voice read; the voice section says so, still never with stderr.
+    let speech_read = Request::Speech {
+        host: String::new(),
+        from: first(),
+        through: first(),
+    };
+    let refused = |stderr: &str| {
+        Some(Exit::Code {
+            code: 1,
+            stdout: Vec::new(),
+            stderr: stderr.into(),
+        })
+    };
+    assert_eq!(
+        speech_read
+            .answer(refused(
+                "hgs: Use a configured remote computer for speech recognition"
+            ))
+            .unwrap_err(),
+        NO_LOCAL_SPEECH
+    );
+    assert_eq!(
+        speech_read
+            .answer(refused("private-stderr-sentinel"))
+            .unwrap_err(),
+        "Analytics read failed or exceeded its response limit."
+    );
+    assert_eq!(
+        read.answer(refused(
+            "hgs: Use a configured remote computer for speech recognition"
+        ))
+        .unwrap_err(),
+        "Analytics read failed or exceeded its response limit.",
+        "only a voice read means it"
+    );
     assert!(matches!(
         voice_read.answer(answer(0, &bytes(&voice()))),
         Ok(Reply::Speech(_))

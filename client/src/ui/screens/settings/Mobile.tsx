@@ -102,7 +102,11 @@ export function MobileSection() {
   const view = () => state().view;
   return (
     <>
-      <SectionHead title={trNoop("Workspace")} intro={tr("Connect your computers and phones to one workspace. Session content is encrypted between your devices; the relay keeps routing and delivery metadata.")} />
+      {/* Task 72 (F5): Qt's page heading is the section's name (SettingsPage makePage);
+          "Workspace" heads the workspace panel under it (WorkspaceSettings.h). */}
+      <SectionHead title={trNoop("Mobile connection")} />
+      <div class="set-group-head"><h3>{tr("Workspace")}</h3></div>
+      <p class="set-group-hint">{tr("Connect your computers and phones to one workspace. Session content is encrypted between your devices; the relay keeps routing and delivery metadata.")}</p>
       <Show when={state().error}>{(text) => <Status kind="error">{text()}</Status>}</Show>
       <WorkspacePanel view={view()} refresh={(afterAction) => page.refreshWorkspace(afterAction)} />
       <button class="btn ghost set-disclosure" disabled={!!view()?.workspace?.encrypted} aria-expanded={legacyOpen()&&!view()?.workspace?.encrypted} title={view()?.workspace?.encrypted?tr("Unavailable while this computer uses an encrypted workspace"):undefined} onClick={()=>setLegacyOpen(!legacyOpen())}><Icon name={legacyOpen()&&!view()?.workspace?.encrypted?"chevron-down":"chevron-right"} size={14}/>{tr("Advanced: legacy connector configuration")}</button>

@@ -132,7 +132,9 @@ fn computer(alias: &str) -> Result<ComputerId, String> {
 /// Follows the Teams views of one computer: the team list, Waiting and at
 /// most one team (its tab, plan and New team form). All false and no team
 /// stops reading that computer.
-#[tauri::command]
+/// Task 72 (F3): off the main thread, which a cold start keeps busy (the
+/// window, WebView2, the tray): the first Waiting read is asked at once.
+#[tauri::command(async)]
 pub fn teams_follow(
     state: State<'_, AppState>,
     teams: State<'_, Teams>,
@@ -240,6 +242,34 @@ pub async fn team_tests(computer: String, team: String, before: Option<f64>) -> 
         )
         .map_err(|error| error.to_string())?;
         Ok(tests_view(&team, &queue, &results))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Task 92: the profile's Time view of one scope (a phase, or the plan
+/// without one), read on request off the UI thread: the status, the scope's
+/// profile, its timelines in bounded pages and the window's test runs,
+/// projected by client/core (`teams::timeline`).
+#[tauri::command]
+pub async fn team_timeline(
+    teams: State<'_, Teams>,
+    computer: String,
+    team: String,
+    phase: Option<u64>,
+) -> Result<zerus_client_core::teams::timeline::TimelineView, String> {
+    if teams.replay {
+        return Err("Teams need hgs; a replay has none.".into());
+    }
+    if !valid_team(&team) {
+        return Err("Not a team id.".into());
+    }
+    let target = self::computer(&computer)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0.0, |elapsed| elapsed.as_secs_f64());
+        zerus_client_core::teams::timeline::read(&default_hgs(), &target, &team, phase, now)
     })
     .await
     .map_err(|error| error.to_string())?

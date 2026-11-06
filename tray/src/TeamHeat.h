@@ -21,13 +21,39 @@ struct HeatLoss {
     QJsonObject detail;
 };
 
+// Task 82 (owner, 2026-11-06: "heat is not telling"): a task's lateness
+// against the plan (`hgs team profile` tasks[].lateness, task 81). Own
+// lateness tints; lateness inherited from a predecessor running late is shown
+// muted, "from #N"; a task before its planned start, or waiting on
+// dependencies that run on schedule, is cold.
+struct HeatLateness {
+    bool known = false;          // the plan has every moment it needs
+    QString unknown;             // why not, when it does not
+    double plannedStart = -1, plannedEnd = -1, actualStart = -1, actualEnd = -1;   // seconds since the epoch; -1: none
+    qint64 startLate = 0, inherited = 0, own = 0, endLate = -1;
+    int from = 0;                // the predecessor the inherited part comes from
+};
+
+// Task 82: the task's own work against its estimate (tasks[].overrun), a
+// measure of its own beside the lateness: on time but slow, or late but fast.
+struct HeatOverrun {
+    bool started = false;        // an attempt exists
+    bool known = false;          // the task has an estimate
+    qint64 estimate = 0, work = 0, overrun = 0;
+    double ratio = 0;
+    bool running = false;
+};
+
 struct Heat {
     QString metric;                       // "time" or "tokens"
     QHash<int, QList<HeatLoss>> losses;   // by task, the largest first
-    bool complete = true;                 // every page was read
+    QHash<int, HeatLateness> lateness;    // task 82: by task; absent without a baseline
+    QHash<int, HeatOverrun> overrun;      // task 82: by task; absent before the profile names it
+    bool complete = true;                 // every loss page was read
+    bool tasksComplete = true;            // every task page was read
     bool tokensPartial = false;           // some spans' tokens are unknown
     int pages = 0;
-    // A task's loss by the metric: seconds or tokens; 0 without any.
+    // A task's heat by the metric: own lateness (time) or tokens lost; 0 without any.
     qint64 lost(int task) const;
     // The largest loss of any task (the tokens scale's end).
     qint64 most() const;
@@ -44,9 +70,19 @@ constexpr qint64 HeatTimeScale = 2 * 3600;
 // At most this many pages of 100 losses are read for one tint.
 constexpr int HeatPages = 5;
 
-// Adds one profile page to `heat`; the cursor of the next page, or null when
-// the list is complete.
-QJsonValue addHeatPage(Heat &heat, const QJsonObject &profile);
+// The cursors of the next pages: the losses' and the tasks' (null: complete).
+struct HeatCursors { QJsonValue losses, tasks; bool done() const { return (losses.isNull() || losses.isUndefined()) && (tasks.isNull() || tasks.isUndefined()); } };
+// Adds one profile page to `heat` (only the lists not yet complete).
+HeatCursors addHeatPage(Heat &heat, const QJsonObject &profile);
+// Task 82: the overrun badge's text: "+40m over 1h", "within 1h", "no
+// estimate"; `compact` (a graph node): "x1.7". Empty before the task started.
+QString overrunText(const HeatOverrun &overrun, bool compact);
+// Its own scale: the muted text at or under the estimate, warming to violet at twice it.
+QColor overrunColor(const Colors &c, const HeatOverrun &overrun);
+// The badge beside the lateness ("teamHeatOverrun"), nullptr when it shows none.
+QLabel *heatOverrunBadge(const Heat &heat, const Teams::Task &task, const Colors &c);
+// "HH:mm" today, "d MMM HH:mm" before.
+QString heatMoment(double at);
 
 // "12k", "1.2M": a token count in short.
 QString tokensText(qint64 tokens);

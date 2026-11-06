@@ -23,7 +23,8 @@ export async function contentSearchSmoke(allowed: boolean) {
     setPage("sessions"); setStateFilter("all"); setSearch("needle");
     await until(() => searchItems().filter((item) => item.found).length === 2 && !contentSearch.busy(), "live and archive contents did not arrive");
     require(new Set(searchItems().map((item) => item.session.key)).size === searchItems().length, "a session appeared more than once");
-    require(searchStatus().includes("Limited history searched") && searchStatus().includes(": contents unavailable"), "partial coverage was hidden");
+    // A partial host names its reason (task 77): no index, an index still building or unreadable sessions.
+    require(searchStatus().includes("Limited history searched") && /: (contents unavailable|content index|history unavailable in)/.test(searchStatus()), "partial coverage was hidden");
     await until(() => document.querySelectorAll(".content-search-row mark").length >= 2, "excerpts were not highlighted");
     const cardsAligned = () => {
       const cards = document.querySelectorAll<HTMLElement>(".content-search-row");

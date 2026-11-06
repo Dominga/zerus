@@ -367,10 +367,20 @@ impl Hub {
         rules::stop_control(&selected, &self.context())
     }
 
+    /// Task 77: a followed (or archived) session whose first inventory has
+    /// not come yet, with no failure to show instead.
+    fn waiting(&self) -> bool {
+        self.target().is_some()
+            && self.value.is_none()
+            && self.failed.is_none()
+            && (self.subscribed.is_some() || self.archive_read.is_some())
+    }
+
     /// `updateBusy` (178-182): the delay starts with the first request while
-    /// the tab shows and ends when none runs or the tab hides.
+    /// the tab shows and ends when none runs or the tab hides. The first
+    /// inventory counts as a request (task 77).
     fn update_busy(&mut self, now: u64) {
-        let running = self.output.reading.is_some() || self.stopping.is_some();
+        let running = self.output.reading.is_some() || self.stopping.is_some() || self.waiting();
         if running && self.shown {
             self.busy_since.get_or_insert(now);
         } else {
@@ -430,6 +440,8 @@ impl Hub {
         self.current = None;
         self.fresh = Some(self.views.get(&identity).cloned().unwrap_or_default());
         self.identity = identity;
+        // Another session's read never counts; its own wait starts anew (task 77).
+        self.busy_since = None;
         self.update_busy(now);
         self.changed = true;
     }
@@ -652,6 +664,7 @@ impl Hub {
         } = self;
         queue.settle(|id| index.get(id).map(|&at| records[at].clone()));
         self.changed = true;
+        self.update_busy(now);
         moved
     }
 
@@ -809,7 +822,11 @@ impl Hub {
         };
         ProcessesView {
             key: self.identity.clone(),
-            summary: rules::summary(&self.records, live),
+            summary: if self.waiting() {
+                rules::READING.into()
+            } else {
+                rules::summary(&self.records, live)
+            },
             summary_tooltip,
             notes,
             groups,
@@ -915,6 +932,7 @@ impl ProcessHub {
         let moved = hub.retarget(&self.0.deps, now);
         let read = hub.output_call(now, moved, self.0.hgs_allowed);
         let archive = hub.archive_call();
+        hub.update_busy(now);
         self.finish(hub, read, None);
         if let Some(call) = archive {
             self.run_archive(call);
@@ -934,6 +952,7 @@ impl ProcessHub {
         let moved = hub.retarget(&self.0.deps, now);
         let read = hub.output_call(now, moved, self.0.hgs_allowed);
         let archive = hub.archive_call();
+        hub.update_busy(now);
         self.finish(hub, read, None);
         if let Some(call) = archive {
             self.run_archive(call);
@@ -2217,6 +2236,79 @@ mod tests {
         );
     }
 
+    /// Task 77 (live pass F3): the topic answers a few seconds after the
+    /// follow. Until then the tab reads, it does not claim an empty history.
+    #[test]
+    fn a_followed_session_reads_its_first_inventory_before_it_says_none() {
+        let (hub, fake) = hub();
+        enabled(&hub);
+        hub.shown(true);
+        let view = snapshot(&hub);
+        assert_eq!(view.summary, rules::READING);
+        assert!(!view.busy, "the loading indicator keeps its delay");
+        fake.now.store(600, Ordering::SeqCst);
+        hub.tick();
+        assert!(snapshot(&hub).busy, "past the 0.5 s delay");
+        // Another session's inventory is not this one's.
+        hub.observe(&mut state_of(
+            "run:other",
+            vec![process("p9", "running", "hook")],
+        ));
+        assert_eq!(snapshot(&hub).summary, rules::READING);
+        // An empty inventory is now known to be empty.
+        hub.observe(&mut state(vec![]));
+        let view = snapshot(&hub);
+        assert_eq!(view.summary, "No shell commands recorded yet");
+        assert!(!view.busy);
+        hub.observe(&mut state(vec![process("p1", "running", "hook")]));
+        assert_eq!(
+            snapshot(&hub).summary,
+            "1 active    0 unconfirmed    1 recorded"
+        );
+        // An ended follow knows nothing more; it no longer reads.
+        let mut ended = state(vec![]);
+        ended.processes[0].kind = "ended".into();
+        hub.observe(&mut ended);
+        assert_eq!(snapshot(&hub).summary, "No shell commands recorded yet");
+    }
+
+    #[test]
+    fn a_refused_follow_shows_its_reason_instead_of_reading() {
+        let (hub, fake) = hub();
+        *lock(&fake.follow_error) = Some("Too many followed sessions".into());
+        enabled(&hub);
+        hub.shown(true);
+        fake.now.store(5000, Ordering::SeqCst);
+        hub.tick();
+        let view = snapshot(&hub);
+        assert_eq!(view.failed.as_deref(), Some("Too many followed sessions"));
+        assert_eq!(view.summary, "No shell commands recorded yet");
+        assert!(!view.busy);
+        // Processes off: nothing is followed and nothing reads.
+        hub.settings(Settings::default());
+        assert_ne!(snapshot(&hub).summary, rules::READING);
+    }
+
+    #[test]
+    fn an_archived_session_reads_its_inventory_once_before_it_says_none() {
+        let (hub, fake) = hub();
+        hub.settings(Settings {
+            enabled: true,
+            ..Settings::default()
+        });
+        hub.shown(true);
+        *lock(&fake.hold) = true;
+        hub.follow(Some(archived_target()));
+        assert_eq!(snapshot(&hub).summary, rules::READING);
+        fake.now.store(600, Ordering::SeqCst);
+        hub.tick();
+        assert!(snapshot(&hub).busy);
+        assert_eq!(run_held(&fake), 1);
+        let view = snapshot(&hub);
+        assert_eq!(view.summary, "No shell commands recorded yet");
+        assert!(!view.busy);
+    }
+
     #[test]
     fn busy_clears_on_a_new_identity() {
         let (hub, fake) = hub();
@@ -2232,6 +2324,8 @@ mod tests {
         other.run_id = "run-2".into();
         hub.follow(Some(other));
         assert!(!snapshot(&hub).busy);
+        // The new session's own first inventory (task 77) has come.
+        hub.observe(&mut state_of("run:run-2", vec![]));
         fake.now.store(5000, Ordering::SeqCst);
         hub.tick();
         assert!(!snapshot(&hub).busy, "the old read no longer counts");

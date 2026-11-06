@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { KIND_STYLES, contrast, distance, keyName, kindKey, labelOn, lossKey, swatchBackground } from "./profile-palette";
+import { CHROMA_CAP, KIND_STYLES, chroma, contrast, distance, keyName, kindKey, labelOn, lossKey, swatchBackground } from "./profile-palette";
 import { resolveSkins, type SkinFile } from "../../skin/skin";
 import zerusDark from "../../skin/skins/zerus-dark.json";
 import zerusLight from "../../skin/skins/zerus-light.json";
@@ -43,6 +43,21 @@ describe("the profile palette", () => {
         for (const b of colours.slice(i + 1)) expect(distance(a.hex, b.hex), `${lane.id}: ${a.key} and ${b.key}`).toBeGreaterThanOrEqual(20);
       }
     }
+  });
+
+  it("keeps every colour calm: no kind above the chroma cap in any skin (task 93)", () => {
+    expect(CHROMA_CAP).toEqual({ dark: 45, light: 55 });
+    // The palette is one table for every skin; each skin uses its theme's half.
+    for (const skin of skins) {
+      const dark = skin.appearance === "dark";
+      for (const style of KIND_STYLES) {
+        const hex = dark ? style.dark : style.light;
+        expect(chroma(hex), `${skin.id} ${style.key} ${hex}`).toBeLessThanOrEqual(dark ? CHROMA_CAP.dark : CHROMA_CAP.light);
+      }
+    }
+    // The old toxic green is gone; work is the skin's liked mint.
+    expect(KIND_STYLES.find((style) => style.key === "work")).toMatchObject({ dark: "#7dd3b0", light: "#3f9f7b" });
+    expect(chroma("#07ab2d")).toBeGreaterThan(CHROMA_CAP.dark);
   });
 
   it("tells every wait by its own pattern, not only by hue", () => {

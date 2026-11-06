@@ -1002,6 +1002,21 @@ export interface TeamProfileView {
   team: string; elapsed_s: number | null; worked_s: number | null; tasks: number; accepted: number;
   tokens: number | null; tokens_partial: boolean;
   losses: TeamProfileLoss[]; roles: TeamProfileRole[];
+  /** Task 82: each task's lateness against the plan and overrun against its estimate (the first page). */
+  task_rows: TeamProfileTask[]; task_rows_more: boolean;
+}
+
+export interface TeamProfileLateness {
+  known: boolean; unknown: string; planned_start: number | null; planned_end: number | null;
+  actual_start: number | null; actual_end: number | null; start_late_s: number; inherited_s: number; own_s: number; from: number | null;
+}
+
+export interface TeamProfileOverrun {
+  started: boolean; known: boolean; estimate_s: number; work_s: number; overrun_s: number; ratio: number; running: boolean;
+}
+
+export interface TeamProfileTask {
+  task: number; lateness: TeamProfileLateness | null; overrun: TeamProfileOverrun | null;
 }
 
 export interface TeamTestPending {
@@ -1013,6 +1028,27 @@ export interface TeamTestRun {
   id: string; suite: string; status: string; asked_by: string; task: number; at: number;
   duration_ms: number; recorded_ms: number; runner: string; excerpt: string;
   flags: string[]; reused_from: string; due: boolean; over_budget: boolean;
+}
+
+/** Task 92: one span of the Time view (core teams/timeline.rs `TimelineSpan`); a test run is kind `tests`, its suite in `member`, its status in `stage_kind`. */
+export interface TimelineSpan {
+  task: number; attempt: number; kind: string; stage_kind: string; member: string; record?: string;
+  from: number; to: number; running: boolean;
+}
+/** Task 92: a member's lane: its own spans (build and merge among them), the waits of its tasks and its idle time. */
+export interface TimelineLane {
+  member: string; role: string; model: string; utilization: number; busy_s: number; idle_s: number;
+  spans: TimelineSpan[]; waits: TimelineSpan[]; idle: [number, number][];
+}
+export interface TimelineEstimate { task: number; estimate_min: number | null; worked_s: number; running: boolean }
+/** Task 92: the profile's Time view of one scope (`team_timeline`). */
+export interface TeamTimelineView {
+  team: string; phase: number | null; from: number; to: number; elapsed_s: number | null; worked_s: number | null;
+  lanes: TimelineLane[]; real: TimelineSpan[]; planned: TimelineSpan[]; real_s: number; planned_s: number;
+  tests: TimelineSpan[]; tests_more: boolean; estimates: TimelineEstimate[];
+  /** Task id to title, for the tasks drawn (JSON object keys are strings). */
+  titles: Record<string, string>;
+  tasks: number; truncated: boolean;
 }
 
 export interface TeamTestsView {

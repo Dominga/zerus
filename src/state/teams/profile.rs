@@ -269,8 +269,8 @@ fn wait_for_member(task: &Task, timeline: &Value, busy: &BTreeMap<String, Vec<(f
 }
 
 /// The losses one task's timeline shows: rework, waits on the lead and on
-/// permissions, a blocked chain, a wait for a free member, long tests, merges
-/// and conflicts.
+/// permissions, waits for a person's answer (task 118), a blocked chain, a
+/// wait for a free member, long tests, merges and conflicts.
 fn task_losses(task: &Task, timeline: &Value, tokens: &TokenMap, busy: &BTreeMap<String, Vec<(f64, f64)>>, now: f64, out: &mut Vec<Loss>) {
     let id = task.id;
     let spans: Vec<&Value> = timeline["spans"].as_array().into_iter().flatten().filter(|span| !span["from"].is_null()).collect();
@@ -309,6 +309,17 @@ fn task_losses(task: &Task, timeline: &Value, tokens: &TokenMap, busy: &BTreeMap
     if permission > 0 {
         let by: BTreeSet<&str> = spans.iter().filter(|span| span["kind"] == "permission").filter_map(|span| span["by"].as_str()).collect();
         out.push(loss("permission_wait", &id.to_string(), permission, None, json!({"task":id,"answered_by":by})));
+    }
+    // Task 118: time that waited for a person's answer, its own cause apart
+    // from the lead's decisions and the permissions the lead answers, with the
+    // seconds of each reason (acceptance, permission, question, deferred, report).
+    let person = total(&["person"]);
+    if person > 0 {
+        let mut reasons: BTreeMap<&str, i64> = BTreeMap::new();
+        for span in spans.iter().filter(|span| span["kind"] == "person") {
+            *reasons.entry(span["reason"].as_str().unwrap_or("unknown")).or_default() += span["s"].as_i64().unwrap_or(0);
+        }
+        out.push(loss("person_wait", &id.to_string(), person, None, json!({"task":id,"reasons":reasons})));
     }
     // A folder another task's stage held. Task 81: waiting for dependencies is
     // no loss by itself - a task that by the plan starts after them is not

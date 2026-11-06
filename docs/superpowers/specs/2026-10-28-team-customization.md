@@ -420,14 +420,15 @@ canceled work stays, its time was spent.
 Spans: `work` and `rework` (a rejected or returned attempt), `deps`,
 `member`, `folder_held` (`held_by`), `hold` (`by`), `delivery`,
 `start_delay`, `lead`, `question` and `permission` (`by` is who answered),
-`stage_wait`, `stage` (`stage_kind`, `round`), `background`, `no_report`,
+`person` (task 118: waiting for a person's answer, `reason`: `acceptance`,
+`permission`, `question`, `deferred` or `report`), `stage_wait`, `stage` (`stage_kind`, `round`), `background`, `no_report`,
 `stop`, and `unknown` with null `from`/`to`/`s` where nothing was recorded
 (never guessed). Builds lie on top as `build` spans with `template` and
 `exit`. A past phase gets its spans from the timestamps its attempts kept.
 
 Losses: `rework` (cause rejected/returned, tokens, share of the task's
 tokens, `tokens_unknown`), `lead_wait` (`lead_s`, `question_s`),
-`permission_wait` (`answered_by`), `blocked_chain` (`deps_s`,
+`person_wait` (`reasons`), `permission_wait` (`answered_by`), `blocked_chain` (`deps_s`,
 `folder_held_s`, `on`, `held_by`), `member_wait`, `idle_member` (`open_s`,
 `from`, `to`; only after the member joined), `long_test` (a test stage or a
 test build of at least 300 s), `merge` and `conflict` (a `git-merge-lead` run

@@ -95,6 +95,7 @@ function lossLabel(kind: string): string {
   if (kind === "member") return tr("Waited for a member");
   if (kind === "deps") return tr("Waited for dependencies");
   if (kind === "lead") return tr("Waited for the lead");
+  if (kind === "person_wait") return tr("Waiting for a person's answer");
   return kind;
 }
 

@@ -2478,7 +2478,16 @@ apply, `member`, `attempt`, `stage`, `round`, `stage_kind`, `state`, `by`,
   started (A1); `lead`: waiting for the lead's decision; `hold`: a hold
   (`by`).
 - `question` and `permission`: blocked on a native question or permission
-  request (`by` is who answered).
+  request (`by` is who answered); what the lead answers.
+- `person` (task 118): waiting for a person's answer, with its `reason`:
+  `acceptance` (a phase before waiting for the owner's acceptance, with
+  `phase`), `permission` and `question` (a native request or a task question
+  the owner answered, or a request that went to the owner after the team's
+  `remind_owner_permission_minutes`, or only the Terminal takes), `deferred`
+  (a request the owner queue answered safely for the owner, task 97) and
+  `report` (the lead's decision on a report the owner decided, or that went
+  to the owner after `remind_owner_minutes`). It is a wait, not the member's
+  work; the lead's own waits stay `lead`, `question` and `permission`.
 - `stage_wait`: waiting for a stage member; `stage`: a U36 stage of a round
   (`stage_kind`, `round`).
 - `background`: Background work (U30); `no_report`: a task without a report;
@@ -2497,7 +2506,9 @@ The output is one JSON object:
   `s`, and `tokens`/`cost_usd` when its part's session is known. The kinds are
   `rework` (per rejected or returned attempt, with `cause`, `share` of the
   task's tokens and `tokens_unknown`), `lead_wait` (`lead_s`, `question_s`),
-  `permission_wait` (`answered_by`), `blocked_chain` (a folder another task's
+  `person_wait` (task 118: the seconds of the task's `person` spans, with
+  `reasons` per reason), `permission_wait` (`answered_by`),
+  `blocked_chain` (a folder another task's
   stage held: `folder_held_s`, `held_by`, with `deps_s` and `on` for context;
   waiting for dependencies is no loss by itself, see lateness below),
   `member_wait`, `idle_member` (`open_s`,

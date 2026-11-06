@@ -15,7 +15,7 @@ namespace TeamUi {
 
 // One ranked loss of a task, as `hgs team profile` gives it.
 struct HeatLoss {
-    QString kind;              // rework, lead_wait, permission_wait, blocked_chain, member_wait, long_test, merge, conflict
+    QString kind;              // rework, lead_wait, person_wait, permission_wait, blocked_chain, member_wait, long_test, merge, conflict
     qint64 seconds = 0;
     qint64 tokens = -1;        // -1: unknown or none
     QJsonObject detail;

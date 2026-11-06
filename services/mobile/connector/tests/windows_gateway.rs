@@ -18,6 +18,46 @@ impl Scratch {
         Self(path, owner)
     }
 }
+
+#[test]
+fn the_packaged_desktop_workspace_probe_reads_an_unconfigured_windows_profile() {
+    let scratch = Scratch::new();
+    for config in [
+        scratch.0.join("connector.json"),
+        scratch.0.join("absent/mobile/connector.json"),
+    ] {
+        let before: Vec<_> = std::fs::read_dir(&scratch.0)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        let result = std::process::Command::new(env!("CARGO_BIN_EXE_zerus-mobile-connector"))
+            .args(["--workspace", "status", "--config"])
+            .arg(&config)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "workspace status: {:?} {:?}",
+            result.status,
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(
+            value,
+            json!({"state":"unconfigured", "encrypted":false, "config_revision":""})
+        );
+        assert!(
+            !config.exists(),
+            "read-only status must not create a configuration"
+        );
+        let after: Vec<_> = std::fs::read_dir(&scratch.0)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(before, after);
+    }
+}
 #[test]
 fn equal_scratch_prefixes_keep_independent_owned_roots() {
     let first = Scratch::with_prefix("zerus-mobile-same-prefix-");

@@ -406,28 +406,86 @@ pub fn workspace(value: &Map<String, Value>) -> Workspace {
     }
 }
 
-/// The status reply, checked as Qt checks it; a failure is the connector's
-/// own short error, or Qt's.
-pub fn status(exit: Option<Exit>) -> Result<Workspace, String> {
-    let unconfirmed = "Workspace operation was not confirmed. Refresh status before continuing. Verify that the matching computer connector is installed.";
-    let (success, stdout) = match exit {
-        Some(Exit::Code { code, stdout, .. }) => (code == 0, stdout),
-        _ => return Err(unconfirmed.into()),
+fn workspace_failure(reason: &str) -> String {
+    format!("Workspace operation was not confirmed: {reason}. Refresh status before continuing.")
+}
+
+fn connector_available(connector: &Path) -> Result<(), String> {
+    // Bare names still use PATH. An absolute bundled selection can name a
+    // missing file; distinguish that from a loader failure without echoing paths.
+    if connector.is_absolute()
+        && matches!(std::fs::metadata(connector), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Err(workspace_failure(
+            "the computer connector is missing; reinstall the matching Zerus package",
+        ));
+    }
+    Ok(())
+}
+
+fn workspace_reply(exit: Option<Exit>, show_refusal: bool) -> Result<Map<String, Value>, String> {
+    let (code, stdout) = match exit {
+        Some(Exit::Code { code, stdout, .. }) => (code, stdout),
+        Some(Exit::StartFailed(_)) => return Err(workspace_failure(
+            "the computer connector could not start; verify its executable and runtime dependencies",
+        )),
+        Some(Exit::TimedOut) => return Err(workspace_failure("the computer connector timed out")),
+        Some(Exit::WriteFailed) => return Err(workspace_failure("the workspace request input could not be delivered")),
+        Some(Exit::Abnormal { .. }) => return Err(workspace_failure("the computer connector ended abnormally")),
+        None => return Err(workspace_failure("the computer connector reply exceeded its limit")),
     };
+    if stdout.len() > STATUS_BYTES {
+        return Err(workspace_failure(
+            "the computer connector reply exceeded its limit",
+        ));
+    }
     let reply = match serde_json::from_slice::<Value>(&stdout) {
-        Ok(Value::Object(reply)) if stdout.len() <= STATUS_BYTES => reply,
-        _ => return Err(unconfirmed.into()),
+        Ok(Value::Object(reply)) => reply,
+        _ => {
+            return Err(if show_refusal {
+                workspace_failure(&format!(
+                "the computer connector returned an invalid workspace reply (exit {code}, 0x{:08x}); verify the matching connector version",
+                code as u32,
+            ))
+            } else {
+                workspace_failure("the computer connector returned an invalid workspace reply; verify the matching connector version")
+            })
+        }
     };
     let ok = reply.get("ok").is_none_or(|ok| ok == &Value::Bool(true));
-    if success && ok && status_shape(&reply) {
-        return Ok(workspace(&reply));
+    if code == 0 && ok {
+        return Ok(reply);
     }
     let error = text(&reply, "error");
-    Err(if error.is_empty() || error.chars().count() > 1024 {
-        unconfirmed.into()
-    } else {
-        error.into()
-    })
+    Err(
+        if !show_refusal
+            || error.is_empty()
+            || error.chars().count() > 1024
+            || error.chars().any(char::is_control)
+        {
+            if show_refusal {
+                workspace_failure(&format!(
+                    "the computer connector refused the workspace request (exit {code})"
+                ))
+            } else {
+                workspace_failure("the computer connector refused the workspace request")
+            }
+        } else {
+            error.into()
+        },
+    )
+}
+
+/// Validate the workspace protocol separately from startup/exit and connector
+/// refusals. No child stderr or private input becomes a diagnostic.
+pub fn status(exit: Option<Exit>) -> Result<Workspace, String> {
+    let reply = workspace_reply(exit, true)?;
+    if !status_shape(&reply) {
+        return Err(workspace_failure(
+            "the computer connector workspace status is incompatible; update the matching Zerus package",
+        ));
+    }
+    Ok(workspace(&reply))
 }
 
 /// Reads the workspace's status. Blocks; never on the main thread.
@@ -443,6 +501,7 @@ pub fn read_status_in(
     config: &Path,
     parent_env: &[(&str, &str)],
 ) -> Result<Workspace, String> {
+    connector_available(connector)?;
     let mut workspace = status(
         crate::run::run_without(
             connector,
@@ -473,6 +532,7 @@ fn workspace_request(
     action: &str,
     payload: &Value,
 ) -> Result<Value, String> {
+    connector_available(connector)?;
     let call = Invocation {
         args: vec![
             "--workspace".into(),
@@ -484,19 +544,8 @@ fn workspace_request(
         timeout: Duration::from_secs(70),
         request_id: None,
     };
-    let exit = crate::run::run_without(connector, &call, &[], &CONNECTOR_UNSET, STATUS_BYTES)
-        .map_err(|_| WORKSPACE_UNCONFIRMED)?;
-    let Exit::Code {
-        code: 0, stdout, ..
-    } = exit
-    else {
-        return Err(WORKSPACE_UNCONFIRMED.into());
-    };
-    let value: Value = serde_json::from_slice(&stdout).map_err(|_| WORKSPACE_UNCONFIRMED)?;
-    if !value.is_object() || value.get("ok").is_some_and(|ok| ok != &Value::Bool(true)) {
-        return Err(WORKSPACE_UNCONFIRMED.into());
-    }
-    Ok(value)
+    let exit = crate::run::run_without(connector, &call, &[], &CONNECTOR_UNSET, STATUS_BYTES).ok();
+    workspace_reply(exit, false).map(Value::Object)
 }
 
 /// HgsClient's failureDetail for an `hgs` call that did not finish cleanly;

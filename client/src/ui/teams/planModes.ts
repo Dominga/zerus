@@ -19,6 +19,12 @@ const COLUMNS: { key: string; statuses: string[] }[] = [
   { key: "cancelled", statuses: ["cancelled", "rejected"] },
 ];
 
+/** Task #60: the task a follow-up was spawned from, from the graph or the task. */
+export function spawnedFrom(node: { origin?: number | null }, task?: { origin?: number | null }): number | undefined {
+  const origin = node.origin ?? task?.origin ?? 0;
+  return origin > 0 ? origin : undefined;
+}
+
 /** The tasks of every phase as one list, cancelled ones only when shown. */
 export function placedTasks(phases: { nodes: PlacedNode[] }[], includeCancelled: boolean): PlacedNode[] {
   return phases.flatMap((phase) => phase.nodes).filter((placed) => includeCancelled || placed.node.status !== "cancelled");

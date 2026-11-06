@@ -38,9 +38,12 @@ QMap<int, int> computeLayers(const Team &team)
         if (active.contains(id)) return -1;
         active.insert(id);
         int level = 0;
-        if (const auto *task = team.task(id))
+        if (const auto *task = team.task(id)) {
             for (const auto &dep : task->deps)
                 if (ids.contains(dep.task)) { const int d = visit(dep.task); if (d >= 0) level = qMax(level, d + 1); }
+            // Task #60: a follow-up sits at least in its origin's layer, as hgs places it.
+            if (task->origin > 0 && task->origin != id && ids.contains(task->origin)) { const int d = visit(task->origin); if (d >= 0) level = qMax(level, d); }
+        }
         active.remove(id);
         depth[id] = level;
         return level;
@@ -574,6 +577,7 @@ Team parse(const QJsonObject &v)
         for (const auto &c : t.value("criteria").toArray()) task.criteria.append(c.toString());
         for (const auto &d : t.value("deps").toArray()) task.deps.append({d.toObject().value("task").toInt(), str(d.toObject(), "kind") == "soft"});
         task.phaseBuild = t.value("phase_build").toBool();
+        task.origin = qMax(0, t.value("origin").toInt());
         if (t.value("hold").isObject()) {
             // A5: parked by the lead or by you until `release`.
             const auto h = t.value("hold").toObject();
@@ -851,6 +855,13 @@ Team parse(const QJsonObject &v)
         for (const auto &id : f.value("running").toArray()) free.running.append(id.toInt());
         free.accepted = f.value("accepted").toInt(); free.acceptedSince = f.value("accepted_since").toInt();
         free.lastBuildAt = f.value("last_build_at").toDouble(); free.closePending = f.value("close_pending").toInt();
+    }
+    // Task #58: the mode of every phase.
+    if (v.value("phase_modes").isObject()) {
+        team.phaseModesKnown = true;
+        const auto modes = v.value("phase_modes").toObject();
+        for (auto it = modes.begin(); it != modes.end(); ++it)
+            if (it.key().toInt() > 0 && it.value().isString()) team.phaseModes.insert(it.key().toInt(), it.value().toString());
     }
     // hgs derives both; a team file without them (an older hgs) gets the same
     // answer from the tasks and the phase records.
@@ -1379,7 +1390,12 @@ QString proposalText(const Team &team, const Team::Proposal &proposal)
         return how.isEmpty() ? tr("Swap %1 to a new session with the same settings").arg(role) : tr("Swap %1 to %2").arg(role, how.join(QStringLiteral(", ")));
     }
     if (proposal.kind == "next-goal") return tr("Next goal: %1").arg(proposal.goal.section('\n', 0, 0).left(120));
-    if (proposal.kind == "switch-plan-mode") return proposal.mode == "standard" ? tr("Switch to standard planning") : tr("Switch to free planning");
+    if (proposal.kind == "switch-plan-mode") {
+        // Task #58: a card that names a phase switches that phase only.
+        if (const int phase = change.value("phase").toInt(); phase > 0)
+            return proposal.mode == "standard" ? tr("Switch phase %1 to standard planning").arg(phase) : tr("Switch phase %1 to free planning").arg(phase);
+        return proposal.mode == "standard" ? tr("Switch to standard planning") : tr("Switch to free planning");
+    }
     // U57: tasks for a running phase, tasks to cancel, a phase to discard.
     if (proposal.kind == "add-to-phase") {
         const int count = int(change.value("tasks").toArray().size());

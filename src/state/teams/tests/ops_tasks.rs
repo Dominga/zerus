@@ -838,6 +838,8 @@ fn findings_are_filed_reopened_and_decided() {
     .unwrap();
     let phase = team.phases.last().unwrap();
     assert_eq!((phase.state, phase.urgent, phase.barrier), (PhaseState::Approved, true, false));
+    // Task #60: the fix is a follow-up of the task whose report filed the finding.
+    assert_eq!(team.task(3).unwrap().origin, Some(team.findings[1].task.unwrap_or(team.findings[1].from_task)));
     assert_eq!(plan::ready(&team)[0], 3);
     // Replan pauses the team with the owner's proposal.
     apply(&mut team, "finding", &json!({"finding":"f2","action":"replan","proposal":"Split the phase"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();

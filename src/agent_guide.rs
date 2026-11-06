@@ -174,6 +174,8 @@ mod tests {
     fn the_lead_protocol_says_every_task_gets_an_estimate() {
         let lead = TOPICS.iter().find(|(name, _)| *name == "team-lead").unwrap().1;
         assert!(lead.contains("Every task gets an estimate"), "{lead}");
+        // Task #60: follow-ups name their origin.
+        assert!(lead.contains("\"origin\":ID") && lead.contains("no dep"), "{lead}");
     }
 
     /// U63 (owner, 2026-10-31): the lead protocol says an accepted phase that

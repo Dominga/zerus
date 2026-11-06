@@ -131,6 +131,7 @@ private slots:
     void planModeIsChosenWhenThePlanIsApproved();
     void switchToFreeOpensOneDialogBoundToTheRequest();
     void freePhaseReadsIdleBuildsAndClosesOnConfirmation();
+    void ownerSwitchesOnePhaseThroughItsDialog();
     void planEditKeepsTheRoadmap();
     void planEditsWaitForTheFullPlan();
     void workAheadSwitchAndBadge();
@@ -1583,6 +1584,87 @@ void TestTeamsUiPlan::switchToFreeOpensOneDialogBoundToTheRequest()
     QCOMPARE(input["expected_hash"].toString(), second);
     QVERIFY(!input.contains("reason"));
     QTRY_VERIFY(!workspace.findChild<QDialog *>("teamSwitchModeDialog"));
+}
+
+// Task #58: the owner switches one phase between free and standard planning in
+// a confirmation dialog (Cancel focused, Cancel sends nothing), from the phase's
+// menu or, for the free phase, the header; the lead's card for one phase names
+// it and says what the lock keeps.
+void TestTeamsUiPlan::ownerSwitchesOnePhaseThroughItsDialog()
+{
+    auto running = phasedTeam();
+    running["plan_mode"] = "standard";
+    running["phase_modes"] = QJsonObject{{"1", "standard"}, {"2", "standard"}, {"3", "standard"}};
+    setTeam(running);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1400, 860); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QTRY_VERIFY(phaseScrollOf(&workspace, 2) && phaseScrollOf(&workspace, 2)->findChild<QToolButton *>("teamPhaseMore"));
+    QVERIFY(!workspace.findChild<QPushButton *>("teamWorkspaceLockPhase"));
+    const auto fromMenu = [&] {
+        chooseMenuAction("teamPhaseModeFree");
+        phaseScrollOf(&workspace, 2)->findChild<QToolButton *>("teamPhaseMore")->click();
+    };
+    fromMenu();
+    QTRY_VERIFY(workspace.findChild<QDialog *>("teamPhaseModeDialog"));
+    auto *dialog = workspace.findChild<QDialog *>("teamPhaseModeDialog");
+    QCOMPARE(dialog->property("phase").toInt(), 2);
+    QCOMPARE(dialog->property("mode").toString(), QStringLiteral("free"));
+    QCOMPARE(dialog->findChild<QLabel *>("teamPhaseModeTitle")->text(), QStringLiteral("Switch Phase 2: QA fixes to free planning?"));
+    QVERIFY(dialog->findChild<QPushButton *>("teamPhaseModeCancel")->isDefault());
+    QVERIFY(!dialog->findChild<QPushButton *>("teamPhaseModeConfirm")->isDefault());
+    QVERIFY2(!dialog->findChild<QLineEdit *>("teamPhaseModeWord"), "never a typed word");
+    for (auto *text : dialog->findChildren<QLabel *>()) QVERIFY2(!text->text().contains(QChar(0x00b7)), qPrintable(text->text()));
+    shot(dialog, "t58-phase-free-dark");
+    dialog->findChild<QPushButton *>("teamPhaseModeCancel")->click();
+    QTRY_VERIFY(!workspace.findChild<QDialog *>("teamPhaseModeDialog"));
+    QTest::qWait(80);
+    QCOMPARE(calls(script(), "phase-mode").size(), 0);
+    fromMenu();
+    QTRY_VERIFY(workspace.findChild<QDialog *>("teamPhaseModeDialog"));
+    workspace.findChild<QDialog *>("teamPhaseModeDialog")->findChild<QPushButton *>("teamPhaseModeConfirm")->click();
+    QTRY_COMPARE(calls(script(), "phase-mode").size(), 1);
+    auto input = calls(script(), "phase-mode").first();
+    QCOMPARE((QPair<int, QString>(input["phase"].toInt(), input["mode"].toString())), (QPair<int, QString>(2, "free")));
+    QCOMPARE(input["team"].toString(), QStringLiteral("team-1"));
+    QTRY_VERIFY(!workspace.findChild<QDialog *>("teamPhaseModeDialog"));
+    // The free phase locks back from the header; the dialog says what stays.
+    auto free = freeTeam();
+    free["phase_modes"] = QJsonObject{{"1", "standard"}, {"2", "free"}};
+    setTeam(free);
+    QTRY_VERIFY(([&] { controller.refresh(); return workspace.findChild<QPushButton *>("teamWorkspaceLockPhase") != nullptr; })());
+    workspace.findChild<QPushButton *>("teamWorkspaceLockPhase")->click();
+    QTRY_VERIFY(workspace.findChild<QDialog *>("teamPhaseModeDialog"));
+    dialog = workspace.findChild<QDialog *>("teamPhaseModeDialog");
+    QCOMPARE((QPair<int, QString>(dialog->property("phase").toInt(), dialog->property("mode").toString())), (QPair<int, QString>(2, "standard")));
+    QCOMPARE(dialog->findChild<QLabel *>("teamPhaseModeTitle")->text(), QStringLiteral("Switch Phase 2: Support stream to standard planning?"));
+    shot(dialog, "t58-phase-lock-dark");
+    dialog->findChild<QLineEdit *>("teamPhaseModeReason")->setText("Release 2.5");
+    dialog->findChild<QPushButton *>("teamPhaseModeConfirm")->click();
+    QTRY_COMPARE(calls(script(), "phase-mode").size(), 2);
+    input = calls(script(), "phase-mode").last();
+    QCOMPARE((QPair<int, QString>(input["phase"].toInt(), input["mode"].toString())), (QPair<int, QString>(2, "standard")));
+    QCOMPARE(input["reason"].toString(), QStringLiteral("Release 2.5"));
+    QTRY_VERIFY(!workspace.findChild<QDialog *>("teamPhaseModeDialog"));
+    // The lead's card for one phase names it, in the card and in its dialog.
+    free["proposals"] = QJsonArray{QJsonObject{{"id", "p7"}, {"kind", "switch-plan-mode"}, {"by", "Lead"}, {"state", "open"}, {"mode", "standard"},
+                                               {"hash", "aa11bb22cc33dd44"}, {"reason", "Ready for the release."}, {"change", QJsonObject{{"phase", 2}}}}};
+    setTeam(free);
+    QTRY_VERIFY(([&] { controller.refresh(); return workspace.findChild<QDialog *>("teamSwitchModeDialog") != nullptr; })());
+    dialog = workspace.findChild<QDialog *>("teamSwitchModeDialog");
+    QCOMPARE(dialog->property("phase").toInt(), 2);
+    bool locked = false;
+    for (auto *text : dialog->findChildren<QLabel *>()) locked = locked || text->text().contains("is locked: its tasks keep their state");
+    QVERIFY(locked);
+    QVERIFY(dialog->findChild<QLabel *>("teamSwitchModeUnchanged")->text().contains("the other phases and their modes"));
+    QCOMPARE(Teams::proposalText(*controller.team("team-1"), controller.team("team-1")->proposals.first()), QStringLiteral("Switch phase 2 to standard planning"));
+    dialog->reject();
 }
 
 // U59: the mode shows beside the phase in the header, Graph and Board. The

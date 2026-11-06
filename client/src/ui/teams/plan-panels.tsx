@@ -3,6 +3,8 @@ import type { JSX } from "solid-js";
 import { tr } from "../../i18n";
 import type { TeamProfileView, TeamTestsView } from "../../types";
 import type { PlacedNode } from "./plan";
+import { KIND_STYLES, keyName, lossKey, styleOf, swatchBackground } from "./profile-palette";
+import { skin } from "../../skin/runtime";
 import {
   boardColumns,
   formatSeconds,
@@ -218,6 +220,24 @@ export function LayersView(props: {
   );
 }
 
+/** Task #79: a kind's swatch from the shared profile palette (a wait shows its hatch). */
+function Swatch(props: { kind?: string; strip?: boolean }): JSX.Element {
+  const style = () => (props.kind ? styleOf(props.kind) : undefined);
+  const dark = () => skin().appearance === "dark";
+  return <span class="pm-swatch" classList={{ strip: props.kind === "build", none: !style() }}
+    style={style() ? { background: swatchBackground(style()!, dark()), "border-color": dark() ? style()!.dark : style()!.light } : undefined} aria-hidden="true" />;
+}
+
+/** Task #79: every span kind of the profile, its name in full; the items wrap. */
+export function ProfileLegend(): JSX.Element {
+  return (
+    <div class="pm-legend" aria-label={tr("Span kinds")}>
+      <span class="pm-legend-title">{tr("SPANS")}</span>
+      <For each={KIND_STYLES}>{(style) => <span class="pm-legend-item" data-kind={style.key}><Swatch kind={style.key} /><span>{keyName(style.key)}</span></span>}</For>
+    </div>
+  );
+}
+
 export function ProfilePanel(props: { profile?: TeamProfileView | null }): JSX.Element {
   return (
     <div class="pm-profile">
@@ -234,7 +254,8 @@ export function ProfilePanel(props: { profile?: TeamProfileView | null }): JSX.E
             <Show when={profile().losses.length > 0} fallback={<p class="pm-empty">{tr("No losses recorded")}</p>}>
               <For each={profile().losses.slice(0, 20)}>
                 {(loss) => (
-                  <div class="pm-loss-row">
+                  <div class="pm-loss-row" data-kind={lossKey(loss.kind) ?? ""}>
+                    <Swatch kind={lossKey(loss.kind)} />
                     <span class="pm-loss-kind">{lossLabel(loss.kind)}</span>
                     <Show when={loss.task > 0}><span class="pm-id">#{loss.task}</span></Show>
                     <span class="grow" />
@@ -244,6 +265,7 @@ export function ProfilePanel(props: { profile?: TeamProfileView | null }): JSX.E
                 )}
               </For>
             </Show>
+            <ProfileLegend />
             <h3>{tr("Roles")}</h3>
             <For each={profile().roles.slice(0, 50)}>
               {(role) => (

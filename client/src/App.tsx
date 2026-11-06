@@ -36,6 +36,7 @@ import { WaitingPage } from "./ui/teams/Waiting";
 import { NewTeamPage } from "./ui/teams/NewTeamPage";
 import { CatalogPage } from "./ui/teams/CatalogPage";
 import { TeamDesigner } from "./ui/teams/TeamDesigner";
+import { ModelServersScreen } from "./ui/screens/ModelServers";
 import { TeamConfirmDialog } from "./ui/teams/TeamConfirmDialog";
 
 // The client shell: the rail, the pages and the status bar.
@@ -178,6 +179,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
           <Match when={page() === "newteam"}><NewTeamPage /></Match>
           <Match when={page() === "catalog"}><CatalogPage /></Match>
           <Match when={page() === "designer"}><TeamDesigner onClose={() => setPage("sessions")} /></Match>
+          <Match when={page() === "modelservers"}><ModelServersScreen /></Match>
         </Switch>
       </main>
       <StatusBar mode={props.mode} />

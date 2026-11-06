@@ -254,10 +254,30 @@ pub fn build_info_for(facts: &BuildFacts, identifier: &str) -> Value {
     let mut info = build_info(facts);
     info["CFBundleIdentifier"] = Value::from(identifier);
     info["ZerusGUI"] = Value::from("tauri");
+    // WhiteWh fork, task #65: the fork build and feed this build embeds (the
+    // ones crate::fork_updates reads), so the packaged zip can be checked
+    // against its build-info.json.
+    for (key, value) in fork_identity(option_env!("ZERUS_FORK_BUILD"), option_env!("ZERUS_FORK_FEED_URL")) {
+        info[key] = value;
+    }
     // Older Tauri rollback builds must use stock libraries: they cannot restore
     // the launcher's environment before starting agents or external programs.
     info["localWebKitChildEnvironment"] = Value::from(1);
     info
+}
+
+/// WhiteWh fork, task #65: `forkBuild` and `forkFeed` of a fork build; a
+/// feed outside the fork's releases is no feed, as the updater reads it.
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
+fn fork_identity(build: Option<&str>, feed: Option<&str>) -> Vec<(&'static str, Value)> {
+    let mut out = Vec::new();
+    if let Some(build) = build.and_then(|build| build.trim().parse::<u64>().ok()).filter(|build| *build > 0) {
+        out.push(("forkBuild", Value::from(build)));
+    }
+    if let Some(feed) = feed.map(str::trim).filter(|feed| feed.starts_with("https://github.com/WhiteWh/zerus/releases/")) {
+        out.push(("forkFeed", Value::from(feed)));
+    }
+    out
 }
 
 /// `hgs-tray --version` (`main.cpp:196-200`).
@@ -614,6 +634,17 @@ mod tests {
             assert_eq!(identified["ZerusGUI"], "tauri");
             assert_eq!(identified["localWebKitChildEnvironment"], 1);
         }
+    }
+
+    #[test]
+    fn a_fork_build_names_its_build_and_feed() {
+        let feed = "https://github.com/WhiteWh/zerus/releases/latest/download/zerus-fork-feed.json";
+        assert_eq!(
+            fork_identity(Some("41"), Some(feed)),
+            vec![("forkBuild", Value::from(41u64)), ("forkFeed", Value::from(feed))]
+        );
+        assert!(fork_identity(Some(""), Some("")).is_empty(), "an experimental build has neither");
+        assert!(fork_identity(None, Some("https://example.com/feed.json")).is_empty());
     }
 
     #[test]

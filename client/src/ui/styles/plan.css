@@ -206,6 +206,17 @@
 .pt-stage-returned, .pt-stage-failed { color: var(--z-color-danger); }
 .pt-stage-waiting, .pt-stage-delivered { color: var(--z-color-accent); }
 .pt-card { background: color-mix(in srgb, var(--pt-tone) calc(var(--heat, 0) * 18%), var(--z-color-surface)); }
+/* Task #59: a phase's and the team's planning mode (Qt's Free and Standard badges). */
+.pt-chip-free { color: var(--z-color-violet); border-color: color-mix(in srgb, var(--z-color-violet) 45%, transparent); }
+.pt-chip-standard { color: var(--z-color-text-3); }
+.team-phase-mode, .team-mode { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+/* Task #79: the profile's span swatches and their legend, which wraps. */
+.pm-swatch { flex: none; width: 16px; height: 10px; border-radius: 2px; border: 1px solid transparent; }
+.pm-swatch.strip { height: 4px; align-self: center; }
+.pm-swatch.none { visibility: hidden; }
+.pm-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin: 10px 0; font-size: var(--fs-xs); color: var(--z-color-text-2); }
+.pm-legend-title { color: var(--z-color-muted); font-weight: 600; }
+.pm-legend-item { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
 .pt-origin-edge { fill: none; stroke: var(--z-color-violet); stroke-width: 1.6; stroke-dasharray: 5 4; opacity: .9; }
 .pt-origin-head { fill: none; stroke: var(--z-color-violet); stroke-width: 1.4; }
 .pt-legend { display: inline-flex; gap: 10px; align-items: center; color: var(--z-color-muted); font-size: var(--fs-2xs); }

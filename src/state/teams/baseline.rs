@@ -71,7 +71,7 @@ fn stamp_with(team: &mut Team, now: f64, historical: bool) {
 /// The tasks `task` is planned to follow and are still ahead: its hard
 /// dependencies, its member's previous task, and (in a barrier phase) every
 /// task of the lower phases. A finished one is no longer ahead.
-fn ahead(team: &Team, task: &Task) -> Vec<u32> {
+fn ahead(team: &Team, task: &Task, historical: bool) -> Vec<u32> {
     let mut out: BTreeSet<u32> = BTreeSet::new();
     for dep in task.deps.iter().filter(|dep| dep.kind == DependencyKind::Hard) {
         out.insert(dep.task);
@@ -90,7 +90,7 @@ fn ahead(team: &Team, task: &Task) -> Vec<u32> {
     if team.phases.iter().any(|phase| phase.n == task.phase && phase.barrier) {
         out.extend(team.tasks.iter().filter(|other| other.phase < task.phase && other.status != TaskStatus::Draft).map(|other| other.id));
     }
-    out.retain(|id| *id != task.id && team.task(*id).is_some_and(|other| !other.status.finished()));
+    out.retain(|id| *id != task.id && team.task(*id).is_some_and(|other| historical || !other.status.finished()));
     out.into_iter().collect()
 }
 
@@ -112,7 +112,7 @@ fn plan_of(
     if !wanted.contains(&id) {
         return task.baseline.clone();
     }
-    let after = ahead(team, task);
+    let after = ahead(team, task, historical);
     let estimate_s = estimates::estimate_from(history, team, task).minutes.map(|minutes| minutes * 60.0);
     // A cycle in the dependencies has no schedule: its tasks start unknown.
     let at = if historical { moment(team, task) } else { now };
@@ -224,6 +224,7 @@ pub(crate) fn overrun(team: &Team, task: &Task, work_s: i64, history: &mut Optio
 #[cfg(test)]
 #[path = "baseline_tests.rs"]
 mod tests;
+
 
 
 

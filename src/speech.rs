@@ -109,7 +109,7 @@ pub(crate) fn capture(
     timeout: Duration,
 ) -> std::result::Result<Value, String> {
     let mut command =
-        std::process::Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
+        std::process::Command::new(crate::self_exec::current().map_err(|e| e.to_string())?);
     command.args(args);
     capture_command(command, input, timeout)
 }

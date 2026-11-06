@@ -7,7 +7,7 @@ Own session/project; PROJECT/T-xxxxxx selects another. Text: stdin; --json: task
   hgs task add [--backlog] [--position N] [--title TEXT] [--request-id UUID]
   hgs task add --start
   hgs task start REF
-  hgs task report|comment REF
+  hgs task report [--progress]|comment REF
   hgs task rename|edit REF
   hgs task move REF --position N
   hgs task stage REF todo|backlog|done

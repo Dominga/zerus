@@ -1,5 +1,6 @@
 //! Explicit Worktrees review. The existing core/CLI checks own removal;
 //! this bounded dialog retains immutable review rows and one-use confirmations.
+pub mod leftover;
 pub mod manual;
 pub mod reminder;
 
@@ -880,6 +881,24 @@ mod tests {
             d.take_plan(&c.id, true, LIMIT).is_err(),
             "unknown outcome bounds never evict history to admit writes"
         );
+    }
+    /// zerus-k2ga: this dialog has no discard consent, so a dirty checkout
+    /// beside hidden programs (which needs the discard and the process
+    /// consent together) is neither selectable nor preparable here.
+    #[test]
+    fn a_dirty_checkout_beside_hidden_programs_is_not_offered_without_a_discard_consent() {
+        let mut combined = ready("/srv/example/dirty");
+        combined["verdict"] = json!("blocked");
+        combined["reasons"] = json!([{"code":"changes"},{"code":"processes_unavailable"}]);
+        combined["discardable"] = json!(false);
+        combined["discardable_with_process_consent"] = json!(true);
+        combined["discard_fingerprint"] = json!("discard-proof");
+        combined["process_fingerprint"] = json!("five-minute-proof");
+        let mut d = dialog(json!({"worktrees":[combined]}));
+        let row = &d.view().rows[0];
+        assert!(!row.selectable && !row.checked);
+        assert_eq!(row.state, "Blocked", "never Check running programs");
+        assert!(d.prepare(7, &[0], false).is_err());
     }
     #[test]
     fn only_exact_reviewed_merged_branches_and_narrow_process_acceptance_are_offered() {

@@ -560,6 +560,127 @@ for kind in ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'S
                 self.assertTrue(any(e.get('detail') == 'Child review result' for e in view['events']))
                 self.assertEqual(self.received(), b'')
 
+    def test_killed_external_child_without_stop_is_not_working_and_can_be_retired(self):
+        import signal
+        self.script('codex', '''#!/usr/bin/env python3
+import json, os, pathlib, signal, subprocess
+root = pathlib.Path(os.environ['INPUT_FIXTURE'])
+for kind in ['SessionStart', 'UserPromptSubmit']:
+    event = dict(hook_event_name=kind, session_id=os.environ['CHILD_CONVERSATION'], cwd=str(root))
+    subprocess.run(['hgs', '__state', 'hook'], input=json.dumps(event), text=True, check=True)
+def pending(*args):
+    event = dict(hook_event_name='PermissionRequest', session_id=os.environ['CHILD_CONVERSATION'], tool_name='Bash', tool_use_id='pending', tool_input=dict(command='fixture'))
+    subprocess.run(['hgs', '__state', 'hook'], input=json.dumps(event), text=True, check=True)
+    (root / 'child-hook-finished').write_text('finished')
+signal.signal(signal.SIGUSR1, pending)
+def progressed(*args):
+    event = dict(hook_event_name='PostToolUse', session_id=os.environ['CHILD_CONVERSATION'], tool_name='Bash', tool_use_id='pending')
+    subprocess.run(['hgs', '__state', 'hook'], input=json.dumps(event), text=True, check=True)
+    (root / 'child-hook-progressed').write_text('finished')
+signal.signal(signal.SIGUSR2, progressed)
+(root / 'child-pid').write_text(str(os.getpid()))
+while True: signal.pause()
+''')
+        sid = str(uuid.uuid4())
+        self.record.update(agent='claude', main_done=True, activity='idle', phase='idle', active_tools={})
+        self.write_record()
+        env = dict(self.env, HGS_SESSION=self.name, HGS_RUN_ID=self.run_id,
+                   CHILD_CONVERSATION=sid, CODEX_HOME=str(self.root / '.codex'))
+        launch = dict(argv=[str(self.bin / 'codex'), 'exec', '--ephemeral'], env=env)
+        (self.root / 'nested-launch.json').write_text(json.dumps(launch))
+        os.kill(self.record['pid'], signal.SIGUSR2)
+        self.wait_for(lambda: (self.root / 'child-pid').exists() and (self.root / 'child-pid').read_text().strip())
+        pid = int((self.root / 'child-pid').read_text())
+        before = self.inspect()
+        self.assertEqual(before['subagent_active_count'], 1)
+        child_id, child = next(iter(before['subagents'].items()))
+        raw = json.loads(self.record_path.read_text())
+        self.assertEqual(raw['subagents'][child_id]['original_process']['pid'], pid)
+        self.assertTrue(raw['subagents'][child_id]['original_process']['birth'])
+        request = dict(request_id=str(uuid.uuid4()), expected_run_id=self.run_id,
+                       expected_conversation_id=self.conversation_id, agent_id=child_id,
+                       expected_updated=child['updated'])
+        def retire(payload):
+            return subprocess.run([str(HGS), 'subagent', 'retire', self.name, '--json'],
+                                  input=json.dumps(payload), env=self.env, text=True,
+                                  capture_output=True, timeout=5)
+        preserved = self.record_path.read_bytes()
+        refused = retire(request)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn('still live', refused.stderr)
+        self.assertEqual(self.record_path.read_bytes(), preserved)
+        # Model a legacy/unbound record: explicit retirement can mark it Ended,
+        # but a genuine hook with fresh process evidence must recover it without
+        # SessionStart. A different recorded birth must not be adopted that way.
+        raw['subagents'][child_id].pop('original_process')
+        self.record_path.write_text(json.dumps(raw))
+        self.assertEqual(retire(request).returncode, 0)
+        retired = json.loads(self.record_path.read_text())
+        retired['subagents'][child_id]['original_process'] = dict(
+            json.loads(preserved)['subagents'][child_id]['original_process'], birth='different original birth')
+        self.record_path.write_text(json.dumps(retired))
+        wrong_birth = self.record_path.read_bytes()
+        os.kill(pid, signal.SIGUSR1)
+        self.wait_for(lambda: (self.root / 'child-hook-finished').exists())
+        self.assertEqual(self.record_path.read_bytes(), wrong_birth)
+        (self.root / 'child-hook-finished').unlink()
+        retired['subagents'][child_id].pop('original_process')
+        self.record_path.write_text(json.dumps(retired))
+        os.kill(pid, signal.SIGUSR1)
+        self.wait_for(lambda: (self.root / 'child-hook-finished').exists())
+        resumed = self.inspect()['subagents'][child_id]
+        self.assertEqual(resumed['display_state'], 'approval')
+        self.assertEqual(resumed['attention_id'], 'pending')
+        self.assertEqual(json.loads(self.record_path.read_text())['subagents'][child_id]['original_process']['pid'], pid)
+        self.assertEqual(retire(request).returncode, 0, 'original receipt must not retire the recovered child')
+        request = dict(request, request_id=str(uuid.uuid4()), expected_updated=resumed['updated'])
+        # Finish the explicit attention before testing loss of Working. Unknown
+        # process evidence must not hide an outstanding approval or input.
+        os.kill(pid, signal.SIGUSR2)
+        self.wait_for(lambda: (self.root / 'child-hook-progressed').exists())
+        self.assertIsNone(self.inspect()['subagents'][child_id].get('display_state'))
+        from test_watch import Stream
+        stream = Stream(self)
+        snapshot = stream.next(lambda frame: frame['t'] == 'snapshot' and frame['topic'] == 'catalog' and frame['last'])
+        listed = next(item['row'] for item in snapshot['items'] if item['row'].get('name') == self.name)
+        self.assertEqual(listed['subagent_active_count'], 1)
+        unchanged = self.record_path.read_bytes()
+        # Kill ONLY the private fake child, with no Stop/SessionEnd hook.
+        os.kill(pid, signal.SIGKILL)
+        delta = stream.next(lambda frame: frame['t'] == 'delta' and frame['topic'] == 'catalog' and any(
+            item['row'].get('name') == self.name and item['row'].get('subagent_active_count') == 0
+            for item in frame['upsert']))
+        self.assertTrue(delta['upsert'])
+        self.assertEqual(self.record_path.read_bytes(), unchanged, 'watch must observe exit without a new hook or write')
+        self.assertEqual(stream.close(), 0)
+        self.wait_for(lambda: self.inspect()['subagent_active_count'] == 0)
+        ended = self.inspect()
+        self.assertEqual(ended['activity'], 'idle')
+        self.assertIn(ended['subagents'][child_id].get('display_state'), ('ended', 'unknown'))
+        request['expected_updated'] = ended['subagents'][child_id]['updated']
+        result = retire(request)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = json.loads(result.stdout)
+        self.assertEqual(receipt['state'], 'ended')
+        self.assertIs(receipt['native_completion'], False)
+        preserved = self.record_path.read_bytes()
+        again = retire(request)
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(json.loads(again.stdout), receipt)
+        self.assertEqual(self.record_path.read_bytes(), preserved)
+        # A fresh, genuinely observed SessionStart can resume this conversation;
+        # replaying the old retirement only reads its receipt, never re-retires it.
+        (self.root / 'child-pid').unlink()
+        os.kill(self.record['pid'], signal.SIGUSR2)
+        self.wait_for(lambda: (self.root / 'child-pid').exists() and (self.root / 'child-pid').read_text().strip())
+        self.assertEqual(self.inspect()['subagent_active_count'], 1)
+        self.assertEqual(retire(request).returncode, 0)
+        self.assertEqual(self.inspect()['subagent_active_count'], 1)
+        view = subprocess.run([str(HGS), 'inspect', self.name, '--agent', child_id],
+                              env=self.env, capture_output=True, text=True, timeout=5)
+        self.assertEqual(view.returncode, 0, view.stderr)
+        self.assertFalse(any(event.get('type') in ('Stop', 'SubagentStop') for event in json.loads(view.stdout)['events']))
+
     def test_unknown_foreign_session_start_cannot_rebind_parent(self):
         env = dict(self.env, HGS_SESSION=self.name, HGS_RUN_ID=self.run_id)
         event = dict(hook_event_name='SessionStart', session_id=str(uuid.uuid4()), model='foreign-model')
@@ -567,6 +688,33 @@ for kind in ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'S
             input=json.dumps(event), capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(self.record_path.read_text()), self.record)
+
+    def test_subagent_retirement_checks_exact_guards_and_finite_input_and_record(self):
+        self.record.update(agent='claude', main_done=True, activity='idle', phase='idle', active_tools={},
+                           subagents={'stale': dict(external=True, state='working', updated=2.0)})
+        self.write_record()
+        request = dict(request_id=str(uuid.uuid4()), expected_run_id=self.run_id,
+                       expected_conversation_id=self.conversation_id, agent_id='stale', expected_updated=2.0)
+        def refused(payload, reason):
+            before = self.record_path.read_bytes()
+            result = subprocess.run([str(HGS), 'subagent', 'retire', self.name, '--json'],
+                                    input=json.dumps(payload), env=self.env, text=True,
+                                    capture_output=True, timeout=5)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(reason, result.stderr)
+            self.assertEqual(self.record_path.read_bytes(), before)
+        refused(dict(request, expected_run_id='changed'), 'generation changed')
+        refused(dict(request, expected_conversation_id='changed'), 'generation changed')
+        refused(dict(request, agent_id='missing'), 'not in the selected conversation')
+        refused(dict(request, expected_updated=3.0), 'changed; inspect it again')
+        refused(dict(request, extra=True), 'Invalid subagent retirement request')
+        refused(dict(request, extra='x' * 8192), 'exceeds 8 KiB')
+        self.record['subagents']['stale']['group'] = True
+        self.write_record()
+        refused(request, 'profile group')
+        self.record['retirement_padding'] = 'x' * (16 * 1024 * 1024)
+        self.write_record()
+        refused(request, 'exceeds retirement bound')
 
     def test_login_delay_cannot_receive_first_prompt_until_native_composer(self):
         self.fresh_unconfirmed()
@@ -613,6 +761,18 @@ for kind in ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'S
         self.screen("\x1b[2J\x1b[H› \x1b[?2004l", "2:0")
         self.assertIn("input mode", self.send(success=False))
         self.assertEqual(self.received(), b"")
+
+    # zerus-ucck P3b: input goes to the session's own terminal, named apart
+    # from its label as a resume beside an untracked terminal names it; the
+    # input claim checks that terminal's name, never the label's.
+    def test_send_reaches_a_terminal_named_apart_from_its_label(self):
+        own = self.name + "~3f2a9c1d"
+        self.tmux("rename-session", "-t", "=" + self.name, own)
+        self.record["terminal_name"] = own
+        self.write_record()
+        self.screen("\x1b[2J\x1b[H› \x1b[?2004h", "2:0")
+        self.send()
+        self.wait_for(lambda: self.received().endswith(b"\r"))
 
     def test_empty_claude_prompt_is_supported(self):
         self.record["agent"] = "claude"

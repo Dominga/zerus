@@ -61,7 +61,7 @@ const KEYBOARD = [
   "Press the new shortcut for %1.", "Already used by %1. Reassign?",
 ];
 const ABOUT_FILLED: [string, string][] = [
-  ["Zerus %1", "`Zerus ${__APP_VERSION__}`"],
+  ["Zerus %1", "`Zerus ${version}`"],
   ["hgs CLI %1", "`hgs CLI ${version}`"],
 ];
 const ABOUT = ["About", "hgs CLI version unavailable", "hgs CLI: checking…", "Open Zerus repository on GitHub"];
@@ -408,7 +408,8 @@ describe("Settings texts", () => {
   });
   it.each(ABOUT_FILLED)("About fills in Qt's %s", (template, shown) => {
     expect(qt).toContain(`"${template}"`);
-    expect(source("About.tsx")).toContain(shown);
+    // The name is built in about-version.ts since upstream's About rewrite.
+    expect(source("About.tsx") + source("about-version.ts")).toContain(shown);
   });
   it("About names the build as UpdateController::installedVersion does", () => {
     const updates = fs.readFileSync(new URL("tray/src/UpdateController.cpp", repo), "utf8");

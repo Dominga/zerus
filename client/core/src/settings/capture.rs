@@ -100,9 +100,11 @@ impl QtStore {
             ) {
                 None
             } else {
-                let Some(disk) =
-                    crate::fsx::checkpoint::current(self.path(), super::MAX_QT_STORE as usize)
-                        .map_err(|_| SourceError::SourceUnreadable)?
+                let Some(disk) = crate::fsx::checkpoint::read_only_source(
+                    self.path(),
+                    super::MAX_QT_STORE as usize,
+                )
+                .map_err(|_| SourceError::SourceUnreadable)?
                 else {
                     return Ok(None);
                 };
@@ -170,7 +172,7 @@ impl CapturedQt {
                 let meta = original
                     .metadata()
                     .map_err(|_| SourceError::SourceUnreadable)?;
-                let current = crate::fsx::checkpoint::current(
+                let current = crate::fsx::checkpoint::read_only_source(
                     self.store.path(),
                     super::MAX_QT_STORE as usize,
                 )
@@ -467,7 +469,71 @@ mod tests {
         );
     }
     #[test]
-    fn absent_qt_has_no_fabricated_snapshot_and_shared_or_linked_qt_is_refused() {
+    fn owned_readable_qt_import_is_unchanged_and_rechecks_write_permissions() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let scratch = Scratch::new();
+        let path = scratch.0.join("qt.ini");
+        let bytes = b"[workspace]\nlanguage=en\n";
+        crate::fsx::write_private_durable(&path, bytes).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let before = fs::metadata(&path).unwrap();
+        let store = QtStore::Ini(path.clone());
+        let cancel = AtomicBool::new(false);
+        let captured = store
+            .capture_for_migration(Arc::new(()), &cancel)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            captured.recheck(Arc::new(()), &cancel).unwrap(),
+            sha256(bytes)
+        );
+        let after = fs::metadata(&path).unwrap();
+        assert_eq!(
+            (
+                before.dev(),
+                before.ino(),
+                before.mode(),
+                before.uid(),
+                before.nlink()
+            ),
+            (
+                after.dev(),
+                after.ino(),
+                after.mode(),
+                after.uid(),
+                after.nlink()
+            )
+        );
+        assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        for mode in [0o664, 0o666] {
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            assert!(captured.recheck(Arc::new(()), &cancel).is_err());
+        }
+    }
+
+    #[test]
+    fn next_settings_capture_still_requires_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = Scratch::new();
+        let settings = scratch.settings(ORIGINAL);
+        for mode in [0o644, 0o664, 0o666] {
+            fs::set_permissions(&settings.shared.path, fs::Permissions::from_mode(mode)).unwrap();
+            assert!(settings.capture_for_migration(deadline()).is_err());
+            assert_eq!(fs::read(&settings.shared.path).unwrap(), ORIGINAL);
+            assert_eq!(
+                fs::metadata(&settings.shared.path)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                mode
+            );
+        }
+    }
+
+    #[test]
+    fn absent_qt_has_no_fabricated_snapshot_and_writable_or_linked_qt_is_refused() {
         use std::os::unix::fs::{symlink, PermissionsExt};
         let scratch = Scratch::new();
         let path = scratch.0.join("qt.ini");
@@ -477,6 +543,9 @@ mod tests {
             .capture_for_migration(Arc::new(()), &cancel)
             .unwrap()
             .is_none());
+        fs::create_dir(&path).unwrap();
+        assert!(store.capture_for_migration(Arc::new(()), &cancel).is_err());
+        fs::remove_dir(&path).unwrap();
         let source = scratch.0.join("original.ini");
         crate::fsx::write_private_durable(&source, b"[workspace]\n").unwrap();
         symlink(&source, &path).unwrap();
@@ -486,8 +555,10 @@ mod tests {
         assert!(store.capture_for_migration(Arc::new(()), &cancel).is_err());
         fs::remove_file(&path).unwrap();
         fs::rename(source, &path).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(store.capture_for_migration(Arc::new(()), &cancel).is_err());
+        for mode in [0o664, 0o666] {
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            assert!(store.capture_for_migration(Arc::new(()), &cancel).is_err());
+        }
     }
 }
 impl CapturedSettings {

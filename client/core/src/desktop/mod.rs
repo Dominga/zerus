@@ -15,7 +15,14 @@ use zerus_desktop_migration::canonical_uuid;
 pub mod activation;
 pub mod approval_audit;
 pub mod cache_maintenance;
+/// The compact-to-send leaf's closed wire (zerus-5wmh.66.4.8, slice 3).
+pub mod compact_to_send;
 pub mod creation_clone;
+pub mod creation_launch;
+pub mod creation_worktree;
+/// The deferred send leaf's closed wire (zerus-5wmh.66.4.4, slice 3).
+pub mod deferred_answer;
+pub mod deferred_send;
 pub mod drain;
 pub mod notification_control;
 pub mod notifications;
@@ -24,8 +31,12 @@ pub mod pending_reads;
 pub mod producer;
 pub mod profile;
 pub mod relay;
+pub mod server_trust;
 pub mod service;
 pub mod startup;
+pub mod task_message;
+pub mod task_start_reconcile;
+pub mod termination_outcome;
 pub mod ui_requests;
 
 #[cfg(unix)]

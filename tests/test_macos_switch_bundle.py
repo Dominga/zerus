@@ -17,7 +17,14 @@ spec = importlib.util.spec_from_file_location("check_macos_bundle", ROOT / "scri
 check = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(check)
 
-QT_INFO = plistlib.loads((ROOT / "tray/packaging/Info.plist").read_bytes())
+# Historical Qt privacy strings remain compatibility fixtures after its build
+# sources are removed; they are not read from a new Qt bundle template.
+QT_INFO = {
+    "NSMicrophoneUsageDescription": "Zerus records your voice when you start dictation and sends it to your selected speech computer for recognition.",
+    "NSCameraUsageDescription": "Zerus records video messages when you hold the video recording button.",
+    "CFBundleIconName": "hgs-zerus-swarm",
+    "CFBundleDevelopmentRegion": "en",
+}
 SWITCH_INFO = plistlib.loads((ROOT / "client/src-tauri/Info.switch.plist").read_bytes())
 VERSION = (ROOT / "VERSION").read_text().strip()
 OTOOL = """hgs-tray:
@@ -83,7 +90,14 @@ class SwitchBundle(unittest.TestCase):
 
     def test_native_entry_precedes_renderer_and_is_not_tied_to_gui_live_data(self):
         main = (ROOT / "client/src-tauri/src/main.rs").read_text()
-        self.assertLess(main.index("notification_host::run()"), main.index("renderer::choose()"))
+        # The authenticated callback is now passed to the entry dispatcher;
+        # renderer/instance setup lives behind the library's ordinary run().
+        dispatch = main.index("zerus_client_lib::entry::notification_host(")
+        gui = main.index("zerus_client_lib::run();")
+        self.assertLess(dispatch, gui)
+        headless = main[dispatch:gui]
+        self.assertIn("zerus_client_lib::notification_host::run,", headless)
+        self.assertIn("std::process::exit(status);", headless)
         manifest = (ROOT / "client/src-tauri/Cargo.toml").read_text()
         native = manifest.split('[target.\'cfg(target_os = "macos")\'.dependencies]', 1)[1].split('\n[', 1)[0]
         self.assertIn('zerus-client-core = { path = "../core", features = ["macos-native-peer"] }', native)

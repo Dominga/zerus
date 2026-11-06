@@ -1,6 +1,7 @@
 import { headerAttention, isWorking, visibleUnreadReply } from "../../store/attention";
 import type { CreationCard, GroupingOut } from "../../types";
 import type { Session, Subagent } from "./types";
+import { currentChildren } from "./subagents";
 
 export type Row =
   /** `project` is the project's id; `name` and the colour come from the organization's header. */
@@ -34,14 +35,17 @@ export function groupRows(input: ListInput): Row[] {
   const out: Row[] = [];
   const cards = (list: readonly Session[]) => {
     for (const s of list) {
-      const kids = input.children === false ? [] : (input.roster?.(s) ?? s.subagents ?? []).filter((child) =>
+      const current = currentChildren(s, input.online(s));
+      const roster = input.children === false ? [] : (input.roster?.(s) ?? s.subagents ?? []);
+      const kids = roster.filter((child) =>
         input.includeCompleted
         || (input.selected?.key === s.key && input.selected.subagent === child.id
           && (!input.selected.conversation || input.selected.conversation === (s.conversationId ?? "")))
         || (!child.group && input.childDraft?.(s, child))
-        || child.inactive === false);
+        || child.inactive === false).map((child): Subagent => !current && child.state === "working" ? { ...child, state: "unknown" } : child);
       const expanded = kids.length > 0 && input.expanded(s.key);
-      const shown = kids.length === (s.subagents ?? []).length ? s : { ...s, subagents: kids };
+      const changed = kids.length !== roster.length || kids.some((child, index) => child !== roster[index]);
+      const shown = changed ? { ...s, subagents: kids } : s;
       out.push({ type: "card", id: s.key, session: shown, expandable: kids.length > 0, expanded, compactRow: input.compact(s.key) });
       if (expanded) kids.forEach((child, i) => out.push({ type: "child", id: `${s.key}/${child.id}`, parent: shown, child, first: i === 0, last: i === kids.length - 1 }));
     }

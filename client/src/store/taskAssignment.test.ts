@@ -5,7 +5,7 @@ const fixture = vi.hoisted(() => ({ rows: {} as Record<string, Session>, tasks: 
 vi.mock("../bridge", () => ({ assignTask: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("./catalog", () => ({ catalog: { rows: fixture.rows }, computerFresh: () => fixture.online }));
 vi.mock("./organization", () => ({ groupOf: () => fixture.project }));
-vi.mock("./tasks", () => ({ tasks: { project: () => "example", tasks: () => fixture.tasks } }));
+vi.mock("./tasks", () => ({ tasks: { project: () => "example", tasks: () => fixture.tasks, find: (uuid: string) => fixture.tasks.find((t) => t.uuid === uuid) } }));
 vi.mock("./actions", () => ({ notify: vi.fn() }));
 import { assignTask } from "../bridge";
 import { assign, canAssign, taskDrop, taskDragStart, readTaskDrag, setDraggedTask, TASK_MIME } from "./taskAssignment";

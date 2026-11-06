@@ -37,6 +37,17 @@ starts a GUI and receives the same exclusion. The fixed authenticated Mac
 creates no window or menu-bar item. Private canonical copies retain the published
 bundle ID and participate in this guard.
 
+During the two-second handoff wait, startup retries kernel acquisition so a
+finishing owner does not discard a relaunch. A successful activation write and
+an unresponsive duplicate are distinct outcomes. Every guard decision appends
+one line of at most 512 bytes to the GUI log: `~/Library/Logs/hgs-tray.log` on
+macOS, `$XDG_STATE_HOME/hgs/hgs-tray.log` (default `~/.local/state`) on Linux,
+and `%LOCALAPPDATA%/hgdev/hgs-tray/hgs-tray.log` on Windows. Entry, final teardown,
+startup refusals and Rust panics also leave bounded records; panic payloads are
+omitted. If the file is unwritable, macOS records a fixed reason in the unified
+log. The fallback never writes to inherited stderr, so a full pipe or a failed
+stderr write cannot block or panic during startup or teardown.
+
 The installed Linux and Windows switch uses the same identifier,
 `com.hgdev.hgs-tray`, and the `hgs-tray` executable/instance name. Settings seed
 once from Qt's `~/.config/hgdev/hgs-tray.conf` on Linux (an absolute
@@ -172,6 +183,25 @@ scripts/check-licenses.sh      # a license notice for every shipped crate (Linux
 RUSTUP_TOOLCHAIN=1.99.1 npx tauri dev
 ```
 
+The main window remains hidden until the saved theme and local skin library have
+been applied, with a native two-second deadline for a requested show even when
+JavaScript never starts. The frontend handshake also settles after 800 ms if
+local inputs hang, and setter errors release the pending show. Its first
+presentation uses the resolved page color for the native
+window and webview, including system appearance and imported skins. Readiness
+never opens a background start or cancels an explicit hide. Later theme changes
+update the native surfaces without reopening a hidden window.
+
+The `window_theme_fixture` example and `scripts/window-theme-smoke.py` check the
+first painted client pixels of a synthetic window in dark, light and both system
+appearances, plus a page that never sends the handshake. Build the example with `--features tauri/custom-protocol` after
+`npm run build`, using a private Cargo target directory. Run the script only in an
+authorized Arch display window under `flock -w 1800 /tmp/zerus-arch-display.lock`;
+pass `--fixture` and a fresh `--output` directory, and `--webkit-prefix` when using
+the maintained local engine. The harness stops on screen lock and closes its
+owned windows. It uses a private HOME/bus and the canonical bundle ID, with no
+tray, live data source or service connection.
+
 `scripts/check-licenses.sh` needs the crates in Cargo's cache (`cargo +1.99.1 fetch
 --locked --manifest-path src-tauri/Cargo.toml`). When it stops at a crate without a
 notice, add the upstream text under `packaging/rust-licenses` as its README there
@@ -205,7 +235,7 @@ Environment:
 | Variable | Effect |
 | --- | --- |
 | `ZERUS_CLIENT_HGS` | The `hgs` to run (default: the first `hgs` on `PATH`, then in `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin`, since an app started from Finder or a launcher gets a short `PATH`) |
-| `ZERUS_CLIENT_DESKTOP_SERVICE` | Exact value `1` selects the experimental desktop-service source at startup (default off). No legacy Fleet, read delivery, automatic approval, notification or recovery-sync worker starts in that mode; unavailable service stays unavailable. This does not activate the service. |
+| `ZERUS_CLIENT_DESKTOP_SERVICE` | Exact `1` selects the Service consumer. When absent on Linux/macOS, it is selected only after read-only helper status confirms an owned registration; an unregistered or unconfirmed host stays guarded Native. Windows remains opt-in. Exact `0` and invalid explicit values stay guarded Native. No legacy Fleet, read-delivery, approval, notification or recovery-sync worker starts in Service mode. Source selection itself grants no authority; see [consumer activation and maintained Qt rollback](../docs/desktop-consumer-activation.md). |
 | `ZERUS_CLIENT_REPLAY` | Replay synthetic watch streams instead of running `hgs`: a path list (`:` on Unix), the first file is this computer, `alias=file` entries are peers, e.g. `fixtures/replay.ndjson:mac=fixtures/replay-mac.ndjson` |
 | `ZERUS_CLIENT_REPLAY_INTERVAL_MS` | The pause per `heartbeat` frame of a replay (default 900) |
 | `ZERUS_CLIENT_QUERY` | URL parameters for the window, e.g. `select=claude/sample-project/api-refactor` opens that session and `page=settings` that screen |

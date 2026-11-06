@@ -176,8 +176,10 @@ public enum ConversationReadPolicies {
         JSON([target.connectionId, target.computerId, target.session, target.conversation, target.archiveId, target.agentId, target.parentConversation]).compact
     }
 
+    /// A fork's inherited reply is its source's: never incoming, so never unread here.
     public static func incoming(_ event: Event) -> Bool {
-        ["AgentMessage", "Stop"].contains(event.nativeType) && event.role != "You" && event.role != "You (answer)" && event.outgoingId.isEmpty
+        ["AgentMessage", "Stop"].contains(event.nativeType) && event.role != "You" && event.role != "You (answer)" && event.outgoingId.isEmpty &&
+            (event.inheritedFrom ?? "").isEmpty
     }
 
     /// Canonical order proves the incoming prefix before a visible message position, including an own row.
@@ -186,7 +188,7 @@ public enum ConversationReadPolicies {
         if epoch.isEmpty { return incomingVisible }
         func canonical(_ row: Event) -> Bool { row.historyEpoch == epoch && !row.historyId.isEmpty && !row.historyCursor.isEmpty }
         func position(_ row: Event) -> Bool {
-            incoming(row) || ["You", "You (answer)"].contains(row.role) &&
+            incoming(row) || (row.inheritedFrom ?? "").isEmpty && ["You", "You (answer)"].contains(row.role) &&
                 ["UserPromptSubmit", "UserPromptQueued", "UserMessage", "TurnStarted", "QuestionAnswered"].contains(row.nativeType)
         }
         let positions = visible.filter { canonical($0) && position($0) }.compactMap { shown -> Int? in

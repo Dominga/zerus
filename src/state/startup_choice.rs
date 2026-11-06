@@ -175,18 +175,21 @@ fn codex_sandbox(choice: &Choice) -> bool {
             .is_some_and(|prompt| words(prompt) == CODEX_SANDBOX)
 }
 
-fn native_input(name: &str) -> PathBuf {
-    root().join("native-input").join(format!("{:x}.lock", Sha256::digest(name.as_bytes())))
+/// The session's native-input lock, keyed by its verified record (#1437
+/// review), so a session in the ID layout never shares one with the other
+/// holder of its label.
+fn native_input(record: &Value) -> PathBuf {
+    root().join("native-input").join(format!("{}.lock", storage::owner_key(record)))
 }
 
 /// Held while Zerus itself drives a native picker in this session, such as the
 /// model picker before the first message. That picker is not a startup wait.
-pub(super) fn driving(name: &str) -> Result<Guard> {
-    lock(Some(&native_input(name)))
+pub(super) fn driving(record: &Value) -> Result<Guard> {
+    lock(Some(&native_input(record)))
 }
 
-fn driven(name: &str) -> bool {
-    !matches!(lock_until(&native_input(name), std::time::Instant::now()), Ok(Some(_)))
+fn driven(record: &Value) -> bool {
+    !matches!(lock_until(&native_input(record), std::time::Instant::now()), Ok(Some(_)))
 }
 
 pub(super) fn eligible(record: &Value) -> bool {
@@ -238,7 +241,7 @@ fn card(record: &Value, choice: &Choice) -> Option<Value> {
 /// Callers check the reviewed startup parsers first; this only reports a wait
 /// none of them can answer.
 pub(super) fn current(record: &Value) -> Option<Value> {
-    if !eligible(record) || driven(string(record, "name")) {
+    if !eligible(record) || driven(record) {
         return None;
     }
     let record = kimi_tui_choice::identity(record).ok()?;

@@ -33,3 +33,11 @@ export function moveFocusOff(transcript: () => boolean, field: FocusTarget | und
   if (transcript()) return;
   if (field && field.isConnected !== false && !field.disabled) field.focus();
 }
+
+/**
+ * Allow retry shows for an uncertain draft, except while the desktop service
+ * still sends its message: retrying then could send it twice
+ * (zerus-5wmh.66.4.4).
+ */
+export const allowRetryShown = (view: { uncertain: boolean; delivery_pending?: boolean } | undefined, locked: boolean): boolean =>
+  !!view?.uncertain && !view.delivery_pending && !locked;

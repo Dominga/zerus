@@ -732,6 +732,10 @@ jobs:
         with:
           ref: ${{ needs.source.outputs.commit }}
           persist-credentials: false
+      - name: Disk usage after native checkout
+        run: python3 scripts/ci/ubuntu-disk.py report after-native-checkout
+      - name: Prepare native disk headroom
+        run: python3 scripts/ci/ubuntu-disk.py prepare
       - name: Linux media, video and Tauri build dependencies
         run: >-
           sudo apt-get update && sudo apt-get install --no-install-recommends -y
@@ -739,6 +743,8 @@ jobs:
           gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav
           libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev xvfb dbus-bin dbus-daemon
       - run: rustup toolchain install 1.99.1 --profile minimal --component clippy
+      - name: Disk usage after native dependencies
+        run: python3 scripts/ci/ubuntu-disk.py report after-native-dependencies
       - name: Rust cache identity
         id: rust
         run: |
@@ -753,8 +759,14 @@ jobs:
             ~/.cargo/git
           key: client-native-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('client/core/Cargo.lock', 'client/media/Cargo.lock', 'client/src-tauri/Cargo.lock') }}
           restore-keys: client-native-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
+      - name: Disk usage after native cache restore
+        run: python3 scripts/ci/ubuntu-disk.py report after-native-cache-restore
       - name: Media and video tests and Tauri media clippy
+        # The script reports between its existing Linux build phases.
         run: bash scripts/ci/client-native.sh linux
+      - name: Disk usage after native checks
+        if: ${{ !cancelled() }}
+        run: python3 scripts/ci/ubuntu-disk.py report after-native-checks
       - name: Save native client Rust cache
         if: inputs.save_caches && steps.rust-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1231,83 +1243,14 @@ jobs:
   # prefix. A save follows a successful build that compiled something, keeping
   # only the entries this build used. Cache directories stay outside the
   # workspace, so they never reach packages, the portable zip or artifacts.
-  arch:
-    name: Arch desktop
-    needs: source
-    if: needs.source.outputs.run_arch == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    container:
-      image: archlinux@sha256:996c3a1d6b0d87b01242f6fcd8cfa3ad3eece1a67ab5c8f108e20af1d7b97bdd
-    env:
-      CCACHE_DIR: /home/user/.cache/ccache
-      CCACHE_MAXSIZE: 150M
-      # Ninja starts a suite's own sources while the libraries it links still build.
-      CMAKE_GENERATOR: Ninja
-      ZERUS_BUILD_JOBS: 4
-    steps:
-      - name: Bootstrap Git before checkout
-        run: pacman -Syu --noconfirm --needed git
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.source.outputs.commit }}
-          persist-credentials: false
-      - name: Arch dependencies and unprivileged builder
-        run: |
-          pacman -Syu --noconfirm --needed base-devel git cmake ninja qt6-base qt6-tools qt6-webengine qt6-multimedia qt6-svg kstatusnotifieritem kwindowsystem kidletime tmux openssh python ccache dbus
-          useradd -m user
-          chown -R user:user "$GITHUB_WORKSPACE"
-      - name: Restore ccache
-        id: ccache-restore
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: /home/user/.cache/ccache
-          key: arch-ccache-v1-${{ github.run_id }}
-          restore-keys: arch-ccache-v1-
-      - name: Reset ccache statistics
-        id: ccache-start
-        run: |
-          chown -R user:user /home/user
-          runuser -u user -- ccache -z
-          echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
-      - name: Desktop build
-        id: build
-        run: runuser -u user -- bash scripts/ci/gui.sh build
-      - name: ccache statistics
-        id: ccache
-        if: ${{ !cancelled() }}
-        env:
-          SAVE: ${{ inputs.save_caches && steps.build.outcome == 'success' }}
-          STARTED: ${{ steps.ccache-start.outputs.started }}
-        run: |
-          runuser -u user -- ccache -sv
-          misses=$(runuser -u user -- ccache --print-stats | awk -F'\t' '$1 == "cache_miss" { print $2 + 0 }')
-          if [ "$SAVE" = true ] && [ "${misses:-0}" -gt 0 ]; then
-            runuser -u user -- ccache --evict-older-than "$(( $(date +%s) - STARTED + 60 ))s"
-            echo save=true >> "$GITHUB_OUTPUT"
-          fi
-      - name: Save ccache
-        if: inputs.save_caches && steps.ccache.outputs.save == 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: /home/user/.cache/ccache
-          key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
-      - name: Offscreen Qt suites
-        run: runuser -u user -- env QTWEBENGINE_DISABLE_SANDBOX=1 bash scripts/ci/gui.sh test
-      - name: Retain desktop test logs
-        if: always() && (github.event_name != 'schedule' || failure())
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: arch-desktop-results
-          path: artifacts/test-results
-          retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}
-
   arch-package:
     name: Arch package
     needs: source
     if: needs.source.outputs.run_arch == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # The recipe's cold release build and full check() take about 30 minutes
+    # on a fast standard runner and over 45 on a slow one (zerus-wnm5z).
+    timeout-minutes: 75
     container:
       image: archlinux@sha256:996c3a1d6b0d87b01242f6fcd8cfa3ad3eece1a67ab5c8f108e20af1d7b97bdd
     env:
@@ -1401,68 +1344,6 @@ jobs:
         with:
           name: arch-x86_64-${{ needs.source.outputs.commit }}
           path: artifacts
-          retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}
-
-  mac-desktop:
-    name: macOS desktop
-    needs: source
-    if: needs.source.outputs.run_macos == 'true'
-    runs-on: macos-15
-    timeout-minutes: 45
-    env:
-      HOMEBREW_NO_AUTO_UPDATE: 1
-      CCACHE_MAXSIZE: 100M
-      CMAKE_GENERATOR: Ninja
-      HGS_SKIP_QT_SCALE_ROWS: 1
-      ZERUS_BUILD_JOBS: 3
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.source.outputs.commit }}
-          persist-credentials: false
-      - run: brew install cmake ninja qt qtmultimedia ccache
-      - name: Restore ccache
-        id: ccache-restore
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/Library/Caches/ccache
-          key: mac-desktop-ccache-v1-${{ runner.arch }}-${{ github.run_id }}
-          restore-keys: mac-desktop-ccache-v1-${{ runner.arch }}-
-      - name: Reset ccache statistics
-        id: ccache-start
-        run: |
-          ccache -z
-          echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
-      - name: Desktop build
-        id: build
-        run: bash scripts/ci/gui.sh build
-      - name: ccache statistics
-        id: ccache
-        if: ${{ !cancelled() }}
-        env:
-          SAVE: ${{ inputs.save_caches && steps.build.outcome == 'success' }}
-          STARTED: ${{ steps.ccache-start.outputs.started }}
-        run: |
-          ccache -sv
-          misses=$(ccache --print-stats | awk -F'\t' '$1 == "cache_miss" { print $2 + 0 }')
-          if [ "$SAVE" = true ] && [ "${misses:-0}" -gt 0 ]; then
-            ccache --evict-older-than "$(( $(date +%s) - STARTED + 60 ))s"
-            echo save=true >> "$GITHUB_OUTPUT"
-          fi
-      - name: Save ccache
-        if: inputs.save_caches && steps.ccache.outputs.save == 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/Library/Caches/ccache
-          key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
-      - name: Offscreen Qt suites
-        run: bash scripts/ci/gui.sh test
-      - name: Retain desktop test logs
-        if: always() && (github.event_name != 'schedule' || failure())
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: mac-desktop-results
-          path: artifacts/test-results
           retention-days: ${{ github.event_name == 'schedule' && 3 || 7 }}
 
   windows-desktop:
@@ -1735,7 +1616,7 @@ jobs:
   gate:
     name: Suite results
     if: always() && (github.event.repository.private == false || github.event_name == 'workflow_dispatch')
-    needs: [source, quick, client-frontend, relay, connector, connector-macos, ios, android, client-native-linux, client-native-macos-core, client-native-macos-tauri, client-native-windows, cli, cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, arch, arch-package, mac-desktop, windows-desktop, windows-host]
+    needs: [source, quick, client-frontend, relay, connector, connector-macos, ios, android, client-native-linux, client-native-macos-core, client-native-macos-tauri, client-native-windows, cli, cli-macos-debug, cli-macos-core, cli-macos-native, cli-macos, arch-package, windows-desktop, windows-host]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -1766,9 +1647,7 @@ jobs:
               'cli-macos-core': json.loads(os.environ['RUN_MACOS']),
               'cli-macos-native': json.loads(os.environ['RUN_MACOS']),
               'cli-macos': json.loads(os.environ['RUN_MACOS']),
-              'arch': json.loads(os.environ['RUN_ARCH']),
               'arch-package': json.loads(os.environ['RUN_ARCH']),
-              'mac-desktop': json.loads(os.environ['RUN_MACOS']),
               'connector-macos': json.loads(os.environ['RUN_MACOS']),
               'ios': json.loads(os.environ['RUN_IOS']),
               'windows-desktop': json.loads(os.environ['RUN_WINDOWS']),

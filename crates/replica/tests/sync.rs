@@ -263,12 +263,28 @@ fn cache_file(root: &Path) -> PathBuf {
         .join("inventory.json")
 }
 
+/// Writes the inventory cache as this build does: with the mark that says a
+/// schema-repairing build wrote it. A cache without it is never trusted.
+fn write_cache(root: &Path, bytes: &[u8]) {
+    let cache = cache_file(root);
+    fs::write(&cache, bytes).unwrap();
+    fs::write(
+        cache.with_file_name("inventory.repaired"),
+        format!(
+            "schema-repair-2 mark-{} {:x}\n",
+            zerus_replica::MARK_FORMAT,
+            Sha256::digest(bytes)
+        ),
+    )
+    .unwrap();
+}
+
 /// Changes one task's remembered entry in the inventory cache.
 fn remember(root: &Path, uuid: &str, change: impl FnOnce(&mut serde_json::Value)) {
     let mut cache: serde_json::Value =
         serde_json::from_slice(&fs::read(cache_file(root)).unwrap()).unwrap();
     change(&mut cache["tasks"][uuid]);
-    fs::write(cache_file(root), serde_json::to_vec(&cache).unwrap()).unwrap();
+    write_cache(root, &serde_json::to_vec(&cache).unwrap());
 }
 
 #[test]
@@ -387,7 +403,11 @@ fn the_inventory_reads_a_task_again_only_when_its_files_change() {
     // While the task's files stay as they were, the cached version is used as is.
     let text = fs::read_to_string(&cache).unwrap();
     let peer = first.tasks[task.uuid()].keys().next().unwrap().clone();
-    fs::write(&cache, text.replace(&format!("\"{peer}\""), "\"7\"")).unwrap();
+    let edited = text.replace(&format!("\"{peer}\""), "\"7\"");
+    // A cache another binary wrote, without this build's mark, is read again.
+    fs::write(&cache, &edited).unwrap();
+    assert!(!a.inventory().unwrap().0.tasks[task.uuid()].contains_key("7"));
+    write_cache(root.path(), edited.as_bytes());
     assert!(a.inventory().unwrap().0.tasks[task.uuid()].contains_key("7"));
     // A change to them reads the task again.
     let mut task = a.load(task.uuid()).unwrap();

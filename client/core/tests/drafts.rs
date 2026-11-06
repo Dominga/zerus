@@ -8,7 +8,7 @@ use zerus_client_core::attachments::{Attachment, Draft};
 use zerus_client_core::drafts::{
     import_at_start, import_once, import_sources, qt_root, read_draft, read_index, Cursor,
     DraftStore, ImportConflict, ImportReport, ImportSource, IndexPage, Loaded, Page, StoredDraft,
-    Summary, ALREADY_EXISTS, IMPORT_MARKER, INTERRUPTED, NOT_RESTORED,
+    Summary, ALREADY_EXISTS, IMPORT_MARKER, INTERRUPTED, NOT_RESTORED, UNCONFIRMED,
 };
 
 struct Scratch(PathBuf);
@@ -729,9 +729,9 @@ fn the_import_never_reads_the_stores_own_folder() {
 }
 
 #[test]
-fn a_read_right_after_import_at_start_sees_the_imported_draft() {
+fn startup_import_keeps_next_interim_drafts_but_ignores_qt() {
     const CHILD: &str = "ZERUS_TEST_IMPORT_AT_START";
-    const NAME: &str = "a_read_right_after_import_at_start_sees_the_imported_draft";
+    const NAME: &str = "startup_import_keeps_next_interim_drafts_but_ignores_qt";
     let other = "studio\nclaude/sample-project/other";
     if let Some(scratch) = std::env::var_os(CHILD).map(PathBuf::from) {
         // In the child, Qt's and the dev app's stores are under the scratch
@@ -746,9 +746,11 @@ fn a_read_right_after_import_at_start_sees_the_imported_draft() {
         };
         let dev = data.join("dev.zerus.next/drafts");
         seed(&dev, &[(other, draft("from the dev app", &[]))]);
+        let before_qt = snapshot(&qt_root().unwrap());
         let store = DraftStore::open(scratch.join("here"));
         import_at_start(&store);
-        assert_eq!(load(&store, KEY).draft.draft.text, "from Qt");
+        assert!(load(&store, KEY).draft.draft.text.is_empty());
+        assert_eq!(snapshot(&qt_root().unwrap()), before_qt);
         assert_eq!(load(&store, other).draft.draft.text, "from the dev app");
         return;
     }
@@ -769,7 +771,7 @@ fn a_read_right_after_import_at_start_sees_the_imported_draft() {
     assert!(output.status.success(), "{stdout}{stderr}");
     assert!(stdout.contains("1 passed"), "{stdout}");
     assert!(
-        stderr.contains("drafts import: 2 imported, 0 identical, 0 conflicts, 0 invalid"),
+        stderr.contains("drafts import: 1 imported, 0 identical, 0 conflicts, 0 invalid"),
         "{stderr}"
     );
 }
@@ -922,4 +924,440 @@ fn form_checkpoint_compares_reserved_identity_and_preserves_unknown_fields() {
         wait(|done| store.replace_if_unchanged(KEY, interrupted, newer.clone(), done)).unwrap()
     );
     assert_eq!(wait(|done| store.load(KEY, done)).draft, newer);
+}
+
+// zerus-5wmh.66.4.4: the deferred-input checkpoint saved with a draft.
+
+use zerus_client_core::drafts::NOT_SAVED_CHECKPOINT;
+use zerus_client_core::operation_recovery::deferred_input::{
+    message_sha256, Checkpoint, Intent, Kind,
+};
+
+fn checkpoint(revision: u64) -> Checkpoint {
+    Checkpoint::reserve(Intent {
+        kind: Kind::Send,
+        draft_revision: revision,
+        message_sha256: message_sha256("was being sent", []),
+        run_id: "run-1".into(),
+        conversation_id: "conv-1".into(),
+        question: None,
+        start: None,
+        retry_of: None,
+        consent: false,
+    })
+}
+
+fn manifest(root: &Path) -> Value {
+    serde_json::from_slice(&fs::read(folder(root, KEY).join("draft.json")).unwrap()).unwrap()
+}
+
+#[test]
+fn a_checkpoint_round_trips_and_only_its_drafts_carry_the_field() {
+    let scratch = Scratch::new("checkpoint-round-trip");
+    let store = DraftStore::open(scratch.0.clone());
+    save(&store, KEY, draft("plain", &[])).unwrap();
+    assert!(
+        manifest(&scratch.0).get("deferred_input").is_none(),
+        "a draft without one keeps its earlier bytes"
+    );
+    let mut sending = draft("was being sent", &[]);
+    sending.sending = true;
+    sending.checkpoint = Some(Box::new(checkpoint(2)));
+    save(&store, KEY, sending.clone()).unwrap();
+    assert_eq!(
+        manifest(&scratch.0)["deferred_input"]["request_id"],
+        json!(sending.checkpoint.as_ref().unwrap().request_id)
+    );
+    let loaded = load(&store, KEY);
+    assert_eq!(
+        loaded.draft.checkpoint, sending.checkpoint,
+        "loaded as data"
+    );
+    assert!(
+        loaded.draft.uncertain,
+        "a send saved as sending reloads uncertain"
+    );
+    assert!(loaded.storage_error.is_none());
+}
+
+#[test]
+fn a_present_but_invalid_checkpoint_is_never_read_as_absent() {
+    let scratch = Scratch::new("checkpoint-invalid");
+    let store = DraftStore::open(scratch.0.clone());
+    save(&store, KEY, draft("kept", &[])).unwrap();
+    store.flush();
+    let path = folder(&scratch.0, KEY).join("draft.json");
+    let good = serde_json::to_value(checkpoint(1)).unwrap();
+    let mut wrong_family = good.clone();
+    wrong_family["receipts"] = json!("question_receipts");
+    for (case, value) in [
+        ("malformed", json!({"request_id": 7})),
+        ("unknown field", {
+            let mut v = good.clone();
+            v["permission"] = json!(true);
+            v
+        }),
+        ("inconsistent", wrong_family),
+        ("null", Value::Null),
+    ] {
+        let mut manifest = manifest(&scratch.0);
+        manifest["deferred_input"] = value;
+        fs::write(&path, manifest.to_string()).unwrap();
+        let loaded = read_draft(&scratch.0, KEY);
+        assert_eq!(
+            loaded.storage_error.as_deref(),
+            Some(NOT_RESTORED),
+            "{case}"
+        );
+        assert!(loaded.draft.checkpoint.is_none(), "{case}");
+        assert!(path.exists(), "{case}: the files stay");
+    }
+}
+
+#[test]
+fn an_invalid_checkpoint_is_never_saved() {
+    let scratch = Scratch::new("checkpoint-refused");
+    let store = DraftStore::open(scratch.0.clone());
+    save(&store, KEY, draft("before", &[])).unwrap();
+    let mut bad = draft("after", &[]);
+    let mut invalid = checkpoint(1);
+    invalid.request_id = "not-a-uuid".into();
+    bad.checkpoint = Some(Box::new(invalid));
+    assert_eq!(save(&store, KEY, bad), Err(NOT_SAVED_CHECKPOINT.to_owned()));
+    assert_eq!(load(&store, KEY).draft.draft.text, "before");
+}
+
+#[test]
+fn imported_and_recovered_drafts_never_carry_a_checkpoint() {
+    let scratch = Scratch::new("checkpoint-import");
+    let (source_root, here, recovered) = (
+        scratch.0.join("dev"),
+        scratch.0.join("here"),
+        scratch.0.join("recovered"),
+    );
+    let mut sending = draft("was being sent", &[]);
+    sending.sending = true;
+    sending.checkpoint = Some(Box::new(checkpoint(3)));
+    seed(&source_root, &[(KEY, sending)]);
+    assert!(read_draft(&source_root, KEY).draft.checkpoint.is_some());
+    assert_eq!(
+        import_once(&here, &[source("dev", &source_root)]).imported,
+        1
+    );
+    let imported = load(&DraftStore::open(here.clone()), KEY);
+    assert_eq!(imported.draft.draft.text, "was being sent");
+    assert!(imported.draft.uncertain, "still interrupted, never re-sent");
+    assert!(imported.draft.checkpoint.is_none());
+    let store = DraftStore::open(recovered);
+    let copy = wait(|done| store.recover(&source_root, KEY, done)).unwrap();
+    assert!(copy.draft.checkpoint.is_none());
+    assert!(load(&store, KEY).draft.checkpoint.is_none());
+}
+
+/// review-n's #1316 probe (zerus-5wmh.66.4.4).
+#[test]
+fn a_checkpoint_only_recovery_destination_is_not_empty() {
+    let root = Scratch::new("probe-checkpoint-destination");
+    let original = DraftStore::open(root.0.join("original"));
+    save(
+        &original,
+        KEY,
+        draft("source text", &[("a.txt", b"kept attachment")]),
+    )
+    .unwrap();
+    let destination = DraftStore::open(root.0.join("destination"));
+    let held = StoredDraft {
+        checkpoint: Some(Box::new(checkpoint(3))),
+        ..Default::default()
+    };
+    let before = held.checkpoint.clone();
+    save(&destination, KEY, held).unwrap();
+    let recovered = wait(|done| destination.recover(original.root(), KEY, done));
+    let after = load(&destination, KEY);
+    eprintln!(
+        "checkpoint-only recover: refused={} original_still_present={}",
+        recovered.is_err(),
+        after.draft.checkpoint == before
+    );
+    assert!(
+        recovered.is_err(),
+        "recovery cannot replace a held identity"
+    );
+}
+
+/// review-n's #1316 probe (zerus-5wmh.66.4.4).
+#[test]
+fn an_invalid_checkpoint_keeps_text_and_attachments_on_read_and_refused_save() {
+    let root = Scratch::new("probe-invalid-attachments");
+    let store = DraftStore::open(root.0.clone());
+    let valid = draft("original text", &[("a.txt", b"original attachment")]);
+    save(&store, KEY, valid.clone()).unwrap();
+    let path = folder(&root.0, KEY).join("draft.json");
+    let mut value = manifest(&root.0);
+    value["deferred_input"] = Value::Null;
+    fs::write(&path, value.to_string()).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    let loaded = load(&store, KEY);
+    assert_eq!(loaded.storage_error.as_deref(), Some(NOT_RESTORED));
+    assert_eq!(loaded.draft.draft, valid.draft);
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        bytes,
+        "reading never normalizes a malformed checkpoint"
+    );
+    let mut bad_save = draft("changed", &[("b.txt", b"new attachment")]);
+    let mut bad = checkpoint(9);
+    bad.receipts = "wrong".into();
+    bad_save.checkpoint = Some(Box::new(bad));
+    assert!(save(&store, KEY, bad_save).is_err());
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(load(&store, KEY).draft.draft, valid.draft);
+}
+
+#[test]
+fn a_held_identity_reloads_uncertain_and_no_rename_replaces_it() {
+    let scratch = Scratch::new("checkpoint-held");
+    let store = DraftStore::open(scratch.0.join("drafts"));
+    // A continuation's waiting save: neither sending nor uncertain.
+    let mut waiting = draft("waits", &[]);
+    waiting.checkpoint = Some(Box::new(checkpoint(1)));
+    save(&store, KEY, waiting.clone()).unwrap();
+    let loaded = load(&store, KEY);
+    assert!(
+        loaded.draft.uncertain,
+        "held: never an unrestricted new attempt"
+    );
+    assert_eq!(loaded.notice.as_deref(), Some(UNCONFIRMED));
+    assert_eq!(loaded.draft.checkpoint, waiting.checkpoint);
+    // One saved while sending keeps its interrupted notice.
+    let mut sending = waiting.clone();
+    sending.sending = true;
+    save(&store, KEY, sending).unwrap();
+    assert_eq!(load(&store, KEY).notice.as_deref(), Some(INTERRUPTED));
+    // A held identity without any content is not an empty destination.
+    let (old, new) = ("studio\nclaude/p/old", "studio\nclaude/p/new");
+    let held = StoredDraft {
+        checkpoint: Some(Box::new(checkpoint(2))),
+        ..Default::default()
+    };
+    save(&store, new, held.clone()).unwrap();
+    save(&store, old, draft("moving", &[])).unwrap();
+    assert_eq!(
+        wait(|done| store.rename(old, new, draft("moving", &[]), done)),
+        Err(ALREADY_EXISTS.to_owned())
+    );
+    assert_eq!(load(&store, new).draft.checkpoint, held.checkpoint);
+    assert_eq!(load(&store, old).draft.draft.text, "moving");
+}
+
+#[test]
+fn an_import_never_replaces_a_held_identity() {
+    let scratch = Scratch::new("checkpoint-import-held");
+    let (source_root, here) = (scratch.0.join("dev"), scratch.0.join("here"));
+    seed(&source_root, &[(KEY, draft("from elsewhere", &[]))]);
+    let store = DraftStore::open(here.clone());
+    let held = StoredDraft {
+        checkpoint: Some(Box::new(checkpoint(4))),
+        ..Default::default()
+    };
+    save(&store, KEY, held.clone()).unwrap();
+    drop(store);
+    let report = import_once(&here, &[source("dev", &source_root)]);
+    assert_eq!(report.imported, 0);
+    assert_eq!(report.conflicts.len(), 1, "reported, never overwritten");
+    let kept = load(&DraftStore::open(here), KEY);
+    assert_eq!(kept.draft.checkpoint, held.checkpoint);
+}
+
+const SESSION_ID: &str = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+
+/// zerus-ucck P2c-2: a session's draft keyed by its name moves once to its
+/// session ID key, as stored, and never over a draft already there.
+#[test]
+fn a_name_key_draft_moves_once_to_its_session_id_key() {
+    let scratch = Scratch::new("adopt");
+    let store = DraftStore::open(scratch.0.join("drafts"));
+    let id_key = format!("studio\nid:{SESSION_ID}");
+    let label = "claude/sample-project/review";
+    assert!(
+        !wait(|done| store.adopt(KEY, &id_key, label, done)),
+        "nothing to move"
+    );
+    let mut held = draft("typed before the upgrade", &[("a.txt", b"kept attachment")]);
+    held.checkpoint = Some(Box::new(checkpoint(3)));
+    save(&store, KEY, held.clone()).unwrap();
+    assert!(
+        !wait(|done| store.adopt(KEY, KEY, label, done)),
+        "a key is not its own legacy"
+    );
+    save(&store, &id_key, draft("already here", &[])).unwrap();
+    assert!(!wait(|done| store.adopt(KEY, &id_key, label, done)));
+    assert_eq!(
+        load(&store, KEY).draft.draft.text,
+        "typed before the upgrade"
+    );
+    assert_eq!(load(&store, &id_key).draft.draft.text, "already here");
+
+    save(&store, &id_key, StoredDraft::default()).unwrap();
+    assert!(wait(|done| store.adopt(KEY, &id_key, label, done)));
+    let moved = load(&store, &id_key).draft;
+    assert_eq!(moved.draft, held.draft);
+    assert_eq!(
+        moved.checkpoint, held.checkpoint,
+        "its reserved input moves with it"
+    );
+    assert_eq!((moved.position, moved.anchor), (3, 1));
+    assert_eq!(moved.session_label, label);
+    assert_eq!(load(&store, KEY).draft, StoredDraft::default());
+    let listed = index(&store);
+    assert_eq!(
+        listed.keys().cloned().collect::<Vec<_>>(),
+        std::slice::from_ref(&id_key)
+    );
+    assert_eq!(listed[&id_key].session_label, label);
+    assert!(
+        !wait(|done| store.adopt(KEY, &id_key, "later", done)),
+        "only once"
+    );
+}
+
+/// #1418 review (review-3): the old key is emptied only after the new one is
+/// durable, so a failed move leaves the name key's draft, reserved input
+/// included. The drafts root is read-only, so the ID key's folder cannot be
+/// created while `private()` would still let the name key be emptied.
+#[cfg(unix)]
+#[test]
+fn a_failed_move_leaves_the_name_key_draft() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new("adopt-failed");
+    let root = scratch.0.join("drafts");
+    let store = DraftStore::open(root.clone());
+    let id_key = format!("studio\nid:{SESSION_ID}");
+    let mut held = draft("kept", &[("a.txt", b"kept attachment")]);
+    held.checkpoint = Some(Box::new(checkpoint(3)));
+    save(&store, KEY, held.clone()).unwrap();
+    // The ID key's folder cannot be created; the name key's still can be written.
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o500)).unwrap();
+    let moved = wait(|done| store.adopt(KEY, &id_key, "claude/p/a", done));
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(!moved);
+    let kept = load(&store, KEY).draft;
+    assert_eq!((kept.draft, kept.checkpoint), (held.draft, held.checkpoint));
+    assert!(!folder(&root, &id_key).join("draft.json").exists());
+}
+
+/// #1418 review: a crash between the move's two writes leaves the same draft
+/// at both keys; the next move empties the name key. Different drafts at the
+/// two keys are never merged or chosen between: both stay.
+#[test]
+fn an_interrupted_move_finishes_only_for_the_same_draft() {
+    let scratch = Scratch::new("adopt-interrupted");
+    let store = DraftStore::open(scratch.0.join("drafts"));
+    let id_key = format!("studio\nid:{SESSION_ID}");
+    let mut held = draft("typed before the crash", &[("a.txt", b"kept attachment")]);
+    held.checkpoint = Some(Box::new(checkpoint(3)));
+    save(&store, KEY, held.clone()).unwrap();
+    // The crash: the ID key was written, with the label the move adds; the
+    // name key was not emptied yet.
+    let mut written = held.clone();
+    written.session_label = "claude/sample-project/review".into();
+    save(&store, &id_key, written.clone()).unwrap();
+    assert!(wait(|done| store.adopt(
+        KEY,
+        &id_key,
+        "claude/sample-project/review",
+        done
+    )));
+    assert_eq!(load(&store, KEY).draft, StoredDraft::default());
+    assert_eq!(load(&store, &id_key).draft.draft, held.draft);
+    // A different draft at each key: nothing changes.
+    save(&store, KEY, draft("typed on an older build", &[])).unwrap();
+    assert!(!wait(|done| store.adopt(
+        KEY,
+        &id_key,
+        "claude/sample-project/review",
+        done
+    )));
+    assert_eq!(
+        load(&store, KEY).draft.draft.text,
+        "typed on an older build"
+    );
+    assert_eq!(load(&store, &id_key).draft.draft, held.draft);
+    // The same text with another reserved input is a different draft too.
+    let mut other = held.clone();
+    other.checkpoint = Some(Box::new(checkpoint(4)));
+    save(&store, KEY, other.clone()).unwrap();
+    assert!(!wait(|done| store.adopt(
+        KEY,
+        &id_key,
+        "claude/sample-project/review",
+        done
+    )));
+    assert_eq!(load(&store, KEY).draft.checkpoint, other.checkpoint);
+}
+
+#[test]
+fn a_damaged_name_key_draft_stays_where_it_is() {
+    let scratch = Scratch::new("adopt-damaged");
+    let root = scratch.0.join("drafts");
+    let store = DraftStore::open(root.clone());
+    let id_key = format!("studio\nid:{SESSION_ID}");
+    save(&store, KEY, draft("kept", &[("a.txt", b"kept attachment")])).unwrap();
+    let dir = folder(&root, KEY);
+    for entry in fs::read_dir(&dir).unwrap().flatten() {
+        if entry.file_name().to_string_lossy().ends_with(".bin") {
+            fs::write(entry.path(), b"changed").unwrap();
+        }
+    }
+    let manifest = fs::read(dir.join("draft.json")).unwrap();
+    assert!(!wait(|done| store.adopt(KEY, &id_key, "claude/p/a", done)));
+    assert_eq!(fs::read(dir.join("draft.json")).unwrap(), manifest);
+    assert!(!folder(&root, &id_key).join("draft.json").exists());
+}
+
+#[test]
+fn only_a_draft_keyed_by_session_id_records_its_session_label() {
+    let scratch = Scratch::new("session-label");
+    let root = scratch.0.join("drafts");
+    let store = DraftStore::open(root.clone());
+    let id_key = format!("studio\nid:{SESSION_ID}");
+    save(&store, KEY, draft("by name", &[])).unwrap();
+    let mut by_id = draft("by id", &[]);
+    by_id.session_label = "claude/p/a".into();
+    save(&store, &id_key, by_id).unwrap();
+    let manifest = |key: &str| -> Value {
+        serde_json::from_slice(&fs::read(folder(&root, key).join("draft.json")).unwrap()).unwrap()
+    };
+    assert!(
+        manifest(KEY).get("session_label").is_none(),
+        "a name key keeps its bytes"
+    );
+    assert_eq!(manifest(&id_key)["session_label"], json!("claude/p/a"));
+    assert_eq!(load(&store, &id_key).draft.session_label, "claude/p/a");
+}
+
+#[test]
+fn form_state_alone_moves_and_is_never_overwritten() {
+    let scratch = Scratch::new("adopt-form");
+    let store = DraftStore::open(scratch.0.join("drafts"));
+    let id_key = format!("studio\nid:{SESSION_ID}");
+    let mut chosen = StoredDraft::default();
+    chosen.form_state.insert(
+        "answers".into(),
+        json!([{"id": "q_0", "options": ["opt_0_0"]}]),
+    );
+    save(&store, KEY, chosen.clone()).unwrap();
+    // Another answer at the ID key: form state alone is never overwritten.
+    let mut other = StoredDraft::default();
+    other.form_state.insert(
+        "answers".into(),
+        json!([{"id": "q_0", "options": ["opt_0_1"]}]),
+    );
+    save(&store, &id_key, other.clone()).unwrap();
+    assert!(!wait(|done| store.adopt(KEY, &id_key, "claude/p/a", done)));
+    assert_eq!(load(&store, &id_key).draft.form_state, other.form_state);
+    save(&store, &id_key, StoredDraft::default()).unwrap();
+    assert!(wait(|done| store.adopt(KEY, &id_key, "claude/p/a", done)));
+    assert_eq!(load(&store, &id_key).draft.form_state, chosen.form_state);
+    assert!(load(&store, KEY).draft.form_state.is_empty());
 }

@@ -11,6 +11,16 @@ use zerus_desktop_catalog::{self as catalog, changes};
 
 pub const ABI: &str = "desktop-catalog-v1";
 pub const CHANGES_ABI: &str = "desktop-catalog-changes-v1";
+/// Root schema leaf: the change journal keeps native removal reasons, which
+/// remove items carry additively within the same changes ABI (zerus-ic13).
+pub(super) const SCHEMA: i64 = 21;
+#[cfg(test)]
+pub(super) fn remove_reason_fixture(db: &rusqlite::Connection) {
+    // Rewind the later schema-22 leaf too, never leaving it labelled older.
+    super::delivery::remove_approval_fixture(db);
+    db.execute_batch("ALTER TABLE desktop_catalog_changes DROP COLUMN reason;")
+        .unwrap();
+}
 pub const WALKS: usize = 64;
 const IDLE: Duration = Duration::from_secs(120);
 const LIFETIME: Duration = Duration::from_secs(600);
@@ -266,7 +276,10 @@ impl Reader {
         let page = changes::page(&store.db, &scope, since, cursor)?;
         let items=page.items.into_iter().map(|r| {
             let row:Option<Value>=r.json.as_deref().map(serde_json::from_str).transpose()?;
-            Ok(json!({"op":if row.is_some(){"upsert"}else{"remove"},"revision":r.revision.to_string(),"key":r.key,"row":row}))
+            let mut item=json!({"op":if row.is_some(){"upsert"}else{"remove"},"revision":r.revision.to_string(),"key":r.key,"row":row});
+            // Additive: only a removal with a known native reason carries one.
+            if let Some(reason)=r.reason { item["reason"]=json!(reason); }
+            Ok(item)
         }).collect::<Result<Vec<_>>>()?;
         let current = changes::watermark(&store.db, &request.computer)?;
         let value = json!({"request_id":request.request_id,"accepted":true,"durable":false,"abi":ABI,

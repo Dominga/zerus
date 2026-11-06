@@ -250,7 +250,8 @@ class SignalTraceSource(unittest.TestCase):
 
 
 MAC_PROTECTED = {'direct_signal_agent': '0e0e76129449c8490a15cb5efadccb631f46aefe8d62b8081a8bf3364c2fd9bd', 'DirectSignalTrace': 'fb9bc39f72f835553e15c00b5744337a23fb3c6ba7d800143e87964c1a32c880', 'Lifecycle': 'fdb572edefe48309a288b014eedb6d026d72e1c7c0ffba5f9ecb6244b953f30c', 'Archive': 'd996ae7fdb6970a0d61f3213e6891c8bc2a88011a82eb00d5660d251221b4dae'}
-MAC_AGENT_SHA256 = 'dcdfeef3ab65f1ff5ae180941d01a828dacf72a3e118921d195b99fffb156959'
+# The fake agent also records HGS_SESSION_ID (zerus-ucck P1, approved addition).
+MAC_AGENT_SHA256 = '0177d1ac2bbb07117e2524e77a585b340297f2b9e2bcb6734151a1901a81a588'
 
 # BEGIN private Mac pause observer controls. Authored separately from native gates.
 MAC_NODES = [node for node in TREE.body if isinstance(node, (ast.ClassDef, ast.Assign)) and

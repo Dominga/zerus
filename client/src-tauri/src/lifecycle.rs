@@ -129,11 +129,24 @@ pub fn show_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     {
         return Ok(window);
     }
-    if window.is_minimized()? {
-        window.unminimize()?;
+    if !crate::window_theme::can_show(&window) {
+        return Ok(window);
     }
-    window.show()?;
-    window.set_focus()?;
+    #[cfg(windows)]
+    {
+        window.show()?;
+        crate::platform::windows::foreground::present(&window);
+    }
+    #[cfg(not(windows))]
+    {
+        if window.is_minimized()? {
+            window.unminimize()?;
+        }
+        window.show()?;
+        // Not Windows: no synthetic Alt here (clippy.toml).
+        #[allow(clippy::disallowed_methods)]
+        window.set_focus()?;
+    }
     sync_policy(app);
     #[cfg(all(windows, feature = "live"))]
     crate::platform::windows::tray::apply_badge(app);
@@ -155,6 +168,7 @@ pub fn request_main(app: &AppHandle) -> Result<(), String> {
 }
 
 pub fn hide_main(app: &AppHandle) {
+    crate::window_theme::hidden(app);
     #[cfg(feature = "live")]
     crate::window_layer::hidden(app);
     if let Some(window) = crate::main_window(app) {
@@ -213,6 +227,8 @@ fn reopen(app: &AppHandle) {
         ReopenAction::Restore => {
             if let Some(window) = window {
                 let _ = window.unminimize();
+                // macOS only: no synthetic Alt here (clippy.toml).
+                #[allow(clippy::disallowed_methods)]
                 let _ = window.set_focus();
             }
         }

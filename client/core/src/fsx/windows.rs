@@ -345,6 +345,12 @@ pub(super) fn preload_file(path: &Path, create: bool) -> io::Result<File> {
     file_access(path, create, true)
 }
 
+/// An existing pre-load leaf opened read-only, for its identity alone.
+pub(super) fn preload_stat_file(path: &Path) -> io::Result<File> {
+    filename(path)?;
+    file_access(path, false, false)
+}
+
 // Only for an unpublished CREATE_NEW file whose original DELETE-capable
 // handle we still own. Never select a cleanup target by a later path lookup.
 // https://learn.microsoft.com/windows/win32/api/winbase/ns-winbase-file_disposition_info

@@ -63,6 +63,28 @@ pub(super) fn answer(action: &str, out: &Value, place: usize, caller: &str, dest
         "target" => format!("{it} now goes to any session."),
         "comment" => format!("Added your comment to {it}."),
         "report" if out["moved_to_review"] == true => format!("{it} is In review."),
+        "report" if out["stale"].is_string() => {
+            let why = match out["stale"].as_str() {
+                Some("conflict") => "two executions claim it, and the person resolves that".to_owned(),
+                Some("finished") => "its current execution already reported".to_owned(),
+                Some("other_attempt") => "you named an earlier execution".to_owned(),
+                _ => format!("{} executes it now", session(&task["session"])),
+            };
+            if out["report"] == "progress" {
+                format!(
+                    "{it} is {}; your progress was added to its history, outside its current execution: {why}.",
+                    label(task)
+                )
+            } else {
+                format!(
+                    "{it} is {}; your report was added to its history but cannot move it: {why}.",
+                    label(task)
+                )
+            }
+        }
+        "report" if out["report"] == "progress" => {
+            format!("{it} is {}; your progress was added to its history.", label(task))
+        }
         "report" => {
             let when = match task["cancelled_at"].as_i64() {
                 Some(at) if task["stage"] == "review" => format!(" (cancelled at {})", clock(at)),

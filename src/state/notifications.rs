@@ -432,8 +432,9 @@ fn update(
 }
 
 /// The raw binding only: never read_marks::current, archive reconciliation,
-/// native adoption, approval fitting, input, acknowledgement or lifecycle.
-fn current(name: &str) -> Result<Option<Value>> {
+/// native adoption, approval fitting, input, acknowledgement or lifecycle. A
+/// `--session-id` selection must still be the record's (#1355 review).
+pub(super) fn current(name: &str) -> Result<Option<Value>> {
     if opencode::exists(name) {
         return opencode::binding(name).map(Some);
     }
@@ -455,6 +456,7 @@ fn current(name: &str) -> Result<Option<Value>> {
     {
         return Err("invalid notification session binding".into());
     }
+    session_id::verify(&record)?;
     if !identity(string(&record, "run_id"))
         || string(&record, "run_id").len() > 128
         || !identity(string(&record, "conversation_id"))
@@ -467,7 +469,7 @@ fn current(name: &str) -> Result<Option<Value>> {
         return Ok(None);
     }
     let panes = live()?;
-    if panes.contains_key(name) && !matches(&record, panes.get(name)) {
+    if terminal_live(&panes, &record)? && !matches(&record, panes_of(&panes, &record)) {
         return Ok(None);
     }
     Ok(Some(record))
@@ -526,6 +528,9 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         return Err("notification request exceeds limits".into());
     }
     let request = parse(crate::state::without_bom(&bytes))?;
+    // zerus-ucck P3c: the request's run and conversation select among
+    // sessions that share the label.
+    expect(name, &request.run_id, &request.conversation_id)?;
     let _preference_guard = lock(Some(&root().join("notifications.lock")))?;
     // Same lock files as their writers, without the default lock's rename
     // recovery. An interrupted rename is refused, never completed here.

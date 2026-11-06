@@ -28,7 +28,9 @@ receipts or writer permission.
   Activity/processes use `session: {name, run_id?, conversation_id?}`; tasks use
   `project`; organization has no key. Activity supports nonnegative `after` or
   a tail of at most 100. Processes supports `interval_ms` from 1,000 to 600,000
-  and an explicit `refresh`. Other topics/fields refuse.
+  and an explicit `refresh`. Tasks supports `window`, the first 1 to 200 rows
+  of each stage, carried to the native subscription unchanged (the GUI asks for
+  50). Other topics/fields refuse.
 - `detail_unfollow` removes that lease's `id`. Unknown IDs are harmless. The
   response means local demand was removed, not that native work has drained.
 - `detail_source` takes `computer`, the expected source `generation`, and
@@ -45,7 +47,8 @@ Processes refresh is scheduling on the same target, preserving its native minimu
 read interval. Matching target demand is shared across subscribers. Activity
 sharing uses the earliest requested cursor, or the largest bounded tail; process
 sharing uses the shortest requested interval. Conflicting session identities
-never share one native target.
+never share one native target, and neither do different tasks windows for one
+project (`conflicting_detail_window`).
 
 ## Frames and recovery
 

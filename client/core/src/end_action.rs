@@ -190,7 +190,13 @@ impl Captured {
             return actions::failed(STATE_CHANGED);
         }
         if matches!(&exit, Exit::Code { stdout, .. } if stdout.len() > RECEIPT_LIMIT) {
-            return actions::failed("Invalid acknowledgement. Check the session before retrying.");
+            let detail = "Invalid acknowledgement. Check the session before retrying.";
+            // A clear that answered may have typed /clear (zerus-1wchz).
+            return if matches!(self.action, Action::ClearContext { .. }) {
+                actions::uncertain(detail)
+            } else {
+                actions::failed(detail)
+            };
         }
         if matches!(self.action, Action::ClearContext { .. }) {
             return actions::classify(&self.target, &self.action, inv, exit);

@@ -14,7 +14,7 @@ export const [taskCancellation, setTaskCancellation] = createSignal<Cancellation
 export const canCancel = (task: Task) => task.writable && task.stage === "active" && !!task.dispatchId && task.stageAt > 0 && !!task.executor.machine && !!task.executor.id;
 const executionOf = (t: Task): Execution => ({ dispatch_id: t.dispatchId, stage_at: t.stageAt, machine: t.executor.machine ?? "", session_id: t.executor.id });
 const matches = (t: Task | undefined, execution: Execution): t is Task => !!t && canCancel(t) && t.dispatchId === execution.dispatch_id && t.stageAt === execution.stage_at && t.executor.machine === execution.machine && t.executor.id === execution.session_id;
-const fresh = (project: string, uuid: string) => tasks.project() === project ? tasks.tasks().find((t) => t.uuid === uuid) : undefined;
+const fresh = (project: string, uuid: string) => tasks.project() === project ? tasks.find(uuid) : undefined;
 
 /** Only opening this dialog is reversible; the confirm button owns the write. */
 export function requestTaskCancellation(project: string, task: Task, origin?: HTMLElement) {

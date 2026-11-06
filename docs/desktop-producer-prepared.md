@@ -1,5 +1,15 @@
 # Durable prepared producer fence
 
+**Status: PARKED, 2026-11-04.** The producer modules stay dormant and fenced
+(`#[allow(dead_code)]`); no production caller is planned since the owner
+direction of 2026-11-01 recorded in `zerus-5wmh.66.3.23` (`hgs desktop` owns
+background duties and Zerus Next is UI only; no universal-old-binary proof
+gate). The schema-9 readback stays, and the startup and presence guards keep
+refusing a prepared row (their other checks are active; this branch sees no
+production-created row). Reactivation reopens `zerus-5wmh.66.3.23.18.2` and
+first satisfies the [universal replacement
+policy](desktop-universal-prepared-policy.md).
+
 The internal `src/desktop/producer_prepared.rs` stores negative preparation in
 the existing desktop SQLite owner, schema 9. No production producer/controller
 calls it yet. It neither closes a role nor creates a Frozen, Drained, Complete,

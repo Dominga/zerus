@@ -386,10 +386,12 @@ impl Store {
     }
 }
 
-fn roots(state: &Path) -> [(&'static str, PathBuf); 4] {
+fn roots(state: &Path) -> [(&'static str, PathBuf); 5] {
     [
         ("binding", state.to_owned()),
         ("binding", state.join("bindings")),
+        // The ID layout (zerus-ucck P3a).
+        ("binding", state.join("sessions")),
         ("archive", state.join("archives")),
         ("native", state.join("dsh/bindings")),
     ]
@@ -403,6 +405,8 @@ fn candidate(path: &Path, kind: &str) -> bool {
     };
     if kind == "archive" {
         uuid::Uuid::parse_str(stem).is_ok()
+    } else if path.parent().and_then(|parent| parent.file_name()).is_some_and(|dir| dir == "sessions") {
+        super::super::session_id::canonical(stem)
     } else {
         stem.len() == 64
             && stem

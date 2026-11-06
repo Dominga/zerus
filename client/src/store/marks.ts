@@ -56,17 +56,25 @@ export interface RowMarks {
   attach(rows: RowsPort): void;
 }
 
-type KeyFields = Pick<Session, "computer" | "cmd" | "name" | "created"> & { conversationId?: string };
+type KeyFields = Pick<Session, "computer" | "cmd" | "name" | "created"> & { conversationId?: string; sessionId?: string };
 
 /** The reply key (`FleetState.cpp` replyKey): computer, agent and conversation. */
 export const replyKey = (computer: string, agent: string, conversation: string) => JSON.stringify([computer, agent, conversation]);
 /** The attention key of a row without a conversation: computer, agent, name and `created`. */
-export const fallbackKey = (s: KeyFields) => JSON.stringify([s.computer, s.cmd, s.name, s.created]);
+const nameFallbackKey = (s: KeyFields) => JSON.stringify([s.computer, s.cmd, s.name, s.created]);
+/**
+ * The fallback key of a row that lists a durable session ID is computer, agent
+ * and `id:<ID>` instead (core `marks::session_fallback_key`, zerus-ucck P2c-2b).
+ */
+export const fallbackKey = (s: KeyFields) => (s.sessionId ? JSON.stringify([s.computer, s.cmd, `id:${s.sessionId}`]) : nameFallbackKey(s));
+/** The fallback keys a row's mark may still sit under (core `marks::fallback_keys`). */
+const fallbackKeys = (s: KeyFields) => (s.sessionId ? [fallbackKey(s), nameFallbackKey(s)] : [nameFallbackKey(s)]);
 /** The attention key: the reply key, or the fallback key without a conversation. */
 export const attentionKey = (s: KeyFields) => (s.conversationId ? replyKey(s.computer, s.cmd, s.conversationId) : fallbackKey(s));
 const replyKeyOf = (s: KeyFields) => replyKey(s.computer, s.cmd, s.conversationId ?? "");
-/** The pending marks are kept per computer and session name, as the Rust `ReadMarks`. */
-const pendingKey = (computer: string, name: string) => JSON.stringify([computer, name]);
+/** The pending marks are kept per computer and session ID, or session name without one, as the Rust `ReadMarks`. */
+const pendingKey = (computer: string, name: string, sessionId?: string | null) =>
+  JSON.stringify([computer, sessionId ? `id:${sessionId}` : name]);
 
 /** ReadMark::merged: a newer mark of the same run and conversation keeps the part it does not set. */
 function merged(old: ReadMark | undefined, next: ReadMark): ReadMark {
@@ -160,7 +168,8 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
   let marks = new Map<string, Mark>();
   let replies = new Map<string, string>();
   let pending = new Map<string, ReadMark>();
-  let loaded = false;
+  let loaded = false, localRevision = 0;
+  let lastLocalWrite: Promise<void> = Promise.resolve();
   /**
    * Changes made before the stored marks arrived, applied over them and sent
    * with the load: a mark as the fields it sets, so an early Mark needs
@@ -221,9 +230,10 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     if (marks.size) {
       const key = attentionKey(s);
       mark = marks.get(key);
-      if (s.conversationId) {
-        const fallback = fallbackKey(s);
-        if (marks.has(fallback)) { moves.set(fallback, key); mark ??= marks.get(fallback); }
+      // A mark under a fallback key moves to the current key: the
+      // conversation's, or the session ID's fallback from the name's.
+      for (const fallback of fallbackKeys(s)) {
+        if (fallback !== key && marks.has(fallback)) { moves.set(fallback, key); mark ??= marks.get(fallback); }
       }
     }
     const reviewLater = s.state !== "archived" && !!mark?.review;
@@ -237,7 +247,7 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
       unreadReply = current && (!replies.size || replies.get(replyKeyOf(s)) !== reply);
       ack = localAck;
     } else {
-      const queued = pending.size ? pending.get(pendingKey(s.computer, s.name)) : undefined;
+      const queued = pending.size ? queuedFor(s.computer, s.name, s.sessionId, s.runId, s.conversationId) : undefined;
       const sameRun = !!queued?.run_id && queued.run_id === (s.runId ?? "") && queued.conversation_id === (s.conversationId ?? "");
       unreadReply = current && !(s.localReadReply || (s.readReplyId ?? "") === reply || (sameRun && (queued!.reply_id ?? "") === reply));
       const signature = s.attentionSignature ?? "";
@@ -357,13 +367,47 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
       reply_id: reply && (s.readReplyId ?? "") !== (s.replyId ?? "") ? s.replyId || null : null,
       attention_signature: attention && (s.readAttentionSignature ?? "") !== (s.attentionSignature ?? "") ? s.attentionSignature || null : null,
     };
-    enqueue(mark, fresh, c);
+    enqueue(mark, fresh, c, s.sessionId);
   }
 
-  function enqueue(mark: ReadMark, fresh: ReadMark[], c: Change) {
+  /**
+   * The pending mark of a row: under its session ID, or one its session left
+   * under the name before the ID was known (core `ReadMarks::found`).
+   */
+  function queuedKey(computer: string, name: string, sessionId?: string | null, run?: string | null, conversation?: string | null): string | undefined {
+    const byId = sessionId ? pendingKey(computer, name, sessionId) : undefined;
+    if (byId && pending.has(byId)) return byId;
+    const named = pendingKey(computer, name);
+    if (pending.has(named)) return named;
+    if (sessionId) return undefined;
+    // A row that lists no ID (a peer whose hgs was downgraded) also finds a
+    // mark queued under an ID for the same name, run and conversation.
+    for (const [key, m] of pending) {
+      if (m.computer === computer && m.name === name && m.run_id === (run ?? "") && m.conversation_id === (conversation ?? "")
+        && (JSON.parse(key) as string[])[1]?.startsWith("id:")) return key;
+    }
+    return undefined;
+  }
+  const queuedFor = (computer: string, name: string, sessionId?: string | null, run?: string | null, conversation?: string | null) => {
+    const key = queuedKey(computer, name, sessionId, run, conversation);
+    return key === undefined ? undefined : pending.get(key);
+  };
+
+  /**
+   * Queues `mark` in the mirror under its row's session ID, as the Rust queue
+   * does from its own listing; the mark sent to Rust carries no ID.
+   */
+  function enqueue(mark: ReadMark, fresh: ReadMark[], c: Change, sessionId?: string) {
     if (!mark.reply_id && !mark.attention_signature) return;
-    const key = pendingKey(mark.computer, mark.name);
-    const next = merged(pending.get(key), mark);
+    const key = pendingKey(mark.computer, mark.name, sessionId);
+    // A mark with the ID takes along the one its session left under the name.
+    const named = sessionId ? pendingKey(mark.computer, mark.name) : key;
+    // As the Rust queue: a mark under the ID merges there, and only without
+    // one does the name's mark move to the ID.
+    const byId = pending.get(key);
+    const old = byId ?? pending.get(named);
+    if (!byId && named !== key) pending.delete(named);
+    const next = merged(old, mark);
     pending.set(key, next);
     fresh.push(next);
     c.names.add(pair(mark.computer, mark.name));
@@ -375,7 +419,7 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     const next = new Map<string, ReadMark>();
     for (const m of list as ReadMark[]) {
       if (!m || typeof m.name !== "string" || typeof m.computer !== "string") continue;
-      next.set(pendingKey(m.computer, m.name), {
+      next.set(pendingKey(m.computer, m.name, m.session_id), {
         computer: m.computer, name: m.name, run_id: m.run_id ?? "", conversation_id: m.conversation_id ?? "",
         reply_id: m.reply_id || null, attention_signature: m.attention_signature || null,
       });
@@ -409,6 +453,7 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
 
   function save(c: Change) {
     if (!c.saved) return;
+    localRevision++;
     if (!loaded) {
       for (const [key, mark] of Object.entries(c.marks)) {
         const before = early.marks.get(key);
@@ -422,7 +467,7 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     // The Rust side writes one update's entries in key order; so does this copy.
     newestInKeyOrder(marks, Object.keys(c.marks));
     newestInKeyOrder(replies, Object.keys(c.replies));
-    port.updateAttentionMarks(c.marks, c.replies).catch((error) => console.warn("Zerus Next: saving attention marks failed", error));
+    lastLocalWrite = port.updateAttentionMarks(c.marks, c.replies).catch((error) => console.warn("Zerus Next: saving attention marks failed", error));
   }
 
   function commit(c: Change, fresh: ReadMark[] = []) {
@@ -500,16 +545,57 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     return { review: mark.review === true, acknowledged: typeof mark.acknowledged === "string" ? mark.acknowledged : "" };
   }
 
+  function storedMaps(stored: AttentionSnapshot | undefined): [Map<string, Mark>, Map<string, string>] {
+    return [
+      inWriteOrder(stored?.marks, stored?.order?.marks, (value) => value && typeof value === "object"
+        ? { review: (value as Mark).review === true, acknowledged: typeof (value as Mark).acknowledged === "string" ? (value as Mark).acknowledged : "" }
+        : undefined),
+      inWriteOrder(stored?.replies, stored?.order?.replies, (value) => (typeof value === "string" ? value : undefined)),
+    ];
+  }
+  let loading: Promise<void> | undefined;
+  function load(): Promise<void> {
+    if (loading) return loading;
+    const work = loadOriginal();
+    loading = work;
+    void work.finally(() => { if (loading === work) loading = undefined; }).catch(() => {});
+    return work;
+  }
+  let reloadFlight: Promise<void> | undefined, reloadAgain = false;
+  function reloadLocal(): Promise<void> {
+    reloadAgain = true;
+    if (reloadFlight) return reloadFlight;
+    const work = (async () => {
+      do {
+        reloadAgain = false;
+        // The first request may have observed paused/loading. Finish its
+        // flight, then read the real model; at most one reload is pending.
+        if (loading) await loading;
+        await lastLocalWrite;
+        const before = localRevision;
+        let stored: AttentionSnapshot | undefined;
+        try { stored = await port.attentionMarks(); } catch { stored = undefined; }
+        if (!stored) return;
+        // A current user action wins over an older snapshot. Coalesce another
+        // read, without repeating that action or creating a write queue.
+        if (before !== localRevision) { reloadAgain = true; continue; }
+        [marks, replies] = storedMaps(stored);
+        const c = change(); cap(marks, c); cap(replies, c); c.all = true;
+        bump(); refresh(c);
+        // Deliberately no save, fallback move, migration or shared-read send.
+      } while (reloadAgain);
+    })();
+    reloadFlight = work;
+    void work.finally(() => { if (reloadFlight === work) reloadFlight = undefined; }).catch(() => {});
+    return work;
+  }
   /** Loads the stored marks and the pending read marks; changes made meanwhile win and are saved then. */
-  async function load() {
+  async function loadOriginal() {
     const pendingLoad = loadPending();
     let stored: AttentionSnapshot | undefined;
     try { stored = await port.attentionMarks(); } catch { stored = undefined; }
     const c = change();
-    const nextMarks = inWriteOrder(stored?.marks, stored?.order?.marks, (value) => value && typeof value === "object"
-      ? { review: (value as Mark).review === true, acknowledged: typeof (value as Mark).acknowledged === "string" ? (value as Mark).acknowledged : "" }
-      : undefined);
-    const nextReplies = inWriteOrder(stored?.replies, stored?.order?.replies, (value) => (typeof value === "string" ? value : undefined));
+    const [nextMarks, nextReplies] = storedMaps(stored);
     // As Rust's update: the value an entry holds already is no change and keeps its place.
     const delta = change();
     for (const [key, fields] of early.marks) {
@@ -565,15 +651,30 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     const fresh: ReadMark[] = [];
     if (pending.size) {
       for (const u of b.replaces.length ? [...b.upserts, ...b.replaces.flatMap((r) => r.rows)] : b.upserts) {
-        const key = pendingKey(u.computer, u.row.name);
-        const mark = pending.get(key);
-        if (mark && settled(mark, u.row)) { pending.delete(key); c.names.add(pair(u.computer, u.row.name)); }
+        const key = queuedKey(u.computer, u.row.name, u.row.session_id, u.row.run_id, u.row.conversation_id);
+        let mark = key === undefined ? undefined : pending.get(key);
+        // A mark found by its session ID under another label takes the row's
+        // label, which Rust's queue then delivers (core ReadMarks::settle).
+        if (mark && u.row.session_id && mark.name !== u.row.name && (JSON.parse(key!) as string[])[1]?.startsWith("id:")) {
+          c.names.add(pair(u.computer, mark.name));
+          mark = { ...mark, name: u.row.name };
+          pending.set(key!, mark);
+          c.names.add(pair(u.computer, u.row.name));
+        }
+        if (mark && settled(mark, u.row)) { pending.delete(key!); c.names.add(pair(u.computer, u.row.name)); }
       }
       // An empty replace is not a listing: a stopped stream sends one.
       for (const r of b.replaces) {
         if (!r.rows.length) continue;
         const names = new Set(r.rows.map((u) => u.row.name));
-        for (const [key, mark] of pending) if (mark.computer === r.computer && !names.has(mark.name)) { pending.delete(key); c.names.add(pair(r.computer, mark.name)); }
+        const ids = new Set(r.rows.flatMap((u) => (u.row.session_id ? [u.row.session_id] : [])));
+        // A mark queued under a session ID stays while that ID is listed, whatever its label is now.
+        const listedMark = (key: string, m: ReadMark) => {
+          const part = (JSON.parse(key) as string[])[1] ?? "";
+          // A listing without IDs (a downgraded peer) keeps an ID mark by its name.
+          return part.startsWith("id:") ? ids.has(part.slice(3)) || (!ids.size && names.has(m.name)) : names.has(m.name);
+        };
+        for (const [key, mark] of pending) if (mark.computer === r.computer && !listedMark(key, mark)) { pending.delete(key); c.names.add(pair(r.computer, mark.name)); }
       }
     }
     if (overrides.size) {
@@ -818,6 +919,7 @@ export function createMarks(port: MarksPort = bridgePort, storage: MigratedStora
     overlay,
     attach(rows: RowsPort) { target = rows; },
     load,
+    reloadLocal,
     loadPending,
     observe,
     markRead,
@@ -849,3 +951,4 @@ export const { overlay, markReadUnavailable, markRead, markReplyRead, markNeedsA
 /** Hands a batch the catalog just applied to the marks (session.ts). */
 export const observeMarks = marks.observe;
 void marks.load();
+desktopService.onLocalReadReady(() => { void marks.reloadLocal().catch(() => {}); });

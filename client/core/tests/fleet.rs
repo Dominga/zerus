@@ -200,7 +200,8 @@ fn an_offline_legacy_refresh_still_works_after_a_periodic_capability_probe() {
 fn a_scheduled_legacy_listing_in_flight_coalesces_refresh_without_an_extra_read() {
     let fake = FakeHgs::new(
         "fleet_refresh_legacy_pending",
-        json!({"": {"marker": false}}),
+        json!({"": {"marker": false,
+            "listing_wait_file": "release-listing", "listing_wait_after": 1}}),
     );
     let (tx, rx) = channel();
     let mut seen = Seen::new(rx);
@@ -211,19 +212,20 @@ fn a_scheduled_legacy_listing_in_flight_coalesces_refresh_without_an_extra_read(
     seen.until("offline listing", |c| {
         is_status(c, "", ComputerStatus::Reconnecting { attempt: 1 })
     });
-    let config_path = fake.dir.join("config.json");
-    let mut config: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
-    config["hosts"][""]["listing_wait_file"] = json!("release-listing");
-    std::fs::write(config_path, config.to_string()).unwrap();
+    // An invocation log precedes the read and is not a barrier witness. The
+    // child acknowledges the barrier from the config installed before start.
+    eventually("scheduled listing reached its barrier", || {
+        fake.log()
+            .iter()
+            .any(|entry| entry["listing_wait"] == "release-listing")
+    });
+    let reads = fake.runs("", &["ls", "--json"]).len();
+    let probes = fake.runs("", &["-h"]).len();
     std::fs::write(
         fake.dir.join("ls-local.json"),
         json!({"sessions": []}).to_string(),
     )
     .unwrap();
-    eventually("normal listing is in flight", || {
-        fake.runs("", &["ls", "--json"]).len() == 2
-    });
     let redundant = (0..100)
         .filter(|_| fleet.reconnect(&ComputerId::local()))
         .count();
@@ -232,10 +234,12 @@ fn a_scheduled_legacy_listing_in_flight_coalesces_refresh_without_an_extra_read(
         is_status(c, "", ComputerStatus::Polled)
     });
     assert_eq!(redundant, 0, "the scheduled read already owns the retry");
-    seen.drain_for(Duration::from_millis(100));
-    assert_eq!(fake.runs("", &["ls", "--json"]).len(), 2);
-    assert_eq!(fake.runs("", &["-h"]).len(), 1);
+    // Stop at the observed recovery, before another normal polling interval
+    // can be mistaken for a redundant Refresh read on a descheduled runner.
     fleet.stop();
+    assert_eq!(reads, 2, "one failed read and its scheduled retry");
+    assert_eq!(fake.runs("", &["ls", "--json"]).len(), reads);
+    assert_eq!(fake.runs("", &["-h"]).len(), probes);
 }
 
 #[test]
@@ -256,7 +260,8 @@ fn a_local_fleet_starts_no_peer_streams() {
     // The listed peers are known even without their streams.
     assert_eq!(fleet.peers(), Some(["alpha".to_owned()].into()));
     fleet.stop();
-    assert_eq!(fake.hosts_started(), vec![String::new(), String::new()]);
+    assert!(fake.hosts_started().iter().all(String::is_empty));
+    assert_eq!(fake.runs("", &["watch", "--json"]).len(), 1);
 }
 
 #[test]

@@ -349,6 +349,7 @@ mod windows {
                 "cannot start the session host: {error}"
             )))
         };
+        crate::self_exec::ensure().map_err(|error| failed(&error))?;
         let mut environment = Environment::current_with_optional_hint_controls()
             .map_err(|e| failed(&e))?;
         let state = state_dir

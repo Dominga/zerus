@@ -1,0 +1,13 @@
+--- a/gdk/gdkframeclockidle.c
++++ b/gdk/gdkframeclockidle.c
+@@ -596,6 +596,10 @@
+                   priv->requested &= ~GDK_FRAME_CLOCK_PHASE_PAINT;
+                   _gdk_frame_clock_emit_paint (clock);
+                 }
++              /* A backend can freeze while painting, before the after-paint
++               * phase. Resume after the completed paint on thaw; repeating
++               * paint can starve layout when every frame requests another. */
++              priv->phase = GDK_FRAME_CLOCK_PHASE_AFTER_PAINT;
+             }
+           /* fallthrough */
+         case GDK_FRAME_CLOCK_PHASE_AFTER_PAINT:

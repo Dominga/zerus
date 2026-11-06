@@ -2128,6 +2128,39 @@ one inbox item and `member_crashed`; pausing the team stops restarts, a member
 the team paused is never restarted, and a launch that fails records
 `restart_failed`.
 
+### A stalled lead tells the owner
+
+When the lead's decisions (a member's report, question or permission) have
+waited longer than `Settings.lead_stall_minutes` (20 by default, 0 turns it
+off, at most 1440; only the owner changes it) and the lead's session does not
+work on them, the dispatcher records `team.lead_stall`. A lead that is in a
+turn, runs a Zerus build or waits for its own Background jobs works; one that
+is idle, has its own question or permission open, ended its turn on a refused
+tool call (the listing's `interrupted` phase) or whose agent exited does not.
+A computer that did not answer the listing decides nothing.
+
+The record names the reason (`idle`, `question` with the question's title,
+`rejected_tool`, `exited`), the decisions waiting past the threshold and the
+members they block, the oldest one's time and a notification `round`. The owner
+sees it as the attention item `lead_stalled` (in status and the team list; it
+covers `lead_stopped`), as the Waiting-for-you item
+`<team>/lead_stalled/<lead role>-<round>` (action `resume_lead` for an exited
+agent, otherwise `open_lead`), on the team bar of both desktops, and on the
+phone: the lead's `hgs ls --json` row carries one `mobile_attention` item
+`{"question_id":"team-lead-stall:<team>:<round>","question_hash",
+"kind":"team_lead_stall","team","team_name","items","members","reason","round",
+"since"}`, never the question's text, and the lead's `state_reason` is
+`team_lead_stalled` ("Waiting for you: the lead stalled, ..."). A row whose own
+question already has an `attention_signature` mixes the alert into it; a null
+signature stays null. The mobile connector keeps the row's `team_lead_stall`
+items when it adds its own question cards.
+
+Desktops notify a waiting id once, so each round is one notification; a new
+round starts at most once an hour while the lead stays stalled. The record
+clears as soon as the lead works again, the decisions are taken or fall back
+under the threshold, the team stops running, or the setting is 0. The feed
+records `lead_stalled` (raised or a new round) and `lead_stall_cleared`.
+
 ### The profile of the work: losses, spans and unknown
 
 `hgs team profile` reads a scope after the work: where its time and tokens

@@ -182,6 +182,7 @@ private slots:
     void waitingBannerAnswersInPlaceAndWithdrawsTheNotice();
     void aWaitingReadThatChangesNothingRedrawsNothing();
     void aPhaseIsAcceptedOrSentBackFromWaitingForYou();
+    void aStalledLeadShowsOnTheTeamBarAndNotifiesEachRound();
 };
 
 // N32 of #499: Zerus started in the tray has no Sessions window, yet a team's
@@ -2477,6 +2478,60 @@ void TestTeamsUiWaiting::waitingToolOffersAreAnsweredInPlace()
     QCOMPARE(sent["allow"].toBool(), true);
     QVERIFY(!sent.contains("reason"));
     QTRY_COMPARE(answered, (QStringList{"tools/a1", "tools/b2"}));
+}
+
+// Task 95: the lead stalled while its decisions wait. The team bar says so
+// and opens the lead's session; the owner is notified once per round, by one
+// notice, never by both lists.
+void TestTeamsUiWaiting::aStalledLeadShowsOnTheTeamBarAndNotifiesEachRound()
+{
+    auto team = phasedTeam();
+    const auto stall = [](int round) {
+        return QJsonObject{{"kind", "lead_stalled"}, {"member", "Architect"}, {"member_id", "lead"}, {"since", 1792866600.0},
+                           {"minutes", 42}, {"reason", "rejected_tool"}, {"items", 3}, {"members", 2}, {"round", round},
+                           {"summary", "The lead stalled (a refused tool call ended its turn): 3 decisions wait for it, the oldest 42 min, 2 members blocked"}};
+    };
+    team["attention"] = QJsonArray{stall(1)};
+    setTeam(team);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    QStringList opened;
+    workspace.openSession = [&opened](const QString &host, const QString &session) { opened << host + QLatin1Char('|') + session; };
+    workspace.resize(1300, 900); workspace.show();
+    controller.refresh(); workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamHeaderLeadStalled"));
+    auto *bar = workspace.findChild<QPushButton *>("teamHeaderLeadStalled");
+    QCOMPARE(bar->text(), QStringLiteral("Lead stalled: 3 decisions wait"));
+    QVERIFY(bar->toolTip().contains(QStringLiteral("a refused tool call ended its turn")));
+    bar->click();
+    QCOMPARE(opened, QStringList{QStringLiteral("|claude/checkout/lead")});
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamAttentionOpenLead"));
+    workspace.findChild<QPushButton *>("teamAttentionOpenLead")->click();
+    QCOMPARE(opened.size(), 2);
+    shot(&workspace, "task95-lead-stalled");
+
+    // One notice per round: the same round again raises nothing, the next one does.
+    TeamAttentionNotices notices;
+    const auto first = notices.observe({Teams::parse(team)});
+    QCOMPARE(first.raised.size(), 1);
+    QVERIFY(first.raised[0].body.startsWith(QStringLiteral("The lead stalled")));
+    QVERIFY(notices.observe({Teams::parse(team)}).raised.isEmpty());
+    auto next = team; next["attention"] = QJsonArray{stall(2)};
+    const auto second = notices.observe({Teams::parse(next)});
+    QCOMPARE(second.raised.size(), 1); QCOMPARE(second.cleared.size(), 1);
+    // Waiting for you lists the same round: the team's notice covers it.
+    const TeamWaitingNotices::Item waiting{QStringLiteral("team-1/lead_stalled/Architect-2"), QStringLiteral("team-1"),
+                                           QStringLiteral("Checkout redesign"), QStringLiteral("lead_stalled"), QStringLiteral("The lead stalled")};
+    QVERIFY(TeamWaitingNotices::covered({Teams::parse(next)}, waiting));
+    QVERIFY(!TeamWaitingNotices::covered({Teams::parse(team)}, waiting));
+    QCOMPARE(TeamWaitingPage::kindLabel(QStringLiteral("lead_stalled")), QStringLiteral("Lead stalled"));
+    // The lead moved: the bar clears.
+    team["attention"] = QJsonArray{};
+    setTeam(team);
+    QTRY_VERIFY(([&] { controller.refresh(); return !workspace.findChild<QPushButton *>("teamHeaderLeadStalled"); })());
 }
 
 QTEST_MAIN(TestTeamsUiWaiting)

@@ -362,6 +362,8 @@ export interface Details {
   /** Null when the inspection does not report it. */
   terminal_supported?: boolean | null;
   terminal_attach_supported?: boolean | null;
+  /** Task 75: this computer's refused private stores, with their fix. */
+  private_stores?: { path: string; reason: string; fix: string }[];
 }
 
 /** A read mark whose delivery is still pending (client/core `readmarks.rs`). */
@@ -878,6 +880,14 @@ export interface UpdatesView {
   version: string;
   /** A source or unknown dev-app installation shows status in Settings only. */
   quiet: boolean;
+  /** WhiteWh fork, task #63: the fork's own update channel; absent outside a fork build. */
+  fork?: ForkUpdatesView | null;
+}
+
+/** WhiteWh fork, task #63: the fork channel (core `fork_update::ForkView`). */
+export interface ForkUpdatesView {
+  supported: boolean; automatic: boolean; repository: string; installed_build: number; running_commit: string;
+  status: Text; busy: boolean; offered_build: number; offered_commit: string; ready_build: number; installing: boolean;
 }
 
 export const emptyUpdatesView = (): UpdatesView => ({

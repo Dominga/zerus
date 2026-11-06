@@ -208,7 +208,11 @@ function TeamBar(props: {
       <button type="button" class="btn ghost small" onClick={props.onCatalog}>{tr("Catalog")}</button>
       <Show when={props.team.created > 0}><span class="dim team-age" title={tr("Since the team was created")}>{duration(now() - props.team.created)}</span></Show>
       <span class="grow" />
-      <TeamBarChips team={props.team} onPhase={props.onPhase} onFinish={() => setFinishOpen(true)} />
+      <TeamBarChips team={props.team} onPhase={props.onPhase} onFinish={() => setFinishOpen(true)} onLead={() => {
+        // Task 95: the lead's session shows what it waits on.
+        const lead = props.team.members.find((member) => member.lead);
+        if (lead) openRow(memberRow(props.computer, lead));
+      }} />
       <Show when={props.state === "planning"}><span class="team-note">{tr("The plan waits for your approval")}</span></Show>
       <Show when={props.state === "done"}><span class="team-note done"><Icon name="check" size={13} />{tr("All tasks are decided")}</span></Show>
       <Show when={props.team.status === "planning"}>

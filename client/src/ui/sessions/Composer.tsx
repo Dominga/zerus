@@ -15,6 +15,7 @@ import { actionEntries } from "./ActionDialogs";
 import { snapshotOf } from "./actions-ui";
 import { markReadChip, runMarkRead } from "./mark-entries";
 import { ModelSettingsButton } from "./ModelSettings";
+import { AccountSwitchChip } from "./AccountSwitchChip";
 import { AttachmentsChip } from "./Attachments";
 import { RecoveryChip } from "./RecoveryChip";
 import { SessionUsageChip, UsageLimitChip } from "./UsageChips";
@@ -331,6 +332,7 @@ export function Composer() {
             onClick={() => { void composer.allowRetry(); editor.focus(); }}><Icon name="refresh-cw" size={13} />{tr("Allow retry")}</button>
         </Show>
         <Show when={!child()}><ModelSettingsButton /></Show>
+        <Show when={!child()}><AccountSwitchChip session={s()} compact={compact()} /></Show>
         <Show when={!child() && act().stop.shown}>
           <button type="button" class="btn" aria-label={tr("Stop current turn")} title={act().stop.hint ?? USUAL_STOP()} disabled={act().stop.disabled}
             onClick={() => { stopTurn(); }}><Icon name="square" size={12} />{tr("Stop")}</button>

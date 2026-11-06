@@ -312,3 +312,12 @@
   :root[data-agent-mark="glyph"] .agent-badge .ab-label { display: none; }
 }
 
+.acct-switch { position: relative; display: inline-flex; }
+.acct-switch-pop { position: absolute; z-index: 40; bottom: calc(100% + 6px); left: 0; min-width: 220px; max-width: 320px; padding: 4px; border: 1px solid var(--z-color-card-border); border-radius: var(--z-radius-md); background: var(--z-color-raised); box-shadow: var(--z-shadow); }
+.acct-switch-row { display: flex; align-items: center; gap: 6px; width: 100%; padding: 6px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--z-color-text); font: inherit; text-align: left; cursor: pointer; }
+.acct-switch-row:hover:not(:disabled) { background: var(--z-color-hover); }
+.acct-switch-row:disabled { cursor: default; }
+.acct-switch-empty { display: block; padding: 8px; }
+.acct-switch-notice { margin: 4px; padding: 6px 8px; color: var(--z-color-text-2); font-size: var(--fs-xs); }
+.tchip.locked { opacity: .6; cursor: not-allowed; }
+.acct-switch-row:disabled { cursor: default; }

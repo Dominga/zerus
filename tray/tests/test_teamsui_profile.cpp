@@ -1009,7 +1009,8 @@ void TestTeamsUiProfile::timelineKindsAreDistinctAndBuildsNeverHideTitles()
     const auto labels = view.findChildren<QLabel *>("teamProfileLegendLabel");
     QCOMPARE(labels.size(), TeamProfile::kindStyles().size());
     for (auto *label : labels) {
-        QVERIFY2(label->isVisible() && label->width() >= label->fontMetrics().horizontalAdvance(label->text()), qPrintable(label->text()));
+        // The legend's flow layout places its items on the first layout pass: wait for it.
+        QTRY_VERIFY2(label->isVisible() && label->width() >= label->fontMetrics().horizontalAdvance(label->text()), qPrintable(label->text()));
         QVERIFY(!label->text().endsWith(QChar(0x2026)));
     }
     for (const auto &key : {QStringLiteral("member"), QStringLiteral("deps"), QStringLiteral("folder_held"), QStringLiteral("hold"), QStringLiteral("stage_wait")}) {

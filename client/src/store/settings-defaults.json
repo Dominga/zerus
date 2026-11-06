@@ -11,6 +11,7 @@
   "client/windowGeometry": "",
   "downloads/cacheBytes": 0,
   "downloads/folder": "",
+  "extensions/socraticode": true,
   "notifications/optionalQuestions": false,
   "processes/activeSeconds": 2.5,
   "processes/backgroundSeconds": 30.0,
@@ -18,6 +19,7 @@
   "processes/loadingSeconds": 0.5,
   "processes/unknownSeconds": 10.0,
   "recovery/sharedPolicy": "",
+  "socraticode/nativeQdrant": false,
   "speech/host": "",
   "speech/machine_id": "",
   "speech/manage_host": "",
@@ -51,8 +53,10 @@
   "workspace/projectFolderSplit": 230,
   "workspace/reduceMotion": false,
   "workspace/removeWorktreeAfterTermination": false,
+  "workspace/sessionLeads": "",
   "workspace/sessionsWidth": 310,
   "workspace/showCompletedSubagents": false,
+  "workspace/skin": "zerus",
   "workspace/theme": "system",
   "workspace/usageIndicator": "rails"
 }

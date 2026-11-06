@@ -82,7 +82,9 @@ struct AppConfig {
     static bool writeConfigValue(const QString &key, const QString &value, QString *error);
     // The hgs executable on Windows: a configured name or path as given (a bare
     // name looked up in PATH), otherwise hgs.exe next to hgs-tray.exe (the
-    // portable zip), otherwise hgs.exe in PATH. Absolute where it was found, so the
+    // portable zip), otherwise, for the WhiteWh fork's Qt fallback
+    // (qt\zerus-qt.exe in a Tauri zip, task #65), the hgs.exe of the build
+    // folder above it, otherwise hgs.exe in PATH. Absolute where it was found, so the
     // tray, its terminals and copied commands all name the same file.
     static QString resolveHgsPath(const QString &configured, const QString &applicationDir);
     // The hgs a Windows GUI runs from its start (spec D2). status is the answer of

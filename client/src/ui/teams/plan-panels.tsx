@@ -135,6 +135,9 @@ function Card(props: { placed: PlacedNode; heat?: TaskHeat | null; onOpen?: (id:
         <span>{task().status || tr("pending")}</span>
         <Show when={task().assignee}><span>{task().assignee}</span></Show>
       </span>
+      <Show when={props.placed.task?.origin || props.placed.node.origin}>
+        {(origin) => <span class="pm-origin">{tr("Spawned from #%1", origin())}</span>}
+      </Show>
       <HeatLine heat={props.heat} />
       <Show when={stageChips(props.placed.task?.pipeline_run).length > 0}>
         <span class="pm-stages">

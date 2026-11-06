@@ -53,6 +53,12 @@ QMap<int, int> computeLayers(const Team &team)
 }
 }
 
+const Team::Attention *Team::leadStall() const
+{
+    for (const auto &item : attention) if (item.kind == QLatin1String("lead_stalled")) return &item;
+    return nullptr;
+}
+
 const Member *Team::member(const QString &id) const
 {
     for (const auto &m : members) if (m.id == id) return &m;
@@ -972,6 +978,8 @@ Team parse(const QJsonObject &v)
         attention.minutes = entry.value("minutes").toInt();
         attention.summary = str(entry, "summary"); attention.command = str(entry, "command");
         attention.phase = entry.value("phase").toInt(); attention.count = entry.value("count").toInt();
+        attention.reason = str(entry, "reason"); attention.items = entry.value("items").toInt();
+        attention.members = entry.value("members").toInt(); attention.round = entry.value("round").toInt();
         team.attention.append(attention);
     }
     // F13: the plan's approval records the owner's sentence.

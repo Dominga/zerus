@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ProposalCards, WaitingAnswer, WaitingNotices, acceptanceSummary, act, noticeToken, proposalCards, proposalKindLabel, toolOffer,
-  waitingActionLabel, waitingAge, waitingCount, waitingKindLabel, approves, opensCard, type DecisionPort, type QuestionChoice,
+  waitingActionLabel, waitingAge, waitingCount, waitingKindIcon, waitingKindLabel, approves, opensCard, type DecisionPort, type QuestionChoice,
 } from "./decisions";
 import { choiceButtons, confirmButtons, createConfirmer } from "../../store/teamConfirm";
 import type { TeamCall, TeamConfirmation, TeamMemberView, TeamProposalView, TeamTaskView, TeamView, TeamWaitingItem } from "../../types";
@@ -402,6 +402,15 @@ describe("Waiting for you", () => {
     expect(f.sent).toHaveLength(1);
     expect(f.sent[0].action).toEqual({ kind: "add_to_phase", phase: 1, confirm: "add-1", decline: true });
     expect(answered).toEqual(["team-1/owner_word_asked/addition-add-1"]);
+  });
+
+  it("names a stalled lead and only opens its team (task 95)", () => {
+    const stalled = item("Lead", "lead_stalled", "open_lead", "The lead stalled (it is idle): 3 decisions wait for it", NOW - 60, { round: 2 });
+    expect(waitingKindLabel(stalled)).toBe("Lead stalled");
+    expect(waitingKindIcon("lead_stalled")).toBe("triangle-alert");
+    expect(opensCard(stalled.action)).toBe(false);
+    expect(waitingActionLabel(stalled.action)).toBe("Open team");
+    expect(waitingActionLabel("resume_lead")).toBe("Open team");
   });
 
   it("aPhaseIsAcceptedOrSentBackFromWaitingForYou: Send back wants a comment, Accept phase, and a phase accepted meanwhile sends nothing", async () => {

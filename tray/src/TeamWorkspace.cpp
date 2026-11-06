@@ -311,8 +311,10 @@ void TeamWorkspace::setTheme(bool dark)
         "QPushButton[link=\"plan\"]{background:%1;color:%2;border:1px solid %3;border-radius:6px;padding:0 7px;font-size:11px;min-height:17px;max-height:17px;}"
         "QPushButton[link=\"plan\"]:hover{background:%4;}"
         "QPushButton[link=\"accent\"]{background:%5;color:%6;border:1px solid transparent;border-radius:6px;padding:0 7px;font-size:11px;min-height:17px;max-height:17px;}"
-        "QPushButton[link=\"accent\"]:hover{background:%7;}")
-        .arg(a(c.folder, .13), c.folder.name(), a(c.folder, .6), a(c.folder, .22), a(c.accent, .10), c.accent.name(), a(c.accent, .18)));
+        "QPushButton[link=\"accent\"]:hover{background:%7;}"
+        "QPushButton[link=\"warn\"]{background:%8;color:%9;border:1px solid transparent;border-radius:6px;padding:0 7px;font-size:11px;min-height:17px;max-height:17px;}")
+        .arg(a(c.folder, .13), c.folder.name(), a(c.folder, .6), a(c.folder, .22), a(c.accent, .10), c.accent.name(), a(c.accent, .18))
+        .arg(a(c.warn, .14), c.warn.name()));
     m_headerStrip->setStyleSheet(QStringLiteral("QFrame#teamWorkspaceHeader{border-bottom:1px solid %1;}").arg(c.border.name()));
     m_conversation->setTheme(dark);
     m_proposalCards->setDark(dark);
@@ -890,6 +892,18 @@ QWidget *TeamWorkspace::headerStatusContent(const Team &team, const QString &sta
         auto *phases = new MiniProgress(c, tr("Phases"), progress.phasesDone, progress.phasesTotal, c.accentMuted, 72);
         phases->setObjectName("teamHeaderPhases"); phases->setToolTip(tr("Done / all phases"));
         row->add(phases, 8);
+    }
+    // Task 95: the lead stalled while its decisions wait: the team bar says
+    // so first, and opens the lead's session (Waiting for you lists it too).
+    if (const auto *stall = team.leadStall()) {
+        const bool exited = stall->reason == QLatin1String("exited");
+        const QString text = stall->items == 1 ? (exited ? tr("Lead stopped: 1 decision waits") : tr("Lead stalled: 1 decision waits"))
+                                               : (exited ? tr("Lead stopped: %1 decisions wait") : tr("Lead stalled: %1 decisions wait")).arg(stall->items);
+        auto *stalled = button(text, "teamHeaderLeadStalled");
+        stalled->setProperty("link", "warn"); stalled->setProperty("reason", stall->reason);
+        stalled->setToolTip(stall->summary);
+        QObject::connect(stalled, &QPushButton::clicked, this, [this, id = team.id] { openLead(id); });
+        row->add(stalled, 1);
     }
     if (const auto found = problems(team, live); !found.isEmpty()) {
         auto *count = small(label(found.size() == 1 ? tr("1 problem") : tr("%1 problems").arg(found.size()), c.warn, 11, false, "teamHeaderProblems"), c.warn);
@@ -1608,6 +1622,12 @@ void TeamWorkspace::attentionRows(const Team &team, QVBoxLayout *v)
         text->setObjectName("teamAttentionLine"); text->setProperty("kind", item.kind);
         text->setToolTip(item.command.isEmpty() ? line : line + QLatin1Char('\n') + item.command);
         r->addWidget(text, 1);
+        if (item.kind == "lead_stalled") {
+            auto *open = button(tr("Open lead"), "teamAttentionOpenLead", true);
+            open->setToolTip(tr("Open the lead's session to see what it waits on"));
+            connect(open, &QPushButton::clicked, this, [this, teamId = team.id] { openLead(teamId); });
+            r->addWidget(open);
+        }
         if (item.kind == "permission") {
             auto *answer = button(tr("Answer"), "teamAttentionAnswer", true);
             answer->setProperty("member", item.member);
@@ -1620,6 +1640,15 @@ void TeamWorkspace::attentionRows(const Team &team, QVBoxLayout *v)
         v->addLayout(r);
     }
     if (team.attention.size() > shown) v->addWidget(label(tr("+%1 more").arg(team.attention.size() - shown), c.muted, 10));
+}
+
+// Task 95: the lead's session, where its own question, refused tool or exit shows.
+void TeamWorkspace::openLead(const QString &teamId)
+{
+    const auto *team = currentTeam(teamId);
+    if (!team || !openSession) return;
+    for (const auto &member : team->members)
+        if (member.lead && !member.session.isEmpty()) { openSession(member.host, member.session); return; }
 }
 
 void TeamWorkspace::answerAttention(const QString &teamId, const QString &member, const QString &command, int attempts,
@@ -1924,6 +1953,11 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
         b->setText(QString()); b->setFixedWidth(b->iconSize().width() + 16);
     }
     h->addWidget(views);
+    // Task 61: the origin link is not a dependency; name its dashed violet look.
+    if (m_view == "graph" || m_view == "layers") {
+        auto *legend = elided(tr("Dashed: spawned from"), c.violet, 11);
+        legend->setObjectName("teamOriginLegend"); h->addWidget(legend);
+    }
     const bool planning = team.status == "planning";
     if (planning) {
         auto *task = button(tr("+ Task"), "teamWorkspaceAddTask");
@@ -2092,6 +2126,7 @@ QWidget *TeamWorkspace::canvas(const Team &team)
             view->edges[task.id].append(d.task);
             if (d.soft && !team.allHard) view->soft.insert({d.task, task.id});
         }
+    for (const auto &task : team.tasks) if (task.origin > 0) view->origins[task.id] = task.origin;
     QList<int> order;
     const auto byLayer = layered(team);
     for (auto it = byLayer.cbegin(); it != byLayer.cend(); ++it) order += it.value();
@@ -3250,6 +3285,7 @@ QWidget *TeamWorkspace::phaseGraph(const Team &team, const PhaseGroup &group, co
         view->edges[id].append(d.task);
         if (d.soft && !team.allHard) view->soft.insert({d.task, id});
     }
+    for (int id : group.tasks) if (const auto *task = team.task(id); task && task->origin > 0) view->origins[id] = task->origin;
     const auto layers = phaseLayers(team, shown);
     QList<int> order = shown;
     std::stable_sort(order.begin(), order.end(), [&layers](int a, int b) { return layers.value(a) < layers.value(b); });
@@ -4764,3 +4800,6 @@ void TeamWorkspace::addMember(const Team &team)
     pop->show();
     placePopover();
 }
+
+
+

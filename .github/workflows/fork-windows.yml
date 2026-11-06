@@ -37,7 +37,8 @@ jobs:
       CCACHE_DEPEND: 1
       CCACHE_MAXSIZE: 500M
       EXPERIMENTAL: ${{ startsWith(github.ref, 'refs/tags/whitewh-exp-') }}
-      # Embedded in hgs-tray: the build the updater compares and the feed it reads.
+      # Embedded in hgs-tray (the Tauri app since task #63): the build the updater
+      # compares and the feed it reads.
       # Empty for an experimental build, so it neither updates nor gets updated.
       ZERUS_FORK_BUILD: ${{ !startsWith(github.ref, 'refs/tags/whitewh-exp-') && github.run_number || '' }}
       ZERUS_FORK_FEED_URL: ${{ !startsWith(github.ref, 'refs/tags/whitewh-exp-') && 'https://github.com/WhiteWh/zerus/releases/latest/download/zerus-fork-feed.json' || '' }}
@@ -89,6 +90,8 @@ jobs:
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
       - name: Pinned ConPTY pair
         run: python scripts/fetch-conpty.py --output "$RUNNER_TEMP/conpty" </dev/null
+      # WhiteWh fork, task #65: the Qt GUI is built and its suites run once more
+      # only for the fallback the zip keeps for one release (qt/zerus-qt.exe).
       - name: Restore Qt 6.10.3 for MSVC
         id: qt-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -143,11 +146,51 @@ jobs:
         run: |
           test -f "$(cygpath -u "$ZERUS_TEST_HGS")"
           bash scripts/ci/gui.sh test </dev/null
+      # WhiteWh fork, task #63 (owner, 2026-11-06): the fork's Windows build runs
+      # on the Tauri desktop, as upstream's Windows zip does. The installed Qt
+      # build's updater installs this zip (its hgs-tray.exe is the Tauri app),
+      # and the Tauri app updates itself from the same feed.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install the locked Zerus Next frontend
+        timeout-minutes: 5
+        working-directory: client
+        run: npm ci </dev/null
+      - name: Fork update channel and the Qt-to-Tauri handoff
+        # The handoff runs the Qt updater's helper and the Tauri updater on a
+        # versioned root: Qt build -> Tauri zip -> next Tauri zip, and both
+        # rollbacks (client/core/tests/fork_handoff.rs).
+        run: |
+          cargo test --locked --manifest-path client/core/Cargo.toml --lib fork_update </dev/null 2>&1 | tee artifacts/test-results/fork-update.log
+          cargo test --locked --manifest-path client/core/Cargo.toml --test fork_handoff </dev/null 2>&1 | tee artifacts/test-results/fork-handoff.log
+      - name: Build the Tauri Windows desktop with the fork channel
+        timeout-minutes: 30
+        working-directory: client
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/windows-next
+          CARGO_BUILD_JOBS: 4
+        # ZERUS_FORK_BUILD and ZERUS_FORK_FEED_URL (job env) are embedded by
+        # client/src-tauri/build.rs, as the Qt build embedded them.
+        run: |
+          npm run tauri -- build --ci --no-bundle --config src-tauri/tauri.windows.conf.json --features video </dev/null \
+            2>&1 | tee ../artifacts/test-results/windows-next-build.log
+          test -f ../target/windows-next/release/hgs-tray.exe
+      - name: Frontend runtime license notices
+        run: python client/scripts/collect-notices.py artifacts/windows-frontend-licenses </dev/null
+      - name: WebView2 Evergreen prerequisite for the portable self-test
+        timeout-minutes: 6
+        run: python scripts/ci/ensure-webview2.py </dev/null
       - name: Portable zip from the tested executables
         run: |
-          python scripts/package-windows-qt.py --cli target/release/hgs.exe --gui .ci-build/gui/hgs-tray.exe \
+          # WhiteWh fork, task #65: the fork identity (ZERUS_FORK_BUILD and
+          # ZERUS_FORK_FEED_URL from the job env) and the Qt fallback.
+          python scripts/package-windows.py --fork --cli target/release/hgs.exe --gui target/windows-next/release/hgs-tray.exe \
             --connector services/mobile/connector/target/release/zerus-mobile-connector.exe \
             --mobile-relay services/mobile/relay/target/release/zerus-relay.exe \
+            --qt-fallback .ci-build/gui/hgs-tray.exe --qt-root "$QT_ROOT_DIR" \
+            --frontend-licenses artifacts/windows-frontend-licenses \
             --conpty "$RUNNER_TEMP/conpty" --output artifacts/zerus-windows-x86_64.zip </dev/null 2>&1 | tee artifacts/test-results/package.log
           python scripts/check-windows-portable.py artifacts/zerus-windows-x86_64.zip --run --selftest \
             </dev/null 2>&1 | tee artifacts/test-results/portable.log

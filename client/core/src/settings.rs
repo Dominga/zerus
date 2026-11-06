@@ -160,6 +160,8 @@ pub const KEYS: &[Key] = &[
     key("workspace/launchAgent", Kind::Text("")),
     key("workspace/launchOpenTerminal", Kind::Flag(false)),
     key("workspace/launchAccounts", Kind::Text("")),
+    // Task 74: Qt's SessionLeads JSON object, by session identity.
+    key("workspace/sessionLeads", Kind::Text("")),
     // A first-G3 family import handles this separately from the old seed.
     Key {
         name: "workspace/allSwarmProjects",
@@ -236,6 +238,8 @@ pub const KEYS: &[Key] = &[
     // and the Overview column (design round 7).
     client("client/darkSkin", Kind::Text("zerus-dark")),
     client("client/lightSkin", Kind::Text("zerus-light")),
+    // WhiteWh fork's skin choice; Tauri ports it as whitewh-dark/whitewh-light.
+    key("workspace/skin", Kind::Text("zerus")),
     client(
         "client/overviewWidth",
         Kind::Whole {
@@ -245,20 +249,22 @@ pub const KEYS: &[Key] = &[
         },
     ),
     client("client/overviewFullWidth", Kind::Flag(false)),
-    client("workspace/inspectorOpen", Kind::AutoFlag),
-    client(
-        "workspace/inspectorTab",
-        Kind::Choice(&["plan", "details", "worktrees", "tasks"]),
-    ),
-    client(
-        "workspace/inspectorWidth",
-        Kind::Whole {
+    Key { name: "workspace/inspectorOpen", kind: Kind::AutoFlag, seeded: true },
+    Key {
+        name: "workspace/inspectorTab",
+        kind: Kind::Choice(&["plan", "details", "worktrees", "tasks"]),
+        seeded: true,
+    },
+    Key {
+        name: "workspace/inspectorWidth",
+        kind: Kind::Whole {
             default: 400,
             min: 240,
             max: 900,
         },
-    ),
-    client("workspace/inspectorClosed", Kind::Text("[]")),
+        seeded: true,
+    },
+    Key { name: "workspace/inspectorClosed", kind: Kind::Text("[]"), seeded: true },
     // New G3 families use the family journal, not the original switch seed.
     client("client/windowGeometry", Kind::Text("")),
     client(
@@ -277,6 +283,11 @@ pub const KEYS: &[Key] = &[
             max: 4096,
         },
     ),
+    // WhiteWh fork: optional extensions (tray/src/Extensions.h). A fork build
+    // turns them on by default; the client is the fork's. Both names are Qt's,
+    // so the switch seeds the owner's choice.
+    key("extensions/socraticode", Kind::Flag(true)),
+    key("socraticode/nativeQdrant", Kind::Flag(false)),
     // The Team tab's dividers (task 9): the side column's width beside the
     // canvas, and the members' share of it above the coordinator, in percent.
     client(

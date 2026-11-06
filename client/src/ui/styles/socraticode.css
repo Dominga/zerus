@@ -1,0 +1,16 @@
+/* WhiteWh fork: the SocratiCode card of the session inspector
+   (SocratiCodePanel.tsx, tray/src/SocratiCodePanel.h). The state parts are
+   laid out side by side without separator dots; the buttons keep their whole
+   labels, as Qt's narrow inspector requires. Skin tokens only. */
+@layer components {
+  .sc-card { display: flex; flex-direction: column; gap: 6px; }
+  .sc-head { display: flex; align-items: flex-start; gap: 8px; }
+  .sc-state { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; flex: 1; min-width: 0; font-size: var(--fs-sm); color: var(--z-color-text-2); }
+  .sc-part { white-space: nowrap; }
+  .sc-part.lead { color: var(--z-color-text); font-weight: 600; }
+  .sc-detail { margin: 0; font-size: var(--fs-xs); line-height: 1.45; color: var(--z-color-muted); white-space: pre-line; }
+  .sc-actions { flex-wrap: wrap; gap: 6px; }
+  .sc-actions:empty { display: none; }
+  .sc-actions .btn { flex: none; }
+  dialog.sc-confirm { width: min(520px, calc(100vw - 48px)); }
+}

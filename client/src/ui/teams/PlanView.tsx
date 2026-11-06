@@ -21,6 +21,7 @@ import {
   phasePlans,
   phaseStatus,
   rowEdges,
+  rowOrigins,
   type PlacedNode,
   type PlanPhase,
   type PlanRow,
@@ -286,7 +287,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           <HeatLine heat={heat} compact />
           <Show when={spawnedFrom(placed.node, task)}>{(origin) => (
             <span class="pt-origin" data-origin={origin()} title={tr("Spawned from #%1; it does not wait for it", origin())}>
-              {tr("from #%1", origin())}
+              {tr("Spawned from #%1", origin())}
             </span>
           )}</Show>
           <Show when={blocks.length > 0}>
@@ -310,6 +311,8 @@ export function PlanView(props: PlanViewProps): JSX.Element {
 
   const layer = (phase: PlanPhase, row: PlanRow) => {
     const edges = rowEdges(phase, row);
+    const origins = rowOrigins(phase, row);
+    const marker = `pt-origin-arrow-${phase.phase.n}-${row.layer}`;
     const litNow = lit();
     return (
       <div
@@ -317,11 +320,26 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         style={{ width: `${Math.max(phase.width, 320)}px`, height: `${CARD_H}px` }}
       >
         <svg class="pt-edges" width={Math.max(phase.width, 320)} height={ROW_H} aria-hidden="true">
+          <defs>
+            <marker id={marker} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 8 4 L 0 8" class="pt-origin-head" />
+            </marker>
+          </defs>
           <For each={edges}>
             {(entry) => (
               <path
                 d={edgePath(entry.from, entry.to, row.top)}
                 class={`pt-edge ${edgeState(entry.edge, litNow)}`}
+              />
+            )}
+          </For>
+          <For each={origins}>
+            {(entry) => (
+              <path
+                d={edgePath(entry.from, entry.to, row.top)}
+                class="pt-origin-edge"
+                marker-end={`url(#${marker})`}
+                data-origin={entry.origin}
               />
             )}
           </For>
@@ -430,6 +448,10 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           onHeat={switchHeat}
         />
         <span class="pt-grow" />
+        <span class="pt-legend" aria-label={tr("Link legend")}>
+          <span class="pt-legend-item"><i class="pt-legend-dep" />{tr("Depends on")}</span>
+          <span class="pt-legend-item"><i class="pt-legend-origin" />{tr("Spawned from")}</span>
+        </span>
         <span class="pt-plan-summary">
           <span>{tr("Phases: %1", phases().length)}</span>
           <span>{tr("Tasks: %1", props.team.tasks.length)}</span>

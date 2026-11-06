@@ -1161,6 +1161,7 @@ QWidget *TeamPanel::tasks(const Team &team, bool narrow)
             if (dep.soft && !team.allHard) view->soft.insert({dep.task, task.id});
         }
     }
+    for (const auto &task : team.tasks) if (task.origin > 0) view->origins[task.id] = task.origin;
     QMap<int, int> localLayer;
     if (grouped) for (const auto &band : view->bands) {
         if (band.collapsed) continue;
@@ -1275,3 +1276,6 @@ QWidget *TeamPanel::feed(const Team &team)
     } else if (shown) v->addWidget(label(tr("Beginning of team history"), c.muted, 11));
     return box;
 }
+
+
+

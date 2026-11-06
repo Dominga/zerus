@@ -29,7 +29,7 @@ protected:
 
 QColor kindColor(const Colors &c, const QString &kind)
 {
-    if (kind == "report_escalated" || kind == "permission_escalated") return c.warn;
+    if (kind == "report_escalated" || kind == "permission_escalated" || kind == "lead_stalled") return c.warn;
     if (kind == "phase_draft" || kind == "plan_draft") return c.folder;
     if (kind == "owner_word_asked") return c.violet;
     if (kind == "team_finished" || kind == "phase_acceptance") return c.accent;
@@ -91,6 +91,7 @@ QString TeamWaitingPage::kindLabel(const QString &kind)
     if (kind == "test_full_run") return tr("Full test run");
     if (kind == "test_quarantine") return tr("Flaky tests");
     if (kind == "phase_acceptance") return tr("Phase acceptance");   // U63
+    if (kind == "lead_stalled") return tr("Lead stalled");   // task 95
     return kind;
 }
 
@@ -107,6 +108,7 @@ QString TeamWaitingPage::kindIcon(const QString &kind)
     if (kind == "test_full_run") return QStringLiteral("refresh");
     if (kind == "test_quarantine") return QStringLiteral("attention");
     if (kind == "phase_acceptance") return QStringLiteral("check-circle");
+    if (kind == "lead_stalled") return QStringLiteral("attention");
     return QStringLiteral("warning");
 }
 

@@ -96,6 +96,11 @@ export const teamRead = (computer: ComputerId, team: string) =>
   inTauri() ? invoke<import("./types").TeamView>("team_read", { computer, team }) : Promise.reject(new Error("Teams need the desktop app."));
 /** Reads the watched team's feed page before the oldest event shown; false when there is none to read. */
 export const teamsOlder = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_older", { computer }) : Promise.resolve(false);
+/** Task 75: why this process is sandboxed, null on a normal desktop. */
+export const sandboxCheck = () => inTauri() ? invoke<string | null>("sandbox_check") : Promise.resolve(null);
+/** Task 69: moves one local session to another account after the owner confirms. */
+export const sessionSwitchAccount = (session: string, account: string, request: string) =>
+  inTauri() ? invoke<Record<string, unknown>>("session_switch_account", { session, account, request }) : Promise.reject(new Error("Accounts need the desktop app."));
 /** Task 51: loads the next older Waiting page; false when there is none. */
 export const teamsWaitingOlder = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_waiting_older", { computer }) : Promise.resolve(false);
 /** Task 51: raises or clears Waiting item notifications through the native notifier. */
@@ -248,6 +253,9 @@ export function normalize(b: Partial<Batch>): Batch {
     desktop_service: b.desktop_service ?? undefined,
     processes_view: b.processes_view ?? undefined,
     composer: b.composer ?? undefined, draft_keys: b.draft_keys ?? undefined, composer_events: b.composer_events ?? undefined,
+    // Task 76: the Teams views (list, Waiting, a team) arrive in batch.teams;
+    // dropping them here left the Team tab and Waiting for you unread.
+    teams: b.teams ?? undefined,
   };
 }
 
@@ -928,6 +936,9 @@ export const updatesOpen = (target: "release" | "download" | "instructions") =>
   inTauri() ? invoke<void>("updates_open", { target }) : Promise.reject(UPDATES_DESKTOP_ONLY);
 export const updatesCopyCommand = () => inTauri() ? invoke<void>("updates_copy_command") : Promise.reject(UPDATES_DESKTOP_ONLY);
 export const updatesRestart = () => inTauri() ? invoke<void>("updates_restart") : Promise.reject(UPDATES_DESKTOP_ONLY);
+/** WhiteWh fork, task #63: the fork channel's Check now and the confirmed replacement. */
+export const forkUpdatesCheck = () => inTauri() ? invoke<void>("fork_updates_check") : Promise.reject(UPDATES_DESKTOP_ONLY);
+export const forkUpdatesConfirm = () => inTauri() ? invoke<void>("fork_updates_confirm") : Promise.reject(UPDATES_DESKTOP_ONLY);
 export const updatesFixLoginItem = (restart: boolean) => inTauri() ? invoke<string | null>("updates_fix_login_item", { restart }) : Promise.reject(UPDATES_DESKTOP_ONLY);
 /** `updates-changed`: the native worker's latest snapshot; resolves once listening. */
 export const onUpdates = (listener: (view: UpdatesView) => void) => onEvent<UpdatesView>("updates-changed", listener);
@@ -1156,3 +1167,16 @@ export const projectCloneStatus = (id: string) => desktop<import("./ui/screens/P
 export const projectCloneClose = (id: string) => desktop<void>("project_clone_close", {id});
 export const projectCloneStep = (id: string, step: "begin" | "check" | "retire", source: {url: string; parent: string; name: string}) => desktop<import("./ui/screens/ProjectCloneDialog").CloneView>("project_clone_step", {id, step, source});
 export const projectCloneUse = (id: string, project: string | null, name: string) => desktop<{outcome: EditOutcome; project: string; folder: string}>("project_clone_use", {id, project, name});
+
+// WhiteWh fork: the Claude desktop app's sessions and the SocratiCode panel
+// (src-tauri/src/claude_app.rs, src-tauri/src/socraticode.rs). The replies are
+// the core's typed projections; the webview parses no hgs JSON.
+
+/** `hgs [@host] claude-app ls`, with each session's folder match for `folder`. */
+export const claudeAppSessions = (host: string, folder: string) => desktop<import("./store/claudeApp").ClaudeAppView>("claude_app_sessions", { host, folder });
+/** `hgs [@host] claude-app resume ID -n NAME --launch-id ID -d [--force]`; resolves with the launch id. */
+export const claudeAppResume = (host: string, session: string, name: string, force: boolean) => desktop<string>("claude_app_resume", { host, session, name, force });
+/** `hgs [@host] socraticode status PATH --qdrant native|docker`. */
+export const socraticodeStatus = (host: string, path: string, native: boolean) => desktop<import("./store/socraticode").SocratiCodePanel>("socraticode_status", { host, path, native });
+/** One of `install`, `install-qdrant`, `start`, `stop` or `connect`. */
+export const socraticodeAct = (action: import("./store/socraticode").SocratiCodeVerb, host: string, path: string, native: boolean) => desktop<import("./store/socraticode").Acted>("socraticode_act", { host, path, action, native });

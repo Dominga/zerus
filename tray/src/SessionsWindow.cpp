@@ -786,6 +786,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_usageRefresh,&QPushButton::clicked,this,[this]{refreshAccountUsage(true);});
     connect(m_accountUsage,&QPushButton::clicked,this,[this]{
         const auto *entry=selected();if(!entry)return;
+        // Owner #83: the chip that shows usage also reaches the session's own switch.
+        if (m_composer->accountChip()->canSwitch()) { m_composer->accountChip()->openList(); return; }
         m_pages->setCurrentIndex(4);m_accountsPage->showAccount(entry->host,m_accountUsageData.value("id").toString());
     });
     m_meta->installEventFilter(this); m_title->installEventFilter(this);
@@ -5431,8 +5433,11 @@ void SessionsWindow::updateAccountChip(const Entry &entry, bool unavailable)
     chip->setOptions(AccountSwitch::options(m_sessionAccountDetailsProfiles, entry.host, s.cmd, AccountSwitch::accountOf(s.cmd, account), m_dark));
     // A team member's account changes only with swap-member (U53, U54).
     const auto *team = m_teams ? m_teams->teamOfSession(entry.host, s.name) : nullptr;
-    const bool member = team && QStringList{"planning", "running", "paused"}.contains(team->status);
-    chip->setLocked(member ? tr("A member of team %1: its account changes with Swap member in the team's Members.").arg(team->name) : QString());
+    const auto *member = team ? team->memberOfSession(entry.host, s.name) : nullptr;
+    // Owner #83: a member's account moves with Swap member; the lead's own
+    // session stays switchable here, since Swap member never applies to it.
+    const bool locked = team && QStringList{"planning", "running", "paused"}.contains(team->status) && member && !member->lead;
+    chip->setLocked(locked ? tr("A member of team %1: its account changes with Swap member in the team's Members.").arg(team->name) : QString());
     chip->setBlocked(accountSwitchBlockReason(entry));
 }
 
@@ -7917,3 +7922,4 @@ void SessionsWindow::startTeamDesigner(const QString &folder,const QString &goal
             timer->start();
         });
 }
+

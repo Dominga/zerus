@@ -23,9 +23,11 @@ public:
 
     static QString token(const Teams::Team &team, const Teams::Team::Attention &item)
     {
+        // Task 95: a stalled lead is notified once per round (at most hourly).
+        const QString round = item.round > 0 ? QStringLiteral(":r%1").arg(item.round) : QString();
         return QString::fromLatin1(kPrefix) + team.id + QLatin1Char(':') + item.kind + QLatin1Char(':') + item.member
                + QLatin1Char(':') + QString::number(item.task) + QLatin1Char(':') + QString::number(item.phase)
-               + QLatin1Char(':') + QString::number(qint64(item.since));
+               + QLatin1Char(':') + QString::number(qint64(item.since)) + round;
     }
     static QString teamOf(const QString &token)
     {

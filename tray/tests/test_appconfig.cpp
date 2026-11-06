@@ -563,6 +563,17 @@ void TestAppConfig::bundledHgsIsPreferredOnWindows()
     QTemporaryDir empty; QVERIFY(empty.isValid());
     const QString fallback = AppConfig::resolveHgsPath({}, empty.path());
     QVERIFY(fallback == "hgs" || QFileInfo(fallback).isAbsolute());
+    // WhiteWh fork, task #65: the Qt fallback (qt\zerus-qt.exe in a fork zip)
+    // uses the hgs.exe of its build folder; any other qt folder does not.
+    QTemporaryDir zip; QVERIFY(zip.isValid());
+    QVERIFY(QDir(zip.path()).mkpath("qt"));
+    QFile cli(zip.filePath("hgs.exe")); QVERIFY(cli.open(QIODevice::WriteOnly)); cli.close();
+    const QString beside = AppConfig::resolveHgsPath({}, zip.filePath("qt"));
+    QVERIFY2(beside != QDir::cleanPath(zip.filePath("hgs.exe")), qPrintable(beside));
+    QFile info(zip.filePath("build-info.json")); QVERIFY(info.open(QIODevice::WriteOnly)); info.write("{}"); info.close();
+    QCOMPARE(AppConfig::resolveHgsPath({}, zip.filePath("qt")), QDir::cleanPath(zip.filePath("hgs.exe")));
+    QVERIFY(QDir(zip.path()).mkpath("other"));
+    QVERIFY(AppConfig::resolveHgsPath({}, zip.filePath("other")) != QDir::cleanPath(zip.filePath("hgs.exe")));
 }
 
 void TestAppConfig::enabledWindowsRunsTheStableCli()

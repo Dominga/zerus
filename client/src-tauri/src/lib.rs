@@ -17,6 +17,8 @@ mod approvals;
 mod child_environment;
 mod cli;
 mod clipboard;
+#[cfg(feature = "live")]
+mod claude_app;
 mod commands;
 #[cfg(feature = "live")]
 mod composer;
@@ -47,6 +49,9 @@ mod exit_flush;
 mod external_open;
 #[cfg(feature = "live")]
 mod files;
+// WhiteWh fork, task #63: the fork's update channel.
+#[cfg(feature = "live")]
+mod fork_updates;
 mod identity;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod instance;
@@ -59,6 +64,13 @@ mod login_item;
 #[cfg(target_os = "macos")]
 mod macos_notification_diagnostics;
 mod metrics;
+mod sandbox;
+
+/// Task 75: why this process is a sandbox, None on a normal desktop.
+#[tauri::command]
+fn sandbox_check() -> Option<String> {
+    sandbox::reason()
+}
 #[cfg(feature = "live")]
 mod mobile;
 #[cfg(feature = "live")]
@@ -94,6 +106,8 @@ mod session_folders;
 pub mod settings;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod signals;
+#[cfg(feature = "live")]
+mod socraticode;
 #[cfg(feature = "live")]
 mod speech_settings;
 #[cfg(feature = "live")]
@@ -1024,6 +1038,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     }
                 }
                 app.manage(updates::start(app.handle()));
+                // WhiteWh fork, task #63: a fork build checks its own feed.
+                fork_updates::start(app.handle());
                 if menu_bar {
                     lifecycle::start_fleet(|| app.state::<commands::AppState>().start_source());
                 }
@@ -1370,6 +1386,10 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         renderer::renderer_frame,
         content_search::content_search,
         content_search::cancel_content_search,
+        claude_app::claude_app_sessions,
+        claude_app::claude_app_resume,
+        socraticode::socraticode_status,
+        socraticode::socraticode_act,
         native_ui::runtime::native_ui_open,
         native_ui::runtime::native_ui_browser,
         native_ui::runtime::native_ui_retire,
@@ -1564,6 +1584,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         screens::screen_visible,
         screens::session_usage,
         screens::accounts_view,
+        screens::session_switch_account,
+        sandbox_check,
         screens::account_edits::account_edit_open,
         screens::account_edits::account_edit_apply,
         screens::account_edits::account_edit_close,
@@ -1693,6 +1715,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         updates::updates_copy_command,
         updates::updates_restart,
         updates::updates_fix_login_item,
+        fork_updates::fork_updates_check,
+        fork_updates::fork_updates_confirm,
         #[cfg(feature = "media")]
         voice::voice_open,
         #[cfg(feature = "media")]

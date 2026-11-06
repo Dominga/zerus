@@ -140,6 +140,7 @@ private slots:
     void aTaskThatHasNotStartedMovesToAnotherPhase();
     void anAutoAcceptedDraftReadsAsDraftUntilItStarts();
     void addedLateTaskIsOutOfScopeEverywhere();
+    void spawnedFromHasItsOwnLinkAndLegend();
     void planTaskTakesModelsAndARole();
     void theEstimateIsSetInThePlanAndWhenATaskJoinsAPhase();
     void phaseScrollsInEveryView();
@@ -2257,6 +2258,33 @@ void TestTeamsUiPlan::anAutoAcceptedDraftReadsAsDraftUntilItStarts()
 // U29: a task added to its running phase carries the "out of the phase's
 // original scope" icon in Graph, Board, Layers and the task card, light and
 // dark; the owner adds one through the warning and a typed confirmation.
+void TestTeamsUiPlan::spawnedFromHasItsOwnLinkAndLegend()
+{
+    auto t = phasedTeam();
+    auto tasks = t["tasks"].toArray();
+    tasks.append(QJsonObject{{"id", 6}, {"phase", 2}, {"title", "Fix the login crash"}, {"assignee", "tester"},
+                             {"status", "pending"}, {"origin", 1}});
+    t["tasks"] = tasks;
+    setTeam(t);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(prototypeLive);
+    workspace.resize(1200, 800);
+    workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QTRY_VERIFY(phaseGraphOf(&workspace, 2));
+    auto *view = phaseGraphOf(&workspace, 2);
+    QTRY_COMPARE(view->origins.value(6), 1);
+    QVERIFY(view->edges.value(6).isEmpty());
+    auto *legend = workspace.findChild<QLabel *>("teamOriginLegend");
+    QVERIFY(legend && legend->isVisible());
+    QCOMPARE(legend->text(), QStringLiteral("Dashed: spawned from"));
+}
+
 void TestTeamsUiPlan::addedLateTaskIsOutOfScopeEverywhere()
 {
     auto t = phasedTeam();

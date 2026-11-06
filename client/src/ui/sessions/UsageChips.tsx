@@ -6,6 +6,7 @@ import { UsageMeters, type UsageIndicator } from "../components/UsageMeter";
 import { useNow } from "../../store/latest";
 import { followSessionUsage, refreshSessionUsage, sessionUsage, startSessionUsage, stopSessionUsage } from "../../store/sessionUsage";
 import { setAccountMachine, setRequestedProfile, loadAccounts } from "../../store/accounts";
+import { requestAccountSwitch, switchable } from "../../store/accountSwitch";
 import { setPage } from "../../store/ui";
 import { openInspector } from "../../store/inspector";
 import { text } from "../../store/settings";
@@ -30,18 +31,26 @@ export function AccountUsageChip(props: { session: Session }) {
   });
   onCleanup(() => { followSessionUsage(null); stopSessionUsage(); });
   const u = sessionUsage;
+  const [open, setOpen] = createSignal(false);
+  let chip!: HTMLButtonElement;
   const online = () => !computerOffline(props.session.computer);
+  const canSwitch = () => switchable(props.session.accountProvider || props.session.agent);
   const openAccount = () => {
+    setOpen(false);
     const s = props.session;
     setAccountMachine(s.computer);
     setRequestedProfile(u().id ? `${s.computer}\u001f${u().id}` : undefined);
     setPage("accounts");
     void loadAccounts();
   };
+  const openSwitch = () => {
+    setOpen(false);
+    requestAccountSwitch(props.session.key);
+  };
   return (
     <Show when={props.session.tracked && !props.session.archiveId}>
       <span class="session-usage-strip">
-        <button type="button" class="sb-usage account-usage" title={accountTooltip(u(), now())} aria-label={`${tr("Account usage")}\n${exhausted(u(), now())}\n${accountTooltip(u(), now())}`} onClick={openAccount}>
+        <button ref={chip} type="button" class="sb-usage account-usage" title={accountTooltip(u(), now())} aria-label={`${tr("Account usage")}\n${exhausted(u(), now())}\n${accountTooltip(u(), now())}`} aria-haspopup="menu" aria-expanded={open()} onClick={() => setOpen(!open())}>
           <Show when={u().provider}><AgentBadge agent={props.session.agent} /></Show>
           <UsageMeters windows={windowsAt(u().windows, now())} loading={usageLoading(u())} summary={footerUsageSummary(u())} indicator={text("workspace/usageIndicator") as UsageIndicator} />
         </button>
@@ -49,6 +58,15 @@ export function AccountUsageChip(props: { session: Session }) {
           title={u().refreshing ? tr("Updating account usage…") : tr("Refresh usage")} onClick={() => void refreshSessionUsage(true)}>
           <Show when={!u().refreshing} fallback={<span class="su-spin"><Icon name="refresh-cw" size={12} /></span>}><Icon name="refresh-cw" size={12} /></Show>
         </button>
+        <ChipPopover open={open()} anchor={chip} label={tr("Account usage")} keyboard={false} class="usage-limit-pop" onClose={(focus) => { setOpen(false); if (focus) chip.focus(); }}>
+          <p class="muted">{tr("This session runs on %1.", u().id || props.session.accountId || tr("the native account"))}</p>
+          <div class="cache-actions">
+            <Show when={canSwitch()}>
+              <button type="button" class="btn small" onClick={openSwitch}>{tr("Switch this session's account…")}</button>
+            </Show>
+            <button type="button" class="btn small ghost" onClick={openAccount}>{tr("Manage accounts…")}</button>
+          </div>
+        </ChipPopover>
       </span>
     </Show>
   );

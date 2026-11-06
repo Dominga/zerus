@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub const FILE: &str = ".zerus/tests.toml";
@@ -501,6 +502,9 @@ pub struct Provider {
     /// ctest: the configured build folder holding CMake's file API reply.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub build_dir: String,
+    /// Unreal: a module folder to its automation test prefix (default the module name).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub prefixes: BTreeMap<String, String>,
     /// A resource class from `[resources]`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub resources: String,
@@ -849,3 +853,7 @@ targets = ["ctest:gui:views"]
         assert!(load(command.path(), None).unwrap_err().to_string().contains("names its command"));
     }
 }
+
+
+
+

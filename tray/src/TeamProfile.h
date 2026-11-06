@@ -84,7 +84,14 @@ constexpr double ChromaCapDark = 45, ChromaCapLight = 55;
 QString kindKey(const QString &kind, const QString &stageKind);
 QColor kindColor(const QString &kind, const QString &stageKind, bool dark);
 Qt::BrushStyle kindPattern(const QString &kind, const QString &stageKind);
+// The brush a kind's bar and swatch fill with: Qt's own pattern, or (task 118,
+// Qt::TexturePattern) the sparse dot of a wait for a person, in `tone`.
+QBrush kindBrush(const QColor &tone, Qt::BrushStyle pattern);
 QString kindName(const QString &kind, const QString &stageKind);
+// Task 118: what a wait for a person's answer waited on ("acceptance", "question",
+// ...) and the loss's reasons with their seconds: "phase acceptance 6m, a question 5m".
+QString personReason(const QString &reason);
+QString personReasons(const QJsonObject &reasons);
 // The name the legend gives a palette key.
 QString keyName(const QString &key);
 // WCAG contrast ratio of two colours.

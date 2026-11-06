@@ -136,7 +136,7 @@ class NativeCodexClear(unittest.TestCase):
         self.assertIn(self.animations, ('true', 'false'))
         # Plugins stay off (see assert_plugin_sync_off). Suites reusing this
         # fixture may serve a localhost provider and enable more features.
-        (native_home / 'config.toml').write_text('''model="gpt-6.1-sol"
+        (native_home / 'config.toml').write_text('model=' + json.dumps(getattr(self, 'native_model', 'gpt-6.1-sol')) + '''
 model_provider="fixture"
 check_for_update_on_startup=false
 [features]

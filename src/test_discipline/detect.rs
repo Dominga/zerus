@@ -75,6 +75,7 @@ fn provider(name: String, kind: Kind, root: &str, sources: Vec<String>, tests: V
         manifest: String::new(),
         widen: Widen::default(),
         build_dir: String::new(),
+        prefixes: Default::default(),
         resources: String::new(),
         platforms: Vec::new(),
         budget_minutes: 0.0,
@@ -149,3 +150,5 @@ mod tests {
         assert_eq!(back.providers[4].affected, Rule::All);
     }
 }
+
+

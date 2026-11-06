@@ -512,7 +512,10 @@ export function waitingKindIcon(kind: string): string {
 
 /** Opens a card to answer in place. */
 export const opensCard = (action: string) =>
-  ["decide_proposal", "confirm_addition", "answer_permission", "decide_tool", "accept_phase", "answer_deferred"].includes(action);
+  ["decide_proposal", "confirm_addition", "answer_permission", "decide_tool", "accept_phase", "answer_deferred",
+    // Task 116: every kind that waits for the owner is answered in its row, the
+    // same controls as its home view, not only in the Team tab.
+    "decide_report", "release_task", "retry_task", "finish"].includes(action);
 /** Approves with the team view's question. */
 export const approves = (action: string) => action === "approve_phase" || action === "approve_plan";
 
@@ -612,6 +615,20 @@ export function staleReason(item: TeamWaitingItem, team: TeamView, shown?: { que
     }
     case "approve_plan":
       return team.status === "planning" ? "" : tr("The plan no longer waits for your approval; nothing was sent.");
+    // Task 116: the report, the held task and the team's end are answered in
+    // their row too, and say when they were decided meanwhile.
+    case "decide_report": {
+      const task = team.tasks.find((found) => found.id === fields.task);
+      return task && task.status === "submitted" ? "" : tr("That report was decided meanwhile; nothing was sent.");
+    }
+    case "release_task": {
+      const task = team.tasks.find((found) => found.id === fields.task);
+      return task && task.held ? "" : tr("That task is no longer held; nothing was sent.");
+    }
+    case "retry_task": {
+      const task = team.tasks.find((found) => found.id === fields.task);
+      return task && task.waits ? "" : tr("That task no longer waits; nothing was sent.");
+    }
     default: return "";
   }
 }
@@ -787,6 +804,20 @@ export class WaitingAnswer {
   retry() { return this.send({ kind: "retry", task: waitingFields(this.item).task }, false); }
   /** Finish needs the owner's summary for the lead (hgs requires one). */
   finishTeam(summary: string) { return summary.trim() ? this.send({ kind: "finish", summary: summary.trim() }, false) : Promise.resolve(undefined); }
+
+  /**
+   * Task 116: a report the lead escalated, answered where it waits: Accept, or
+   * Reject with the reason the member receives. The team is read again first,
+   * so a report decided meanwhile sends nothing.
+   */
+  acceptReport(reason = "") {
+    const fields = waitingFields(this.item);
+    return this.send({ kind: "accept", task: fields.task, ...(reason.trim() ? { reason: reason.trim() } : {}) });
+  }
+  rejectReport(reason: string) {
+    const fields = waitingFields(this.item);
+    return reason.trim() ? this.send({ kind: "reject", task: fields.task, reason: reason.trim() }) : Promise.resolve(undefined);
+  }
 
   /** A proposal answered in its row: once hgs took it, the row leaves. */
   async decide(allow: boolean) {

@@ -49,6 +49,15 @@ fn the_helper_is_the_qt_updaters_own_script() {
     assert_eq!(helper_script(false), qt_plain, "fork_update/*.ps1 drifted from tray/src/ForkUpdater.cpp");
     assert!(helper_script(true).contains("New-Item -ItemType Junction"));
     assert!(helper_script(false).contains("'.previous'") || helper_script(false).contains("$Previous"));
+    // Task 114: both helpers take -Quiet (tests only): no banner, and builds
+    // start without a window. The comparison above holds the Qt copy to it.
+    for versioned in [true, false] {
+        let script = helper_script(versioned);
+        assert!(script.lines().next().unwrap().ends_with(", [switch]$Quiet)"), "{versioned}");
+        assert!(script.contains("if ($Quiet) { $PSDefaultParameterValues['Start-Process:WindowStyle'] = 'Hidden' }"));
+        let script = script.replace("\r\n", "\n");
+        assert!(script.contains("try {\n    if ($Quiet) { throw 'quiet' }\n    Add-Type -AssemblyName System.Windows.Forms"));
+    }
 }
 
 #[test]
@@ -292,6 +301,8 @@ fn restart_writes_the_helper_with_the_qt_updaters_arguments() {
         assert!(args.contains(part), "{part}: {args}");
     }
     assert!(args.contains(".previous") && args.contains(TOP), "{args}");
+    // The real update shows its banner: the updater never asks for quiet.
+    assert!(!command.args.iter().any(|arg| arg.eq_ignore_ascii_case("-Quiet")), "{args}");
     assert!(fork.start_install(&script, 1, Path::new("C:/Windows"), &dir).is_err(), "one install at a time");
     // A versioned root targets app-<N> and its current junction.
     let versioned = Layout { install: dir.join("app-5"), versioned: true, root: dir.clone(), link: dir.join("current"), superseded: false, stage: dir.join(".update") };

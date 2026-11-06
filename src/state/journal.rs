@@ -985,14 +985,29 @@ fn message_events(db: &Connection, name: &str, conversation: Option<&str>, scope
     Ok((events, truncated))
 }
 
+/// Task 117: how long an inspection waits for the state lock.
+const INSPECT_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+pub(super) const STATE_BUSY: &str =
+    "The session state is busy: another hgs call held its lock for more than 3 s";
+
 pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, include_processes: bool) -> Result<Value> {
+    // Task 117: every step's milliseconds ride in the answer; a slow call is logged.
+    let mut phases = super::slow_calls::Phases::start();
     // An approval answered in Terminal sends no hook; settling it takes the lock.
     if archive_id.is_none() && record_path(name).exists() {
         if let Ok(record) = read(name) {
             claude_approval::reconcile(record);
         }
     }
-    let _guard = lock(None)?;
+    phases.mark("approval_reconcile");
+    // Task 117: a writer that keeps the state lock never holds an inspection
+    // past the desktop's limit; it answers that the state is busy, and the
+    // desktop keeps the last Activity and tries again.
+    let Some(_guard) = storage::writer_until(std::time::Instant::now() + INSPECT_LOCK_WAIT)? else {
+        let _ = phases.finish("inspect", name);
+        return Err(format!("{STATE_BUSY} [timings: {}]", phases.value()));
+    };
+    phases.mark("state_lock");
     let untracked = |cwds| {
         let mut value = json!({"name": name, "tracked": false, "events": [], "cursor": 0});
         value
@@ -1019,7 +1034,9 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     } else {
         read(name)?
     };
+    phases.mark("record");
     let (snapshot, mut names) = live_sessions()?;
+    phases.mark("live_sessions");
     // The session's own terminal (P3b), never another under its label.
     let panes = if archive_id.is_some() {
         None
@@ -1095,6 +1112,7 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
         output["state"] = json!("archived");
     }
     drop(_guard);
+    phases.mark("summary");
     if archive_id.is_none() {
         output.as_object_mut().unwrap().extend(
             input::first_message_summary(&record, panes.is_some())
@@ -1104,6 +1122,7 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
         );
         input::attention_message_summary(&record, &mut output, panes.is_some());
     }
+    phases.mark("message_summary");
     match questions::inspection(&record, panes.is_some()) {
         Ok(pending) => output["pending_questions"] = pending,
         Err(error) => {
@@ -1111,6 +1130,7 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
             output["pending_questions_error"] = json!(error);
         }
     }
+    phases.mark("questions");
     output["input_queue"] = if archive_id.is_none() { input_queue::inspection(&record, panes.is_some()).unwrap_or(Value::Null) } else { Value::Null };
     output["session_usage"] = if clear_context::awaiting_start(&record) {
         json!({"status":"unavailable","source":record["agent"],"scope":"conversation"})
@@ -1125,11 +1145,13 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     };
     output["session_clear"] = clear_context::event(&record).unwrap_or(Value::Null);
     output["clear_context_request"] = record["clear_context_request"].clone();
+    phases.mark("usage");
     if include_processes {
         output["processes"] = processes::snapshot(&record, archive_id.is_none() && panes.is_some() && process_alive(&record));
         output["process_work"] = processes::WorkSample::default().summary(&record,
             archive_id.is_none() && panes.is_some() && output["activity"] == "idle" && output["phase"] == "idle");
     }
+    phases.mark("processes");
     // Each unavailable action names its reason; an older host omits it.
     let context_reason = if archive_id.is_some() { Some("Restore the archived session first".to_owned()) }
         else { clear_context::unavailable_shown(&record,panes.is_some(),&output) };
@@ -1152,6 +1174,7 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
         && clear_context::dismissable(&record,panes.is_some()) && !clear_context::startup_choice(&output["pending_questions"]));
     output["interrupt_supported"] = json!(archive_id.is_none() && interrupt::available(&record,panes.is_some()));
     cache_hint::enrich(&record,&mut output,archive_id.is_none()&&panes.is_some());
+    phases.mark("actions");
     let messages = if string(&record, "agent") == "kimi" {
         kimi_messages::read_with_turns(&record).map(|(messages, turns, complete)| {
             output["kimi_turns"] = json!(turns);
@@ -1182,7 +1205,9 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
         output["kimi_turns_complete"] = json!(false);
         output["cache_hint"] = Value::Null;
     }
+    phases.mark("provider_messages");
     let db = event_db()?;
+    phases.mark("events_open");
     // A fork recorded before its lineage finds its source once (zerus-b4qk),
     // outside the state lock; saving it takes the lock again.
     if archive_id.is_none() {
@@ -1213,6 +1238,7 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
         events.push(row.event(&record)?);
     }
     output["events"] = json!(events);
+    phases.mark("activity");
     let (messages, truncated) =
         message_events(&db, journal_name, conversation, &scope, &record)?;
     output["message_events"] = json!(messages);
@@ -1228,14 +1254,21 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     // uncertain), so the composer that sent one restores its text.
     output["held_settled"] = input_hold::settled(string(&record, "name"));
     output["voice_messages"] = conversation_history::inspected_voice_messages(&record, &output, None);
+    phases.mark("message_events");
     // The lock was released after `snapshot`, so a rename may have landed since.
     // The pane folders go by the session IDs, which a rename keeps, to the name
     // this inspection reports (zerus-byyw, as in `merge_listing`).
     workspace::enrich(std::slice::from_mut(&mut output), &workspace::snapshot_cwds(&names));
+    phases.mark("workspace");
     waits::decorate(std::slice::from_mut(&mut output));
+    phases.mark("waits");
     notifications::enrich(&mut output, notifications::load().as_ref(), journal_name);
+    phases.mark("notifications");
     // U30: after the notification preferences, which say whether it is muted.
     session_state::decorate(std::slice::from_mut(&mut output));
+    phases.mark("session_state");
+    phases.note("team_store", session_state::TEAM_READ_MS.load(std::sync::atomic::Ordering::Relaxed));
+    output["timings_ms"] = phases.finish("inspect", name);
     Ok(output)
 }
 

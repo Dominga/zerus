@@ -56,6 +56,49 @@ SCHEMA = current_store_schema()
 
 
 class Desktop(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'posix', 'Unix directory mode migration')
+    def test_native_startup_preparation_repairs_only_the_owned_state_directory(self):
+        self.assertEqual(self.cli('desktop', 'prepare-state', '--json'), {'prepared': True})
+        self.assertFalse(self.state.exists(), 'absence remains read-only')
+        self.state.mkdir(mode=0o755)
+        self.state.chmod(0o755)
+        original = self.state / 'original'
+        original.write_bytes(b'original session data')
+        original.chmod(0o644)
+        before = self.state.stat()
+        self.cli('desktop', 'status', '--json', ok=False)
+        self.cli('desktop', 'ownership-status', '--json', ok=False)
+        self.assertEqual(self.state.stat().st_mode & 0o777, 0o755)
+        self.cli('desktop', 'prepare-state', '--json')
+        self.assertEqual(self.state.stat().st_mode & 0o777, 0o700)
+        self.assertEqual((self.state.stat().st_dev, self.state.stat().st_ino),
+                         (before.st_dev, before.st_ino))
+        self.assertEqual(original.read_bytes(), b'original session data')
+        self.assertEqual(original.stat().st_mode & 0o777, 0o644)
+        self.assertFalse(self.cli('desktop', 'status', '--json')['running'])
+        self.assertEqual(self.cli('desktop', 'ownership-status', '--json')['state'], 'passive')
+        self.assertFalse(self.desktop.exists())
+        self.desktop.mkdir(mode=0o755)
+        self.desktop.chmod(0o755)
+        self.cli('desktop', 'prepare-state', '--json')
+        self.cli('desktop', 'status', '--json', ok=False)
+        self.assertEqual(self.desktop.stat().st_mode & 0o777, 0o755)
+        self.desktop.rmdir()
+        actual = self.root / 'actual-state'
+        self.state.rename(actual)
+        self.state.symlink_to(actual, target_is_directory=True)
+        actual.chmod(0o755)
+        self.cli('desktop', 'prepare-state', '--json', ok=False)
+        self.assertEqual(actual.stat().st_mode & 0o777, 0o755)
+        actual.chmod(0o700)
+        before = actual.stat()
+        self.cli('desktop', 'prepare-state', '--json')
+        self.assertEqual(actual.stat().st_ctime_ns, before.st_ctime_ns)
+        self.cli('desktop', 'status', '--json')
+        process, _ = self.serve()
+        self.assertTrue(self.cli('desktop', 'status', '--json')['running'])
+        self.stop(process)
+
     @unittest.skipUnless(sys.platform.startswith(('linux', 'darwin')), 'Unix private foreground holder')
     def test_installer_retains_the_real_original_hold_through_private_passive_restart(self):
         """Real holder in isolated non-agent CI/private foreground ancestry."""

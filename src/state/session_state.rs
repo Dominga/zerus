@@ -60,7 +60,7 @@ pub(super) fn decorate(sessions: &mut [Value]) {
         let key = format!("{}\n{}", text(session, "agent"), text(session, "account_home"));
         let ttl = accounts.entry(key).or_insert_with(|| cache_ttl(session, &observed)).clone();
         apply(session, ttl, team, at);
-        if let Some(alert) = team.and_then(|team| team.alert.as_ref()) {
+        for alert in team.map(|team| team.alerts.as_slice()).unwrap_or_default() {
             add_alert(session, alert);
         }
         let name = text(session, "name").to_owned();
@@ -111,9 +111,51 @@ fn build_of(session: &Value, builds: &[Value]) -> Option<Value> {
             "command":claim["command"],"since":claim["started"]}))
 }
 
+/// Task 117: the team store's read on every listing and inspection waits at
+/// most this long for a writer. The installed rollback-journal store made
+/// readers wait up to 10 s behind a team write, past the desktop's 5 s
+/// inspect limit ("Could not refresh activity: timed out").
+const TEAM_READ_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
+/// A busy store answers with the last good reasons, at most this old.
+const TEAM_CACHE_SECONDS: f64 = 120.0;
+/// The last team read's milliseconds, for the inspection's phase timings.
+pub(crate) static TEAM_READ_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn team_cache_path() -> std::path::PathBuf {
+    teams::store::path().with_file_name("waiting-cache.json")
+}
+
 fn team_reasons(at: f64) -> Vec<teams::waiting::Waiting> {
-    let Ok(store) = teams::store::Store::open(false) else { return Vec::new() };
-    store.active_teams(TEAMS_READ).map(|found| teams::waiting::reasons(&found, at)).unwrap_or_default()
+    let started = std::time::Instant::now();
+    let reasons = team_reasons_at(&teams::store::path(), &team_cache_path(), TEAM_READ_WAIT, at);
+    TEAM_READ_MS.store(started.elapsed().as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+    reasons
+}
+
+/// The reasons from the store at `store`, or, when it stays busy past `wait`,
+/// the last good ones saved at `cache` within `TEAM_CACHE_SECONDS`.
+pub(crate) fn team_reasons_at(store: &Path, cache: &Path, wait: std::time::Duration, at: f64) -> Vec<teams::waiting::Waiting> {
+    if !store.exists() {
+        return Vec::new();
+    }
+    let read = teams::store::Store::open_at(store, false)
+        .and_then(|found| {
+            found.busy_timeout(wait)?;
+            found.active_teams(TEAMS_READ)
+        });
+    match read {
+        Ok(found) => {
+            let reasons = teams::waiting::reasons(&found, at);
+            let _ = super::storage::atomic_private(cache, &json!({"at":at,"reasons":reasons}).to_string());
+            reasons
+        }
+        Err(_) => std::fs::read(cache)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .filter(|saved| at - saved["at"].as_f64().unwrap_or(0.0) <= TEAM_CACHE_SECONDS)
+            .and_then(|saved| serde_json::from_value(saved["reasons"].clone()).ok())
+            .unwrap_or_default(),
+    }
 }
 
 /// The last native event: the cache's last use, a keepalive turn included.
@@ -239,6 +281,35 @@ pub(crate) fn compute(session: &Value, team: Option<(bool, Option<&Value>)>, at:
     } else {
         ("cold", None)
     }
+}
+
+/// Task 115: a team member's session state from this contract, for
+/// `hgs team status` and its member card. A native question or permission the
+/// member waits on is Waiting for you even while the last tick still saw it
+/// busy; Kimi answers its Edit and Write approvals only in its Terminal panel,
+/// and its other permissions reach the lead. Otherwise the stored phase and
+/// activity decide, so an idle member reads Cooling/Cold rather than busy.
+pub(crate) fn member_state(member: &teams::model::Member) -> (&'static str, Option<Value>) {
+    let live = member.seen.is_some_and(|seen| seen.live);
+    let last = member.seen_event_at.or(member.seen.map(|seen| seen.at)).unwrap_or(0.0);
+    let mut session = json!({
+        "state": if live { "running" } else { "stopped" },
+        "process_state": if live { "running" } else { "exited" },
+        "activity": if member.seen_activity.is_empty() { "unknown" } else { member.seen_activity.as_str() },
+        "phase": member.seen_phase,
+        "current_tool": "",
+        "last_active": last,
+    });
+    if let Some(asked) = member.pending.as_ref().or(member.terminal_question.as_ref()) {
+        session["activity"] = json!("busy");
+        session["phase"] = json!(if asked.approval { "approval" } else { "input" });
+        return compute(&session, None, now());
+    }
+    // A native question phase is Waiting for you; the contract names it input.
+    if member.seen_phase == "question" {
+        session["phase"] = json!("input");
+    }
+    compute(&session, None, now())
 }
 
 fn subagents(session: &Value, active: u64) -> Value {
@@ -650,5 +721,62 @@ mod tests {
             assert_eq!(asked["mobile_attention"].as_array().unwrap().len(), 2);
             assert_ne!(asked["attention_signature"], json!("a".repeat(64)));
         });
+    }
+
+    /// Task 115: the recorded Adventure team case. The Integrator (Kimi) showed
+    /// "Needs approval" in the session list while the team tick still stored it
+    /// busy/working, so `hgs team status` told the lead it was active. Its state
+    /// now comes from this contract: an open native approval is Waiting for you.
+    #[test]
+    fn a_kimi_member_waiting_on_an_approval_is_waiting_for_you_not_busy() {
+        use teams::model::{Member, MemberSeen, MemberState, PendingQuestion};
+        let stored = || Member {
+            id: "integrator".into(),
+            role: "Integrator".into(),
+            agent: "kimi".into(),
+            state: MemberState::Active,
+            seen: Some(MemberSeen { at: now() - 120.0, live: true }),
+            seen_phase: "working".into(),
+            seen_activity: "busy".into(),
+            seen_event_at: Some(now() - 120.0),
+            ..Default::default()
+        };
+        // Kimi answers its tool approvals in its Terminal panel; the stored
+        // pending approval outranks the phase the last tick saw.
+        let mut approval = stored();
+        approval.pending = Some(PendingQuestion {
+            question_id: "q".into(),
+            question_hash: "h".into(),
+            approval: true,
+            at: now(),
+            ..Default::default()
+        });
+        assert_eq!(
+            member_state(&approval),
+            ("user", Some(json!({"kind":"approval","text":"Needs approval"})))
+        );
+        // A Kimi question the lead cannot answer in the panel is the same wait.
+        let mut question = stored();
+        question.terminal_question = Some(PendingQuestion {
+            question_id: "q".into(),
+            question_hash: "h".into(),
+            at: now(),
+            ..Default::default()
+        });
+        assert_eq!(member_state(&question).0, "user");
+        assert_eq!(member_state(&question).1.unwrap()["kind"], "input");
+        // The contract's question phase is Waiting for you without a card.
+        let mut phase = stored();
+        phase.seen_phase = "question".into();
+        phase.seen_activity = "attention".into();
+        assert_eq!(member_state(&phase).0, "user");
+        // Without a question the stored phase decides: a busy tool works, and a
+        // stopped session is stopped, never waiting.
+        let mut working = stored();
+        working.seen_phase = "tool".into();
+        assert_eq!(member_state(&working), ("working", None));
+        let mut stopped = stored();
+        stopped.seen = Some(MemberSeen { at: now(), live: false });
+        assert_eq!(member_state(&stopped), ("stopped", None));
     }
 }

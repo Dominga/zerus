@@ -1280,14 +1280,20 @@ fn attention_cards(detail: &Value, key: &(String, String, String)) -> Option<Val
 
 /// The connector's question cards, after the row's own Zerus alerts (task 95:
 /// a stalled lead's `team_lead_stall` item on the lead's row; task 97: an
-/// `owner_deferred` request of the owner queue). Only those alerts are kept:
+/// `owner_deferred` request of the owner queue; task 113: a member's raised
+/// `team_terminal_prompt`). Only those alerts are kept:
 /// every other row item is the cards' to replace.
 fn merge_attention(row: Option<&Value>, cards: &Value) -> Value {
     let mut merged: Vec<Value> = row
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter(|item| matches!(item.get("kind").and_then(Value::as_str), Some("team_lead_stall" | "owner_deferred")))
+        .filter(|item| {
+            matches!(
+                item.get("kind").and_then(Value::as_str),
+                Some("team_lead_stall" | "owner_deferred" | "team_terminal_prompt")
+            )
+        })
         .cloned()
         .collect();
     merged.extend(cards.as_array().into_iter().flatten().cloned());
@@ -1308,6 +1314,9 @@ mod attention_merge_tests {
         // Task 97: a deferred request of the owner queue is kept as well.
         let deferred = json!({"question_id":"owner-deferred:ab","question_hash":"d","kind":"owner_deferred"});
         assert_eq!(merge_attention(Some(&json!([deferred.clone()])), &cards), json!([deferred, {"question_id":"q1","question_hash":"h1"}]));
+        // Task 113: a member's Terminal-only prompt raised on the lead's row.
+        let prompt = json!({"question_id":"team-terminal-prompt:t:m:q","question_hash":"p","kind":"team_terminal_prompt"});
+        assert_eq!(merge_attention(Some(&json!([prompt.clone()])), &cards), json!([prompt, {"question_id":"q1","question_hash":"h1"}]));
         // Without a team alert the cards replace the row's items, as before.
         assert_eq!(merge_attention(Some(&json!([{"question_id":"old","question_hash":"o"}])), &cards), cards);
         assert_eq!(merge_attention(None, &cards), cards);

@@ -1368,6 +1368,40 @@ fn the_time_view_lays_out_qt_s_lanes_from_the_team_s_replies() {
     assert_eq!(flooded.lanes[0].spans.len(), MAX_SPANS);
 }
 
+/// Task 118: time that waited for a person's answer is a wait under its
+/// task's lane, never the member's own busy time, so it counts as neither work
+/// nor busy and the lane's idle outline is not drawn over it.
+#[test]
+fn a_wait_for_a_person_is_drawn_as_a_wait_and_not_as_the_member_s_own_time() {
+    use super::timeline;
+    let status = fixture("status");
+    // Task 1 is ui2's.
+    let timelines = vec![json!({"task": 1, "spans": [
+        {"kind": "work", "member": "ui2", "from": 1000.0, "to": 1100.0},
+        {"kind": "person", "reason": "permission", "member": "ui2", "from": 1100.0, "to": 1400.0},
+        {"kind": "work", "member": "ui2", "from": 1400.0, "to": 1500.0},
+    ]})];
+    let view = timeline::build(
+        TEAM,
+        None,
+        &status,
+        &json!({"members": [{"member": "ui2"}]}),
+        &timelines,
+        &[],
+        false,
+        1600.0,
+    );
+    let lane = view.lanes.iter().find(|lane| lane.member == "ui2").unwrap();
+    assert_eq!(
+        lane.spans.iter().map(|span| span.kind.as_str()).collect::<Vec<_>>(),
+        ["work", "work"]
+    );
+    assert_eq!(
+        lane.waits.iter().map(|span| (span.kind.as_str(), span.from, span.to)).collect::<Vec<_>>(),
+        [("person", 1100.0, 1400.0)]
+    );
+}
+
 /// Task 92: the Time view's reads name the scope and their bounds.
 #[test]
 fn the_time_view_reads_a_scope_in_bounded_pages() {

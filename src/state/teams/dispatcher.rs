@@ -346,6 +346,9 @@ pub(crate) enum Step {
     /// team's `defer_minutes`: answer it safely and queue it for the owner.
     /// `question` is its `id:hash`.
     Defer { member: String, question: String },
+    /// Task 113: a request only the member's Terminal takes waited for the
+    /// defer time: raised once to the owner and the phone with its screen.
+    EscalateTerminal { member: String },
     /// U56: a pending task pinned to a stuck, stopped or offline member says so
     /// in its waits.
     WaitOnMember { task: u32, member: String, reason: String },
@@ -626,6 +629,13 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             }
         }
     }
+    // Task 113: a request only the member's Terminal takes never stays a
+    // quiet wait; after the defer time the owner and the phone hear of it.
+    for member in &team.members {
+        if super::terminal_prompt::due(team, member, now) {
+            steps.push(Step::EscalateTerminal { member: member.id.clone() });
+        }
+    }
     // H6: a swapped lead is briefed once, also while the team runs.
     let briefing = (active || planning || drafting) && matches!(team.brief, Notice::Pending | Notice::Sending);
     if briefing {
@@ -859,7 +869,16 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             };
             let quiet = last.map(|at| now - at).unwrap_or(0.0);
             let limit = if in_tool { tool_stuck_minutes(team) * 60.0 } else { super::ops::stuck_minutes(team) * 60.0 };
-            let stuck = busy && !found.asking && !found.background && !found.building && quiet >= limit;
+            // Task 115: a member with an open native question or permission is
+            // Waiting for you, never stuck in a silent turn: the stored card
+            // outlives a tick whose phase has moved on.
+            let stuck = busy
+                && !found.asking
+                && !found.background
+                && !found.building
+                && member.pending.is_none()
+                && member.terminal_question.is_none()
+                && quiet >= limit;
             if stuck && member.stuck.is_none() {
                 let reason = if found.phase == "compacting" { "compaction_timeout" } else { "no_progress" };
                 let checked = open.as_ref().is_some_and(|(_, attempt)| attempt.told_lead.iter().any(|kind| kind == "silent"));
@@ -2905,6 +2924,48 @@ fn input_blocked(store: &mut Store, team_id: &str, member_id: &str, session: &Se
     })
 }
 
+/// Task 113: raises the member's Terminal-only request to the owner once,
+/// with the screen's last lines; a snapshot that fails raises it without them.
+fn escalate_terminal(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Result<()> {
+    let member = team.member(member_id).context("unknown member")?;
+    let Some((asked, None)) = super::terminal_prompt::of(member) else { return Ok(()) };
+    let question = asked.question_id.clone();
+    let screen = member
+        .session
+        .as_ref()
+        .and_then(|session| {
+            let snapshot = json!({"request_id":uuid::Uuid::new_v4().to_string(),"action":"snapshot",
+                "expected_run_id":session.run_id,"expected_conversation_id":session.conversation_id});
+            hgs(&session.host, &["terminal", &session.name, "--json"], Some(&snapshot), Duration::from_secs(30)).ok()
+        })
+        .filter(|output| output.status.success())
+        .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
+        .map(|answer| last_lines(answer["screen"].as_str().unwrap_or_default(), TerminalEscalation::SCREEN_LINES))
+        .unwrap_or_default();
+    change(store, &team.id, |team, events| {
+        let role = team.role_of(member_id);
+        let found = team.members.iter_mut().find(|found| found.id == member_id).context("unknown member")?;
+        // The request may have gone while the screen was read.
+        let Some(asked) = found.terminal_question.as_ref().filter(|asked| asked.question_id == question) else {
+            return Ok(());
+        };
+        let at = now();
+        events.push(Event::new("terminal_prompt_raised", json!({"member":role,"question_id":question,
+            "tool":super::terminal_prompt::title(asked),"minutes":super::terminal_prompt::minutes(asked, at),
+            "screen":!screen.is_empty()})));
+        found.terminal_escalation = Some(TerminalEscalation { question_id: question.clone(), at, screen: screen.clone() });
+        Ok(())
+    })
+}
+
+/// An escalation outlives no request: it goes with the request it raised.
+fn drop_stale_escalation(found: &mut Member, role: &str, events: &mut Vec<Event>) {
+    let current = found.terminal_question.as_ref().map(|asked| asked.question_id.clone());
+    if let Some(raised) = found.terminal_escalation.take_if(|raised| Some(&raised.question_id) != current.as_ref()) {
+        events.push(Event::new("terminal_prompt_cleared", json!({"member":role,"question_id":raised.question_id})));
+    }
+}
+
 /// Task 97: an `hgs answer` outcome, as conservatively as a send: success is
 /// an answer that reached the session, exit 1 without "uncertain" one refused
 /// before anything was typed, anything else may have arrived.
@@ -3598,6 +3659,10 @@ pub(crate) fn host_still_starting(error: &str) -> bool {
 
 fn launch(team: &Team, member: &Member) -> anyhow::Result<()> {
     super::super::iron_rules::for_team(team, member)?;
+    // Task 115: a Kimi member's read-only rules are the owner's explicit
+    // opt-in (`hgs account kimi-read-only`), never written by a launch: Kimi
+    // has no per-launch rule override, and editing the config a launch reads
+    // would silently change every Kimi session on this computer.
     let folder = member_folder(team, member)?;
     let args = launch_args(team, member, &folder);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -5565,6 +5630,7 @@ fn sync_permission(store: &mut Store, team: &Team, member_id: &str) -> anyhow::R
                     "tool":asked.card["questions"][0]["header"],"reason":asked.card["answer_unavailable_reason"]})));
             }
             found.terminal_question = terminal.clone();
+            drop_stale_escalation(found, &role, events);
         }
         match &ask {
             Some(pending) => {
@@ -6164,9 +6230,11 @@ pub(crate) fn starved_text(team: &Team, member: &Member, now: f64) -> String {
     }
     format!(
         "[Zerus team \u{b7} from: Zerus \u{b7} starved]\n{role} has had no ready task for {minutes} min while {} task(s) are open.\n\
-         Blocking:\n{chain}\
+         Blocking:\n{chain}{}\
          Give it work, release a held task or change the plan (hgs guide team-lead).",
-        open.len()
+        open.len(),
+        // Task 113: a member held by a prompt only its Terminal takes.
+        super::terminal_prompt::lead_lines(team, now)
     )
 }
 
@@ -6770,6 +6838,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                 }
                 found.permission = None;
                 found.terminal_question = None;
+                drop_stale_escalation(found, &role, events);
             }
             Ok(())
         }),
@@ -7173,6 +7242,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             Ok(())
         }),
         Step::Defer { member, question } => defer_request(store, team, member, question),
+        Step::EscalateTerminal { member } => escalate_terminal(store, team, member),
         Step::LeadStall { stall } => change(store, &team.id, |team, events| {
             if let Some((kind, data)) = super::lead_stall::event(team.lead_stall.as_ref(), stall.as_ref(), now()) {
                 events.push(Event::new(kind, data));
@@ -8347,6 +8417,9 @@ mod dispatcher_owner_queue;
 #[cfg(test)]
 #[path = "tests/dispatcher_input_block.rs"]
 mod dispatcher_input_block;
+#[cfg(test)]
+#[path = "tests/dispatcher_terminal_prompt.rs"]
+mod dispatcher_terminal_prompt;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_areas.rs"]

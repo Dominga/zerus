@@ -10,7 +10,8 @@ use serde_json::{json, Value};
 const REPORTS_SHOWN: usize = 4;
 
 /// One team session's reason, and the budget its Background job runs under.
-#[derive(Clone, Debug, Default, PartialEq)]
+/// Task 117: kept as the last good answer for a read the store keeps busy.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Waiting {
     pub name: String,
     pub conversation_id: String,
@@ -24,9 +25,10 @@ pub(crate) struct Waiting {
     /// U30: the member's `hgs team run` still running in its folder: the
     /// session is Building.
     pub build: Option<Value>,
-    /// Task 95: the lead stalled: the phone's alert item for the lead's row
-    /// (`mobile_attention`), one per notification round.
-    pub alert: Option<Value>,
+    /// The phone's alert items for the lead's row (`mobile_attention`): task
+    /// 95's stalled lead, one per notification round, and task 113's raised
+    /// Terminal-only requests of the team's members.
+    pub alerts: Vec<Value>,
     /// Task 97: the team, so the owner queue finds its lead's row.
     pub team: String,
 }
@@ -49,11 +51,16 @@ pub(crate) fn reasons(teams: &[Team], now: f64) -> Vec<Waiting> {
                     "job":budget.job.as_ref().map(|job| json!({"command":job.command,"since":job.since}))})
             });
             let build = if lead { None } else { team_build(team, member, now) };
-            let alert = team
+            let mut alerts: Vec<Value> = team
                 .lead_stall
                 .as_ref()
                 .filter(|_| lead && team.status == TeamStatus::Running)
-                .map(|stall| super::lead_stall::mobile_item(team, stall));
+                .map(|stall| super::lead_stall::mobile_item(team, stall))
+                .into_iter()
+                .collect();
+            if lead {
+                alerts.extend(team.members.iter().filter_map(|member| super::terminal_prompt::mobile_item(team, member)));
+            }
             out.push(Waiting {
                 name: session.name.clone(),
                 conversation_id: session.conversation_id.clone(),
@@ -61,7 +68,7 @@ pub(crate) fn reasons(teams: &[Team], now: f64) -> Vec<Waiting> {
                 reason,
                 budget,
                 build,
-                alert,
+                alerts,
                 team: team.id.clone(),
             });
         }

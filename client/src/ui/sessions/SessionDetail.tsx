@@ -9,6 +9,7 @@ import { nativeUi } from "../../store/native-ui";
 import { pageHidden } from "../../store/visibility";
 import { ProcessesTab } from "./Processes";
 import { TeamTab } from "../teams/TeamTab";
+import { WaitingBanner } from "../teams/Waiting";
 import { selectedTeam } from "../../store/teams";
 import { drops } from "../../store/drops";
 import { processes, processesTab } from "../../store/processes";
@@ -268,6 +269,11 @@ export function SessionDetail() {
               <Switch>
                 <Match when={detailTab() === "activity"}>
                   <div class="activity-wrap" classList={{ "has-goal": !!goal().objective }} style={columnStyle()}>
+                    {/* Task 116: what waits for the owner, in the lead's Activity
+                        strip too (Qt's waitingBannerHost): every kind the team
+                        feed has, each answered in its row as Waiting for you
+                        answers it, and one click to its team or the full list. */}
+                    <WaitingBanner />
                     <Show when={goal().objective}><button class="goal-pill" onClick={() => openInspector("plan")}><Icon name="circle-dot" size={13} /><b>{goal().caption}</b><span class="ell">{goal().objective}</span><span class="grow" /><span>{tr("Details")}</span><Icon name="chevron-right" size={12} /></button></Show>
                     <ActivityView source={activitySourceFor(selected()!.key)} />
                     {/* Child Activity stays read-only; its own composer opens only when the inspection supports send. */}

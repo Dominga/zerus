@@ -925,6 +925,12 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
             // event, and whether Zerus marks it stuck - status without inspect.
             entry["phase"] = json!(member.seen_phase);
             entry["activity"] = json!(member.seen_activity);
+            // Task 115: the member's state from the session state contract, so
+            // `hgs team status` and the member card say Waiting for you while
+            // its approval or question is open, not busy.
+            let (state, reason) = crate::state::session_state::member_state(member);
+            entry["session_state"] = json!(state);
+            entry["state_reason"] = reason.unwrap_or(Value::Null);
             entry["minutes_without_progress"] =
                 json!(member.seen_event_at.map(|at| ((crate::state::now() - at) / 60.0).max(0.0).round() as u64));
             entry["stuck"] = serde_json::to_value(&member.stuck).unwrap_or(Value::Null);
@@ -1058,6 +1064,11 @@ fn summary(team: &Team, include_cancelled: bool) -> Value {
                 "session":m.session,"state":m.state,"error":m.error,"queue":member_queue(team, &m.id),
                 "stage_queue":super::stages::queue(team, &m.id),
                 "services":m.services,"question":m.permission});
+            // Task 115: the state contract's own state, so the session list's
+            // member card says Waiting for you rather than busy.
+            let (state, reason) = crate::state::session_state::member_state(m);
+            value["session_state"] = json!(state);
+            value["state_reason"] = reason.unwrap_or(Value::Null);
             if let Some(held) = captured_hold(team, &m.id) {
                 value["captured_hold"] = held;
             }

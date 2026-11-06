@@ -8,8 +8,10 @@ case "$run_tests" in
     *) echo 'ZERUS_RUN_TESTS must be true or false.' >&2; exit 2 ;;
 esac
 if [ "$run_tests" = false ]; then
-    if [[ "${ZERUS_RELEASE_CHANNEL:-}" != dev || ! "${ZERUS_DEV_BUILD_NUMBER:-}" =~ ^[1-9][0-9]*$ ]]; then
-        echo 'Skipping full bundle tests requires the Dev channel and a positive Dev build number.' >&2
+    if [[ "${ZERUS_RELEASE_CHANNEL:-}" = stable && "${ZERUS_MACOS_TESTS_IN_VERIFY:-}" = true ]]; then
+        : # The caller must gate signing/sealing on its same-SHA full matrix.
+    elif [[ "${ZERUS_RELEASE_CHANNEL:-}" != dev || ! "${ZERUS_DEV_BUILD_NUMBER:-}" =~ ^[1-9][0-9]*$ ]]; then
+        echo 'Skipping bundle tests requires the Dev gate or same-SHA stable verification.' >&2
         exit 2
     fi
 fi
@@ -18,8 +20,12 @@ output="${ZERUS_MACOS_OUTPUT:-$PWD/artifacts/macos-unsigned}"
 version="$(cat VERSION)"
 # A nightly passes its release version; stable bundles use the product version.
 release="${ZERUS_RELEASE_VERSION:-$version}"
-if [ "$run_tests" = false ] && [ "$release" != "$(cat DEV_VERSION)-dev.$ZERUS_DEV_BUILD_NUMBER" ]; then
+if [ "$run_tests" = false ] && [ "${ZERUS_RELEASE_CHANNEL:-}" = dev ] && [ "$release" != "$(cat DEV_VERSION)-dev.$ZERUS_DEV_BUILD_NUMBER" ]; then
     echo 'Build-only bundles require the exact numbered Dev release.' >&2
+    exit 2
+fi
+if [ "$run_tests" = false ] && [ "${ZERUS_RELEASE_CHANNEL:-}" = stable ] && [ "$release" != "$version" ]; then
+    echo 'Stable build-only bundles require the exact product release.' >&2
     exit 2
 fi
 export CARGO_BUILD_JOBS="${ZERUS_BUILD_JOBS:-3}"
@@ -46,7 +52,7 @@ if [ "$run_tests" = true ]; then
     cargo test --locked --release --manifest-path client/src-tauri/Cargo.toml --features video \
         2>&1 | tee artifacts/test-results/macos-bundle-tauri.log
 else
-    echo 'Dev build-only bundle: full Next regression tests were not run; package checks remain required.'
+    echo 'Build-only bundle: regression tests belong to the caller gate; package checks remain required.'
 fi
 python3 scripts/package-macos.py --gui tauri --app target/release/bundle/macos/Zerus.app \
     --cli target/release/hgs --connector target/release/zerus-mobile-connector \

@@ -51,11 +51,19 @@ class DevReadiness(unittest.TestCase):
 
     def regression_selected(self, *, event='push', branch='main', repository='ufna/zerus',
                             source_repository='ufna/zerus', private=False,
-                            enabled='true', conclusion='success', event_name='workflow_run'):
+                            enabled='true', conclusion='success', event_name='workflow_run',
+                            observer='success', covered='false', cancelled=False):
         expression = field(job(self.regression, 'checks'), 'if')
         expression = expression.replace('&&', ' and ').replace('||', ' or ')
-        expression = re.sub(r'\bfalse\b', 'False', expression)
+        expression = re.sub(r'!(?!=)', 'not ', expression)
+        expression = re.sub(r"(?<!')\bfalse\b(?!')", 'False', expression)
+        class Outputs(SimpleNamespace):
+            def __getattr__(self, _): return ''  # GitHub's missing-output value.
+        # GitHub's string comparison ignores case; the helper emits lowercase.
+        outputs = Outputs(**({} if covered is None else {'covered': covered.casefold()}))
         return bool(eval(expression, {'__builtins__': {}}, {
+            'cancelled': lambda: cancelled,
+            'needs': SimpleNamespace(overlap=SimpleNamespace(result=observer, outputs=outputs)),
             'github': SimpleNamespace(repository=repository, event_name=event_name, event=SimpleNamespace(
                 repository=SimpleNamespace(private=private), workflow_run=SimpleNamespace(
                     event=event, head_branch=branch, conclusion=conclusion,
@@ -72,6 +80,14 @@ class DevReadiness(unittest.TestCase):
         self.assertIn('ref: ${{ github.event.workflow_run.head_sha }}', self.regression)
         self.assertEqual(field(job(self.regression, 'checks'), 'uses'), './.github/workflows/checks.yml')
         self.assertNotIn('continue-on-error', self.regression)
+
+    def test_regression_overlap_requires_a_positive_observation_and_honours_cancellation(self):
+        for observer in ('success', 'failure', 'skipped', 'cancelled', ''):
+            for covered in (None, '', 'false', 'true', 'TrUe'):
+                with self.subTest(observer=observer, covered=covered):
+                    expected = not (observer == 'success' and covered in ('true', 'TrUe'))
+                    self.assertEqual(self.regression_selected(observer=observer, covered=covered), expected)
+                    self.assertFalse(self.regression_selected(observer=observer, covered=covered, cancelled=True))
 
     def regression_group(self, build_source, *, wrapper_source='c' * 40, run_id=100):
         group = re.search(r'(?m)^  group: (.*)$', self.regression)[1]

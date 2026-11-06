@@ -52,6 +52,11 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 unicode-casefold = "0.2"
 windows-sys = { version = "0.61", features = ["Wdk_System_Threading", "Win32_Foundation", "Win32_Globalization", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Diagnostics_Debug", "Win32_System_Environment", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Kernel", "Win32_System_Memory", "Win32_System_Pipes", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_RemoteDesktop", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_UI_Shell"] }
 
+# Task 114: tests/fork_handoff.rs checks that the update helpers it runs never
+# show a window.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
+
 [features]
 konsole = ["dep:dbus"]
 linux-native-notify = ["dep:zbus", "dep:async-io", "dep:futures-lite", "dep:tokio"]

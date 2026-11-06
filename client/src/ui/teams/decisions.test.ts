@@ -325,8 +325,8 @@ describe("Waiting for you", () => {
   it("waitingPageListsEveryKindAcrossTeams: each kind in words, its answer in place, the count by teams", () => {
     const items = kinds();
     expect(items.map(waitingKindLabel)).toEqual(["Plan", "Phase draft", "Permission", "Proposal", "Report", "Held task", "All decided"]);
-    expect(items.map((found) => (approves(found.action) ? "Approve…" : opensCard(found.action) ? "Answer" : ""))).toEqual(["Approve…", "Approve…", "Answer", "Answer", "", "", ""]);
-    expect(items.map((found) => waitingActionLabel(found.action))).toEqual(["Approve…", "Approve…", "Answer", "Answer", "Accept…", "Open team", "Open team"]);
+    expect(items.map((found) => (approves(found.action) ? "Approve…" : opensCard(found.action) ? "Answer" : ""))).toEqual(["Approve…", "Approve…", "Answer", "Answer", "Answer", "Answer", "Answer"]);
+    expect(items.map((found) => waitingActionLabel(found.action))).toEqual(["Approve…", "Approve…", "Answer", "Answer", "Accept…", "Answer", "Answer"]);
     expect(waitingCount(items, 7)).toBe("7 items in 6 teams");
     expect(waitingCount([], 0)).toBe("Nothing waits for you");
     expect(waitingAge(NOW - 300, NOW)).toBe("5 min ago");
@@ -351,8 +351,9 @@ describe("Waiting for you", () => {
     const items = answerItems();
     const answered: string[] = [];
     const answer = (found: TeamWaitingItem) => new WaitingAnswer(found, f.port, "", () => {}, (done) => answered.push(done.id));
-    // A report and a held task are read in the team first: Open team only.
-    expect([items.report, items.held].map((found) => opensCard(found.action) || approves(found.action))).toEqual([false, false]);
+    // Task 116: a report and a held task are answered in their row too, like
+    // every other kind that waits for the owner.
+    expect([items.report, items.held].map((found) => opensCard(found.action) || approves(found.action))).toEqual([true, true]);
     // The proposal: Deny with its reason, bound to its hash.
     const proposalRow = answer(items.proposal);
     await proposalRow.open();
@@ -394,6 +395,59 @@ describe("Waiting for you", () => {
     expect(f.sent).toHaveLength(4);
     expect(stale.done).toBe(false);
   });
+
+  it("everyKindIsAnsweredInItsRow: a report, a held task, a retry and the end answer where they wait (task 116)", async () => {
+    const team = answerTeam({
+      tasks: [
+        task({ id: 1, title: "Saved cards API", status: "submitted" }),
+        task({ id: 2, title: "Release notes", held: true }),
+        task({ id: 5, title: "Code review", status: "pending", waits: "hgs: unknown model gpt-5.5" }),
+        task({ id: 6, title: "Docs", status: "accepted" }),
+      ],
+    });
+    const f = fake(team);
+    const answered: string[] = [];
+    const answer = (found: TeamWaitingItem) => new WaitingAnswer(found, f.port, "", () => {}, (done) => answered.push(done.id));
+    // The report: the same Accept and Reject its team card has.
+    const report = answer(item("1", "report_escalated", "decide_report", "Report on #1 Saved cards API", NOW - 300, { task: 1, member: "Backend" }));
+    await report.open();
+    await report.acceptReport();
+    expect(f.sent.at(-1)!.action).toEqual({ kind: "accept", task: 1 });
+    const reject = answer(item("1b", "report_escalated", "decide_report", "Report on #1 Saved cards API", NOW - 300, { task: 1, member: "Backend" }));
+    await reject.open();
+    await reject.rejectReport("Fix the flaky test first");
+    expect(f.sent.at(-1)!.action).toEqual({ kind: "reject", task: 1, reason: "Fix the flaky test first" });
+    // A held task: Release; a step Zerus could not take: Retry.
+    const held = answer(item("2", "task_waits_owner", "release_task", "#2 Release notes is held by you", NOW - 360, { task: 2 }));
+    await held.open();
+    await held.release();
+    expect(f.sent.at(-1)!.action).toEqual({ kind: "release", task: 2 });
+    const retry = answer(item("5", "task_waits_owner", "retry_task", "#5 Code review waits: hgs: unknown model", NOW - 400, { task: 5 }));
+    await retry.open();
+    await retry.retry();
+    expect(f.sent.at(-1)!.action).toEqual({ kind: "retry", task: 5 });
+    // The end of the team: its summary reaches the lead, after the confirmation.
+    const finish = answer(item("finish", "team_finished", "finish", "All 4 tasks decided: waits for you to finish", NOW - 900, {}));
+    await finish.open();
+    await finish.finishTeam("  ");
+    expect(f.sent).toHaveLength(4);
+    await finish.finishTeam("Shipped 0.43");
+    expect(f.sent.at(-1)!.action).toEqual({ kind: "finish", summary: "Shipped 0.43" });
+    expect(answered).toEqual([report.item.id, reject.item.id, held.item.id, retry.item.id, finish.item.id]);
+    // Each is an answer in its row, never only an Open team: the strip and the
+    // page use the same entries.
+    for (const found of [report, reject, held, retry, finish]) expect(opensCard(found.item.action)).toBe(true);
+  });
+
+  it("aDeferredRequestIsAnsweredWithoutOpeningTheTeam", () => {
+    const found = item("d1", "deferred", "answer_deferred", "answered safely", NOW - 60,
+      { deferred: "d1", request: "permission", text: "rm -rf build", session: "codex/x/dev", outcome: "denied" });
+    expect(splitDeferred([found]).deferred.map((entry) => entry.id)).toEqual([found.id]);
+    expect(opensCard(found.action)).toBe(true);
+    // The tool offer is answered in its row too, with or without a team.
+    expect(opensCard("decide_tool")).toBe(true);
+  });
+
 
   it("waitingAdditionCancelDeclinesIt: Cancel declines the addition with its id", async () => {
     const f = fake(answerTeam());

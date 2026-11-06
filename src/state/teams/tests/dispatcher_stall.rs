@@ -110,6 +110,18 @@ fn a_stuck_member_is_marked_when_busy_without_events() {
         found.iter().any(|step| matches!(step, Step::MarkStuck { reason, .. } if reason == "compaction_timeout")),
         "{found:?}"
     );
+    // Task 115: a stored native approval outlives the tick that saw the busy
+    // phase; the member waits for the owner, so it is never marked stuck.
+    let mut waiting = team();
+    waiting.members.iter_mut().find(|member| member.id == "dev").unwrap().pending = Some(PendingQuestion {
+        question_id: "q1".into(),
+        question_hash: "h1".into(),
+        approval: true,
+        at,
+        card: json!({}),
+    });
+    let found = steps(&waiting, &[lead.clone(), dev.clone()], at);
+    assert!(!found.iter().any(|step| matches!(step, Step::MarkStuck { .. })), "{found:?}");
     // stuck_minutes moves the limit: 5 minutes marks the 6-minute silence.
     t.settings.stuck_minutes = 5;
     let mut five = dev.clone();

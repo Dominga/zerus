@@ -2496,6 +2496,28 @@ defer-session --json` (0 turns it off; at most 100 sessions). The team worker
 then reads such a session while it asks, at most every 20 seconds, and keeps
 running for it. A session of a team follows its team's setting.
 
+#### A request only the Terminal takes is raised to the owner
+
+A member's request that Zerus cannot answer (`can_answer` false: a Kimi
+approval whose panel Zerus cannot verify, Kimi's Edit and Write approvals, a
+request behind another one) is never a quiet wait. The owner sees it at once
+(Waiting for you, kind `permission_escalated`, action `open_terminal`) and the
+lead's inbox names it. Once it has waited `defer_minutes` (10 when the queue is
+off), the dispatcher raises it once (task 113): it reads the member's Terminal
+(`hgs terminal NAME --json`, action `snapshot`) and keeps the last 12 non-blank
+lines in the member's `terminal_escalation`, bound to that request's id. The
+owner's item then adds `escalated`, `raised_at`, `minutes`, `session`, `host`,
+`tool`, `reason` and `screen`; the lead's `hgs ls --json` row carries one
+`mobile_attention` alert `{"question_id":"team-terminal-prompt:<team>:<member>:<question>",
+"question_hash","kind":"team_terminal_prompt","team","team_name","member",
+"member_id","session","host","tool","screen","action":"open_terminal",
+"action_label":"Open Terminal","since"}` with the screen's last six lines (at
+most 120 characters each); the mobile connector keeps it beside its question
+cards. The lead's starved-member message lists every member that waits in a
+Terminal, with its session, minutes and request. The escalation goes with its
+request (feed `terminal_prompt_raised`, `terminal_prompt_cleared`); Zerus never
+answers it.
+
 ### The profile of the work: losses, spans and unknown
 
 `hgs team profile` reads a scope after the work: where its time and tokens
@@ -2533,7 +2555,16 @@ apply, `member`, `attempt`, `stage`, `round`, `stage_kind`, `state`, `by`,
   started (A1); `lead`: waiting for the lead's decision; `hold`: a hold
   (`by`).
 - `question` and `permission`: blocked on a native question or permission
-  request (`by` is who answered).
+  request (`by` is who answered); what the lead answers.
+- `person` (task 118): waiting for a person's answer, with its `reason`:
+  `acceptance` (a phase before waiting for the owner's acceptance, with
+  `phase`), `permission` and `question` (a native request or a task question
+  the owner answered, or a request that went to the owner after the team's
+  `remind_owner_permission_minutes`, or only the Terminal takes), `deferred`
+  (a request the owner queue answered safely for the owner, task 97) and
+  `report` (the lead's decision on a report the owner decided, or that went
+  to the owner after `remind_owner_minutes`). It is a wait, not the member's
+  work; the lead's own waits stay `lead`, `question` and `permission`.
 - `stage_wait`: waiting for a stage member; `stage`: a U36 stage of a round
   (`stage_kind`, `round`).
 - `background`: Background work (U30); `no_report`: a task without a report;
@@ -2552,7 +2583,9 @@ The output is one JSON object:
   `s`, and `tokens`/`cost_usd` when its part's session is known. The kinds are
   `rework` (per rejected or returned attempt, with `cause`, `share` of the
   task's tokens and `tokens_unknown`), `lead_wait` (`lead_s`, `question_s`),
-  `permission_wait` (`answered_by`), `blocked_chain` (a folder another task's
+  `person_wait` (task 118: the seconds of the task's `person` spans, with
+  `reasons` per reason), `permission_wait` (`answered_by`),
+  `blocked_chain` (a folder another task's
   stage held: `folder_held_s`, `held_by`, with `deps_s` and `on` for context;
   waiting for dependencies is no loss by itself, see lateness below),
   `member_wait`, `idle_member` (`open_s`,
@@ -3324,6 +3357,16 @@ record Kimi is still writing, a line that is not a JSON object with one string
 type, an interaction record without its ID or of a kind Kimi does not write,
 or a repeated request ID keeps the approval read-only. Types and IDs are
 compared as decoded JSON.
+Kimi Code 2.5 (task 113) writes the same wire records and draws the same
+rows; in fullscreen mode (`tui_mode = "fullscreen"`) it docks the panel: its
+body is one column narrower (the scrollbar's) and shows at most six rows, and a
+longer body adds ` · shift+↑/↓ scroll` to the key hint. Zerus reads both
+layouts row by row; a scrolled body, a panel without the keyboard (`esc back
+to approval`) or a narrow one stays read-only and says why. A request of the
+running turn whose tool call Kimi's PreToolUse hook has not reported to Zerus
+still shows its exact command, read-only with **Open Terminal**, and becomes
+answerable once the hook reports it; one older than the turn, or after it
+ended, shows nothing.
 Experimental and off by default: an empty file
 `~/.config/hgs/kimi-unverified-edit-approvals` (in `HGS_CONFIG_DIR` when set)
 also lets Zerus answer Kimi's **Edit** and **Write** approvals, from Activity
@@ -3363,6 +3406,9 @@ descriptions only for reviewed text. In a Git subdirectory or worktree, Codex
 folder access names the repository root that Codex will trust. Claude wraps a
 long workspace path across rows; the joined rows must still equal the launch
 folder exactly.
+Codex 0.167 can offer **Back to Agent Command Center** instead of **Quit**.
+Back cancels opening the folder without saving trust and keeps Codex running;
+Quit exits the original Codex process. Both require an explicit user choice.
 Trust persistence belongs to the native agent.
 Already-running Claude and Kimi sessions can retain the exact Bitwarden launcher
 notices above the complete workspace-trust panel; Claude also accepts its
@@ -3426,6 +3472,11 @@ for your message. A dialog too narrow to read, or for another goal, stays in
 Terminal.
 
 Optional Codex questions preserve the regular composer and support **Skip**.
+Codex closes unanswered optional questions when their native turn completes,
+is interrupted, or accepts an ordinary follow-up. Zerus removes those cards
+and their question badge without recording a user answer. Continued tool work
+alone does not close a question. Questions belonging to a native child remain
+with that child's parent; they are not requests for the person.
 When Codex's own question panel is open, Zerus answers or skips there. Codex's
 animated working status above the panel does not block an answer; any change
 to the panel itself does. An open panel taller than its pane keeps its title
@@ -3444,7 +3495,10 @@ If an optional answer enters Codex's native queue, the question stays visible as
 **Submitted / Awaiting agent** with the original answer locked. Submission means
 the verified terminal received the answer; it does not mean Codex has recorded
 it yet. This state survives polling and GUI restarts. The card disappears after
-the exact native question reply appears in the conversation. Zerus never resends
+the exact native question reply appears in the conversation. If Codex closes
+the question first, this exact submitted answer stays as a read-only delivery
+receipt until acknowledgement; it is not an outstanding request for input.
+Zerus never resends
 the answer or promotes the queue automatically; **Send now** remains an explicit
 native queue action. Delivery without confirmed submission still requires
 checking Terminal before retrying.
@@ -6083,6 +6137,32 @@ another command. Codex completion beyond the normal 8 MiB transcript window can
 be read incrementally up to 16 MiB per poll and cached privately. Completion needs
 the exact call ID in the verified conversation; absence of an event is not success.
 
+## Activity never sticks on a timed-out refresh
+
+The desktops give a local `hgs inspect` 5 s (a peer's 15 s). Task 117 keeps
+the read inside that and lets a failure pass by itself:
+
+- `hgs inspect` answers its phase timings in `timings_ms` (`total` and each step:
+  `state_lock`, `record`, `live_sessions`, `questions`, `processes`,
+  `provider_messages`, `events_open`, `activity`, `waits`, `session_state`,
+  `team_store` and others). A call of 1 s or more leaves one JSON line in
+  `<state>/logs/slow-calls.log`, which rotates at 256 KiB to one older file.
+- The team reasons every listing and inspection reads wait at most 300 ms for a
+  team writer. A store that stays busy answers with the last good reasons, kept
+  in `teams/waiting-cache.json` for 2 minutes. Before, a rollback-journal store
+  (hgs before task 105's WAL) made this read wait up to 10 s behind a team
+  write: past the desktop's limit.
+- An inspection waits at most 3 s for the state lock, then answers "The session
+  state is busy" with its timings instead of being killed.
+- Qt and Zerus Next keep the last good Activity after a failed refresh. The
+  status says "Activity not refreshed since HH:mm:ss, retrying: <why>" (before
+  any good read, "Could not refresh activity: <why>"). The session is read
+  again by itself after 2 s (Activity's interval in Zerus Next, 2.5 s, or the
+  background interval behind Terminal), doubled for each failure in a row up to
+  a minute, also while a live event stream follows it, which before left the
+  notice standing. A read that succeeds, or a stream state, clears it; a
+  timed-out request never holds the next one.
+
 ## Build folder cleanup
 
 Zerus removes the build folders it creates, automatically and only its own
@@ -6975,8 +7055,8 @@ holds the `question_id` of the newest 32, oldest first, and `latest_at` is when
 the newest was asked (seconds since the epoch, or `null` when not recorded).
 Without any it is `{"count": 0}`, as for saved, archived and non-Codex sessions.
 A question stops counting once its answer appears in the conversation, it is
-skipped, or its answer was submitted (**Submitted / Awaiting agent**); one asked
-in an earlier run of the same conversation counts until then. Only the main
+skipped, closed by native turn completion/interruption or ordinary follow-up,
+or its answer was submitted (**Submitted / Awaiting agent**). Only the main
 conversation is indexed: async questions of Codex native subagents are not
 counted. The value is `null` while the question index is incomplete or held by
 another process (as above) or cannot be read: unknown, never a count of 0, so a

@@ -16,6 +16,7 @@ pub(crate) mod ops;
 pub(crate) mod outbox;
 pub(crate) mod owner_queue;
 pub(crate) mod owner_waiting;
+pub(crate) mod terminal_prompt;
 pub(crate) mod owner_word;
 pub(crate) mod pipeline;
 pub(crate) mod plan;

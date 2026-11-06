@@ -153,14 +153,15 @@ class DevBuildScriptTests(unittest.TestCase):
         self.assertNotIn('secrets.', WORKFLOW)
         self.assertNotIn('environment: macos-signing', WORKFLOW)
 
-    def workflow_release(self, channel, run_tests):
+    def workflow_release(self, channel, run_tests, *, tests_in_verify='false', event='workflow_call'):
         body = textwrap.dedent(re.search(r"(?s)python3 - <<'PY'\n(.*?)\n          PY", WORKFLOW)[1])
         ast.parse(body)
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)
             (root / 'VERSION').write_text('0.1.0\n')
             (root / 'DEV_VERSION').write_text('0.2.0\n')
-            environment = {'CHANNEL': channel, 'RUN_TESTS': run_tests, 'COMMIT': 'a' * 40,
+            environment = {'CHANNEL': channel, 'RUN_TESTS': run_tests,
+                           'TESTS_IN_VERIFY': tests_in_verify, 'EVENT_NAME': event, 'COMMIT': 'a' * 40,
                            'RUN_NUMBER': '17', 'GITHUB_OUTPUT': str(root / 'output')}
             modules = {'macos_release': SimpleNamespace(cask_for=lambda name: name),
                        'nightly_common': SimpleNamespace(nightly_version=lambda *args: '0.1.0.r9.gaaaaaaa.n17')}
@@ -176,11 +177,24 @@ class DevBuildScriptTests(unittest.TestCase):
             with self.subTest(channel=channel):
                 self.assertIn('release=', self.workflow_release(channel, 'true'))
 
-    def test_workflow_refuses_fast_stable_nightly_and_invalid_boolean(self):
+    def test_workflow_refuses_ungated_fast_stable_nightly_and_invalid_boolean(self):
         for channel, flag in (('stable', 'false'), ('nightly', 'false'), ('other', 'false'), ('dev', 'no')):
             with self.subTest(channel=channel, flag=flag):
-                with self.assertRaisesRegex(SystemExit, 'Only Dev bundles'):
+                with self.assertRaisesRegex(SystemExit, 'Skipping bundle regression requires'):
                     self.workflow_release(channel, flag)
+
+    def test_fast_stable_requires_explicit_same_source_verification_and_manual_event(self):
+        self.assertEqual(self.workflow_release('stable', 'false', tests_in_verify='true',
+                                               event='workflow_dispatch'), 'release=0.1.0\n')
+        for verified in ('false', '', 'True', 'true '):
+            with self.subTest(verified=verified), self.assertRaises(SystemExit):
+                self.workflow_release('stable', 'false', tests_in_verify=verified,
+                                      event='workflow_dispatch')
+        for event in ('push', 'pull_request', 'schedule', 'workflow_call', ''):
+            with self.subTest(event=event), self.assertRaises(SystemExit):
+                self.workflow_release('stable', 'false', tests_in_verify='true', event=event)
+        with self.assertRaises(SystemExit):
+            self.workflow_release('nightly', 'false', tests_in_verify='true', event='workflow_dispatch')
 
 
 if __name__ == '__main__':

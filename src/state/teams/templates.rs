@@ -194,7 +194,7 @@ pub(crate) const BUILTIN: &[Template] = &[
         program: "{engine}/Engine/Build/BatchFiles/Build.bat",
         args: &["{project}", "{target}", "{platform}", "{config}", "-Project={project}"],
         params: &[
-            param("engine", Kind::Path), param("project", Kind::Path),
+            optional("engine", Kind::Text), param("project", Kind::Path),
             param("target", Kind::Identifier), optional("platform", Kind::Identifier), optional("config", Kind::Identifier),
             optional("files", Kind::Paths),
         ],
@@ -205,7 +205,7 @@ pub(crate) const BUILTIN: &[Template] = &[
         summary: "UnrealEditor-Cmd runs automation tests headless and exports a report (-nullrhi -unattended -ExecCmds)",
         program: "{engine}/Engine/Binaries/Win64/UnrealEditor-Cmd.exe",
         args: &["{project}", "-nullrhi", "-unattended", "-saveddir=.zerus-team/ue/Saved", "-abslog=.zerus-team/ue/Unreal.log", "-ExecCmds=Automation RunTests {filters};Quit", "-ReportExportPath=.zerus-team/results/unreal"],
-        params: &[param("engine", Kind::Path), param("project", Kind::Path), optional("filters", Kind::Text), optional("files", Kind::Paths)],
+        params: &[optional("engine", Kind::Text), param("project", Kind::Path), optional("filters", Kind::Text), optional("files", Kind::Paths)],
         timeout_secs: 3600,
     },    // Task 85 (owner, 2026-11-06: builds and tests of any stack): any CMake
     // project, not only tray/; qt-configure and qt-build are these with their
@@ -759,6 +759,50 @@ fn interpreter(folder: &Path) -> anyhow::Result<(String, Vec<String>)> {
     }
     bail!("No project Python environment: create .venv with uv, poetry or venv first; Zerus never creates or syncs one")
 }
+/// Task 87: one registry string; the system reader queries reg.exe.
+trait EngineRegistry {
+    fn value(&self, root: &str, key: &str, name: &str) -> Option<String>;
+}
+struct SystemRegistry;
+impl EngineRegistry for SystemRegistry {
+    fn value(&self, root: &str, key: &str, name: &str) -> Option<String> {
+        let output = Command::new("reg").args(["query", &format!("{root}\\{key}"), "/v", name]).output().ok()?;
+        if !output.status.success() { return None; }
+        let text = String::from_utf8_lossy(&output.stdout);
+        text.lines().find_map(|line| {
+            let mut parts = line.split_whitespace();
+            (parts.next()? == name).then(|| parts.collect::<Vec<_>>().join(" "))
+        })
+    }
+}
+
+/// The engine from the project's EngineAssociation: a launcher version reads
+/// HKLM InstalledDirectory, a source-build GUID reads HKCU Builds. The
+/// per-machine override wins; a missing engine names every place tried.
+fn unreal_engine(project: &Path, override_path: Option<&str>, registry: &dyn EngineRegistry) -> anyhow::Result<String> {
+    if let Some(path) = override_path.filter(|path| !path.trim().is_empty()) {
+        return Ok(path.to_owned());
+    }
+    if let Some(path) = std::env::var("ZERUS_UE_ENGINE").ok().filter(|path| !path.trim().is_empty()) {
+        return Ok(path);
+    }
+    let text = std::fs::read_to_string(project).unwrap_or_default();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+    let association = value.get("EngineAssociation").and_then(serde_json::Value::as_str).unwrap_or_default();
+    if association.is_empty() {
+        bail!("{} names no EngineAssociation", project.display());
+    }
+    let version = association.parse::<f64>().is_ok();
+    let (root, key) = if version {
+        ("HKLM", format!("SOFTWARE\\EpicGames\\Unreal Engine\\{association}"))
+    } else {
+        ("HKCU", "Epic Games\\Unreal Engine\\Builds".to_owned())
+    };
+    if let Some(path) = registry.value(root, &key, association) {
+        return Ok(path);
+    }
+    bail!("No Unreal engine for EngineAssociation {association}: looked in {root}\\{key}, ZERUS_UE_ENGINE, and the engine override")
+}
 /// Validates a run request and builds the exact program and argv (U21). Nothing
 /// here reads a shell: every value is one argv element, or spliced as whole
 /// elements for the list placeholders.
@@ -783,6 +827,14 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
     }
     let Some(template) = builtin(id) else { bail!("Unknown template {id}") };
     ensure!(enabled(), "The built-in command templates are turned off in Settings > Teams");
+    let mut args = args.clone();
+    if matches!(template.id, "ue-build" | "ue-test") {
+        let project = args["project"].as_str().unwrap_or_default();
+        if project.is_empty() { bail!("The template {id} needs a project"); }
+        let engine = unreal_engine(&folder.join(project), args["engine"].as_str(), &SystemRegistry)?;
+        args["engine"] = json!(engine);
+    }
+    let args = &args;
     for (key, _) in args.as_object().into_iter().flatten() {
         ensure!(template.params.iter().any(|param| param.name == key), "The template {id} has no \"{key}\"");
     }
@@ -2845,10 +2897,29 @@ kind = "path"
         assert!(test.argv.contains(&"-nullrhi".to_owned()) && test.argv.contains(&"-unattended".to_owned()));
         assert!(test.argv.contains(&"-saveddir=.zerus-team/ue/Saved".to_owned()));
         assert!(test.argv.contains(&"-abslog=.zerus-team/ue/Unreal.log".to_owned()));
-        assert!(plan("ue-build", &json!({"engine":"../UE","project":"Game.uproject","target":"Game"}), dir.path()).is_err());
+        assert!(plan("ue-build", &json!({"engine":"UE_5.5","project":"Game.uproject","target":"Game"}), dir.path()).is_ok());
+    }
+
+    struct FakeRegistry(std::collections::BTreeMap<(String,String,String),String>);
+    impl EngineRegistry for FakeRegistry {
+        fn value(&self, root: &str, key: &str, name: &str) -> Option<String> {
+            self.0.get(&(root.to_owned(), key.to_owned(), name.to_owned())).cloned()
+        }
+    }
+
+    #[test]
+    fn unreal_engine_comes_from_the_association_or_the_override() {
+        let dir = temp();
+        let project = dir.path().join("Game.uproject");
+        std::fs::write(&project, r#"{"EngineAssociation":"5.5"}"#).unwrap();
+        let launcher = FakeRegistry([(("HKLM".into(), "SOFTWARE\\EpicGames\\Unreal Engine\\5.5".into(), "5.5".into()), "C:/Epic/UE_5.5".into())].into());
+        assert_eq!(unreal_engine(&project, None, &launcher).unwrap(), "C:/Epic/UE_5.5");
+        assert_eq!(unreal_engine(&project, Some("D:/UE"), &launcher).unwrap(), "D:/UE");
+        std::fs::write(&project, r#"{"EngineAssociation":"{abc}"}"#).unwrap();
+        let source = FakeRegistry([(("HKCU".into(), "Epic Games\\Unreal Engine\\Builds".into(), "{abc}".into()), "D:/Source/UE".into())].into());
+        assert_eq!(unreal_engine(&project, None, &source).unwrap(), "D:/Source/UE");
+        let error = unreal_engine(&project, None, &launcher).unwrap_err().to_string();
+        assert!(error.contains("HKCU") && error.contains("ZERUS_UE_ENGINE"), "{error}");
     }
 }
-
-
-
 

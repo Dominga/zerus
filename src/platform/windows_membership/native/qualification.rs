@@ -186,7 +186,7 @@ fn private_measurement() {
     let ticks = unsafe { GetTickCount64() };
     let remaining = tick_end
         .checked_sub(ticks)
-        .filter(|n| *n <= 120000)
+        .filter(|n| *n <= 900000)
         .expect("expired/invalid original deadline");
     let until = invocation + Duration::from_millis(remaining);
     let before = context().unwrap();
@@ -279,7 +279,7 @@ fn private_measurement() {
         }
     );
 
-    // ONE experimental 120 s ceiling across census/walk/queries/settlement.
+    // ONE experimental ceiling (at most 900 s) across census/walk/queries/settlement.
     // This is not a chosen product budget. The external owned-worker launcher
     // must also bound/reap this exact test process and retain actual pipe EOF.
     let entered = Instant::now();

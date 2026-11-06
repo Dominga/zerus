@@ -1,7 +1,11 @@
 # Private Windows membership measurements
 
-The opt-in CI input `retain_membership_probe` retains a test executable and its
-exact source/hash manifest. It is separate from distributables and publication
+The opt-in CI input `retain_membership_probe` retains an optimized release-profile
+test executable and its exact source/hash/profile manifest. The builder requires
+Cargo's level-3 optimization and disabled debug assertions; a debug test image
+cannot receive this artifact identity. The artifact name is
+`membership-qualification-windows-release-<source SHA>`.
+It is separate from distributables and publication
 candidates, expires after one day, and grants no removal capability. Normal CI
 does not retain it. The build runs under the maintained owned-job timeout; a
 failed build cannot upload a partial fixture.
@@ -25,7 +29,7 @@ Its per-child environment contains:
 - `ZERUS_MEMBERSHIP_OBJECTS`, exactly `128`, `4096` or `32768`;
 - `ZERUS_MEMBERSHIP_PASS`, `prepare`, `first-pass` or `warm`;
 - `ZERUS_MEMBERSHIP_UNTIL_TICK`, one absolute `GetTickCount64` expiry set by the
-  original launcher before process creation, at most 120 seconds ahead.
+  original launcher before process creation, at most 900 seconds ahead.
 
 Run `prepare` once per size, then `first-pass` and `warm` against that retained
 fixture and nonce. Each invocation has its own original bounded request; no
@@ -36,7 +40,9 @@ owned disk objects. Reparse points, caps, changed identities, failed reads and
 expired bounds remain incomplete. A root-object refusal is never a per-process
 denial waiver; later objects can still supply positive data.
 
-The 120-second limit is an experimental measurement ceiling. It does not select
+The 900-second limit is an experimental measurement ceiling, not a default:
+each coordinator-booked plan must select an explicit original pass deadline and
+an outer fixture bound that fits its machine slot. It does not select
 the product background budget or change the GUI's review timeout. Record the
 launcher's whole-process duration as well as the reported phases. Pending native
 I/O stays owned until physical completion; a timeout is not a drain witness. If
@@ -56,3 +62,11 @@ actual-caller evidence and the measured final budget remain part of the later
 actual-source G1. Windows removal, program stop/Force and leftover deletion stay
 closed. The original launcher owns bounded cleanup of only its verified private
 fixture after every original resource has settled.
+
+The initial debug-profile fixture at source `fdc5e4bde` measured 128-file scans
+at about three seconds and 4096-file scans at about 87–89 seconds on Windows
+build 26200, x64, NTFS. Both 32768-file scans exhausted their original 120-second
+deadline and remained incomplete. Those measurements are debug observations,
+not production timing or a selected product budget. Preserve them separately
+from the optimized fixture, including their changed process censuses and the
+absence of cold-cache evidence.

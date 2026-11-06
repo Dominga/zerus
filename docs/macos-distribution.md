@@ -629,7 +629,7 @@ On the owner's decision of 2026-10-28, the Tauri client (`client/`) replaces the
 - **Identity.** It has the executable `hgs-tray` and the build identifier `com.hgdev.hgs-tray.local`; `tray/sign-local-macos.py` promotes its signed copy to `com.hgdev.hgs-tray`, as for Qt's raw bundles.
 - **Info.plist.** `Info.switch.plist` adds Qt's keys:
   - `CFBundleName` Zerus, with `CFBundleDisplayName` hgs-tray and `en.lproj` naming it Zerus;
-  - `LSUIElement`;
+  - no `LSUIElement`: unlike Qt's bundle, it launches as a regular app, so Mission Control moves its window between desktop Spaces as for any other app (zerus-v5ft5). The menu-bar-only mode is the client's run-time policy instead: Accessory whenever no window is open, Regular while it is open. A start without a window, such as a login start, may show the Dock icon briefly before that policy applies;
   - Qt's icons and usage texts;
   - `ZerusGUI = tauri`, which `tray/update-installed.py` uses to tell the clients apart.
 - **LaunchAgent template.** It ships in `Contents/Resources/setup/com.hgdev.hgs-tray.plist`. The installed agent is unchanged: `KeepAlive Crashed`, `ProcessType Interactive`, `--hgs` and the same label.

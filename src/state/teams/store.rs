@@ -2,7 +2,7 @@
 //! (live JSON with a revision and indexed task archives), the feed and the
 //! idempotent operations, opened as the coordination waits are.
 use super::super::*;
-use super::model::{Team, Task, ArchivedTask, ArchivedPhase, Phase, PhaseState};
+use super::model::{Team, Task, ArchivedTask, ArchivedPhase, Phase, PhaseState, Prerequisite};
 use anyhow::{bail, ensure, Context};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
@@ -675,20 +675,24 @@ fn restore_phase(db: &Connection, team: &mut Team, input: &Value) -> anyhow::Res
     Ok(())
 }
 
-/// Resolve only referenced missing dependencies through the archive primary key.
-/// This one helper serves loads and mutations, including newly proposed deps.
+/// Resolve only referenced missing dependencies and prerequisites through the archive primary key.
+/// This one helper serves loads and mutations, including proposed input.
 fn resolve_dependencies(db: &Connection, team: &mut Team, input: &Value) -> anyhow::Result<()> {
     let mut ids: std::collections::BTreeSet<u32> = team
         .tasks
         .iter()
         .filter(|task| task.archived.is_none())
-        .flat_map(|task| task.deps.iter().map(|dep| dep.task))
+        .flat_map(|task| task.deps.iter().map(|dep| dep.task).chain(task.requires.iter().filter_map(|required| {
+            if let Prerequisite::Task { task } = required { Some(*task) } else { None }
+        })))
         .collect();
     fn proposed(value: &Value, ids: &mut std::collections::BTreeSet<u32>) {
-        if let Some(deps) = value.get("deps").and_then(Value::as_array) {
-            for dep in deps {
-                if let Some(id) = dep.as_u64().or_else(|| dep["task"].as_u64()).and_then(|id| u32::try_from(id).ok()) {
-                    ids.insert(id);
+        for field in ["deps", "requires"] {
+            if let Some(deps) = value.get(field).and_then(Value::as_array) {
+                for dep in deps {
+                    if let Some(id) = dep.as_u64().or_else(|| dep["task"].as_u64()).and_then(|id| u32::try_from(id).ok()) {
+                        ids.insert(id);
+                    }
                 }
             }
         }

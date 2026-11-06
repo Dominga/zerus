@@ -2026,3 +2026,17 @@ fn a_free_phase_never_reuses_an_archived_header() {
     assert_eq!(open_phase(&team), 2);
     assert!(team.phases[0].archived.is_some());
 }
+
+#[test]
+fn phase_checks_refresh_and_clear_for_sent_back_drafts() {
+    let mut team = running_team();
+    let mut events = Vec::new();
+    let none = BTreeSet::new();
+    apply(&mut team, "extend", &json!({"target_hours":0.5,"tasks":[{"id":3,"title":"Later","assignee":"dev","estimate_minutes":90}]}), &Actor::Human, &none, &mut events).unwrap();
+    apply(&mut team, "reject-phase", &json!({"phase":2,"comment":"Rework the plan"}), &Actor::Human, &none, &mut events).unwrap();
+    assert_eq!(team.phases[0].state, PhaseState::Rejected);
+    apply(&mut team, "settings", &json!({"settings":{"phase_checks":{"critical_path_target":true}}}), &Actor::Human, &none, &mut events).unwrap();
+    assert!(team.phases[0].checks.as_ref().unwrap().target_exceeded);
+    apply(&mut team, "settings", &json!({"settings":{"phase_checks":{"critical_path_target":false}}}), &Actor::Human, &none, &mut events).unwrap();
+    assert!(team.phases[0].checks.is_none());
+}

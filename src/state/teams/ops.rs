@@ -1,6 +1,6 @@
-//! WhiteWh fork: the team state machine. Every change is a pure function of
-//! the team, the request and who asks, so the CLI and the dispatcher share it.
-//! Optional phase prerequisite checks also verify Git ancestry with a deadline.
+//! WhiteWh fork: the team state machine shared by the CLI and dispatcher.
+//! Only the opt-in prerequisite check spawns Git, for draft commit/branch
+//! requirements. Snapshot refreshes share one five-second deadline.
 use super::super::now;
 use super::model::*;
 use super::plan;
@@ -6183,10 +6183,10 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         let enabled = team.settings.phase_checks.critical_path_target || team.settings.phase_checks.unresolved_prerequisites;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let checks: Vec<_> = team.phases.iter().map(|phase| {
-            (enabled && phase.state == PhaseState::Draft).then(|| plan::phase_checks(team, phase, deadline))
+            (enabled && phase.state.is_draft()).then(|| plan::phase_checks(team, phase, deadline))
         }).collect();
         for (phase, result) in team.phases.iter_mut().zip(checks) {
-            if phase.state == PhaseState::Draft { phase.checks = result; }
+            if phase.state.is_draft() { phase.checks = result; }
         }
     }
     Ok(result)

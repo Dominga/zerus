@@ -215,3 +215,49 @@ fn archive_small_phases_evict_stubs_together_with_their_headers() {
         assert_eq!(store.task(&team.id, 1).unwrap()["title"], "Task 1");
     }
 }
+
+#[test]
+fn archive_prerequisites_resolve_evicted_tasks_in_live_and_proposed_requirements() {
+    use crate::state::teams::{model::{Member, Prerequisite}, ops::{self, Actor}};
+    use std::collections::BTreeSet;
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
+        let mut team = legacy(1050);
+        team.settings.phase_checks.unresolved_prerequisites = true;
+        team.members = vec![
+            Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() },
+            Member { id: "dev".into(), role: "Developer".into(), agent: "claude".into(), ..Default::default() },
+        ];
+        for task in &mut team.tasks {
+            task.assignee = "dev".into();
+            task.deps.clear(); // Only requires may bring these evicted tasks back.
+        }
+        for (n, id, requires) in [(23, 1071, vec![Prerequisite::Task { task: 1 }]), (24, 1072, vec![])] {
+            team.tasks.push(Task { id, phase: n, title: format!("Phase {n}"), assignee: "dev".into(), requires, ..Default::default() });
+            team.phases.push(Phase { n, tasks: vec![id], state: PhaseState::Draft, ..Default::default() });
+        }
+        insert(&store, &team);
+        store.mutate(None, &team.id, None, |_, _| Ok(json!({}))).unwrap();
+        let loaded = store.load(&team.id).unwrap().unwrap();
+        assert!(loaded.tasks.iter().all(|task| task.id != 1 && task.id != 2), "old tasks must leave the live window");
+        assert_eq!(loaded.task(1).unwrap().status, TaskStatus::Accepted);
+        assert!(loaded.archive_deps.contains_key(&1));
+        let approve = json!({"phase":23});
+        let result = store.mutate(Some(("11111111-1111-4111-8111-111111111111", &approve)), &team.id, None,
+            |team, events| ops::apply(team, "approve-phase", &approve, &Actor::Human, &BTreeSet::new(), events)).unwrap();
+        assert_eq!(result["status"], "phase_approved");
+        let edit = json!({"phase":24,"tasks_update":[{"id":1072,"requires":[{"task":2},{"task":99999}]}]});
+        store.mutate(Some(("22222222-2222-4222-8222-222222222222", &edit)), &team.id, None, |team, events| {
+            assert_eq!(team.task(2).unwrap().status, TaskStatus::Accepted, "the proposed input must resolve its archived requirement");
+            ops::apply(team, "edit-draft", &edit, &Actor::Human, &BTreeSet::new(), events)
+        }).unwrap();
+        let loaded = store.load(&team.id).unwrap().unwrap();
+        let checks = loaded.phases.iter().find(|phase| phase.n == 24).unwrap().checks.as_ref().unwrap();
+        assert_eq!(checks.unresolved, vec!["Task #1072: task #99999 does not exist"]);
+        let approve = json!({"phase":24});
+        let error = store.mutate(Some(("33333333-3333-4333-8333-333333333333", &approve)), &team.id, None,
+            |team, events| ops::apply(team, "approve-phase", &approve, &Actor::Human, &BTreeSet::new(), events)).unwrap_err().to_string();
+        assert!(error.contains("Unresolved prerequisites") && error.contains("#99999"), "{error}");
+    });
+}

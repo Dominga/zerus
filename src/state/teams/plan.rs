@@ -1059,13 +1059,12 @@ pub(crate) fn phase_checks(team: &Team, phase: &Phase, deadline: std::time::Inst
     if !team.settings.phase_checks.unresolved_prerequisites {
         return result;
     }
-    let by_id: BTreeMap<u32, &Task> = team.tasks.iter().map(|task| (task.id, task)).collect();
     let order = |n| team.phases.iter().find(|p| p.n == n).map_or(n, Phase::order);
     let mut git_results: BTreeMap<String, Option<String>> = BTreeMap::new();
     for task in tasks {
         for requirement in &task.requires {
             let reason = match requirement {
-                Prerequisite::Task { task: id } => match by_id.get(id) {
+                Prerequisite::Task { task: id } => match team.task(*id) {
                     None => Some(format!("task #{id} does not exist")),
                     Some(_) if *id == task.id => Some(format!("task #{id} requires itself")),
                     Some(required) if required.phase == phase.n => None,

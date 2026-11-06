@@ -181,3 +181,9 @@
 /* Mobile connection: the pinned pair and revoke commands, copyable whole. */
 .mobile-commands { display: grid; gap: 4px; }
 .mobile-commands code { overflow-wrap: break-word; user-select: all; }
+
+/* Settings > Build folders (tasks 108, 109): a folder per row, its path
+   shortened, then its size, last use and state. */
+.disk-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto minmax(0, 14rem) auto; gap: 8px; align-items: center; padding: 2px 0 2px 12px; }
+.disk-row .warn, .disk-drive.warn { color: var(--z-color-warn); }
+@media (max-width: 640px) { .disk-row { grid-template-columns: minmax(0, 1fr) auto; } }

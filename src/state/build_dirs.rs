@@ -932,6 +932,10 @@ pub(crate) fn command(input: &Value) -> anyhow::Result<Value> {
                 discover(now);
                 measure_some(now);
                 track_low(now);
+            } else if input["measure"] == true {
+                // Task 109: the open Disk view's live read measures a few
+                // folders whose size is unknown or old, and finds nothing new.
+                measure_some(now);
             }
             Ok(listing(now))
         }
@@ -975,19 +979,29 @@ pub(crate) fn command(input: &Value) -> anyhow::Result<Value> {
     }
 }
 
-/// The Disk view: the policy, the drives and the folders by team.
+/// The folders whose in-use check the Disk view runs, at most (the rest show
+/// no busy state until a dry run decides them).
+const BUSY_CHECKS: usize = 300;
+
+/// The Disk view: the policy, the drives (with what Zerus holds on each) and
+/// the folders by team, each with its drive and, for a removable one, whether a
+/// build or test uses it now (task 109).
 fn listing(now: f64) -> Value {
     let registry = read_registry();
     let facts = team_facts();
+    let live: Vec<&Entry> = registry.entries.iter().filter(|entry| entry.state != "removed").collect();
+    let on: Vec<Option<String>> = live.iter().map(|entry| drive(Path::new(&entry.path)).map(|(key, _, _)| key)).collect();
     let drives: Vec<Value> = drives(&registry)
         .into_iter()
         .map(|(key, free, total)| {
             let limit = threshold(&registry.policy, total);
-            json!({"drive":key,"free":free,"total":total,"threshold":limit,"low":free < limit})
+            let held: u64 = live.iter().zip(&on).filter(|(_, at)| at.as_deref() == Some(key.as_str())).filter_map(|(entry, _)| entry.size).sum();
+            json!({"drive":key,"free":free,"total":total,"threshold":limit,"low":free < limit,"held":held})
         })
         .collect();
+    let mut checks = 0;
     let mut groups: std::collections::BTreeMap<String, (String, Vec<Value>, u64)> = std::collections::BTreeMap::new();
-    for entry in registry.entries.iter().filter(|entry| entry.state != "removed") {
+    for (entry, at) in live.iter().zip(&on) {
         let name = if entry.team.is_empty() {
             "Sessions".to_owned()
         } else {
@@ -995,8 +1009,14 @@ fn listing(now: f64) -> Value {
         };
         let due = (entry.owned && entry.state == "kept").then(|| policy_reason(entry, &registry.policy, &facts, now)).flatten();
         let mut value = serde_json::to_value(entry).unwrap_or_default();
-        value["exists"] = json!(Path::new(&entry.path).exists());
+        let exists = Path::new(&entry.path).exists();
+        value["exists"] = json!(exists);
         value["due"] = json!(due);
+        value["drive"] = json!(at);
+        if entry.owned && entry.state == "kept" && exists && checks < BUSY_CHECKS {
+            checks += 1;
+            value["busy"] = json!(busy(Path::new(&entry.path), now));
+        }
         let group = groups.entry(entry.team.clone()).or_insert((name, Vec::new(), 0));
         group.2 += entry.size.unwrap_or(0);
         group.1.push(value);

@@ -1,7 +1,10 @@
-import { For, Show, createSignal, onMount, type JSX } from "solid-js";
+import { For, Show, createEffect, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 import { tr } from "../../../i18n";
 import { useModel, windowPort } from "../../teams/ProposalCards";
-import { DiskModel, decisionsLine, driveLine, folderState, size, type DiskPolicy } from "./disk-model";
+import { DiskModel, decisionsLine, driveLine, folderKind, folderState, lastUse, size, type DiskPolicy } from "./disk-model";
+
+/** Task 109: the open section reads again this often, measuring a few folders each time. */
+export const DISK_LIVE_MS = 10_000;
 
 /** Settings > Build folders (task 108): the policy, what Zerus holds, a dry run and Clean now. */
 export function DiskSection(): JSX.Element {
@@ -9,9 +12,19 @@ export function DiskSection(): JSX.Element {
   const read = () => (tick(), model);
   const [policy, setPolicy] = createSignal<DiskPolicy | undefined>();
   const [scope, setScope] = createSignal<"policy" | "all">("policy");
-  onMount(async () => {
-    await model.load();
-    if (model.view) setPolicy({ ...model.view.policy });
+  onMount(() => {
+    void model.load();
+    const live = setInterval(() => void model.poll(), DISK_LIVE_MS);
+    onCleanup(() => clearInterval(live));
+  });
+  // The form follows the stored policy when it changes (first read, a save,
+  // another window); edits not yet saved stay while the live read repeats it.
+  let stored = "";
+  createEffect(() => {
+    const now = read().view?.policy;
+    if (!now || JSON.stringify(now) === stored) return;
+    stored = JSON.stringify(now);
+    setPolicy({ ...now });
   });
   const field = (key: keyof DiskPolicy, value: number | boolean) => setPolicy((now) => (now ? { ...now, [key]: value } : now));
   const number = (key: "unused_days" | "free_gb" | "free_percent", label: string, max: number) => (
@@ -70,10 +83,11 @@ export function DiskSection(): JSX.Element {
             <div class="set-group" data-disk-team={team.team}>
               <b>{team.team_name || tr("Sessions")}</b> <span class="dim">{size(team.bytes)}</span>
               <For each={team.folders}>{(folder) => (
-                <div class="disk-row" data-state={folder.state}>
+                <div class="disk-row" data-state={folder.state} data-kind={folderKind(folder)}>
                   <code class="ell" title={folder.path}>{folder.path}</code>
                   <span class="dim">{size(folder.size)}</span>
-                  <span class="dim ell">{folderState(folder)}</span>
+                  <span class="dim">{lastUse(folder.last_used)}</span>
+                  <span classList={{ dim: true, ell: true, warn: folderKind(folder) === "busy" }}>{folderState(folder)}</span>
                   <Show when={folder.state === "review"}>
                     <button type="button" class="btn ghost small" disabled={read().busy} onClick={() => void model.forget(folder.path)}>{tr("I dealt with it")}</button>
                   </Show>

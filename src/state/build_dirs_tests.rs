@@ -221,3 +221,34 @@ fn a_drive_under_its_threshold_is_an_alert_with_what_zerus_holds() {
         assert!(decided.iter().any(|decision| decision["reason"] == "its drive is low on space"), "{decided:?}");
     });
 }
+
+/// Task 109: the Disk view says which drive each folder is on, what Zerus holds
+/// on each drive and whether a removable folder is in use now; its live read
+/// measures without discovering.
+#[test]
+fn the_disk_view_names_each_folders_drive_and_whether_it_is_busy() {
+    let state = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(state.path(), || {
+        let path = work.path().join("target-live");
+        note(Use { path: path.clone(), kind: "cargo_target", origin: "hgs_run", ..Default::default() }).unwrap();
+        cargo_target(&path);
+        // Just written: busy; its size is measured by the live read.
+        let listing = command(&json!({"action":"list","measure":true})).unwrap();
+        let folder = &listing["teams"][0]["folders"][0];
+        let (key, _, _) = drive(&path).unwrap();
+        assert_eq!(folder["drive"].as_str(), Some(key.as_str()), "{listing}");
+        assert!(folder["busy"].as_str().is_some_and(|why| why.contains("written")), "{listing}");
+        assert!(folder["size"].as_u64().is_some_and(|size| size >= 4096), "{listing}");
+        let on = listing["drives"].as_array().unwrap().iter().find(|known| known["drive"] == key.as_str()).unwrap().clone();
+        assert_eq!(on["held"], folder["size"], "{listing}");
+        // Not Zerus's: never checked, so never shown busy.
+        locked(|registry| {
+            registry.entries[0].owned = false;
+            Ok(())
+        })
+        .unwrap();
+        let listing = command(&json!({"action":"list"})).unwrap();
+        assert!(listing["teams"][0]["folders"][0].get("busy").is_none(), "{listing}");
+    });
+}

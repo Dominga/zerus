@@ -14,6 +14,7 @@
 #include "IronRulesEditor.h"
 #include "TeamWorkspace.h"
 #include "DiskSettings.h"
+#include <QCheckBox>
 #include <QSpinBox>
 #include <QTemporaryDir>
 
@@ -84,6 +85,7 @@ class TestTeamsUiSettings : public QObject, public TeamsUiFixture {
     Q_OBJECT
 private slots:
     void buildFoldersListDryRunAndCleanAfterRemove();
+    void buildFoldersShowBusyAndLastUseLiveAndThePolicyRoundTrips();
     void initTestCase()
     {
         setUpCase();
@@ -1117,4 +1119,109 @@ else:
 }
 
 QTEST_MAIN(TestTeamsUiSettings)
+// Task 109: each folder says its size, last use and state (busy, waits for
+// review, not Zerus's, removable); each drive what Zerus holds on it. While
+// shown, the view reads again and measures; a newer size shows without a
+// click. The policy goes to hgs and comes back as hgs stores it; an edit not
+// yet saved survives the live reads.
+void TestTeamsUiSettings::buildFoldersShowBusyAndLastUseLiveAndThePolicyRoundTrips()
+{
+    QTemporaryDir dir;
+    const QString hgs = dir.filePath("hgs");
+    QVERIFY(FakeCli::install(hgs, R"PY(#!/usr/bin/env python3
+import json,os,sys,time
+a=sys.argv[1:]
+body=json.load(sys.stdin) if a[:1]==['team'] else {}
+open(__file__+'.calls','a').write(json.dumps({'args':a,'input':body})+'\n')
+GB=1024**3
+store=__file__+'.policy'
+policy=json.load(open(store)) if os.path.exists(store) else {'enabled':True,'unused_days':7,'free_gb':50,'free_percent':10}
+sized=os.path.exists(__file__+'.sized')
+now=time.time()
+if a[:2]==['team','disk'] and body.get('action')=='list':
+ if body.get('measure'): open(__file__+'.sized','w').write('1')
+ folders=[
+  {'path':'D:/zerus-build/core','kind':'cargo_target','origin':'hgs_run','owned':True,'owned_reason':'a Zerus run created it','state':'kept','last_used':now-3*3600-120,'exists':True,'drive':'D:','busy':'cargo is building in it'},
+  {'path':'D:/zerus-build/old','kind':'cargo_target','origin':'hgs_run','owned':True,'owned_reason':'a Zerus run created it','state':'kept','size':2*GB,'last_used':now-2*86400-120,'exists':True,'drive':'D:','busy':None},
+  {'path':'D:/zerus-build/half','kind':'cargo_target','origin':'hgs_run','owned':True,'owned_reason':'a Zerus run created it','state':'review','note':'removing failed','size':GB,'last_used':0,'exists':True,'drive':'D:'}]
+ if sized: folders[0]['size']=30*GB
+ print(json.dumps({'policy':policy,'drives':[{'drive':'D:','free':400*GB,'total':900*GB,'threshold':90*GB,'low':False,'held':(33 if sized else 3)*GB}],
+  'held':(33 if sized else 3)*GB,'teams':[{'team':'','team_name':'Sessions','bytes':3*GB,'folders':folders}]}))
+elif a[:2]==['team','disk'] and body.get('action')=='policy':
+ json.dump(body['policy'],open(store,'w'))
+ print(json.dumps({'status':'updated','policy':body['policy']}))
+else:
+ print(json.dumps({'status':'ok'}))
+)PY"));
+    HgsClient client(FakeCli::program(hgs));
+    TeamController controller(&client);
+    DiskSettings page(&controller);
+    page.setLiveInterval(150);
+    const auto calls = [&](const QString &action) {
+        QList<QJsonObject> found;
+        QFile file(hgs + ".calls");
+        if (file.open(QIODevice::ReadOnly))
+            for (const auto &line : file.readAll().split('\n')) {
+                const auto input = QJsonDocument::fromJson(line).object()["input"].toObject();
+                if (input["action"].toString() == action) found << input;
+            }
+        return found;
+    };
+    const auto row = [&](const QString &path) -> QWidget * {
+        // The newest row: a redraw's old rows go with deleteLater.
+        QWidget *found = nullptr;
+        for (auto *folder : page.findChildren<QWidget *>("diskFolder"))
+            if (folder->property("path").toString() == path) found = folder;
+        return found;
+    };
+    const auto text = [&](QWidget *folder, const char *name) { return folder ? folder->findChild<QLabel *>(name)->text() : QString(); };
+    // Not shown yet: one read, no live ones.
+    QTRY_VERIFY(row("D:/zerus-build/core"));
+    QTest::qWait(400);
+    QVERIFY(calls("list").size() == 1 && !calls("list")[0].contains("measure"));
+    QCOMPARE(text(row("D:/zerus-build/core"), "diskFolderState"), QStringLiteral("Busy: cargo is building in it"));
+    QCOMPARE(row("D:/zerus-build/core")->property("kind").toString(), QStringLiteral("busy"));
+    QCOMPARE(text(row("D:/zerus-build/core"), "diskFolderSize"), QStringLiteral("not measured yet"));
+    QCOMPARE(text(row("D:/zerus-build/core"), "diskFolderUsed"), QStringLiteral("used 3 h ago"));
+    QCOMPARE(text(row("D:/zerus-build/old"), "diskFolderState"), QStringLiteral("Removable"));
+    QCOMPARE(text(row("D:/zerus-build/old"), "diskFolderUsed"), QStringLiteral("used 2 d ago"));
+    QCOMPARE(text(row("D:/zerus-build/half"), "diskFolderState"), QStringLiteral("Waits for your review: removing failed"));
+    QCOMPARE(text(row("D:/zerus-build/half"), "diskFolderUsed"), QStringLiteral("never used"));
+    QCOMPARE(page.findChild<QLabel *>("diskDrive")->text(), QStringLiteral("D: 400.0 GB free of 900.0 GB, keeps 90.0 GB; Zerus holds 3.0 GB here"));
+    // An edit not yet saved.
+    page.findChild<QSpinBox *>("diskPolicyFreeGb")->setValue(80);
+    // Shown: the live read measures and the new size appears by itself.
+    page.resize(900, 700); page.show();
+    QTRY_VERIFY(!calls("list").isEmpty() && calls("list").last()["measure"].toBool());
+    QTRY_COMPARE(text(row("D:/zerus-build/core"), "diskFolderSize"), QStringLiteral("30.0 GB"));
+    QTRY_COMPARE(page.findChild<QLabel *>("diskDrive")->text(), QStringLiteral("D: 400.0 GB free of 900.0 GB, keeps 90.0 GB; Zerus holds 33.0 GB here"));
+    QCOMPARE(page.findChild<QSpinBox *>("diskPolicyFreeGb")->value(), 80);
+    for (auto *label : page.findChildren<QLabel *>()) QVERIFY2(!label->text().contains(QStringLiteral(" · ")), qPrintable(label->text()));
+    // The policy round-trips: saved as set, read back as hgs stored it.
+    page.findChild<QCheckBox *>("diskPolicyEnabled")->setChecked(false);
+    page.findChild<QSpinBox *>("diskPolicyDays")->setValue(3);
+    QTRY_VERIFY(page.findChild<QPushButton *>("diskPolicySave")->isEnabled());
+    page.findChild<QPushButton *>("diskPolicySave")->click();
+    QTRY_COMPARE(calls("policy").size(), 1);
+    QCOMPARE(calls("policy")[0]["policy"].toObject(), (QJsonObject{{"enabled", false}, {"unused_days", 3}, {"free_gb", 80}, {"free_percent", 10}}));
+    QCOMPARE(calls("policy")[0]["by"].toString(), QStringLiteral("human"));
+    {
+        // Closed before it is replaced below (Windows keeps an open file).
+        QFile stored(hgs + ".policy");
+        QVERIFY(stored.open(QIODevice::ReadOnly));
+        QCOMPARE(QJsonDocument::fromJson(stored.readAll()).object()["unused_days"].toInt(), 3);
+    }
+    // Another window changes it: the form follows the stored policy.
+    QVERIFY(FakeCli::replace(hgs + ".policy", R"({"enabled":true,"unused_days":14,"free_gb":20,"free_percent":5})"));
+    QTRY_COMPARE(page.findChild<QSpinBox *>("diskPolicyDays")->value(), 14);
+    QCOMPARE(page.findChild<QSpinBox *>("diskPolicyFreeGb")->value(), 20);
+    QVERIFY(page.findChild<QCheckBox *>("diskPolicyEnabled")->isChecked());
+    // Hidden: no more live reads.
+    page.hide();
+    QTest::qWait(300);
+    const auto reads = calls("list").size();
+    QTest::qWait(500);
+    QCOMPARE(calls("list").size(), reads);
+}
+
 #include "test_teamsui_settings.moc"

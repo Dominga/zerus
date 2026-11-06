@@ -2,6 +2,7 @@
 #include "TeamController.h"
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDateTime>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -64,7 +65,68 @@ DiskSettings::DiskSettings(TeamController *teams, QWidget *parent) : QWidget(par
     connect(m_dry, &QPushButton::clicked, this, [this] { clean(true); });
     connect(m_clean, &QPushButton::clicked, this, [this] { clean(false); });
     connect(m_measure, &QPushButton::clicked, this, [this] { refresh(true); });
+    m_live.setInterval(10000);
+    connect(&m_live, &QTimer::timeout, this, [this] { poll(); });
     refresh();
+}
+
+void DiskSettings::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    m_live.start();
+}
+
+void DiskSettings::hideEvent(QHideEvent *event)
+{
+    QWidget::hideEvent(event);
+    m_live.stop();
+}
+
+void DiskSettings::poll()
+{
+    // Skipped while an action or another live read runs; never touches the
+    // buttons or a notice.
+    if (!m_teams || m_busy || m_polling) return;
+    m_polling = true;
+    const quint64 generation = ++m_generation;
+    m_teams->call(QStringLiteral("disk"), QJsonObject{{"action", "list"}, {"measure", true}},
+                  [this, generation](bool ok, const QJsonObject &result, const QString &) {
+        m_polling = false;
+        // The same view again redraws nothing.
+        if (!ok || generation != m_generation || m_busy || result == m_view) return;
+        showView(result);
+    }, false, 120000);
+}
+
+QString DiskSettings::lastUse(double at, double now)
+{
+    if (at <= 0) return tr("never used");
+    const qint64 minutes = qMax<qint64>(0, qint64((now - at) / 60));
+    if (minutes < 1) return tr("used just now");
+    if (minutes < 60) return tr("used %1 min ago").arg(minutes);
+    const qint64 hours = minutes / 60;
+    if (hours < 24) return tr("used %1 h ago").arg(hours);
+    return tr("used %1 d ago").arg(hours / 24);
+}
+
+QString DiskSettings::folderKind(const QJsonObject &folder)
+{
+    if (folder["state"] == QLatin1String("review")) return QStringLiteral("review");
+    if (!folder["owned"].toBool()) return QStringLiteral("foreign");
+    if (!folder["exists"].toBool(true)) return QStringLiteral("gone");
+    if (folder["busy"].isString() && !folder["busy"].toString().isEmpty()) return QStringLiteral("busy");
+    return folder["due"].isString() ? QStringLiteral("due") : QStringLiteral("removable");
+}
+
+QString DiskSettings::folderState(const QJsonObject &folder)
+{
+    const QString kind = folderKind(folder);
+    if (kind == QLatin1String("review")) return tr("Waits for your review: %1").arg(folder["note"].toString());
+    if (kind == QLatin1String("foreign")) return tr("Kept: not Zerus's (%1)").arg(folder["owned_reason"].toString());
+    if (kind == QLatin1String("gone")) return tr("Gone");
+    if (kind == QLatin1String("busy")) return tr("Busy: %1").arg(folder["busy"].toString());
+    if (kind == QLatin1String("due")) return tr("The policy removes it: %1").arg(folder["due"].toString());
+    return tr("Removable");
 }
 
 QString DiskSettings::size(qint64 bytes, bool known)
@@ -79,6 +141,7 @@ void DiskSettings::send(const QJsonObject &input, const std::function<void(const
 {
     if (!m_teams || m_busy) return;
     m_busy = true;
+    ++m_generation;
     for (auto *button : {m_dry, m_clean, m_measure, m_save}) button->setEnabled(false);
     QJsonObject request = input;
     request.insert("by", "human");
@@ -95,15 +158,23 @@ void DiskSettings::refresh(bool measure)
 {
     QJsonObject input{{"action", "list"}};
     if (measure) input.insert("refresh", true);
-    send(input, [this](const QJsonObject &result) {
-        m_view = result;
-        const auto policy = result["policy"].toObject();
+    send(input, [this](const QJsonObject &result) { showView(result); });
+}
+
+void DiskSettings::showView(const QJsonObject &result)
+{
+    m_view = result;
+    // The form follows the stored policy when it changes (first read, a save,
+    // another window); edits not yet saved stay while reads repeat it.
+    const auto policy = result["policy"].toObject();
+    if (policy != m_policyShown) {
+        m_policyShown = policy;
         m_enabled->setChecked(policy["enabled"].toBool(true));
         m_days->setValue(policy["unused_days"].toInt(7));
         m_freeGb->setValue(policy["free_gb"].toInt(50));
         m_freePercent->setValue(policy["free_percent"].toInt(10));
-        render();
-    });
+    }
+    render();
 }
 
 void DiskSettings::savePolicy()
@@ -178,6 +249,7 @@ void DiskSettings::render()
         const auto drive = value.toObject();
         QString text = tr("%1 %2 free of %3, keeps %4").arg(drive["drive"].toString(), size(qint64(drive["free"].toDouble())),
                                                              size(qint64(drive["total"].toDouble())), size(qint64(drive["threshold"].toDouble())));
+        if (drive.contains("held")) text = tr("%1; Zerus holds %2 here").arg(text, size(qint64(drive["held"].toDouble())));
         if (drive["low"].toBool()) text = tr("%1; low on space").arg(text);
         auto *row = line(text, "diskDrive");
         row->setProperty("low", drive["low"].toBool());
@@ -192,19 +264,16 @@ void DiskSettings::render()
         auto *head = line(tr("%1   %2").arg(name, size(qint64(team["bytes"].toDouble()))), "diskTeam");
         head->setProperty("team", team["team"].toString());
         m_rows->addWidget(head);
+        const double now = double(QDateTime::currentSecsSinceEpoch());
         for (const auto &item : team["folders"].toArray()) {
             const auto folder = item.toObject();
-            QString state;
-            if (folder["state"] == QLatin1String("review")) state = tr("Waits for your review: %1").arg(folder["note"].toString());
-            else if (!folder["owned"].toBool()) state = tr("Kept: not Zerus's (%1)").arg(folder["owned_reason"].toString());
-            else if (!folder["exists"].toBool(true)) state = tr("Gone");
-            else if (folder["due"].isString()) state = tr("The policy removes it: %1").arg(folder["due"].toString());
-            else state = tr("Kept");
             auto *row = new QWidget; row->setObjectName("diskFolder"); row->setProperty("path", folder["path"].toString());
+            row->setProperty("kind", folderKind(folder));
             auto *h = new QHBoxLayout(row); h->setContentsMargins(12, 0, 0, 0);
             h->addWidget(line(folder["path"].toString(), "diskFolderPath", false), 1);
             h->addWidget(line(size(qint64(folder["size"].toDouble()), folder.contains("size")), "diskFolderSize", false));
-            h->addWidget(line(state, "diskFolderState"), 1);
+            h->addWidget(line(lastUse(folder["last_used"].toDouble(), now), "diskFolderUsed", false));
+            h->addWidget(line(folderState(folder), "diskFolderState"), 1);
             if (folder["state"] == QLatin1String("review")) {
                 auto *dealt = new QPushButton(tr("I dealt with it")); dealt->setObjectName("diskForget");
                 const QString path = folder["path"].toString();

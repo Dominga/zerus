@@ -1131,7 +1131,7 @@ export type TeamAction =
   | { kind: "answer_deferred"; id: string; decision: "allow" | "deny" | "answer"; text?: string }
   /** Task 108: the build folders Zerus holds: the Disk view, a dry run or Clean now, the policy, forget a reviewed folder. */
   | { kind: "disk"; action: "list" | "clean" | "policy" | "forget"; scope?: "policy" | "all"; dry_run?: boolean;
-      policy?: { enabled: boolean; unused_days: number; free_gb: number; free_percent: number }; paths?: string[]; path?: string; refresh?: boolean }
+      policy?: { enabled: boolean; unused_days: number; free_gb: number; free_percent: number }; paths?: string[]; path?: string; refresh?: boolean; measure?: boolean }
   | { kind: "release"; task: number }
   | { kind: "retry"; task: number }
   | { kind: "finish"; summary: string }

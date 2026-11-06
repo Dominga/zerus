@@ -442,12 +442,18 @@ fn every_action_sends_its_request_once_and_gives_the_receipt() {
     // Task 108: the Disk view belongs to no team. A list and a dry run go at
     // once; Clean now asks first, then sends exactly what was confirmed.
     let disk = |action: &str, dry_run: bool| TeamAction::Disk {
-        action: action.into(), scope: "policy".into(), dry_run, policy: Value::Null, paths: vec![], path: String::new(), refresh: false,
+        action: action.into(), scope: "policy".into(), dry_run, policy: Value::Null, paths: vec![], path: String::new(), refresh: false, measure: false,
     };
     reply(&fake, "disk", "", json!({"stdout": {"decisions": []}}));
     let listed = run(&fake.path(), &TeamCall { team: String::new(), ..call(disk("list", false)) });
     assert!(matches!(listed, TeamOutcome::Done { .. }), "{listed:?}");
     assert_eq!(requests(&fake).pop().unwrap().1["action"], "list");
+    // Task 109: the open Disk view's live read asks hgs to measure.
+    let live = run(&fake.path(), &TeamCall { team: String::new(), ..call(TeamAction::Disk {
+        action: "list".into(), scope: String::new(), dry_run: false, policy: Value::Null, paths: vec![], path: String::new(), refresh: false, measure: true,
+    }) });
+    assert!(matches!(live, TeamOutcome::Done { .. }), "{live:?}");
+    assert_eq!(requests(&fake).pop().unwrap().1["measure"], true);
     let dry = run(&fake.path(), &TeamCall { team: String::new(), ..call(disk("clean", true)) });
     assert!(matches!(dry, TeamOutcome::Done { .. }), "{dry:?}");
     assert_eq!(requests(&fake).pop().unwrap().1["dry_run"], true);
@@ -461,7 +467,7 @@ fn every_action_sends_its_request_once_and_gives_the_receipt() {
     let (op, request) = requests(&fake).pop().unwrap();
     assert_eq!((op.as_str(), request["dry_run"].clone(), request["scope"].clone(), request["by"].clone()), ("disk", json!(false), json!("policy"), json!("human")));
     let wrong = run(&fake.path(), &TeamCall { team: String::new(), ..call(TeamAction::Disk { action: "wipe".into(), scope: String::new(), dry_run: true,
-        policy: Value::Null, paths: vec![], path: String::new(), refresh: false }) });
+        policy: Value::Null, paths: vec![], path: String::new(), refresh: false, measure: false }) });
     assert!(matches!(wrong, TeamOutcome::Failed { .. }), "{wrong:?}");
     // A send back without a comment and an answer without a choice never run.
     let before = requests(&fake).len();

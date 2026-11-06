@@ -456,6 +456,9 @@ export function decidedWaiting(items: readonly TeamWaitingItem[], call: Pick<Tea
   }).map((item) => item.id);
 }
 
+/** Task 108/109: a drive low on space; its row opens Settings > Build folders. */
+export const opensDisk = (item: Pick<TeamWaitingItem, "action">) => item.action === "open_disk";
+
 /** The item's kind in words. */
 export function waitingKindLabel(item: Pick<TeamWaitingItem, "kind" | "action">): string {
   if (item.action === "decide_proposal") return tr("Proposal");

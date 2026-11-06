@@ -63,6 +63,12 @@ public:
         }
         return false;
     }
+    // Task 109: a drive low on space is no team's; its notice says what it is.
+    static QString title(const Item &item)
+    {
+        if (item.kind == QLatin1String("disk_low")) return tr("Low disk space on %1").arg(item.teamName);
+        return tr("Waiting for you in %1").arg(item.teamName.isEmpty() ? item.team : item.teamName);
+    }
     bool known(const QString &id) const { return m_known.contains(id); }
     QStringList knownIds() const { return m_known; }
 
@@ -82,7 +88,7 @@ public:
             }
             m_known.append(item.id);
             if (covered(teams, item)) continue;
-            fresh.append({token(item), item.team, tr("Waiting for you in %1").arg(item.teamName.isEmpty() ? item.team : item.teamName), item.title});
+            fresh.append({token(item), item.team, title(item), item.title});
         }
         if (complete) m_known.erase(std::remove_if(m_known.begin(), m_known.end(), [&present](const QString &id) { return !present.contains(id); }), m_known.end());
         while (m_known.size() > Limit) m_known.removeFirst();

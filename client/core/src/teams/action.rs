@@ -182,6 +182,9 @@ pub enum TeamAction {
         path: String,
         #[serde(default)]
         refresh: bool,
+        /// Task 109: the open Disk view's live read: measures a few folders.
+        #[serde(default)]
+        measure: bool,
     },
     /// Task 11: releases a task the owner held.
     Release {
@@ -896,7 +899,7 @@ impl TeamAction {
                     put("reason", json!(reason));
                 }
             }
-            Self::Disk { action, scope, dry_run, policy, paths, path, refresh } => {
+            Self::Disk { action, scope, dry_run, policy, paths, path, refresh, measure } => {
                 put("action", json!(action));
                 if !scope.is_empty() {
                     put("scope", json!(scope));
@@ -915,6 +918,9 @@ impl TeamAction {
                 }
                 if *refresh {
                     put("refresh", json!(true));
+                }
+                if *measure {
+                    put("measure", json!(true));
                 }
             }
             Self::AnswerDeferred { id, decision, text } => {

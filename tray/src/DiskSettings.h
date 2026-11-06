@@ -1,6 +1,7 @@
 #pragma once
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QTimer>
 #include <QWidget>
 #include <functional>
 
@@ -30,6 +31,19 @@ public:
     QJsonObject view() const { return m_view; }
     QJsonArray decisions() const { return m_decisions; }
     static QString size(qint64 bytes, bool known = true);
+    // Task 109: when a build last used a folder, and what its row says about it
+    // (busy, waits for review, not Zerus's, gone, due or removable).
+    static QString lastUse(double at, double now);
+    static QString folderState(const QJsonObject &folder);
+    static QString folderKind(const QJsonObject &folder);
+    // Task 109: while shown, the view reads again this often (measuring a few
+    // folders each time); tests shorten it.
+    void setLiveInterval(int ms) { m_live.setInterval(ms); }
+    // The live read, as the timer runs it.
+    void poll();
+protected:
+    void showEvent(QShowEvent *event) override;
+    void hideEvent(QHideEvent *event) override;
 private:
     void render();
     void clean(bool dry);
@@ -46,4 +60,11 @@ private:
     QJsonObject m_view;
     QJsonArray m_decisions;
     bool m_dryShown = true, m_busy = false;
+    // Task 109: the live read; its answer is dropped when an action overtook it.
+    QTimer m_live;
+    quint64 m_generation = 0;
+    bool m_polling = false;
+    // The stored policy the form last showed: a read repeating it keeps edits.
+    QJsonObject m_policyShown;
+    void showView(const QJsonObject &result);
 };

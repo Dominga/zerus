@@ -143,6 +143,17 @@ fn native_reference_opens_refuse_a_final_symlink_and_a_fifo() {
 }
 #[cfg(unix)]
 #[test]
+fn replacing_the_archive_directory_after_its_type_check_cannot_block() {
+    for case in [
+        "native-directory-fifo",
+        "native-directory-file",
+        "native-directory-link",
+    ] {
+        run(case);
+    }
+}
+#[cfg(unix)]
+#[test]
 fn an_in_place_rewrite_with_restored_mtime_invalidates_reference_coverage() {
     run("in-place");
 }
@@ -207,6 +218,18 @@ fn isolated_reference_probe() {
     #[cfg(unix)]
     if let Some(which) = case.strip_prefix("native-") {
         use std::os::unix::ffi::OsStrExt;
+        if which.starts_with("directory-") {
+            AFTER_DIRECTORY_TYPE.with(|slot| slot.set(Some(replace_after_directory_type)));
+            fs::write(
+                std::env::var_os("HGS_TEST_ARCHIVE_READY").unwrap(),
+                b"ready",
+            )
+            .unwrap();
+            let begin = Instant::now();
+            assert!(visit_metadata(begin + Duration::from_millis(100), |_| Ok(())).is_err());
+            assert!(begin.elapsed() < Duration::from_secs(1));
+            return;
+        }
         if which == "open" {
             let regular = root().join("regular-input");
             fs::write(&regular, b"bounded native data").unwrap();
@@ -514,6 +537,26 @@ fn isolated_reference_probe() {
             assert!(metadata().is_err());
         }
         _ => panic!("unknown reference fixture"),
+    }
+}
+
+#[cfg(unix)]
+fn replace_after_directory_type(path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    assert_eq!(path, root().join("archives"));
+    let original = root().join("retained-archives");
+    fs::rename(path, &original).unwrap();
+    match std::env::var("HGS_TEST_ARCHIVE_REFERENCES")
+        .unwrap()
+        .as_str()
+    {
+        "native-directory-fifo" => {
+            let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        }
+        "native-directory-file" => fs::write(path, b"not a directory").unwrap(),
+        "native-directory-link" => std::os::unix::fs::symlink(original, path).unwrap(),
+        _ => panic!("unexpected directory replacement control"),
     }
 }
 

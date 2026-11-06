@@ -290,13 +290,30 @@ struct Snapshot {
     bytes: usize,
     namespace: Option<String>,
 }
+#[cfg(all(test, unix))]
+std::thread_local! {
+    static AFTER_DIRECTORY_TYPE: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
+}
 fn directory_stamp(path: &Path) -> Result<String> {
     let meta = fs::symlink_metadata(path).map_err(fail)?;
     if !meta.is_dir() {
         return Err(INVALID.into());
     }
+    #[cfg(all(test, unix))]
+    AFTER_DIRECTORY_TYPE.with(|slot| {
+        if let Some(hook) = slot.take() {
+            hook(path);
+        }
+    });
     let mut options = fs::OpenOptions::new();
     crate::platform::refuse_link(options.read(true));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // The name may change after the type check. Never wait on a FIFO or
+        // follow a replacement link, and require the opened object to be a directory.
+        options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;

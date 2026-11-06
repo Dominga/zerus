@@ -7105,62 +7105,34 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-/// How often a working DeepSeek member's counters are sampled (seconds).
-const USAGE_EVERY: f64 = 10.0;
-
 /// DeepSeek reports only the running total of its tokens and keeps no history,
 /// so the team profile takes an attempt's tokens from counter samples taken at
-/// its ends (`usage_samples`). Each tick, a local DeepSeek member session that
-/// works, or worked at the last sample, is read in the background (the host may
-/// take long to answer; the tick never waits for it): the reading while it works
-/// and one more after it turned idle, so the end of its turn has a reading.
+/// its ends (`usage_samples`). Reading a counter is an rpc to the session host
+/// (35 s timeout), so the tick only tells the sampler thread which local
+/// DeepSeek members run and which of them work; it never waits for a reading.
 fn sample_usage(teams: &[Team], seen: &[Seen]) {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Mutex;
-    static READING: AtomicBool = AtomicBool::new(false);
-    /// Per session: when it was last read and whether that reading was still
-    /// of a working (or just changed) session.
-    static LAST: Mutex<std::collections::BTreeMap<String, (f64, bool)>> = Mutex::new(std::collections::BTreeMap::new());
-    let at = now();
-    let due: Vec<(String, bool)> = {
-        let last = LAST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut names = BTreeSet::new();
-        for team in teams {
-            for member in team.members.iter().filter(|member| member.state != MemberState::Removed) {
-                let Some(session) = member.session.as_ref().filter(|session| session.host.is_empty()) else { continue };
-                let Some(found) = session_of(member, seen).filter(|found| found.agent == "dsh" && found.live) else { continue };
-                let (read_at, dirty) = last.get(&session.name).copied().unwrap_or((0.0, false));
-                let working = !found.idle;
-                if (working || dirty) && at - read_at >= USAGE_EVERY {
-                    names.insert((session.name.clone(), working));
-                }
+    let mut sessions: Vec<(String, bool)> = Vec::new();
+    for team in teams {
+        for member in team.members.iter().filter(|member| member.state != MemberState::Removed) {
+            let Some(session) = member.session.as_ref().filter(|session| session.host.is_empty()) else { continue };
+            let Some(found) = session_of(member, seen).filter(|found| found.agent == "dsh" && found.live) else { continue };
+            if !sessions.iter().any(|(name, _)| *name == session.name) {
+                sessions.push((session.name.clone(), !found.idle));
             }
         }
-        names.into_iter().collect()
-    };
-    if due.is_empty() || READING.swap(true, Ordering::SeqCst) {
-        return;
     }
-    let spawned = std::thread::Builder::new().name("usage-samples".into()).spawn(move || {
-        for (name, working) in due {
-            let changed = super::super::dsh::sample_usage(&name, false).unwrap_or(false);
-            LAST.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(name, (now(), working || changed));
-        }
-        READING.store(false, Ordering::SeqCst);
-    });
-    if spawned.is_err() {
-        READING.store(false, Ordering::SeqCst);
-    }
+    super::usage_sampler::SAMPLER.tick(&sessions, now());
 }
 
 /// The reading an attempt's or stage's start is measured from: the session's
-/// counters at the hand-out, before the message goes out.
+/// counters at the hand-out. The sampler thread takes it and records it at this
+/// moment (an idle member's counters do not move); the hand-out never waits.
 fn sample_member_usage(team: &Team, member_id: &str) {
     let Some(session) = team.member(member_id).and_then(|member| member.session.as_ref()).filter(|session| session.host.is_empty()) else {
         return;
     };
     if super::super::dsh::exists(&session.name) {
-        let _ = super::super::dsh::sample_usage(&session.name, true);
+        super::usage_sampler::SAMPLER.hand_out(&session.name, now());
     }
 }
 

@@ -22,6 +22,9 @@ const MAX_SAMPLES: usize = 4000;
 /// unless the caller forces one (an attempt's hand-out), so a watching window
 /// that inspects every second does not fill the list.
 const MIN_GAP: f64 = 10.0;
+/// A hand-out reading taken more than this many seconds after the hand-out
+/// moment is dropped (see `dsh::sample_usage`).
+pub(super) const HANDOUT_FRESH: f64 = 10.0;
 /// A reading this near a window's end (seconds) stands for it when the counters
 /// changed between the two samples around the moment.
 const NEAR: f64 = 45.0;
@@ -86,17 +89,18 @@ fn store(name: &str, samples: &[Sample]) -> Result<()> {
 
 /// Adds a sample to a session's list. A sample equal to the last two extends
 /// the last (an unchanged run keeps its first and last moment, which is all a
-/// reading across it needs). Returns whether the counters differ from the
-/// previous sample; a sample not after the last, or a changed one closer than
-/// `MIN_GAP` to it (unless forced), is not recorded.
-fn push(samples: &mut Vec<Sample>, sample: Sample, force: bool) -> bool {
+/// reading across it needs). Returns None when nothing was recorded (the list
+/// is untouched, so nothing is written): a sample not after the last, or one
+/// closer than `MIN_GAP` to it (unless forced), changed or not. Otherwise
+/// whether the counters differ from the previous sample.
+fn push(samples: &mut Vec<Sample>, sample: Sample, force: bool) -> Option<bool> {
     let same_run = |a: &Sample, b: &Sample| a.conversation == b.conversation && a.counters == b.counters;
     if samples.last().is_some_and(|last| sample.at <= last.at) {
-        return false;
+        return None;
     }
     let changed = !samples.last().is_some_and(|last| same_run(last, &sample));
-    if changed && !force && samples.last().is_some_and(|last| sample.at - last.at < MIN_GAP && last.conversation == sample.conversation) {
-        return false;
+    if !force && samples.last().is_some_and(|last| sample.at - last.at < MIN_GAP && last.conversation == sample.conversation) {
+        return None;
     }
     let len = samples.len();
     if len >= 2 && same_run(&samples[len - 1], &sample) && same_run(&samples[len - 2], &sample) {
@@ -112,12 +116,14 @@ fn push(samples: &mut Vec<Sample>, sample: Sample, force: bool) -> bool {
             index > older || index % 2 == 1
         });
     }
-    changed
+    Some(changed)
 }
 
 /// Records the counters `projections` shows for the session `name` at `at`
 /// (epoch seconds). Returns whether they changed since the previous sample; a
-/// projection without counters records nothing, so the gap stays unknown.
+/// projection without counters records nothing, so the gap stays unknown. The
+/// file is written only when a sample was recorded: a session inspected every
+/// second must not rewrite its (up to 4000) samples every second.
 pub(super) fn record(name: &str, conversation: &str, at: f64, projections: &Value, force: bool) -> Result<bool> {
     let Some(counters) = counters(projections) else { return Ok(false) };
     if name.is_empty() || conversation.is_empty() || !at.is_finite() || at <= 0.0 {
@@ -125,9 +131,68 @@ pub(super) fn record(name: &str, conversation: &str, at: f64, projections: &Valu
     }
     let _guard = lock(Some(&path(name).with_extension("lock")))?;
     let mut samples = load(name);
-    let changed = push(&mut samples, Sample { at, conversation: conversation.to_owned(), counters }, force);
+    let Some(changed) = push(&mut samples, Sample { at, conversation: conversation.to_owned(), counters }, force) else {
+        return Ok(false);
+    };
     store(name, &samples)?;
     Ok(changed)
+}
+
+/// A session deleted for good (`hgs forget`) takes its samples with it.
+pub(super) fn forget(name: &str) {
+    let file = path(name);
+    let _ = fs::remove_file(&file);
+    let _ = fs::remove_file(file.with_extension("lock"));
+}
+
+/// A renamed session keeps its samples under its new name (the file is named
+/// by the session name's hash).
+pub(super) fn rename(old: &str, new: &str) -> Result<()> {
+    if old == new {
+        return Ok(());
+    }
+    let _guard = lock(Some(&path(new).with_extension("lock")))?;
+    let samples = load(old);
+    if samples.is_empty() {
+        return Ok(());
+    }
+    store(new, &samples)?;
+    forget(old);
+    Ok(())
+}
+
+/// A sample file untouched for this long belongs to a session that is gone
+/// (or has not been looked at for a month): its windows are old news.
+pub(super) const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 3600);
+/// Entries one prune pass looks at, so a folder of tens of thousands of files
+/// is walked in bounded slices.
+pub(super) const PRUNE_SCAN: usize = 400;
+
+/// One bounded pass over the folder: looks at up to `limit` entries from
+/// `offset` on and removes the sample and lock files not modified within
+/// `max_age`. Returns the offset the next pass continues from (0 after the end
+/// of the folder), counting the entries kept.
+pub(super) fn prune(max_age: std::time::Duration, offset: usize, limit: usize) -> usize {
+    let Some(cutoff) = std::time::SystemTime::now().checked_sub(max_age) else { return 0 };
+    let Ok(entries) = fs::read_dir(root().join("usage-samples")) else { return 0 };
+    let (mut looked, mut kept) = (0usize, 0usize);
+    for entry in entries.flatten().skip(offset).take(limit) {
+        looked += 1;
+        let file = entry.path();
+        let stale = |file: &Path| fs::metadata(file).and_then(|meta| meta.modified()).is_ok_and(|modified| modified < cutoff);
+        let remove = match file.extension().and_then(|extension| extension.to_str()) {
+            Some("json") => stale(&file),
+            // A lock file is never written: it goes with its samples, or alone
+            // once they are gone, never while they are in use.
+            Some("lock") => !file.with_extension("json").exists() || stale(&file.with_extension("json")),
+            _ => false,
+        };
+        if remove && fs::remove_file(&file).is_ok() {
+            continue;
+        }
+        kept += 1;
+    }
+    if looked < limit { 0 } else { offset + kept }
 }
 
 /// The counters at `moment`: where the samples around it agree, those; else the

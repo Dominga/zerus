@@ -2178,14 +2178,28 @@ pub(crate) fn inspect(name: &str, agent_id: Option<&str>) -> Result<Value> {
 /// records even closer than the minimum gap to the previous sample, for an
 /// attempt's hand-out. Returns whether the counters changed since the previous
 /// sample. Without a session binding or counters nothing is recorded.
-pub(crate) fn sample_usage(name: &str, force: bool) -> Result<bool> {
+///
+/// This is an rpc to the session host (35 s timeout): never call it on the
+/// dispatcher's tick or hand-out path (`teams::usage_sampler` runs it on its
+/// own thread). `moment` is the hand-out moment a reading stands for: an idle
+/// member's counters do not move, so the reading taken a moment later is
+/// recorded at `moment`; a reading that came more than `HANDOUT_FRESH` seconds
+/// after it may include the attempt's own work and is dropped (the start
+/// stays unknown rather than wrong).
+pub(crate) fn sample_usage(name: &str, force: bool, moment: Option<f64>) -> Result<bool> {
     let record = binding(name)?;
     let inspected = rpc(
         &record,
         "inspect",
         json!({"sessionId":record["conversation_id"],"agentId":Value::Null,"includeProcesses":false}),
     )?;
-    usage_samples::record(string(&record, "name"), string(&record, "conversation_id"), now(), &inspected["baseline"]["values"], force)
+    let read = now();
+    let at = match moment {
+        Some(moment) if read - moment > usage_samples::HANDOUT_FRESH => return Ok(false),
+        Some(moment) => moment,
+        None => read,
+    };
+    usage_samples::record(string(&record, "name"), string(&record, "conversation_id"), at, &inspected["baseline"]["values"], force)
 }
 /// `hgs inspect NAME` with its process inventory, for `hgs watch`.
 pub(crate) fn inspect_processes(name: &str) -> Result<Value> {
@@ -2823,6 +2837,8 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             recovery::rename_job(name,new,string(&record,"run_id"))?;
             save(&record)?;
             fs::remove_file(binding_path(name)).map_err(|e| e.to_string())?;
+            // The token samples follow the name; losing them only turns old windows unknown.
+            let _ = usage_samples::rename(name, new);
             // The rename is done; losing read marks only shows a reply as unread again.
             let _ = read_marks::rename_owner(name, new);
             println!(
@@ -2840,6 +2856,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
                 json!({"sessionId":record["conversation_id"]}),
             )?;
             fs::remove_file(binding_path(name)).map_err(|e| e.to_string())?;
+            usage_samples::forget(name);
         }
         "exists" => return Ok(0),
         "schedules" => println!("{}", schedules(name, &record, &args[1..])?),

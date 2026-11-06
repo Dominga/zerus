@@ -135,3 +135,100 @@ fn a_dsh_record_without_a_name_is_unavailable() {
     assert_eq!(result["status"], "unknown", "{result}");
     assert!(result["reason"].as_str().unwrap().contains("Native usage unavailable"), "{result}");
 }
+
+fn age(file: &std::path::Path, days: u64) {
+    let handle = fs::OpenOptions::new().write(true).open(file).unwrap();
+    handle.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(days * 24 * 3600)).unwrap();
+}
+
+#[test]
+fn a_reading_that_records_nothing_writes_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    with_test_state_root(temp.path(), || {
+        let name = "dsh/p/member";
+        assert!(record(name, "session-A", 1000.0, &projections(1, 1, 0, 0), false).unwrap());
+        // The file is an hour old; any rewrite would make it new again.
+        age(&path(name), 1);
+        let before = fs::metadata(path(name)).unwrap().modified().unwrap();
+        let bytes = fs::read(path(name)).unwrap();
+        // Inspected every second: unchanged, changed, and not after the last.
+        for second in 1..=5 {
+            assert!(!record(name, "session-A", 1000.0 + second as f64, &projections(1, 1, 0, 0), false).unwrap());
+        }
+        assert!(!record(name, "session-A", 1006.0, &projections(2, 2, 0, 0), false).unwrap());
+        assert!(!record(name, "session-A", 999.0, &projections(3, 3, 0, 0), true).unwrap());
+        assert_eq!(fs::metadata(path(name)).unwrap().modified().unwrap(), before, "the file was rewritten");
+        assert_eq!(fs::read(path(name)).unwrap(), bytes);
+        // A reading MIN_GAP later is recorded and written.
+        assert!(record(name, "session-A", 1000.0 + MIN_GAP, &projections(2, 2, 0, 0), false).unwrap());
+        assert!(fs::metadata(path(name)).unwrap().modified().unwrap() > before);
+        assert_eq!(load(name).len(), 2);
+    });
+}
+
+#[test]
+fn a_forgotten_session_takes_its_samples_with_it() {
+    let temp = tempfile::tempdir().unwrap();
+    with_test_state_root(temp.path(), || {
+        record("dsh/p/gone", "session-A", 1000.0, &projections(1, 1, 0, 0), true).unwrap();
+        record("dsh/p/stays", "session-B", 1000.0, &projections(1, 1, 0, 0), true).unwrap();
+        assert!(path("dsh/p/gone").exists() && path("dsh/p/gone").with_extension("lock").exists());
+        forget("dsh/p/gone");
+        assert!(!path("dsh/p/gone").exists() && !path("dsh/p/gone").with_extension("lock").exists());
+        assert!(path("dsh/p/stays").exists());
+    });
+}
+
+#[test]
+fn a_renamed_session_keeps_its_samples_under_the_new_name() {
+    let temp = tempfile::tempdir().unwrap();
+    with_test_state_root(temp.path(), || {
+        record("dsh/p/old", "session-A", 1000.0, &projections(100, 50, 0, 0), true).unwrap();
+        record("dsh/p/old", "session-A", 1100.0, &projections(400, 150, 0, 0), true).unwrap();
+        rename("dsh/p/old", "dsh/p/new").unwrap();
+        assert!(!path("dsh/p/old").exists());
+        let result = usage::span_many(&record_of("dsh/p/new"), &[(1000.0, 1100.0)]);
+        assert_eq!(tokens_of(&result)["uncached_input"], 300, "{result}");
+        // A session without samples renames without creating a file.
+        rename("dsh/p/never", "dsh/p/other").unwrap();
+        assert!(!path("dsh/p/other").exists());
+    });
+}
+
+#[test]
+fn old_sample_files_are_pruned_in_bounded_slices_and_fresh_ones_stay() {
+    let temp = tempfile::tempdir().unwrap();
+    with_test_state_root(temp.path(), || {
+        let folder = root().join("usage-samples");
+        // Five sessions untouched for 40 days, one fresh; each with its lock file.
+        for index in 0..5 {
+            let name = format!("dsh/p/old{index}");
+            record(&name, "session-A", 1000.0, &projections(1, 1, 0, 0), true).unwrap();
+            age(&path(&name), 40);
+            age(&path(&name).with_extension("lock"), 40);
+        }
+        record("dsh/p/fresh", "session-A", 1000.0, &projections(1, 1, 0, 0), true).unwrap();
+        let count = || fs::read_dir(&folder).unwrap().count();
+        assert_eq!(count(), 12);
+        // A pass looks at no more than its limit of entries.
+        let before = count();
+        let mut offset = prune(MAX_AGE, 0, 3);
+        assert!(count() >= before - 3, "one pass removed more than it looked at: {} left", count());
+        let mut passes = 1;
+        while passes < 20 && count() > 2 {
+            offset = prune(MAX_AGE, offset, 3);
+            passes += 1;
+        }
+        // Only the fresh session's two files are left; a pass over the end restarts.
+        assert_eq!(count(), 2, "{:?}", fs::read_dir(&folder).unwrap().map(|e| e.unwrap().file_name()).collect::<Vec<_>>());
+        assert!(path("dsh/p/fresh").exists() && path("dsh/p/fresh").with_extension("lock").exists());
+        assert_eq!(prune(MAX_AGE, offset, 100), 0);
+        // An orphaned lock file (its samples gone) is removed once old.
+        fs::write(path("dsh/p/orphan").with_extension("lock"), b"").unwrap();
+        age(&path("dsh/p/orphan").with_extension("lock"), 40);
+        prune(MAX_AGE, 0, 100);
+        assert!(!path("dsh/p/orphan").with_extension("lock").exists());
+        // No folder: nothing to do.
+        assert_eq!(prune(MAX_AGE, 5, 100), 0);
+    });
+}

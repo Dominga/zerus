@@ -28,6 +28,7 @@ pub(crate) mod test_results;
 pub(crate) mod test_runners;
 pub(crate) mod merge_queue;
 pub(crate) mod timing;
+pub(crate) mod usage_sampler;
 pub(crate) mod waiting;
 
 use std::collections::BTreeSet;

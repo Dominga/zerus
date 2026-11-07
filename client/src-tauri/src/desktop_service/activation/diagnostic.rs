@@ -42,7 +42,9 @@ impl Reason {
                 Some("hgs: canonical frontend evidence unavailable") => {
                     Some("canonical_frontend_evidence_unavailable")
                 }
-                _ => None,
+                // Task 180: the portable binding's checks, by their exact lines.
+                Some(line) => crate::takeover_refusal::code(line),
+                None => None,
             };
             if let Some(code) = known {
                 return Self::Runner(code);

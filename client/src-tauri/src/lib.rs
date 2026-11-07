@@ -104,6 +104,8 @@ mod selection_diagnostic;
 mod session_files;
 #[cfg(feature = "live")]
 mod session_folders;
+// Task 180: a refused native takeover names its check in the app.
+mod takeover_refusal;
 #[cfg(feature = "live")]
 pub mod settings;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

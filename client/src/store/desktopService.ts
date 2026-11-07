@@ -438,6 +438,40 @@ export const firstChoiceActions = createFirstChoiceActions(
 );
 const HELPER_UNAVAILABLE = ["activation_helper_unavailable", "activation_helper_update_required", "activation_helper_changed"];
 const COMPONENTS = ["fleet", "presence", "reads", "attention", "approvals"];
+/**
+ * Task 180 (owner, 2026-11-07): a refused native takeover says which check
+ * refused it and the next step, never an empty list or a bare "paused".
+ */
+export interface TakeoverRefusal { check: string; reason: string; next: string }
+
+export function takeoverRefusal(view: NotificationOwnership | undefined): TakeoverRefusal | undefined {
+  const refused = view?.native_recovery ? view.native_recovery_reason : undefined;
+  if (!refused) return undefined;
+  const reinstall = tr("Install Zerus again from this portable folder so hgs records this app, then restart Zerus.");
+  switch (refused.code) {
+    case "frontend_binding_unavailable":
+      return { check: tr("App binding"), reason: tr("hgs has no record of this app: its binding (frontend.json) is missing or unreadable."), next: reinstall };
+    case "frontend_binding_other_cli":
+      return { check: tr("App binding"), reason: tr("hgs's record of this app names another hgs installation."), next: reinstall };
+    case "frontend_not_bound_application":
+    case "frontend_not_installed_application":
+      return { check: tr("App binding"), reason: tr("This app is not the one hgs recorded."), next: tr("Start Zerus from its installed folder, or install this copy again; then restart Zerus.") };
+    case "frontend_folders_not_private":
+      return { check: tr("Folder privacy"), reason: tr("Another account can change a folder that holds hgs's record of this app (.local/share/hgs/host or a folder above it)."),
+        next: tr("Make that folder changeable only by you (other accounts may keep read access to the folders above it), then restart Zerus.") };
+    case "agent_descended_frontend_refused":
+      return { check: tr("Process ancestry"), reason: tr("Zerus was started from an agent's session."), next: tr("Close it and start Zerus from the Start menu or its folder.") };
+  }
+  switch (refused.check) {
+    case "ownership_journal":
+      return { check: tr("Ownership journal"), reason: tr("The background service has an ownership change that is not settled."), next: tr("Review it in Settings > About, then resume background work.") };
+    case "identity":
+      return { check: tr("App identity"), reason: tr("hgs could not verify this app's process."), next: tr("Restart Zerus.") };
+    default:
+      return { check: tr("Takeover"), reason: tr("The takeover was not confirmed (%1).", refused.code), next: tr("Restart Zerus. If it stays, send hgs-tray.log to the team.") };
+  }
+}
+
 export function ownershipNotice(view: NotificationOwnership | undefined): string {
   if (!view) return "";
   if (view.pending) return tr("Background access is unconfirmed. Check the result before making another change.");
@@ -453,6 +487,9 @@ export function ownershipNotice(view: NotificationOwnership | undefined): string
       return tr("Background activation is unavailable. Update Zerus and its desktop service, then Resume to check again.");
     return tr("Background work is paused. Resume to activate the service explicitly.");
   }
+  // Task 180: the refused takeover names its check and the next step.
+  const refused = takeoverRefusal(view);
+  if (refused) return `${tr("Zerus could not take over its sessions")} (${refused.check}): ${refused.reason} ${refused.next}`;
   if (view.native_recovery) return tr("Background service is not ready. Some actions are unavailable.");
   if (view.status?.rearm_required) return tr("Background access was revoked. Resume it to let the service work while Zerus is closed.");
   if (view.code || view.status?.state !== "service" || !view.status.identity_current)

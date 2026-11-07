@@ -444,6 +444,16 @@ impl PortableScope {
     /// a proof is cached. A cached proof is reused only when that record names
     /// exactly its app object and digest, and it is rechecked for the same
     /// process; otherwise the process is proven against the record.
+    /// Task 180: why `running` gave no proof, in fixed words the desktop
+    /// shows: the binding's folders, the binding itself, a binding of another
+    /// hgs, or a running app that is not the bound one.
+    pub fn refusal(&self) -> &'static str {
+        match staging::frontend_binding(&self.images) {
+            Err(reason) => reason,
+            Ok(binding) if binding.cli != self.cli => "frontend binding names another hgs",
+            Ok(_) => "frontend is not the bound application",
+        }
+    }
     pub fn running(&self, original: &Original, until: Instant) -> Option<std::sync::Arc<GuiProof>> {
         let binding = self.refresh()?;
         if let Some(proof) = self.cache.find(original) {

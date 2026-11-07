@@ -182,6 +182,8 @@ export interface FirstChoiceOffer {
 export interface NotificationOwnership {
   /** Local startup recovery presentation; never a service grant. */
   native_recovery?: boolean;
+  /** Task 180: the check that refused the native takeover, by its fixed code. */
+  native_recovery_reason?: { code: string; check: string };
   /** Native helper observation only; never permission to start a writer. */
   activation?: { pending: boolean; running: boolean; needs_resume: boolean; code: string;
     review?: ModeReview | null; automatic_blocked?: boolean; request_id?: string | null; active?: boolean; business_ready?: boolean;

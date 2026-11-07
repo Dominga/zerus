@@ -1,6 +1,8 @@
 //! Native Windows controls for the portable frontend binding. Fixture files
 //! and fixture processes (copies of this test binary) under temporary folders
-//! only; no installed app, task, registration, host or agent.
+//! only; no installed app, task, registration, host or agent. Task 180: each
+//! temporary root is private to this user, so the runner's inherited access
+//! entries never decide a result (staging::private_tempdir).
 use super::*;
 use std::{fs, io::Write, process::Command, sync::Arc};
 
@@ -11,7 +13,7 @@ const CHANGED: &[u8] = b"portable app fixture, changed! bytes";
 const DIGEST_TIME: Duration = Duration::from_secs(30);
 
 fn fixture() -> (tempfile::TempDir, PathBuf) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = staging::private_tempdir();
     let zip = dir.path().join("zip");
     fs::create_dir(&zip).unwrap();
     let gui = zip.join(staging::FRONTEND_IMAGE);
@@ -151,7 +153,7 @@ fn a_binding_for_another_cli_object_is_refused() {
 
 #[test]
 fn a_missing_or_corrupt_record_proves_nothing() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = staging::private_tempdir();
     let (_, gui) = fixture();
     let home = dir.path().to_string_lossy().into_owned();
     let scope = scope_over(dir.path());
@@ -164,7 +166,7 @@ fn a_missing_or_corrupt_record_proves_nothing() {
 
 #[test]
 fn a_process_not_started_by_the_app_beside_it_records_nothing() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = staging::private_tempdir();
     let layout = Layout::new(
         &dir.path().join("home").to_string_lossy(),
         &dir.path().join("config"),
@@ -224,7 +226,7 @@ fn wait_until(what: &str, done: impl Fn() -> bool) {
 
 #[test]
 fn a_running_gui_proof_is_released_on_exit_while_borrowers_keep_their_pin() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = staging::private_tempdir();
     let gui = FixtureGui::start(&dir.path().join("zip"));
     let (scope, _, _) = serve(dir.path(), &gui.image);
     let original = gui.original();
@@ -258,7 +260,7 @@ fn a_running_gui_proof_is_released_on_exit_while_borrowers_keep_their_pin() {
 
 #[test]
 fn another_process_or_an_exited_one_has_no_proof() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = staging::private_tempdir();
     let gui = FixtureGui::start(&dir.path().join("zip"));
     let other = FixtureGui::start(&dir.path().join("other"));
     let (scope, _, _) = serve(dir.path(), &gui.image);
@@ -275,7 +277,7 @@ fn another_process_or_an_exited_one_has_no_proof() {
 
 #[test]
 fn maintained_staging_proceeds_while_old_portable_work_remains() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = staging::private_tempdir();
     let home = dir.path().join("home");
     let layout = Layout::new(&home.to_string_lossy(), &home.join("config"));
     // A serving process whose own image is the staged stable CLI, with a scope.
@@ -508,7 +510,7 @@ fn fixture_zip(dir: &Path) -> PathBuf {
 
 #[test]
 fn a_same_path_replacement_is_seen_at_start_and_rebinds_through_the_app_s_own_install() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = staging::private_tempdir();
     let app = fixture_zip(dir.path());
     let home = dir.path().join("home");
     let layout = Layout::new(&home.to_string_lossy(), &home.join("config"));
@@ -542,7 +544,7 @@ fn a_same_path_replacement_is_seen_at_start_and_rebinds_through_the_app_s_own_in
 
 #[test]
 fn only_the_app_s_own_install_outside_an_agent_tree_records_a_binding() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = staging::private_tempdir();
     let zip = dir.path().join("zip");
     fs::create_dir(&zip).unwrap();
     let own = std::env::current_exe().unwrap();
@@ -632,7 +634,7 @@ fn icacls(arguments: &[&std::ffi::OsStr]) {
 #[test]
 fn a_binding_that_is_not_a_private_record_of_this_user_is_refused() {
     // Others may read it.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = staging::private_tempdir();
     let (layout, record) = published(dir.path());
     icacls(&[
         record.as_os_str(),
@@ -698,7 +700,7 @@ fn a_binding_that_is_not_a_private_record_of_this_user_is_refused() {
 
 #[test]
 fn an_inherited_untrusted_ace_refuses_the_candidate_before_the_record_exists() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = staging::private_tempdir();
     let (layout, record) = published(dir.path());
     fs::remove_file(&record).unwrap();
     // Inherit-only: the folder's own access stays private, new files inherit it.
@@ -738,7 +740,7 @@ fn an_inherited_untrusted_ace_refuses_the_candidate_before_the_record_exists() {
 
 #[test]
 fn a_failed_watcher_drops_the_cache_s_proofs_and_a_new_one_takes_over() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = staging::private_tempdir();
     let gui = FixtureGui::start(&dir.path().join("zip"));
     let (scope, _, _) = serve(dir.path(), &gui.image);
     let original = gui.original();
@@ -773,7 +775,7 @@ fn a_failed_watcher_drops_the_cache_s_proofs_and_a_new_one_takes_over() {
 
 #[test]
 fn a_running_service_admits_a_same_path_rebind_at_once_and_never_the_old_object() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = staging::private_tempdir();
     let zip = dir.path().join("zip");
     let old = FixtureGui::start(&zip);
     let home = dir.path().join("serve-home");
@@ -858,7 +860,7 @@ fn a_running_service_refuses_a_record_for_another_cli_object() {
 
 #[test]
 fn a_warm_proof_never_outlives_its_record() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = staging::private_tempdir();
     let gui = FixtureGui::start(&dir.path().join("zip"));
     let (scope, binding, layout) = serve(dir.path(), &gui.image);
     let record = layout.images.join(staging::FRONTEND_BINDING);
@@ -947,7 +949,7 @@ fn this_test_binary_outside_dot_local_bin_has_no_portable_scope() {
 
 #[test]
 fn a_serving_process_finds_the_record_beside_its_own_cli_whatever_its_home() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = staging::private_tempdir();
     let home = dir.path().join("fixture-home");
     let layout = Layout::new(&home.to_string_lossy(), &home.join("config"));
     fs::create_dir_all(layout.cli.parent().unwrap()).unwrap();

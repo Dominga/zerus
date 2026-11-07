@@ -12,7 +12,7 @@ import {
   emphasis, childStatus, gitTooltip, paletteIndex, folderOf, ProviderGlyph,
 } from "./SessionCard";
 import { agentKind, catalog, computerFresh, computerOffline } from "../../store/catalog";
-import { StateRefusalDetail, servicePausedEmpty, stateRefusal } from "../components/DesktopServiceStatus";
+import { StateRefusalDetail, TakeoverRefusalDetail, servicePausedEmpty, stateRefusal, takeoverRefused } from "../components/DesktopServiceStatus";
 import { visibleUnreadReply } from "../../store/attention";
 import { optionalQuestionCount } from "./optional-questions";
 import { currentChildren } from "./subagents";
@@ -856,6 +856,7 @@ function ListPlaceholder() {
   const unsupported = () => computers().length > 0 && computers().every((c) => c.status === "unsupported");
   return (
     <Show when={!stateRefusal()} fallback={<StateRefusalDetail />}>
+    <Show when={!(takeoverRefused() && !Object.keys(catalog.computers).length)} fallback={<TakeoverRefusalDetail />}>
     <Show when={!servicePausedEmpty()} fallback={
       <div class="empty sp-empty sp-paused">
         <Icon name="pause" size={30} />
@@ -886,6 +887,7 @@ function ListPlaceholder() {
           <p>{tr("This computer's hgs has no event stream (Event stream ABI: watch-v1). Update hgs to see its sessions here.")}</p>
         </Show>
       </div>
+    </Show>
     </Show>
     </Show>
     </Show>

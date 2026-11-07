@@ -80,6 +80,33 @@ CODEX = os.environ.get("HGS_CODEX_TEST_BIN")
 CONPTY = os.environ.get("HGS_TEST_CONPTY_DIR")
 KEY = "fixture-key"
 DEAD_PROXY = "http://127.0.0.1:9"
+
+# Claude 2.1.319's shared permission dialog rejects input for 150 ms after
+# first paint. A complete hook card is an observation, not an input-ready ACK.
+CLAUDE_PERMISSION_INPUT_GUARD = 0.150
+
+
+def wait_claude_permission_guard(card, read, observed, now=None, pause=None):
+    """Wait out the native window on this original card, before ONE key.
+
+    This does not claim to explain the historical Windows missed Enter. An
+    unchanged prompt after that key still fails; it never authorizes replay.
+    """
+    now = now or time.monotonic
+    pause = pause or time.sleep
+    fields = ('question_id', 'question_hash', 'run_id', 'conversation_id',
+              'tool_call_id', 'agent_id', 'source')
+    until = observed + CLAUDE_PERMISSION_INPUT_GUARD
+    while True:
+        current = read()
+        if (not current or not current.get('panel_verified') or not current.get('can_answer')
+                or any(current.get(field) != card.get(field) for field in fields)):
+            raise AssertionError('The original Claude permission panel changed before Terminal input')
+        remaining = until - now()
+        if remaining <= 0:
+            return
+        pause(min(remaining, 0.040))
+
 # Seconds an agent may take to start, finish a turn, pause or exit: Claude Code starts
 # in about 9 s under ConPTY on the development PC (spike S6), and a hosted runner scans
 # a freshly linked executable on its first start.
@@ -847,12 +874,19 @@ class NativeWindowsClaude(NativeAgent, host.HostCase):
         for key, check in (("Enter", approved.is_file),
                            ("Escape", lambda: "What should Claude do instead?" in self.capture(name))):
             card = self.hook_card(name, api.BASH)
-            worker = self.worker()
+            def current():
+                return next((item for item in self.inspect(name).get('pending_questions', [])
+                             if item.get('question_id') == card['question_id']), None)
+            self.until('the original complete Bash permission panel',
+                       lambda: (item := current()) and item.get('panel_verified'))
             carded = time.monotonic()
+            worker = self.worker()
+            wait_claude_permission_guard(card, current, carded)
             self.keys(name, {"named": key})
             # zerus-dy5u: an intermittent Enter without effect; the failure
             # must tell a key sent before the panel from one that was lost.
-            sent = f"panel_verified={card.get('panel_verified')}, sent {time.monotonic() - carded:.3f} s after the card"
+            sent = (f"panel_verified=True, native_guard={CLAUDE_PERMISSION_INPUT_GUARD:.3f} s, "
+                    f"sent {time.monotonic() - carded:.3f} s after the complete card")
             self.until(f"Terminal's {key} ({sent})", check)
             self.until(f"the hook to end after {key}", lambda: not self.alive(*worker))
             self.until("no pending card", lambda: not self.inspect(name).get("pending_questions"))

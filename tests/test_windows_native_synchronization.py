@@ -4,9 +4,59 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import test_windows_native_agents as native
+
+
+class ClaudePermissionInputReadiness(unittest.TestCase):
+    CARD = dict(question_id='original', question_hash='a' * 64, run_id='run', conversation_id='conversation',
+                tool_call_id='tool', agent_id='main', source='claude_tool_approval',
+                panel_verified=True, can_answer=True)
+
+    def test_the_actual_terminal_case_waits_before_each_single_original_key(self):
+        case = native.NativeWindowsClaude('test_terminal_answers_end_the_hook')
+        with tempfile.TemporaryDirectory() as directory:
+            case.project = Path(directory)
+            clock = [0.0]
+            observations, keys = [], []
+            pending = [True]
+            case.launch = lambda _: 'claude/fixture/terminal'
+            def hook(*_):
+                pending[0] = True
+                observations.append(clock[0])
+                return self.CARD.copy()
+            case.hook_card = hook
+            case.worker = lambda: (123, 'original-birth')
+            case.inspect = lambda _: dict(pending_questions=[self.CARD.copy()] if pending[0] else [])
+            def send(_, key):
+                self.assertGreaterEqual(clock[0] - observations[-1], 0.150)
+                keys.append(key['named'])
+                pending[0] = False
+                (case.project / native.api.BASH_FILE).touch()
+            case.keys = send
+            case.until = lambda what, check: self.assertTrue(check(), what)
+            case.alive = lambda *_: False
+            case.refused = lambda *_: None
+            case.choose = lambda *_: []
+            case.channels = lambda _: []
+            case.turn_ended = lambda *_: True
+            case.capture = lambda _: 'What should Claude do instead?'
+            with patch.object(native.time, 'monotonic', lambda: clock[0]), \
+                    patch.object(native.time, 'sleep', lambda delay: clock.__setitem__(0, clock[0] + delay)):
+                case.test_terminal_answers_end_the_hook()
+            self.assertEqual(keys, ['Enter', 'Escape'])
+
+    def test_changed_original_or_unverified_panel_refuses_before_input(self):
+        for change in (dict(question_hash='b' * 64), dict(run_id='replacement'),
+                       dict(panel_verified=False), dict(can_answer=False)):
+            with self.subTest(change=change):
+                clock = [0.0]
+                read = lambda: dict(self.CARD, **change) if clock[0] > 0 else self.CARD.copy()
+                with self.assertRaisesRegex(AssertionError, 'original Claude permission panel changed'):
+                    native.wait_claude_permission_guard(self.CARD, read, 0,
+                        now=lambda: clock[0], pause=lambda delay: clock.__setitem__(0, clock[0] + delay))
+                self.assertEqual(clock[0], 0.040)
 
 
 class CodexStopSynchronization(unittest.TestCase):

@@ -25,6 +25,8 @@ mod state;
 mod status;
 mod swarm;
 mod tasks;
+#[cfg(all(test, unix))]
+mod test_process;
 mod watch;
 
 fn main() {

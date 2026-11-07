@@ -564,11 +564,11 @@ fn all_items(team: &Team) -> Vec<Item> {
         items.push(Item {
             subagents: Value::Null,
             kind: "input_blocked",
-            key: format!("input_blocked:{}:{}", member.id, block.since),
+            key: format!("input_blocked:{}", member.id),
             task: None,
             member: name.clone(),
             since: block.since,
-            summary: summary(&format!("{name} refused {} hand-outs: {}", block.count, block.reason)),
+            summary: summary(&format!("{name}'s terminal is busy: {}", block.reason)),
             command: String::new(),
             detail: input_block_action(&terminal, &block.screen),
         });

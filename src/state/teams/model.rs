@@ -1451,6 +1451,14 @@ pub(crate) struct Attempt {
     pub folder_head: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub folder_branch: String,
+    /// Task 165: how many hand-outs this one refused in a row, and why.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub refusal_count: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub refusal_reason: String,
+    /// The member's state when it refused; a change retries at once.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub refusal_state: String,
     #[serde(default)]
     pub sent_at: f64,
     #[serde(default)]
@@ -2974,4 +2982,6 @@ mod tests {
         assert!(!attempt.questions[0].open());
     }
 }
+
+
 

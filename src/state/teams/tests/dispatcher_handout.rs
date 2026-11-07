@@ -550,3 +550,32 @@ fn send_outcomes_are_classified_conservatively() {
     assert!(matches!(classify(&output(255, "", "ssh: connection reset")), Sent::Uncertain(_)));
     assert!(matches!(classify(&Err(anyhow::anyhow!("timed out"))), Sent::Uncertain(_)));
 }
+
+#[test]
+fn a_repeated_refusal_backs_off_to_fifteen_minutes() {
+    assert_eq!(crate::state::teams::dispatcher::refusal_pause(1), 30.0);
+    assert_eq!(crate::state::teams::dispatcher::refusal_pause(2), 60.0);
+    assert_eq!(crate::state::teams::dispatcher::refusal_pause(3), 120.0);
+    assert_eq!(crate::state::teams::dispatcher::refusal_pause(9), 15.0 * 60.0);
+}
+
+#[test]
+fn repeated_refusals_stay_one_attempt_with_a_count() {
+    let (team, _seen) = team_with_two_backends();
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
+    store.create("11111111-1111-4111-8111-111111111111", &json!({}), team.clone(), vec![]).unwrap();
+    set_fake_hgs(Some(Box::new(|_, _, _| Ok(fake_output(1, "", "terminal is busy")))));
+    run_step(&mut store, &team, &Step::HandOut { task: 1, member: "dev".into() }, "").unwrap();
+    // Move the stored refusal past its pause so the next hand-out is tried.
+    change(&mut store, &team.id, |saved, _| {
+        saved.task_mut(1).unwrap().attempts.last_mut().unwrap().sent_at = crate::state::now() - 31.0;
+        Ok(())
+    }).unwrap();
+    run_step(&mut store, &team, &Step::HandOut { task: 1, member: "dev".into() }, "").unwrap();
+    set_fake_hgs(None);
+    let task = store.load(&team.id).unwrap().unwrap().task(1).unwrap().clone();
+    assert_eq!(task.attempts.len(), 1, "one attempt carries every refusal");
+    assert_eq!(task.attempts[0].refusal_count, 2);
+    assert_eq!(task.attempts[0].refusal_reason, "terminal is busy");
+}

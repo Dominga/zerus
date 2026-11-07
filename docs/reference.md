@@ -6266,6 +6266,19 @@ most 64 folders (`limits.git_subscriptions`); more fail with
 `too_many_subscriptions`, and a missing or relative path fails with
 `bad_request`.
 
+The desktop session list follows only its selected and visible rows (including
+the virtual list's small overscan), at most 48 row identities across computers.
+Native catalog rows supply the checkout paths; equal paths on different
+computers remain separate. In service mode these are Git demands on the
+original fleet/details lease, within its existing 64-demand budget and the
+original Hello's Git limit. Native mode uses its existing watch supervisors.
+Both retire old interests before replacements and fence a new subscription
+with the original Pong. Hidden rows retain no Git cache. Unsupported topics,
+failed reads and offline/replaced sources clear the display facts; there is no
+independent GUI Git/SSH poller or automatic retry of a refused route. Checkout
+freshness and remote verification age separately, and missing upstream/count
+evidence never paints a clean, verified checkout.
+
 The `processes` topic follows one session's processes, subscribed like Activity
 (`{"op":"subscribe","topic":"processes","session":{...}}`) and keyed by its
 catalog key. Its `state` value is `{processes, process_work}` exactly as

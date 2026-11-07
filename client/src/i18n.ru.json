@@ -1188,6 +1188,7 @@
   "Git no longer tracks this folder, but files remain. The removal is never retried.": "Git больше не отслеживает эту папку, но в ней остались файлы. Удаление не повторяется.",
   "Git repository": "Git-репозиторий",
   "Git status (current checkout)": "Состояние Git (текущая рабочая копия)",
+  "Git status is unavailable or out of date.": "Статус Git недоступен или устарел.",
   "Give computer code": "Выдать код компьютера",
   "Go": "Перейти",
   "Go to": "Перейти",

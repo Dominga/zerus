@@ -217,6 +217,7 @@ export function normalize(b: Partial<Batch>): Batch {
     upserts: b.upserts ?? e.upserts, removes: b.removes ?? e.removes, replaces: b.replaces ?? e.replaces, computers: b.computers ?? e.computers,
     machines: b.machines ?? [], activity: b.activity ?? e.activity, tasks: b.tasks ?? [], groups: b.groups ?? [], grouping: b.grouping ?? undefined,
     desktop_service: b.desktop_service ?? undefined,
+    git: b.git ?? [],
     processes_view: b.processes_view ?? undefined,
     composer: b.composer ?? undefined, draft_keys: b.draft_keys ?? undefined, composer_events: b.composer_events ?? undefined,
   };
@@ -227,6 +228,10 @@ export const activityPort: ActivityPort = {
   follow: (request) => source?.follow(request) ?? Promise.resolve(),
   unfollow: (computer, key) => source?.unfollow(computer, key) ?? Promise.resolve(),
 };
+
+/** Bounded current row identities; native code selects the actual paths. */
+export const gitRows = (rows: { computer: string; key: string }[]) =>
+  inTauri() ? invoke<void>("git_rows", { rows }) : Promise.resolve();
 
 /** Process RSS and CPU of the app, when running in Tauri. */
 export async function metrics(windowMs?: number): Promise<Record<string, unknown> | undefined> {

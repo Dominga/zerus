@@ -16,6 +16,10 @@ pub const SUMMARY_CHARS: usize = 240;
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ViewRow {
+    /// Native service catalog provenance, retained only inside the frontend's
+    /// existing mirror. Renderer JSON and cached rows cannot supply it.
+    #[serde(skip)]
+    pub catalog_source: Option<(String, u64, u64)>,
     /// The session's full name, its identity in `hgs` commands.
     pub name: String,
     /// The card title: the tag, else the name after its project, else the project.
@@ -169,6 +173,10 @@ pub struct ViewRow {
     /// The checkout's root (`git_root`), empty outside Git. The worktree
     /// picker counts sessions by it.
     pub git_root: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub git_metadata_state: String,
+    #[serde(skip_serializing_if = "is_false")]
+    pub git_detached: bool,
     /// Linked checkout name from the existing Git worktree metadata. Main
     /// checkouts and rows without verified metadata leave the chip absent.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1289,6 +1297,7 @@ pub fn row(value: &Value) -> ViewRow {
     };
     let flag = |field: &str| value.get(field).and_then(Value::as_bool);
     ViewRow {
+        catalog_source: None,
         name: session.name.to_owned(),
         title: session.title(),
         display_title: session.display_title(),
@@ -1389,6 +1398,8 @@ pub fn row(value: &Value) -> ViewRow {
         cwd: text(value, "cwd").to_owned(),
         cwd_canonical: text(value, "cwd_canonical").to_owned(),
         git_root: text(value, "git_root").to_owned(),
+        git_metadata_state: text(value, "git_metadata_state").to_owned(),
+        git_detached: value["git_detached"] == true,
         git_worktree: match flag("git_worktree") {
             Some(false) if !matches!(text(value, "git_metadata_state"), "ok" | "not_repo") => None,
             reported => reported,

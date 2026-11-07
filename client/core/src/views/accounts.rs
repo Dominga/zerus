@@ -156,7 +156,7 @@ pub struct Profile {
     /// The status line under the machine tags.
     pub detail: Text,
     pub signed_in: bool,
-    /// `bypass`, `auto`, `plan`, `default` or `unknown`.
+    /// Zerus/provider permission mode, including OpenCode's allow/ask/deny/custom.
     pub permission: String,
     /// Zerus override, separate from the provider's effective permission mode.
     pub permission_mode: String,
@@ -469,13 +469,36 @@ pub fn permission_label(mode: &str) -> &'static str {
         "auto" => crate::source!("Auto"),
         "plan" => crate::source!("Plan"),
         "mixed" => crate::source!("Varies"),
+        "allow" => crate::source!("Allow tools"),
+        "ask" => crate::source!("Ask before tools"),
+        "deny" => crate::source!("Deny tools"),
+        "custom" => crate::source!("Custom rules"),
+        "unknown" => crate::source!("Unverified"),
         _ => crate::source!("Default"),
     }
 }
 
 /// permissionHint (AccountsPage.cpp:89-92).
 fn permission_hint(raw: &Value) -> Text {
-    let source = if text(raw, "permission_mode_source") == "default" {
+    if text(raw, "provider") == "opencode" {
+        let detail = match text(raw, "effective_permission_mode").as_str() {
+            "allow" if text(raw, "permission_detail") == "OpenCode native default" => {
+                crate::text!("OpenCode allows tools by default; reads of .env files may still ask.")
+            }
+            "allow" => crate::text!("OpenCode account rules allow tools without asking."),
+            "ask" => crate::text!("OpenCode account rules ask before tools run."),
+            "deny" => crate::text!("OpenCode account rules deny tools."),
+            "custom" => crate::text!("OpenCode uses custom permission rules."),
+            _ => crate::text!("OpenCode permission configuration could not be verified."),
+        };
+        return crate::text!(
+            "%1\n%2\n%3",
+            crate::text!("From provider settings"),
+            detail,
+            crate::text!("Project, agent and session rules may use a different policy.")
+        );
+    }
+    let source = if zerus_default(raw) {
         // Bypass for Claude, Codex and Kimi without a choice (T-6hcfnu).
         crate::text!("Zerus default")
     } else if text(raw, "permission_mode") == "bypass" {
@@ -485,7 +508,7 @@ fn permission_hint(raw: &Value) -> Text {
     };
     // The provider's own detail is shown as it reports it; the default says
     // what it is.
-    let detail = if text(raw, "permission_mode_source") == "default" {
+    let detail = if zerus_default(raw) {
         crate::text!("Without a choice, Claude, Codex and Kimi accounts bypass permissions.")
     } else {
         Some(text(raw, "permission_detail"))
@@ -503,6 +526,10 @@ fn permission_hint(raw: &Value) -> Text {
             "Applies to new and resumed sessions; a running session may use a different mode."
         )
     )
+}
+
+fn zerus_default(raw: &Value) -> bool {
+    text(raw, "permission_mode_source") == "default" && text(raw, "permission_mode") == "bypass"
 }
 
 /// The model line (AccountsPage.cpp:610-612), with the effort in parentheses (the dots rule).
@@ -646,7 +673,7 @@ fn profile(entry: &FleetEntry, raw: &Value, state: &AccountsState) -> Profile {
             "provider"
         }
         .into(),
-        permission_default: text(raw, "permission_mode_source") == "default",
+        permission_default: zerus_default(raw),
         model_supported: flag(raw, "model_defaults_supported"),
         model_text: model_text(raw),
         model: text(raw.get("model_defaults").unwrap_or(&Value::Null), "model"),
@@ -2135,5 +2162,56 @@ mod permission_source_tests {
             profile(&entry, &explicit, &AccountsState::default()).permission_mode,
             "bypass"
         );
+    }
+
+    #[test]
+    fn opencode_native_policy_is_localized_and_never_labelled_as_a_zerus_default() {
+        let entry = FleetEntry {
+            computer: ComputerId::local(),
+            status: "live".into(),
+            attempt: 0,
+            local_sessions: true,
+            local_host: false,
+            host: Some("workstation".into()),
+            platform: Some("linux".into()),
+        };
+        for (mode, label) in [
+            ("allow", "Allow tools"),
+            ("ask", "Ask before tools"),
+            ("deny", "Deny tools"),
+            ("custom", "Custom rules"),
+            ("unknown", "Unverified"),
+        ] {
+            let raw = json!({"id":"native-opencode","provider":"opencode","home":"/accounts/example","native":true,"installed":true,
+                "permission_mode":"provider","permission_mode_source":"default","effective_permission_mode":mode,"permission_detail":"OpenCode native default"});
+            let p = profile(&entry, &raw, &AccountsState::default());
+            assert_eq!(p.permission, mode);
+            assert_eq!(p.permission_label.source, label);
+            assert!(!p.permission_default);
+            assert_eq!(p.permission_mode, "provider");
+            assert!(p
+                .permission_hint
+                .english()
+                .starts_with("From provider settings"));
+            assert!(!p.permission_hint.english().contains("Without a choice"));
+            assert!(p
+                .permission_hint
+                .english()
+                .contains("Project, agent and session rules"));
+            if mode == "allow" {
+                assert!(p.permission_hint.english().contains(".env"));
+            }
+            if mode == "unknown" {
+                assert!(p
+                    .permission_hint
+                    .english()
+                    .contains("could not be verified"));
+            }
+            assert!(p
+                .permission_hint
+                .args
+                .iter()
+                .all(|arg| !matches!(arg, crate::text::Arg::Verbatim(_))));
+        }
     }
 }

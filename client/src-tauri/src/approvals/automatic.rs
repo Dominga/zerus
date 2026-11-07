@@ -135,12 +135,17 @@ impl Worker {
                     && settings.flag(policy::ENABLED)
                     && pump.approval_current(target)
                     && actions
-                        .session_write(&target.target.computer, &target.target.name, || {
-                            (
-                                pump.row(&target.target.computer, &target.catalog_key),
-                                pump.online(&target.target.computer),
-                            )
-                        })
+                        .session_write_for_run(
+                            &target.target.computer,
+                            &target.target.name,
+                            &target.target.run_id,
+                            || {
+                                (
+                                    pump.row(&target.target.computer, &target.catalog_key),
+                                    pump.online(&target.target.computer),
+                                )
+                            },
+                        )
                         .is_none()
             })
         };

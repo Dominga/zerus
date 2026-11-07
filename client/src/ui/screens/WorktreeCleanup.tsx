@@ -5,7 +5,7 @@ import { MachineLabel } from "../components/MachineLabel";
 import { Icon } from "../lib/icons";
 import type { Inspection } from "../../store/terminationCleanup";
 import { terminationCleanupInspect } from "../../bridge";
-import { cleanup, cleanupDialog, closeCleanup, keepCleanup, checkCleanup, removeCleanup, emptyConsents, type CleanupRow } from "../../store/terminationCleanup";
+import { cleanup, cleanupDialog, closeCleanup, clearCleanupResults, checkCleanup, removeCleanup, emptyConsents, type CleanupRow } from "../../store/terminationCleanup";
 import { activityLabel } from "../../store/backgroundTasks";
 import { anyCleanupRestore, cleanupRestoring, restoreCleanupRow } from "../../store/cleanupNotices";
 import { tr } from "../../i18n";
@@ -33,6 +33,7 @@ export default function WorktreeCleanup() {
     <dialog ref={dialog} class="dlg su-dlg worktree-cleanup" style={{ width: "780px", position: "fixed", inset: "0", margin: "auto" }} aria-labelledby="cleanup-title" onCancel={closeCleanup} onClose={closeCleanup}>
       <div class="dlg-head"><Icon name="trash" size={18} class="accent" /><h2 id="cleanup-title">{tr("Remove working folders")}</h2><span class="grow" /><button class="icon-btn" aria-label={tr("Close")} onClick={closeCleanup}><Icon name="x" size={16} /></button></div>
       <div class="dlg-body bc-body">
+        <Show when={cleanup().rows.length || cleanup().kept || cleanup().unknown} fallback={<p class="muted" role="status">{tr("No working folders need review.")}</p>}>
         <h3 class="section-title">{cleanup().rows.length === 1 ? tr("Review 1 selected worktree") : tr("Review %1 selected worktrees", cleanup().rows.length)}</h3>
         <p class="muted">{tr("Conversations and branches are kept. Removing a working folder permanently deletes its local files.")}</p>
         <table class="su-table bc-table"><thead><tr><th>{tr("Folder / branch")}</th><th>{tr("Computer")}</th><th>{tr("Size")}</th><th>{tr("Result")}</th></tr></thead><tbody><For each={cleanup().rows}>{(row) =>
@@ -55,8 +56,15 @@ export default function WorktreeCleanup() {
           <Show when={targets().length && cleanup().required.unchecked_processes}><label class="check" title={tr("Accept this uncertainty for this folder for five minutes. Known programs and sessions using the folder still prevent removal.")}><input type="checkbox" checked={consents().unchecked_processes} disabled={cleanup().busy} onChange={(e) => setConsents({ ...consents(), unchecked_processes: e.currentTarget.checked })} />{tr("Remove even if some running programs cannot be checked")}</label></Show>
         </div>
         <Show when={cleanup().cleaning ?? cleanup().busy}><progress aria-label={tr("Removing working folders")} /></Show>
+        </Show>
       </div>
-      <div class="dlg-foot"><span class="bc-summary tabular" role="status">{summary()}<Show when={cleanup().unknown}><span class="warn bc-note">{tr("An unknown result will not be retried.")}</span></Show></span><span class="grow" /><Show when={targets().length}><button type="button" class="btn solid-danger" disabled={cleanup().busy || anyCleanupRestore() || !consented()} onClick={() => void removeCleanup(consents())}>{tr("Remove %1 folders", targets().length)}</button></Show><button type="button" class="btn primary" autofocus disabled={cleanup().busy || anyCleanupRestore()} onClick={() => void keepCleanup()}>{tr("Keep folders")}</button></div>
+      <div class="dlg-foot">
+        <span class="bc-summary tabular" role="status">{summary()}<Show when={cleanup().unknown}><span class="warn bc-note">{tr("An unknown result will not be retried.")}</span></Show></span>
+        <span class="grow" />
+        <Show when={cleanup().can_clear}><button type="button" class="btn" disabled={anyCleanupRestore()} title={tr("Folders and archives are kept. Unfinished program stops and unknown outcomes stay in review.")} onClick={() => void clearCleanupResults()}>{tr("Clear settled results")}</button></Show>
+        <Show when={targets().length}><button type="button" class="btn solid-danger" disabled={cleanup().busy || anyCleanupRestore() || !consented()} onClick={() => void removeCleanup(consents())}>{tr("Remove %1 folders", targets().length)}</button></Show>
+        <button type="button" class="btn primary" autofocus onClick={closeCleanup}>{tr("Close")}</button>
+      </div>
     </dialog>
     <Show when={inspect()}>{(row) => <CleanupInspection row={row()} close={() => setInspect(undefined)} />}</Show>
     <Show when={force()}>{(row) => <ForceStopDialog id={row().id} label={row().label} close={() => setForce(undefined)} />}</Show>

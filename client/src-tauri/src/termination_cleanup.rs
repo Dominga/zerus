@@ -72,6 +72,9 @@ struct Job {
     busy: bool,
     phase: &'static str,
     manual_review: bool,
+    // Presentation retention, not consent/custody: expiry may release the
+    // program pipeline while its incomplete/unknown result still needs review.
+    program_review_pending: bool,
     source: Option<Target>,
     archive: Option<ArchiveIdentity>,
     restore_supported: bool,
@@ -79,6 +82,21 @@ struct Job {
     programs: Option<program_pipeline::ProgramJob>,
 }
 impl Job {
+    fn clearable(&self) -> bool {
+        !self.busy
+            && !self.has_programs()
+            && !self.program_review_pending
+            && self.cleanup.entries.iter().all(|entry| {
+                entry.status != Some(Status::Unconfirmed)
+                    && entry.row["process_count"].as_u64().unwrap_or(0) == 0
+                    && !entry.row["processes"]
+                        .as_array()
+                        .is_some_and(|p| !p.is_empty())
+                    && !entry.row["reasons"]
+                        .as_array()
+                        .is_some_and(|reasons| reasons.iter().any(|r| r["code"] == "processes"))
+            })
+    }
     fn has_programs(&self) -> bool {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
@@ -288,6 +306,7 @@ pub struct View {
     rows: Vec<Row>,
     busy: bool,
     cleaning: bool,
+    can_clear: bool,
     removed: usize,
     kept: usize,
     unknown: usize,
@@ -307,6 +326,12 @@ fn ready(entry: &zerus_client_core::termination_cleanup::Entry) -> bool {
     entry.eligible()
 }
 impl Model {
+    fn clear_settled_results(&mut self) {
+        self.jobs.retain(|job| !job.clearable());
+        self.overflow_kept = 0;
+        // Unknown outcomes still fence future removal; clearing presentation
+        // must not erase that protection or reconstruct an execution permit.
+    }
     fn retain(
         &mut self,
         target: &Target,
@@ -425,6 +450,7 @@ impl Model {
             busy: false,
             phase: "checking",
             manual_review: false,
+            program_review_pending: false,
             source: Some(target.clone()),
             archive,
             restore_supported,
@@ -642,6 +668,8 @@ impl Model {
             rows,
             busy,
             cleaning,
+            can_clear: self.restoring.is_empty()
+                && (self.overflow_kept > 0 || self.jobs.iter().any(Job::clearable)),
             removed,
             kept,
             unknown,
@@ -1159,6 +1187,7 @@ pub async fn termination_cleanup_confirm(
                 busy: true,
                 phase: "checking",
                 manual_review: false,
+                program_review_pending: false,
                 source: Some(capture.target.clone()),
                 restore_supported: true,
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1249,12 +1278,10 @@ pub fn termination_cleanup_keep(
     revision: u64,
 ) -> Result<View, String> {
     let mut m = lock(&state.0.model);
-    if m.revision != revision || m.jobs.iter().any(|j| j.busy) || !m.restoring.is_empty() {
+    if m.revision != revision || !m.restoring.is_empty() {
         return Err("Cleanup changed or is still running. Review the recorded outcomes.".into());
     }
-    m.jobs.clear();
-    m.overflow_kept = 0;
-    m.overflow_unknown = 0;
+    m.clear_settled_results();
     changed(&app, &mut m);
     Ok(m.view())
 }
@@ -1576,6 +1603,7 @@ mod tests {
             busy: false,
             phase: "checking",
             manual_review: false,
+            program_review_pending: false,
             source: None,
             archive: None,
             restore_supported: false,
@@ -1620,6 +1648,61 @@ mod tests {
         assert_eq!(view.text, "Working folders: 1 kept  1 unknown");
         m.jobs[1].busy = true;
         assert_eq!(m.view().text, "Working folders: 1 kept  1 unknown");
+    }
+    #[test]
+    fn clearing_settled_results_preserves_program_review_busy_and_unknown_rows() {
+        let mut m = Model::default();
+        let mut settled = job(Some(Status::Kept));
+        settled.id = "settled".into();
+        m.jobs.push_back(settled);
+        let mut programs = job(Some(Status::Kept));
+        programs.id = "programs".into();
+        // The live pipeline sets this before its stop starts. It survives the
+        // holder's expiry: loss of Force consent is not a completed stop.
+        programs.program_review_pending = true;
+        assert!(!programs.has_programs());
+        m.jobs.push_back(programs);
+        let mut busy = job(None);
+        busy.id = "busy".into();
+        busy.busy = true;
+        m.jobs.push_back(busy);
+        let mut unknown = job(Some(Status::Unconfirmed));
+        unknown.id = "unknown".into();
+        m.jobs.push_back(unknown);
+        m.overflow_kept = 2;
+        m.overflow_unknown = 1;
+        let originals: Vec<_> = m.jobs.iter().skip(1).map(|j| j.cleanup.clone()).collect();
+        assert!(m.view().can_clear);
+        m.clear_settled_results();
+        assert_eq!(
+            m.jobs.iter().map(|j| j.id.as_str()).collect::<Vec<_>>(),
+            ["programs", "busy", "unknown"]
+        );
+        assert_eq!(
+            m.jobs.iter().map(|j| j.cleanup.clone()).collect::<Vec<_>>(),
+            originals
+        );
+        assert_eq!(m.overflow_kept, 0);
+        assert_eq!(m.overflow_unknown, 1);
+        assert!(!m.view().can_clear);
+        m.clear_settled_results();
+        assert_eq!(m.jobs.len(), 3);
+    }
+    #[test]
+    fn clearing_results_never_forgets_known_use_from_an_ordinary_review() {
+        for row in [
+            json!({"process_count":1}),
+            json!({"processes":[{"pid":42}]}),
+            json!({"reasons":[{"code":"processes"}]}),
+        ] {
+            let mut j = job(Some(Status::Kept));
+            j.cleanup.entries[0].row = row;
+            let mut m = Model::default();
+            m.jobs.push_back(j);
+            assert!(!m.view().can_clear);
+            m.clear_settled_results();
+            assert_eq!(m.jobs.len(), 1);
+        }
     }
     #[test]
     fn a_running_folder_never_replaces_a_held_result_in_the_chip_text() {

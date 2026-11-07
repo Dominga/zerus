@@ -946,8 +946,8 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                         facts: {
                             let actions = app.state::<actions::Actions>().inner().clone();
                             let pump = app.state::<commands::AppState>().pump();
-                            std::sync::Arc::new(move |computer: &str, name: &str| {
-                                actions.session_write(computer, name, || {
+                            std::sync::Arc::new(move |computer: &str, name: &str, run: &str| {
+                                actions.session_write_for_run(computer, name, run, || {
                                     (pump.row_named(computer, name), pump.online(computer))
                                 })
                             })
@@ -2125,7 +2125,7 @@ mod tests {
                 notify: Arc::new(|| {}),
                 clock: Arc::new(|| 1_793_000_100.0),
                 rows: Arc::new(|_, _, _| None),
-                facts: Arc::new(|_, _| None),
+                facts: Arc::new(|_, _, _| None),
                 reconnect: std::sync::Arc::new(|_| {}),
                 inspect: Arc::new(|_, _, _| Err("timed out".into())),
                 dispatch: Arc::new(|_, _, _| Err("no call in these tests".into())),

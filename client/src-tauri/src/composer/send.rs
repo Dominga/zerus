@@ -257,6 +257,18 @@ pub(crate) struct Context {
     pub(crate) facts: BlockFacts,
 }
 
+fn native_run<'a>(row: &'a ViewRow, details: Option<&'a Value>) -> &'a str {
+    row.run_id
+        .as_deref()
+        .filter(|run| !run.is_empty())
+        .or_else(|| {
+            details
+                .map(|details| text(details, "run_id"))
+                .filter(|run| !run.is_empty())
+        })
+        .unwrap_or("")
+}
+
 impl Context {
     /// Only the open child's own inspection, never its parent's state or another child's.
     pub(crate) fn child_details(&self) -> Option<&Value> {
@@ -327,7 +339,11 @@ impl Composers {
         let write = if archived {
             None
         } else {
-            (self.0.deps.facts)(&session.computer, &session.name)
+            (self.0.deps.facts)(
+                &session.computer,
+                &session.name,
+                native_run(&row, details.as_deref()),
+            )
         };
         let facts = BlockFacts {
             // Qt's `m_startSend.key`, `m_compacts` and `m_clearKey`
@@ -1597,7 +1613,13 @@ impl Composers {
             return false;
         }
         // A termination, or any session update or rename (Qt's `m_pending`).
-        if (self.0.deps.facts)(&delivery.session.computer, &delivery.session.name).is_some() {
+        if (self.0.deps.facts)(
+            &delivery.session.computer,
+            &delivery.session.name,
+            &delivery.run,
+        )
+        .is_some()
+        {
             return false;
         }
         if let Some(id) = &delivery.retry_id {
@@ -1948,7 +1970,7 @@ impl Composers {
             && now_row.created == ctx.row.created
             && observed
             && online
-            && (self.0.deps.facts)(&ctx.session.computer, &ctx.session.name).is_none()
+            && (self.0.deps.facts)(&ctx.session.computer, &ctx.session.name, &row.run_id).is_none()
             && text(evidence, "run_id") == row.run_id
             && text(evidence, "conversation_id") == row.conversation_id
             && text(evidence, "runtime_state") == "live"
@@ -2274,7 +2296,7 @@ impl Composers {
         }
         let hub = self.lock();
         let key = session.key.clone();
-        let clearing = (self.0.deps.facts)(&session.computer, &session.name)
+        let clearing = (self.0.deps.facts)(&session.computer, &session.name, &target.run_id)
             == Some(WriteKind::Clear)
             || hub.clearing.as_ref() == Some(&key);
         let facts = BlockFacts {
@@ -2314,7 +2336,11 @@ impl Composers {
     /// (Qt finds it in `m_entries` by key).
     fn rules_of(&self, key: &str, session: &SessionRef) -> Option<Session> {
         let (row, online) = (self.0.deps.rows)(&session.computer, &session.key, &session.name)?;
-        let write = (self.0.deps.facts)(&session.computer, &session.name);
+        let write = (self.0.deps.facts)(
+            &session.computer,
+            &session.name,
+            row.run_id.as_deref().unwrap_or(""),
+        );
         Some(rules_of_row(
             key,
             session,
@@ -2602,7 +2628,14 @@ impl Composers {
                 } else {
                     pending.evidence.clone()
                 };
-                let write = (self.0.deps.facts)(&pending.session.computer, &pending.session.name);
+                let write = (self.0.deps.facts)(
+                    &pending.session.computer,
+                    &pending.session.name,
+                    evidence
+                        .as_deref()
+                        .map(|details| text(details, "run_id"))
+                        .unwrap_or(""),
+                );
                 // Qt's `m_pending` (and its rename).
                 let busy = matches!(write, Some(WriteKind::Update | WriteKind::Settings));
                 if start {
@@ -3047,7 +3080,8 @@ impl Composers {
                 return;
             };
             let draft_now = Self::draft_mark(&mut hub, key);
-            let write = (self.0.deps.facts)(&session.computer, &session.name);
+            let write =
+                (self.0.deps.facts)(&session.computer, &session.name, text(details, "run_id"));
             // Qt's `m_terminating` and `m_pending` (4618, 4787).
             let terminating = write == Some(WriteKind::Terminate);
             let updating = matches!(write, Some(WriteKind::Update | WriteKind::Settings));
@@ -3334,13 +3368,17 @@ impl Composers {
         let action = Action::ClearContext {
             dismiss_prompt: dismiss,
         };
-        let (computer, name) = (target.computer.clone(), target.name.clone());
+        let (computer, name, run) = (
+            target.computer.clone(),
+            target.name.clone(),
+            target.run_id.clone(),
+        );
         let called = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             dispatch(target, action, uuid::Uuid::new_v4().to_string())
         }));
         // A taken lane refused before anything ran: the block reason Qt
         // would show for that write (`messageBlockReason`, 4391 and 4395).
-        let refused = if (self.0.deps.facts)(&computer, &name) == Some(WriteKind::Terminate) {
+        let refused = if (self.0.deps.facts)(&computer, &name, &run) == Some(WriteKind::Terminate) {
             TERMINATING
         } else {
             UPDATING
@@ -3595,7 +3633,7 @@ pub(crate) mod tests {
                         None
                     }
                 }),
-                facts: Arc::new(move |_, _| *lock(&f4.write)),
+                facts: Arc::new(move |_, _, _| *lock(&f4.write)),
                 reconnect: reconnect.unwrap_or_else(|| {
                     Arc::new(move |computer| {
                         lock(&f6.reconnects).push(computer.to_owned());
@@ -3825,7 +3863,7 @@ pub(crate) mod tests {
                 rows: Arc::new(|_, key, name| {
                     crate::composer::archived_row(key, name).map(|row| (row, true))
                 }),
-                facts: Arc::new(|_, _| None),
+                facts: Arc::new(|_, _, _| None),
                 reconnect: Arc::new(|_| {}),
                 inspect: Arc::new(|_, _, _| panic!("archived composer must not inspect")),
                 dispatch: Arc::new(|_, _, _| panic!("archived composer must not dispatch")),
@@ -4014,7 +4052,7 @@ pub(crate) mod tests {
                 }),
                 clock: Arc::new(move || *lock(&clock)),
                 rows: Arc::new(|_, _, _| Some((row("claude/sample-project/review"), true))),
-                facts: Arc::new(|_, _| None),
+                facts: Arc::new(|_, _, _| None),
                 reconnect: Arc::new(|_| {}),
                 inspect: Arc::new(|_, _, _| panic!("nothing is open to inspect")),
                 dispatch: Arc::new(|_, _, _| Err("no call in these tests".into())),
@@ -4053,7 +4091,7 @@ pub(crate) mod tests {
                     1_793_000_100.0
                 }),
                 rows: Arc::new(|_, _, _| None),
-                facts: Arc::new(|_, _| None),
+                facts: Arc::new(|_, _, _| None),
                 reconnect: Arc::new(|_| {}),
                 inspect: Arc::new(|_, _, _| Err("timed out".into())),
                 dispatch: Arc::new(|_, _, _| Err("no call in these tests".into())),
@@ -4455,7 +4493,7 @@ pub(crate) mod tests {
                 notify: Arc::new(|| {}),
                 clock: Arc::new(move || *lock(&clock)),
                 rows: Arc::new(|_, _, name| Some((row(name), true))),
-                facts: Arc::new(|_, _| None),
+                facts: Arc::new(|_, _, _| None),
                 reconnect: Arc::new(|_| {}),
                 inspect: Arc::new(move |_, _, _| {
                     let _ = lock(&gate).recv_timeout(Duration::from_secs(5));
@@ -4552,7 +4590,7 @@ pub(crate) mod tests {
                     row.run_id = Some(key.trim_start_matches("run:").into());
                     Some((row, true))
                 }),
-                facts: Arc::new(|_, _| None),
+                facts: Arc::new(|_, _, _| None),
                 reconnect: Arc::new(|_| {}),
                 inspect: Arc::new(move |target, _, _| {
                     // The first inspect waits until the test lets it answer.
@@ -4953,6 +4991,8 @@ pub(crate) mod tests {
         let root = dir("write-hook");
         let actions = Actions::new(root.join("marks.json"));
         let facts = actions.clone();
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let calls = delivered.clone();
         let c = Composers::new(
             drafts(&root),
             Config {
@@ -4967,12 +5007,15 @@ pub(crate) mod tests {
                 notify: Arc::new(|| {}),
                 clock: Arc::new(|| 1_793_000_100.0),
                 rows: Arc::new(|_, _, name| Some((row(name), true))),
-                facts: Arc::new(move |computer, name| {
-                    facts.session_write(computer, name, || (None, true))
+                facts: Arc::new(move |computer, name, run| {
+                    facts.session_write_for_run(computer, name, run, || (Some(row(name)), true))
                 }),
                 reconnect: Arc::new(|_| {}),
                 inspect: Arc::new(|_, _, _| Err("timed out".into())),
-                dispatch: Arc::new(|_, _, _| Err("no call in these tests".into())),
+                dispatch: Arc::new(move |_, action, id| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(receipt(&action, &id))
+                }),
             },
         );
         actions.on_writes(c.changed_hook());
@@ -4980,7 +5023,7 @@ pub(crate) mod tests {
         assert!(c.take_view().unwrap().available);
         let target = zerus_client_core::Target {
             computer: "studio".into(),
-            name: "claude/sample-project/other".into(),
+            name: "claude/sample-project/review".into(),
             run_id: "run-2".into(),
             conversation_id: "conv-2".into(),
         };
@@ -4993,10 +5036,182 @@ pub(crate) mod tests {
         assert_eq!(
             c.take_view().unwrap().block_reason.as_deref(),
             Some("Wait for the session update to finish."),
-            "another session's write, shown before any tick"
+            "the target's own write, shown before any tick"
         );
         drop(pause);
         assert!(c.take_view().unwrap().available);
+        for (computer, name) in [
+            ("studio", "claude/sample-project/other"),
+            ("laptop", "claude/sample-project/review"),
+        ] {
+            let mut other = target.clone();
+            other.computer = computer.into();
+            other.name = name.into();
+            for action in [
+                zerus_client_core::Action::Pause,
+                zerus_client_core::Action::Terminate,
+            ] {
+                let held = actions.begin(Lane::key(&other, &action), &action).unwrap();
+                assert!(
+                    c.current().unwrap().available,
+                    "another target's write never blocks input"
+                );
+                drop(held);
+                assert!(c.current().unwrap().available);
+            }
+        }
+        // The original write remains held while another target's saved
+        // message reaches delivery, including the final native facts check.
+        let mut other = target.clone();
+        other.name = "claude/sample-project/other".into();
+        let held = actions
+            .begin(
+                Lane::key(&other, &zerus_client_core::Action::Terminate),
+                &zerus_client_core::Action::Terminate,
+            )
+            .unwrap();
+        let view = c.current().unwrap();
+        assert_eq!(
+            c.send_message(view.handle, 1, view.text_epoch, "allowed".into(), 7, 7),
+            SendReply::Sending
+        );
+        until(&c, |view| !view.sending);
+        assert_eq!(delivered.load(Ordering::SeqCst), 1);
+        assert!(
+            actions
+                .begin(
+                    Lane::key(&other, &zerus_client_core::Action::Pause),
+                    &zerus_client_core::Action::Pause
+                )
+                .is_none(),
+            "delivery never releases the other target's custody"
+        );
+        drop(held);
+        // Question availability consumes the same scoped native fact.
+        use crate::composer::questions::tests::{asking, card_json, with_card};
+        c.observe(&state(asking(vec![card_json("tool:t1")])));
+        assert!(with_card(&c).question.unwrap().view.available);
+        let mut other = target.clone();
+        other.name = "claude/sample-project/other".into();
+        let held = actions
+            .begin(
+                Lane::key(&other, &zerus_client_core::Action::Terminate),
+                &zerus_client_core::Action::Terminate,
+            )
+            .unwrap();
+        assert!(c.current().unwrap().question.unwrap().view.available);
+        drop(held);
+        let held = actions
+            .begin(
+                Lane::key(&target, &zerus_client_core::Action::Terminate),
+                &zerus_client_core::Action::Terminate,
+            )
+            .unwrap();
+        assert!(!c.current().unwrap().question.unwrap().view.available);
+        drop(held);
+        assert!(c.current().unwrap().question.unwrap().view.available);
+    }
+
+    #[test]
+    fn review_rename_of_a_held_target_never_reenables_its_composer() {
+        use crate::actions::{Actions, Lane};
+        let root = dir("review-held-rename");
+        let actions = Actions::new(root.join("marks.json"));
+        let facts = actions.clone();
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let calls = delivered.clone();
+        let omit_run = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let catalog = omit_run.clone();
+        let observed = omit_run.clone();
+        let c = Composers::new(
+            drafts(&root),
+            Config {
+                cache: root.join("cache"),
+                qt_drafts: None,
+                dev_drafts: Vec::new(),
+            },
+            Deps {
+                spawn: Arc::new(|job: Job| {
+                    std::thread::spawn(job);
+                }),
+                notify: Arc::new(|| {}),
+                clock: Arc::new(|| 1_793_000_100.0),
+                rows: Arc::new(move |_, _, name| {
+                    let mut row = row(name);
+                    if catalog.load(Ordering::SeqCst) {
+                        row.run_id = None;
+                    }
+                    Some((row, true))
+                }),
+                facts: Arc::new(move |computer, name, run| {
+                    facts.session_write_for_run(computer, name, run, || {
+                        let mut row = row(name);
+                        if observed.load(Ordering::SeqCst) {
+                            row.run_id = None;
+                        }
+                        (Some(row), true)
+                    })
+                }),
+                reconnect: Arc::new(|_| {}),
+                inspect: Arc::new(|_, _, _| Err("timed out".into())),
+                dispatch: Arc::new(move |_, action, id| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(receipt(&action, &id))
+                }),
+            },
+        );
+        actions.on_writes(c.changed_hook());
+        opened(&c, ready());
+        let target = zerus_client_core::Target {
+            computer: "studio".into(),
+            name: session().name,
+            run_id: "run-1".into(),
+            conversation_id: "conv-1".into(),
+        };
+        let held = actions
+            .begin(Lane::key(&target, &Action::Terminate), &Action::Terminate)
+            .unwrap();
+        assert!(
+            !c.current().unwrap().available,
+            "original target is initially blocked"
+        );
+        let mut renamed = session();
+        renamed.name = "claude/sample-project/renamed".into();
+        c.open(Some(renamed));
+        let view = until(&c, |v| v.loaded);
+        let became_available = view.available;
+        let result = c.send_message(
+            view.handle,
+            1,
+            view.text_epoch,
+            "same original after rename".into(),
+            26,
+            26,
+        );
+        until(&c, |v| !v.sending);
+        let reached = delivered.load(Ordering::SeqCst);
+        omit_run.store(true, Ordering::SeqCst);
+        assert!(
+            !c.current().unwrap().available,
+            "native details keep the original run bound when the row omits it"
+        );
+        use crate::composer::questions::tests::{asking, card_json, with_card};
+        c.observe(&state(asking(vec![card_json("tool:t1")])));
+        let question_available = with_card(&c).question.unwrap().view.available;
+        // Keep and then release the SAME original target's write claim.
+        assert!(actions
+            .begin(Lane::key(&target, &Action::Pause), &Action::Pause)
+            .is_none());
+        drop(held);
+        assert!(!became_available,"same run's composer became available while its original write remained held; send={result:?}, dispatched={reached}");
+        assert_eq!(
+            reached, 0,
+            "no same-run delivery while original write is held"
+        );
+        assert!(
+            !question_available,
+            "the same original run's question remains blocked after rename"
+        );
     }
 
     pub(crate) fn receipt(action: &Action, id: &str) -> Outcome {
@@ -5627,7 +5842,7 @@ pub(crate) mod tests {
             c.send_message(view.handle, 1, view.text_epoch, "mid write".into(), 9, 9),
             SendReply::Sending
         );
-        // Qt's `m_pending`: any session's update now runs.
+        // This target's update begins while its draft save is pending.
         *lock(&fake.write) = Some(WriteKind::Update);
         release.send(()).unwrap();
         let view = until(&c, |v| !v.sending);
@@ -5635,8 +5850,7 @@ pub(crate) mod tests {
         assert_eq!(view.text, "mid write");
         std::thread::sleep(Duration::from_millis(50));
         assert!(sent(&fake).is_empty());
-        // The same with another session open: the write alone stops it,
-        // as Qt's `m_pending` does (4889).
+        // The same target must still be checked when another session is open.
         *lock(&fake.write) = None;
         let view = c.current().unwrap();
         let release = hold(&store);
@@ -5805,7 +6019,7 @@ pub(crate) mod tests {
                 notify: Arc::new(|| {}),
                 clock: Arc::new(|| 1_793_000_100.0),
                 rows: Arc::new(|_, _, name| Some((row(name), true))),
-                facts: Arc::new(|_, _| None),
+                facts: Arc::new(|_, _, _| None),
                 reconnect: Arc::new(|_| {}),
                 inspect: Arc::new(|_, _, _| Err("timed out".into())),
                 dispatch,

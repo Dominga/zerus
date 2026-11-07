@@ -63,8 +63,8 @@ pub type Notify = Arc<dyn Fn() + Send + Sync>;
 pub type Clock = Arc<dyn Fn() -> f64 + Send + Sync>;
 /// (computer, catalog key, name) -> (row, online); a new run is found by name.
 pub type Rows = Arc<dyn Fn(&str, &str, &str) -> Option<(ViewRow, bool)> + Send + Sync>;
-/// (computer, name) -> the session's write, for the send rules.
-pub type Facts = Arc<dyn Fn(&str, &str) -> Option<WriteKind> + Send + Sync>;
+/// (computer, name, native run) -> the session's write, for the send rules.
+pub type Facts = Arc<dyn Fn(&str, &str, &str) -> Option<WriteKind> + Send + Sync>;
 /// One `hgs inspect` of the parent or exact child (archive id, then agent id); blocking.
 /// The error is Qt's detail for "Could not refresh activity: %1" (`send::inspection`).
 pub type Inspect =
@@ -2091,7 +2091,7 @@ pub(crate) mod tests {
                 // No session: these views read "Select a session.".
                 clock: Arc::new(|| 1_793_000_100.0),
                 rows: Arc::new(|_, _, _| None),
-                facts: Arc::new(|_, _| None),
+                facts: Arc::new(|_, _, _| None),
                 reconnect: Arc::new(|_| {}),
                 inspect: Arc::new(|_, _, _| Err("timed out".into())),
                 dispatch: Arc::new(|_, _, _| Err("no call in these tests".into())),

@@ -117,7 +117,7 @@ export interface ViewRow {
   bulk_lifecycle_supported?: boolean;
 }
 
-/** A child's parent as its computer lists it; `state` is live, saved, archived, missing or remote. */
+/** A child's parent as its computer lists it; `state` is live, saved, archived or missing. */
 export interface ParentLinkOut { machine: string; session_id: string; name: string; conversation_id: string; run_id: string; state: string }
 export interface RowOut { computer: ComputerId; key: string; row: ViewRow }
 export interface KeyOut { computer: ComputerId; key: string; reason?: string | null }

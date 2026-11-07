@@ -248,7 +248,7 @@ pub struct ChildFacts {
 /// A child's parent session as the child's computer lists it (`parent` in
 /// `hgs ls --json`): the parent's machine and durable session ID, hints to
 /// match an older parent record and to name it, and its state in that same
-/// listing (`live`, `saved`, `archived`, `missing` or `remote`).
+/// listing (`live`, `saved`, `archived` or `missing`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ParentLink {

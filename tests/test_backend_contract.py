@@ -812,6 +812,8 @@ class Sessions(Contract):
         lead_path.write_text(json.dumps(lead))
         # Teardown stops every recorded process; this one is the test itself.
         self.addCleanup(lead_path.unlink, missing_ok=True)
+        # The link reads this computer's identity from its existing shared catalog.
+        self.hgs("reference", lead["name"], "--json")
         # A value inherited from a surrounding session never reaches the record.
         self.env.update(HGS_SESSION=lead["name"], HGS_RUN_ID="run-lead", HGS_PARENT='{"forged": true}')
         name, row, _ = self.launch("kid")

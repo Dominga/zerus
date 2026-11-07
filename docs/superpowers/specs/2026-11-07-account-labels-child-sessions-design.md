@@ -138,18 +138,20 @@ worktrees of the parent's repository already infer the same project.
 
 ### 1.5 Supervision on the host
 
-The host computes one more fact per listed row with a parent on the same
-computer: `parent.state`, one of `live` (the parent record is running and its
-process has not exited), `saved` (paused or stopped), `archived` or `missing`.
-A parent on another computer lists `remote`. This needs only the rows of the
-same listing, so it is computed in `finish_rows` with one map keyed by
-`session_id`.
+The host computes one more fact per listed row with a parent: `parent.state`,
+one of `live` (the parent record is running and its process has not exited),
+`saved` (paused or stopped), `archived` or `missing` (this listing has no such
+session: gone, or on another computer). Session IDs are UUIDs, so this needs
+only the rows of the same listing and no machine identity; it is computed in
+`finish_rows` with one map keyed by `session_id`. A listing never reads or
+waits on the shared catalog, and a launch reads its machine identity without
+the catalog lock, only after proving its caller.
 
 A row is **supervised** when `parent.state == "live"`. Every consumer, the
 desktop list, the desktop notification tracker in `client/core`, the desktop
 service (which projects each row through the same tracker) and later Android,
-reads the same fact from the row. When the parent is unknown, remote, saved,
-archived or missing, the child is not supervised and behaves like any session.
+reads the same fact from the row. When the parent is unknown, saved, archived or
+missing (including a parent on another computer), the child is not supervised and behaves like any session.
 This fails open: an unverifiable parent never silences a request.
 
 ### 1.6 Account label, color and mark
@@ -237,8 +239,8 @@ count, and it does not mark anything read.
   ordinary: a pending question notifies, an unread reply counts. Unmute-style
   replay protection applies: the transition raises the current request once and
   does not replay older ones the tracker already settled.
-* **Parent on another computer:** never supervised in this version; nested in the
-  list, ordinary attention. Follow-up: resolve remote parents in the desktop
+* **Parent on another computer:** never supervised in this version (its host
+  lists it as `missing`); nested in the list, ordinary attention. Follow-up: resolve remote parents in the desktop
   catalog.
 * **Parent live but stuck:** the parent's own state surfaces it (its question,
   approval, error or idle reply alerts the person normally). Children stay quiet

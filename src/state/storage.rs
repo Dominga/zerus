@@ -295,6 +295,12 @@ pub(super) fn read_label(name: &str) -> Result<Value> {
     read_at(&label_record_path(name), name, None)
 }
 
+/// [`read_label`] bounded: a regular file only, never a final link and never
+/// waiting on a FIFO.
+pub(super) fn read_label_bounded(name: &str, bytes: u64) -> Result<Value> {
+    read_at(&label_record_path(name), name, Some(bytes))
+}
+
 fn read_limit(name: &str, limit: Option<u64>) -> Result<Value> {
     read_at(&record_path(name), name, limit)
 }

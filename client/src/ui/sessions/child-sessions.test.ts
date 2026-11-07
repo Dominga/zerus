@@ -55,6 +55,18 @@ describe("child sessions in the list", () => {
     expect(shape(out)[0]).toBe("s1");
   });
 
+  it("handles a 20,000-session chain in one pass, nesting at most eight levels (zerus-x94c7)", () => {
+    const chain = Array.from({ length: 20000 }, (_, i) => session(i + 1, i ? i : undefined));
+    const started = performance.now();
+    const out = cards(rows(chain));
+    expect(performance.now() - started).toBeLessThan(3000);
+    expect(out).toHaveLength(20000);
+    expect(Math.max(...out.map((r) => r.depth ?? 0))).toBe(8);
+    expect(out[0].team?.total).toBe(8);
+    // The ninth level starts at top level again, naming its parent.
+    expect(out[9]).toMatchObject({ depth: 0, fromParent: { name: "claude/p/s9" } });
+  });
+
   it("matches a parent by machine and session ID, never by name", () => {
     const parent = session(1), other = toSession("peer", "run:1", { name: "claude/p/s1", session_id: id(7) });
     const find = parentIndex([parent, other], (computer) => (computer === "" ? MACHINE : "99999999-9999-4999-8999-999999999999"));

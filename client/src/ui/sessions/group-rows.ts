@@ -20,6 +20,9 @@ export type Row =
 
 export interface Team { total: number; working: number; collapsed: boolean }
 
+/** Nesting stops after this many levels; deeper children start at top level (spec 1.4). */
+export const MAX_DEPTH = 8;
+
 export interface ListInput {
   grouping: GroupingOut;
   /** Each project's rows in list order (groupMembers). */
@@ -86,48 +89,58 @@ export function groupRows(input: ListInput): Row[] {
       const parent = parentOf.get(s.key);
       if (parent) children.set(parent, [...(children.get(parent) ?? []), s]);
     }
-    // A chain that loops back never reaches a root: its first card in rank order becomes one.
-    const roots = list.filter((s) => {
-      const seen = new Set<string>([s.key]);
-      for (let at = parentOf.get(s.key); at; at = parentOf.get(at)) {
-        if (seen.has(at)) return true;
-        seen.add(at);
-      }
-      return !parentOf.has(s.key);
-    });
-    const team = (key: string, seen: Set<string>): Omit<Team, "collapsed"> => {
-      let total = 0, working = 0;
-      const stack = [...(children.get(key) ?? [])];
+    // One depth-first pass from each root in rank order; a loop's first card
+    // in rank order becomes its root.
+    interface Node { s: Session; depth: number; parent?: string; last: boolean }
+    const nodes: Node[] = [];
+    const seen = new Set<string>();
+    const walk = (root: Session) => {
+      const stack: Node[] = [{ s: root, depth: 0, last: true }];
       while (stack.length) {
-        const s = stack.pop()!;
-        if (seen.has(s.key)) continue;
-        seen.add(s.key); total++;
-        if (isWorking(s, input.online(s))) working++;
-        stack.push(...(children.get(s.key) ?? []));
+        const node = stack.pop()!;
+        if (seen.has(node.s.key)) continue;
+        seen.add(node.s.key);
+        nodes.push(node);
+        if (node.depth >= MAX_DEPTH) continue;
+        const kids = (children.get(node.s.key) ?? []).filter((c) => !seen.has(c.key));
+        for (let i = kids.length - 1; i >= 0; i--) stack.push({ s: kids[i], depth: node.depth + 1, parent: node.s.key, last: i === kids.length - 1 });
       }
-      return { total, working };
     };
-    const placed = new Set<string>();
-    for (const root of roots) {
-      if (placed.has(root.key)) continue;
-      const stack: { s: Session; depth: number; parent?: string; last: boolean }[] = [{ s: root, depth: 0, last: true }];
+    // Cards below a session without a shown parent; the rest sit in a loop.
+    const rooted = new Set<string>();
+    for (const s of list) {
+      if (parentOf.has(s.key)) continue;
+      const stack = [s];
       while (stack.length) {
-        const { s, depth, parent, last } = stack.pop()!;
-        if (placed.has(s.key)) continue;
-        placed.add(s.key);
-        const kids = (children.get(s.key) ?? []).filter((c) => !placed.has(c.key));
-        const counts = kids.length ? team(s.key, new Set([s.key])) : undefined;
-        const collapsed = !!counts && !!input.teamCollapsed?.(s.key);
-        const from = !parent && s.parent ? { fromParent: { name: s.parent.name, key: input.parentKey?.(s) } } : {};
-        card(s, { depth, parentKey: parent, lastChild: parent ? last : undefined, team: counts && { ...counts, collapsed }, ...from });
-        if (collapsed) {
-          // Hidden with their parent; never promoted to top level.
-          const hide = [...kids];
-          while (hide.length) { const k = hide.pop()!; if (placed.has(k.key)) continue; placed.add(k.key); hide.push(...(children.get(k.key) ?? [])); }
-          continue;
-        }
-        for (let i = kids.length - 1; i >= 0; i--) stack.push({ s: kids[i], depth: depth + 1, parent: s.key, last: i === kids.length - 1 });
+        const at = stack.pop()!;
+        if (rooted.has(at.key)) continue;
+        rooted.add(at.key);
+        stack.push(...(children.get(at.key) ?? []));
       }
+    }
+    // In rank order: a real root, or the first card of a loop, starts a walk.
+    for (const s of list) if (!seen.has(s.key) && (!parentOf.has(s.key) || !rooted.has(s.key))) walk(s);
+    // Below the depth bound a card starts at top level again; nothing is hidden.
+    for (const s of list) if (!seen.has(s.key)) walk(s);
+    // Each parent's descendants, summed once from the leaves up (linear).
+    const teams = new Map<string, Omit<Team, "collapsed">>();
+    for (let i = nodes.length - 1; i >= 0; i--) {
+      const { s, parent } = nodes[i];
+      if (!parent) continue;
+      const below = teams.get(s.key), sum = teams.get(parent) ?? { total: 0, working: 0 };
+      sum.total += 1 + (below?.total ?? 0);
+      sum.working += (isWorking(s, input.online(s)) ? 1 : 0) + (below?.working ?? 0);
+      teams.set(parent, sum);
+    }
+    const hidden = new Set<string>();
+    for (const { s, depth, parent, last } of nodes) {
+      // Hidden with a collapsed parent; never promoted to top level.
+      if (parent && hidden.has(parent)) { hidden.add(s.key); continue; }
+      const counts = teams.get(s.key);
+      const collapsed = !!counts && !!input.teamCollapsed?.(s.key);
+      if (collapsed) hidden.add(s.key);
+      const from = !parent && s.parent ? { fromParent: { name: s.parent.name, key: input.parentKey?.(s) } } : {};
+      card(s, { depth, parentKey: parent, lastChild: parent ? last : undefined, team: counts && { ...counts, collapsed }, ...from });
     }
   };
   const wanted = (id: string) => !input.projects.length || input.projects.includes(id);

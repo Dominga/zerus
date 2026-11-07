@@ -672,7 +672,10 @@ A launch on another computer (`hgs @peer …`) records no parent yet.
 same way, the session's parent. It refuses a caller that no live agent owns, a
 session adopting itself, archived sessions, a target that already leads the
 caller on this computer (a cycle), and a session with another parent unless
-`replace` is true. Coordinators use it for workers they direct but did not
+`replace` is true. The cycle check follows at most eight of the caller's
+parents through the session ID index, reading each record bounded, as a
+regular file only, never following a final link or waiting on a FIFO; a
+longer chain or an unreadable parent is refused rather than assumed acyclic. Coordinators use it for workers they direct but did not
 launch. The answer names the link now in effect and the previous one. Links
 are presentation and attention routing only: they never authorize a send,
 answer, approval, stop or removal, and never change project membership.
@@ -680,14 +683,18 @@ answer, approval, stop or removal, and never change project membership.
 
 `hgs ls --json` rows carry `parent` with `state` from the same listing: `live`
 (running, its agent not exited), `saved` (paused, stopped or exited),
-`archived`, `missing`, or `remote` for a parent on another computer.
+`archived`, or `missing` when this computer lists no such session (gone, or on
+another computer). Neither the listing nor the launch waits on the shared
+catalog: the link's machine identity is read once a caller is proven, without
+the catalog lock, and a launch without a readable identity records no parent.
 
 The desktop session list nests a child under its parent when both are shown in
 the same project group, 26 px per level up to three levels, with a connector
 from the parent above. The parent's footer shows **Team** with working and all
 child sessions (`2 of 5`); it collapses or expands them for this window, and
 Left and Right do the same from the keyboard, Left then moving from a child to
-its parent. A child whose parent is not shown above it stays at top level with
+its parent. Nesting stops after eight levels; a deeper child starts at top
+level again. A child whose parent is not shown above it stays at top level with
 **from PARENT**, which opens the parent when it is listed. A parent is matched by
 its computer's machine UUID and session ID, or by conversation for a parent an
 older `hgs` listed without one; names never match. A loop never hides a card.

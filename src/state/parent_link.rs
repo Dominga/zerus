@@ -8,7 +8,7 @@
 //! only: it never authorizes a send, answer, approval, stop or removal, and it
 //! never changes project membership.
 use super::*;
-use std::io::Read;
+use std::{fs, io::Read};
 
 /// The launching hgs's proven caller for a new session, as compact JSON. The
 /// launcher always sets it, empty when no live tracked agent owns it, so an
@@ -60,21 +60,42 @@ fn link_of(record: &Value, machine: &str, host: &str, source: &str) -> Option<Va
     valid(&link).then_some(link)
 }
 
-/// The link a launch run by a live tracked agent records for its new session.
-pub(crate) fn caller_link(machine: &str, host: &str) -> Option<String> {
-    let record = session_graph::caller_record()?;
-    link_of(&record, machine, host, "launch").map(|link| link.to_string())
+/// The largest shared catalog read to observe this computer's identity, as
+/// the session action receipts bound it.
+const CATALOG_BYTES: u64 = 128 * 1024 * 1024;
+
+/// This computer's machine UUID from its existing shared catalog, read
+/// without the catalog lock and never initialized or saved: an optional link
+/// must never wait for, or change, Swarm state (zerus-hycp0).
+fn observed_machine(config: &crate::config::Config) -> Option<String> {
+    let path = config.dir.join("swarm/catalog.json");
+    // A regular file only: never a final link, never waiting on a FIFO.
+    let file = crate::platform::no_follow(fs::OpenOptions::new().read(true)).open(&path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > CATALOG_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(CATALOG_BYTES + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > CATALOG_BYTES {
+        return None;
+    }
+    crate::swarm::existing_node_id(&bytes).ok()
 }
 
 /// `HGS_PARENT`'s value for a session this process launches: the proven
 /// caller's link, or empty, which keeps an inherited value from the record.
+/// The caller is proven first; only a proven caller reads the identity.
 pub(crate) fn launcher_value() -> String {
-    crate::config::Config::load()
-        .ok()
-        .and_then(|config| {
-            let machine = crate::swarm::local_node_id(&config).ok()?;
-            caller_link(&machine, config.host())
-        })
+    let Some(record) = session_graph::caller_record() else {
+        return String::new();
+    };
+    let Ok(config) = crate::config::Config::load() else {
+        return String::new();
+    };
+    observed_machine(&config)
+        .and_then(|machine| link_of(&record, &machine, config.host(), "launch"))
+        .map(|link| link.to_string())
         .unwrap_or_default()
 }
 
@@ -93,20 +114,10 @@ pub(super) fn listed(record: &Value) -> Option<Value> {
 
 /// The live state of each listed row's parent, from the same listing:
 /// `live` (running, its agent not exited), `saved` (paused, stopped or
-/// exited), `archived`, `missing`, or `remote` for a parent on another
-/// computer, which this computer cannot see.
+/// exited), `archived`, or `missing` when this listing has no such session
+/// (gone, or on another computer). Session IDs are UUIDs, so no machine
+/// identity is read: a listing never waits on Swarm state (zerus-hycp0).
 pub(super) fn decorate(sessions: &mut [Value]) {
-    if !sessions.iter().any(|row| row.get("parent").is_some_and(Value::is_object)) {
-        return;
-    }
-    let machine = crate::config::Config::load()
-        .ok()
-        .and_then(|config| crate::swarm::local_node_id(&config).ok())
-        .unwrap_or_default();
-    decorate_with(sessions, &machine);
-}
-
-fn decorate_with(sessions: &mut [Value], machine: &str) {
     let state = |row: &Value| -> &'static str {
         match row["state"].as_str().unwrap_or("running") {
             "archived" => "archived",
@@ -133,15 +144,11 @@ fn decorate_with(sessions: &mut [Value], machine: &str) {
         let Some(link) = row.get("parent").filter(|link| link.is_object()) else {
             continue;
         };
-        let found = if machine.is_empty() || string(link, "machine") != machine {
-            "remote"
-        } else {
-            by_session
-                .get(string(link, "session_id"))
-                .or_else(|| by_conversation.get(string(link, "conversation_id")))
-                .copied()
-                .unwrap_or("missing")
-        };
+        let found = by_session
+            .get(string(link, "session_id"))
+            .or_else(|| by_conversation.get(string(link, "conversation_id")))
+            .copied()
+            .unwrap_or("missing");
         row["parent"]["state"] = json!(found);
     }
 }
@@ -188,9 +195,13 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         None
     };
     let config = crate::config::Config::load().map_err(|e| e.message)?;
-    let machine = crate::swarm::local_node_id(&config).map_err(|e| e.to_string())?;
+    let machine = if request.action == "adopt" {
+        observed_machine(&config).ok_or("This computer's identity cannot be read yet; retry later")?
+    } else {
+        String::new()
+    };
     let _writer = lock(None)?;
-    let mut record = read(name)?;
+    let mut record = read_bounded(name, storage::ID_RECORD_BYTES)?;
     if string(&record, "run_id") != request.expected_run_id
         || string(&record, "conversation_id") != request.expected_conversation_id
     {
@@ -215,7 +226,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             {
                 return Err("A session cannot adopt itself".into());
             }
-            if ancestors(&caller).contains(&target.to_owned()) {
+            if ancestors(&caller)?.contains(&target.to_owned()) {
                 return Err("This session already leads the caller; adopting it would make a cycle".into());
             }
             if let Some(old) = previous.as_ref() {
@@ -239,26 +250,39 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
 }
 
 /// The session IDs of `record`'s parents on this computer, nearest first,
-/// through the verified ID index only (no record scan).
-fn ancestors(record: &Value) -> Vec<String> {
+/// through the session ID index. Each record is read bounded, a regular file
+/// only, never following a final link or waiting on a FIFO (zerus-mzgfh). A
+/// chain that ends at a session this computer no longer lists, or on another
+/// computer, is complete. A chain longer than [`DEPTH`], or an indexed record
+/// that cannot be read, proves nothing, so adoption refuses (zerus-lwz9t).
+fn ancestors(record: &Value) -> Result<Vec<String>> {
     let mut found = Vec::new();
     let mut current = record.clone();
-    for _ in 0..DEPTH {
-        let Some(link) = listed(&current) else { break };
+    loop {
+        let Some(link) = listed(&current) else {
+            return Ok(found);
+        };
         let id = string(&link, "session_id").to_owned();
         if id.is_empty() || found.contains(&id) {
-            break;
+            return Ok(found);
+        }
+        if found.len() == DEPTH {
+            return Err(format!("The caller's parents reach deeper than {DEPTH} sessions; adoption cannot rule out a cycle"));
         }
         found.push(id.clone());
-        let Some(next) = session_index::find(&id).and_then(|hit| read(&hit.name).ok()) else {
-            break;
-        };
+        let next = match session_index::indexed(&id) {
+            None => return Ok(found),
+            Some((name, session_index::Kind::Record)) => storage::read_label_bounded(&name, storage::ID_RECORD_BYTES),
+            Some((_, session_index::Kind::IdRecord)) => storage::read_id(&id),
+            // DeepSeek and OpenCode sessions carry no parent links.
+            Some(_) => return Ok(found),
+        }
+        .map_err(|_| "A parent of the caller cannot be read safely; adoption cannot rule out a cycle".to_owned())?;
         if string(&next, "session_id") != id {
-            break;
+            return Err("A parent of the caller changed while it was read; retry".into());
         }
         current = next;
     }
-    found
 }
 
 #[cfg(test)]
@@ -310,11 +334,7 @@ mod tests {
             child("55555555-5555-4555-8555-555555555555"),
         ];
         let states = |rows: &[Value]| rows[4..].iter().map(|row| row["parent"]["state"].clone()).collect::<Vec<_>>();
-        decorate_with(&mut rows, machine);
+        decorate(&mut rows);
         assert_eq!(states(&rows), [json!("live"), json!("saved"), json!("saved"), json!("missing")]);
-        decorate_with(&mut rows, "99999999-9999-4999-8999-999999999999");
-        assert!(states(&rows).iter().all(|state| state == "remote"));
-        decorate_with(&mut rows, "");
-        assert!(states(&rows).iter().all(|state| state == "remote"), "an unknown machine never claims a local parent");
     }
 }

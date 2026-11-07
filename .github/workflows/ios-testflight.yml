@@ -5,10 +5,12 @@ name: iOS TestFlight
 # sequence; the read-only ASC preflight avoids repeated nightly uploads.
 
 on:
+  schedule:
+    - cron: '47 */6 * * *'
   workflow_call:
     inputs:
       channel:
-        description: dev (TestFlight internal testers and promoted public beta) or stable (App Store candidate)
+        description: dev (TestFlight internal testers and Public beta) or stable (App Store candidate)
         type: string
         required: true
     secrets:
@@ -54,6 +56,8 @@ jobs:
       run_windows: true
       run_ios: true
   upload:
+    outputs:
+      number: ${{ steps.build.outputs.number }}
     needs: verify
     if: >-
       !cancelled() && ((inputs.channel == 'dev' && needs.verify.result == 'skipped') ||
@@ -115,3 +119,131 @@ jobs:
         run: |
           security delete-keychain "$RUNNER_TEMP/app-store-connect/signing.keychain-db" 2> /dev/null || true
           rm -rf "$RUNNER_TEMP/app-store-connect"
+
+  public-beta:
+    name: Public beta promotion and review
+    needs: upload
+    if: >-
+      !cancelled() && needs.upload.result == 'success' && inputs.channel == 'dev' &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+      vars.IOS_TESTFLIGHT_ENABLED == 'true' &&
+      github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: ios-testflight
+    # The job's failure stays visible; it must not block the independent desktop publisher.
+    continue-on-error: true
+    concurrency:
+      group: ios-public-beta
+      cancel-in-progress: false
+    env:
+      BUILD_NUMBER: ${{ needs.upload.outputs.number }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Plan exact-build notes
+        id: plan-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASC_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        run: python3 scripts/ci/ios-public-beta.py plan --action notes --plan "$RUNNER_TEMP/beta-notes.json"
+      - name: Reserve durable notes intent before mutation
+        id: reserve-notes
+        if: steps.plan-notes.outputs.write == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.plan-notes.outputs.name }}
+          path: ${{ runner.temp }}/beta-notes.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Apply original notes once and read back
+        if: steps.plan-notes.outputs.write == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASC_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+          INTENT_ARTIFACT: ${{ steps.reserve-notes.outputs.artifact-id }}
+        run: python3 scripts/ci/ios-public-beta.py apply --action notes --plan "$RUNNER_TEMP/beta-notes.json" --artifact "$INTENT_ARTIFACT"
+      - name: Plan exact-build group
+        id: plan-group
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASC_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        run: python3 scripts/ci/ios-public-beta.py plan --action group --plan "$RUNNER_TEMP/beta-group.json"
+      - name: Reserve durable group intent before mutation
+        id: reserve-group
+        if: steps.plan-group.outputs.write == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.plan-group.outputs.name }}
+          path: ${{ runner.temp }}/beta-group.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Apply original group once and read back
+        if: steps.plan-group.outputs.write == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASC_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+          INTENT_ARTIFACT: ${{ steps.reserve-group.outputs.artifact-id }}
+        run: python3 scripts/ci/ios-public-beta.py apply --action group --plan "$RUNNER_TEMP/beta-group.json" --artifact "$INTENT_ARTIFACT"
+      - name: Plan exact-build review
+        id: plan-review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASC_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        run: python3 scripts/ci/ios-public-beta.py plan --action review --plan "$RUNNER_TEMP/beta-review.json"
+      - name: Reserve durable review intent before mutation
+        id: reserve-review
+        if: steps.plan-review.outputs.write == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.plan-review.outputs.name }}
+          path: ${{ runner.temp }}/beta-review.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Apply original review once and read back
+        if: steps.plan-review.outputs.write == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASC_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+          INTENT_ARTIFACT: ${{ steps.reserve-review.outputs.artifact-id }}
+        run: python3 scripts/ci/ios-public-beta.py apply --action review --plan "$RUNNER_TEMP/beta-review.json" --artifact "$INTENT_ARTIFACT"
+      - name: Exact-build group and review summary
+        if: always()
+        env:
+          ASC_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        run: python3 scripts/ci/ios-public-beta.py check
+
+  public-beta-status:
+    name: Read-only Public beta status
+    if: >-
+      github.event_name == 'schedule' && inputs.channel == '' &&
+      github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' &&
+      github.event.repository.private == false && vars.IOS_TESTFLIGHT_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: ios-testflight
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Report latest build, external group and beta review
+        env:
+          ASC_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        run: python3 scripts/ci/ios-public-beta.py status

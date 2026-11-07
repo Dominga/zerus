@@ -25,6 +25,8 @@ type Dispatch =
     Arc<dyn Fn(&policy::Candidate, Action, String) -> Result<Outcome, String> + Send + Sync>;
 struct Calls {
     current: Arc<dyn Fn(&policy::Candidate) -> bool + Send + Sync>,
+    /// The categories enabled now, read fresh at every check.
+    allowed: Arc<dyn Fn() -> policy::Set + Send + Sync>,
     inspect: Inspect,
     journal: Journal,
     dispatch: Dispatch,
@@ -42,9 +44,17 @@ fn attempt(calls: &Calls, target: &policy::Candidate) -> Result<bool, String> {
     if !(calls.current)(target) {
         return Ok(false);
     }
-    let Some(question) = policy::question(target, &details) else {
+    let Some(policy::Selected {
+        question,
+        categories,
+    }) = policy::question(target, &details, (calls.allowed)(), policy::now())
+    else {
         return Ok(false);
     };
+    // The categories again, right before the durable reservation.
+    if !(calls.allowed)().permits(categories) {
+        return Ok(false);
+    }
     let host = if target.target.computer.is_empty() {
         details["machine"]
             .as_str()
@@ -55,7 +65,8 @@ fn attempt(calls: &Calls, target: &policy::Candidate) -> Result<bool, String> {
     };
     let reply = (calls.journal)(
         Operation::Begin,
-        &json!({"host":host,"session":target.target.name,"provider":target.provider,"question":question}),
+        &json!({"host":host,"session":target.target.name,"provider":target.provider,"question":question,
+            "categories":categories.ids()}),
     )?;
     let Some(reservation) =
         policy::reserved(&reply, &target.provider, &question).map_err(str::to_owned)?
@@ -64,6 +75,8 @@ fn attempt(calls: &Calls, target: &policy::Candidate) -> Result<bool, String> {
     };
     let (status, detail) = if !(calls.current)(target) {
         ("cancelled", policy::CANCELLED.into())
+    } else if !(calls.allowed)().permits(categories) {
+        ("cancelled", policy::CATEGORY_CANCELLED.into())
     } else {
         let action = Action::Answer {
             question,
@@ -151,6 +164,10 @@ impl Worker {
         };
         let calls = Calls {
             current,
+            allowed: {
+                let settings = settings.clone();
+                Arc::new(move || policy::Set::from_settings(&settings))
+            },
             inspect: Arc::new(|target| {
                 let hgs = zerus_client_core::default_hgs();
                 let inv = zerus_client_core::details::details_invocation(&target.target, None);

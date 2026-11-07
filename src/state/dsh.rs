@@ -1761,6 +1761,24 @@ mod native_operation_tests {
 #[cfg(all(test, unix))]
 mod question_identity_tests {
     use super::*;
+    /// The approval card built from `src/dsh/bridge.mjs`'s published
+    /// approval names its tool for automatic-approval categories.
+    #[test]
+    fn automatic_approval_categories_read_the_bridge_approval_card() {
+        use zerus_client_core::approvals::automatic::{categories, once, Category};
+        let record = json!({"name":"dsh/test/session","conversation_id":"session-one","run_id":"run"});
+        let card = |tool: &str| {
+            let inspected = json!({"generation":"g1","pendingQuestions":[{"id":"q1","approval":true,"questions":[
+                {"id":"decision","header":"Approval required","question":format!("Allow {tool}?"),"detail":"",
+                 "options":[{"label":"Allow once"},{"label":"Reject"}]}]}]});
+            question_cards(&record, &inspected).remove(0)
+        };
+        assert!(once("dsh", &card("bash")).is_some());
+        for (tool, expected) in [("bash", Category::Shell), ("web_search", Category::Paid),
+            ("mcp__docs__lookup", Category::Mcp), ("create_worktree", Category::Other)] {
+            assert_eq!(categories::tool("dsh", &card(tool)).category, expected, "{tool}");
+        }
+    }
     #[test]
     fn pending_native_questions_have_an_exact_attention_identity() {
         let record = json!({"name":"dsh/test/session","conversation_id":"session-one","run_id":"run"});

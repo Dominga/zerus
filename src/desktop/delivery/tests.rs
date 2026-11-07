@@ -693,6 +693,41 @@ fn approval_reservation_precedes_answer_and_unknown_never_replays_after_restart(
 }
 
 #[test]
+fn paid_requests_stay_manual_and_others_record_their_categories() {
+    // The service admits the default categories: all except paid usage.
+    for (case, header) in ["WebSearch", "Bash", "Bash"].into_iter().enumerate() {
+        let run: Runner = Arc::new(move |inv, _, _, _| {
+            if inv.args.iter().any(|a| a == "inspect") {
+                let mut q = question();
+                q["questions"][0]["header"] = json!(header);
+                let Exit::Code { stdout, .. } = inspected(q) else { unreachable!() };
+                let mut details: Value = serde_json::from_slice(&stdout).unwrap();
+                if case == 2 {
+                    details["cache_hint"] = json!({"status":"cold"});
+                }
+                return Exit::Code { code: 0, stderr: String::new(), stdout: serde_json::to_vec(&details).unwrap() };
+            }
+            assert_eq!(case, 1, "a paid request was answered");
+            Exit::TimedOut
+        });
+        let mut f = Fixture::new(run);
+        f.active();
+        f.enabled(true);
+        f.source(row(), true);
+        f.scan();
+        f.tick_until(|r| r.jobs.is_empty());
+        if case == 1 {
+            let saved: String = f.runtime.journal.as_ref().unwrap()
+                .query_row("SELECT question FROM attempts", [], |r| r.get(0)).unwrap();
+            let saved: Value = serde_json::from_str(&saved).unwrap();
+            assert_eq!(saved["categories"], json!(["shell"]));
+        } else {
+            assert!(f.runtime.journal.is_none(), "{header} case {case}");
+        }
+    }
+}
+
+#[test]
 fn cached_question_identity_and_broader_grants_never_reserve_or_answer() {
     for case in 0..5 {
         let run: Runner = Arc::new(move |inv, _, _, _| {

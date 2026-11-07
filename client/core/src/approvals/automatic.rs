@@ -3,10 +3,16 @@
 use crate::{actions::Target, questions::AnswerItem, ViewRow};
 use serde_json::{json, Value};
 
+pub mod categories;
+pub use categories::{Category, Set};
+
 pub const ENABLED: &str = "automaticApprovals/enabled";
 pub const ERROR: &str = "automaticApprovals/error";
 pub const CANCELLED: &str =
     "Automatic approvals were disabled or the session changed before delivery.";
+/// A reserved request whose category was turned off before delivery.
+pub const CATEGORY_CANCELLED: &str =
+    "Its approval category was turned off before delivery. No answer was sent.";
 pub const INVALID: &str =
     "The approval journal did not confirm a durable request. No answer was sent.";
 pub const MAX_QUESTION: usize = 120 * 1024;
@@ -161,7 +167,19 @@ pub fn once(provider: &str, question: &Value) -> Option<Vec<AnswerItem>> {
         text: String::new(),
     }])
 }
-pub fn question(target: &Candidate, details: &Value) -> Option<Value> {
+/// A pending question the enabled categories admit, with the categories it
+/// needs. The worker checks them again before the journal reservation and
+/// before delivery.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Selected {
+    pub question: Value,
+    pub categories: Set,
+}
+/// The first verified one-time permission of this exact run and conversation
+/// whose required categories are all in `allowed`. A request kept manual is
+/// skipped; another pending request of the session may still qualify.
+/// `now` is seconds since the epoch, for the cold-cache rule.
+pub fn question(target: &Candidate, details: &Value, allowed: Set, now: f64) -> Option<Selected> {
     if details["runtime_state"] != "live"
         || details["process_state"] != "running"
         || details["run_id"] != target.target.run_id
@@ -179,13 +197,24 @@ pub fn question(target: &Candidate, details: &Value) -> Option<Value> {
             bytes: Vec::new(),
             limit: MAX_QUESTION,
         };
-        if once(&target.provider, question).is_some()
-            && serde_json::to_writer(&mut bytes, question).is_ok()
-        {
-            return Some(question.clone());
+        if once(&target.provider, question).is_none() {
+            continue;
+        }
+        let categories = categories::required(&target.provider, question, details, now);
+        if allowed.permits(categories) && serde_json::to_writer(&mut bytes, question).is_ok() {
+            return Some(Selected {
+                question: question.clone(),
+                categories,
+            });
         }
     }
     None
+}
+/// Seconds since the epoch, as the cold-cache rule reads time.
+pub fn now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |elapsed| elapsed.as_secs_f64())
 }
 pub struct Reservation {
     pub id: i64,

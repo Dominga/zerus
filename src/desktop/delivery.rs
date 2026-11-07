@@ -147,7 +147,7 @@ enum Completion {
     NotStarted,
     Unknown,
     Read(reads::Outcome),
-    Inspection(Option<Value>),
+    Inspection(Option<policy::Selected>),
     Answer {
         status: &'static str,
         detail: String,
@@ -155,7 +155,7 @@ enum Completion {
 }
 enum Work {
     Read(reads::ReadMark),
-    Inspect(policy::Candidate),
+    Inspect(policy::Candidate, policy::Set),
     Answer { target: Target, action: Action },
 }
 struct Job {
@@ -454,19 +454,19 @@ impl Runtime {
                     Completion::NotStarted
                 } else {
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let cap = if matches!(&work, Work::Inspect(_)) {
+                        let cap = if matches!(&work, Work::Inspect(..)) {
                             8 << 20
                         } else {
                             1 << 20
                         };
                         let exit = run(&inv, cap, &stop, resource);
                         match work {
-                            Work::Inspect(target) => Completion::Inspection(match exit {
+                            Work::Inspect(target, allowed) => Completion::Inspection(match exit {
                                 Exit::Code {
                                     code: 0, stdout, ..
-                                } => serde_json::from_slice(&stdout)
-                                    .ok()
-                                    .and_then(|details| policy::question(&target, &details)),
+                                } => serde_json::from_slice(&stdout).ok().and_then(|details| {
+                                    policy::question(&target, &details, allowed, policy::now())
+                                }),
                                 _ => None,
                             }),
                             Work::Read(mark) => {
@@ -666,6 +666,13 @@ impl Runtime {
         self.policy.is_some_and(|p| p.enabled) && self.approval_error.is_none()
     }
 
+    /// The approval categories this service admits. It enforces the default
+    /// (all except paid usage) until its durable policy stores the person's
+    /// choices (zerus-sz42x.2).
+    fn categories(&self) -> policy::Set {
+        policy::Set::defaults()
+    }
+
     /// The approval-phase rows of this scan, in pass order. A pass moves past
     /// a row only once it was inspected or found to need nothing; at the first
     /// candidate without a free approval slot the scan stops, and the next one
@@ -744,7 +751,7 @@ impl Runtime {
         }
         self.recent.push_back((key, now));
         let inv = zerus_client_core::details::details_invocation(&candidate.target.target, None);
-        let work = Work::Inspect(candidate.target.clone());
+        let work = Work::Inspect(candidate.target.clone(), self.categories());
         let job = self.launch(Phase::Inspect(candidate), inv, work, lease);
         self.jobs.push(job);
         true
@@ -792,10 +799,14 @@ impl Runtime {
                 {
                     return Ok(false);
                 }
-                let Completion::Inspection(Some(question)) = result else {
+                let Completion::Inspection(Some(selected)) = result else {
                     return Ok(false);
                 };
-                if policy::once(&candidate.target.provider, question).is_none() {
+                let question = &selected.question;
+                // The categories again, right before the durable reservation.
+                if policy::once(&candidate.target.provider, question).is_none()
+                    || !self.categories().permits(selected.categories)
+                {
                     return Ok(false);
                 }
                 if self.journal.is_none() {
@@ -810,7 +821,8 @@ impl Runtime {
                     &candidate.target.target.computer
                 };
                 let reply=approval_log::begin(self.journal.as_mut().expect("opened actor journal"),
-                    &json!({"host":host,"session":candidate.target.target.name,"provider":candidate.target.provider,"question":question}))
+                    &json!({"host":host,"session":candidate.target.target.name,"provider":candidate.target.provider,"question":question,
+                        "categories":selected.categories.ids()}))
                     .map_err(|_|anyhow::anyhow!("approval reservation unavailable"))?;
                 let Some(reservation) =
                     policy::reserved(&reply, &candidate.target.provider, question)

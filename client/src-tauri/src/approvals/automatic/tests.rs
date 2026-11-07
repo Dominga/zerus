@@ -1,7 +1,7 @@
 use super::*;
 use zerus_client_core::{ComputerId, ComputerStatus, MachineMeta, ViewRow};
 fn q() -> Value {
-    json!({"approval":true,"can_answer":true,"approval_choices":true,"source":"claude_tool_approval","answer_transport":"claude_tui","question_id":"approval-one","question_hash":"a".repeat(64),"run_id":"run-one","conversation_id":"conversation-one","questions":[{"id":"approval","options":[{"id":"yes","label":"Yes","scope":"once"},{"id":"always","label":"Always allow","scope":"broader"}]}]})
+    json!({"approval":true,"can_answer":true,"approval_choices":true,"source":"claude_tool_approval","answer_transport":"claude_tui","question_id":"approval-one","question_hash":"a".repeat(64),"run_id":"run-one","conversation_id":"conversation-one","questions":[{"id":"approval","header":"Bash","options":[{"id":"yes","label":"Yes","scope":"once"},{"id":"always","label":"Always allow","scope":"broader"}]}]})
 }
 fn row() -> ViewRow {
     let mut row = ViewRow {
@@ -28,6 +28,10 @@ struct Fixture {
     malformed: Arc<AtomicBool>,
     outcome: Arc<Mutex<Outcome>>,
     fail_finish: Arc<AtomicBool>,
+    /// The enabled categories, and from which `allowed` read (0-based) on
+    /// they lose Shell: 0 at selection, 1 before begin, 2 before delivery.
+    allowed: Arc<Mutex<(policy::Set, usize)>>,
+    reads: Arc<std::sync::atomic::AtomicUsize>,
 }
 fn fixture() -> Fixture {
     let log = Arc::new(Mutex::new(Vec::new()));
@@ -40,10 +44,24 @@ fn fixture() -> Fixture {
         cleanup: None,
     }));
     let fail_finish = Arc::new(AtomicBool::new(false));
+    let allowed = Arc::new(Mutex::new((policy::Set::defaults(), usize::MAX)));
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let calls = Calls {
         current: {
             let current = current.clone();
             Arc::new(move |_| current.load(Ordering::Acquire))
+        },
+        allowed: {
+            let allowed = allowed.clone();
+            let reads = reads.clone();
+            Arc::new(move || {
+                let (set, from) = *allowed.lock().unwrap();
+                if reads.fetch_add(1, Ordering::AcqRel) >= from {
+                    policy::Set::from_fn(|c| set.contains(c) && c != policy::Category::Shell)
+                } else {
+                    set
+                }
+            })
         },
         inspect: {
             let log = log.clone();
@@ -62,6 +80,7 @@ fn fixture() -> Fixture {
             let fail_finish = fail_finish.clone();
             Arc::new(move |operation, value| match operation {
                 Operation::Begin => {
+                    assert_eq!(value["categories"], json!(["shell"]));
                     log.lock().unwrap().push("durable begin".into());
                     if change.load(Ordering::Acquire) {
                         current.store(false, Ordering::Release);
@@ -74,6 +93,9 @@ fn fixture() -> Fixture {
                     log.lock()
                         .unwrap()
                         .push(format!("finish {}", value["status"].as_str().unwrap()));
+                    if value["detail"] == policy::CATEGORY_CANCELLED {
+                        log.lock().unwrap().push("category turned off".into());
+                    }
                     if fail_finish.load(Ordering::Acquire) {
                         Err("journal unavailable".into())
                     } else {
@@ -103,7 +125,55 @@ fn fixture() -> Fixture {
         malformed,
         outcome,
         fail_finish,
+        allowed,
+        reads,
     }
+}
+#[test]
+fn a_request_in_a_manual_category_is_never_reserved() {
+    let f = fixture();
+    *f.allowed.lock().unwrap() = (
+        policy::Set::from_fn(|c| c != policy::Category::Shell),
+        usize::MAX,
+    );
+    attempt(&f.calls, &target()).unwrap();
+    assert_eq!(*f.log.lock().unwrap(), ["inspect"]);
+    // A cold cache makes it paid usage, which is off by default.
+    let f = fixture();
+    let calls = Calls {
+        inspect: Arc::new(|_| {
+            let mut details = json!({"runtime_state":"live","process_state":"running","run_id":"run-one",
+                "conversation_id":"conversation-one","pending_questions":[q()]});
+            details["cache_hint"] = json!({"status":"cold"});
+            Ok(details)
+        }),
+        ..f.calls
+    };
+    attempt(&calls, &target()).unwrap();
+    assert!(f.log.lock().unwrap().is_empty());
+}
+#[test]
+fn a_category_turned_off_before_the_reservation_reserves_nothing() {
+    let f = fixture();
+    f.allowed.lock().unwrap().1 = 1;
+    attempt(&f.calls, &target()).unwrap();
+    assert_eq!(*f.log.lock().unwrap(), ["inspect"]);
+    assert_eq!(f.reads.load(Ordering::Acquire), 2);
+}
+#[test]
+fn a_category_turned_off_after_the_reservation_cancels_without_native_input() {
+    let f = fixture();
+    f.allowed.lock().unwrap().1 = 2;
+    attempt(&f.calls, &target()).unwrap();
+    assert_eq!(
+        *f.log.lock().unwrap(),
+        [
+            "inspect",
+            "durable begin",
+            "finish cancelled",
+            "category turned off"
+        ]
+    );
 }
 #[test]
 fn a_durable_reservation_precedes_the_shared_answer_lane() {

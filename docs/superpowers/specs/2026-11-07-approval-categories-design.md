@@ -184,8 +184,9 @@ background service (`src/desktop/delivery.rs`) both call this core function.
   some servers bill per call. Other tools says it includes tools Zerus cannot
   classify, possibly paid ones. Paid usage covers web search, image
   generation and cold-cache resumes, and says it is needed even when another
-  category matches. The hint and confirmation texts mention categories, and
-  docs/reference.md lists the final categories.
+  category matches. The group's own hint explains categories; the existing
+  switch hint, warning and confirmation texts stay as reviewed, with their
+  translations. docs/reference.md lists the final categories.
   The Russian catalog is regenerated. No dot separators.
 - Journal: `begin` stores `categories` inside the existing JSON `question`
   column (no journal schema change). `list` returns it through

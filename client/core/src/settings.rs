@@ -107,6 +107,47 @@ pub const KEYS: &[Key] = &[
         kind: Kind::Text(""),
         seeded: false,
     },
+    // Its categories (zerus-sz42x): all except paid usage until changed.
+    Key {
+        name: "automaticApprovals/category/read",
+        kind: Kind::Flag(true),
+        seeded: false,
+    },
+    Key {
+        name: "automaticApprovals/category/edit",
+        kind: Kind::Flag(true),
+        seeded: false,
+    },
+    Key {
+        name: "automaticApprovals/category/shell",
+        kind: Kind::Flag(true),
+        seeded: false,
+    },
+    Key {
+        name: "automaticApprovals/category/web",
+        kind: Kind::Flag(true),
+        seeded: false,
+    },
+    Key {
+        name: "automaticApprovals/category/mcp",
+        kind: Kind::Flag(true),
+        seeded: false,
+    },
+    Key {
+        name: "automaticApprovals/category/agents",
+        kind: Kind::Flag(true),
+        seeded: false,
+    },
+    Key {
+        name: "automaticApprovals/category/other",
+        kind: Kind::Flag(true),
+        seeded: false,
+    },
+    Key {
+        name: "automaticApprovals/category/paid",
+        kind: Kind::Flag(false),
+        seeded: false,
+    },
     // Appearance (SettingsPage.h:46-95, UiLanguage.h, ContentScale.h,
     // ActivityWidth.h, WindowLayer.cpp).
     key(

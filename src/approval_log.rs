@@ -33,6 +33,20 @@ fn input() -> Result<Value> {
     }
     Ok(payload)
 }
+/// The approval categories a request needed (zerus-sz42x), as the client
+/// names them. Display only: never part of the identity or the grant. A
+/// newer client may name categories this CLI does not know.
+pub(crate) fn categories(value: &Value) -> Option<Value> {
+    let ids = value.as_array()?;
+    (!ids.is_empty()
+        && ids.len() <= 16
+        && ids.iter().all(|id| {
+            id.as_str().is_some_and(|id| {
+                !id.is_empty() && id.len() <= 32 && id.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+            })
+        }))
+    .then(|| value.clone())
+}
 fn string<'a>(value: &'a Value, key: &str, max: usize) -> Result<&'a str> {
     let text = value[key]
         .as_str()
@@ -213,11 +227,15 @@ pub(crate) fn begin(db: &mut Connection, payload: &Value) -> Result<Value> {
         .chars()
         .take(320)
         .collect();
+    let mut saved = json!({"question":question,"answers":answers});
+    if let Some(categories) = categories(&payload["categories"]) {
+        saved["categories"] = categories;
+    }
     let transaction = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(bad)?;
     let inserted = transaction.execute("INSERT OR IGNORE INTO attempts(identity,request_id,at,host,session,provider,prompt,question) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
-        params![identity,request,at,host,session,provider,prompt,json!({"question":question,"answers":answers}).to_string()]).map_err(bad)?;
+        params![identity,request,at,host,session,provider,prompt,saved.to_string()]).map_err(bad)?;
     let (id, request): (i64, String) = transaction
         .query_row(
             "SELECT id,request_id FROM attempts WHERE identity=?1",
@@ -259,6 +277,14 @@ pub(crate) fn finish(db: &Connection, payload: &Value) -> Result<Value> {
     Ok(json!({"id":id,"status":status}))
 }
 
+/// A row's saved categories, read by SQLite without loading the question
+/// into the page: NULL for an older row or an oversized value.
+pub(crate) const CATEGORIES: &str = "CASE WHEN json_valid(question) AND json_type(question,'$.categories')='array' AND length(json_extract(question,'$.categories'))<=1024 THEN json_extract(question,'$.categories') END";
+pub(crate) fn saved_categories(raw: Option<String>) -> Value {
+    raw.and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|value| categories(&value))
+        .unwrap_or(Value::Null)
+}
 fn list(db: &Connection, payload: &Value) -> Result<Value> {
     let reverse = payload.get("after").is_some();
     let cursor = match payload.get(if reverse { "after" } else { "before" }) {
@@ -293,8 +319,9 @@ fn list(db: &Connection, payload: &Value) -> Result<Value> {
         };
     let operator = if reverse { ">" } else { "<" };
     let order = if reverse { "ASC" } else { "DESC" };
-    let mut statement = db.prepare(&format!("SELECT id,at,host,session,provider,prompt,status FROM attempts WHERE id{operator}?1{filter} ORDER BY id {order} LIMIT {}",PAGE+1)).map_err(bad)?;
-    let rows = statement.query_map(values.as_slice(),|row| Ok(json!({"id":row.get::<_,i64>(0)?,"at":row.get::<_,i64>(1)?,"host":row.get::<_,String>(2)?,"session":row.get::<_,String>(3)?,"provider":row.get::<_,String>(4)?,"prompt":row.get::<_,String>(5)?,"status":row.get::<_,String>(6)?}))).map_err(bad)?;
+    let mut statement = db.prepare(&format!("SELECT id,at,host,session,provider,prompt,status,{CATEGORIES} FROM attempts WHERE id{operator}?1{filter} ORDER BY id {order} LIMIT {}",PAGE+1)).map_err(bad)?;
+    let rows = statement.query_map(values.as_slice(),|row| Ok(json!({"id":row.get::<_,i64>(0)?,"at":row.get::<_,i64>(1)?,"host":row.get::<_,String>(2)?,"session":row.get::<_,String>(3)?,"provider":row.get::<_,String>(4)?,"prompt":row.get::<_,String>(5)?,"status":row.get::<_,String>(6)?,
+        "categories":saved_categories(row.get::<_,Option<String>>(7)?)}))).map_err(bad)?;
     let mut entries = rows
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(bad)?;
@@ -364,7 +391,8 @@ pub fn dispatch(config: &Config, target: &str, args: &[String], dry: bool) -> Re
             let (question, status, detail) =
                 row.ok_or_else(|| bad("Approval journal entry is unavailable"))?;
             let saved = serde_json::from_str::<Value>(&question).map_err(bad)?;
-            json!({"id":id,"question":saved["question"],"answers":saved["answers"],"status":status,"detail":detail})
+            json!({"id":id,"question":saved["question"],"answers":saved["answers"],"status":status,"detail":detail,
+                "categories":categories(&saved["categories"])})
         }
     };
     println!("{result}");
@@ -519,6 +547,37 @@ mod tests {
         let mut next = payload();
         next["question"]["question_hash"] = json!("b".repeat(64));
         assert_eq!(begin(&mut db, &next).unwrap()["fresh"], true);
+    }
+
+    #[test]
+    fn categories_are_saved_listed_and_shown_but_never_part_of_the_grant() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut db = open(&directory.path().join("audit")).unwrap();
+        let mut request = payload();
+        request["categories"] = json!(["shell", "paid"]);
+        let first = begin(&mut db, &request).unwrap();
+        // Another category set is still the same permission.
+        request["categories"] = json!(["other"]);
+        assert_eq!(begin(&mut db, &request).unwrap()["fresh"], false);
+        // Malformed or missing categories never block the reservation.
+        for (n, value) in [json!("shell"), json!([]), json!(["Shell"]), json!([1]), Value::Null].into_iter().enumerate() {
+            let mut other = payload();
+            other["question"]["question_id"] = json!(format!("malformed-{n}"));
+            other["categories"] = value;
+            assert_eq!(begin(&mut db, &other).unwrap()["fresh"], true);
+        }
+        db.execute("INSERT INTO attempts(identity,request_id,at,host,session,provider,prompt,question) VALUES('old','old',1,'h','s','claude','p','{\"question\":{},\"answers\":[]}')", []).unwrap();
+        let page = list(&db, &json!({})).unwrap();
+        let entries = page["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 7);
+        assert_eq!(entries.last().unwrap()["categories"], json!(["shell", "paid"]));
+        assert!(entries[..6].iter().all(|entry| entry["categories"].is_null()));
+        let saved: String = db
+            .query_row("SELECT question FROM attempts WHERE id=?1", [first["id"].as_i64().unwrap()], |r| r.get(0))
+            .unwrap();
+        let saved: Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(saved["categories"], json!(["shell", "paid"]));
+        assert_eq!(saved["answers"], first["answers"]);
     }
 
     #[cfg(unix)]

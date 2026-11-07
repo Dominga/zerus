@@ -237,8 +237,11 @@ mod tests {
         })
         .unwrap();
         assert!(read().is_err());
-        session_id::clear();
-        assert_eq!(storage::read_label(name).unwrap()["session_id"], first);
+        #[cfg(unix)]
+        {
+            session_id::clear();
+            assert_eq!(storage::read_label(name).unwrap()["session_id"], first);
+        }
     }
     #[test]
     fn only_bounded_literal_binding_identity_is_needed_for_paused_metadata() {

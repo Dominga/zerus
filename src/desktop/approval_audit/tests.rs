@@ -130,10 +130,13 @@ fn absent_journal_is_empty_without_creating_or_authorizing_anything() {
 fn indexed_pages_hold_their_high_water_and_detail_uses_the_same_journal() {
     let mut f = Fixture::new();
     let db = f.rows(123);
+    db.execute("UPDATE attempts SET question=json_set(question,'$.categories',json('[\"shell\",\"paid\"]')) WHERE id=123", []).unwrap();
     let mut request = f.query();
     let first = f.send(&request);
     assert_eq!(first["result"]["entries"].as_array().unwrap().len(), 50);
     assert_eq!(first["result"]["entries"][0]["id"], 123);
+    assert_eq!(first["result"]["entries"][0]["categories"], json!(["shell", "paid"]));
+    assert!(first["result"]["entries"][1]["categories"].is_null());
     request["journal"] = first["journal"].clone();
     request["through"] = first["result"]["through"].clone();
     db.execute(
@@ -165,6 +168,7 @@ fn indexed_pages_hold_their_high_water_and_detail_uses_the_same_journal() {
         "configuration":f.reader.configuration,"epoch":f.reader.epoch,"journal":first["journal"],"id":123});
     let reply = f.send(&detail);
     assert_eq!(reply["result"]["question"]["question_id"], "fixture-123");
+    assert_eq!(reply["result"]["categories"], json!(["shell", "paid"]));
     let mut filtered = f.query();
     filtered["host"] = json!("a.example");
     let reply = f.send(&filtered);

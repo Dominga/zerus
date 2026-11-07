@@ -13,7 +13,7 @@ Lead, in-session:
      "assignee":"api","deps":[{"task":2}]}]} | hgs team plan --json
   hard waits for Accepted, soft for In progress. Nothing runs before
   the owner approves.
-  {"team":"ID"} | hgs team status --json   tasks, attempts, waits
+  {"team":"ID","task":N} | hgs team status --json   one task
   {"team":"ID"} | hgs team inbox --json    reports, questions, your tasks
   Reports arrive as [Zerus team messages; decide:
     {"request_id":"UUID","team":"ID","task":N} | hgs team accept --json

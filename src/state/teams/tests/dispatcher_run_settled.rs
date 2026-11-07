@@ -38,7 +38,7 @@ fn a_member_waiting_for_its_own_team_run_is_woken_not_captured() {
     let timeout = team.settings.report_timeout_seconds as f64;
     // While the run is claimed the session is Building: the run is remembered
     // and the turn is not captured.
-    let found = steps(&team, &[dev.clone()], 60.0);
+    let found = steps(&team, std::slice::from_ref(&dev), 60.0);
     assert!(found.contains(&Step::RunAwaited { task: 1, run: RUN.into(), label: "cargo-test".into() }), "{found:?}");
     assert!(!found.iter().any(|step| matches!(step, Step::TurnEnded { .. } | Step::NoReport { .. })), "{found:?}");
     {
@@ -47,14 +47,14 @@ fn a_member_waiting_for_its_own_team_run_is_woken_not_captured() {
         attempt.awaited_label = "cargo-test".into();
     }
     // Remembered once: the next tick asks for nothing new.
-    assert!(!steps(&team, &[dev.clone()], 70.0).iter().any(|step| matches!(step, Step::RunAwaited { .. })));
+    assert!(!steps(&team, std::slice::from_ref(&dev), 70.0).iter().any(|step| matches!(step, Step::RunAwaited { .. })));
     // The run settles and the session stays idle. Before this task the quiet
     // session became a TurnEnded at once and, report_timeout_seconds later, a
     // No report that captured "waiting for my build". Now the member is woken
     // and nothing is captured, however long the tick comes after.
     let done = settled(&dev);
     for at in [80.0, 80.0 + timeout, 50.0 + 10.0 * timeout] {
-        let found = steps(&team, &[done.clone()], at);
+        let found = steps(&team, std::slice::from_ref(&done), at);
         assert!(found.contains(&Step::RunSettled { task: 1, wake: true }), "{at}: {found:?}");
         assert!(!found.iter().any(|step| matches!(step, Step::TurnEnded { .. } | Step::NoReport { .. } | Step::GateOpen { .. })), "{at}: {found:?}");
     }
@@ -66,7 +66,7 @@ fn a_member_waiting_for_its_own_team_run_is_woken_not_captured() {
         attempt.turn_reply = "r7".into();
         attempt.report_ready_at = Some(55.0);
     }
-    let found = steps(&team, &[done.clone()], 55.0 + timeout);
+    let found = steps(&team, std::slice::from_ref(&done), 55.0 + timeout);
     assert!(found.contains(&Step::RunSettled { task: 1, wake: true }) && !found.contains(&Step::NoReport { task: 1 }), "{found:?}");
     // A member that waited inside its turn (hgs team run --wait) works on when
     // the run settles: the run is forgotten, nobody is woken.
@@ -117,7 +117,7 @@ fn the_wake_goes_once_and_a_member_that_still_stops_gets_no_report() {
         // The member truly stops: no new turn after the wake. Nothing wakes it
         // again; its old turn is recorded and, after the timeout, No report.
         let done = settled(&dev);
-        let found = steps(&saved, &[done.clone()], 200.0);
+        let found = steps(&saved, std::slice::from_ref(&done), 200.0);
         assert!(!found.iter().any(|step| matches!(step, Step::RunSettled { .. } | Step::RunAwaited { .. })), "{found:?}");
         assert!(found.contains(&Step::TurnEnded { task: 1, at: 50.0, reply: "r7".into() }), "{found:?}");
         let mut stopped = saved.clone();
@@ -128,7 +128,7 @@ fn the_wake_goes_once_and_a_member_that_still_stops_gets_no_report() {
             attempt.report_ready_at = Some(200.0);
         }
         let timeout = stopped.settings.report_timeout_seconds as f64;
-        assert!(!steps(&stopped, &[done.clone()], 199.0 + timeout).contains(&Step::NoReport { task: 1 }));
+        assert!(!steps(&stopped, std::slice::from_ref(&done), 199.0 + timeout).contains(&Step::NoReport { task: 1 }));
         assert!(steps(&stopped, &[done], 200.0 + timeout).contains(&Step::NoReport { task: 1 }));
     });
 }

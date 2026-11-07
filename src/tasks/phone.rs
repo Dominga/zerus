@@ -43,7 +43,7 @@ pub(super) fn digests(config: &Config) -> Result<Value> {
         projects.insert(id.clone(), json!({"digest": Inventory::default().digest()}));
     }
     for id in stored {
-        match ProjectStore::open_within(&root(config), &id, DIGEST_WAIT) {
+        match ProjectStore::open_within(&super::replica_root(config).map_err(fail)?, &id, DIGEST_WAIT) {
             Ok(Some(store)) => match store.live_inventory() {
                 Ok((inventory, _)) => {
                     projects.insert(id, json!({"digest": inventory.digest()}));
@@ -76,7 +76,7 @@ pub(super) fn exchange(config: &Config) -> Result<Value> {
     if !alive.contains(&request.project) && !stored.contains(&request.project) {
         return Err(fail(format!("no project {:?} here", request.project)));
     }
-    let store = ProjectStore::open_within(&root(config), &request.project, PROJECT_WAIT)
+    let store = ProjectStore::open_within(&super::replica_root(config).map_err(fail)?, &request.project, PROJECT_WAIT)
         .map_err(fail)?
         .ok_or_else(|| fail("the project's tasks are busy; try again"))?;
     serde_json::to_value(answer(&store, request).map_err(fail)?).map_err(fail)

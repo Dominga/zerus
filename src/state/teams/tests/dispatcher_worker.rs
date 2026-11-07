@@ -88,7 +88,8 @@ fn a_usage_limit_is_read_from_the_listing_and_named_to_the_lead() {
     assert!(limited.summary.contains("resets at 2026"), "{}", limited.summary);
     assert!(!limited.summary.contains("1793050000"), "{}", limited.summary);
     assert_eq!(limited.member, "dev (Backend)");
-    assert!(limited.command.contains("hgs team status --json"), "{}", limited.command);
+    // A taskless usage-limit notice links to the bounded inbox.
+    assert_eq!(limited.command, format!("{} | hgs team inbox --json", json!({"team":team.id})));
     // Status keeps the number.
     assert_eq!(team.member("dev").unwrap().limited.as_ref().and_then(|limit| limit.resets_at), Some(1_793_050_000.0));
 }

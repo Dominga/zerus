@@ -1770,6 +1770,7 @@ fn test_queue_tick(store: &mut Store, team_id: &str, now: f64) -> anyhow::Result
         super::test_queue::load_now,
         &policy,
         &places,
+        team.settings.tests.as_ref(),
     )?;
     if !read {
         return Ok(());
@@ -1928,12 +1929,12 @@ fn dependency_folder(team: &Team, member_id: &str, local_host: &str) -> String {
 /// `deps` order, each report bounded to 2,000 characters and 6,000 in total,
 /// and at most 20 header lines.
 fn dependencies_text(team: &Team, task: &Task, local_host: &str) -> String {
-    let listed: Vec<(&Task, &Attempt)> = task
-        .deps
-        .iter()
-        .filter_map(|dep| team.task(dep.task))
-        .filter_map(|found| dependency_attempt(found).map(|attempt| (found, attempt)))
-        .collect();
+    let listed: Vec<(&Task, Option<&Attempt>)> = task
+        .deps.iter().filter_map(|dep| team.task(dep.task))
+        .filter_map(|found| {
+            if found.archived.is_some() { Some((found, None)) }
+            else { dependency_attempt(found).map(|attempt| (found, Some(attempt))) }
+        }).collect();
     let mut text = String::new();
     let mut used = 0usize;
     for (index, (found, attempt)) in listed.iter().enumerate() {
@@ -1941,6 +1942,12 @@ fn dependencies_text(team: &Team, task: &Task, local_host: &str) -> String {
             text += &format!("[{} more dependencies omitted]\n", listed.len() - index);
             break;
         }
+        if found.archived.is_some() {
+            text += &format!("#{} {}: archived report: {} | hgs team status --json\n",
+                found.id, found.title, json!({"team":team.id,"task":found.id}));
+            continue;
+        }
+        let Some(attempt) = attempt else { continue };
         let Some(report) = attempt.report.as_ref() else { continue };
         let status = serde_json::to_value(found.status).ok().and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_default();
         text += &format!(
@@ -1962,8 +1969,8 @@ fn dependencies_text(team: &Team, task: &Task, local_host: &str) -> String {
         text += &report.text.chars().take(shown).collect::<String>();
         if shown < total {
             text += &format!(
-                "\n[cut: shown {shown} of {total} characters; full report: hgs team status --json, task #{}]\n",
-                found.id
+                "\n[cut: shown {shown} of {total} characters; full report: {} | hgs team status --json]\n",
+                json!({"team":team.id,"task":found.id})
             );
         } else {
             text.push('\n');

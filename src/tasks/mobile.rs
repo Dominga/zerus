@@ -143,7 +143,7 @@ pub(super) fn done(config: &Config) -> Result<Value> {
         task_uuid(&cursor.uuid)?;
     }
     let (id, _) = project(config, &request.project)?;
-    let store = ProjectStore::open_within(&config.state.join("replica"), &id, PROJECT_WAIT)
+    let store = ProjectStore::open_within(&super::replica_root(config).map_err(fail)?, &id, PROJECT_WAIT)
         .map_err(fail)?
         .ok_or_else(|| fail("the project's tasks are busy; try again"))?;
     let page = store

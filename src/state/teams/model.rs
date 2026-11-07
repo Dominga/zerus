@@ -1540,6 +1540,9 @@ impl Attempt {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Task {
+    /// Full history is in team_task_archive; these summaries remain in the plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<ArchivedTask>,
     pub id: u32,
     /// The phase of the plan: the approved initial plan is 1, `extend`
     /// appends later phases.
@@ -1656,6 +1659,15 @@ pub(crate) struct Task {
     /// they move to the attempt that hands it out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prepare: Vec<PrepareStep>,
+}
+
+/// Frozen display metadata, computed before the task history leaves the live record.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct ArchivedTask {
+    pub accepted_at: Option<f64>,
+    pub started_at: Option<f64>,
+    pub merge_commit: String,
+    pub timing: serde_json::Value,
 }
 
 /// One tick's index of each member's in-progress tasks, built once rather
@@ -2055,6 +2067,8 @@ pub(crate) struct PhaseRejection {
 /// and has no record.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Phase {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<ArchivedPhase>,
     pub n: u32,
     /// The display and approval order (F10): drafts may be moved before each
     /// other. 0 on a team stored before the field means n order.
@@ -2123,6 +2137,43 @@ pub(crate) struct Phase {
     pub awaiting_since: Option<f64>,
 }
 
+/// Constant-size totals survive eviction of archived phase headers.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct ArchiveTotals {
+    pub phases: usize,
+    pub tasks: usize,
+    pub accepted: usize,
+    pub rejected: usize,
+    pub cancelled: usize,
+}
+
+impl ArchiveTotals {
+    pub(crate) fn add(&mut self, phase: &ArchivedPhase) {
+        self.phases += 1;
+        self.tasks += phase.tasks;
+        self.accepted += phase.accepted;
+        self.rejected += phase.rejected;
+        self.cancelled += phase.cancelled;
+    }
+    pub(crate) fn remove(&mut self, phase: &ArchivedPhase) {
+        self.phases -= 1;
+        self.tasks -= phase.tasks;
+        self.accepted -= phase.accepted;
+        self.rejected -= phase.rejected;
+        self.cancelled -= phase.cancelled;
+    }
+}
+
+/// Closed phase header; task ids and histories are paged from the archive.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct ArchivedPhase {
+    pub tasks: usize,
+    pub accepted: usize,
+    pub rejected: usize,
+    pub cancelled: usize,
+    pub closed_at: Option<f64>,
+}
+
 impl Phase {
     /// The display and approval order; a team stored before the field keeps
     /// its phase numbers as the order (F10).
@@ -2137,6 +2188,14 @@ impl Phase {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Team {
+    /// Highest archived task id; evicting stubs never frees an archived id.
+    #[serde(default)]
+    pub last_archived_task: u32,
+    #[serde(default)]
+    pub archive_totals: ArchiveTotals,
+    /// Read-through dependency metadata; never grows the persisted live record.
+    #[serde(skip)]
+    pub archive_deps: std::collections::BTreeMap<u32, Task>,
     pub id: String,
     pub name: String,
     #[serde(default)]
@@ -2226,9 +2285,11 @@ pub(crate) struct Team {
     #[serde(default)]
     pub members: Vec<Member>,
     #[serde(default)]
+    #[serde(serialize_with = "serialize_tasks")]
     pub tasks: Vec<Task>,
     /// Phases added by `extend`; the approved initial plan (phase 1) has none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(serialize_with = "serialize_phases")]
     pub phases: Vec<Phase>,
     /// Permissions a plan widens beyond the role's default (B5): the owner
     /// confirms them before the plan can be approved.
@@ -2431,7 +2492,7 @@ impl Team {
         self.members.iter().find(|member| member.id == id)
     }
     pub(crate) fn task(&self, id: u32) -> Option<&Task> {
-        self.tasks.iter().find(|task| task.id == id)
+        self.tasks.iter().find(|task| task.id == id).or_else(|| self.archive_deps.get(&id))
     }
     pub(crate) fn task_mut(&mut self, id: u32) -> Option<&mut Task> {
         self.tasks.iter_mut().find(|task| task.id == id)
@@ -2525,6 +2586,38 @@ impl Team {
             .filter(|m| m.id != self.lead && m.state != MemberState::Removed && self.reviewer_of(&m.id) == member)
             .collect()
     }
+}
+
+/// Archived rows have a deliberately small wire representation.
+pub(crate) fn task_stub(task: &Task) -> serde_json::Value {
+    serde_json::json!({"id":task.id,"phase":task.phase,"title":task.title,"assignee":task.assignee,
+        "status":task.status,"archived":task.archived})
+}
+
+pub(crate) fn phase_stub(phase: &Phase) -> serde_json::Value {
+    serde_json::json!({"n":phase.n,"order":phase.order,"title":phase.title,
+        "state":phase.state,"acceptance":phase.acceptance,"decided_at":phase.decided_at,"archived":phase.archived})
+}
+
+fn serialize_phases<S: serde::Serializer>(phases: &[Phase], serializer: S) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeSeq;
+    let mut seq = serializer.serialize_seq(Some(phases.len()))?;
+    for phase in phases {
+        if phase.archived.is_some() {
+            seq.serialize_element(&phase_stub(phase))?;
+        } else { seq.serialize_element(phase)?; }
+    }
+    seq.end()
+}
+
+fn serialize_tasks<S: serde::Serializer>(tasks: &[Task], serializer: S) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeSeq;
+    let mut seq = serializer.serialize_seq(Some(tasks.len()))?;
+    for task in tasks {
+        if task.archived.is_some() { seq.serialize_element(&task_stub(task))?; }
+        else { seq.serialize_element(task)?; }
+    }
+    seq.end()
 }
 
 /// An estimate source of "none" is the default and is not stored.

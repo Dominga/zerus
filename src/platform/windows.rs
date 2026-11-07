@@ -1670,9 +1670,9 @@ mod process {
             _ => Some(name),
         }
     }
-    /// Directories below the user profile inherit its owner-only ACL.
+    /// Protect only folders created by this call; existing ACLs stay unchanged.
     pub fn private_dir(path: &Path) -> io::Result<()> {
-        fs::create_dir_all(path)
+        owner_only_dir(path)
     }
     /// Open a reparse point (a symbolic link) itself; it is then not a regular file.
     pub fn refuse_link(options: &mut fs::OpenOptions) -> &mut fs::OpenOptions {
@@ -2831,6 +2831,45 @@ mod tests {
         assert_eq!(fs::read(&file).unwrap(), b"{}");
     }
 
+    #[test]
+    fn private_creation_excludes_inherited_grants_and_preserves_existing_acls() {
+        let temp = tempfile::tempdir().unwrap();
+        let open = temp.path().join("open");
+        fs::create_dir(&open).unwrap();
+        // Only this synthetic parent gains an inheritable Authenticated Users ACE.
+        assert!(Command::new("icacls").arg(&open)
+            .args(["/grant", "*S-1-5-11:(OI)(CI)M", "/Q"])
+            .stdout(Stdio::null()).status().unwrap().success());
+        let foreign = open.join("foreign");
+        fs::create_dir(&foreign).unwrap();
+        let existing = foreign.join("existing.json");
+        fs::write(&existing, b"unchanged").unwrap();
+        let acl = |path: &Path| {
+            let result = Command::new("icacls").arg(path).output().unwrap();
+            assert!(result.status.success());
+            result.stdout
+        };
+        let folder_acl = acl(&foreign);
+        let file_acl = acl(&existing);
+        private_dir(&foreign).unwrap();
+        private_open(fs::OpenOptions::new().write(true)).open(&existing).unwrap();
+        assert_eq!(acl(&foreign), folder_acl);
+        assert_eq!(acl(&existing), file_acl);
+        assert!(!verify_private(&foreign, Private::Directory).unwrap());
+        assert!(!verify_private(&existing, Private::File).unwrap());
+        assert_eq!(fs::read(&existing).unwrap(), b"unchanged");
+
+        let nested = open.join("new").join("nested");
+        private_dir(&nested).unwrap();
+        for folder in [open.join("new"), nested.clone()] {
+            assert!(verify_private(&folder, Private::Directory).unwrap());
+        }
+        let path = nested.join("created.json");
+        let file = private_open(fs::OpenOptions::new().write(true).create_new(true)).open(&path).unwrap();
+        assert!(verify_private_file(&file).unwrap());
+        assert!(verify_private(&path, Private::File).unwrap());
+    }
+
     /// U34: a folder that inherits Modify only has WRITE_DAC (the owner's
     /// implicit right) but no WRITE_OWNER, so the DeepSeek sandbox would fail;
     /// the grant adds this user's inheritable FullControl and the precheck then
@@ -3872,6 +3911,8 @@ mod detach_tests {
     /// The helper side: it starts a ~30 s child the way `spawn_detached`
     /// does (without the breakaway a test job may forbid) and exits at once.
     #[test]
+    // This helper must exit before its child; the parent terminates that exact PID.
+    #[allow(clippy::zombie_processes)]
     fn detached_child_helper() {
         if std::env::var_os("HGS_TEST_DETACH_HELPER").is_none() {
             return;

@@ -1,6 +1,7 @@
 package app.zerus.mobile
 
 import android.app.Application
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -212,9 +213,20 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     fun toggleMachine(key: MachineKey) { selectedMachines = if (key in selectedMachines) selectedMachines - key else selectedMachines + key; resetSessionScroll() }
     fun allMachines() { selectedMachines = emptySet(); resetSessionScroll() }
     fun toggleProject(key: ProjectKey) { collapsedProjects = if (key.key in collapsedProjects) collapsedProjects - key.key else collapsedProjects + key.key }
-    /** Session cards whose subagent rows are open, by exact parent target, as the desktop session tree keeps them. */
-    var expandedSubagents by mutableStateOf<Set<String>>(emptySet()); private set
-    fun toggleSubagents(target: Target) { expandedSubagents = if (target.key in expandedSubagents) expandedSubagents - target.key else expandedSubagents + target.key }
+    /** Parents whose subagents and child sessions are hidden: one toggle, kept across relaunches (TeamCollapse). */
+    var teamCollapse by mutableStateOf(TeamCollapse()); private set
+    private var teamWriter: OrderedStatePersistence<List<String>>? = null
+    /** The machine UUID of a target's computer, which parent links and collapsed parents name. */
+    fun machineUuid(target: Target) = machines.find { it.connectionId == target.connectionId && it.id == target.computerId }?.machineId
+    fun teamCollapsed(session: Session) = teamCollapse.collapsed(session, machineUuid(session.target))
+    fun toggleTeam(session: Session) {
+        val collapsed = !teamCollapsed(session)
+        val stored = ChildSessions.teamId(machineUuid(session.target), session)?.let { id ->
+            teamWriter?.edit { ChildSessions.withTeam(it, id, collapsed) } } ?: teamCollapse.stored
+        teamCollapse = TeamCollapse(stored, teamCollapse.overrides + (session.target.key to collapsed))
+    }
+    /** Grouped accounts, which label the cards' account marks. */
+    val groupedAccounts by derivedStateOf { AccountGrouping.group(displayedAccounts) }
     fun saveSessionScroll(index: Int, offset: Int, scope: String, reset: Long) {
         if (scope != sessionProjectScope?.key?.key.orEmpty() || reset != sessionScrollReset) return
         sessionListIndex = index; sessionListOffset = offset
@@ -863,6 +875,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 accountsWriter!!.edit { rows -> rows.filter { row -> connections.any { it.id==row.key.connectionId } } }
                 accountCatalogs=accountsWriter!!.state.value
                 launch { accountsWriter!!.state.collectLatest { accountCatalogs=it } }
+                try {
+                    teamWriter=OrderedStatePersistence(withContext(Dispatchers.IO) { store.collapsedTeams() },viewModelScope,{ store.saveCollapsedTeams(it) })
+                    teamCollapse=teamCollapse.copy(stored=teamWriter!!.state.value)
+                } catch(_:Exception) { }
                 launch { AccountsPersistence.get(application).error.collectLatest { failure -> accountsError=if(failure!=null) "Account snapshots could not be saved. Existing private data is preserved." else "" } }
                 try {
                     readWriter=ConversationReadPersistence.get(application).open();readState=readWriter!!.state.value;readTrackingReady=true
@@ -947,7 +963,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             finally { machineColorSaving=machineColorSaving-key }
         }
     }
-    fun flushDrafts() { persistence?.flushAsync();readWriter?.flushAsync();accountsWriter?.flushAsync() }
+    fun flushDrafts() { persistence?.flushAsync();readWriter?.flushAsync();accountsWriter?.flushAsync();teamWriter?.flushAsync() }
     var updateInstallPreparing by mutableStateOf(false); private set
     fun updateInstallReason(): String = if (speech.busy || speechConfiguration.busy) "Finish the voice operation before installing." else UpdateInstallGuard.reason(messageState,storageReady,
         attachmentImporting || attachmentPreparing,preparingTargets.isNotEmpty(),

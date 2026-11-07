@@ -14,7 +14,9 @@ enum class SessionFilter(val id: String, val caption: String) {
     All("all", "All sessions"), Attention("attention", "Needs attention"), Active("active", "Active"),
     Saved("paused", "Saved sessions"), Archive("archived", "Archive")
 }
-data class SessionGroup(val key: ProjectKey, val name: String, val color: String, val sessions: List<Session>)
+/** `cards` nests child sessions under their parents (ChildSessions.nest); a group built without nesting lists each session. */
+data class SessionGroup(val key: ProjectKey, val name: String, val color: String, val sessions: List<Session>,
+    val cards: List<SessionCardEntry> = sessions.map { SessionCardEntry(it) })
 
 object SessionFilters {
     fun machineKey(target: Target) = MachineKey(target.connectionId, target.computerId)

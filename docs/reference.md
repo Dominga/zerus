@@ -791,7 +791,22 @@ owner, 2026-11-07, zerus-sa9qn.16, replacing the crossed bell); the parent's **T
 toggle adds **Asking** (quiet requests waiting for it) and **Needs you**
 (person-only requests), which never raise the parent's own attention.
 `client/core/tests/fixtures/supervised-attention.json` lists the cases the
-desktop projects; Android and iOS follow (`zerus-sa9qn.4`, `.5`). See
+desktop projects and Android checks; iOS follows (`zerus-sa9qn.5`).
+
+Android applies the same contract (zerus-sa9qn.4): child cards nest under a
+parent shown in the same project group, 16 dp per level up to three levels
+with a connector, and a child without a shown parent stays at top level with
+**from PARENT**. A parent's counter is the same single toggle for its shown
+subagents and child sessions (`2 of 5`, gray **Asking**, amber **Needs you**),
+expanded by default; the phone remembers a collapsed parent across relaunches
+by machine UUID and session ID, at most 2048. A quiet child gets the mute
+treatment on the phone: no system notification, gray badges and reply count,
+and the same arrow before its title; a request that waited quietly notifies
+once when the parent is gone, and a completion seen meanwhile is not replayed.
+Cards show the account mark (circle, letter and label) resolved by the row's
+computer and recorded `account_id` against that computer's account catalog,
+in the label's default palette color: colors and emoji remain desktop choices
+until hosts store them. See
 `docs/superpowers/specs/2026-11-07-account-labels-child-sessions-design.md`.
 
 ### Rename, Saved and Archive

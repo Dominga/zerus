@@ -37,7 +37,9 @@ data class NotificationEvent(val id: Long, val computer: String, val session: St
 data class NotificationCurrent(val slot: NotificationSlot, val target: String, val title: String,
     val machine: String, val kind: SessionAlertKind?, val identity: String, val idle: Boolean,
     val online: Boolean = true, val live: Boolean = true, val conversation: String = "", val optional: List<String> = emptyList(), val suppressed: Boolean = false,
-    val notificationPreference:SessionNotificationPreference?=null)
+    val notificationPreference:SessionNotificationPreference?=null,
+    /** A supervised child's attention is its parent's (ChildSessions.quiet). */
+    val quiet: Boolean = false)
 data class NotificationRecord(val slot: NotificationSlot, val target: String, val observedAt: Double,
     val observedFingerprint: String = "", val postedFingerprint: String = "",
     val postedKind: SessionAlertKind? = null, val postedTarget: String = "", val eventId: Long = 0, val eventAt: Double = 0.0,
@@ -118,6 +120,13 @@ object NotificationPolicy {
         val recoverable = mutableSetOf<String>()
         for (session in current.distinctBy { it.slot.key }) {
             val previous = old[session.slot.key]
+            if(session.quiet) {
+                // A supervised child posts nothing (spec 2.1). Its request is not remembered, so
+                // once orphaned it is announced once (2.4); a completion seen meanwhile is not replayed.
+                records += (previous ?: NotificationRecord(session.slot,session.target,now)).copy(target=session.target,observedAt=now,
+                    postedFingerprint="",postedKind=null,candidateFingerprint="",candidateTarget="",candidateEventId=0,candidateEventAt=0.0)
+                continue
+            }
             if(session.suppressed) {
                 records += NotificationRecord(session.slot,session.target,now,
                     observedFingerprint=session.kind?.let { fingerprint(JSONArray(listOf(session.target,it.name,session.identity)).toString()) }.orEmpty(),

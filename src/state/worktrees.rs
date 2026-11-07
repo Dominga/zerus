@@ -55,6 +55,33 @@ pub(super) fn error(state: &'static str, detail: impl Into<String>) -> GitError 
     }
 }
 
+/// Whether `reference` (`refs/heads/<branch>`) is taken: the ref itself, a
+/// ref under it (`<branch>/x`) or a ref named by one of its leading parts
+/// (`a` for `a/b`). Each check reads at most one ref, so a repository that
+/// keeps thousands of branches never overflows the bounded Git output, as a
+/// full branch listing did. Ref patterns match whole path parts, and refs sort
+/// by name, so a part sorts before every ref under it.
+fn branch_taken(read: &dyn Fn(&[&str]) -> Result<String>, reference: &str) -> Result<bool> {
+    let first = |pattern: &str| -> Result<String> {
+        Ok(
+            read(&["for-each-ref", "--count=1", "--format=%(refname)", pattern])?
+                .trim_end()
+                .to_owned(),
+        )
+    };
+    if !first(reference)?.is_empty() {
+        return Ok(true);
+    }
+    let parts: Vec<&str> = reference.split('/').collect();
+    for end in 3..parts.len() {
+        let parent = parts[..end].join("/");
+        if first(&parent)? == parent {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub(super) fn git(cwd: &Path, args: &[&str], deadline: Instant) -> std::result::Result<Vec<u8>, GitError> {
     git_holding(cwd, args, deadline, None)
 }
@@ -854,14 +881,7 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
     read(&["check-ref-format", &reference]).map_err(|_| "Invalid new branch name".to_string())?;
     read(&["check-ref-format", "--branch", branch])
         .map_err(|_| "Invalid new branch name".to_string())?;
-    if read(&["for-each-ref", "--format=%(refname)", "refs/heads"])?
-        .lines()
-        .any(|r| {
-            r == reference
-                || r.starts_with(&format!("{reference}/"))
-                || reference.starts_with(&format!("{r}/"))
-        })
-    {
+    if branch_taken(&read, &reference)? {
         return Err(format!(
             "Branch '{branch}' already exists or conflicts with an existing branch. Choose a new branch name."
         ));
@@ -1185,4 +1205,101 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
         created["creation_owner"] = managed.unwrap_or(Value::Null);
     }
     Ok(created)
+}
+
+#[cfg(test)]
+mod branch_taken_tests {
+    use super::branch_taken;
+    use std::cell::Cell;
+    use std::process::Command;
+
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("LC_ALL", "C")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    #[test]
+    fn a_repository_with_thousands_of_branches_keeps_every_check_to_one_ref() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        git(
+            repo,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.invalid",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+        );
+        let head = git(repo, &["rev-parse", "HEAD"]).trim().to_owned();
+        // 3000 long branch names: a full refs/heads listing is far beyond the 64 KiB Git output bound.
+        let mut batch = String::new();
+        for i in 0..3000 {
+            batch.push_str(&format!(
+                "create refs/heads/work-{i:04}-{} {head}\n",
+                "x".repeat(40)
+            ));
+        }
+        for name in ["feat", "a/b", "deep/one/two"] {
+            batch.push_str(&format!("create refs/heads/{name} {head}\n"));
+        }
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["update-ref", "--stdin"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(child.stdin.as_mut().unwrap(), batch.as_bytes()).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert!(git(repo, &["for-each-ref", "--format=%(refname)", "refs/heads"]).len() > 65_536);
+
+        let largest = Cell::new(0usize);
+        let read = |args: &[&str]| -> crate::state::Result<String> {
+            let out = git(repo, args);
+            largest.set(largest.get().max(out.len()));
+            Ok(out)
+        };
+        let taken = |branch: &str| branch_taken(&read, &format!("refs/heads/{branch}")).unwrap();
+        assert!(taken("main"), "the ref itself");
+        assert!(
+            taken("work-0042-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
+            "an existing branch among thousands"
+        );
+        assert!(taken("feat/x"), "a leading part is a branch");
+        assert!(
+            taken("deep/one/two/three"),
+            "a deeper leading part is a branch"
+        );
+        assert!(taken("a"), "a branch lives under it");
+        assert!(taken("deep"), "a branch lives further under it");
+        assert!(!taken("a/c"), "a sibling under the same parent is free");
+        assert!(
+            !taken("work-0042"),
+            "a name that only shares a prefix is free"
+        );
+        assert!(!taken("work-aaca42cc"), "a new name is free");
+        assert!(
+            largest.get() < 256,
+            "each check reads at most one ref, got {} bytes",
+            largest.get()
+        );
+    }
 }

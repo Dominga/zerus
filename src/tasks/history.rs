@@ -234,9 +234,10 @@ mod tests {
     #[test]
     fn pages_preserve_canonical_order_and_are_indexed() {
         let temp = tempfile::tempdir().unwrap();
-        let store = ProjectStore::open(temp.path(), "example").unwrap();
-        let dir = temp
-            .path()
+        let root = temp.path().join("replica");
+        crate::platform::owner_only_dir(&root).unwrap();
+        let store = ProjectStore::open(&root, "example").unwrap();
+        let dir = root
             .join(format!("{:x}", Sha256::digest(b"example")));
         let mut task = task();
         // Equal times retain the canonical Loro order; merged earlier times
@@ -268,9 +269,10 @@ mod tests {
     #[test]
     fn cursor_survives_append_compaction_and_cache_eviction() {
         let temp = tempfile::tempdir().unwrap();
-        let store = ProjectStore::open(temp.path(), "example").unwrap();
-        let dir = temp
-            .path()
+        let root = temp.path().join("replica");
+        crate::platform::owner_only_dir(&root).unwrap();
+        let store = ProjectStore::open(&root, "example").unwrap();
+        let dir = root
             .join(format!("{:x}", Sha256::digest(b"example")));
         let mut a = task();
         for n in 1..=6 {
@@ -317,6 +319,35 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_new_store_and_history_cache_inherit_only_the_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        fs::create_dir(&state).unwrap();
+        assert!(std::process::Command::new("icacls").arg(&state)
+            .args(["/grant", "*S-1-5-11:(OI)(CI)M", "/Q"])
+            .stdout(std::process::Stdio::null()).status().unwrap().success());
+        let config = Config {
+            home: temp.path().to_string_lossy().into_owned(),
+            dir: temp.path().join("config"), state,
+            selves: vec![], peers: vec![], base_peers: vec![],
+            peers_from_environment: false, machines: Default::default(),
+            tab: false, tab_colors: String::new(),
+        };
+        let store = super::super::store(&config, "example").unwrap();
+        let mut task = task();
+        store.save(&mut task).unwrap();
+        let dir = store_dir(&config, "example");
+        for _ in 0..2 {
+            page(&store, &dir, task.uuid(), 2, None).unwrap();
+        }
+        assert!(platform::verify_private(&dir, platform::Private::Directory).unwrap());
+        assert!(platform::verify_private(&dir.join(CACHE), platform::Private::File).unwrap());
+        assert!(!platform::verify_private(&config.state, platform::Private::Directory).unwrap(),
+            "the existing parent keeps its foreign grant");
     }
 
     #[test]

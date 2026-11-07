@@ -452,6 +452,8 @@ fn the_worker_answers_a_sandboxed_members_read_and_starts_its_run_at_low_integri
         let folder = dir.path().join("work");
         std::fs::create_dir_all(&folder).unwrap();
         t.folder = folder.display().to_string();
+        // Task 173: dev's run belongs to its handed task.
+        delivered(&mut t);
         store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
         let read = "88888888-8888-4888-8888-888888888888";
         let send = "99999999-9999-4999-8999-999999999999";

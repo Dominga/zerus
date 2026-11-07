@@ -136,8 +136,12 @@ fn start(input: &Value, wait: bool) -> Result<Value> {
         return Ok(if wait { wait_for(&id) } else { running_note(&claim) });
     }
     let (label, command, cwd, minutes) = fields(input)?;
+    // Task 173: a team member's job belongs to the work handed to it; with
+    // none, or for another attempt, it is refused.
+    let job = teams::shadow::member_job(&caller, string(input, "attempt")).map_err(|error| error.to_string())?;
     if crate::platform::sandboxed() {
-        let request = json!({"label":label,"command":command,"cwd":cwd.display().to_string(),"timeout_minutes":minutes});
+        let request = json!({"label":label,"command":command,"cwd":cwd.display().to_string(),"timeout_minutes":minutes,
+            "attempt":string(input, "attempt")});
         return sandboxed_start(&id, &caller, &request, wait);
     }
     private_dir(&dir())?;
@@ -145,8 +149,13 @@ fn start(input: &Value, wait: bool) -> Result<Value> {
     // Task 108: the build folders the command names are recorded for the
     // cleanup, with whether this run creates them.
     super::build_dirs::note_run(&command, &cwd, caller["name"].as_str().unwrap_or_default());
-    let claim = json!({"request_id":id,"label":label,"command":command,"cwd":cwd.display().to_string(),
+    let mut claim = json!({"request_id":id,"label":label,"command":command,"cwd":cwd.display().to_string(),
         "session":session_of(&caller),"started":now(),"timeout_secs":minutes * 60,"source":"hgs_run"});
+    if let Some(job) = &job {
+        claim["team"] = json!(job.team);
+        claim["task"] = json!(job.task);
+        claim["attempt"] = json!(job.attempt);
+    }
     storage::atomic(&running_path(&id), &claim.to_string())?;
     if let Err(error) = spawn(&id) {
         let _ = fs::remove_file(running_path(&id));
@@ -694,7 +703,7 @@ fn prune() {
 pub(crate) mod tests {
     use super::*;
 
-    use crate::state::teams::model::{Member, MemberState, SessionRef, Team, TeamStatus};
+    use crate::state::teams::model::{Attempt, AttemptState, Member, MemberState, SessionRef, Task, TaskStatus, Team, TeamStatus};
     use crate::state::teams::store::Store;
 
     const QA: &str = "session-10e9dd92-4a7a-49be-a139-da281115f842";
@@ -706,6 +715,11 @@ pub(crate) mod tests {
 
     /// A running team whose member qa is that DeepSeek session, in `folder`.
     fn qa_team(folder: &Path) {
+        qa_team_with(folder, true);
+    }
+
+    /// Task 173: qa's live check is handed to it (an open attempt), unless not.
+    fn qa_team_with(folder: &Path, handed: bool) {
         let session = |name: &str, run: &str, conversation: &str| SessionRef {
             name: name.into(), run_id: run.into(), conversation_id: conversation.into(), ..Default::default()
         };
@@ -723,6 +737,10 @@ pub(crate) mod tests {
                     session: Some(session("dsh/Zerus/zerus-next-for-the-fork-qa", "ba3d8c92-041c-4e14-81b2-b2e63f0e7ee7", QA)),
                     ..Default::default() },
             ],
+            tasks: vec![Task { id: 1, title: "Live check".into(), assignee: "qa".into(),
+                status: if handed { TaskStatus::InProgress } else { TaskStatus::Pending },
+                attempts: if handed { vec![Attempt { n: 1, id: "qa-1".into(), member: "qa".into(), state: AttemptState::Delivered, ..Default::default() }] } else { Vec::new() },
+                ..Default::default() }],
             ..Default::default()
         };
         Store::open(true).unwrap().create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
@@ -767,6 +785,12 @@ pub(crate) mod tests {
             let answer = as_sandboxed_qa(|| start(&request, false)).unwrap();
             assert_eq!(answer["status"], "queued", "{answer}");
             assert!(!dir().exists(), "the sandbox wrote no Zerus state");
+            // Task 173: a run that names an attempt not handed to qa is refused.
+            let mut other = request.clone();
+            other["request_id"] = json!("77777777-7777-4777-8777-777777777777");
+            other["attempt"] = json!("someone-else");
+            let error = as_sandboxed_qa(|| start(&other, false)).unwrap_err();
+            assert!(error.contains("Attempt someone-else is not handed to you"), "{error}");
             let queued = teams::outbox::request(folder.path(), id).unwrap();
             assert_eq!((queued["op"].as_str(), queued["member"].as_str()), (Some("session-run"), Some("qa")));
             assert_eq!(queued["input"]["command"], "cargo build");
@@ -829,6 +853,22 @@ pub(crate) mod tests {
 
     /// Task #28 (1): a process that is no team member's in a sandbox hears
     /// why, and nothing is queued anywhere.
+    /// Task 173: a team member's run with nothing handed to it is refused
+    /// before anything is queued: it asks the lead instead.
+    #[test]
+    fn a_team_members_run_needs_its_handed_work() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        with_test_state_root(root.path(), || {
+            qa_team_with(folder.path(), false);
+            let request = json!({"request_id":"88888888-8888-4888-8888-888888888888","label":"cargo build","command":"cargo build",
+                "cwd":folder.path().display().to_string()});
+            let error = as_sandboxed_qa(|| start(&request, false)).unwrap_err();
+            assert!(error.starts_with("No task is handed to you in team Zerus Next: ask the lead"), "{error}");
+            assert!(teams::outbox::request(folder.path(), "88888888-8888-4888-8888-888888888888").is_none(), "nothing was queued");
+        });
+    }
+
     #[test]
     fn a_sandboxed_run_outside_a_team_is_refused_with_its_reason() {
         let root = tempfile::tempdir().unwrap();

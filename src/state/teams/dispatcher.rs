@@ -295,6 +295,9 @@ pub(crate) enum Step {
     CheckSilent { task: u32, last: f64 },
     /// The member is idle without a ready task while tasks are open (C7).
     Starving { member: String },
+    /// Task 173: the member's session works with nothing handed to it.
+    Unassigned { member: String, what: String },
+    UnassignedEnded { member: String },
     /// The member got work again or nothing is open: the episode ends (C7).
     StarvedEnded { member: String },
     /// Idle without work for too long: tell the free lead once (C7).
@@ -1357,6 +1360,20 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     // hour; a member that becomes due meanwhile waits for the next one.
     if !starved_due.is_empty() && team.starved_digest_at.is_none_or(|at| now - at >= STARVED_DIGEST_EVERY) {
         steps.push(Step::PlanStarved { members: starved_due });
+    }
+    // Task 173: a member building, or working past the grace, with nothing
+    // handed to it is unassigned work for the lead at once, never idle.
+    if team.status == TeamStatus::Running {
+        for member in team.members.iter().filter(|member| member.id != team.lead) {
+            let Some(found) = session_of(member, seen) else { continue };
+            match (super::shadow::unassigned(team, member, found, now), member.unassigned.is_some()) {
+                (Some(what), false) => steps.push(Step::Unassigned { member: member.id.clone(), what }),
+                (None, true) if !found.building && (found.free || !super::shadow::handed(team, &member.id).is_empty()) => {
+                    steps.push(Step::UnassignedEnded { member: member.id.clone() });
+                }
+                _ => {}
+            }
+        }
     }
     // C12: Background work and the budgets declared for it. A job without a
     // budget gets the default red time; a budget ends with its job and never
@@ -7395,6 +7412,22 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::RingMessages { member } => super::doorbell::ring(store, team, member).map(drop),
         Step::RemindReviewer { task, member } => remind_reviewer(store, team, *task, member),
         Step::RemindReport { task } => remind_report(store, team, *task),
+        Step::Unassigned { member, what } => change(store, &team.id, |team, events| {
+            let at = now();
+            let Some(found) = team.members.iter_mut().find(|found| found.id == *member) else { return Ok(()) };
+            if found.unassigned.is_none() {
+                found.unassigned = Some(Unassigned { since: at, what: what.clone() });
+                events.push(Event::new("unassigned_work", json!({"member":member,"what":what})));
+            }
+            Ok(())
+        }),
+        Step::UnassignedEnded { member } => change(store, &team.id, |team, events| {
+            let Some(found) = team.members.iter_mut().find(|found| found.id == *member) else { return Ok(()) };
+            if found.unassigned.take().is_some() {
+                events.push(Event::new("unassigned_work_ended", json!({"member":member})));
+            }
+            Ok(())
+        }),
         Step::Starving { member } => change(store, &team.id, |team, _| {
             if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
                 if found.starved_since.is_none() {
@@ -8117,7 +8150,14 @@ fn take_outbox_with(
             }
             // Task #28: a sandboxed member's own `hgs run` and its host reads.
             if matches!(request["op"].as_str(), Some("session-run" | "read")) {
-                let outcome = sandbox_request(member, folder, &request);
+                // Task 173: a sandboxed member's run belongs to its handed work too.
+                let outcome = match (request["op"].as_str(), member.id != team.lead) {
+                    (Some("session-run"), true) => match super::shadow::job_of(team, &member.id, request["input"]["attempt"].as_str().unwrap_or_default()) {
+                        Ok(_) => sandbox_request(member, folder, &request),
+                        Err(error) => json!({"status":"refused","request_id":request["request_id"],"error":error.to_string()}),
+                    },
+                    _ => sandbox_request(member, folder, &request),
+                };
                 if let Err(error) = super::outbox::settle(folder, &request, &outcome) {
                     eprintln!("hgs team worker: {}: outbox {}: {error}", team.name, path.display());
                 }
@@ -9009,6 +9049,9 @@ mod dispatcher_rights;
 #[cfg(test)]
 #[path = "tests/dispatcher_pulses.rs"]
 mod dispatcher_pulses;
+#[cfg(test)]
+#[path = "tests/dispatcher_shadow.rs"]
+mod dispatcher_shadow;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_areas.rs"]

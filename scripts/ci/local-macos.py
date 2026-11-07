@@ -219,6 +219,10 @@ print('keychain-service policy denies; no IPC or keychain item query')
 
 
 def profile(root, public, temporary, system_temp=None):
+    # Seatbelt does not implement counted repetitions such as {32}. Spell out
+    # the exact length; neither a shorter nor a longer fixture name is admitted.
+    fixture_hex = '[0-9a-f]' * 32
+    service_hex = '[0-9a-f]' * 16
     reads = ['/System', '/usr', '/bin', '/sbin', '/opt/homebrew', '/Library/Developer',
              '/Library/Apple', '/Applications/Xcode.app', '/private/etc', '/private/var/db/dyld',
              '/Library/Preferences/com.apple.dt.Xcode.plist',
@@ -239,13 +243,13 @@ def profile(root, public, temporary, system_temp=None):
         '(allow file-read* ' + ' '.join('(literal ' + quoted(p) + ')' for p in parents) + ')',
         '(allow file-read* file-write* (subpath ' + quoted(root) + ') (subpath ' + quoted(temporary) + ') (subpath "/dev"))',
         '(allow file-ioctl (subpath "/dev"))',
-        '(allow file-read* file-write* (regex #"^/private/tmp/(zguard|zgui)-[0-9a-f]{32}(/|$)"))',
-        '(allow file-read* file-write* (regex #"^/private/tmp/hgs-svc-[0-9a-f]{16}(/|$)"))',
+        '(allow file-read* file-write* (regex #"^/private/tmp/(zguard|zgui)-' + fixture_hex + '(/|$)"))',
+        '(allow file-read* file-write* (regex #"^/private/tmp/hgs-svc-' + service_hex + '(/|$)"))',
         '(allow network-outbound (remote ip))',
         '(allow network-inbound network-bind (local ip))',
         '(allow network* (subpath ' + quoted(temporary) + ') (subpath ' + quoted(root) + '))',
-        '(allow network* (regex #"^/private/tmp/(zguard|zgui)-[0-9a-f]{32}(/|$)"))',
-        '(allow network* (regex #"^/private/tmp/hgs-svc-[0-9a-f]{16}(/|$)"))',
+        '(allow network* (regex #"^/private/tmp/(zguard|zgui)-' + fixture_hex + '(/|$)"))',
+        '(allow network* (regex #"^/private/tmp/hgs-svc-' + service_hex + '(/|$)"))',
         '(allow network-outbound (literal "/private/var/run/mDNSResponder"))',
     ]
     if system_temp is not None:

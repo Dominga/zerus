@@ -3,6 +3,9 @@ import importlib.util
 from pathlib import Path
 import sys
 import os
+import json
+import re
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -96,6 +99,54 @@ class MacPlan(unittest.TestCase):
         self.assertNotIn('(subpath "/private/var/folders', profile)
         with self.assertRaises(RuntimeError):
             MAC.profile('/Users/example/private-ci', [], '/private/tmp/owned-ci', '/Users/example')
+
+    def test_fixture_patterns_keep_exact_lengths_without_counted_repetitions(self):
+        profile = MAC.profile('/Users/example/private-ci', [], '/private/tmp/owned-ci')
+        patterns = [json.loads(p) for p in re.findall(r'\(regex #("[^"\n]+")\)', profile)]
+        self.assertEqual(len(patterns), 4)
+        for prefix, length in [('zguard-', 32), ('zgui-', 32), ('hgs-svc-', 16)]:
+            for size in (length - 1, length, length + 1):
+                path = '/private/tmp/' + prefix + 'a' * size
+                for suffix in ('', '/socket'):
+                    self.assertEqual(any(re.match(p, path + suffix) for p in patterns), size == length)
+        self.assertTrue(all('{' not in p for p in patterns))
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'native Seatbelt policy control')
+    def test_native_fixture_directory_and_socket_scope(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            policy = root / 'checks.sb'
+            policy.write_text(MAC.profile(root, [str(Path(sys.base_prefix).resolve())], root))
+            script = root / 'probe.py'
+            script.write_text(MAC.CREDENTIAL_PROBE + '''
+import pathlib, socket, uuid
+for prefix, length in [('zguard-', 32), ('zgui-', 32), ('hgs-svc-', 16)]:
+    for size in (length - 1, length, length + 1):
+        token = uuid.uuid4().hex + uuid.uuid4().hex
+        path = pathlib.Path('/private/tmp') / (prefix + token[:size])
+        created = False
+        try:
+            try:
+                path.mkdir(mode=0o700)
+                created = True
+            except PermissionError:
+                assert size != length, (prefix, size, 'exact fixture refused')
+            else:
+                assert size == length, (prefix, size, 'adjacent length admitted')
+                with socket.socket(socket.AF_UNIX) as stream:
+                    stream.bind(str(path / 's'))
+                (path / 's').unlink()
+        finally:
+            if created:
+                path.rmdir()
+print('three exact fixture directories/sockets; six adjacent lengths refused')
+''')
+            env = dict(HOME=str(root), CFFIXED_USER_HOME=str(root), TMPDIR=str(root),
+                       PATH='/usr/bin:/bin', LANG='en_US.UTF-8')
+            result = subprocess.run(['/usr/bin/sandbox-exec', '-f', str(policy), sys.executable, str(script)],
+                                    env=env, cwd=root, capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('six adjacent lengths refused', result.stdout)
 
 
 class CanaryIdentity(unittest.TestCase):

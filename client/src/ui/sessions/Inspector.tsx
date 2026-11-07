@@ -54,10 +54,10 @@ function Card(props: { id: string; title: JSX.Element; aside?: JSX.Element; clas
  * A value row. With `copy` the whole row is a button: hover highlights it, the
  * copy mark shows at its right end, and a click copies that text (owner 2026-11-07).
  */
-function Row(props: { icon: string; label?: string; mono?: boolean; title?: string; tail?: JSX.Element; copy?: string; children: JSX.Element }) {
+function Row(props: { icon: string; label?: string; mono?: boolean; title?: string; tail?: JSX.Element; copy?: string; onCopy?: () => void; copyName?: string; children: JSX.Element }) {
   const body = () => <><span class="irow-ico"><Icon name={props.icon} size={16} /></span><span class="irow-val ell" classList={{ mono: props.mono }}>{props.children}</span>{props.tail}<Show when={props.label}><span class="irow-label">{props.label}</span></Show></>;
   return <Show when={props.copy} fallback={<div class="irow" title={props.title}>{body()}</div>}>{(text) =>
-    <button type="button" class="irow copyable" title={copyTip(props.title)} aria-label={props.label ? tr("Copy %1: %2", props.label, text()) : tr("Copy")} onClick={() => void copyValue(text())}>{body()}<CopyMark /></button>}</Show>;
+    <button type="button" class="irow copyable" title={copyTip(props.title)} aria-label={props.copyName ?? (props.label ? tr("Copy %1: %2", props.label, text()) : tr("Copy"))} onClick={() => (props.onCopy ? props.onCopy() : void copyValue(text()))}>{body()}<CopyMark /></button>}</Show>;
 }
 const copyTip = (title?: string) => (title ? `${title}\n${tr("Click to copy")}` : tr("Click to copy"));
 const CopyMark = () => <span class="copy-mark" aria-hidden="true"><Icon name="copy" size={13} /></span>;
@@ -97,11 +97,17 @@ function Details() {
     if (a) return plan ? tr("%1 (%2)", a.label || tr("Unnamed account"), plan) : a.label || tr("Unnamed account");
     return bound().accountId || bound().accountHome || (SHELLS.has(s().cmd) ? tr("No account (shell)") : tr("Account not recorded"));
   };
+  // The account as the row names it, without the plan suffix: its sign-in email when known, else its
+  // label, else the recorded ID or home. A shell or an unrecorded account has nothing to copy.
+  const accountCopy = () => {
+    const a = account().account;
+    return a?.usage.identity.email || a?.label || bound().accountId || bound().accountHome || undefined;
+  };
   const home = () => bound().accountHome || account().profile?.home || "";
   const profileId = () => bound().accountId || account().profile?.id || "";
-  return <div class="insp-body"><Card id="details-id" title={tr(identity().title)}><Row icon="key-round" mono title={tr(identity().title)} tail={<button class="icon-btn small" aria-label={tr(identity().caption)} title={tr(identity().caption)} disabled={!identity().value} onClick={() => void copyIdentity(snapshotOf(s()), details())}><Icon name="copy" size={13} /></button>}><span class="selectable">{value(identity().value)}</span></Row></Card>
+  return <div class="insp-body"><Card id="details-id" title={tr(identity().title)}><Row icon="key-round" mono title={tr(identity().title)} copy={identity().value || undefined} copyName={tr("Copy %1: %2", tr(identity().title), identity().value)} onCopy={() => void copyIdentity(snapshotOf(s()), details())}>{value(identity().value)}</Row></Card>
     <Card id="details-session" title={tr("Session")}><Row icon="message-square" label={tr("name")} mono title={s().name} copy={s().name}>{s().name}</Row><Row icon="monitor" label={tr("machine")} copy={s().machine}>{s().machine}</Row><Row icon="folder" label={tr("directory")} mono title={s().cwdPath} copy={s().cwdPath}>{value(s().cwdPath)}</Row><Row icon="git-branch" label={tr("branch")} copy={s().branch}>{value(s().branch)}</Row><Row icon="layers" label={tr("project")} copy={grouping().headers.find((p) => p.id === groupOf(s().key))?.name}>{grouping().headers.find((p) => p.id === groupOf(s().key))?.name ?? tr("Not reported")}</Row><Row icon="clock" label={tr("last event")}>{s().updatedAt ? eventTimeOf(new Date(s().updatedAt! * 1000)) : tr("Not reported")}</Row></Card>
-    <Card id="details-account" title={tr("Account")}><Row icon="user-round-cog" label={tr("account")} title={profileId() ? tr("Profile %1", profileId()) : undefined} tail={<Show when={account().tag}><span class="acct-pid tabular" title={tr("Profile %1", profileId())}>{account().tag}</span></Show>}>{accountText()}</Row><Row icon="hard-drive" label={tr("agent home")} mono title={home() || undefined} copy={home() || undefined}>{value(homeShort(home()))}</Row><Row icon="sparkles" label={tr("model")} copy={s().model || undefined}>{value(s().model)} {s().effort}</Row></Card>
+    <Card id="details-account" title={tr("Account")}><Row icon="user-round-cog" label={tr("account")} title={profileId() ? tr("Profile %1", profileId()) : undefined} copy={accountCopy()} tail={<Show when={account().tag}><span class="acct-pid tabular" title={tr("Profile %1", profileId())}>{account().tag}</span></Show>}>{accountText()}</Row><Row icon="hard-drive" label={tr("agent home")} mono title={home() || undefined} copy={home() || undefined}>{value(homeShort(home()))}</Row><Row icon="sparkles" label={tr("model")} copy={s().model || undefined}>{value(s().model)} {s().effort}</Row></Card>
     <Card id="details-usage" title={tr("Session usage")}><Show when={rows().length} fallback={<div class="hint">{tr("No native usage reported for this conversation yet.")}</div>}><table class="usage"><tbody><For each={rows()}>{([label, val]) => <Show when={val !== tr("Not reported")} fallback={<tr><td>{label}</td><td class="tabular">{val}</td></tr>}>
       <tr class="copyable" tabindex="0" role="button" title={tr("Click to copy")} aria-label={tr("Copy %1: %2", label, val)} onClick={() => void copyValue(val)}
         onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); void copyValue(val); } }}><td>{label}</td><td class="tabular"><span class="u-val">{val}<CopyMark /></span></td></tr></Show>}</For></tbody></table><Show when={usage().costNote}><div class="hint">{usage().costNote}</div></Show><div class="hint">{usage().footer}</div></Show></Card>

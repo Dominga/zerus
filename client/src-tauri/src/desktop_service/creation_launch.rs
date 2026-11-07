@@ -74,22 +74,37 @@ pub(crate) fn call(
     shutdown: &AtomicBool,
 ) -> LaunchAnswer {
     let sent = std::cell::Cell::new(false);
+    let stage = std::cell::Cell::new("selection");
     let result = (|| -> Result<LaunchAnswer, ()> {
         let read = Read::new(service).map_err(drop)?;
+        stage.set("operation");
         if !creation::valid_operation(id, operation) {
             return Err(());
         }
         // Only a completed probe can prove no support; an I/O error cannot.
+        stage.set("help_probe");
         if !read.supports(wire::HELP_MARKER).map_err(drop)? {
             return Ok(LaunchAnswer::Direct);
         }
+        stage.set("consent");
         if !fresh {
             return Err(());
         }
+        stage.set("plan");
         let plan = wire::Plan::from_operation(id, operation).ok_or(())?;
         let until = Instant::now() + RPC_WAIT;
+        stage.set("creation_rpc_admission");
         let charge = loop {
-            if shutdown.load(Ordering::Acquire) || !read.current() || Instant::now() >= until {
+            if shutdown.load(Ordering::Acquire) {
+                stage.set("creation_rpc_shutdown");
+                return Err(());
+            }
+            if !read.current() {
+                stage.set("creation_rpc_selection_changed");
+                return Err(());
+            }
+            if Instant::now() >= until {
+                stage.set("creation_rpc_deadline");
                 return Err(());
             }
             match read.service.shared.creation_rpc.admit(Role::Fleet) {
@@ -97,17 +112,28 @@ pub(crate) fn call(
                 Err(zerus_client_core::desktop::drain::Refused::Capacity) => {
                     std::thread::sleep(Duration::from_millis(10))
                 }
-                Err(_) => return Err(()),
+                Err(refusal) => {
+                    eprintln!("zerus-client: creation_launch_refused code=creation_rpc refusal={refusal:?}");
+                    return Err(());
+                }
             }
         };
+        stage.set("intent_revision");
+        let revision = operation["revision"].as_u64().ok_or(())?;
+        stage.set("intent_encoding");
+        let original = serde_json::to_string(operation).map_err(drop)?;
         let intent = wire::Intent {
             scope: read.scope.clone(),
             creation_id: id.into(),
             launch_id: plan.launch_id.clone(),
-            revision: operation["revision"].as_u64().ok_or(())?,
-            original: serde_json::to_string(operation).map_err(drop)?,
+            revision,
+            original,
         };
-        intent.clone().verify().map_err(drop)?;
+        stage.set("intent_verify");
+        // verify returns a closed &'static str code, never child or request text.
+        intent.clone().verify().map_err(|code| {
+            eprintln!("zerus-client: creation_launch_refused code={code}");
+        })?;
         sent.set(true);
         // A lost or unreadable reply may still have been admitted: only
         // the read-only lookup below can tell.
@@ -170,6 +196,11 @@ pub(crate) fn call(
         if sent.get() {
             LaunchAnswer::Unconfirmed(zerus_client_core::repository::UNCONFIRMED_OPERATION.into())
         } else {
+            // Fixed stage/boolean only; never log the operation or proof.
+            eprintln!(
+                "zerus-client: creation_launch_unsent stage={} fresh={fresh}",
+                stage.get()
+            );
             // Nothing reached the service: never Unknown.
             LaunchAnswer::Unsent(NOT_SENT.into())
         }

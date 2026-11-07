@@ -2609,6 +2609,48 @@ mod tests {
         fake.stop(host);
     }
     #[test]
+    fn continue_after_a_definitely_unsent_submit_has_fresh_consent_for_the_reserved_launch() {
+        use crate::desktop_service::creation_launch::{self, LaunchAnswer};
+        let fake = Fake::new();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = calls.clone();
+        let mut services = fake.services();
+        services.service_launch = Some(Arc::new(move |id, operation, fresh, shutdown| {
+            let mut calls = lock(&seen);
+            calls.push((text(operation, "launch_id").to_owned(), fresh));
+            if calls.len() == 1 {
+                return creation_launch::call(None, id, operation, fresh, shutdown);
+            }
+            if fresh {
+                LaunchAnswer::Launched
+            } else {
+                LaunchAnswer::Unsent(creation_launch::NOT_SENT.into())
+            }
+        }));
+        let host = CreationHost::new(fake.dir.join("creations.json"), services);
+        let id = admitted(&host, plan());
+        state(&host, &id, "failed");
+        let replacement = operation(&host, &id)["launch_id"].clone();
+        assert_eq!(lock(&calls).len(), 1);
+        assert!(lock(&calls)[0].1);
+        assert!(!flag(&operation(&host, &id), "launch_dispatched"));
+        assert_ne!(replacement, lock(&calls)[0].0);
+        host.action(id.clone(), CreationAction::Resume).unwrap();
+        state(&host, &id, "confirming");
+        assert_eq!(lock(&calls).len(), 2);
+        assert!(lock(&calls)[1].1);
+        assert_eq!(replacement, lock(&calls)[1].0);
+        host.action(id.clone(), CreationAction::Resume).unwrap();
+        assert!(host.arrange_for_test(|| {}));
+        assert_eq!(
+            lock(&calls).len(),
+            2,
+            "no regrant for an already dispatched launch"
+        );
+        assert!(!launched_directly(&fake));
+        fake.stop(host);
+    }
+    #[test]
     fn a_service_without_launch_support_launches_on_the_direct_path() {
         use crate::desktop_service::creation_launch::LaunchAnswer;
         let fake = Fake::new();

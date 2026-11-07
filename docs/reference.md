@@ -2934,7 +2934,10 @@ is kept: **Continue setup** never repeats it. **Edit choices** opens a separate,
 reviewed creation with a new identity. Missing, unreadable, mismatched or Unknown
 receipts stay **Creation result unknown**, with **Check result** and **Hide status**.
 Failure and unknown-result notices close on the normal toast timer; their full
-details remain on the creation card.
+details remain on the creation card. A failure first read after opening the
+window stays quiet only if its last recorded state change predates this window's
+start, even when the creation itself is much older. Older cards without that
+timestamp use their creation time.
 
 Only the exact native launch identity, computer, name and agent replace a card
 with a real session. Command success alone remains **Confirming session…**; a

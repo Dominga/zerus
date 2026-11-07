@@ -115,6 +115,17 @@ For a persistent desktop rollback use that page's maintained previous-version
 Qt route; an `=0` process override or `launchctl setenv` is not a reboot-persistent
 desktop selection.
 
+On Linux, Zerus checks the native AT-SPI accessibility bus before starting GTK.
+The check has a two-second budget, including discovery and authentication. If
+the bus is unavailable or the check cannot finish, the GUI starts with
+`NO_AT_BRIDGE=1` for that launch, avoiding a failed bridge initialization. A
+healthy bus keeps accessibility enabled; an explicit `NO_AT_BRIDGE=1` remains
+respected. The startup log records `accessibility_bus_unavailable`,
+`accessibility_bus_timeout` or `accessibility_probe_failed` without bus addresses.
+After the desktop accessibility service recovers, an ordinary GUI restart can
+restore accessibility. Zerus does not change accessibility settings or restart
+the bus. This startup check cannot prevent a bus failure after the check.
+
 For a local Linux Zerus Next source build, an explicit private WebKitGTK/GTK3
 stack can be selected at installation:
 

@@ -55,6 +55,8 @@ mod instance;
 mod instance;
 #[doc(hidden)]
 pub mod lifecycle;
+#[cfg(target_os = "linux")]
+mod linux_accessibility;
 #[cfg(feature = "live")]
 mod login_item;
 #[cfg(target_os = "macos")]
@@ -251,6 +253,12 @@ pub struct Startup {
 /// `--build-info`. It then takes the single-instance socket, or hands the
 /// activation to the running instance and returns, and runs the app.
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    if let Some(status) =
+        linux_accessibility::probe_entry(&std::env::args_os().skip(1).collect::<Vec<_>>())
+    {
+        std::process::exit(status);
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let options = match cli::parse(&args) {
         Ok(cli::Command::Run(options)) => options,
@@ -309,6 +317,8 @@ pub fn run() {
             std::process::exit(2);
         }
     };
+    #[cfg(target_os = "linux")]
+    linux_accessibility::prepare();
     startup_log::record("entered", "gui_entry", None);
     startup_log::install_panic_hook();
     let context: tauri::Context<tauri::Wry> = tauri::generate_context!();

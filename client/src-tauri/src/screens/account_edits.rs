@@ -6,6 +6,7 @@ use std::collections::VecDeque;
 use zerus_client_core::account_actions::{
     self, models::Catalog as ModelCatalog, Binding, Kind, Values,
 };
+use zerus_client_core::text::{Arg, Text};
 pub mod distribution;
 pub mod setup;
 
@@ -22,6 +23,11 @@ struct Plan {
     kind: Kind,
     targets: Vec<Target>,
     models: Option<ModelCatalog>,
+    /// A permission change opened as shared: every member must still share
+    /// it when it is saved (zerus-f0uz8).
+    shared: bool,
+    /// The account the plan was opened for.
+    account: String,
 }
 struct Target {
     machine: String,
@@ -51,7 +57,8 @@ pub struct EditView {
 }
 #[derive(Serialize)]
 pub struct EditResult {
-    notices: Vec<String>,
+    /// Translated by the webview (zerus-0y2yx); errors carry hgs's own text.
+    notices: Vec<Text>,
     errors: Vec<String>,
 }
 #[derive(Deserialize, Default)]
@@ -261,6 +268,8 @@ impl Screens {
             handle,
             Plan {
                 kind,
+                shared: kind == Kind::Permissions && !group.permissions_per_computer,
+                account: group.key.clone(),
                 targets,
                 models,
             },
@@ -338,11 +347,12 @@ impl Screens {
         // The handle is consumed before any effect. No exit, retry or reopened
         // webview can dispatch this captured plan for a second time.
         let _busy = Busy(&self.0.edits);
-        let values = Values {
+        let mut values = Values {
             label: request.label,
             mode: request.mode,
             model: request.model,
             effort: request.effort,
+            ..Default::default()
         };
         if plan.kind == Kind::Model {
             plan.models
@@ -354,6 +364,46 @@ impl Screens {
             notices: Vec::new(),
             errors: Vec::new(),
         };
+        if plan.shared {
+            // The scope is outside the catalog revision: before any write,
+            // every member must still share its permissions. A member that
+            // keeps them per computer since the dialog opened makes the
+            // account per computer, so nothing is saved (zerus-f0uz8): the
+            // hub's current view of every member (offline and newly added
+            // ones too), then a fresh read of each computer written.
+            let still_shared = self
+                .accounts(false)
+                .accounts
+                .iter()
+                .find(|account| account.key == plan.account)
+                .is_some_and(|account| !account.permissions_per_computer);
+            if !still_shared {
+                return Ok(EditResult {
+                    notices: Vec::new(),
+                    errors: vec![PER_COMPUTER_NOW.into()],
+                });
+            }
+            for target in &plan.targets {
+                let Ok(binding) = target.binding.as_ref() else {
+                    continue;
+                };
+                let current = binding.fresh(&self.0.hgs).ok();
+                let per_computer = current.as_ref().is_some_and(|catalog| {
+                    catalog["profiles"].as_array().is_some_and(|rows| {
+                        rows.iter().any(|row| {
+                            row["id"] == binding.id.as_str()
+                                && row["permission_scope"] == "computer"
+                        })
+                    })
+                });
+                if per_computer {
+                    return Ok(EditResult {
+                        notices: Vec::new(),
+                        errors: vec![format!("{}: {PER_COMPUTER_NOW}", target.machine)],
+                    });
+                }
+            }
+        }
         let mut own_revisions: BTreeMap<ComputerId, (String, String)> = BTreeMap::new();
         // Computers saved by a model, permission or scope edit: one notice
         // names them all; each failure keeps its own computer.
@@ -378,6 +428,13 @@ impl Screens {
                 .map(|_| "This machine")
                 .unwrap_or(&target.machine)
                 .to_owned();
+            // Each shared write also names the scope, checked under that
+            // computer's catalog lock; an older hgs keeps no scope.
+            values.expect_scope = if plan.shared && target.scope_supported {
+                "account".into()
+            } else {
+                String::new()
+            };
             let result = (|| {
                 let mut binding = target.binding?;
                 let original_revision = binding.revision.clone();
@@ -424,13 +481,13 @@ impl Screens {
                     }
                     reply.notices.push(match plan.kind {
                         Kind::Rename | Kind::Model | Kind::Permissions | Kind::Scope => continue,
-                        Kind::Default => format!(
-                            "Default account saved for new sessions on {}.",
-                            target.machine
+                        Kind::Default => zerus_client_core::text!(
+                            "Default account saved for new sessions on %1.",
+                            target.machine.clone()
                         ),
-                        Kind::Remove => format!(
-                            "Account removed from {}. Add it again whenever you need it.",
-                            target.machine
+                        Kind::Remove => zerus_client_core::text!(
+                            "Account removed from %1. Add it again whenever you need it.",
+                            target.machine.clone()
                         ),
                     });
                 }
@@ -445,19 +502,24 @@ impl Screens {
             }
         }
         if plan.kind == Kind::Rename && reply.errors.is_empty() {
-            reply.notices.push("Account name updated.".into());
+            reply
+                .notices
+                .push(zerus_client_core::text!("Account name updated."));
         }
         if !saved.is_empty() {
             let on = machine_list(&saved);
             reply.notices.push(match plan.kind {
-                Kind::Model => format!("Model defaults saved for new sessions on {on}."),
-                Kind::Permissions => {
-                    format!("Permission mode saved for new and resumed sessions on {on}.")
+                Kind::Model => {
+                    zerus_client_core::text!("Model defaults saved for new sessions on %1.", on)
                 }
+                Kind::Permissions => zerus_client_core::text!(
+                    "Permission mode saved for new and resumed sessions on %1.",
+                    on
+                ),
                 _ if values.mode == "computer" => {
-                    format!("Permissions are now kept per computer on {on}.")
+                    zerus_client_core::text!("Permissions are now kept per computer on %1.", on)
                 }
-                _ => format!("Permissions are now shared by {on}."),
+                _ => zerus_client_core::text!("Permissions are now shared by %1.", on),
             });
         }
         reply.notices.dedup();
@@ -465,12 +527,25 @@ impl Screens {
     }
 }
 
-/// `arch`, `arch and mac`, `arch, mac and va-kids`.
-fn machine_list(machines: &[String]) -> String {
+const PER_COMPUTER_NOW: &str =
+    "Permissions on this account are now kept per computer. Nothing was saved; open Change… again.";
+
+/// `arch`, `arch and mac`, `arch, mac and va-kids`, translated by the
+/// webview: names verbatim, the joins as nested prose.
+pub(crate) fn machine_list(machines: &[String]) -> Arg {
     match machines {
-        [] => String::new(),
-        [one] => one.clone(),
-        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+        [] => Arg::Verbatim(String::new()),
+        [one] => Arg::Verbatim(one.clone()),
+        [one, last] => Arg::Text(zerus_client_core::text!(
+            "%1 and %2",
+            one.clone(),
+            last.clone()
+        )),
+        [first, rest @ ..] => Arg::Text(zerus_client_core::text!(
+            "%1, %2",
+            first.clone(),
+            machine_list(rest)
+        )),
     }
 }
 
@@ -705,6 +780,8 @@ mod tests {
         screens.0.edits.0.lock().unwrap().plans.push_back((
             "model".into(),
             Plan {
+                shared: false,
+                account: String::new(),
                 kind: Kind::Model,
                 targets: vec![Target {
                     machine: "workstation".into(),
@@ -757,6 +834,8 @@ mod tests {
         screens.0.edits.0.lock().unwrap().plans.push_back((
             "captured".into(),
             Plan {
+                shared: false,
+                account: String::new(),
                 models: None,
                 kind: Kind::Rename,
                 targets: vec![
@@ -840,6 +919,8 @@ mod tests {
         screens.0.edits.0.lock().unwrap().plans.push_back((
             "same-machine".into(),
             Plan {
+                shared: false,
+                account: String::new(),
                 models: None,
                 kind: Kind::Rename,
                 targets: vec![
@@ -867,7 +948,7 @@ mod tests {
             )
             .unwrap();
         assert!(result.errors.is_empty(), "{:?}", result.errors);
-        assert_eq!(result.notices, ["Account name updated."]);
+        assert_eq!(english(&result.notices), ["Account name updated."]);
         let saved: Value =
             serde_json::from_slice(&std::fs::read(scratch.0.join("catalog.json")).unwrap())
                 .unwrap();
@@ -980,7 +1061,7 @@ mod tests {
         assert!(opened.differs);
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(
-            result.notices,
+            english(&result.notices),
             ["Model defaults saved for new sessions on workstation and workstation."]
         );
         let saved = || -> Value {
@@ -1017,7 +1098,7 @@ mod tests {
         );
         assert_eq!(opened.machines.len(), 2);
         assert_eq!(
-            result.notices,
+            english(&result.notices),
             ["Permissions are now kept per computer on workstation and workstation."]
         );
         assert!(group().permissions_per_computer);
@@ -1038,13 +1119,150 @@ mod tests {
             .collect();
         assert_eq!(modes, [json!("provider"), json!("bypass")]);
     }
+    #[cfg(unix)]
+    #[test]
+    fn a_shared_permission_change_stops_when_a_computer_kept_its_own_since() {
+        // zerus-f0uz8 review: the scope is outside the catalog revision, so a
+        // dialog opened as shared must not spread a mode after another
+        // member switched to per computer.
+        use std::os::unix::fs::PermissionsExt;
+        struct Scratch(PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let scratch = Scratch(std::env::temp_dir().join(format!(
+            "zerus-account-scope-{}-{stamp}",
+            std::process::id()
+        )));
+        std::fs::create_dir(&scratch.0).unwrap();
+        let hgs = scratch.0.join("hgs");
+        std::fs::copy(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../core/tests/support/fake_hgs_account_edits.py"),
+            &hgs,
+        )
+        .unwrap();
+        std::fs::set_permissions(&hgs, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (screens, pump, first) = fixture_at(hgs);
+        let member = |id: &str, home: &str| {
+            json!({"id":id,"provider":"codex","label":"Example","home":home,"auth_revision":"a1","installed":true,
+                "permission_scope":"account","account_status":{"status":"ok","identity":{"account_id":"example-account"}}})
+        };
+        let catalog = json!({"revision":"r1","setup_revision":true,"permission_scope_supported":true,
+            "profiles":[member("work", "/accounts/example"), member("second", "/accounts/second")]});
+        std::fs::write(scratch.0.join("catalog.json"), catalog.to_string()).unwrap();
+        screens
+            .lock()
+            .accounts
+            .catalogs
+            .get_mut(&first.computer)
+            .unwrap()
+            .data = Some(catalog.clone());
+        let view = screens.accounts(false);
+        let account = view.accounts.iter().find(|a| a.members.len() == 2).unwrap();
+        let selected = account.members.iter().find(|m| m.id == "work").unwrap();
+        let opened = screens
+            .edit_open(&pump, &account.key, &selected.key, Kind::Permissions)
+            .unwrap();
+        assert_eq!((opened.machines.len(), opened.per_computer), (2, false));
+        // Meanwhile the second profile keeps its permissions per computer;
+        // the revision does not change, and the hub has not heard yet.
+        let mut changed = catalog.clone();
+        changed["profiles"][1]["permission_scope"] = json!("computer");
+        std::fs::write(scratch.0.join("catalog.json"), changed.to_string()).unwrap();
+        let result = screens
+            .edit_apply(
+                &pump,
+                EditRequest {
+                    handle: opened.handle.clone(),
+                    mode: "bypass".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(result.notices.is_empty(), "{:?}", result.notices);
+        assert_eq!(result.errors.len(), 1);
+        assert!(
+            result.errors[0].contains("now kept per computer"),
+            "{:?}",
+            result.errors
+        );
+        let calls = std::fs::read_to_string(scratch.0.join("calls.jsonl")).unwrap();
+        assert!(!calls.contains("\"permissions\""), "{calls}");
+        // The review's case: the hub has heard of the switch already.
+        std::fs::write(scratch.0.join("catalog.json"), catalog.to_string()).unwrap();
+        let reopened = screens
+            .edit_open(&pump, &account.key, &selected.key, Kind::Permissions)
+            .unwrap();
+        assert!(!reopened.per_computer);
+        screens
+            .lock()
+            .accounts
+            .catalogs
+            .get_mut(&first.computer)
+            .unwrap()
+            .data = Some(changed.clone());
+        assert!(screens
+            .accounts(false)
+            .accounts
+            .iter()
+            .any(|a| a.permissions_per_computer));
+        let result = screens
+            .edit_apply(
+                &pump,
+                EditRequest {
+                    handle: reopened.handle.clone(),
+                    mode: "bypass".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(result.errors, [PER_COMPUTER_NOW]);
+        let calls = std::fs::read_to_string(scratch.0.join("calls.jsonl")).unwrap();
+        assert!(!calls.contains("\"permissions\""), "{calls}");
+        // Each shared write also names the scope its computer must still have.
+        let binding = Binding::capture(
+            first.computer.clone(),
+            first.machine_id.clone(),
+            &catalog,
+            "work",
+        )
+        .unwrap();
+        let shared = binding
+            .edit_values(
+                Kind::Permissions,
+                &Values {
+                    mode: "bypass".into(),
+                    expect_scope: "account".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(shared
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--expect-scope", "account"]));
+    }
+    fn english(notices: &[Text]) -> Vec<String> {
+        notices.iter().map(Text::english).collect()
+    }
     #[test]
     fn computer_lists_read_as_text() {
         let list = |names: &[&str]| {
-            machine_list(&names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>())
+            let names: Vec<String> = names.iter().map(|n| (*n).to_owned()).collect();
+            Text::with("%1", vec![machine_list(&names)]).english()
         };
         assert_eq!(list(&["arch"]), "arch");
         assert_eq!(list(&["arch", "mac"]), "arch and mac");
         assert_eq!(list(&["arch", "mac", "va-kids"]), "arch, mac and va-kids");
+        // The joins are prose the webview translates; the names never are.
+        let names = vec!["arch".to_owned(), "mac".to_owned()];
+        assert!(matches!(machine_list(&names), Arg::Text(ref text) if text.source == "%1 and %2"));
     }
 }

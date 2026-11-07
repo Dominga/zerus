@@ -284,6 +284,13 @@ class Accounts(unittest.TestCase):
         self.assertEqual(changed['revision'],listed['revision'])
         self.assertEqual(json.loads((self.config/'account-scopes.json').read_text()),{'permission_scopes':{'work':'computer'}})
         self.assertEqual(oct((self.config/'account-scopes.json').stat().st_mode & 0o777),'0o600')
+        # A shared change names the scope it saw; a computer that keeps its
+        # permissions per computer since then refuses it, under the lock.
+        stale=self.run_hgs('account','permissions','work','--mode','bypass','--expect-scope','account',ok=False)
+        self.assertIn(b'changed between shared and per computer',stale.stderr)
+        self.assertNotIn('work',json.loads((self.config/'accounts.json').read_text()).get('permission_modes',{}))
+        self.run_hgs('account','permissions','work','--mode','bypass','--expect-scope','computer')
+        self.run_hgs('account','permissions','work','--mode','provider')
         back=json.loads(self.run_hgs('account','permission-scope','work','--scope','account').stdout)
         self.assertEqual({r['id']:r for r in back['profiles']}['work']['permission_scope'],'account')
         self.assertEqual(json.loads((self.config/'account-scopes.json').read_text()),{})

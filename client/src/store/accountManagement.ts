@@ -1,6 +1,7 @@
 import { createSignal } from "solid-js";
 import { accountEditOpen, accountEditApply, accountEditClose, type AccountEditKind, type AccountEditView, type AccountEditResult, type AccountEditValues } from "../bridge";
 import { notify } from "./actions";
+import { trText } from "../text";
 
 export interface AccountPrompt extends AccountEditView { origin: HTMLElement }
 interface Port {
@@ -25,7 +26,7 @@ export function createAccountManagement(port: Port) {
     setPrompt(undefined); setBusy(true);
     try {
       const answer = await port.apply(view.handle, values);
-      answer.notices.forEach(text => { setNotice(text); port.notice(false, text); });
+      answer.notices.map(trText).forEach(text => { setNotice(text); port.notice(false, text); });
       answer.errors.forEach(text => port.notice(true, text));
     } catch (error) { port.notice(true, String(error)); }
     finally { setBusy(false); }

@@ -51,6 +51,13 @@ pub(super) fn describe(config: &Config, rows: &mut [Value]) {
     }
 }
 
+/// Whether `id`'s scope here is `expected` (`account` or `computer`); an
+/// unreadable record is `computer`. Called under the catalog lock.
+pub(super) fn is(config: &Config, id: &str, expected: &str) -> bool {
+    let per_computer = read_scopes(config).is_none_or(|scopes| scopes.permission_scopes.contains_key(id));
+    expected == if per_computer { PER_COMPUTER } else { SHARED }
+}
+
 /// `account permission-scope ID --scope account|computer [--revision REV]`.
 pub(super) fn set(config: &Config, args: &[String], dry: bool) -> Result<Value> {
     let id = args.get(1).map(String::as_str).unwrap_or("");

@@ -4287,10 +4287,16 @@ computer makes the whole account per computer, so a change never spreads by
 accident. `hgs [@host] account permission-scope ID --scope account|computer
 [--revision REV]` sets it on one computer; `account ls` reports
 `permission_scope_supported: true` where it is available. An unreadable scope
-record reads as per computer. **Add to machine…** copies the selected computer's model
-and effort, and a shared bypass mode, to the new profile; a computer whose
-catalog refuses one names it in the result, and the account shows the
-difference.
+record reads as per computer. The scope is outside the catalog revision, so a
+shared permission change checks it again when it is saved: if the account is
+now per computer, by the desktop's current view of every member or by a fresh
+read of any computer it writes, nothing is saved; each write also passes
+`--expect-scope account`, which that computer checks under its catalog lock.
+**Add to machine…** copies the selected computer's model and effort, and its
+permission mode while the account still shares it, to the new profile as
+explicit values, provider settings included, so a restored profile drops older
+overrides. A computer whose catalog refuses one names it in the result, and
+the account shows the difference.
 
 Accounts collects provider profiles from connected machines. Verified provider
 account ID, or email with organization, groups the same account across hosts;

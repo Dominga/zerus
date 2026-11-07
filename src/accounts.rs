@@ -589,6 +589,11 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             let _lock=locked(config)?;let bytes=read(config)?;check_revision(&bytes,args)?;let mut catalog=decode(&bytes)?;
             if !native_id(id) && !catalog.profiles.contains_key(id) {return Err(Error::new(1,"Account profile does not exist."));}
             if id=="native-opencode" && mode!="provider" {return Err(Error::new(1,"OpenCode permissions are managed in its native configuration"));}
+            // A shared change names the scope it saw; a computer that keeps
+            // its permissions per computer since then refuses it (zerus-f0uz8).
+            if let Some(expected)=arg(args,"--expect-scope") {
+                if !permission_scope::is(config,id,expected) {return Err(Error::new(1,"Permissions on this account changed between shared and per computer. Refresh before saving."));}
+            }
             if mode=="provider" {catalog.permission_modes.remove(id);} else {catalog.permission_modes.insert(id.into(),mode.into());}
             if !dry {save(config,&catalog)?;}println!("{}",list(config)?);
         },

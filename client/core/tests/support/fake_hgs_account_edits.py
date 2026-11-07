@@ -48,11 +48,19 @@ elif args[3] == "rm":
 elif args[3] == "permissions":
     mode = args[args.index("--mode") + 1]
     assert mode in ("provider", "bypass")
+    if "--expect-scope" in args and profile.get("permission_scope", "account") != args[args.index("--expect-scope") + 1]:
+        print("Permissions on this account changed between shared and per computer. Refresh before saving.", file=sys.stderr)
+        sys.exit(1)
     profile["permission_mode"] = mode
 elif args[3] == "permission-scope":
     scope = args[args.index("--scope") + 1]
     assert scope in ("account", "computer")
     profile["permission_scope"] = scope
+    # As the real CLI: the scope lives beside accounts.json, so the catalog
+    # revision does not change.
+    (root / "catalog.json").write_text(json.dumps(catalog))
+    print(json.dumps(catalog))
+    sys.exit()
 elif args[3] == "model-defaults":
     model, effort = args[args.index("--model") + 1], args[args.index("--effort") + 1]
     assert (not model and not effort) or (model == "model-a" and effort in ("", "low", "high"))

@@ -32,6 +32,9 @@ pub struct Values {
     pub mode: String,
     pub model: String,
     pub effort: String,
+    /// For a shared permission change: the scope the member must still have
+    /// (`account`), checked by its hgs under the catalog lock (zerus-f0uz8).
+    pub expect_scope: String,
 }
 
 /// Native-only evidence captured when the action opens, never read from a
@@ -163,6 +166,10 @@ impl Binding {
                 return Err("Choose provider or bypass permission mode.".into());
             }
             call.args.extend(["--mode".into(), values.mode.clone()]);
+            if !values.expect_scope.is_empty() {
+                call.args
+                    .extend(["--expect-scope".into(), values.expect_scope.clone()]);
+            }
         }
         if kind == Kind::Scope {
             if self.provider == "opencode"

@@ -14,12 +14,16 @@ pub(super) struct Plan {
     carried: Carried,
 }
 /// What Add to other computers carries to a new profile: the shown
-/// computer's model and effort, and a shared bypass permission mode. Values
-/// equal to the provider's defaults need nothing.
+/// computer's model and effort, and its permission mode while the account
+/// shares it. Provider settings are carried too, as explicit values: a
+/// restored profile may still hold older overrides (zerus-7hkgh).
 #[derive(Clone, Default)]
 struct Carried {
     model: Option<(String, String)>,
-    bypass: bool,
+    permission: Option<String>,
+    /// The account, to check when the profile is added that it still
+    /// shares its permissions (zerus-f0uz8).
+    account: String,
 }
 impl Carried {
     fn edits(&self) -> Vec<(Kind, Values)> {
@@ -34,11 +38,11 @@ impl Carried {
                 },
             ));
         }
-        if self.bypass {
+        if let Some(mode) = &self.permission {
             edits.push((
                 Kind::Permissions,
                 Values {
-                    mode: "bypass".into(),
+                    mode: mode.clone(),
                     ..Default::default()
                 },
             ));
@@ -105,6 +109,9 @@ pub struct Progress {
     machine: String,
     state: &'static str,
     text: String,
+    /// A setting the new profile did not take, translated by the webview
+    /// (zerus-f0uz8, zerus-0y2yx).
+    note: Option<Text>,
     saved: bool,
     profile: Option<String>,
 }
@@ -278,11 +285,12 @@ impl Screens {
             edits.distributions.pop_front();
         }
         let carried = Carried {
-            model: (member.model_supported && !member.model.is_empty())
+            model: member
+                .model_supported
                 .then(|| (member.model.clone(), member.effort.clone())),
-            bypass: !selected.permissions_per_computer
-                && member.provider != "opencode"
-                && member.permission_mode == "bypass",
+            permission: (!selected.permissions_per_computer && member.provider != "opencode")
+                .then(|| member.permission_mode.clone()),
+            account: selected.key.clone(),
         };
         edits.distributions.push_back((
             handle,
@@ -305,29 +313,46 @@ impl Screens {
         host: &HostBinding,
         mut catalog: Value,
         id: &str,
-        text: String,
-    ) -> (Value, String) {
+    ) -> (Value, Option<Text>) {
         let mut missed = Vec::new();
+        // The shared mode is carried only while the account still shares
+        // it: a member may have switched to per computer since the dialog
+        // opened (the scope is outside the catalog revision).
+        let shared = carried.permission.is_some()
+            && self
+                .accounts(false)
+                .accounts
+                .iter()
+                .find(|account| account.key == carried.account)
+                .is_some_and(|account| !account.permissions_per_computer);
+        let carried = Carried {
+            permission: carried.permission.clone().filter(|_| shared),
+            ..carried.clone()
+        };
         for (kind, values) in carried.edits() {
             let saved =
                 Binding::capture(host.computer.clone(), host.machine_id.clone(), &catalog, id)
                     .and_then(|binding| binding.execute_values(&self.0.hgs, kind, &values));
             match saved {
                 Ok(next) => catalog = next,
-                Err(error) => missed.push(match kind {
-                    Kind::Model => format!("model ({error})"),
-                    _ => format!("permission mode ({error})"),
-                }),
+                Err(error) => missed.push(Arg::Text(if kind == Kind::Model {
+                    zerus_client_core::text!("model (%1)", error)
+                } else {
+                    zerus_client_core::text!("permission mode (%1)", error)
+                })),
             }
         }
-        if missed.is_empty() {
-            return (catalog, text);
-        }
-        let joined = if text.ends_with('.') { " " } else { ". " };
-        let note = format!(
-            "{text}{joined}Not copied: {}. Use everywhere on the Accounts screen applies it later.",
-            missed.join(", ")
-        );
+        let note = (!missed.is_empty()).then(|| {
+            let list = missed
+                .into_iter()
+                .rev()
+                .reduce(|rest, item| Arg::Text(zerus_client_core::text!("%1, %2", item, rest)))
+                .unwrap_or(Arg::Verbatim(String::new()));
+            zerus_client_core::text!(
+                "Not copied: %1. Use everywhere on the Accounts screen applies it later.",
+                list
+            )
+        });
         (catalog, note)
     }
     fn distribution_apply(
@@ -408,6 +433,7 @@ impl Screens {
                 machine: target.machine.clone(),
                 state: "working",
                 text: "Working…".into(),
+                note: None,
                 saved,
                 profile: None,
             };
@@ -541,12 +567,12 @@ impl Screens {
                         let text=match setup::setup_terminal(dir,&self.0.hgs,&after.terminal_call("login",&id).map_err(|message|Failure{issued:true,message})?.args) {Ok(_)=>"Profile created. Complete the sign-in in a terminal on that machine.".into(),Err(error)=>format!("Profile created. Could not open agent sign-in: {error}")};
                         (catalog, "needs-signin", text)
                     };
-                    let (catalog, text) =
-                        self.carry_settings(&plan.carried, &target.host, catalog, &id, text);
+                    let (catalog, note) =
+                        self.carry_settings(&plan.carried, &target.host, catalog, &id);
                     Ok((
                         catalog,
                         state,
-                        text,
+                        (text, note),
                         format!("{}\u{1f}{id}", target.host.computer.0),
                     ))
                 };
@@ -566,9 +592,10 @@ impl Screens {
                 work
             })();
             match outcome {
-                Ok((_, state, text, profile)) => {
+                Ok((_, state, (text, note), profile)) => {
                     result.state = state;
                     result.text = text;
+                    result.note = note;
                     result.profile = Some(profile);
                 }
                 Err(error) => {
@@ -796,20 +823,47 @@ mod tests {
             &catalog,
         )
         .unwrap();
+        let account = screens.accounts(false).accounts[0].key.clone();
+        // An account that is gone, or keeps permissions per computer, by
+        // now carries no shared mode (zerus-f0uz8 review).
+        let (unshared, _) = screens.carry_settings(
+            &Carried {
+                permission: Some("bypass".into()),
+                account: "another account".into(),
+                ..Default::default()
+            },
+            &host,
+            catalog.clone(),
+            "work",
+        );
+        assert_eq!(unshared, catalog);
         let carried = Carried {
             model: Some(("model-a".into(), "high".into())),
-            bypass: true,
+            permission: Some("bypass".into()),
+            account: account.clone(),
         };
-        let added = "Added with the saved sign-in on that machine".to_owned();
-        let (after, text) =
-            screens.carry_settings(&carried, &host, catalog.clone(), "work", added.clone());
-        assert_eq!(text, added);
+        let (after, note) = screens.carry_settings(&carried, &host, catalog.clone(), "work");
+        assert_eq!(note, None);
         assert_eq!(
             after["profiles"][0]["model_defaults"],
             serde_json::json!({"model":"model-a","effort":"high"})
         );
         assert_eq!(after["profiles"][0]["permission_mode"], "bypass");
         assert_eq!(after["revision"], "r3");
+        // A restored profile keeps older overrides: provider settings are
+        // carried as explicit values and reset them (zerus-7hkgh).
+        let reset = Carried {
+            model: Some((String::new(), String::new())),
+            permission: Some("provider".into()),
+            account: account.clone(),
+        };
+        let (cleared, note) = screens.carry_settings(&reset, &host, after.clone(), "work");
+        assert_eq!(note, None);
+        assert_eq!(
+            cleared["profiles"][0]["model_defaults"],
+            serde_json::json!({"model":"","effort":""})
+        );
+        assert_eq!(cleared["profiles"][0]["permission_mode"], "provider");
         // Nothing to carry: no call at all.
         let calls = || {
             std::fs::read_to_string(scratch.0.join("calls.jsonl"))
@@ -818,31 +872,24 @@ mod tests {
                 .count()
         };
         let before = calls();
-        let (same, text) = screens.carry_settings(
-            &Carried::default(),
-            &host,
-            after.clone(),
-            "work",
-            added.clone(),
-        );
-        assert_eq!(
-            (same, text, calls()),
-            (after.clone(), added.clone(), before)
-        );
+        let (same, note) =
+            screens.carry_settings(&Carried::default(), &host, after.clone(), "work");
+        assert_eq!((same, note, calls()), (after.clone(), None, before));
         // A model this computer's catalog lacks is named; the profile stays.
         let refused = Carried {
             model: Some(("model-b".into(), String::new())),
-            bypass: false,
+            ..Default::default()
         };
-        let (_, text) =
-            screens.carry_settings(&refused, &host, after, "work", "Profile created.".into());
-        assert!(
-            text.starts_with("Profile created. Not copied: model ("),
-            "{text}"
+        let (_, note) = screens.carry_settings(&refused, &host, after, "work");
+        let note = note.expect("the refused model is named");
+        assert_eq!(
+            note.source,
+            "Not copied: %1. Use everywhere on the Accounts screen applies it later."
         );
         assert!(
-            text.ends_with("Use everywhere on the Accounts screen applies it later."),
-            "{text}"
+            note.english().starts_with("Not copied: model ("),
+            "{}",
+            note.english()
         );
     }
 }

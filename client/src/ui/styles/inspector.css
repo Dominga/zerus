@@ -77,6 +77,30 @@
   .insp-resize > i { position: absolute; top: 35%; bottom: 35%; width: 3px; border-radius: 2px; background: var(--z-color-accent); opacity: 0; }
   .inspector .usage { user-select: text; }
   .work-main { min-width: min(360px, 100%); }
+  /* Task 206: the Compact skins' side panel, one scroll of Qt's collapsible sections. */
+  .insp-head { display: flex; }
+  .insp-title { font-size: var(--fs-xs); font-weight: 600; color: var(--z-color-text-3); padding-left: 4px; }
+  .insp-sections .icard-body { display: flex; flex-direction: column; gap: 2px; }
+  /* Qt's section header: a small title after its chevron. */
+  .insp-sections > .icard > .icard-head > .icard-toggle { flex-direction: row-reverse; justify-content: flex-end; }
+  .insp-sections > .icard > .icard-head .icard-title { font-size: var(--fs-xs); font-weight: 600; }
+  .insp-sections > .icard > .icard-head .icard-aside { font-size: var(--fs-2xs); }
+  .side-team { display: flex; flex-direction: column; gap: 6px; padding-bottom: 4px; }
+  .side-team-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .side-team > .btn { align-self: stretch; justify-content: center; }
+  .side-chip { --tone: var(--z-color-text-3); display: inline-flex; align-items: center; height: 18px; padding: 0 7px; border-radius: 9px; font-size: var(--fs-2xs); font-weight: 600;
+    color: var(--tone); background: color-mix(in srgb, var(--tone) 14%, transparent); white-space: nowrap; }
+  .inspector .tone-active { --tone: var(--z-color-accent); } .inspector .tone-warn { --tone: var(--z-color-warn); } .inspector .tone-danger { --tone: var(--z-color-danger); }
+  .inspector .tone-done { --tone: var(--z-color-success, var(--z-color-accent)); } .inspector .tone-planning { --tone: var(--z-color-text-2); }
+  .side-member > .dim[class*=tone-] { color: var(--tone, inherit); }
+  .side-progress { display: grid; grid-template-columns: minmax(64px, auto) 1fr auto; align-items: center; gap: 8px; font-size: var(--fs-xs); }
+  .side-bar { height: 4px; border-radius: 2px; background: var(--z-color-divider); overflow: hidden; }
+  .side-bar > i { display: block; height: 100%; border-radius: 2px; background: var(--z-color-accent); }
+  .side-members-head { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: var(--fs-xs); }
+  .side-member { display: flex; align-items: center; gap: 6px; min-width: 0; min-height: 24px; font-size: var(--fs-xs); }
+  .side-member .role-badge { max-width: 45%; }
+  .side-actions { display: flex; align-items: center; gap: 8px; margin: 2px 0 4px; }
+  .side-tasks { height: 440px; display: flex; flex-direction: column; min-height: 0; }
 }
 @keyframes insp-in { from { opacity: 0; translate: 24px 0; } }
 @media (prefers-reduced-motion: reduce) { .inspector, .icard, .icard-body { animation: none !important; } .icard-chev { transition: none; } }

@@ -1,9 +1,11 @@
 // Task 197: screenshots of the plan's Graph, Board and Layers (scripts/plan-smoke.html,
-// src/perf/planSmoke.tsx) beside Qt's shots of the same team. Starts Vite and a
+// src/perf/planSmoke.tsx) beside Qt's shots of the same team; task 206: the side
+// panel's sections and tabs (page "side-panel": scripts/side-panel-smoke.html,
+// src/perf/sidePanelSmoke.tsx) beside Qt's ux-6-inspector shots. Starts Vite and a
 // headless Chrome of its own (a new, empty profile under the output folder),
 // drives it over CDP only (Page.captureScreenshot; no OS input, no screen
 // capture), and closes both. No CLI, session or owner data is opened.
-//   node scripts/plan-smoke.mjs <output folder> [chrome.exe]
+//   node scripts/plan-smoke.mjs <output folder> [chrome.exe] [plan|side-panel]
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -12,6 +14,7 @@ import solid from "vite-plugin-solid";
 
 const out = resolve(process.argv[2] || "plan-smoke-shots");
 const chrome = process.argv[3] || "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+const page = process.argv[4] || "plan";
 mkdirSync(out, { recursive: true });
 const profile = join(out, "chrome-profile");
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -57,14 +60,19 @@ try {
   const target = (await json("/json/list")).find((page) => page.type === "page");
   const cdp = connect(target.webSocketDebuggerUrl);
   await cdp.send("Page.enable");
-  await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1180, height: 900, deviceScaleFactor: 1, mobile: false });
-  const cases = [
+  await cdp.send("Emulation.setDeviceMetricsOverride", page === "side-panel"
+    ? { width: 440, height: 1000, deviceScaleFactor: 1, mobile: false }
+    : { width: 1180, height: 900, deviceScaleFactor: 1, mobile: false });
+  const cases = page === "side-panel" ? [
+    ["sections-dark", "skin=whitewh-dark"], ["sections-light", "skin=whitewh-light"], ["sections-folded-dark", "skin=whitewh-dark&fold=1"],
+    ["tabs-dark", "skin=zerus-dark"],
+  ] : [
     ["graph-dark", "mode=graph"], ["board-dark", "mode=board"], ["layers-dark", "mode=layers"],
     ["graph-light", "mode=graph&skin=whitewh-light"], ["board-light", "mode=board&skin=whitewh-light"], ["layers-light", "mode=layers&skin=whitewh-light"],
     ["graph-tester", "mode=graph&member=tester"],
   ];
   for (const [name, query] of cases) {
-    await cdp.send("Page.navigate", { url: `http://127.0.0.1:${port}/scripts/plan-smoke.html?${query}` });
+    await cdp.send("Page.navigate", { url: `http://127.0.0.1:${port}/scripts/${page}-smoke.html?${query}` });
     let title = "";
     for (let i = 0; i < 150 && !title.endsWith(": ready"); i++) {
       await sleep(100);
@@ -73,7 +81,9 @@ try {
     if (!title.endsWith(": ready")) throw new Error(`${name}: the page never said it was ready (${title})`);
     await sleep(600);
     const errors = (await cdp.send("Runtime.evaluate", {
-      expression: "JSON.stringify({cards: document.querySelectorAll('[data-task]').length, edges: document.querySelectorAll('[data-edge]').length})",
+      expression: page === "side-panel"
+        ? "JSON.stringify({sections: [...document.querySelectorAll('.insp-sections > [data-section]')].map((e) => e.dataset.section + (e.classList.contains('closed') ? ' (folded)' : '')), tabs: document.querySelectorAll('.insp-tabs .tab').length})"
+        : "JSON.stringify({cards: document.querySelectorAll('[data-task]').length, edges: document.querySelectorAll('[data-edge]').length})",
       returnByValue: true })).result.value;
     const png = await cdp.send("Page.captureScreenshot", { format: "png" });
     const file = join(out, `${name}.png`);

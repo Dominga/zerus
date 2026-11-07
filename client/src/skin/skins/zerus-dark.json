@@ -215,6 +215,7 @@
     "rail": "icons",
     "sessions-pane": "left",
     "inspector": "docked",
-    "activity-column": "centered"
+    "activity-column": "centered",
+    "side-panel": "tabs"
   }
 }

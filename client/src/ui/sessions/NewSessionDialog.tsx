@@ -466,6 +466,12 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
                 );
               }}</For>
             </ul>
+            {/* The effective permission mode of the account (owner, 2026-11-07, T-6hcfnu). */}
+            <Show when={s().accounts[s().account]?.profile?.permission_label.source ? s().accounts[s().account]?.profile : undefined}>{(p) => (
+              <div class="ns-perm dim" title={[trText(p().permission_hint), tr("Change it on the Accounts screen.")].filter(Boolean).join("\n")}>
+                {p().permission_default ? tr("Permissions: %1 (Zerus default)", trText(p().permission_label)) : tr("Permissions: %1", trText(p().permission_label))}
+              </div>
+            )}</Show>
             <div class="row ns-acc-status">
               <span class="grow ns-status">{s().accountStatus}</span>
               <button type="button" class="btn small" data-keys="button" aria-label={tr("Refresh accounts")} disabled={!s().refreshEnabled} onClick={() => act.refreshAccounts()}>

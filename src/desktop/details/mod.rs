@@ -73,7 +73,7 @@ enum Request {
         lease: String,
         id: String,
         computer: String,
-        subscription: Spec,
+        subscription: Box<Spec>,
     },
     #[serde(rename = "detail_unfollow")]
     Unfollow {
@@ -161,7 +161,8 @@ impl Adapter {
     fn limits() -> Value {
         json!({"subscribers":protocol::SUBSCRIBERS,"demands_per_subscriber":DEMANDS,
         "groups":GROUPS,"activity_per_computer":16,"processes_per_computer":16,"projects_per_computer":16,
-        "organization_per_computer":1,"queue_bytes":protocol::QUEUE_BYTES,"fence_ms":FENCE.as_millis()})
+        "organization_per_computer":1,"git_per_subscriber":48,"git_per_computer":64,
+        "queue_bytes":protocol::QUEUE_BYTES,"fence_ms":FENCE.as_millis()})
     }
     pub fn status(&self) -> Value {
         json!({"abi":ABI,"stopping":self.stopping,"subscribers":self.subscribers.len(),
@@ -285,6 +286,7 @@ impl Adapter {
                 topic: key.topic.clone(),
                 session: wanted.session.clone(),
                 project: wanted.project.clone(),
+                path: wanted.path.clone(),
                 ..Subscription::default()
             };
             if controls(
@@ -348,6 +350,7 @@ impl Adapter {
                 topic: key.topic.clone(),
                 session: group.wanted.session.clone(),
                 project: group.wanted.project.clone(),
+                path: group.wanted.path.clone(),
                 ..Subscription::default()
             };
             if !online
@@ -454,7 +457,7 @@ impl Adapter {
                 {
                     return refused("invalid_detail_target");
                 }
-                let Ok((native, refresh)) = subscription.native() else {
+                let Ok((native, refresh)) = (*subscription).native() else {
                     return refused("invalid_detail_subscription");
                 };
                 let key = Key::new(&computer, &native);
@@ -482,7 +485,15 @@ impl Adapter {
                         }
                     }
                 } else {
-                    if subscriber.demands.len() >= DEMANDS {
+                    if subscriber.demands.len() >= DEMANDS
+                        || (key.topic == topic::GIT
+                            && subscriber
+                                .demands
+                                .values()
+                                .filter(|d| d.key.topic == topic::GIT)
+                                .count()
+                                >= 48)
+                    {
                         return refused("detail_demand_limit");
                     }
                     let limit = self

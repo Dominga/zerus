@@ -140,6 +140,8 @@ function Detail(props: { a: Account }) {
   };
   const shown = () => visibleMembers(props.a, m().key);
   const nativeConfig = () => props.a.provider === "opencode";
+  // zerus-f0uz8: one permission mode for the account unless it keeps one per computer.
+  const perComputer = () => !!props.a.permissions_per_computer;
   const defaultable = () => props.a.provider !== "dsh" && !nativeConfig();
   const matches = () => props.a.members.filter((x) => x.machine.toLowerCase().includes(moreQuery().trim().toLowerCase()));
   const tags = createMemo(() => profileTags(props.a));
@@ -263,15 +265,33 @@ function Detail(props: { a: Account }) {
         )}</Show>
         <div class="acct-setting">
           <span title={trText(m().permission_hint)}>
-            {tr("Permissions on %1:", m().machine)} <b classList={{ danger: m().permission === "bypass" }}>{trText(m().permission_label)}</b>
-            <span class="dim acct-src">{m().permission_mode === "bypass" ? tr("set in Zerus") : tr("from provider settings")}</span>
+            {perComputer() ? tr("Permissions on %1:", m().machine) : tr("Permissions:")} <b classList={{ danger: m().permission === "bypass" }}>{trText(m().permission_label)}</b>
+            <span class="dim acct-src">{m().permission_default ? tr("Zerus default") : m().permission_mode === "bypass" ? tr("set in Zerus") : tr("from provider settings")}</span>
           </span>
-          <button class="btn small" disabled={!m().online || nativeConfig() || managementBusy()} title={tr("Change permission defaults on %1", m().machine)} onClick={event=>void openCatalog("permissions",props.a.key,m().key,event.currentTarget)}>{tr("Change…")}</button>
+          <span class="acct-actions">
+            <Show when={!perComputer() && props.a.permission_differs && !nativeConfig()}>
+              <span class="acct-differs">{tr("Differs between computers")}</span>
+              <button class="btn small" disabled={!m().online || managementBusy()} title={tr("Save the permission mode of %1 on every computer with this account", m().machine)} onClick={event=>void openCatalog("permissions",props.a.key,m().key,event.currentTarget)}>{tr("Use everywhere")}</button>
+            </Show>
+            <button class="btn small" disabled={!m().online || nativeConfig() || managementBusy()} title={perComputer() ? tr("Change permission defaults on %1", m().machine) : tr("Change permission defaults on every computer with this account")} onClick={event=>void openCatalog("permissions",props.a.key,m().key,event.currentTarget)}>{tr("Change…")}</button>
+          </span>
         </div>
+        <Show when={!nativeConfig()}>
+          <div class="acct-setting">
+            <span class="dim">{perComputer() ? tr("Permissions are kept per computer.") : tr("Permissions are shared by every computer with this account.")}</span>
+            <button class="btn small" disabled={!m().online || managementBusy()} onClick={event=>void openCatalog("scope",props.a.key,m().key,event.currentTarget)}>{perComputer() ? tr("Share across computers…") : tr("Keep per computer…")}</button>
+          </div>
+        </Show>
         <Show when={m().model_supported}>
           <div class="acct-setting">
             <span>{trText(m().model_text)}</span>
-            <button class="btn small" disabled={!m().online || managementBusy()} onClick={event=>void openCatalog("model",props.a.key,m().key,event.currentTarget)}>{tr("Model and effort…")}</button>
+            <span class="acct-actions">
+              <Show when={props.a.model_differs}>
+                <span class="acct-differs">{tr("Differs between computers")}</span>
+                <button class="btn small" disabled={!m().online || managementBusy()} title={tr("Save the model and effort of %1 on every computer with this account", m().machine)} onClick={event=>void openCatalog("model",props.a.key,m().key,event.currentTarget)}>{tr("Use everywhere")}</button>
+              </Show>
+              <button class="btn small" disabled={!m().online || managementBusy()} onClick={event=>void openCatalog("model",props.a.key,m().key,event.currentTarget)}>{tr("Model and effort…")}</button>
+            </span>
           </div>
         </Show>
         <Actions>
@@ -373,7 +393,7 @@ export function AccountsScreen() {
       </main>
       <Show when={accountDistribution.prompt()}>{prompt=><Suspense><AccountDistributionDialog prompt={prompt()}/></Suspense>}</Show>
       <Show when={accountSetup.prompt()}>{prompt=><Suspense><AccountSetupDialog prompt={prompt()} busy={accountSetup.busy()} close={accountSetup.close} confirm={(values,handle)=>void accountSetup.confirm(values,handle)}/></Suspense>}</Show>
-      <Show when={accountManagement.prompt()}>{prompt=><Suspense><Switch><Match when={prompt().kind==="permissions" || prompt().kind==="model"}><AccountDefaultsDialog prompt={prompt()} close={accountManagement.close} confirm={(values,handle)=>void accountManagement.confirm(values,handle)}/></Match><Match when={true}><AccountCatalogDialog prompt={prompt()} close={accountManagement.close} confirm={(label,handle)=>void accountManagement.confirm(label,handle)}/></Match></Switch></Suspense>}</Show>
+      <Show when={accountManagement.prompt()}>{prompt=><Suspense><Switch><Match when={prompt().kind==="permissions" || prompt().kind==="model" || prompt().kind==="scope"}><AccountDefaultsDialog prompt={prompt()} close={accountManagement.close} confirm={(values,handle)=>void accountManagement.confirm(values,handle)}/></Match><Match when={true}><AccountCatalogDialog prompt={prompt()} close={accountManagement.close} confirm={(label,handle)=>void accountManagement.confirm(label,handle)}/></Match></Switch></Suspense>}</Show>
     </div>
   );
 }

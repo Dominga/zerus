@@ -7,9 +7,87 @@ fn id() -> String {
 fn hello() -> Value {
     json!({"t":"hello","machine_id":"fixture","host":"observed-host","hgs_version":"1.56.0",
     "stream":id(),"heartbeat_ms":10000,"max_frame_bytes":1048576,
-    "topics":["catalog","catalog.meta","activity","processes","tasks","organization"],
+    "topics":["catalog","catalog.meta","activity","processes","tasks","organization","git"],
     "limits":{"activity_subscriptions":16,"processes_subscriptions":16,"tasks_subscriptions":16,
-    "page_bytes":524288,"queue_bytes":4194304,"activity_tail":100,"activity_read":200,"control_line_bytes":65536}})
+    "git_subscriptions":2,"page_bytes":524288,"queue_bytes":4194304,"activity_tail":100,"activity_read":200,"control_line_bytes":65536}})
+}
+
+#[test]
+fn git_uses_original_fences_caps_and_exact_native_path_frames() {
+    let mut f = Fixture::new();
+    let (lease, queue) = f.open();
+    let demand = id();
+    assert_eq!(
+        f.follow(&lease, &demand, json!({"topic":"git","path":"/fixture/a"}))["state"],
+        "starting"
+    );
+    assert!(
+        matches!(&f.commands[0][..], [Control::Unsubscribe(spec), Control::Ping(_)]
+        if spec.path.as_deref() == Some("/fixture/a"))
+    );
+    output(&queue);
+    let state = json!({"t":"state","topic":"git","key":"/fixture/a","rev":7,
+        "value":{"state":"ok","root":"/fixture/a","changed_files":3}});
+    f.native(state.clone());
+    assert!(output(&queue).is_empty());
+    f.pong();
+    output(&queue);
+    assert!(
+        matches!(&f.commands.last().unwrap()[..], [Control::Subscribe(spec)]
+        if spec.path.as_deref() == Some("/fixture/a"))
+    );
+    let native = f.native(state);
+    let frames = output(&queue);
+    assert_eq!(frames.len(), 1);
+    assert_eq!(
+        frames[0]["value"]["frame"],
+        serde_json::to_value(native).unwrap()
+    );
+    assert_eq!(frames[0]["value"]["id"], demand);
+    assert_eq!(
+        f.follow(&lease, &id(), json!({"topic":"git","path":"/fixture/b"}))["accepted"],
+        true
+    );
+    assert_eq!(
+        f.follow(&lease, &id(), json!({"topic":"git","path":"/fixture/c"}))["code"],
+        "detail_topic_limit"
+    );
+    f.request(&lease, json!({"op":"detail_unfollow","id":demand}));
+    assert!(
+        matches!(&f.commands.last().unwrap()[..], [Control::Unsubscribe(spec)]
+        if spec.path.as_deref() == Some("/fixture/a"))
+    );
+    f.native(json!({"t":"state","topic":"git","key":"/fixture/a","rev":8,"value":{"state":"ok"}}));
+    assert!(!output(&queue).iter().any(|v| v["t"] == "detail"));
+}
+
+#[test]
+fn git_paths_are_exclusive_to_git_and_mixed_detail_fields_still_refuse() {
+    for value in [
+        json!({"topic":"activity","path":"/fixture","session":{"name":"codex/fixture/a"}}),
+        json!({"topic":"processes","path":"/fixture","session":{"name":"codex/fixture/a"}}),
+        json!({"topic":"tasks","path":"/fixture","project":"fixture"}),
+        json!({"topic":"organization","path":"/fixture"}),
+        json!({"topic":"git","path":"/fixture","session":{"name":"codex/fixture/a"}}),
+        json!({"topic":"git","path":"/fixture","project":"fixture"}),
+        json!({"topic":"git","path":"/fixture","after":0}),
+        json!({"topic":"git","path":"/fixture","tail":1}),
+        json!({"topic":"git","path":"/fixture","interval_ms":1000}),
+        json!({"topic":"git","path":"/fixture","window":1}),
+        json!({"topic":"git","path":"relative"}),
+    ] {
+        assert!(serde_json::from_value::<Spec>(value)
+            .unwrap()
+            .native()
+            .is_err());
+    }
+    for path in ["/fixture/checkout", "C:\\fixture\\checkout"] {
+        let (spec, _) = serde_json::from_value::<Spec>(json!({"topic":"git","path":path}))
+            .unwrap()
+            .native()
+            .unwrap();
+        assert_eq!(Key::new("", &spec).key.as_deref(), Some(path));
+    }
 }
 fn activity(after: Option<i64>) -> Value {
     let mut s = json!({"topic":"activity","session":{"name":"claude/example/a","run_id":"run","conversation_id":"conversation"}});
@@ -545,7 +623,11 @@ fn the_gui_s_bounded_tasks_follow_is_admitted_with_its_window() {
     assert_eq!(gui, json!({"topic":"tasks","project":"p","window":50}));
     let mut f = Fixture::new();
     let (lease, _queue) = f.open();
-    assert_eq!(f.follow(&lease, &id(), gui.clone())["accepted"], true, "the GUI's own follow");
+    assert_eq!(
+        f.follow(&lease, &id(), gui.clone())["accepted"],
+        true,
+        "the GUI's own follow"
+    );
     while f
         .adapter
         .groups
@@ -559,32 +641,66 @@ fn the_gui_s_bounded_tasks_follow_is_admitted_with_its_window() {
         .iter()
         .flatten()
         .filter_map(|control| match control {
-            Control::Subscribe(s) if s.topic == zerus_watch_protocol::topic::TASKS => Some(s.clone()),
+            Control::Subscribe(s) if s.topic == zerus_watch_protocol::topic::TASKS => {
+                Some(s.clone())
+            }
             _ => None,
         })
         .collect();
     assert!(!subscribed.is_empty(), "the native subscription was sent");
-    assert!(subscribed.iter().all(|s| s.window == Some(50)), "{subscribed:?}");
+    assert!(
+        subscribed.iter().all(|s| s.window == Some(50)),
+        "{subscribed:?}"
+    );
     // A second view of the same project with the same window shares it.
     let (other, _other_queue) = f.open();
     assert_eq!(f.follow(&other, &id(), gui.clone())["accepted"], true);
     let sent = f.commands.len();
     for (spec, code) in [
-        (json!({"topic":"tasks","project":"p","window":25}), "conflicting_detail_window"),
-        (json!({"topic":"tasks","project":"q","window":0}), "invalid_detail_subscription"),
-        (json!({"topic":"tasks","project":"q","window":201}), "invalid_detail_subscription"),
+        (
+            json!({"topic":"tasks","project":"p","window":25}),
+            "conflicting_detail_window",
+        ),
+        (
+            json!({"topic":"tasks","project":"q","window":0}),
+            "invalid_detail_subscription",
+        ),
+        (
+            json!({"topic":"tasks","project":"q","window":201}),
+            "invalid_detail_subscription",
+        ),
         // An unknown field is refused when the request is read, as `window`
         // itself was before this fix.
-        (json!({"topic":"tasks","project":"q","windows":50}), "invalid_detail_request"),
-        (json!({"topic":"organization","window":50}), "invalid_detail_subscription"),
-        (json!({"topic":"processes","session":{"name":"claude/example/a"},"window":50}), "invalid_detail_subscription"),
+        (
+            json!({"topic":"tasks","project":"q","windows":50}),
+            "invalid_detail_request",
+        ),
+        (
+            json!({"topic":"organization","window":50}),
+            "invalid_detail_subscription",
+        ),
+        (
+            json!({"topic":"processes","session":{"name":"claude/example/a"},"window":50}),
+            "invalid_detail_subscription",
+        ),
     ] {
         let refused = f.follow(&other, &id(), spec.clone());
-        assert_eq!((refused["accepted"].clone(), refused["code"].clone()), (json!(false), json!(code)), "{spec}");
+        assert_eq!(
+            (refused["accepted"].clone(), refused["code"].clone()),
+            (json!(false), json!(code)),
+            "{spec}"
+        );
     }
     assert_eq!(f.commands.len(), sent, "no refusal admitted a control");
     // The largest window is admitted.
-    assert_eq!(f.follow(&other, &id(), json!({"topic":"tasks","project":"r","window":200}))["accepted"], true);
+    assert_eq!(
+        f.follow(
+            &other,
+            &id(),
+            json!({"topic":"tasks","project":"r","window":200})
+        )["accepted"],
+        true
+    );
 }
 #[test]
 fn process_refresh_keeps_revision_and_native_interval_instead_of_replacing_the_view() {

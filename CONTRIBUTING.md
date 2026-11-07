@@ -46,6 +46,10 @@ bash scripts/ci/cli.sh
 (cd client && npm ci && npm run check && npm test)
 ```
 
+After editing `client/src/i18n.next-ru.json`, run
+`python3 client/scripts/generate-i18n-catalog.py`. It sorts the supplement and
+refreshes the generated catalog; `--check` verifies both without writing.
+
 The CLI script clears inherited `HGS_*` session/account context, runs Rust unit
 tests and terminal smoke tests, then runs the Python integration test classes in
 parallel fresh processes and builds a release binary. Classes larger than twelve

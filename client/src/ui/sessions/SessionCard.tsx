@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import { tr, trNoop } from "../../i18n";
 import { AGENT_LABEL, Icon } from "../lib/icons";
 import { computerFresh, computerOffline } from "../../store/catalog";
@@ -139,16 +139,17 @@ export function AgentBadge(props: { agent: AgentKind; narrow?: boolean; max?: nu
 }
 
 /**
- * A supervised child: its parent handles its requests (spec 3.4). The crossed
- * bell of Mute, dim, before the title, as in the owner's prototype (owner
- * feedback 2026-11-07: a plain bell read as "notifications coming").
+ * A supervised child: its parent handles its requests (spec 3.4). A dim
+ * arrow turning down and right, before the title: handled by the parent
+ * above (owner, 2026-11-07, zerus-sa9qn.16; a bell read as notifications, a
+ * crossed bell as muted).
  */
 export function SupervisedMark(props: { session: Session }) {
   const name = () => props.session.parent?.name.split("/").pop() || props.session.parent?.name || "";
   return (
     <span class="sc-supervised" role="img" aria-label={tr("Supervised by %1", name())}
       title={tr("Supervised by %1\nOnly requests that need you notify you.", props.session.parent?.name ?? "")}>
-      <Icon name="mute" size={13} />
+      <Icon name="corner-down-right" size={13} />
     </span>
   );
 }
@@ -189,7 +190,7 @@ export function AgentTile(props: { agent: AgentKind; size?: number }) {
 export function TeamToggle(props: { team: Team; onToggle?: () => void }) {
   return (
     <button class="sc-team" classList={{ open: !props.team.collapsed }} aria-expanded={!props.team.collapsed}
-      title={props.team.collapsed ? tr("Show child sessions") : tr("Hide child sessions")}
+      title={props.team.collapsed ? tr("Show subagents and child sessions") : tr("Hide subagents and child sessions")}
       onClick={(e) => { e.stopPropagation(); props.onToggle?.(); }} onDblClick={(e) => e.stopPropagation()}>
       <svg class="team-glyph" width="16" height="12" viewBox="0 0 16 12" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
         <circle cx="8" cy="3" r="2" /><circle cx="3" cy="5" r="1.6" /><circle cx="13" cy="5" r="1.6" />
@@ -261,39 +262,50 @@ type Git = NonNullable<Session["git"]>;
 interface GitMark { icon: string; count?: string; tone: "muted" | "attention" | "incoming" | "synced" | "conflict" }
 
 // GitStatusBadge::marks: changed files, outgoing, incoming, then unverified or synced.
-export function gitMarks(g: Git): GitMark[] {
-  const verified = g.state !== "unknown";
+function gitFreshness(g: Git, at = Date.now()) {
+  const age = g.receivedAt === undefined ? 0 : at - g.receivedAt;
+  const fresh = (g.localFresh ?? g.state !== "unknown") && age >= 0 && (g.streamed === true || age < 30_000);
+  const verified = fresh && (g.remoteVerified ?? g.state !== "unknown")
+    && (g.remoteAge ?? 0) + age / 1000 < 60 && g.countsKnown !== false;
+  return { fresh, verified };
+}
+export function gitMarks(g: Git, at = Date.now()): GitMark[] {
+  const { fresh, verified } = gitFreshness(g, at);
   const count = (n: number) => (n > 99 ? "99+" : String(n));
   const marks: GitMark[] = [];
-  if (g.changed) marks.push({ icon: "git-diff", count: count(g.changed), tone: !verified ? "muted" : g.conflicts ? "conflict" : "attention" });
+  if (g.changed) marks.push({ icon: "git-diff", count: count(g.changed), tone: !fresh ? "muted" : g.conflicts ? "conflict" : "attention" });
   if (g.ahead) marks.push({ icon: "git-push", count: count(g.ahead), tone: verified ? "attention" : "muted" });
   if (g.behind) marks.push({ icon: "git-pull", count: count(g.behind), tone: verified ? "incoming" : "muted" });
   if (!verified) marks.push({ icon: "git-unknown", tone: "muted" });
-  else if (!g.changed && !g.ahead && !g.behind) marks.push({ icon: "git-synced", tone: "synced" });
+  else if (!g.changed && !g.ahead && !g.behind && !g.detached && !g.unborn) marks.push({ icon: "git-synced", tone: "synced" });
   return marks;
 }
 
-export function gitTooltip(s: Session): string {
+export function gitTooltip(s: Session, at = Date.now()): string {
   const g = s.git!;
-  const verified = g.state !== "unknown";
+  const { fresh, verified } = gitFreshness(g, at);
   const ref = verified ? tr("verified upstream") : tr("last known upstream; remote unverified");
   return [
     tr("Git status (current checkout)"),
-    s.cwd,
+    g.root || s.gitRoot || s.cwdPath || s.cwd,
     s.branch ? tr("Branch: %1", s.branch) : "",
-    s.branch ? tr("Upstream: %1", `origin/${s.branch}`) : "",
-    tr("%1 changed or new files (including staged and untracked files)", g.changed),
+    g.upstream ? tr("Upstream: %1", g.upstream) : "",
+    g.changedKnown !== false ? tr("%1 changed or new files (including staged and untracked files)", g.changed) : "",
     g.conflicts ? tr("%1 files with merge conflicts", g.conflicts) : "",
-    tr("%1 outgoing commits (%2)", g.ahead, ref),
-    tr("%1 incoming commits (%2)", g.behind, ref),
+    g.aheadKnown !== false ? tr("%1 outgoing commits (%2)", g.ahead, ref) : "",
+    g.behindKnown !== false ? tr("%1 incoming commits (%2)", g.behind, ref) : "",
+    !fresh ? tr("Git status is unavailable or out of date.") : "",
     !verified ? tr("Remote publication has not been verified recently.") : !g.changed && !g.ahead && !g.behind ? tr("Clean checkout. Branch matches the verified remote.") : "",
   ].filter(Boolean).join("\n");
 }
 
 export function GitMarks(props: { session: Session }) {
+  const marks = createMemo(() => props.session.git ? gitMarks(props.session.git, now() * 1000) : [], [], {
+    equals: (a, b) => a.length === b.length && a.every((m, i) => m.icon === b[i].icon && m.count === b[i].count && m.tone === b[i].tone),
+  });
   return (
-    <span class="gmarks" title={gitTooltip(props.session)}>
-      <For each={gitMarks(props.session.git!)}>{(m) => (
+    <span class="gmarks" title={props.session.git ? gitTooltip(props.session, now() * 1000) : ""}>
+      <For each={marks()}>{(m) => (
         <span class={`gmark t-${m.tone}`} classList={{ counted: !!m.count }}>
           <Icon name={m.icon} size={16} />
           <Show when={m.count}><span>{m.count}</span></Show>
@@ -374,9 +386,11 @@ export function SessionCard(props: {
     <div class="scard tiled" classList={{ selected: props.selected, offline: statusOf(s()) === "offline", muted: !!s().muted }} data-emphasis={emphasis(s())}>
       <span class="sc-tile"><AgentTile agent={s().agent} /></span>
       <div class="sc-l1">
-        <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
-        <Show when={!s().muted && s().parent?.state === "live"}><SupervisedMark session={s()} /></Show>
+        {/* Supervision and Mute are independent: the arrow before the name,
+            the crossed bell right after it (owner, 2026-11-08). */}
+        <Show when={s().parent?.state === "live"}><SupervisedMark session={s()} /></Show>
         <span class="sc-title ell" style={titleReserve(s().title, 72)} title={s().name}>{s().title}</span>
+        <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
         <StatusBadge kind={kind()} caption={statusCaption(s())} />
         <Show when={visibleUnreadReply(s(), computerFresh(s().computer)) && (s().status === "working" || s().status === "attention" || s().draft)}>
           <span class="sc-extra"><StatusBadge kind={quietAttention(s()) ? "muted-unread" : "unread"} caption="" iconOnly /></span>
@@ -401,7 +415,7 @@ export function SessionCard(props: {
         <Show when={s().effort}><span class="sc-effort">{s().effort}</span></Show>
         <AccountChip session={s()} />
         <span class="grow" />
-        <Show when={(s().subagents ?? []).length}>
+        <Show when={!props.team && (s().subagents ?? []).length}>
           <AgentsCounter label={agentsLabel(s())} expandable={props.expandable} expanded={props.expanded} onToggle={props.onToggleChildren} />
         </Show>
         <Show when={props.team}>{(team) => <TeamToggle team={team()} onToggle={props.onToggleTeam} />}</Show>
@@ -423,20 +437,20 @@ export const childStatus = (c: Subagent, current = true): { kind: BadgeKind; cap
   ? { ...CHILD_STATUS[c.state], caption: tr(CHILD_STATUS[c.state].caption) }
   : { kind: "neutral", caption: tr("Recorded") };
 
-/** Native subagent row (64 px): card indented 24 px, one muted detail line. */
+/**
+ * Native subagent row (40 px), indented under its parent: a compact session
+ * row that never expands (owner, 2026-11-07, zerus-sa9qn.16): the agent's
+ * tile, the name and the status; the summary is its tooltip.
+ */
 export function ChildCard(props: { parent: Session; child: Subagent; last: boolean; first: boolean; selected: boolean }) {
   const status = () => childStatus(props.child, currentChildren(props.parent, !computerOffline(props.parent.computer)));
   return (
     <div class="child-row" classList={{ last: props.last, first: props.first }}>
       <i class="tree" aria-hidden="true" />
-      <div class="scard child" classList={{ selected: props.selected }}>
-        <div class="sc-l1">
-          <span class="sc-title ell" style={titleReserve(props.child.name, 72)}>{props.child.name}</span>
-          <StatusBadge kind={status().kind} caption={status().caption} />
-          <span class="grow" />
-          <AgentBadge agent={props.parent.agent} max={85} />
-        </div>
-        <div class="sc-child-detail ell">{props.child.summary}</div>
+      <div class="scard compact child" classList={{ selected: props.selected }} title={props.child.summary || undefined}>
+        <span class="cc-tile"><AgentTile agent={props.parent.agent} size={22} /></span>
+        <span class="sc-title ell" style={titleReserve(props.child.name, 60)}>{props.child.name}</span>
+        <StatusBadge kind={status().kind} caption={status().caption} />
       </div>
     </div>
   );
@@ -469,7 +483,7 @@ export function fitCounters(state: { narrow: boolean; needed: number }, scrollWi
 }
 
 function CompactTeam(props: { team: Team; onToggle?: () => void }) {
-  const title = () => (props.team.collapsed ? tr("Show child sessions") : tr("Hide child sessions"));
+  const title = () => (props.team.collapsed ? tr("Show subagents and child sessions") : tr("Hide subagents and child sessions"));
   // Short counters when the long ones do not fit; the container query below
   // about 300 px is the first approximation before any measurement.
   let body: HTMLSpanElement | undefined;
@@ -530,11 +544,11 @@ export function CompactCard(props: { session: Session; selected: boolean; onExpa
       <div class="cc-line">
       <span class="cc-tile"><AgentTile agent={s().agent} size={22} /></span>
       <Show when={sessionMark(s())}>{(m) => <span class="cc-mark" title={markTooltip(s(), m())}><AccountMarkCircle mark={m()} size={14} /></span>}</Show>
-      <Show when={!s().muted && s().parent?.state === "live"}><SupervisedMark session={s()} /></Show>
+      <Show when={s().parent?.state === "live"}><SupervisedMark session={s()} /></Show>
       <span class="sc-title ell" style={titleReserve(s().title, 60)} title={s().name}>{s().title}</span>
+      <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
       <StatusBadge kind={badgeKind(s())} caption={statusCaption(s())} />
       <OptionalQuestionsChip session={s()} />
-      <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
       <button class="cc-expand" title={tr("Expand session row")} onClick={(e) => { e.stopPropagation(); props.onExpand(); }} onDblClick={(e) => e.stopPropagation()}>
         <Icon name="expand-row" size={16} />
       </button>

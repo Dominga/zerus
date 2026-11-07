@@ -1,5 +1,5 @@
 import { TextInput } from "../lib/TextField";
-import { inspectSession } from "../../bridge";
+import { inspectSession, windowVisibility } from "../../bridge";
 import { sessionTerminalEntry } from "../../store/sessionTerminal";
 import { groupOf } from "../../store/organization";
 import { taskDragOver, taskDrop } from "../../store/taskAssignment";
@@ -36,11 +36,11 @@ import { CreationCard, CreationTile } from "./CreationCard";
 import { accessibleText as creationText } from "./creations-ui";
 import { creationCount, creationFooter, creationStatusMenu } from "../../store/creations";
 import {
-  selectedKey, setSelectedKey, setExpandedChildren, expandedChildren,
+  now, selectedKey, setSelectedKey, setExpandedChildren, expandedChildren,
   setCompactRows, compactRows, expandCompactRows, stateFilter, setStateFilter, search, setSearch, stripMode, setStripMode,
   setMenu, visibleMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter, accountFilterSet, setAccountFilter, folderFilter, setPage,
   multi, setMulti, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, commitSessionsWidth, menu, subagentOpen,
-  revealing, setRevealing, setDetailTab, collapsedTeams, setCollapsedTeams,
+  revealing, setRevealing, setDetailTab,
   type StateFilter, type MenuEntry,
 } from "../../store/ui";
 import type { Session } from "./types";
@@ -48,6 +48,7 @@ import { filterAccounts, selectedFilterAccounts, chooseFilterAccounts, toggleFil
 import { loadMarkCatalogs } from "../../store/accounts";
 import { clearFolderScope } from "../../store/folderFilter";
 import { compactNewChildren } from "../../store/childRowsWatch";
+import { setTeamCollapsed, teamCollapsed } from "../../store/teamCollapse";
 import { leaf, native } from "./paths";
 import { appendAccountChoices, bindingState, type AccountChoice } from "./scope-filters";
 import type { ClearControl, SessionRef } from "../../types";
@@ -58,6 +59,9 @@ import { bulkSelect, clearMulti, multiCount, setAnchor, dragItem, setDragItem, d
 import { POINTER_DRAG, pointerDrag } from "../lib/pointerDrag";
 
 import { SearchResults } from "./SearchResults";
+import { followGitRows } from "../../store/gitInterests";
+import { pageHidden } from "../../store/visibility";
+import { page } from "../../store/ui";
 import "../styles/content-search.css";
 
 const SavedDraftsDialog = lazy(() => import("./SavedDrafts").then((m) => ({ default: m.SavedDraftsDialog })));
@@ -458,11 +462,15 @@ function useRows(strip: boolean) {
   // here tracks it, and an unchanged key list keeps every row's DOM node.
   const keys = createMemo<string[]>(() => items().map((i) => String(i.key)), [], { equals: (a, b) => a.length === b.length && a.every((k, i) => k === b[i]) });
   const startOf = createMemo(() => new Map(items().map((i) => [String(i.key), i.start])));
+  const gitKeys = createMemo(() => keys().flatMap((id) => {
+    const row = byId().get(id);
+    return row?.type === "card" ? [row.session.key] : row?.type === "child" ? [row.parent.key] : [];
+  }), [], { equals: (a, b) => a.length === b.length && a.every((key, i) => key === b[i]) });
   // The scroller can be replaced (placeholder, then the list); observe the new box once it is in the page.
   const ref = (el: HTMLElement) => { scrollEl = el; requestAnimationFrame(() => virtualizer._willUpdate()); };
   // Fixed heights per row type, so every row's offset is known without the DOM.
   const offsets = createMemo(() => { let y = 0; return heights().map((h) => { const t = y; y += h; return t; }); });
-  return { ref, rows, virtualizer, byId, keys, startOf, offsets, heights, heightOf: (id: string) => { const i = rows().findIndex((r) => r.id === id); return heights()[i] ?? 94; } };
+  return { ref, rows, virtualizer, byId, keys, gitKeys, startOf, offsets, heights, heightOf: (id: string) => { const i = rows().findIndex((r) => r.id === id); return heights()[i] ?? 94; } };
 }
 
 /** The panel slide in flight, and the timer that ends it. */
@@ -524,6 +532,14 @@ export function SessionList() {
   });
   const accountChoices = createMemo(() => filterAccounts().map((a) => ({ ...a, count: a.bindings.reduce((n, b) => n + (pickerCounts().account.get(b) ?? 0), 0) })));
   const list = useRows(false);
+  const [stripGitRows, setStripGitRows] = createSignal<string[]>([]);
+  const [gitWindowHidden, setGitWindowHidden] = createSignal(windowVisibility.hidden());
+  onCleanup(windowVisibility.onChange(() => setGitWindowHidden(windowVisibility.hidden())));
+  createEffect(on(() => page() !== "sessions" || pageHidden() || gitWindowHidden() ? [] : [...new Set([
+    ...(selectedKey() ? [selectedKey()!] : []),
+    ...(!stripMode() || peek() ? list.gitKeys() : stripGitRows()),
+  ])].slice(0, 48), followGitRows));
+  onCleanup(() => followGitRows([]));
   // A row the menu bar or a notification opened (Qt's revealRow): scrolled to
   // once the list has it; another selection drops the request.
   createEffect(on([revealing, list.rows, selectedKey], ([id, rows, selected]) => {
@@ -611,7 +627,7 @@ export function SessionList() {
       if (r.type === "card" && r.compactRow && right) setRowCompact(r.session.key, false);
       else if (r.type === "card" && r.expandable && (right ? !expandedChildren[r.session.key] : !!expandedChildren[r.session.key])) setExpandedChildren(r.session.key, right);
       // Child sessions (zerus-sa9qn.2): Right expands, Left collapses, then moves to the parent.
-      else if (r.type === "card" && r.team && r.team.collapsed === right) setCollapsedTeams(r.session.key, !right);
+      else if (r.type === "card" && r.team && r.team.collapsed === right) setTeamCollapsed(r.session.key, !right);
       else if (r.type === "card" && !right && r.parentKey) setSelectedKey(r.parentKey);
       else if (r.type === "card" && r.expandable) setExpandedChildren(r.session.key, right);
       else if (r.type === "child" && !right) setSelectedKey(r.parent.key);
@@ -627,7 +643,7 @@ export function SessionList() {
     <section class="sessions-pane" ref={section} classList={{ strip: stripMode(), peek: stripMode() && peek() }} aria-label={tr("Sessions")}
       style={{ "--pane-w": stripMode() ? `${STRIP_WIDTH}px` : `${sessionsWidth()}px`, "--panel-w": `${sessionsWidth()}px` }}
       onPointerEnter={onSectionEnter} onPointerLeave={onSectionLeave}>
-      <Show when={stripMode()}><Strip onEnter={onStripEnter} onToggle={toggleDock} /></Show>
+      <Show when={stripMode()}><Strip onEnter={onStripEnter} onToggle={toggleDock} onGitRows={setStripGitRows} /></Show>
       <div class="sp-panel" ref={panel} classList={{ overlay: stripMode() }} hidden={!panelVisible()}
         onContextMenu={(e) => { if ((e.target as Element).closest("input,textarea")) return; openMenu(e, backgroundEntries({ newSession: newSessionFromPanel, newProject: openCreateProjectDialog })); }}>
         <header class="sp-head">
@@ -853,10 +869,10 @@ function ListRow(props: { id: string; list: RowSource }) {
             onContextMenu={(e) => sessionContextMenu(e, v().session)}
             onDblClick={(e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey) setRowCompact(v().session.key, !compactRows[v().session.key]); }}>
             <Show when={!v().compactRow} fallback={<CompactCard session={v().session} selected={selectedKey() === v().session.key || !!multi[v().session.key]} onExpand={() => setRowCompact(v().session.key, false)}
-              team={v().team} onToggleTeam={() => setCollapsedTeams(v().session.key, !collapsedTeams[v().session.key])} />}>
+              team={v().team} onToggleTeam={() => setTeamCollapsed(v().session.key, !teamCollapsed(v().session.key))} />}>
               <SessionCard session={v().session} selected={(selectedKey() === v().session.key && !subagentOpen()) || !!multi[v().session.key]} expandable={v().expandable}
                 expanded={!!expandedChildren[v().session.key]} onToggleChildren={() => setExpandedChildren(v().session.key, !expandedChildren[v().session.key])}
-                team={v().team} onToggleTeam={() => setCollapsedTeams(v().session.key, !collapsedTeams[v().session.key])}
+                team={v().team} onToggleTeam={() => setTeamCollapsed(v().session.key, !teamCollapsed(v().session.key))}
                 fromParent={v().fromParent} onOpenParent={(key) => { setSelectedKey(key); setRevealing(key); }} />
             </Show>
           </div>
@@ -925,8 +941,10 @@ function ListPlaceholder() {
  * wide as a tile, the active and most urgent filters meeting in the middle,
  * then the same rows at their heights: bands, 84 px square tiles, child rows.
  */
-function Strip(props: { onEnter: () => void; onToggle: () => void }) {
+function Strip(props: { onEnter: () => void; onToggle: () => void; onGitRows: (rows: string[]) => void }) {
   const list = useRows(true);
+  createEffect(() => props.onGitRows(list.gitKeys()));
+  onCleanup(() => props.onGitRows([]));
   // The active filter plus the first of attention, active, all that is not checked and has sessions.
   const shown = createMemo(() => {
     const urgent = (["attention", "active", "all"] as StateFilter[]).find((id) => id !== stateFilter() && (id === "all" || Number(FILTERS.find((f) => f.id === id)!.count()) > 0));
@@ -1000,7 +1018,7 @@ function StripTile(props: { row: Extract<Row, { type: "card" }> }) {
   const optionalCount = () => optionalQuestionCount(s(), computerFresh(s().computer));
   const kind = () => badgeKind(s());
   const frame = () => (emphasis(s()) === "draft" ? "draft" : kind() === "muted-attention" || kind() === "muted-unread" ? "muted" : kind() === "unread" ? "attention" : kind());
-  const tip = () => [`${s().name}: ${statusCaption(s())}`, s().summary, `${folderOf(s())}${s().branch ? ` / ${s().branch}` : ""} on ${s().machine}`, s().git ? gitTooltip(s()) : "", optionalCount() ? `${optionalCount()} optional question(s) waiting` : ""].filter(Boolean).join("\n");
+  const tip = () => [`${s().name}: ${statusCaption(s())}`, s().summary, `${folderOf(s())}${s().branch ? ` / ${s().branch}` : ""} on ${s().machine}`, s().git ? gitTooltip(s(), now() * 1000) : "", optionalCount() ? `${optionalCount()} optional question(s) waiting` : ""].filter(Boolean).join("\n");
   return (
     <button class="strip-tile" classList={{ selected: selectedKey() === s().key, "context-target": visibleMenu()?.sessionKey === s().key }} data-frame={frame()} title={tip()} onClick={() => selectSession(s().key)}
       onContextMenu={(e) => sessionContextMenu(e, s())}>

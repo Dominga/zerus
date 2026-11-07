@@ -6,6 +6,7 @@ mod claude;
 mod claude_settings;
 mod mcp_servers;
 mod permission_status;
+mod permission_scope;
 mod install;
 mod deepseek;
 use crate::{
@@ -330,12 +331,15 @@ fn list(config: &Config) -> Result<Value> {
         rows.push(row);
     }
     for row in &mut rows {
-        let provider = row["provider"].as_str().unwrap_or("");
-        row["is_default"] = json!(row["id"].as_str() == Some(catalog.defaults.get(provider).map(String::as_str).unwrap_or(&format!("native-{provider}"))));
-        let mode = catalog.permission_modes.get(row["id"].as_str().unwrap_or("")).map(String::as_str).unwrap_or("provider");
-        permission_status::describe(config, row, mode);
+        let provider = row["provider"].as_str().unwrap_or("").to_owned();
+        row["is_default"] = json!(row["id"].as_str() == Some(catalog.defaults.get(&provider).map(String::as_str).unwrap_or(&format!("native-{provider}"))));
+        let explicit = catalog.permission_modes.get(row["id"].as_str().unwrap_or("")).map(String::as_str);
+        // `zerus`: the person chose it; `default`: the Zerus default (T-6hcfnu).
+        row["permission_mode_source"] = json!(if explicit.is_some() { "zerus" } else { "default" });
+        permission_status::describe(config, row, explicit.unwrap_or(default_permission_mode(&provider)));
         model_defaults::describe(row, &catalog);
     }
+    permission_scope::describe(config, &mut rows);
     // The connector forwards at most 128 KiB of accounts; this row keeps within 32 KiB.
     #[cfg(unix)]
     for row in rows.iter_mut().filter(|r| r["id"] == "native-opencode" && r["model_options"].is_array()) {
@@ -347,7 +351,7 @@ fn list(config: &Config) -> Result<Value> {
             .contains(r["id"].as_str().unwrap_or(""))
     });
     Ok(
-        json!({"host":config.host(),"profiles":visible,"removed_profiles":removed,"defaults":catalog.defaults,"revision":revision(&bytes),"setup_revision":true,"copy_revision":true}),
+        json!({"host":config.host(),"profiles":visible,"removed_profiles":removed,"defaults":catalog.defaults,"revision":revision(&bytes),"setup_revision":true,"copy_revision":true,"permission_scope_supported":true}),
     )
 }
 pub const AUTH_ENV: &[&str] = &[
@@ -373,12 +377,21 @@ pub const AUTH_ENV: &[&str] = &[
     "CLAUDE_CODE_USE_VERTEX",
     "CLAUDE_CODE_USE_FOUNDRY",
 ];
+/// The permission mode of an account without an explicit choice (owner,
+/// 2026-11-07, T-6hcfnu): bypass for Claude, Codex and Kimi. OpenCode and
+/// DeepSeek keep their native configuration: OpenCode refuses a Zerus mode,
+/// and DeepSeek's bypass needs its own confirmed setup.
+pub fn default_permission_mode(provider: &str) -> &'static str {
+    if matches!(provider, "claude" | "codex" | "kimi") { "bypass" } else { "provider" }
+}
+
 /// Called before state lookup: a resumed/forked record still retains its original native home.
+/// An explicit choice (`provider` or `bypass`) always wins over the default.
 pub fn permission_mode(config: &Config, account: &str, provider: &str) -> Result<String> {
     let id = if account.is_empty() {format!("native-{provider}")} else {account.into()};
     let (profile,_,_) = lookup(config,&id)?;
     if profile.provider != provider { return Err(Error::new(1,"The account belongs to another provider.")); }
-    Ok(decode(&read(config)?)?.permission_modes.get(&id).cloned().unwrap_or_else(||"provider".into()))
+    Ok(decode(&read(config)?)?.permission_modes.get(&id).cloned().unwrap_or_else(||default_permission_mode(provider).into()))
 }
 
 /// Append native switches only to the spawned argv; saved resume recipes stay
@@ -582,14 +595,22 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             if !dry {save(config,&catalog)?;}println!("{}",list(config)?);
         },
         "permissions"=>{
-            let mode=arg(args,"--mode").ok_or_else(||Error::new(1,"Choose provider or bypass permission mode."))?;
-            if !["provider","bypass"].contains(&mode) {return Err(Error::new(1,"Choose provider or bypass permission mode."));}
+            let mode=arg(args,"--mode").ok_or_else(||Error::new(1,"Choose provider, bypass or default permission mode."))?;
+            if !["provider","bypass","default"].contains(&mode) {return Err(Error::new(1,"Choose provider, bypass or default permission mode."));}
             let _lock=locked(config)?;let bytes=read(config)?;check_revision(&bytes,args)?;let mut catalog=decode(&bytes)?;
             if !native_id(id) && !catalog.profiles.contains_key(id) {return Err(Error::new(1,"Account profile does not exist."));}
             if id=="native-opencode" && mode!="provider" {return Err(Error::new(1,"OpenCode permissions are managed in its native configuration"));}
-            if mode=="provider" {catalog.permission_modes.remove(id);} else {catalog.permission_modes.insert(id.into(),mode.into());}
+            // A shared change names the scope it saw; a computer that keeps
+            // its permissions per computer since then refuses it (zerus-f0uz8).
+            if let Some(expected)=arg(args,"--expect-scope") {
+                if !permission_scope::is(config,id,expected) {return Err(Error::new(1,"Permissions on this account changed between shared and per computer. Refresh before saving."));}
+            }
+            // Both choices are kept: an explicit provider mode must stay when
+            // the default is bypass (T-6hcfnu); `default` returns to it.
+            if mode=="default" {catalog.permission_modes.remove(id);} else {catalog.permission_modes.insert(id.into(),mode.into());}
             if !dry {save(config,&catalog)?;}println!("{}",list(config)?);
         },
+        "permission-scope"=>{println!("{}",permission_scope::set(config,args,dry)?);},
         "rename"=>{
             let label=arg(args,"--label").ok_or_else(||Error::new(1,"Account name is required."))?.trim();validate_label(label)?;
             let _lock=locked(config)?;let bytes=read(config)?;check_revision(&bytes,args)?;let mut catalog=decode(&bytes)?;
@@ -680,7 +701,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             }
             return Ok(code);
         },
-        _=>return Err(Error::new(1,"usage: hgs account ls | add ID --provider codex|claude|kimi --label NAME | rm ID | login ID | favorite native-opencode --model PROVIDER/MODEL --favorite on|off --request-id UUID | models native-opencode [--location DIR]")),
+        _=>return Err(Error::new(1,"usage: hgs account ls | add ID --provider codex|claude|kimi --label NAME | rm ID | login ID | permission-scope ID --scope account|computer | favorite native-opencode --model PROVIDER/MODEL --favorite on|off --request-id UUID | models native-opencode [--location DIR]")),
     }
     Ok(0)
 }

@@ -106,6 +106,8 @@ export interface ViewRow {
   cwd_canonical?: string;
   /** The checkout's root, "" outside Git (the worktree picker's session counts). */
   git_root?: string;
+  git_metadata_state?: string;
+  git_detached?: boolean;
   /** Verified linked checkout name; absent for main or unknown checkouts. */
   worktree?: string | null;
   /** The session that launched or adopted this one (core `ParentLink`). */
@@ -250,6 +252,7 @@ export interface DesktopService {
 }
 
 export interface Batch {
+  git?: GitOut[];
   desktop_service?: DesktopService;
   upserts: RowOut[];
   removes: KeyOut[];
@@ -270,6 +273,13 @@ export interface Batch {
   processes_view?: ProcessesView;
   /** Notices and Terminal requests that arrived after their call, at most 16. */
   composer_events?: ComposerEvent[];
+}
+
+export interface GitOut {
+  computer: ComputerId;
+  key: string;
+  kind: "state" | "unavailable";
+  payload: { value?: Record<string, unknown>; rev?: number; code?: string };
 }
 
 /** A row of the Processes tab (processes.rs `RowView`). */
@@ -325,7 +335,7 @@ export const emptyBatch = (): Batch => ({ upserts: [], removes: [], replaces: []
 
 /** A batch with nothing to apply. A composer view or a draft key set is content: Rust sends each once. */
 export const isEmptyBatch = (b: Batch) =>
-  !b.upserts.length && !b.removes.length && !b.replaces.length && !b.computers.length && !b.machines?.length && !b.activity.length
+  !b.git?.length && !b.upserts.length && !b.removes.length && !b.replaces.length && !b.computers.length && !b.machines?.length && !b.activity.length
   && !b.desktop_service && !b.tasks?.length && !b.groups?.length && !b.grouping && !b.processes_view && !b.composer && !b.draft_keys && !b.composer_events?.length;
 
 /** One Activity event as `inspect` returns it; unknown fields are kept. */
@@ -500,11 +510,19 @@ export interface Profile {
   native: boolean; installed: boolean; is_default: boolean; home: string; auth_revision: string; online: boolean;
   state: MemberState; detail: Text; signed_in: boolean;
   permission: string; permission_mode?: string; permission_label: Text; permission_hint: Text; model_supported: boolean; model_text: Text;
+  /** The mode is the Zerus default (bypass for Claude, Codex and Kimi), not a choice (T-6hcfnu). */
+  permission_default?: boolean;
+  /** This computer's model and effort defaults, empty for provider settings (zerus-f0uz8). */
+  model?: string; effort?: string;
+  /** `account` (shared), `computer`, or empty when this computer keeps no scope. */
+  permission_scope?: string;
   usage: Usage; opencode: OpenCodeInfo | null;
 }
 export interface Account {
   key: string; label: string; provider: string; installed: boolean; machines: string[]; members: Profile[];
   usage: Usage; permission: Text; identity_lines: Text[]; identity_note: Text | null;
+  /** zerus-f0uz8: permissions kept per computer; members' model or permission settings differ. */
+  permissions_per_computer?: boolean; model_differs?: boolean; permission_differs?: boolean;
 }
 export interface AccountHost { computer: ComputerId; name: string; label: string; online: boolean }
 export interface BindingEvidence { host: ComputerId; provider: string; id: string; home: string; group: string }

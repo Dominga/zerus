@@ -36,6 +36,14 @@ if (root / ('spoil-' + alias)).exists() and args[1:2] == [json.loads((root / ('s
     if 'value' in spoil: output[spoil['field']] = spoil['value']
     else: output.pop(spoil['field'], None)
     print(json.dumps(output)); sys.exit(0)
+if (root / ('nolabels-' + alias)).exists() and args[1:2] in (['hello'], ['session-labels']):
+    result = subprocess.run([os.environ['SWARM_TEST_HGS'], *args], input=sys.stdin.read(), env=env, text=True, capture_output=True)
+    sys.stderr.write(result.stderr)
+    if result.returncode: sys.exit(result.returncode)
+    output = json.loads(result.stdout)
+    context = output.get('session_labels', output)
+    if isinstance(context, dict): context.get('context', {}).pop('labels_by_id', None)
+    print(json.dumps(output)); sys.exit(0)
 if (root / ('linger-' + alias)).exists() and args[1:2] == ['hello']:
     # The answer comes at once, but a descendant keeps the pipe open.
     result = subprocess.run([os.environ['SWARM_TEST_HGS'], *args], input=sys.stdin.read(), env=env, text=True, capture_output=True)
@@ -169,6 +177,40 @@ class Swarm(unittest.TestCase):
         snapshots = [self.call(node, 'get') for node in ['a', 'b', 'c']]
         self.assertEqual(len({s['digest'] for s in snapshots}), 1)
         return snapshots
+
+    def test_label_gate_needs_every_fresh_cli_and_actual_connector(self):
+        self.env['XDG_CONFIG_HOME'] = str(self.root / 'xdg')
+        # Only A and B join this swarm. C is not part of its declared roster.
+        (self.root / 'b/config').write_text('HGS_SELF="b"\nHGS_PEERS="a"\n')
+        gate = lambda: self.call('a', 'session-labels-gate', '--json')['ready']
+        self.assertFalse(gate())
+        self.join('a', 'b'); self.join('b', 'a')
+        for node in ('a', 'b', 'a', 'b', 'a'):
+            self.call(node, 'sync')
+        self.assertTrue(gate())
+        # A fresh hello from the foundation build invalidates the earlier
+        # positive, despite an unchanged package version and membership.
+        old = self.root / 'nolabels-b'; old.touch()
+        self.call('a', 'sync'); self.assertFalse(gate())
+        old.unlink(); self.call('a', 'sync'); self.assertTrue(gate())
+        offline = self.root / 'offline-b'; offline.touch()
+        self.call('a', 'sync'); self.assertFalse(gate())
+        offline.unlink(); self.call('a', 'sync'); self.assertTrue(gate())
+        # The canonical slot alone requires the RUNNING responder. An absent
+        # or old connector cannot be replaced by this new CLI's help marker.
+        connector = self.root / 'xdg/hgs/mobile/connector.json'
+        connector.parent.mkdir(parents=True, mode=0o700); connector.write_text('{}'); connector.chmod(0o600)
+        self.assertFalse(gate())
+        started = time.monotonic(); self.call('a', 'sync')
+        self.assertLess(time.monotonic() - started, 8)
+        self.assertFalse(gate())
+        connector.unlink()
+        # Scope restoration alone never resurrects an old positive.
+        self.assertFalse(gate())
+        self.call('a', 'sync'); self.assertTrue(gate())
+        # A configured machine which has never answered is also closed.
+        (self.root / 'a/config').write_text('HGS_SELF="a"\nHGS_PEERS="b c"\n')
+        self.assertFalse(gate())
 
     def test_third_node_transitive_sync_access_filter_and_private_configuration(self):
         self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')

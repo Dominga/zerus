@@ -120,3 +120,76 @@ fn another_machines_id_membership_and_archive_names_cannot_select_a_live_twin() 
     assert_eq!(rows[0]["mobile_project_id"], "inbox");
     assert_eq!(rows[1]["mobile_project_id"], "two");
 }
+
+#[test]
+fn primary_null_conflict_and_missing_are_distinct_without_new_public_fields() {
+    use zerus_mobile_connector::projects::PrimaryMemberships;
+    let mut raw = catalog();
+    raw["session_id_memberships"] = json!({"available":true,"records":[
+        {"machine":NODE,"session_id":ONE,"project":null,"conflict":false},
+        {"machine":NODE,"session_id":TWO,"project":null,"conflict":true}]});
+    let primary = PrimaryMemberships::read(&raw).unwrap();
+    let mut public = normalized(&raw);
+    primary.project(&mut public);
+    assert!(public.get("session_id_memberships").is_none());
+    assert!(public["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|p| p["session_ids"].as_array().is_none_or(|ids| ids.is_empty())));
+    let mut twins = rows();
+    primary.apply(&mut twins, &public);
+    assert!(twins
+        .iter()
+        .all(|row| row.get("mobile_project_id").is_none()));
+    let third = "55555555-5555-4555-8555-555555555555";
+    let mut absent = vec![json!({"name":LABEL,"session_id":third,"run_id":"third"})];
+    primary.apply(&mut absent, &public);
+    assert_eq!(
+        absent[0]["mobile_project_id"], "one",
+        "only proven absence permits unique-label fallback"
+    );
+    raw["session_id_memberships"]["available"] = json!(false);
+    PrimaryMemberships::read(&raw)
+        .unwrap()
+        .apply(&mut absent, &public);
+    assert!(absent[0].get("mobile_project_id").is_none());
+}
+
+#[test]
+fn primary_grouping_separates_twins_and_ignores_other_computers() {
+    use zerus_mobile_connector::projects::PrimaryMemberships;
+    let mut raw = catalog();
+    raw["session_id_memberships"] = json!({"available":true,"records":[
+        {"machine":NODE,"session_id":ONE,"project":"two","conflict":false},
+        {"machine":NODE,"session_id":TWO,"project":"one","conflict":false},
+        {"machine":"66666666-6666-4666-8666-666666666666","session_id":ONE,"project":"inbox","conflict":false}]});
+    let primary = PrimaryMemberships::read(&raw).unwrap();
+    let mut public = normalized(&raw);
+    primary.project(&mut public);
+    let mut twins = rows();
+    let parent = twins[0]["parent"].clone();
+    let human = twins[0]["human_request"].clone();
+    primary.apply(&mut twins, &public);
+    assert_eq!(twins[0]["mobile_project_id"], "two");
+    assert_eq!(twins[1]["mobile_project_id"], "one");
+    assert_eq!(twins[0]["parent"], parent);
+    assert_eq!(twins[0]["human_request"], human);
+    assert_eq!(public["projects"][0]["session_ids"], json!([TWO]));
+    assert_eq!(public["projects"][1]["session_ids"], json!([ONE]));
+    let record = raw["session_id_memberships"]["records"][0].clone();
+    raw["session_id_memberships"]["records"]
+        .as_array_mut()
+        .unwrap()
+        .push(record);
+    assert!(PrimaryMemberships::read(&raw).is_err());
+    raw["session_id_memberships"]["records"] =
+        json!([{ "machine":NODE,"session_id":ONE,"project":"one","conflict":true}]);
+    assert!(PrimaryMemberships::read(&raw).is_err());
+    raw["session_id_memberships"]["records"] =
+        json!([{ "machine":NODE,"session_id":ONE,"conflict":false}]);
+    assert!(
+        PrimaryMemberships::read(&raw).is_err(),
+        "missing is not an explicit null"
+    );
+}

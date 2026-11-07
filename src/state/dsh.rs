@@ -15,6 +15,9 @@ use std::{
 };
 
 #[cfg(unix)]
+mod host_identity;
+
+#[cfg(unix)]
 // Resident bridge identity is independent of the installed harness release.
 const ADAPTER_VERSION: &str = "0.2.1-rc.2";
 #[cfg(unix)]
@@ -149,6 +152,7 @@ fn ensure_host(record: &Value) -> Result<()> {
         Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused) => {},
         Err(e) => return Err(format!("Cannot check the native host: {e}")),
     }
+    host_identity::before_start(&dir)?;
     let recommended = REVIEWED_VERSIONS.last().expect("reviewed harness version");
     let version = Command::new("dsh").arg("--version").output().map_err(|_| {
         format!("Install the official harness: npm install -g @deepseek-ai/dsh@{recommended}")
@@ -221,8 +225,7 @@ fn ensure_host(record: &Value) -> Result<()> {
         .stderr(log);
     // Detach only the dedicated native host. Closing its launching terminal or
     // HGS process must not stop conversations.
-    let mut child = crate::platform::spawn_detached(&mut command).map_err(|e| e.to_string())?;
-    atomic(&dir.join("host.pid"), &child.id().to_string())?;
+    let mut child = host_identity::spawn(&dir, &mut command)?;
     let deadline = Instant::now() + Duration::from_secs(35);
     while Instant::now() < deadline {
         if let Ok(value) = rpc(record, "ping", json!({})) {

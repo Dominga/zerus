@@ -14,6 +14,12 @@ const TITLE: &str = "Make auto mode your default permission mode?";
 const ACCEPT: &str = "Yes, set auto mode as my default permission mode";
 const KEEP: &str = "No, keep ";
 
+// Claude Code 2.1.319's auto-default nudge rejects confirmation for 150 ms
+// after its first paint. Observe the SAME panel throughout that native guard;
+// this is not a promise that a later release accepts Enter. A panel that stays
+// open after our ONE Enter still has the usual uncertain/Terminal outcome.
+const NATIVE_CONFIRMATION_GUARD: std::time::Duration = std::time::Duration::from_millis(150);
+
 struct Panel {
     folder: Option<String>,
     body: String,
@@ -198,7 +204,15 @@ pub(super) fn answer(record: &Value, question: &Value, answers: &Value) -> Resul
         Some("mode_1") => 1,
         _ => return Err("Choose whether to use auto mode or keep the current mode".into()),
     };
-    kimi_tui_choice::answer(record, question, chosen, 2, snapshot, answered, false)
+    kimi_tui_choice::answer_after_observation(
+        record,
+        question,
+        chosen,
+        2,
+        snapshot,
+        answered,
+        NATIVE_CONFIRMATION_GUARD,
+    )
 }
 
 #[cfg(test)]

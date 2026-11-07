@@ -127,6 +127,7 @@ class PermissionMode(unittest.TestCase):
     def test_missing_acknowledgement_is_never_retried(self):
         (self.root/'hold-dialog').touch();p=self.payload()
         self.assertIn('delivery uncertain',self.answer(p,success=False));before=self.received()
+        self.assertEqual(before.count(b'\r'),1)
         self.assertIn('delivery uncertain',self.answer(p,success=False));self.assertEqual(self.received(),before)
 
     def test_after_reply_offer_is_answered_from_activity(self):

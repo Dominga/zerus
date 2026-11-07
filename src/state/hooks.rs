@@ -1421,7 +1421,9 @@ fn track(name: String, token: String, mut event: Value, output: &mut StartOutput
     telemetry::observe(&mut record, &event);
     tasks::observe(&mut record, &event);
     processes::observe(&mut record, &event);
+    keep_warm::observe(&mut record, &mut event, now());
     journal::update_activity(&mut record, &event);
+    keep_warm::settle(&mut record, &event, now());
     if resumed_clear_end {
         // The real main hook ended this requested clear, not its supervised
         // process. Keep the exact deferred-start fence, never fabricate Ready.

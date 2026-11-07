@@ -177,8 +177,19 @@ pub(super) fn mark_system_prompt(record: &Value, event: &mut Value, prompt: &str
 }
 
 /// The person's latest request. Older records may hold background work.
+/// The last reply the session shows, which a keep-warm ping does not replace.
+pub(super) fn last_message(record: &Value) -> &str {
+    if record["keep_warm_quiet"].is_object() {
+        return string(&record["keep_warm_quiet"], "last_message");
+    }
+    string(record, "last_message")
+}
+
 pub(super) fn user_prompt(record: &Value) -> &Value {
     static NONE: Value = Value::Null;
+    if record["keep_warm_quiet"].is_object() {
+        return &record["keep_warm_quiet"]["prompt"];
+    }
     if system_prompt(string(record, "prompt")).is_some() { &NONE } else { &record["prompt"] }
 }
 
@@ -293,6 +304,13 @@ pub(super) fn log_event(record: &Value, event: &Value) -> Result<()> {
     if let Some(origin) = turn_origin(record, event) {
         data["turn_origin"] = json!(origin);
     }
+    // A keep-warm ping is not the person's message, and its turn is no reply.
+    if let Some(mark) = event["keep_warm"].as_str() {
+        data["turn_origin"] = json!("keep_warm");
+        if mark == "prompt" {
+            data["origin"] = json!("keep_warm");
+        }
+    }
     if let Some(id) = kimi_turn_id(record, event) {
         data["kimi_turn_id"] = json!(id);
         data["kimi_conversation_id"] = record["conversation_id"].clone();
@@ -377,6 +395,7 @@ fn latest_reply(record: &Value, recurring_schedules: Option<u64>) -> Result<Valu
         .query_row(
             "SELECT seq, payload FROM events WHERE name = ? AND conversation = ?
          AND json_extract(payload, '$.type') = 'Stop' AND json_extract(payload, '$.agent_id') = ''
+         AND COALESCE(json_extract(payload, '$.turn_origin'), '') != 'keep_warm'
          ORDER BY seq DESC LIMIT 1",
             params![journal_name(record), conversation],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -414,6 +433,10 @@ fn kimi_reply(db: &Connection, record: &Value, skip_scheduled: bool) -> Result<O
     let mut stop: Option<(i64, Value)> = None;
     for row in rows {
         let (seq, kind, origin, payload) = row.map_err(|e| e.to_string())?;
+        // Keep-warm ping turns are never replies, nor the person's prompts.
+        if origin.as_deref() == Some("keep_warm") {
+            continue;
+        }
         match (kind.as_deref(), stop.take()) {
             (Some("AgentMessage"), pending) => stop = pending,
             (Some("Stop"), None) => {
@@ -547,6 +570,7 @@ fn observed_summary(record: &Value, live_pane: bool) -> Value {
         }
     }
     recovery::enrich(record, &mut output);
+    keep_warm::visible(&mut output, record);
     output
 }
 
@@ -995,6 +1019,7 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     if !user_prompt(&record).is_null() {
         output["prompt"] = record["prompt"].clone();
     }
+    keep_warm::visible(&mut output, &record);
     output["tracked"] = json!(true);
     if archive_id.is_some() {
         output["state"] = json!("archived");

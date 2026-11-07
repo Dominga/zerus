@@ -488,6 +488,10 @@ fn schedule(job: &mut Value, s: &Value, time: f64) {
 // Pure transition function; wall clock is supplied so tests can exercise long
 // backoff sequences, restarts, and interleaved user activity without sleeping.
 fn advance(mut job: Value, s: &Value, p: &Policy, time: f64) -> Value {
+    // A failed keep-warm ping is not the person's work: never continue it.
+    if job.is_null() && s["recovery_user_text"] == keep_warm::TEXT {
+        return Value::Null;
+    }
     let error = &s["provider_error"];
     let fid = failure_id(s);
     let user_at = seconds(s, "recovery_user_at");

@@ -129,7 +129,7 @@ pub(super) fn load() -> Option<Store> {
 }
 
 /// The `keep_warm` object of a listing row.
-fn view(entry: Option<&Entry>, runtime: &Value, record: &Value) -> Value {
+fn view(entry: Option<&Entry>, runtime: &Value, record: &Value, now: f64) -> Value {
     let enabled = entry.is_some_and(|entry| entry.enabled);
     let state = if !enabled {
         "off"
@@ -140,7 +140,7 @@ fn view(entry: Option<&Entry>, runtime: &Value, record: &Value) -> Value {
         "revision":entry.map_or(0, |entry| entry.revision),"state":state,
         "next_at":if enabled { runtime["next_at"].clone() } else { Value::Null },
         "reason":if enabled { runtime["reason"].as_str().unwrap_or("") } else { "" },
-        "turn_active":record["keep_warm_turn"].is_object()})
+        "turn_active":record["keep_warm_turn"]["started_at"].as_f64().is_some_and(|at| now - at <= TURN_SECONDS)})
 }
 
 fn read_runtime(owner: &str) -> Value {
@@ -161,7 +161,7 @@ pub(super) fn enrich(session: &mut Value, store: Option<&Store>, record: &Value)
     let owner = storage::owner_key(record);
     let entry = store.sessions.get(&owner);
     let runtime = if entry.is_some_and(|entry| entry.enabled) { read_runtime(&owner) } else { Value::Null };
-    session["keep_warm"] = view(entry, &runtime, record);
+    session["keep_warm"] = view(entry, &runtime, record, now());
 }
 
 fn entry(store: &Store, owner: &str) -> Option<Entry> {
@@ -352,6 +352,114 @@ pub(super) fn eligibility(record: &Value, usage: &Value, last_turn_at: Option<f6
     }
 }
 
+/// How long a submitted ping may wait for its prompt hook to mark its turn.
+const PENDING_SECONDS: f64 = 120.0;
+/// A ping turn that never reported its end stops marking events after this.
+const TURN_SECONDS: f64 = 600.0;
+/// What a ping turn keeps from the session's visible state: listings and
+/// search show these instead of the ping's prompt, reply and time.
+const VISIBLE: [&str; 4] = ["prompt", "last_message", "last_event_at", "turn_started"];
+
+fn main_event(record: &Value, event: &Value) -> bool {
+    let agent_id = string(event, "agent_id");
+    !["SubagentStart", "SubagentStop"].contains(&string(event, "hook_event_name"))
+        && (agent_id.is_empty() || (string(record, "agent") == "kimi" && agent_id == "main"))
+}
+
+fn prompt_text(event: &Value) -> String {
+    event["prompt"].as_str().map(str::to_owned).unwrap_or_else(|| {
+        event["prompt"].as_array().into_iter().flatten().filter(|part| part["type"] == "text")
+            .map(|part| string(part, "text")).collect::<Vec<_>>().join("\n")
+    })
+}
+
+fn remove(record: &mut Value, key: &str) -> Option<Value> {
+    record.as_object_mut().and_then(|record| record.remove(key))
+}
+
+/// Mark a main-agent hook `event` of a ping turn before `update_activity`:
+/// `event["keep_warm"]` is "prompt" for the ping's own prompt and "turn" for
+/// the rest of its turn. Only the ping's exact text while its submission is
+/// pending opens a ping turn; any other prompt makes the turn the person's.
+pub(super) fn observe(record: &mut Value, event: &mut Value, now: f64) {
+    if !main_event(record, event) {
+        return;
+    }
+    if record["keep_warm_pending"]["submitted_at"].as_f64().is_none_or(|at| now - at > PENDING_SECONDS) {
+        remove(record, "keep_warm_pending");
+    }
+    if record["keep_warm_turn"]["started_at"].as_f64().is_none_or(|at| now - at > TURN_SECONDS) {
+        remove(record, "keep_warm_turn");
+    }
+    let kind = string(event, "hook_event_name");
+    let prompt = ["UserPromptSubmit", "UserPromptQueued"].contains(&kind)
+        || (kind == "TurnStarted" && (event["prompt"].is_string() || event["prompt"].is_array() || event["origin_kind"].is_string()));
+    if !prompt {
+        if record["keep_warm_turn"].is_object() {
+            event["keep_warm"] = json!("turn");
+        }
+        return;
+    }
+    if prompt_text(event).trim() == TEXT {
+        if record["keep_warm_turn"].is_object() {
+            // The same ping reported again (Kimi's TurnStarted after its prompt).
+            event["keep_warm"] = json!("turn");
+            return;
+        }
+        if let Some(pending) = remove(record, "keep_warm_pending") {
+            record["keep_warm_turn"] = json!({"request_id":pending["request_id"],"started_at":now});
+            if !record["keep_warm_quiet"].is_object() {
+                let mut quiet = json!({});
+                for key in VISIBLE {
+                    quiet[key] = if key == "prompt" { journal::user_prompt(record).clone() } else { record[key].clone() };
+                }
+                record["keep_warm_quiet"] = quiet;
+            }
+            event["keep_warm"] = json!("prompt");
+            return;
+        }
+    }
+    // The person's own message, or a job's: everything is visible again.
+    remove(record, "keep_warm_turn");
+    remove(record, "keep_warm_quiet");
+}
+
+/// After `update_activity`: record when the cache was last used and end a
+/// ping turn at its Stop, failure or interruption.
+pub(super) fn settle(record: &mut Value, event: &Value, now: f64) {
+    if !main_event(record, event) {
+        return;
+    }
+    let ping = event["keep_warm"].is_string();
+    match string(event, "hook_event_name") {
+        "Stop" => {
+            record["cache_touched_at"] = json!(now);
+            if ping {
+                remove(record, "keep_warm_turn");
+            } else {
+                record["keep_warm_real_stop_at"] = json!(now);
+            }
+        }
+        "StopFailure" | "Interrupt" | "SessionEnd" if ping => {
+            remove(record, "keep_warm_turn");
+        }
+        _ => {}
+    }
+}
+
+/// Show the session as it was before its ping turns.
+pub(super) fn visible(output: &mut Value, record: &Value) {
+    let quiet = &record["keep_warm_quiet"];
+    if !quiet.is_object() {
+        return;
+    }
+    for key in VISIBLE {
+        if output.get(key).is_some() {
+            output[key] = quiet[key].clone();
+        }
+    }
+}
+
 /// Work around the agent that its record alone does not show.
 #[derive(Debug)]
 pub(super) struct Facts {
@@ -482,7 +590,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         recovery::ensure_worker()?;
     }
     if code == 0 {
-        output["keep_warm"] = view(entry.as_ref(), &read_runtime(&owner), &record);
+        output["keep_warm"] = view(entry.as_ref(), &read_runtime(&owner), &record, now());
         let usage = if string(&record, "agent") == "claude" { usage::read(&record) } else { Value::Null };
         describe(&mut output, &record, &usage);
     }
@@ -594,17 +702,19 @@ mod tests {
         let entry = store.sessions.get("owner");
         let runtime = json!({"state":"waiting","next_at":NOW + 2880.0,"reason":""});
         let mut current = record();
-        assert_eq!(view(entry, &runtime, &current), json!({"enabled":true,"until":NOW + 10800.0,"revision":1,
+        assert_eq!(view(entry, &runtime, &current, NOW), json!({"enabled":true,"until":NOW + 10800.0,"revision":1,
             "state":"waiting","next_at":NOW + 2880.0,"reason":"","turn_active":false}));
-        current["keep_warm_turn"] = json!({"request_id":"ping"});
-        assert_eq!(view(entry, &runtime, &current)["turn_active"], true);
+        current["keep_warm_turn"] = json!({"request_id":"ping","started_at":NOW - 30.0});
+        assert_eq!(view(entry, &runtime, &current, NOW)["turn_active"], true);
+        // A ping turn that never reported its end hides nothing for long.
+        assert_eq!(view(entry, &runtime, &current, NOW + TURN_SECONDS)["turn_active"], false);
         // No setting, or a disabled one, is simply off; worker state is not shown.
-        assert_eq!(view(None, &Value::Null, &record()), json!({"enabled":false,"until":null,"revision":0,
+        assert_eq!(view(None, &Value::Null, &record(), NOW), json!({"enabled":false,"until":null,"revision":0,
             "state":"off","next_at":null,"reason":"","turn_active":false}));
         let off = Entry { enabled: false, ..entry.unwrap().clone() };
-        assert_eq!(view(Some(&off), &runtime, &record())["state"], "off");
+        assert_eq!(view(Some(&off), &runtime, &record(), NOW)["state"], "off");
         // A new setting has no worker state yet.
-        assert_eq!(view(entry, &Value::Null, &record())["state"], "waiting");
+        assert_eq!(view(entry, &Value::Null, &record(), NOW)["state"], "waiting");
     }
 
     #[test]
@@ -740,6 +850,98 @@ mod tests {
         for facts in [Facts { background: Some(1), ..quiet() }, Facts { background: None, ..quiet() },
             Facts { schedules: 1, ..quiet() }, Facts { recovery_active: true, ..quiet() }] {
             assert!(refusal(&idle(), entry, &runtime, &facts, NOW).is_some(), "{facts:?}");
+        }
+    }
+
+    fn hook(kind: &str, extra: Value) -> Value {
+        let mut event = json!({"hook_event_name":kind,"agent_id":""});
+        for (key, value) in extra.as_object().unwrap() { event[key] = value.clone(); }
+        event
+    }
+
+    fn pinged() -> Value {
+        let mut record = idle();
+        record.as_object_mut().unwrap().extend(json!({"prompt":"Fix the tests","last_message":"Done.",
+            "last_event_at":NOW - 2880.0,"turn_started":NOW - 3000.0,"input_pending_at":NOW,
+            "keep_warm_pending":{"request_id":"request-1","ping":"ping-1","submitted_at":NOW}}).as_object().unwrap().clone());
+        record
+    }
+
+    /// One hook through observe, a stand-in for update_activity, then settle.
+    fn deliver(record: &mut Value, mut event: Value) -> Value {
+        observe(record, &mut event, NOW);
+        let kind = string(&event, "hook_event_name").to_owned();
+        record["last_event_at"] = json!(NOW + 1.0);
+        if kind == "UserPromptSubmit" { record["prompt"] = event["prompt"].clone(); }
+        if kind == "Stop" { record["last_message"] = event["last_assistant_message"].clone(); }
+        settle(record, &event, NOW + 1.0);
+        event
+    }
+
+    #[test]
+    fn a_ping_turn_is_marked_and_leaves_the_visible_session_unchanged() {
+        let mut record = pinged();
+        let prompt = deliver(&mut record, hook("UserPromptSubmit", json!({"prompt":TEXT})));
+        assert_eq!(prompt["keep_warm"], "prompt");
+        assert!(record["keep_warm_turn"].is_object());
+        assert!(record.get("keep_warm_pending").is_none());
+        let reply = deliver(&mut record, hook("Stop", json!({"last_assistant_message":"OK"})));
+        assert_eq!(reply["keep_warm"], "turn");
+        assert!(record.get("keep_warm_turn").is_none());
+        assert_eq!(record["cache_touched_at"], json!(NOW + 1.0));
+        assert!(record.get("keep_warm_real_stop_at").is_none());
+        // Listings keep the person's prompt, reply and time.
+        let mut output = json!({"prompt":TEXT,"last_message":"OK","last_event_at":NOW + 1.0,"turn_started":NOW});
+        visible(&mut output, &record);
+        assert_eq!(output, json!({"prompt":"Fix the tests","last_message":"Done.",
+            "last_event_at":NOW - 2880.0,"turn_started":NOW - 3000.0}));
+        // The person's next message makes everything visible again.
+        let next = deliver(&mut record, hook("UserPromptSubmit", json!({"prompt":"Next task"})));
+        assert!(next.get("keep_warm").is_none());
+        assert!(record.get("keep_warm_quiet").is_none());
+        deliver(&mut record, hook("Stop", json!({"last_assistant_message":"Done again."})));
+        assert_eq!(record["keep_warm_real_stop_at"], json!(NOW + 1.0));
+    }
+
+    #[test]
+    fn a_message_the_person_queues_during_a_ping_makes_the_turn_theirs() {
+        let mut record = pinged();
+        deliver(&mut record, hook("UserPromptSubmit", json!({"prompt":TEXT})));
+        let queued = deliver(&mut record, hook("UserPromptQueued", json!({"prompt":"Also check CI"})));
+        assert!(queued.get("keep_warm").is_none());
+        assert!(record.get("keep_warm_turn").is_none());
+        assert!(record.get("keep_warm_quiet").is_none());
+        let stop = deliver(&mut record, hook("Stop", json!({"last_assistant_message":"CI is green."})));
+        assert!(stop.get("keep_warm").is_none());
+    }
+
+    #[test]
+    fn the_ping_text_alone_is_not_a_ping() {
+        // Typed by someone, or after the pending ping expired: an ordinary prompt.
+        let mut record = idle();
+        let typed = deliver(&mut record, hook("UserPromptSubmit", json!({"prompt":TEXT})));
+        assert!(typed.get("keep_warm").is_none());
+        let mut stale = pinged();
+        stale["keep_warm_pending"]["submitted_at"] = json!(NOW - 600.0);
+        let late = deliver(&mut stale, hook("UserPromptSubmit", json!({"prompt":TEXT})));
+        assert!(late.get("keep_warm").is_none());
+        assert!(stale.get("keep_warm_pending").is_none());
+        // Subagent events never join or end the main ping turn.
+        let mut record = pinged();
+        deliver(&mut record, hook("UserPromptSubmit", json!({"prompt":TEXT})));
+        let child = deliver(&mut record, hook("SubagentStop", json!({"agent_id":"worker"})));
+        assert!(child.get("keep_warm").is_none());
+        assert!(record["keep_warm_turn"].is_object());
+    }
+
+    #[test]
+    fn a_failed_ping_ends_its_turn() {
+        for kind in ["StopFailure", "Interrupt"] {
+            let mut record = pinged();
+            deliver(&mut record, hook("UserPromptSubmit", json!({"prompt":TEXT})));
+            let failed = deliver(&mut record, hook(kind, json!({"error":"rate_limit"})));
+            assert_eq!(failed["keep_warm"], "turn", "{kind}");
+            assert!(record.get("keep_warm_turn").is_none(), "{kind}");
         }
     }
 

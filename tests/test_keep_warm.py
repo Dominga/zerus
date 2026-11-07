@@ -84,6 +84,70 @@ class KeepWarm(unittest.TestCase):
         self.assertIn("GPT-5.6", refused["reason"])
         self.assertFalse((self.state / "keep-warm.json").exists())
 
+    def hook(self, kind, **values):
+        result = subprocess.run([str(fixtures.HGS), "__state", "hook"],
+                                env=dict(self.env, HGS_SESSION=self.name, HGS_RUN_ID=self.run_id),
+                                input=json.dumps(dict(hook_event_name=kind, session_id=self.conversation_id, **values)),
+                                text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def pending_ping(self):
+        record = json.loads(self.record_path.read_text())
+        record["keep_warm_pending"] = dict(request_id="request-1", ping="ping-1", submitted_at=time.time())
+        self.record_path.write_text(json.dumps(record))
+
+    def test_a_ping_turn_creates_no_reply_and_keeps_the_visible_session(self):
+        for agent in ("claude", "codex", "kimi"):
+            with self.subTest(agent=agent):
+                self.record.update(agent=agent, conversation_id=self.conversation_id)
+                self.write_record()
+                self.exercise_ping_turn()
+                # The next agent starts from a fresh conversation.
+                self.conversation_id = str(__import__("uuid").uuid4())
+                self.record = json.loads(self.record_path.read_text())
+                for key in ("keep_warm_turn", "keep_warm_quiet", "keep_warm_pending"):
+                    self.record.pop(key, None)
+
+    def exercise_ping_turn(self):
+        self.hook("UserPromptSubmit", prompt="Fix the tests")
+        self.hook("Stop", last_assistant_message="Done.")
+        before = self.inspect()
+        self.assertTrue(before["reply_id"])
+        self.pending_ping()
+        self.hook("UserPromptSubmit", prompt=TEXT)
+        self.assertTrue(self.listed()["keep_warm"]["turn_active"])
+        self.hook("Stop", last_assistant_message="OK")
+        after = self.inspect()
+        self.assertEqual(after["reply_id"], before["reply_id"])
+        self.assertEqual((after["last_message"], after["prompt"]), ("Done.", "Fix the tests"))
+        self.assertEqual(after["last_event_at"], before["last_event_at"])
+        row = self.listed()
+        self.assertEqual((row["reply_id"], row["prompt"], row["last_event_at"], row["keep_warm"]["turn_active"]),
+                         (before["reply_id"], "Fix the tests", before["last_event_at"], False))
+        ping = [event for event in after["events"] if event.get("turn_origin") == "keep_warm"]
+        self.assertEqual([(event["type"], event.get("origin")) for event in ping],
+                         [("UserPromptSubmit", "keep_warm"), ("Stop", None)])
+        # The person's next message is an ordinary turn with its own reply.
+        self.hook("UserPromptSubmit", prompt="Next task")
+        self.hook("Stop", last_assistant_message="Done again.")
+        final = self.inspect()
+        self.assertNotEqual(final["reply_id"], before["reply_id"])
+        self.assertEqual(final["last_message"], "Done again.")
+
+    def test_a_failed_ping_starts_no_recovery(self):
+        self.record["agent"] = "claude"
+        self.write_record()
+        directory = self.state / "recovery"
+        (directory / "policy.json").write_text(json.dumps(dict(version=1, revision=1, enabled=True, enabled_at=1,
+            service=True, rate_limit=True, network=True, delays=[15, 30, 60, 300])))
+        self.screen("\x1b[2J\x1b[H❯ ", "2:0")
+        self.pending_ping()
+        self.hook("UserPromptSubmit", prompt=TEXT)
+        self.hook("StopFailure", error="server_error", error_details="503 Service unavailable")
+        self.command("recovery", "tick")
+        self.assertIsNone(self.inspect().get("recovery"))
+        self.assertEqual(self.received(), b"")
+
     def test_a_stale_conversation_is_refused(self):
         stale = self.command("keep-warm", self.name, "--json", ok=False, payload=dict(
             expected_run_id=self.run_id, expected_conversation_id="other", expected_revision=0,

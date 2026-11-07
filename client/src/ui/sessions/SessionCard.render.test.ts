@@ -113,6 +113,22 @@ describe("full and compact session question presentation", () => {
   });
 });
 
+describe("supervised and muted children (owner 2026-11-08)", () => {
+  const parent = { machine: "11111111-1111-4111-8111-111111111111", session_id: "22222222-2222-4222-8222-222222222222",
+    name: "codex/project/lead", conversation_id: "c", run_id: "r", state: "live" };
+  // The order of the arrow, the name and the crossed bell in the first line.
+  const order = (html: string) => [...html.matchAll(/class="(sc-supervised|sc-title ell|sc-mute)[" ]/g)].map((m) => m[1].split(" ")[0]);
+  it("shows the supervised arrow whether muted or not, and the bell right after the name", () => {
+    for (const compact of [false, true]) {
+      expect(order(render(compact, row({ parent, muted: true })))).toEqual(["sc-supervised", "sc-title", "sc-mute"]);
+      expect(order(render(compact, row({ parent })))).toEqual(["sc-supervised", "sc-title"]);
+      expect(order(render(compact, row({ muted: true })))).toEqual(["sc-title", "sc-mute"]);
+      // A parent that is not live supervises nothing.
+      expect(order(render(compact, row({ parent: { ...parent, state: "missing" }, muted: true })))).toEqual(["sc-title", "sc-mute"]);
+    }
+  });
+});
+
 describe("account marks", () => {
   it("marks the recorded account with its letter in both views and its label on full cards", () => {
     const compact = render(true, row({ accountId: "claude-a1" }));

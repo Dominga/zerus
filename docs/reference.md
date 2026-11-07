@@ -1164,7 +1164,9 @@ clock stamped the links, the latest link time it handled and the children
 handled in that second (`sessions/childRowsSeen`). A computer seen for the first
 time only records its current children, so existing rows never change, and a
 row the person expands afterwards stays expanded across restarts. Turned off,
-new child rows keep the full card. A muted session keeps its mute icon in either size.
+new child rows keep the full card. A muted session keeps its mute icon in either size, right after its name; a
+supervised child shows its arrow before the name whether muted or not
+(owner, 2026-11-08).
 The folder/branch line also shows native outline Git badges: a diff with the
 number of changed/new files, upload/download with outgoing/incoming commit counts,
 and a green cloud check for a clean checkout matching its verified upstream.

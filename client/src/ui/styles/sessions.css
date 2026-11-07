@@ -109,6 +109,8 @@
   .sc-foot { top: 62px; height: 20px; font-size: 10px; color: var(--z-list-muted); }
   .sc-title { flex: 0 1 auto; font-size: 14px; font-weight: 600; line-height: 21px; }
   .sc-mute { flex: none; margin-right: 4px; color: var(--z-list-badge-muted); }
+  /* The crossed bell sits right after the name (owner, 2026-11-08). */
+  .sc-title + .sc-mute { margin-left: 6px; margin-right: 0; }
   .sc-l1 > .sbadge { margin-left: 8px; flex-shrink: .001; }
   .sc-l1 > .sc-title { flex-shrink: 1; }
   .sc-extra { display: contents; }
@@ -232,6 +234,9 @@
   .scard.compact .sc-title { flex: 1 1 auto; line-height: 22px; }
   .scard.compact .sbadge { flex-shrink: .001; }
   .scard.compact .sbadge, .scard.compact .agent-badge, .scard.compact .sc-mute { margin-left: 6px; margin-right: 0; }
+  /* A muted row: the name keeps its width and the bell after it takes the rest. */
+  .scard.compact .sc-title:has(+ .sc-mute) { flex: 0 1 auto; }
+  .scard.compact .sc-title + .sc-mute { margin-right: auto; }
   /* A compact parent (zerus-sa9qn): a second line sums up its child sessions. */
   .scard.compact .cc-line { display: contents; }
   .scard.compact.two { flex-direction: column; align-items: stretch; padding-top: 3px; padding-bottom: 3px; }

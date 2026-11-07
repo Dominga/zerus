@@ -66,6 +66,18 @@ fn fake() -> Calls {
     calls
 }
 
+/// The texts of the hand-out messages stored for `member`, oldest first (task
+/// 134: the text lives in the working tier; the terminal gets a doorbell, or,
+/// for an agent without a turn hook, the doorbell and the text).
+fn stored_hand_outs(store: &Store, team: &str, member: &str) -> Vec<String> {
+    crate::state::teams::working::unread(store.connection(), team, member, crate::state::now())
+        .unwrap()
+        .into_iter()
+        .filter(|message| message.kind == "hand_out")
+        .map(|message| message.text)
+        .collect()
+}
+
 /// The text of the `n`th send to `session`.
 fn sent(calls: &Calls, session: &str, n: usize) -> String {
     let wanted = format!("send {session} --json");
@@ -127,8 +139,9 @@ fn swap_to_kimi(store: &mut Store, team: &str, session: Option<Value>) {
 #[test]
 fn a_claude_to_kimi_swap_gives_the_new_session_a_brief_with_its_first_message() {
     let (dir, mut store, team, calls) = running();
-    // The working session's own hand-out carried no brief.
-    assert!(!sent(&calls, "claude/x/dev", 1).contains(MARK), "the default path is unchanged");
+    // The working session's own hand-out of task 2 carried no brief.
+    let before = stored_hand_outs(&store, &team.id, "dev");
+    assert!(before.iter().any(|text| text.contains("Task #2:")) && before.iter().all(|text| !text.contains(MARK)), "the default path is unchanged");
     swap_to_kimi(&mut store, &team.id, Some(json!({"name":"kimi/x/dev","run_id":"run-dev","conversation_id":"c"})));
     let swapped = store.load(&team.id).unwrap().unwrap();
     let need = swapped.member("dev").unwrap().handoff.clone().expect("a swap leaves a brief to give");
@@ -141,11 +154,16 @@ fn a_claude_to_kimi_swap_gives_the_new_session_a_brief_with_its_first_message() 
     assert!(found.contains(&Step::HandOut { task: 2, member: "dev".into() }), "{found:?}");
     run_step(&mut store, &swapped, &Step::HandOut { task: 2, member: "dev".into() }, "").unwrap();
     set_fake_hgs(None);
-    let text = sent(&calls, "kimi/x/dev", 0);
-    // The brief is the first thing in the first message, then the hand-out.
-    assert!(text.starts_with(MARK), "{text}");
-    let hand_out = text.find("[Zerus team \u{b7} from: Lead").expect("the hand-out follows the brief");
-    let brief = &text[..hand_out];
+    // What the new session is told: its header line keeps the hand-out's own
+    // fields (the doorbell is made from it), and the brief is under it, ahead of the task text.
+    let text = stored_hand_outs(&store, &team.id, "dev").into_iter().find(|text| text.contains(MARK)).expect("the brief is in the stored hand-out");
+    assert!(text.starts_with("[Zerus team \u{b7} from: Lead \u{b7} task: #2"), "{text}");
+    let at = text.find(MARK).unwrap();
+    let body = text.find("Task #2:").expect("the hand-out's task text follows the brief");
+    assert!(at < body, "{text}");
+    let brief = &text[at..body];
+    let pasted = sent(&calls, "kimi/x/dev", 0);
+    assert!(pasted.starts_with("[Zerus team \u{b7} from: Lead \u{b7} task: #2"), "the doorbell keeps the hand-out's header: {pasted}");
     for wanted in [
         "You are Backend in the team Handoff",
         "swapped away from claude/x/dev",
@@ -170,7 +188,7 @@ fn a_claude_to_kimi_swap_gives_the_new_session_a_brief_with_its_first_message() 
     assert_eq!(after.handoffs.len(), 1);
     let kept = handoff::find(&after, 2, None).unwrap();
     assert_eq!((kept.task, kept.version, kept.why.as_str()), (2, 1, "swap"));
-    assert_eq!(kept.text, brief.trim_end_matches('\n').to_owned() + "\n");
+    assert!(text.contains(&kept.text), "the kept brief is the one in the message");
     assert!(kept.misses.is_empty(), "{:?}", kept.misses);
     let kinds = kinds(&store, &team.id);
     assert!(kinds.contains(&"handoff_sent".to_owned()) && !kinds.contains(&"handoff_gap".to_owned()), "{kinds:?}");
@@ -202,8 +220,7 @@ fn a_fresh_session_is_briefed_once_and_the_next_hand_out_carries_none() {
     let launched = store.load(&team.id).unwrap().unwrap();
     assert!(launched.member("dev").unwrap().handoff.is_some(), "a launch alone does not clear it");
     run_step(&mut store, &launched, &Step::HandOut { task: 2, member: "dev".into() }, "").unwrap();
-    let first = sent(&calls, "kimi/x/dev", 0);
-    assert!(first.starts_with(MARK), "{first}");
+    let first = stored_hand_outs(&store, &team.id, "dev").into_iter().find(|text| text.contains(MARK)).expect("the fresh session's hand-out carries the brief");
     assert!(first.contains("swapped away from claude/x/dev"), "{first}");
     // The next hand-out to the same session has no brief: it is no longer fresh.
     let mut after = store.load(&team.id).unwrap().unwrap();
@@ -215,8 +232,11 @@ fn a_fresh_session_is_briefed_once_and_the_next_hand_out_carries_none() {
     store.mutate(None, &team.id, None, |team, events| ops::apply(team, "accept", &json!({"task":2}), &Actor::Member("lead".into()), &BTreeSet::new(), events)).unwrap();
     after = store.load(&team.id).unwrap().unwrap();
     run_step(&mut store, &after, &Step::HandOut { task: 4, member: "dev".into() }, "").unwrap();
-    let second = sent(&calls, "kimi/x/dev", 1);
-    assert!(second.contains("Docs") && !second.contains(MARK), "only the fresh session's first message carries it: {second}");
+    let all = stored_hand_outs(&store, &team.id, "dev");
+    let docs = all.iter().find(|text| text.contains("Task #4:")).expect("the docs task was handed out");
+    assert!(!docs.contains(MARK), "only the fresh session's first message carries it: {docs}");
+    assert_eq!(all.iter().filter(|text| text.contains(MARK)).count(), 1);
+    assert!(sent(&calls, "kimi/x/dev", 1).starts_with("[Zerus team \u{b7} from: Lead \u{b7} task: #4"));
     // The task closed: its brief is still the latest, and it is the only version.
     let closed = store.load(&team.id).unwrap().unwrap();
     assert_eq!(closed.handoffs.iter().filter(|handoff| handoff.task == 2).count(), 1);
@@ -284,7 +304,7 @@ fn a_brief_that_cannot_answer_a_control_question_is_a_gap_the_lead_sees() {
     let swapped = store.load(&t.id).unwrap().unwrap();
     run_step(&mut store, &swapped, &Step::HandOut { task: 2, member: "dev".into() }, "").unwrap();
     set_fake_hgs(None);
-    assert!(sent(&calls, "kimi/x/dev", 0).starts_with(MARK));
+    assert!(stored_hand_outs(&store, &t.id, "dev").iter().any(|text| text.contains(MARK)));
     let after = store.load(&t.id).unwrap().unwrap();
     let kept = handoff::find(&after, 2, None).unwrap();
     assert_eq!(kept.misses, vec!["Who owns the staging key?".to_owned()]);

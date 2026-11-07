@@ -5134,7 +5134,8 @@ fn hand_out_now(
             let pulses = handoff::pulse_lines(team, member_id, &recent, now());
             let built = handoff::build(team, member_id, handoff::Why::Swap(&need), &pulses, handoff::BRIEF_UNITS);
             if let Some((_, text)) = message.as_mut() {
-                *text = format!("{}\n{}", built.text, text);
+                // Under the hand-out's own header line: the doorbell is made from it (task 134).
+                *text = handoff::within(text, &built.text);
             }
             handoff = Some((built, need.why));
         }

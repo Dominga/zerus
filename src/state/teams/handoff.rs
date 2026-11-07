@@ -319,6 +319,16 @@ pub(crate) fn pulse_lines(team: &Team, member: &str, items: &[Value], now: f64) 
     lines
 }
 
+/// The hand-out `text` with the brief after its first line. Task 134's doorbell
+/// takes its header (`from`, `task`, `attempt`) from the first line of a
+/// hand-out's text, so the brief goes under that line, never before it.
+pub(crate) fn within(text: &str, brief: &str) -> String {
+    match text.split_once('\n') {
+        Some((first, rest)) => format!("{first}\n{brief}\n{rest}"),
+        None => format!("{text}\n{brief}"),
+    }
+}
+
 /// Keeps `built` with the team as the next version of its task's brief.
 pub(crate) fn record(team: &mut Team, built: &Built, member: &str, why: &str, at: f64) {
     let version = team.handoffs.iter().filter(|handoff| handoff.task == built.task).map(|handoff| handoff.version).max().unwrap_or(0) + 1;

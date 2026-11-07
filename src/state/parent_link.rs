@@ -167,7 +167,7 @@ pub(super) fn listed(record: &Value) -> Option<Value> {
 /// identity is read: a listing never waits on Swarm state (zerus-hycp0). A
 /// link another computer forwarded is unverified: always `missing`, whatever
 /// sessions here its IDs match (zerus-l4ehe).
-pub(super) fn decorate(sessions: &mut [Value]) {
+pub(crate) fn decorate(sessions: &mut [Value]) {
     let state = |row: &Value| -> &'static str {
         match row["state"].as_str().unwrap_or("running") {
             "archived" => "archived",

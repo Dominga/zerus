@@ -27,6 +27,7 @@ export function SessionsSection() {
     <>
       <SectionHead title={trNoop("Sessions")} />
       <Group>
+        <ToggleRow label={trNoop("Compact session rows")} checked={flag("workspace/compact")} onChange={toggle("workspace/compact")} />
         <ToggleRow label={trNoop("Expand the collapsed session list on hover")} checked={flag("workspace/expandSessionsOnHover")} onChange={toggle("workspace/expandSessionsOnHover")} />
         <ToggleRow label={trNoop("Hide projects without active sessions")} checked={flag("workspace/hideEmptyProjects")} onChange={toggle("workspace/hideEmptyProjects")} />
         <ToggleRow label={trNoop("Animate working sessions")} checked={flag("workspace/animateActivity")} onChange={toggle("workspace/animateActivity")}

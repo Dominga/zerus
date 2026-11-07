@@ -46,7 +46,7 @@ const WINDOW_LAYER = [
   "Keep Above is unavailable in this Zerus session. On Wayland, KDE Plasma 6 with KWin scripting is required. You can use your desktop's window menu or rules.",
 ];
 const SESSIONS = [
-  "Expand the collapsed session list on hover", "Hide projects without active sessions", "Animate working sessions",
+  "Compact session rows", "Expand the collapsed session list on hover", "Hide projects without active sessions", "Animate working sessions",
   "Show completed subagents",
   "Include agents whose latest turn has finished in the session list and its counts. Plan & agents always shows all reported agents. Agents with unknown status remain visible.",
   "Notify about optional questions",

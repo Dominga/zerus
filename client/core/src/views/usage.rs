@@ -12,6 +12,25 @@ use serde_json::Value;
 const WINDOWS: usize = 16;
 const BALANCES: usize = 8;
 
+/// A failed quota read may still positively identify a changed native account.
+/// Last-good display fallback must not carry the previous account's windows.
+pub(super) fn changed_claude_account(previous: &Value, current: &Value) -> bool {
+    let next = current.get("identity").unwrap_or(&Value::Null);
+    let old = previous.get("identity").unwrap_or(&Value::Null);
+    text(current, "provider") == "claude"
+        && text(current, "auth_status") == "signed_in"
+        && !text(next, "email").is_empty()
+        && [
+            "email",
+            "organization",
+            "organization_id",
+            "plan",
+            "auth_method",
+        ]
+        .iter()
+        .any(|field| text(old, field) != text(next, field))
+}
+
 /// One limit window.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Window {

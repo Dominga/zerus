@@ -4093,6 +4093,13 @@ the desktop) use saved reports and never contact the usage endpoint. Arch and
 Mac clients viewing the same owning computer therefore share its cooldown.
 Verified native account UUIDs share a cache across profiles on that computer;
 otherwise the selected profile home and credential identity keep reports separate.
+Every Claude inspection first reads current native sign-in status, even during
+a cooldown. Cache keys bind that observed email, organization identity and plan,
+plus any stable credential account identifiers. Token values, expiry, scope and
+tier changes do not reset the same account's cooldown. A different account never
+inherits the prior account's windows or wait; an unconfirmed native identity
+cannot adopt a previous report. Cache and lock files must be private regular
+files; links and special files are refused without waiting for a writer.
 
 On HTTP 429, the last successful windows and their original sample time remain
 visible, labelled **rate limited** with their age and next retry time. Refresh

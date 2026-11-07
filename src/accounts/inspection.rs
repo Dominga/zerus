@@ -340,7 +340,7 @@ fn claude(config: &Config, home: &Path, native: bool, seed: &Value) -> Result<Va
     // Claude returns valid signed-out JSON with exit code 1.
     if let Ok(bytes) = capture_with_exit(cmd, &[], 5, Some(1)) {
         if let Ok(a) = serde_json::from_slice::<Value>(&bytes) {
-            result["identity"] = json!({"email":text(&a,"email"),"plan":text(&a,"subscriptionType"),"organization":text(&a,"orgName"),"auth_method":text(&a,"authMethod")});
+            result["identity"] = json!({"email":text(&a,"email"),"plan":text(&a,"subscriptionType"),"organization":text(&a,"orgName"),"organization_id":text(&a,"orgId"),"auth_method":text(&a,"authMethod")});
             if a["loggedIn"] == false {
                 result["status"] = json!(claude::missing_login_status(home, native));
                 result["auth_status"] = result["status"].clone();
@@ -383,10 +383,19 @@ fn claude(config: &Config, home: &Path, native: bool, seed: &Value) -> Result<Va
         return Ok(result);
     }
     // Native OAuth usage endpoint used by /usage; never sends a message or refreshes a grant.
-    let key = claude_usage::key(home, &result["identity"], result["auth_status"] == "signed_in");
-    let quota = claude_usage::get(&config.dir, &key, seed, now, || {
+    // Without a current native account identity, neither a prior identity nor
+    // its quota/cooldown can safely stand in for this account.
+    if result["auth_status"] != "signed_in" || text(&result["identity"], "email").is_empty() {
+        return Ok(result);
+    }
+    let key = claude_usage::key(home, &result["identity"], &credentials, true);
+    let same_sample = seed["_claude_usage_key"].as_str() == Some(&key)
+        || (seed["_claude_usage_key"].is_null()
+            && claude_usage::same_identity(&result["identity"], &seed["identity"]));
+    let quota = claude_usage::get(&config.dir, &key, if same_sample { seed } else { &Value::Null }, now, || {
         claude_http("https://api.anthropic.com/api/oauth/usage", auth["accessToken"].as_str().unwrap_or(""))
     })?;
+    result["_claude_usage_key"] = json!(key);
     for field in ["windows", "status", "checked_at", "attempted_at", "retry_at"] {
         result[field] = quota[field].clone();
     }
@@ -563,7 +572,7 @@ fn cache_path(config: &Config, id: &str, home: &Path) -> PathBuf {
 // Catalog loading remains read-only and does not contact providers. A cached
 // identity is usable only for the same home and unchanged file credentials.
 pub(super) fn catalog_status(config: &Config, id: &str, provider: &str, home: &Path) -> Value {
-    let cache = read_json(&cache_path(config, id, home));
+    let cache = claude_usage::read_cache(&cache_path(config, id, home)).unwrap_or(Value::Null);
     if cache["signature"] != signature(home, provider) {
         return Value::Null;
     }
@@ -681,13 +690,13 @@ pub(super) fn inspect(config: &Config, args: &[String]) -> Result<Value> {
     let signature = signature(&home, &profile.provider);
     let cache_dir = config.dir.join("account-status");
     let cache_path = cache_path(config, &id, &home);
-    let cached = read_json(&cache_path);
+    let cached = claude_usage::read_cache(&cache_path)?;
     let refresh = args.iter().any(|s| s == "--refresh");
     let same = cached["signature"] == signature;
-    let cooling = profile.provider == "claude"
-        && cached["data"]["retry_at"].as_u64().is_some_and(|t| t > now());
-    let mut data = if same && (cooling || (!refresh
-        && now().saturating_sub(cached["data"]["checked_at"].as_u64().unwrap_or(0)) < 60))
+    // Claude must observe native identity before reusing any quota/cooldown:
+    // its durable auth revision deliberately excludes rotating bearer tokens.
+    let mut data = if profile.provider != "claude" && same && !refresh
+        && now().saturating_sub(cached["data"]["checked_at"].as_u64().unwrap_or(0)) < 60
     {
         cached["data"].clone()
     } else {
@@ -699,7 +708,9 @@ pub(super) fn inspect(config: &Config, args: &[String]) -> Result<Value> {
             "opencode"=>json!({"status":"configured","source":"OpenCode","identity":{},"windows":[],"reason":"OpenCode uses its native inference-provider configuration; quota inspection is not available"}),
             _ => Value::Null,
         };
-        retain_cached_identity(&mut data, &cached, &signature);
+        if profile.provider != "claude" {
+            retain_cached_identity(&mut data, &cached, &signature);
+        }
         if data.get("checked_at").is_none() {
             data["checked_at"] = json!(now());
         }
@@ -715,6 +726,9 @@ pub(super) fn inspect(config: &Config, args: &[String]) -> Result<Value> {
             .map_err(|_| Error::new(1, "Could not cache account status."))?;
         data
     };
+    if let Some(data) = data.as_object_mut() {
+        data.remove("_claude_usage_key");
+    }
     data["id"] = json!(id);
     data["provider"] = json!(profile.provider);
     data["label"] = json!(profile.label);

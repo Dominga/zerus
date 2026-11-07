@@ -434,7 +434,7 @@ if sys.argv[1:3]==['auth','login']:
  assert sys.argv[3:]==['--claudeai']
  sys.exit(1 if (home/'fail-login').exists() else 0)
 assert sys.argv[1:]==['auth','status','--json']
-print(json.dumps({'loggedIn':not (home/'signed-out').exists(),'authMethod':'claude.ai'}))
+print(json.dumps({'loggedIn':not (home/'signed-out').exists(),'email':'work@example.test','authMethod':'claude.ai'}))
 ''')
         return home,settings
 
@@ -581,6 +581,94 @@ else:
         self.assertEqual(row['account_status']['status'],'rate_limited')
         self.assertEqual(credentials.read_bytes(),before)
         self.assertNotIn('SYNTHETIC-USAGE-TOKEN',json.dumps(saved)+json.dumps(limited)+cache.read_text())
+
+    def test_claude_usage_cache_rejects_nonregular_paths_before_request(self):
+        import stat
+        home,_=self.claude_login_fixture()
+        (home/'.credentials.json').write_text(json.dumps({'claudeAiOauth':{'accessToken':'SYNTHETIC-USAGE-TOKEN'}}))
+        marker=self.root/'unexpected-curl'
+        curl=self.bin/'curl';curl.write_text('#!/bin/sh\nprintf unexpected > '+str(marker)+'\nexit 99\n');curl.chmod(0o755)
+        folder=self.config/'account-status';folder.mkdir(mode=0o700,exist_ok=True)
+        target=self.root/'original';target.write_text('synthetic original');target.chmod(0o600)
+        before=(target.read_bytes(),target.stat().st_mode)
+        profile_cache=hashlib.sha256((str(home)+':claude-work').encode()).hexdigest()+'.json'
+        for leaf in ('claude-usage.json','claude-usage.lock',profile_cache):
+            for kind in ('fifo','symlink','directory','hardlink','oversize'):
+                if kind=='oversize' and leaf=='claude-usage.lock':continue
+                with self.subTest(leaf=leaf,kind=kind):
+                    path=folder/leaf
+                    if path.exists() or path.is_symlink():path.unlink()
+                    if kind=='fifo':os.mkfifo(path,0o600)
+                    elif kind=='symlink':path.symlink_to(target)
+                    elif kind=='hardlink':os.link(target,path)
+                    elif kind=='oversize':path.write_bytes(b' '*(1024*1024+1));path.chmod(0o600)
+                    else:path.mkdir(mode=0o700)
+                    child=subprocess.Popen([HGS,'account','inspect','claude-work','--refresh'],env=self.env,cwd=self.root,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+                    try:
+                        _,stderr=child.communicate(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        child.kill();child.communicate(timeout=3)
+                        self.fail('cache file open blocked before admission: '+leaf+'/'+kind)
+                    self.assertNotEqual(child.returncode,0,stderr.decode())
+                    self.assertFalse(marker.exists())
+                    self.assertEqual((target.read_bytes(),target.stat().st_mode),before)
+                    if kind=='fifo':self.assertTrue(stat.S_ISFIFO(path.lstat().st_mode))
+                    if kind=='directory':path.rmdir()
+                    else:path.unlink()
+
+    def test_claude_account_switch_cannot_reuse_quota_or_cooldown_without_uuid(self):
+        home,_=self.claude_login_fixture()
+        selected=home/'selected.json'
+        (self.bin/'claude').write_text('''#!/usr/bin/env python3
+import json,os,pathlib,sys
+home=pathlib.Path(os.environ['CLAUDE_CONFIG_DIR'])
+assert sys.argv[1:]==['auth','status','--json']
+print(json.dumps(dict(loggedIn=True,authMethod='claude.ai',**json.loads((home/'selected.json').read_text()))))
+''')
+        calls=self.root/'usage-calls'
+        curl=self.bin/'curl';curl.write_text('''#!/usr/bin/env python3
+import json,sys,pathlib
+config=sys.stdin.read();alpha='SYNTHETIC-ALPHA' in config
+calls=pathlib.Path('''+repr(str(calls))+''')
+old=calls.read_text().splitlines() if calls.exists() else []
+with calls.open('a') as file:file.write(('alpha' if alpha else 'beta')+'\\n')
+limited=alpha and 'alpha' in old
+headers=pathlib.Path(sys.argv[sys.argv.index('--dump-header')+1])
+headers.write_text('HTTP/1.1 429 Too Many Requests\\r\\nRetry-After: 1000\\r\\n\\r\\n' if limited else 'HTTP/1.1 200 OK\\r\\n\\r\\n')
+print('{}' if limited else json.dumps({'five_hour':{'utilization':20 if alpha else 80,'resets_at':'2030-01-01T00:00:00Z'}}))
+print('429' if limited else '200',end='')
+''');curl.chmod(0o755)
+        def choose(name,token=None):
+            selected.write_text(json.dumps({'email':name+'@example.test','orgName':'Fixture','subscriptionType':'Max'}))
+            (home/'.credentials.json').write_text(json.dumps({'claudeAiOauth':{'accessToken':token or 'SYNTHETIC-'+name.upper()}}))
+        def inspect(*flags):return json.loads(self.run_hgs('account','inspect','claude-work',*flags).stdout)
+        choose('alpha');first=inspect('--refresh');self.assertEqual(first['windows'][0]['used_percent'],20)
+        cache=self.config/'account-status/claude-usage.json';saved=json.loads(cache.read_text())
+        for row in saved.values():row['attempted_at']-=360;row['checked_at']-=360
+        cache.write_text(json.dumps(saved))
+        limited=inspect('--refresh');self.assertEqual(limited['status'],'rate_limited')
+        choose('beta');before=(home/'.credentials.json').read_bytes()
+        beta=inspect() # Even an unforced inspect must observe the changed account.
+        self.assertEqual((beta['identity']['email'],beta['windows'][0]['used_percent'],beta['status']),('beta@example.test',80,'ok'))
+        self.assertIsNone(beta['retry_at'])
+        self.assertEqual(inspect('--refresh')['windows'][0]['used_percent'],80)
+        self.assertEqual(calls.read_text().splitlines(),['alpha','alpha','beta'])
+        self.assertEqual((home/'.credentials.json').read_bytes(),before)
+        choose('alpha','SYNTHETIC-ALPHA-ROTATED')
+        changed=json.loads((home/'.credentials.json').read_text())
+        changed['claudeAiOauth'].update(scopes=['profile','usage'],rateLimitTier='updated',expiresAt=9999999999999)
+        (home/'.credentials.json').write_text(json.dumps(changed))
+        rotated=inspect('--refresh')
+        self.assertEqual((rotated['identity']['email'],rotated['status'],rotated['retry_at']),('alpha@example.test','rate_limited',limited['retry_at']))
+        self.assertEqual(rotated['windows'][0]['used_percent'],20)
+        self.assertEqual(calls.read_text().splitlines(),['alpha','alpha','beta'])
+        # A failed identity observation cannot adopt Alpha while credentials
+        # now select Beta. No credential refresh or usage request is attempted.
+        choose('beta');(self.bin/'claude').write_text('#!/bin/sh\nexit 99\n')
+        unknown=inspect('--refresh')
+        self.assertEqual(unknown['windows'],[])
+        self.assertNotIn('alpha@example.test',json.dumps(unknown))
+        self.assertEqual(calls.read_text().splitlines(),['alpha','alpha','beta'])
 
     @unittest.skipUnless(os.uname().sysname=='Darwin', 'macOS Keychain diagnostic')
     def test_claude_inaccessible_saved_sign_in_preserves_profile_identity(self):

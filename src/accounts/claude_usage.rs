@@ -15,15 +15,42 @@ pub(super) enum Reply {
     Unavailable,
 }
 
-// Use the native account UUID only when the native status identifies that same
-// account. Otherwise retain the selected home/credential identity boundary.
-pub(super) fn key(home: &Path, identity: &Value, signed_in: bool) -> String {
+// Fresh native identity is part of every key, including the UUID route. OAuth
+// bearer/refresh tokens and expiry timestamps never participate in this key.
+fn identity(value: &Value) -> Value {
+    let mut public = json!({});
+    for field in [
+        "email",
+        "organization",
+        "organization_id",
+        "plan",
+        "auth_method",
+    ] {
+        public[field] = json!(value[field]
+            .as_str()
+            .unwrap_or("")
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(256)
+            .collect::<String>());
+    }
+    public
+}
+
+pub(super) fn same_identity(a: &Value, b: &Value) -> bool {
+    !a["email"].as_str().unwrap_or("").is_empty() && identity(a) == identity(b)
+}
+
+pub(super) fn key(home: &Path, observed: &Value, credentials: &Value, signed_in: bool) -> String {
     let saved = inspection::read_json(&home.join(".claude.json"));
     let account = &saved["oauthAccount"];
-    let email = identity["email"].as_str().unwrap_or("");
+    let email = observed["email"].as_str().unwrap_or("");
     let uuid = account["accountUuid"].as_str().unwrap_or("");
-    let organization = account["organizationUuid"].as_str().unwrap_or("");
-    let material = if signed_in
+    let organization = observed["organization_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| account["organizationUuid"].as_str().unwrap_or(""));
+    let namespace = if signed_in
         && !email.is_empty()
         && account["emailAddress"].as_str() == Some(email)
         && uuid::Uuid::parse_str(uuid).is_ok()
@@ -31,13 +58,66 @@ pub(super) fn key(home: &Path, identity: &Value, signed_in: bool) -> String {
     {
         format!("account:{uuid}:{organization}")
     } else {
-        format!(
-            "profile:{}:{}",
-            home.display(),
-            inspection::signature(home, "claude")
-        )
+        format!("profile:{}", home.display())
     };
-    format!("{:x}", Sha256::digest(material.as_bytes()))
+    let auth = &credentials["claudeAiOauth"];
+    let mut metadata = json!({});
+    // Only stable account markers: scope/tier/expiry changes accompanying a
+    // token rotation must not discard this account's cooldown either.
+    for field in ["accountUuid", "organizationUuid"] {
+        metadata[field] = json!(auth[field]
+            .as_str()
+            .filter(|s| uuid::Uuid::parse_str(s).is_ok())
+            .unwrap_or(""));
+    }
+    let credential_fingerprint = format!("{:x}", Sha256::digest(metadata.to_string().as_bytes()));
+    format!(
+        "{:x}",
+        Sha256::digest(
+            json!([
+                "claude-usage-v2",
+                namespace,
+                identity(observed),
+                credential_fingerprint
+            ])
+            .to_string()
+            .as_bytes()
+        )
+    )
+}
+
+// Opening must itself be bounded: a byte/read timeout cannot protect a FIFO's
+// open handshake. The held handle must be a private regular file, never a link.
+fn open_regular(path: &Path, lock: bool) -> std::io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(!lock).write(lock).create(lock).truncate(false);
+    platform::private_open(&mut options);
+    platform::no_follow(&mut options);
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() || !platform::verify_private_file(&file)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Account cache must be a private regular file.",
+        ));
+    }
+    Ok(file)
+}
+
+pub(super) fn read_cache(path: &Path) -> Result<Value> {
+    let file = match open_regular(path, false) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Value::Null),
+        Err(e) => return Err(e.into()),
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_CACHE + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_CACHE as usize {
+        return Err(Error::new(1, "Account cache is too large."));
+    }
+    if bytes.is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| Error::new(1, "Account cache is unreadable."))
 }
 
 fn snapshot(value: &Value) -> Value {
@@ -87,7 +167,11 @@ fn ready_at(data: &Value) -> u64 {
 fn store(dir: &Path, entries: &serde_json::Map<String, Value>) -> Result<()> {
     let mut f = tempfile::NamedTempFile::new_in(dir)?;
     platform::make_private(f.as_file())?;
-    f.write_all(Value::Object(entries.clone()).to_string().as_bytes())?;
+    let bytes = Value::Object(entries.clone()).to_string().into_bytes();
+    if bytes.len() > MAX_CACHE as usize {
+        return Err(Error::new(1, "Claude usage cache is too large."));
+    }
+    f.write_all(&bytes)?;
     platform::persist(f, dir.join("claude-usage.json"))
         .map_err(|_| Error::new(1, "Could not cache Claude usage."))?;
     Ok(())
@@ -105,12 +189,7 @@ pub(super) fn get(
 ) -> Result<Value> {
     let dir = config_dir.join("account-status");
     private_dir(&dir)?;
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(dir.join("claude-usage.lock"))?;
-    platform::make_private(&file)?;
+    let file = open_regular(&dir.join("claude-usage.lock"), true)?;
     let started = Instant::now();
     while file.try_lock_exclusive().is_err() {
         if started.elapsed() >= Duration::from_secs(8) {
@@ -124,23 +203,10 @@ pub(super) fn get(
     let _lock = platform::FileLock::held(file);
     let now = clock();
     let path = dir.join("claude-usage.json");
-    let bytes = match fs::File::open(&path) {
-        Ok(f) => {
-            let mut bytes = Vec::new();
-            f.take(MAX_CACHE + 1).read_to_end(&mut bytes)?;
-            bytes
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(e) => return Err(e.into()),
-    };
-    let mut entries: serde_json::Map<String, Value> = if bytes.is_empty() {
-        Default::default()
-    } else {
-        if bytes.len() > MAX_CACHE as usize {
-            return Err(Error::new(1, "Claude usage cache is too large."));
-        }
-        serde_json::from_slice(&bytes)
-            .map_err(|_| Error::new(1, "Claude usage cache is unreadable."))?
+    let mut entries = match read_cache(&path)? {
+        Value::Null => serde_json::Map::new(),
+        Value::Object(entries) => entries,
+        _ => return Err(Error::new(1, "Claude usage cache is unreadable.")),
     };
     if entries.len() > ACCOUNTS {
         return Err(Error::new(1, "Claude usage cache has too many accounts."));
@@ -401,16 +467,55 @@ mod tests {
         }
         let identity = json!({"email":"person@example.test"});
         assert_eq!(
-            key(a.path(), &identity, true),
-            key(b.path(), &identity, true)
+            key(a.path(), &identity, &Value::Null, true),
+            key(b.path(), &identity, &Value::Null, true)
         );
         assert_ne!(
-            key(a.path(), &identity, true),
-            key(b.path(), &json!({"email":"other@example.test"}), true)
+            key(a.path(), &identity, &Value::Null, true),
+            key(
+                b.path(),
+                &json!({"email":"other@example.test"}),
+                &Value::Null,
+                true
+            )
         );
         assert_ne!(
-            key(a.path(), &identity, false),
-            key(b.path(), &identity, false)
+            key(a.path(), &identity, &Value::Null, false),
+            key(b.path(), &identity, &Value::Null, false)
         );
+    }
+
+    #[test]
+    fn observed_identity_and_public_credential_metadata_bind_even_without_uuid() {
+        let dir = tempfile::tempdir().unwrap();
+        let alpha = json!({"email":"alpha@example.test","organization":"First","plan":"Max","auth_method":"claude.ai"});
+        let auth = json!({"claudeAiOauth":{"accessToken":"synthetic-alpha","refreshToken":"synthetic-refresh","expiresAt":1,"subscriptionType":"max","rateLimitTier":"tier1","scopes":["usage","profile"]}});
+        let first = key(dir.path(), &alpha, &auth, true);
+        let mut rotated = auth.clone();
+        rotated["claudeAiOauth"]["accessToken"] = json!("synthetic-rotated");
+        rotated["claudeAiOauth"]["refreshToken"] = json!("synthetic-refresh-rotated");
+        rotated["claudeAiOauth"]["expiresAt"] = json!(999999);
+        assert_eq!(first, key(dir.path(), &alpha, &rotated, true));
+        for field in [
+            "email",
+            "organization",
+            "organization_id",
+            "plan",
+            "auth_method",
+        ] {
+            let mut other = alpha.clone();
+            other[field] = json!("different");
+            assert_ne!(first, key(dir.path(), &other, &auth, true), "{field}");
+        }
+        rotated["claudeAiOauth"]["rateLimitTier"] = json!("tier2");
+        rotated["claudeAiOauth"]["scopes"] = json!(["profile"]);
+        assert_eq!(first, key(dir.path(), &alpha, &rotated, true));
+        rotated["claudeAiOauth"]["accountUuid"] = json!("00000000-0000-4000-8000-000000000002");
+        assert_ne!(first, key(dir.path(), &alpha, &rotated, true));
+        assert!(!same_identity(
+            &alpha,
+            &json!({"email":"beta@example.test"})
+        ));
+        assert!(!same_identity(&json!({}), &json!({})));
     }
 }

@@ -141,6 +141,7 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     launchId: optional(v.launch_id),
     sessionId: optional(v.session_id),
     parent: v.parent ?? undefined,
+    quiet: !!v.quiet,
     conversationId: optional(v.conversation_id),
     compactKeys: v.compact_keys,
     cmd: text(v.agent),

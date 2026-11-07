@@ -1,4 +1,4 @@
-import { headerAttention, isWorking, visibleUnreadReply } from "../../store/attention";
+import { countedHeaderAttention, isWorking, needsAttention, quietAttention, visibleUnreadReply } from "../../store/attention";
 import type { CreationCard, GroupingOut } from "../../types";
 import type { Session, Subagent } from "./types";
 import { currentChildren } from "./subagents";
@@ -18,7 +18,12 @@ export type Row =
   | { type: "child"; id: string; parent: Session; child: Subagent; first: boolean; last: boolean }
   | { type: "creation"; id: string; creation: CreationCard };
 
-export interface Team { total: number; working: number; collapsed: boolean }
+/**
+ * A parent's child sessions: all, working, quiet requests its children hold
+ * for it (`asking`) and requests only the person can answer (`needsYou`).
+ * Informational: it never raises the parent's own attention (spec 2.3).
+ */
+export interface Team { total: number; working: number; collapsed: boolean; asking?: number; needsYou?: number }
 
 /** Nesting stops after this many levels; deeper children start at top level (spec 1.4). */
 export const MAX_DEPTH = 8;
@@ -87,7 +92,10 @@ export function groupRows(input: ListInput): Row[] {
     const children = new Map<string, Session[]>();
     for (const s of list) {
       const parent = parentOf.get(s.key);
-      if (parent) children.set(parent, [...(children.get(parent) ?? []), s]);
+      if (!parent) continue;
+      const siblings = children.get(parent);
+      if (siblings) siblings.push(s);
+      else children.set(parent, [s]);
     }
     // One depth-first pass from each root in rank order; a loop's first card
     // in rank order becomes its root.
@@ -123,13 +131,18 @@ export function groupRows(input: ListInput): Row[] {
     // Below the depth bound a card starts at top level again; nothing is hidden.
     for (const s of list) if (!seen.has(s.key)) walk(s);
     // Each parent's descendants, summed once from the leaves up (linear).
-    const teams = new Map<string, Omit<Team, "collapsed">>();
+    const teams = new Map<string, Required<Omit<Team, "collapsed">>>();
     for (let i = nodes.length - 1; i >= 0; i--) {
       const { s, parent } = nodes[i];
       if (!parent) continue;
-      const below = teams.get(s.key), sum = teams.get(parent) ?? { total: 0, working: 0 };
+      const below = teams.get(s.key), sum = teams.get(parent) ?? { total: 0, working: 0, asking: 0, needsYou: 0 };
+      const up = input.online(s);
+      // A quiet request waits for the parent; any other one needs the person (spec 2.3).
+      const asks = up && s.status === "attention" && s.state !== "archived";
       sum.total += 1 + (below?.total ?? 0);
-      sum.working += (isWorking(s, input.online(s)) ? 1 : 0) + (below?.working ?? 0);
+      sum.working += (isWorking(s, up) ? 1 : 0) + (below?.working ?? 0);
+      sum.asking += (asks && s.quiet ? 1 : 0) + (below?.asking ?? 0);
+      sum.needsYou += (!s.muted && (asks ? !s.quiet : !s.quiet && needsAttention(s, up)) ? 1 : 0) + (below?.needsYou ?? 0);
       teams.set(parent, sum);
     }
     const hidden = new Set<string>();
@@ -161,9 +174,9 @@ export function groupRows(input: ListInput): Row[] {
     let attention = 0, unread = 0, working = 0;
     for (const s of all) {
       const up = input.online(s);
-      if (!s.muted && headerAttention(s, up)) attention++;
+      if (countedHeaderAttention(s, up)) attention++;
       // An offline computer's unread replies count too (visibleUnreadReply, HgsClient.h:104-105).
-      if (!s.muted && visibleUnreadReply(s, up)) unread++;
+      if (!quietAttention(s) && visibleUnreadReply(s, up)) unread++;
       if (isWorking(s, up)) working++;
     }
     out.push({ type: "header", id: `h:${h.id}`, project: h.id, name: h.name, color: h.color, palette: h.palette,

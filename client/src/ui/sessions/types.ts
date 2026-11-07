@@ -98,6 +98,8 @@ export interface Session {
   sessionId?: string;
   /** The session that launched or adopted this one; display and attention routing only. */
   parent?: ParentLinkOut;
+  /** Supervised by a live parent and holding no request only the person can answer. */
+  quiet?: boolean;
   conversationId?: string;
   /** Exact/fallback device-local density identity, calculated in Rust. */
   compactKeys?: [string, string];

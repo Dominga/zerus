@@ -9,7 +9,7 @@ import { defaultProject, grouping, groups } from "../../store/organization";
 import { stateFilter, matchesFilter, listedByFilter, search,machineFilter, projectFilter, accountFilter, folderFilter, expandedChildren, compactRows, selected, selectedKey, subagentOpen, collapsedTeams } from "../../store/ui";
 import { compileScopes, scopeCounts } from "./scope-filters";
 import { withCreations } from "../../store/creations";
-import { isWorking, needsAttention } from "../../store/attention";
+import { countedAttention, isWorking, quietAttention } from "../../store/attention";
 import { followedFor } from "../../store/actions";
 import { flag } from "../../store/settings";
 import { rosterFor } from "./subagents";
@@ -134,7 +134,7 @@ export function summarize(rows: readonly Row[], up: (s: Session) => boolean) {
     shown++;
     const s = r.session;
     if (isWorking(s, up(s))) working++;
-    if (!s.muted && needsAttention(s, up(s))) attention++;
+    if (countedAttention(s, up(s))) attention++;
   }
   return { shown, working, attention };
 }
@@ -147,7 +147,7 @@ export const filterCounts = createMemo(() => {
     if (!scoped()(s, projectOf(s))) continue;
     all++;
     if (matchesFilter(s, "active")) active++;
-    if (matchesFilter(s, "attention") && !s.muted) attention++;
+    if (matchesFilter(s, "attention") && (!quietAttention(s) || (!s.muted && !!s.reviewLater))) attention++;
     if (isWorking(s, online(s))) working++;
     if (s.status === "paused") paused++;
   }

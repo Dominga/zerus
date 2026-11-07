@@ -116,6 +116,13 @@ pub struct ViewRow {
     /// only; it never authorizes an action.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<ParentLink>,
+    /// A supervised child (zerus-sa9qn.3): its computer lists its parent as
+    /// running there, and it holds no request only the person can answer
+    /// (`human_request`: an approval, folder or hook trust, signing in). Its
+    /// replies, questions, errors and exits are the parent's to handle, so
+    /// they draw no attention, as for a muted session; its state is unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quiet: bool,
     /// The raw `state` (`running`, `paused`, `stopped`, `archived`, ...);
     /// `running` when the row lists none (a live session).
     pub state: String,
@@ -1309,6 +1316,8 @@ pub fn row(value: &Value) -> ViewRow {
         session_id: some(text(value, "session_id"))
             .filter(|id| crate::creation::canonical_uuid(id)),
         parent: ParentLink::from_row(value),
+        quiet: ParentLink::from_row(value).is_some_and(|parent| parent.live())
+            && value.get("human_request") != Some(&Value::Bool(true)),
         // A live row lists no state; Qt reads it as running (`HgsClient.cpp`).
         state: session.state.to_owned(),
         tracked: session.tracked,

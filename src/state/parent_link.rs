@@ -153,6 +153,34 @@ pub(super) fn decorate(sessions: &mut [Value]) {
     }
 }
 
+/// Native questions only the person may answer: folder and hook trust.
+const PERSON_ONLY_QUESTIONS: [&str; 4] = ["claude-trust:", "codex-trust:", "kimi-trust:", "codex-hooks-trust:"];
+
+/// Whether a live row holds a request only the person can answer (spec 2.2):
+/// a tool or permission approval, folder or hook trust, or signing in. A
+/// supervised child's other requests are its parent's to answer.
+pub(super) fn human_request(session: &Value, questions: Option<&[Value]>) -> bool {
+    string(session, "phase") == "approval"
+        || session["provider_error"]["error_kind"] == "authentication"
+        || string(session, "activity_summary") == "Sign in required"
+        || questions.is_some_and(|questions| {
+            questions.iter().any(|question| {
+                let id = string(question, "question_id");
+                PERSON_ONLY_QUESTIONS.iter().any(|prefix| id.starts_with(prefix))
+            })
+        })
+}
+
+/// The session `id` without an index entry: its own ID layout record, or the
+/// record at the label a link names, each read bounded, regular, no-follow
+/// and nonblocking, and only when it carries that ID.
+fn unindexed(id: &str, name: &str) -> Option<Value> {
+    storage::read_id(id)
+        .ok()
+        .or_else(|| (!name.is_empty()).then(|| storage::read_label_bounded(name, storage::ID_RECORD_BYTES).ok()).flatten())
+        .filter(|record| string(record, "session_id") == id)
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
@@ -270,14 +298,22 @@ fn ancestors(record: &Value) -> Result<Vec<String>> {
             return Err(format!("The caller's parents reach deeper than {DEPTH} sessions; adoption cannot rule out a cycle"));
         }
         found.push(id.clone());
+        let unsafe_read = |_| "A parent of the caller cannot be read safely; adoption cannot rule out a cycle".to_owned();
         let next = match session_index::indexed(&id) {
-            None => return Ok(found),
-            Some((name, session_index::Kind::Record)) => storage::read_label_bounded(&name, storage::ID_RECORD_BYTES),
-            Some((_, session_index::Kind::IdRecord)) => storage::read_id(&id),
+            Some((name, session_index::Kind::Record)) => {
+                storage::read_label_bounded(&name, storage::ID_RECORD_BYTES).map_err(unsafe_read)?
+            }
+            Some((_, session_index::Kind::IdRecord)) => storage::read_id(&id).map_err(unsafe_read)?,
             // DeepSeek and OpenCode sessions carry no parent links.
             Some(_) => return Ok(found),
-        }
-        .map_err(|_| "A parent of the caller cannot be read safely; adoption cannot rule out a cycle".to_owned())?;
+            // The index is a cache: without an entry, look where the session
+            // would be, its ID layout record or the label the link names, the
+            // same bounded way (zerus-lwz9t). Neither there: the chain ends.
+            None => match unindexed(&id, string(&link, "name")) {
+                Some(next) => next,
+                None => return Ok(found),
+            },
+        };
         if string(&next, "session_id") != id {
             return Err("A parent of the caller changed while it was read; retry".into());
         }
@@ -317,6 +353,23 @@ mod tests {
         let mut older = link();
         older["session_id"] = json!("");
         assert!(valid(&older), "an older parent record matches by conversation");
+    }
+
+    #[test]
+    fn only_approvals_trust_and_sign_in_are_the_persons_requests() {
+        let row = |phase: &str| json!({"phase": phase});
+        assert!(human_request(&row("approval"), None));
+        assert!(!human_request(&row("input"), None));
+        assert!(!human_request(&row("idle"), Some(&[])));
+        let asked = |id: &str| vec![json!({"question_id": id})];
+        for id in ["claude-trust:abc", "codex-trust:abc", "kimi-trust:abc", "codex-hooks-trust:abc"] {
+            assert!(human_request(&row("input"), Some(&asked(id))), "{id}");
+        }
+        assert!(!human_request(&row("input"), Some(&asked("toolu_ask_user"))));
+        assert!(!human_request(&row("input"), Some(&asked("x-claude-trust:abc"))));
+        assert!(human_request(&json!({"phase":"error","provider_error":{"error_kind":"authentication"}}), None));
+        assert!(!human_request(&json!({"phase":"error","provider_error":{"error_kind":"quota"}}), None));
+        assert!(human_request(&json!({"phase":"input","activity_summary":"Sign in required"}), None));
     }
 
     #[test]

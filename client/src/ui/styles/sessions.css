@@ -201,6 +201,12 @@
   .sc-team .team-glyph { position: absolute; left: 6px; top: 4px; }
   .sc-team .chev { position: absolute; right: 5px; top: 7px; transition: rotate var(--z-motion-base) var(--ease); }
   .sc-team.open .chev { rotate: 180deg; }
+  .sc-team .team-asking, .sc-team .team-needs { margin-left: 6px; padding: 0 4px; border-radius: 3px; font-weight: 600; }
+  .sc-team .team-asking { color: var(--z-list-badge-muted); background: var(--z-list-chip); }
+  .sc-team .team-needs { color: var(--z-list-tone-attention); background: color-mix(in srgb, var(--z-list-tone-attention) 16%, transparent); }
+  /* A supervised child: its parent handles its requests (zerus-sa9qn.3). */
+  .sc-supervised { flex: none; display: inline-flex; margin-right: 4px; color: var(--z-list-badge-muted); }
+  .scard.compact .sc-supervised { margin-left: 6px; margin-right: 0; }
   /* A child shown away from its parent names it. */
   .sc-from { flex: 0 0 auto; margin-right: 6px; height: 16px; max-width: 40%; padding: 0 5px; border-radius: 3px; background: var(--z-list-chip); color: var(--z-list-muted); font-size: 10.5px; line-height: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   button.sc-from:hover { color: var(--z-list-text); text-decoration: underline; }

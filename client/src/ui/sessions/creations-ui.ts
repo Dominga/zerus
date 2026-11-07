@@ -1,5 +1,5 @@
 import type { MenuEntry, StateFilter } from "../../store/ui";
-import { headerAttention, isWorking } from "../../store/attention";
+import { countedHeaderAttention, isWorking, quietAttention } from "../../store/attention";
 import type { CreationCard, GroupingOut, HeaderOut } from "../../types";
 import type { ListInput, Row } from "./model";
 import type { Session } from "./types";
@@ -216,8 +216,8 @@ function headerRow(h: HeaderOut, all: readonly Session[], online: (s: Session) =
   let attention = 0, unread = 0, working = 0;
   for (const s of all) {
     const up = online(s);
-    if (!s.muted && headerAttention(s, up)) attention++;
-    if (!s.muted && s.unread) unread++;
+    if (countedHeaderAttention(s, up)) attention++;
+    if (!quietAttention(s) && s.unread) unread++;
     if (isWorking(s, up)) working++;
   }
   return { type: "header", id: `h:${h.id}`, project: h.id, name: h.name, color: h.color, palette: h.palette, collapsed: h.collapsed, total: 0, attention, unread, working };

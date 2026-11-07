@@ -232,6 +232,11 @@ fn muted(row: &ViewRow) -> bool {
         .is_some_and(|preferences| preferences.muted)
 }
 
+/// A supervised child's requests are its parent's (zerus-sa9qn.3).
+fn quiet(row: &ViewRow) -> bool {
+    row.quiet
+}
+
 fn baseline(row: &ViewRow) -> Option<&Map<String, Value>> {
     row.notify
         .preferences
@@ -380,7 +385,12 @@ impl Pass<'_, '_> {
                 || !old.contains_key("started")
                 || old.get("started").and_then(Value::as_f64).unwrap_or(0.0)
                     == edge.started.unwrap_or(0.0));
-        if edge.silent || muted(row) {
+        if quiet(row) && !edge.reply {
+            // A supervised child's request is not remembered: if the child
+            // stops being supervised it is announced once (spec 2.4).
+            return;
+        }
+        if edge.silent || muted(row) || quiet(row) {
             // Withdraw the banner but remember the request without a token.
             self.current.insert(edge.key, Value::Object(entry));
             return;
@@ -488,6 +498,7 @@ impl Pass<'_, '_> {
             let previous = self.previous;
             // Routine ticks of a recurring scheduled job are consumed.
             if muted(row)
+                || quiet(row)
                 || suppressed
                 || (idle && facts.reply_scheduled && facts.recurring_schedules > 0)
             {
@@ -603,7 +614,7 @@ impl Pass<'_, '_> {
             if item.unknown {
                 // An unreadable index is not an answer: keep the banner and IDs.
                 if !old.is_empty() {
-                    if muted(row) {
+                    if muted(row) || quiet(row) {
                         old.remove("token");
                         old.remove("retry_at");
                     }
@@ -641,7 +652,12 @@ impl Pass<'_, '_> {
             entry.insert("seen".into(), json!(seen));
             // Marking the session read acknowledges its questions; turning
             // banners off or muting withdraws them.
-            if !item.ids.is_empty() && enabled && !row.notify.acknowledged && !muted(row) {
+            if !item.ids.is_empty()
+                && enabled
+                && !row.notify.acknowledged
+                && !muted(row)
+                && !quiet(row)
+            {
                 let token = text(&old, "token").to_owned();
                 let retry = integer(&old, "retry_at");
                 // A request that needs action announces itself; with focus,
@@ -794,7 +810,7 @@ impl Tracker {
         for row in host
             .rows
             .values()
-            .filter(|row| muted(row) && row.state != "archived")
+            .filter(|row| (muted(row) || quiet(row)) && row.state != "archived")
         {
             muted_runs.insert(identity(row));
             if let Some(conversation) = nonempty(&row.conversation_id) {
@@ -1221,6 +1237,63 @@ mod tests {
             )])
             .raised
             .is_empty());
+    }
+
+    fn supervised(mut row: ViewRow, quiet: bool) -> ViewRow {
+        row.quiet = quiet;
+        row
+    }
+
+    #[test]
+    fn a_supervised_childs_request_waits_for_its_parent_and_is_announced_once_when_orphaned() {
+        // zerus-sa9qn.3: a quiet request is not remembered, so it notifies
+        // once the child stops being supervised, and never twice.
+        let mut fixture = Fixture::new();
+        let quiet = fixture.observe(vec![supervised(asking("claude/p/kid", "input", "q"), true)]);
+        assert_eq!(quiet, Changes::default());
+        let orphaned = fixture.observe(vec![supervised(
+            asking("claude/p/kid", "input", "q"),
+            false,
+        )]);
+        assert_eq!(orphaned.raised.len(), 1);
+        assert!(fixture
+            .observe(vec![supervised(
+                asking("claude/p/kid", "input", "q"),
+                false
+            )])
+            .raised
+            .is_empty());
+        // A banner raised before supervision began is withdrawn.
+        let mut fixture = Fixture::new();
+        let token = fixture
+            .observe(vec![asking("claude/p/kid", "input", "r")])
+            .raised[0]
+            .token
+            .clone();
+        let withdrawn =
+            fixture.observe(vec![supervised(asking("claude/p/kid", "input", "r"), true)]);
+        assert_eq!(
+            withdrawn,
+            Changes {
+                raised: vec![],
+                cleared: vec![token]
+            }
+        );
+    }
+
+    #[test]
+    fn a_supervised_childs_replies_are_remembered_silently_and_never_replayed() {
+        let mut fixture = Fixture::new();
+        fixture.observe(vec![replied("claude/p/kid", "one")]);
+        let quiet = fixture.observe(vec![supervised(replied("claude/p/kid", "two"), true)]);
+        assert!(quiet.raised.is_empty());
+        assert!(
+            fixture
+                .observe(vec![replied("claude/p/kid", "two")])
+                .raised
+                .is_empty(),
+            "orphaning never announces a reply seen while supervised"
+        );
     }
 
     #[test]

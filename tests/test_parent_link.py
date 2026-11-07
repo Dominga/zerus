@@ -150,6 +150,14 @@ class ParentLink(unittest.TestCase):
         refusal = self.parent(self.worker, 'adopt', caller=chain[0], success=False)
         self.assertIn('deeper than 8', refusal)
         self.assertNotIn('parent', self.read(self.worker))
+        # The index is only a cache: without the first entry the walk reads the
+        # labelled records and still refuses (zerus-lwz9t).
+        (self.state / 'ids' / (chain[1]['session_id'] + '.json')).unlink()
+        self.assertIn('deeper than 8', self.parent(self.worker, 'adopt', caller=chain[0], success=False))
+        for entry in (self.state / 'ids').iterdir():
+            entry.unlink()
+        self.assertIn('deeper than 8', self.parent(self.worker, 'adopt', caller=chain[0], success=False))
+        self.assertNotIn('parent', self.read(self.worker))
 
     def test_an_ancestor_record_that_is_a_fifo_never_blocks_adoption(self):
         # zerus-mzgfh (review-win-c control): an indexed ancestor replaced by a FIFO.

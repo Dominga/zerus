@@ -227,8 +227,8 @@ nested place under the parent is unchanged, so the person sees whose child asks.
 
 A parent card aggregates its children (all depths, bounded by the rows already
 listed). The Team toggle reads **2 of 5** (working of all children). When a
-child holds a quiet blocking question, the toggle adds a gray **1 asks**; when a
-child holds a human signal, an amber **1 needs you**. The aggregate is
+child holds a quiet request, the toggle adds a gray **Asking: 1**; when a
+child holds a human signal, an amber **Needs you: 1**. The aggregate is
 informational: it never raises the parent's own attention, notification or
 count, and it does not mark anything read.
 

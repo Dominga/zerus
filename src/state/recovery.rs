@@ -379,6 +379,10 @@ pub(super) fn cancel_for_input(record: &Value) -> Result<()> {
 fn active(job: &Value) -> bool {
     ["waiting", "dispatching", "retrying"].contains(&string(job, "state"))
 }
+/// Whether an automatic recovery episode owns this session's next input.
+pub(super) fn job_active(record: &Value) -> bool {
+    active(&load_job(&owner(record)))
+}
 /// The agent works again after a provider failure while the continuation it
 /// accepted is still its latest input: that turn went on rather than stopped.
 fn working_on_continuation(job: &Value, s: &Value) -> bool {
@@ -484,6 +488,11 @@ fn schedule(job: &mut Value, s: &Value, time: f64) {
 // Pure transition function; wall clock is supplied so tests can exercise long
 // backoff sequences, restarts, and interleaved user activity without sleeping.
 fn advance(mut job: Value, s: &Value, p: &Policy, time: f64) -> Value {
+    // A failed keep-warm ping is not the person's work: never continue it,
+    // whatever earlier, finished episode the session keeps.
+    if s["phase"] == "error" && keep_warm::ping_was_last_prompt(s) && !active(&job) {
+        return Value::Null;
+    }
     let error = &s["provider_error"];
     let fid = failure_id(s);
     let user_at = seconds(s, "recovery_user_at");
@@ -645,6 +654,7 @@ pub(super) fn enrich(record: &Value, output: &mut Value) {
         "recovery_user_text",
         "recovery_success_at",
         "recovery_cancel_at",
+        "keep_warm_prompt_at",
     ] {
         if let Some(v) = record.get(key) {
             output[key] = v.clone();
@@ -909,12 +919,20 @@ fn worker() -> Result<i32> {
     };
     recover_interrupted_jobs()?;
     super::worktree_maintenance::worker();
+    // Keep-warm rounds run beside recovery, whatever its policy says.
+    let mut keep_warm_at: Option<std::time::Instant> = None;
     loop {
         if replaced() || owner.yields() {
             return Ok(0);
         }
         if let Err(e) = tick() {
             eprintln!("hgs recovery: {e}");
+        }
+        if keep_warm_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(15)) {
+            keep_warm_at = Some(std::time::Instant::now());
+            if let Err(e) = keep_warm::tick() {
+                eprintln!("hgs keep-warm: {e}");
+            }
         }
         std::thread::sleep(Duration::from_secs(2));
     }
@@ -925,12 +943,12 @@ fn worker() -> Result<i32> {
 /// from hgs.exe's job would outlive the GUI and keep the GUI's hgs.exe from
 /// being replaced.
 #[cfg(windows)]
-fn ensure_worker() -> Result<()> {
+pub(super) fn ensure_worker() -> Result<()> {
     crate::self_exec::ensure().map_err(|e| e.to_string())?;
     backend::host::HOST.supervise_recovery()
 }
 #[cfg(not(windows))]
-fn ensure_worker() -> Result<()> {
+pub(super) fn ensure_worker() -> Result<()> {
     let executable = crate::self_exec::current().map_err(|e| e.to_string())?;
     // Policy refresh must not race the installed supervisor with a detached
     // executor. Starting an active unit preserves its PID and current delivery.
@@ -959,6 +977,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         Some("worker") if args.len() == 1 => return worker(),
         Some("tick") if args.len() == 1 => {
             tick()?;
+            keep_warm::tick()?;
             return Ok(0);
         }
         Some("get") if args.len() == 1 => {
@@ -1286,6 +1305,25 @@ mod tests {
             enabled_at: 1.0,
             ..Policy::default()
         }
+    }
+    #[test]
+    fn a_verified_keep_warm_ping_failure_never_starts_recovery() {
+        let mut earlier = snapshot("claude");
+        earlier["provider_error"]["at"] = json!(3.0);
+        earlier["recovery_user_at"] = json!(2.0);
+        let mut old = advance(Value::Null, &earlier, &on(), 3.5);
+        assert_eq!(old["state"], "waiting");
+        stop(&mut old, "succeeded", "Agent completed the turn");
+        old["completed_at"] = json!(4.0);
+        let mut ping = snapshot("claude");
+        ping["recovery_user_text"] = json!(keep_warm::TEXT);
+        ping["keep_warm_prompt_at"] = ping["recovery_user_at"].clone();
+        assert!(advance(Value::Null, &ping, &on(), 11.0).is_null());
+        assert!(advance(old.clone(), &ping, &on(), 11.0).is_null(), "a completed earlier episode must not let a ping failure in");
+        // The same text typed by the person is the person's turn.
+        let mut typed = ping.clone();
+        typed["keep_warm_prompt_at"] = json!(1.0);
+        assert_eq!(advance(old, &typed, &on(), 11.0)["state"], "waiting");
     }
     #[test]
     fn independent_sequences_keep_class_budgets_and_repeat_last_delay() {

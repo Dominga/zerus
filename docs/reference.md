@@ -2483,6 +2483,99 @@ Incomplete, unreadable, ambiguous or exhausted verification keeps Send unavailab
 
 <a id="projects"></a>
 
+### Keep cache warm
+
+A session can keep its agent's provider prompt cache warm for 1 to 7 hours or
+always, so the next message after a pause reads the cached conversation instead
+of rebuilding it. It is off by default and lives with the session on the
+computer that runs the agent, so every desktop and phone sees the same setting.
+
+While it is on, the [recovery worker](#automatic-recovery) on that computer
+sends the idle agent one short message, exactly
+`[Zerus keep-warm] Reply with exactly OK and do nothing else.`, at 80% of the
+cache lifetime after the last turn ended: 48 minutes for a 1-hour cache and
+24 minutes for a 30-minute cache. The margin keeps pings ahead of Claude Code's
+own idle compaction at 90% of the TTL. A ping only extends a warm cache: when a
+window was missed (the computer slept, the agent stayed busy until expiry) or
+the cache is within 30 seconds of its estimated expiry, nothing is sent and
+keep-warm resumes after the next real turn. The cache clock belongs to the
+current conversation: after **Clear** the setting stays on, and the first ping
+waits for a finished turn of the new conversation. The deadline is on the agent
+computer's clock; at the deadline the worker turns the setting off. A rename,
+including a legacy-label rename, keeps the setting.
+
+| Agent | Lifetime used | Offered |
+|---|---|---|
+| Claude Code | the TTL its last request wrote in native usage: 1 hour on a subscription within its usage, 5 minutes on an API key or usage credits | 1 hour only |
+| Codex | OpenAI's 30-minute default for GPT-5.6 and later; Codex sends no TTL | GPT-5.6 and later |
+| Kimi Code | Kimi Code's own `estimated_cache_duration` (60 minutes for `kimi-for-coding`, 30 minutes for `k3` models), read from its home | models with at least 15 minutes |
+| DeepSeek, OpenCode | DeepSeek's disk cache lasts hours without pings; others report none | no |
+
+Shorter caches are not offered: a 5-minute cache would need about 15 pings an
+hour, each a cached read of the whole context, costing about as much as
+rebuilding the cache once. Claude Code's `CLAUDE_CODE_PROMPT_CACHE_TTL=1h` or
+`promptCacheTtl` setting requests the 1-hour cache on API-key accounts at a 2x
+write price. Each ping uses the account's usage: a cached read of the whole
+context plus about 40 new tokens, which stay in the conversation.
+
+A ping goes only to the exact verified, live agent process with the expected
+run and conversation when it is settled: no turn, tool or child is running, no
+live background or scheduled job, no automatic recovery episode, no unconfirmed
+or queued input, no pending launch message, question, approval, trust, resume,
+usage-limit or cache-expiry choice, no pending model or effort setting, an
+empty recognized composer, no terminal input in the last two minutes (a terminal
+that cannot report input times must have no attached client; unknown activity
+never admits a ping), and the session is not paused, archived or terminated.
+The last check before the first typed byte repeats these rules and the
+30-second cache margin, so a slow stage never types into a cold cache. It uses the
+guarded send path with its own origin and request ID, bound to the setting
+revision it was decided for (a change in between cancels it): a refusal before any input
+waits for the next round, and an unknown delivery is never sent again; keep-warm
+then waits for the next real turn. Rounds run every 15 seconds and never
+overlap, so two desktops or a manual `hgs recovery tick` cannot send two pings
+for one window.
+
+A ping is not the person's message. Its prompt is journaled with
+`origin: "keep_warm"` and every event of its turn with
+`turn_origin: "keep_warm"`. Its Stop is never the session's reply, so it adds no
+unread badge, notification or read-mark change; listings and search keep the
+previous prompt, last message and last event time. A message the person sends
+or queues while a ping is being typed or running makes that turn theirs; the
+ping's own prompt arriving later is then shown as ordinary text. A ping turn that
+fails, for example on a usage limit, never starts automatic recovery, even when
+an earlier finished recovery episode is kept: keep-warm stops
+until the next real turn, and the provider failure stays visible as usual.
+
+```sh
+hgs [@host] keep-warm SESSION --json
+```
+
+The request on standard input carries `expected_run_id`,
+`expected_conversation_id`, `expected_revision`, `enabled` and, when enabling,
+`hours` (1 to 7) or `always: true`. A stale identity, an older revision
+(`conflict`), more than 64 enabled sessions on one computer (`capacity`) or an
+ineligible agent (`unsupported`, with `reason`) are refused. Enabling starts the
+recovery worker as a policy change does. `hgs --help` lists
+`session-keep-warm-v1`; an older peer refuses the command.
+
+Listing rows carry `keep_warm: {enabled, until, revision, state, next_at,
+reason, turn_active}`; `until` is null for Always and `state` is `off`,
+`waiting`, `warming`, `cold`, `uncertain`, `stopped`, `paused` or
+`unsupported`. `inspect` and the command response add `supported`,
+`reason_code`, `ttl_seconds`, `ttl_source` (`native_usage`, `provider_default`,
+`kimi_config`, `kimi_table`), `interval_seconds` and `cache_expires_at`.
+The setting is `keep-warm.json` in the state directory, keyed only by session
+IDs or label keys; the worker's state of each session is under
+`recovery/keep-warm/`. Both are read as bounded regular files: a special file is
+refused without blocking, and a worker state that is unreadable or not one
+the worker writes holds keep-warm as uncertain until the next real turn. A
+legacy-label rename carries the worker state before the setting, stops when it
+cannot tell whether a state exists (permission denied is not absence), and
+repairs an interrupted move when the rename resumes. A session record that exists
+but cannot be read skips the round; only a session that is gone turns the
+setting off, and turning it off keeps an uncertain-delivery fence. See the
+[design note](superpowers/specs/2026-11-07-keep-cache-warm-design.md).
+
 ## Projects and P2P synchronization
 
 A project has a stable ID, name, color, folders on multiple computers and session
@@ -4883,7 +4976,8 @@ UUID embedded in that text: it cannot distinguish identical text independently
 typed in Terminal. Zerus never uses transcript text alone to acknowledge delivery.
 
 An independent `hgs-recovery.service` / `com.hgdev.hgs-recovery` worker runs without
-GUI. Custom installs can run `hgs recovery worker`. Episodes and receipts live on
+GUI. Custom installs can run `hgs recovery worker`. The same worker runs
+[Keep cache warm](#keep-cache-warm) rounds, whatever the recovery policy says. Episodes and receipts live on
 the agent host under `sessions/recovery/`, guarded by policy revision and a single
 executor lock. CLI operations are `hgs [@host] recovery get|set|sync|action`, with
 JSON writes on stdin. Adapters register explicitly in `src/state/recovery.rs`.

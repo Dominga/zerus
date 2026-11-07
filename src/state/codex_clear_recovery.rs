@@ -15,7 +15,10 @@ pub(super) struct Successor {
 }
 
 pub(super) fn observe(record: &Value, event: &Value) -> Option<Successor> {
-    if !clear_context::recovering_resume(record)
+    // Stop/PostToolUse are completion observations admitted during Terminate,
+    // but must not turn into a successor's main-start binding transition.
+    if terminating::pending(record)
+        || !clear_context::recovering_resume(record)
         || !string(event, "agent_id").is_empty()
         || ![
             "SessionStart",
@@ -41,7 +44,8 @@ pub(super) fn observe(record: &Value, event: &Value) -> Option<Successor> {
 /// refusal. It needs the exact native end binding, the original open rollout,
 /// and a genuine clear SessionStart. Never synthesize a request for this path.
 pub(super) fn terminal_start(record: &Value, event: &Value) -> Option<Successor> {
-    if !clear_context::ended_terminal_resume(record)
+    if terminating::pending(record)
+        || !clear_context::ended_terminal_resume(record)
         || event["hook_event_name"] != "SessionStart"
         || event["source"] != "clear"
         || !string(event, "agent_id").is_empty()

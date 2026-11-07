@@ -166,7 +166,8 @@ pub struct ViewRow {
     /// checkouts and rows without verified metadata leave the chip absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
-    /// A reported false excludes folder removal; absence still needs inspection.
+    /// False excludes folder removal only after an available native Git read;
+    /// unavailable or unreported metadata still needs inspection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_worktree: Option<bool>,
     /// The row's `terminal_supported`, else true unless the agent is
@@ -1348,7 +1349,10 @@ pub fn row(value: &Value) -> ViewRow {
         cwd: text(value, "cwd").to_owned(),
         cwd_canonical: text(value, "cwd_canonical").to_owned(),
         git_root: text(value, "git_root").to_owned(),
-        git_worktree: flag("git_worktree"),
+        git_worktree: match flag("git_worktree") {
+            Some(false) if !matches!(text(value, "git_metadata_state"), "ok" | "not_repo") => None,
+            reported => reported,
+        },
         worktree: (value.get("git_worktree").and_then(Value::as_bool) == Some(true))
             .then(|| {
                 path_parts(text(value, "git_root"))
@@ -2340,7 +2344,23 @@ mod worktree_chip_tests {
     #[test]
     fn a_reported_ordinary_folder_is_distinct_from_unreported_or_invalid_metadata() {
         for (value, expected) in [
-            (json!({"git_worktree": false}), Some(false)),
+            (
+                json!({"git_worktree": false, "git_metadata_state": "ok"}),
+                Some(false),
+            ),
+            (
+                json!({"git_worktree": false, "git_metadata_state": "not_repo"}),
+                Some(false),
+            ),
+            (json!({"git_worktree": false}), None),
+            (
+                json!({"git_worktree": false, "git_metadata_state": null}),
+                None,
+            ),
+            (
+                json!({"git_worktree": false, "git_metadata_state": "unavailable"}),
+                None,
+            ),
             (json!({"git_worktree": true}), Some(true)),
             (json!({}), None),
             (json!({"git_worktree": null}), None),

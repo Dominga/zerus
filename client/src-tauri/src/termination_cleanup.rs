@@ -1471,6 +1471,31 @@ pub async fn termination_cleanup_inspect(
 mod tests {
     use super::*;
     #[test]
+    fn raw_unavailable_git_metadata_cannot_hide_the_confirmed_cleanup_offer() {
+        let target = source();
+        // workspace::empty emits false for both not_repo and unavailable.
+        // Only the former proves this is an ordinary folder.
+        for (metadata, inspect) in [("unavailable", true), ("not_repo", false), ("ok", false)] {
+            let raw = serde_json::json!({
+                "name": target.name, "tracked": true, "run_id": target.run_id,
+                "conversation_id": target.conversation_id,
+                "git_root": "", "git_branch": "", "git_worktree": false,
+                "git_worktree_name": "", "git_detached": false, "git_common_dir": "",
+                "git_metadata_state": metadata
+            });
+            let mut row = zerus_client_core::view::row(&raw);
+            row.machine = "fixture-machine".into();
+            assert_eq!(offer_candidate(&row, &target), Ok(inspect), "{metadata}");
+            let wire = serde_json::to_value(row).unwrap();
+            assert_eq!(
+                wire.get("git_worktree")
+                    .and_then(serde_json::Value::as_bool),
+                (!inspect).then_some(false),
+                "{metadata}"
+            );
+        }
+    }
+    #[test]
     fn known_ordinary_folder_never_needs_the_offer_pipeline_before_a_first_turn() {
         let mut target = source();
         target.conversation_id.clear();

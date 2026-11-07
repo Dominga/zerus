@@ -499,23 +499,28 @@ pub fn merge_listing(box_value: Value, ids: &BTreeMap<String, String>) -> Result
 
 pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, String>, include_archives: bool) -> Result<Value> {
     local_sessions()?;
-    // A rename renames the terminal session and moves its binding under the
-    // state lock. Read the panes and the saved records under it as well, so a
-    // listing sees a rename before it began or after it finished, never a
-    // pane under the new name with its binding still under the old one: that
-    // session would list twice (zerus-gd02). Archive reconciliation already
-    // read both under this lock; the listing reuses those reads and releases
-    // the lock before it summarizes the sessions.
+    // Task 193 (owner decision, 2026-11-07): a listing reads committed state and
+    // never takes or waits for the writer's state lock. The pane snapshot and
+    // the bindings can lag one writer change (about 2 s); a rename is still
+    // followed by session ID below, and a writer's next reconcile records what
+    // this read did not. A row read while a write is in flight is its last
+    // committed state.
+    let mut phases = slow_calls::Phases::start();
     let ((snapshot, mut names), (archived, bindings)) = if root().exists() {
-        let _guard = lock(None)?;
         let (snapshot, names) = live_sessions()?;
-        let saved = if include_archives { archive::reconcile_locked(&snapshot)? } else { (Vec::new(), archive::reconcile_active_locked(&snapshot)?) };
+        let saved = if include_archives {
+            (archive::records()?, storage::records()?)
+        } else {
+            (Vec::new(), archive::read_active(&snapshot)?)
+        };
         ((snapshot, names), saved)
     } else {
         (live_sessions()?, Default::default())
     };
+    phases.mark("reads");
     let marks = read_marks::load();
     let notification_preferences = notifications::load();
+    phases.mark("marks");
     let sessions = box_value
         .get_mut("sessions")
         .and_then(Value::as_array_mut)
@@ -619,9 +624,14 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
         notifications::enrich(&mut session, notification_preferences.as_ref(), journal::journal_name(&record));
         sessions.push(session);
     }
+    phases.mark("rows");
     sessions.extend(dsh::snapshots()?);
     sessions.extend(opencode::snapshots()?);
+    phases.mark("snapshots");
     finish_rows(sessions, &marks, &names);
+    phases.mark("finish_rows");
+    // Task 193: a listing over SLOW_MS is one slow-calls line with its phases.
+    phases.finish("ls", &string(&box_value, "host"));
     Ok(box_value)
 }
 
@@ -651,6 +661,9 @@ fn label_row(session: &mut Value, record: &Value) {
 }
 
 fn live_row(session: &mut Value, record: Value, shared: &Shared, process_work: &mut processes::WorkSample) -> Result<()> {
+    // Task 193: a listing's per-session cost, named in slow-calls when a row
+    // takes 100 ms or more (the rows a listing cannot afford).
+    let mut phases = slow_calls::Phases::start();
     // An approval answered in Terminal sends no hook.
     let record = claude_approval::reconcile(record);
     session["resumable"] = json!(
@@ -658,6 +671,7 @@ fn live_row(session: &mut Value, record: Value, shared: &Shared, process_work: &
             && string(&record, "error").is_empty()
     );
     let summary = journal::summary(&record, true);
+    phases.mark("summary");
     session["process_work"] = process_work.summary(&record, summary["activity"] == "idle" && summary["phase"] == "idle");
     session
         .as_object_mut()
@@ -665,7 +679,12 @@ fn live_row(session: &mut Value, record: Value, shared: &Shared, process_work: &
         .extend(summary.as_object().ok_or("invalid summary")?.clone());
     let questions = read_marks::pending_questions(&record, session, true, shared.budget);
     read_marks::enrich_listing(session, shared.marks, journal::journal_name(&record), questions);
+    phases.mark("questions");
     notifications::enrich(session, shared.preferences, journal::journal_name(&record));
+    phases.mark("notifications");
+    if phases.total_ms() >= 100 {
+        phases.finish_at("ls-row", &string(session, "name"), 100);
+    }
     Ok(())
 }
 

@@ -66,8 +66,14 @@ impl Phases {
     /// Logs the call when it was slow: one JSON line with the command, its
     /// subject, the total and every phase. Never fails the call.
     pub(crate) fn finish(&self, command: &str, subject: &str) -> Value {
+        self.finish_at(command, subject, SLOW_MS)
+    }
+
+    /// [`finish`] with its own threshold: a listing row is worth a line from
+    /// 100 ms (task 193 names the rows a listing cannot afford).
+    pub(crate) fn finish_at(&self, command: &str, subject: &str, min_ms: u64) -> Value {
         let value = self.value();
-        if self.total_ms() >= SLOW_MS {
+        if self.total_ms() >= min_ms {
             let line = json!({"at":crate::state::now(),"command":command,"subject":subject.chars().take(200).collect::<String>(),
                 "pid":std::process::id(),"timings_ms":value});
             let _ = append(&log_path(), &line.to_string());

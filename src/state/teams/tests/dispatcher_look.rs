@@ -371,6 +371,8 @@ fn a_finished_turn_the_hooks_still_call_working_is_settled_in_the_record() {
     assert!(!due("claude", &working, None, Some((Screen::Draft, "[Pasted text]")), Some(&earlier), later));
     assert!(!due("claude", &working, Some("Bash: Run?"), prompt, Some(&earlier), later));
     assert!(!due("claude", &Hooks { building: true, ..working.clone() }, None, prompt, Some(&earlier), later));
+    // A subagent whose stop never came counts as Background work: the screen decides.
+    assert!(due("claude", &Hooks { background: true, ..working.clone() }, None, prompt, Some(&earlier), later));
     assert!(!due("claude", &Hooks { quiet: 30.0, ..working.clone() }, None, prompt, Some(&earlier), later), "a recent event");
     // A DeepSeek session's state is its host's: never corrected here.
     assert!(!due("dsh", &working, None, prompt, Some(&earlier), later));

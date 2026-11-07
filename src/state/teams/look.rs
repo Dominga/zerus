@@ -357,11 +357,12 @@ pub(crate) fn note_open_tool(hooks: &mut Hooks, open: Option<(String, f64)>, bou
 /// Task 181: whether this read settles a finished turn the hooks still call
 /// working. A hook-driven agent (a DeepSeek session's state is its host's, not a
 /// record), the hooks say working with no request recorded, the screen shows
-/// an idle prompt (no spinner, no agent row, no shell, no draft), the session
+/// an idle prompt (no spinner, no agent row, no shell, no draft; a wedged
+/// subagent counts as Background work, so that alone never blocks it), the session
 /// has been silent for `SETTLE_AFTER`, and an earlier read at least `GRACE` ago
 /// showed the same clash.
 pub(crate) fn settle_due(agent: &str, hooks: &Hooks, record: Option<&str>, screen: Option<(Screen, &str)>, previous: Option<&MemberCheck>, now: f64) -> bool {
-    if agent == "dsh" || record.is_some() || hooks.view() != "working" || hooks.building || hooks.background {
+    if agent == "dsh" || record.is_some() || hooks.view() != "working" || hooks.building {
         return false;
     }
     if !matches!(screen, Some((Screen::Prompt, _))) || hooks.quiet < SETTLE_AFTER {

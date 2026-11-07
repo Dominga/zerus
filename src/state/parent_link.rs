@@ -17,6 +17,9 @@ pub(crate) const ENV: &str = "HGS_PARENT";
 const USAGE: &str = "usage: hgs parent <session> --json   (JSON stdin: expected_run_id, expected_conversation_id, action read|adopt|set|clear, optional replace; set names parent {session_id, name, conversation_id, run_id})";
 /// The longest parent chain walked when refusing a cycle.
 const DEPTH: usize = 8;
+/// The source of a link another computer forwarded with a launch: a claim
+/// this computer cannot verify, never a live parent (zerus-l4ehe).
+const FORWARDED_SOURCE: &str = "forwarded";
 
 fn text(value: &Value, limit: usize, required: bool) -> bool {
     value.as_str().is_some_and(|s| {
@@ -47,7 +50,7 @@ pub(crate) fn valid(link: &Value) -> bool {
         && (!session.is_empty()
             || !string(link, "conversation_id").is_empty()
             || !string(link, "run_id").is_empty())
-        && matches!(string(link, "source"), "launch" | "adopt" | "manual")
+        && matches!(string(link, "source"), "launch" | "adopt" | "manual" | FORWARDED_SOURCE)
         && object.get("at").is_some_and(Value::is_i64)
 }
 
@@ -83,20 +86,65 @@ fn observed_machine(config: &crate::config::Config) -> Option<String> {
     crate::swarm::existing_node_id(&bytes).ok()
 }
 
+/// The proven local caller's link, for a session this process launches.
+fn proven_link() -> Option<String> {
+    let record = session_graph::caller_record()?;
+    let config = crate::config::Config::load().ok()?;
+    let machine = observed_machine(&config)?;
+    link_of(&record, &machine, config.host(), "launch").map(|link| link.to_string())
+}
+
+/// A link another computer's hgs forwarded with this launch (zerus-sa9qn.7).
+static FORWARDED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 /// `HGS_PARENT`'s value for a session this process launches: the proven
-/// caller's link, or empty, which keeps an inherited value from the record.
-/// The caller is proven first; only a proven caller reads the identity.
+/// local caller's link; else a link forwarded by the computer that ran the
+/// launch; else empty, which keeps an inherited value from the record. The
+/// caller is proven first; only a proven caller reads the identity.
 pub(crate) fn launcher_value() -> String {
-    let Some(record) = session_graph::caller_record() else {
-        return String::new();
-    };
-    let Ok(config) = crate::config::Config::load() else {
-        return String::new();
-    };
-    observed_machine(&config)
-        .and_then(|machine| link_of(&record, &machine, config.host(), "launch"))
-        .map(|link| link.to_string())
-        .unwrap_or_default()
+    proven_link().or_else(|| FORWARDED.get().cloned()).unwrap_or_default()
+}
+
+/// `--parent-link HEX` for a launch on a peer: the proven caller's link, hex
+/// encoded so no shell or SSH quoting can change it. None without a caller.
+pub(crate) fn forwarded_argument() -> Option<String> {
+    proven_link().map(|link| link.bytes().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Accepts a link the launching computer forwarded (`--parent-link HEX`): a
+/// well-formed `launch` link naming another computer. It is a claim by the
+/// SSH-authenticated caller that this computer cannot verify, so it is
+/// recorded with the `forwarded` source: the listing never shows such a
+/// parent as live, even when its IDs match a session here, and it never
+/// quiets the child (zerus-l4ehe).
+pub(crate) fn accept_forwarded(hex: &str) -> std::result::Result<(), String> {
+    let mut link = forwarded_link(hex)?;
+    let local = crate::config::Config::load().ok().and_then(|config| observed_machine(&config));
+    if local.as_deref() == Some(string(&link, "machine")) {
+        return Err("A link for a parent on this computer comes from this computer's own proof".into());
+    }
+    link["source"] = json!(FORWARDED_SOURCE);
+    FORWARDED.set(link.to_string()).map_err(|_| "--parent-link may be given once".to_owned())
+}
+
+/// The well-formed `launch` link `--parent-link` carries, hex-encoded JSON.
+fn forwarded_link(hex: &str) -> std::result::Result<Value, String> {
+    let refuse = || "--parent-link needs a launch link from another computer".to_owned();
+    // ASCII hex digits only, checked before any slicing (zerus-so6hr).
+    if hex.is_empty() || hex.len() > 8192 || !hex.len().is_multiple_of(2) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(refuse());
+    }
+    let bytes = hex
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| std::str::from_utf8(pair).ok().and_then(|pair| u8::from_str_radix(pair, 16).ok()))
+        .collect::<Option<Vec<u8>>>()
+        .ok_or_else(refuse)?;
+    let link: Value = serde_json::from_slice(&bytes).map_err(|_| refuse())?;
+    if !valid(&link) || string(&link, "source") != "launch" {
+        return Err(refuse());
+    }
+    Ok(link)
 }
 
 /// The link the launching hgs passed, for a new session's first record.
@@ -116,7 +164,9 @@ pub(super) fn listed(record: &Value) -> Option<Value> {
 /// `live` (running, its agent not exited), `saved` (paused, stopped or
 /// exited), `archived`, or `missing` when this listing has no such session
 /// (gone, or on another computer). Session IDs are UUIDs, so no machine
-/// identity is read: a listing never waits on Swarm state (zerus-hycp0).
+/// identity is read: a listing never waits on Swarm state (zerus-hycp0). A
+/// link another computer forwarded is unverified: always `missing`, whatever
+/// sessions here its IDs match (zerus-l4ehe).
 pub(super) fn decorate(sessions: &mut [Value]) {
     let state = |row: &Value| -> &'static str {
         match row["state"].as_str().unwrap_or("running") {
@@ -144,11 +194,15 @@ pub(super) fn decorate(sessions: &mut [Value]) {
         let Some(link) = row.get("parent").filter(|link| link.is_object()) else {
             continue;
         };
-        let found = by_session
-            .get(string(link, "session_id"))
-            .or_else(|| by_conversation.get(string(link, "conversation_id")))
-            .copied()
-            .unwrap_or("missing");
+        let found = if string(link, "source") == FORWARDED_SOURCE {
+            "missing"
+        } else {
+            by_session
+                .get(string(link, "session_id"))
+                .or_else(|| by_conversation.get(string(link, "conversation_id")))
+                .copied()
+                .unwrap_or("missing")
+        };
         row["parent"]["state"] = json!(found);
     }
 }
@@ -353,7 +407,8 @@ fn ancestors(record: &Value) -> Result<Vec<String>> {
     let mut found = Vec::new();
     let mut current = record.clone();
     loop {
-        let Some(link) = listed(&current) else {
+        // A forwarded parent is on another computer: the chain here ends.
+        let Some(link) = listed(&current).filter(|link| string(link, "source") != FORWARDED_SOURCE) else {
             return Ok(found);
         };
         let id = string(&link, "session_id").to_owned();
@@ -440,6 +495,46 @@ mod tests {
         assert!(human_request(&child("approval"), None), "a native subagent's approval");
         assert!(!human_request(&child("input"), None));
         assert!(human_request(&json!({"phase":"tool","subagent_previews":[{"state":"approval"}]}), None));
+    }
+
+    #[test]
+    fn a_forwarded_link_must_be_a_well_formed_launch_link() {
+        let hex = |value: &Value| value.to_string().bytes().map(|b| format!("{b:02x}")).collect::<String>();
+        for bad in ["", "zz", "abc", &hex(&json!({"schema": 2}))] {
+            assert!(accept_forwarded(bad).is_err(), "{bad}");
+        }
+        let mut adopted = link();
+        adopted["source"] = json!("adopt");
+        assert!(accept_forwarded(&hex(&adopted)).is_err(), "only a launch is forwarded");
+        let mut forwarded = link();
+        forwarded["source"] = json!(FORWARDED_SOURCE);
+        assert!(accept_forwarded(&hex(&forwarded)).is_err(), "a forwarded link is not forwarded again");
+        // Non-ASCII input is refused, never sliced inside a character (zerus-so6hr).
+        for bad in ["\u{20ac}x", "a\u{20ac}", "\u{e9}\u{e9}", "0g"] {
+            assert!(forwarded_link(bad).is_err(), "{bad}");
+        }
+        assert_eq!(forwarded_link(&hex(&link())).unwrap(), link());
+    }
+
+    #[test]
+    fn a_forwarded_parent_is_never_live_even_when_its_ids_match_here() {
+        // zerus-l4ehe: another computer's claim naming a live session here.
+        let live = "22222222-2222-4222-8222-222222222222";
+        let mut claim = link();
+        claim["session_id"] = json!(live);
+        claim["conversation_id"] = json!("conv-live");
+        claim["source"] = json!(FORWARDED_SOURCE);
+        assert!(valid(&claim));
+        let mut rows = vec![
+            json!({"name":"claude/p/lead","session_id":live,"conversation_id":"conv-live","state":"running"}),
+            json!({"name":"codex/p/kid","parent":claim}),
+        ];
+        decorate(&mut rows);
+        assert_eq!(rows[1]["parent"]["state"], "missing");
+        // The same IDs from a local proof match.
+        rows[1]["parent"]["source"] = json!("launch");
+        decorate(&mut rows);
+        assert_eq!(rows[1]["parent"]["state"], "live");
     }
 
     #[test]

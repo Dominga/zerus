@@ -221,6 +221,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        Mobile clear-context ABI: dismiss-prompt-v1
        session-notifications-v1
        session-parent-v1
+       launch-parent-v1
        hgs [@host] dirs [--hidden] [path]   directories as JSON (default: home)
        hgs [@host] dirs --create <path> [--request-id UUID]   create one folder (existing parent)
        hgs [@host] kill <session> [--archive <id>]
@@ -1184,7 +1185,7 @@ fn peer_session(command: &str, args: &[String]) -> String {
                 tag = args.get(i + 1).cloned().unwrap_or_default();
                 i += 1;
             }
-            "--launch-id" => i += 1,
+            "--launch-id" | "--parent-link" => i += 1,
             option if option.starts_with('-') => {}
             name if project.is_empty() => project = name.into(),
             _ => {}
@@ -1691,6 +1692,16 @@ fn remote_via(
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF '{}'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to stream events (watch-v1)' >&2; exit 1; fi",zerus_watch_protocol::HELP_MARKER,platform::join(&remote_args)))
     } else if command == "guide" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] guide'; then exec ~/.local/bin/hgs {}; else echo 'hgs: the selected computer has no agent guide; check hgs @host -h' >&2; exit 1; fi",platform::join(&remote_args)))
+    } else if let Some(link) = (matches!(command, "claude" | "codex" | "kimi" | "fork") && machine.is_none())
+        .then(state::parent_link::forwarded_argument)
+        .flatten()
+    {
+        // The peer records this agent as the new session's parent only if it
+        // advertises launch-parent-v1; an older peer launches without it.
+        let mut with = remote_args.clone();
+        let at = with.iter().position(|arg| arg == "--").unwrap_or(with.len());
+        with.splice(at..at, ["--parent-link".to_owned(), link]);
+        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*launch-parent-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else exec ~/.local/bin/hgs {}; fi", platform::join(&with), platform::join(&remote_args)))
     } else { format!("~/.local/bin/hgs {}", platform::remote_join(&remote_args)) };
     if !global_dry && !has(&args, "--dry-run") && command == "ls" && has(&args, "--json") {
         println!("{}", peer_json_archives(config, target, !has(&args,"--no-archives")));
@@ -2158,6 +2169,11 @@ fn fork_session(config: &Config, args: &[String], client: &str, mut dry: bool) -
         match args[index].as_str() {
             "--dry-run" => dry = true,
             "-d" => detached = true,
+            "--parent-link" => {
+                let link = require(args, index + 1, "--parent-link needs a link")?;
+                state::parent_link::accept_forwarded(link).map_err(|e| Error::new(1, e))?;
+                index += 1;
+            }
             "-n" | "--archive" | "--expected-run-id" | "--expected-conversation-id" => {
                 let value = require(args, index + 1, "missing fork option value")?;
                 let slot = match args[index].as_str() {
@@ -2480,6 +2496,11 @@ impl LaunchOptions {
                 "--account" => {
                     options.account =
                         Some(require(args, i + 1, "--account needs a profile ID")?.into());
+                    i += 1;
+                }
+                "--parent-link" => {
+                    let link = require(args, i + 1, "--parent-link needs a link")?;
+                    state::parent_link::accept_forwarded(link).map_err(|e| Error::new(1, e))?;
                     i += 1;
                 }
                 "--launch-id" => {

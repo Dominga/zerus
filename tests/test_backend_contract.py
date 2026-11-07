@@ -831,6 +831,24 @@ class Sessions(Contract):
         self.hgs("pause", name)
         self.assertEqual(self.sessions()[name]["parent"]["session_id"], lead_id)
 
+    def test_a_launch_records_a_parent_another_computer_forwarded(self):
+        # zerus-sa9qn.7: the peer side of a remote launch. The link names another
+        # computer, so this computer lists the parent as missing: never supervised.
+        link = {"schema": 1, "machine": "99999999-9999-4999-8999-999999999999", "host": "mac",
+                "session_id": "22222222-2222-4222-8222-222222222222", "name": "claude/elsewhere/lead",
+                "conversation_id": "c", "run_id": "r", "source": "launch", "at": 1}
+        self.launched = True
+        launch_id = str(uuid.uuid4())
+        result = self.hgs("claude", str(self.project), "--new", "-n", "forwarded", "-d", "--launch-id", launch_id,
+                          "--parent-link", json.dumps(link, separators=(",", ":")).encode().hex())
+        self.assertEqual(result.stdout, "hgs: started claude/project/forwarded\n")
+        row = self.wait_for(lambda: (row := self.sessions().get("claude/project/forwarded")) and row.get("parent") and row,
+                            "the forwarded parent")
+        self.assertEqual((row["parent"]["session_id"], row["parent"]["host"], row["parent"]["state"]),
+                         (link["session_id"], "mac", "missing"))
+        bad = self.hgs("claude", str(self.project), "--new", "-n", "refused", "-d", "--parent-link", "zz", rc=None)
+        self.assertNotEqual(bad.returncode, 0)
+
 
 class Input(Contract):
     def test_send_pastes_exact_bytes_then_one_enter_and_never_repeats(self):

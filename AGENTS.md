@@ -130,10 +130,15 @@ stops on refusal.
 Owner decisions of 2026-11-05 apply only to explicit Terminate with Remove
 working folder: Zerus may stop every program proven by its cwd or open files to
 use that session's verified generated worktree, including editors and terminals
-the person opened there. A complete bounded native manifest lists those programs
-before native confirmation and binds the original checkout object, ownership
-nonce, session/run/archive identity, selected CLI and configuration. Renderer
-PIDs or paths grant no authority. Before each signal, recheck the process
+the person opened there. A complete bounded native manifest binds the original
+checkout object, ownership nonce, session/run/archive identity, selected CLI and
+configuration. Before confirmation, show a collapsed count and expandable list
+of other programs. A separate native presentation companion may omit only the
+exact record-bound agent and supervisor with verified native PID/birth and
+parent correlation; uncertainty leaves rows visible. Never filter the manifest,
+execution bindings, held sources or Stop/Force/cleanup inputs. Force shows its
+complete freshly checked survivor list expanded. Renderer PIDs or paths grant
+no authority. Before each signal, recheck the process
 birth/pin and actual membership in that same checkout; new or changed members
 require fresh review. Never signal the executing custodian or an ancestor or
 resource needed to verify and settle the action.
@@ -142,8 +147,8 @@ For this explicit Remove choice, processes whose cwd/open-file membership cannot
 be inspected because of EACCES or EPERM are ignored for the removal decision:
 do not list or signal them, and they do not keep the folder. Apply this rule
 from the actual inspection result, never from executable names or an allowlist
-of system programs. Proven occupants remain listed and must be stopped first. This
-exception grants no signal authority and does not relax checkout ownership,
+of system programs. Proven occupants remain in the full manifest and must be
+stopped first. This exception grants no signal authority and does not relax checkout ownership,
 process identity, confirmation, custody or unknown-removal protections.
 
 Normal stop is bounded and distinguishes confirmed exit, known surviving

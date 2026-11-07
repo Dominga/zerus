@@ -60,13 +60,21 @@ impl Offer {
         self.source.close()
     }
     pub(crate) fn programs(&self) -> Vec<ProgramView> {
-        view(self.source.manifest())
+        self.source
+            .visible_programs()
+            .into_iter()
+            .map(|program| ProgramView {
+                pid: program.pid,
+                label: program.label.clone(),
+            })
+            .collect()
     }
     pub(crate) fn expires(&self) -> u64 {
         self.source.manifest().expires
     }
     /// Called only after the host takes the original opaque Remove offer.
-    /// The immutable manifest is already visible; the renderer supplies no list.
+    /// The native initial display is a projection; the complete immutable
+    /// execution manifest stays in Source. The renderer supplies no list.
     pub(crate) fn consume(self, id: String) -> Result<Confirmation, String> {
         if !self.source.current() {
             return Err(UNCONFIRMED.into());
@@ -475,4 +483,59 @@ impl Removal {
                     .ok_or(UNCONFIRMED)
             })
     }
+}
+
+/// Fixture-only display control, called with already retired original I/O. No
+/// confirmation/effect method is invoked; the inert outcome grants nothing.
+#[cfg(test)]
+pub(super) fn assert_presentation_views(
+    source: Arc<Source>,
+    running: Arc<crate::actions::Running>,
+    input: Input,
+    mutation: super::source::Mutation,
+) {
+    let binding = input.manifest.binding();
+    let capture = input.manifest.capture.clone();
+    let offer = Offer {
+        source: source.clone(),
+        capture: capture.clone(),
+        running,
+        pending: Arc::new(Pending::default()),
+    };
+    assert_eq!(
+        offer.programs().iter().map(|p| p.pid).collect::<Vec<_>>(),
+        [30, 40]
+    );
+    assert_eq!(source.manifest().programs.len(), 4);
+    assert_eq!(source.manifest().binding(), binding);
+    drop(offer);
+    let previous = Stopped {
+        continuation: Continuation {
+            source,
+            capture,
+            done: Done::Native(NativeDone {
+                original: String::new(),
+                archive: String::new(),
+                confirmation: String::new(),
+                call: Weak::new(),
+            }),
+            outcome: Outcome::Failed {
+                detail: "inert display fixture".into(),
+            },
+        },
+        attempt: StopAttempt {
+            input: input.clone(),
+            result: Err("inert display fixture".into()),
+            mutation,
+        },
+    };
+    let force = ForceOffer { previous, input };
+    // Force must consult its complete ORIGINAL survivor manifest, never the
+    // Source's initial presentation projection, even for the selected pair.
+    assert_eq!(
+        force.programs().iter().map(|p| p.pid).collect::<Vec<_>>(),
+        [10, 20, 30, 40]
+    );
+    assert_eq!(force.input.manifest.binding(), binding);
+    assert_eq!(force.previous.attempt.input.manifest.binding(), binding);
 }

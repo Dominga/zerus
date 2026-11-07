@@ -65,6 +65,7 @@ impl Fixture {
         let owner = Owner::begin(
             &self.0.join("hgs"),
             Control::Open {
+                presentation: false,
                 pipeline: "99999999-9999-4999-8999-999999999999".into(),
                 discovery: crate::worktree_programs::Discovery {
                     capture: crate::worktree_programs::tests::manifest().capture,

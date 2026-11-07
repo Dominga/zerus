@@ -194,6 +194,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        Worktree programs ABI: worktree-programs-v1
        hgs [@host] worktrees program-holder --json   bounded read-only native checkout custody (stdin)
        Worktree program custody ABI: worktree-program-custody-v1
+       Worktree program presentation ABI: worktree-program-presentation-v1
        hgs worktrees program-stop --json   original native-confirmed program stop (private stdin)
        hgs worktrees program-stop-status --json   original result only, never replay (stdin)
        Worktree program stop ABI: worktree-program-stop-v1
@@ -3450,6 +3451,7 @@ mod tests {
                 )
                 .replace("       hgs [@host] worktrees program-holder --json   bounded read-only native checkout custody (stdin)\n", "")
                 .replace("       Worktree program custody ABI: worktree-program-custody-v1\n", "")
+                .replace("       Worktree program presentation ABI: worktree-program-presentation-v1\n", "")
                 .replace("       hgs worktrees program-stop --json   original native-confirmed program stop (private stdin)\n", "")
                 .replace("       hgs worktrees program-stop-status --json   original result only, never replay (stdin)\n", "")
                 .replace("       Worktree program stop ABI: worktree-program-stop-v1\n", "")

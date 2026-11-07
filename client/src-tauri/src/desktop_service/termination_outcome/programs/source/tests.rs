@@ -110,9 +110,35 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
             let (service, _cache) = connected(&f).await;
             let actions = crate::actions::Actions::new(f.0.join("marks"));
             let key = crate::actions::Lane::key(&capture().target, &Action::Terminate);
-            let hold = actions.begin(key.clone(), &Action::Terminate).unwrap();
-            let context = Context::new_supported(service.clone(), Arc::new(hold)).unwrap();
-            let manifest = manifest();
+            let hold = Arc::new(actions.begin(key.clone(), &Action::Terminate).unwrap());
+            let context = Context::new_supported(service.clone(), hold.clone()).unwrap();
+            let mut manifest = manifest();
+            manifest.programs = [
+                (10, "agent"),
+                (20, "hgs"),
+                (30, "hgs"),
+                (40, "agent descendant"),
+            ]
+            .into_iter()
+            .map(
+                |(pid, label)| zerus_client_core::worktree_programs::Program {
+                    pid,
+                    birth: format!("native-{pid}"),
+                    label: label.into(),
+                },
+            )
+            .collect();
+            let display = zerus_client_core::worktree_programs::presentation::Presentation::new(
+                &manifest,
+                zerus_client_core::worktree_programs::presentation::Identity {
+                    pid: 10,
+                    birth: "native-10".into(),
+                },
+                zerus_client_core::worktree_programs::presentation::Identity {
+                    pid: 20,
+                    birth: "native-20".into(),
+                },
+            );
             let pipeline = uuid::Uuid::new_v4().to_string();
             let input = stop::Input {
                 request_id: uuid::Uuid::new_v4().to_string(),
@@ -142,6 +168,7 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
             let mut owner = Owner::begin(
                 &f.0.join("holder"),
                 Control::Open {
+                    presentation: false,
                     pipeline: pipeline.clone(),
                     discovery: Discovery {
                         capture: manifest.capture.clone(),
@@ -170,6 +197,7 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
                 )
                 .unwrap();
             let source = Arc::new(Source {
+                presentation: Some(display),
                 context: Arc::new(Origin::Service(context)),
                 owner: Mutex::new(owner),
                 manifest,
@@ -268,7 +296,12 @@ fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan()
                 !source.current(),
                 "closed original custody cannot become current again"
             );
-            drop(mutation);
+            super::super::pipeline::assert_presentation_views(
+                source.clone(),
+                hold,
+                input,
+                mutation,
+            );
             drop(source);
             assert!(actions.begin(key, &Action::Terminate).is_some());
             service.join().await.unwrap();

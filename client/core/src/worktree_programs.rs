@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 pub mod cleanup;
 pub mod custody;
 pub mod invocation;
+pub mod presentation;
 pub mod stop;
 
 pub const ABI: &str = "worktree-programs-v1";

@@ -5,7 +5,7 @@ import { MachineTile } from "../components/MachineTile";
 import { MachineLabel } from "../components/MachineLabel";
 import { Actions, Spinner, Status } from "../components/Status";
 import { AccountMarkCircle, AgentBadge, ProviderGlyph } from "../sessions/SessionCard";
-import { accountMark } from "../../store/accountMarks";
+import { accountAppearance, accountMark } from "../../store/accountMarks";
 import { settings } from "../../store/settings";
 import { ResizeHandle } from "../sessions/SessionList";
 import type { Account } from "../../types";
@@ -165,6 +165,7 @@ function Detail(props: { a: Account }) {
       <div class="acct-title">
         <AccountMarkCircle mark={accountMark(props.a, settings)} size={22} />
         <h2 class="ell">{props.a.label}</h2>
+        <Show when={accountAppearance(settings, props.a.members).hidden}><span class="dim am-hidden">{tr("Hidden on session cards")}</span></Show>
         <span class="grow" />
         <button class="btn" onClick={event=>setMarkEditor({ origin: event.currentTarget })}><Icon name="palette" size={13} />{tr("Color and mark…")}</button>
         <button class="btn" disabled={managementBusy()} onClick={event=>void openCatalog("rename",props.a.key,m().key,event.currentTarget)}><Icon name="pencil" size={13} />{tr("Rename…")}</button>

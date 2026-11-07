@@ -17,6 +17,7 @@
   "processes/unknownSeconds": 10.0,
   "recovery/sharedPolicy": "",
   "sessions/accountMarks": "letter",
+  "sessions/showAccountMarks": true,
   "speech/host": "",
   "speech/machine_id": "",
   "speech/manage_host": "",

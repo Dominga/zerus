@@ -31,9 +31,11 @@ export function SessionsSection() {
         <ToggleRow label={trNoop("Hide projects without active sessions")} checked={flag("workspace/hideEmptyProjects")} onChange={toggle("workspace/hideEmptyProjects")} />
         <ToggleRow label={trNoop("Animate working sessions")} checked={flag("workspace/animateActivity")} onChange={toggle("workspace/animateActivity")}
           hint={motionReduced() ? tr("Reduce motion is on, so working sessions hold still.") : undefined} />
-        <Row label={trNoop("Account marks")} for="set-account-marks"
+        <ToggleRow label={trNoop("Show account labels on session cards")} checked={flag("sessions/showAccountMarks")} onChange={toggle("sessions/showAccountMarks")}
+          hint={trNoop("A colored circle with the account's first letter or emoji. One account can be hidden in its Color and mark settings on the Accounts screen.")} />
+        <Row label={trNoop("Account marks")} for="set-account-marks" disabled={!flag("sessions/showAccountMarks")}
           hint={trNoop("Session cards mark each account with a colored circle. Choose the color and emoji on the Accounts screen.")}>
-          <Select id="set-account-marks" value={text("sessions/accountMarks")} onChange={(value) => void setSetting("sessions/accountMarks", value)}
+          <Select id="set-account-marks" value={text("sessions/accountMarks")} disabled={!flag("sessions/showAccountMarks")} onChange={(value) => void setSetting("sessions/accountMarks", value)}
             options={[{ value: "letter", label: trNoop("First letter") }, { value: "emoji", label: trNoop("Emoji when set") }]} />
         </Row>
         <ToggleRow label={trNoop("Show completed subagents")} checked={flag("workspace/showCompletedSubagents")} onChange={toggle("workspace/showCompletedSubagents")}

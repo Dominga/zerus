@@ -1626,6 +1626,10 @@ impl Question {
 pub(crate) struct Unassigned {
     pub since: f64,
     pub what: String,
+    /// Task #227: the task the member's screen or branch shows it working on,
+    /// so the lead's item names it and one command binds the work to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<u32>,
 }
 
 /// Task 160: a task parked on a named outside condition, with an estimate.
@@ -2887,6 +2891,34 @@ pub(crate) struct Team {
     /// was paused, by whom and why; only while it is paused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused: Option<TeamPause>,
+    /// Task #227: a retry on a task its member is working on does not revoke
+    /// it; the notice to continue reaches the member at its turn's safe point,
+    /// newest last, at most 20.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub continues: Vec<ContinueNotice>,
+    /// Task #227: the attempts a restart gave back by itself (re-sent, or
+    /// bound to the work already running), newest last, at most 20; the lead
+    /// reads them as one inbox item.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub crash_recovered: Vec<Value>,
+}
+
+/// Task #227: a retry while the member works on the task: "continue", never
+/// "start over". The notice is a team message queued for the member's turn end.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct ContinueNotice {
+    pub id: String,
+    pub task: u32,
+    pub attempt: u32,
+    pub member: String,
+    #[serde(default)]
+    pub by: String,
+    pub at: f64,
+    #[serde(default)]
+    pub notice: Notice,
+    /// A refused send is tried on later ticks, ten times at most.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub tries: u32,
 }
 
 /// Task 112: the pause of a team, as the team bar, Waiting for you and the

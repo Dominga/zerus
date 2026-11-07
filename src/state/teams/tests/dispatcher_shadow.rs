@@ -17,7 +17,7 @@ fn busy_dev(building: bool, turn_started: Option<f64>) -> Vec<Seen> {
 fn a_member_building_with_no_hand_out_is_unassigned_work_at_once() {
     let team = team();
     let found = steps(&team, &busy_dev(true, Some(1_000.0)), 1_010.0);
-    assert!(found.contains(&Step::Unassigned { member: "dev".into(), what: "builds cargo test --release".into() }), "{found:?}");
+    assert!(found.contains(&Step::Unassigned { member: "dev".into(), what: "builds cargo test --release".into(), task: None }), "{found:?}");
     // Working without a build: only past the grace.
     assert!(!steps(&team, &busy_dev(false, Some(1_000.0)), 1_060.0).iter().any(|step| matches!(step, Step::Unassigned { .. })));
     assert!(steps(&team, &busy_dev(false, Some(1_000.0)), 1_200.0).iter().any(|step| matches!(step, Step::Unassigned { member, .. } if member == "dev")));
@@ -33,7 +33,7 @@ fn the_flag_reaches_the_lead_and_look_and_clears_when_it_stops() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
     store.create("11111111-1111-4111-8111-111111111111", &json!({}), team.clone(), vec![]).unwrap();
-    run_step(&mut store, &team, &Step::Unassigned { member: "dev".into(), what: "builds cargo test --release".into() }, "").unwrap();
+    run_step(&mut store, &team, &Step::Unassigned { member: "dev".into(), what: "builds cargo test --release".into(), task: None }, "").unwrap();
     let flagged = store.load(&team.id).unwrap().unwrap();
     let flag = flagged.member("dev").unwrap().unassigned.clone().expect("flagged");
     assert_eq!(flag.what, "builds cargo test --release");

@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import shlex
 import subprocess
 import sys
 import time
@@ -124,6 +125,46 @@ def plan(workflow, cli, selected=None):
 
 def quoted(path):
     return json.dumps(str(path))
+
+
+def mktemp_script():
+    # Explicit paths/options retain BSD mktemp's own meaning. Only an implicit
+    # parent is redirected into the already-private job TMPDIR.
+    return ('#!/bin/sh\n'
+            'for zerus_arg do\n'
+            '  case "$zerus_arg" in */*|-p|-p?*) exec /usr/bin/mktemp "$@";; esac\n'
+            'done\n'
+            '[ -n "$TMPDIR" ] && [ -d "$TMPDIR" ] || exit 125\n'
+            'exec /usr/bin/mktemp -p "$TMPDIR" "$@"\n')
+
+
+def login_shell_script(observation_bin):
+    # /etc/profile runs path_helper before the command, moving /bin/ps ahead
+    # of our non-setuid copy. Preserve real login startup and every original
+    # argument; restore only the private observation tool before that command.
+    prefix = 'PATH=' + shlex.quote(str(observation_bin)) + ':"$PATH"; export PATH\n'
+    return ('#!/bin/sh\n'
+            'if [ "$#" -ge 2 ] && [ "$1" = "-lic" ]; then\n'
+            '  zerus_original=$2\n'
+            '  shift 2\n'
+            '  zerus_prefix=' + shlex.quote(prefix) + '\n'
+            '  exec /bin/bash -lic "$zerus_prefix$zerus_original" "$@"\n'
+            'fi\n'
+            'exec /bin/bash "$@"\n')
+
+
+def verify_runner_source(repository, commit, directory):
+    paths = CI.git(repository, 'ls-tree', '-r', '--name-only', commit, 'scripts/ci').splitlines()
+    expected = {Path(p).name: p for p in paths if Path(p).suffix == '.py'}
+    present = {p.name: p for p in directory.glob('*.py')}
+    required = {name for name in expected if name.startswith('local')}
+    if not required <= present.keys() or not present.keys() <= expected.keys():
+        raise ValueError('runner directory has missing or unrecorded Python helpers')
+    for name, path in present.items():
+        recorded = subprocess.check_output(['git', '-C', str(repository), 'show', commit + ':' + expected[name]])
+        if path.is_symlink() or path.read_bytes() != recorded:
+            raise ValueError('runner helper differs from its immutable commit: ' + name)
+    return {name: CI.file_digest(present[name]) for name in sorted(required)}
 
 
 def node24(root):
@@ -301,8 +342,7 @@ class Runner:
         # with TMPDIR supplied. Preserve its native implementation and options,
         # while making the default parent this job's verified private folder.
         mktemp = self.tools / 'mktemp'
-        mktemp.write_text('#!/bin/sh\n[ -n "$TMPDIR" ] && [ -d "$TMPDIR" ] || exit 125\n'
-                          'exec /usr/bin/mktemp -p "$TMPDIR" "$@"\n')
+        mktemp.write_text(mktemp_script())
         mktemp.chmod(0o755)
         for name in ('cargo', 'rustc', 'rustdoc', 'rustfmt', 'cargo-fmt', 'cargo-clippy', 'clippy-driver', 'rustup'):
             source = Path.home() / '.cargo/bin' / name
@@ -333,6 +373,14 @@ class Runner:
                                          sandbox_copy_sha256=CI.file_digest(ps),
                                          mode=oct(ps.stat().st_mode & 0o7777),
                                          note='system code; setuid removed; empty entitlements; ad-hoc signature')
+        observations = self.tools / 'observations'; observations.mkdir(exist_ok=True)
+        shutil.copy2(ps, observations / 'ps')
+        shells = self.tools / 'login-shells'; shells.mkdir(exist_ok=True)
+        self.login_shell = shells / 'bash'
+        self.login_shell.write_text(login_shell_script(observations))
+        self.login_shell.chmod(0o755)
+        self.report['private_login_shell'] = dict(sha256=CI.file_digest(self.login_shell),
+            note='real bash login startup; original command/arguments; private ps routing only')
         rustup = self.cache / 'rustup'
         if not rustup.exists():
             rustup.mkdir()
@@ -352,6 +400,13 @@ class Runner:
                         'https://github.com/ufna/zerus.git', self.report['commit']], env=self.host_environment, check=True, timeout=300)
         subprocess.run(['git', '-C', str(self.snapshot), '-c', 'core.hooksPath=/dev/null', 'checkout',
                         '--detach', self.report['commit']], env=self.host_environment, check=True)
+        runner_commit = self.args.runner_sha or self.report['commit']
+        if runner_commit != self.report['commit']:
+            subprocess.run(['git', '-C', str(self.snapshot), '-c', 'credential.helper=', 'fetch', '--no-tags',
+                            'https://github.com/ufna/zerus.git', runner_commit],
+                           env=self.host_environment, check=True, timeout=300)
+        self.report['runner_source_files'] = verify_runner_source(self.snapshot, runner_commit, Path(__file__).parent)
+        self.report['runner_commit'] = runner_commit
         for manifest in self.snapshot.rglob('Cargo.toml'):
             path = manifest.parent / 'target'
             if not path.exists():
@@ -400,7 +455,7 @@ class Runner:
         private_tmp.mkdir(mode=0o700, exist_ok=True)
         run_temp = home / 'runner-temp'
         run_temp.mkdir(exist_ok=True)
-        base_env = dict(HOME=str(home), USER='test', LOGNAME='test', LANG='en_US.UTF-8', SHELL='/bin/bash',
+        base_env = dict(HOME=str(home), USER='test', LOGNAME='test', LANG='en_US.UTF-8', SHELL=str(self.login_shell),
                    CFFIXED_USER_HOME=str(home),
                    PATH=str(self.tools) + ':' + str(self.node) + ':/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
                    TMPDIR=str(private_tmp), TMUX_TMPDIR=str(private_tmp),
@@ -462,6 +517,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repo', type=Path, required=True, help='public local source object cache')
     parser.add_argument('--sha', required=True)
+    parser.add_argument('--runner-sha', help='immutable reviewed runner commit when it differs from --sha')
     parser.add_argument('--root', type=Path, required=True, help='one private cache/source/output root')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--workers', type=int, choices=range(1, 7), default=6)
@@ -473,11 +529,14 @@ def main():
         parser.error('requires macOS')
     if not re.fullmatch(r'[0-9a-f]{40}', args.sha):
         parser.error('use a complete immutable commit hash')
+    if args.runner_sha is not None and not re.fullmatch(r'[0-9a-f]{40}', args.runner_sha):
+        parser.error('use a complete immutable runner commit hash')
     args.root.mkdir(parents=True, exist_ok=True, mode=0o700)
     if args.output.exists() or not args.output.resolve().is_relative_to(args.root.resolve()):
         parser.error('output must be new and below the private root')
     # Bodies are transferred from the exact source separately during preparation.
-    report = dict(version=1, commit=args.sha, platform='native macOS local preflight', completed=False, jobs=[])
+    report = dict(version=1, commit=args.sha, source_commit=args.sha, runner_commit=None,
+                  platform='native macOS local preflight', completed=False, jobs=[])
     runner = Runner(args, report)
     try:
         runner.prepare()

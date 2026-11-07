@@ -32,8 +32,8 @@ if command.startswith('& ([ScriptBlock]::Create('):
     encoded=command.split("FromBase64String('",1)[1].split("'",1)[0]
 else:
     assert command.startswith('"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" '),command
-    encoded=command.rsplit(' -EncodedCommand ',1)[1]
-script=base64.b64decode(encoded).decode('utf-16-le')
+    encoded=command.split("FromBase64String('",1)[1].split("'",1)[0]
+script=base64.b64decode(encoded).decode('utf-8')
 data=script.split("FromBase64String('",1)[1].split("'",1)[0]
 words=json.loads(base64.b64decode(data))
 with (r/'words').open('a') as f:f.write(json.dumps(words)+'\n')
@@ -303,9 +303,52 @@ class WindowsTarget(unittest.TestCase):
         self.assertEqual(self.operations(),[{'argv':['send','codex/project/tag','--json'],'stdin':'{"text":"synthetic"}'}])
 
 
+def async_stdin_pipe():
+    """Match Windows OpenSSH's inherited overlapped stdin, not Popen's sync pipe."""
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+    import uuid
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    class Security(ctypes.Structure):
+        _fields_ = [('size', wintypes.DWORD), ('descriptor', ctypes.c_void_p), ('inherit', wintypes.BOOL)]
+    kernel.CreateNamedPipeW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                      wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+                                      wintypes.DWORD, ctypes.POINTER(Security)]
+    kernel.CreateNamedPipeW.restype = wintypes.HANDLE
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                  ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    name = r'\\.\pipe\hgs-ssh-stdin-' + uuid.uuid4().hex
+    security = Security(ctypes.sizeof(Security), None, True)
+    # Inbound, first-instance, overlapped byte pipe; the sole writer is synchronous.
+    read = kernel.CreateNamedPipeW(name, 1 | 0x80000 | 0x40000000, 0, 1, 4096, 4096, 0,
+                                  ctypes.byref(security))
+    invalid = ctypes.c_void_p(-1).value
+    if read == invalid: raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        write = kernel.CreateFileW(name, 0x40000000, 0, None, 3, 0, None)
+        if write == invalid: raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            reader = msvcrt.open_osfhandle(read, os.O_RDONLY | os.O_BINARY)
+            read = None
+            try:
+                writer = os.fdopen(msvcrt.open_osfhandle(write, os.O_WRONLY | os.O_BINARY), 'wb', buffering=0)
+                write = None
+                return reader, writer
+            except BaseException:
+                os.close(reader)
+                raise
+        finally:
+            if write is not None: kernel.CloseHandle(write)
+    finally:
+        if read is not None: kernel.CloseHandle(read)
+
+
 @unittest.skipUnless(os.name == 'nt', 'native PowerShell 5.1/cmd decoder controls run on Windows')
 class WindowsNativeTransport(unittest.TestCase):
-    def run_decoder(self, shell, lease=False, code=0, slow=False):
+    def run_decoder(self, shell, lease=False, code=0, slow=False, sustained=False):
         import base64
         import shutil
         import struct
@@ -334,20 +377,35 @@ class WindowsNativeTransport(unittest.TestCase):
             if slow:
                 words = ['--version']
                 env['FAKE_AGENT_PROBE_TEXT'] = version
+            if sustained:
+                render = root/'render'
+                render.write_bytes(b''.join(json.dumps({'i': n}).encode().ljust(63, b' ')+b'\n' for n in range(20)))
+                env.update(FAKE_AGENT_RENDER=str(render), FAKE_AGENT_RENDER_CHUNK='64', FAKE_AGENT_RENDER_DELAY='1000')
             data = base64.b64encode(json.dumps(words, ensure_ascii=False, separators=(',', ':')).encode()).decode()
             script = '\n'.join(line.strip() for line in (ROOT/'src/remote_shell/windows.ps1').read_text().splitlines()
                                if line.strip() and not line.strip().startswith('#')).replace('__HGS_ARGUMENTS__', data)
-            encoded = base64.b64encode(script.encode('utf-16-le')).decode()
+            encoded = base64.b64encode(script.encode('utf-8')).decode()
             if shell == 'powershell':
-                invocation = "& ([ScriptBlock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('"+encoded+"'))))"
+                invocation = "& ([ScriptBlock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('"+encoded+"'))))"
                 argv, executable = [str(ps), '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', invocation], None
             else:
-                invocation = '"'+str(ps)+'" -NoLogo -NoProfile -NonInteractive -EncodedCommand '+encoded
+                invocation = ('"'+str(ps)+'" -NoLogo -NoProfile -NonInteractive -Command "'
+                              "& ([ScriptBlock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('"
+                              +encoded+"'))))"+'"')
                 argv, executable = '"'+str(cmd)+'" /d /s /c "'+invocation+'"', str(cmd)
             self.assertLess(len(invocation), 8000)
-            child = subprocess.Popen(argv, executable=executable, cwd=root, env=env,
-                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                     creationflags=subprocess.CREATE_NO_WINDOW)
+            reader, writer = async_stdin_pipe() if sustained else (None, None)
+            try:
+                child = subprocess.Popen(argv, executable=executable, cwd=root, env=env,
+                                         stdin=reader if sustained else subprocess.PIPE,
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                         creationflags=subprocess.CREATE_NO_WINDOW)
+            except BaseException:
+                if writer is not None: writer.close()
+                raise
+            finally:
+                if reader is not None: os.close(reader)
+            if sustained: child.stdin = writer
             readers = []
             def capture(pipe, path):
                 with path.open('wb', buffering=0) as out:
@@ -364,12 +422,20 @@ class WindowsNativeTransport(unittest.TestCase):
             fallback = False
             try:
                 child.stdin.write(struct.pack('<I', 0xffffffff)); child.stdin.flush()
-                deadline = time.monotonic()+8
+                # The fake renders before writing ready; keep renewing while
+                # its twenty-second output crosses OpenSSH's original lease.
+                started = time.monotonic()
+                deadline = started+(25 if sustained else 8)
+                next_ping = started+2
                 while not slow and not ready.exists():
+                    if sustained and time.monotonic() >= next_ping:
+                        child.stdin.write(struct.pack('<I', 0xffffffff)); child.stdin.flush()
+                        next_ping = time.monotonic()+2
                     self.assertIsNone(child.poll(), (root/'stderr').read_bytes())
                     self.assertLess(time.monotonic(), deadline, 'original fake did not become ready')
                     time.sleep(.02)
                 if not slow: self.assertEqual(json.loads(ready.read_text(encoding='utf-8'))['argv'], words)
+                if sustained: self.assertGreaterEqual(time.monotonic()-started, 19)
                 started = time.monotonic()
                 if slow:
                     child.stdin.write(struct.pack('<I', 0)); child.stdin.flush()
@@ -394,6 +460,9 @@ class WindowsNativeTransport(unittest.TestCase):
                     rows = [json.loads(line) for line in record.read_text().splitlines()]
                     self.assertEqual(b''.join(bytes.fromhex(row['hex']) for row in rows if 'hex' in row), body)
                     self.assertEqual((root/'stderr').read_bytes(), b'')
+                    if sustained:
+                        self.assertEqual([json.loads(line) for line in (root/'stdout').read_bytes().splitlines()],
+                                         [{'i': n} for n in range(20)])
             finally:
                 if child.poll() is None:
                     fallback = True
@@ -417,3 +486,7 @@ class WindowsNativeTransport(unittest.TestCase):
     def test_native_output_backpressure_preserves_every_byte_and_exit(self):
         for shell in ('powershell', 'cmd'):
             with self.subTest(shell=shell): self.run_decoder(shell, slow=True)
+
+    def test_async_ssh_stdin_keeps_a_live_stream_through_repeated_lease_renewal(self):
+        for shell in ('powershell', 'cmd'):
+            with self.subTest(shell=shell): self.run_decoder(shell, sustained=True)

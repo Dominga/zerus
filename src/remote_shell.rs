@@ -180,13 +180,14 @@ fn encode<S: AsRef<str>>(shell: &Login, words: &[S]) -> Result<String> {
         .collect::<Vec<_>>()
         .join("\n")
         .replace("__HGS_ARGUMENTS__", &data);
-    let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
-    let encoded = STANDARD.encode(bytes);
+    // UTF-8 keeps the fixed bootstrap below cmd's smaller command limit.
+    // Only Base64 data reaches either login shell.
+    let encoded = STANDARD.encode(script.as_bytes());
     let command = match shell {
         // Execute in this disposable SSH login shell, without passing binary
         // output through PowerShell's native-command text decoding pipeline.
-        Login::PowerShell(_) => format!("& ([ScriptBlock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{encoded}'))))"),
-        Login::Cmd(path) => format!("\"{path}\" -NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}"),
+        Login::PowerShell(_) => format!("& ([ScriptBlock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}'))))"),
+        Login::Cmd(path) => format!("\"{path}\" -NoLogo -NoProfile -NonInteractive -Command \"& ([ScriptBlock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}'))))\""),
         Login::Posix => return Err(Error::new(1, "Windows transport requires a verified Windows shell")),
     };
     // cmd's command-line limit is smaller than CreateProcess's. Refuse before
@@ -335,14 +336,7 @@ mod tests {
             .split('\'')
             .next()
             .unwrap();
-        let bytes = STANDARD.decode(encoded).unwrap();
-        let utf16: Vec<_> = bytes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|v| u16::from_le_bytes([v[0], v[1]]))
-            .collect();
-        let script = String::from_utf16(&utf16).unwrap();
+        let script = String::from_utf8(STANDARD.decode(encoded).unwrap()).unwrap();
         let data = script
             .split("FromBase64String('")
             .nth(1)

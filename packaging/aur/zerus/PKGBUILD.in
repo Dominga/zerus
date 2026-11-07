@@ -40,6 +40,7 @@ build() {
     cd "$srcdir/zerus-$pkgver"
     export RUSTUP_TOOLCHAIN=stable CARGO_TARGET_DIR="$PWD/target"
     cargo build --frozen --release
+    cargo build --frozen --release --manifest-path crates/lore/Cargo.toml --target-dir target
     cargo build --frozen --release --manifest-path services/mobile/connector/Cargo.toml
     (cd client && npm exec -- tauri build --no-bundle \
         --config "$PWD/src-tauri/tauri.switch.linux.conf.json" --features video -- --frozen)
@@ -62,7 +63,7 @@ check() {
 package() {
     cd "$srcdir/zerus-$pkgver"
     python scripts/package-linux.py --destdir "$pkgdir" \
-        --cli target/release/hgs --gui target/release/hgs-tray \
+        --cli target/release/hgs --lore target/release/lore --gui target/release/hgs-tray \
         --connector target/release/zerus-mobile-connector \
         --licenses "$srcdir/licenses" --package-name "$pkgname"
 }

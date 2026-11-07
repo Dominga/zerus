@@ -74,6 +74,17 @@ DESKTOP_ARGS=()
 # Capture the root build before the GUI changes CARGO_TARGET_DIR. The SSH
 # wrapper supplies its retained native build explicitly; never sign that file.
 LOCAL_CLI_BUILD="${HGS_MAC_CLI_BUILD:-${CARGO_TARGET_DIR:-${SCRIPT_DIR}/../target}/release/hgs}"
+# Task 182: hgs runs lore as a subprocess from the same MacOS folder.
+PATH="${HOME}/.cargo/bin:${PATH}"; export PATH
+LORE_BUILD="${HGS_MAC_LORE_BUILD:-${SCRIPT_DIR}/../target/lore/release/lore}"
+lore_args=()
+if [ -f "${SCRIPT_DIR}/../crates/lore/Cargo.toml" ]; then
+    if [ ! -x "${LORE_BUILD}" ]; then
+        cargo build --locked --release --manifest-path "${SCRIPT_DIR}/../crates/lore/Cargo.toml" \
+            --target-dir "${SCRIPT_DIR}/../target/lore"
+    fi
+    lore_args=(--lore "${LORE_BUILD}")
+fi
 python3 "${SCRIPT_DIR}/prepare-local-macos.py" --check-cli \
     --hgs "${LOCAL_CLI_BUILD}" --runner-hgs "${HGS_BIN}"
 
@@ -108,7 +119,7 @@ echo "[2/4] Installing the .app bundle to ~/Applications..."
 LOCAL_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/zerus-source-install.XXXXXX")"
 trap 'rm -rf "${LOCAL_STAGE}"' EXIT
 python3 "${SCRIPT_DIR}/prepare-local-macos.py" --app "${BUILD_APP}" \
-    --hgs "${LOCAL_CLI_BUILD}" --runner-hgs "${HGS_BIN}" \
+    --hgs "${LOCAL_CLI_BUILD}" ${lore_args[@]+"${lore_args[@]}"} --runner-hgs "${HGS_BIN}" \
     --output "${LOCAL_STAGE}/hgs-tray.app" --installed "${APP_DEST}"
 # The parent remains private; the installed bundle has its normal app mode.
 chmod 755 "${LOCAL_STAGE}/hgs-tray.app"

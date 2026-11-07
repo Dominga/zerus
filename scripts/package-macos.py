@@ -57,6 +57,7 @@ def main():
     parser.add_argument("--gui", choices=("tauri",), default="tauri")
     parser.add_argument("--app", type=Path, required=True, help="tested release GUI app")
     parser.add_argument("--cli", type=Path, required=True, help="release hgs executable")
+    parser.add_argument("--lore", type=Path, required=True, help="release lore executable (hgs subprocess)")
     parser.add_argument("--connector", type=Path, required=True,
                         help="release zerus-mobile-connector executable (services/mobile/connector)")
     parser.add_argument("--licenses", type=Path, required=True, help="output of collect-licenses.py")
@@ -107,6 +108,7 @@ def main():
 
     contents = staged / "Contents"
     install(args.cli, contents / "MacOS/hgs", 0o755)
+    install(args.lore, contents / "MacOS/lore", 0o755)
     # Opt-in through zerus-setup --mobile-connector install; signed with the other code.
     install(args.connector, contents / "MacOS/zerus-mobile-connector", 0o755)
     resources = contents / "Resources"

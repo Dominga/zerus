@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tomllib
@@ -22,6 +23,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--destdir", type=Path, required=True)
     parser.add_argument("--cli", type=Path, required=True)
+    # Task 182: hgs runs lore as a subprocess; it sits beside hgs.
+    parser.add_argument("--lore", type=Path, required=True)
     parser.add_argument("--gui", type=Path, required=True)
     # The Rust mobile connector (services/mobile/connector); its user unit is
     # packaged but never enabled.
@@ -32,6 +35,9 @@ def main():
     destination = args.destdir.resolve()
     if destination == Path("/"):
         parser.error("stage into a package directory, never the running system")
+    if not args.lore.is_file():
+        parser.error(f"build output missing: {args.lore}")
+    install(args.lore, destination / "usr/bin/lore", 0o755)
     for name, source in (("hgs", args.cli), ("hgs-tray", args.gui), ("zerus-mobile-connector", args.connector)):
         if not source.is_file():
             parser.error(f"build output missing: {source}")
@@ -75,8 +81,10 @@ def main():
     shutil.copytree(args.licenses, licenses / "rust", dirs_exist_ok=True)
     cli_version = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
     connector_version = tomllib.loads((ROOT / "services/mobile/connector/Cargo.toml").read_text())["package"]["version"]
+    lore_version = re.search(r'pub const VERSION: &str = "([^"]+)"', (ROOT / "crates/lore/src/lib.rs").read_text(encoding="utf-8")).group(1)
     manifest = {"product": "Zerus", "version": (ROOT / "VERSION").read_text().strip(),
                 "cli_version": cli_version, "mobile_connector_version": connector_version,
+                "lore_version": lore_version,
                 "platform": "Arch Linux", "native_agents_bundled": False}
     if (ROOT / ".git").exists():
         manifest["source_commit"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
@@ -98,3 +106,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

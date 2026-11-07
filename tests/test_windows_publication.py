@@ -426,7 +426,8 @@ class PackageTests(unittest.TestCase):
             folder.mkdir(parents=True, exist_ok=True)
             (folder / "inventory.json").write_text("[]")
             (folder / "LICENSE-MIT").write_text("MIT\n")
-        for name, data in {"hgs.exe": b"tested cli", "hgs-tray.exe": b"tested tauri gui",
+        for name, data in {"hgs.exe": b"tested cli", "lore.exe": b"tested lore",
+                           "hgs-tray.exe": b"tested tauri gui",
                            "zerus-mobile-connector.exe": b"tested connector"}.items():
             (base / name).write_bytes(data)
         self.conpty = base / "conpty"
@@ -442,6 +443,7 @@ class PackageTests(unittest.TestCase):
 
     def package(self, output, **overrides):
         arguments = {"--connector": self.directory / "zerus-mobile-connector.exe", "--cli": self.directory / "hgs.exe",
+                     "--lore": self.directory / "lore.exe",
                      "--gui": self.directory / "hgs-tray.exe", "--output": output, "--crt-dir": self.crt,
                      "--rust-licenses": self.rust, "--frontend-licenses": self.frontend, "--conpty": self.conpty, **overrides}
         command = [part for key, value in arguments.items() for part in (key, str(value))]
@@ -463,7 +465,7 @@ class PackageTests(unittest.TestCase):
             names = archive.namelist()
             self.assertEqual(names, sorted(names))
             self.assertTrue(all(name.startswith(portable.TOP + "/") for name in names))
-            for name, expected in {"hgs.exe": b"tested cli", "hgs-tray.exe": b"tested tauri gui",
+            for name, expected in {"hgs.exe": b"tested cli", "lore.exe": b"tested lore", "hgs-tray.exe": b"tested tauri gui",
                                    "zerus-mobile-connector.exe": b"tested connector", **PAIR}.items():
                 self.assertEqual(archive.read(f"{portable.TOP}/{name}"), expected)
             self.assertFalse([name for name in names if portable.NEXT_FORBIDDEN.search(name)])
@@ -550,7 +552,11 @@ class NextInspectTests(unittest.TestCase):
         for name in ["Qt6Core.dll", "platforms/qwindows.dll", "licenses/qt/LGPL-3.0-only.txt"]:
             with self.subTest(name=name), self.assertRaises(ValueError):
                 portable.inspect(bundle(self.directory / "bad.zip", {**self.files, name: b"Qt"}, self.info))
+        for name in ["models/nomic-embed-text.safetensors", "model.gguf"]:
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "model weights"):
+                portable.inspect(bundle(self.directory / "bad.zip", {**self.files, name: b"weights"}, self.info))
 
 
 if __name__ == "__main__":
     unittest.main()
+

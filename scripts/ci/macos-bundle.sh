@@ -35,6 +35,8 @@ command -v tmux > /dev/null || { echo 'Install tmux before bundle self-tests.' >
 export MACOSX_DEPLOYMENT_TARGET=14.0
 mkdir -p artifacts/test-results
 cargo build --locked --release
+# Task 182: lore runs as hgs's subprocess from the same MacOS folder.
+cargo build --locked --release --manifest-path crates/lore/Cargo.toml --target-dir target/lore
 cargo build --locked --release --manifest-path services/mobile/connector/Cargo.toml
 rm -rf artifacts/macos-licenses artifacts/macos-client-licenses artifacts/macos-frontend-licenses
 python3 scripts/collect-licenses.py artifacts/macos-licenses \
@@ -55,7 +57,7 @@ else
     echo 'Build-only bundle: regression tests belong to the caller gate; package checks remain required.'
 fi
 python3 scripts/package-macos.py --gui tauri --app target/release/bundle/macos/Zerus.app \
-    --cli target/release/hgs --connector target/release/zerus-mobile-connector \
+    --cli target/release/hgs --lore target/lore/release/lore --connector target/release/zerus-mobile-connector \
     --licenses artifacts/macos-licenses --version "$version" --release "$release" \
     --client-licenses artifacts/macos-client-licenses --frontend-licenses artifacts/macos-frontend-licenses \
     --output "$output"

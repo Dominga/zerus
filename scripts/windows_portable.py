@@ -42,12 +42,14 @@ REQUIRED = (
 # legacy inspection for immutable published Qt archives; new Tauri packages
 # cannot quietly carry an old Qt runtime alongside the replacement executable.
 NEXT_REQUIRED = (
-    "hgs.exe", "hgs-tray.exe", "zerus-mobile-connector.exe", "build-info.json", "README.txt", "LICENSE", "THIRD_PARTY_NOTICES.md",
+    "hgs.exe", "lore.exe", "hgs-tray.exe", "zerus-mobile-connector.exe", "build-info.json", "README.txt", "LICENSE", "THIRD_PARTY_NOTICES.md",
     "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "conpty.dll", "OpenConsole.exe",
     "licenses/conpty-LICENSE.txt", "licenses/conpty-NOTICE.md", "licenses/rust/inventory.json",
     "licenses/rust/desktop/inventory.json", "licenses/frontend/inventory.json",
 )
 NEXT_FORBIDDEN = re.compile(r"(?i)(?:^|/)(?:qt[^/]*\.(?:dll|exe|pak)|qwindows\.dll)$|/licenses/qt/")
+# Task 182: lore fetches model weights at runtime; they never travel in a package.
+MODEL_FORBIDDEN = re.compile(r"(?i)(?:^|/)(?:[^/]+\.(?:gguf|safetensors|onnx|pt|pth|npz)|models/[^/]+)$")
 # WhiteWh fork, task #65 (owner, 2026-11-06): a fork zip keeps the Qt GUI for
 # one release as a fallback the owner starts by hand, never as the default:
 # qt/zerus-qt.exe with its own Qt runtime, app-local MSVC runtime and Qt
@@ -171,6 +173,8 @@ def inspect(path, required=None):
         require(not any(NEXT_FORBIDDEN.search(name) for name in names
                         if fallback is None or not name.startswith(folder)),
                 "Tauri portable bundle must not contain Qt deployment files.")
+        require(not any(MODEL_FORBIDDEN.search(name) for name in names),
+                "lore model weights must be fetched at runtime, never shipped")
         if fallback is not None:
             require(isinstance(fallback, dict) and fallback.get("executable") == f"{QT_FALLBACK}/zerus-qt.exe" and
                     isinstance(fallback.get("qt_version"), str) and VERSION.fullmatch(fallback["qt_version"]),

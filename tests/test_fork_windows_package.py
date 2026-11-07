@@ -61,6 +61,7 @@ class ForkPackageTests(unittest.TestCase):
 
     def fork(self, output, *extra):
         arguments = ["--connector", self.directory / "zerus-mobile-connector.exe", "--cli", self.directory / "hgs.exe",
+                     "--lore", self.directory / "lore.exe",
                      "--gui", self.directory / "hgs-tray.exe", "--output", output, "--crt-dir", self.crt,
                      "--rust-licenses", self.rust, "--frontend-licenses", self.frontend, "--conpty", self.conpty, *extra]
         environment = {key: value for key, value in os.environ.items() if not key.startswith(("QT_", "HGS_", "ZERUS_FORK_"))}
@@ -115,7 +116,7 @@ class ForkWorkflowTests(unittest.TestCase):
         build = self.step("name: Build the Tauri Windows desktop with the fork channel")
         self.assertIn("npm run tauri -- build --ci --no-bundle --config src-tauri/tauri.windows.conf.json --features video", build)
         package = self.step("name: Portable zip from the tested executables")
-        for part in ["package-windows.py --fork", "--gui target/windows-next/release/hgs-tray.exe",
+        for part in ["package-windows.py --fork", "--lore target/lore/release/lore.exe", "--gui target/windows-next/release/hgs-tray.exe",
                      "--mobile-relay services/mobile/relay/target/release/zerus-relay.exe",
                      "--qt-fallback .ci-build/gui/hgs-tray.exe", '--qt-root "$QT_ROOT_DIR"',
                      "--frontend-licenses artifacts/windows-frontend-licenses",
@@ -136,3 +137,4 @@ class ForkWorkflowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

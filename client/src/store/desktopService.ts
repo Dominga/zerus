@@ -527,6 +527,10 @@ export function serviceStatus(state: DesktopService | undefined) {
   if (manualRefresh) {
     label = tr("Service refresh required");
     notice = tr("The CLI was updated. The Windows background service needs a manual refresh. See Settings > About.");
+  } else if (state.state_refusal) {
+    // Task 176: hgs's own words name the folder, the access entry and the repair.
+    label = tr("Session state folder refused");
+    notice = state.state_refusal;
   } else if (!state.connected) {
     label = tr("Background service unavailable");
     notice = state.reconnecting

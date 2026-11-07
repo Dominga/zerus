@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 
 pub const CONFIG_NAME: &str = "lore.toml";
 pub const MODES: &[&str] = &["none", "plain", "shared-tree"];
-pub const PROVIDERS: &[&str] = &["ollama", "none"];
+/// `builtin` is the nomic-embed-text model in this process and `none` is text only. `ollama` is the
+/// name Python's `lore init` and every lore.toml written before the owner dropped Ollama use: it
+/// means the built-in model too, and the `url`, `model` and `timeout` keys beside it are ignored.
+pub const PROVIDERS: &[&str] = &["builtin", "ollama", "none"];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
@@ -29,6 +32,93 @@ pub struct Config {
     pub limits: BTreeMap<String, usize>,
     pub dedupe_cosine: f64,
     pub dedupe_jaccard: f64,
+    /// `[working]`: the working tier's expiry and bounds (docs/lore.md 11.3, 11.4).
+    pub working: Working,
+    /// `[secrets] allow`: literals the secret scan lets pass (11.9).
+    pub secrets_allow: Vec<String>,
+}
+
+/// The working tier's settings. The expiry days are 1 to 365; every bound may
+/// be lowered and never raised above the addendum's table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Working {
+    pub pulse_days: i64,
+    pub message_days: i64,
+    pub unread_days: i64,
+    /// Minutes an urgent message may stay unrung before the lead hears (1 to 120).
+    pub urgent_bound: i64,
+    pub pulses_per_team: usize,
+    pub messages_per_team: usize,
+    pub unread_normal: usize,
+    pub unread_urgent: usize,
+    pub brief_versions: usize,
+    pub entries: usize,
+    pub file_bytes: u64,
+}
+
+impl Default for Working {
+    fn default() -> Self {
+        Self {
+            pulse_days: 14,
+            message_days: 7,
+            unread_days: 30,
+            urgent_bound: 10,
+            pulses_per_team: 2_000,
+            messages_per_team: 1_000,
+            unread_normal: 50,
+            unread_urgent: 5,
+            brief_versions: 20,
+            entries: 20_000,
+            file_bytes: 64 * 1024 * 1024,
+        }
+    }
+}
+
+/// The `[working]` keys: (name, least, most). A bound's most is its ceiling.
+const WORKING_KEYS: [(&str, i64, i64); 11] = [
+    ("pulse_days", 1, 365),
+    ("message_days", 1, 365),
+    ("unread_days", 1, 365),
+    ("urgent_bound", 1, 120),
+    ("pulses_per_team", 1, 2_000),
+    ("messages_per_team", 1, 1_000),
+    ("unread_normal", 1, 50),
+    ("unread_urgent", 1, 5),
+    ("brief_versions", 1, 20),
+    ("entries", 1, 20_000),
+    ("file_mib", 1, 64),
+];
+
+fn parse_working(value: &toml::Value, bad: &mut Vec<String>) -> Working {
+    let mut working = Working::default();
+    let Some(table) = value.as_table() else {
+        bad.push("`[working]` must be a table".into());
+        return working;
+    };
+    for (key, value) in table {
+        let Some((_, least, most)) = WORKING_KEYS.iter().find(|(name, _, _)| name == key) else {
+            bad.push(format!("unknown key `working.{key}`"));
+            continue;
+        };
+        let Some(number) = value.as_integer().filter(|n| (*least..=*most).contains(n)) else {
+            bad.push(format!("`working.{key}` must be a whole number from {least} to {most}"));
+            continue;
+        };
+        match key.as_str() {
+            "pulse_days" => working.pulse_days = number,
+            "message_days" => working.message_days = number,
+            "unread_days" => working.unread_days = number,
+            "urgent_bound" => working.urgent_bound = number,
+            "pulses_per_team" => working.pulses_per_team = number as usize,
+            "messages_per_team" => working.messages_per_team = number as usize,
+            "unread_normal" => working.unread_normal = number as usize,
+            "unread_urgent" => working.unread_urgent = number as usize,
+            "brief_versions" => working.brief_versions = number as usize,
+            "entries" => working.entries = number as usize,
+            _ => working.file_bytes = number as u64 * 1024 * 1024,
+        }
+    }
+    working
 }
 
 impl Config {
@@ -51,6 +141,8 @@ impl Config {
             limits: BTreeMap::new(),
             dedupe_cosine: 0.95,
             dedupe_jaccard: 0.5,
+            working: Working::default(),
+            secrets_allow: Vec::new(),
         }
     }
 
@@ -111,7 +203,7 @@ pub fn parse(data: &toml::Value, root: &Path, place: &str) -> Result<Config, Lor
     let empty = toml::map::Map::new();
     let table = data.as_table().unwrap_or(&empty);
     for key in table.keys() {
-        if !["version", "dir", "areas", "commit", "embed", "limits", "dedupe"].contains(&key.as_str()) {
+        if !["version", "dir", "areas", "commit", "embed", "limits", "dedupe", "working", "secrets"].contains(&key.as_str()) {
             bad.push(format!("unknown key `{key}`"));
         }
     }
@@ -243,6 +335,26 @@ pub fn parse(data: &toml::Value, root: &Path, place: &str) -> Result<Config, Lor
                 }
             }
             None => bad.push("`[dedupe]` must be a table".into()),
+        },
+    }
+
+    if let Some(working) = table.get("working") {
+        config.working = parse_working(working, &mut bad);
+    }
+    match table.get("secrets") {
+        None => {}
+        Some(secrets) => match secrets.as_table() {
+            Some(map) => {
+                for key in map.keys().filter(|key| key.as_str() != "allow") {
+                    bad.push(format!("unknown key `secrets.{key}`"));
+                }
+                match map.get("allow").map(|allow| allow.as_array().filter(|items| items.iter().all(toml::Value::is_str))) {
+                    None => {}
+                    Some(Some(items)) => config.secrets_allow = items.iter().filter_map(|item| item.as_str().map(str::to_owned)).collect(),
+                    Some(None) => bad.push("`secrets.allow` must be a list of literal strings".into()),
+                }
+            }
+            None => bad.push("`[secrets]` must be a table".into()),
         },
     }
 

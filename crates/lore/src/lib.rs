@@ -8,20 +8,27 @@ use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 use std::path::Path;
 
+pub mod builtin;
 pub mod cli;
 pub mod config;
 pub mod cover;
 pub mod dedupe;
 pub mod embed;
+pub mod finder;
 pub mod gitio;
+pub mod history;
+pub mod index;
 pub mod ops;
 pub mod plans;
 pub mod private;
 pub mod py;
+pub mod promote;
 pub mod refs;
 pub mod schema;
 pub mod search;
+pub mod secrets;
 pub mod store;
+pub mod working;
 pub mod writer;
 
 pub use schema::{validate, RecordError};

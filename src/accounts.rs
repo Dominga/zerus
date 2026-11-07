@@ -1647,7 +1647,8 @@ mod permission_tests {
         let written = kimi_read_only(&config, "work", &args(&["--yes", "--json"]), false).unwrap();
         assert_eq!(written["written"], true);
         let text = fs::read_to_string(home.join("config.toml")).unwrap();
-        assert!(text.contains("Bash(hgs team status *)"), "{text}");
+        assert!(text.contains("Bash(hgs team status --json)"), "{text}");
+        assert!(!text.contains("Bash(hgs inspect") && !text.contains(" *)"), "{text}");
         let removed = kimi_read_only(&config, "work", &args(&["--remove", "--json"]), false).unwrap();
         assert_eq!(removed["removed"].as_u64(), Some(12));
         fs::write(

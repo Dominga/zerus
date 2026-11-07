@@ -18,7 +18,7 @@ use zerus_lore::{gitio, schema, FORMAT_VERSION};
 
 /// The ranked search, once the index is in this crate.
 fn finder() -> Option<&'static dyn Finder> {
-    None
+    Some(&zerus_lore::builtin::BUILTIN)
 }
 
 const WAITS: &str = "waits for the FTS5 index (find ranks through it)";
@@ -64,7 +64,7 @@ impl Case {
         let root = self.root.to_string_lossy().into_owned();
         let mut full = vec!["-C", root.as_str()];
         full.extend(argv);
-        let env = Env { cwd: self.root.clone(), stdin: stdin.as_bytes().to_vec(), lore_by: None, finder: finder(), roots: None };
+        let env = Env { cwd: self.root.clone(), stdin: stdin.as_bytes().to_vec(), lore_by: None, finder: finder(), roots: None, ..Env::default() };
         cli::run(&full, &env)
     }
 
@@ -642,7 +642,6 @@ fn search_case() -> Case {
 }
 
 #[test]
-#[ignore = "waits for the FTS5 index (find ranks through it)"]
 fn search_plans__Search__a_writer_holding_the_index_is_waited_for() {
     let case = search_case();
     case.add(&[f("written while another process holds the index")]);
@@ -650,7 +649,6 @@ fn search_plans__Search__a_writer_holding_the_index_is_waited_for() {
 }
 
 #[test]
-#[ignore = "waits for the FTS5 index (find ranks through it)"]
 fn search_plans__Search__exact_signal_first() {
     let case = search_case();
     assert_eq!(case.find_ids(&["whatever", "tar.exe: Damaged tar archive (bad header checksum)", "more"]).expect(WAITS)[0], "git-archive-piped-into-tar-fails");
@@ -659,7 +657,6 @@ fn search_plans__Search__exact_signal_first() {
 }
 
 #[test]
-#[ignore = "waits for the FTS5 index (find ranks through it)"]
 fn search_plans__Search__a_copied_phrase_beats_a_bag_of_its_words() {
     let case = search_case();
     let noise = "the file on the line wrote every head of the line, the file on every line ".repeat(3).trim().to_owned();
@@ -672,7 +669,6 @@ fn search_plans__Search__a_copied_phrase_beats_a_bag_of_its_words() {
 }
 
 #[test]
-#[ignore = "waits for the FTS5 index (find ranks through it)"]
 fn search_plans__Search__words() {
     let case = search_case();
     assert_eq!(case.find_ids(&["same stale picture on every frame"]).expect(WAITS)[0], "the-device-was-lost");
@@ -691,7 +687,6 @@ fn search_plans__Search__terms_are_whole() {
 }
 
 #[test]
-#[ignore = "waits for the FTS5 index (find ranks through it)"]
 fn search_plans__Search__retired_hidden_unless_all() {
     let case = search_case();
     assert!(!case.find_ids(&["obsolete symptom"]).expect(WAITS).contains(&"old-thing".to_owned()));
@@ -700,7 +695,6 @@ fn search_plans__Search__retired_hidden_unless_all() {
 }
 
 #[test]
-#[ignore = "waits for the FTS5 index (find ranks through it)"]
 fn search_plans__Search__fresh_after_change() {
     let case = search_case();
     case.lore(&["update", "the-device-was-lost", "-s", "symptom=the frame turns purple"]);
@@ -732,7 +726,7 @@ fn search_plans__Search__for_file_dir_symbol() {
 }
 
 #[test]
-#[ignore = "waits for the FTS5 index (find ranks through it)"]
+#[ignore = "Ollama's provider-down path does not exist with the built-in model"]
 fn search_plans__Search__provider_down_is_text_only_and_quick() {
     let case = search_case();
     let config = std::fs::read_to_string(case.file("lore.toml")).unwrap().replace("provider = \"none\"", "provider = \"ollama\"\nurl = \"http://127.0.0.1:9\"\ntimeout = 1.0");
@@ -745,7 +739,7 @@ fn search_plans__Search__provider_down_is_text_only_and_quick() {
 }
 
 #[test]
-#[ignore = "waits for the FTS5 index and the embedder (find ranks through them)"]
+#[ignore = "needs a test-injected embedding corpus; the built-in model is measured by tests/parity.rs"]
 fn search_plans__Search__fusion_with_meaning() {
     let case = search_case();
     let out = case.json(&["find", "frame picture stale"]);
@@ -1062,7 +1056,7 @@ fn migration__Check__evidence() {
 }
 
 #[test]
-#[ignore = "waits for the FTS5 index (where the index falls back to is the index's)"]
+#[ignore = "needs an unwritable user cache; index_dirs covers the fallback"]
 fn migration__Sandbox__index_falls_back_to_the_git_directory() {
     let case = Case::new("plain");
     case.lore_in(&["add", "any", "--stdin", "--new"], &f("one").to_string());
@@ -1189,7 +1183,7 @@ fn json_shapes_of_every_command() {
     assert_eq!(plans[0]["plan"]["id"], "pl");
     assert_eq!(case.json(&["items"]), json!([]));
     assert_eq!(case.json(&["stale"]), json!([]));
-    assert_eq!(ids(&case.json(&["for", "src/chain.py"])), [rid.clone()]);
+    assert_eq!(ids(&case.json(&["for", "src/chain.py"])), std::slice::from_ref(&rid));
     assert_eq!(case.json(&["show", &rid])["id"], json!(rid));
     let check = case.json(&["check"]);
     assert_eq!(check.as_object().unwrap().keys().collect::<Vec<_>>(), ["records", "files", "errors", "warnings"]);

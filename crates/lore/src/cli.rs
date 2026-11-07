@@ -47,6 +47,16 @@ pub struct Env<'a> {
     pub finder: Option<&'a dyn Finder>,
     /// A Zerus project store's reference roots (docs/lore.md 2.4).
     pub roots: Option<Roots>,
+    /// The time the working tier reads (UTC seconds); None: the clock.
+    pub now: Option<i64>,
+    /// Verbatim history (11.7): Zerus's content-search index, or none.
+    pub history: Option<std::sync::Arc<dyn crate::history::HistorySource>>,
+    /// Whose sessions the history channel may return.
+    pub history_scope: crate::history::Scope,
+    /// A message's delivery (11.11): only Zerus has one.
+    pub doorbell: Option<&'a dyn crate::working::Doorbell>,
+    /// How expiry learns a task's life (11.14); None: the plans' items.
+    pub clock: Option<&'a dyn crate::working::TaskClock>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -168,11 +178,13 @@ fn options_of(command: &str) -> Option<Vec<(&'static str, &'static [&'static str
         "find" => {
             let mut list = filters.to_vec();
             list.push(("n", &["-n"], true));
+            // docs/lore.md 11.6: the working tier and the history channel.
+            list.extend([("working", &[] as &[&str], false), ("no-working", &[], false), ("history", &[], false), ("no-history", &[], false), ("team", &[], true), ("role", &[], true)]);
             list
         }
         "for" => vec![("all", &[], false)],
         "cover" => vec![("list", &[], false), ("add", &[], false), ("history", &[], false), ("reason", &[], true), ("record", &[], true), ("title", &[], true)],
-        "add" => vec![writes, ("json-in", &["--stdin"], false), ("batch", &[], false), ("new", &[], false), ("skip-duplicates", &[], false)],
+        "add" => vec![writes, ("json-in", &["--stdin"], false), ("batch", &[], false), ("new", &[], false), ("skip-duplicates", &[], false), ("occurrence", &[], false)],
         "update" => vec![writes, ("json-in", &["--stdin"], false), ("batch", &[], false)],
         "plans" => vec![("all", &[], false)],
         "items" => vec![("plan", &[], true), ("status", &[], true), ("ready", &[], false), ("all", &[], false)],
@@ -185,13 +197,38 @@ fn options_of(command: &str) -> Option<Vec<(&'static str, &'static [&'static str
         "item drop" => vec![("reason", &[], true), ("decided-by", &[], true), ("outcome", &[], true)],
         "item supersede" => vec![("with", &[], true), ("outcome", &[], true)],
         "item defer" | "item reopen" => vec![("reason", &[], true)],
+        // docs/lore.md 11.13: the working tier.
+        "pulse add" => vec![("task", &[], true), ("done", &[], true), ("next", &[], true), ("blocked", &[], true), ("team", &[], true), ("role", &[], true)],
+        "pulses" => vec![("task", &[], true), ("since", &[], true), ("all", &[], false), ("team", &[], true), ("role", &[], true)],
+        "message send" => vec![("to", &[], true), ("urgent", &[], false), ("team", &[], true), ("role", &[], true), ("recipients", &[], true)],
+        "messages" => vec![("unread", &[], false), ("to", &[], true), ("from", &[], true), ("peek", &[], false), ("team", &[], true), ("role", &[], true)],
+        "message read" => vec![("team", &[], true), ("role", &[], true)],
+        "brief set" => vec![("task", &[], true), ("title", &[], true), ("team", &[], true), ("role", &[], true)],
+        "brief show" => vec![("task", &[], true), ("version", &[], true), ("team", &[], true), ("role", &[], true)],
+        "promote" => vec![("kind", &[], true), ("field", &[], true), ("dry-run", &[], false), ("query", &[], true), ("team", &[], true), ("role", &[], true)],
+        "supersede" => vec![],
+        "working status" | "working cleanup" => vec![],
         _ => return None,
     })
+}
+
+/// The commands of two words and their second words.
+fn subcommands(command: &str) -> Option<&'static [&'static str]> {
+    match command {
+        "plan" => Some(PLAN_COMMANDS),
+        "item" => Some(ITEM_COMMANDS),
+        "pulse" => Some(&["add"]),
+        "message" => Some(&["send", "read"]),
+        "brief" => Some(&["set", "show"]),
+        "working" => Some(&["status", "cleanup"]),
+        _ => None,
+    }
 }
 
 /// The commands, as `lore guide` may name them.
 pub const COMMANDS: &[&str] = &[
     "init", "guide", "areas", "check", "fmt", "index", "find", "for", "show", "exists", "cover", "add", "update", "plans", "items", "stale", "plan", "item",
+    "pulse", "pulses", "message", "messages", "brief", "promote", "supersede", "working",
 ];
 pub const PLAN_COMMANDS: &[&str] = &["new", "show", "set", "close"];
 pub const ITEM_COMMANDS: &[&str] = &["add", "done", "drop", "supersede", "defer", "reopen"];
@@ -267,13 +304,13 @@ fn parse_args(argv: &[String]) -> std::result::Result<Args, Usage> {
                 return Err(Usage(format!("argument <command>: invalid choice: {}", repr_str(&word))));
             }
             args.command.push(word.clone());
-            if word != "plan" && word != "item" {
+            if subcommands(&word).is_none() {
                 spec = options_of(&word);
             }
             continue;
         }
-        if args.command.len() == 1 && (args.command[0] == "plan" || args.command[0] == "item") {
-            let allowed = if args.command[0] == "plan" { PLAN_COMMANDS } else { ITEM_COMMANDS };
+        if args.command.len() == 1 && subcommands(&args.command[0]).is_some() {
+            let allowed = subcommands(&args.command[0]).unwrap_or_default();
             if !allowed.contains(&word.as_str()) {
                 return Err(Usage(format!("argument <{} command>: invalid choice: {}", args.command[0], repr_str(&word))));
             }
@@ -304,7 +341,11 @@ fn check_shape(args: &Args) -> std::result::Result<(), Usage> {
     };
     match command.as_str() {
         "" => Err(Usage("a command is needed".into())),
-        "plan" | "item" => Err(Usage(format!("a {command} command is needed"))),
+        "plan" | "item" | "pulse" | "message" | "brief" | "working" => Err(Usage(format!("a {command} command is needed"))),
+        "pulse add" | "pulses" | "messages" | "brief set" | "brief show" | "working status" | "working cleanup" => positional(0, Some(0), ""),
+        "message send" => positional(0, None, ""),
+        "message read" | "promote" => positional(1, Some(1), "id"),
+        "supersede" => positional(2, Some(2), "old new"),
         "init" | "guide" | "areas" | "check" | "fmt" | "index" | "plans" | "items" | "stale" => positional(0, Some(0), ""),
         "find" => positional(1, None, "query"),
         "for" => positional(1, Some(1), "target"),
@@ -601,7 +642,7 @@ impl<'a> Ctx<'a> {
         };
         let mut outcome = ops::apply(&self.config, build, &options)?;
         let mut all = notes;
-        all.extend(outcome.notes.drain(..));
+        all.append(&mut outcome.notes);
         outcome.notes = all;
         let place = format!("{}/{}", self.config.remote, self.config.branch);
         let line = outcome.commit.as_ref().map(|commit| {
@@ -703,6 +744,9 @@ fn dispatch(args: Args, env: &Env, io: &mut Io) -> Result<i32> {
             ctx.write(io, &build, None, Vec::new())
         }
         "item add" => cmd_item_add(&ctx, io),
+        "pulse add" | "pulses" | "message send" | "messages" | "message read" | "brief set" | "brief show" | "promote" | "supersede" | "working status" | "working cleanup" => {
+            working_cli::run(&mut ctx, io)
+        }
         "item done" => {
             let fields = vec![("commits", json!(ctx.args.many("commit"))), ("outcome", json!(ctx.args.one("outcome")))];
             item_move(&ctx, io, "done", fields, None)
@@ -805,6 +849,23 @@ fn cmd_find(ctx: &mut Ctx, io: &mut Io) -> Result<i32> {
     }
     let records = ctx.records()?;
     let (hits, notes) = finder.find(&ctx.config, &records, &query, &filters(&ctx.args), limit, ctx.args.text_only)?;
+    // docs/lore.md 11.6: without working entries and without a history
+    // source, `find` is CodeLore's byte for byte.
+    if let Some(merged) = working_cli::tiers(ctx, &query, &hits, &notes, limit)? {
+        if ctx.args.json {
+            io.json(&merged.json);
+        } else {
+            for note in &merged.notes {
+                io.note(note);
+            }
+            if merged.text.is_empty() {
+                io.say("nothing found");
+            } else {
+                io.say(&merged.text.join("\n\n"));
+            }
+        }
+        return Ok(0);
+    }
     if ctx.args.json {
         io.json(&shape_find(&query, &notes, &hits));
         return Ok(0);
@@ -927,6 +988,9 @@ fn new_from_args(ctx: &Ctx, kind: &str) -> Result<Vec<Value>> {
 fn cmd_add(ctx: &mut Ctx, io: &mut Io) -> Result<i32> {
     let kind = ctx.args.positional[0].clone();
     let mut records = new_from_args(ctx, &kind)?;
+    if ctx.args.flag("occurrence") {
+        return working_cli::add_resolved(ctx, io, records);
+    }
     let existing = ctx.records()?;
     let mut found = dedupe::candidates(&ctx.config, &existing, &records, None);
     let mut blocking: BTreeMap<usize, Vec<dedupe::Match>> = found.iter().filter(|(_, matches)| matches.iter().any(|m| m.blocking)).map(|(at, matches)| (*at, matches.clone())).collect();
@@ -1598,3 +1662,6 @@ fn item_move(ctx: &Ctx, io: &mut Io, status: &str, fields: Vec<(&str, Value)>, r
     let build = ops::updater(id, Patch::Fixed(patch), reopen_reason);
     ctx.write(io, &build, subject, Vec::new())
 }
+
+#[path = "cli_working.rs"]
+mod working_cli;

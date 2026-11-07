@@ -44,6 +44,6 @@ Members:
 - Shared folder: hgs guide team-broker.
 - Codex on Windows commits via git-commit (read-only .git) and runs
   powershell.exe (team-run).
-- Permissions: allow what the task needs; outside or destructive: ask the owner.
+- Rights: tasks go only to members able to do them ("needs"); hgs team rights narrows.
 - Cancel empty tasks first; all decided: extend/finish; owner stop is final.
 Sub-teams: hgs guide team-tree.

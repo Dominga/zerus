@@ -112,6 +112,27 @@ gains the exact command and, after the answer, who answered.
   the template stores `"profile_widening":{"member","from","to"}` and the plan
   cannot be approved until the owner confirms it in the desktop (an approve
   without `"confirm_widening": true` from the owner is refused).
+- Task 154 (owner, 2026-11-07): every profile maps to each agent's real mode
+  and a sixth profile, `operate`, launches and inspects sessions, reads
+  terminals and runs a worker. DeepSeek takes `read-only`, `workspace-write`
+  or `danger-full-access` presets (read; write/build/commit; network/operate),
+  Codex the same sandboxes with `on-request` approval, Kimi plan mode for
+  read, Claude its permission mode. An empty profile keeps the account's
+  mode. `permissions` takes the solo launch's selection: provider, bypass,
+  auto (not DeepSeek) or `native:{...}`. A member's capabilities follow its
+  sandbox: a Codex or DeepSeek workspace sandbox runs at Low integrity
+  outside the session host, so it edits, builds (through Zerus) and commits
+  but launches no session, reads no terminal and runs no worker. A task's
+  needs are its `needs` list, else what its words ask (sessions, terminals,
+  worker). Plan validation (error kind `rights`) and the hand-out (the task
+  waits on `rights`) refuse a member that lacks one, naming the members who
+  can and the `{"kind":"rights",...}` card that fixes it. `hgs team rights`
+  changes a member's rights, also while its session runs: the lead narrows,
+  widening is the owner's (or the card). A running member is paused once
+  idle and launched again under its name without `--new`, which resumes its
+  conversation with the new `--permissions`. A QA role defaults to `operate`
+  and a merger to `commit` (a catalog role's own `permissions_profile` wins);
+  a role default is not widening. Status shows each member's `rights`.
 - B5, the lead's own session: when Zerus starts a lead (or adopts a session as
   lead) it allows `hgs team answer` and `hgs team reply` for that session:
   Claude through `--allowedTools "Bash(hgs team answer:*)" "Bash(hgs team reply:*)"`

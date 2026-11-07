@@ -193,7 +193,7 @@ fn a_wider_profile_waits_for_the_owner() {
     )
     .unwrap_err()
     .to_string();
-    assert_eq!(error, "A member \"dev\": field \"permissions_profile\" is read, write, build, commit or network, not \"root\"");
+    assert_eq!(error, "A member \"dev\": field \"permissions_profile\" is read, write, build, commit, network, operate, not \"root\"");
     // C3: `permissions` stays the launch mode; bypass is accepted.
     let (mut bypass, _) = create("t3", &json!({"name":"T3","lead":{"id":"lead","agent":"claude"}})).unwrap();
     plan(
@@ -214,7 +214,10 @@ fn a_wider_profile_waits_for_the_owner() {
     )
     .unwrap_err()
     .to_string();
-    assert_eq!(error, "A member \"dev\": field \"permissions\" is auto or bypass, not \"root\"");
+    assert_eq!(
+        error,
+        "A member \"dev\": field \"permissions\": \"root\" is not a launch selection: use provider, bypass, auto or native:{...} (the agent's own selection)"
+    );
 }
 
 #[test]

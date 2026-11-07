@@ -1,0 +1,10 @@
+ ──────────────────────────────────────────────────────────────────────────────
+  • The plan's phase 2 is ready; the lead's inbox has one report.
+  • Worked for 12s · 3 tools · read, run
+
+ ╭────────────────────────────────────────────────────────────────────────────╮
+ │ > [Zerus team · from: Zerus · starved] The lead's task got stuck in the    │
+ │   prompt, and this message waits there until Enter reaches it.            │
+ ╰────────────────────────────────────────────────────────────────────────────╯
+ Ask When Needed  K3 thinking: max  [1 task running]  /work/example  main
+                                                         context: 22% (217k/1M)

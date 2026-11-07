@@ -184,6 +184,29 @@ pub fn verify_private_file(file: &fs::File) -> io::Result<bool> {
 pub fn verify_private_directory(file: &fs::File) -> io::Result<bool> {
     Ok(private_metadata(&file.metadata()?, Private::Directory))
 }
+/// WhiteWh fork, task 176: why the entry at `path` is not private, in words
+/// a person can act on; None when it is. Reads only.
+pub fn describe_private(path: &Path, kind: Private) -> io::Result<Option<String>> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(Some("it is a symbolic link".into()));
+    }
+    match kind {
+        Private::Directory if !metadata.is_dir() => return Ok(Some("it is not a folder".into())),
+        Private::File if !metadata.is_file() => return Ok(Some("it is not a regular file".into())),
+        Private::File if metadata.nlink() != 1 => return Ok(Some(format!("the file has {} links", metadata.nlink()))),
+        _ => {}
+    }
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        return Ok(Some(format!("it is owned by uid {}", metadata.uid())));
+    }
+    let mode = metadata.mode() & 0o7777;
+    Ok((mode & 0o077 != 0).then(|| format!("its mode {mode:04o} gives its group or others access")))
+}
+/// The Unix form of the Windows ancestor check stays owner-only.
+pub fn verify_guarded_directory(file: &fs::File) -> io::Result<bool> {
+    verify_private_directory(file)
+}
 fn private_metadata(metadata: &fs::Metadata, kind: Private) -> bool {
     (match kind {
         Private::Directory => metadata.is_dir(),

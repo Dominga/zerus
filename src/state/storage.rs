@@ -413,6 +413,9 @@ fn verify_at(path: &Path, name: &str, bytes: &[u8]) -> Result<Value> {
     claude_subagents::reconcile(&mut record);
     native_subagents::reconcile(&mut record);
     subagent_lifecycle::reconcile(&mut record);
+    // Task 121: Kimi's heartbeat is a lock-free append; its time is folded here,
+    // where every record read passes, so the session still looks alive.
+    super::heartbeat::apply(&mut record);
     Ok(record)
 }
 

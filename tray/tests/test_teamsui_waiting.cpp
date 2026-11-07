@@ -1702,7 +1702,8 @@ void TestTeamsUiWaiting::waitingPageListsEveryKindAcrossTeams()
     }
     QCOMPARE(kinds, (QStringList{"Plan", "Phase draft", "Permission", "Proposal", "Report", "Held task", "All decided"}));
     // #724: every row opens its team; a one-click decision is answered in it
-    // too (Approve… for the drafts, Answer for the proposal and the permission).
+    // too (Approve… for the drafts, Answer for the proposal and the permission;
+    // task 116: and Answer for a report, a held task and the end of the team).
     QStringList answers;
     for (auto *row : page.findChildren<QFrame *>("teamWaitingRow")) {
         QCOMPARE(row->findChild<QPushButton *>("teamWaitingOpen")->text(), QStringLiteral("Open team"));
@@ -1710,7 +1711,7 @@ void TestTeamsUiWaiting::waitingPageListsEveryKindAcrossTeams()
         const auto *answer = row->findChild<QPushButton *>("teamWaitingAnswerToggle");
         answers << (approve ? approve->text() : answer ? answer->text() : QString());
     }
-    QCOMPARE(answers, (QStringList{"Approve…", "Approve…", "Answer", "Answer", "", "", ""}));
+    QCOMPARE(answers, (QStringList{"Approve…", "Approve…", "Answer", "Answer", "Answer", "Answer", "Answer"}));
     QCOMPARE(teams.size(), 6);
     const QString count = page.findChild<QLabel *>("teamWaitingCount")->text();
     QVERIFY2(count.contains("7 items") && count.contains("6 teams"), qPrintable(count));
@@ -1816,7 +1817,7 @@ void TestTeamsUiWaiting::waitingBannerFoldsOpensAndHides()
     }
     QCOMPARE(ids, (QStringList{"team-plan/plan_draft/plan", "team-1/phase_draft/2", "team-3/permission_escalated/Tester",
                                "team-2/owner_word_asked/proposal-p3", "team-2/report_escalated/4"}));
-    QCOMPARE(actions, (QStringList{"Approve…", "Approve…", "Answer", "Answer", "Accept…"}));
+    QCOMPARE(actions, (QStringList{"Approve…", "Approve…", "Answer", "Answer", "Answer"}));
     // No dots as separators: the rows keep their parts apart with space.
     for (auto *label : banner->findChildren<QLabel *>()) QVERIFY2(label->text() != QStringLiteral("·"), "a dot separator");
     auto *more = banner->findChild<QPushButton *>("teamWaitingBannerAll");
@@ -2095,9 +2096,10 @@ void TestTeamsUiWaiting::waitingReportHeldRetryAndFinishAnswerInPlace()
         auto tasks = team["tasks"].toArray();
         auto first = tasks[0].toObject(); first["status"] = "submitted"; tasks[0] = first;
         auto second = tasks[1].toObject(); second["hold"] = QJsonObject{{"by", "You"}, {"reason", "After the release"}, {"at", 1}}; tasks[1] = second;
-        auto fifth = tasks[4].toObject();
-        fifth["waits"] = QJsonObject{{"for", "model"}, {"on", QJsonArray{"model"}}, {"unblock", "choose a model"}};
-        tasks[4] = fifth;
+        // The team has two tasks: #5 is added whole (indexing past the end of the
+        // array was undefined and crashed).
+        tasks.append(QJsonObject{{"id", 5}, {"phase", 1}, {"title", "Code review"}, {"assignee", "backend"}, {"status", "pending"},
+                                 {"waits", QJsonObject{{"for", "model"}, {"on", QJsonArray{"model"}}, {"unblock", "choose a model"}}}});
         team["tasks"] = tasks;
     }
     setTeam(team);
@@ -2321,8 +2323,9 @@ void TestTeamsUiWaiting::waitingBannerAnswersInPlaceAndWithdrawsTheNotice()
         return nullptr;
     };
     QTRY_VERIFY(bannerRow(permission) && bannerRow(held));
-    QCOMPARE(bannerRow(held)->findChild<QPushButton *>("teamWaitingBannerAction")->text(), QStringLiteral("Open team"));
-    QVERIFY(!bannerRow(held)->findChild<QToolButton *>("teamWaitingBannerOpen"));
+    // Task 116: a held task answers in its row too (Release), like the permission.
+    QCOMPARE(bannerRow(held)->findChild<QPushButton *>("teamWaitingBannerAction")->text(), QStringLiteral("Answer"));
+    QVERIFY(bannerRow(held)->findChild<QToolButton *>("teamWaitingBannerOpen"));
     auto *answer = bannerRow(permission)->findChild<QPushButton *>("teamWaitingBannerAction");
     QCOMPARE(answer->text(), QStringLiteral("Answer"));
     QVERIFY(bannerRow(permission)->findChild<QToolButton *>("teamWaitingBannerOpen"));

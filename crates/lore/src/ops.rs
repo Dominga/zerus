@@ -421,6 +421,10 @@ pub fn apply(config: &Config, build: &Builder, options: &Options) -> Result<Outc
                 }
             }
             errs.extend(validate(&record, &config.areas, Some(&config.limits)));
+            // docs/lore.md 11.9: every durable write passes the secret scan;
+            // the refusal names the field and never repeats the match.
+            let rid = text(&record, "id").unwrap_or_default().to_owned();
+            errs.extend(crate::secrets::check_record(&record, &config.secrets_allow).iter().map(|found| format!("{rid}: {}", found.line())));
             errs.extend(transition_errors(&record, old, change.reopen_reason.as_deref()));
             if let Some(old) = old {
                 if text(old, "kind") != text(&record, "kind") {
@@ -592,8 +596,11 @@ pub fn patched(current: &Value, patch: &Map<String, Value>) -> Result<Value> {
 /// `field+=value` appends to what the commit is built on.
 pub enum Patch {
     Fixed(Map<String, Value>),
-    Of(Box<dyn Fn(&Value) -> Result<Map<String, Value>>>),
+    Of(PatchFn),
 }
+
+/// A patch computed from the record as the write finds it.
+pub type PatchFn = Box<dyn Fn(&Value) -> Result<Map<String, Value>>>;
 
 pub fn updater(rid: String, patch: Patch, reopen_reason: Option<String>) -> impl Fn(&Snapshot) -> Result<Vec<Change>> {
     move |snapshot| {

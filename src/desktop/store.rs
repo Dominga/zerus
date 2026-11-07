@@ -32,6 +32,29 @@ impl HandoffLock {
         Ok(())
     }
 }
+/// The start of every refusal of a desktop state folder that is not
+/// private; the desktop client recognizes it (task 176).
+pub const NOT_PRIVATE: &str = "desktop folders must be private directories";
+
+/// WhiteWh fork, task 176: the refusal of a desktop state folder that is not
+/// private names the folder, why (its owner, or the access entry that opens
+/// it, such as a sandbox group's inherited read) and the repair. The read-only
+/// paths refuse with it; starting the service repairs a folder this user owns.
+pub(crate) fn not_private(path: &Path, error: Option<&std::io::Error>) -> anyhow::Error {
+    let reason = match error {
+        Some(error) => format!("it could not be checked ({error})"),
+        None => match platform::describe_private(path, platform::Private::Directory) {
+            Ok(Some(reason)) => reason,
+            Ok(None) => "it is not private".to_owned(),
+            Err(error) => format!("it could not be read ({error})"),
+        },
+    };
+    anyhow::anyhow!(
+        "{NOT_PRIVATE}: {}: {reason}. Repair: starting the background service (or hgs desktop prepare-state --json) makes a folder you own private in place; a folder another account owns must be fixed by its owner",
+        path.display()
+    )
+}
+
 pub struct Location {
     pub root: PathBuf,
     pub configuration: String,
@@ -53,10 +76,9 @@ impl Location {
             // adds one to ~/.local), so creation is owner-only and an existing
             // owned folder is made private in place; the check stays.
             platform::owner_only_dir(path)?;
-            ensure!(
-                crate::private_stores::ensure(path, platform::Private::Directory)?,
-                "desktop folders must be private directories"
-            );
+            if !crate::private_stores::ensure(path, platform::Private::Directory)? {
+                return Err(not_private(path, None));
+            }
         }
         Ok(())
     }
@@ -68,7 +90,8 @@ impl Location {
             match platform::verify_private(path, platform::Private::Directory) {
                 Ok(true) => (),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-                _ => anyhow::bail!("desktop folders must be private directories"),
+                Ok(false) => return Err(not_private(path, None)),
+                Err(error) => return Err(not_private(path, Some(&error))),
             }
         }
         Ok(())

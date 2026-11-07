@@ -1,0 +1,6 @@
+ ──────────────────────────────────────────────────────────────────────────────
+ > a typed draft that no event submitted
+   with a continuation line
+ ──────────────────────────────────────────────────────────────────────────────
+ Ask When Needed  K3 thinking: max  [1 task running]  /work/example  main
+                                                         context: 22% (217k/1M)

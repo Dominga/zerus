@@ -75,6 +75,8 @@ pub(crate) fn desired(team: &Team, seen: &[Seen], now: f64, listed: Option<&BTre
         oldest,
         round,
         notified_at,
+        // Task 139: the lead hears of a round once.
+        lead_told: team.lead_stall.as_ref().is_some_and(|old| old.round == round && old.lead_told),
     }))
 }
 

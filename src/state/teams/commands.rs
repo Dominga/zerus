@@ -22,6 +22,8 @@ const MUTATIONS: &[&str] = &[
     "draft", "propose", "close-phase", "integrate-build", "start-ahead", "full-tests",
     // Task #58: the owner switches one phase between free and standard planning.
     "phase-mode",
+    // Task 154: a member's launch rights.
+    "rights",
 ];
 
 fn text<'a>(input: &'a Value, key: &str) -> &'a str {
@@ -921,6 +923,9 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
             // U54: the real account of the member's session, beside its
             // configured one.
             entry["session_account"] = json!(session_account(member));
+            // Task 154: what the member launches with and what it can do,
+            // for the member card and the New team form.
+            entry["rights"] = super::rights::view(member);
             // U56: each member's session phase, activity and minutes without an
             // event, and whether Zerus marks it stuck - status without inspect.
             entry["phase"] = json!(member.seen_phase);
@@ -934,6 +939,15 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
             entry["minutes_without_progress"] =
                 json!(member.seen_event_at.map(|at| ((crate::state::now() - at) / 60.0).max(0.0).round() as u64));
             entry["stuck"] = serde_json::to_value(&member.stuck).unwrap_or(Value::Null);
+            // Task 139: the last cross-check of its sources; an uncertain
+            // member never shows a confident phase or activity.
+            if let Some(check) = &member.check {
+                entry["check"] = json!({"state":check.state,"at":check.at,"since":check.since,"disagree":check.disagree});
+                if check.state == "uncertain" {
+                    entry["phase"] = json!("uncertain");
+                    entry["activity"] = json!("uncertain");
+                }
+            }
             let folder = super::dispatcher::member_folder_path(team, member).unwrap_or_default();
             // C11: a member on another computer works in a folder there; this
             // computer cannot read it, so its facts stay empty rather than
@@ -2912,6 +2926,65 @@ fn test_command(input: &Value) -> anyhow::Result<Value> {
 
 /// The member's live attempt from its own session; `team` is optional when the
 /// session belongs to one team (spec section 5). Read only.
+/// Task 139: `hgs team look`: one member's compact verified snapshot - its
+/// screen read now, every source's view, the reconciled state, its task and
+/// pulse and what Zerus does next. Reads only; changes nothing.
+fn look(input: &Value) -> anyhow::Result<Value> {
+    let wanted = text(input, "member").trim();
+    ensure!(!wanted.is_empty(), "hgs team look needs a member: its id or role");
+    let named = text(input, "team");
+    let teams = Store::open(false)?.active_teams(ACTIVE_TEAMS)?;
+    let matches = |team: &Team| {
+        team.members.iter().find(|member| {
+            member.state != MemberState::Removed
+                && (member.id.eq_ignore_ascii_case(wanted)
+                    || member.role.eq_ignore_ascii_case(wanted)
+                    || member.session.as_ref().is_some_and(|session| session.name == wanted))
+        }).cloned()
+    };
+    let found: Vec<(&Team, Member)> = teams
+        .iter()
+        .filter(|team| named.is_empty() || team.id == named)
+        .filter_map(|team| matches(team).map(|member| (team, member)))
+        .collect();
+    let (team, member) = match found.len() {
+        0 => bail!("No running team has a member {wanted}"),
+        1 => found.into_iter().next().unwrap(),
+        _ => {
+            // The caller's own team first.
+            let record = caller_record();
+            let ids: Vec<String> = found.iter().map(|(team, _)| team.id.clone()).collect();
+            let own = record.as_ref().and_then(|record| found.iter().position(|(team, _)| calling_member(team, record).is_some()));
+            let index = own.with_context(|| format!("Several teams have a member {wanted}; name one with \"team\": {}", ids.join(", ")))?;
+            found.into_iter().nth(index).unwrap()
+        }
+    };
+    let at = now();
+    let quiet = member.seen_event_at.map(|seen| (at - seen).max(0.0)).unwrap_or(0.0);
+    let hooks = super::look::Hooks {
+        live: member.seen.is_some_and(|seen| seen.live),
+        activity: member.seen_activity.clone(),
+        phase: member.seen_phase.clone(),
+        asking: member.pending.is_some() || member.terminal_question.is_some(),
+        background: member.background_since.is_some(),
+        building: false,
+        tool: String::new(),
+        last_event_at: member.seen_event_at,
+        quiet,
+        limit: super::ops::stuck_minutes(team) * 60.0,
+    };
+    let screen = member.session.as_ref().and_then(super::dispatcher::read_screen);
+    let lines = screen.as_deref().map(|screen| super::dispatcher::last_lines(screen, 40)).unwrap_or_default();
+    let shown = screen.as_ref().map(|_| super::look::classify(&member.agent, &lines));
+    let record = super::look::recorded_request(&member);
+    let compared = super::look::compare(&hooks, record.as_deref(), shown.as_ref().map(|(kind, detail)| (*kind, detail.as_str())));
+    let kept = lines[lines.len().saturating_sub(super::look::SCREEN_LINES)..].to_vec();
+    let check = super::look::next_check(member.check.as_ref(), &compared, kept, at);
+    let mut value = super::look::snapshot(team, &member, &check, at);
+    value["screen_read"] = json!(screen.is_some());
+    Ok(value)
+}
+
 fn current(input: &Value) -> anyhow::Result<Value> {
     let named = text(input, "team");
     // A member on another computer has no local identity: its attempt id names
@@ -4477,6 +4550,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             Ok(super::broker::builds_view(&team, super::super::now()))
         }
         "current" => current(input),
+        "look" => look(input),
         "escalate" => escalate(input),
         op if MUTATIONS.contains(&op) => {
             let request = text(input, "request_id");
@@ -4773,6 +4847,13 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     } else {
         None
     };
+    // Task 139: `hgs team look MEMBER [--team ID]`, beside its JSON form.
+    if args.first().map(String::as_str) == Some("look") && args.get(1).is_some_and(|arg| !arg.starts_with("--")) && file.is_none() {
+        let team = args.iter().position(|arg| arg == "--team").and_then(|index| args.get(index + 1)).cloned().unwrap_or_default();
+        let result = run("look", &json!({"member":args[1],"team":team}), false).map_err(|e| e.to_string())?;
+        println!("{result}");
+        return Ok(0);
+    }
     let catalog = args.first().map(String::as_str) == Some("catalog");
     if catalog {
         args.remove(0);

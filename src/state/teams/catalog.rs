@@ -36,6 +36,10 @@ pub(crate) struct Role {
     pub effort: String,
     #[serde(default)]
     pub permissions: String,
+    /// Task 154: the rights profile a member of this role launches with;
+    /// empty: the role's default (rights::role_profile).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub permissions_profile: String,
     #[serde(default)]
     pub computer: String,
     /// worktree, shared or read_only.
@@ -449,6 +453,19 @@ pub(crate) fn snapshot_for(role_name: &str) -> Option<super::model::PromptSnapsh
         notes: role.notes.clone(),
         context_before_task: role.context_before_task.clone(),
     })
+}
+
+/// Task 154 (4): the rights profile a member of this role launches with when
+/// it names none: the role's own, else what the role's job needs (QA
+/// operates sessions and workers, a merger commits, a tester builds).
+pub(crate) fn profile_for(role_name: &str) -> String {
+    let catalog = load().unwrap_or_else(|_| builtin());
+    let role = catalog.roles.iter().find(|role| role.id == role_name || role.name == role_name);
+    if let Some(profile) = role.map(|role| role.permissions_profile.clone()).filter(|profile| !profile.is_empty()) {
+        return profile;
+    }
+    let (id, name) = role.map(|role| (role.id.as_str(), role.name.as_str())).unwrap_or(("", role_name));
+    super::rights::role_profile(id, name).unwrap_or_default().to_owned()
 }
 
 /// U45: the model list of a catalog role, copied into a member when it joins

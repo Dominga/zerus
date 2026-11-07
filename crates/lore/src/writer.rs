@@ -27,7 +27,7 @@ impl Writer {
     pub fn acquire(root: &Path, who: &str) -> Result<Self> {
         std::fs::create_dir_all(root).map_err(|error| LoreError::new(format!("{}: {error}", root.display())))?;
         let path = root.join(".lore.lock");
-        let mut file = OpenOptions::new().read(true).write(true).create(true).open(&path)
+        let mut file = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path)
             .map_err(|error| LoreError::new(format!("{}: {error}", path.display())))?;
         let started = Instant::now();
         loop {
@@ -135,5 +135,3 @@ fn read_holder(file: &mut File) -> Option<String> {
     let value: Value = serde_json::from_str(&text).ok()?;
     Some(format!("{} since {}", value["who"].as_str().unwrap_or("unknown"), value["since"].as_u64().unwrap_or(0)))
 }
-
-

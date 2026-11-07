@@ -6,7 +6,9 @@ implemented yet. RustCodeLore is the Rust implementation of CodeLore
 (`D:/Tools/CodeLore`, Python 0.3.0, github.com/WhiteWh/CodeLore): it starts as a
 port in `crates/lore` here and becomes the implementation itself (section 2.1).
 The Python version stays the conformance reference until the Rust one matches
-it, then it is retired (section 8).
+it, then it is retired (section 8). Section 11 (task 131, owner, 2026-11-07)
+adds the working tier: a fast, expiring memory beside the durable lore, for
+pulses, messages and briefs.
 
 ## 0. The owner's decisions and where this document answers them
 
@@ -29,6 +31,22 @@ it, then it is retired (section 8).
 | (1) The user decides whether a project uses project memory. When a project is declared in Zerus (a project may group several folders or repositories), RustCodeLore can be turned on for the whole project, and the user chooses where its database lives: by default under Zerus's own data folder, or another folder. | One store per catalog project. The project's memory setting lives in the project's replicated settings, so every computer of the swarm sees it. The default path is under the state root; another folder can be chosen, and the store can be moved with a confirmation and no data loss (section 3). |
 | (2) When a team is created and its project has RustCodeLore on, the team gets a shared workspace in it by default. | A team workspace is a sub-store inside the project store. The team writes there; in the `project` mode reads span the workspace and the project store (section 4.3). |
 | (3) When the project has it off, New team offers the memory mode like the behaviour mode: plain memory or RustCodeLore, RustCodeLore by default. | New team picks the team's initial memory mode (section 4.1): `project` when the project's store is on, else `team`; `plain`, `off` and `read-only` where allowed. Memory is a mode of the running team, not a Planning-like creation choice (answer 1). |
+
+### 0.3 The working tier (2026-11-07, task 131)
+
+| The owner's point or review feedback | Design |
+|---|---|
+| A fast working memory beside the durable lore, expiring by itself, for member pulses, team messages and handoff briefs; the durable tier stays CodeLore's strict records. | Section 11: three kinds in the store's SQLite only (never JSONL or git), each with an expiry (11.3), bounded (11.4), found by the same `find` ranked lower and marked working (11.6), promoted to a durable record under the strict rules (11.8); plain-memory teams keep the same kinds in Zerus state (11.5). |
+| (a) Verbatim text is cheap to store and costly to read; pulses are the default view and `find` also searches the verbatim turn history, federated into Zerus's content-search index, with retention, size bounds, redaction and a per-session opt-out. | 11.2 (the current pulse per member) and 11.7 (the history provider, never copied, bounded, redacted, scoped per caller, opt-out per session). |
+| (b) Duplicates and conflicts between members. | 11.10: the check runs inside the writer lock and returns candidates; the writer adds an occurrence or supersedes on request; sync mode keeps section 3.5's rules. |
+| (c) Message urgency: normal and urgent, urgent marked in the doorbell. | 11.11. |
+| (d) Brief and pulse quality as acceptance tests. | 11.15, tests 1 and 2. |
+| (e) The interface is the CLI (`lore`, `hgs lore`, `--json`), no MCP server. | 11.13. |
+| (f) Briefs survive a home-computer restart. | 11.12: the latest brief per task is a committed file (or a `teams.sqlite3` row); the TTL governs the older versions. |
+| (g) Secrets: verbatim history never in the store's git or the Loro replica; every durable write and promote passes a secret scan; scrubbing terminal output is best-effort. | 11.1 (hard rules 1 and 2) and 11.9. |
+| (h) The lead's acceptance test after a forced compaction. | 11.15, test 3, with `hgs team lore plans` (11.13). |
+| (i) The lore/Zerus boundary: the crate never depends on Zerus; history search is a provider trait Zerus implements. | 11.14. |
+| (j) Urgent messages during a long turn: delivered at the next safe point, never pasted into a working composer; the lead is told past a bound and may stop the member natively. | 11.11 and hard rule 3. |
 
 ## 1. What exists today
 
@@ -54,9 +72,14 @@ The facts the port must keep. References are to `D:/Tools/CodeLore`, HEAD
 - **No writer lock:** concurrency is the SQLite busy timeout (120 s, WAL), the shared-tree compare-and-swap, and an atomic replace with retries.
 - **Index:** disposable SQLite under the user cache. That is `$LORE_CACHE`, else `%LOCALAPPDATA%\codelore` (Windows), `~/Library/Caches/codelore` (macOS) or `$XDG_CACHE_HOME`/`~/.cache` + `/codelore`, then `/<sha1(root)[..16]>/index.sqlite`.
   - It is refreshed on open by size, mtime and content hash.
-  - It holds FTS5 `words` (porter) and `terms` (code tokens), plus optional vectors.
+  - It holds FTS5 `words` (porter) and `terms` (code tokens), plus optional vectors (one per record text, by the text's hash and the model's name).
+  - It has CodeLore's schema (`user_version` 3), so the Rust and the Python versions read each other's file.
+  - A file is read again only when its size or mtime moved and its hash differs; a file that is gone is dropped, and another version rebuilds it.
+  - When the cache cannot be written, the index goes to the repository's git directory (`.git/codelore`) and the command says so.
 - **Search:** hybrid, fused by RRF (k = 60, depth 50).
-  - The lists are BM25 words, BM25 terms and vectors (Ollama `nomic-embed-text` at `127.0.0.1:11434`, optional).
+  - The lists are BM25 words, BM25 terms and vectors. The vectors come from the built-in model (`nomic-embed-text` v1.5, run in the process on the CPU with candle; no Ollama and no ONNX runtime). They are optional: without the model, or with `embed.provider = "none"` or `--text-only`, the search runs on the first two lists and says so.
+  - The weights (about 550 MB) are not in the binary and never fetched by a search: `lore model fetch` downloads them from Hugging Face at a pinned revision into the user cache (or an offline install gives `LORE_MODEL_DIR`), each file checked by size and SHA-256.
+  - Records are embedded with the model's `search_document: ` prefix and queries with `search_query: `.
   - Phrase and signal bonuses apply.
   - Retired records are hidden by default.
 - **CLI:**
@@ -113,7 +136,7 @@ The facts the port must keep. References are to `D:/Tools/CodeLore`, HEAD
   | `ops` | the one write path, references, relations, ids, commit subjects |
   | `dedupe` | duplicates |
   | `index` | SQLite FTS5 and vectors |
-  | `embed` | `ollama` or `none` |
+  | `embed` | the built-in nomic-embed-text model (candle), `builtin` or `none` |
   | `search` | `find`, `for` |
   | `plans` | counts, layers, readiness, stale |
   | `cover` | sources |
@@ -187,7 +210,7 @@ A store whose git is unusable (no git on that computer, a broken repository) is 
 
 - `cover` (sources and their coverage). The commands are ported but not used by Teams in the first version.
 - Push from Zerus-held stores.
-- Any embedding provider other than Ollama, and any network model service.
+- Any embedding provider other than the built-in model (Ollama was dropped by the owner's decision), and any network model service. A lore.toml that still says `provider = "ollama"` reads as `builtin`, and its `url`, `model`, `timeout` and prefix keys are ignored.
 - A web or desktop editor for records. The desktop lists and opens them read-only at first.
 - Sharing a store between projects.
 
@@ -440,6 +463,7 @@ The Python version is the reference until every point below holds. Then RustCode
    - the bounded hand-out block and recall text, per mode (section 6.2);
    - a synced store (section 3.5) with two replicas: concurrent appends merge, a same-id conflict raises the owner's item, the settings' last writer wins, and switching to and from sync keeps every record.
 7. **The replacement:** the crate's move to the CodeLore repository, its CI and release, the Python tree's retirement tag and the in-tree path dependency's removal, checked by building Zerus against the released crate. This point is what makes answer 6 done; until it holds, both tools stay installed and the Python one is the reference.
+8. **The working tier** (section 11), independent of the replacement: the twelve acceptance tests of section 11.15, and the format check for `seen` (a file with the field is rewritten by Python 0.3.0 with the field kept, and the Rust and Python `find` of a store with no working entries are still byte-for-byte equal).
 
 ## 9. Order of work
 
@@ -460,6 +484,18 @@ The Python version is the reference until every point below holds. Then RustCode
 10. CodeLore 1.0: the crate's move to github.com/WhiteWh/CodeLore, the Python tree's retirement (section 8, point 7) and Zerus's dependency switch.
 11. The conformance points re-run against the released crate and the owner's real stores.
 
+### The working tier: order of work (section 11)
+
+It builds on phase 4's memory (the store, the writer lock, the modes, Teams' reads) and does not need phase 5's synchronisation; it ships after phase 4's item 7, in this order:
+- **W1.** The crate: the working tables, the three kinds, expiry and bounds with a fake clock, the cleanup, the secret scan (11.9), `lore pulse|message|brief|working` and `--json` (tests 4, 5, 8 in part).
+- **W2.** Search: the working lists in `find`, the rank rule, marks and flags, and `show <w-id>` (test 6).
+- **W3.** Promote and the duplicate rules: `lore promote`, occurrences, `supersede`, and the `seen` field in `FORMAT.md` (tests 7, 9).
+- **W4.** Zerus's pulses and briefs: Teams writes pulses at the points of 11.2, the lead's brief is written through `lore brief set` and committed under 11.12, `hgs team lore plans|pulses|brief`, plain-memory tables in `teams.sqlite3`, the hand-out line (tests 1, 2, 3, 12).
+- **W5.** Messages and the doorbell: `Doorbell` and `TaskClock` implemented by Zerus, normal and urgent delivery at safe points, the bound, the lead's inbox item and the native stop request, `URGENT` in the three places (test 10).
+- **W6.** The history source: `HistorySource` over the content-search index, scope per caller, the per-session opt-out, redaction (tests 8 and 11).
+- **W7.** The desktop: Projects > Memory > Working memory (the three days settings and the urgent bound), the lead's pulse view, the session option `memory_history`, `URGENT` in the session row, in Qt and Zerus Next.
+- **W8.** The acceptance runs 1 to 3 on recorded fixtures, then the owner's confirmation of section 11.16.
+
 ### The phase-4 and phase-5 notes the answers change
 
 - **Phase 4, task 5:** the team's memory is five modes with an owner-confirmed switch (answer 1), not a plain/RustCodeLore creation choice. The New team form picks the starting mode; the Team > Memory tab switches it while the team runs, like task 58's plan mode.
@@ -471,4 +507,223 @@ The Python version is the reference until every point below holds. Then RustCode
 
 ## 10. Record of the answers
 
-The seven questions of task 122 were answered by the owner on 2026-11-07. Section 0.1 is the record of the answers and where each is designed; this document is amended to them and has no open questions. A question that the implementation raises goes to the owner as its own card, not into this document.
+The seven questions of task 122 were answered by the owner on 2026-11-07. Section 0.1 is the record of the answers and where each is designed; this document is amended to them and has no open questions, apart from section 11.16, which lists the numbers and choices the working-tier addendum (task 131) took and the owner is asked to confirm. A question that the implementation raises goes to the owner as its own card, not into this document.
+
+## 11. The working tier (addendum, task 131; owner, 2026-11-07)
+
+Beside the durable lore, a fast working memory that expires by itself. It holds what agents are doing and saying now, for three uses: **pulses** (what a member does, so the lead sees it without reading chats), **messages** (a bus between members, the lead and the owner) and **briefs** (what a fresh session needs to take a task up). It is the efficient form of the owner's mempalace practice (duplicating chats so the lead sees what agents do, and a message bus), without copying transcripts again.
+
+It builds on the memory of sections 2 to 6 and changes none of their rules: the durable tier stays CodeLore's strict records, byte for byte. Everything here is additive, and a store without working entries behaves and prints exactly as sections 1 to 10 say.
+
+### 11.1 The tiers and the hard rules
+
+| Tier | Holds | Lives in | Expires | Strict |
+|---|---|---|---|---|
+| **Durable** | faults, readings, decisions, topics, recipes, plans, items, sources | the store's JSONL, git, and (synced) the Loro replica | never by itself | yes: `validate()`, the duplicate check, the secret scan, one commit |
+| **Working** | pulses, messages, briefs | one SQLite file of the store (section 11.5) | by rule (section 11.3) | bounded and typed, not a record |
+| **History** | the verbatim turns of sessions | Zerus's own session histories and its content-search index, **not copied** | by Zerus's retention for those histories | no: it is searched, never stored by lore |
+
+The hard rules, which every later section keeps:
+1. **Verbatim text never enters the store's git or the Loro replica.** Not a transcript, not a terminal screen, not a pasted log. The working tier is never in JSONL and never in git, and it is not replicated (section 11.5). (A brief is authored text, not verbatim history, and is the one working-tier text that is committed, after the scan: section 11.12.) The only verbatim text that reaches a durable record is a quoted excerpt of at most 400 characters that a person or the lead's promote puts into a field, after the secret scan (sections 11.8 and 11.9).
+2. **Every durable write and every promote passes the secret scan** (section 11.9) before the commit, and is refused with the match named. This includes Teams' automatic writes (section 6.1) and the durable brief (section 11.12).
+3. **A doorbell never types into a working agent** (section 11.11). Nothing in this addendum pastes text into a composer of a session that is working.
+4. **The interface is the CLI** (section 11.13): `lore` and `hgs lore`, `--json`. There is no MCP server. `crates/lore` never depends on Zerus (section 11.14).
+
+### 11.2 The three kinds
+
+All entries have an `id` (`w-<kind>-<8 hex>`, unique in the store), `kind`, `team` (the team id, or empty outside a team), `by` (the writing member, the lead, `owner` or `zerus`), `at` (UTC, seconds), `expires` (UTC, seconds, set by section 11.3 and moved by it), and `promoted` (the durable id it was promoted to, or empty).
+
+**Pulse** — what a member did and does, in the four fields the lead reads:
+- `task`: the team task reference (`#12`) or empty (a pulse outside a task); `done`, `next`, `blocked`: text of at most 500 characters each, at least one non-empty. `blocked` is empty when nothing blocks.
+- It is written by Zerus at the points it already knows (a task starts, an interim report, a report, a stuck or waiting verdict, an acceptance, a rework) and by the member with `lore pulse add`. A pulse by the same `by` and `task` within 5 minutes of the previous one replaces it in place (its `at` moves); otherwise it is a new row. So a week of work is a bounded series, not a stream.
+- The lead's default view is the **current pulse per member and task**: the newest row of each `(by, task)`. Older rows stay until they expire, so a reader can reconstruct a week (section 11.15).
+
+**Message** — one note to a recipient:
+- `to`: a member, `lead`, `team` (every member and the lead) or `owner`; `from` is `by`; `text`: at most 2,000 characters; `urgency`: `normal` (the default) or `urgent` (section 11.11); `state`: `queued`, `rung`, `read`; `rung_at`, `read_at`, and `safe_point` (how it was delivered: `idle`, `hook`, `turn_end`).
+- A message to `team` is one row with one read mark per recipient (`read_by`), not one row per recipient.
+
+**Brief** — what a fresh session needs to take up a task:
+- `task`: the team task reference (required), `version` (1, 2, … per task), `text`: at most 8 KiB. The text is the lead's brief for the task: the goal, the files and constraints, what is decided, what is out of scope, the acceptance, and the first step.
+- The **latest brief of a task is also a durable artefact** (section 11.12); the working row is the copy that expires.
+
+### 11.3 Expiry, exactly
+
+Times are UTC. An entry's `expires` is recomputed by the rule below whenever the thing it waits on changes, and the cleanup (section 11.4) deletes an entry whose `expires` has passed. No other rule deletes a working entry except the bounds of section 11.4.
+
+| Kind | Expires at | Defaults (`lore.toml` `[working]`) |
+|---|---|---|
+| Pulse with a task | the task's close (accepted, cancelled, or the team's finish, whichever first) + `pulse_days`; while the task is open it has no expiry | `pulse_days = 14` |
+| Pulse without a task | `at` + `pulse_days` | |
+| Message | `read_at` + `message_days` once read by every recipient; `at` + `unread_days` while unread by anyone | `message_days = 7`, `unread_days = 30` |
+| Brief, any version but the latest | the task's close + 0 days (the next cleanup) | |
+| Brief, the latest | never by the TTL: its durable artefact governs (section 11.12) | |
+
+- **A reopened task** clears the close time: its pulses and briefs go back to "while the task is open" and nothing that had not yet been deleted is lost. What was deleted is not restored.
+- **An unread message that reaches `unread_days`** is not dropped silently: the cleanup writes one journal event `working_unread_expired` (sender, recipient, `at`, the first 80 characters) and, for a message to the lead or the owner, one inbox item with the same text, then deletes it.
+- **The settings** `pulse_days`, `message_days` and `unread_days` are whole numbers from 1 to 365; a value outside that range refuses `lore.toml`. They may be lowered or raised per project (Projects > Memory > Working memory), owner-confirmed like the other memory settings.
+
+### 11.4 Bounds and the cleanup, exactly
+
+| What | Bound | At the bound |
+|---|---|---|
+| A pulse field (`done`, `next`, `blocked`) | 500 characters | the write is refused, naming the field and the length |
+| A message `text` | 2,000 characters | refused, naming the length |
+| A brief `text` | 8 KiB | refused; the lead is told it must be shorter (a longer subject is a document the brief names, or several topics) |
+| Pulses per team | 2,000 | the cleanup deletes the oldest pulses of closed tasks first, then the oldest overall that are not a `(by, task)` current row |
+| Messages per team | 1,000 | the oldest read messages go first; unread messages are never deleted for a bound |
+| Unread messages per recipient | 50 normal, 5 urgent | the sender's write is refused naming the recipient and the count; the lead gets an inbox item (a recipient that does not read is a stall, section 11.11) |
+| Brief versions per task | 20 | the oldest version goes; the latest never |
+| Entries per store | 20,000 | as the lines above, store-wide |
+| The file | 64 MiB | after the cleanup, the write that would pass it is refused with "the working tier is full (64 MiB)" and a journal event; reads and expiry go on |
+
+- The settings may lower every bound and never raise it above this table (a larger value refuses `lore.toml`, as `[limits]` does for the format's ceilings).
+- **Never deleted by a bound:** a current pulse, an unread urgent message, the latest brief of a task, an entry a promote is reading.
+- **The cleanup is background and bounded.** It runs at store open and every 10 minutes while the store is in use, takes the store's working lock (not the writer lock; durable writes never wait for it) and deletes at most 500 rows per pass in transactions of at most 50 ms. It then runs `PRAGMA incremental_vacuum(200)`. A pass that finds more to do ends and the next one continues. It writes one journal event `working_cleaned` (count, bytes freed) per hour at most, and none when it deleted nothing. A cleanup that fails (a busy file, a full disk) is a journal event and a one-line note on the next read, never an error to a writer.
+- **A read never waits for the cleanup**, and an entry past its `expires` is not returned even before the cleanup deletes it.
+
+### 11.5 Where it lives, and what it is not
+
+- **Storage:** `working.sqlite` in the store's private folder (section 3.4's `requests` table is in the same folder), WAL, `auto_vacuum = incremental`, `user_version` set. The folder is listed in the store's own `.gitignore`, no commit stages it, and a test asserts `git ls-files` never names it. It is a private store file (section 3.2: owner-only, no reparse point, one link).
+- **Not disposable, unlike the index:** deleting it loses the working entries (and the latest briefs are safe, section 11.12). It has its own FTS5 tables (`words`, `terms`, built as the index's, section 2.6) over `text`, `done`, `next`, `blocked` and `to`/`by`.
+- **Not replicated.** In a synced project (section 3.5) the working tier stays on the computer that holds it (the home computer in the home model; each computer for its own members' entries). Loro never carries it, so expiry never races a merge. A computer that is offline queues the messages it sends in Zerus's own outbox, as `hgs send` does, and the rows are written when it reaches the store; the content never travels except over the `@home` request path (section 3.4) that durable writes already use, with its request ids.
+- **Plain-memory teams** (section 5) keep the same three kinds in Zerus state: tables `working_pulses`, `working_messages` and `working_briefs` in `teams.sqlite3`, with the same fields, expiry, bounds and cleanup (the team data's own file, so no store is needed), and one FTS5 table. They are searchable inside the team only (`hgs team lore find`); this is the single exception to section 5's "no search". A plain team's latest brief stays in `teams.sqlite3` as long as the team record does (section 5, item 1). `promote` is not available in `plain`: it answers "no store: this team's memory mode is plain; switching it is the owner's (section 4.2)". An `off` team has no working tier at all; its messages stay Zerus's present channels with nothing stored.
+
+### 11.6 Search: found by the same `find`, ranked lower, marked working
+
+`lore find` searches the working tier too, in the same call, and keeps CodeLore's contract for durable results.
+- **Lists:** the durable lists are exactly section 1.1's (words, terms, meaning; phrase and signal bonuses). The working tier adds its own words and terms lists, over the working FTS5 tables, with the same BM25 weights and `RRF_K = 60`, depth 50.
+- **Rank:** a working entry's fused score is **multiplied by 0.5** before it joins the durable results, and the phrase and signal bonuses never apply to it, so no working entry outranks a durable record that matches by signal or by phrase, and a durable and a working entry of equal rank order durable first. Ties are broken as the durable lists do.
+- **Marks:** a working result carries `"tier": "working"` and `via` includes `working`. In text output it is prefixed `[working pulse]`, `[working message]` or `[working brief]` and shows `expires` as a relative time. A durable result is unchanged: `{"score","via","record"}`. A working result is `{"score","via","tier":"working","entry":{...}}` with the entry's fields of section 11.2 (never a `record`). The history channel (section 11.7) is `"tier": "history"`.
+- **Flags:** `--no-working` leaves the working tier out; `--working` returns only working entries; `--no-history` and `--history` do the same for the history channel. `--text-only` leaves out meaning for all tiers. Without any working entry and without a history source, `find` is byte-for-byte CodeLore's.
+- **Embeddings:** working entries are searched by words and terms only; they are not embedded (they are short-lived, and a vector costs more than the entry is worth).
+- **Who sees what:** a member sees its team's pulses, the messages addressed to it, to `team` or sent by it, and the briefs of its team's tasks; the lead sees all of its team's; the owner and the desktop see every team's. A search from outside a team (the owner's `hgs lore find --project`) sees all. No search crosses to another project.
+- **Counting toward `-n`:** working and history results share the limit; they are ranked lower, so they fill the tail. At most `ceil(n / 2)` of the returned results are working, and at most 3 are history, so a few durable records are never pushed out by chatter.
+- **`for <file>` and `show`** read the durable tier only, and `show <w-id>` shows a working entry by id (until it expires).
+
+### 11.7 Verbatim history: federated, never copied
+
+Storing verbatim text is cheap; reading it is what costs. So lore does not copy transcripts into its store and has no index of them. It asks Zerus's existing local content-search index over the sessions' histories (private, bounded: `hgs search --indexed`, `content-search-query-v1`, a page of at most 100 verified hits and 2 MiB, every returned session proved by a fresh binding) through a provider.
+- **The provider trait.** `crates/lore` defines `HistorySource` (a `Source` plug-in, section 11.14): `search(query, scope, limit) -> Vec<HistoryHit>`, where a `HistoryHit` is `{session, run_id, conversation_id, message_id, role, at, excerpt, score}`. Zerus implements it over the content-search index and registers it; standalone `lore` has none and says "no history source" once in `notes`.
+- **What `find` does with it:** it asks for at most 10 hits, takes the 3 best by the provider's score, ranks them below the working tier (their fused score multiplied by 0.25), and returns them as `"tier": "history"` with `{session, message_id, role, at, excerpt}`. A provider that is slow (over 500 ms) or unavailable adds one note and the search goes on without it; it never blocks a hand-out (section 6.2).
+- **Retention.** Lore keeps nothing. A history hit lives as long as the session's history and the index entry do: Zerus's own retention for histories decides, and a forgotten or changed session retires before any hit is exposed (the index's own rule). A hit that a person promotes (section 11.8) is the only way text of it persists in lore.
+- **Size bounds.** The excerpt is at most 400 characters, centred on the match; the history channel of one `find` is at most 8 KiB; no lore file holds a hit.
+- **Secret redaction.** Every excerpt passes the secret scan's patterns (section 11.9) **before it leaves the provider**; a match is replaced by `[redacted: <pattern name>]`, so a secret that is in a transcript is never copied into a result. Redaction is best-effort: it cannot find a secret that fits no pattern, and terminal output (screens, command output, build logs) is scrubbed the same best-effort way; the docs and the guide say so. Hard rule 1 holds either way: the excerpt is not stored.
+- **Who may search whose history.** A member's `find` reaches the history of its own sessions only (its own earlier context, for example after a compaction). The lead's reaches its team's sessions (the lead's and its members'). The owner's, from the desktop, reaches any session, as the desktop search does. History of another project or of a session outside the caller's reach never appears.
+- **Per-session opt-out.** A session has a setting `memory_history` (default on) in its options, in Qt and Zerus Next, and a project default. A session that is off is never returned by the history channel for anyone but the owner's own desktop search; a team session can be created off. The setting changes only what lore federates: it does not change the content-search index, and the owner's own desktop search is the owner's. Turning it on or off applies at once and is journaled (`session_history_memory`).
+
+### 11.8 Promote
+
+`lore promote <id> [--kind K] [--field name=value]… [--dry-run] [--by NAME]` turns a working entry (or a history hit, `lore promote history:<run>/<message>`) into a **durable record under the strict rules**. It is the only way working text becomes durable, and the only way a history excerpt does.
+- **Draft.** The entry prefills a draft; the caller fills the rest. `--kind` is required unless the entry's kind fixes it:
+  - a **brief** becomes a `topic` (`title` from the task's title, `body` the brief's text); the topic's `body` ceiling is 3,000 characters, so a longer brief is refused with "too long for a topic" and never cut;
+  - a **message** becomes a `decision` (`question` = its first line, `choice` and `reason` from `--field`, `decided_by` the sender or `--field`) or a `topic`, by `--kind`;
+  - a **pulse's** `blocked` becomes a `fault`'s `symptom`, and `done`/`next` a `reading` or `topic`'s text, by `--kind`; `cause`, `fix` and `check` come from `--field` (a fault needs all four, as section 6.1 says);
+  - a **history excerpt** (at most 400 characters, already redacted) goes into the record's text as a quotation with its source named in the words (`session <name>, message <id>`): the format has no new key for it.
+- **The write is the durable write:** `validate()`, the duplicate check (section 11.10), the secret scan on every field, the writer lock, one commit, with the trailer `Zerus-Promoted: <entry id>`. A refusal writes nothing and names the field: the secret scan's, the schema's, the duplicate's.
+- **After it:** the working entry gets `promoted = <the record's id>` and keeps its normal expiry; promoting it again answers the existing record id (the request id is the entry's id), and writes nothing.
+- **Who:** the lead and the owner may promote any entry of their team (the owner: any); a member may promote its own entries into its team's workspace. Into the project store (not a team workspace) only the owner's export or the project rule's (section 4.5) moves records, as ever.
+- **`--dry-run`** prints the draft, the duplicate candidates and every refusal, and writes nothing.
+- **In `plain` and `off`:** not available (section 11.5).
+
+### 11.9 The secret scan
+
+Hard rule 2. Before the commit of **every durable write, every promote and every automatic Teams write**, every string field of the record (and every field of the draft a promote builds) is scanned. The write is refused and nothing is written if a field matches:
+- **Key and token patterns** (case-sensitive unless noted): a PEM private-key block (`-----BEGIN [A-Z ]*PRIVATE KEY-----`); AWS access key ids (`AKIA`/`ASIA` + 16 upper-case letters or digits); GitHub tokens (`gh[pousr]_` + 36 or more); Slack tokens (`xox[abprs]-`); Hugging Face (`hf_` + 30 or more); OpenAI-style and Anthropic keys (`sk-` or `sk-ant-` + 20 or more); Google API keys (`AIza` + 35); a JSON Web Token (three base64url parts, the first two starting `eyJ`); credentials in a URL (`://user:password@`); and an assignment to a name that says it is secret (`password`, `passwd`, `secret`, `token`, `api_key`, `apikey`, case-insensitive, followed by `=` or `:` and 8 or more non-space characters that are not a placeholder such as `<…>`, `***`, `xxxx` or `${…}`).
+- **High-entropy strings:** a token of 24 or more characters from `A-Za-z0-9+/_=-` whose Shannon entropy is at least 4.0 bits per character. Exempt: a hex string of 7 to 64 characters (a commit or hash, in any field), a UUID, and anything containing a `/` or `.` that reads as a path or name (`src/render/post.py`, `scene.depth_buffer`).
+- **The refusal names the match, never repeats it:** "refused: `fix` holds what looks like an AWS access key id (`AKIA…WXYZ`, 20 characters); nothing was written", showing at most the first 4 and last 4 characters and the field. `--json` gives `{"error", "details": [{"field","pattern","length","masked"}]}`.
+- **A known false positive** is cleared by an exact string in `lore.toml`'s `[secrets] allow = [...]` (the owner's edit; each entry is a literal, never a pattern). An allowed string is still redacted in history excerpts.
+- **Teams' automatic writes** that are refused are a journal event `lore_refused` with the pattern name and the field (never the match) and a lead inbox item; the record is not retried until a field changes.
+- **Working-tier entries are redacted, not refused:** a pulse, message or brief that matches is stored with each match replaced by `[redacted: <pattern name>]` and the write answers with a note saying so. The bus must not lose a message, and a working entry is never durable; the durable brief (section 11.12) and any promote still refuse.
+- **Best-effort, said plainly:** the scan finds the patterns above and high-entropy strings; it does not prove a text has no secret. The guide says it and says that scrubbing terminal output, screens and logs is best-effort too.
+
+### 11.10 Duplicates and conflicts
+
+Two members writing the same fault is the normal case in a team.
+- **The duplicate check returns the candidates** (section 1.1: signals, cosine and word overlap, the `names differ` downgrade), up to 3, blocking and near, strongest first. It runs **inside the writer lock** (section 2.3), after the previous writer's commit, so two concurrent writers cannot both miss each other: the second sees the first. A refusal still names the candidates.
+- **When a blocking candidate is the same fault** (the new record's `cause` and `fix` words overlap the candidate's at the `dedupe.jaccard` threshold, 0.5, or the cosine threshold, or a signal is shared) the writer **adds an occurrence** instead of refusing: the candidate gets one line in its optional field `seen` (a list of at most 20 strings of at most 160 characters, `<date> <by> <where>`, oldest dropped), its `updated` moves, and nothing else changes. One commit. The new record is not written. The write answers `{"occurrence_of": "<id>"}`.
+- **When it differs** (the candidate is blocking but `cause` or `fix` disagree) the new record is written as its own record and the writer names the conflict: it answers with `conflicts_with: ["<id>"]` and, in a team, Zerus puts one lead inbox item ("two faults disagree: `<a>` and `<b>`: supersede, keep both, or merge") with the ready commands. **The writer supersedes only on an explicit request:** `lore add … --supersede <id>` or `lore supersede <old> <new>`, which in one commit sets the old record to `superseded` with `superseded_by` (CodeLore's existing lifecycle) and writes the new one; the lead or the owner decides, never an automatic write.
+- **Format note.** `seen` is the one addition to the record format that this addendum needs: an optional list of strings on the five knowledge kinds. `FORMAT.md` section 7 says a change that only adds an optional field keeps the version, and section 3 says unknown fields are kept and round-tripped, so a CodeLore that does not know `seen` keeps it on rewrite and the format stays version 3. `FORMAT.md` documents the field and the conformance run checks the round trip (section 8, point 8). Nothing else in section 11 touches the format.
+- **In a synced store** the replica's conflict rules of section 3.5 apply unchanged: `seen` is an append-only list, so concurrent occurrences merge as a union (capped at 20 after the merge); the same `(kind, id)` with different bytes is the owner's Waiting item; a duplicate found only at merge is a conflict item (keep both, skip, or supersede the older), never a silent drop; supersede by two records keeps both relations.
+
+### 11.11 Messages: urgency and the doorbell
+
+A message is delivered by a **doorbell**: a short notice, never the message text. The text stays in the store and the recipient reads it with `lore messages --unread` (`hgs lore messages --unread`, or a member's `hgs team lore messages`).
+- **The doorbell text** is one line: `[Zerus lore · message · from <by> · normal|URGENT · <id>] read it with hgs lore messages --unread`, at most 200 characters. It is the only text pasted, and an urgent one is marked `URGENT` in it, in the lead's inbox item and in the desktop's session row.
+- **Normal:** rung at the recipient's **next idle moment** (the session is not working and its composer is empty), coalesced: at most one doorbell per recipient per 5 minutes, naming the count ("3 messages") when several wait.
+- **Urgent rings at once, at the next safe point.** A **safe point** is the first of: the session is idle (ring now); a **tool boundary** where the agent has a hook for it (a Claude Code `PostToolUse` hook, a Codex or Kimi equivalent as their native contracts allow), where the doorbell is returned as the hook's `additionalContext` and never typed; the **turn end**. `safe_point` records which.
+- **Never into a busy composer.** A working session's composer is never written to. If the recipient is working and has no hook, the urgent message waits for the turn end.
+- **When the turn runs past a bound** (`urgent_bound`, default 10 minutes from the message, 1 to 120) the message is still unrung: the lead gets one inbox item ("urgent message from `<by>` to `<member>` is undelivered: the member has worked N minutes") with the text's first 200 characters. The lead may **stop the member natively** (the existing native Stop; Zerus pastes nothing), after which the message rings at the turn end that the stop causes. For a message to the lead, the owner gets the Waiting item instead, and the lead is not stopped by Zerus.
+- **A message to the owner** is an inbox item and a Waiting-for-you card (the existing channel), marked urgent when it is; the owner's reply is a message to the sender.
+- **Read marks** are set by `lore message read <id>` and by reading it with `lore messages` (a `--peek` does not mark). A normal message that stays unread past the next phase of the team (or 24 hours, whichever is first) is mentioned once in the lead's inbox as a stall (the recipient does not read), and the unread cap of section 11.4 backs it.
+
+### 11.12 Briefs survive a restart
+
+- **The latest brief per task is a durable artefact,** so a restart of the home computer, a lost `working.sqlite` or a compaction never loses it. It is a committed file, not a record (the topic kind's 3,000-character ceiling and its two statuses do not fit a brief, and a brief per task would fill the durable lore):
+  - **With a store** (`team` and `project`): `<workspace>/briefs/t<task>.md` in the team's workspace (section 4.3), outside `lore/`, so `lore check`, the index and the Loro replica never see it. Its first line is `# Brief: <task title>`, then the text (at most 8 KiB). A new version rewrites the file in one commit by the writer, under the writer lock, with the trailer `Zerus-Brief: <team>/t<task>/v<version>`; the older versions are in git. The text passes the secret scan first: a brief that matches is refused with the match named, the lead is told to rewrite it, and the file and the working row keep the previous version. (A `read-only` team writes nothing durable: its briefs stay working rows and its lead is told so.)
+  - **In `plain`:** a row in `teams.sqlite3` (`team_briefs`), latest per task, kept as long as the team record is (section 5).
+  - **In `off`:** the brief is Zerus's present dispatcher text, as today.
+- **The working rows are the history:** every version is a working row; the TTL of section 11.3 governs the older versions only.
+- **When the task closes,** the file stays for 30 days, then the writer removes it in one commit (git keeps every version: `git log -- briefs/t<task>.md`). The closing is the task's own (accepted, cancelled, or the team's finish) and a reopen cancels the removal.
+- **Reading:** `lore brief show --task REF` answers the latest from the file (the working row if the workspace is unreachable); `--version N` reads a working row while it exists, or the file's git history.
+- **Not searched after the task closes:** a closed task's brief is not a record, so `find` does not return it; `lore brief show` does. Promote it (section 11.8) to keep it as a topic.
+
+### 11.13 The interface
+
+The interface is the CLI, `lore` and `hgs lore`, with `--json`. No MCP server is part of this design. An MCP wrapper, if ever wanted, calls the CLI's `--json` and changes no format; the JSON shapes below are additive-only (a key may be added, never removed or renamed) and are the contract.
+
+| Command | Does |
+|---|---|
+| `lore pulse add [--task REF] [--done T] [--next T] [--blocked T] [--by NAME]` | writes a pulse (section 11.2); `--json` answers the entry |
+| `lore pulses [--task REF] [--by NAME] [--since TIME] [--all] [--json]` | the current pulse per member and task, or with `--all` every unexpired row, newest first |
+| `lore message send --to WHO [--urgent] TEXT` (or stdin) | writes a message and rings by section 11.11; answers `{id, state, urgency}` |
+| `lore messages [--unread] [--to WHO] [--from WHO] [--peek] [--json]` | lists and, unless `--peek`, marks read |
+| `lore message read ID` | marks one read |
+| `lore brief set --task REF` (text on stdin), `lore brief show --task REF [--version N]` | section 11.12 |
+| `lore promote ID …` | section 11.8 |
+| `lore supersede OLD NEW` | section 11.10 |
+| `lore working status [--json]` | counts by kind, the bytes, the oldest entry, the last cleanup and whether a history source is registered |
+| `lore working cleanup [--json]` | one cleanup pass now (the same bounds) |
+| `lore find … [--working \| --no-working] [--history \| --no-history]` | section 11.6 |
+
+- **In Zerus:** `hgs lore …` is these commands with Zerus's addressing (`--project`, `--team`); `hgs team lore plans|pulses|messages|brief` read the team's own working tier and the workspace. **`hgs team lore plans`** is `lore plans` over the team's workspace, plus for each live item the current pulse of the member that holds it: it is the answer the lead needs after a compaction (section 11.15, test 3). Members use `hgs lore message send`, `hgs lore pulse add` and `hgs lore brief show`; the hand-out names them in one line (section 6.2).
+- **JSON entry shape:** `{"id","kind","team","by","at","expires","promoted", …the kind's fields}`; a list is `{"entries":[…], "notes":[…]}`; a refusal is `{"error","details"}` as CodeLore's.
+
+### 11.14 The lore and Zerus boundary
+
+- **`crates/lore` never depends on Zerus** (section 2.1). The working tier is in the crate: the tables, the kinds, the expiry and bounds, the cleanup, the commands, the secret scan, the promote and the duplicate rules; they run standalone with no team and no history source.
+- **What Zerus supplies** through traits the crate defines: `HistorySource` (section 11.7: the content-search index), `Doorbell` (`ring(recipient, text, urgency) -> Delivered{safe_point}`: the delivery of section 11.11, which only Zerus can do, because only it knows a session's state and hooks), and `TaskClock` (`closed_at(task) -> Option<time>`, `open(task) -> bool`: how expiry learns a task's life). Standalone `lore` has no doorbell (messages stay unread until read, and urgent ones are only marked), no history (a note) and a task clock that reads the task from `lore plans` items (`#N` is the plan item id).
+- **Zerus implements and registers them** in `hgs lore` and the dispatcher; the registration is the only place the two meet, so the crate's own tests run with recorded fakes.
+
+### 11.15 Acceptance tests
+
+They run in the section 8 style: fixtures, key-based grading (a control question is answered when the answer holds one of its keys, as the retrieval bench judges), no model as judge. Each fixture states its N and its bar.
+1. **A brief is enough (N = 10).** For each of 5 recorded tasks (a rework, a multi-file feature, a task with a decision behind it, a test-only task, one with a constraint that must not be broken) a fresh session is given **only the brief** and answers 10 control questions about the task (goal, files, constraints, what is decided and why, what is out of scope, the acceptance, the first step) **without asking the owner and without a tool call to anything but `hgs lore brief show`**. The bar: at least 9 of 10 per task, and no answer that states a fact the brief does not hold (counted as wrong).
+2. **A week of pulses reconstructs the week (N = 10).** A recorded team week (the fixture journal of a real team, 5 days, 4 members, about 40 tasks) is turned into its pulses by the section 11.2 rules. A reader given **only the pulses** answers 10 control questions (who did what and when, which tasks were blocked and on what, what was reworked, what finished last). The bar: at least 8 of 10, with every `done` and `blocked` of the questions' keys present in the pulses.
+3. **The lead after a forced compaction (N = 12).** A team fixture is run to a forced compaction (section 6.2's recall trigger, source `compact`); the lead, given **only `hgs team lore plans` and the pulses**, answers 12 control questions about the team's state (who does what, what was decided, what waits for whom, what is blocked, what is next) **without asking the owner**. The bar: at least 11 of 12 and zero invented facts.
+4. **Expiry (section 11.3), exactly:** a pulse of an open task never expires; one of a closed task expires at close + `pulse_days` and not a second before; a reopen clears it; a read message expires at `read_at` + `message_days`; an unread one at `unread_days`, with its `working_unread_expired` event and inbox item; old brief versions at the task's close; the latest brief never. Run with a fake clock.
+5. **Bounds (section 11.4):** each row of the table at its bound (the refusal text, the order of what the cleanup deletes, the protected entries); the cleanup deletes at most 500 rows and holds no write transaction over 50 ms; durable writes never wait for it.
+6. **Search (section 11.6):** a working entry never outranks a durable record that matches by signal or phrase; the half-and-3 caps; the marks and the JSON shape; without working entries and without a history source `find` is byte-for-byte CodeLore's (the conformance of section 8, points 1 to 3, must still hold: the live two-CLI run 13 of 13 and the 300-invocation script equal).
+7. **Promote (section 11.8):** each mapping, the refusal paths (secret, schema, duplicate), idempotence by entry id, `--dry-run` writing nothing, `plain` unavailable.
+8. **Secrets (section 11.9):** a corpus of one sample per pattern and of near misses (a git sha, a UUID, a path, a placeholder) is refused or passes as stated, with the match masked in the refusal; history excerpts are redacted before leaving the provider; working text is redacted, not refused; verbatim text never appears in `git log -p`, in the store's tree or in a Loro snapshot, apart from the authored brief files and the promoted records, which passed the scan (a test greps all three after a run that wrote every kind).
+9. **Duplicates and conflicts (section 11.10):** two writers racing the same fault leave one record with one occurrence, not two records; a differing fault is written with `conflicts_with` and the inbox item; supersede only on request; `seen` merges as a union in two replicas; the round trip (Python 0.3.0 rewriting a file with `seen` keeps the field).
+10. **Urgent delivery (section 11.11):** a busy session's composer receives nothing (a recorded session in each of: idle, working with a hook, working without one); the hook returns the doorbell as context; the turn-end delivery; the bound, the lead's inbox item and the native stop (the stop is requested through the existing action, never a paste); `URGENT` in the three places.
+11. **History (section 11.7):** the provider fake, the 3-hit and 8 KiB bounds, the scope per caller (member, lead, owner), the per-session opt-out, the unavailable-source note, and that nothing the provider returned is in any lore file.
+12. **Briefs survive (section 11.12):** delete `working.sqlite` and restart: the latest brief of each task is still there, from `briefs/t<task>.md` or `teams.sqlite3`; a brief with a secret is refused with the previous file intact; the file is removed 30 days after the close and a reopen cancels it; `git ls-files` shows no brief outside `briefs/`, and no brief is in the index or a Loro snapshot.
+
+### 11.16 Decisions this addendum takes, for the owner to confirm
+
+The owner's points and the two reviews fix the shape; these numbers and choices are this document's, and each is a setting or a one-line change:
+- the defaults: `pulse_days = 14`, `message_days = 7`, `unread_days = 30`, `urgent_bound = 10 min`, the bounds table, the 0.5 and 0.25 rank weights and the caps of half and 3;
+- **the working tier is not replicated** in a synced project (section 11.5), because replicating expiring rows through a CRDT would make expiry race the merge, and the home-computer rule already carries the cross-computer path;
+- **working text is redacted, not refused,** on a secret match (section 11.9), so a message is never lost to a false positive;
+- **who may search whose history** (section 11.7): members their own, the lead its team's, the owner any;
+- **`seen`,** the one format addition (section 11.10), an optional list on the knowledge kinds, which keeps format version 3;
+- **a brief is a committed markdown file** in the team's workspace, not a record, removed 30 days after its task closes (section 11.12).
+
+### 11.17 Out of scope
+
+- An MCP server (section 11.13).
+- Copying, exporting or indexing transcripts in lore, and anything that puts verbatim history into git or the replica (hard rule 1).
+- Semantic (embedding) search of working entries and of history.
+- A working tier shared across projects, or a working tier on a computer that holds no store.
+- Any delivery to a working composer, by any mechanism (hard rule 3).

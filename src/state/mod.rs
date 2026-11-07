@@ -38,6 +38,7 @@ mod input;
 pub(crate) use input::{Lookup as ReceiptLookup, Submission};
 mod input_queue;
 mod journal;
+mod keep_warm;
 mod kimi_cache_hint;
 mod kimi_messages;
 mod kimi_approval;
@@ -416,6 +417,7 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
     };
     let marks = read_marks::load();
     let notification_preferences = notifications::load();
+    let keep_warm_settings = keep_warm::load();
     let sessions = box_value
         .get_mut("sessions")
         .and_then(Value::as_array_mut)
@@ -459,7 +461,7 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
             .extend(telemetry::unavailable().as_object().unwrap().clone());
     }
     // Bounds question indexing for the whole listing.
-    let shared = Shared { marks: &marks, preferences: notification_preferences.as_ref(), budget: read_marks::question_budget() };
+    let shared = Shared { marks: &marks, preferences: notification_preferences.as_ref(), keep_warm: keep_warm_settings.as_ref(), budget: read_marks::question_budget() };
     let mut process_work = processes::WorkSample::default();
     for record in bindings {
         if archive::equivalent(&record, &archived) {
@@ -500,6 +502,7 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
         );
         read_marks::enrich_listing(&mut session, &marks, journal::journal_name(&record), Ok(Some(Vec::new())));
         notifications::enrich(&mut session, notification_preferences.as_ref(), journal::journal_name(&record));
+        keep_warm::enrich(&mut session, keep_warm_settings.as_ref(), &record);
         sessions.push(session);
     }
     for record in archived {
@@ -529,6 +532,7 @@ pub fn merge_listing_archives(mut box_value: Value, ids: &BTreeMap<String, Strin
 struct Shared<'a> {
     marks: &'a Value,
     preferences: Option<&'a notifications::Store>,
+    keep_warm: Option<&'a keep_warm::Store>,
     /// Bounds question indexing for the whole listing.
     budget: std::time::Instant,
 }
@@ -570,6 +574,7 @@ fn live_row(session: &mut Value, record: Value, shared: &Shared, process_work: &
     }
     read_marks::enrich_listing(session, shared.marks, journal::journal_name(&record), questions);
     notifications::enrich(session, shared.preferences, journal::journal_name(&record));
+    keep_warm::enrich(session, shared.keep_warm, &record);
     Ok(())
 }
 
@@ -1183,6 +1188,7 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     }
     if command == "read" { return read_marks::dispatch(args); }
     if command == "notifications" { return notifications::dispatch(args); }
+    if command == "keep-warm" { return keep_warm::dispatch(args); }
     if command == "history" { return conversation_history::dispatch(args); }
     if command == "history-projection" { return conversation_history::projection_dispatch(args); }
     if command == "terminal" { return terminal::dispatch(args); }

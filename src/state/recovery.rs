@@ -925,12 +925,12 @@ fn worker() -> Result<i32> {
 /// from hgs.exe's job would outlive the GUI and keep the GUI's hgs.exe from
 /// being replaced.
 #[cfg(windows)]
-fn ensure_worker() -> Result<()> {
+pub(super) fn ensure_worker() -> Result<()> {
     crate::self_exec::ensure().map_err(|e| e.to_string())?;
     backend::host::HOST.supervise_recovery()
 }
 #[cfg(not(windows))]
-fn ensure_worker() -> Result<()> {
+pub(super) fn ensure_worker() -> Result<()> {
     let executable = crate::self_exec::current().map_err(|e| e.to_string())?;
     // Policy refresh must not race the installed supervisor with a detached
     // executor. Starting an active unit preserves its PID and current delivery.

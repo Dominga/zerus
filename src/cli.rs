@@ -153,6 +153,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] subagent retire <session> --json   retire an exact stale child record (JSON stdin)
        Subagent retirement ABI: subagent-retire-v1
        hgs [@host] notifications <session> --json   shared mute preference (session-notifications-v1)
+       hgs [@host] keep-warm <session> --json   keep the prompt cache warm for 1-7 hours or always (session-keep-warm-v1)
        hgs [@host] fork <session> [-n name] [-d] [--archive ID]  branch into a new conversation
        hgs [@host] effort <session> --json   change this agent's effort from JSON stdin
        hgs [@host] settings <session> --json model and effort for this session (JSON stdin)
@@ -220,6 +221,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        Mobile project assignment ABI: session-project-v1
        Mobile clear-context ABI: dismiss-prompt-v1
        session-notifications-v1
+       session-keep-warm-v1
        session-parent-v1
        launch-parent-v1
        hgs [@host] dirs [--hidden] [path]   directories as JSON (default: home)
@@ -993,7 +995,7 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
             }
             state_command(command, &args)
         }
-        "inspect" | "processes" | "worktrees" | "git-status" | "repository" | "dirs" | "send" | "send-now" | "session-action" | "session-action-status" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "read" | "notifications"
+        "inspect" | "processes" | "worktrees" | "git-status" | "repository" | "dirs" | "send" | "send-now" | "session-action" | "session-action-status" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "read" | "notifications" | "keep-warm"
         | "attachment" | "file-read" | "recovery" | "voice" | "schedules" | "graph" | "wait" | "parent" => {
             if command == "session-action-status" && dry { return Err(Error::new(1,"Lifecycle receipt reads do not support --dry-run")); }
             if command == "repository" && dry { return Err(Error::new(1,"Repository operations do not support --dry-run")); }
@@ -1005,7 +1007,7 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
             if command == "worktrees" && args.first().is_some_and(|s| s == "create" || s == "cancel" || s == "remove" || s == "sweep" || s == "policy" && args.get(1).is_some_and(|s|s=="set")) && dry {
                 return Err(Error::new(1, "worktree creation, removal and policy changes do not support --dry-run"));
             }
-            if (matches!(command.as_str(), "processes" | "send" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "recovery" | "read" | "notifications" | "voice" | "schedules" | "parent") || (command=="attachment" && has(args,"--stage"))) && dry {
+            if (matches!(command.as_str(), "processes" | "send" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "recovery" | "read" | "notifications" | "keep-warm" | "voice" | "schedules" | "parent") || (command=="attachment" && has(args,"--stage"))) && dry {
                 return Err(Error::new(1, "message input does not support --dry-run"));
             }
             state_command(command, args)
@@ -1295,6 +1297,7 @@ fn selector_markers(command: &str, args: &[String]) -> Result<Option<Vec<Marker>
     }
     match inner {
         "notifications" => markers.push(Marker::Line("session-notifications-v1")),
+        "keep-warm" => markers.push(Marker::Line("session-keep-warm-v1")),
         "hooks" => markers.push(Marker::Text("hooks-health-v1")),
         _ => {}
     }
@@ -1348,7 +1351,7 @@ fn is_reference_call(command: &str, args: &[String]) -> bool {
 const SESSION_COMMANDS: &[&str] = &[
     "inspect", "reference", "processes", "send", "send-now", "history", "history-projection",
     "terminal", "session-action", "session-action-status", "compact-context", "clear-context",
-    "interrupt", "attachment", "file-read", "answer", "read", "notifications", "fork", "effort",
+    "interrupt", "attachment", "file-read", "answer", "read", "notifications", "keep-warm", "fork", "effort",
     "settings", "schedules", "voice", "hooks", "a", "kill", "rename", "archive", "terminate",
     "pause", "resume", "native-ui", "__dsh-ui-url", "parent",
 ];
@@ -1402,7 +1405,7 @@ fn resolves_label_first(command: &str, args: &[String], here: bool, local: bool)
 const REQUEST_GUARDED: &[&str] = &[
     "send", "send-now", "history", "history-projection", "terminal", "session-action",
     "compact-context", "clear-context", "interrupt", "attachment", "file-read", "answer", "read",
-    "notifications", "effort", "settings", "schedules", "voice", "parent",
+    "notifications", "keep-warm", "effort", "settings", "schedules", "voice", "parent",
 ];
 /// Its guard is on its command line (`--expected-run-id`, `--run`, `--run-id`,
 /// `--expected-conversation-id`, `--conversation`).
@@ -1642,7 +1645,7 @@ fn remote_via(
         }
         "session-action-status" if machine.is_none() => return Err(Error::new(2,"A remote lifecycle receipt read requires --expect-machine ID before session-action-status")),
         "archives" | "session-action-status" | "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "repository" | "dirs" | "project" | "archive" | "rename"
-        | "send" | "send-now" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "guide" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "notifications" | "speech" | "analytics" | "voice" | "hooks" | "parent" | "--help" => {
+        | "send" | "send-now" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "guide" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "notifications" | "keep-warm" | "speech" | "analytics" | "voice" | "hooks" | "parent" | "--help" => {
             flags = vec![
                 "-o".into(),
                 "BatchMode=yes".into(),
@@ -1717,6 +1720,8 @@ fn remote_via(
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*session-parent-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to change parent sessions' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "notifications" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*session-notifications-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to change notification preferences' >&2; exit 1; fi",platform::join(&remote_args)))
+    } else if command == "keep-warm" {
+        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*session-keep-warm-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to keep the prompt cache warm' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "hooks" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hooks-health-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to inspect hook health' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "analytics" {
@@ -1749,6 +1754,7 @@ fn remote_via(
             "repository" => vec![("repository-clone-v1", false)],
             "wait" => vec![("hgs [@host] wait", false)],
             "notifications" => vec![("session-notifications-v1", true)],
+            "keep-warm" => vec![("session-keep-warm-v1", true)],
             "hooks" => vec![("hooks-health-v1", false)],
             "analytics" => vec![("hgs [@host] analytics --json", false)],
             "watch" => vec![(zerus_watch_protocol::HELP_MARKER, false)],

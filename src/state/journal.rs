@@ -1129,6 +1129,9 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     workspace::enrich(std::slice::from_mut(&mut output), &workspace::snapshot_cwds(&names));
     waits::decorate(std::slice::from_mut(&mut output));
     notifications::enrich(&mut output, notifications::load().as_ref(), journal_name);
+    if archive_id.is_none() {
+        keep_warm::enrich(&mut output, keep_warm::load().as_ref(), &record);
+    }
     Ok(output)
 }
 

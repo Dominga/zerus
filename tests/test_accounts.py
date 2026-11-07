@@ -304,6 +304,26 @@ class Accounts(unittest.TestCase):
         self.assertEqual({r['id']:r['permission_scope'] for r in self.ls()['profiles']}['work'],'computer')
         self.assertIn(b'repair or remove',self.run_hgs('account','permission-scope','work','--scope','account',ok=False).stderr)
 
+    def test_connected_accounts_default_to_bypass_and_keep_an_explicit_choice(self):
+        # Owner, 2026-11-07 (T-6hcfnu): without an explicit choice Claude, Codex
+        # and Kimi accounts bypass permissions; an explicit choice always wins.
+        self.add()
+        rows={r['id']:r for r in self.ls()['profiles']}
+        self.assertEqual((rows['work']['permission_mode'],rows['work']['permission_mode_source'],rows['work']['permission_detail']),
+                         ('bypass','default','Zerus default'))
+        self.run_hgs('account','permissions','work','--mode','provider')
+        row={r['id']:r for r in self.ls()['profiles']}['work']
+        self.assertEqual((row['permission_mode'],row['permission_mode_source']),('provider','zerus'))
+        self.assertEqual(json.loads((self.config/'accounts.json').read_text())['permission_modes'],{'work':'provider'})
+        self.run_hgs('account','permissions','work','--mode','default')
+        row={r['id']:r for r in self.ls()['profiles']}['work']
+        self.assertEqual((row['permission_mode'],row['permission_mode_source']),('bypass','default'))
+        self.run_hgs('account','permissions','work','--mode','everything',ok=False)
+        # OpenCode keeps its native configuration.
+        native={r['id']:r for r in self.ls()['profiles']}
+        if 'native-opencode' in native:
+            self.assertEqual(native['native-opencode']['permission_mode'],'provider')
+
     def test_stale_revision_and_duplicate_rejected(self):
         before=self.ls()['revision']; self.add()
         self.run_hgs('account','add','other','--provider','kimi','--revision',before,ok=False)

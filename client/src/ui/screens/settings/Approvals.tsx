@@ -9,7 +9,7 @@ import ApprovalsConfirm from "./ApprovalsConfirm";
 import { APPROVALS_KEY, APPROVALS_WARNING, APPROVALS_HINT, createApprovalOptIn } from "./approval-opt-in";
 import { Icon } from "../../lib/icons";
 import { Actions, Group, SectionHead, Status, Table, Switch, ToggleRow } from "./ui";
-import { APPROVAL_CATEGORIES, CATEGORIES_HINT, SERVICE_CATEGORIES, categoryLabels } from "./approval-categories";
+import { APPROVAL_CATEGORIES, CATEGORIES_HINT, SERVICE_CATEGORIES_UNKNOWN, categoryLabels, type ApprovalCategory } from "./approval-categories";
 import { PLACEHOLDER, createJournal, type JournalState, type Page } from "./approvals-journal";
 import { tr, trNoop } from "../../../i18n";
 import { canToggleServiceApproval } from "./approval-readiness";
@@ -40,6 +40,25 @@ export function ApprovalsSection() {
     if (inTauri() && desktopService.enabled()) void serviceApprovalIntent.check().catch(() => {});
   });
   onCleanup(() => clearTimeout(debounce));
+  // Categories: per-computer settings in this window, or the background
+  // service's committed policy, changed only through its authenticated route.
+  const [categoryBusy, setCategoryBusy] = createSignal(false);
+  const serviceCategories = () => desktopService.state()?.automatic_approval_categories ?? undefined;
+  const serviceSwitch = () => desktopService.state()?.automatic_approvals;
+  const categoryOn = (category: ApprovalCategory) => desktopService.enabled()
+    ? serviceCategories()?.includes(category.id) ?? category.on : flag(category.key);
+  const categoriesLocked = () => desktopService.enabled() && (!serviceCategories() || typeof serviceSwitch() !== "boolean"
+    || !!serviceApprovalIntent.pending() || categoryBusy() || optIn.busy());
+  const failed = (error: unknown) => bus.notify("error", String(error), true);
+  const changeCategory = (category: ApprovalCategory, on: boolean) => {
+    if (!desktopService.enabled()) { void setSetting(category.key, on).catch(failed); return; }
+    const current = serviceCategories();
+    const enabled = serviceSwitch();
+    if (!current || typeof enabled !== "boolean" || categoriesLocked()) return;
+    const next = APPROVAL_CATEGORIES.filter((c) => c.id === category.id ? on : current.includes(c.id)).map((c) => c.id);
+    setCategoryBusy(true);
+    void serviceApprovalIntent.submitCategories(enabled, next).catch(failed).finally(() => setCategoryBusy(false));
+  };
   const page = () => state().page;
   const loading = () => state().loading;
 
@@ -65,12 +84,10 @@ export function ApprovalsSection() {
 
       <Group title={trNoop("Categories")} hint={CATEGORIES_HINT} class="appr-categories">
         <For each={APPROVAL_CATEGORIES}>{(category) => (
-          <ToggleRow label={category.label} hint={category.hint}
-            checked={desktopService.enabled() ? category.on : flag(category.key)}
-            disabled={desktopService.enabled()}
-            onChange={(on) => void setSetting(category.key, on).catch((error: unknown) => bus.notify("error", String(error), true))} />
+          <ToggleRow label={category.label} hint={category.hint} checked={categoryOn(category)}
+            disabled={categoriesLocked()} onChange={(on) => changeCategory(category, on)} />
         )}</For>
-        <Show when={desktopService.enabled()}><p class="set-group-hint">{tr(SERVICE_CATEGORIES)}</p></Show>
+        <Show when={desktopService.enabled() && !serviceCategories()}><p class="set-group-hint">{tr(SERVICE_CATEGORIES_UNKNOWN)}</p></Show>
       </Group>
 
       <Group title={trNoop("Approval journal")}>

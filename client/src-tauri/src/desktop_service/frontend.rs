@@ -272,8 +272,16 @@ fn recovery_edit(request: &Request, value: &mut Value) {
 }
 fn unknown(request: &Request, code: &str) -> Value {
     let mut result = json!({"request_id":request.id(),"op":request.operation(),"accepted":null,"durable":false,"pending":true,"code":code});
-    if let Request::AutomaticApprovals { enabled, .. } = request {
+    if let Request::AutomaticApprovals {
+        enabled,
+        categories,
+        ..
+    } = request
+    {
         result["enabled"] = json!(enabled);
+        if let Some(categories) = categories {
+            result["categories"] = json!(categories);
+        }
     }
     recovery_edit(request, &mut result);
     result
@@ -331,6 +339,7 @@ enum Input {
     Approvals {
         id: String,
         enabled: bool,
+        categories: Option<Vec<String>>,
     },
     Maintenance {
         id: String,
@@ -364,9 +373,14 @@ impl Input {
                 request_id: id,
                 page,
             })),
-            Self::Approvals { id, enabled } => Ok(Some(Request::AutomaticApprovals {
+            Self::Approvals {
+                id,
+                enabled,
+                categories,
+            } => Ok(Some(Request::AutomaticApprovals {
                 request_id: id,
                 enabled,
+                categories,
             })),
             Self::Maintenance {
                 id,
@@ -390,10 +404,15 @@ impl Input {
                 "accepted":false,"durable":false,"pending":false,"code":code}),
             Self::ImportReads { id, .. } => json!({"request_id":id,"op":"import_pending_reads",
                 "accepted":false,"durable":false,"pending":false,"code":code}),
-            Self::Approvals { id, enabled } => refused(
+            Self::Approvals {
+                id,
+                enabled,
+                categories,
+            } => refused(
                 &Request::AutomaticApprovals {
                     request_id: id.clone(),
                     enabled: *enabled,
+                    categories: categories.clone(),
                 },
                 code,
             ),
@@ -428,11 +447,20 @@ impl Service {
         self: &Arc<Self>,
         id: String,
         enabled: bool,
+        categories: Option<Vec<String>>,
     ) -> Result<Value, String> {
         if !canonical(&id) {
             return Err("Invalid approval request identity.".into());
         }
-        Ok(submit(self.shared.clone(), Input::Approvals { id, enabled }).await)
+        Ok(submit(
+            self.shared.clone(),
+            Input::Approvals {
+                id,
+                enabled,
+                categories,
+            },
+        )
+        .await)
     }
     pub async fn maintenance_configure(
         self: &Arc<Self>,
@@ -461,16 +489,28 @@ pub(super) async fn approval_command(
     service: Option<Arc<Service>>,
     request_id: String,
     enabled: bool,
+    categories: Option<Vec<String>>,
 ) -> Result<Value, String> {
     if !canonical(&request_id) {
         return Err("Invalid approval request identity.".into());
     }
+    if categories
+        .as_deref()
+        .is_some_and(|ids| zerus_client_core::approvals::automatic::Set::from_ids(ids).is_none())
+    {
+        return Err("Invalid approval categories.".into());
+    }
     match service {
-        Some(service) => service.automatic_approvals(request_id, enabled).await,
+        Some(service) => {
+            service
+                .automatic_approvals(request_id, enabled, categories)
+                .await
+        }
         None => Ok(refused(
             &Request::AutomaticApprovals {
                 request_id,
                 enabled,
+                categories,
             },
             "frontend_route_unavailable",
         )),
@@ -617,7 +657,17 @@ fn submission_ready(snapshot: &Snapshot, request: &Request) -> bool {
     }
     // Reducing consent must still reach the authenticated route while its
     // background component is degraded or absent. The store commits it there.
-    if matches!(request, Request::AutomaticApprovals { enabled: false, .. }) {
+    // A category change also goes there: the service accepts one that only
+    // narrows (or one made while approvals are off) without full readiness
+    // and refuses one that widens what is approved.
+    if matches!(
+        request,
+        Request::AutomaticApprovals { enabled: false, .. }
+            | Request::AutomaticApprovals {
+                categories: Some(_),
+                ..
+            }
+    ) {
         return true;
     }
     if matches!(request, Request::CacheMaintenance { .. }) {
@@ -951,8 +1001,17 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
         | Request::WorktreeProgramStop { .. }
         | Request::WorktreeProgramCleanup { .. }
         | Request::TerminationOutcome { .. } => return None,
-        Request::AutomaticApprovals { enabled, .. } => {
-            if value["op"] != "automatic_approvals" || value["enabled"] != *enabled {
+        Request::AutomaticApprovals {
+            enabled,
+            categories,
+            ..
+        } => {
+            if value["op"] != "automatic_approvals"
+                || value["enabled"] != *enabled
+                || categories
+                    .as_ref()
+                    .is_some_and(|ids| value["categories"] != json!(ids))
+            {
                 return None;
             }
             true

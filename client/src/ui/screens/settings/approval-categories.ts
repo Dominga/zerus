@@ -22,7 +22,7 @@ export const APPROVAL_CATEGORIES: readonly ApprovalCategory[] = [
 ];
 
 export const CATEGORIES_HINT = trNoop("Requests in a category that is off wait for you. The categories apply only while automatic approvals are on.");
-export const SERVICE_CATEGORIES = trNoop("The background service approves the default categories, all except paid usage. Choosing categories for it is not available yet.");
+export const SERVICE_CATEGORIES_UNKNOWN = trNoop("The background service has not reported its approval categories. They can be changed once it does.");
 
 /** The labels of a journal entry's category IDs, in list order; unknown IDs are left out. */
 export const categoryLabels = (ids: readonly string[] | undefined) =>

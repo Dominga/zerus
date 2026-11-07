@@ -340,7 +340,7 @@ fn schema_32_preserves_existing_conversation_keys_and_indexes_the_new_run_lookup
             .db
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        32
+        crate::desktop::store::SCHEMA
     );
     let mut query = reopened
         .db

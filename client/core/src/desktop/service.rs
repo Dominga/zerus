@@ -89,6 +89,10 @@ pub struct Snapshot {
     /// Shared host presentation only. Null and incomplete counts stay unknown.
     pub attention_counts: Option<Value>,
     pub automatic_approvals: Option<bool>,
+    /// The approval categories the service's committed policy keeps on, by
+    /// ID (zerus-sz42x); None from an older service or without a policy.
+    #[serde(default)]
+    pub automatic_approval_categories: Option<Vec<String>>,
     /// Held task message copies a person may review. Display only: it never
     /// authorizes a release, which names a fresh review's observation.
     #[serde(default)]
@@ -137,6 +141,7 @@ impl Default for Snapshot {
             fleet_computers: None,
             attention_counts: None,
             automatic_approvals: None,
+            automatic_approval_categories: None,
             task_message_inputs: None,
             details_available: false,
             code: "unavailable".into(),
@@ -276,6 +281,15 @@ impl State {
             fleet_computers: checked_connections(&value["background_runtime"], epoch),
             attention_counts: counts,
             automatic_approvals: value["automatic_approvals"].as_bool(),
+            automatic_approval_categories: value["automatic_approval_categories"]
+                .as_array()
+                .and_then(|ids| {
+                    let ids: Option<Vec<String>> = ids
+                        .iter()
+                        .map(|id| id.as_str().map(str::to_owned))
+                        .collect();
+                    ids.filter(|ids| crate::approvals::automatic::Set::from_ids(ids).is_some())
+                }),
             task_message_inputs: HeldInputs::parse(
                 &value["operation_queue"]["kinds"]["task_message"]["inputs"],
             ),

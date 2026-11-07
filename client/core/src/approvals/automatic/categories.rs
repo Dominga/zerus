@@ -121,6 +121,20 @@ impl Set {
         self.0 & category.bit() != 0
     }
 
+    /// Whether this set holds every category of `other`.
+    pub fn contains_all(self, other: Set) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// A set from category IDs: None for an unknown or repeated ID.
+    pub fn from_ids<S: AsRef<str>>(ids: &[S]) -> Option<Self> {
+        ids.iter().try_fold(Set::EMPTY, |set, id| {
+            Category::from_id(id.as_ref())
+                .filter(|c| !set.contains(*c))
+                .map(|c| set.with(c))
+        })
+    }
+
     /// Whether every category of `required` is in this set. An empty
     /// requirement is never met: nothing is approved without a category.
     pub fn permits(self, required: Set) -> bool {

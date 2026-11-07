@@ -2240,6 +2240,7 @@ mod tests {
             &serde_json::to_value(Request::AutomaticApprovals {
                 request_id: id(99),
                 enabled: false,
+                categories: None,
             })
             .unwrap(),
         ));
@@ -2296,6 +2297,7 @@ mod tests {
             request: Request::AutomaticApprovals {
                 request_id: id(2),
                 enabled: true,
+                categories: None,
             },
         };
         let frontend = Process {
@@ -3330,6 +3332,7 @@ mod tests {
             Request::AutomaticApprovals {
                 request_id: id(107),
                 enabled: false,
+                categories: None,
             },
             7,
         )

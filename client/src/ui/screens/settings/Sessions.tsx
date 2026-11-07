@@ -38,6 +38,8 @@ export function SessionsSection() {
           <Select id="set-account-marks" value={text("sessions/accountMarks")} disabled={!flag("sessions/showAccountMarks")} onChange={(value) => void setSetting("sessions/accountMarks", value)}
             options={[{ value: "letter", label: trNoop("First letter") }, { value: "emoji", label: trNoop("Emoji when set") }]} />
         </Row>
+        <ToggleRow label={trNoop("Start new child sessions as compact rows")} checked={flag("sessions/compactNewChildren")} onChange={toggle("sessions/compactNewChildren")}
+          hint={trNoop("A session that another session launches or adopts appears collapsed under its parent. Expanding a row keeps it expanded.")} />
         <ToggleRow label={trNoop("Show completed subagents")} checked={flag("workspace/showCompletedSubagents")} onChange={toggle("workspace/showCompletedSubagents")}
           hint={trNoop("Include agents whose latest turn has finished in the session list and its counts. Plan & agents always shows all reported agents. Agents with unknown status remain visible.")} />
         <ToggleRow label={trNoop("Notify about optional questions")} checked={notifications.checked()} onChange={(on)=>void notifications.change(on)}

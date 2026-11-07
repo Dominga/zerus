@@ -263,19 +263,46 @@ fn record_bytes(path: &Path, limit: Option<u64>) -> io::Result<Vec<u8>> {
     let Some(limit) = limit.or(in_sessions(path).then_some(ID_RECORD_BYTES)) else {
         return fs::read(path);
     };
+    bounded_bytes(
+        path,
+        limit,
+        "Selected session is not a regular record",
+        if retiring {
+            "Selected session record exceeds retirement bound"
+        } else {
+            "Session record exceeds its bound"
+        },
+    )
+}
+
+/// A binding file's bytes for a scan that decides whether a folder is still
+/// in use (zerus-lr1l2): never a final link, never waiting on a FIFO, a
+/// regular file only, at most the ID layout's record bound. Anything else is
+/// an error, so the caller keeps what it protects for review.
+pub(super) fn binding_bytes(path: &Path) -> io::Result<Vec<u8>> {
+    bounded_bytes(
+        path,
+        ID_RECORD_BYTES,
+        "Session binding is not a regular file",
+        "Session binding exceeds its bound",
+    )
+}
+
+fn bounded_bytes(
+    path: &Path,
+    limit: u64,
+    irregular: &'static str,
+    too_large: &'static str,
+) -> io::Result<Vec<u8>> {
     use std::io::Read;
     let file = crate::platform::no_follow(OpenOptions::new().read(true)).open(path)?;
     if !file.metadata()?.is_file() {
-        return Err(io::Error::other("Selected session is not a regular record"));
+        return Err(io::Error::other(irregular));
     }
     let mut bytes = Vec::new();
     file.take(limit + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > limit {
-        return Err(io::Error::other(if retiring {
-            "Selected session record exceeds retirement bound"
-        } else {
-            "Session record exceeds its bound"
-        }));
+        return Err(io::Error::other(too_large));
     }
     Ok(bytes)
 }

@@ -322,9 +322,73 @@ mod tests {
         );
     }
 
+    /// `control`, but a child that is still running after `within` is
+    /// killed and fails the test: a blocked scan must fail, never hang.
+    fn control_within(case: &str, within: std::time::Duration) {
+        use std::io::Read;
+        let state = tempfile::tempdir().unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "state::worktree_lock::tests::fixture",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("HGS_STATE_DIR", state.path().join("sessions-root"))
+            .env("TMUX_TMPDIR", state.path().join("tmux"))
+            .env("ZERUS_WORKTREE_LOCK_CONTROL", case)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", state.path().join("gitconfig"))
+            .env_remove("TMUX")
+            .env_remove("HGS_SESSION")
+            .env_remove("HGS_SESSION_ID")
+            .env_remove("HGS_RUN_ID")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let until = std::time::Instant::now() + within;
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= until {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("{case}: the control was still blocked after {within:?}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let mut stdout = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut stdout)
+            .unwrap();
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .unwrap();
+        assert!(
+            status.success() && stdout.contains("test result: ok. 1 passed"),
+            "{case}: {stdout}{stderr}"
+        );
+    }
+
     #[test]
     fn its_own_lock_is_released_and_no_other_is_touched() {
         control("own");
+    }
+    /// zerus-lr1l2: the initial binding scan reads each file bounded: a
+    /// canonical FIFO, a link or an oversized binding keeps the lock for
+    /// review, promptly, and never blocks the release.
+    #[test]
+    fn a_fifo_link_or_oversized_binding_keeps_the_lock_without_blocking() {
+        control_within("unreadable", std::time::Duration::from_secs(60));
     }
     #[test]
     fn a_shared_checkout_unverified_ownership_or_unreadable_evidence_keeps_the_lock() {
@@ -517,6 +581,45 @@ mod tests {
                 kept(&record, "cannot be checked");
                 fs::remove_file(&broken).unwrap();
                 clean();
+                assert_eq!(release_locked(&record), Release::Released(checkout.clone()));
+            }
+            "unreadable" => {
+                place(&own);
+                let before = fs::read(&lock).unwrap();
+                let kept = |why: &str| match release_locked(&record) {
+                    Release::Kept(path, reason) => {
+                        assert_eq!(path, checkout);
+                        assert!(reason.contains("cannot be checked"), "{why}: {reason}");
+                        assert_eq!(fs::read(&lock).unwrap(), before, "{why}");
+                    }
+                    other => panic!("{why}: {other:?}"),
+                };
+                // A FIFO at a canonical ID-layout binding path: no writer
+                // ever opens it, so a blocking read would wait forever.
+                let sessions = root().join("sessions");
+                fs::create_dir_all(&sessions).unwrap();
+                let fifo = sessions.join(format!("{}.json", uuid::Uuid::new_v4()));
+                let name = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+                assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+                kept("a FIFO binding");
+                fs::remove_file(&fifo).unwrap();
+                // A link at a legacy binding path, to a valid record elsewhere.
+                let target = base.join("record.json");
+                fs::write(&target, serde_json::to_vec(&record).unwrap()).unwrap();
+                let linked = root().join(format!("{}.json", "1".repeat(64)));
+                std::os::unix::fs::symlink(&target, &linked).unwrap();
+                kept("a linked binding");
+                fs::remove_file(&linked).unwrap();
+                // A binding past the record bound (sparse: no disk used).
+                let huge = root().join(format!("{}.json", "2".repeat(64)));
+                fs::File::create(&huge)
+                    .unwrap()
+                    .set_len(storage::ID_RECORD_BYTES + 1)
+                    .unwrap();
+                kept("an oversized binding");
+                fs::remove_file(&huge).unwrap();
+                clean();
+                // With only readable bindings left, the lock is released.
                 assert_eq!(release_locked(&record), Release::Released(checkout.clone()));
             }
             "replaced" => {

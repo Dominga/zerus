@@ -207,8 +207,11 @@ pub(super) fn bindings() -> Result<Vec<Reference>> {
             if count > 5000 {
                 return Err("Too many session bindings to check".into());
             }
-            let value: Value = serde_json::from_slice(&fs::read(&path).map_err(|e| e.to_string())?)
-                .map_err(|e| e.to_string())?;
+            // Bounded, no final link, no FIFO wait, a regular file only: an
+            // unreadable binding is an error, so a release keeps its lock
+            // for review (zerus-lr1l2).
+            let bytes = storage::binding_bytes(&path).map_err(|e| e.to_string())?;
+            let value: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
             if value["rename_shadow"] == true {
                 continue;
             }

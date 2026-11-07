@@ -877,8 +877,8 @@ class NativeWindowsClaude(NativeAgent, host.HostCase):
             def current():
                 return next((item for item in self.inspect(name).get('pending_questions', [])
                              if item.get('question_id') == card['question_id']), None)
-            self.until('the original complete Bash permission panel',
-                       lambda: (item := current()) and item.get('panel_verified'))
+            card = self.until('the original complete Bash permission panel',
+                              lambda: (item := current()) and item.get('panel_verified') and item)
             carded = time.monotonic()
             worker = self.worker()
             wait_claude_permission_guard(card, current, carded)

@@ -15,6 +15,12 @@ class ClaudePermissionInputReadiness(unittest.TestCase):
                 panel_verified=True, can_answer=True)
 
     def test_the_actual_terminal_case_waits_before_each_single_original_key(self):
+        self.terminal_case(unverified_first=False)
+
+    def test_the_verified_panel_replaces_the_unverified_hook_hash_before_the_guard(self):
+        self.terminal_case(unverified_first=True)
+
+    def terminal_case(self, unverified_first):
         case = native.NativeWindowsClaude('test_terminal_answers_end_the_hook')
         with tempfile.TemporaryDirectory() as directory:
             case.project = Path(directory)
@@ -25,6 +31,8 @@ class ClaudePermissionInputReadiness(unittest.TestCase):
             def hook(*_):
                 pending[0] = True
                 observations.append(clock[0])
+                if unverified_first:
+                    return dict(self.CARD, panel_verified=False, question_hash='b' * 64)
                 return self.CARD.copy()
             case.hook_card = hook
             case.worker = lambda: (123, 'original-birth')
@@ -35,7 +43,11 @@ class ClaudePermissionInputReadiness(unittest.TestCase):
                 pending[0] = False
                 (case.project / native.api.BASH_FILE).touch()
             case.keys = send
-            case.until = lambda what, check: self.assertTrue(check(), what)
+            def until(what, check):
+                item = check()
+                self.assertTrue(item, what)
+                return item
+            case.until = until
             case.alive = lambda *_: False
             case.refused = lambda *_: None
             case.choose = lambda *_: []

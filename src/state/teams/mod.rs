@@ -25,6 +25,7 @@ pub(crate) mod plan;
 pub(crate) mod run_results;
 pub(crate) mod profile;
 pub(crate) mod lore_sync;
+pub(crate) mod pulse_worker;
 pub(crate) mod pulses;
 pub(crate) mod rights;
 pub(crate) mod safe_actions;

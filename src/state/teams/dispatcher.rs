@@ -1856,6 +1856,11 @@ fn finish_rights(store: &mut Store, team_id: &str, member_id: &str, role: &str, 
 /// gave one during the turn, else a summary of the turn's tool events (the
 /// task, the files changed, the last tool or error line). No chat text is
 /// read; a turn with nothing concrete writes nothing.
+///
+/// Task 185: the summary needs the session's events, an `hgs inspect` with a
+/// 15 s bound; a hung ssh member would hold the tick for that long at each of
+/// its turn ends. The tick only queues the build to the pulse worker and goes
+/// on; a test, whose fake hgs lives on its own thread, builds inline.
 fn turn_pulse(store: &mut Store, team_id: &str, task_id: u32, ended: f64) {
     let Ok(Some(team)) = store.load(team_id) else { return };
     let Some(task) = team.task(task_id) else { return };
@@ -1870,27 +1875,18 @@ fn turn_pulse(store: &mut Store, team_id: &str, task_id: u32, ended: f64) {
         .any(|pulse| pulse.source == "note" && pulse.task == task_id && pulse.at > since);
     if !noted {
         if let Some(session) = &member.session {
-            let events: Vec<Value> = hgs(&session.host, &["inspect", &session.name, "--after", "0"], None, Duration::from_secs(15))
-                .ok()
-                .filter(|output| output.status.success())
-                .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
-                .and_then(|value| value.get("events").and_then(Value::as_array).cloned())
-                .unwrap_or_default();
-            let folder = member_folder_path(&team, &member).unwrap_or_default();
-            if let Some((done, next, blocked)) = super::pulses::auto(task, &events, since, &folder) {
-                let pulse = super::pulses::Pulse {
-                    team: team_id.to_owned(),
-                    member: member.id.clone(),
-                    task: task_id,
-                    done,
-                    next,
-                    blocked,
-                    at,
-                    source: "auto".into(),
-                    ..Default::default()
-                };
-                let _ = store.put_pulse(&pulse);
-            }
+            let job = super::pulse_worker::Job {
+                team: team_id.to_owned(),
+                member: member.id.clone(),
+                task: task_id,
+                title: task.title.clone(),
+                folder: member_folder_path(&team, &member).unwrap_or_default(),
+                host: session.host.clone(),
+                session: session.name.clone(),
+                since,
+                at,
+            };
+            queue_pulse(store, job);
         }
     }
     let _ = change(store, team_id, |team, _| {
@@ -1899,8 +1895,51 @@ fn turn_pulse(store: &mut Store, team_id: &str, task_id: u32, ended: f64) {
         }
         Ok(())
     });
-    if let Ok(Some(team)) = store.load(team_id) {
-        let _ = store.prune_pulses(&team, at);
+}
+
+/// Task 185: hands a turn end's pulse build to the worker, which reads the
+/// session on its own thread. A test's fake hgs lives on the test's thread, so
+/// a test only queues the job there and builds it itself.
+#[cfg(not(test))]
+fn queue_pulse(_store: &Store, job: super::pulse_worker::Job) {
+    super::pulse_worker::SAMPLER.queue(job);
+}
+
+// Task 185: the turn ends a test queued, oldest first; the test drains them
+// with `take_queued_pulses` and builds them on its own thread.
+#[cfg(test)]
+thread_local! {
+    static QUEUED_PULSES: std::cell::RefCell<Vec<super::pulse_worker::Job>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn queue_pulse(_store: &Store, job: super::pulse_worker::Job) {
+    QUEUED_PULSES.with(|queued| queued.borrow_mut().push(job));
+}
+
+/// Task 185: the jobs a turn end queued since the last call (a test only).
+#[cfg(test)]
+fn take_queued_pulses() -> Vec<super::pulse_worker::Job> {
+    QUEUED_PULSES.with(|queued| std::mem::take(&mut *queued.borrow_mut()))
+}
+
+/// Task 185: stores the turn-end pulses the worker built since the last tick.
+fn take_pulses(store: &Store) {
+    for ready in super::pulse_worker::SAMPLER.take() {
+        super::pulse_worker::apply(store, &ready.job, (ready.done, ready.next, ready.blocked));
+    }
+}
+
+/// Task 185: how far the pulse prune got through the loaded teams.
+static PRUNE_NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Task 185: pulses expire on their own schedule, never at a member's turn end:
+/// one team a tick, round-robin, so a finished team's rows go without every
+/// turn end loading the team again. Bounded by the store's 500 rows a call.
+fn prune_pulses_step(store: &Store, teams: &[Team], at: f64, offset: usize) {
+    let Some(team) = teams.get(offset % teams.len().max(1)) else { return };
+    if let Err(error) = store.prune_pulses(team, at) {
+        eprintln!("hgs team worker: {}: pulses: {error}", team.name);
     }
 }
 
@@ -7987,8 +8026,16 @@ fn recover(store: &mut Store) -> anyhow::Result<()> {
 
 /// One pass over every running team. Returns whether any team is active.
 pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
-    let teams: Vec<Team> = store
-        .teams(false, 10_000)?
+    let loaded: Vec<Team> = store.teams(false, 10_000)?;
+    // Task 185: the pulses built on the worker since the last tick, and one
+    // loaded team's expired pulses, retired here rather than at a turn end. A
+    // finished team's rows are still reached: the worker keeps ticking for a
+    // while after the last team ends.
+    take_pulses(store);
+    let offset = PRUNE_NEXT.load(std::sync::atomic::Ordering::Relaxed);
+    prune_pulses_step(store, &loaded, now(), offset);
+    PRUNE_NEXT.store(offset.wrapping_add(1), std::sync::atomic::Ordering::Relaxed);
+    let teams: Vec<Team> = loaded
         .into_iter()
         .filter(|team| {
             matches!(team.status, TeamStatus::Running | TeamStatus::Paused)

@@ -2,9 +2,9 @@ use super::*;
 use crate::state::teams::model::{Attempt, TaskStatus};
 use crate::state::teams::store::Store;
 
-fn task() -> Task {
-    Task { id: 12, title: "Render the black frame fix".into(), ..Default::default() }
-}
+/// The turn's task: its id and title are all a pulse names of it.
+const TASK: u32 = 12;
+const TITLE: &str = "Render the black frame fix";
 
 fn event(kind: &str, tool: &str, detail: &str, at: f64) -> Value {
     json!({"type": kind, "tool": tool, "detail": detail, "at": at.to_string(), "seq": "1"})
@@ -21,7 +21,7 @@ fn an_automatic_pulse_names_the_task_files_and_last_tool() {
         event("PostToolUse", "Bash", "hgs team run --json < run.json\nsecond line", 13.0),
         event("UserPromptSubmit", "", "the whole chat prompt text that must never be stored", 14.0),
     ];
-    let (done, next, blocked) = auto(&task(), &events, 5.0, r"D:\work\dev").unwrap();
+    let (done, next, blocked) = auto(TASK, TITLE, &events, 5.0, r"D:\work\dev").unwrap();
     assert_eq!(done, "#12 Render the black frame fix; changed src/render/post.rs, tests/post_test.rs");
     assert_eq!(next, "last: Bash: hgs team run --json < run.json");
     assert_eq!(blocked, "");
@@ -29,8 +29,8 @@ fn an_automatic_pulse_names_the_task_files_and_last_tool() {
         assert!(!field.contains("chat prompt"), "no chat text is stored");
     }
     // Only the turn's events count.
-    assert_eq!(auto(&task(), &events, 13.5, r"D:\work\dev"), None, "nothing concrete: no pulse");
-    assert_eq!(auto(&task(), &[], 0.0, ""), None);
+    assert_eq!(auto(TASK, TITLE, &events, 13.5, r"D:\work\dev"), None, "nothing concrete: no pulse");
+    assert_eq!(auto(TASK, TITLE, &[], 0.0, ""), None);
 }
 
 #[test]
@@ -39,23 +39,23 @@ fn a_failed_last_tool_is_the_blocked_line() {
         event("PostToolUse", "Bash", "cargo build", 1.0),
         event("PostToolUseFailure", "Bash", "error[E0425]: cannot find value `frame` in this scope\n  --> src/post.rs:3", 2.0),
     ];
-    let (done, next, blocked) = auto(&task(), &events, 0.0, "").unwrap();
+    let (done, next, blocked) = auto(TASK, TITLE, &events, 0.0, "").unwrap();
     assert_eq!(done, "#12 Render the black frame fix");
     assert_eq!(next, "last: Bash: cargo build");
     assert_eq!(blocked, "Bash failed: error[E0425]: cannot find value `frame` in this scope");
     // A later tool that succeeds clears it.
     let mut later = events.clone();
     later.push(event("PostToolUse", "Bash", "cargo build", 3.0));
-    assert_eq!(auto(&task(), &later, 0.0, "").unwrap().2, "");
+    assert_eq!(auto(TASK, TITLE, &later, 0.0, "").unwrap().2, "");
 }
 
 #[test]
 fn a_pulse_is_bounded() {
     let many: Vec<Value> = (0..9).map(|n| event("PostToolUse", "Edit", &format!("src/file{n}.rs"), f64::from(n) + 1.0)).collect();
-    let (done, _, _) = auto(&task(), &many, 0.0, "").unwrap();
+    let (done, _, _) = auto(TASK, TITLE, &many, 0.0, "").unwrap();
     assert!(done.ends_with("and 4 more"), "{done}");
     let long = event("PostToolUse", "Bash", &"x".repeat(2000), 1.0);
-    let (_, next, _) = auto(&task(), &[long], 0.0, "").unwrap();
+    let (_, next, _) = auto(TASK, TITLE, &[long], 0.0, "").unwrap();
     assert!(next.chars().count() <= "last: Bash: ".len() + 160, "one line of at most 160 characters: {}", next.chars().count());
     assert!(check_note(&"y".repeat(501), "", "").unwrap_err().to_string().contains("at most 500"));
     assert!(check_note("", "", " ").is_err(), "a note says something");

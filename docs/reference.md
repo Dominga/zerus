@@ -4783,6 +4783,14 @@ The official web host uses a separate `hgs` profile through `--patch`; sign-in a
 secrets stay in `DSH_HOME`. The web endpoint is loopback-only; remote access uses
 SSH. `~/.npm-global/bin` is discoverable from service and SSH launches.
 
+If the adapter endpoint disappears while the recorded original host is still
+alive, Zerus refuses another launch and leaves the original running. New
+launches record its native PID and birth identity; a dead original or a reused
+PID permits normal startup. A live legacy PID-only record, an unreadable
+identity, or an interrupted launch without a confirmed identity refuses
+replacement. A healthy resident adapter still reconnects without a restart or
+record rewrite. These checks never stop a host or reload its bridge.
+
 Reviewed adoption of `0.2.1-rc.5` (2026-10-29, `zerus-r7d4`): the rc.2-only
 startup gate rejected rc.5 before starting the host. Comparison of the official
 npm packages found the launcher's code, boot/profile handling, web listener,

@@ -87,7 +87,7 @@ impl Default for Config {
         }
         Config {
             enabled: true,
-            templates: list(&["cargo-test", "qt-test", "android-test"]),
+            templates: list(&["cargo-test", "qt-test", "android-test", "web-test"]),
             env,
             keep: map(&[("CARGO_HOME", ".cargo"), ("RUSTUP_HOME", ".rustup")]),
             remove: list(&["HGS_STATE_DIR", "HGS_CONFIG_DIR", "HGS_TRAY_HOME", "HGS_TRAY_LOCK_DIR"]),

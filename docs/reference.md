@@ -1371,6 +1371,13 @@ of `docs/test-providers.md`) have their own templates beside the Qt ones:
 | `ctest` | `build_dir`, `config`, `tests` or `regex` | `ctest --test-dir build_dir --output-on-failure --output-junit <report> [-C config] [-R ^(tests)$ or regex]` |
 | `msbuild-build` | `project` (a `.sln` or project file), `config`, `platform`, `targets` | Visual Studio's MSBuild (vswhere), `/m /nologo /v:minimal [/p:Configuration] [/p:Platform] [/t:targets]` |
 | `vstest` | `tests` (assemblies), `filter` | `vstest.console tests /Logger:trx [/TestCaseFilter:filter]` |
+| `web-test` | `project` (default the member's folder), `paths` | the project's own `node_modules/vitest` run by `node` (or `npx --no-install vitest`), `run --reporter=default --reporter=junit --outputFile.junit=<report> paths...`; `npm ci` (or `npm install` without a lock file) first when `node_modules` are missing |
+
+A web project's vitest run (task 239) happens through the worker like the
+other templates: it reads its JUnit report per test file, keeps npm's cache in
+the member's `.zerus-team/npm`, and installs its dependencies only when the
+project has no `node_modules`. `hgs test affected` prints it for an `npm`
+provider, so a sandboxed member never runs `npx` itself.
 
 Every value is typed: a `source` or `build_dir` is a path inside the member's
 folder (it may not exist yet), a target or test name a plain word, a regex,
@@ -3057,8 +3064,9 @@ phase.
 
 ### Test isolation
 
-A test template that Zerus runs for a member (`cargo-test`, `qt-test` and
-`android-test` unless the project names others) runs in a run folder of the
+A test template that Zerus runs for a member (`cargo-test`, `qt-test`,
+`android-test` and `web-test` unless the project names others) runs in a run
+folder of the
 member's own folder, `.zerus-team/runs/<template>-<time>`, with its own
 `HOME`, `TEMP`/`TMP`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`,
 `XDG_CACHE_HOME` and, on Windows, `APPDATA` and `LOCALAPPDATA` (on Unix also

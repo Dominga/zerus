@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
-import type { Session } from "./types";
+import type { Session, Subagent } from "./types";
 
 // Render the actual JSX in Node without adding a DOM dependency. Only the
 // stateful application stores and English translation are isolated; the card,
@@ -12,6 +12,7 @@ const translations = "\0session-card-i18n";
 const marks = "\0session-card-marks";
 let server: ViteDevServer | undefined;
 let render: (compact: boolean, session: Session, online?: boolean, team?: { total: number; working: number; collapsed: boolean; needsYou?: number; asking?: number; errors?: number }) => string;
+let renderChild: (parent: Session, child: Subagent) => string;
 
 beforeAll(async () => {
   const { fileURLToPath } = await import(/* @vite-ignore */ ["node", "url"].join(":")) as { fileURLToPath(url: URL): string };
@@ -39,17 +40,19 @@ beforeAll(async () => {
           export const tr = (s, ...args) => s.replace(/%(\\d+)/g, (_, n) => String(args[n - 1]));`;
         if (id === entry) return `import {createComponent} from 'solid-js';
           import {renderToString} from 'solid-js/web';
-          import {SessionCard, CompactCard} from '/src/ui/sessions/SessionCard.tsx';
+          import {SessionCard, CompactCard, ChildCard} from '/src/ui/sessions/SessionCard.tsx';
           import {state} from '${stores}';
           export const render = (compact, session, online = true, team = undefined) => {
             state.online = online;
             return renderToString(() => createComponent(compact ? CompactCard : SessionCard,
               {session, selected: false, expandable: false, expanded: false, onToggleChildren() {}, onExpand() {}, team}));
-          };`;
+          };
+          export const renderChild = (parent, child) => renderToString(() => createComponent(ChildCard,
+            {parent, child, first: true, last: true, selected: false}));`;
       },
     }, solid({ ssr: true })],
   });
-  render = (await server.ssrLoadModule(entry)).render;
+  ({ render, renderChild } = await server.ssrLoadModule(entry) as { render: typeof render; renderChild: typeof renderChild });
 });
 
 afterAll(async () => { await server?.close(); });
@@ -117,15 +120,31 @@ describe("supervised and muted children (owner 2026-11-08)", () => {
   const parent = { machine: "11111111-1111-4111-8111-111111111111", session_id: "22222222-2222-4222-8222-222222222222",
     name: "codex/project/lead", conversation_id: "c", run_id: "r", state: "live" };
   // The order of the arrow, the name and the crossed bell in the first line.
-  const order = (html: string) => [...html.matchAll(/class="(sc-supervised|sc-title ell|sc-mute)[" ]/g)].map((m) => m[1].split(" ")[0]);
+  const order = (html: string) => [...html.matchAll(/class="(sc-supervised|sc-title ell|sc-mute|sbadge)[" ]/g)].map((m) => m[1].split(" ")[0]);
   it("shows the supervised arrow whether muted or not, and the bell right after the name", () => {
     for (const compact of [false, true]) {
-      expect(order(render(compact, row({ parent, muted: true })))).toEqual(["sc-supervised", "sc-title", "sc-mute"]);
-      expect(order(render(compact, row({ parent })))).toEqual(["sc-supervised", "sc-title"]);
-      expect(order(render(compact, row({ muted: true })))).toEqual(["sc-title", "sc-mute"]);
+      // The status pill follows them (review note, 2026-11-08).
+      expect(order(render(compact, row({ parent, muted: true })))).toEqual(["sc-supervised", "sc-title", "sc-mute", "sbadge"]);
+      expect(order(render(compact, row({ parent })))).toEqual(["sc-supervised", "sc-title", "sbadge"]);
+      expect(order(render(compact, row({ muted: true })))).toEqual(["sc-title", "sc-mute", "sbadge"]);
       // A parent that is not live supervises nothing.
-      expect(order(render(compact, row({ parent: { ...parent, state: "missing" }, muted: true })))).toEqual(["sc-title", "sc-mute"]);
+      expect(order(render(compact, row({ parent: { ...parent, state: "missing" }, muted: true })))).toEqual(["sc-title", "sc-mute", "sbadge"]);
     }
+  });
+});
+
+describe("subagent rows (owner 2026-11-08)", () => {
+  const child: Subagent = { id: "a", name: "general-purpose", state: "working", summary: "Reading the plan" };
+  const parts = (html: string) => [...html.matchAll(/class="(cc-tile|cc-mark|sc-title ell|sbadge|cc-expand cc-slot)[" ]/g)].map((m) => m[1]);
+  it("shows the parent's account mark, and keeps the expand button's slot empty", () => {
+    const html = renderChild(row({ accountId: "claude-a1" }), child);
+    expect(parts(html)).toEqual(["cc-tile", "cc-mark", "sc-title ell", "sbadge", "cc-expand cc-slot"]);
+    expect(html).toContain("acct-mark");
+    // The slot is no control: hidden from assistive technology, not a button.
+    expect(html).toMatch(/<span class="cc-expand cc-slot" aria-hidden="true">/);
+    expect(html).not.toContain("<button");
+    // A parent without a mark gives its subagents none.
+    expect(parts(renderChild(row(), child))).toEqual(["cc-tile", "sc-title ell", "sbadge", "cc-expand cc-slot"]);
   });
 });
 

@@ -119,6 +119,8 @@ The system's setuid `ps` cannot run in Seatbelt. A private copy keeps its code,
 removes setuid/private entitlements and receives an ad-hoc signature. The report
 records the system and copied hashes and mode. It queries actual current-user
 kernel data; it is not a fake process table or an installed helper observation.
+The startup canary is created with exclusive, no-follow creation inside an atomically created private directory outside the test sandbox. Cleanup verifies the original directory and leaf identities, retaining replacements. Before any check, the runner also verifies its own Seatbelt policy denies SecurityServer and the securityd/secd credential-service namespaces. That control uses `sandbox_check` only: it makes no service lookup or keychain-item request. A check that needs these denied services stays unavailable; the runner never widens the boundary for it.
+
 The system binary and keychains stay untouched. Native original-child/signature
 controls continue to select their own original executables.
 

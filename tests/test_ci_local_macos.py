@@ -2,6 +2,8 @@
 import importlib.util
 from pathlib import Path
 import sys
+import os
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -63,6 +65,8 @@ class MacPlan(unittest.TestCase):
         self.assertNotIn('(subpath "/private/tmp")', profile)
         self.assertNotIn('com.hgdev.hgs-tray', profile)
         self.assertIn('(allow file-ioctl (subpath "/dev"))', profile)
+        self.assertIn('(deny mach-lookup (global-name "com.apple.SecurityServer")', profile)
+        self.assertIn('securityd|secd', profile)
 
     def test_xcode_cache_exception_is_only_the_public_cache_leaf(self):
         profile = MAC.profile('/Users/example/private-ci', [], '/private/tmp/owned-ci',
@@ -71,6 +75,49 @@ class MacPlan(unittest.TestCase):
         self.assertNotIn('(subpath "/private/var/folders', profile)
         with self.assertRaises(RuntimeError):
             MAC.profile('/Users/example/private-ci', [], '/private/tmp/owned-ci', '/Users/example')
+
+
+class CanaryIdentity(unittest.TestCase):
+    def test_exclusive_private_canary_and_original_cleanup(self):
+        with tempfile.TemporaryDirectory() as parent:
+            canary = MAC.Canary(parent)
+            self.assertEqual(canary.directory.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(canary.path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(canary.path.read_text(), 'synthetic out-of-sandbox canary')
+            self.assertTrue(canary.close())
+            self.assertFalse(canary.directory.exists())
+
+    def test_precreated_symlink_never_truncates_the_other_file(self):
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)
+            other = root / 'other'; other.write_text('keep exactly')
+            precreated = root / 'precreated'; precreated.mkdir(mode=0o700)
+            alias = precreated / 'canary'; alias.symlink_to(other)
+            with patch.object(MAC.tempfile, 'mkdtemp', return_value=str(precreated)):
+                with self.assertRaises(FileExistsError):
+                    MAC.Canary(root)
+            self.assertEqual(other.read_text(), 'keep exactly')
+            self.assertTrue(alias.is_symlink())
+
+    def test_replaced_leaf_is_retained_and_not_followed_during_cleanup(self):
+        with tempfile.TemporaryDirectory() as parent:
+            other = Path(parent) / 'other'; other.write_text('keep exactly')
+            canary = MAC.Canary(parent)
+            canary.path.unlink(); canary.path.symlink_to(other)
+            self.assertFalse(canary.close())
+            self.assertEqual(other.read_text(), 'keep exactly')
+            self.assertTrue(canary.path.is_symlink())
+
+    def test_replaced_parent_is_not_cleaned_up(self):
+        with tempfile.TemporaryDirectory() as parent:
+            canary = MAC.Canary(parent)
+            original = Path(parent) / 'original'
+            canary.directory.rename(original)
+            canary.directory.mkdir(mode=0o700)
+            other = canary.directory / 'other'; other.write_text('keep exactly')
+            self.assertFalse(canary.close())
+            self.assertEqual(other.read_text(), 'keep exactly')
+            self.assertEqual((original / 'canary').read_text(), 'synthetic out-of-sandbox canary')
 
 
 if __name__ == '__main__':

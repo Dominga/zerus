@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 import tarfile
+import tempfile
 import urllib.request
 
 SPEC = importlib.util.spec_from_file_location('local_linux', Path(__file__).with_name('local-linux.py'))
@@ -146,6 +147,71 @@ def node24(root):
     return target / 'bin'
 
 
+class Canary:
+    """An exclusive private outside-sandbox object, retained through cleanup."""
+    def __init__(self, parent):
+        self.directory = Path(tempfile.mkdtemp(prefix='zerus-ci-canary-', dir=parent))
+        self.directory_stamp = self.directory.stat(follow_symlinks=False)
+        self.directory_fd = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        self.path = self.directory / 'canary'
+        self.fd, self.stamp = None, None
+        try:
+            held = os.fstat(self.directory_fd)
+            if (held.st_dev, held.st_ino) != (self.directory_stamp.st_dev, self.directory_stamp.st_ino):
+                raise RuntimeError('canary directory changed before exclusive creation')
+            self.fd = os.open('canary', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                              0o600, dir_fd=self.directory_fd)
+            self.stamp = os.fstat(self.fd)
+            text = b'synthetic out-of-sandbox canary'
+            if os.write(self.fd, text) != len(text):
+                raise OSError('short canary write')
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self):
+        """Never unlink a replacement leaf or a substituted directory."""
+        unchanged = False
+        try:
+            selected = self.directory.stat(follow_symlinks=False)
+            if (selected.st_dev, selected.st_ino) != (self.directory_stamp.st_dev, self.directory_stamp.st_ino):
+                return False
+            if self.stamp is not None:
+                leaf = os.stat('canary', dir_fd=self.directory_fd, follow_symlinks=False)
+                if (leaf.st_dev, leaf.st_ino) != (self.stamp.st_dev, self.stamp.st_ino):
+                    return False
+                os.unlink('canary', dir_fd=self.directory_fd)
+            os.rmdir(self.directory)
+            unchanged = True
+            return True
+        except OSError:
+            return unchanged
+        finally:
+            if self.fd is not None:
+                os.close(self.fd); self.fd = None
+            os.close(self.directory_fd)
+
+
+# These are policy checks only, not bootstrap lookups or keychain item requests.
+# SecurityServer and securityd/secd MachServices come from Apple's public system
+# launch plists; deny the whole related namespace rather than one API spelling.
+CREDENTIAL_SERVICES = ('com.apple.SecurityServer', 'com.apple.securityd.xpc',
+                       'com.apple.securityd.general', 'com.apple.secd',
+                       'com.apple.security.octagon', 'com.apple.security.kcsharing')
+CREDENTIAL_PROBE = '''
+import ctypes,os
+library=ctypes.CDLL('/usr/lib/libsandbox.1.dylib')
+check=library.sandbox_check
+check.argtypes=(ctypes.c_int,ctypes.c_char_p,ctypes.c_int)
+check.restype=ctypes.c_int
+for service in CREDENTIAL_SERVICES:
+    # SANDBOX_FILTER_GLOBAL_NAME=2, as declared by WebKit's SandboxSPI.h.
+    assert check(os.getpid(),b'mach-lookup',2,ctypes.c_char_p(service.encode())) > 0, service
+assert check(os.getpid(),b'mach-lookup',2,ctypes.c_char_p(b'com.apple.cfprefsd.agent')) == 0
+print('keychain-service policy denies; no IPC or keychain item query')
+'''.replace('CREDENTIAL_SERVICES', repr(CREDENTIAL_SERVICES))
+
+
 def profile(root, public, temporary, system_temp=None):
     reads = ['/System', '/usr', '/bin', '/sbin', '/opt/homebrew', '/Library/Developer',
              '/Library/Apple', '/Applications/Xcode.app', '/private/etc', '/private/var/db/dyld',
@@ -156,6 +222,9 @@ def profile(root, public, temporary, system_temp=None):
     rules = [
         '(version 1)', '(deny default)',
         '(allow process-exec process-fork sysctl-read mach-lookup mach-task-name)',
+        '(deny mach-lookup (global-name "com.apple.SecurityServer") '
+        '(global-name-regex #"^com\\.apple\\.(securityd|secd)(\\.|$)") '
+        '(global-name-regex #"^com\\.apple\\.security\\."))',
         '(allow signal (target same-sandbox))',
         '(allow process-info*)',
         '(allow file-read-metadata)',
@@ -408,8 +477,8 @@ def main():
                       jobs=plan(workflow, (runner.snapshot / 'scripts/ci/cli.sh').read_text(), selected))
         # Real unrelated fixtures, never the owner's files or processes. Refuse
         # all checks unless reads/signals outside this sandbox are denied.
-        canary = Path('/private/tmp') / ('hn7fg-canary-' + str(os.getpid()))
-        canary.write_text('synthetic out-of-sandbox canary')
+        canary = Canary('/private/tmp')
+        report['canary_created_exclusively'] = True
         unrelated = subprocess.Popen(['/bin/sleep', '60'])
         probe_body = '''python3 - <<'PYPROBE'
 import os,pathlib,signal,subprocess
@@ -423,7 +492,8 @@ else:raise AssertionError('outside process signal allowed')
 p=subprocess.Popen(['/bin/sleep','20']);p.terminate();p.wait(timeout=5)
 print('private home; outside content/signal refused; own child reaped')
 PYPROBE
-'''.replace('CANARY', repr(str(canary))).replace('UNRELATED', str(unrelated.pid))
+'''.replace('CANARY', repr(str(canary.path))).replace('UNRELATED', str(unrelated.pid))
+        probe_body += "python3 - <<'PYCREDENTIAL'\n" + CREDENTIAL_PROBE + "\nPYCREDENTIAL\n"
         probe = dict(name='Mac sandbox startup', index=-1, env={}, directory='.', timeout=30,
                      body=probe_body)
         probe_job = dict(id='sandbox', steps=[probe])
@@ -431,10 +501,13 @@ PYPROBE
         try:
             runner.check(probe_job, probe, runner.snapshot, probe_home)
         finally:
-            canary.unlink()
+            canary_clean = canary.close()
+            report['canary_original_cleanup'] = canary_clean
             if unrelated.poll() is None:
                 unrelated.terminate()
             unrelated.wait(timeout=5)
+            if not canary_clean:
+                raise RuntimeError('canary changed; replacement retained, no tests started')
         report['isolation_probe'] = probe
         if probe['status'] != 'pass':
             raise RuntimeError('Mac sandbox startup failed; no tests started')

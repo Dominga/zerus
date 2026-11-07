@@ -933,6 +933,55 @@ fn diagnostics_redact_credentials() {
 }
 
 #[test]
+fn explicit_destinations_ignore_matching_folder_and_swarm_inference() {
+    use zerus_client_core::launch::{Form, INBOX, INBOX_PREVIEW};
+    let projects = vec![
+        Project {
+            id: INBOX.into(),
+            name: "General".into(),
+            folders: vec![],
+        },
+        Project {
+            id: "zerus".into(),
+            name: "Zerus".into(),
+            folders: vec![ProjectFolder {
+                machine: String::new(),
+                path: "/home/example".into(),
+            }],
+        },
+        Project {
+            id: "other".into(),
+            name: "Other".into(),
+            folders: vec![],
+        },
+    ];
+    for evidence in [
+        json!({"path":"/home/example"}),
+        json!({"path":"/home/example","project_inference":{"schema":1,"swarm_id":"S","project_id":"zerus"}}),
+    ] {
+        for (group, implicit, expected, name) in [
+            (INBOX, false, INBOX, "General"),
+            ("other", false, "other", "Other"),
+            (INBOX, true, "zerus", "Zerus"),
+        ] {
+            let mut plan = json!({"group":group,"implicit_inbox":implicit,"swarm":"S","host":""});
+            assert_eq!(
+                place(&mut plan, &evidence, &projects).unwrap().group,
+                expected
+            );
+            assert_eq!(plan["group_name"], name);
+            let shown = zerus_client_core::launch::shown(&Form {
+                path: "/home/example".into(),
+                implicit_inbox: implicit,
+                ..Form::default()
+            });
+            let preview = shown.preview.map(|text| text.english()).unwrap_or_default();
+            assert_eq!(preview == INBOX_PREVIEW, implicit);
+        }
+    }
+}
+
+#[test]
 fn repository_addresses_without_secrets_are_kept() {
     for (url, safe) in [
         ("git@example.com:r.git", true),

@@ -195,6 +195,10 @@ elsewhere = [
     "tray/tests/test_nativeuiplugin.cpp",
 ]
 resources = "gui"
+# The installed queue runs ctest on a prebuilt folder without building the
+# merged commit, so on Windows the suite is recorded as not run here; the
+# fork's Windows CI runs only cargo tests. Remove once the queue builds it.
+platforms = ["linux", "macos"]
 
 # The Python suites: a test runs when a file it names or imports changes; the
 # integration tests that start target/debug/hgs run for every CLI change.

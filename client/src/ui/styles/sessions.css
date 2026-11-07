@@ -109,6 +109,8 @@
   .sc-foot { top: 62px; height: 20px; font-size: 10px; color: var(--z-list-muted); }
   .sc-title { flex: 0 1 auto; font-size: 14px; font-weight: 600; line-height: 21px; }
   .sc-mute { flex: none; margin-right: 4px; color: var(--z-list-badge-muted); }
+  /* The crossed bell sits right after the name (owner, 2026-11-08). */
+  .sc-title + .sc-mute { margin-left: 6px; margin-right: 0; }
   .sc-l1 > .sbadge { margin-left: 8px; flex-shrink: .001; }
   .sc-l1 > .sc-title { flex-shrink: 1; }
   .sc-extra { display: contents; }
@@ -232,6 +234,9 @@
   .scard.compact .sc-title { flex: 1 1 auto; line-height: 22px; }
   .scard.compact .sbadge { flex-shrink: .001; }
   .scard.compact .sbadge, .scard.compact .agent-badge, .scard.compact .sc-mute { margin-left: 6px; margin-right: 0; }
+  /* A muted row: the name keeps its width and the bell after it takes the rest. */
+  .scard.compact .sc-title:has(+ .sc-mute) { flex: 0 1 auto; }
+  .scard.compact .sc-title + .sc-mute { margin-right: auto; }
   /* A compact parent (zerus-sa9qn): a second line sums up its child sessions. */
   .scard.compact .cc-line { display: contents; }
   .scard.compact.two { flex-direction: column; align-items: stretch; padding-top: 3px; padding-bottom: 3px; }
@@ -266,13 +271,12 @@
 
   /* Native child rows: 64 px, card indented 24 px, the prototype's tree lines. */
   .child-row { position: absolute; inset: 0; }
+  /* A native subagent is a compact row that never expands (zerus-sa9qn.16). */
   .child-row .scard.child { left: 26px; top: 4px; bottom: 6px; }
-  .child-row .scard.child .sc-l1 { top: 4px; }
-  .sc-child-detail { position: absolute; left: 11px; right: 10px; top: 29px; height: 18px; font-size: 11px; color: var(--z-list-muted); line-height: 18px; }
   .child-row .tree { position: absolute; left: 14px; top: 0; bottom: 0; width: 10px; pointer-events: none; }
   .child-row .tree::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 1px; background: var(--z-list-tree-line); }
-  .child-row.last .tree::before { bottom: auto; height: 25px; }
-  .child-row .tree::after { content: ""; position: absolute; left: 0; top: 23px; width: 9px; height: 8px; border-left: 1px solid var(--z-list-tree-line); border-bottom: 1px solid var(--z-list-tree-line); border-bottom-left-radius: 6px; }
+  .child-row.last .tree::before { bottom: auto; height: 13px; }
+  .child-row .tree::after { content: ""; position: absolute; left: 0; top: 11px; width: 9px; height: 8px; border-left: 1px solid var(--z-list-tree-line); border-bottom: 1px solid var(--z-list-tree-line); border-bottom-left-radius: 6px; }
   .rowhit.has-kids-open::after { content: ""; position: absolute; left: 14px; bottom: 0; height: 6px; width: 1px; background: var(--z-list-tree-line); }
   :root[data-tree-lines="indent"] .child-row .tree, :root[data-tree-lines="indent"] .rowhit.has-kids-open::after { display: none; }
 

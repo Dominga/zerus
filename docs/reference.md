@@ -730,9 +730,16 @@ the catalog lock, and a launch without a readable identity records no parent.
 The desktop session list nests a child under its parent when both are shown in
 the same project group, 26 px per level up to three levels, with a connector
 from the parent above. The parent's footer shows **Team** with working and all
-child sessions (`2 of 5`); it collapses or expands them for this window, and
-Left and Right do the same from the keyboard, Left then moving from a child to
-its parent. Nesting stops after eight levels; a deeper child starts at top
+child sessions and native subagents together, working of all (`2 of 5`); this
+one toggle shows or hides both (owner, 2026-11-07, zerus-sa9qn.16), and Left
+and Right do the same from the keyboard, Left then moving from a child to its
+parent. A native subagent row looks like a compact session row (the agent's
+tile, its name and status, the summary as its tooltip) and never expands. This
+device remembers a collapsed parent across relaunches by its computer's machine
+UUID and session ID (`sessions/collapsedTeams`, at most 2048 parents, the oldest
+forgotten first), so a rename, resume or restart keeps the choice; a parent
+without those IDs keeps it for this window only. A child row's compact or full
+form is remembered like any row's. Nesting stops after eight levels; a deeper child starts at top
 level again. A child whose parent is not shown above it stays at top level with
 **from PARENT**, which opens the parent when it is listed. A parent is matched by
 its computer's machine UUID and session ID, or by conversation for a parent an
@@ -771,9 +778,10 @@ own mark, still counts. A person-only request notifies as for any session.
 When the parent is paused, stopped, exited, archived, not listed on the
 child's computer (including a parent on another computer) or gone, the child
 is ordinary again: a pending request that waited quietly is announced once,
-while replies seen meanwhile are not replayed. A supervised child shows the
-crossed bell of Mute, dim, before its title (its tooltip and accessible name
-say which session supervises it); the parent's **Team**
+while replies seen meanwhile are not replayed. A supervised child shows a dim
+arrow turning down and right before its title, meaning its parent above
+handles it (its tooltip and accessible name say which session supervises it;
+owner, 2026-11-07, zerus-sa9qn.16, replacing the crossed bell); the parent's **Team**
 toggle adds **Asking** (quiet requests waiting for it) and **Needs you**
 (person-only requests), which never raise the parent's own attention.
 `client/core/tests/fixtures/supervised-attention.json` lists the cases the
@@ -1156,7 +1164,9 @@ clock stamped the links, the latest link time it handled and the children
 handled in that second (`sessions/childRowsSeen`). A computer seen for the first
 time only records its current children, so existing rows never change, and a
 row the person expands afterwards stays expanded across restarts. Turned off,
-new child rows keep the full card. A muted session keeps its mute icon in either size.
+new child rows keep the full card. A muted session keeps its mute icon in either size, right after its name; a
+supervised child shows its arrow before the name whether muted or not
+(owner, 2026-11-08).
 The folder/branch line also shows native outline Git badges: a diff with the
 number of changed/new files, upload/download with outgoing/incoming commit counts,
 and a green cloud check for a clean checkout matching its verified upstream.
@@ -6436,7 +6446,10 @@ notification preferences, waits, launches, renames, name routes, the archive
 folder and the DeepSeek and OpenCode bindings, and holds a read-only connection
 to the Activity journal. A changed binding, or new journal rows of its session,
 derives only that session's row again, through the steps and under the lock of
-the listing. Any other change lists all rows again. Both wait 150 ms after a
+the listing; every row's parent state is then read again from all listed rows,
+so a derived child never reads its listed parent as missing and a parent's
+change reaches its children at once (zerus-sa9qn.16). Any other change lists
+all rows again. Both wait 150 ms after a
 change and start at most every 500 ms and at most once per four durations of
 the previous one. Every 5 s the stream probes what no file shows: tmux sessions
 that start, end, are renamed, attached or detached, exited agent processes,

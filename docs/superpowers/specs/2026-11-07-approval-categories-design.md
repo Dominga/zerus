@@ -20,6 +20,13 @@ A request gets its category from the tool name in the verified native
 question, as the provider reports it. Matching is exact against a fixed table.
 Zerus never parses commands, paths or free text to pick a category.
 
+Coordinator correction, 2026-11-07 (design-tima2): an eighth category,
+**Other tools**, covers every verified one-time permission whose tool is not
+in the table, is ambiguous or cannot be read. It is on by default, so
+"everything except paid" keeps approving new or unlisted tools. Paid always
+wins: a request that is paid by tool, by a paid name hint or by the cold-cache
+rule also needs `paid`, whatever else it matches.
+
 | ID | Label | Claude (`questions[0].header` = hook `tool_name`) | OpenCode 2 (permission `action`) | DeepSeek dsh (`toolName`) |
 |---|---|---|---|---|
 | `read` | Read files and search | Read, Glob, Grep, LS, LSP, NotebookRead | read, glob, grep, list, lsp | read, read_image, glob, grep, terminal_list, terminal_read, job_list, job_output |
@@ -28,6 +35,7 @@ Zerus never parses commands, paths or free text to pick a category.
 | `web` | Web pages | WebFetch | webfetch | web_fetch |
 | `mcp` | MCP tools | `mcp__<server>__<tool>`, ListMcpResourcesTool, ReadMcpResourceTool | none (see below) | `mcp__<server>__<tool>` |
 | `agents` | Subagents and skills | Agent, Task, Skill, Workflow | subagent, skill | skill, subagent, workflow, spawn_teammate, send_message, interrupt_agent, wait_agent |
+| `other` | Other tools | any other verified tool | any other action, every underscored action, a card without `permission_action` | any other tool, an unreadable card |
 | `paid` | Paid usage | WebSearch | websearch | web_search |
 
 Where each name comes from:
@@ -45,12 +53,14 @@ Where each name comes from:
   tool actions are `${server}_${tool}` with no prefix. They can equal a
   built-in name that contains `_` (an MCP server `external` with a tool
   `directory` yields `external_directory`). So only underscore-free OpenCode
-  actions are classified. `external_directory`, `experimental_image_generate`,
-  `opencode_*` and all MCP tools stay manual. Today the card has the action
-  only as the first line of `prompt`. The CLI will add an exact
-  `permission_action` field (`src/state/opencode/forms.rs`). The classifier
-  requires that field and also requires the prompt's first line to equal it.
-  A card from an older peer, without the field, stays manual.
+  actions get a specific category. `external_directory`,
+  `experimental_image_generate`, `opencode_*` and all MCP tools are Other.
+  Today the card has the action only as the first line of `prompt`. The CLI
+  will add an exact `permission_action` field (`src/state/opencode/forms.rs`).
+  A specific category needs that field, and the prompt's first line must equal
+  it. A card from an older peer, without the field, is Other. Either the field
+  or the prompt's first line naming a paid action (`websearch`,
+  `experimental_image_generate`) also requires `paid`.
 - **DeepSeek.** Our bridge (`src/dsh/bridge.mjs`) turns each `approval/request`
   into item `decision` with header `Approval required` and question
   `Allow ${toolName}?`. The dsh pipeline (`dsh-tools`, `serviceAsk`) sets
@@ -60,11 +70,12 @@ Where each name comes from:
   format, with the name matching `^[A-Za-z0-9_-]{1,128}$`. Changing the
   bridge would need a DeepSeek host restart, and live hosts are never
   hot-reloaded. Parsing our own fixed format works for running hosts too.
-- **Any other tool stays manual, in every category setting.** That covers
-  tools missing from the table and malformed names. In Claude it includes
-  Artifact, ShareOnboardingGuide, Cron*, RemoteTrigger and SendUserFile. In
-  OpenCode it includes question, todowrite and every underscored action. This
-  is a deliberate narrowing compared with today's single switch.
+  A card that does not match it is Other.
+- **Any other tool is Other.** That covers tools missing from the table,
+  ambiguous and malformed names. In Claude it includes Artifact,
+  ShareOnboardingGuide, Cron*, RemoteTrigger and SendUserFile. In OpenCode it
+  includes question, todowrite and every underscored action. With Other off,
+  such requests stay manual.
 
 **Shell commands are one category.** Zerus does not try to detect destructive
 commands. Quoting, aliases, scripts and `eval` make text checks unreliable,
@@ -83,8 +94,8 @@ can keep them manual:
 - **OpenCode websearch.** It searches through "the user's selected search
   integration" (`websearch:provider`), an external provider. OpenCode's image
   generation (`experimental_image_generate`, billed per image) is paid as
-  well. Its underscored name cannot be told apart from an MCP tool, so it
-  stays manual whatever the categories say.
+  well. Its underscored name cannot be told apart from an MCP tool, so it is
+  Other and, because its name is a paid hint, also needs `paid`.
 - **DeepSeek web_search.** `@deepseek-ai/dsh-web-search-deepseek` runs
   DeepSeek's server-side search, and its documentation says: "Each search
   costs a model turn".
@@ -115,12 +126,12 @@ category's description says some servers bill per call.
 - The master switch keeps its key, its default (off) and its confirmation
   dialog. The category choices are separate. They can be set while the switch
   is off and take effect only while it is on.
-- Default categories: all except `paid`, as in the owner's example.
+- Default categories: all except `paid`, as in the owner's example. `other`
+  is on by default.
 - Migration: existing enabled users get the default (all except `paid`), not
   "all on". This matches what the owner asked for and is the narrower choice.
-  The existing warning already tells people paid usage is risky. Together
-  with the unknown-tool rule, an upgrade can only make fewer requests
-  auto-approve.
+  The existing warning already tells people paid usage is risky. With Other
+  on, an upgrade only stops paid and cold-cache requests from auto-approving.
 - Category flags are stored per category, so a category added later defaults
   to off unless it is explicitly given another default.
 
@@ -170,9 +181,11 @@ background service (`src/desktop/delivery.rs`) both call this core function.
   (label plus a one-line description, using the existing `Switch` and
   keyboard handling). The descriptions say what is included. Shell commands
   includes any command, including ones that delete data. MCP tools notes that
-  some servers bill per call. Paid usage covers web search, image generation
-  and cold-cache resumes. A line under the list says that unrecognized tools
-  always stay manual. The hint and confirmation texts mention categories.
+  some servers bill per call. Other tools says it includes tools Zerus cannot
+  classify, possibly paid ones. Paid usage covers web search, image
+  generation and cold-cache resumes, and says it is needed even when another
+  category matches. The hint and confirmation texts mention categories, and
+  docs/reference.md lists the final categories.
   The Russian catalog is regenerated. No dot separators.
 - Journal: `begin` stores `categories` inside the existing JSON `question`
   column (no journal schema change). `list` returns it through

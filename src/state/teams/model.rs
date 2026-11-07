@@ -609,6 +609,9 @@ pub(crate) struct Member {
     /// H6: a swapped member's new session starts even before its next task.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub launch_after_swap: bool,
+    /// Task 135: the fresh session of a swap has not had its handoff brief yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<HandoffNeed>,
     /// Owner feedback 2026-11-04 (14): the session a swap replaced, which the
     /// dispatcher pauses and renames before the new session takes the same
     /// name; None once it is set aside or gone.
@@ -1089,6 +1092,50 @@ pub(crate) struct Continuation {
     pub report: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub questions: Vec<String>,
+}
+
+/// Task 135: what a fresh session of a member still has to be told. Set by a
+/// swap (a new agent, model or account ends the old session) and cleared when
+/// the handoff brief goes out with the session's first message.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct HandoffNeed {
+    /// `swap` today; the reason the brief is written.
+    pub why: String,
+    pub at: f64,
+    /// The session the member was swapped away from.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub from: String,
+    /// What the swap changed, as `agent claude -> kimi`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<String>,
+}
+
+/// Task 135: one handoff brief, kept with the team (so it survives a restart of
+/// the home computer). The latest of a task is kept while the team is; the older
+/// versions of a task are dropped when the task closes.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Handoff {
+    /// The task the brief is for; 0 when the member held none.
+    pub task: u32,
+    pub version: u32,
+    /// The member's role.
+    pub member: String,
+    pub why: String,
+    pub at: f64,
+    pub text: String,
+    /// The task's control questions the text cannot answer (empty when it can).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub misses: Vec<String>,
+}
+
+/// Task 135: a control question written with a task, and the strings an
+/// answer to it holds: a fresh session given only the brief answers it when the
+/// brief holds one of them (as the retrieval bench judges an answer).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Control {
+    pub q: String,
+    #[serde(default)]
+    pub keys: Vec<String>,
 }
 
 /// A member's pending native question as Zerus read it (C2): the lead answers
@@ -1645,6 +1692,10 @@ pub(crate) struct Task {
     pub check: Option<Check>,
     #[serde(default)]
     pub criteria: Vec<String>,
+    /// Task 135: questions a fresh session must answer from the task's handoff
+    /// brief alone, each with the strings an answer holds. At most 12.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub control: Vec<Control>,
     #[serde(default)]
     pub deps: Vec<Dependency>,
     /// Task #60 (owner, 2026-11-06): the task this one was added for (a missed
@@ -2399,6 +2450,10 @@ pub(crate) struct Team {
     /// 20: {member, old, at, by}. The old session keeps running for the owner.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub swapped: Vec<serde_json::Value>,
+    /// Task 135: the handoff briefs, oldest first (at most 20 versions per task
+    /// and 200 in all; see `handoff::record`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handoffs: Vec<Handoff>,
     /// Section 9.1: the parent team and task this sub-team was delegated
     /// from; absent on a master (or any flat) team.
     #[serde(default, skip_serializing_if = "Option::is_none")]

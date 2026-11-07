@@ -3,6 +3,7 @@
 //! to free members and forwards reports to the lead. A hand-off is recorded
 //! before it is sent and never sent again once it may have arrived.
 use super::super::*;
+use super::handoff;
 use super::inbox;
 use super::model::*;
 use super::ops;
@@ -4669,6 +4670,9 @@ fn hand_out_now(
     let mut note = String::new();
     let mut extra = String::new();
     let mut git_job: Option<(String, f64)> = None;
+    // Task 135: a fresh session's first message carries the handoff brief.
+    let recent = recent_events(store, team_id);
+    let mut handoff: Option<(handoff::Built, String)> = None;
     change(store, team_id, |team, events| {
         // U46: the confirmed wait is done; this hand-out replaces it.
         if resume {
@@ -4768,6 +4772,14 @@ fn hand_out_now(
         message = Some((session, hand_off_text_rules(team, task, task.attempts.last().unwrap(), host, &member_host, &extra,
                 &rules,
             )));
+        if let Some(need) = team.member(member_id).and_then(|member| member.handoff.clone()) {
+            let pulses = handoff::pulse_lines(team, member_id, &recent, now());
+            let built = handoff::build(team, member_id, handoff::Why::Swap(&need), &pulses, handoff::BRIEF_UNITS);
+            if let Some((_, text)) = message.as_mut() {
+                *text = format!("{}\n{}", built.text, text);
+            }
+            handoff = Some((built, need.why));
+        }
         // D2: the finding goes with this one hand-out only.
         if !task.reopen_note.is_empty() {
             if let Some(task) = team.task_mut(task_id) {
@@ -4818,8 +4830,36 @@ fn hand_out_now(
                 events.push(Event::new("unconfirmed", json!({"task":task_id,"attempt":n,"error":error})));
             }
         }
+        if !matches!(outcome, Sent::Refused(_)) {
+            if let Some((built, why)) = &handoff {
+                handoff_sent(team, events, member_id, built, why);
+            }
+        }
         Ok(())
     })
+}
+
+/// Task 135: the brief went out with the session's first message (a refused
+/// send leaves it pending): keep it with the team as the task's next version,
+/// clear what the seat still had to be told, and say so in the journal; a brief
+/// that cannot answer a control question of its task is a `handoff_gap` the lead
+/// can see.
+fn handoff_sent(team: &mut Team, events: &mut Vec<Event>, member_id: &str, built: &handoff::Built, why: &str) {
+    let role = team.role_of(member_id);
+    handoff::record(team, built, member_id, why, now());
+    if let Some(member) = team.members.iter_mut().find(|member| member.id == member_id) {
+        member.handoff = None;
+    }
+    events.push(Event::new("handoff_sent", json!({"member":role,"task":built.task,"why":why,"units":built.text.encode_utf16().count()})));
+    if !built.misses.is_empty() {
+        events.push(Event::new("handoff_gap", json!({"member":role,"task":built.task,"questions":built.misses})));
+    }
+}
+
+/// Task 135: the team's last journal items, newest first, for the pulse lines
+/// of a brief; a journal that cannot be read gives none.
+fn recent_events(store: &Store, team_id: &str) -> Vec<Value> {
+    store.events(team_id, None, 60).ok().and_then(|page| page["items"].as_array().cloned()).unwrap_or_default()
 }
 
 /// U36: gives the task's waiting stage to `member` and sends the stage
@@ -6780,19 +6820,35 @@ fn send_brief(store: &mut Store, team_id: &str) -> anyhow::Result<()> {
     )?;
     let brief_id = uuid::Uuid::new_v4().to_string();
     let mut message = None;
+    // Task 135: a swapped lead's first message starts with the handoff brief.
+    let recent = recent_events(store, team_id);
+    let mut handoff: Option<(handoff::Built, String)> = None;
     change(store, team_id, |team, _| {
         anyhow::ensure!(team.brief == Notice::Pending, "already briefed");
         let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
-        message = Some((lead, brief_text_rules(team, &rules)));
+        let mut text = brief_text_rules(team, &rules);
+        if let Some(need) = team.member(&team.lead).and_then(|member| member.handoff.clone()) {
+            let pulses = handoff::pulse_lines(team, &team.lead, &recent, now());
+            let built = handoff::build(team, &team.lead, handoff::Why::Swap(&need), &pulses, handoff::BRIEF_UNITS);
+            text = format!("{}\n{}", built.text, text);
+            handoff = Some((built, need.why));
+        }
+        message = Some((lead, text));
         team.brief = Notice::Sending;
         team.brief_id = brief_id.clone();
         Ok(())
     })?;
     let (lead, text) = message.unwrap();
     let outcome = send(&lead, &brief_id, &text);
+    let lead_id = rules_team.lead.clone();
     change(store, team_id, |team, events| {
         if team.brief != Notice::Sending || team.brief_id != brief_id {
             return Ok(());
+        }
+        if !matches!(outcome, Sent::Refused(_)) {
+            if let Some((built, why)) = &handoff {
+                handoff_sent(team, events, &lead_id, built, why);
+            }
         }
         team.brief = match &outcome {
             Sent::Delivered => Notice::Sent,
@@ -8513,6 +8569,10 @@ fn ensure_worker_now() -> anyhow::Result<()> {
 #[cfg(test)]
 #[path = "models_tests.rs"]
 mod models_tests;
+
+#[cfg(test)]
+#[path = "handoff_tests.rs"]
+mod handoff_tests;
 
 
 #[cfg(test)]

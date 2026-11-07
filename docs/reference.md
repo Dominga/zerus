@@ -429,6 +429,32 @@ account; a busy old session is never interrupted, and that member keeps the
 reason in its error ("waiting for the old session to finish its turn"). `team
 status` names each member's real account in `session_account`.
 
+A new session of a team member is briefed (task 135). When `swap-member` gives a
+seat a new session - another agent, model or account, an adopted session or a
+fresh one, the lead included - Zerus builds a **handoff brief** from the team's
+own record, never from the old session: the goal; the seat's task with its
+criteria, files, needs and the previous attempt's partial report and open
+questions; what is done and decided; what else is open and which findings are
+open; and the seat's last pulses (its recent journal items). It starts the new
+session's first message, ahead of the task hand-out (or the lead's brief for a
+lead), is at most 6,000 UTF-16 units and is cut by section, never in the middle
+of the seat's own task. The journal says `handoff_sent`. A refused send keeps
+it pending for the next try; a switch that keeps the session and its
+conversation (the bulk account switch, a model switch) sends none, and a seat
+that is not new is never briefed again. A session whose context was compacted or
+cleared (the SessionStart sources `compact` and `clear`) gets the same brief in
+recall form as start context, at most 3,000 units and only what the iron rules
+and the hint leave of the 8,000-unit start context. A task may carry `control`:
+up to 12 questions, each with 1 to 6 strings an answer holds (`{"q":"which file
+holds the endpoint?","keys":["src/api/items.rs"]}`); a brief that holds none of
+a question's strings is a `handoff_gap` in the journal, naming the questions, so
+a brief nobody could use does not go out unnoticed. The brief is kept with the
+team, so it survives a restart of the home computer: the latest of a task stays
+while the team record does, the older versions of a task go when it closes, at
+most 20 versions of a task and 200 briefs are kept. `hgs team handoff [TASK]
+[--team ID] [--version N]` reads them: the latest of every task, or one task's
+text with its versions and the questions it missed.
+
 On the desktop, the team workspace's member menu has **Move to another
 account…**: choose the agent, the account to leave and the one to move to; the
 dialog lists the members it takes, asks once, and shows each one's progress

@@ -1793,7 +1793,9 @@ fn service_catalog_completion_populates_the_tray_like_the_gui_with_device_attent
             let mut desk = desk.lock().unwrap();
             assert_eq!(desk.total(), 2);
             assert_eq!(desk.attention(), 1, "the device's review mark is included");
-            assert_eq!(desk.face(), Face::counts(2, 1, false));
+            // The icon shows the active sessions (core menubar tests pin the rule).
+            assert!(desk.active() <= desk.total());
+            assert_eq!(desk.face(), Face::counts(desk.active(), 1, false));
             assert_eq!(desk.badge().as_deref(), Some("1"));
             assert_eq!(
                 desk.tooltip()
@@ -1817,7 +1819,7 @@ fn service_catalog_completion_populates_the_tray_like_the_gui_with_device_attent
             ));
             assert!(desk.computers()[&ComputerId::from("studio")].fresh());
             desk.set_marks(DeviceMarks::default());
-            assert_eq!(desk.face(), Face::counts(2, 0, false));
+            assert_eq!(desk.face(), Face::counts(desk.active(), 0, false));
             assert!(desk.badge().is_none());
         }
         service.join().await.unwrap();

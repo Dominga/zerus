@@ -1,6 +1,17 @@
 import type { AccountEditView,AccountModelCatalog } from "../../bridge";
 import { providerName } from "../lib/usage";
-import { tr } from "../../i18n";
+import { tr, uiLanguage } from "../../i18n";
+
+/** Computer names as one phrase in the UI language: "arch, mac and va-kids". */
+export function computerList(names: readonly string[], language: string = uiLanguage()) {
+  try { return new Intl.ListFormat(language, { style: "long", type: "conjunction" }).format(names); }
+  catch { return names.join(", "); }
+}
+/** Where an account edit saves: the selected computer, or every one it reaches (zerus-f0uz8). */
+export function savesOn(view: Pick<AccountEditView, "label" | "machine" | "machines">) {
+  const machines = view.machines?.length ? view.machines : [view.machine];
+  return machines.length > 1 ? tr("%1 on %2", view.label, computerList(machines)) : tr("%1 on %2", view.label, machines[0]);
+}
 
 export function permissionExplanation(view:AccountEditView,mode:string) {
   return mode==="provider" ? tr("Inherit %1 settings on %2. %3", providerName(view.provider), view.machine, view.permission_mode==="bypass" ? "" : view.permission_detail??"")

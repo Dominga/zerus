@@ -4252,8 +4252,14 @@ known session inventory; live-work filters still require current work evidence.
 ### Accounts
 
 In **Accounts → Model and effort…**, save the model and reasoning effort for new
-conversations with the selected account on that computer. Codex and Claude offer
-only models and effort levels from that account's native catalog. Open the agent
+conversations with the selected account. One account has one model and effort
+(owner, 2026-11-07, zerus-f0uz8): saving applies on every computer that has the
+account, the selected one first, and lists where it saved and where it failed,
+such as an offline computer. When the computers differ, the account shows
+**Differs between computers** with **Use everywhere**, which saves the selected
+computer's choice on all of them. Codex and Claude offer
+only models and effort levels from the selected computer's native catalog; each
+other computer checks the choice against its own catalog. Open the agent
 once and refresh Accounts if its catalog is empty. **Provider settings** removes
 the Zerus override; the dialog also shows readable native account defaults.
 Kimi supports a launch model choice; its effort remains controlled by Kimi's
@@ -4267,6 +4273,24 @@ The CLI is `hgs [@host] account model-settings ID` to inspect the catalog and
 to save a choice. Omit effort to inherit the selected model's provider default;
 pass `--model ''` to return to provider settings. Revisions prevent overwriting
 another account edit made while the dialog was open.
+
+The Zerus permission mode (**Permissions: … Change…**) is likewise shared by every
+computer with the account by default, with the same per-computer results and
+**Use everywhere** mark. **Keep per computer…** switches the account to
+per-computer permissions, for example bypass on one computer only: then
+**Change…** saves only on the selected computer, the row names it, and
+**Share across computers…** switches back. The account says which mode it is in.
+Each computer keeps the choice as `permission_scope` in its `account ls` rows
+(`account` or `computer`, from `account-scopes.json` beside `accounts.json`,
+which older hgs builds never read); any computer that keeps permissions per
+computer makes the whole account per computer, so a change never spreads by
+accident. `hgs [@host] account permission-scope ID --scope account|computer
+[--revision REV]` sets it on one computer; `account ls` reports
+`permission_scope_supported: true` where it is available. An unreadable scope
+record reads as per computer. **Add to machine…** copies the selected computer's model
+and effort, and a shared bypass mode, to the new profile; a computer whose
+catalog refuses one names it in the result, and the account shows the
+difference.
 
 Accounts collects provider profiles from connected machines. Verified provider
 account ID, or email with organization, groups the same account across hosts;

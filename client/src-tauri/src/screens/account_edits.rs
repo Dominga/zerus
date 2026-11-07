@@ -26,6 +26,8 @@ struct Plan {
 struct Target {
     machine: String,
     binding: Result<Binding, String>,
+    /// The computer's hgs keeps a permission scope (zerus-f0uz8).
+    scope_supported: bool,
 }
 #[derive(Clone, Serialize)]
 pub struct EditView {
@@ -37,6 +39,15 @@ pub struct EditView {
     permission_mode: String,
     permission_detail: String,
     models: Option<ModelCatalog>,
+    /// Every computer this edit saves on, the selected one first: a model,
+    /// a shared permission mode or the scope reach all of the account's
+    /// computers (zerus-f0uz8).
+    machines: Vec<String>,
+    /// Those computers' current values differ, so saving the shown value
+    /// is a change even when it equals the selected computer's.
+    differs: bool,
+    /// The account keeps its permission mode per computer.
+    per_computer: bool,
 }
 #[derive(Serialize)]
 pub struct EditResult {
@@ -115,10 +126,31 @@ impl Screens {
         if kind == Kind::Model && !selected.model_supported {
             return Err("This agent manages model defaults in its native settings.".into());
         }
-        let members: Vec<_> = if kind == Kind::Rename {
-            group.members.iter().collect()
-        } else {
-            vec![selected]
+        if kind == Kind::Scope && selected.provider == "opencode" {
+            return Err("OpenCode permissions are managed in its native configuration".into());
+        }
+        // One model and effort per account, and one permission mode unless
+        // the account keeps it per computer (owner, 2026-11-07). The selected
+        // computer comes first: its model catalog validates the choice.
+        let fan_out = |keep: &dyn Fn(&&accounts::Profile) -> bool| {
+            std::iter::once(selected)
+                .chain(group.members.iter().filter(|m| m.key != selected.key))
+                .filter(keep)
+                .collect::<Vec<_>>()
+        };
+        let members: Vec<_> = match kind {
+            Kind::Rename => group.members.iter().collect(),
+            Kind::Model => fan_out(&|m| m.model_supported),
+            Kind::Permissions if !group.permissions_per_computer => {
+                fan_out(&|m| m.provider != "opencode")
+            }
+            Kind::Scope => fan_out(&|m| m.provider != "opencode"),
+            _ => vec![selected],
+        };
+        let differs = match kind {
+            Kind::Model => group.model_differs,
+            Kind::Permissions => group.permission_differs && !group.permissions_per_computer,
+            _ => false,
         };
         if members.len() > account_actions::MAX_MEMBERS {
             return Err(account_actions::CHANGED.into());
@@ -153,9 +185,16 @@ impl Screens {
             .chars()
             .take(2000)
             .collect();
+        let machines_shown: Vec<String> = members.iter().map(|m| m.machine.clone()).collect();
         let targets: Vec<Target> = members
             .into_iter()
             .map(|member| {
+                let scope_supported = hub
+                    .accounts
+                    .catalogs
+                    .get(&member.host)
+                    .and_then(|s| s.data.as_ref())
+                    .is_some_and(|catalog| catalog["permission_scope_supported"] == true);
                 let binding = (|| {
                     if !member.online {
                         return Err(format!("{} is offline.", member.machine));
@@ -184,6 +223,7 @@ impl Screens {
                 Target {
                     machine: member.machine.clone(),
                     binding,
+                    scope_supported,
                 }
             })
             .collect();
@@ -204,6 +244,9 @@ impl Screens {
             permission_mode,
             permission_detail,
             models: models.clone(),
+            machines: machines_shown,
+            differs,
+            per_computer: group.permissions_per_computer,
         };
         let mut edits = self
             .0
@@ -312,7 +355,21 @@ impl Screens {
             errors: Vec::new(),
         };
         let mut own_revisions: BTreeMap<ComputerId, (String, String)> = BTreeMap::new();
+        // Computers saved by a model, permission or scope edit: one notice
+        // names them all; each failure keeps its own computer.
+        let mut saved: Vec<String> = Vec::new();
         for target in plan.targets {
+            if plan.kind == Kind::Scope && !target.scope_supported {
+                // An older computer keeps no scope: sharing needs nothing
+                // there, but per-computer permissions need a newer hgs.
+                if values.mode != "account" {
+                    reply.errors.push(format!(
+                        "{}: Update hgs there to keep its permissions per computer.",
+                        target.machine
+                    ));
+                }
+                continue;
+            }
             let error_machine = target
                 .binding
                 .as_ref()
@@ -361,18 +418,14 @@ impl Screens {
             match result {
                 Ok((computer, original, current)) => {
                     own_revisions.insert(computer, (original, current));
+                    if matches!(plan.kind, Kind::Model | Kind::Permissions | Kind::Scope) {
+                        saved.push(target.machine.clone());
+                        continue;
+                    }
                     reply.notices.push(match plan.kind {
-                        Kind::Rename => continue,
+                        Kind::Rename | Kind::Model | Kind::Permissions | Kind::Scope => continue,
                         Kind::Default => format!(
                             "Default account saved for new sessions on {}.",
-                            target.machine
-                        ),
-                        Kind::Permissions => format!(
-                            "Permission mode saved for new and resumed sessions on {}.",
-                            target.machine
-                        ),
-                        Kind::Model => format!(
-                            "Model defaults saved for new sessions on {}.",
                             target.machine
                         ),
                         Kind::Remove => format!(
@@ -394,8 +447,30 @@ impl Screens {
         if plan.kind == Kind::Rename && reply.errors.is_empty() {
             reply.notices.push("Account name updated.".into());
         }
+        if !saved.is_empty() {
+            let on = machine_list(&saved);
+            reply.notices.push(match plan.kind {
+                Kind::Model => format!("Model defaults saved for new sessions on {on}."),
+                Kind::Permissions => {
+                    format!("Permission mode saved for new and resumed sessions on {on}.")
+                }
+                _ if values.mode == "computer" => {
+                    format!("Permissions are now kept per computer on {on}.")
+                }
+                _ => format!("Permissions are now shared by {on}."),
+            });
+        }
         reply.notices.dedup();
         Ok(reply)
+    }
+}
+
+/// `arch`, `arch and mac`, `arch, mac and va-kids`.
+fn machine_list(machines: &[String]) -> String {
+    match machines {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
 }
 
@@ -634,6 +709,7 @@ mod tests {
                 targets: vec![Target {
                     machine: "workstation".into(),
                     binding: Ok(binding),
+                    scope_supported: true,
                 }],
                 models: Some(ModelCatalog {
                     models: Vec::new(),
@@ -687,10 +763,12 @@ mod tests {
                     Target {
                         machine: "studio".into(),
                         binding: Err("offline".into()),
+                        scope_supported: true,
                     },
                     Target {
                         machine: "other".into(),
                         binding: Err("must not run".into()),
+                        scope_supported: true,
                     },
                 ],
             },
@@ -768,10 +846,12 @@ mod tests {
                     Target {
                         machine: "workstation".into(),
                         binding: Ok(first),
+                        scope_supported: true,
                     },
                     Target {
                         machine: "workstation".into(),
                         binding: Ok(second),
+                        scope_supported: true,
                     },
                 ],
             },
@@ -804,5 +884,167 @@ mod tests {
                 .count(),
             4
         );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn model_and_shared_permissions_reach_every_computer_of_the_account() {
+        // zerus-f0uz8: one model and effort per account; one permission mode
+        // unless the account keeps it per computer.
+        use std::os::unix::fs::PermissionsExt;
+        struct Scratch(PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let scratch = Scratch(std::env::temp_dir().join(format!(
+            "zerus-account-shared-{}-{stamp}",
+            std::process::id()
+        )));
+        std::fs::create_dir(&scratch.0).unwrap();
+        let hgs = scratch.0.join("hgs");
+        std::fs::copy(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../core/tests/support/fake_hgs_account_edits.py"),
+            &hgs,
+        )
+        .unwrap();
+        std::fs::set_permissions(&hgs, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (screens, pump, first) = fixture_at(hgs);
+        let shared = |id: &str, home: &str, scope: &str| {
+            json!({"id":id,"provider":"codex","label":"Example","home":home,"auth_revision":"a1","installed":true,
+                "model_defaults_supported":true,"permission_scope":scope,
+                "account_status":{"status":"ok","identity":{"account_id":"example-account"}}})
+        };
+        let mut work = shared("work", "/accounts/example", "account");
+        work["model_defaults"] = json!({"model":"model-a","effort":"low"});
+        work["permission_mode"] = json!("bypass");
+        let catalog = json!({"revision":"r1","setup_revision":true,"permission_scope_supported":true,
+            "profiles":[work, shared("second", "/accounts/second", "account")]});
+        std::fs::write(scratch.0.join("catalog.json"), catalog.to_string()).unwrap();
+        screens
+            .lock()
+            .accounts
+            .catalogs
+            .get_mut(&first.computer)
+            .unwrap()
+            .data = Some(catalog);
+        let group = || {
+            let view = screens.accounts(false);
+            let group = view
+                .accounts
+                .iter()
+                .find(|a| a.members.len() == 2)
+                .expect("one account on two profiles")
+                .clone();
+            group
+        };
+        let account = group();
+        assert!(account.model_differs && account.permission_differs);
+        assert!(!account.permissions_per_computer);
+        let selected = account
+            .members
+            .iter()
+            .find(|m| m.id == "work")
+            .unwrap()
+            .key
+            .clone();
+        let apply = |kind: Kind, request: EditRequest| {
+            let opened = screens
+                .edit_open(&pump, &group().key, &selected, kind)
+                .unwrap();
+            let result = screens
+                .edit_apply(
+                    &pump,
+                    EditRequest {
+                        handle: opened.handle.clone(),
+                        ..request
+                    },
+                )
+                .unwrap();
+            (opened, result)
+        };
+        let (opened, result) = apply(
+            Kind::Model,
+            EditRequest {
+                model: "model-a".into(),
+                effort: "high".into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(opened.machines, ["workstation", "workstation"]);
+        assert!(opened.differs);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            result.notices,
+            ["Model defaults saved for new sessions on workstation and workstation."]
+        );
+        let saved = || -> Value {
+            serde_json::from_slice(&std::fs::read(scratch.0.join("catalog.json")).unwrap()).unwrap()
+        };
+        assert!(saved()["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["model_defaults"] == json!({"model":"model-a","effort":"high"})));
+        assert!(!group().model_differs);
+        // A shared permission mode reaches both profiles.
+        let (opened, result) = apply(
+            Kind::Permissions,
+            EditRequest {
+                mode: "bypass".into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            (opened.machines.len(), opened.differs, opened.per_computer),
+            (2, true, false)
+        );
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert!(!group().permission_differs);
+        // Per computer: the scope reaches both, then a permission edit stays
+        // on the selected computer only.
+        let (opened, result) = apply(
+            Kind::Scope,
+            EditRequest {
+                mode: "computer".into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(opened.machines.len(), 2);
+        assert_eq!(
+            result.notices,
+            ["Permissions are now kept per computer on workstation and workstation."]
+        );
+        assert!(group().permissions_per_computer);
+        let (opened, result) = apply(
+            Kind::Permissions,
+            EditRequest {
+                mode: "provider".into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!((opened.machines.len(), opened.per_computer), (1, true));
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let modes: Vec<Value> = saved()["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["permission_mode"].clone())
+            .collect();
+        assert_eq!(modes, [json!("provider"), json!("bypass")]);
+    }
+    #[test]
+    fn computer_lists_read_as_text() {
+        let list = |names: &[&str]| {
+            machine_list(&names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>())
+        };
+        assert_eq!(list(&["arch"]), "arch");
+        assert_eq!(list(&["arch", "mac"]), "arch and mac");
+        assert_eq!(list(&["arch", "mac", "va-kids"]), "arch, mac and va-kids");
     }
 }

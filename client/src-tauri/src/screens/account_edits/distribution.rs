@@ -10,6 +10,41 @@ pub(super) struct Plan {
     provider: String,
     targets: Vec<Destination>,
     sources: Vec<Source>,
+    /// The account's settings a new profile takes (zerus-f0uz8).
+    carried: Carried,
+}
+/// What Add to other computers carries to a new profile: the shown
+/// computer's model and effort, and a shared bypass permission mode. Values
+/// equal to the provider's defaults need nothing.
+#[derive(Clone, Default)]
+struct Carried {
+    model: Option<(String, String)>,
+    bypass: bool,
+}
+impl Carried {
+    fn edits(&self) -> Vec<(Kind, Values)> {
+        let mut edits = Vec::new();
+        if let Some((model, effort)) = &self.model {
+            edits.push((
+                Kind::Model,
+                Values {
+                    model: model.clone(),
+                    effort: effort.clone(),
+                    ..Default::default()
+                },
+            ));
+        }
+        if self.bypass {
+            edits.push((
+                Kind::Permissions,
+                Values {
+                    mode: "bypass".into(),
+                    ..Default::default()
+                },
+            ));
+        }
+        edits
+    }
 }
 struct Destination {
     host: HostBinding,
@@ -242,15 +277,58 @@ impl Screens {
         while edits.distributions.len() >= 8 {
             edits.distributions.pop_front();
         }
+        let carried = Carried {
+            model: (member.model_supported && !member.model.is_empty())
+                .then(|| (member.model.clone(), member.effort.clone())),
+            bypass: !selected.permissions_per_computer
+                && member.provider != "opencode"
+                && member.permission_mode == "bypass",
+        };
         edits.distributions.push_back((
             handle,
             Plan {
                 provider: selected.provider.clone(),
                 targets,
                 sources,
+                carried,
             },
         ));
         Ok(answer)
+    }
+    /// Gives a new profile the account's model and shared permission mode
+    /// (zerus-f0uz8), each as a guarded edit on the reply's revision. The
+    /// profile is added either way: a setting that could not be saved there
+    /// is named, and the Accounts screen marks that computer.
+    fn carry_settings(
+        &self,
+        carried: &Carried,
+        host: &HostBinding,
+        mut catalog: Value,
+        id: &str,
+        text: String,
+    ) -> (Value, String) {
+        let mut missed = Vec::new();
+        for (kind, values) in carried.edits() {
+            let saved =
+                Binding::capture(host.computer.clone(), host.machine_id.clone(), &catalog, id)
+                    .and_then(|binding| binding.execute_values(&self.0.hgs, kind, &values));
+            match saved {
+                Ok(next) => catalog = next,
+                Err(error) => missed.push(match kind {
+                    Kind::Model => format!("model ({error})"),
+                    _ => format!("permission mode ({error})"),
+                }),
+            }
+        }
+        if missed.is_empty() {
+            return (catalog, text);
+        }
+        let joined = if text.ends_with('.') { " " } else { ". " };
+        let note = format!(
+            "{text}{joined}Not copied: {}. Use everywhere on the Accounts screen applies it later.",
+            missed.join(", ")
+        );
+        (catalog, note)
     }
     fn distribution_apply(
         &self,
@@ -463,6 +541,8 @@ impl Screens {
                         let text=match setup::setup_terminal(dir,&self.0.hgs,&after.terminal_call("login",&id).map_err(|message|Failure{issued:true,message})?.args) {Ok(_)=>"Profile created. Complete the sign-in in a terminal on that machine.".into(),Err(error)=>format!("Profile created. Could not open agent sign-in: {error}")};
                         (catalog, "needs-signin", text)
                     };
+                    let (catalog, text) =
+                        self.carry_settings(&plan.carried, &target.host, catalog, &id, text);
                     Ok((
                         catalog,
                         state,
@@ -614,6 +694,7 @@ mod tests {
             "captured".into(),
             Plan {
                 provider: "codex".into(),
+                carried: Carried::default(),
                 targets: vec![Destination {
                     host,
                     machine: "workstation".into(),
@@ -658,6 +739,7 @@ mod tests {
             "captured".into(),
             Plan {
                 provider: "codex".into(),
+                carried: Carried::default(),
                 targets: vec![Destination {
                     host,
                     machine: "workstation".into(),
@@ -672,5 +754,95 @@ mod tests {
             .distribution_apply(&pump, std::path::Path::new("unused"), req, |_| {})
             .is_err());
         assert!(!screens.0.edits.0.lock().unwrap().busy);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn a_new_profile_takes_the_account_model_and_shared_bypass() {
+        // zerus-f0uz8: Add to other computers carries the shown computer's
+        // model and a shared bypass mode; a refused one is named, not fatal.
+        use std::os::unix::fs::PermissionsExt;
+        struct Scratch(std::path::PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let scratch = Scratch(std::env::temp_dir().join(format!(
+            "zerus-account-carry-{}-{stamp}",
+            std::process::id()
+        )));
+        std::fs::create_dir(&scratch.0).unwrap();
+        let hgs = scratch.0.join("hgs");
+        std::fs::copy(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../core/tests/support/fake_hgs_account_edits.py"),
+            &hgs,
+        )
+        .unwrap();
+        std::fs::set_permissions(&hgs, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (screens, _, binding) = super::super::tests::fixture_at(hgs);
+        let catalog = screens.lock().accounts.catalogs[&binding.computer]
+            .data
+            .clone()
+            .unwrap();
+        std::fs::write(scratch.0.join("catalog.json"), catalog.to_string()).unwrap();
+        let host = HostBinding::capture(
+            binding.computer.clone(),
+            binding.machine_id.clone(),
+            &catalog,
+        )
+        .unwrap();
+        let carried = Carried {
+            model: Some(("model-a".into(), "high".into())),
+            bypass: true,
+        };
+        let added = "Added with the saved sign-in on that machine".to_owned();
+        let (after, text) =
+            screens.carry_settings(&carried, &host, catalog.clone(), "work", added.clone());
+        assert_eq!(text, added);
+        assert_eq!(
+            after["profiles"][0]["model_defaults"],
+            serde_json::json!({"model":"model-a","effort":"high"})
+        );
+        assert_eq!(after["profiles"][0]["permission_mode"], "bypass");
+        assert_eq!(after["revision"], "r3");
+        // Nothing to carry: no call at all.
+        let calls = || {
+            std::fs::read_to_string(scratch.0.join("calls.jsonl"))
+                .unwrap()
+                .lines()
+                .count()
+        };
+        let before = calls();
+        let (same, text) = screens.carry_settings(
+            &Carried::default(),
+            &host,
+            after.clone(),
+            "work",
+            added.clone(),
+        );
+        assert_eq!(
+            (same, text, calls()),
+            (after.clone(), added.clone(), before)
+        );
+        // A model this computer's catalog lacks is named; the profile stays.
+        let refused = Carried {
+            model: Some(("model-b".into(), String::new())),
+            bypass: false,
+        };
+        let (_, text) =
+            screens.carry_settings(&refused, &host, after, "work", "Profile created.".into());
+        assert!(
+            text.starts_with("Profile created. Not copied: model ("),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("Use everywhere on the Accounts screen applies it later."),
+            "{text}"
+        );
     }
 }

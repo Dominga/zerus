@@ -27,6 +27,16 @@ describe("captured account catalog actions",()=>{
     await t.state.open("model","group","peer",origin);await t.state.confirm({model:"old",effort:"high"});expect(t.apply).not.toHaveBeenCalled();
     await t.state.open("model","group","peer",origin);await t.state.confirm({model:"new",effort:"low"});await t.state.confirm({model:"new",effort:"low"});expect(t.apply).toHaveBeenCalledExactlyOnceWith("model",{model:"new",effort:"low"});
   });
+  it("saves an unchanged value when the account's computers differ, and skips an unchanged scope (zerus-f0uz8)",async()=>{
+    const t=setup();
+    t.open.mockImplementation(async (_a,_p,kind)=>({handle:kind,kind,label:"Example",machine:"studio",provider:"codex",permission_mode:"bypass",differs:true,per_computer:false,machines:["studio","laptop"],
+      models:{models:[],defaults:{model:"old",effort:"high"},provider_defaults:{model:"",effort:""},effort_supported:true}}));
+    await t.state.open("permissions","group","peer",origin);await t.state.confirm({mode:"bypass"});
+    await t.state.open("model","group","peer",origin);await t.state.confirm({model:"old",effort:"high"});
+    expect(t.apply.mock.calls).toEqual([["permissions",{mode:"bypass"}],["model",{model:"old",effort:"high"}]]);
+    await t.state.open("scope","group","peer",origin);await t.state.confirm({mode:"account"});expect(t.apply).toHaveBeenCalledTimes(2);
+    await t.state.open("scope","group","peer",origin);await t.state.confirm({mode:"computer"});expect(t.apply).toHaveBeenLastCalledWith("scope",{mode:"computer"});
+  });
   it("applies the captured handle once and never retargets by the later selection",async()=>{
     const t=setup();await t.state.open("rename","account-group","studio-profile",origin);
     expect(t.open).toHaveBeenCalledWith("account-group","studio-profile","rename");

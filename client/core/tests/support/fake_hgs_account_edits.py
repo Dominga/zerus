@@ -49,6 +49,10 @@ elif args[3] == "permissions":
     mode = args[args.index("--mode") + 1]
     assert mode in ("provider", "bypass")
     profile["permission_mode"] = mode
+elif args[3] == "permission-scope":
+    scope = args[args.index("--scope") + 1]
+    assert scope in ("account", "computer")
+    profile["permission_scope"] = scope
 elif args[3] == "model-defaults":
     model, effort = args[args.index("--model") + 1], args[args.index("--effort") + 1]
     assert (not model and not effort) or (model == "model-a" and effort in ("", "low", "high"))

@@ -48,9 +48,12 @@ export function createAccountManagement(port: Port) {
       const view = prompt();
       if (!view || busy() || (expectedHandle && view.handle !== expectedHandle)) return;
       const values=typeof input==="string" ? {label:input} : input;
+      // Unchanged values need no save, unless the computers differ now: then
+      // saving the shown value is what makes them the same ("Use everywhere").
       if ((view.kind === "rename" && values.label?.trim() === view.label)
-        || (view.kind === "permissions" && values.mode === view.permission_mode)
-        || (view.kind === "model" && values.model === view.models?.defaults.model && values.effort === view.models?.defaults.effort)) { close(); return; }
+        || (view.kind === "permissions" && !view.differs && values.mode === view.permission_mode)
+        || (view.kind === "model" && !view.differs && values.model === view.models?.defaults.model && values.effort === view.models?.defaults.effort)
+        || (view.kind === "scope" && values.mode === (view.per_computer ? "computer" : "account"))) { close(); return; }
       await apply(view, values);
     },
   };

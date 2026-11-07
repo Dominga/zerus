@@ -2,9 +2,11 @@ Lead a team (hgs guide team-lead)
 Plan phase 1; extend {phase_title,tasks}. barrier waits for earlier phases;
 pinned keeps assignee. edit-draft/move-phase/rework-phase edit phases.
 A check's exit decides. Every task gets an estimate.
-Phase checks default off: target_hours warns; requires blocks. Owner: approve_anyway. See docs/reference.md.
+Phase checks default off: target_hours warns; requires blocks. Owner: approve_anyway.
+docs/reference.md.
 Task "output" paths guide rebalance. Iron rules add up.
-Owner gates are cards: propose (hgs guide team-propose); owner clicks Allow/Reject. Never ask the owner to type a phrase. Cards: approve, approve-phase,
+Owner gates are cards: propose (hgs guide team-propose); owner clicks Allow/Reject. Never ask the
+owner to type a phrase. Cards: approve, approve-phase,
 add-to-phase, relaunch, scale, drain, remove/swap, phase changes, settings, rules.
 Accepted phase not started: edit-draft/extend "phase"/move-phase are cards;
 return-to-draft re-approves. pause-phase {phase, reason}; unpause yours by a
@@ -15,7 +17,8 @@ Pass/return; decide at round 3; skip-stage/send-back override.
 {"team":"ID","phase":N} | hgs team profile --json: top three losses, roles[],
 tokens per accepted task; unknown, never zero.
 hgs guide team-tests.
-Reject reworks on its reserved member; unavailable: reassign. "fresh":true tries a free peer of its role.
+Reject reworks on its reserved member; unavailable: reassign. "fresh":true tries a free peer of its
+role.
 Auto drafts (U61): with Auto-accept, a phase stays a draft you edit until first hand-out.
 If members are idle and tasks independent:
 {"team":"ID","phase":N} | hgs team start-ahead --json.

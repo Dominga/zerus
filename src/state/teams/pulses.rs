@@ -104,10 +104,11 @@ fn shown_path(path: &str, folder: &str) -> String {
 
 /// The automatic pulse of one turn (task 133): the task, the files the turn
 /// changed and its last tool or error line, from the session's tool events
-/// after `since`. None when the turn did nothing concrete: no generic
-/// "worked on the task" pulse is ever written. Assistant and user text are
-/// never read.
-pub(crate) fn auto(task: &Task, events: &[Value], since: f64, folder: &str) -> Option<(String, String, String)> {
+/// after `since`. The task is named by its id and title, so a pulse can be
+/// built beside the tick (task 185) without the team record. None when the turn
+/// did nothing concrete: no generic "worked on the task" pulse is ever written.
+/// Assistant and user text are never read.
+pub(crate) fn auto(task: u32, title: &str, events: &[Value], since: f64, folder: &str) -> Option<(String, String, String)> {
     let turn: Vec<&Value> = events.iter().filter(|event| at(event) > since).collect();
     let mut files: Vec<String> = Vec::new();
     let mut last_tool: Option<String> = None;
@@ -141,7 +142,7 @@ pub(crate) fn auto(task: &Task, events: &[Value], since: f64, folder: &str) -> O
     if files.is_empty() && last_tool.is_none() && error.is_none() {
         return None;
     }
-    let title = one_line(&task.title, 80);
+    let title = one_line(title, 80);
     let changed = if files.is_empty() {
         String::new()
     } else {
@@ -149,7 +150,7 @@ pub(crate) fn auto(task: &Task, events: &[Value], since: f64, folder: &str) -> O
         let shown = files.iter().take(FILES).cloned().collect::<Vec<_>>().join(", ");
         if more > 0 { format!("; changed {shown} and {more} more") } else { format!("; changed {shown}") }
     };
-    let done = one_line(&format!("#{} {title}{changed}", task.id), FIELD);
+    let done = one_line(&format!("#{task} {title}{changed}"), FIELD);
     let next = last_tool.map(|line| one_line(&format!("last: {line}"), FIELD)).unwrap_or_default();
     let blocked = error.map(|line| one_line(&line, FIELD)).unwrap_or_default();
     Some((done, next, blocked))

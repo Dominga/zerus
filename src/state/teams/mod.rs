@@ -31,6 +31,7 @@ pub(crate) mod lore_sync;
 pub(crate) mod owner_steps;
 pub(crate) mod park;
 pub(crate) mod wait_loops;
+pub(crate) mod pulse_worker;
 pub(crate) mod pulses;
 pub(crate) mod shadow;
 pub(crate) mod rights;

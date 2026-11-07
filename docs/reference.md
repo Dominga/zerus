@@ -2503,6 +2503,20 @@ written for compatibility. `swarm export --kinds`
 takes the kinds its requester parses on stdin; without them it exports only
 the kinds hgs v0.47.0 parses.
 
+The session-label transition gate's supported connector inventory consists of
+the maintained installer's connector using the canonical mobile configuration
+(`core::mobile::config_path()`). On Linux its user unit is
+`zerus-mobile-connector.service`; other platforms include an equivalent only
+where their installer creates one. An existing configuration or installer unit
+requires a fresh positive capability reply from the actual running connector,
+bound to its generation, configuration and machine. An installed executable's
+help cannot substitute for that reply; an old or absent responder keeps the gate
+closed. With neither the canonical configuration nor an installer unit, the node
+has no supported connector. Hand-started connectors with custom configuration
+paths and legacy services outside the installer must be stopped or upgraded
+before labels repeat. They are not inferred from process names. Deploying a live
+connector remains an explicit owner-approved operation.
+
 On a computer without a Qt settings store, the first `hgs swarm get` or initial
 `organization` watch subscription may initialize an empty catalog. It derives
 no projects, folder links or session assignments from names. The client still

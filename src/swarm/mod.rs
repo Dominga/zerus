@@ -9,6 +9,7 @@ mod infer_project;
 pub(crate) use infer_project::{directory_project, infer_new_session, inherit_fork_project};
 mod session_project;
 mod session_ids;
+pub(crate) mod session_labels;
 #[cfg(unix)]
 pub(crate) use session_project::validate_payload as validate_session_project;
 mod model;
@@ -367,6 +368,14 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
     let worker = matches!(action, "get" | "preference" | "exchange" | "join" | "sync")
         .then(|| service::supervise(config));
     match action {
+        "session-labels-context" => {
+            ensure!(args == ["session-labels-context", "--json"], "usage: hgs swarm session-labels-context --json");
+            Ok(serde_json::to_value(session_labels::context(config)?)?)
+        }
+        "session-labels" => {
+            ensure!(args == ["session-labels", "--json"], "usage: hgs swarm session-labels --json");
+            session_labels::observe(config, std::time::Instant::now() + std::time::Duration::from_secs(2))
+        }
         "session-project" | "assign-session" => {
             ensure!(args.len() == 2 && args[1] == "--json", "usage: hgs swarm {action} --json");
             Ok(session_project::execute(config, input()?, action == "assign-session"))

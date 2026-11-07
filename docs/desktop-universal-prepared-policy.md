@@ -113,6 +113,48 @@ its artifact is older, unpaired, inactive, hidden or normally reached only after
 an update failure. A link, command override or fallback must not silently select
 a different unqualified artifact.
 
+## Concrete limits of the existing Unix activation boundary
+
+The existing Qt activation protocol is not a lifetime writer lease. The source
+paths below explain why a guardian that merely occupies today's canonical
+socket, holds the start lock or observes the GUI service cannot establish
+condition 2. This is a source-derived counterexample to those proposed proofs,
+not an executed concurrent-writer test or a new startup restriction.
+
+| Boundary | Actual source behavior | Limit on future exclusion claims |
+| --- | --- | --- |
+| Relative activation name | Unix [SingleInstance::key](../tray/src/SingleInstance.h) returns `hgs-tray`. Qt's [server](https://github.com/qt/qtbase/blob/v6.11.0/src/network/socket/qlocalserver_unix.cpp) and [client](https://github.com/qt/qtbase/blob/v6.11.0/src/network/socket/qlocalsocket_unix.cpp) resolve a relative name through `QDir::tempPath()`. [Next's compatibility paths](../client/src-tauri/src/instance.rs) likewise separate the temporary socket path from the runtime start-lock path. | A socket in one temporary directory does not cover a different temporary namespace. The cited Qt version is reference source, not an audit of an installed Qt library. |
+| Start serialization | [SingleInstance::start](../tray/src/SingleInstance.cpp) creates its `QLockFile` inside the startup loop. The default lock wait is 10 seconds; failure reports a diagnostic and continues with forwarding and socket claim. The lock is also released while waiting for the service. | Holding this lock is neither a permanent refusal nor a lifetime exclusion of GUI writers. A successfully claimed GUI does not retain this local lock through its writer lifetime. |
+| Service wait | When forwarding does not connect, the same function waits for another reported service only until the default 30-second startup threshold, then attempts its own socket claim. | A service-manager observation is not an enduring writer barrier. A guardian cannot treat that bounded wait as refusal or resource completion. These thresholds are not whole-bootstrap time bounds. |
+| Settings identity | [main.cpp](../tray/src/main.cpp) uses the fixed `hgdev` / `hgs-tray` application identity; [SettingsJson](../tray/src/SettingsJson.cpp) reads and writes default `QSettings`. [AppConfig::configPath](../tray/src/AppConfig.cpp) separately selects the home-based `tray.conf`. | Changing only `TMPDIR` does not establish a different settings/profile identity. Qt's [settings locations](https://doc.qt.io/qt-6/qsettings.html#platform-specific-notes) depend on platform, home/configuration and application identity, rather than the activation socket. |
+| Writer bootstrap | After a successful claim and the normal tray-availability check, `main.cpp` preloads settings and constructs [TrayAgent](../tray/src/TrayAgent.cpp). Its attention observation path can store `attention/observed`; [read marks](../tray/src/ReadMarks.h) use the same settings abstraction. | Reaching an independent activation endpoint is not evidence that the resulting writer uses an independent durable store. A claim or a successful forward supplies no G1 role authority. |
+
+For a concrete Linux source case, take otherwise identical startup inputs:
+same user, HOME, configuration/runtime overrides, application identity and
+selected CLI, but a different existing temporary directory for a manual old Qt
+launch. The relative socket resolution
+then differs while the settings inputs stay the same. Even a common start-lock
+location does not repair this gap: its ordinary function lifetime and bounded
+failure branch are not writer exclusion. If a service is reported but forwarding
+still cannot connect, the existing service-wait fallback also remains. This
+shows a possible path into the ordinary writer bootstrap; it does not assert
+that a particular installed artifact launched, reached a native effect or
+actually overlapped another writer.
+
+The existing [Qt startup tests](../tray/tests/test_appconfig.cpp), including
+`aStuckStartDelaysOthersBoundedly` and
+`launcherClaimsWhenTheServiceStopsOrNeverListens`, encode the lock-failure and service-wait compatibility behavior with private paths. Reading
+those tests is not a fresh execution result. No Qt, native service or concurrent
+writer was launched for this inventory. Windows has a different lifetime-lock
+path and is not covered by this Unix example; no Windows exclusion is inferred.
+
+Keep the current compatibility behavior and maintained Qt rollback intact.
+Do not turn these observations into a store scan, a search over temporary
+directories, a process-name detector, a socket broker or a new guardian API.
+Any future guardian design still needs both necessary conditions above, with
+an exact artifact/configuration/lifetime argument and fresh private proof.
+Unknown coverage keeps production prepare fenced.
+
 ## Trusted-guardian alternative and paired Mac origin
 
 A maintained trusted guardian independent of the selected daily-operations CLI

@@ -30,7 +30,7 @@ describe("child sessions in the list", () => {
     const out = rows([session(1), session(2, 1), session(3), session(4, 2), session(5, 1)]);
     expect(shape(out)).toEqual(["s1", "  s2", "    s4", "  s5", "s3"]);
     const lead = cards(out)[0];
-    expect(lead.team).toEqual({ total: 3, working: 0, collapsed: false });
+    expect(lead.team).toEqual({ total: 3, working: 0, asking: 0, needsYou: 0, collapsed: false });
     expect(cards(out)[1]).toMatchObject({ parentKey: lead.session.key, lastChild: false });
     expect(cards(out)[3]).toMatchObject({ parentKey: lead.session.key, lastChild: true });
   });
@@ -38,7 +38,13 @@ describe("child sessions in the list", () => {
   it("counts working descendants and collapses a parent's children without promoting them", () => {
     const out = rows([session(1), session(2, 1, { status: "working" }), session(3, 2)], { teamCollapsed: (k) => k === "\nrun:1" });
     expect(shape(out)).toEqual(["s1"]);
-    expect(cards(out)[0].team).toEqual({ total: 2, working: 1, collapsed: true });
+    expect(cards(out)[0].team).toEqual({ total: 2, working: 1, asking: 0, needsYou: 0, collapsed: true });
+  });
+
+  it("tells a parent which children wait for its answer and which need the person (zerus-sa9qn.3)", () => {
+    const out = rows([session(1), session(2, 1, { status: "attention", quiet: true }), session(3, 1, { status: "attention" }),
+      session(4, 2, { status: "attention", quiet: true }), session(5, 1, { status: "working" })]);
+    expect(cards(out)[0].team).toEqual({ total: 4, working: 1, asking: 2, needsYou: 1, collapsed: false });
   });
 
   it("keeps a child at top level, naming its parent, when the parent is elsewhere or not listed", () => {
@@ -65,6 +71,15 @@ describe("child sessions in the list", () => {
     expect(out[0].team?.total).toBe(8);
     // The ninth level starts at top level again, naming its parent.
     expect(out[9]).toMatchObject({ depth: 0, fromParent: { name: "claude/p/s9" } });
+  });
+
+  it("handles a 40,000-child star in one pass (zerus-x94c7)", () => {
+    const star = Array.from({ length: 40000 }, (_, i) => session(i + 1, i ? 1 : undefined));
+    const started = performance.now();
+    const out = cards(rows(star));
+    expect(performance.now() - started).toBeLessThan(3000);
+    expect(out).toHaveLength(40000);
+    expect(out[0].team?.total).toBe(39999);
   });
 
   it("matches a parent by machine and session ID, never by name", () => {

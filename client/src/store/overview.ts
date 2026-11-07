@@ -1,6 +1,6 @@
 import { createMemo, untrack, type Accessor } from "solid-js";
 import type { ComputerState } from "./catalog";
-import { attentionNeeded, isActive, needsAttention } from "./attention";
+import { attentionNeeded, countedAttention, isActive, quietAttention } from "./attention";
 import type { ComputerId, MachineMeta } from "../types";
 import type { Session } from "../ui/sessions/types";
 import type { MachineState } from "../ui/components/MachineTile";
@@ -84,8 +84,8 @@ export function overviewStats(rows: readonly Session[], computers: Record<Comput
     const current = fresh(computers, s.computer);
     stats.all++;
     per.sessions++;
-    if (!s.muted && needsAttention(s, current)) stats.attention++;
-    if (!s.muted && attentionNeeded(s)) per.attention++;
+    if (countedAttention(s, current)) stats.attention++;
+    if (!quietAttention(s) && attentionNeeded(s)) per.attention++;
     if (isActive(s, current)) stats.active++;
     if (!current) stats.offline++;
   }

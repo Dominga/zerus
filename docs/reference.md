@@ -2509,6 +2509,30 @@ is there, in one click.
   settings file (Settings > Teams): `hgs team scratch-rules --json` lists
   them, and `{"action":"revoke","id":"sXXXXXXXX","by":"human"}` revokes one;
   teams created under it keep what they were given.
+- Task #228 (owner, 2026-11-07, on task 170): a QA member runs live checks on
+  its own scratch teams. Each team has a scratch root, `scratch_root` or
+  `<team folder>/.qa-scratch` (only the owner changes it in Settings > Teams);
+  the owner grants **one standing scratch rule per team** at that root, for the
+  agents of the team's roster: `{"standing":true,"by":"human"} | hgs team
+  scratch-rule --json` (or the lead's existing `scratch-rule` card naming the
+  team, whose folder is the root). A re-grant for the same team replaces its
+  rule, so a team never has two. A member with the QA right (task 154's
+  `operate` profile, which launches sessions) creates a scratch team from its
+  own session: `hgs team create --json` with a folder inside the root. It
+  becomes that scratch team's lead, its plan needs no card (`approval` and
+  `phase_approval` are `auto`), the root is trusted at member launch for
+  Claude and Codex as before, and the parent's `max_members`, `tree_depth` and
+  `tree_sessions` cap the new team; its members use the agents of the parent's
+  roster and their folders stay inside the root. A create outside the root,
+  without the QA right, or before the standing rule is granted is refused;
+  `scratch_parent` names the parent team, the creating task and the member.
+  The parent lead sees each scratch team as `scratch_team_created` and
+  `scratch_teams_stopped` in its feed and a `scratch_team` inbox item
+  (created, stopped, or listed). When the creating task is accepted, rejected
+  or cancelled, Zerus stops its scratch teams and terminates their sessions
+  except the creating member's own (that session is the parent team's work);
+  a session that cannot be stopped is listed for the owner in the inbox and
+  is never reported stopped.
 
 Task 161 (owner, 2026-11-07): neither the lead nor a member turns a task into a
 waiting loop; waiting on an outside event is always a park.

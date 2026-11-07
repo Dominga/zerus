@@ -1239,6 +1239,45 @@ fn all_items(team: &Team) -> Vec<Item> {
             });
         }
     }
+    // Task #228: the scratch teams a QA member created for this team's tasks.
+    // The lead reads each creation and stop here; a team whose sessions could
+    // not be stopped is listed for the owner.
+    if active || finished {
+        let cutoff = crate::state::now() - 7.0 * 86400.0;
+        let recent: Vec<&super::model::ScratchChild> = team
+            .scratch_teams
+            .iter()
+            .filter(|record| record.at >= cutoff)
+            .collect();
+        if !recent.is_empty() {
+            let since = recent.iter().map(|record| record.at).fold(f64::INFINITY, f64::min);
+            let mut names = Vec::new();
+            for record in &recent {
+                let task = if record.task == 0 { String::new() } else { format!(" for task #{}", record.task) };
+                names.push(match record.state.as_str() {
+                    "stopped" => format!("{} ({}, stopped{task})", record.name, record.id),
+                    "listed" => format!("{} ({}, listed: its sessions could not be stopped{task})", record.name, record.id),
+                    _ => format!("{} ({}, created{task})", record.name, record.id),
+                });
+            }
+            let listed = recent.iter().any(|record| record.state == "listed");
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "scratch_team",
+                key: format!("scratch_team:{since:.0}"),
+                task: None,
+                member: "Zerus".into(),
+                since,
+                summary: summary(&format!("Scratch teams created by the QA check: {}", names.join("; "))),
+                command: if listed {
+                    "The owner stops a listed team: {\"team\":\"<scratch team>\",\"by\":\"human\"} | hgs team stop --json".into()
+                } else {
+                    "no action: hgs team status --json shows them; Zerus stops them when the creating task is decided".into()
+                },
+                detail: names.join("; "),
+            });
+        }
+    }
     // Task 156: a report that contradicts a decision, before its accept.
     for task in team.tasks.iter().filter(|_| active) {
         let Some(attempt) = task.attempts.iter().rev().find(|attempt| attempt.state == AttemptState::Reported && !attempt.decision_flags.is_empty()) else { continue };

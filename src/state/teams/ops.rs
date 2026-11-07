@@ -197,6 +197,14 @@ fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
         (50..=100).contains(&settings.context_compact_percent),
         "context_compact_percent is 50 to 100 (the share of the context window at which Zerus compacts a member)"
     );
+    // Task #228: the QA scratch root is an absolute folder or empty (the team
+    // folder's .qa-scratch).
+    let root = settings.scratch_root.trim();
+    ensure!(
+        root.is_empty()
+            || (std::path::Path::new(root).is_absolute() && root.chars().count() <= 4096 && !root.chars().any(char::is_control)),
+        "The scratch root is an absolute folder or empty: {{\"scratch_root\":\"D:/scratch\"}}"
+    );
     ensure!(
         (30..=3600).contains(&settings.start_timeout_seconds),
         "The start warning waits 30 to 3600 seconds after delivery"
@@ -528,6 +536,20 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
     } else {
         None
     };
+    // Task #228: a QA member's scratch team names the parent team and the task
+    // whose decision stops it; it is not a delegated sub-team (`parent` above).
+    let scratch_parent: Option<ScratchParent> = if input["scratch_parent"].is_object() {
+        let value = &input["scratch_parent"];
+        let team = clean(text(value, "team").trim(), 80, "The parent team")?;
+        ensure!(!team.is_empty(), "The scratch team's parent team is required");
+        let task = value["task"].as_u64().and_then(|id| u32::try_from(id).ok()).unwrap_or(0);
+        Some(ScratchParent { team, task, member: clean(text(value, "member").trim(), 40, "The parent member")? })
+    } else {
+        None
+    };
+    // Task #228: the standing rule a QA member's scratch team was created
+    // under; the dispatcher trusts the scratch root for its roster's agents.
+    let scratch_rule = clean(text(input, "scratch_rule").trim(), 40, "The scratch rule")?;
     // From the desktop: the members and template tasks proposed for the
     // lead's plan; the lead starts and gets a planning brief.
     let mut members = vec![lead.clone()];
@@ -573,6 +595,8 @@ pub(crate) fn create(id: &str, input: &Value) -> anyhow::Result<(Team, Vec<Event
         brief: if start { Notice::Pending } else { Notice::None },
         lead_protocol: clean(&lead_protocol, 8000, "The lead protocol")?,
         parent,
+        scratch_parent,
+        scratch_rule,
         ..Default::default()
     };
     let events = vec![Event::new("created", json!({"by":"You","name":name}))];
@@ -1232,7 +1256,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-pub(crate) const OWNER_SETTINGS: [&str; 26] = [
+pub(crate) const OWNER_SETTINGS: [&str; 27] = [
     "approval",
     // Task 126: the owner chooses the team's memory and its store.
     "memory",
@@ -1275,6 +1299,9 @@ pub(crate) const OWNER_SETTINGS: [&str; 26] = [
     // Task 209: only the owner sets what Zerus does to a member's context (the
     // share of the window at which it compacts, 95% by default).
     "context_compact_percent",
+    // Task #228: the folder a QA member's scratch teams start in (empty is the
+    // team folder's .qa-scratch); the owner grants the standing rule as well.
+    "scratch_root",
 ];
 
 /// Task 126: a lead's whole settings object that leaves out `memory` keeps

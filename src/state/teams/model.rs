@@ -183,6 +183,10 @@ pub(crate) struct Settings {
     /// 95 by default; the owner sets it.
     #[serde(default = "default_context_compact_percent")]
     pub context_compact_percent: u8,
+    /// Task #228 (owner, 2026-11-07): the folder a QA member's scratch teams
+    /// start in; empty is <team folder>/.qa-scratch. Only the owner sets it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scratch_root: String,
     /// N19 (spec 7, 12): folders whose images and HTML the desktop previews
     /// as report evidence, besides the team and member folders.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -364,6 +368,7 @@ impl Default for Settings {
             worktrees_forbidden: false,
             resume_after_limits: false,
             context_compact_percent: DEFAULT_CONTEXT_COMPACT_PERCENT,
+            scratch_root: String::new(),
             evidence_folders: Vec::new(),
             tree_depth: default_tree_depth(),
             tree_sessions: default_tree_sessions(),
@@ -1146,6 +1151,39 @@ pub(crate) struct Parent {
     /// The assignee whose session became the sub-team's lead.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub member: String,
+}
+
+/// Task #228: a QA member's scratch team names the parent team and the task
+/// whose decision stops it. It is not a delegated sub-team: it has no parent
+/// approval, no parent task report and no slot in the parent's `children`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct ScratchParent {
+    pub team: String,
+    /// The creating task, 0 when the member had none open.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub task: u32,
+    /// The parent member whose session leads the scratch team.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub member: String,
+}
+
+/// Task #228: one scratch team a parent lead sees: created, then stopped when
+/// the creating task was decided.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct ScratchChild {
+    pub id: String,
+    pub name: String,
+    /// The creating task, 0 when the member had none open.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub task: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub member: String,
+    pub at: f64,
+    /// "created" or "stopped".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_at: Option<f64>,
 }
 
 /// A member's session stopped by a usage limit (H1); `resets_at` is present
@@ -2854,6 +2892,14 @@ pub(crate) struct Team {
     /// Section 9.1: the sub-teams delegated from this team, at most 32.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<String>,
+    /// Task #228: the parent team and creating task of a QA member's scratch
+    /// team; absent on every other team.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scratch_parent: Option<ScratchParent>,
+    /// Task #228: the scratch teams this team's members created, newest last,
+    /// at most 32; its lead reads created and stopped in the feed and inbox.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scratch_teams: Vec<ScratchChild>,
     /// U26: verified owner events already spent on a change, so one sentence
     /// authorizes one change: [{event, change}].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

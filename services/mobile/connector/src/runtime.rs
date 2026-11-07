@@ -65,6 +65,8 @@ pub fn log(level: &str, message: &str) {
     let _ = writeln!(std::io::stderr(), "{level}: {message}");
 }
 
+pub const TASK_EXCHANGE_UNAVAILABLE: &str = "Configured hgs lacks mobile task exchange and digests; phone task sync is unavailable. Point connector.json hgs_path at the maintained hgs, or update the pinned CLI.";
+
 /// A one-shot flag that tasks can wait for.
 #[derive(Default)]
 pub struct Event {
@@ -158,6 +160,7 @@ pub struct Connector<N: Native> {
     /// A peer context's gateway capabilities: its calls pass the gateway's
     /// own mobile peer entry point first.
     gateway_flags: Option<Rc<Cell<Flags>>>,
+    task_exchange_warning_logged: Cell<bool>,
     pub state: RefCell<State>,
     pub snapshot_ready: Event,
     /// The first capability probe has finished (`fleet.probe_complete`).
@@ -210,6 +213,7 @@ impl<N: Native + 'static> Connector<N> {
             settings,
             flags: Rc::new(Cell::new(Flags::default().for_native_platform())),
             gateway_flags: None,
+            task_exchange_warning_logged: Cell::new(false),
             state: RefCell::new(State::fresh()),
             snapshot_ready: Event::default(),
             probed: Event::default(),
@@ -234,6 +238,7 @@ impl<N: Native + 'static> Connector<N> {
             },
             flags: Rc::new(Cell::new(Flags::default())),
             gateway_flags: Some(Rc::clone(&self.flags)),
+            task_exchange_warning_logged: Cell::new(false),
             state: RefCell::new(State::fresh()),
             snapshot_ready: Event::default(),
             probed: Event::default(),
@@ -388,8 +393,14 @@ impl<N: Native + 'static> Connector<N> {
             .native(Call::new(["--help"]).timeout(PROBE_TIMEOUT).text())
             .await
         {
-            self.flags
-                .set(Flags::from_help(&help).for_native_platform());
+            let flags = Flags::from_help(&help).for_native_platform();
+            if !self.peer
+                && !flags.task_exchange
+                && !self.task_exchange_warning_logged.replace(true)
+            {
+                log("WARNING", TASK_EXCHANGE_UNAVAILABLE);
+            }
+            self.flags.set(flags);
         }
         self.probed.set();
     }

@@ -491,6 +491,33 @@ receipt before preparing another attempt.
 Upgrade the connector's `hgs` executable together with the connector when using
 new native operations. A private executable path in `connector.json` can keep
 the mobile connector on a reviewed build without replacing the desktop CLI.
+That explicit `hgs_path` takes precedence over `PATH`. Ordinary desktop/CLI
+updates do not refresh a separate copy such as
+`~/.local/share/zerus-mobile/bin/hgs`. If that copy predates
+`hgs task exchange|digests --json`, the connector omits phone task exchange and
+project task digests even when the ordinary installed CLI supports them.
+
+To correct this configuration, with the gateway owner's approval:
+
+1. Drain phone actions and stop **only the connector** using its protected
+   service. Keep native agents, tmux and DeepSeek hosts running.
+2. Verify the maintained CLI's help advertises
+   `hgs task exchange|digests --json` and `hgs task digests --json` succeeds.
+   A source install normally maintains `~/.local/bin/hgs`; choose the actual
+   maintained executable on this computer.
+3. Privately edit only `hgs_path` in the connector's existing configuration to
+   that executable's absolute path. Alternatively remove `hgs_path` to use the
+   service's `PATH`, after verifying that it selects the maintained CLI.
+   Preserve every other field, file permissions, credential, relay identity
+   and receipt directory. Do not copy, clear or reinitialize the journal.
+4. Run the connector's read-only `--check` against that configuration, then
+   start only the connector. Verify its next mobile catalog advertises
+   `task_exchange`, project rows contain `tasks_digest`, and a paired phone can
+   exchange tasks. A green desktop build alone is not this acceptance check.
+
+The runtime keeps explicit custom pins: it never silently substitutes another
+CLI. A successful help probe without task exchange logs one warning per local
+connector process; failed probes and old peer CLIs do not produce that warning.
 Before restarting a connector, wait for its active mutation attempts to finish.
 Restart only the connector service, once it is [protected](#protect-running-agents);
 leave native agents, tmux and owning DeepSeek hosts running. Older resident

@@ -31,6 +31,20 @@ trNoop("OpenAI keeps a 30-minute cache only for GPT-5.6 and later. This model's 
 trNoop("Kimi reports no cache lifetime of at least 15 minutes for this model.");
 trNoop("DeepSeek keeps its context cache for hours without pings.");
 trNoop("This agent reports no prompt cache that pings can keep warm.");
+trNoop("Terminal input activity is unknown.");
+trNoop("The keep-warm state of this session is unreadable. Nothing is sent until your next message.");
+trNoop("Keep cache warm was turned off; nothing was submitted");
+trNoop("Keep cache warm has expired; nothing was submitted");
+trNoop("This keep-warm ping is no longer current; nothing was submitted");
+trNoop("The agent is not idle; nothing was submitted");
+trNoop("Background work is running or unknown; nothing was submitted");
+trNoop("The agent has scheduled jobs; nothing was submitted");
+trNoop("Automatic recovery owns the next message; nothing was submitted");
+trNoop("Terminal input activity is unknown; nothing was submitted");
+trNoop("Someone typed in Terminal; nothing was submitted");
+trNoop("The cache may already have expired; nothing was submitted");
+trNoop("Keep cache warm settings are unreadable; nothing was submitted");
+trNoop("model or effort settings are pending; no keep-warm ping was typed");
 // The core's refusals of a change (client/core/src/keep_warm.rs).
 trNoop("Keep cache warm changed on another device. Refresh the session and try again.");
 trNoop("At most 64 sessions on one computer can keep their cache warm.");

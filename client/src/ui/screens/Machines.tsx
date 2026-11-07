@@ -13,6 +13,7 @@ import { machineEditor as editor, NEW_MACHINE } from "../../store/machineEditor"
 import { tr, trNoop } from "../../i18n";
 import type { MachineMeta, MachineRow } from "../../types";
 import { catalog } from "../../store/catalog";
+import { PeerConfigurationNotice } from "../components/MachinesStatus";
 import { machineCards, machinesPage, requestedMachine, resolveMachine, setRequestedMachine, testConnection } from "../../store/machines";
 import { setAccountMachine } from "../../store/accounts";
 import { connectionOf, osOf } from "../../store/overview";
@@ -230,6 +231,7 @@ export function MachinesScreen() {
           <button class="btn primary" disabled={busy()} onClick={() => { editor.choose(NEW_MACHINE); if (editor.isNew() && !editor.prompt()) queueMicrotask(() => document.getElementById("mach-alias")?.focus()); }}><Icon name="plus" size={14} />{tr("Add machine")}</button>
         </header>
         <p class="muted mach-summary">{summary({ console: local().console, live: ["live", "polled"].includes(catalog.computers[""]?.status ?? "") }, peers().map((p) => p.state))}</p>
+        <PeerConfigurationNotice />
         <Show when={view().error}>{(error) => <Status kind="error"><Lines text={error()} /></Status>}</Show>
         <div class="mach-body">
           <div class="mach-list" role="list" aria-label={tr("Machines")}>

@@ -19,7 +19,13 @@ function stateText(status: string) {
 
 /** Connection presentation only; opening Machines never retries a connection. */
 export function MachinesStatus(props: { mode: () => BridgeMode | "starting" }) {
-  const computers = createMemo(() => Object.values(catalog.computers));
+  // The catalog has no row for a peer that has never greeted. Use the native
+  // checked display roster when available; older/native clients keep theirs.
+  const computers = createMemo(() => {
+    const service = desktopService.state();
+    return service?.connected && service.fleet_computers
+      ? service.fleet_computers : Object.values(catalog.computers);
+  });
   const connected = (status: string) => status === "live" || status === "polled";
   const live = createMemo(() => computers().filter((c) => connected(c.status)).length);
   const problems = createMemo(() => computers().filter((c) => !connected(c.status)));
@@ -41,4 +47,9 @@ export function MachinesStatus(props: { mode: () => BridgeMode | "starting" }) {
       <button type="button" class="btn small ghost" onClick={() => { void fleetRefresh().catch((error) => toast(tr("Connection"), String(error), "error", true)); }}>{tr("Retry now")}</button>
     </Show>
   </Show>;
+}
+
+/** Configuration is captured by the service process; this notice has no effect action. */
+export function PeerConfigurationNotice() {
+  return <Show when={desktopService.enabled()}><p class="muted">{tr("Restart the background service after changing HGS_PEERS. Existing sessions keep running.")}</p></Show>;
 }

@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import time
 import select
+import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -164,6 +165,29 @@ class WindowsTarget(unittest.TestCase):
             if child.poll() is None:child.kill();child.wait()
             child.stdin.close();child.stderr.close()
 
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'requires a controlled Linux pipe capacity')
+    def test_original_exit_waits_for_a_healthy_slow_output_consumer(self):
+        import fcntl
+        script = self.root/'ssh'
+        script.write_text("#!/usr/bin/env python3\nimport os,pathlib\nb=bytes(range(256))*32\nwhile b:\n n=os.write(1,b);b=b[n:]\npathlib.Path(os.environ['REMOTE_WINDOWS_FIXTURE'],'original-exited').touch()\nos._exit(0)\n")
+        expected = bytes(range(256))*32
+        for delay in (0, 3):
+            with self.subTest(delay=delay):
+                marker = self.root/'original-exited'
+                marker.unlink(missing_ok=True)
+                child = subprocess.Popen([str(HGS),'--ssh-bytes-client','peer','__hgs_ssh_bytes_v1__ fixed'],
+                                         env=self.env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+                try:
+                    fcntl.fcntl(child.stdout, fcntl.F_SETPIPE_SZ, 4096)
+                    if delay: time.sleep(delay)
+                    out, err = child.communicate(timeout=8)
+                    self.assertEqual(child.returncode, 0, err)
+                    self.assertEqual(out, expected)
+                    self.assertTrue(marker.exists())
+                finally:
+                    if child.poll() is None: child.terminate();child.wait(timeout=5)
+                    child.stdout.close();child.stderr.close()
+
     def test_unknown_probe_is_closed_before_an_operation(self):
         for mode in ('unknown','offline','oversize'):
             with self.subTest(mode=mode):
@@ -251,7 +275,7 @@ class WindowsTarget(unittest.TestCase):
 
 @unittest.skipUnless(os.name == 'nt', 'native PowerShell 5.1/cmd decoder controls run on Windows')
 class WindowsNativeTransport(unittest.TestCase):
-    def run_decoder(self, shell, lease=False, code=0):
+    def run_decoder(self, shell, lease=False, code=0, slow=False):
         import base64
         import shutil
         import struct
@@ -276,6 +300,10 @@ class WindowsNativeTransport(unittest.TestCase):
                        FAKE_AGENT_READY=str(ready), FAKE_AGENT_RECORD=str(record), FAKE_AGENT_CONTROL=str(control),
                        FAKE_AGENT_RAW='0', FAKE_AGENT_MODES='none', FAKE_AGENT_ON_EOF='exit:'+str(code))
             words = ['', 'a"b', 'back\\', 'two\\\\tail', '日本語', 'Пример', '$(literal);& data', "it's a word"]
+            version = 'x'*8191
+            if slow:
+                words = ['--version']
+                env['FAKE_AGENT_VERSION'] = version
             data = base64.b64encode(json.dumps(words, ensure_ascii=False, separators=(',', ':')).encode()).decode()
             script = '\n'.join(line.strip() for line in (ROOT/'src/remote_shell/windows.ps1').read_text().splitlines()
                                if line.strip() and not line.strip().startswith('#')).replace('__HGS_ARGUMENTS__', data)
@@ -293,6 +321,7 @@ class WindowsNativeTransport(unittest.TestCase):
             readers = []
             def capture(pipe, path):
                 with path.open('wb', buffering=0) as out:
+                    if slow: time.sleep(3)  # keep the same reader open, without consuming
                     while True:
                         chunk = pipe.read(4096)
                         if not chunk: break
@@ -306,13 +335,15 @@ class WindowsNativeTransport(unittest.TestCase):
             try:
                 child.stdin.write(struct.pack('<I', 0xffffffff)); child.stdin.flush()
                 deadline = time.monotonic()+8
-                while not ready.exists():
+                while not slow and not ready.exists():
                     self.assertIsNone(child.poll(), (root/'stderr').read_bytes())
                     self.assertLess(time.monotonic(), deadline, 'original fake did not become ready')
                     time.sleep(.02)
-                self.assertEqual(json.loads(ready.read_text(encoding='utf-8'))['argv'], words)
+                if not slow: self.assertEqual(json.loads(ready.read_text(encoding='utf-8'))['argv'], words)
                 started = time.monotonic()
-                if not lease:
+                if slow:
+                    child.stdin.write(struct.pack('<I', 0)); child.stdin.flush()
+                elif not lease:
                     frame = struct.pack('<I', len(body))+body
                     child.stdin.write(frame[:2]); child.stdin.flush()
                     child.stdin.write(frame[2:]+struct.pack('<I', 0)); child.stdin.flush()
@@ -326,6 +357,9 @@ class WindowsNativeTransport(unittest.TestCase):
                     reader.join(timeout=3); self.assertFalse(reader.is_alive())
                 if lease:
                     self.assertIn(b'remote Windows invocation failed', (root/'stderr').read_bytes())
+                elif slow:
+                    self.assertEqual((root/'stdout').read_bytes(), (version+'\n').encode())
+                    self.assertEqual((root/'stderr').read_bytes(), b'')
                 else:
                     rows = [json.loads(line) for line in record.read_text().splitlines()]
                     self.assertEqual(b''.join(bytes.fromhex(row['hex']) for row in rows if 'hex' in row), body)
@@ -349,3 +383,7 @@ class WindowsNativeTransport(unittest.TestCase):
     def test_lease_loss_ends_only_the_original_native_helper(self):
         for shell in ('powershell', 'cmd'):
             with self.subTest(shell=shell): self.run_decoder(shell, lease=True)
+
+    def test_native_output_backpressure_preserves_every_byte_and_exit(self):
+        for shell in ('powershell', 'cmd'):
+            with self.subTest(shell=shell): self.run_decoder(shell, slow=True)

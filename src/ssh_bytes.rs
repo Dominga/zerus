@@ -131,7 +131,6 @@ pub(crate) fn run(mut args: Vec<String>) -> io::Result<i32> {
         let mut failed = false;
         let mut input_error_at = None;
         let mut exit = None;
-        let mut exited_at = None;
         loop {
             while let Ok((index, result)) = rx.try_recv() {
                 completed[index] = true;
@@ -147,13 +146,10 @@ pub(crate) fn run(mut args: Vec<String>) -> io::Result<i32> {
                 exit = child.child.try_wait()?;
             }
             if exit.is_some() {
+                // A live downstream reader may apply backpressure indefinitely.
+                // Its actual close is a copy error, not a drain deadline.
                 stop.store(true, Ordering::Relaxed);
-                let start = *exited_at.get_or_insert_with(Instant::now);
                 if completed[1] && completed[2] {
-                    break;
-                }
-                if start.elapsed() > Duration::from_secs(2) {
-                    failed = true;
                     break;
                 }
             } else if failed

@@ -266,3 +266,41 @@ fn messages_mark_read_unless_peeked() {
     assert_eq!(status["counts"]["message"], 1);
     assert_eq!(status["history"], false);
 }
+
+/// Task 187 (HIGH 6, 11.12): a brief the working tier refuses is never
+/// committed: an empty brief leaves no file and no commit.
+#[test]
+fn a_refused_brief_commits_nothing() {
+    let repo = Repo::new();
+    let before = repo.head();
+    let refused = repo.refuse(&["brief", "set", "--task", "#8", "--team", "t"], "   \n");
+    assert!(refused.contains("the brief is empty"), "{refused}");
+    assert_eq!(repo.head(), before, "nothing was committed");
+    assert!(!repo.root.join("briefs/t8.md").exists());
+    // A valid one is committed and stored.
+    repo.json(&["brief", "set", "--task", "#8", "--team", "t"], "Goal: the frame");
+    assert_ne!(repo.head(), before);
+    assert!(repo.root.join("briefs/t8.md").exists());
+}
+
+/// Task 187 (11.4: a read never waits for the cleanup): reads never run it;
+/// an expired row is hidden by every read and deleted by the next write's pass.
+#[test]
+fn reads_never_run_the_cleanup_and_writes_do() {
+    let repo = Repo::new();
+    repo.json(&["pulse", "add", "--done", "looked at the shader", "--team", "t"], "");
+    let later = T0 + 20 * 86_400;
+    // (the oldest row's time and the last pass's: the counts hide expired rows)
+    let rows = |now: i64| -> (i64, i64) {
+        let out = repo.run_at(now, &["--json", "working", "status"], "");
+        let value = serde_json::from_str::<Value>(&out.stdout).unwrap();
+        (value["oldest"].as_i64().unwrap(), value["last_cleanup"].as_i64().unwrap())
+    };
+    let listed = repo.run_at(later, &["--json", "pulses", "--all", "--team", "t"], "");
+    assert_eq!(serde_json::from_str::<Value>(&listed.stdout).unwrap()["entries"].as_array().unwrap().len(), 0);
+    repo.run_at(later, &["--json", "messages", "--team", "t"], "");
+    assert_eq!(rows(later), (T0, T0), "a read left the expired row and ran no pass");
+    let out = repo.run_at(later, &["--json", "pulse", "add", "--done", "next step", "--team", "t"], "");
+    assert_eq!(out.code, 0, "{}", out.text());
+    assert_eq!(rows(later), (later, later), "the write's pass deleted the expired row");
+}

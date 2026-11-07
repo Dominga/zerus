@@ -36,7 +36,9 @@ pub const CLEANUP_EVERY: i64 = 600;
 pub const RING_COALESCE: i64 = 300;
 /// Journal events kept in the file.
 const EVENTS_KEPT: i64 = 1_000;
-const USER_VERSION: i64 = 1;
+/// 2 (task 187): the search tables' rows carry their entry's rowid, so a
+/// delete finds them by rowid instead of scanning the UNINDEXED id.
+const USER_VERSION: i64 = 2;
 
 /// The folder beside the store that git never sees (11.5): `.lore-private`.
 pub const PRIVATE_DIR: &str = ".lore-private";
@@ -52,6 +54,11 @@ pub trait TaskClock {
     /// When the task closed (accepted, cancelled, or the team's finish), or
     /// None while it is open or unknown.
     fn closed_at(&self, team: &str, task: &str) -> Option<i64>;
+    /// Whether its answers are to be applied at all (task 187): a clock that
+    /// knows nothing must not reopen the tasks the store recorded as closed.
+    fn knows(&self) -> bool {
+        true
+    }
 }
 
 /// No task ever closes.
@@ -59,6 +66,19 @@ pub struct OpenClock;
 impl TaskClock for OpenClock {
     fn closed_at(&self, _team: &str, _task: &str) -> Option<i64> {
         None
+    }
+}
+
+/// Task 187: a clock that knows no task. A cleanup with it keeps every
+/// recorded close as it is (the store's own `tasks` table), where `OpenClock`
+/// would reopen them all: the cleanup a full file runs before a write.
+pub struct UnknownClock;
+impl TaskClock for UnknownClock {
+    fn closed_at(&self, _team: &str, _task: &str) -> Option<i64> {
+        None
+    }
+    fn knows(&self) -> bool {
+        false
     }
 }
 
@@ -269,6 +289,8 @@ pub struct Store {
     lock_path: PathBuf,
     settings: Settings,
     allow: Vec<String>,
+    /// The longest cleanup transaction (11.4: 50 ms); a test lowers it.
+    budget: std::cell::Cell<Duration>,
 }
 
 /// `<root>/.lore-private`, excluded from git through `info/exclude` so no
@@ -392,11 +414,41 @@ impl Store {
             db.execute_batch("PRAGMA journal_mode = WAL").map_err(error)?;
         }
         let lock_path = path.with_extension("lock");
-        Ok(Self { db, path: path.to_path_buf(), lock_path, settings: settings.clone(), allow: allow.to_vec() })
+        let store = Self { db, path: path.to_path_buf(), lock_path, settings: settings.clone(), allow: allow.to_vec(), budget: std::cell::Cell::new(PASS_TRANSACTION) };
+        if (1..USER_VERSION).contains(&version) {
+            store.reindex_by_rowid()?;
+        }
+        Ok(store)
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Task 187: a version 1 store's search rows are rebuilt keyed by their
+    /// entry's rowid, once, in one transaction (at most `entries` rows).
+    fn reindex_by_rowid(&self) -> Result<()> {
+        self.db.execute_batch("BEGIN IMMEDIATE").map_err(error)?;
+        let result = (|| -> Result<()> {
+            // A concurrent opener may have done it meanwhile.
+            let version: i64 = self.db.query_row("PRAGMA user_version", [], |row| row.get(0)).map_err(error)?;
+            if version >= USER_VERSION {
+                return Ok(());
+            }
+            self.db.execute_batch("DELETE FROM words; DELETE FROM terms;").map_err(error)?;
+            for entry in self.select("1 = 1", &[])? {
+                self.index(&entry)?;
+            }
+            self.db.execute_batch(&format!("PRAGMA user_version = {USER_VERSION}")).map_err(error)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => self.db.execute_batch("COMMIT").map_err(error),
+            Err(failure) => {
+                let _ = self.db.execute_batch("ROLLBACK");
+                Err(failure)
+            }
+        }
     }
 
     fn file_bytes(&self) -> u64 {
@@ -447,21 +499,30 @@ impl Store {
         self.index(entry)
     }
 
+    /// The entry's rowid, which keys its search rows (task 187).
+    fn rowid(&self, id: &str) -> rusqlite::Result<Option<i64>> {
+        self.db.query_row("SELECT rowid FROM entries WHERE id = ?1", [id], |row| row.get(0)).optional()
+    }
+
     fn index(&self, entry: &Entry) -> Result<()> {
         let text = entry.searchable();
-        self.db.execute("DELETE FROM words WHERE id = ?1", [&entry.id]).map_err(error)?;
-        self.db.execute("DELETE FROM terms WHERE id = ?1", [&entry.id]).map_err(error)?;
-        self.db.execute("INSERT INTO words(id, main) VALUES(?1, ?2)", params![entry.id, text]).map_err(error)?;
-        self.db.execute("INSERT INTO terms(id, toks) VALUES(?1, ?2)", params![entry.id, terms_of(&text).join(" ")]).map_err(error)?;
+        let rowid = self.rowid(&entry.id).map_err(error)?.ok_or_else(|| error(format!("{} is not stored", entry.id)))?;
+        // By rowid: an FTS rowid lookup, never a scan of the UNINDEXED id.
+        self.db.execute("DELETE FROM words WHERE rowid = ?1", [rowid]).map_err(error)?;
+        self.db.execute("DELETE FROM terms WHERE rowid = ?1", [rowid]).map_err(error)?;
+        self.db.execute("INSERT INTO words(rowid, id, main) VALUES(?1, ?2, ?3)", params![rowid, entry.id, text]).map_err(error)?;
+        self.db.execute("INSERT INTO terms(rowid, id, toks) VALUES(?1, ?2, ?3)", params![rowid, entry.id, terms_of(&text).join(" ")]).map_err(error)?;
         Ok(())
     }
 
     fn delete_rows(&self, ids: &[String]) -> rusqlite::Result<()> {
         for id in ids {
             self.db.execute("DELETE FROM meta WHERE key = ?1", [format!("told:{id}")])?;
+            if let Some(rowid) = self.rowid(id)? {
+                self.db.execute("DELETE FROM words WHERE rowid = ?1", [rowid])?;
+                self.db.execute("DELETE FROM terms WHERE rowid = ?1", [rowid])?;
+            }
             self.db.execute("DELETE FROM entries WHERE id = ?1", [id])?;
-            self.db.execute("DELETE FROM words WHERE id = ?1", [id])?;
-            self.db.execute("DELETE FROM terms WHERE id = ?1", [id])?;
         }
         Ok(())
     }
@@ -543,6 +604,10 @@ impl Store {
 
     /// Asks the clock about the tasks working entries wait on, at most `limit`.
     fn sync_clock(&self, clock: &dyn TaskClock, limit: usize) -> Result<()> {
+        // Task 187: a clock that knows nothing changes no recorded close.
+        if !clock.knows() {
+            return Ok(());
+        }
         let mut statement = self.db.prepare("SELECT DISTINCT team, task FROM entries WHERE task <> '' LIMIT ?1").map_err(error)?;
         let tasks: Vec<(String, String)> = statement
             .query_map([limit as i64], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -570,7 +635,9 @@ impl Store {
 
     fn full(&self, now: i64) -> Result<()> {
         if self.file_bytes() > self.settings.file_bytes {
-            let _ = self.cleanup(now, &OpenClock);
+            // Task 187: with a clock that knows nothing, closed tasks stay
+            // closed (OpenClock reopened them all and so freed nothing).
+            let _ = self.cleanup(now, &UnknownClock);
             if self.file_bytes() > self.settings.file_bytes {
                 let mib = self.settings.file_bytes / (1024 * 1024);
                 self.event(now, "working_full", json!({"bytes": self.file_bytes()}));
@@ -750,19 +817,7 @@ impl Store {
     /// Writes a brief's next version (11.2, 11.12); the older versions lose
     /// their protection and expire with the task.
     pub fn brief(&self, team: &str, task: &str, by: &str, text: &str, now: i64) -> Result<Written> {
-        if task.trim().is_empty() {
-            return Err(LoreError::new("refused: a brief names its task (`--task`)"));
-        }
-        if text.len() > BRIEF_BYTES {
-            return Err(LoreError::new(format!(
-                "refused: the brief has {} bytes; a brief holds at most 8 KiB - name a longer subject as a document the brief points to, or split it into topics",
-                text.len()
-            )));
-        }
-        if text.trim().is_empty() {
-            return Err(LoreError::new("refused: the brief is empty"));
-        }
-        self.full(now)?;
+        self.check_brief(task, text, now)?;
         let mut notes = Vec::new();
         let clean = self.redact(text, "text", &mut notes);
         let version = self.latest_brief_version(team, task) + 1;
@@ -781,6 +836,25 @@ impl Store {
         self.insert(&entry)?;
         self.refresh_task(team, task)?;
         Ok(Written { entry, notes })
+    }
+
+    /// Task 187: everything `brief` refuses (the task, the size, an empty text,
+    /// a full file), checked before the durable file is committed, so a brief
+    /// is never committed that the working tier then refuses (11.12).
+    pub fn check_brief(&self, task: &str, text: &str, now: i64) -> Result<()> {
+        if task.trim().is_empty() {
+            return Err(LoreError::new("refused: a brief names its task (`--task`)"));
+        }
+        if text.len() > BRIEF_BYTES {
+            return Err(LoreError::new(format!(
+                "refused: the brief has {} bytes; a brief holds at most 8 KiB - name a longer subject as a document the brief points to, or split it into topics",
+                text.len()
+            )));
+        }
+        if text.trim().is_empty() {
+            return Err(LoreError::new("refused: the brief is empty"));
+        }
+        self.full(now)
     }
 
     /// The latest brief of a task, or one version, while its row exists.
@@ -966,12 +1040,15 @@ impl Store {
         let mut events: Vec<Value> = Vec::new();
         let protected = self.protected(now)?;
         self.tell_stalls(now, &mut events)?;
-        // Expired entries; an unread message is not dropped silently.
+        // Expired entries; an unread message is not dropped silently: its
+        // event is written in the same transaction as its delete (task 187),
+        // so a crash between them can neither lose the event nor repeat it.
+        let mut with_event: BTreeMap<String, Value> = BTreeMap::new();
         for entry in self.select("expires IS NOT NULL AND expires <= ?1 ORDER BY expires LIMIT ?2", &[&now, &((PASS_ROWS + 1) as i64)])? {
             if entry.unread() {
                 let body = json!({"from": entry.by, "to": entry.to, "at": entry.at, "text": entry.text.chars().take(80).collect::<String>(),
                     "inbox": matches!(entry.to.as_deref(), Some("lead" | "owner"))});
-                events.push(json!({"kind": "working_unread_expired", "body": body}));
+                with_event.insert(entry.id.clone(), body);
             }
             victims.push(entry.id);
         }
@@ -1049,17 +1126,31 @@ impl Store {
         }
         let more = victims.len() > PASS_ROWS;
         victims.truncate(PASS_ROWS);
-        // Delete in short transactions.
+        // Delete in short transactions. Task 187: the budget starts once the
+        // transaction holds the lock (a wait for BEGIN is not its time), and
+        // each transaction deletes at least one row, so a slow start can
+        // never leave the pass looping on empty transactions.
         let mut deleted = 0;
         let mut queue = victims.as_slice();
         while !queue.is_empty() {
-            let started = Instant::now();
             self.db.execute_batch("BEGIN IMMEDIATE").map_err(error)?;
+            let started = Instant::now();
             let mut n = 0;
-            while n < queue.len() && started.elapsed() < PASS_TRANSACTION {
-                if let Err(failure) = self.delete_rows(&queue[n..n + 1]) {
+            while n < queue.len() && (n == 0 || started.elapsed() < self.budget.get()) {
+                let id = &queue[n];
+                let step = self.delete_rows(std::slice::from_ref(id)).and_then(|()| match with_event.get(id) {
+                    Some(body) => self
+                        .db
+                        .execute("INSERT INTO events(at, kind, body) VALUES(?1, 'working_unread_expired', ?2)", params![now, body.to_string()])
+                        .map(|_| ()),
+                    None => Ok(()),
+                });
+                if let Err(failure) = step {
                     let _ = self.db.execute_batch("ROLLBACK");
                     return Err(error(failure));
+                }
+                if let Some(body) = with_event.get(id) {
+                    events.push(json!({"kind": "working_unread_expired", "body": body}));
                 }
                 n += 1;
             }
@@ -1067,7 +1158,8 @@ impl Store {
             deleted += n;
             queue = &queue[n..];
         }
-        for event in &events {
+        let _ = self.db.execute("DELETE FROM events WHERE n <= (SELECT MAX(n) FROM events) - ?1", [EVENTS_KEPT]);
+        for event in events.iter().filter(|event| event["kind"] != "working_unread_expired") {
             self.event(now, event["kind"].as_str().unwrap_or_default(), event["body"].clone());
         }
         let _ = self.db.execute_batch("PRAGMA incremental_vacuum(200)");

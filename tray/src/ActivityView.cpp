@@ -2626,6 +2626,7 @@ void ActivityView::commitRender(const std::shared_ptr<ActivityRenderResult> &res
         bar->setValue(bar->value() + m_browser->cursorRect(restoredTop).top() - topY);
     }
     m_rendering = false; m_followLatest = follow;
+    emit rendered();
     if (searching) {
         QList<QTextEdit::ExtraSelection> highlights; QTextCursor found(m_browser->document()), first;
         while (highlights.size() < 300 && !m_searchQuery.isEmpty()) {
@@ -2711,3 +2712,4 @@ void ActivityView::hideEvent(QHideEvent *event)
     if(m_voicePlayer)m_voicePlayer->stop();m_voiceLoading.clear();updateVoiceImage(m_voiceKey);
     QWidget::hideEvent(event);
 }
+

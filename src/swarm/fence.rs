@@ -896,6 +896,17 @@ impl Proof {
         let Some(mut admitted) = store.admit_until(deadline) else {
             return closed(None, "busy");
         };
+        // The identity again, under the final admission: the project lock
+        // and the admission may have been waited for after the first read,
+        // and a store rotated meanwhile refuses (zerus-o28he).
+        let again = match ProjectStore::store_id_until(&root, deadline) {
+            Ok(Some(own)) => Some(own),
+            Ok(None) => return closed(None, "busy"),
+            Err(_) => None,
+        };
+        if again != self.me.store {
+            return closed(Some(&self.me.node), "changed_identity");
+        }
         let Ok(mut task) = admitted.load(&self.task) else {
             return closed(None, "damaged");
         };
@@ -1492,6 +1503,12 @@ pub(crate) fn admit_certified<R>(
     let Some(mut admitted) = store.admit_until(deadline) else {
         return closed(None, "busy");
     };
+    // The certified identity again, under the final admission (zerus-o28he).
+    match ProjectStore::store_id_until(&root, deadline) {
+        Ok(Some(again)) if again == own => {}
+        Ok(None) => return closed(None, "busy"),
+        _ => return closed(Some(&node), "changed_identity"),
+    }
     let Ok(mut task) = admitted.load(uuid) else {
         return closed(None, "damaged");
     };
@@ -2095,6 +2112,82 @@ printf '{{"node_id":"{PEER}"}}'
         assert_eq!(refused.unwrap().unwrap_err().reason, "busy");
         assert_eq!(runs, 0);
         assert!(waited >= Duration::from_millis(100) && waited < Duration::from_secs(2), "{waited:?}");
+    }
+
+    /// zerus-o28he: holds the project lock as a barrier while `admit` runs
+    /// in another thread, rotates this computer's store identity once that
+    /// admission waits for the lock (after its first identity read), then
+    /// releases the lock. The admission must refuse, and run nothing.
+    fn rotated_while_waiting(
+        config: &Config,
+        admit: impl FnOnce(
+                std::sync::Arc<std::sync::atomic::AtomicUsize>,
+            ) -> std::result::Result<(), Closed>
+            + Send
+            + 'static,
+    ) {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let root = config.state.join("replica");
+        let barrier = ProjectStore::open(&root, "p").unwrap();
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counted = runs.clone();
+        let waiting = std::thread::spawn(move || admit(counted));
+        // The admission reads the identity, then waits for the project lock.
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            !waiting.is_finished(),
+            "the admission waits for the project lock"
+        );
+        std::fs::write(root.join("store-id"), uuid::Uuid::new_v4().to_string()).unwrap();
+        drop(barrier);
+        let closed = waiting.join().unwrap();
+        assert_eq!(closed.unwrap_err().reason, "changed_identity");
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            0,
+            "nothing ran under the rotated store"
+        );
+    }
+
+    #[test]
+    fn a_store_rotated_while_the_admission_waits_refuses() {
+        use std::sync::atomic::Ordering;
+        let members = chain_abc();
+        let task = floored(&members, "a");
+        let config = members.configs["a"].clone();
+        let net = InProcess::new(&members, Faults::default());
+        let proof = prove(&config, &net, "p", task.uuid(), soon())
+            .unwrap()
+            .1
+            .unwrap();
+        let admitting = config.clone();
+        rotated_while_waiting(&config, move |runs| {
+            proof
+                .admit(&admitting, soon(), |_, _| {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+                .unwrap()
+        });
+    }
+
+    #[test]
+    fn a_store_rotated_while_the_certified_admission_waits_refuses() {
+        use std::sync::atomic::Ordering;
+        let members = chain_abc();
+        let (uuid, _) = certified(&members);
+        let config = members.configs["a"].clone();
+        let admitting = config.clone();
+        rotated_while_waiting(&config, move |runs| {
+            admit_certified(&admitting, "p", &uuid, soon(), |_, _| {
+                runs.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap()
+        });
     }
 
     /// A floored task over A-B-C, proved and certified at a.

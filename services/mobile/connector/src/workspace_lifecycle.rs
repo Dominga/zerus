@@ -14,6 +14,13 @@ use std::{
 };
 /// Consumers must require this exact capability before offering a running Stop.
 pub const STOP_PREFLIGHT_ABI: &str = "service-preflight-v1";
+/// The closed result of a Stop refused by its preflight: no marker was offered, so
+/// nothing changed. Nothing else may be read as that, least of all an error's text.
+pub const STOP_REFUSED_BEFORE_EFFECT: &str = "stop-refused-before-effect";
+/// A closed refusal is a reply, and still not a success.
+pub fn reply_exit(reply: &Value) -> u8 {
+    u8::from(reply["ok"] == false)
+}
 const CONTROL: &str = "workspace-control.json";
 const STOP: &str = "workspace-stop.json";
 fn fail() -> ConnectorError {
@@ -214,14 +221,32 @@ pub async fn manage_stop(config_path: &Path, input: &Value) -> Result<Value> {
         {
             return Err(fail());
         }
-        crate::workspace_service::stop_preflight(
+        if crate::workspace_service::stop_preflight(
             config_path,
             &private_dir,
             &revision,
             &profile,
             &control,
         )
-        .await?;
+        .await
+        .is_err()
+        {
+            // An earlier call's marker for this generation is a Stop in effect,
+            // whatever this admission says now, so it is not this refusal.
+            if record(&profile.state_dir, STOP)?
+                .as_ref()
+                .is_some_and(|stop| generation(stop).ok() == Some(expected))
+            {
+                return Err(fail());
+            }
+            return Ok(json!({
+                "ok": false,
+                "refusal": STOP_REFUSED_BEFORE_EFFECT,
+                "error": "Stop was refused before anything changed",
+                "generation": expected,
+                "expected_revision": revision,
+            }));
+        }
         // The admission awaited bounded manager reads. Do not publish against a
         // replaced generation, lock owner or configuration after that await.
         if record(&profile.state_dir, CONTROL)?.as_ref() != Some(&control)
@@ -248,6 +273,16 @@ pub async fn manage_stop(config_path: &Path, input: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_a_reply_that_says_not_ok_exits_with_failure() {
+        assert_eq!(
+            reply_exit(&json!({"ok":false,"refusal":STOP_REFUSED_BEFORE_EFFECT})),
+            1
+        );
+        for reply in [json!({"ok":true}), json!({"state":"running"}), json!({})] {
+            assert_eq!(reply_exit(&reply), 0, "{reply}");
+        }
+    }
     #[tokio::test]
     async fn stale_stop_generation_does_not_stop_replacement() {
         let directory = tempfile::tempdir().unwrap();

@@ -3,6 +3,7 @@ use super::*;
 use mobile::{
     connector_actions::{self as core, Kind},
     enrollment::Target,
+    Failure,
 };
 use serde::Serialize;
 use std::{collections::VecDeque, sync::atomic::AtomicBool};
@@ -93,7 +94,7 @@ impl Inner {
     pub(super) fn connector_apply(
         self: &Arc<Self>,
         handle: &str,
-        apply: impl FnOnce(&Target, Kind) -> Result<core::Answer, String>,
+        apply: impl FnOnce(&Target, Kind) -> Result<core::Answer, Failure>,
     ) -> Result<&'static str, String> {
         let (plan, _active) = self.connector_take(handle)?;
         if !self.page().read_workspace() {
@@ -103,12 +104,13 @@ impl Inner {
     }
     /// One lifecycle call on the taken lane. Stop disarms at its admission, saved
     /// before it is sent: a crash here must not bring the connector back at the
-    /// next start. A successful Start is what arms it again.
+    /// next start. A successful Start is what arms it again, and a definite refusal
+    /// restores the choice, because nothing happened.
     pub(super) fn connector_run(
         self: &Arc<Self>,
         target: &Target,
         kind: Kind,
-        apply: impl FnOnce(&Target, Kind) -> Result<core::Answer, String>,
+        apply: impl FnOnce(&Target, Kind) -> Result<core::Answer, Failure>,
     ) -> Result<&'static str, String> {
         if kind == Kind::Stop {
             self.page()
@@ -127,10 +129,19 @@ impl Inner {
                 }
                 Ok(notice)
             }
-            Err(error) => {
+            // Only the connector's closed result for this very call: nothing happened.
+            Err(Failure::StopRefused) if kind == Kind::Stop => {
+                self.page()
+                    .autostart_stop_refused(&target.node_id, target.generation.as_deref());
+                self.save_autostart();
+                self.page()
+                    .workspace_answered(Err(mobile::STOP_REFUSED.into()));
+                Err(mobile::STOP_REFUSED.into())
+            }
+            Err(failure) => {
                 self.page()
                     .workspace_answered(Err(mobile::WORKSPACE_UNCONFIRMED.into()));
-                Err(error)
+                Err(failure.message())
             }
         };
         (self.notify)();

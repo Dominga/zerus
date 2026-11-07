@@ -182,7 +182,7 @@ impl Inner {
         self: &Arc<Self>,
         kind: core::Kind,
         admitted: &Workspace,
-        answer: Result<core::Answer, String>,
+        answer: Result<core::Answer, mobile::Failure>,
     ) -> Result<&'static str, String> {
         let target = core::admit(admitted, kind).unwrap();
         assert!(self.page().read_workspace());
@@ -190,7 +190,10 @@ impl Inner {
     }
 }
 
-fn stop_answer(workspace: Workspace, notice: &'static str) -> Result<core::Answer, String> {
+fn stop_answer(
+    workspace: Workspace,
+    notice: &'static str,
+) -> Result<core::Answer, mobile::Failure> {
     Ok(core::Answer { workspace, notice })
 }
 
@@ -438,6 +441,65 @@ fn a_failed_stop_stays_disarmed_against_the_same_generation() {
     assert_eq!(inner.view(None).autostart, Some(Line::RunningNotArmed));
 }
 
+// zerus-7rkq9: a definite refusal means nothing happened, so nothing the person
+// chose before pressing Stop may change. The disarm is still saved first, for a crash.
+#[test]
+fn a_refused_stop_restores_the_armed_choice() {
+    let (inner, log) = fixture(Some(ARMED), vec![Ok(running())]);
+    let reply = inner.button(
+        core::Kind::Stop,
+        &running(),
+        Err(mobile::Failure::StopRefused),
+    );
+    assert_eq!(reply.unwrap_err(), mobile::STOP_REFUSED);
+    let saved = log.saved();
+    assert_eq!(saved.len(), 2, "disarm, then the restored choice");
+    assert_eq!(saved[0]["armed"], false);
+    assert_eq!(saved[1]["armed"], true);
+    assert!(saved[1].get("stopped_generation").is_none());
+    assert_eq!(
+        inner.view(None).workspace_error.as_deref(),
+        Some(mobile::STOP_REFUSED)
+    );
+    inner.answer_for_test(running());
+    assert_eq!(inner.view(None).autostart, Some(Line::Running));
+    inner.answer_for_test(stopped());
+    assert_eq!(inner.view(None).autostart, Some(Line::WillStart));
+    assert_eq!(log.saved().len(), 2, "a later read changed the choice");
+}
+
+#[test]
+fn a_refused_stop_keeps_an_earlier_stop_of_another_generation() {
+    let earlier = format!(
+        r#"{{"version":1,"node_id":"node-a","armed":false,"stopped_generation":"{LATER}"}}"#
+    );
+    let (inner, log) = fixture(Some(&earlier), vec![Ok(running())]);
+    let _ = inner.button(
+        core::Kind::Stop,
+        &running(),
+        Err(mobile::Failure::StopRefused),
+    );
+    let saved = log.saved();
+    assert_eq!(saved.last().unwrap()["armed"], false);
+    assert_eq!(saved.last().unwrap()["stopped_generation"], LATER);
+}
+
+#[test]
+fn any_other_stop_failure_is_not_a_refusal_and_stays_disarmed() {
+    // The refusal's own words as text are still not the closed result.
+    for error in [
+        "refused",
+        mobile::WORKSPACE_UNCONFIRMED,
+        "timed out",
+        mobile::STOP_REFUSED,
+    ] {
+        let (inner, log) = fixture(Some(ARMED), vec![Ok(running())]);
+        let _ = inner.button(core::Kind::Stop, &running(), Err(error.into()));
+        assert_eq!(log.saved().len(), 1, "{error}");
+        assert_eq!(log.saved()[0]["armed"], false, "{error}");
+    }
+}
+
 #[test]
 fn only_a_new_start_or_later_generation_arms_after_a_stop() {
     let (inner, log) = fixture(Some(ARMED), vec![Ok(stopped())]);
@@ -554,6 +616,35 @@ fn a_changed_workspace_inherits_nothing() {
     assert_eq!(log.counts(), (1, 0), "B was started by A's choice");
     assert!(log.saved().is_empty());
     assert_eq!(inner.view(None).autostart, Some(Line::NotArmed));
+}
+
+#[test]
+fn a_workspace_change_whose_stop_is_refused_restores_the_armed_choice() {
+    let (inner, log) = fixture(Some(ARMED), vec![Ok(running())]);
+    inner.answer_for_test(running());
+    let target = Target::capture(&running()).unwrap();
+    inner.enrollment_disarm(&target);
+    assert_eq!(log.saved()[0]["armed"], false);
+    let _ = inner.enrollment_call_failed(&target, mobile::Failure::StopRefused);
+    assert_eq!(log.saved().last().unwrap()["armed"], true);
+    assert_eq!(
+        inner.view(None).workspace_error.as_deref(),
+        Some(mobile::STOP_REFUSED)
+    );
+}
+
+#[test]
+fn a_workspace_change_that_fails_any_other_way_stays_disarmed() {
+    let (inner, log) = fixture(Some(ARMED), vec![Ok(running())]);
+    inner.answer_for_test(running());
+    let target = Target::capture(&running()).unwrap();
+    inner.enrollment_disarm(&target);
+    let _ = inner.enrollment_call_failed(&target, "anything else".into());
+    assert_eq!(log.saved().len(), 1);
+    assert_eq!(
+        inner.view(None).workspace_error.as_deref(),
+        Some(mobile::WORKSPACE_UNCONFIRMED)
+    );
 }
 
 #[test]

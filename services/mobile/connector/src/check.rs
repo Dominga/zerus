@@ -66,7 +66,11 @@ pub fn report(
     let mut report = Map::new();
     report.insert(
         "capabilities".into(),
-        json!({"workspace_stop": crate::workspace_lifecycle::STOP_PREFLIGHT_ABI}),
+        if cfg!(target_os = "linux") {
+            json!({"workspace_stop": crate::workspace_lifecycle::STOP_PREFLIGHT_ABI})
+        } else {
+            json!({})
+        },
     );
     if let Ok(config) = &validated {
         if config.encrypted_workspace.is_some() {

@@ -161,7 +161,10 @@ relay suite; and native wire/storage/HTTP tests in Android and ZerusKit. Source
 changes and test builds do not migrate a live gateway or publish a release.
 
 Desktop Stop admission is advertised as `Workspace stop ABI: service-preflight-v1`
-in connector help and `capabilities.workspace_stop` in `--check --json`. Before
+in connector help and `capabilities.workspace_stop` in `--check --json`, only on
+Linux, the one platform that can currently admit it. Windows and macOS advertise
+neither, so their clients disable Stop and a running workspace change, say why
+and send no such request. Before
 writing a generation-bound Stop marker, Linux verifies the saved managed unit,
 its effective `KillMode=process` policy, unchanged definition, exact MainPID,
 connector image, journal lock and generation. Extra processes or delegated
@@ -170,3 +173,11 @@ and no active service; unreadable supervision refuses. Platforms without a
 verified installer service admission refuse Stop. Clients must require the ABI
 marker before offering Stop or a running workspace change; there is no legacy
 Stop fallback. Installing a new connector on a live gateway remains explicit.
+
+A client disarms autostart and saves that before it sends Stop, so a crash can't
+bring the connector back. A refused admission writes no marker and answers with
+the closed `stop-refused-before-effect` result, exit status 1, naming the call's
+generation and revision. Only that result restores the choice the Stop replaced,
+and only while that same disarm is still the current decision. A timeout, a
+malformed reply, any other error, or a Stop already in effect for the generation
+leaves it disarmed, with no automatic status call, retry or rearm.

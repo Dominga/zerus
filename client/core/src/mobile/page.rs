@@ -169,6 +169,14 @@ impl Page {
         }
     }
 
+    /// The connector positively refused this exact Stop before offering it.
+    pub fn autostart_stop_refused(&mut self, node: &str, generation: Option<&str>) {
+        if let Some(autostart) = &mut self.autostart {
+            autostart.stop_refused(node, generation);
+            self.changed();
+        }
+    }
+
     /// The person's Start connector succeeded with this status.
     pub fn autostart_person_started(&mut self, workspace: &Workspace) {
         if let Some(autostart) = &mut self.autostart {

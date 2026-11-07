@@ -415,3 +415,106 @@ fn only_the_connector_packaged_beside_this_app_is_usable() {
         Some(client.join(connector_name()))
     );
 }
+
+#[test]
+fn a_refused_stop_puts_back_exactly_what_it_found() {
+    let mut state = armed();
+    state.stop_chosen(NODE, Some(GENERATION));
+    assert_eq!(saved(&mut state).unwrap()["armed"], false);
+    state.stop_refused(NODE, Some(GENERATION));
+    let restored = saved(&mut state).unwrap();
+    assert_eq!(restored["armed"], true);
+    assert!(restored.get("stopped_generation").is_none());
+    // Nothing is left to restore a second time.
+    state.stop_refused(NODE, Some(GENERATION));
+    assert!(saved(&mut state).is_none());
+}
+
+#[test]
+fn a_refused_stop_with_no_earlier_choice_arms_what_is_running() {
+    // A verified running connector with no record is armed by the next read anyway.
+    let mut state = State::default();
+    state.stop_chosen(NODE, Some(GENERATION));
+    let _ = saved(&mut state);
+    state.stop_refused(NODE, Some(GENERATION));
+    assert_eq!(saved(&mut state).unwrap()["armed"], true);
+    assert_eq!(state.line(&running()), Some(Line::Running));
+}
+
+#[test]
+fn a_refusal_with_no_stop_chosen_changes_nothing() {
+    let mut state = armed();
+    state.stop_refused(NODE, Some(GENERATION));
+    assert!(saved(&mut state).is_none());
+    assert_eq!(state.line(&running()), Some(Line::Running));
+}
+
+#[test]
+fn a_refusal_for_another_node_or_generation_changes_nothing() {
+    for (node, generation) in [
+        ("node-b", Some(GENERATION)),
+        (NODE, Some(LATER)),
+        (NODE, None),
+    ] {
+        let mut state = armed();
+        state.stop_chosen(NODE, Some(GENERATION));
+        let _ = saved(&mut state);
+        state.stop_refused(node, generation);
+        assert!(saved(&mut state).is_none(), "{node} {generation:?}");
+        // The real refusal still finds its transition.
+        state.stop_refused(NODE, Some(GENERATION));
+        assert_eq!(saved(&mut state).unwrap()["armed"], true);
+    }
+}
+
+#[test]
+fn a_late_refusal_cannot_overwrite_a_later_arm() {
+    let mut state = armed();
+    state.stop_chosen(NODE, Some(GENERATION));
+    let _ = saved(&mut state);
+    // A later generation is running, and arms it.
+    state.observe(&running_as(LATER));
+    let armed_later = saved(&mut state).unwrap();
+    assert_eq!(armed_later["armed"], true);
+    state.stop_refused(NODE, Some(GENERATION));
+    assert!(saved(&mut state).is_none());
+}
+
+#[test]
+fn a_late_refusal_cannot_overwrite_a_later_stop() {
+    let mut state = armed();
+    state.stop_chosen(NODE, Some(GENERATION));
+    let _ = saved(&mut state);
+    state.stop_chosen(NODE, Some(LATER));
+    let _ = saved(&mut state);
+    state.stop_refused(NODE, Some(GENERATION));
+    assert!(saved(&mut state).is_none(), "the older refusal changed it");
+    // The later Stop's own refusal restores only what that Stop replaced.
+    state.stop_refused(NODE, Some(LATER));
+    let restored = saved(&mut state).unwrap();
+    assert_eq!(restored["armed"], false);
+    assert_eq!(restored["stopped_generation"], GENERATION);
+}
+
+#[test]
+fn a_late_refusal_cannot_overwrite_a_workspace_the_person_changed_to() {
+    let mut state = armed();
+    state.stop_chosen(NODE, Some(GENERATION));
+    let _ = saved(&mut state);
+    state.observe(&other_node("running"));
+    let _ = saved(&mut state);
+    state.stop_refused(NODE, Some(GENERATION));
+    assert!(saved(&mut state).is_none());
+}
+
+#[test]
+fn a_restore_that_could_not_be_saved_is_offered_again_and_stays_visible() {
+    let mut state = armed();
+    state.stop_chosen(NODE, Some(GENERATION));
+    let _ = saved(&mut state);
+    state.stop_refused(NODE, Some(GENERATION));
+    assert!(state.take_unsaved().is_some());
+    state.save_failed();
+    assert!(state.save_problem());
+    assert_eq!(saved(&mut state).unwrap()["armed"], true);
+}

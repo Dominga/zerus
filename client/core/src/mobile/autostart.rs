@@ -88,6 +88,14 @@ pub struct State {
     unsaved: bool,
     save_problem: bool,
     attempt: Attempt,
+    /// The last admitted Stop's disarm and what it replaced.
+    stop: Option<AdmittedStop>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AdmittedStop {
+    disarm: Record,
+    before: Option<Record>,
 }
 
 impl State {
@@ -152,12 +160,37 @@ impl State {
 
     /// The person chose a Stop for this running generation, at its admission.
     pub fn stop_chosen(&mut self, node: &str, generation: Option<&str>) {
-        self.store(Record {
+        let disarm = Record {
             version: VERSION,
             node_id: node.to_owned(),
             armed: false,
             stopped_generation: generation.map(str::to_owned),
+        };
+        self.stop = Some(AdmittedStop {
+            disarm: disarm.clone(),
+            before: self.record.clone(),
         });
+        self.store(disarm);
+    }
+
+    /// The connector positively refused this exact Stop before offering it, so the
+    /// choice goes back to what it was, but only while that disarm is still the
+    /// current record: a later Stop, workspace change or arm always stands. An
+    /// unknown outcome never comes here and stays disarmed, as a crash would.
+    pub fn stop_refused(&mut self, node: &str, generation: Option<&str>) {
+        let current = self.stop.as_ref().is_some_and(|stop| {
+            stop.disarm.node_id == node
+                && stop.disarm.stopped_generation.as_deref() == generation
+                && self.record.as_ref() == Some(&stop.disarm)
+        });
+        if !current {
+            return;
+        }
+        match self.stop.take().and_then(|stop| stop.before) {
+            Some(record) => self.store(record),
+            // No earlier choice: the next read of this running connector arms it.
+            None => self.arm(node),
+        }
     }
 
     /// What to start, when this workspace is armed and can be started now.

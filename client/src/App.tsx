@@ -21,7 +21,6 @@ import { SessionDetail } from "./ui/sessions/SessionDetail";
 import { CreationPanel } from "./ui/sessions/CreationPanel";
 import { selectedCreation } from "./store/creations";
 import { OverviewScreen } from "./ui/screens/Overview";
-import { ProjectsScreen } from "./ui/screens/Projects";
 import { applySkin, skin } from "./skin/runtime";
 import { contentScale, page, selectedKey, setContentScale, setPage, toast } from "./store/ui";
 import { num, setSetting } from "./store/settings";
@@ -42,6 +41,7 @@ const WorktreeReviewDialog = lazy(() => import("./ui/screens/WorktreeReviewDialo
 // screen loads on first navigation.
 const MachinesScreen = lazy(() => import("./ui/screens/Machines").then((m) => ({ default: m.MachinesScreen })));
 const AccountsScreen = lazy(() => import("./ui/screens/Accounts").then((m) => ({ default: m.AccountsScreen })));
+const ProjectsScreen = lazy(() => import("./ui/screens/Projects").then((m) => ({ default: m.ProjectsScreen })));
 // Settings and its sections load the first time Settings opens; their
 // state lives in their modules, so it stays once loaded.
 const SettingsScreen = lazy(() => import("./ui/screens/Settings").then((m) => ({ default: m.SettingsScreen })));
@@ -143,7 +143,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
           <Match when={page() === "dashboard"}><OverviewScreen /></Match>
           <Match when={page() === "machines"}><MachinesScreen /></Match>
           <Match when={page() === "accounts"}><Suspense><AccountsScreen /></Suspense></Match>
-          <Match when={page() === "projects"}><ProjectsScreen /></Match>
+          <Match when={page() === "projects"}><Suspense><ProjectsScreen /></Suspense></Match>
           <Match when={page() === "settings"}><Suspense><SettingsScreen /></Suspense></Match>
         </Switch>
       </main>

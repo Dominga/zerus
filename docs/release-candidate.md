@@ -28,10 +28,12 @@ python scripts/release-candidate.py --commit <sha> --exp-tag rc-<date>-<n>
 ```
 
 The script refuses to continue a leg that fails and never records a failure as
-green. It is also the `release-candidate` template:
+green. Its local leg is also the `release-candidate` template, which a member
+runs without an approval; the template never takes `exp_tag`, because the
+runner leg pushes a tag and stays the owner's step by hand:
 
 ```
-hgs team run --template release-candidate --args '{"commit":"<sha>","exp_tag":"rc-..."}'
+hgs team run --template release-candidate --args '{"commit":"<sha>"}'
 ```
 
 ## Publishing

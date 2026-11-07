@@ -166,17 +166,20 @@ pub(crate) const BUILTIN: &[Template] = &[
         params: &[],
         timeout_secs: 3600,
     },
-    // Task 157: the release candidate a Windows worker runs before the release
-    // branch moves. The script runs the fork-windows steps; --exp-tag also
-    // dispatches the whitewh-exp-* workflow and waits for it.
+    // Task 157: the release candidate's local leg a Windows worker runs before
+    // the release branch moves: the fork-windows steps, recorded per commit.
+    // Task 169 review: a built-in template runs for any member without an
+    // approval, so it never takes --exp-tag (that pushes a tag to origin): the
+    // runner leg stays the owner's step by hand (docs/release-candidate.md).
     Template {
         id: "release-candidate",
-        summary: "the whole fork release candidate on a Windows worker: Qt offscreen suites, fork handoff/update, Tauri build, portable zip self-test; --exp-tag dispatches and waits for the experimental runner",
+        summary: "the fork release candidate's local leg on a Windows worker: Qt offscreen suites, fork handoff/update, Tauri build, portable zip self-test, recorded for the commit",
         program: "python",
-        args: &["scripts/release-candidate.py", "--commit={commit}", "--exp-tag={exp_tag}"],
-        params: &[optional("commit", Kind::Identifier), optional("exp_tag", Kind::Identifier)],
+        args: &["scripts/release-candidate.py", "--commit={commit}"],
+        params: &[optional("commit", Kind::Identifier)],
         timeout_secs: 10800,
-    },    // Owner, 2026-10-28: a stale generated build folder (an AAPT intermediate)
+    },
+    // Owner, 2026-10-28: a stale generated build folder (an AAPT intermediate)
     // needed a permission to remove; only a build output can go.
     Template {
         id: "clean-build",
@@ -3251,7 +3254,3 @@ kind = "path"
         assert!(error.contains("HKCU") && error.contains("ZERUS_UE_ENGINE"), "{error}");
     }
 }
-
-
-
-

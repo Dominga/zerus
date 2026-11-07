@@ -1,5 +1,6 @@
 """Keep cache warm: setting, worker round and silent ping turns, with private fake agents only."""
 import fcntl
+import os
 import json
 import subprocess
 import time
@@ -150,7 +151,8 @@ class KeepWarm(unittest.TestCase):
 
     def due(self, ago=1500):
         """An idle Codex session on a 30-minute cache whose last turn ended `ago` seconds back."""
-        self.record.update(model="gpt-6.1-sol", cache_touched_at=time.time() - ago, last_event_at=time.time() - ago)
+        self.record.update(model="gpt-6.1-sol", last_event_at=time.time() - ago,
+                           cache_touched=dict(at=time.time() - ago, conversation_id=self.conversation_id))
         self.write_record()
 
     def tick(self):
@@ -189,7 +191,8 @@ class KeepWarm(unittest.TestCase):
         self.due()
         self.tick()
         self.assertEqual(self.inspect()["keep_warm"]["state"], "cold", "a missed window waits for a real turn")
-        self.record.update(cache_touched_at=time.time() - 1500, keep_warm_real_stop_at=time.time(), activity="busy", phase="working")
+        self.record.update(cache_touched=dict(at=time.time() - 1500, conversation_id=self.conversation_id),
+                           keep_warm_real_stop_at=time.time(), activity="busy", phase="working")
         self.write_record()
         self.tick()
         self.assertEqual(self.inspect()["keep_warm"]["reason"], "The agent is working.")
@@ -204,6 +207,87 @@ class KeepWarm(unittest.TestCase):
         self.assertEqual((listed["enabled"], listed["state"]), (False, "off"))
         time.sleep(0.3)
         self.assertEqual(self.received(), b"")
+
+    def wrap_tmux(self, case):
+        """Replace the fixture's tmux with one that runs `case` (shell) first."""
+        self.script("tmux", "#!/bin/sh\n" + case + "\nexec " + fixtures.TMUX + ' -S "' + str(self.socket) + '" -f /dev/null "$@"\n')
+
+    def test_unknown_terminal_input_never_admits_a_ping(self):
+        self.due()
+        self.change(hours=1)
+        self.wrap_tmux('[ "$1" = list-clients ] && exit 1')
+        self.tick()
+        time.sleep(0.3)
+        self.assertEqual(self.received(), b"")
+        self.assertEqual(self.inspect()["keep_warm"]["reason"], "Terminal input activity is unknown.")
+
+    def test_a_slow_stage_that_crosses_the_cache_margin_types_nothing(self):
+        self.due(ago=1765)  # 35 s of the 30-minute cache left
+        self.change(hours=1)
+        self.wrap_tmux('[ "$1" = load-buffer ] && sleep 7')
+        self.tick()
+        time.sleep(0.3)
+        self.assertEqual(self.received(), b"")
+        warm = self.inspect()["keep_warm"]
+        # Refused by the final pre-input check, after the slow stage.
+        self.assertEqual((warm["state"], warm["reason"]), ("waiting", "The cache may already have expired; nothing was submitted"))
+
+    def test_a_crafted_owner_key_writes_nothing_outside_the_state(self):
+        canary = self.root / "canary"
+        (self.root / "canary.json").write_text("original")
+        entry = dict(name=self.name, enabled=True, until=None, revision=1, set_at=time.time())
+        (self.state / "keep-warm.json").write_text(json.dumps(dict(version=1, sessions={str(canary): entry})))
+        self.tick()
+        self.assertEqual((self.root / "canary.json").read_text(), "original")
+        self.assertIsNone(self.listed()["keep_warm"])
+
+    def test_a_special_store_file_never_blocks_a_listing(self):
+        os.mkfifo(self.state / "keep-warm.json")
+        started = time.monotonic()
+        row = self.listed()
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertIsNone(row["keep_warm"])
+        self.tick()
+
+    def test_a_malformed_worker_state_sends_nothing(self):
+        self.due()
+        self.change(hours=1)
+        owner = next(iter(json.loads((self.state / "keep-warm.json").read_text())["sessions"]))
+        state = self.state / "recovery" / "keep-warm"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / f"{owner}.json").write_text('{"state":"dispatch')
+        self.tick()
+        time.sleep(0.3)
+        self.assertEqual(self.received(), b"")
+        self.assertEqual(self.inspect()["keep_warm"]["state"], "uncertain")
+        self.tick()
+        time.sleep(0.3)
+        self.assertEqual(self.received(), b"", "an uncertain state waits for a real turn")
+
+    def test_a_cleared_conversation_waits_for_its_own_turn(self):
+        self.due()
+        self.change(hours=1)
+        # Clear: the same session continues in a new conversation.
+        record = json.loads(self.record_path.read_text())
+        record["conversation_id"] = self.conversation_id = "0f8b5f7e-3c2a-4d1e-9b6a-7c5d4e3f2a1b"
+        self.record_path.write_text(json.dumps(record))
+        self.tick()
+        time.sleep(0.3)
+        self.assertEqual(self.received(), b"")
+        warm = self.inspect()["keep_warm"]
+        self.assertEqual((warm["enabled"], warm["state"], warm["cache_expires_at"]), (True, "waiting", None))
+
+    def test_a_legacy_label_rename_keeps_the_setting(self):
+        self.change(hours=2)
+        renamed = "codex/input-test/renamed"
+        result = subprocess.run([str(fixtures.HGS), "rename", self.name, renamed], env=self.env, text=True,
+                                capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.name = renamed
+        warm = self.listed()["keep_warm"]
+        self.assertEqual((warm["enabled"], warm["revision"]), (True, 1))
+        store = json.loads((self.state / "keep-warm.json").read_text())
+        self.assertEqual([entry["name"] for entry in store["sessions"].values()], [renamed])
 
     def test_a_stale_conversation_is_refused(self):
         stale = self.command("keep-warm", self.name, "--json", ok=False, payload=dict(

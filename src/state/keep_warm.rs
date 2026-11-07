@@ -85,28 +85,55 @@ fn lock_path() -> PathBuf {
     root().join("keep-warm.lock")
 }
 
+/// A setting's key is its session's owner key (`storage::owner_key`): a
+/// canonical session ID, or the SHA-256 of a legacy label. Nothing else may
+/// name a file of this feature.
+fn owner_valid(owner: &str) -> bool {
+    session_id::canonical(owner)
+        || (owner.len() == 64 && owner.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+}
+
 /// The worker's state of one session's keep-warm, written only by the worker.
-fn runtime_path(owner: &str) -> PathBuf {
-    root().join("recovery/keep-warm").join(format!("{owner}.json"))
+fn runtime_path(owner: &str) -> Option<PathBuf> {
+    owner_valid(owner).then(|| root().join("recovery/keep-warm").join(format!("{owner}.json")))
+}
+
+/// At most `limit` bytes of a regular file, None when it does not exist. A
+/// FIFO, device, directory or symbolic link is refused without blocking.
+fn read_regular(path: &Path, limit: u64) -> Result<Option<Vec<u8>>> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > limit {
+        return Err(format!("{} exceeds limits", path.display()));
+    }
+    Ok(Some(bytes))
 }
 
 fn read_store(path: &Path) -> Result<Store> {
-    let file = match fs::File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Store::default()),
-        Err(error) => return Err(error.to_string()),
+    let Some(bytes) = read_regular(path, MAX_FILE)? else {
+        return Ok(Store::default());
     };
-    let mut bytes = Vec::new();
-    file.take(MAX_FILE + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-    if bytes.len() as u64 > MAX_FILE {
-        return Err("keep-warm settings exceed limits".into());
-    }
     let store: Store = serde_json::from_slice(&bytes).map_err(|e| format!("invalid keep-warm settings: {e}"))?;
     if store.version != 1
         || store.sessions.len() > MAX_ENTRIES + 1
         || store.sessions.values().filter(|entry| entry.enabled).count() > MAX_ENABLED
         || store.sessions.iter().any(|(owner, entry)| {
-            !identity(owner) || entry.name.len() > 2048 || entry.revision > MAX_REVISION
+            !owner_valid(owner) || entry.name.len() > 2048 || entry.revision > MAX_REVISION
                 || entry.until.is_some_and(|until| !until.is_finite())
         })
     {
@@ -143,12 +170,26 @@ fn view(entry: Option<&Entry>, runtime: &Value, record: &Value, now: f64) -> Val
         "turn_active":record["keep_warm_turn"]["started_at"].as_f64().is_some_and(|at| now - at <= TURN_SECONDS)})
 }
 
-fn read_runtime(owner: &str) -> Value {
-    fs::File::open(runtime_path(owner)).ok().and_then(|file| {
-        let mut bytes = Vec::new();
-        file.take(64 * 1024).read_to_end(&mut bytes).ok()?;
-        serde_json::from_slice(&bytes).ok()
-    }).unwrap_or(Value::Null)
+const UNREADABLE: &str = "The keep-warm state of this session is unreadable. Nothing is sent until your next message.";
+
+/// The worker's state: Null when there is none yet, an error when a file
+/// exists but is not a readable state object, which must never read as none.
+fn read_runtime_at(path: &Path) -> Result<Value> {
+    let Some(bytes) = read_regular(path, 64 * 1024)? else {
+        return Ok(Value::Null);
+    };
+    serde_json::from_slice::<Value>(&bytes).ok().filter(Value::is_object)
+        .ok_or_else(|| format!("invalid keep-warm state in {}", path.display()))
+}
+
+fn read_runtime(owner: &str) -> Result<Value> {
+    read_runtime_at(&runtime_path(owner).ok_or("invalid keep-warm owner")?)
+}
+
+/// What a round records when it cannot read its state: uncertain, so that
+/// nothing is sent again before the person's next turn.
+fn unreadable(now: f64) -> Step {
+    hold("uncertain", UNREADABLE, None, Some(now))
 }
 
 /// Add `keep_warm` to one listing or inspect row. Only enabled sessions read
@@ -160,7 +201,11 @@ pub(super) fn enrich(session: &mut Value, store: Option<&Store>, record: &Value)
     };
     let owner = storage::owner_key(record);
     let entry = store.sessions.get(&owner);
-    let runtime = if entry.is_some_and(|entry| entry.enabled) { read_runtime(&owner) } else { Value::Null };
+    let runtime = if entry.is_some_and(|entry| entry.enabled) {
+        read_runtime(&owner).unwrap_or_else(|_| json!({"state":"uncertain","reason":UNREADABLE}))
+    } else {
+        Value::Null
+    };
     session["keep_warm"] = view(entry, &runtime, record, now());
 }
 
@@ -296,11 +341,7 @@ fn kimi_config(home: &Path, model: &str) -> Option<u64> {
         if !name.to_string_lossy().ends_with("estimated_cache_duration.json") {
             continue;
         }
-        let mut bytes = Vec::new();
-        let Ok(file) = fs::File::open(entry.path()) else { continue };
-        if file.take(64 * 1024 + 1).read_to_end(&mut bytes).is_err() || bytes.len() > 64 * 1024 {
-            continue;
-        }
+        let Ok(Some(bytes)) = read_regular(&entry.path(), 64 * 1024) else { continue };
         let Ok(value) = serde_json::from_slice::<Value>(&bytes) else { continue };
         let fetched = value["fetchedAt"].as_f64().unwrap_or(0.0);
         let rules = &value["config"]["config"];
@@ -419,9 +460,19 @@ pub(super) fn observe(record: &mut Value, event: &mut Value, now: f64) {
             return;
         }
     }
-    // The person's own message, or a job's: everything is visible again.
+    // The person's own message, or a job's: everything is visible again, and
+    // a ping still being dispatched can no longer claim a later prompt.
     remove(record, "keep_warm_turn");
     remove(record, "keep_warm_quiet");
+    remove(record, "keep_warm_pending");
+    remove(record, "keep_warm_prompt_at");
+}
+
+/// Whether the latest prompt of the session was a verified keep-warm ping
+/// (marked through its pending submission, never by its text alone).
+pub(super) fn ping_was_last_prompt(record: &Value) -> bool {
+    record["keep_warm_prompt_at"].as_f64()
+        .is_some_and(|at| at >= record["recovery_user_at"].as_f64().unwrap_or(0.0))
 }
 
 /// After `update_activity`: record when the cache was last used and end a
@@ -431,9 +482,12 @@ pub(super) fn settle(record: &mut Value, event: &Value, now: f64) {
         return;
     }
     let ping = event["keep_warm"].is_string();
+    if event["keep_warm"] == "prompt" {
+        record["keep_warm_prompt_at"] = json!(now);
+    }
     match string(event, "hook_event_name") {
         "Stop" => {
-            record["cache_touched_at"] = json!(now);
+            record["cache_touched"] = json!({"at":now,"conversation_id":record["conversation_id"]});
             if ping {
                 remove(record, "keep_warm_turn");
             } else {
@@ -469,6 +523,9 @@ pub(super) struct Facts {
     pub schedules: u64,
     /// An automatic recovery episode owns this session's next input.
     pub recovery_active: bool,
+    /// When an attached terminal client last had input: `Some(None)` with
+    /// none attached, None when unknown, which never admits a ping.
+    pub client_input: Option<Option<f64>>,
 }
 
 impl Facts {
@@ -481,21 +538,22 @@ impl Facts {
         } else {
             0
         };
-        Self { background, schedules, recovery_active: recovery::job_active(record) }
+        let client_input = backend::current().last_client_input(terminal_name(record));
+        Self { background, schedules, recovery_active: recovery::job_active(record), client_input }
     }
 }
 
 /// Why ping `id` must not be typed now, if it must not. The guarded submit
 /// asks this under the input lock, once before staging and again immediately
 /// before the first input byte.
-fn submission_refusal(record: &Value, entry: Option<&Entry>, runtime: &Value, facts: &Facts, id: &str, now: f64) -> Option<&'static str> {
+fn submission_refusal(record: &Value, entry: Option<&Entry>, runtime: &Value, facts: &Facts, rule: &Eligibility, id: &str, now: f64) -> Option<&'static str> {
     let Some(entry) = entry.filter(|entry| entry.enabled) else {
         return Some("Keep cache warm was turned off; nothing was submitted");
     };
     if entry.until.is_some_and(|until| until <= now) {
         return Some("Keep cache warm has expired; nothing was submitted");
     }
-    if runtime["state"] != "dispatching" || runtime["request_id"] != id {
+    if runtime["state"] != "dispatching" || runtime["request_id"] != id || runtime["revision"].as_u64() != Some(entry.revision) {
         return Some("This keep-warm ping is no longer current; nothing was submitted");
     }
     if !telemetry::settled(record) || record["keep_warm_turn"].is_object() || record["paused"] == true
@@ -512,6 +570,15 @@ fn submission_refusal(record: &Value, entry: Option<&Entry>, runtime: &Value, fa
     if facts.recovery_active {
         return Some("Automatic recovery owns the next message; nothing was submitted");
     }
+    match facts.client_input {
+        None => return Some("Terminal input activity is unknown; nothing was submitted"),
+        Some(Some(at)) if now - at < TYPING_SECONDS => return Some("Someone typed in Terminal; nothing was submitted"),
+        _ => {}
+    }
+    // Staging can take long: the cache must still be warm when the ping is typed.
+    if !rule.supported || rule.expires_at.is_none_or(|expires| expires - now < COLD_MARGIN) {
+        return Some("The cache may already have expired; nothing was submitted");
+    }
     None
 }
 
@@ -520,7 +587,10 @@ pub(super) fn check_submission(record: &Value, id: &str) -> Result<()> {
     let owner = storage::owner_key(record);
     let store = load().ok_or("Keep cache warm settings are unreadable; nothing was submitted")?;
     let facts = Facts::observe(record);
-    match submission_refusal(record, store.sessions.get(&owner), &read_runtime(&owner), &facts, id, now()) {
+    let runtime = read_runtime(&owner)?;
+    let usage = if string(record, "agent") == "claude" { usage::read(record) } else { Value::Null };
+    let rule = eligibility(record, &usage, last_turn_at(record));
+    match submission_refusal(record, store.sessions.get(&owner), &runtime, &facts, &rule, id, now()) {
         Some(reason) => Err(reason.into()),
         None => Ok(()),
     }
@@ -556,9 +626,8 @@ fn hold(state: &'static str, reason: impl Into<String>, next_at: Option<f64>, si
     Step::Hold { state, reason: reason.into(), next_at, since }
 }
 
-/// One round's decision. `facts` and `input` are asked only for a due ping.
-fn decide(entry: &Entry, runtime: &Value, observed: Option<&Observed>, facts: impl FnOnce() -> Facts,
-    input: impl FnOnce() -> Option<Option<f64>>, now: f64) -> Step {
+/// One round's decision. `facts` is asked only for a due ping.
+fn decide(entry: &Entry, runtime: &Value, observed: Option<&Observed>, facts: impl FnOnce() -> Facts, now: f64) -> Step {
     if entry.until.is_some_and(|until| until <= now) {
         return Step::Off("expired", "Keep cache warm ended at the chosen time.");
     }
@@ -593,7 +662,7 @@ fn decide(entry: &Entry, runtime: &Value, observed: Option<&Observed>, facts: im
     if !observed.live || record["paused"] == true {
         return hold("paused", "The agent is not running.", None, None);
     }
-    if record["phase"] == "error" && record["recovery_user_text"] == TEXT {
+    if record["phase"] == "error" && ping_was_last_prompt(record) {
         return hold("stopped", format!("The last keep-warm ping failed. {RESUMES}"), None, Some(now));
     }
     let rule = eligibility(record, &observed.usage, last_turn_at(record));
@@ -622,10 +691,10 @@ fn decide(entry: &Entry, runtime: &Value, observed: Option<&Observed>, facts: im
     if facts.recovery_active {
         return hold("waiting", "Automatic recovery is active.", None, None);
     }
-    if let Some(Some(at)) = input() {
-        if now - at < TYPING_SECONDS {
-            return hold("waiting", "Someone is typing in Terminal.", None, None);
-        }
+    match facts.client_input {
+        None => return hold("waiting", "Terminal input activity is unknown.", None, None),
+        Some(Some(at)) if now - at < TYPING_SECONDS => return hold("waiting", "Someone is typing in Terminal.", None, None),
+        _ => {}
     }
     Step::Send
 }
@@ -639,7 +708,7 @@ fn bound_record(owner: &str, entry: &Entry) -> Option<Value> {
 }
 
 fn save_runtime(owner: &str, value: &Value) -> Result<()> {
-    atomic(&runtime_path(owner), &value.to_string())
+    atomic(&runtime_path(owner).ok_or("invalid keep-warm owner")?, &value.to_string())
 }
 
 /// Turn an expired or orphaned setting off, unless it changed meanwhile.
@@ -657,10 +726,11 @@ fn turn_off(owner: &str, entry: &Entry) -> Result<()> {
 
 /// Send one ping. The guarded submit re-checks everything under the input
 /// lock; only a refusal before any input lets a later round try again.
-fn send(owner: &str, record: &Value, mut runtime: Value, now: f64) -> Result<()> {
+fn send(owner: &str, entry: &Entry, record: &Value, mut runtime: Value, now: f64) -> Result<()> {
     let request_id = uuid::Uuid::new_v4().to_string();
+    // The ping belongs to the setting it was decided for (its revision).
     for (key, value) in [("state", json!("dispatching")), ("request_id", json!(request_id)), ("since", json!(now)),
-        ("reason", json!("")), ("next_at", Value::Null)] {
+        ("reason", json!("")), ("next_at", Value::Null), ("revision", json!(entry.revision))] {
         runtime[key] = value;
     }
     save_runtime(owner, &runtime)?;
@@ -688,7 +758,16 @@ fn send(owner: &str, record: &Value, mut runtime: Value, now: f64) -> Result<()>
 }
 
 fn round(owner: &str, entry: &Entry, panes: &Snapshot, now: f64) -> Result<()> {
-    let runtime = read_runtime(owner);
+    if !owner_valid(owner) {
+        return Err("invalid keep-warm owner".into());
+    }
+    let runtime = match read_runtime(owner) {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            let Step::Hold { state, reason, since, .. } = unreadable(now) else { unreachable!() };
+            return save_runtime(owner, &json!({"state":state,"reason":reason,"since":since}));
+        }
+    };
     let record = bound_record(owner, entry);
     let observed = record.as_ref().map(|record| Observed {
         record,
@@ -696,8 +775,8 @@ fn round(owner: &str, entry: &Entry, panes: &Snapshot, now: f64) -> Result<()> {
         usage: if string(record, "agent") == "claude" { usage::read(record) } else { Value::Null },
     });
     let step = decide(entry, &runtime, observed.as_ref(),
-        || record.as_ref().map_or(Facts { background: None, schedules: 0, recovery_active: false }, Facts::observe),
-        || record.as_ref().and_then(|record| backend::current().last_client_input(terminal_name(record))), now);
+        || record.as_ref().map_or(Facts { background: None, schedules: 0, recovery_active: false, client_input: None }, Facts::observe),
+        now);
     match step {
         Step::Off(state, reason) => {
             turn_off(owner, entry)?;
@@ -713,7 +792,7 @@ fn round(owner: &str, entry: &Entry, panes: &Snapshot, now: f64) -> Result<()> {
             }
             if next != runtime { save_runtime(owner, &next) } else { Ok(()) }
         }
-        Step::Send => send(owner, record.as_ref().unwrap(), if runtime.is_object() { runtime } else { json!({}) }, now),
+        Step::Send => send(owner, entry, record.as_ref().unwrap(), if runtime.is_object() { runtime } else { json!({}) }, now),
     }
 }
 
@@ -742,11 +821,13 @@ pub(super) fn tick() -> Result<()> {
     Ok(())
 }
 
-/// When the last main-agent turn or ping ended, the start of the current
-/// cache lifetime for agents whose TTL is not observed per request.
+/// When the last main-agent turn or ping of the current conversation ended,
+/// the start of its cache lifetime for agents whose TTL is not observed per
+/// request. A clock from another conversation (before Clear) is no evidence.
 pub(super) fn last_turn_at(record: &Value) -> Option<f64> {
-    ["cache_touched_at", "recovery_success_at"].iter()
-        .find_map(|key| record[*key].as_f64().filter(|at| at.is_finite() && *at > 0.0))
+    let touched = &record["cache_touched"];
+    (!string(record, "conversation_id").is_empty() && touched["conversation_id"] == record["conversation_id"])
+        .then(|| touched["at"].as_f64()).flatten().filter(|at| at.is_finite() && *at > 0.0)
 }
 
 /// Add the derived fields of the Details read to `output["keep_warm"]`.
@@ -806,12 +887,44 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         recovery::ensure_worker()?;
     }
     if code == 0 {
-        output["keep_warm"] = view(entry.as_ref(), &read_runtime(&owner), &record, now());
+        let runtime = read_runtime(&owner).unwrap_or_else(|_| json!({"state":"uncertain","reason":UNREADABLE}));
+        output["keep_warm"] = view(entry.as_ref(), &runtime, &record, now());
         let usage = if string(&record, "agent") == "claude" { usage::read(&record) } else { Value::Null };
         describe(&mut output, &record, &usage);
     }
     println!("{output}");
     Ok(code)
+}
+
+/// Move a legacy label's setting to its new label's key. False when there is
+/// nothing to move or the new key already has a setting of its own.
+fn rename_entry(store: &mut Store, old: &str, new: &str) -> bool {
+    let (from, to) = (storage::label_key(old), storage::label_key(new));
+    if from == to || store.sessions.contains_key(&to) {
+        return false;
+    }
+    let Some(mut entry) = store.sessions.remove(&from) else { return false };
+    entry.name = new.to_owned();
+    store.sessions.insert(to, entry);
+    true
+}
+
+/// A legacy-label rename (`rename.rs`): its setting and worker state follow
+/// the session, as its recovery job does. Replaying it is harmless.
+pub(super) fn rename(old: &str, new: &str) -> Result<()> {
+    let _guard = lock(Some(&lock_path()))?;
+    let mut store = read_store(&path())?;
+    if !rename_entry(&mut store, old, new) {
+        return Ok(());
+    }
+    persist(&path(), &store)?;
+    let (from, to) = (runtime_path(&storage::label_key(old)), runtime_path(&storage::label_key(new)));
+    if let (Some(from), Some(to)) = (from, to) {
+        if fs::symlink_metadata(&from).is_ok() {
+            fs::rename(&from, &to).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 /// Drop the oldest disabled entries beyond the bound; enabled ones stay.
@@ -947,7 +1060,7 @@ mod tests {
         std::fs::write(&path, " ".repeat(MAX_FILE as usize + 1)).unwrap();
         assert!(read_store(&path).is_err());
         let mut store = Store::default();
-        update(&mut store, "owner", &record(), &request(json!({})), NOW, ok);
+        update(&mut store, &"c".repeat(64), &record(), &request(json!({})), NOW, ok);
         persist(&path, &store).unwrap();
         assert_eq!(read_store(&path).unwrap().sessions, store.sessions);
     }
@@ -1035,7 +1148,7 @@ mod tests {
     }
 
     fn quiet() -> Facts {
-        Facts { background: Some(0), schedules: 0, recovery_active: false }
+        Facts { background: Some(0), schedules: 0, recovery_active: false, client_input: Some(None) }
     }
 
     #[test]
@@ -1043,9 +1156,10 @@ mod tests {
         let mut store = Store::default();
         update(&mut store, "owner", &record(), &request(json!({})), NOW, ok);
         let entry = store.sessions.get("owner");
-        let runtime = json!({"state":"dispatching","request_id":"ping-1"});
+        let runtime = json!({"state":"dispatching","request_id":"ping-1","revision":1});
+        let warm = Eligibility::known(3600, "native_usage", Some(NOW + 600.0));
         let refusal = |record: &Value, entry: Option<&Entry>, runtime: &Value, facts: &Facts, now: f64| {
-            submission_refusal(record, entry, runtime, facts, "ping-1", now)
+            submission_refusal(record, entry, runtime, facts, &warm, "ping-1", now)
         };
         assert_eq!(refusal(&idle(), entry, &runtime, &quiet(), NOW), None);
         // The setting changed or expired, or another ping is current.
@@ -1064,9 +1178,141 @@ mod tests {
             assert!(refusal(&busy, entry, &runtime, &quiet(), NOW).is_some(), "{key}");
         }
         for facts in [Facts { background: Some(1), ..quiet() }, Facts { background: None, ..quiet() },
-            Facts { schedules: 1, ..quiet() }, Facts { recovery_active: true, ..quiet() }] {
+            Facts { schedules: 1, ..quiet() }, Facts { recovery_active: true, ..quiet() },
+            // Unknown terminal activity, or someone typed in Terminal moments ago.
+            Facts { client_input: None, ..quiet() }, Facts { client_input: Some(Some(NOW - 30.0)), ..quiet() }] {
             assert!(refusal(&idle(), entry, &runtime, &facts, NOW).is_some(), "{facts:?}");
         }
+        assert_eq!(refusal(&idle(), entry, &runtime, &Facts { client_input: Some(Some(NOW - 121.0)), ..quiet() }, NOW), None);
+    }
+
+    #[test]
+    fn a_ping_decided_for_an_older_setting_is_not_typed() {
+        let mut store = Store::default();
+        update(&mut store, "owner", &record(), &request(json!({})), NOW, ok);
+        let longer = request(json!({"hours":7,"expected_revision":1}));
+        update(&mut store, "owner", &record(), &longer, NOW, ok);
+        let warm = Eligibility::known(3600, "native_usage", Some(NOW + 600.0));
+        let decided = |revision: u64| json!({"state":"dispatching","request_id":"ping-1","revision":revision});
+        let entry = store.sessions.get("owner");
+        assert!(submission_refusal(&idle(), entry, &decided(1), &quiet(), &warm, "ping-1", NOW).is_some());
+        assert!(submission_refusal(&idle(), entry, &json!({"state":"dispatching","request_id":"ping-1"}), &quiet(), &warm, "ping-1", NOW).is_some());
+        assert_eq!(submission_refusal(&idle(), entry, &decided(2), &quiet(), &warm, "ping-1", NOW), None);
+    }
+
+    #[test]
+    fn the_cache_clock_belongs_to_the_current_conversation() {
+        let mut record = ended(600.0);
+        assert_eq!(last_turn_at(&record), Some(NOW - 600.0));
+        // Clear started a new conversation: the old clock says nothing about it.
+        record["conversation_id"] = json!("conversation-2");
+        assert_eq!(last_turn_at(&record), None);
+        let rule = eligibility(&record, &Value::Null, last_turn_at(&record));
+        assert_eq!(rule.due_at(), None);
+        assert!(matches!(step(&enabled(), Value::Null, Some(&record), quiet(), Some(None)), Step::Hold { state: "waiting", .. }));
+        // Legacy evidence without a conversation is no evidence.
+        let mut legacy = idle();
+        legacy["recovery_success_at"] = json!(NOW - 600.0);
+        legacy["cache_touched_at"] = json!(NOW - 600.0);
+        assert_eq!(last_turn_at(&legacy), None);
+    }
+
+    #[test]
+    fn a_person_prompt_during_dispatch_cancels_the_pending_ping_mark() {
+        let mut record = pinged();
+        let person = deliver(&mut record, hook("UserPromptSubmit", json!({"prompt":"Stop and look at this"})));
+        assert!(person.get("keep_warm").is_none());
+        assert!(record.get("keep_warm_pending").is_none());
+        // The ping's own hook arriving later is then just text, never hidden.
+        let late = deliver(&mut record, hook("UserPromptSubmit", json!({"prompt":TEXT})));
+        assert!(late.get("keep_warm").is_none());
+        assert!(record.get("keep_warm_turn").is_none());
+    }
+
+    #[test]
+    fn a_legacy_label_rename_carries_the_setting() {
+        let (old, new) = ("claude/p/old", "claude/p/new");
+        let mut store = Store::default();
+        update(&mut store, &storage::label_key(old), &record(), &request(json!({})), NOW, ok);
+        assert!(rename_entry(&mut store, old, new));
+        assert!(!store.sessions.contains_key(&storage::label_key(old)));
+        let moved = store.sessions.get(&storage::label_key(new)).unwrap();
+        assert_eq!((moved.name.as_str(), moved.enabled, moved.revision), (new, true, 1));
+        // Replaying the rename changes nothing; an occupied destination is kept.
+        assert!(!rename_entry(&mut store, old, new));
+        update(&mut store, &storage::label_key("claude/p/other"), &record(), &request(json!({})), NOW, ok);
+        assert!(!rename_entry(&mut store, new, "claude/p/other"));
+        assert!(store.sessions.contains_key(&storage::label_key(new)));
+    }
+
+    #[test]
+    fn the_last_check_before_typing_needs_a_cache_that_is_still_warm() {
+        let mut store = Store::default();
+        update(&mut store, "owner", &record(), &request(json!({})), NOW, ok);
+        let entry = store.sessions.get("owner");
+        let runtime = json!({"state":"dispatching","request_id":"ping-1","revision":1});
+        let refusal = |rule: &Eligibility, now: f64| submission_refusal(&idle(), entry, &runtime, &quiet(), rule, "ping-1", now);
+        // Staging took long enough that the cache is within 30 s of expiry, or past it.
+        let expiring = Eligibility::known(1800, "provider_default", Some(NOW + 29.0));
+        assert!(refusal(&expiring, NOW).is_some());
+        assert!(refusal(&expiring, NOW + 60.0).is_some());
+        assert!(refusal(&Eligibility::known(1800, "provider_default", None), NOW).is_some());
+        assert!(refusal(&Eligibility::refused("codex_model", "old"), NOW).is_some());
+        assert!(refusal(&Eligibility::waiting("no report"), NOW).is_some());
+        assert_eq!(refusal(&Eligibility::known(1800, "provider_default", Some(NOW + 31.0)), NOW), None);
+    }
+
+    #[test]
+    fn only_session_ids_and_label_keys_name_settings() {
+        let label = "a".repeat(64);
+        let id = "0f8b5f7e-3c2a-4d1e-9b6a-7c5d4e3f2a1b";
+        for owner in [label.as_str(), id] {
+            assert!(owner_valid(owner), "{owner}");
+            assert!(runtime_path(owner).is_some());
+        }
+        for owner in ["/tmp/canary", "../escape", "nested/key", "", "A".repeat(64).as_str(), "short", "a".repeat(65).as_str()] {
+            assert!(!owner_valid(owner), "{owner}");
+            assert!(runtime_path(owner).is_none(), "{owner}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keep-warm.json");
+        let entry = json!({"name":"claude/p/warm","enabled":true,"until":null,"revision":1,"set_at":NOW});
+        std::fs::write(&path, json!({"version":1,"sessions":{"/tmp/canary":entry}}).to_string()).unwrap();
+        assert!(read_store(&path).is_err());
+        std::fs::write(&path, json!({"version":1,"sessions":{id:entry}}).to_string()).unwrap();
+        assert!(read_store(&path).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn special_files_are_refused_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("keep-warm.json");
+        let name = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let path = fifo.clone();
+        std::thread::spawn(move || sender.send((read_store(&path).is_err(), read_runtime_at(&path).is_err())).unwrap());
+        assert_eq!(receiver.recv_timeout(std::time::Duration::from_secs(5)).unwrap(), (true, true));
+        let link = dir.path().join("link.json");
+        std::fs::write(dir.path().join("real.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real.json"), &link).unwrap();
+        assert!(read_runtime_at(&link).is_err());
+    }
+
+    #[test]
+    fn a_malformed_worker_state_is_never_read_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owner.json");
+        assert_eq!(read_runtime_at(&path).unwrap(), Value::Null);
+        std::fs::write(&path, "{\"state\":\"dispatch").unwrap();
+        assert!(read_runtime_at(&path).is_err());
+        std::fs::write(&path, "[]").unwrap();
+        assert!(read_runtime_at(&path).is_err());
+        std::fs::write(&path, json!({"state":"warming","request_id":"ping-1"}).to_string()).unwrap();
+        assert_eq!(read_runtime_at(&path).unwrap()["state"], "warming");
+        // A round that cannot read its state sends nothing until a real turn.
+        assert!(matches!(unreadable(NOW), Step::Hold { state: "uncertain", since: Some(at), .. } if at == NOW));
     }
 
     fn hook(kind: &str, extra: Value) -> Value {
@@ -1104,7 +1350,7 @@ mod tests {
         let reply = deliver(&mut record, hook("Stop", json!({"last_assistant_message":"OK"})));
         assert_eq!(reply["keep_warm"], "turn");
         assert!(record.get("keep_warm_turn").is_none());
-        assert_eq!(record["cache_touched_at"], json!(NOW + 1.0));
+        assert_eq!(record["cache_touched"], json!({"at":NOW + 1.0,"conversation_id":"conversation-1"}));
         assert!(record.get("keep_warm_real_stop_at").is_none());
         // Listings keep the person's prompt, reply and time.
         let mut output = json!({"prompt":TEXT,"last_message":"OK","last_event_at":NOW + 1.0,"turn_started":NOW});
@@ -1170,13 +1416,13 @@ mod tests {
         let mut record = idle();
         record["agent"] = json!("codex");
         record["model"] = json!("gpt-6.1-sol");
-        record["cache_touched_at"] = json!(NOW - ago);
+        record["cache_touched"] = json!({"at":NOW - ago,"conversation_id":record["conversation_id"]});
         record
     }
 
     fn step(entry: &Entry, runtime: Value, record: Option<&Value>, facts: Facts, input: Option<Option<f64>>) -> Step {
         let observed = record.map(|record| Observed { record, live: true, usage: Value::Null });
-        decide(entry, &runtime, observed.as_ref(), || facts, || input, NOW)
+        decide(entry, &runtime, observed.as_ref(), || Facts { client_input: input, ..facts }, NOW)
     }
 
     fn held(state: &str) -> impl Fn(&Step) -> bool + '_ {
@@ -1190,6 +1436,9 @@ mod tests {
         // Typing in an attached terminal two minutes ago no longer blocks it.
         assert_eq!(step(&enabled(), Value::Null, Some(&due), quiet(), Some(Some(NOW - 121.0))), Step::Send);
         assert!(held("waiting")(&step(&enabled(), Value::Null, Some(&due), quiet(), Some(Some(NOW - 30.0)))));
+        // Unknown terminal activity never admits a ping.
+        let unknown = step(&enabled(), Value::Null, Some(&due), quiet(), None);
+        assert!(held("waiting")(&unknown), "{unknown:?}");
         // Not due yet: it says when.
         let early = step(&enabled(), Value::Null, Some(&ended(600.0)), quiet(), Some(None));
         assert_eq!(early, Step::Hold { state: "waiting", reason: String::new(), next_at: Some(NOW + 840.0), since: None });
@@ -1239,7 +1488,8 @@ mod tests {
         // A failed ping stops keep-warm until the person's next turn.
         let mut failed = ended(1500.0);
         failed["phase"] = json!("error");
-        failed["recovery_user_text"] = json!(TEXT);
+        failed["recovery_user_at"] = json!(NOW - 20.0);
+        failed["keep_warm_prompt_at"] = json!(NOW - 20.0);
         assert!(held("stopped")(&step(&enabled(), Value::Null, Some(&failed), quiet(), Some(None))));
     }
 
@@ -1247,7 +1497,7 @@ mod tests {
     fn a_paused_or_stopped_agent_gets_nothing() {
         let record = ended(1500.0);
         let observed = Observed { record: &record, live: false, usage: Value::Null };
-        assert!(held("paused")(&decide(&enabled(), &Value::Null, Some(&observed), quiet, || Some(None), NOW)));
+        assert!(held("paused")(&decide(&enabled(), &Value::Null, Some(&observed), quiet, NOW)));
     }
 
     #[test]

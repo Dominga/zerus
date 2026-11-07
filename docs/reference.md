@@ -2423,8 +2423,11 @@ cache lifetime after the last turn ended: 48 minutes for a 1-hour cache and
 own idle compaction at 90% of the TTL. A ping only extends a warm cache: when a
 window was missed (the computer slept, the agent stayed busy until expiry) or
 the cache is within 30 seconds of its estimated expiry, nothing is sent and
-keep-warm resumes after the next real turn. The deadline is on the agent
-computer's clock; at the deadline the worker turns the setting off.
+keep-warm resumes after the next real turn. The cache clock belongs to the
+current conversation: after **Clear** the setting stays on, and the first ping
+waits for a finished turn of the new conversation. The deadline is on the agent
+computer's clock; at the deadline the worker turns the setting off. A rename,
+including a legacy-label rename, keeps the setting.
 
 | Agent | Lifetime used | Offered |
 |---|---|---|
@@ -2445,9 +2448,13 @@ run and conversation when it is settled: no turn, tool or child is running, no
 live background or scheduled job, no automatic recovery episode, no unconfirmed
 or queued input, no pending launch message, question, approval, trust, resume,
 usage-limit or cache-expiry choice, no pending model or effort setting, an
-empty recognized composer, no terminal input in the last two minutes where tmux
-reports it, and the session is not paused, archived or terminated. It uses the
-guarded send path with its own origin and request ID: a refusal before any input
+empty recognized composer, no terminal input in the last two minutes (a terminal
+that cannot report input times must have no attached client; unknown activity
+never admits a ping), and the session is not paused, archived or terminated.
+The last check before the first typed byte repeats these rules and the
+30-second cache margin, so a slow stage never types into a cold cache. It uses the
+guarded send path with its own origin and request ID, bound to the setting
+revision it was decided for (a change in between cancels it): a refusal before any input
 waits for the next round, and an unknown delivery is never sent again; keep-warm
 then waits for the next real turn. Rounds run every 15 seconds and never
 overlap, so two desktops or a manual `hgs recovery tick` cannot send two pings
@@ -2458,8 +2465,10 @@ A ping is not the person's message. Its prompt is journaled with
 `turn_origin: "keep_warm"`. Its Stop is never the session's reply, so it adds no
 unread badge, notification or read-mark change; listings and search keep the
 previous prompt, last message and last event time. A message the person sends
-or queues during a ping turn makes that turn theirs. A ping turn that fails,
-for example on a usage limit, never starts automatic recovery: keep-warm stops
+or queues while a ping is being typed or running makes that turn theirs; the
+ping's own prompt arriving later is then shown as ordinary text. A ping turn that
+fails, for example on a usage limit, never starts automatic recovery, even when
+an earlier finished recovery episode is kept: keep-warm stops
 until the next real turn, and the provider failure stays visible as usual.
 
 ```sh
@@ -2480,8 +2489,11 @@ reason, turn_active}`; `until` is null for Always and `state` is `off`,
 `unsupported`. `inspect` and the command response add `supported`,
 `reason_code`, `ttl_seconds`, `ttl_source` (`native_usage`, `provider_default`,
 `kimi_config`, `kimi_table`), `interval_seconds` and `cache_expires_at`.
-The setting is `keep-warm.json` in the state directory; the worker's state of
-each session is under `recovery/keep-warm/`. See the
+The setting is `keep-warm.json` in the state directory, keyed only by session
+IDs or label keys; the worker's state of each session is under
+`recovery/keep-warm/`. Both are read as bounded regular files: a special file is
+refused without blocking, and an unreadable worker state holds keep-warm as
+uncertain until the next real turn. See the
 [design note](superpowers/specs/2026-11-07-keep-cache-warm-design.md).
 
 ## Projects and P2P synchronization

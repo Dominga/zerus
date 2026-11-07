@@ -488,8 +488,9 @@ fn schedule(job: &mut Value, s: &Value, time: f64) {
 // Pure transition function; wall clock is supplied so tests can exercise long
 // backoff sequences, restarts, and interleaved user activity without sleeping.
 fn advance(mut job: Value, s: &Value, p: &Policy, time: f64) -> Value {
-    // A failed keep-warm ping is not the person's work: never continue it.
-    if job.is_null() && s["recovery_user_text"] == keep_warm::TEXT {
+    // A failed keep-warm ping is not the person's work: never continue it,
+    // whatever earlier, finished episode the session keeps.
+    if s["phase"] == "error" && keep_warm::ping_was_last_prompt(s) && !active(&job) {
         return Value::Null;
     }
     let error = &s["provider_error"];
@@ -653,6 +654,7 @@ pub(super) fn enrich(record: &Value, output: &mut Value) {
         "recovery_user_text",
         "recovery_success_at",
         "recovery_cancel_at",
+        "keep_warm_prompt_at",
     ] {
         if let Some(v) = record.get(key) {
             output[key] = v.clone();
@@ -1303,6 +1305,25 @@ mod tests {
             enabled_at: 1.0,
             ..Policy::default()
         }
+    }
+    #[test]
+    fn a_verified_keep_warm_ping_failure_never_starts_recovery() {
+        let mut earlier = snapshot("claude");
+        earlier["provider_error"]["at"] = json!(3.0);
+        earlier["recovery_user_at"] = json!(2.0);
+        let mut old = advance(Value::Null, &earlier, &on(), 3.5);
+        assert_eq!(old["state"], "waiting");
+        stop(&mut old, "succeeded", "Agent completed the turn");
+        old["completed_at"] = json!(4.0);
+        let mut ping = snapshot("claude");
+        ping["recovery_user_text"] = json!(keep_warm::TEXT);
+        ping["keep_warm_prompt_at"] = ping["recovery_user_at"].clone();
+        assert!(advance(Value::Null, &ping, &on(), 11.0).is_null());
+        assert!(advance(old.clone(), &ping, &on(), 11.0).is_null(), "a completed earlier episode must not let a ping failure in");
+        // The same text typed by the person is the person's turn.
+        let mut typed = ping.clone();
+        typed["keep_warm_prompt_at"] = json!(1.0);
+        assert_eq!(advance(old, &typed, &on(), 11.0)["state"], "waiting");
     }
     #[test]
     fn independent_sequences_keep_class_budgets_and_repeat_last_delay() {

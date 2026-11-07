@@ -241,6 +241,7 @@
   "Close the verified shell terminal for %1? Its working folder will be kept; no archive will be created.": "Закрыть проверенный терминал оболочки %1? Рабочая папка будет сохранена; архив не будет создан.",
   "Color and mark": "Цвет и значок",
   "Color and mark for %1": "Цвет и значок для %1",
+  "Color and mark saved on %1.": "Цвет и значок сохранены на %1.",
   "Color and mark…": "Цвет и значок…",
   "Color picker": "Выбор цвета",
   "Comment on this task": "Комментарий к задаче",

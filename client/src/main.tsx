@@ -18,6 +18,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { receive } from "./store/session";
 import { startDesk } from "./store/desk";
 import { startDrops } from "./store/drops";
+import { startMarkMigration } from "./store/accountMarkMigration";
 import { startUpdates } from "./store/updates";
 import { composer } from "./store/composer";
 import { exitFlush } from "./store/exitFlush";
@@ -44,6 +45,7 @@ startUpdates().catch((error) => console.warn("Zerus Next: the updates wiring did
 void startBridge(receive).then(setMode, (error) => console.error("Zerus Next: the data source did not start", error));
 // Files dropped on the session's panel go to its composer or its Terminal.
 startDrops();
+if (inTauri()) startMarkMigration();
 
 // Load the bounded device-local skin library once; no directory poller.
 const skinLibrary = import("./skin/user").then(m => m.loadUserSkins());

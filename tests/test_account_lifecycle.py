@@ -77,6 +77,11 @@ with open(home / "argv.jsonl", "a") as f:''').replace('"codex_home": os.environ.
         rows=json.loads(self.hgs('ls','--json','--local'))['sessions']
         listed=next(row for row in rows if row['name']==source)
         self.assertEqual(listed['account_id'],'work');self.assertEqual(listed['account_home'],home)
+        # zerus-sa9qn.6: a session row carries its account's mark from this computer.
+        self.assertNotIn('account_mark',listed)
+        self.hgs('account','mark','work','--color','#2B97FF','--emoji','🦊')
+        listed=next(row for row in json.loads(self.hgs('ls','--json','--local'))['sessions'] if row['name']==source)
+        self.assertEqual(listed['account_mark'],{'color':'#2b97ff','emoji':'🦊'})
         self.hgs('account','rm','work')
         self.hgs('pause',source); self.resume(source)
         self.assertEqual(self.binding(source)['agent_home'],home)

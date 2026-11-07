@@ -520,17 +520,19 @@ export async function accountsView(force = false): Promise<AccountsView> {
   if (!inTauri()) return emptyAccounts([DESKTOP_ONLY]);
   return invoke<AccountsView>("accounts_view", { force });
 }
-export type AccountEditKind = "rename" | "default" | "remove" | "permissions" | "model" | "scope";
+export type AccountEditKind = "rename" | "default" | "remove" | "permissions" | "model" | "scope" | "mark";
 export interface AccountModelCatalog {
   models: {id:string;label:string;effort_options:string[]}[];
   defaults: {model:string;effort:string}; provider_defaults: {model:string;effort:string}; effort_supported:boolean;
 }
-export interface AccountEditValues {label?:string;mode?:string;model?:string;effort?:string}
+export interface AccountEditValues {label?:string;mode?:string;model?:string;effort?:string;color?:string;emoji?:string}
 export interface AccountEditView { handle: string; kind: AccountEditKind; label: string; machine: string; provider: string; permission_mode?:string; permission_detail?:string; models?:AccountModelCatalog|null;
   /** Every computer the edit saves on, the selected one first; whether their values differ now; per-computer permissions (zerus-f0uz8). */
   machines?: string[]; differs?: boolean; per_computer?: boolean }
 /** Notices are translated prose (zerus-0y2yx); errors carry hgs's own text. */
-export interface AccountEditResult { notices: Text[]; errors: string[] }
+export interface AccountEditResult { notices: Text[]; errors: string[];
+  /** A mark edit's members whose computer keeps no marks (an older hgs), and those whose computer saved it (zerus-sa9qn.6). */
+  local?: string[]; marked?: string[] }
 export async function accountEditOpen(account: string, profile: string, kind: AccountEditKind): Promise<AccountEditView> {
   if (!inTauri()) throw new Error(DESKTOP_ONLY);
   return invoke("account_edit_open", { account, profile, kind });
@@ -538,6 +540,11 @@ export async function accountEditOpen(account: string, profile: string, kind: Ac
 export async function accountEditApply(handle: string, values: AccountEditValues): Promise<AccountEditResult> {
   if (!inTauri()) throw new Error(DESKTOP_ONLY);
   return invoke("account_edit_apply", { request: { handle, ...values } });
+}
+/** Move this desktop's mark of one member profile to its computer, filling only what it has no value for (zerus-sa9qn.6). */
+export async function accountMarkMigrate(profile: string, color: string, emoji: string): Promise<boolean> {
+  if (!inTauri()) return false;
+  return invoke<boolean>("account_mark_migrate", { profile, color, emoji });
 }
 export async function accountEditClose(handle: string): Promise<void> {
   if (inTauri()) await invoke("account_edit_close", { handle });

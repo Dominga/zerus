@@ -34,6 +34,10 @@ struct Target {
     binding: Result<Binding, String>,
     /// The computer's hgs keeps a permission scope (zerus-f0uz8).
     scope_supported: bool,
+    /// The computer's hgs keeps account marks (zerus-sa9qn.6).
+    marks_supported: bool,
+    /// The member's profile key (`host + U+001F + id`).
+    key: String,
 }
 #[derive(Clone, Serialize)]
 pub struct EditView {
@@ -60,6 +64,13 @@ pub struct EditResult {
     /// Translated by the webview (zerus-0y2yx); errors carry hgs's own text.
     notices: Vec<Text>,
     errors: Vec<String>,
+    /// Members whose computer keeps no marks (an older hgs): the webview
+    /// keeps their mark as this desktop's preference (zerus-sa9qn.6).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    local: Vec<String>,
+    /// Members whose computer saved the mark: the desktop forgets its own.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    marked: Vec<String>,
 }
 #[derive(Deserialize, Default)]
 pub struct EditRequest {
@@ -72,6 +83,10 @@ pub struct EditRequest {
     model: String,
     #[serde(default)]
     effort: String,
+    #[serde(default)]
+    color: String,
+    #[serde(default)]
+    emoji: String,
 }
 
 struct Busy<'a>(&'a Edits);
@@ -119,7 +134,7 @@ impl Screens {
             .iter()
             .find(|m| m.key == profile)
             .ok_or(account_actions::CHANGED)?;
-        if kind != Kind::Rename && !selected.online {
+        if !matches!(kind, Kind::Rename | Kind::Mark) && !selected.online {
             return Err(format!("{} is offline.", selected.machine));
         }
         if kind == Kind::Default
@@ -152,6 +167,8 @@ impl Screens {
                 fan_out(&|m| m.provider != "opencode")
             }
             Kind::Scope => fan_out(&|m| m.provider != "opencode"),
+            // One mark per account, kept on each of its computers.
+            Kind::Mark => fan_out(&|_| true),
             _ => vec![selected],
         };
         let differs = match kind {
@@ -231,6 +248,8 @@ impl Screens {
                     machine: member.machine.clone(),
                     binding,
                     scope_supported,
+                    marks_supported: member.marks_supported,
+                    key: member.key.clone(),
                 }
             })
             .collect();
@@ -352,6 +371,8 @@ impl Screens {
             mode: request.mode,
             model: request.model,
             effort: request.effort,
+            color: request.color,
+            emoji: request.emoji,
             ..Default::default()
         };
         if plan.kind == Kind::Model {
@@ -363,6 +384,8 @@ impl Screens {
         let mut reply = EditResult {
             notices: Vec::new(),
             errors: Vec::new(),
+            local: Vec::new(),
+            marked: Vec::new(),
         };
         if plan.shared {
             // The scope is outside the catalog revision: before any write,
@@ -381,6 +404,8 @@ impl Screens {
                 return Ok(EditResult {
                     notices: Vec::new(),
                     errors: vec![PER_COMPUTER_NOW.into()],
+                    local: Vec::new(),
+                    marked: Vec::new(),
                 });
             }
             for target in &plan.targets {
@@ -400,6 +425,8 @@ impl Screens {
                     return Ok(EditResult {
                         notices: Vec::new(),
                         errors: vec![format!("{}: {PER_COMPUTER_NOW}", target.machine)],
+                        local: Vec::new(),
+                        marked: Vec::new(),
                     });
                 }
             }
@@ -418,6 +445,12 @@ impl Screens {
                         target.machine
                     ));
                 }
+                continue;
+            }
+            if plan.kind == Kind::Mark && !target.marks_supported {
+                // An older hgs keeps no marks: this desktop keeps the
+                // member's mark until that computer updates.
+                reply.local.push(target.key.clone());
                 continue;
             }
             let error_machine = target
@@ -475,12 +508,22 @@ impl Screens {
             match result {
                 Ok((computer, original, current)) => {
                     own_revisions.insert(computer, (original, current));
-                    if matches!(plan.kind, Kind::Model | Kind::Permissions | Kind::Scope) {
+                    if plan.kind == Kind::Mark {
+                        reply.marked.push(target.key.clone());
+                    }
+                    if matches!(
+                        plan.kind,
+                        Kind::Model | Kind::Permissions | Kind::Scope | Kind::Mark
+                    ) {
                         saved.push(target.machine.clone());
                         continue;
                     }
                     reply.notices.push(match plan.kind {
-                        Kind::Rename | Kind::Model | Kind::Permissions | Kind::Scope => continue,
+                        Kind::Rename
+                        | Kind::Model
+                        | Kind::Permissions
+                        | Kind::Scope
+                        | Kind::Mark => continue,
                         Kind::Default => zerus_client_core::text!(
                             "Default account saved for new sessions on %1.",
                             target.machine.clone()
@@ -516,6 +559,7 @@ impl Screens {
                     "Permission mode saved for new and resumed sessions on %1.",
                     on
                 ),
+                Kind::Mark => zerus_client_core::text!("Color and mark saved on %1.", on),
                 _ if values.mode == "computer" => {
                     zerus_client_core::text!("Permissions are now kept per computer on %1.", on)
                 }
@@ -524,6 +568,82 @@ impl Screens {
         }
         reply.notices.dedup();
         Ok(reply)
+    }
+
+    /// Move this desktop's mark of one member profile to its computer, once
+    /// (zerus-sa9qn.6): only the fields that computer has no value for, so a
+    /// value another desktop moved there first stays. Ok(false) when that
+    /// computer is offline or keeps no marks: the desktop keeps its own.
+    fn mark_migrate(
+        &self,
+        pump: &crate::pump::Pump,
+        profile: &str,
+        color: &str,
+        emoji: &str,
+    ) -> Result<bool, String> {
+        if !self.0.allowed {
+            return Err(REPLAY_NEEDS_HGS.into());
+        }
+        let _migrating = {
+            let mut state = self
+                .0
+                .edits
+                .0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if state.busy {
+                return Err(account_actions::UPDATING.into());
+            }
+            state.busy = true;
+            Busy(&self.0.edits)
+        };
+        let view = self.accounts(false);
+        let Some(member) = view
+            .accounts
+            .iter()
+            .flat_map(|account| account.members.iter())
+            .find(|member| member.key == profile)
+        else {
+            return Ok(false);
+        };
+        if !member.online || !member.marks_supported {
+            return Ok(false);
+        }
+        let values = Values {
+            color: color.into(),
+            emoji: emoji.into(),
+            if_unset: true,
+            ..Default::default()
+        };
+        let machine = pump
+            .machine(&member.host)
+            .and_then(|m| m.machine_id)
+            .ok_or(account_actions::CHANGED)?;
+        let binding = {
+            let hub = self.lock();
+            let catalog = hub
+                .accounts
+                .catalogs
+                .get(&member.host)
+                .and_then(|s| s.data.as_ref())
+                .ok_or(account_actions::CHANGED)?;
+            Binding::capture(member.host.clone(), machine, catalog, &member.id)?
+        };
+        if binding.provider != member.provider
+            || binding.home != member.home
+            || binding.auth_revision != member.auth_revision
+            || !pump.online(&binding.computer.0)
+        {
+            return Err(account_actions::CHANGED.into());
+        }
+        binding.edit_values(Kind::Mark, &values)?;
+        self.edit_begin(&binding)?;
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            binding.execute_values(&self.0.hgs, Kind::Mark, &values)
+        }))
+        .unwrap_or_else(|_| Err(READ_FAILED.into()));
+        self.edit_finish(&binding.computer, outcome.clone());
+        outcome.map(|_| true)
     }
 }
 
@@ -568,6 +688,22 @@ pub fn account_edit_apply(
     request: EditRequest,
 ) -> Result<EditResult, String> {
     state.edit_apply(&source.pump(), request)
+}
+#[cfg(feature = "live")]
+#[tauri::command(async)]
+pub fn account_mark_migrate(
+    state: State<'_, Screens>,
+    source: State<'_, crate::commands::AppState>,
+    profile: String,
+    color: String,
+    emoji: String,
+) -> Result<bool, String> {
+    state.mark_migrate(&source.pump(), &profile, &color, &emoji)
+}
+#[cfg(not(feature = "live"))]
+#[tauri::command]
+pub fn account_mark_migrate() -> Result<bool, String> {
+    Err(REPLAY_NEEDS_HGS.into())
 }
 #[tauri::command]
 pub fn account_edit_close(state: State<'_, Screens>, handle: String) {
@@ -787,6 +923,8 @@ mod tests {
                     machine: "workstation".into(),
                     binding: Ok(binding),
                     scope_supported: true,
+                    marks_supported: true,
+                    key: String::new(),
                 }],
                 models: Some(ModelCatalog {
                     models: Vec::new(),
@@ -843,11 +981,15 @@ mod tests {
                         machine: "studio".into(),
                         binding: Err("offline".into()),
                         scope_supported: true,
+                        marks_supported: true,
+                        key: String::new(),
                     },
                     Target {
                         machine: "other".into(),
                         binding: Err("must not run".into()),
                         scope_supported: true,
+                        marks_supported: true,
+                        key: String::new(),
                     },
                 ],
             },
@@ -928,11 +1070,15 @@ mod tests {
                         machine: "workstation".into(),
                         binding: Ok(first),
                         scope_supported: true,
+                        marks_supported: true,
+                        key: String::new(),
                     },
                     Target {
                         machine: "workstation".into(),
                         binding: Ok(second),
                         scope_supported: true,
+                        marks_supported: true,
+                        key: String::new(),
                     },
                 ],
             },
@@ -967,6 +1113,127 @@ mod tests {
         );
     }
     #[cfg(unix)]
+    #[test]
+    fn a_mark_reaches_each_computer_that_keeps_marks_and_migration_fills_only_unset_fields() {
+        // zerus-sa9qn.6: the account's mark is kept on its computers; a
+        // computer with an older hgs keeps it as this desktop's preference.
+        use std::os::unix::fs::PermissionsExt;
+        struct Scratch(PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let scratch = Scratch(std::env::temp_dir().join(format!(
+            "zerus-account-marks-{}-{stamp}",
+            std::process::id()
+        )));
+        std::fs::create_dir(&scratch.0).unwrap();
+        let hgs = scratch.0.join("hgs");
+        std::fs::copy(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../core/tests/support/fake_hgs_account_edits.py"),
+            &hgs,
+        )
+        .unwrap();
+        std::fs::set_permissions(&hgs, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (screens, pump, first) = fixture_at(hgs);
+        let profile = |id: &str, home: &str| {
+            json!({"id":id,"provider":"codex","label":"Example","home":home,"auth_revision":"a1","installed":true,
+                "account_status":{"status":"ok","identity":{"account_id":"example-account"}}})
+        };
+        let mut work = profile("work", "/accounts/example");
+        work["mark"] = json!({"color":null,"emoji":null});
+        // `second` stands for an older hgs: its row has no `mark`.
+        let catalog = json!({"revision":"r1","setup_revision":true,"marks_supported":true,
+            "profiles":[work, profile("second", "/accounts/second")]});
+        std::fs::write(scratch.0.join("catalog.json"), catalog.to_string()).unwrap();
+        screens
+            .lock()
+            .accounts
+            .catalogs
+            .get_mut(&first.computer)
+            .unwrap()
+            .data = Some(catalog);
+        let group = || {
+            screens
+                .accounts(false)
+                .accounts
+                .iter()
+                .find(|a| a.members.len() == 2)
+                .expect("one account on two profiles")
+                .clone()
+        };
+        let member = |id: &str| group().members.into_iter().find(|m| m.id == id).unwrap();
+        assert!(member("work").marks_supported && !member("second").marks_supported);
+        let opened = screens
+            .edit_open(&pump, &group().key, &member("work").key, Kind::Mark)
+            .unwrap();
+        assert_eq!(opened.machines.len(), 2);
+        let result = screens
+            .edit_apply(
+                &pump,
+                EditRequest {
+                    handle: opened.handle,
+                    color: "#2B97FF".into(),
+                    emoji: "🦊".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(
+            english(&result.notices),
+            ["Color and mark saved on workstation."]
+        );
+        assert_eq!(result.local, [member("second").key]);
+        assert_eq!(result.marked, [member("work").key]);
+        assert_eq!(
+            (
+                member("work").mark_color.as_str(),
+                member("work").mark_emoji.as_str()
+            ),
+            ("#2b97ff", "🦊")
+        );
+        // Migration fills only what the computer has no value for, and skips
+        // a computer that keeps no marks.
+        let work_key = member("work").key;
+        let cleared = screens
+            .edit_open(&pump, &group().key, &work_key, Kind::Mark)
+            .unwrap();
+        screens
+            .edit_apply(
+                &pump,
+                EditRequest {
+                    handle: cleared.handle,
+                    color: "#2b97ff".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(screens
+            .mark_migrate(&pump, &work_key, "#00aa7f", "🐙")
+            .unwrap());
+        assert_eq!(
+            (
+                member("work").mark_color.as_str(),
+                member("work").mark_emoji.as_str()
+            ),
+            ("#2b97ff", "🐙")
+        );
+        assert!(!screens
+            .mark_migrate(&pump, &member("second").key, "#00aa7f", "🐙")
+            .unwrap());
+        assert!(!screens
+            .mark_migrate(&pump, "unknown", "#00aa7f", "")
+            .unwrap());
+        assert!(screens.mark_migrate(&pump, &work_key, "red", "").is_err());
+    }
+
     #[test]
     fn model_and_shared_permissions_reach_every_computer_of_the_account() {
         // zerus-f0uz8: one model and effort per account; one permission mode

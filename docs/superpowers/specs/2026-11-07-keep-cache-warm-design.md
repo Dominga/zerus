@@ -259,9 +259,13 @@ In Details, **Session** card, after **last event**:
 - Tooltip: the interval, the estimated pings per hour and the cost, for
   example "Pings every 48 m while idle, about 1.25 an hour. Each ping reads the
   whole cached context (about 331k tokens) from this account's usage."
-- States: unsupported agent or short TTL (switch disabled with the reason),
-  waiting for the first cache report, **Cache went cold** (resumes after your
-  next message), last delivery unconfirmed, expired.
+- The row is never hidden. When the agent or account is not eligible (Claude
+  on a 5-minute cache, Codex on GPT-5.5 or earlier, DeepSeek, OpenCode), the
+  switch is disabled and a one-line reason sits under it.
+- Other states: waiting for the first cache report, **Cache went cold**
+  (resumes after your next message), last delivery unconfirmed, expired.
+- The ping text is fixed as above; making it configurable is a possible later
+  change, not part of this work.
 - A peer without `session-keep-warm-v1` shows the row disabled: "Update Zerus
   on this computer to keep the cache warm".
 - Russian translations; no dot separators between values.

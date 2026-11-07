@@ -647,7 +647,7 @@ fn a_legacy_publication_before_spawn_vetoes_the_original_without_signalling_it()
             }
         }))
     });
-    match spawn(dir.path(), &mut Command::new("/bin/sleep").arg("1")) {
+    match spawn(dir.path(), Command::new("/bin/sleep").arg("1")) {
         Err(error) => assert_eq!(error, UNVERIFIABLE),
         Ok(child) => {
             let _unexpected = Owned(child); // Retain/reap even a regression's own child.

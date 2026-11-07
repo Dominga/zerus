@@ -241,6 +241,13 @@ export async function setNotifications(target: Target, muted: boolean, expectedR
   return invoke<Record<string, unknown>>("set_notifications", { target, muted, expectedRevision });
 }
 
+/** A session's parent link change (zerus-sa9qn.9), checked by its host; resolves with the host's reply. */
+export type ParentChange = { kind: "clear" } | { kind: "set"; session_id: string; name: string; conversation_id: string; run_id: string; replace: boolean };
+export async function setParent(target: Target, change: ParentChange): Promise<Record<string, unknown>> {
+  if (!inTauri()) throw new Error("Actions need the desktop app.");
+  return invoke<Record<string, unknown>>("set_parent", { target, change });
+}
+
 /** The inspect fields of a session; null when they are unavailable. */
 export async function inspectSession(target: Target, archiveId: string | null): Promise<Details | null> {
   if (!inTauri()) return null;

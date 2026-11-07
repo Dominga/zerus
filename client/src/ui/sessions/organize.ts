@@ -5,6 +5,7 @@ import { catalog } from "../../store/catalog";
 import { grouping, groupOf, headerOf, INBOX, moveProject, moveToProject } from "../../store/organization";
 import { multi, setMulti, selectedKey } from "../../store/ui";
 import { projectOf } from "./creations-ui";
+import { nestable, setParentDialog } from "../../store/parentLinks";
 
 // Bulk selection and drag-and-drop organisation of the session list, after
 // tray/src/SessionList.cpp (mousePressEvent, selectRange, placement, dropEvent).
@@ -46,7 +47,9 @@ export function bulkSelect(key: string, additive: boolean, range: boolean) {
 export type DragItem = { kind: "session" | "group"; id: string };
 /** Where a drop lands: a group (project) and the session or group it goes
  *  before (none = the end), drawn as a line or as a frame around a header. */
-export type Drop = { group: string; before?: string; line?: number; inset?: number; box?: { top: number; height: number } };
+export type Drop = { group: string; before?: string; line?: number; inset?: number; box?: { top: number; height: number };
+  /** Drop onto this session's card to make the dragged session its child (zerus-sa9qn.9). */
+  nest?: string };
 
 export const SESSION_MIME = "application/x-zerus-session";
 export const [dragItem, setDragItem] = createSignal<DragItem>();
@@ -77,6 +80,12 @@ export function placement(rows: Row[], offsets: number[], heights: number[], ove
   }
   // A session over a header moves into that project (frame around the band).
   if (over.type === "header") return { group, box: { top: top + 6, height: 30 } };
+  // The middle of another card on the same computer nests the dragged session under it.
+  const moving = catalog.rows[item.id];
+  if (over.type === "card" && moving && nestable(moving, over.session)) {
+    const height = heights[i];
+    if (y > top + height * 0.3 && y < top + height * 0.7) return { group, nest: over.session.key, box: { top: top + 4, height: height - 10 } };
+  }
   if (y <= (top + bottom) / 2) return { group, before: over.id, line: top, inset: 12 };
   let n = i + 1;
   while (n < rows.length && rows[n].type === "child") n++;
@@ -90,6 +99,12 @@ export function placement(rows: Row[], offsets: number[], heights: number[], ove
  * its own project too (sessionMoved, moveSession; SessionsWindow.cpp:556-561).
  */
 export function applyDrop(item: DragItem, d: Drop) {
+  if (d.nest) {
+    // A link change is confirmed first; the host checks it.
+    const child = catalog.rows[item.id], parent = catalog.rows[d.nest];
+    if (child && parent && nestable(child, parent)) setParentDialog({ kind: "set", child, parent });
+    return;
+  }
   if (d.before === item.id) return;
   if (item.kind === "group") { void moveProject(item.id, d.before); return; }
   const moving = catalog.rows[item.id] ?? archive.row(item.id);

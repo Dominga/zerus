@@ -667,8 +667,13 @@ Codex and Kimi sessions carry links; DeepSeek and OpenCode sessions do not yet.
 A launch on another computer (`hgs @peer …`) records no parent yet.
 
 `hgs [@host] parent SESSION --json` reads JSON stdin with
-`expected_run_id`, `expected_conversation_id` and `action`: `read`, `adopt` or
-`clear`, plus optional `replace`. `adopt` makes the calling agent, proven the
+`expected_run_id`, `expected_conversation_id` and `action`: `read`, `adopt`,
+`set` or `clear`, plus optional `replace`. `set` names `parent` with the chosen
+session's `session_id` and, as the desktop listed them, its `name`,
+`conversation_id` and `run_id`; the host reads that session on its own computer
+the same bounded way, and refuses an archived, changed or missing parent, the
+session itself and a cycle. `hgs --help` lists `session-parent-v1`; a call to a
+peer without it is refused before it reaches the peer. `adopt` makes the calling agent, proven the
 same way, the session's parent. It refuses a caller that no live agent owns, a
 session adopting itself, archived sessions, a target that already leads the
 caller on this computer (a cycle), and a session with another parent unless
@@ -680,6 +685,14 @@ launch. The answer names the link now in effect and the previous one. Links
 are presentation and attention routing only: they never authorize a send,
 answer, approval, stop or removal, and never change project membership.
 `hgs wait` dependencies, native subagents, names and folders never create one.
+
+On the desktop the session menu offers **Set parent…** (a searchable list of
+the computer's other Claude, Codex and Kimi sessions, never the session's own
+descendants) and, for a child, **Detach from PARENT…**. Dragging a session card
+onto the middle of another card on the same computer frames it and asks to
+make the dragged session its child; the upper and lower parts of a card still
+reorder. Every change is confirmed in a dialog, which names a parent it
+replaces, before the desktop calls `hgs parent`.
 
 `hgs ls --json` rows carry `parent` with `state` from the same listing: `live`
 (running, its agent not exited), `saved` (paused, stopped or exited),

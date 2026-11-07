@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -21,7 +22,10 @@ def run(command: list[str], cwd: Path = ROOT, env: dict[str, str] | None = None,
         return
     merged = dict(os.environ)
     merged.update(env or {})
-    if subprocess.run(command, cwd=cwd, env=merged).returncode != 0:
+    # On Windows npm is npm.cmd: CreateProcess finds only .exe by a bare
+    # name, so the program is resolved on PATH first (task 169).
+    program = shutil.which(command[0], path=merged.get("PATH")) or command[0]
+    if subprocess.run([program, *command[1:]], cwd=cwd, env=merged).returncode != 0:
         raise SystemExit(f"release candidate step failed: {' '.join(command)}")
 
 

@@ -60,6 +60,14 @@ describe("overview selectors", () => {
     // A quiet supervised child's request is its parent's: it drops out with the others.
     const quiet = { ...row(8, { status: "attention", phase: "approval", needs_action: true, needs_attention: true }), quiet: true };
     expect(mainSessions([lead, quiet], (s) => (s.key === quiet.key ? lead.key : undefined)).map((s) => s.key)).toEqual([lead.key]);
+    // ...unless the person marked it Review later, which the attention tile counts.
+    const marked = { ...quiet, reviewLater: true };
+    expect(mainSessions([lead, marked], (s) => (s.key === marked.key ? lead.key : undefined)).map((s) => s.key)).toEqual([lead.key, marked.key]);
+    // A long chain under one card stays linear and drops every link.
+    const chain = Array.from({ length: 20_000 }, (_, i) => ({ ...lead, key: `chain:${i}` }));
+    const started = performance.now();
+    expect(mainSessions(chain, (s) => { const i = Number(s.key.slice(6)); return i ? `chain:${i - 1}` : undefined; }).map((s) => s.key)).toEqual(["chain:0"]);
+    expect(performance.now() - started).toBeLessThan(1_000);
   });
 
   it("sort by Qt's session.needsAttention(), so an asking subagent does not go first (DashboardPage.cpp:453)", () => {

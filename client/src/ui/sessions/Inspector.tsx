@@ -54,7 +54,8 @@ function Card(props: { id: string; title: JSX.Element; aside?: JSX.Element; clas
 function Row(props: { icon: string; label?: string; mono?: boolean; title?: string; tail?: JSX.Element; copy?: string; children: JSX.Element }) {
   return <div class="irow" title={props.title}><span class="irow-ico"><Icon name={props.icon} size={16} /></span><span class="irow-val ell" classList={{ mono: props.mono }}>{props.children}</span>{props.tail}<Show when={props.copy}>{(text) => <button class="icon-btn small irow-copy" title={tr("Copy")} aria-label={props.label ? tr("Copy %1", props.label) : tr("Copy")} onClick={() => void copyValue(text())}><Icon name="copy" size={13} /></button>}</Show><Show when={props.label}><span class="irow-label">{props.label}</span></Show></div>;
 }
-const copyValue = (text: string) => copy(text).then((out) => out.outcome === "done" ? notify("info", tr("Copied")) : notify("error", tr("Not copied")));
+// copy() reports a failure itself; confirm only success.
+const copyValue = (text: string) => copy(text).then((out) => { if (out.outcome === "done") notify("info", tr("Copied")); });
 function PlanAgents() {
   const s = selected, plan = createMemo(() => sessionPlan(raw())), goal = createMemo(() => sessionGoal(raw()));
   const online = () => !!s() && !computerOffline(s()!.computer);

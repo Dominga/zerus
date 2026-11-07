@@ -6,6 +6,7 @@
 #include <functional>
 class CollapsibleBlock;
 class IronRulesPanel;
+class ProjectMemoryPanel;
 class ProjectPreview;
 class WorktreePanel;
 class WorktreesDialog;
@@ -149,11 +150,12 @@ private:
     QString m_renameId;   // the project a rename in progress belongs to
     bool m_renaming = false;
     std::function<QHash<QString, int>()> m_countsProvider;
-    CollapsibleBlock *m_foldersBlock = nullptr, *m_sessionsBlock = nullptr, *m_rulesBlock = nullptr;
+    CollapsibleBlock *m_foldersBlock = nullptr, *m_sessionsBlock = nullptr, *m_rulesBlock = nullptr, *m_memoryBlock = nullptr;
     QTableWidget *m_sessions = nullptr;
     QPushButton *m_allSessions = nullptr;
     QList<ProjectSession> m_projectSessions;
     QTimer *m_live = nullptr;
     IronRulesPanel *m_rules = nullptr;
+    ProjectMemoryPanel *m_memory = nullptr;
     std::function<QList<ProjectSession>(const QString &)> m_sessionsProvider;
 };

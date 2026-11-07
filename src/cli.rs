@@ -239,6 +239,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] resume <session> --fresh [-d] [--expected-run-id ID]   same settings, new conversation
        hgs notify [--bell] <session> [text]   event for the tray (no tray = no-op)
        hgs project ls [--json] | add <name> <dir> | set <name> <dir> | rm <name>
+       hgs project config get|set|move --json   project memory (RustCodeLore), project-memory-v1 (JSON stdin)
        hgs task list|get|add|edit|move|stage|target|start|send|handoff|cancel|report|comment|settings …   project tasks (JSON; agents read one line)
        hgs task list --project P --stage S --limit N [--after|--before CURSOR] [--if-revision R]   one indexed page
        hgs task attachment REF --file N [--entry ID]   one task file's bytes, for metadata-only history pages
@@ -2587,6 +2588,8 @@ fn project(config: &Config, args: &[String], dry: bool) -> Result<i32> {
     let subcommand = args.first().map(String::as_str).unwrap_or("ls");
     let args = if args.is_empty() { args } else { &args[1..] };
     match subcommand {
+        // Task 126: project memory, by the project's stable identity.
+        "config" => return crate::state::project_memory::dispatch(args).map_err(|e| Error::new(1, e)),
         "ls" => {
             let projects = config.projects()?;
             if has(args, "--json") {
@@ -2652,7 +2655,7 @@ fn project(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         _ => {
             return Err(Error::new(
                 1,
-                "usage: hgs project ls [--json] | add <name> <dir> | set <name> <dir> | rm <name>",
+                "usage: hgs project ls [--json] | add <name> <dir> | set <name> <dir> | rm <name> | config get|set|move --json",
             ))
         }
     }

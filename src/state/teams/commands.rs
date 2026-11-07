@@ -2198,6 +2198,20 @@ fn create(input: &Value) -> anyhow::Result<Value> {
             }
         }
     };
+    // Task 126: a team created outright (not a draft, which settles its
+    // memory at Create team) gets its memory now: a shared workspace in the
+    // project's store when the project has RustCodeLore on.
+    if team.status != TeamStatus::Draft {
+        let memory = super::super::project_memory::team_memory(&team.project_id, &team.id, team.settings.memory.as_ref());
+        match memory {
+            Ok(Some(memory)) => team.settings.memory = Some(memory),
+            Ok(None) => {}
+            Err(error) => {
+                release_reservation(&parent_link, &child_id);
+                return Err(error.context("The team's memory store could not be prepared"));
+            }
+        }
+    }
     let rules_authorization = (|| -> anyhow::Result<()> {
         if !team.settings.iron_rules.is_empty() || team.members.iter().any(|member| !member.iron_rules.is_empty()) {
             let caller = actor(&team, "settings", input)?;

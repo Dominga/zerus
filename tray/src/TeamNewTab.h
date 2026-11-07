@@ -156,6 +156,9 @@ private:
     bool m_forcedShared = false;
     QWidget *m_planning = nullptr;
     QString m_planningValue = QStringLiteral("lead");
+    // Task 126: the team's memory mode, "lore" (RustCodeLore) or "plain".
+    QWidget *m_memory = nullptr;
+    QString m_memoryValue = QStringLiteral("lore");
     QSpinBox *m_max = nullptr;
     QPushButton *m_addMember = nullptr, *m_create = nullptr, *m_discard = nullptr, *m_start = nullptr, *m_useLead = nullptr;
     QProgressBar *m_progress = nullptr;

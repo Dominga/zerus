@@ -89,6 +89,7 @@ mod search;
 pub(crate) mod search_index;
 pub(crate) mod session_graph;
 mod storage;
+pub(crate) mod project_memory;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod task_reconcile;
 mod subagents;

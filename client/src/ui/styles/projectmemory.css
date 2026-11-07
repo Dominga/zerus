@@ -1,0 +1,10 @@
+/* Task 126: project memory on Projects. Skin tokens only. */
+@layer components {
+  .proj-memory { display: flex; flex-direction: column; gap: 6px; min-width: 0; width: min(520px, 100%); }
+  .pm-head, .pm-store, .pm-actions { align-items: center; gap: 6px; }
+  .pm-path { min-width: 0; overflow-wrap: anywhere; }
+  .pm-status, .pm-notice { margin: 0; color: var(--z-color-text); font-size: var(--fs-sm); }
+  .pm-error { margin: 0; color: var(--z-color-danger); font-size: var(--fs-sm); white-space: pre-wrap; }
+  .pm-old { margin: 0; padding-left: 22px; font-size: var(--fs-sm); }
+  .proj-memory-row { margin-bottom: 12px; }
+}

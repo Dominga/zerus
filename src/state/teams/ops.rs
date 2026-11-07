@@ -175,6 +175,15 @@ pub(crate) fn branch_name(template: &str, id: u32, member: &str, team8: &str) ->
 
 fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
     super::super::iron_rules::validate(&json!(settings.iron_rules))?;
+    if let Some(memory) = &settings.memory {
+        ensure!(
+            super::super::project_memory::MODES.contains(&memory.mode.as_str()),
+            "The team's memory mode is plain or lore"
+        );
+        for path in [&memory.store, &memory.workspace] {
+            ensure!(path.len() <= 4096 && !path.chars().any(char::is_control), "Invalid memory store folder");
+        }
+    }
     ensure!(
         settings.tests.as_ref().is_none_or(|tests| tests.is_object()),
         "The tests override is an object shaped like .zerus/tests.toml"
@@ -573,11 +582,14 @@ fn plan(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
         tasks.push(task);
     }
     ensure!(tasks.len() <= 200, "A plan has at most 200 tasks");
-    let settings: Option<Settings> = if input["settings"].is_null() {
+    let mut settings: Option<Settings> = if input["settings"].is_null() {
         None
     } else {
         Some(serde_json::from_value(input["settings"].clone()).context("Invalid team settings")?)
     };
+    if let Some(settings) = settings.as_mut() {
+        keep_owner_memory(&team.settings, settings, actor);
+    }
     if let Some(settings) = &settings {
         validate_settings(settings)?;
         ensure_lead_settings(&team.settings, settings, actor, false)?;
@@ -1049,8 +1061,10 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-pub(crate) const OWNER_SETTINGS: [&str; 24] = [
+pub(crate) const OWNER_SETTINGS: [&str; 25] = [
     "approval",
+    // Task 126: the owner chooses the team's memory and its store.
+    "memory",
     "phase_approval",
     "max_members",
     "worktrees_forbidden",
@@ -1087,6 +1101,14 @@ pub(crate) const OWNER_SETTINGS: [&str; 24] = [
     "lead_removes_own_pause",
     "phase_acceptance",
 ];
+
+/// Task 126: a lead's whole settings object that leaves out `memory` keeps
+/// the owner's choice rather than clearing it (the owner's own write may).
+fn keep_owner_memory(old: &Settings, new: &mut Settings, actor: &Actor) {
+    if !matches!(actor, Actor::Human) && new.memory.is_none() {
+        new.memory = old.memory.clone();
+    }
+}
 
 fn ensure_lead_settings(old: &Settings, new: &Settings, actor: &Actor, on_word: bool) -> anyhow::Result<()> {
     if matches!(actor, Actor::Human) {
@@ -4588,7 +4610,8 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                     // Spec 3: the protocol addendum is the team's lead protocol.
                     "addendum" => team.lead_protocol = clean(value.as_str().unwrap_or_default(), 8000, "The lead protocol")?,
                     "settings" => {
-                        let settings: Settings = serde_json::from_value(value.clone()).context("Invalid settings")?;
+                        let mut settings: Settings = serde_json::from_value(value.clone()).context("Invalid settings")?;
+                        keep_owner_memory(&team.settings, &mut settings, actor);
                         validate_settings(&settings)?;
                         // C4: the lead drafts the rest; the owner's settings stay theirs.
                         ensure_lead_settings(&team.settings, &settings, actor, false)?;
@@ -4721,6 +4744,12 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                 validation.errors.len(),
                 validation.errors.iter().map(|finding| finding.text.as_str()).collect::<Vec<_>>().join("; ")
             );
+            // Task 126: the team's memory: a shared workspace in the project's
+            // store when the project has RustCodeLore on, else the mode New
+            // team chose (RustCodeLore in the team's own store, or plain).
+            if let Some(memory) = super::super::project_memory::team_memory(&team.project_id, &team.id, team.settings.memory.as_ref())? {
+                team.settings.memory = Some(memory);
+            }
             // Task 23: the draft's phases 2..N become the team's Draft phases,
             // approved in order; a listed phase without tasks is refused as in
             // a plan.

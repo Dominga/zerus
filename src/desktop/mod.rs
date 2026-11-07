@@ -1493,18 +1493,11 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => (),
             }
-            if feed.retire(&mut store).unwrap_or(false) {
+            for mut change in feed.retire(&mut store).unwrap_or_default() {
                 seq += 1;
+                change["attention_counts"] = attention_counts(&store, &epoch, seq, &feed);
                 fanout.publish(
-                    protocol::encode(&frame(
-                        &epoch,
-                        seq,
-                        "catalog_changed",
-                        json!({"display_only":true,"retired":true,"reset_required":true,
-                        "changes_abi":catalog_read::CHANGES_ABI,
-                        "attention_counts":attention_counts(&store,&epoch,seq,&feed)}),
-                    ))?
-                    .into(),
+                    protocol::encode(&frame(&epoch, seq, "catalog_changed", change))?.into(),
                 );
             }
             if Instant::now() >= collect_at {

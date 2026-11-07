@@ -27,13 +27,7 @@ fn changed() -> io::Error {
     io::Error::other("process identity changed")
 }
 
-fn ticks(time: FILETIME) -> u64 {
-    (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
-}
-
-/// Creation and exit times, in FILETIME ticks. The exit time means nothing until the
-/// process has ended.
-fn times_of(process: HANDLE) -> io::Result<(u64, u64)> {
+fn birth_of(process: HANDLE) -> io::Result<u64> {
     let empty = FILETIME {
         dwLowDateTime: 0,
         dwHighDateTime: 0,
@@ -44,11 +38,7 @@ fn times_of(process: HANDLE) -> io::Result<(u64, u64)> {
     if unsafe { GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok((ticks(created), ticks(exited)))
-}
-
-fn birth_of(process: HANDLE) -> io::Result<u64> {
-    Ok(times_of(process)?.0)
+    Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
 }
 
 fn image_of(process: HANDLE) -> io::Result<String> {
@@ -157,7 +147,20 @@ impl OriginalProcess {
         if unsafe { GetExitCodeProcess(raw, &mut code) } == 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok((code, times_of(raw)?.1))
+        // Deliberately not shared with `birth_of`, which Stop's identity check uses.
+        let empty = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let (mut created, mut exited, mut kernel, mut user) = (empty, empty, empty, empty);
+        // SAFETY: the owned handle stays open; all four outputs are live stack values.
+        if unsafe { GetProcessTimes(raw, &mut created, &mut exited, &mut kernel, &mut user) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((
+            code,
+            (u64::from(exited.dwHighDateTime) << 32) | u64::from(exited.dwLowDateTime),
+        ))
     }
 }
 

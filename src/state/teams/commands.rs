@@ -26,6 +26,8 @@ const MUTATIONS: &[&str] = &[
     "rights",
     // Task 127: the team's memory mode (docs/lore.md 4.2).
     "switch-memory-mode",
+    // Task 160: park a task on an outside event, and give it back.
+    "park", "unpark",
 ];
 
 fn text<'a>(input: &'a Value, key: &str) -> &'a str {
@@ -2617,6 +2619,8 @@ fn no_attempt_text(team: &Team, member: &str) -> String {
             Some(AttemptState::Reported) => "has a report waiting for the lead's decision",
             Some(AttemptState::Revoked) => "was returned to the lead",
             Some(AttemptState::Refused) => "was not delivered; Zerus tries it again",
+            // Task 160: the attempt is kept; Zerus gives it back.
+            Some(AttemptState::Parked) => "is parked; Zerus gives it back to you when its condition holds",
             Some(AttemptState::Delivering | AttemptState::Delivered | AttemptState::Unconfirmed) => "is open to another attempt",
             None => match task.status {
                 TaskStatus::Accepted => "was accepted",
@@ -4851,6 +4855,27 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 let mut ask = input["profile"].clone();
                 ask["team"] = json!(team.id);
                 value["profile"] = profile_view(&ask)?;
+            }
+            // Task 160: a parked task and its member say until when.
+            let at = now();
+            if let Some(tasks) = value["tasks"].as_array_mut() {
+                for entry in tasks {
+                    let id = entry["id"].as_u64().unwrap_or(0) as u32;
+                    if let Some(park) = team.task(id).and_then(|task| task.park.as_ref()) {
+                        entry["parked"] = json!(super::park::summary(park, at));
+                    }
+                }
+            }
+            if let Some(members) = value["members"].as_array_mut() {
+                for entry in members {
+                    let id = entry["id"].as_str().unwrap_or_default().to_owned();
+                    let parked: Vec<Value> = team.tasks.iter()
+                        .filter_map(|task| task.park.as_ref().filter(|park| park.member == id).map(|park| json!({"task":task.id,"text":super::park::summary(park, at)})))
+                        .collect();
+                    if !parked.is_empty() {
+                        entry["parked"] = json!(parked);
+                    }
+                }
             }
             // Task 133: each member's latest pulse, for the Team tab.
             let pulses = store.latest_pulses(&team.id, now());

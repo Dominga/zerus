@@ -371,7 +371,8 @@ pub(crate) fn spans(team: &Team, task: &Task, journal: &[Journal], holders: &[Ho
     let mut unknown: BTreeSet<&str> = BTreeSet::new();
     let opened = opened(team, task);
     let ready = ready(team, task, opened);
-    let pending = live && task.status == TaskStatus::Pending && task.open_attempt().is_none();
+    // Task 160: a parked task waits for its condition, not for a hand-out.
+    let pending = live && task.status == TaskStatus::Pending && task.open_attempt().is_none() && task.park.is_none();
     if !task.deps.is_empty() {
         match (opened, ready) {
             (Moment::At(open), Moment::At(ready)) => lane.push(Candidate::new("deps", open, ready, WAIT, false)),

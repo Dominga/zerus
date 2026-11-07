@@ -1467,3 +1467,20 @@ fn the_time_view_reads_a_scope_in_bounded_pages() {
     )
     .is_err());
 }
+
+/// Task 160: a parked task carries hgs status's words; any other task omits
+/// the field, so its wire shape is unchanged.
+#[test]
+fn task_160_a_parked_task_says_until_when() {
+    let status = json!({"id":"t1","name":"Checkout","status":"running","lead":"lead",
+        "members":[{"id":"lead","role":"Lead"},{"id":"dev","role":"Backend"}],
+        "tasks":[{"id":1,"title":"API","status":"pending","assignee":"dev",
+                  "parked":"parked until hgs version 1.58.0 installed, ETA 14:30 (in 25 min)"},
+                 {"id":2,"title":"Docs","status":"pending","assignee":"dev"}]});
+    let view = super::view::team(&status);
+    assert_eq!(view.tasks[0].parked, "parked until hgs version 1.58.0 installed, ETA 14:30 (in 25 min)");
+    assert_eq!(view.tasks[1].parked, "");
+    let wire = serde_json::to_value(&view.tasks[1]).unwrap();
+    assert!(wire.get("parked").is_none(), "{wire}");
+    assert_eq!(serde_json::to_value(&view.tasks[0]).unwrap()["parked"], view.tasks[0].parked.as_str());
+}

@@ -21,6 +21,8 @@ const TOPICS: &[(&str, &str)] = &[
     ("team-propose", include_str!("agent_guide/team-propose.md")),
     // Task 128: a team's RustCodeLore memory.
     ("team-lore", include_str!("agent_guide/team-lore.md")),
+    // Task 160: park a task on an outside event, never poll.
+    ("team-park", include_str!("agent_guide/team-park.md")),
     ("team-broker", include_str!("agent_guide/team-broker.md")),
     ("team-cpp", include_str!("agent_guide/team-cpp.md")),
     ("run", include_str!("agent_guide/run.md")),
@@ -31,7 +33,7 @@ const TOPICS: &[(&str, &str)] = &[
     ("stop", include_str!("agent_guide/stop.md")),
     ("tasks", include_str!("agent_guide/tasks.md")),
 ];
-const USAGE: &str = "usage: hgs guide [send|wait|team|team-tests|team-lead|team-custom|team-draft|team-input|team-tree|team-run|team-safe|team-propose|team-lore|team-broker|team-cpp|run|tests|designer|launch|stop|tasks]";
+const USAGE: &str = "usage: hgs guide [send|wait|team|team-tests|team-lead|team-custom|team-draft|team-input|team-tree|team-run|team-safe|team-propose|team-lore|team-park|team-broker|team-cpp|run|tests|designer|launch|stop|tasks]";
 
 pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     let text = match args {

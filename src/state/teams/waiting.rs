@@ -199,6 +199,13 @@ fn member_reason(team: &Team, member: &Member) -> Option<Value> {
     if working {
         return None;
     }
+    // Task 160: a member whose task is parked waits for that condition, never
+    // for a build of its own: Zerus watches it.
+    if let Some((task, park)) = team.tasks.iter().find_map(|task| task.park.as_ref().filter(|park| park.member == member.id).map(|park| (task, park))) {
+        let text = super::park::summary(park, crate::state::now());
+        let text = format!("Waiting for #{}: {text}", task.id);
+        return reason(team, "team_parked", text, json!({"task":task.id,"eta":park.eta,"state":park.state}));
+    }
     let parent = if member.parent.is_empty() { team.lead.as_str() } else { member.parent.as_str() };
     // U36: a report in a stage of its pipeline waits for that stage.
     if let Some(task) = team.tasks.iter().filter(mine).filter(|task| task.status.in_stage()).max_by_key(|task| task.id) {

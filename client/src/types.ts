@@ -1066,6 +1066,8 @@ export interface TeamTaskView {
   questions?: { id: string; text: string; at: number }[];
   /** Task #60: the task this follow-up was spawned from; never a dependency. */
   origin?: number | null;
+  /** Task 160: "parked until <condition>, ETA HH:MM (in N min)"; absent when not parked. */
+  parked?: string;
 }
 
 /** A task's pipeline run (core PipelineRunView). */

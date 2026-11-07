@@ -1077,6 +1077,31 @@ fn all_items(team: &Team) -> Vec<Item> {
             detail: if limit.detail.is_empty() { String::new() } else { summary(&limit.detail) },
         });
     }
+    // Task 160: a parked task whose condition failed is the lead's to decide;
+    // one well past its estimate is named too.
+    let now = crate::state::now();
+    for task in team.tasks.iter().filter(|_| active) {
+        let Some(park) = task.park.as_ref() else { continue };
+        let overdue = park.state == super::park::WAITING && now > park.eta + (park.eta - park.at).max(1800.0);
+        if park.state != super::park::FAILED && !overdue {
+            continue;
+        }
+        let kind = if overdue { "park_overdue" } else { "park_failed" };
+        items.push(Item {
+            subagents: Value::Null,
+            kind,
+            key: format!("{kind}:{}:{}", task.id, park.at as i64),
+            task: Some(task.id),
+            member: park.member.clone(),
+            since: if overdue { park.eta } else if park.checked_at > 0.0 { park.checked_at } else { park.at },
+            summary: summary(&format!("#{} {}", task.id, super::park::summary(park, now))),
+            command: format!(
+                "{{\"team\":\"{}\",\"task\":{}}} | hgs team unpark --json (give it back now), or reassign or cancel it",
+                team.id, task.id
+            ),
+            detail: String::new(),
+        });
+    }
     // Task 128 (docs/lore.md 6.1): a record Zerus cannot write until a field
     // is known waits here, with the workspace to write it in.
     if let Some((workspace, true)) = super::lore_sync::workspace(team) {

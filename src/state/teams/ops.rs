@@ -3348,6 +3348,13 @@ fn revoke(task: &mut Task, why: &str) -> Option<u32> {
     close_questions(task);
     // U36: so does the stage that was reading its report.
     super::pipeline::revoke_runs(task, why);
+    // Task 160: a decision on a parked task ends its park and its attempt.
+    if task.park.take().is_some() {
+        if let Some(parked) = task.attempts.iter_mut().rev().find(|attempt| attempt.state == AttemptState::Parked) {
+            parked.state = AttemptState::Revoked;
+            parked.error = why.to_owned();
+        }
+    }
     let attempt = task.open_attempt_mut()?;
     attempt.state = AttemptState::Revoked;
     attempt.interim = None;
@@ -3574,6 +3581,8 @@ pub(crate) fn attempt_phase(task: &Task, session_stopped: bool) -> Option<&'stat
         // Nothing reached the agent, or another attempt replaced this one:
         // the task itself is Pending, so it has no phase of its own.
         AttemptState::Refused | AttemptState::Revoked => return None,
+        // Task 160: the task is Pending with its park; it has no phase here.
+        AttemptState::Parked => return None,
         AttemptState::Delivered | AttemptState::Reported => {
             if attempt.open_question().is_some() {
                 // A question is not a report, and the attempt stays open (A3).
@@ -3696,6 +3705,17 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
         return Ok(result);
     }
     let attempt_id = text(input, "attempt");
+    // Task 160: a member that finished its parked attempt anyway reports on it.
+    if let Some(task) = team.task_mut(id) {
+        if task.park.as_ref().is_some_and(|park| park.attempt == attempt_id || attempt_id.is_empty()) {
+            let park = task.park.take().expect("checked");
+            if let Some(parked) = task.attempts.iter_mut().find(|attempt| attempt.id == park.attempt && attempt.state == AttemptState::Parked) {
+                parked.state = AttemptState::Delivered;
+            }
+            task.status = TaskStatus::InProgress;
+            events.push(Event::new("unparked", json!({"by":park.member,"task":id,"member":park.member,"reason":"reported"})));
+        }
+    }
     let mut body = clean(text(input, "text").trim(), 64 * 1024, "A report")?;
     // C5: a check task reports its exit code and output tail; its text is
     // optional (Zerus writes the summary) and its decision is the exit code.
@@ -4557,6 +4577,67 @@ fn hold(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
     task.hold = Some(Hold { by: label.clone(), at: now(), reason: reason.clone() });
     events.push(Event::new("held", json!({"by":label,"task":id,"reason":reason})));
     Ok(json!({"status":"held","task":id}))
+}
+
+/// Task 160: parks a task on an outside condition with an estimate. Its
+/// member (on its own open attempt) or its reviewer parks it; the attempt is
+/// kept, the member is free at once, and Zerus gives it back when the
+/// condition holds.
+fn park(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(team.status == TeamStatus::Running || team.status == TeamStatus::Paused, "Only a running or paused team parks tasks");
+    let id = task_id(input)?;
+    let task = team.task(id).context("Unknown task")?;
+    let attempt = task.open_attempt().with_context(|| format!("Task #{id} has no open attempt to park; a pending task is held instead (hold)"))?.clone();
+    ensure!(task.park.is_none(), "Task #{id} is already parked");
+    let named = text(input, "attempt");
+    ensure!(named.is_empty() || named == attempt.id, "Task #{id}'s open attempt is {}, not {named}", attempt.id);
+    let own = matches!(actor, Actor::Member(member) if *member == attempt.member);
+    ensure!(own || actor.reviews(team, &attempt.member), "Only the task's member, its reviewer or you park a task");
+    ensure!(attempt.report.is_none() && attempt.open_question().is_none(), "An attempt with a report or an open question is not parked: answer or decide it first");
+    let condition = super::park::condition_of(team, id, &input["condition"])?;
+    let minutes = input["eta_minutes"].as_u64().context("A park names its estimate: \"eta_minutes\":N (1 to 10080)")?;
+    ensure!((1..=super::park::ETA_MAX_MINUTES).contains(&minutes), "A park's estimate is 1 to {} minutes", super::park::ETA_MAX_MINUTES);
+    let note = clean(text(input, "note").trim(), 2000, "A park note")?;
+    let label = actor.label(team);
+    let at = now();
+    let park = Park {
+        attempt: attempt.id.clone(),
+        member: attempt.member.clone(),
+        by: label.clone(),
+        at,
+        condition,
+        eta: at + minutes as f64 * 60.0,
+        note,
+        state: super::park::WAITING.into(),
+        detail: String::new(),
+        checked_at: 0.0,
+    };
+    let summary = super::park::summary(&park, at);
+    let task = team.task_mut(id).context("Unknown task")?;
+    if let Some(open) = task.attempts.iter_mut().find(|found| found.id == park.attempt) {
+        open.state = AttemptState::Parked;
+    }
+    task.status = TaskStatus::Pending;
+    let (member, until) = (park.member.clone(), super::park::label(&park.condition));
+    task.park = Some(park);
+    events.push(Event::new("parked", json!({"by":label,"task":id,"member":member,"until":until,"eta_minutes":minutes})));
+    Ok(json!({"status":"parked","task":id,"parked":summary,
+        "note":"End your turn now: Zerus watches the condition and gives this task back to you; take your next task meanwhile."}))
+}
+
+/// Task 160: gives a parked task back now, as if its condition held.
+fn unpark(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    let id = task_id(input)?;
+    let member = team.task(id).and_then(|task| task.park.as_ref()).map(|park| park.member.clone()).with_context(|| format!("Task #{id} is not parked"))?;
+    let own = matches!(actor, Actor::Member(found) if *found == member);
+    ensure!(own || actor.reviews(team, &member), "Only the task's member, its reviewer or you give a parked task back");
+    let reason = clean(text(input, "reason").trim(), 1000, "A reason")?;
+    let label = actor.label(team);
+    let park = team.task_mut(id).and_then(|task| task.park.as_mut()).context("Unknown task")?;
+    park.state = super::park::MET.into();
+    park.detail = if reason.is_empty() { format!("{label} gave it back") } else { format!("{label} gave it back: {reason}") };
+    events.push(Event::new("unparked", json!({"by":label,"task":id,"member":member})));
+    Ok(json!({"status":"unparked","task":id,"note":"It goes back to its member at its next free turn."}))
 }
 
 /// A5: clears a hold; the task is handed out again when it is ready.
@@ -6180,6 +6261,9 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         "ask" => ask(team, input, actor, events),
         "reply" => reply(team, input, actor, events),
         "hold" => hold(team, input, actor, events),
+        // Task 160: park on an outside event, and give it back at once.
+        "park" => park(team, input, actor, events),
+        "unpark" => unpark(team, input, actor, events),
         "release" => release(team, input, actor, events),
         "accept" => decide(team, input, actor, true, events),
         "reject" => decide(team, input, actor, false, events),

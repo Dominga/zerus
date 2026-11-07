@@ -255,6 +255,8 @@ pub(crate) enum Step {
     Adopt { member: String, session: SessionRef },
     Launch { member: String },
     HandOut { task: u32, member: String },
+    /// Task 160: a parked task whose condition held goes back to its member.
+    Resume { task: u32, member: String },
     /// U45: switch the member's model and effort before it gets the task.
     SwitchModel { task: u32, member: String, from: String, model: String, effort: String },
     /// U45: the switch was not confirmed in time; the task waits for the lead.
@@ -1498,6 +1500,17 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             steps.push(Step::StageSilent { task: task.id, run: run.id.clone() });
         }
     }
+    // Task 160: a parked task whose condition held goes back to its member at
+    // its next free turn, before any new task.
+    if team.status == TeamStatus::Running {
+        for task in team.tasks.iter().filter(|task| task.park.as_ref().is_some_and(|park| park.state == super::park::MET)) {
+            let Some(member) = task.park.as_ref().and_then(|park| team.member(&park.member)) else { continue };
+            if available(member, &busy, Some(task.id)) {
+                busy.insert(member.id.as_str());
+                steps.push(Step::Resume { task: task.id, member: member.id.clone() });
+            }
+        }
+    }
     // C6: among a member's ready tasks the one with the most transitive
     // dependants goes first, then the lowest number.
     let ready = plan::dispatch_order(team, ready_ids);
@@ -1701,7 +1714,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     // delivery rings for everything unread).
     for member in team.members.iter().filter(|member| member.state != MemberState::Removed) {
         let given = steps.iter().any(|step| match step {
-            Step::HandOut { member: to, .. } | Step::StageOut { member: to, .. } | Step::WorkAhead { member: to, .. } => *to == member.id,
+            Step::HandOut { member: to, .. } | Step::StageOut { member: to, .. } | Step::WorkAhead { member: to, .. } | Step::Resume { member: to, .. } => *to == member.id,
             Step::Rebalance { to, .. } => *to == member.id,
             Step::Inbox => member.id == team.lead,
             _ => false,
@@ -3387,6 +3400,37 @@ pub(crate) fn classify_answer(output: &anyhow::Result<Output>) -> Sent {
     } else {
         Sent::Refused(stderr)
     }
+}
+
+/// Task 160: gives a parked task back to its member in the same attempt, with
+/// the notes it parked with. A refused message leaves it to the next tick; an
+/// uncertain one is unconfirmed, as a hand-out is.
+fn resume_parked(store: &mut Store, team: &Team, task_id: u32, member_id: &str) -> anyhow::Result<()> {
+    let task = team.task(task_id).context("unknown task")?;
+    let park = task.park.clone().filter(|park| park.state == super::park::MET).context("the task is no longer parked")?;
+    let member = team.member(member_id).context("unknown member")?;
+    let session = member.session.clone().context("the member has no session")?;
+    let text = super::park::resume_text(task_id, &task.title, &park);
+    let sent = send(&session, &uuid::Uuid::new_v4().to_string(), &text);
+    if let Sent::Refused(reason) = &sent {
+        anyhow::bail!("the resume of #{task_id} was refused: {reason}");
+    }
+    let unconfirmed = matches!(sent, Sent::Uncertain(_));
+    change(store, &team.id, |team, events| {
+        let task = team.task_mut(task_id).context("unknown task")?;
+        if task.park.as_ref().is_none_or(|found| found.attempt != park.attempt) {
+            return Ok(());
+        }
+        task.park = None;
+        task.status = TaskStatus::InProgress;
+        if let Some(attempt) = task.attempts.iter_mut().find(|attempt| attempt.id == park.attempt) {
+            attempt.state = if unconfirmed { AttemptState::Unconfirmed } else { AttemptState::Delivered };
+            attempt.sent_at = now();
+        }
+        events.push(Event::new("resumed", json!({"task":task_id,"member":park.member,"condition":super::park::label(&park.condition),
+            "detail":park.detail,"unconfirmed":unconfirmed})));
+        Ok(())
+    })
 }
 
 pub(crate) fn send(session: &SessionRef, request_id: &str, text: &str) -> Sent {
@@ -7375,6 +7419,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         }
     }
     match step {
+        Step::Resume { task, member } => resume_parked(store, team, *task, member),
         Step::Brief => send_brief(store, &team.id),
         Step::AllDecided => send_all_decided(store, &team.id),
         Step::Permission { member } => sync_permission(store, team, member),
@@ -8843,6 +8888,8 @@ pub(crate) fn worker() -> Result<i32> {
     let mut last_reason = String::new();
     // Task 128: the lore writer runs beside the ticks, never inside one.
     super::lore_sync::start_background(|line| eprintln!("hgs team worker: {line}"));
+    // Task 160: the park watcher, beside the ticks too.
+    super::park::start_background(|line| eprintln!("hgs team worker: {line}"));
     let exit = loop {
         if fs::metadata(&executable).and_then(|m| m.modified()).ok() != started {
             // An update replaced hgs: the new one carries on with the teams.
@@ -9024,6 +9071,9 @@ mod dispatcher_rights;
 #[cfg(test)]
 #[path = "tests/dispatcher_pulses.rs"]
 mod dispatcher_pulses;
+#[cfg(test)]
+#[path = "tests/dispatcher_park.rs"]
+mod dispatcher_park;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_areas.rs"]

@@ -830,7 +830,18 @@ fn all_items(team: &Team) -> Vec<Item> {
                         "{} | hgs team reply --json",
                         json!({"request_id":PLACEHOLDER,"team":team.id,"question":question.id,"text":"..."})
                     ),
-                    detail: String::new(),
+                    // Task 161: a member blocked on an outside event is
+                    // answered with a park until its condition, with an ETA.
+                    detail: if super::wait_loops::waiting_reply(&question.text) || super::wait_loops::lead_wait_instruction(&question.text) {
+                        let (condition, what) = super::wait_loops::guess_condition(&question.text, question.at);
+                        format!(
+                            "Blocked on an outside event? Answer with a park until {what}, ETA: {} | hgs team reply --json",
+                            json!({"request_id":PLACEHOLDER,"team":team.id,"question":question.id,"text":"",
+                                "park":{"condition":condition,"eta_minutes":60,"note":"..."}})
+                        )
+                    } else {
+                        String::new()
+                    },
                 });
             }
         }

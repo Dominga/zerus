@@ -82,9 +82,16 @@ fn a_met_park_goes_back_to_the_same_member_in_the_same_attempt() {
     store.create("11111111-1111-4111-8111-111111111111", &json!({}), team.clone(), vec![]).unwrap();
     let sent = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let keep = sent.clone();
+    let lead_told = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let told = lead_told.clone();
     set_fake_hgs(Some(Box::new(move |_, args, input| {
-        assert_eq!(&args[..2], &["send", "codex/x/dev"]);
-        *keep.lock().unwrap() = input.map(|value| value["text"].as_str().unwrap_or_default().to_owned()).unwrap_or_default();
+        // Task 161: the lead is told the outcome too (its doorbell).
+        if args[1] == "codex/x/dev" {
+            *keep.lock().unwrap() = input.map(|value| value["text"].as_str().unwrap_or_default().to_owned()).unwrap_or_default();
+        } else {
+            assert_eq!(&args[..2], &["send", "claude/x/lead"]);
+            told.lock().unwrap().push(input.map(crate::state::teams::doorbell::posted_text).unwrap_or_default());
+        }
         Ok(fake_output(0, r#"{"status":"submitted"}"#, ""))
     })));
     let result = run_step(&mut store, &team, &Step::Resume { task: 1, member: "dev".into() }, "");
@@ -99,6 +106,9 @@ fn a_met_park_goes_back_to_the_same_member_in_the_same_attempt() {
     let text = sent.lock().unwrap().clone();
     assert!(text.contains("Your parked task #1") && text.contains("task #3 accepted held (task #3 was accepted)"), "{text}");
     assert!(text.contains("tests pass; only the install is left") && text.contains(ATTEMPT), "{text}");
+    // Task 161: the lead gets the outcome without watching.
+    let told = lead_told.lock().unwrap().join("\n");
+    assert!(told.contains("Task #1") && told.contains("is back with") && told.contains("task #3 was accepted"), "{told}");
 }
 
 #[test]

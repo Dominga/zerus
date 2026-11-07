@@ -63,7 +63,7 @@ fn parent_lead_proven(team: &Team, parent: Option<&Team>, record: Option<&Value>
 /// The member whose session runs this CLI, proven by process ancestry. U54: a
 /// renamed session stays the member: the run id and the conversation id match
 /// as well as the stored name, so `hgs rename` never drops a member.
-fn calling_member(team: &Team, record: &Value) -> Option<String> {
+pub(crate) fn calling_member(team: &Team, record: &Value) -> Option<String> {
     let name = record["name"].as_str()?;
     let run = record["run_id"].as_str().unwrap_or_default();
     let conversation = record["conversation_id"].as_str().unwrap_or_default();
@@ -3291,6 +3291,11 @@ fn message_command(input: &Value) -> anyhow::Result<Value> {
         }
     };
     ensure!(!recipients.is_empty(), "Nobody else is in the team");
+    // Task 161: the lead never tells a member to wait; waiting is a park.
+    if by == team.lead && super::wait_loops::lead_wait_instruction(&body) {
+        let open = recipients.iter().find_map(|member| team.tasks.iter().find_map(|task| task.open_attempt().filter(|attempt| attempt.member == *member).map(|attempt| (task.id, attempt.id.clone()))));
+        bail!("{}", super::wait_loops::lead_refusal(&team.id, open.as_ref().map(|found| found.0), open.as_ref().map_or("", |found| found.1.as_str())));
+    }
     let now = super::super::now();
     let mut store = Store::open(true)?;
     let posted = store.mutate_working(&team.id, |tx, team, events| {

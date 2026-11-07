@@ -4487,7 +4487,8 @@ fn reply(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>)
     let question = clean(text(input, "question").trim(), 400, "A question id")?;
     ensure!(!question.is_empty(), "A question id is required");
     let body = clean(text(input, "text").trim(), 4000, "An answer")?;
-    ensure!(!body.is_empty(), "An answer needs text");
+    let parks = input["park"].is_object();
+    ensure!(!body.is_empty() || parks, "An answer needs text");
     // A question id names one question of the team; it belongs to an attempt or
     // to a stage run (#630 N6).
     let mut found: Option<(usize, AskedWhere, usize)> = None;
@@ -4531,7 +4532,20 @@ fn reply(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>)
         );
     }
     let task_id = team.tasks[task].id;
+    // Task 161: waiting is a park, never an instruction: the lead's answer
+    // telling the member to wait for an outside event is refused with the
+    // park, and "park" answers the question and parks the task at once.
+    let lead = matches!(actor, Actor::Member(member) if *member == team.lead) || matches!(actor, Actor::ParentLead);
+    let open = match where_at {
+        AskedWhere::Attempt(attempt) => Some(team.tasks[task].attempts[attempt].id.clone()),
+        AskedWhere::Stage(_) => None,
+    };
+    if lead && !parks && super::wait_loops::lead_wait_instruction(&body) {
+        bail!("{}", super::wait_loops::lead_refusal(&team.id, Some(task_id), open.as_deref().unwrap_or_default()));
+    }
+    ensure!(!parks || open.is_some(), "A stage's question is answered, not parked");
     let label = actor.label(team);
+    let body = if parks && body.is_empty() { "Parked: Zerus watches the condition and gives the task back to you.".to_owned() } else { body };
     let asked = match where_at {
         AskedWhere::Attempt(attempt) => &mut team.tasks[task].attempts[attempt].questions[question_at],
         AskedWhere::Stage(run) => &mut team.tasks[task].pipeline_run.as_mut().and_then(|pipeline| pipeline.runs.get_mut(run)).context("The stage ended")?.questions[question_at],
@@ -4554,6 +4568,13 @@ fn reply(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>)
             };
             events.push(Event::new("question_answered", json!({"by":label,"task":task_id,"stage":stage,"round":round,"question":question})));
         }
+    }
+    if parks {
+        let mut request = input["park"].clone();
+        request["task"] = json!(task_id);
+        request["attempt"] = json!(open.unwrap_or_default());
+        let parked = park(team, &request, actor, events)?;
+        return Ok(json!({"status":"answered","question":question,"parked":parked["parked"]}));
     }
     Ok(json!({"status":"answered","question":question}))
 }

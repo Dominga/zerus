@@ -2363,6 +2363,38 @@ Status shows `parked` on the task ("parked until <condition>, ETA HH:MM (in N
 min)") and on its member; an idle member's session waits for it ("Waiting for
 #N: parked until ...", reason kind `team_parked`), never Building.
 
+Task 161 (owner, 2026-11-07): neither the lead nor a member turns a task into a
+waiting loop; waiting on an outside event is always a park.
+- The lead's `hgs team reply` (and a parent lead's), `hgs team message` to
+  members and `hgs send` from the lead's session to a member are refused when
+  the text tells the member to wait for an outside event (a wait word with an
+  install, a build or version, CI, a card or approval, a time); the refusal
+  is the park request for the member's open task. A reply with
+  `"park":{condition, eta_minutes, note}` answers the question and parks the
+  task at once; the lead's inbox item for a question that says the member is
+  blocked or waiting carries that reply, with a guessed condition.
+- `hgs run` refuses a job whose purpose is waiting: its label says it waits
+  ("wait", "poll", "watch for", "until"), or its command (and the .cmd, .bat,
+  .ps1, .sh or .py script it names, first 64 KB) loops (`while`, `until`,
+  `for /l`, `goto`, `loop`) around a pause (`sleep`, `Start-Sleep`,
+  `timeout /t`, `ping -n`). The refusal names the caller's park request.
+- A turn that ends without a report and whose last reply says it waits or is
+  blocked on an outside event gets one message offering the park with a
+  guessed condition (`park_offered`); it is never kept as a wait.
+- Every five minutes, from ten minutes after its hand-out, a member's open,
+  delivered attempt with no report or open question is looked at
+  (`wait_checked_at`): a running job of its session whose purpose is waiting,
+  or the same read-only check (a version, a status, a CI run, a listing) its
+  turn ran three or more times at least a minute apart, parks the task on a
+  guessed condition (a CI run named, else an installed version named, else a
+  time 30 minutes on) with a 60-minute estimate, by "Zerus (a wait loop)"
+  (`wait_parked`). The member is told to stop the wait and end its turn; the
+  lead is told once with the guessed condition to correct. Zerus does not stop
+  the job itself; it ends at its own bound.
+- The lead gets every park's outcome without watching: a met park is told
+  when the task goes back to its member; a failed or overdue one is a lead
+  inbox item.
+
 A reassign, a take-over or a cancel of a task whose attempt its member is still
 working on (sent or delivered, not reported) tells that member at once: one
 `[Zerus team · from: Zerus · task: #N · stop]` message names the task and why it

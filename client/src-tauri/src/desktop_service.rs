@@ -79,6 +79,7 @@ pub(crate) mod notification_controls;
 mod read_import;
 mod reconnect;
 pub(crate) mod retained_import;
+mod state_refusal;
 mod status;
 pub(crate) mod termination_outcome;
 
@@ -406,6 +407,8 @@ struct Shared {
     hgs: PathBuf,
     configuration: Mutex<Option<String>>,
     audit_help: audit::help::Cache,
+    /// Task 176: hgs's refusal of a desktop state folder that is not private.
+    state_refusal: state_refusal::Seen,
     relay: Mutex<Option<Arc<zerus_client_core::desktop::relay::Connection>>>,
     pump: crate::pump::Pump,
     sink: Mutex<Option<SyncSender<Data>>>,
@@ -626,6 +629,7 @@ impl Service {
             cancellation: Mutex::new(None),
             configuration: Mutex::new(None),
             audit_help: audit::help::Cache::default(),
+            state_refusal: state_refusal::Seen::default(),
             responder,
             reads: Mutex::new(BTreeMap::new()),
             details: Mutex::new(details::Hub::default()),
@@ -1569,6 +1573,7 @@ impl Shared {
         );
         snapshot.retained_source_import =
             self.retained_import.as_ref().map(|report| report.status());
+        snapshot.state_refusal = self.state_refusal.shown();
         let mut current = self.snapshot.lock();
         *current = snapshot.clone();
         self.pump.service(snapshot);
@@ -1780,6 +1785,11 @@ async fn command_accounted(
                 }
                 Ok(stdout)
             }
+            Ok(zerus_client_core::Exit::Code { stderr, .. }) => {
+                // Task 176: a refused state folder is named to the person.
+                state.state_refusal.observe(&stderr);
+                Err("service_request_unconfirmed")
+            }
             _ => Err("service_request_unconfirmed"),
         }
     })
@@ -1850,6 +1860,38 @@ impl PreflightMode<'_> {
         }
     }
 }
+/// `hgs desktop status --json`, with task 176's repair of a refused state
+/// folder: `hgs desktop prepare-state --json` (what the service start runs
+/// first) and one more status. A refusal that stays ends the connection with
+/// its own code and is shown; any success clears it.
+async fn status_checked(shared: &Arc<Shared>, stop: Arc<AtomicBool>, repair: bool) -> Result<Vec<u8>, &'static str> {
+    let status = || vec!["desktop".to_owned(), "status".to_owned(), "--json".to_owned()];
+    shared.state_refusal.take();
+    let mut result = command(shared, status(), None, stop.clone()).await;
+    if result.is_err() && repair && shared.state_refusal.take().is_some() {
+        let _ = command(shared, vec!["desktop".into(), "prepare-state".into(), "--json".into()], None, stop.clone()).await;
+        shared.state_refusal.take();
+        result = command(shared, status(), None, stop).await;
+    }
+    match result {
+        Ok(bytes) => {
+            shared.state_refusal.show(None);
+            Ok(bytes)
+        }
+        Err(code) => match shared.state_refusal.take() {
+            Some(refusal) => {
+                shared.state_refusal.show(Some(refusal));
+                Err(state_refusal::CODE)
+            }
+            None => {
+                // Another failure: an old refusal no longer describes it.
+                shared.state_refusal.show(None);
+                Err(code)
+            }
+        },
+    }
+}
+
 async fn preflight(shared: &Arc<Shared>, stop: Arc<AtomicBool>) -> Result<String, &'static str> {
     preflight_for(shared, stop, PreflightMode::Connection).await
 }
@@ -1902,13 +1944,14 @@ async fn preflight_for(
     }) {
         return Err("incompatible_service_cli");
     }
-    let bytes = command(
-        shared,
-        vec!["desktop".into(), "status".into(), "--json".into()],
-        None,
-        stop,
-    )
-    .await?;
+    // Task 176: a state folder hgs refuses as not private is repaired once by
+    // the service start's own preparation, never on a read-only or recovery
+    // connection; a refusal that stays is shown with its folder and entry.
+    let repair = matches!(mode, PreflightMode::Connection)
+        && !shared.read_checks_only()
+        && !startup_recovery()
+        && state_refusal::can_prepare(&help);
+    let bytes = status_checked(shared, stop, repair).await?;
     let value: Value = serde_json::from_slice(&bytes).map_err(|_| "invalid_service_response")?;
     // A successful status CLI can report an absent socket. Its unavailable
     // response has no capability table; this is not a protocol incompatibility.

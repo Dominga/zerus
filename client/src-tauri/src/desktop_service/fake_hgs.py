@@ -59,6 +59,12 @@ with (root / 'calls').open('a') as log:
 signal_ready()
 
 
+STATE_REFUSAL = ('desktop folders must be private directories: /fixture/state/sessions: it grants '
+                 'MSI\\CodexSandboxUsers (S-1-5-21-1-2-3-1009) read and execute (RX), mask 0x001200A9, inherited from its '
+                 'parent folder. Repair: starting the background service (or hgs desktop prepare-state --json) makes a '
+                 'folder you own private in place; a folder another account owns must be fixed by its owner')
+
+
 def counter(name):
     path = root / name
     number = int(path.read_text()) + 1 if path.exists() else 1
@@ -493,6 +499,8 @@ if args == ['--help']:
         print('Desktop maintenance ABI: desktop-maintenance-v1')
     if config.get('audit_abi', True):
         print('Desktop approval audit ABI: desktop-approval-audit-v1')
+    if config.get('prepare_state_abi'):
+        print('Desktop state preparation: desktop-state-prepare-v1')
 elif args[:1] == ['notifications'] and config.get('notification_fixture'):
     if config.get('notification_hold'):
         (root / 'notification-held').touch()
@@ -634,6 +642,17 @@ elif args == ['desktop', 'frontend-request', '--json']:
                 time.sleep(.005)
             os._exit(0)
         print(json.dumps(receipt))
+elif args == ['desktop', 'prepare-state', '--json']:
+    # Task 176: the service start's repair of a state folder that only
+    # inherited a sandbox group's read; an unrepairable one stays refused.
+    if config.get('state_unrepairable'):
+        sys.stderr.write('hgs: ' + STATE_REFUSAL + '\n')
+        raise SystemExit(1)
+    (root / 'state-prepared').touch()
+    print(json.dumps({'prepared': True}))
+elif args == ['desktop', 'status', '--json'] and config.get('state_refused') and not (root / 'state-prepared').exists():
+    sys.stderr.write('hgs: ' + STATE_REFUSAL + '\n')
+    raise SystemExit(1)
 elif args == ['desktop', 'status', '--json']:
     if (root / 'mode-preflight-hold').exists():
         (root / 'mode-preflight-entered').touch()

@@ -45,6 +45,9 @@
   .sp-foot .icon-btn.small { width: 26px; height: 26px; }
   .sp-empty { flex: 1; }
   .sp-paused { align-content: center; }
+  /* Task 176: hgs's refusal of the state folder, selectable to copy. */
+  .sp-refused { align-content: center; }
+  .sp-refusal { user-select: text; overflow-wrap: anywhere; max-width: 60ch; }
 
   /* Docked width handle (QSplitter handle, 8 px, transparent). */
   /* Width handle: an 8 px strip on the edge; only a centred grip (4×52) shows,

@@ -45,7 +45,7 @@ describe("passive service", () => {
   });
   it("replaces the skeletons, Connecting and the empty detail only while paused without computers", async () => {
     const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: URL, encoding: "utf8"): string };
-    const read = (path: string) => fs.readFileSync(new URL(path, import.meta.url), "utf8");
+    const read = (path: string) => fs.readFileSync(new URL(path, import.meta.url), "utf8").replace(/\r\n/g, "\n");
     const component = read("./DesktopServiceStatus.tsx");
     expect(component).toContain("(!!servicePaused(desktopService.state()) || firstChoicePending(desktopService.state()))\n  && !Object.keys(catalog.computers).length");
     const detail = component.match(/export function PausedServiceDetail[\s\S]*?\n}\n/)?.[0] ?? "";
@@ -63,6 +63,39 @@ describe("passive service", () => {
     expect(list.indexOf("<Show when={!servicePausedEmpty()}")).toBeGreaterThan(-1);
     expect(list.indexOf("<Show when={!servicePausedEmpty()}")).toBeLessThan(list.indexOf("skel-card"));
     expect(read("../../App.tsx")).toContain('fallback={<Show when={!servicePaused(desktopService.state()) && !firstChoicePending(desktopService.state())}><span>{props.mode() === "starting" ? tr("Starting…") : tr("Connecting…")}</span></Show>}');
+  });
+});
+
+// Task 176 (owner, 2026-11-07): an inherited sandbox read on the session state
+// folder left an endless skeleton. A refusal the repair did not fix is shown.
+const REFUSAL = "desktop folders must be private directories: C:\\Users\\me\\.local\\state\\hgs\\sessions: it grants MSI\\CodexSandboxUsers (S-1-5-21-1-2-3-1009) read and execute (RX), mask 0x001200A9, inherited from its parent folder. Repair: starting the background service (or hgs desktop prepare-state --json) makes a folder you own private in place; a folder another account owns must be fixed by its owner";
+
+describe("refused session state folder", () => {
+  it("heads the footer with hgs's own words and offers Retry", () => {
+    const state = healthy({ connected: false, background: {}, code: "state_folder_not_private", state_refusal: REFUSAL });
+    const view = serviceStatus(state)!;
+    expect(view.label).toBe("Session state folder refused");
+    expect(view.details).toContain(REFUSAL);
+    expect(view).toMatchObject({ healthy: false, retry: true });
+    // Without a refusal the same disconnection reads as before.
+    expect(serviceStatus(healthy({ connected: false, code: "service_unavailable" }))!.label).toBe("Background service unavailable");
+  });
+  it("replaces the skeleton rows with the refusal, its repair and Retry", async () => {
+    const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: URL, encoding: "utf8"): string };
+    const read = (path: string) => fs.readFileSync(new URL(path, import.meta.url), "utf8").replace(/\r\n/g, "\n");
+    const list = read("../sessions/SessionList.tsx").match(/function ListPlaceholder\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    const refused = list.indexOf("<Show when={!stateRefusal()} fallback={<StateRefusalDetail />}>");
+    expect(refused).toBeGreaterThan(-1);
+    expect(refused).toBeLessThan(list.indexOf("skel-card"));
+    expect(refused).toBeLessThan(list.indexOf("<Show when={!servicePausedEmpty()}"));
+    const component = read("./DesktopServiceStatus.tsx");
+    expect(component).toContain('export const stateRefusal = () => desktopService.state()?.state_refusal || "";');
+    const detail = component.match(/export function StateRefusalDetail[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(detail).toContain('role="alert"');
+    expect(detail).toContain("{stateRefusal()}");
+    expect(detail).toContain('tr("Sessions cannot load")');
+    expect(detail).toContain("retryDesktopService()");
+    expect(detail).not.toContain("skeleton");
   });
 });
 
@@ -128,7 +161,7 @@ describe("Windows first background choice (zerus-yfbd.1)", () => {
   });
   it("shows the Settings group only for a healthy offer, and B2's interrupted group takes precedence", async () => {
     const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: URL, encoding: "utf8"): string };
-    const read = (path: string) => fs.readFileSync(new URL(path, import.meta.url), "utf8");
+    const read = (path: string) => fs.readFileSync(new URL(path, import.meta.url), "utf8").replace(/\r\n/g, "\n");
     const group = read("../screens/settings/ServiceFirstChoice.tsx");
     expect(group).toContain('(!manual() && activation()?.first && !ownershipNotice(ownership())) ? activation()!.first! : undefined');
     expect(group).toContain("const visible = () => !activation()?.review && (!!offer() || pending() || notStarted());");
@@ -163,7 +196,7 @@ describe("Windows first background choice in flight", () => {
   });
   it("source wiring: the footer, main area and Settings group show the explicit change, never Retry or Connecting", async () => {
     const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as { readFileSync(path: URL, encoding: "utf8"): string };
-    const read = (path: string) => fs.readFileSync(new URL(path, import.meta.url), "utf8");
+    const read = (path: string) => fs.readFileSync(new URL(path, import.meta.url), "utf8").replace(/\r\n/g, "\n");
     const store = read("../../store/desktopService.ts");
     expect(store).toContain('return { label: tr("Turning on background mode"),');
     expect(store).toContain('healthy: false, retry: false, review: !!retained, inputsReview, ownership: "check" as const, manualRefresh: false, modeReview: false };');

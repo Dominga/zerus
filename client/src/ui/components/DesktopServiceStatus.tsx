@@ -4,6 +4,7 @@ import { desktopService, serviceStatus, servicePaused, retryDesktopService, owne
 import { catalog } from "../../store/catalog";
 import { toast } from "../../store/ui";
 import { tr } from "../../i18n";
+import { Icon } from "../lib/icons";
 import { MigrationReportDialog } from "./MigrationReportDialog";
 import { TaskMessageInputsDialog } from "./TaskMessageInputsDialog";
 
@@ -15,6 +16,25 @@ const resume = () => void ownershipActions.rearm().catch(error => toast(tr("Back
 const resumeBlocked = () => ownershipActions.busy() || !!desktopService.state()?.notification_ownership?.running;
 /** Settings > About shows the service state (and, after an interrupted change, its review). */
 const openServiceSettings = () => void import("../screens/settings/sections").then(({ openSettings }) => openSettings("about"));
+
+/** Task 176: hgs refused the session state folder and the repair did not fix it. */
+export const stateRefusal = () => desktopService.state()?.state_refusal || "";
+
+/**
+ * The session list while hgs refuses the session state folder: the refusal in
+ * hgs's own words (folder, access entry, repair) and Retry, never loading rows.
+ */
+export function StateRefusalDetail() {
+  return (
+    <div class="empty sp-empty sp-refused" role="alert">
+      <Icon name="triangle-alert" size={30} />
+      <h3>{tr("Sessions cannot load")}</h3>
+      <p class="sp-refusal">{stateRefusal()}</p>
+      <p>{tr("Zerus makes a folder you own private when the background service starts. A folder another account owns must be fixed by its owner; then retry.")}</p>
+      <button type="button" class="btn small" onClick={() => void retryDesktopService().catch(error => toast(tr("Background service"), String(error), "error", true))}>{tr("Retry now")}</button>
+    </div>
+  );
+}
 
 /**
  * The empty main area while background work is paused. Its one action is

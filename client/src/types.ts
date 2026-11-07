@@ -237,6 +237,9 @@ export interface DesktopService {
   retained_source_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null; creations_capture?: { code: string; paused: boolean; capture_id: string | null }; local_read_capture?: { code: string; paused: boolean; capture_id: string | null; view_ready?: boolean; view_revision?: string }; drafts_capture?: { code: string; writes: boolean; paused: boolean; capture_id: string | null; manifests: number }; downloads_capture?: null | { code: string; capture_id: string | null }; downloads_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null }; drafts_report?: { required: boolean; complete: boolean; partial?: boolean; running: boolean; code: string; phase: string | null }; worktree_cache_capture?: { code: string; paused: boolean; capture_id: string | null }; worktree_cache_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null }; local_reads_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null }; creations_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null } };
   notification_ownership?: NotificationOwnership;
   code: string;
+  /** Task 176: hgs refused this computer's session state folder as not private;
+   * its own words name the folder, the access entry and the repair. */
+  state_refusal?: string | null;
 }
 
 export interface Batch {

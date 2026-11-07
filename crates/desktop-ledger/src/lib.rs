@@ -90,6 +90,13 @@ pub enum Target {
         run: String,
         conversation: String,
     },
+    /// A mandatory native question before the first conversation exists.
+    /// It cannot borrow a name, host epoch or synthetic conversation ID.
+    StartupQuestion {
+        computer: String,
+        run: String,
+        question: String,
+    },
     Device {
         configuration: String,
     },
@@ -133,6 +140,21 @@ impl Identity {
                 ensure!(
                     matches!(self.kind, Kind::Badge | Kind::Presence),
                     "invalid device effect kind"
+                );
+            }
+            Target::StartupQuestion {
+                computer,
+                run,
+                question,
+            } => {
+                if !computer.is_empty() {
+                    text(computer, 255)?;
+                }
+                text(run, 1024)?;
+                text(question, 1024)?;
+                ensure!(
+                    matches!(self.kind, Kind::Post | Kind::Withdrawal),
+                    "invalid startup question effect kind"
                 );
             }
         }

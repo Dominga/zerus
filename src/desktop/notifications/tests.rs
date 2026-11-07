@@ -4,6 +4,43 @@ use crate::desktop::store::Location;
 fn id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
+
+#[test]
+fn startup_post_token_must_keep_the_exact_question_run_and_scope() {
+    let identity = Identity {
+        kind: Kind::Post,
+        target: Target::StartupQuestion {
+            computer: String::new(),
+            run: "run".into(),
+            question: "codex-trust:q".into(),
+        },
+        edge: "startup_question".into(),
+    };
+    let original = json!({"host":"","name":"fixture","run":"run","conversation":"",
+        "startup_question":"codex-trust:q","notice":"notice"});
+    let action = |target: &serde_json::Value| Action::Post {
+        token: attention::encode_token(target.as_object().unwrap()),
+        title: "Needs attention".into(),
+        body: String::new(),
+    };
+    assert!(check_identity(&identity, &action(&original)).is_ok());
+    for (field, value) in [
+        ("run", "replaced"),
+        ("startup_question", "different"),
+        ("conversation", "bound"),
+        ("host", "other"),
+    ] {
+        let mut changed = original.clone();
+        changed[field] = json!(value);
+        assert!(
+            check_identity(&identity, &action(&changed)).is_err(),
+            "{field}"
+        );
+    }
+    let mut missing = original;
+    missing.as_object_mut().unwrap().remove("startup_question");
+    assert!(check_identity(&identity, &action(&missing)).is_err());
+}
 struct Fixture {
     _temp: tempfile::TempDir,
     store: Store,
@@ -215,7 +252,7 @@ fn schema_thirty_one_preserves_prior_failure_receipts_and_marks_their_time_unava
     f.store
         .db
         .execute_batch(
-            "ALTER TABLE desktop_attempts DROP COLUMN recorded_at; PRAGMA user_version=30",
+            "DROP INDEX desktop_attention_catalog_run; ALTER TABLE desktop_attempts DROP COLUMN recorded_at; PRAGMA user_version=30",
         )
         .unwrap();
     let Fixture { _temp, store, .. } = f;

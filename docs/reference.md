@@ -5817,6 +5817,19 @@ authoritative catalog and every restorable archive; that separate sweep is
 tracked in `zerus-n3qm`. Catalog absence or an offline source alone never proves
 that an edge cannot reappear.
 
+Mandatory startup questions can notify before SessionStart supplies a
+conversation. Their separate identity contains the exact run and native
+question ID; names, host leases and timestamps never substitute for either.
+They use the same focus, baseline, supervised-child and outbox rules as other
+attention. Answering withdraws the original notice. When the conversation
+binds, its startup notice is retired; the same still-visible question is consumed
+in the conversation scope rather than posted again. A different question is a
+new edge. Reconnects and upgrades preserve the original intent and unknown
+delivery is never replayed. Schema 32 adds the indexed run lookup needed for
+simultaneous sessions awaiting their first conversation. A startup click also
+requires that same run and question, and cannot follow a replaced run or a
+question that has already ended or acquired a conversation.
+
 Schema 3 adds the indexed revocation command journal. Before a maintained Qt
 rollback or Qt installation starts its GUI, the installer must obtain a settled
 receipt from this exact configuration:

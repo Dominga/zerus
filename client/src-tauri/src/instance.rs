@@ -1136,6 +1136,7 @@ mod tests {
             computer: "peer.example".into(),
             run: "original-run".into(),
             conversation: "original-conversation".into(),
+            startup_question: None,
         });
         assert_eq!(Activation::parse(&value.line()), Some(value));
         assert!(Activation::parse(br#"target {"computer":"peer","run":"r","conversation":"c","activation_token":"injected"}"#).is_none());
@@ -1150,6 +1151,7 @@ mod tests {
             computer: "peer.example".into(),
             run: "r".repeat(1024),
             conversation: "c".repeat(1024),
+            startup_question: None,
         };
         let value = Activation::Navigation(target);
         assert!(forward(&paths.socket, value.clone()));

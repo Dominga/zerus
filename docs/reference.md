@@ -3207,7 +3207,17 @@ Desktop **Terminate** also offers **Remove the unused worktree after stopping**,
 including for a selection of sessions. The choice is remembered on this desktop.
 The choice is bound to the checkout ownership recorded at that session's launch.
 A replacement checkout at the same path or branch is kept for manual review;
-older sessions without a launch ownership record also require review. Fresh
+older sessions without a launch ownership record also require review.
+For a retained **Not created by Zerus** linked worktree, **Remove anyway…**
+opens a separate explicit manual confirmation. It shows the native-selected path,
+computer, kept branch, size, changed/untracked counts and local data, and requires
+its matching discard consents. Fresh session and program checks still apply;
+known occupants must stop first (use the existing Force flow when offered).
+Unreadable program paths retain the existing five-minute manual acceptance.
+This action never removes the primary checkout or an ordinary folder, never
+makes an unowned folder eligible for automatic cleanup, and never retries an
+unknown removal. The branch and archive identities remain; recreating an unowned
+working folder for Restore remains an explicit manual step. Fresh
 removal fingerprints include the ownership nonce, so replacing a checkout after
 review cannot inherit its removal consent.
 

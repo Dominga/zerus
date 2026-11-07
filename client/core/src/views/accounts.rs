@@ -164,6 +164,13 @@ pub struct Profile {
     pub permission_hint: Text,
     pub model_supported: bool,
     pub model_text: Text,
+    /// This computer's model and effort defaults for the account, empty when
+    /// it follows the provider (zerus-f0uz8).
+    pub model: String,
+    pub effort: String,
+    /// `account` (shared by the account's computers), `computer`, or empty
+    /// when this computer's hgs does not keep a scope.
+    pub permission_scope: String,
     pub usage: Usage,
     pub opencode: Option<OpenCode>,
 }
@@ -181,6 +188,13 @@ pub struct Account {
     pub usage: Usage,
     /// Bypass, Auto, Plan, Default, or Varies when the members differ.
     pub permission: Text,
+    /// The account keeps its permission mode per computer: any member says
+    /// so (zerus-f0uz8). Otherwise one mode is shared by every computer.
+    pub permissions_per_computer: bool,
+    /// The members' model and effort defaults differ.
+    pub model_differs: bool,
+    /// The members' Zerus permission modes differ.
+    pub permission_differs: bool,
     /// Identity values verbatim, then "Plan: %1" and "Sign-in: %1".
     pub identity_lines: Vec<Text>,
     /// Shown without identity lines: "Reading account details…" or
@@ -623,6 +637,12 @@ fn profile(entry: &FleetEntry, raw: &Value, state: &AccountsState) -> Profile {
         .into(),
         model_supported: flag(raw, "model_defaults_supported"),
         model_text: model_text(raw),
+        model: text(raw.get("model_defaults").unwrap_or(&Value::Null), "model"),
+        effort: text(raw.get("model_defaults").unwrap_or(&Value::Null), "effort"),
+        permission_scope: match text(raw, "permission_scope").as_str() {
+            scope @ ("account" | "computer") => scope.to_owned(),
+            _ => String::new(),
+        },
         usage,
         opencode: opencode(raw),
         id: r.id,
@@ -850,6 +870,9 @@ pub fn group(profiles: &[Profile]) -> Vec<Account> {
                 members: Vec::new(),
                 usage: p.usage.clone(),
                 permission: Text::default(),
+                permissions_per_computer: false,
+                model_differs: false,
+                permission_differs: false,
                 identity_lines: Vec::new(),
                 identity_note: None,
             });
@@ -873,9 +896,34 @@ pub fn group(profiles: &[Profile]) -> Vec<Account> {
             group.label = group.usage.identity.email.clone();
         }
         group.permission = Text::new(permission_label(&account_permission(&group.members)));
+        (
+            group.permissions_per_computer,
+            group.model_differs,
+            group.permission_differs,
+        ) = shared_settings(&group.members);
         (group.identity_lines, group.identity_note) = identity_lines(&group.label, &group.usage);
     }
     groups
+}
+
+/// Whether the account keeps permissions per computer, and whether its
+/// members' model defaults or Zerus permission modes differ (zerus-f0uz8).
+fn shared_settings(members: &[Profile]) -> (bool, bool, bool) {
+    let models: BTreeSet<(&str, &str)> = members
+        .iter()
+        .filter(|m| m.model_supported)
+        .map(|m| (m.model.as_str(), m.effort.as_str()))
+        .collect();
+    let modes: BTreeSet<&str> = members
+        .iter()
+        .filter(|m| m.provider != "opencode")
+        .map(|m| m.permission_mode.as_str())
+        .collect();
+    (
+        members.iter().any(|m| m.permission_scope == "computer"),
+        models.len() > 1,
+        modes.len() > 1,
+    )
 }
 
 /// NewSessionDialog::refreshUsage (990-1000): the groups of an earlier
@@ -906,6 +954,8 @@ pub fn refresh_groups(groups: &[Account], profiles: &[Profile]) -> Vec<Account> 
             }
         }
         let (identity_lines, identity_note) = identity_lines(&old.label, &usage);
+        let (permissions_per_computer, model_differs, permission_differs) =
+            shared_settings(&members);
         out.push(Account {
             key: old.key.clone(),
             label: old.label.clone(),
@@ -913,6 +963,9 @@ pub fn refresh_groups(groups: &[Account], profiles: &[Profile]) -> Vec<Account> 
             installed: members.iter().any(|m| m.installed),
             machines,
             permission: Text::new(permission_label(&account_permission(&members))),
+            permissions_per_computer,
+            model_differs,
+            permission_differs,
             usage,
             identity_lines,
             identity_note,

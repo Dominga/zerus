@@ -3,6 +3,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type ActivityEvent, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalEvent, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type AttachmentRef, type Fetched, type TaskFileSource, type ConflictsPage, type DraftSource, type SavedDraftDetail, type SavedDraftsPage, type QuestionEdit, type QuestionReply, type ClearControl, emptyUsage, type TerminalFinished, type SessionUsageRef, type Usage } from "./types";
 import type { CreatedWorktree, CreationAction, CreationAdmission, CreationCard, CreationEvent, FolderOut, LaunchAccounts, LaunchChoices, LaunchPlan, LaunchStart, MachineMeta, NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields } from "./types";
+import type { Text } from "./text";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
 import { emptyUpdatesView, type UpdateChannel, type UpdatesView } from "./types";
@@ -502,14 +503,17 @@ export async function accountsView(force = false): Promise<AccountsView> {
   if (!inTauri()) return emptyAccounts([DESKTOP_ONLY]);
   return invoke<AccountsView>("accounts_view", { force });
 }
-export type AccountEditKind = "rename" | "default" | "remove" | "permissions" | "model";
+export type AccountEditKind = "rename" | "default" | "remove" | "permissions" | "model" | "scope";
 export interface AccountModelCatalog {
   models: {id:string;label:string;effort_options:string[]}[];
   defaults: {model:string;effort:string}; provider_defaults: {model:string;effort:string}; effort_supported:boolean;
 }
 export interface AccountEditValues {label?:string;mode?:string;model?:string;effort?:string}
-export interface AccountEditView { handle: string; kind: AccountEditKind; label: string; machine: string; provider: string; permission_mode?:string; permission_detail?:string; models?:AccountModelCatalog|null }
-export interface AccountEditResult { notices: string[]; errors: string[] }
+export interface AccountEditView { handle: string; kind: AccountEditKind; label: string; machine: string; provider: string; permission_mode?:string; permission_detail?:string; models?:AccountModelCatalog|null;
+  /** Every computer the edit saves on, the selected one first; whether their values differ now; per-computer permissions (zerus-f0uz8). */
+  machines?: string[]; differs?: boolean; per_computer?: boolean }
+/** Notices are translated prose (zerus-0y2yx); errors carry hgs's own text. */
+export interface AccountEditResult { notices: Text[]; errors: string[] }
 export async function accountEditOpen(account: string, profile: string, kind: AccountEditKind): Promise<AccountEditView> {
   if (!inTauri()) throw new Error(DESKTOP_ONLY);
   return invoke("account_edit_open", { account, profile, kind });
@@ -538,7 +542,8 @@ export async function accountSetupClose(handle:string) {if(inTauri())await invok
 export interface AccountDistributionMachine {key:string;machine:string;platform:string;version:string;blocked:string|null;present:boolean;saved:boolean}
 export interface AccountDistributionForm {handle:string;label:string;provider:string;machines:AccountDistributionMachine[];sources:{key:string;label:string}[]}
 export type AccountDistributionState="pending"|"working"|"added"|"needs-signin"|"failed"|"unknown";
-export interface AccountDistributionProgress {handle:string;host:string;machine:string;state:AccountDistributionState;text:string;saved:boolean;profile:string|null}
+/** `note`: a setting the new profile did not take, translated (zerus-f0uz8). */
+export interface AccountDistributionProgress {handle:string;host:string;machine:string;state:AccountDistributionState;text:string;note?:Text|null;saved:boolean;profile:string|null}
 export interface AccountDistributionValues {hosts:string[];method:"copy"|"signin"|"apikey";use_saved:boolean;source:string;label:string;profile_id:string;api_key:string}
 export async function accountDistributionOpen(account:string,profile:string):Promise<AccountDistributionForm> {
   if(!inTauri())throw new Error(DESKTOP_ONLY);return invoke("account_distribution_open",{account,profile});

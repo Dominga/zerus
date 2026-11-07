@@ -500,11 +500,17 @@ export interface Profile {
   native: boolean; installed: boolean; is_default: boolean; home: string; auth_revision: string; online: boolean;
   state: MemberState; detail: Text; signed_in: boolean;
   permission: string; permission_mode?: string; permission_label: Text; permission_hint: Text; model_supported: boolean; model_text: Text;
+  /** This computer's model and effort defaults, empty for provider settings (zerus-f0uz8). */
+  model?: string; effort?: string;
+  /** `account` (shared), `computer`, or empty when this computer keeps no scope. */
+  permission_scope?: string;
   usage: Usage; opencode: OpenCodeInfo | null;
 }
 export interface Account {
   key: string; label: string; provider: string; installed: boolean; machines: string[]; members: Profile[];
   usage: Usage; permission: Text; identity_lines: Text[]; identity_note: Text | null;
+  /** zerus-f0uz8: permissions kept per computer; members' model or permission settings differ. */
+  permissions_per_computer?: boolean; model_differs?: boolean; permission_differs?: boolean;
 }
 export interface AccountHost { computer: ComputerId; name: string; label: string; online: boolean }
 export interface BindingEvidence { host: ComputerId; provider: string; id: string; home: string; group: string }

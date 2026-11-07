@@ -268,6 +268,42 @@ class Accounts(unittest.TestCase):
         ssh_line('@peer','--expect-machine',machine,'account','ls',sign_in=False)
         ssh_line('@peer','--expect-machine',machine,'account','install','codex','--revision','r1',sign_in=False)
 
+    def test_permission_scope_is_shared_by_default_and_kept_beside_the_catalog(self):
+        # zerus-f0uz8: an account's permission mode is shared by all its
+        # computers unless the person keeps it per computer.
+        self.add()
+        listed=self.ls()
+        self.assertTrue(listed['permission_scope_supported'])
+        rows={r['id']:r for r in listed['profiles']}
+        self.assertEqual(rows['work']['permission_scope'],'account')
+        catalog=(self.config/'accounts.json').read_bytes()
+        changed=json.loads(self.run_hgs('account','permission-scope','work','--scope','computer','--revision',listed['revision']).stdout)
+        self.assertEqual({r['id']:r for r in changed['profiles']}['work']['permission_scope'],'computer')
+        # accounts.json is unchanged, so older hgs builds keep reading it.
+        self.assertEqual((self.config/'accounts.json').read_bytes(),catalog)
+        self.assertEqual(changed['revision'],listed['revision'])
+        self.assertEqual(json.loads((self.config/'account-scopes.json').read_text()),{'permission_scopes':{'work':'computer'}})
+        self.assertEqual(oct((self.config/'account-scopes.json').stat().st_mode & 0o777),'0o600')
+        # A shared change names the scope it saw; a computer that keeps its
+        # permissions per computer since then refuses it, under the lock.
+        stale=self.run_hgs('account','permissions','work','--mode','bypass','--expect-scope','account',ok=False)
+        self.assertIn(b'changed between shared and per computer',stale.stderr)
+        self.assertNotIn('work',json.loads((self.config/'accounts.json').read_text()).get('permission_modes',{}))
+        self.run_hgs('account','permissions','work','--mode','bypass','--expect-scope','computer')
+        self.run_hgs('account','permissions','work','--mode','provider')
+        back=json.loads(self.run_hgs('account','permission-scope','work','--scope','account').stdout)
+        self.assertEqual({r['id']:r for r in back['profiles']}['work']['permission_scope'],'account')
+        self.assertEqual(json.loads((self.config/'account-scopes.json').read_text()),{})
+        for args in (['work','--scope','everywhere'],['missing','--scope','computer'],['work','--scope','computer','--revision','stale'],
+                     ['native-opencode','--scope','computer']):
+            with self.subTest(args=args):
+                self.run_hgs('account','permission-scope',*args,ok=False)
+        # A malformed record fails closed: every row reads per computer, and
+        # writes refuse instead of dropping other accounts' choices.
+        (self.config/'account-scopes.json').write_text('{"permission_scopes":{"work":"maybe"}}')
+        self.assertEqual({r['id']:r['permission_scope'] for r in self.ls()['profiles']}['work'],'computer')
+        self.assertIn(b'repair or remove',self.run_hgs('account','permission-scope','work','--scope','account',ok=False).stderr)
+
     def test_stale_revision_and_duplicate_rejected(self):
         before=self.ls()['revision']; self.add()
         self.run_hgs('account','add','other','--provider','kimi','--revision',before,ok=False)

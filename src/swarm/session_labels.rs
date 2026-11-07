@@ -12,6 +12,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use zerus_watch_protocol::session_labels as wire;
+mod cache;
+pub(super) use cache::{begin_peer, finish_peer};
+pub(crate) use cache::{cached, due_local, refresh_local, refresh_peer};
 
 const CATALOG_BYTES: u64 = 128 * 1024 * 1024;
 const MEMBERS_BYTES: u64 = 1024 * 1024;
@@ -76,6 +79,7 @@ pub(crate) fn context(config: &Config) -> Result<wire::Context> {
         configuration: configuration(config)?,
         version: env!("CARGO_PKG_VERSION").into(),
         membership_by_id: ready,
+        labels_by_id: true,
     };
     ensure!(context.valid(), "session-label context unavailable");
     Ok(context)
@@ -124,7 +128,7 @@ fn now_millis() -> Result<u64> {
 
 /// The exact declared installer inputs, not a process census. A present but
 /// unreadable/irregular input is unknown, never proof that no connector exists.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
 struct Inventory {
     path: PathBuf,
     configuration: Option<String>,
@@ -280,6 +284,20 @@ pub(crate) fn observe(config: &Config, deadline: Instant) -> Result<serde_json::
         deadline,
     )?;
     Ok(json!({"context":context,"connector":connector}))
+}
+
+/// Ordinary/fence hello has no connector wait in its budget. A proven absent
+/// supported slot can answer immediately; configured/unknown slots remain
+/// closed until the separate bounded background observation completes.
+pub(crate) fn observe_absent(config: &Config) -> Result<serde_json::Value> {
+    let context = context(config)?;
+    ensure!(
+        context.membership_by_id && context.labels_by_id,
+        "ID membership unavailable"
+    );
+    let inventory = Inventory::read(&connector_path(config), &installer_units(config))?;
+    ensure!(!inventory.required(), "connector observation required");
+    Ok(json!({"context":context,"connector":{"required":false}}))
 }
 
 #[cfg(test)]

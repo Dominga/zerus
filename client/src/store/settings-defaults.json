@@ -1,4 +1,12 @@
 {
+  "automaticApprovals/category/agents": true,
+  "automaticApprovals/category/edit": true,
+  "automaticApprovals/category/mcp": true,
+  "automaticApprovals/category/other": true,
+  "automaticApprovals/category/paid": false,
+  "automaticApprovals/category/read": true,
+  "automaticApprovals/category/shell": true,
+  "automaticApprovals/category/web": true,
   "automaticApprovals/enabled": false,
   "automaticApprovals/error": "",
   "automaticApprovals/qtEnabledAtSwitch": false,

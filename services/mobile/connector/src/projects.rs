@@ -5,6 +5,196 @@ use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use zerus_relay::json::digest;
 
+/// Native-only presence data. It is never copied into the relay catalog:
+/// null/conflict are exact ID records, distinct from an absent ID record.
+#[derive(Clone, Default)]
+pub enum PrimaryMemberships {
+    #[default]
+    Legacy,
+    Unavailable,
+    Ready(HashMap<String, Option<String>>),
+}
+impl PrimaryMemberships {
+    pub fn read(native: &Value) -> PyResult<Self> {
+        let Some(raw) = native.get("session_id_memberships") else {
+            return Ok(Self::Legacy);
+        };
+        let object = raw
+            .as_object()
+            .ok_or_else(|| invalid("invalid native ID membership projection"))?;
+        if object.get("available") == Some(&Value::Bool(false)) {
+            return Ok(Self::Unavailable);
+        }
+        if object.get("available") != Some(&Value::Bool(true)) {
+            return Err(invalid("unavailable native ID memberships"));
+        }
+        let node = native["node_id"]
+            .as_str()
+            .filter(|s| crate::session_selector::canonical(s))
+            .ok_or_else(|| invalid("invalid native membership computer"))?;
+        let records = raw["records"]
+            .as_array()
+            .filter(|r| r.len() <= 100_000)
+            .ok_or_else(|| invalid("invalid native ID membership records"))?;
+        let mut seen = HashSet::new();
+        let mut values = HashMap::new();
+        for record in records {
+            let machine = record["machine"]
+                .as_str()
+                .filter(|s| crate::session_selector::canonical(s))
+                .ok_or_else(|| invalid("invalid native membership computer"))?;
+            let id = record["session_id"]
+                .as_str()
+                .filter(|s| crate::session_selector::canonical(s))
+                .ok_or_else(|| invalid("invalid native membership ID"))?;
+            if !seen.insert((machine, id)) {
+                return Err(invalid("duplicate native ID membership"));
+            }
+            let conflict = record["conflict"]
+                .as_bool()
+                .ok_or_else(|| invalid("invalid native membership conflict"))?;
+            let project = match record.get("project") {
+                Some(Value::Null) => None,
+                Some(Value::String(project))
+                    if !conflict
+                        && !project.is_empty()
+                        && project.len() <= 128
+                        && !project.chars().any(char::is_control) =>
+                {
+                    Some(project.clone())
+                }
+                _ => return Err(invalid("invalid native ID project")),
+            };
+            if machine == node {
+                values.insert(id.into(), project);
+            }
+        }
+        Ok(Self::Ready(values))
+    }
+    pub fn available(&self) -> bool {
+        !matches!(self, Self::Unavailable)
+    }
+    /// Keep the existing public ID lists consistent with exact primary data;
+    /// do not add protocol fields or promote an unready native ID view.
+    pub fn project(&self, catalog: &mut Value) {
+        let Self::Ready(values) = self else {
+            return;
+        };
+        if catalog["membership_by_id"]["ready"] != true {
+            return;
+        }
+        let Some(projects) = catalog["projects"].as_array_mut() else {
+            return;
+        };
+        for project in projects {
+            let mut ids = project["session_ids"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            ids.retain(|id| id.as_str().is_none_or(|id| !values.contains_key(id)));
+            let Some(project_id) = project["id"].as_str() else {
+                continue;
+            };
+            ids.extend(
+                values
+                    .iter()
+                    .filter(|(_, choice)| choice.as_deref() == Some(project_id))
+                    .map(|(id, _)| json!(id)),
+            );
+            ids.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+            project["session_ids"] = json!(ids);
+        }
+    }
+    pub fn apply(&self, rows: &mut [Value], catalog: &Value) {
+        apply_memberships(rows, catalog);
+        let Self::Ready(values) = self else {
+            if matches!(self, Self::Unavailable) {
+                for row in rows
+                    .iter_mut()
+                    .filter_map(Value::as_object_mut)
+                    .filter(|r| !is_archived(r))
+                {
+                    row.remove("mobile_project_id");
+                }
+            }
+            return;
+        };
+        let mut names = HashMap::<String, usize>::new();
+        for row in rows
+            .iter()
+            .filter_map(Value::as_object)
+            .filter(|r| !is_archived(r))
+        {
+            if let Some(name) = row.get("name").and_then(Value::as_str) {
+                *names.entry(name.into()).or_default() += 1;
+            }
+        }
+        let live: HashSet<_> = catalog["projects"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|p| p["id"].as_str())
+            .collect();
+        for row in rows
+            .iter_mut()
+            .filter_map(Value::as_object_mut)
+            .filter(|r| !is_archived(r))
+        {
+            let Some(id) = row
+                .get("session_id")
+                .and_then(Value::as_str)
+                .filter(|id| crate::session_selector::canonical(id))
+            else {
+                row.remove("mobile_project_id");
+                continue;
+            };
+            if let Some(project) = values.get(id) {
+                // An exact null/conflict never borrows the shared label's group.
+                let project = project
+                    .as_ref()
+                    .filter(|p| live.contains(p.as_str()))
+                    .cloned();
+                row.remove("mobile_project_id");
+                if let Some(project) = project {
+                    row.insert("mobile_project_id".into(), json!(project));
+                }
+            } else {
+                // A genuine absent ID record alone permits legacy name fallback,
+                // and a repeated label is still not a usable legacy identity.
+                let name = row.get("name").and_then(Value::as_str).unwrap_or_default();
+                if names.get(name) != Some(&1) {
+                    continue;
+                }
+                let by_id = catalog["projects"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|p| {
+                        p["session_ids"]
+                            .as_array()
+                            .is_some_and(|ids| ids.iter().any(|v| v == id))
+                    });
+                if by_id {
+                    continue;
+                }
+                let project = catalog["projects"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|p| {
+                        p["sessions"]
+                            .as_array()
+                            .is_some_and(|members| members.iter().any(|v| v == name))
+                    })
+                    .and_then(|p| p["id"].as_str());
+                if let Some(project) = project {
+                    row.insert("mobile_project_id".into(), json!(project));
+                }
+            }
+        }
+    }
+}
+
 /// `projects.is_archived(row)`.
 pub fn is_archived(row: &Map<String, Value>) -> bool {
     row.get("state").and_then(Value::as_str) == Some("archived")

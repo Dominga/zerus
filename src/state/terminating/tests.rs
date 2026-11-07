@@ -12,6 +12,65 @@ fn any_marker_value_retains_the_unix_finalization_fence() {
     }
 }
 
+#[test]
+fn mutation_admission_and_scoped_actions_refuse_every_marker_shape() {
+    let mut record = json!({"name":"codex/termination-fence","run_id":"run-1",
+        "conversation_id":"conversation-1"});
+    let scope = crate::state::session_action::Scope::expecting(
+        "codex/termination-fence",
+        "run-1",
+        "conversation-1",
+    );
+    assert!(check_mutation(&record).is_ok());
+    assert!(scope.check(&record).is_ok());
+    for marker in [Value::Null, json!(false), json!("damaged"), json!({})] {
+        record["terminating"] = marker;
+        let refused = cfg!(any(target_os = "linux", target_os = "macos"));
+        assert_eq!(check_mutation(&record).is_err(), refused);
+        assert_eq!(scope.check(&record).is_err(), refused);
+        // Lookup/base correlation is still available; it creates no consent.
+        assert!(scope.check_base(&record).is_ok());
+    }
+}
+
+#[test]
+fn marked_hook_admission_is_completion_only_and_windows_is_unchanged() {
+    let record = json!({"terminating":Value::Null});
+    for kind in [
+        "SessionEnd",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "PostCompact",
+        "PostModelSwitch",
+        "Stop",
+        "StopFailure",
+        "SubagentStop",
+        "Interrupt",
+        "PermissionResult",
+        "SessionHeartbeat",
+    ] {
+        assert!(completion_hook(&record, kind), "{kind}");
+    }
+    for kind in [
+        "SessionStart",
+        "UserPromptSubmit",
+        "UserPromptQueued",
+        "PreToolUse",
+        "TurnStarted",
+        "TaskStarted",
+        "PermissionRequest",
+        "SubagentStart",
+        "unknown",
+    ] {
+        assert_eq!(
+            completion_hook(&record, kind),
+            !cfg!(any(target_os = "linux", target_os = "macos")),
+            "{kind}"
+        );
+        assert!(completion_hook(&json!({}), kind));
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod unix {
     use super::*;

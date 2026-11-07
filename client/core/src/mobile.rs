@@ -34,7 +34,39 @@ pub mod phone_actions;
 /// "mobile" as an agent to launch.
 pub const PHONES_MARKER: &str = "mobile phones|invite|revoke-phone";
 pub const STOP_MARKER: &str = "Workspace stop ABI: service-preflight-v1";
-pub const STOP_UNAVAILABLE: &str = "Stop is not available with this connector version. You can change the workspace while the connector is stopped.";
+pub const STOP_UNAVAILABLE: &str = "Zerus can't stop the connector on this computer. You can change the workspace while the connector is stopped.";
+/// The connector's closed result for a Stop its preflight refused before offering
+/// any marker. Only this, bound to the call, ever means that nothing changed.
+pub const STOP_REFUSED_BEFORE_EFFECT: &str = "stop-refused-before-effect";
+/// What the person reads for that refusal: nothing happened, and why.
+pub const STOP_REFUSED: &str =
+    "Zerus can't stop this connector because it can't confirm how it was started. Nothing changed.";
+
+/// How a lifecycle call that may send Stop ended without an answer. Everything
+/// but the closed refusal is an unknown outcome, whatever its text says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Failure {
+    StopRefused,
+    Other(String),
+}
+impl Failure {
+    pub fn message(&self) -> String {
+        match self {
+            Failure::StopRefused => STOP_REFUSED.into(),
+            Failure::Other(error) => error.clone(),
+        }
+    }
+}
+impl From<String> for Failure {
+    fn from(error: String) -> Self {
+        Failure::Other(error)
+    }
+}
+impl From<&str> for Failure {
+    fn from(error: &str) -> Self {
+        Failure::Other(error.into())
+    }
+}
 pub const WORKSPACE_UNCONFIRMED: &str = "Workspace operation was not confirmed. Refresh status before continuing. Verify that the matching computer connector is installed.";
 /// The connector's status reply, at most.
 const STATUS_BYTES: usize = 64 * 1024;
@@ -600,6 +632,16 @@ fn workspace_request(
     action: &str,
     payload: &Value,
 ) -> Result<Value, String> {
+    let exit = workspace_call(connector, config, action, payload)?;
+    workspace_reply(exit, false).map(Value::Object)
+}
+
+fn workspace_call(
+    connector: &Path,
+    config: &Path,
+    action: &str,
+    payload: &Value,
+) -> Result<Option<Exit>, String> {
     connector_available(connector)?;
     let call = Invocation {
         args: vec![
@@ -612,8 +654,43 @@ fn workspace_request(
         timeout: Duration::from_secs(70),
         request_id: None,
     };
-    let exit = crate::run::run_without(connector, &call, &[], &CONNECTOR_UNSET, STATUS_BYTES).ok();
-    workspace_reply(exit, false).map(Value::Object)
+    Ok(crate::run::run_without(connector, &call, &[], &CONNECTOR_UNSET, STATUS_BYTES).ok())
+}
+
+/// The one Stop call of the connector's workspace protocol, for this exact
+/// configuration and generation.
+fn workspace_stop(
+    connector: &Path,
+    config: &Path,
+    revision: &str,
+    generation: &str,
+) -> Result<Value, Failure> {
+    let payload = serde_json::json!({"expected_revision":revision,"generation":generation});
+    let exit = workspace_call(connector, config, "stop", &payload)?;
+    if stop_refused(&exit, revision, generation) {
+        return Err(Failure::StopRefused);
+    }
+    workspace_reply(exit, false)
+        .map(Value::Object)
+        .map_err(Failure::from)
+}
+
+/// Only the connector's closed result for this very call: not its error text, a
+/// timeout, a malformed reply, or a refusal naming another generation.
+fn stop_refused(exit: &Option<Exit>, revision: &str, generation: &str) -> bool {
+    let Some(Exit::Code {
+        code: 1, stdout, ..
+    }) = exit
+    else {
+        return false;
+    };
+    let Ok(Value::Object(reply)) = serde_json::from_slice::<Value>(stdout) else {
+        return false;
+    };
+    reply.get("ok") == Some(&Value::Bool(false))
+        && reply.get("refusal").and_then(Value::as_str) == Some(STOP_REFUSED_BEFORE_EFFECT)
+        && reply.get("generation").and_then(Value::as_str) == Some(generation)
+        && reply.get("expected_revision").and_then(Value::as_str) == Some(revision)
 }
 
 /// HgsClient's failureDetail for an `hgs` call that did not finish cleanly;

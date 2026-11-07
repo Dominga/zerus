@@ -1,5 +1,8 @@
 //! Explicit connector lifecycle calls; the existing connector owns supervision.
-use super::{enrollment::Target, read_status, workspace_request, Workspace, WORKSPACE_UNCONFIRMED};
+use super::{
+    enrollment::Target, read_status, workspace_request, workspace_stop, Failure, Workspace,
+    WORKSPACE_UNCONFIRMED,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::Path;
@@ -43,24 +46,25 @@ pub fn apply(
     config: &Path,
     target: &Target,
     kind: Kind,
-) -> Result<Answer, String> {
+) -> Result<Answer, Failure> {
     let current = target.fresh(connector, config)?;
     if admit(&current, kind)? != *target {
         return Err(CHANGED.into());
     }
-    let mut payload = json!({"expected_revision":target.config_revision});
-    if kind == Kind::Stop {
-        payload["generation"] = json!(target.generation);
-    }
-    let reply = workspace_request(
-        connector,
-        config,
-        match kind {
-            Kind::Start => "start",
-            Kind::Stop => "stop",
-        },
-        &payload,
-    )?;
+    let reply = match kind {
+        Kind::Start => workspace_request(
+            connector,
+            config,
+            "start",
+            &json!({"expected_revision":target.config_revision}),
+        )?,
+        Kind::Stop => workspace_stop(
+            connector,
+            config,
+            &target.config_revision,
+            target.generation.as_deref().ok_or(CHANGED)?,
+        )?,
+    };
     let valid = super::lifecycle(&reply["state"], &reply["running"], &reply["generation"])
         && match kind {
             Kind::Start => reply["state"] == "running",

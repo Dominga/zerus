@@ -66,12 +66,15 @@ makes one attempt per Zerus start: a failure is shown there, with no retry or
 watchdog. A connector that exits later stays stopped until the next Zerus start
 or Start connector. Legacy API v1 configurations still start by hand.
 
-Closing the GUI leaves the connector running. **Stop connector** stops claiming,
-completes its in-flight native call and journals the outcome; reload status to
-confirm it has stopped before saving changes. It never kills the independent
-ConPTY session host or native agents. Stop also disarms automatic start, so the
-connector stays stopped across Zerus restarts and logins until you choose Start
-connector again. There is no Windows service or scheduled task for the connector.
+Closing the GUI leaves the connector running. Zerus can't yet stop a running
+encrypted workspace connector on Windows: the connector doesn't advertise Stop
+here, so **Stop connector** stays disabled and says why, and the workspace can't
+be changed while its connector runs. Automatic start therefore stays on once that
+connector has run. A legacy API v1 configuration keeps its own Stop, which stops
+claiming, completes its in-flight native call and journals the outcome; reload
+status to confirm it has stopped before saving changes. Nothing here kills the
+independent ConPTY session host or native agents. There is no Windows service or
+scheduled task for the connector.
 
 Supported scope is existing local Codex, Claude and Kimi sessions and their
 native inspection, history, messages, questions, Terminal and allowed session

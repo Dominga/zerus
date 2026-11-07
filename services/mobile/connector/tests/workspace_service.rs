@@ -850,15 +850,25 @@ async fn stop_preflight_refuses_unsafe_or_changed_service_before_any_marker() {
             }
             _ => unreachable!(),
         }
-        assert!(
-            service::test_scope(
-                f.paths(),
-                zerus_mobile_connector::workspace::manage("stop", &f.config, input.clone(), false)
-            )
-            .await
-            .is_err(),
-            "{fault}"
-        );
+        let refused = service::test_scope(
+            f.paths(),
+            zerus_mobile_connector::workspace::manage("stop", &f.config, input.clone(), false),
+        )
+        .await;
+        // A control record of another generation means this call's target is gone,
+        // which is no refusal of it. Every other case is the closed result.
+        if fault == "control-generation" {
+            assert!(refused.is_err(), "{refused:?}");
+        } else {
+            let refused = refused.unwrap();
+            assert_eq!(refused["ok"], false, "{fault}");
+            assert_eq!(refused["refusal"], "stop-refused-before-effect", "{fault}");
+            assert_eq!(refused["generation"], input["generation"], "{fault}");
+            assert_eq!(
+                refused["expected_revision"], input["expected_revision"],
+                "{fault}"
+            );
+        }
         assert!(!state.join("workspace-stop.json").exists(), "{fault}");
         assert!(
             owned_start(control["pid"].as_i64().unwrap() as i32).is_some(),
@@ -870,6 +880,25 @@ async fn stop_preflight_refuses_unsafe_or_changed_service_before_any_marker() {
             std::fs::remove_dir(subgroup).unwrap();
         }
     }
+    // A refusal leaves another generation's marker exactly as it was, and the
+    // running connector ignores that marker.
+    save(&f.path("manager.json"), &manager);
+    f.replace_private("legacy-service-handover.json", &record);
+    save(&state.join("workspace-control.json"), &control);
+    f.mutate(|q| q["properties"]["KillMode"] = json!("control-group"));
+    let marker = state.join("workspace-stop.json");
+    let other = json!({"version":1,"generation":"f".repeat(32)});
+    write(&marker, &serde_json::to_vec(&other).unwrap(), 0o600);
+    let stale = std::fs::read(&marker).unwrap();
+    let refused = service::test_scope(
+        f.paths(),
+        zerus_mobile_connector::workspace::manage("stop", &f.config, input.clone(), false),
+    )
+    .await
+    .unwrap();
+    assert_eq!(refused["refusal"], "stop-refused-before-effect");
+    assert_eq!(std::fs::read(&marker).unwrap(), stale);
+    std::fs::remove_file(&marker).unwrap();
     save(&f.path("manager.json"), &manager);
     f.replace_private("legacy-service-handover.json", &record);
     save(&state.join("workspace-control.json"), &control);
@@ -880,6 +909,48 @@ async fn stop_preflight_refuses_unsafe_or_changed_service_before_any_marker() {
         let args: Vec<String> = serde_json::from_str(line).unwrap();
         matches!(args[1].as_str(), "show" | "daemon-reload" | "start")
     }));
+}
+#[tokio::test(flavor = "current_thread")]
+async fn a_stop_already_in_effect_is_never_the_closed_refusal() {
+    let mut f = Fixture::new().await;
+    f.drain().await;
+    f.finish().await;
+    assert!(f.drain().await.is_none());
+    let revision = f.activate();
+    let current = f.start(NODE, &revision).await;
+    let state = PathBuf::from(value(&f.config)["state_dir"].as_str().unwrap());
+    let input = json!({"expected_revision":revision,"generation":current["generation"]});
+    let stop = || {
+        service::test_scope(
+            f.paths(),
+            zerus_mobile_connector::workspace::manage("stop", &f.config, input.clone(), false),
+        )
+    };
+    // The admission refuses in this state, which the closed result first proves.
+    f.mutate(|q| q["properties"]["KillMode"] = json!("control-group"));
+    let refused = stop().await.unwrap();
+    assert_eq!(refused["refusal"], "stop-refused-before-effect");
+    // With this generation's marker in effect nothing may say nothing changed. The
+    // connector honors the marker within its poll, so it may already have gone.
+    let marker = json!({"version":1,"generation":current["generation"]});
+    write(
+        &state.join("workspace-stop.json"),
+        &serde_json::to_vec(&marker).unwrap(),
+        0o600,
+    );
+    let in_effect = stop().await;
+    assert!(
+        in_effect
+            .as_ref()
+            .map_or(true, |reply| reply.get("refusal").is_none()),
+        "{in_effect:?}"
+    );
+    until(|| {
+        value(&f.path("manager.json"))["pid"]
+            .as_u64()
+            .is_some_and(|p| owned_start(p as i32).is_none())
+    })
+    .await;
 }
 #[tokio::test(flavor = "current_thread")]
 async fn foreground_stop_needs_exact_lock_owner_generation_and_no_active_service() {

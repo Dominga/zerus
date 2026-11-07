@@ -54,6 +54,7 @@ pub(super) fn io(record: PathBuf) -> Io {
         }),
         start: Box::new(|connector, target| {
             core::apply(connector, &mobile::config_path(), target, core::Kind::Start)
+                .map_err(|failure| failure.message())
         }),
     }
 }

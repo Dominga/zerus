@@ -65,3 +65,29 @@ fn an_offer_a_teams_run_raises_names_its_team_member_and_task() {
         assert_eq!((gcovr.team.as_str(), gcovr.member.as_str(), gcovr.task), ("", "", None), "{owner:?}");
     });
 }
+
+#[test]
+fn an_attributed_offer_waits_for_its_lead_not_the_owner() {
+    let state = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(state.path(), || {
+        let id = stored_review_team();
+        let project = tempfile::tempdir().unwrap();
+        as_qa(|| tools::record(project.path(), &[(need("sccache"), false)])).unwrap();
+        // The owner's Waiting for you does not carry a team's offer.
+        assert!(tools::waiting_items().is_empty(), "{:?}", tools::waiting_items());
+        // The lead's own inbox does, with the Deny and the Ask the owner commands.
+        let inbox = run("inbox", &json!({"team":id,"by":"human"}), false).unwrap();
+        let items = inbox["items"].as_array().unwrap();
+        let item = items.iter().find(|item| item["kind"] == "tool_missing").expect("the lead's inbox names it");
+        let command = item["command"].as_str().unwrap_or_default();
+        assert!(command.contains("decide-tool") && command.contains("\"allow\":false"), "{item}");
+        let detail = item["detail"].as_str().unwrap_or_default();
+        assert!(detail.contains("install-tool") && detail.contains("hgs team propose"), "{item}");
+        assert_eq!(item["task"], json!(2));
+        // An offer no team raised keeps the owner's path.
+        let alone = tempfile::tempdir().unwrap();
+        tools::record(alone.path(), &[(need("ccache"), false)]).unwrap();
+        let owner = tools::waiting_items();
+        assert_eq!((owner.len(), owner[0]["tool"].as_str()), (1, Some("ccache")), "{owner:?}");
+    });
+}

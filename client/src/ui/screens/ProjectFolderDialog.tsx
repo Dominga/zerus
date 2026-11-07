@@ -23,7 +23,7 @@ export default function ProjectFolderDialog(props: { prompt: FolderPrompt; busy:
   const duplicate = () => props.folders.some((f) => f.key !== p.original?.key && f.machine === machine() && clean(f.path) === clean(path()));
   const valid = () => !!place() && path().trim().startsWith("/") && !/[\r\n\0]/u.test(path()) && !duplicate();
   let dialog!: HTMLDialogElement;
-  onMount(() => { dialog.showModal(); queueMicrotask(() => dialog.querySelector<HTMLElement>("select, input")?.focus()); });
+  onMount(() => { dialog.showModal(); queueMicrotask(() => dialog.querySelector<HTMLElement>('[role="combobox"], input')?.focus()); });
   onCleanup(() => { dialog.close(); queueMicrotask(() => { if (p.origin.isConnected) p.origin.focus(); else document.querySelector<HTMLElement>('.proj-table tr[aria-selected="true"]')?.focus(); }); });
   const browse = async () => {
     if (computer()) setBrowsing(true);

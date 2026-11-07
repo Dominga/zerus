@@ -65,7 +65,7 @@ export default function WorktreeCleanup() {
   const summary = () => tr("%1 removed  %2 kept  %3 unknown", cleanup().removed, cleanup().kept, cleanup().unknown);
   createEffect(() => { cleanup().revision; setConsents(emptyConsents()); });
   createEffect(() => { const id = cleanupDialog()?.selected; if (id) setSelected(id); });
-  onMount(() => { dialog.showModal(); queueMicrotask(() => dialog.querySelector<HTMLElement>("[autofocus], .dlg-body select")?.focus()); });
+  onMount(() => { dialog.showModal(); queueMicrotask(() => dialog.querySelector<HTMLElement>('[autofocus], .dlg-body [role="combobox"]')?.focus()); });
   onCleanup(() => { dialog.close(); queueMicrotask(() => { if (origin?.isConnected) origin.focus(); }); });
   return <>
     <dialog ref={dialog} class="dlg su-dlg worktree-cleanup" style={{ width: "780px", position: "fixed", inset: "0", margin: "auto" }} aria-labelledby="cleanup-title" onCancel={closeCleanup} onClose={closeCleanup}>
@@ -149,7 +149,7 @@ export function CleanupInspection(props: { row: InspectionRow; close: () => void
       </Show></Show></div><div class="ip-status hint parts"><Show when={readAt()}>{(time) => <span>{tr("Updated %1", time())}</span>}</Show><span>{props.row.machine}</span><span>{tr("Local Git refs")}</span></div>
     </section>;
   if (props.panel) return body;
-  onMount(() => { dialog.showModal(); queueMicrotask(() => dialog.querySelector<HTMLElement>("[autofocus], .dlg-body select")?.focus()); });
+  onMount(() => { dialog.showModal(); queueMicrotask(() => dialog.querySelector<HTMLElement>('[autofocus], .dlg-body [role="combobox"]')?.focus()); });
   onCleanup(() => { dialog.close(); if (origin instanceof HTMLElement && origin.isConnected) origin.focus(); });
   return <dialog ref={dialog} class="dlg su-dlg worktree-inspection" style={{ width: "min(900px, calc(100vw - 48px))", height: "min(680px, calc(100vh - 48px))", position: "fixed", inset: "0", margin: "auto" }} aria-labelledby="cleanup-inspect-title" onCancel={props.close} onClose={props.close}>
     <div class="dlg-head"><Icon name="eye" size={18} class="accent" /><h2 id="cleanup-inspect-title">{tr("Inspect working folder")}</h2><span class="grow" /><button class="icon-btn" aria-label={tr("Close")} onClick={props.close}><Icon name="x" size={16} /></button></div>

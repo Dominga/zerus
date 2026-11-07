@@ -37,7 +37,7 @@ export default function AccountSetupDialog(props:{prompt:SetupPrompt;busy:boolea
  const hint=()=>!machine()?.online?`${machine()?.machine??"Machine"} is offline.`:reuse()&&provider()==="opencode"?tr("Use OpenCode's native configuration on %1 for new sessions again.", machine()?.machine ?? ""):reuse()?tr("Use the saved sign-in on %1. The account will be available for new sessions again.", machine()?.machine ?? ""):provider()==="dsh"?tr("Configure a DeepSeek API key on the selected machine."):tr("Create a separate account profile on the selected machine, then sign in.");
  const can=()=>!!machine()?.online&&(api()?!!key().trim():canAgent(provider())&&(reuse()||!!name().trim()));
  let dialog!:HTMLDialogElement;let keyInput:HTMLInputElement|undefined;
- onMount(()=>{dialog.showModal();queueMicrotask(()=>dialog.querySelector<HTMLElement>(api()?"input":"select")?.focus());});
+ onMount(()=>{dialog.showModal();queueMicrotask(()=>dialog.querySelector<HTMLElement>(api()?"input":'[role="combobox"]')?.focus());});
  onCleanup(()=>{setKey("");dialog.close();if(view.origin.isConnected)view.origin.focus();});
  const submit=(e:Event)=>{e.preventDefault();if(!can()||props.busy)return;if(!api()&&!reuse()&&provider()==="dsh"&&machine()?.deepseek_installed){setApi(true);queueMicrotask(()=>keyInput?.focus());return;}props.confirm({host:host(),provider:provider(),saved:saved(),label:view.kind==="key"?view.label:name().trim(),api_key:key().trim()},view.handle);setKey("");};
  const titleId=()=>api()?"accounts-api-key-title":"accounts-add-title";

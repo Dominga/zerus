@@ -72,7 +72,7 @@ export default function ProjectSwarmDialog(props: { projects: Project[]; connect
       const stop = inTauri() ? await listen("project-swarm-changed", state.changed) : () => {};
       if (gone) { stop(); return; }
       off = stop; await state.open();
-      if (!gone) dialog.querySelector<HTMLElement>(tab() === "computers" ? "input[type=search]" : "select")?.focus();
+      if (!gone) dialog.querySelector<HTMLElement>(tab() === "computers" ? "input[type=search]" : '[role="combobox"]')?.focus();
     })();
   });
   onCleanup(() => { gone = true; off?.(); state.dispose(); dialog.close(); queueMicrotask(() => { if (props.origin.isConnected) props.origin.focus(); }); });

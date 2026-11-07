@@ -38,7 +38,7 @@ export default function ProjectCloneDialog(props: { project: string; preferred?:
     try { if (view()) { closeRequested = true; await bridge.projectCloneClose(view()!.id); } props.close(); }
     catch (e) {closeRequested = false; setError(String(e));}
   };
-  onMount(() => { dialog.showModal(); queueMicrotask(() => dialog.querySelector<HTMLElement>("select")?.focus()); });
+  onMount(() => { dialog.showModal(); queueMicrotask(() => dialog.querySelector<HTMLElement>('[role="combobox"]')?.focus()); });
   onCleanup(() => { stopFollowing(); gone = true; if (view() && !closeRequested) void bridge.projectCloneClose(view()!.id).catch(() => {}); dialog.close(); if (props.origin.isConnected) props.origin.focus(); });
   const open = async () => {
     const selected = places.find((p) => p.computer === computer()); if (!selected || busy()) return;

@@ -12,7 +12,7 @@ export default function AccountDefaultsDialog(props:{prompt:AccountPrompt;close(
   const titleId=permissions ? "accounts-permissions-title" : "accounts-model-title";
   const [mode,setMode]=createSignal(view.permission_mode??"provider"),[model,setModel]=createSignal(catalog?.defaults.model??""),[effort,setEffort]=createSignal(catalog && accountModelView(catalog,catalog.defaults.model).efforts.includes(catalog.defaults.effort) ? catalog.defaults.effort : "");
   let dialog!:HTMLDialogElement;
-  onMount(()=>{dialog.showModal();queueMicrotask(()=>dialog.querySelector<HTMLElement>("select")?.focus());});
+  onMount(()=>{dialog.showModal();queueMicrotask(()=>dialog.querySelector<HTMLElement>('[role="combobox"]')?.focus());});
   onCleanup(()=>{dialog.close();if(view.origin.isConnected)view.origin.focus();});
   const state=()=>catalog ? accountModelView(catalog,model()) : undefined;
   const choose=(value:string)=>{setModel(value);setEffort(catalog && value===catalog.defaults.model && accountModelView(catalog,value).efforts.includes(catalog.defaults.effort) ? catalog.defaults.effort : "");};

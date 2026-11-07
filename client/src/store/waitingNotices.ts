@@ -1,6 +1,6 @@
 import type { TeamWaitingItem } from "../types";
 import { tr } from "../i18n";
-import { teamWaitingNotify } from "../bridge";
+import { inTauri, teamWaitingNotify } from "../bridge";
 import { setSetting, text } from "./settings";
 
 // Task 51: one desktop notification for each Waiting item seen for the first
@@ -26,19 +26,23 @@ export const waitingToken = (item: Pick<TeamWaitingItem, "id">) => `team-waiting
 // Task 159: hgs holds the owner's cards while the owner is away
 // (`notify: false`) and gives the ones shown together one `batch`.
 const detailOf = (item: TeamWaitingItem) => (item.detail ?? {}) as Record<string, unknown>;
-const held = (item: TeamWaitingItem) => detailOf(item).notify === false;
+// hgs stores these on the item itself; an older fixture may carry them in detail.
+const held = (item: TeamWaitingItem) => item.notify === false || detailOf(item).notify === false;
 const batchOf = (item: TeamWaitingItem) => {
-  const batch = detailOf(item).batch;
+  const batch = item.batch ?? detailOf(item).batch;
   return typeof batch === "string" ? batch : "";
 };
 
-/** The client's native notifier; no-ops outside the desktop app. */
+/**
+ * The client's native notifier; no-ops outside the desktop app. Task 258: the
+ * app's own Team Waiting watcher posts the OS notice (also with the window
+ * closed), so the page does not post it a second time; answering still
+ * withdraws it at once through the same native command.
+ */
 export const desktopNotifications: WaitingNotificationPort = {
-  post(notice) {
-    void teamWaitingNotify([notice], []).catch(() => undefined);
-  },
+  post() {},
   withdraw(token) {
-    void teamWaitingNotify([], [token]).catch(() => undefined);
+    if (inTauri()) void teamWaitingNotify([], [token]).catch(() => undefined);
   },
 };
 
@@ -134,7 +138,9 @@ function savedNotices(): [string, string][] {
 let shared: WaitingNotices | undefined;
 export function waitingNotices(): WaitingNotices {
   shared ??= new WaitingNotices(desktopNotifications, savedNotices(), (posted) => {
-    void setSetting(NOTIFIED, JSON.stringify(Object.fromEntries(posted)));
+    // Task 258: in the app the native Team Waiting watcher owns this shared
+    // map. Browser dev has no desktop watcher and keeps its own.
+    if (!inTauri()) void setSetting(NOTIFIED, JSON.stringify(Object.fromEntries(posted)));
   });
   return shared;
 }

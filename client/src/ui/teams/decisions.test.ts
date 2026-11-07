@@ -1,11 +1,11 @@
 import { withdrawnRefusal } from "../../teamRefusals";
 import { describe, expect, it } from "vitest";
 import { decidedWaiting,
-  ProposalCards, WaitingAnswer, WaitingNotices, acceptanceSummary, act, noticeToken, proposalCards, proposalKindLabel, toolOffer,
+  ProposalCards, WaitingAnswer, WaitingNotices, acceptanceSummary, act, approvePhaseCall, noticeToken, proposalCards, proposalKindLabel, toolOffer,
   waitingActionLabel, waitingAge, waitingCount, waitingKindIcon, waitingKindLabel, deferredRequest, splitDeferred, approves, opensCard, type DecisionPort, type QuestionChoice,
 } from "./decisions";
 import { choiceButtons, confirmButtons, createConfirmer } from "../../store/teamConfirm";
-import type { TeamAction, TeamCall, TeamConfirmation, TeamMemberView, TeamProposalView, TeamTaskView, TeamView, TeamWaitingItem } from "../../types";
+import type { TeamAction, TeamCall, TeamConfirmation, TeamMemberView, TeamOutcome, TeamProposalView, TeamTaskView, TeamView, TeamWaitingItem } from "../../types";
 
 // Every owner decision path of Qt's tray/tests/test_teamsui_waiting.cpp, on
 // the pure model the Team tab and Waiting for you draw (task 11). Each test
@@ -772,6 +772,45 @@ describe("confirmations", () => {
     // act() itself: a refused call that never ran is failed, never thrown.
     const broken: DecisionPort = { ...port, async send() { throw new Error("Teams need the desktop app."); } };
     expect(await act(broken, { computer: "", team: "team-1", team_name: "Live", action: { kind: "finish", summary: "Done" } })).toMatchObject({ outcome: "failed" });
+  });
+});
+
+describe("the Team tab's draft-phase approval", () => {
+  const confirmation: TeamConfirmation = {
+    name: "teamApprovePhaseConfirm", title: "Approve phase?",
+    text: "Hand phase 2's 3 tasks to the members?", action: "Approve phase",
+  };
+  function fake(yes: boolean) {
+    const sent: TeamCall[] = [], asked: TeamConfirmation[] = [];
+    const port: Pick<DecisionPort, "send" | "confirm"> = {
+      async send(call: TeamCall): Promise<TeamOutcome> {
+        sent.push(call);
+        if (!call.confirmed) return { outcome: "confirm", confirmation };
+        return { outcome: "done", receipt: { status: "approved" }, request_id: "r1" };
+      },
+      async confirm(askedFor: TeamConfirmation) {
+        asked.push(askedFor);
+        return yes;
+      },
+    };
+    return { sent, asked, port };
+  }
+
+  it("Cancel sends nothing after the core's question", async () => {
+    const f = fake(false);
+    expect(await approvePhaseCall(f.port, { computer: "", team: "t", teamName: "Team" }, 2)).toBe("cancelled");
+    // The dialog shows the core's own text; the first call went out alone.
+    expect(f.asked).toEqual([confirmation]);
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]).toMatchObject({ confirmed: false, action: { kind: "approve", phase: 2 } });
+  });
+
+  it("the confirm button sends the call again, confirmed", async () => {
+    const f = fake(true);
+    expect(await approvePhaseCall(f.port, { computer: "", team: "t", teamName: "Team" }, 2)).toMatchObject({ outcome: "done" });
+    expect(f.asked).toEqual([confirmation]);
+    expect(f.sent).toHaveLength(2);
+    expect(f.sent[1]).toMatchObject({ confirmed: true, action: { kind: "approve", phase: 2 } });
   });
 });
 

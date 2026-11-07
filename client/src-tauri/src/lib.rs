@@ -157,6 +157,8 @@ mod qt_first_start;
 mod model_servers;
 // G1: the Windows session host that stays for other computers.
 mod resident_host;
+// Task 258: Team Waiting notices while the window is closed.
+mod team_watch;
 #[cfg(any(windows, test))]
 mod windows_shell;
 #[cfg(feature = "live")]
@@ -1230,6 +1232,18 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 ));
                 app.manage(session_folders::SessionFolders::new(dir.clone(), opener.clone()));
                 app.manage(opener);
+                // Task 258: the same ownership and opt-in gate the attention
+                // notifier uses, so a switch build beside Qt posts nothing twice.
+                let watch_notifies = {
+                    let identity = app.state::<identity::Identity>().inner().clone();
+                    !desktop_service::mode()
+                        && (!identity.is_switch()
+                            || app.try_state::<desktop_ownership::NativeReady>().is_some())
+                        && identity.notifications(
+                            identity::flag("ZERUS_CLIENT_NOTIFICATIONS"),
+                            replay,
+                        )
+                };
                 // The menu-bar item, before the fleet starts so its first catalog reaches it.
                 #[cfg(target_os = "macos")]
                 {
@@ -1347,6 +1361,11 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(updates::start(app.handle()));
                 // WhiteWh fork, task #63: a fork build checks its own feed.
                 fork_updates::start(app.handle());
+                // Task 258: Team Waiting notices are decided by the app itself,
+                // so they arrive with the window closed too.
+                if watch_notifies && !replay {
+                    team_watch::start(app.handle().clone());
+                }
                 if menu_bar {
                     lifecycle::start_fleet(|| app.state::<commands::AppState>().start_source());
                 }

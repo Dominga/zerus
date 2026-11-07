@@ -1,4 +1,4 @@
-import { deskPage, deskTakePending, onDeskNotice, onOpenSession, onOpenUpdates, type DeskNotice, type OpenSession } from "../bridge";
+import { deskPage, deskTakePending, onDeskNotice, onOpenSession, onOpenTeam, onOpenUpdates, type DeskNotice, type OpenSession } from "../bridge";
 import { catalog, rowId } from "./catalog";
 import { groupOf, headerOf, setProjectCollapsed } from "./organization";
 import {
@@ -103,6 +103,14 @@ export function openAbout(): void {
 }
 
 /**
+ * Task 258: a Team Waiting notice was clicked. The Waiting for you page lists
+ * every team's waiting item, so it is the place the item lives.
+ */
+export function openTeamNotice(): void {
+  setPage("waiting");
+}
+
+/**
  * Starts the wiring: it listens first and only then takes what waited, so
  * nothing falls between the two. Resolves with its stop once listening.
  */
@@ -110,6 +118,7 @@ export async function startDesk(): Promise<() => void> {
   let active = true;
   const stops = await Promise.all([
     onOpenSession((target) => { if (active) openSession(target); }),
+    onOpenTeam(() => { if (active) openTeamNotice(); }),
     onOpenUpdates(openUpdates),
     onDeskNotice(showDeskNotice),
   ]);

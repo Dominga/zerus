@@ -124,6 +124,12 @@ pub fn program_words(argv: &[String]) -> usize {
     1
 }
 
+/// A project script is not the native agent executable. Version/hook setup
+/// must keep its identity unknown, never adopt the interpreter's version.
+pub fn script(argv: &[String]) -> Option<&str> {
+    (program_words(argv) == 7).then(|| argv[6].as_str())
+}
+
 #[cfg(any(windows, test))]
 pub const DATA_ENV: &str = "HGS_PROJECT_LAUNCH_DATA";
 
@@ -289,6 +295,8 @@ mod tests {
     fn only_the_exact_recipe_prefix_hides_interpreter_words() {
         let argv = prefix();
         assert_eq!(program_words(&argv), 7);
+        assert_eq!(script(&argv), Some(argv[6].as_str()));
+        assert_eq!(script(&strings(&["codex", "resume", "id"])), None);
         for index in 0..7 {
             let mut bad = argv.clone();
             bad[index] = "foreign".into();

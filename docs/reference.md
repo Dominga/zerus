@@ -791,7 +791,11 @@ the script path and argument array as data, then clears that private data before
 invoking the script. This avoids PowerShell `-File` splitting a literal argument
 such as `-name:value`; empty, quoted and Unicode strings reach `$args` intact.
 The wrapper remains responsible for forwarding those arguments to its agent and
-returning its exit code. Windows PowerShell 5.1 has
+returning its exit code. A new Claude profile whose tracking-hook form is not
+known must first initialize native tracking with `--bare`, or explicitly run
+untracked with `HGS_TRACKING=0`. Zerus does not probe the PowerShell interpreter
+as Claude or invoke a project script a second time for its version.
+Windows PowerShell 5.1 has
 [native argument forwarding limitations](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_parsing?view=powershell-5.1)
 for empty strings and embedded quotes. [PowerShell 7.3+ improves native argument
 passing](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_parsing?view=powershell-7.6); its Windows mode still uses legacy rules for batch/npm shims. Prefer a

@@ -977,6 +977,9 @@ function onEvent<T>(name: string, listener: (payload: T) => void): Promise<() =>
 
 /** `open-session`: the menu bar or a notification opens a session; resolves with the stop once listening. */
 export const onOpenSession = (listener: (target: OpenSession) => void) => onEvent<OpenSession>("open-session", listener);
+/** A clicked Team Waiting notice (task 258): open the Waiting for you list. */
+export type OpenTeam = { team: string; item: string };
+export const onOpenTeam = (listener: (target: OpenTeam) => void) => onEvent<OpenTeam>("open-team", listener);
 /** `open-updates`: an update notice or menu item opens Settings > Updates. */
 export const onOpenUpdates = (listener: () => void) => onEvent<void>("open-updates", listener);
 /** `desk-notice`: a notice for the window; resolves with the stop once listening. */

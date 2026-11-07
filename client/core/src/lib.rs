@@ -95,6 +95,7 @@ pub mod task_start;
 pub mod task_view;
 pub mod tasks;
 pub mod tasks_write;
+pub mod team_notices;
 pub mod teams;
 pub mod terminal;
 pub mod terminal_launch;

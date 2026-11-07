@@ -113,6 +113,34 @@ pub struct OpenSession {
     pub expected: Option<ExactSession>,
 }
 
+/// A clicked Team Waiting notice (task 258): its team and item, so the window
+/// opens the Waiting for you list with that team in view.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamClick {
+    pub team: String,
+    pub item: String,
+}
+
+/// `team-waiting:<item>` (the item id starts with its team) or
+/// `team-waiting:batch:<batch>` (no single team).
+pub fn team_click(token: &str) -> Option<TeamClick> {
+    let rest = token.strip_prefix("team-waiting:")?;
+    if rest.is_empty() {
+        return None;
+    }
+    if rest.starts_with("batch:") {
+        return Some(TeamClick {
+            team: String::new(),
+            item: rest.into(),
+        });
+    }
+    let team = rest.split('/').next().unwrap_or_default();
+    (!team.is_empty()).then(|| TeamClick {
+        team: team.into(),
+        item: rest.into(),
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Notice {
     pub title: String,
@@ -590,6 +618,8 @@ pub struct Outcome {
     pub changes: Changes,
     /// The clicked notification's session.
     pub open: Option<(ComputerId, String)>,
+    /// A clicked Team Waiting notice: open the Waiting for you list.
+    pub team: Option<TeamClick>,
     /// Notices for the window, kept until its page asks.
     pub notices: Vec<String>,
     /// Notices only for a window that exists (`if (m_sessionsWindow)`,
@@ -675,6 +705,13 @@ impl DeskLoop {
                         outcome.publish = true;
                     }
                 }
+                DeskInput::Clicked(token) if self.attention_completions && token.starts_with("team-waiting:") => {
+                    // Task 258: a Team Waiting notice opens the list it belongs to.
+                    if let Some(click) = team_click(&token) {
+                        outcome.team = Some(click);
+                        outcome.show = true;
+                    }
+                }
                 DeskInput::Clicked(token) if self.attention_completions => {
                     // A token that does not decode opens nothing (`TrayAgent.cpp:176-179`).
                     if let Some(target) = attention::target(&token) {
@@ -687,6 +724,14 @@ impl DeskLoop {
                             exact: None,
                         });
                         outcome.show = true;
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                DeskInput::LinuxClicked { token, activation } if self.attention_completions && token.starts_with("team-waiting:") => {
+                    if let Some(click) = team_click(&token) {
+                        outcome.team = Some(click);
+                        outcome.show = true;
+                        outcome.activation = (!activation.is_empty()).then_some(activation);
                     }
                 }
                 #[cfg(target_os = "linux")]
@@ -965,6 +1010,14 @@ fn apply(app: &AppHandle, outcome: Outcome) {
             if let Err(error) = crate::lifecycle::request_main(&handle) {
                 eprintln!("zerus-client: could not open the window: {error}");
             }
+        });
+    }
+    if let Some(team) = outcome.team.clone() {
+        // Task 258: the clicked Team Waiting notice opens the Waiting for you
+        // list. The window itself is opened by `outcome.show` above.
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            let _ = handle.emit("open-team", team);
         });
     }
     if let Some((computer, key)) = outcome.open {
@@ -2274,6 +2327,41 @@ mod tests {
             ["This session is no longer available: claude/p/b"],
             "expired"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_team_waiting_notice_opens_the_waiting_list_with_its_team() {
+        let dir = scratch("click-team");
+        let mut thread = Thread::new(&dir);
+        let opened = thread.round(
+            0.0,
+            vec![DeskInput::Clicked(
+                "team-waiting:t/owner_word_asked/card-1".into(),
+            )],
+        );
+        assert!(opened.show, "the window opens (`showSessions`)");
+        assert_eq!(
+            opened.team,
+            Some(TeamClick {
+                team: "t".into(),
+                item: "t/owner_word_asked/card-1".into(),
+            })
+        );
+        assert_eq!((opened.open, opened.notices), (None, Vec::new()));
+        // A batch notice names no single team, but still opens the list.
+        let batch = thread.round(1.0, vec![DeskInput::Clicked("team-waiting:batch:b1".into())]);
+        assert!(batch.show);
+        assert_eq!(
+            batch.team,
+            Some(TeamClick {
+                team: String::new(),
+                item: "batch:b1".into(),
+            })
+        );
+        // A token with no item opens nothing.
+        let empty = thread.round(2.0, vec![DeskInput::Clicked("team-waiting:".into())]);
+        assert!(!empty.show && empty.team.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

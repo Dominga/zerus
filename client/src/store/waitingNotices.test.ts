@@ -50,6 +50,19 @@ describe("waiting notices", () => {
     expect(out.posted).toHaveLength(2);
   });
 
+  it("holds and batches the top-level fields hgs writes (task 258)", () => {
+    const out = port();
+    const notices = new WaitingNotices(out);
+    // A card the server held while the owner was away is not announced.
+    expect(notices.observe([{ ...item("a"), notify: false }], true)).toEqual([]);
+    expect(notices.known()).toEqual([]);
+    // Cards that come back together are one notice.
+    const first = { ...item("b"), notify: true, batch: "b1" };
+    const second = { ...item("c"), notify: true, batch: "b1" };
+    expect(notices.observe([first, second], true).map((notice) => notice.token)).toEqual(["team-waiting:batch:b1"]);
+    expect(out.posted[0].body).toBe("b\nc");
+  });
+
   it("does not raise an item a restart already showed and saves every change (W2)", () => {
     const out = port();
     const saves: Record<string, string>[] = [];

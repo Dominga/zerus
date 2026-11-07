@@ -11,6 +11,7 @@ vi.mock("../ui/screens/settings/sections", () => ({ openSettings: vi.fn() }));
 vi.mock("../bridge", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../bridge")>()),
   onOpenSession: vi.fn(async () => () => {}),
+  onOpenTeam: vi.fn(async () => () => {}),
   onOpenUpdates: vi.fn(async () => () => {}),
   onDeskNotice: vi.fn(async () => () => {}),
   deskPage: vi.fn(async () => 3),
@@ -160,6 +161,18 @@ describe("desk wiring", () => {
     expect(shown.revealRow).toHaveBeenCalledWith("mac\nclaude/sample-project/review");
     stopDesk();
     expect(stop).toHaveBeenCalled();
+  });
+
+  it("a clicked Team Waiting notice opens the Waiting for you list (task 258)", async () => {
+    let open: ((target: bridge.OpenTeam) => void) | undefined;
+    mocked.onOpenTeam.mockImplementation(async (listener) => {
+      open = listener;
+      return () => {};
+    });
+    const stopDesk = await startDesk();
+    open!({ team: "t", item: "t/owner_word_asked/card-1" });
+    expect(shown.setPage).toHaveBeenCalledWith("waiting");
+    stopDesk();
   });
 
   it("opens a clicked notification's session on Activity, a menu row on the tab it had", async () => {

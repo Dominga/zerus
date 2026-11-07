@@ -1228,6 +1228,10 @@ export interface TeamAddition { id: string; phase?: number; by?: string; request
 /** One thing that waits for the owner (`hgs team waiting`); `detail` is the whole item as hgs lists it. */
 export interface TeamWaitingItem {
   id: string; kind: string; team: string; team_name: string; title: string; action: string; since: number; proposal: unknown;
+  /** False while the server holds this card for the owner's return (task 258). */
+  notify?: boolean;
+  /** Cards that arrived together share this batch; one notice covers them. */
+  batch?: string;
   detail?: Record<string, unknown> | null;
 }
 

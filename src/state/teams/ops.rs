@@ -230,16 +230,19 @@ fn parse_member_as(value: &Value, what: &str, example: &str) -> anyhow::Result<M
     member.role = clean_text(&member.role, 60, "A role").map_err(field("role"))?;
     ensure!(!member.agent.is_empty(), "{who}: field \"agent\" is required, such as \"claude\"");
     // C3: `permissions` is the launch mode, the profile an agent's mode.
+    // Task 154: the agent's own selection as the solo launch takes it
+    // (provider, bypass, auto or native:{...}), DeepSeek's presets included.
+    member.permissions = super::rights::check_selection(&member.agent, &member.permissions).map_err(field("permissions"))?;
     ensure!(
-        member.permissions.is_empty() || ["auto", "bypass"].contains(&member.permissions.as_str()),
-        "{who}: field \"permissions\" is auto or bypass, not \"{}\"",
-        member.permissions
-    );
-    ensure!(
-        member.permissions_profile.is_empty() || ["read", "write", "build", "commit", "network"].contains(&member.permissions_profile.as_str()),
-        "{who}: field \"permissions_profile\" is read, write, build, commit or network, not \"{}\"",
+        member.permissions_profile.is_empty() || super::rights::PROFILES.contains(&member.permissions_profile.as_str()),
+        "{who}: field \"permissions_profile\" is {}, not \"{}\"",
+        super::rights::PROFILES.join(", "),
         member.permissions_profile
     );
+    // Task 154 (4): a member that names no rights takes its role's.
+    if member.permissions.is_empty() && member.permissions_profile.is_empty() {
+        member.permissions_profile = super::catalog::profile_for(&member.role);
+    }
     // U46: opt-in; empty inherits the role, "none" overrides it with none.
     ensure!(
         matches!(member.context_before_task.as_str(), "" | "none" | "compact" | "clear"),
@@ -249,6 +252,7 @@ fn parse_member_as(value: &Value, what: &str, example: &str) -> anyhow::Result<M
     member.launch_id.clear();
     member.error.clear();
     member.host_waits = 0;
+    member.rights_relaunch = false;
     member.inbox = Inbox::default();
     if !member.parent.is_empty() {
         member.parent = member_id(&member.parent).map_err(field("parent"))?;
@@ -378,6 +382,10 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
     }
     for criterion in &mut task.criteria {
         *criterion = clean_text(criterion, 500, "An acceptance criterion").map_err(field("criteria"))?;
+    }
+    // Task 154: what the task needs of its member's session.
+    if let Some(needs) = &task.needs {
+        super::rights::check_needs(needs).map_err(field("needs"))?;
     }
     let mut seen = BTreeSet::new();
     task.deps.retain(|dep| seen.insert(dep.task));
@@ -849,20 +857,22 @@ fn phase_approval(team: &Team) -> Approval {
 
 /// B5: the order of permission profiles; a wider one needs the owner.
 fn profile_rank(profile: &str) -> u8 {
-    match profile {
-        "read" => 1,
-        "build" => 3,
-        "commit" => 4,
-        "network" => 5,
-        _ => 2, // write is the default
-    }
+    super::rights::rank(profile)
 }
 
 /// B5: the members whose profile widens the role's default, for the owner.
+/// Task 154: the profile a role's member gets without asking: the role's
+/// own (QA operates, a merger commits), never narrower than write.
+fn role_default(role: &str) -> String {
+    let profile = super::catalog::profile_for(role);
+    if profile_rank(&profile) > profile_rank("write") { profile } else { "write".into() }
+}
+
 fn widening(team: &Team, members: &[Member]) -> Vec<Value> {
     let mut found = Vec::new();
     for member in members.iter().filter(|member| member.id != team.lead) {
-        let default = team.member(&member.id).map(|old| old.permissions_profile.as_str()).unwrap_or("write");
+        let default = team.member(&member.id).map(|old| old.permissions_profile.clone()).unwrap_or_else(|| role_default(&member.role));
+        let default = default.as_str();
         if profile_rank(&member.permissions_profile) > profile_rank(default) {
             found.push(json!({"member":member.id,"from":default,"to":member.permissions_profile}));
         }
@@ -903,6 +913,71 @@ fn ensure_draft_revision(team: &Team, input: &Value) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+/// Task 154 (2): a member's launch rights change, also while its session
+/// runs: the dispatcher then pauses the session and resumes it in its
+/// conversation with them. The lead narrows; widening is the owner's (or the
+/// lead's card the owner allows: {"kind":"rights",...} | hgs team propose).
+fn rights(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    let human = matches!(actor, Actor::Human);
+    ensure!(human || actor.is_lead(team), "Only the lead or you change a member's rights");
+    ensure!(
+        matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused),
+        "Only a planning, running or paused team changes a member's rights"
+    );
+    let id = text(input, "member").to_owned();
+    let member = team.member(&id).with_context(|| format!("Unknown member {id}"))?.clone();
+    ensure!(member.state != MemberState::Removed, "This member was removed");
+    let profile = match input.get("permissions_profile") {
+        Some(value) => {
+            let profile = value.as_str().context("permissions_profile is text")?.to_owned();
+            ensure!(
+                profile.is_empty() || super::rights::PROFILES.contains(&profile.as_str()),
+                "permissions_profile is {}, not \"{profile}\"",
+                super::rights::PROFILES.join(", ")
+            );
+            profile
+        }
+        None => member.permissions_profile.clone(),
+    };
+    let selection = match input.get("permissions") {
+        Some(value) => super::rights::check_selection(&member.agent, value.as_str().context("permissions is text")?)
+            .context("permissions")?,
+        None => member.permissions.clone(),
+    };
+    let changed = Member { permissions_profile: profile.clone(), permissions: selection.clone(), ..member.clone() };
+    let before = super::rights::capabilities(&member);
+    let after = super::rights::capabilities(&changed);
+    let wider = !after.is_subset(&before) || super::rights::rank(&profile) > super::rights::rank(&member.permissions_profile)
+        || (selection == "bypass" && member.permissions != "bypass");
+    ensure!(
+        human || !wider,
+        "Wider rights are the owner's: propose {} | hgs team propose --json; the owner allows it with a click",
+        json!({"kind":"rights","member":id,"permissions_profile":profile,"permissions":selection,"reason":"..."})
+    );
+    if profile == member.permissions_profile && selection == member.permissions {
+        return Ok(json!({"status":"unchanged","member":id,"rights":super::rights::view(&member)}));
+    }
+    let role = team.role_of(&id);
+    let by = actor.label(team);
+    let found = team.members.iter_mut().find(|found| found.id == id).context("Unknown member")?;
+    found.permissions_profile = profile;
+    found.permissions = selection;
+    // A running session takes the new rights only when it is launched again.
+    let relaunch = found.session.is_some();
+    found.rights_relaunch = relaunch;
+    let view = super::rights::view(found);
+    events.push(Event::new("member_rights", json!({"by":by,"member":role,"id":id,"rights":view,"wider":wider,"relaunch":relaunch})));
+    // Tasks that waited for these rights go again.
+    let member = team.member(&id).cloned().context("Unknown member")?;
+    for task in team.tasks.iter_mut() {
+        let rights_wait = task.waits.as_ref().is_some_and(|wait| wait.waits_for == "zerus" && wait.on.iter().any(|on| on == "rights"));
+        if rights_wait && (task.assignee.is_empty() || task.assignee == member.id || task.role.eq_ignore_ascii_case(&member.role)) && super::rights::missing(task, &member).is_empty() {
+            task.waits = None;
+        }
+    }
+    Ok(json!({"status":"changed","member":id,"rights":view,"relaunch":relaunch}))
 }
 
 /// F1.5: the lead or owner changes a team's settings and its members in place.
@@ -965,8 +1040,9 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
         if let Some(profile) = update.get("permissions_profile") {
             let profile = profile.as_str().unwrap_or_default().to_owned();
             ensure!(
-                profile.is_empty() || ["read", "write", "build", "commit", "network"].contains(&profile.as_str()),
-                "Member \"{id}\": field \"permissions_profile\" is read, write, build, commit or network, not \"{profile}\""
+                profile.is_empty() || super::rights::PROFILES.contains(&profile.as_str()),
+                "Member \"{id}\": field \"permissions_profile\" is {}, not \"{profile}\"",
+                super::rights::PROFILES.join(", ")
             );
             if profile_rank(&profile) > profile_rank(&member.permissions_profile) {
                 widen.push(json!({"member":id,"from":member.permissions_profile,"to":profile}));
@@ -4635,8 +4711,8 @@ fn draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Strin
                         // role default widens it.
                         team.profile_widening = members
                             .iter()
-                            .filter(|member| member.id != team.lead && profile_rank(&member.permissions_profile) > profile_rank("write"))
-                            .map(|member| json!({"member":member.id,"from":"write","to":member.permissions_profile}))
+                            .filter(|member| member.id != team.lead && profile_rank(&member.permissions_profile) > profile_rank(&role_default(&member.role)))
+                            .map(|member| json!({"member":member.id,"from":role_default(&member.role),"to":member.permissions_profile}))
                             .collect();
                         team.members = members;
                     }
@@ -5261,7 +5337,7 @@ pub(crate) const SWITCHES: [&str; 1] = ["build_broker"];
 /// owner's Allow runs it as the owner's own `hgs team <op>`, once, under the
 /// proposal's request id; Reject changes nothing. A typed word stays accepted
 /// as a fallback, but no flow needs one.
-pub(crate) const OWNER_OPS: [&str; 14] = [
+pub(crate) const OWNER_OPS: [&str; 15] = [
     "relaunch",
     "scale",
     "drain",
@@ -5277,6 +5353,8 @@ pub(crate) const OWNER_OPS: [&str; 14] = [
     "settings",
     // U62: one full test run, bound to its release.
     "full-tests",
+    // Task 154: wider rights for a member, relaunched in its conversation.
+    "rights",
 ];
 
 /// Task #21: owner settings a switch card sets through the settings operation
@@ -5333,6 +5411,16 @@ fn describe_owner_op(team: &Team, op: &str, input: &Value) -> (String, Vec<Strin
     let mut lines = Vec::new();
     let title = match op {
         "relaunch" => format!("Relaunch {}", member("member")),
+        "rights" => {
+            let profile = text(input, "permissions_profile");
+            let selection = text(input, "permissions");
+            lines.push("Zerus relaunches it in its conversation with these rights.".to_owned());
+            format!(
+                "Give {} the rights {}",
+                member("member"),
+                [profile, selection].iter().filter(|value| !value.is_empty()).copied().collect::<Vec<_>>().join(", ")
+            )
+        }
         "drain" if input["draining"].as_bool() == Some(false) => format!("Keep {} (stop its drain)", member("member")),
         "drain" => {
             lines.push("It finishes its open work, takes nothing new, then its session is paused and it leaves the team.".to_owned());
@@ -5883,6 +5971,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         "send-back-phase" => send_back_at_acceptance(team, input, actor, events),
         "reject-phase" | "undo-reject-phase" | "rework-phase" => send_back(team, op, input, actor, events),
         "settings" => settings(team, input, actor, events),
+        "rights" => rights(team, input, actor, events),
         "finding" => finding(team, input, actor, offline, events),
         "draft" => draft(team, input, actor, offline, events),
         "propose" => propose(team, input, actor, events),
@@ -6185,8 +6274,9 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
                 bail!("Fix {} folder error(s) to add the member: {}", folder_errors.len(), errors_text(&folder_errors));
             }
             // B5: a profile wider than the role's default waits for the owner.
-            if profile_rank(&profile) > profile_rank("write") {
-                team.profile_widening.push(json!({"member":id,"from":"write","to":profile}));
+            let from = team.member(&id).map(|member| role_default(&member.role)).unwrap_or_else(|| "write".into());
+            if profile_rank(&profile) > profile_rank(&from) {
+                team.profile_widening.push(json!({"member":id,"from":from,"to":profile}));
             }
             let by = if on_word { format!("{} on your word", actor.label(team)) } else { actor.label(team) };
             events.push(Event::new("member_added", json!({"by":by,"member":role,"owner_word":quote})));

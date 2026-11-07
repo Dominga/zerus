@@ -22,6 +22,8 @@ const MUTATIONS: &[&str] = &[
     "draft", "propose", "close-phase", "integrate-build", "start-ahead", "full-tests",
     // Task #58: the owner switches one phase between free and standard planning.
     "phase-mode",
+    // Task 154: a member's launch rights.
+    "rights",
 ];
 
 fn text<'a>(input: &'a Value, key: &str) -> &'a str {
@@ -921,6 +923,9 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
             // U54: the real account of the member's session, beside its
             // configured one.
             entry["session_account"] = json!(session_account(member));
+            // Task 154: what the member launches with and what it can do,
+            // for the member card and the New team form.
+            entry["rights"] = super::rights::view(member);
             // U56: each member's session phase, activity and minutes without an
             // event, and whether Zerus marks it stuck - status without inspect.
             entry["phase"] = json!(member.seen_phase);

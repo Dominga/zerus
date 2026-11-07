@@ -911,6 +911,21 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
         } else if super::models::applies(team, task) && !super::models::can_run(team, task) {
             found.warnings.push(finding("models", Some(task.id), None, format!("#{} {}: {}", task.id, task.title, super::models::no_fit_reason(team, task))));
         }
+        // Task 154: the task goes only to a member whose launch can do it.
+        if !task.status.finished() {
+            if super::models::for_role(task) {
+                let candidates = super::models::candidates(team, task);
+                if !candidates.is_empty() && candidates.iter().all(|member| !super::rights::missing(task, member).is_empty()) {
+                    if let Some(text) = super::rights::refusal(team, task, candidates[0]) {
+                        found.errors.push(finding("rights", Some(task.id), Some(&candidates[0].id), text));
+                    }
+                }
+            } else if let Some(member) = team.member(&task.assignee).filter(|member| member.state != MemberState::Removed) {
+                if let Some(text) = super::rights::refusal(team, task, member) {
+                    found.errors.push(finding("rights", Some(task.id), Some(&member.id), text));
+                }
+            }
+        }
         for dep in &task.deps {
             if team.task(dep.task).is_none() {
                 found.errors.push(finding(

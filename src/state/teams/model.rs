@@ -587,6 +587,10 @@ pub(crate) struct Member {
     /// member; the dispatcher runs the session commands and clears this.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub restart_pending: bool,
+    /// Task 154: its rights changed while its session runs; the dispatcher
+    /// pauses the session and resumes it in its conversation with them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rights_relaunch: bool,
     /// The permission request the lead last heard about (B1): the exact
     /// command, where it came from and the agent's reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1645,6 +1649,11 @@ pub(crate) struct Task {
     pub check: Option<Check>,
     #[serde(default)]
     pub criteria: Vec<String>,
+    /// Task 154: what the task needs of its member's session (rights.rs
+    /// CAPABILITIES); absent, Zerus reads the needs from the task's words, and
+    /// an empty list says it needs nothing beyond editing and building.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs: Option<Vec<String>>,
     #[serde(default)]
     pub deps: Vec<Dependency>,
     /// Task #60 (owner, 2026-11-06): the task this one was added for (a missed

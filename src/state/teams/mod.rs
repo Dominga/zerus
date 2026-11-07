@@ -28,6 +28,7 @@ pub(crate) mod lore_sync;
 pub(crate) mod pulses;
 pub(crate) mod rights;
 pub(crate) mod safe_actions;
+pub(crate) mod secrets;
 pub(crate) mod spans;
 pub(crate) mod strict;
 pub(crate) mod stages;

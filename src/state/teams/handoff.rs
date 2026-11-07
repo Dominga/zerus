@@ -280,6 +280,10 @@ pub(crate) fn build(team: &Team, member: &str, why: Why<'_>, pulses: &[String], 
     let misses = task
         .map(|task| task.control.iter().filter(|control| !answers(&text, &control.keys)).map(|control| control.q.clone()).collect())
         .unwrap_or_default();
+    // Task 184: the brief is working-tier text (docs/lore.md 11.9), kept in the
+    // team record and sent as a message: a token or a password URL a member
+    // pasted into a title, a description or a pulse is stored redacted.
+    let text = super::secrets::redact_working(&text);
     Built { text, task: task.map(|task| task.id).unwrap_or(0), misses }
 }
 

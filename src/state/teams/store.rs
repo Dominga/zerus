@@ -339,6 +339,12 @@ impl Store {
     pub(crate) fn put_pulse(&self, pulse: &super::pulses::Pulse) -> anyhow::Result<super::pulses::Pulse> {
         use super::pulses::{PER_TEAM, REPLACE_WITHIN};
         let mut pulse = pulse.clone();
+        // Task 184: a pulse is working-tier text (docs/lore.md 11.9): a token in
+        // a command line or a note is stored redacted, never refused, and the
+        // replacement is a visible `[redacted: <pattern>]` marker.
+        pulse.done = super::secrets::redact_working(&pulse.done);
+        pulse.next = super::secrets::redact_working(&pulse.next);
+        pulse.blocked = super::secrets::redact_working(&pulse.blocked);
         let previous: Option<String> = self
             .db
             .query_row(

@@ -3128,7 +3128,21 @@ fn note(input: &Value) -> anyhow::Result<Value> {
         ..Default::default()
     };
     let pulse = store.put_pulse(&pulse)?;
-    Ok(json!({"status":"noted","pulse":pulse.json()}))
+    // Task 184: a field that held a secret is stored redacted (docs/lore.md
+    // 11.9); the answer says so, like the working tier's writes do.
+    let mut redacted: Vec<&'static str> = Vec::new();
+    for value in [done, next, blocked] {
+        for pattern in super::secrets::redact(value, &[]).1 {
+            if !redacted.contains(&pattern) {
+                redacted.push(pattern);
+            }
+        }
+    }
+    let mut answer = json!({"status":"noted","pulse":pulse.json()});
+    if !redacted.is_empty() {
+        answer["redacted"] = json!(redacted);
+    }
+    Ok(answer)
 }
 
 /// Task 134: `hgs team current` gives the member's open attempt and its
@@ -3318,8 +3332,14 @@ fn message_command(input: &Value) -> anyhow::Result<Value> {
         }
         Ok(posted)
     })?;
-    Ok(json!({"status":"queued","team":team.id,"request_id":request,"urgency":urgency,"messages":posted,
-        "note":"Zerus rings each recipient's doorbell at its next idle moment; the text waits in the working tier until it reads it with hgs team inbox."}))
+    let (_, redacted) = super::secrets::redact(&body, &[]);
+    let mut answer = json!({"status":"queued","team":team.id,"request_id":request,"urgency":urgency,"messages":posted,
+        "note":"Zerus rings each recipient's doorbell at its next idle moment; the text waits in the working tier until it reads it with hgs team inbox."});
+    // Task 184: a text that held a secret was stored redacted (11.9).
+    if !redacted.is_empty() {
+        answer["redacted"] = json!(redacted);
+    }
+    Ok(answer)
 }
 
 /// Task 134: `hgs team inbox`: the lead's (or a sub-lead's) inbox items, and

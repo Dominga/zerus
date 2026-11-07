@@ -927,6 +927,11 @@ fn new_from_args(ctx: &Ctx, kind: &str) -> Result<Vec<Value>> {
 fn cmd_add(ctx: &mut Ctx, io: &mut Io) -> Result<i32> {
     let kind = ctx.args.positional[0].clone();
     let mut records = new_from_args(ctx, &kind)?;
+    // Task 150: a fault whose signals are only exact strings gets a warning,
+    // never a refusal.
+    for record in &records {
+        for warning in schema::warnings(record) { io.progress(&format!("warn: {warning}")); }
+    }
     let existing = ctx.records()?;
     let mut found = dedupe::candidates(&ctx.config, &existing, &records, None);
     let mut blocking: BTreeMap<usize, Vec<dedupe::Match>> = found.iter().filter(|(_, matches)| matches.iter().any(|m| m.blocking)).map(|(at, matches)| (*at, matches.clone())).collect();
@@ -1598,3 +1603,4 @@ fn item_move(ctx: &Ctx, io: &mut Io, status: &str, fields: Vec<(&str, Value)>, r
     let build = ops::updater(id, Patch::Fixed(patch), reopen_reason);
     ctx.write(io, &build, subject, Vec::new())
 }
+

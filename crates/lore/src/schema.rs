@@ -593,3 +593,19 @@ pub fn item_moves(from: &str) -> &'static [&'static str] {
         _ => &[],
     }
 }
+
+/// Task 150: a warning, never a refusal. A fault should name 2-3 signals in
+/// the words a person would use, not only exact strings.
+pub fn warnings(record: &Value) -> Vec<String> {
+    if record.get("kind").and_then(Value::as_str) != Some("fault") { return Vec::new(); }
+    let human = record.get("signals").and_then(Value::as_array).map(|signals| {
+        signals.iter().filter_map(Value::as_str)
+            .filter(|signal| signal.contains(' ') && !signal.starts_with("0x") && !signal.contains("\\\\"))
+            .count()
+    }).unwrap_or(0);
+    if human < 2 {
+        vec!["add 2-3 human-language signals (how a person would see it), not only exact strings".into()]
+    } else {
+        Vec::new()
+    }
+}

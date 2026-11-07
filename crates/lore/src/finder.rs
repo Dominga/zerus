@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 pub const RRF_K: f64 = 60.0;
 pub const DEPTH: usize = 50;
 /// BM25 weights for the word table's columns: signals, title, main, body.
-const WEIGHTS: [f64; 4] = [10.0, 5.0, 3.0, 1.0];
+const WEIGHTS: [f64; 4] = [50.0, 20.0, 1.0, 1.0];
 /// Statuses that retire a record from ordinary search.
 pub const RETIRED: [&str; 4] = ["obsolete", "superseded", "reversed", "closed"];
 /// A query shorter than this is a few words, not a phrase someone copied.
@@ -383,3 +383,4 @@ pub fn for_target(index: &Index, target: &str, filters: &Filters) -> Result<Vec<
     });
     Ok(out)
 }
+

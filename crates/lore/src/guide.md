@@ -41,6 +41,11 @@ refuses a record that is past it.
 - **topic**: `body` (up to 3000 characters) - how something works now, never its history; status `current` / `superseded`. A longer subject is several topics.
 - **recipe**: `when`, `steps` (a list), `check` - a procedure done more than once; status `current` / `superseded`.
 
+A fault also carries **2-3 human-language signals**: how a person would see it,
+not only the exact text - "the window flickers while I resize it", "saving a map
+fails after the terrain check". Paraphrase search finds those sentences, and
+`lore add` warns (never refuses) when a fault has fewer than two.
+
 A signal is the whole line the fault prints - `AttributeError: 'NoneType'
 object has no attribute 'depth'`, `ERR_DEVICE_LOST`, `0x80070005` - never a bare
 class name like `AttributeError`, which every fault of its kind prints; lore
@@ -121,3 +126,5 @@ document the record came from.
 - A number is recorded with the commit it was measured at.
 - Cite only commits you have seen: `git show --stat <sha>`. A hash that exists is not yet evidence.
 - Do not edit `lore/*.jsonl` by hand; `lore check` refuses a file that was.
+
+

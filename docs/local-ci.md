@@ -144,3 +144,36 @@ plus nonrecursive reads of their ancestors. This is public compiler-cache data;
 the rest of that directory, owner preferences and credentials are excluded.
 The private Rustup copies disable self-update, so target installation cannot
 try to replace the read-only runner proxies or the owner's Rustup.
+
+
+## Native Windows preflight
+
+`scripts/ci/local-windows.py` reads the selected exact source's workflow and
+runs supported Bash bodies on Windows, with private profiles and verified
+Python3.13.15, Node24 and Rust1.99.1 tools. The private root supplies public tool
+copies; no installer, global PATH or default-toolchain mutation is performed.
+The controller needs PyYAML. For example, within a coordinator-admitted slot:
+
+```powershell
+python scripts/ci/local-windows.py --sha FULL_COMMIT --repo PRIVATE_SOURCE `
+  --root PRIVATE_ROOT --output PRIVATE_ROOT/new-results `
+  --node-directory node-v24.22.2-win-x64 --until $SlotEndUtc
+```
+
+The MSVC environment comes from the existing Visual Studio tools, with owner
+user PATH entries removed and the actual MSVC linker selected ahead of Git's
+unrelated `link.exe`. Four workers and a 10 GiB free-space floor bound each run.
+`PRIVATE_ROOT/STOP` pauses before the next command and stops only the current
+original private job. Each gated worker joins a non-breakaway kill-on-close job
+before release. Completion waits for that job's physical settlement; no WMI,
+PID adoption, path wildcard cleanup or existing scheduled task is used.
+
+This is a private-profile preflight, not a Windows security sandbox. Use only
+reviewed source under the coordinator's machine slot. Installer/runtime setup,
+hosted frontend adversaries, shared desktop/registration checks and outside-job
+bodies stay **not run**, with their reasons. No local result qualifies an
+installed pair, public package or hosted adversarial check. A failed exact-source
+build cannot hand an older cached executable to its later integration suite.
+The report retains all workflow jobs, unchanged bodies/hashes, tool versions,
+logs and the exact helper source. Remove private build trees when returning the
+slot and retain cited reports/logs separately.

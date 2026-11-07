@@ -641,7 +641,7 @@ fn service_roster_restores_settings_peer_choices_without_authorizing_legacy_mark
 fn approval_seam_is_an_explicit_refusal_without_a_generic_cli_policy_call() {
     tauri::async_runtime::block_on(async {
         let id = uuid::Uuid::new_v4().to_string();
-        let result = frontend::approval_command(None, id.clone(), true)
+        let result = frontend::approval_command(None, id.clone(), true, None)
             .await
             .unwrap();
         assert_eq!(result["request_id"], id);

@@ -141,7 +141,7 @@ fn cold_gui_and_service_restore_only_eligibility_and_preserve_historical_complet
             let id = uuid::Uuid::new_v4().to_string();
             let result = running
                 .service
-                .automatic_approvals(id.clone(), true)
+                .automatic_approvals(id.clone(), true, None)
                 .await
                 .unwrap();
             assert_eq!(result["accepted"], true, "{result}");

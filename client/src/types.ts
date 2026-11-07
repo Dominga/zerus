@@ -238,6 +238,8 @@ export interface DesktopService {
     computers: { computer: string; complete: boolean; online: boolean; total: number | null; attention: number | null }[];
   };
   automatic_approvals: boolean | null;
+  /** The approval categories the service's committed policy keeps on; absent from an older service. */
+  automatic_approval_categories?: string[] | null;
   /** Held task message copies a person may review; display only, never a release. */
   task_message_inputs?: null | { review: number; full: boolean };
   details_available: boolean;

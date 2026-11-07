@@ -8,6 +8,7 @@ fn approval(enabled: bool) -> Request {
     Request::AutomaticApprovals {
         request_id: uuid::Uuid::new_v4().to_string(),
         enabled,
+        categories: None,
     }
 }
 #[test]
@@ -526,11 +527,11 @@ pub(crate) mod native {
             .await;
             assert!(!service.snapshot().component_ready("approvals"));
             let enable = service
-                .automatic_approvals(uuid::Uuid::new_v4().to_string(), true)
+                .automatic_approvals(uuid::Uuid::new_v4().to_string(), true, None)
                 .await
                 .unwrap();
             let disable = service
-                .automatic_approvals(uuid::Uuid::new_v4().to_string(), false)
+                .automatic_approvals(uuid::Uuid::new_v4().to_string(), false, None)
                 .await
                 .unwrap();
             service.join().await.unwrap();
@@ -739,7 +740,10 @@ pub(crate) mod native {
                         .await
                         .unwrap()
                 } else {
-                    service.automatic_approvals(id.clone(), true).await.unwrap()
+                    service
+                        .automatic_approvals(id.clone(), true, None)
+                        .await
+                        .unwrap()
                 };
                 if not_applied {
                     let operation = if is_maintenance {
@@ -770,7 +774,10 @@ pub(crate) mod native {
                     let cached = if is_maintenance {
                         service.frontend_result(operation).await
                     } else {
-                        service.automatic_approvals(id.clone(), true).await.unwrap()
+                        service
+                            .automatic_approvals(id.clone(), true, None)
+                            .await
+                            .unwrap()
                     };
                     assert_eq!(cached, absent);
                     std::fs::write(fixture.0.join("service-back"), []).unwrap();
@@ -789,7 +796,7 @@ pub(crate) mod native {
                             .unwrap()
                     } else {
                         service
-                            .automatic_approvals(next_id.clone(), false)
+                            .automatic_approvals(next_id.clone(), false, None)
                             .await
                             .unwrap()
                     };
@@ -878,7 +885,7 @@ pub(crate) mod native {
                             .unwrap()
                     } else {
                         service
-                            .automatic_approvals(uuid::Uuid::new_v4().to_string(), false)
+                            .automatic_approvals(uuid::Uuid::new_v4().to_string(), false, None)
                             .await
                             .unwrap()
                     };
@@ -889,7 +896,10 @@ pub(crate) mod native {
                             .frontend_result(Operation::MaintenanceConfigure)
                             .await
                     } else {
-                        service.automatic_approvals(id.clone(), true).await.unwrap()
+                        service
+                            .automatic_approvals(id.clone(), true, None)
+                            .await
+                            .unwrap()
                     };
                     assert_eq!(result["request_id"], id);
                     assert_eq!(result["durable"], true);

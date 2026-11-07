@@ -2681,11 +2681,13 @@ pub async fn desktop_service_automatic_approvals(
     source: tauri::State<'_, crate::commands::AppState>,
     request_id: String,
     enabled: bool,
+    categories: Option<Vec<String>>,
 ) -> Result<Value, String> {
     frontend::approval_command(
         source.desktop_service().filter(|_| mode()),
         request_id,
         enabled,
+        categories,
     )
     .await
 }

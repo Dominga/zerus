@@ -1,5 +1,14 @@
 {
   "attention_counts": null,
+  "automatic_approval_categories": [
+    "read",
+    "edit",
+    "shell",
+    "web",
+    "mcp",
+    "agents",
+    "other"
+  ],
   "automatic_approvals": false,
   "background": {
     "approvals": {

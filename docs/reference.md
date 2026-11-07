@@ -2371,9 +2371,14 @@ The expanded session tree hides children whose latest reported turn is finished
 or failed by default. Session and Overview cards then show only the active count, omitting
 an empty indicator when no active or uncertain children remain.
 **Settings → Sessions → Show completed subagents** restores completed rows and
-active/total card counts. The **Plan & agents** inspector always shows the full
-reported roster and its active/total counts, including completed turns.
-Unknown states, paused agents and input/approval requests remain visible.
+active/total card counts. Unknown states, paused agents and input/approval
+requests remain visible. The **Plan & agents** inspector counts the full
+reported roster (active/total) but keeps only working agents, those waiting for
+an answer and the one open in Activity in view; the others fold behind
+**Finished: N** and unfold 50 at a time, so a session with many subagents
+renders and scrolls a bounded list (owner, 2026-11-08, T-ug5hxx). Each session
+starts folded. `client/scripts/inspector-scroll-smoke.html` measures that
+scroll in WebKitGTK under a private Xvfb.
 An open child's Activity and draft stay in place when its turn finishes. A child's
 draft keeps its row visible after returning to main Activity. Finished turns are
 not proof that the agent's task or process has ended.

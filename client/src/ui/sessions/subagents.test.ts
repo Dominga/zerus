@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { toSession } from "../../store/catalog";
 import { groupRows, type ListInput } from "./group-rows";
-import { childInactive, childRows, rosterFor } from "./subagents";
+import { childInactive, childRows, rosterFor, splitSubagents } from "./subagents";
 import type { GroupingOut } from "../../types";
+import type { Subagent } from "./types";
 
 const grouping: GroupingOut = { loaded: true, default_project: "ungrouped", headers: [], ready: true, reason: null, busy: false, status: "", status_error: false, conflicts: 0 };
 const input = (extra: Partial<ListInput> = {}): ListInput => ({ grouping, members: new Map(), visible: () => true, online: () => true, projects: [], expanded: () => true, compact: () => false, ...extra });
@@ -76,5 +77,20 @@ describe("native child presentation", () => {
     expect(ids({ selected: { key: row.key, subagent: "done", conversation: "conv" } })).toEqual(["done", "working"]);
     expect(ids({ childDraft: (_parent, child) => child.id === "done" })).toEqual(["done", "working"]);
     expect(ids({ includeCompleted: true })).toEqual(["done", "working"]);
+  });
+});
+
+describe("Plan & agents keeps working subagents in view (zerus-5ffek)", () => {
+  const child = (id: string, state: Subagent["state"]): Subagent => ({ id, name: id, state, summary: "" });
+  const children = [child("a", "working"), child("b", "ready"), child("c", "attention"), child("d", "error"), child("e", "ended"), child("f", "unknown")];
+  it("shows the working and asking ones and folds the rest", () => {
+    expect(splitSubagents(children, true)).toEqual({ active: ["a", "c"], finished: ["b", "d", "e", "f"] });
+  });
+  it("keeps the one open in Activity in view", () => {
+    expect(splitSubagents(children, true, "e").active).toEqual(["a", "c", "e"]);
+  });
+  it("folds everything when the session's report is not current", () => {
+    expect(splitSubagents(children, false)).toEqual({ active: [], finished: ["a", "b", "c", "d", "e", "f"] });
+    expect(splitSubagents(children, false, "b").active).toEqual(["b"]);
   });
 });

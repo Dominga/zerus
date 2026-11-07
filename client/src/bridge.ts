@@ -28,6 +28,14 @@ let source: Source | undefined;
 
 export const inTauri = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+/** Content-free invariant evidence through the existing capped stderr logger. */
+export async function reportDetailInvariant(line: string): Promise<void> {
+  if (inTauri()) {
+    try { await invoke<void>("perf_log", { line }); return; } catch { /* Best-effort evidence; no retry or UI operation. */ }
+  }
+  console.warn(line);
+}
+
 export const nativeUiOpen = (request: import("./store/native-ui-model").NativeRequest, reload: boolean, embedded: boolean) => desktop<import("./store/native-ui-model").NativeStatus>("native_ui_open", { request, reload, embedded });
 export const nativeUiRetire = () => inTauri() ? invoke<void>("native_ui_retire") : Promise.resolve();
 export const nativeUiVisible = (nonce: string, visible: boolean) => inTauri() ? invoke<void>("native_ui_visible", { nonce, visible }) : Promise.resolve();

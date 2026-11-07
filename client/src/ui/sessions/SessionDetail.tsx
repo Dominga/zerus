@@ -19,7 +19,7 @@ import { detailTab, page, selected, setDetailTab, setMenu, subagentOpen, type Me
 import { activity, subagentActivity } from "../../store/session";
 import { activityReadOnly, type ActivitySource } from "../../store/activitySource";
 import { archiveActivity } from "../../store/archiveActivity";
-import { computerOffline } from "../../store/catalog";
+import { catalog, computerOffline } from "../../store/catalog";
 import { copyIdentity, detailsFor, followedFor } from "../../store/actions";
 import { headerClearSlot, sessionIdentity } from "./actions-ui";
 import { actionEntries, copyEntries, freshActionEntry } from "./ActionDialogs";
@@ -37,13 +37,15 @@ import { createSubagentIdentity } from "../../store/subagentIdentity";
 import { selectedTask } from "../../store/taskNavigation";
 import { Inspector } from "./Inspector";
 import { followProjectTasks } from "../../store/taskContext";
-import { inspectorOpen, setInspectorOpen, openInspector, inspectorHint } from "../../store/inspector";
+import { inspectorOpen, inspectorTab, setInspectorOpen, openInspector, inspectorHint } from "../../store/inspector";
 import { sessionGoal } from "./inspector-data";
 import { PausedServiceDetail, servicePausedEmpty } from "../components/DesktopServiceStatus";
 
 import { folderEntries, folderRequest } from "../../store/sessionFolders";
+import { watchDetailRemoval } from "./detail-removal";
 
 const TaskView = lazy(() => import("../screens/TaskView"));
+let reportedRemovedDetail = false;
 
 // The session header and its Activity with the composer under it, after
 // design/webui SessionDetail. Session actions keep the mockup placement and
@@ -227,6 +229,30 @@ export function SessionDetail() {
   // A reply shown in Activity or Terminal for a second is read (Qt's checkViewedReply).
   followViewedReplies();
   const [available, setAvailable] = createSignal(900);
+  // One lifetime for the whole frame. Archive browsing has its own bounded
+  // row store; every live detail must still belong to the current catalog.
+  const shown = createMemo(() => {
+    const row = selected();
+    return row && (activityReadOnly(row.key) || catalog.rows[row.key]) ? row : undefined;
+  });
+  let frame: HTMLDivElement | undefined;
+  const removal = watchDetailRemoval({
+    listed: (key) => !!catalog.rows[key],
+    schedule: (check) => { const id = requestAnimationFrame(check); return () => cancelAnimationFrame(id); },
+    report: (line) => {
+      if (reportedRemovedDetail) return;
+      reportedRemovedDetail = true;
+      void bridge.reportDetailInvariant(line);
+    },
+  });
+  createEffect(() => {
+    const row = shown();
+    removal.update(row && frame ? {
+      key: row.key, catalogBound: !activityReadOnly(row.key), sessionId: row.sessionId, element: frame,
+      route: { tab: detailTab(), inspector: inspectorOpen() ? inspectorTab() : "closed", child: !!subagentOpen() },
+    } : undefined);
+  });
+  onCleanup(() => removal.dispose());
   const measure = (el: HTMLDivElement) => {
     const observer = new ResizeObserver(() => setAvailable(el.clientWidth)); observer.observe(el);
     onCleanup(() => observer.disconnect());
@@ -249,44 +275,46 @@ export function SessionDetail() {
     <section class="detail" aria-label={tr("Session")}>
       {/* Qt's drop overlay (SessionFileDrop): what a drop on this panel does. */}
       <Show when={drops.hint()}>{(text) => <div class="drop-overlay" aria-hidden="true"><span>{text()}</span></div>}</Show>
-      <Show when={selected()}><Header /></Show>
-        <div class="work" ref={measure}>
-        <Show when={selected()} fallback={<div class="work-main"><EmptyDetail /></div>}>
-          <div class="work-main">
-            <div class="detail-tabs tabs" role="tablist">
-              <For each={tabs().filter((t) => t.show)}>{(t) => (
-                <button class="tab" role="tab" classList={{ on: detailTab() === t.id }} aria-selected={detailTab() === t.id} onClick={() => { if (t.id === "terminal") terminal.opened(); setDetailTab(t.id); }}>{t.label}</button>
-              )}</For>
-              <span class="grow" />
-              <Show when={!inspectorOpen()}><button class="icon-btn small" data-cmd="show-side-panel" aria-label={tr("Show side panel")} data-tip={inspectorHint(tr("Show tasks, plan, agents, details and worktrees"))} data-tip-pos="left" onClick={() => setInspectorOpen(true)}><Icon name="panel-right" size={15} /></button></Show>
+      <Show when={shown()} fallback={<div class="work"><div class="work-main"><EmptyDetail /></div></div>}>
+        <div class="detail-frame" ref={frame}>
+          <Header />
+          <div class="work" ref={measure}>
+            <div class="work-main">
+              <div class="detail-tabs tabs" role="tablist">
+                <For each={tabs().filter((t) => t.show)}>{(t) => (
+                  <button class="tab" role="tab" classList={{ on: detailTab() === t.id }} aria-selected={detailTab() === t.id} onClick={() => { if (t.id === "terminal") terminal.opened(); setDetailTab(t.id); }}>{t.label}</button>
+                )}</For>
+                <span class="grow" />
+                <Show when={!inspectorOpen()}><button class="icon-btn small" data-cmd="show-side-panel" aria-label={tr("Show side panel")} data-tip={inspectorHint(tr("Show tasks, plan, agents, details and worktrees"))} data-tip-pos="left" onClick={() => setInspectorOpen(true)}><Icon name="panel-right" size={15} /></button></Show>
+              </div>
+              <div class="tab-body">
+                <Switch>
+                  <Match when={detailTab() === "activity"}>
+                    <div class="activity-wrap" classList={{ "has-goal": !!goal().objective }} style={columnStyle()}>
+                      <Show when={goal().objective}><button class="goal-pill" onClick={() => openInspector("plan")}><Icon name="circle-dot" size={13} /><b>{goal().caption}</b><span class="ell">{goal().objective}</span><span class="grow" /><span>{tr("Details")}</span><Icon name="chevron-right" size={12} /></button></Show>
+                      <ActivityView source={activitySourceFor(selected()!.key)} />
+                      {/* Child Activity stays read-only; its own composer opens only when the inspection supports send. */}
+                      <Show when={!subagentOpen()}>
+                        <Show when={signIn()}><div class="cmp-col"><div class="qcard">
+                          <p class="qcard-body">{tr("Sign in to DeepSeek to start using this session. Complete sign-in in the official DeepSeek UI, then return here.")}</p>
+                          <div class="qcard-actions"><button class="btn small" onClick={() => nativeRoute(selected())()}>{tr("Sign in to DeepSeek…")}</button></div>
+                        </div></div></Show>
+                        <HeldMessage /><QueuePanel /><QuestionCard />
+                      </Show>
+                      <div class="cmp-col"><Composer /></div>
+                    </div>
+                  </Match>
+                  <Match when={detailTab() === "taskview"}><Suspense><TaskView /></Suspense></Match>
+                  <Match when={detailTab() === "terminal"}><TerminalTab /></Match>
+                  <Match when={detailTab() === "native"}><NativeUiTab /></Match>
+                  <Match when={detailTab() === "processes"}><ProcessesTab /></Match>
+                </Switch>
+              </div>
             </div>
-            <div class="tab-body">
-              <Switch>
-                <Match when={detailTab() === "activity"}>
-                  <div class="activity-wrap" classList={{ "has-goal": !!goal().objective }} style={columnStyle()}>
-                    <Show when={goal().objective}><button class="goal-pill" onClick={() => openInspector("plan")}><Icon name="circle-dot" size={13} /><b>{goal().caption}</b><span class="ell">{goal().objective}</span><span class="grow" /><span>{tr("Details")}</span><Icon name="chevron-right" size={12} /></button></Show>
-                    <ActivityView source={activitySourceFor(selected()!.key)} />
-                    {/* Child Activity stays read-only; its own composer opens only when the inspection supports send. */}
-                    <Show when={!subagentOpen()}>
-                      <Show when={signIn()}><div class="cmp-col"><div class="qcard">
-                        <p class="qcard-body">{tr("Sign in to DeepSeek to start using this session. Complete sign-in in the official DeepSeek UI, then return here.")}</p>
-                        <div class="qcard-actions"><button class="btn small" onClick={() => nativeRoute(selected())()}>{tr("Sign in to DeepSeek…")}</button></div>
-                      </div></div></Show>
-                      <HeldMessage /><QueuePanel /><QuestionCard />
-                    </Show>
-                    <div class="cmp-col"><Composer /></div>
-                  </div>
-                </Match>
-                <Match when={detailTab() === "taskview"}><Suspense><TaskView /></Suspense></Match>
-                <Match when={detailTab() === "terminal"}><TerminalTab /></Match>
-                <Match when={detailTab() === "native"}><NativeUiTab /></Match>
-                <Match when={detailTab() === "processes"}><ProcessesTab /></Match>
-              </Switch>
-            </div>
+          <Inspector available={available()} />
           </div>
-        </Show>
-        <Show when={selected()}><Inspector available={available()} /></Show>
         </div>
+      </Show>
         {/* The composer's questions and Clear session, also from the header on another tab; the field takes the focus back. */}
         <ComposerDialogs onClosed={() => { if (document.activeElement === document.body) document.querySelector<HTMLTextAreaElement>(".cmp-editor")?.focus(); }} />
     </section>

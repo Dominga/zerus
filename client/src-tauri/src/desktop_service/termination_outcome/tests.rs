@@ -29,6 +29,12 @@ thread_local! {
     static AFTER_OBSERVATION: std::cell::RefCell<Option<RefusedObserver>> = const { std::cell::RefCell::new(None) };
     static AFTER_BINDING: std::cell::RefCell<Option<RefusedObserver>> = const { std::cell::RefCell::new(None) };
     static AFTER_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_RPC_INPUT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+pub(super) fn before_rpc_input() {
+    if let Some(hook) = BEFORE_RPC_INPUT.with_borrow_mut(Option::take) {
+        hook();
+    }
 }
 pub(super) fn after_capture() {
     if let Some(hook) = AFTER_CAPTURE.with_borrow_mut(Option::take) {
@@ -1271,6 +1277,41 @@ fn offer_physical_finish_diagnostic_keeps_the_original_rpc_charge_until_real_rel
         assert!(context.busy.load(Ordering::Acquire));
         drop(held);
         assert!(!context.busy.load(Ordering::Acquire));
+        assert!(effects(&calls(&f)).is_empty());
+        service.join().await.unwrap();
+    });
+}
+
+#[test]
+fn rpc_scope_drift_after_pipe_setup_is_sticky_and_cannot_readmit_the_context() {
+    if crate::test_context::desktop_fixture() {
+        return;
+    }
+    let _process = crate::PROCESS_TREE.read().unwrap();
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let context = Context::new_supported(service.clone(), Arc::new(())).unwrap();
+        let checked = context.clone();
+        BEFORE_RPC_INPUT.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || {
+                *checked.service.shared.configuration.lock().unwrap() = Some("b".repeat(64));
+            }));
+        });
+        assert!(context.rpc(vec!["--help".into()], None, None).is_err());
+        assert!(context.rejected.load(Ordering::Acquire));
+        assert!(!context.busy.load(Ordering::Acquire));
+        *service.shared.configuration.lock().unwrap() = Some("a".repeat(64));
+        let called = Arc::new(AtomicBool::new(false));
+        let spawned = called.clone();
+        AFTER_BINDING.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move |_| spawned.store(true, Ordering::Release)));
+        });
+        assert!(context.rpc(vec!["--help".into()], None, None).is_err());
+        AFTER_BINDING.with_borrow_mut(|hook| {
+            hook.take();
+        });
+        assert!(!called.load(Ordering::Acquire));
         assert!(effects(&calls(&f)).is_empty());
         service.join().await.unwrap();
     });

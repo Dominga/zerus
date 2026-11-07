@@ -7,9 +7,8 @@ use std::{
     thread,
 };
 
-// Only this dormant module's private fixtures use its global admission pool.
-// Serialize pool assertions; all children and pipes belong to these fixtures.
-static TESTS: Mutex<()> = Mutex::new(());
+// Serialize this pool's primitive and adapter fixtures; all helper children
+// and pipes belong to those fixtures.
 
 fn admission(source: Arc<dyn Send + Sync>, span: Duration) -> Admission {
     Admission::reserve(source, Instant::now() + span).unwrap()

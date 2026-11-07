@@ -333,9 +333,9 @@ same collapse toggle; the summary joins the row's accessible description.
 
 ### 3.4 Supervised indicator
 
-A supervised child shows a small 12 px "delegated" glyph (a bell with a
-downward arrow to the parent) before its title, in `--z-dim`, instead of the
-mute bell. Tooltip: "Supervised by PARENT. Only requests that need you notify
+A supervised child shows the crossed bell of Mute, 13 px, before its title in
+`--z-color-dim`, as in the owner's prototype (owner feedback 2026-11-07: a
+plain bell read as "notifications coming"). Tooltip: "Supervised by PARENT. Only requests that need you notify
 you." Its quiet badges are gray as for muted rows; a human signal keeps the
 amber badge and edge.
 

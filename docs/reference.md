@@ -732,8 +732,9 @@ own mark, still counts. A person-only request notifies as for any session.
 When the parent is paused, stopped, exited, archived, not listed on the
 child's computer (including a parent on another computer) or gone, the child
 is ordinary again: a pending request that waited quietly is announced once,
-while replies seen meanwhile are not replayed. A supervised child shows a bell
-with an arrow before its title instead of the mute bell; the parent's **Team**
+while replies seen meanwhile are not replayed. A supervised child shows the
+crossed bell of Mute, dim, before its title (its tooltip and accessible name
+say which session supervises it); the parent's **Team**
 toggle adds **Asking** (quiet requests waiting for it) and **Needs you**
 (person-only requests), which never raise the parent's own attention.
 `client/core/tests/fixtures/supervised-attention.json` lists the cases the

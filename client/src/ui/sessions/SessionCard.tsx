@@ -138,15 +138,17 @@ export function AgentBadge(props: { agent: AgentKind; narrow?: boolean; max?: nu
   );
 }
 
-/** A supervised child: its parent handles its requests (spec 3.4). */
+/**
+ * A supervised child: its parent handles its requests (spec 3.4). The crossed
+ * bell of Mute, dim, before the title, as in the owner's prototype (owner
+ * feedback 2026-11-07: a plain bell read as "notifications coming").
+ */
 export function SupervisedMark(props: { session: Session }) {
   const name = () => props.session.parent?.name.split("/").pop() || props.session.parent?.name || "";
   return (
     <span class="sc-supervised" role="img" aria-label={tr("Supervised by %1", name())}
       title={tr("Supervised by %1\nOnly requests that need you notify you.", props.session.parent?.name ?? "")}>
-      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M3.5 9.5V6.5A3.5 3.5 0 0 1 10.5 6.5V9.5L11.5 10.5H2.5Z" /><path d="M6 12.2A1.2 1.2 0 0 0 8 12.2" /><path d="M7 1V3.4M5.6 2.2L7 3.4L8.4 2.2" />
-      </svg>
+      <Icon name="mute" size={13} />
     </span>
   );
 }
@@ -496,11 +498,11 @@ export function CompactCard(props: { session: Session; selected: boolean; onExpa
       <div class="cc-line">
       <span class="cc-tile"><AgentTile agent={s().agent} size={22} /></span>
       <Show when={sessionMark(s())}>{(m) => <span class="cc-mark" title={markTooltip(s(), m())}><AccountMarkCircle mark={m()} size={14} /></span>}</Show>
+      <Show when={!s().muted && s().parent?.state === "live"}><SupervisedMark session={s()} /></Show>
       <span class="sc-title ell" style={titleReserve(s().title, 60)} title={s().name}>{s().title}</span>
       <StatusBadge kind={badgeKind(s())} caption={statusCaption(s())} />
       <OptionalQuestionsChip session={s()} />
       <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
-      <Show when={!s().muted && s().parent?.state === "live"}><SupervisedMark session={s()} /></Show>
       <button class="cc-expand" title={tr("Expand session row")} onClick={(e) => { e.stopPropagation(); props.onExpand(); }} onDblClick={(e) => e.stopPropagation()}>
         <Icon name="expand-row" size={16} />
       </button>

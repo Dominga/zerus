@@ -234,7 +234,7 @@ fn member_reason(team: &Team, member: &Member) -> Option<Value> {
             json!({"task":next.id,"phase":next.phase,"held_by":held}));
     }
     let blockers = plan::barrier_blockers(team, next);
-    if !blockers.is_empty() || phase_of(next.phase).is_some_and(|phase| phase.state == PhaseState::Queued) {
+    if !blockers.is_empty() {
         let title = phase_of(next.phase).filter(|phase| !phase.title.is_empty())
             .map(|phase| format!(" \u{b7} {}", phase.title)).unwrap_or_default();
         return reason(team, "team_phase", format!("Waiting for phase {}{title} to start (#{})", next.phase, next.id),
@@ -386,7 +386,7 @@ mod tests {
         held.tasks[2].phase = 4;
         held.phases = vec![
             Phase { n: 2, order: 2, title: "Checkout".into(), state: PhaseState::AwaitingAcceptance, acceptance: super::super::model::PhaseAcceptance::Owner, tasks: vec![1], ..Default::default() },
-            Phase { n: 3, order: 3, state: PhaseState::Queued, tasks: vec![2], ..Default::default() },
+            Phase { n: 3, order: 3, state: PhaseState::Approved, barrier: true, tasks: vec![2], ..Default::default() },
             Phase { n: 4, order: 4, state: PhaseState::Approved, tasks: vec![3], ..Default::default() },
         ];
         let found = reasons(&[held.clone()], 0.0);

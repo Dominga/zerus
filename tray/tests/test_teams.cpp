@@ -806,9 +806,9 @@ void TestTeams::phaseProgressShowsThePhaseInWorkAndThePhases()
     QCOMPARE(waiting.phase, 2);
     QVERIFY(waiting.draft);
     QCOMPARE(waiting.phaseText(), QStringLiteral("0/2"));
-    // U61: phase 2's approval is auto, so it waits for its first hand-out, not for you.
-    QVERIFY(waiting.autoDraft && !waiting.startAhead);
-    QVERIFY(waiting.tooltip().contains(QStringLiteral("Draft (auto): Auto accepts it when its first task starts")));
+    // U61: phase 2's approval is auto, so Auto accepts it, not you.
+    QVERIFY(waiting.autoDraft);
+    QVERIFY(waiting.tooltip().contains(QStringLiteral("Draft (auto): Auto accepts it once its plan has no blocker")));
     QVERIFY(!waiting.tooltip().contains(QStringLiteral("waiting for your approval")));
     QCOMPARE(waiting.phasesDone, 1);
     QCOMPARE(waiting.phasesTotal, 2);

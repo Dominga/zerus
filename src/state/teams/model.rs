@@ -195,10 +195,6 @@ pub(crate) struct Settings {
     /// waiting when the owner turns it on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub auto_accept: bool,
-    /// U31: let an idle member take an independent task of the next draft
-    /// phase; the result waits for that phase's approval.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub work_ahead: bool,
     /// U48: the owner allows a pipeline's land stage, which may push; without
     /// it a land stage holds the task for the lead.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -362,7 +358,6 @@ impl Default for Settings {
             tree_sessions: default_tree_sessions(),
             subteam_approval: SubteamApproval::default(),
             auto_accept: false,
-            work_ahead: false,
             land_allowed: false,
             branch_per_task: None,
             base_branch: String::new(),
@@ -1583,9 +1578,6 @@ pub(crate) struct Attempt {
     /// unconfirmed (spec 1).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prepare: Vec<PrepareStep>,
-    /// U31: this attempt worked a task of a draft phase before its approval.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub worked_ahead: bool,
     /// #728 L2: when the silent check last read a dsh session for this attempt;
     /// the stuck check reads it at most once a minute too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2204,16 +2196,18 @@ pub(crate) enum PhaseState {
     /// Waits for the owner's approval.
     #[default]
     Draft,
-    /// The owner approved it, or its approval was `auto`.
+    /// The owner approved it, or its approval was `auto`. Task 158 (owner,
+    /// 2026-11-07): an approved phase runs alongside the phases before it;
+    /// its tasks wait only for their dependencies, for the outputs an open
+    /// task holds (task 155), for a barrier and for an owner-acceptance gate.
+    /// A record from before reads its old `queued` state as approved.
+    #[serde(alias = "queued")]
     Approved,
     /// The owner discarded it; its ids stay used.
     Discarded,
     /// U25: the owner sent the draft back with a comment; the lead reworks it
     /// into a draft again. Its tasks are not handed out.
     Rejected,
-    /// U25: accepted while an earlier phase still runs; it starts (becomes
-    /// approved) once every earlier phase is finished.
-    Queued,
     /// U63 (owner, 2026-10-31): a phase that requires the owner's acceptance
     /// has every task decided and waits for that acceptance; no later phase
     /// starts meanwhile.
@@ -2229,10 +2223,10 @@ impl PhaseState {
     pub(crate) fn is_draft(self) -> bool {
         matches!(self, Self::Draft | Self::Rejected)
     }
-    /// Accepted: running, finished or queued behind an earlier phase (U63:
-    /// or awaiting the owner's acceptance, or accepted by the owner).
+    /// Accepted: running or finished (U63: or awaiting the owner's
+    /// acceptance, or accepted by the owner).
     pub(crate) fn is_accepted(self) -> bool {
-        matches!(self, Self::Approved | Self::Queued | Self::AwaitingAcceptance | Self::Done)
+        matches!(self, Self::Approved | Self::AwaitingAcceptance | Self::Done)
     }
 }
 
@@ -2360,10 +2354,6 @@ pub(crate) struct Phase {
     /// and its tasks are handed out before other pending ones.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub urgent: bool,
-    /// U61: the lead lets idle members start this auto-accepted draft early;
-    /// its first hand-out accepts the phase.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub start_ahead: bool,
     /// Section 9.5: why a "Rework" draft was opened after the parent lead
     /// rejected the sub-team's report.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -2418,6 +2408,10 @@ pub(crate) struct Team {
     pub iron_rules_error: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iron_rules_error_at: Option<f64>,
+    /// Task 164 (owner, 2026-11-07): when the lead last got the team's starved
+    /// digest; at most one an hour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starved_digest_at: Option<f64>,
     #[serde(default)]
     pub folder: String,
     #[serde(default)]

@@ -517,8 +517,8 @@ fn the_lead_discards_or_redrafts_an_accepted_phase_on_the_owners_word() {
             Task { id: 3, phase: 3, title: "C".into(), assignee: "m1".into(), status: TaskStatus::Pending, ..Default::default() },
         ];
         team.phases = vec![
-            Phase { n: 2, order: 2, title: "Two".into(), state: PhaseState::Queued, tasks: vec![2], ..Default::default() },
-            Phase { n: 3, order: 3, title: "Three".into(), state: PhaseState::Queued, tasks: vec![3], ..Default::default() },
+            Phase { n: 2, order: 2, title: "Two".into(), state: PhaseState::Approved, tasks: vec![2], ..Default::default() },
+            Phase { n: 3, order: 3, title: "Three".into(), state: PhaseState::Approved, tasks: vec![3], ..Default::default() },
         ];
         let id = team.id.clone();
         store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();

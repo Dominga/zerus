@@ -2050,14 +2050,8 @@ QWidget *TeamWorkspace::toolbar(const Team &team)
         h->addWidget(autoSwitch);
         auto *autoLabel = label(tr("Auto-accept drafts"), c.text3, 11); autoLabel->setProperty("compactHide", true);
         h->addWidget(autoLabel);
-        auto *aheadSwitch = new ToggleSwitch(c); aheadSwitch->setObjectName("teamWorkspaceWorkAhead"); aheadSwitch->setChecked(team.workAhead);
-        aheadSwitch->setAccessibleName(tr("Work ahead"));
-        aheadSwitch->setToolTip(tr("On: an idle member may take an independent task of the next draft phase; its report waits for your approval"));
-        aheadSwitch->setEnabled(settingsOpen(team));
-        QObject::connect(aheadSwitch, &QAbstractButton::clicked, this, [this, id = team.id](bool on) { if (const auto *t = currentTeam(id)) setWorkAhead(*t, on); });
-        h->addWidget(aheadSwitch);
-        auto *aheadLabel = label(tr("Work ahead"), c.text3, 11); aheadLabel->setProperty("compactHide", true);
-        h->addWidget(aheadLabel);
+        // Task 158 (owner, 2026-11-07): no Work ahead switch; an approved
+        // phase runs alongside the phases before it, a draft after approval.
     }
     if (!groups.isEmpty() && m_view != "profile" && m_view != "tests") {
         bool allOpen = true;
@@ -2646,12 +2640,6 @@ void TeamWorkspace::setAutoAccept(const Team &team, bool on)
     m_panel->act("settings", {{"settings", QJsonObject{{"auto_accept", on}}}});
 }
 
-void TeamWorkspace::setWorkAhead(const Team &team, bool on)
-{
-    if (!settingsOpen(team)) return;
-    m_panel->act("settings", {{"settings", QJsonObject{{"work_ahead", on}}}});
-}
-
 // Spec 5.2: Reject… sends the draft back to the lead with the owner's words.
 void TeamWorkspace::rejectPhase(const QString &id, int phase)
 {
@@ -2757,7 +2745,7 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
                                             state == "idle" ? QStringLiteral("delivered") : QStringLiteral("running"), false)
                            : new PhaseBadge(autoDraft ? autoDraftBadge() : phaseStateBadge(state), tone, kind, state == "draft" || state == "planned");
     badge->setObjectName("teamPhaseBadge"); badge->setProperty("state", state); badge->setProperty("auto", autoDraft);
-    if (autoDraft) badge->setToolTip(autoDraftTip(record->startAhead));
+    if (autoDraft) badge->setToolTip(autoDraftTip());
     h->addWidget(badge);
     // Task #59: the phase's own mode, live from hgs, for a phase a switch
     // reaches: the free one, or a running one (Standard).
@@ -2787,14 +2775,10 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
         pauseIcon->setAttribute(Qt::WA_TransparentForMouseEvents);
         h->addWidget(pauseIcon);
     }
-    // U61: the lead let idle members start this auto draft early; a phase
-    // Auto accepted at its first hand-out says so.
-    if (autoDraft && record->startAhead) {
-        auto *ahead = label(tr("started ahead by the lead"), c.accent, 11, true, "teamPhaseStartAhead");
-        ahead->setToolTip(autoDraftTip(true)); h->addWidget(ahead);
-    } else if (!freeOpen && record && record->acceptedByAuto()) {
+    // U61: a phase Auto accepted says so (task 158: there is no start ahead).
+    if (!freeOpen && record && record->acceptedByAuto()) {
         auto *byAuto = label(tr("accepted by Auto"), c.dim, 11, false, "teamPhaseByAuto");
-        byAuto->setToolTip(tr("Auto accepted this phase when its first task started")); h->addWidget(byAuto);
+        byAuto->setToolTip(tr("Auto accepted this phase once its plan had no blocker")); h->addWidget(byAuto);
     }
     if (auto *mode = phaseModeBadge(team, group.n)) h->addWidget(mode);
     // A cancelled task is not work the phase still owes: a Done phase with one

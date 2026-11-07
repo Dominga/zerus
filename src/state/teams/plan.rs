@@ -1,7 +1,7 @@
 //! WhiteWh fork: pure rules of a team's task graph, as the prototype
 //! (design/agent-teams/index.html: cycleNodes, layersOf, chainOf, readyTasks,
 //! planErrors) defines them. Edges run from a dependency to its dependent.
-use super::model::{Approval, AttemptState, DependencyKind, MemberState, Phase, PhaseAcceptance, PhasePause, PhaseState, Task, TaskStatus, Team};
+use super::model::{AttemptState, DependencyKind, Member, MemberState, Phase, PhaseAcceptance, PhasePause, PhaseState, Task, TaskStatus, Team};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -251,11 +251,12 @@ pub(crate) fn acceptance_block(team: &Team, n: u32) -> Option<u32> {
 }
 
 /// The earlier-phase tasks a barrier phase still waits for (C3): a barrier
-/// task starts only once every task of a lower phase is finished.
+/// task starts only once every task of a lower phase is finished. Task 158
+/// (owner, 2026-11-07): only a phase marked barrier waits so; any other
+/// approved phase runs alongside the phases before it.
 pub(crate) fn barrier_blockers(team: &Team, task: &Task) -> Vec<u32> {
     let Some(phase) = team.phases.iter().find(|phase| phase.n == task.phase) else { return Vec::new() };
-    // U25: a phase accepted while an earlier one runs queues behind it.
-    if !phase.barrier && phase.state != PhaseState::Queued {
+    if !phase.barrier {
         return Vec::new();
     }
     let target = phase.order();
@@ -279,6 +280,12 @@ fn barrier_holds(team: &Team, task: &Task) -> bool {
 }
 
 /// Pending tasks whose dependencies and phase barrier are satisfied, in id order.
+/// Task 158 (owner, 2026-11-07): one phase-start model. A task of any approved
+/// phase is ready when its dependencies are satisfied; phases keep their order
+/// for display and acceptance, not for scheduling, unless a phase is a barrier
+/// or one before it waits for the owner's acceptance. The dispatcher still
+/// holds a task whose outputs an open task holds (task 155). A draft's tasks
+/// are Draft, never Pending, so nothing runs before its phase is approved.
 pub(crate) fn ready(team: &Team) -> Vec<u32> {
     let cycles = cycle_tasks(&team.tasks);
     let mut out: Vec<u32> = team
@@ -300,39 +307,6 @@ pub(crate) fn ready(team: &Team) -> Vec<u32> {
         .collect();
     // D2: an urgent phase's tasks go before every other pending one.
     out.sort_by_key(|id| (!urgent(team, *id), *id));
-    out
-}
-
-/// U61: the independent tasks of a draft the lead started ahead: ready by
-/// their dependencies, not held by the draft's barrier.
-pub(crate) fn ready_ahead(team: &Team, phase: u32) -> Vec<u32> {
-    let cycles = cycle_tasks(&team.tasks);
-    team.tasks
-        .iter()
-        .filter(|task| task.phase == phase && matches!(task.status, TaskStatus::Pending | TaskStatus::Draft) && !cycles.contains(&task.id))
-        .filter(|task| task.hold.is_none() && task.waits.is_none())
-        .filter(|task| task.deps.iter().all(|dep| satisfied(team, dep.task, dep.kind)))
-        // U63: nothing starts ahead behind a phase awaiting the owner's acceptance.
-        .filter(|task| acceptance_block(team, task.phase).is_none())
-        .map(|task| task.id)
-        .collect()
-}
-
-/// U61: the independent tasks of an auto-accepted draft the lead started ahead;
-/// only that decision opens such a draft early (the phases-ahead case is
-/// accepted by Auto and goes through the ordinary ready path).
-pub(crate) fn auto_draft_tasks(team: &Team) -> Vec<u32> {
-    if !team.settings.auto_accept {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for phase in team
-        .phases
-        .iter()
-        .filter(|phase| phase.state == PhaseState::Draft && phase.approval == Approval::Auto && phase.start_ahead)
-    {
-        out.extend(ready_ahead(team, phase.n));
-    }
     out
 }
 
@@ -741,19 +715,13 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
             let done = tasks.len() - open;
             let blocked = record.is_some_and(|phase| phase.barrier)
                 && team.tasks.iter().any(|task| task.phase < n && !task.status.finished());
-            // U25: a queued phase waits for every earlier phase, barrier or not.
-            let queued = record.is_some_and(|phase| phase.state == PhaseState::Queued) && {
-                let target = record.map_or(n, |phase| phase.order());
-                let order_of = |m: u32| team.phases.iter().find(|phase| phase.n == m).map_or(m, |phase| phase.order());
-                team.tasks.iter().any(|task| task.phase != n && order_of(task.phase) < target && !task.status.finished())
-            };
             // U63 (owner, 2026-10-31): a paused phase, and a phase behind one
             // that waits for the owner's acceptance, wait as queued.
             let pause = record.and_then(|phase| phase.pause.clone());
             let awaiting = record.is_some_and(|phase| awaits_acceptance(team, phase));
             let held = !awaiting && open > 0 && (pause.is_some() || acceptance_block(team, n).is_some());
             let rework = record.is_some_and(|phase| phase.acceptance_rework);
-            let blocked = blocked || queued || held;
+            let blocked = blocked || held;
             // U58: a phase whose tasks are all cancelled reads cancelled; the
             // dashboard hides it with its tasks unless the caller asks for them.
             let cancelled = phase_cancelled(team, n);
@@ -814,10 +782,8 @@ pub(crate) fn phase_summary(team: &Team) -> Vec<serde_json::Value> {
                 "done": done,
                 "total": tasks.len(),
                 "barrier": record.is_some_and(|phase| phase.barrier),
-                // U61: a draft that Auto will accept at its first hand-out, and
-                // whether the lead started it ahead.
+                // U61: a draft that Auto accepts once its plan has no blocker.
                 "auto": record.is_some_and(|phase| phase.approval == super::model::Approval::Auto),
-                "start_ahead": record.is_some_and(|phase| phase.start_ahead),
                 // U63: the phase's pause and who accepts it.
                 "pause": pause,
                 "acceptance": record.map_or(PhaseAcceptance::Lead, |phase| phase.acceptance),
@@ -890,7 +856,7 @@ pub(crate) fn waiting_for_owner(team: &Team) -> bool {
             return true;
         }
         phase.state.is_accepted()
-            && (phase.barrier || phase.state == PhaseState::Queued)
+            && phase.barrier
             && team
                 .tasks
                 .iter()
@@ -899,10 +865,51 @@ pub(crate) fn waiting_for_owner(team: &Team) -> bool {
     })
 }
 
+/// Task 164 (owner, 2026-11-07): an open task whose phase can start: not a
+/// draft's, not in a paused phase, not behind a phase awaiting the owner's
+/// acceptance and not held by a barrier. Only such work makes a member
+/// starve; a phase that cannot start is the owner's or the plan's wait.
+pub(crate) fn startable(team: &Team, task: &Task) -> bool {
+    !task.status.finished()
+        && task.status != TaskStatus::Draft
+        && phase_pause(team, task.phase).is_none()
+        && acceptance_block(team, task.phase).is_none()
+        && barrier_blockers(team, task).is_empty()
+}
+
+/// Task 164: a role whose work is to wait for others' work - review, QA,
+/// acceptance and merging. Idle is its normal state.
+pub(crate) fn waiting_role(role: &str) -> bool {
+    review_kind(role, "").is_some() || role.to_lowercase().contains("merg")
+}
+
+/// Task 164: the ready tasks of a member's role or kind that sit with another
+/// member: a task routed to its role, one assigned to a member of the same
+/// role, or (a waiting role) of the same kind. The lead can hand one over;
+/// only these make a waiting role starve.
+pub(crate) fn ready_for_role(team: &Team, member: &Member, ready: &[u32]) -> Vec<u32> {
+    let kind = |role: &str| review_kind(role, "").or_else(|| role.to_lowercase().contains("merg").then_some("merge"));
+    let own = kind(&member.role);
+    ready
+        .iter()
+        .copied()
+        .filter(|id| {
+            team.task(*id).is_some_and(|task| {
+                task.assignee != member.id
+                    && ((!task.role.is_empty() && task.role.eq_ignore_ascii_case(&member.role))
+                        || team.member(&task.assignee).is_some_and(|other| {
+                            other.role.eq_ignore_ascii_case(&member.role) || (own.is_some() && kind(&other.role) == own)
+                        }))
+            })
+        })
+        .collect()
+}
+
 /// Members idle without a ready task while tasks are open (C7), for status.
-/// U9: no episode exists while every open task waits for the owner.
+/// U9: no episode exists while every open task waits for the owner. Task
+/// 164: only tasks of phases that can start count as open.
 pub(crate) fn starved(team: &Team, now: f64) -> Vec<Starved> {
-    let open: Vec<u32> = team.tasks.iter().filter(|task| !task.status.finished()).map(|task| task.id).collect();
+    let open: Vec<u32> = team.tasks.iter().filter(|task| startable(team, task)).map(|task| task.id).collect();
     if open.is_empty()
         || waiting_for_owner(team)
         || !matches!(team.status, super::model::TeamStatus::Running | super::model::TeamStatus::Paused)

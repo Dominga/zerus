@@ -34,8 +34,11 @@ fn notices_name_members_by_id_and_role() {
     assert!(start_late_text(&team, &task, &attempt, 1000.0).contains("delivered to dev (Backend)"));
     assert!(blocked_text(&team, &task, &attempt, 1000.0).contains("dev (Backend)'s turn"));
     team.members.iter_mut().find(|member| member.id == "dev").unwrap().starved_since = Some(10.0);
-    let member = team.member("dev").unwrap().clone();
-    assert!(starved_text(&team, &member, 1210.0).contains("dev (Backend) has had no ready task"));
+    // Task 164: the digest needs an action; #3 waiting hard on #1 is one.
+    let mut waiting = team.clone();
+    waiting.task_mut(3).unwrap().deps[0].kind = DependencyKind::Hard;
+    let text = starved_text(&waiting, &["dev".into()], 1210.0).unwrap();
+    assert!(text.contains("Idle with no ready task: dev (Backend) 20 min") && text.contains("#3 Tests waits for deps: accept #1"), "{text}");
     team.task_mut(1).unwrap().attempts[0].no_report = true;
     team.task_mut(1).unwrap().attempts[0].turn_ended_at = Some(crate::state::now() - 10_000.0);
     team.task_mut(1).unwrap().attempts[0].last_reply = "Waiting for the build".into();

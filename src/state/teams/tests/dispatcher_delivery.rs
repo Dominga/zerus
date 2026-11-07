@@ -30,8 +30,10 @@ fn a_task_block_without_a_template_keeps_the_standard_task_text() {
     assert!(!text.contains("Task #1: API"), "{text}");
 }
 
+/// Task 158: a draft's tasks wait for its approval; once approved, the phase
+/// runs alongside the open phase 1 and hands out only its independent task.
 #[test]
-fn work_ahead_hands_only_an_independent_draft_task() {
+fn an_approved_phase_hands_only_an_independent_task_alongside() {
     let mut t = team();
     // The running phase has no ready work: every task waits for a decision.
     for task in &mut t.tasks {
@@ -46,16 +48,17 @@ fn work_ahead_hands_only_an_independent_draft_task() {
         {"id":5,"title":"Depends on API","assignee":"dev","deps":[{"task":1,"kind":"hard"}]}]}),
         &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
     let seen = vec![session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
-    // Off: nothing from the draft phase is handed out.
-    assert!(!steps(&t, &seen, 100.0).iter().any(|step| matches!(step, Step::WorkAhead { .. })));
-    t.settings.work_ahead = true;
-    let found = steps(&t, &seen, 100.0);
-    assert!(found.contains(&Step::WorkAhead { task: 4, member: "dev".into() }), "{found:?}");
-    assert!(!found.iter().any(|step| matches!(step, Step::WorkAhead { task: 5, .. })), "{found:?}");
-    // U31: its report waits Submitted and cannot be accepted before the
-    // phase is approved; approval opens it.
+    // A draft: nothing from it is handed out.
+    assert!(!steps(&t, &seen, 100.0).iter().any(|step| matches!(step, Step::HandOut { task: 4 | 5, .. })));
+    let mut approved = t.clone();
+    ops::apply(&mut approved, "approve-phase", &json!({"phase":2}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    let found = steps(&approved, &seen, 100.0);
+    assert!(found.contains(&Step::HandOut { task: 4, member: "dev".into() }), "{found:?}");
+    assert!(!found.iter().any(|step| matches!(step, Step::HandOut { task: 5, .. })), "{found:?}");
+    // U31: an older record's report made ahead of the draft waits Submitted
+    // and cannot be accepted before the phase is approved; approval opens it.
     t.task_mut(4).unwrap().status = TaskStatus::Submitted;
-    t.task_mut(4).unwrap().attempts.push(Attempt { n: 1, state: AttemptState::Reported, member: "dev".into(), worked_ahead: true, ..Default::default() });
+    t.task_mut(4).unwrap().attempts.push(Attempt { n: 1, state: AttemptState::Reported, member: "dev".into(), ..Default::default() });
     let mut events = Vec::new();
     let error = ops::apply(&mut t, "accept", &json!({"task":4}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap_err().to_string();
     assert!(error.contains("worked ahead of phase 2"), "{error}");

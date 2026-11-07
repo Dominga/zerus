@@ -54,10 +54,10 @@ fn a_phase_returned_to_a_draft_keeps_its_place_and_ids() {
     let none = BTreeSet::new();
     let returned = apply(&mut team, "return-to-draft", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap();
     assert_eq!((returned["phase"].as_u64(), returned["tasks"].clone()), (Some(3), json!([4])));
-    use PhaseState::{Draft, Queued};
+    use PhaseState::{Approved, Draft};
     assert_eq!(
         phase_rows(&team),
-        vec![(2, 2, Queued, vec![3]), (3, 3, Draft, vec![4]), (4, 4, Queued, vec![5]), (5, 5, Draft, vec![6]), (6, 6, Draft, vec![7])]
+        vec![(2, 2, Approved, vec![3]), (3, 3, Draft, vec![4]), (4, 4, Approved, vec![5]), (5, 5, Draft, vec![6]), (6, 6, Draft, vec![7])]
     );
     assert_eq!((team.task(4).unwrap().title.as_str(), team.task(4).unwrap().phase, team.task(4).unwrap().status), ("B", 3, TaskStatus::Draft));
     // The same team, stored with phase 5 already discarded, is compacted on
@@ -68,7 +68,7 @@ fn a_phase_returned_to_a_draft_keeps_its_place_and_ids() {
     // Discard the draft after c: only the last draft closes the gap.
     events.clear();
     apply(&mut team, "discard-phase", &json!({"phase":5}), &Actor::Human, &none, &mut events).unwrap();
-    let expected = vec![(2, 2, Queued, vec![3]), (3, 3, Draft, vec![4]), (4, 4, Queued, vec![5]), (5, 5, Draft, vec![6])];
+    let expected = vec![(2, 2, Approved, vec![3]), (3, 3, Draft, vec![4]), (4, 4, Approved, vec![5]), (5, 5, Draft, vec![6])];
     assert_eq!(phase_rows(&team), expected);
     assert_eq!((team.task(4).unwrap().title.as_str(), team.task(6).unwrap().title.as_str(), team.task(6).unwrap().phase), ("B", "E", 5));
     let renumbered = events.iter().rev().find(|event| event.kind == "phase_renumbered").unwrap();
@@ -82,7 +82,7 @@ fn a_phase_returned_to_a_draft_keeps_its_place_and_ids() {
     assert_eq!(error, "Phase 5 opens after the previous phase is approved");
     let approved = apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap();
     assert_eq!((approved["status"].as_str(), approved["tasks"].clone()), (Some("phase_approved"), json!([4])));
-    assert_eq!(phase_rows(&team)[1], (3, 3, Queued, vec![4]));
+    assert_eq!(phase_rows(&team)[1], (3, 3, Approved, vec![4]));
 }
 
 /// An accepted phase that has not started is edited in place: it stays
@@ -128,26 +128,30 @@ fn the_lead_edits_an_accepted_phase_only_on_the_owners_word() {
     assert_eq!(error, "Phase 3 has started; only a phase with no delivered attempt can change");
 }
 
-/// The owner moves an accepted phase that has not started; queued and barrier
-/// semantics follow the new order. The lead does it on the owner's word.
+/// The owner moves an accepted phase that has not started; barrier semantics
+/// follow the new order (task 158: only a barrier phase waits for the ones
+/// before it). The lead does it on the owner's word.
 #[test]
-fn an_accepted_phase_moves_and_its_queue_follows_the_order() {
+fn an_accepted_phase_moves_and_its_barrier_follows_the_order() {
     let mut team = running_team();
     let mut events = Vec::new();
     let none = BTreeSet::new();
     phase_one_done(&mut team);
     extend(&mut team, &json!({"phase_title":"A","tasks":[{"id":3,"title":"A","assignee":"dev"}]}), &lead(), &none, &mut events).unwrap();
     extend(&mut team, &json!({"phase_title":"B","tasks":[{"id":4,"title":"B","assignee":"qa"}]}), &lead(), &none, &mut events).unwrap();
+    for phase in &mut team.phases {
+        phase.barrier = true;
+    }
     apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
     apply(&mut team, "approve-phase", &json!({"phase":3}), &Actor::Human, &none, &mut events).unwrap();
-    assert_eq!(team.phases.iter().map(|phase| phase.state).collect::<Vec<_>>(), vec![PhaseState::Approved, PhaseState::Queued]);
+    assert_eq!(team.phases.iter().map(|phase| phase.state).collect::<Vec<_>>(), vec![PhaseState::Approved, PhaseState::Approved]);
     assert_eq!(plan::ready(&team), vec![3]);
-    // The owner moves B before A: B runs first, A queues behind it.
+    // The owner moves B before A: B runs first, A's barrier waits for it.
     let moved = apply(&mut team, "move-phase", &json!({"phase":3,"to":2,"position":"before"}), &Actor::Human, &none, &mut events).unwrap();
     assert_eq!(moved["order"], json!([3, 2]));
     assert_eq!(
         team.phases.iter().map(|phase| (phase.n, phase.order(), phase.state, phase.tasks.clone())).collect::<Vec<_>>(),
-        vec![(3, 2, PhaseState::Approved, vec![4]), (2, 3, PhaseState::Queued, vec![3])]
+        vec![(3, 2, PhaseState::Approved, vec![4]), (2, 3, PhaseState::Approved, vec![3])]
     );
     assert_eq!(plan::ready(&team), vec![4]);
     // The lead moves it back on the owner's word.
@@ -221,19 +225,20 @@ fn a_paused_phase_holds_its_place_until_the_pause_is_removed() {
     assert!(error.contains("Phase 2 has started work (#3)"), "{error}");
 }
 
-/// A queued phase that is paused does not start when the phases before it
-/// end; it starts once the pause is removed.
+/// An approved phase that is paused hands nothing out, alongside or after
+/// the phases before it; it starts once the pause is removed.
 #[test]
-fn a_paused_queued_phase_starts_only_after_its_pause() {
+fn a_paused_phase_starts_only_after_its_pause() {
     let mut team = running_team();
     let mut events = Vec::new();
     let none = BTreeSet::new();
     extend(&mut team, &json!({"tasks":[{"id":3,"title":"A","assignee":"dev"}]}), &lead(), &none, &mut events).unwrap();
     apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
-    assert_eq!(team.phases[0].state, PhaseState::Queued);
+    assert_eq!(team.phases[0].state, PhaseState::Approved);
+    assert!(plan::ready(&team).contains(&3), "it runs alongside phase 1");
     apply(&mut team, "pause-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
+    assert!(!plan::ready(&team).contains(&3));
     phase_one_done(&mut team);
-    assert_eq!(team.phases[0].state, PhaseState::Queued);
     assert!(plan::ready(&team).is_empty());
     apply(&mut team, "unpause-phase", &json!({"phase":2}), &Actor::Human, &none, &mut events).unwrap();
     assert_eq!(team.phases[0].state, PhaseState::Approved);

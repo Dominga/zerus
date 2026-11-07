@@ -69,15 +69,14 @@ QJsonObject idleFreeTeam()
 }
 
 // U61: with Auto-accept drafts on, a drafted phase stays a draft the lead edits
-// until its first task is handed out; then Auto accepts it.
-static QJsonObject autoDraftTeam(bool startAhead, bool accepted)
+// until Auto accepts it (task 158: once its plan has no blocker).
+static QJsonObject autoDraftTeam(bool accepted)
 {
     auto t = phasedTeam();
     auto settings = t["settings"].toObject(); settings["auto_accept"] = true; settings["phase_approval"] = "auto"; t["settings"] = settings;
     auto phases = t["phases"].toArray();
     auto three = phases[1].toObject();
     three["approval"] = "auto";
-    if (startAhead) three["start_ahead"] = true;
     if (accepted) { three["state"] = "approved"; three["decided_by"] = "Auto"; three["decided_at"] = 1800.0; t["pending_phase"] = 0; }
     phases[1] = three; t["phases"] = phases;
     if (accepted) {
@@ -135,7 +134,7 @@ private slots:
     void phaseHeadersShowTheirModeLiveAndLockFromTheirHeader();
     void planEditKeepsTheRoadmap();
     void planEditsWaitForTheFullPlan();
-    void workAheadSwitchAndBadge();
+    void noWorkAheadSwitchOrBadge();
     void thePlanHidesCancelledTasksAndNeverSendsTheCopy();
     void aTaskThatHasNotStartedMovesToAnotherPhase();
     void anAutoAcceptedDraftReadsAsDraftUntilItStarts();
@@ -1992,10 +1991,10 @@ void TestTeamsUiPlan::planEditsWaitForTheFullPlan()
     QCOMPARE(calls(script(), "plan").first()["revision"].toInt(), 12);
 }
 
-// U31: the owner's Work ahead switch in the Team tab's toolbar and the
-// "worked ahead" mark on a task worked before its draft phase was approved,
-// in one picture per theme.
-void TestTeamsUiPlan::workAheadSwitchAndBadge()
+// Task 158 (owner, 2026-11-07): Work ahead is gone. The toolbar has no switch
+// for it, even for a team stored with it on, and a task worked ahead by an
+// older record shows no mark of its own.
+void TestTeamsUiPlan::noWorkAheadSwitchOrBadge()
 {
     auto t = graphTeam();
     auto settings = t["settings"].toObject(); settings["work_ahead"] = true; t["settings"] = settings;
@@ -2018,38 +2017,15 @@ void TestTeamsUiPlan::workAheadSwitchAndBadge()
     controller.refresh();
     QTRY_VERIFY(controller.team("team-1"));
     panel.showTeam("team-1"); workspace.showTeam("team-1");
-    QAbstractButton *ahead = nullptr;
-    QTRY_VERIFY((ahead = workspace.findChild<QAbstractButton *>("teamWorkspaceWorkAhead")));
-    QTRY_VERIFY(ahead->isChecked());
-    QCOMPARE(ahead->accessibleName(), QString("Work ahead"));
+    QTRY_VERIFY(workspace.findChild<QAbstractButton *>("teamWorkspaceAutoAccept"));
+    QVERIFY(!workspace.findChild<QAbstractButton *>("teamWorkspaceWorkAhead"));
     const auto parsed = Teams::parse(t);
-    QVERIFY(parsed.task(8) && parsed.task(8)->workedAhead());
     const auto live = [](const Member &) { Live state; state.known = true; return state; };
     TeamTaskCard card;
     card.resize(560, 420); card.show();
-    for (const bool dark : {true, false}) {
-        if (dark) darkPalette(); else lightPalette();
-        workspace.setTheme(dark);
-        card.setTask(parsed, 8, live, dark);
-        QLabel *badge = nullptr;
-        QTRY_VERIFY((badge = card.findChild<QLabel *>("teamTaskWorkedAhead")));
-        QCOMPARE(badge->text(), QString("worked ahead"));
-        QTRY_VERIFY(workspace.findChild<QAbstractButton *>("teamWorkspaceWorkAhead"));
-        const auto dir = qEnvironmentVariable("ZERUS_TEAM_SHOTS");
-        if (dir.isEmpty()) continue;
-        QTest::qWait(250);
-        // The toolbar with the switch above the task card with the mark.
-        auto *toolbar = workspace.findChild<QWidget *>("teamWorkspaceToolbar");
-        QVERIFY(toolbar);
-        const QPixmap top = toolbar->grab(), bottom = card.grab();
-        QPixmap picture(qMax(top.width(), bottom.width()), top.height() + 12 + bottom.height());
-        picture.fill(dark ? QColor("#15191f") : QColor("#f5f7f9"));
-        QPainter painter(&picture);
-        painter.drawPixmap(0, 0, top);
-        painter.drawPixmap(0, top.height() + 12, bottom);
-        painter.end();
-        QVERIFY(picture.save(QDir(dir).filePath(QStringLiteral("ux-31-work-ahead-%1.png").arg(dark ? "dark" : "light"))));
-    }
+    card.setTask(parsed, 8, live, true);
+    QTRY_VERIFY(card.findChild<QWidget *>("teamTaskTitle"));
+    QVERIFY(!card.findChild<QLabel *>("teamTaskWorkedAhead"));
 }
 
 void TestTeamsUiPlan::thePlanHidesCancelledTasksAndNeverSendsTheCopy()
@@ -2169,7 +2145,7 @@ void TestTeamsUiPlan::anAutoAcceptedDraftReadsAsDraftUntilItStarts()
 {
     Settings::set("workspace/skin", "whitewh");
     const auto restore = qScopeGuard([] { Settings::remove("workspace/skin"); darkPalette(); });
-    setTeam(autoDraftTeam(false, false));
+    setTeam(autoDraftTeam(false));
     HgsClient client(FakeCli::program(script()));
     TeamController controller(&client);
     TeamPanel panel(&controller);
@@ -2196,7 +2172,7 @@ void TestTeamsUiPlan::anAutoAcceptedDraftReadsAsDraftUntilItStarts()
         QVERIFY(phaseBadge);
         QCOMPARE(phaseBadge->text(), QStringLiteral("Draft (auto)"));
         QCOMPARE(badge(3)->property("state").toString(), QStringLiteral("draft"));
-        QVERIFY(badge(3)->toolTip().startsWith(QStringLiteral("Auto accepts it when its first task starts")));
+        QVERIFY(badge(3)->toolTip().startsWith(QStringLiteral("Auto accepts it once its plan has no blocker")));
         QVERIFY(!phaseScrollOf(&workspace, 3)->findChild<QLabel *>("teamPhaseStartAhead"));
     }
     view("graph");
@@ -2205,34 +2181,20 @@ void TestTeamsUiPlan::anAutoAcceptedDraftReadsAsDraftUntilItStarts()
     QVERIFY(!workspace.findChild<QPushButton *>("teamWorkspaceDrafts"));
     auto *autoSwitch = workspace.findChild<QAbstractButton *>("teamWorkspaceAutoAccept");
     QVERIFY(autoSwitch && autoSwitch->isChecked());
-    QCOMPARE(autoSwitch->toolTip(), QStringLiteral("On: a phase draft without errors stays a draft the lead edits, and Auto accepts it when its first task starts"));
+    QCOMPARE(autoSwitch->toolTip(), QStringLiteral("On: Auto accepts a phase draft once it has no errors, and it runs alongside the phases before it"));
     if (auto *phaseSwitch = workspace.findChild<QAbstractButton *>("teamPhaseAutoAccept")) QCOMPARE(phaseSwitch->toolTip(), autoSwitch->toolTip());
     // The plan's band says the same.
     QTRY_VERIFY(controller.watched() && controller.watched()->full);
     const auto bands = TeamUi::phaseBands(*controller.watched(), [](const PhaseGroup &) { return true; });
-    QVERIFY(std::any_of(bands.cbegin(), bands.cend(), [](const TeamUi::TaskView::PhaseBand &band) { return band.n == 3 && band.autoDraft && !band.startAhead; }));
+    QVERIFY(std::any_of(bands.cbegin(), bands.cend(), [](const TeamUi::TaskView::PhaseBand &band) { return band.n == 3 && band.autoDraft; }));
     QVERIFY(std::none_of(bands.cbegin(), bands.cend(), [](const TeamUi::TaskView::PhaseBand &band) { return band.n == 2 && band.autoDraft; }));
     if (shotsWanted()) {   // #713: the light half of the shots
         shot(&workspace, "u61-auto-draft-dark");
         workspace.setTheme(false); lightShot(&workspace, "u61-auto-draft-light");
         darkPalette(); workspace.setTheme(true);
     }
-    // The lead started it ahead: the header says so.
-    setTeam(autoDraftTeam(true, false));
-    QTRY_VERIFY(([&] { controller.refresh(); auto *frame = phaseScrollOf(&workspace, 3); return frame && frame->findChild<QLabel *>("teamPhaseStartAhead"); })());
-    auto *ahead = phaseScrollOf(&workspace, 3)->findChild<QLabel *>("teamPhaseStartAhead");
-    QCOMPARE(ahead->text(), QStringLiteral("started ahead by the lead"));
-    QVERIFY(ahead->toolTip().startsWith(QStringLiteral("The lead started it ahead")));
-    QVERIFY(badge(3)->toolTip().contains(QStringLiteral("Its reports need no approval from you")));
-    QTRY_VERIFY(([&] { if (!controller.watched()) return false; const auto now = TeamUi::phaseBands(*controller.watched(), [](const PhaseGroup &) { return true; });
-                       return std::any_of(now.cbegin(), now.cend(), [](const TeamUi::TaskView::PhaseBand &band) { return band.n == 3 && band.startAhead; }); })());
-    if (shotsWanted()) {   // #713: the light half of the shots
-        shot(&workspace, "u61-started-ahead-dark");
-        workspace.setTheme(false); lightShot(&workspace, "u61-started-ahead-light");
-        darkPalette(); workspace.setTheme(true);
-    }
-    // Its first task was handed out: Auto accepted it, and it reads as accepted.
-    setTeam(autoDraftTeam(true, true));
+    // Auto accepted it, and it reads as accepted.
+    setTeam(autoDraftTeam(true));
     QTRY_VERIFY(([&] { controller.refresh(); auto *frame = phaseScrollOf(&workspace, 3); return frame && frame->findChild<QLabel *>("teamPhaseByAuto"); })());
     QVERIFY(!badge(3)->property("auto").toBool());
     QVERIFY(badge(3)->property("state").toString() != QStringLiteral("draft"));

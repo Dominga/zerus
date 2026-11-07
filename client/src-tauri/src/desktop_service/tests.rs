@@ -1795,7 +1795,11 @@ fn service_catalog_completion_populates_the_tray_like_the_gui_with_device_attent
             assert_eq!(desk.attention(), 1, "the device's review mark is included");
             // The icon shows the active sessions (core menubar tests pin the rule).
             assert!(desk.active() <= desk.total());
-            assert_eq!(desk.active(), 1, "only the row with the review mark is active");
+            assert_eq!(
+                desk.active(),
+                1,
+                "only the row with the review mark is active"
+            );
             assert_eq!(desk.face(), Face::counts(1, 1, false));
             assert_eq!(desk.badge().as_deref(), Some("1"));
             assert_eq!(
@@ -1820,7 +1824,11 @@ fn service_catalog_completion_populates_the_tray_like_the_gui_with_device_attent
             ));
             assert!(desk.computers()[&ComputerId::from("studio")].fresh());
             desk.set_marks(DeviceMarks::default());
-            assert_eq!(desk.face(), Face::counts(0, 0, false), "no active row once the mark is gone");
+            assert_eq!(
+                desk.face(),
+                Face::counts(0, 0, false),
+                "no active row once the mark is gone"
+            );
             assert!(desk.badge().is_none());
         }
         service.join().await.unwrap();

@@ -807,7 +807,10 @@ impl Pump {
     pub(crate) fn git_scope(&self, computer: &str, key: &str) -> Option<GitScope> {
         let inner = self.lock();
         let row = inner.mirror.computers.get(computer)?.rows.get(key)?;
-        Some(GitScope { source: row.catalog_source.clone(), path: zerus_client_core::git::path(row)?.to_owned() })
+        Some(GitScope {
+            source: row.catalog_source.clone(),
+            path: zerus_client_core::git::path(row)?.to_owned(),
+        })
     }
 
     /// The last-known row of `(computer, catalog key)`.

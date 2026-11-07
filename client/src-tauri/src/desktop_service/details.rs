@@ -666,12 +666,21 @@ pub(super) async fn frame(
             }
             let id = entry.route.id.clone();
             let result = entry.route.apply(kind, value);
-            let terminal_git = (key.topic == topic::GIT && kind == "detail").then(|| {
-                result.as_ref().ok()?.iter().find_map(|change| match change {
-                    Change::Git { update: zerus_client_core::GitUpdate::Unavailable { code }, .. } => Some(code.clone()),
-                    _ => None,
+            let terminal_git = (key.topic == topic::GIT && kind == "detail")
+                .then(|| {
+                    result
+                        .as_ref()
+                        .ok()?
+                        .iter()
+                        .find_map(|change| match change {
+                            Change::Git {
+                                update: zerus_client_core::GitUpdate::Unavailable { code },
+                                ..
+                            } => Some(code.clone()),
+                            _ => None,
+                        })
                 })
-            }).flatten();
+                .flatten();
             if let Some(code) = terminal_git {
                 let recovered = hub.recover(&key, &id, &code, false)?;
                 shared.details_changed.notify_one();

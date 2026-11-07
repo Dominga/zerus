@@ -31,7 +31,7 @@ fn visible_rows_flow_through_the_original_local_and_remote_watches() {
     );
     let (tx, rx) = channel();
     let mut seen = Seen::new(rx);
-    let mut fleet = Fleet::start_with(
+    let fleet = Fleet::start_with(
         fake.path(),
         tx,
         Timing {

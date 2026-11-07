@@ -55,6 +55,7 @@ fn run(case: &str) {
             "--exact",
             "--nocapture",
         ])
+        .current_dir(directory.path())
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", directory.path())
@@ -120,6 +121,12 @@ fn every_matching_archive_is_selected_with_legacy_and_label_routing_preserved() 
 fn ordinary_writes_rewrites_and_removal_keep_reference_coverage_current() {
     run("writers");
 }
+#[cfg(windows)]
+#[test]
+fn native_receipt_publication_keeps_directory_pins_and_honors_a_live_reader() {
+    run("native-receipt-publication");
+}
+
 #[test]
 fn a_changed_relevant_body_is_never_overwritten_by_a_preloaded_record() {
     run("changed");
@@ -448,6 +455,10 @@ fn isolated_reference_probe() {
                     "the global restore index must not inherit scoped search omissions"
                 );
             }
+        }
+        #[cfg(windows)]
+        "native-receipt-publication" => {
+            updates::test_native_publication(&root());
         }
         "writers" => {
             original["name"] = json!("codex/p/renamed");

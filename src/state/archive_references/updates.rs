@@ -6,6 +6,8 @@ use super::super::repositories::directory::Directory;
 use super::*;
 const DIRECTORY: &str = "archive-reference-writes-v1";
 const CAP: usize = META + 2048;
+#[cfg(windows)]
+mod windows;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Update {
@@ -112,19 +114,29 @@ pub(super) fn write(metadata: &Metadata, stamp: &Version) -> Result<()> {
     {
         use std::io::Write;
         use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::{
+            Foundation::GENERIC_WRITE,
+            Storage::FileSystem::{DELETE, SYNCHRONIZE},
+        };
         let from = directory.path.join(staging);
-        let to = directory.path.join(name);
         let mut file = crate::platform::refuse_link(
             fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
+                .access_mode(GENERIC_WRITE | DELETE | SYNCHRONIZE)
                 .share_mode(0),
         )
         .open(&from)
         .map_err(fail)?;
-        let result = file.write_all(&bytes).and_then(|()| file.sync_all());
+        let result = file
+            .write_all(&bytes)
+            .and_then(|()| file.sync_all())
+            .and_then(|()| {
+                // SAFETY: this exclusive CREATE_NEW file was opened synchronously
+                // above, with DELETE access, and stays live through publication.
+                unsafe { windows::rename_same_parent(&file, &name) }
+            });
         drop(file);
-        let result = result.and_then(|()| fs::rename(&from, &to));
         if let Err(error) = result {
             let _ = fs::remove_file(from);
             return Err(fail(error));
@@ -191,4 +203,90 @@ pub(super) fn forget(id: &str) -> Result<()> {
         }
     }
     directory.verify()
+}
+
+#[cfg(all(test, windows))]
+pub(super) fn test_native_publication(root: &Path) {
+    use std::{io::Write, os::windows::fs::OpenOptionsExt};
+    use windows_sys::Win32::{
+        Foundation::GENERIC_WRITE,
+        Storage::FileSystem::{DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE},
+    };
+    let path = root.join("native-publication");
+    fs::create_dir(&path).unwrap();
+    let directory = Directory::open(&path).unwrap();
+    let name = key("11111111-1111-4111-8111-111111111111").unwrap();
+    let target = path.join(&name);
+    let stage = path.join(".original-stage");
+    assert_ne!(std::env::current_dir().unwrap(), path);
+    let mut file = crate::platform::refuse_link(
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .access_mode(GENERIC_WRITE | DELETE | SYNCHRONIZE)
+            .share_mode(0),
+    )
+    .open(&stage)
+    .unwrap();
+    file.write_all(b"first receipt").unwrap();
+    file.sync_all().unwrap();
+    let wrong_case = format!("{}.json", "A".repeat(64));
+    let escaped = format!("{}\\.json", "a".repeat(63));
+    for invalid in [
+        "",
+        "..",
+        "/absolute",
+        "relative\\path",
+        "stream:name",
+        "a.json",
+        &wrong_case,
+        &escaped,
+    ] {
+        assert_eq!(
+            unsafe { windows::rename_same_parent(&file, invalid) }
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert!(stage.exists());
+        assert!(!target.exists());
+    }
+    unsafe { windows::rename_same_parent(&file, &name) }.unwrap();
+    directory.verify().unwrap();
+    assert!(!stage.exists());
+    drop(file);
+    assert_eq!(fs::read(&target).unwrap(), b"first receipt");
+    assert!(
+        !std::env::current_dir().unwrap().join(&name).exists(),
+        "the native basename must not resolve through cwd"
+    );
+    assert!(
+        fs::rename(&path, path.with_file_name("replaced-parent")).is_err(),
+        "publication must retain original directory custody"
+    );
+    let reader = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(&target)
+        .unwrap();
+    let mut next = crate::platform::refuse_link(
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .access_mode(GENERIC_WRITE | DELETE | SYNCHRONIZE)
+            .share_mode(0),
+    )
+    .open(&stage)
+    .unwrap();
+    next.write_all(b"replacement receipt").unwrap();
+    next.sync_all().unwrap();
+    let error = unsafe { windows::rename_same_parent(&next, &name) }.unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(32));
+    assert_eq!(fs::read(&target).unwrap(), b"first receipt");
+    directory.verify().unwrap();
+    drop(reader);
+    unsafe { windows::rename_same_parent(&next, &name) }.unwrap();
+    drop(next);
+    assert_eq!(fs::read(&target).unwrap(), b"replacement receipt");
+    directory.verify().unwrap();
 }

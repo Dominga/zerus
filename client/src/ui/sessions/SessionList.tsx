@@ -592,14 +592,14 @@ export function SessionList() {
   const onStripEnter = () => {
     clearTimeout(leaveTimer);
     if (!stripMode() || peek()) return;
-    enterTimer = setTimeout(() => { if (stripMode() && !peek()) { hoverOpened = true; setPeek(true); } }, 150);
+    enterTimer = window.setTimeout(() => { if (stripMode() && !peek()) { hoverOpened = true; setPeek(true); } }, 150);
   };
   const onSectionEnter = () => clearTimeout(leaveTimer);
   const onSectionLeave = () => {
     clearTimeout(enterTimer);
     if (!peek() || !hoverOpened) return;
-    const check = () => { if (keepOpen()) leaveTimer = setTimeout(check, 100); else { hoverOpened = false; setPeek(false); } };
-    leaveTimer = setTimeout(check, 350);
+    const check = () => { if (keepOpen()) leaveTimer = window.setTimeout(check, 100); else { hoverOpened = false; setPeek(false); } };
+    leaveTimer = window.setTimeout(check, 350);
   };
   const onKeyEsc = (e: KeyboardEvent) => {
     if (e.key !== "Escape") return;

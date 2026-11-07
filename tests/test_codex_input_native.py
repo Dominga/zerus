@@ -145,6 +145,13 @@ class NativeCodexStartup(test_pause.Harness):
             time.sleep(.1)
         self.fail(label + '\n' + self.screen())
 
+    def turn_completed(self, text):
+        # SessionStart or a previous Stop can still describe idle after Enter.
+        # Require this exact provider request too; never resend to make it true.
+        record = self.binding(self.name)
+        return (any(row['texts'][-1:] == [text] for row in self.server.requests)
+                and record.get('activity') == 'idle' and not record.get('expected_id'))
+
     def pause_settled_original(self):
         # SessionStart can publish idle before this turn's UserPromptSubmit.
         # Only these preflight refusals prove that pause sent no signal.
@@ -271,11 +278,10 @@ class NativeCodexStartup(test_pause.Harness):
                    and 'Hooks need review' not in self.screen())
         self.assertEqual((hooks.read_bytes(), hooks.stat().st_mtime_ns), (original, stamp))
         self.assertIsNone(card(), 'An unchanged registration must not request trust again')
-        result = message('Synthetic unchanged-hook resume.')
+        unchanged = 'Synthetic unchanged-hook resume.'
+        result = message(unchanged)
         self.assertEqual(result.returncode, 0, result.stderr + '\n' + self.screen())
-        self.until('The resumed turn must finish', lambda:
-                   self.binding(self.name).get('activity') == 'idle'
-                   and not self.binding(self.name).get('expected_id'))
+        self.until('The resumed turn must finish', lambda: self.turn_completed(unchanged))
 
         for mode in ('resume', 'restore'):
             with self.subTest(mode=mode):
@@ -310,9 +316,8 @@ class NativeCodexStartup(test_pause.Harness):
                 text = 'Synthetic after ' + mode + ' hook review.'
                 result = message(text)
                 self.assertEqual(result.returncode, 0, result.stderr + '\n' + self.screen())
-                self.until('The original resumed conversation must complete its turn', lambda:
-                           self.binding(self.name).get('activity') == 'idle'
-                           and not self.binding(self.name).get('expected_id'))
+                self.until('The original resumed conversation must complete its turn',
+                           lambda: self.turn_completed(text))
                 self.assertEqual(self.binding(self.name)['conversation_id'], conversation)
                 self.assertEqual(sum(row['texts'][-1:] == [text] for row in self.server.requests), 1)
 

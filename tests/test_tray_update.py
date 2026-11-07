@@ -112,7 +112,7 @@ if sys.argv[1:4] == ['exec', '--', 'tauri']:
 class TrayUpdate(unittest.TestCase):
     def setUp(self):
         # Short even with macOS's canonical /private/tmp Unix socket prefix.
-        self.root = Path(tempfile.mkdtemp(prefix='ztu-', dir='/tmp'))
+        self.root = Path(tempfile.mkdtemp(prefix='ztu-', dir=os.environ.get('ZERUS_TEST_SHORT_TMPDIR', '/tmp')))
         self.owned = self.control = None
         self.addCleanup(self.stop_all)
         self.root = self.root.resolve()

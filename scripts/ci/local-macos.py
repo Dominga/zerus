@@ -23,7 +23,7 @@ SPEC = importlib.util.spec_from_file_location('local_linux', Path(__file__).with
 CI = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CI)
 SUPPORTED = {'client-native-macos-core', 'client-native-macos-tauri', 'connector-macos',
-             'cli-macos-debug', 'cli-macos-core', 'cli-macos-native', 'ios'}
+             'cli-macos-debug', 'cli-macos-core', 'cli-macos-native'}
 RUST_CACHE = ('echo "rustc=$(rustc{toolchain} -Vv | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"\n'
               'echo "epoch=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"')
 TOOLCHAINS = {'rustup toolchain install 1.99.1 --profile minimal',
@@ -43,6 +43,9 @@ def plan(workflow, cli, selected=None):
     for key, job in workflow['jobs'].items():
         row = dict(id=key, name=job.get('name', key), status='not run', steps=[])
         result.append(row)
+        if key == 'ios':
+            row['reason'] = 'iOS global Xcode selection and device services are not isolated locally; GitHub only'
+            continue
         if key not in SUPPORTED or (selected is not None and key not in selected):
             row['reason'] = 'other platform or GitHub aggregate' if selected is None else 'not selected'
             continue
@@ -58,6 +61,9 @@ def plan(workflow, cli, selected=None):
             action = step.get('uses', '')
             if action and body:
                 item['reason'] = 'mixed action and command; no infrastructure substitution'
+                continue
+            if 'select-xcode.sh' in body or re.search(r'\bxcode-select\b', body):
+                item['reason'] = 'global Xcode selection excluded on owner hardware; GitHub only'
                 continue
             if action.startswith(('actions/checkout@', 'actions/cache/', 'actions/upload-artifact@',
                                   'actions/download-artifact@')) or body.rstrip('\n') in TRANSPORT:
@@ -394,6 +400,7 @@ class Runner:
                    CFFIXED_USER_HOME=str(home),
                    PATH=str(self.tools) + ':' + str(self.node) + ':/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
                    TMPDIR=str(private_tmp), TMUX_TMPDIR=str(private_tmp),
+                   ZERUS_TEST_SHORT_TMPDIR=str(private_tmp),
                    XDG_CONFIG_HOME=str(home / '.config'), XDG_STATE_HOME=str(home / '.local/state'),
                    XDG_DATA_HOME=str(home / '.local/share'), XDG_CACHE_HOME=str(home / '.cache'),
                    CARGO_HOME=str(self.cache / 'cargo'), RUSTUP_HOME=str(self.cache / 'rustup'),

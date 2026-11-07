@@ -381,7 +381,7 @@ class Qualification:
         require(self.gui_runtime is None, "A private GUI runtime already exists.")
         # A resolved native fixture below /private/var/folders can put hgs-tray
         # at Darwin's 104-byte sockaddr_un limit. Own a short separate directory.
-        self.gui_runtime = tempfile.TemporaryDirectory(prefix="zerus-cask-ipc-", dir="/tmp")
+        self.gui_runtime = tempfile.TemporaryDirectory(prefix="zerus-cask-ipc-", dir=os.environ.get("ZERUS_TEST_SHORT_TMPDIR", "/tmp"))
         self.env["TMPDIR"] = str(Path(self.gui_runtime.name).resolve())
 
     def gui_runtime_info(self):

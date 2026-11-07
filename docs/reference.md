@@ -628,6 +628,14 @@ while 0.155.1 lacks that required flag.
 
 New hooks call `hgs __state hook`. Existing trusted Python commands are retained:
 `hgs_state.py` forwards them to the Rust CLI, so keep Python for legacy hooks.
+Codex can request **Hooks need review** before both a new session and a saved
+conversation's resume or archive restore. Activity shows that exact native
+decision; messages remain blocked while it is open. Only the person's explicit
+choice trusts or skips hooks, and Codex persists that choice. A pending message
+receipt is never retried by recognizing or answering the card. Normal supervised
+startup preserves existing tracking definitions; an unchanged registration does
+not require trust again merely because the Zerus binary was updated. New or
+changed definitions can require a new native review.
 The CLI and session core are Rust; SQLite is bundled and requires a C compiler at
 build time. Existing session bindings and provider history remain compatible.
 
@@ -2901,6 +2909,56 @@ known use, sessions and file protections still refuse removal. Generic backgroun
 maintenance remains conservative; retained results never reconstruct this
 original confirmation or retry an unknown removal.
 
+For a local Linux or macOS native confirmation, a selected CLI that supports
+`worktree-program-stop-v1` and `worktree-program-cleanup-v1` can also stop the
+programs proven to use that generated checkout. The dialog lists the complete
+bounded native manifest before **Stop and remove folder** is confirmed. This
+includes editors and terminals the person opened there. Only those original
+process identities are eligible: immediately before each signal, Zerus checks
+their native birth/pin and current cwd or open-file membership in the same held
+checkout. Newly discovered or replaced programs require fresh review. Programs
+needed to verify and settle the operation, and their protected ancestors, are
+never signalled. Pause, native Stop, manual cleanup and background maintenance
+retain their existing scope.
+
+These native helpers resolve the existing configured session-state root once
+at command configuration load, including aliases selected through `HGS_STATE_DIR`,
+`XDG_STATE_HOME`, or a symlinked home or `~/.local`. All phase reads use that
+same physical root. The configuration identity is unchanged; registrations and
+their original argv keep their existing spelling. Journal descendants and the
+checkout walk still refuse symlinks. A missing, unreadable or non-directory
+state root is refused with its configured path; inspection does not create it
+or choose a fallback profile.
+
+The original Terminate UUID and exact successful archive receipt precede a
+separate, durably reserved program-stop UUID. Normal stop sends TERM with a
+15-second phase bound and never escalates automatically. If process metadata
+is temporarily unavailable after signalling, read-only exit observation stays
+within that original phase; only a later exact native pin observation establishes
+exit. Uncertainty at the bound remains Unknown. If verified original programs
+survive, **Force stop…** opens a new native confirmation listing the
+currently surviving originals, with a new UUID. It becomes available only after
+the previous mutating helper, descendants, pipes and loans physically settle.
+Missing or uncertain outcomes cannot create a Force offer. The original selected
+CLI, configuration, environment, Actions claim and checkout/ancestor handles
+remain held across both confirmations, within one original five-minute custody
+bound. Neither a deadline nor a returned status proves drain.
+
+After a known Complete stop and actual mutation retirement, that same live
+Remove continuation may open one final cleanup phase, with its own UUID. It
+reuses the guarded cleanup engine: fresh file, ownership, session and known-use
+checks still apply; the branch and archive restore identity stay. Only the
+original read-only holder's one proven root descriptor is omitted from process
+use accounting. Another descriptor, cwd use or any other process still counts.
+The holder remains charged independently; it has no stop or deletion verb.
+Cleanup returns Removed, Kept or Unknown once. A lost or partial deletion stays
+Unknown, with original-ID status lookup only; a restart, reconnect or a new UUID
+cannot reconstruct the continuation or repeat it. The new fixed stdio helper
+commands accept only their current canonical native parent's original-child
+proof, never renderer, manual or background requests. If the selected route
+cannot support this pipeline, removal remains available through the existing
+separately guarded folder review rather than an alternate CLI selection.
+
 A checkout with uncommitted or untracked files can also have such access
 denials. Its review then offers both consents (`discardable_with_process_consent`
 beside the discard and process fingerprints, while `discardable` stays false for
@@ -3080,9 +3138,30 @@ of whether automatic provider-error recovery is enabled or the GUI is open. It
 imports at most 64 old ownership receipts and checks at most one queued worktree
 per 30-second round. An indexed private queue schedules retained worktrees for a
 later hourly check; it does not rescan project disks or journals. Archive metadata
-checks stream at most 5000 entries and 32 MiB within their deadline; incomplete
-coverage keeps automatic cleanup from removing the folder. Old removed receipts
-do not repopulate the queue once their Git metadata is gone.
+checks verify compact reference metadata against the complete native archive-file
+roster and exact file versions, at most 5000 entries and 32 MiB within their
+deadline. Ordinary archive catalog migration/reconciliation builds this metadata;
+archive writes, rewrites and removals maintain it. Its ordinary reconciliation
+stamp is separate from the search stamp, so an older CLI's search refresh cannot
+hide pending reference maintenance. Warm pages still use only these stamps.
+Missing, stale or corrupt coverage keeps the folder; cleanup never rebuilds it
+or interprets an omitted row as no reference.
+Before deletion, an indexed checkout query reads the relevant authoritative
+archive bodies within the same bounds and durably prepares Restore for every
+compatible reference, including older archives without an ownership field.
+Unrelated archive bodies and conversation journals do not consume this check's
+byte budget. Reference coverage is independent of search/label filtering, and an
+interrupted initial migration cannot publish complete coverage. Branch, head and
+ownership checks remain independent. Old removed receipts do not repopulate the
+queue once their Git metadata is gone.
+
+Reference reads bind a regular native catalog object before SQLite runs; its
+private read-only reader never reopens mutable paths or accesses SQLite sidecars.
+Unexpected sidecars or replacement refuse coverage within the original budget.
+Archive write hooks publish bounded per-ID native metadata updates without
+opening SQLite. Reads verify those updates against the current archive objects;
+ordinary catalog reconciliation absorbs them. Missing or corrupt updates never
+substitute for a stale base row.
 
 All automatic rules use fresh native checks under the repository/session locks.
 They preserve branches, changed/untracked files and **all ignored local data**,
@@ -3131,6 +3210,21 @@ A replacement checkout at the same path or branch is kept for manual review;
 older sessions without a launch ownership record also require review. Fresh
 removal fingerprints include the ownership nonce, so replacing a checkout after
 review cannot inherit its removal consent.
+
+On Linux and macOS, `worktrees programs --json` provides read-only native
+discovery for an original live session and its verified launch-owned checkout.
+Its closed stdin object contains `capture`; the bounded reply binds the exact
+capture, configuration, boot and checkout directory object to the complete list
+of observed program PIDs and native birth identities. This is data, never a stop
+permit. The command sends no signals and changes no cleanup or Force authority.
+It refuses an incomplete or changing census, changed ownership, ambiguous hard
+links, nested mounts, or a custodian using the checkout. The discovery budget is
+five seconds, 64 programs, 65,536 filesystem objects and 8 MiB of retained relative
+names; the wire reply is capped at 64 KiB and expires after five minutes. Actual
+permission denials are omitted only from this explicit-Remove discovery; a
+readable cwd or open file still establishes membership. The existing generic
+worktree review and background cleanup keep their conservative process policy.
+
 After the original confirmation closes, cleanup runs in the background only
 following exact successful termination. A compact workspace notice shows progress,
 then **Working folder removed**, **Working folder kept** with a short reason, or
@@ -3141,7 +3235,11 @@ background batches run sequentially. Closing the review does not cancel an
 accepted removal. The notice remains visible through the confirmed action and
 the actual folder-checking/removal phases. Result notices use the normal notice
 timeout; dismissing one does not discard the retained result. The status bar's
-working-folder entry still opens its review.
+working-folder entry still opens its review. While a folder is being checked,
+removed or restored, the status bar also shows **Background tasks** with a count.
+Its list names each folder and its current state, and offers the same review.
+It adds no cancel or retry, and goes away only when the work has really ended.
+A kept or unknown result stays on the working-folder entry while other folders run.
 
 The original folder is checked on its owning computer. A verified Zerus-created,
 clean, integrated checkout can be removed with tool-declared generated caches
@@ -3271,8 +3369,45 @@ replica did nothing before it. A task can also take a floor before its first
 attempt: a cutover record that keeps schema 7 the same way, so a reader that
 does not know attempts or the floor refuses to write it, while every path that would start
 it without an attempt refuses it as cutting over. A floor this version cannot
-read still counts. This version reads attempts and guards reports against the
-current execution; recording attempts and floors comes later.
+read still counts. This version reads attempts, guards reports against the
+current execution, and records attempts and floors through the attempt writer
+(below).
+
+The attempt writer (zerus-cg5h.4 S2b.2 C3 activation) is how every native task
+input now begins: the desktop's Start (`start-plan`/`start-deliver`),
+`task send`, `task handoff` and a reopen (`task message --mode reopen`). It
+runs on the computer whose session executes the task, which holds the input's
+receipts, within one 15-second budget counted from the command's entry:
+1. The request is frozen first: ONE request ID and the exact native request.
+2. With no lock held, the fence admits it: the task's certificate with no
+   network; otherwise, for a task with no floor yet, its first floor, which
+   is written only when the project's bootstrap gate is positively satisfied
+   (every eligible direct member recorded current, with a complete exchange,
+   the phase known, and the hold off); then a fresh proof.
+3. In the fence's final admission, and only there, the frozen request is
+   checked again against the task as admitted (its prompt, attachments,
+   queued messages, requirement, target, executor and settings): any change
+   refuses it, and nothing is reserved. Otherwise its attempt is reserved
+   under that ID and saved.
+4. Only then, with every lock released, the input is submitted once. Its own
+   submitted receipt settles the attempt, and the settlement never overwrites
+   a later stage or assignment.
+
+The outcome is explicit: `submitted`; `refused` (the request changed, or the
+input was refused before anything was offered to the terminal, which settles
+the attempt as not admitted; a new action with a new ID may send it);
+`cutting_over` (the fence, the hold or unknown bootstrap evidence; nothing was
+reserved or sent); or `uncertain` (the input may have arrived; it is never sent
+again). Repeating a request ID, a restart or `--recover-only` only reads that
+request's receipt and never submits, even when no receipt exists. Only a task
+positively without floor or attempt, whose bootstrap gate is positively open
+(a member not yet known current, or the person's hold), keeps the legacy route,
+checked again there; a task that may hold a floor or attempt is never sent
+that way. A reopen of a managed task keeps the person's text as a discussion
+note bound to its attempt's ID, saved together with that attempt; the note is
+not queued feedback and is never delivered by itself, and only the receipt
+moves the task back to In progress. Feedback to a task In progress
+(`--mode send`) stays an ordinary message.
 
 Plain `task list` still returns every task for existing clients. With `--stage`
 and `--limit` (1–200) it returns one page of that stage in the same order and
@@ -3349,7 +3484,8 @@ commands: `hgs task start-plan REF --project P --json` prepares an immutable
 native request without sending it, and `hgs task start-deliver REF --project P
 --json` delivers that exact plan. Preparation binds a fresh request UUID, the
 task's `stage_at` and target, and the selected host, session name, stable session
-ID, run ID and conversation ID. Delivery rechecks the task revision and executor
+ID, run ID and conversation ID. Delivery goes through the attempt writer: it
+rechecks the plan against the task and executor in the fence's final admission
 before entering the existing native input path. Peers without these commands
 refuse them; there is no fallback to an unguarded send.
 
@@ -3537,7 +3673,12 @@ away from it. After restoring a replica root from a backup or copying it to
 another computer, delete its `store-id` file so a new one is created: other
 computers then see a changed store, and the cutover proof (which binds each
 member's verified computer and store) stays closed for it until a fresh,
-complete inventory with it.
+complete inventory with it. Zerus creates `store-id` only where nothing is
+(or an empty file an interrupted first creation left); one it cannot read
+without waiting, that is not a regular file, or that holds anything but one
+canonical identity is refused and kept, never replaced, until a person
+removes it. A project folder is listed only by its own `project-id`: a
+regular file holding the valid ID the folder is named after.
 
 The damaged entries of `task list` (and its pages) say what is known here,
 read only: `kept: true` with `kept_reason` (`marked` for a copy cut over
@@ -3606,14 +3747,14 @@ this cannot read keeps the member eligible and the cutover open as an
 unknown protocol. It grants nothing and dispatches
 nothing. `--hold on` sets the project's cutover hold, a replicated value that
 names who set it and when (concurrent changes: the last writer wins). While on,
-no task of the project takes a new floor or a first attempt, where those are
-written (they come with the attempt writer); it never lowers anything, and a
+no task of the project takes a new floor or a first attempt (the attempt
+writer refuses them as cutting over); it never lowers anything, and a
 task that never cut over keeps the legacy Start. Only a person sets or clears it,
 and clearing it takes `--hold off --confirm`. A hold that cannot be read is
 on. Times are in milliseconds.
 
 `task cutover --project P --task T --check` reads the task's writer universe
-for the fence that the attempt writer will need (zerus-cg5h.4 S2b.2 C3), within
+for the fence that the attempt writer uses (zerus-cg5h.4 S2b.2 C3), within
 one 15-second budget counted once from the command's entry. This computer's
 identity, the project's name and lock, every call (from its spawn to its
 parsed answer) and the result all count against it, and nothing is reported
@@ -3700,6 +3841,55 @@ Only then would a reservation run; the check runs none. Closed reasons add:
 `membership_changed`, `changed_version`, `held`, `malformed`, `busy` and
 `deadline`. It proves the schema barrier only: not exclusive delivery, not
 consent.
+
+A proof that passed its final admission can be kept as the task's
+certificate (C3e): `<project store>/fence/<task>.json`, inside the replica
+root, so a replaced root loses it. The record holds:
+- the proven version;
+- this computer's membership view (peers, catalog machines, membership
+  generation), store, root and configuration identity (the Location identity
+  of its state and configuration folders);
+- every node with the store it answered from;
+- a digest of all of it.
+
+A later operation reuses it with no network, in the same final admission
+(the catalog lock, the project lock, the store's admission). That admission
+reads everything the record binds again:
+- the record itself, for this task, project and swarm. It is read without
+  waiting: only a regular file of at most 1 MiB, never a link, FIFO, device
+  or folder (`certificate_not_regular`, `certificate_oversized`). It must be
+  exactly as written (its digest) and well-formed: a non-empty canonical
+  version, and every certified node a canonical identity other than this
+  computer's, with a canonical store;
+- the view, so any enrolment, disconnection or new catalog machine refuses;
+- the store, the root and the configuration identity, so another
+  configuration sharing this state never inherits it;
+- every direct member, from the swarm's member records, read the same way:
+  - a certified member must be recorded with the store it answered from;
+  - an uncertified member must be recorded with no replica;
+  - a member without a record of its current enrolment refuses
+    (`member_unobserved`), and so does a damaged record file
+    (`members_unreadable`). The records only refuse; their absence is never
+    taken as "nothing changed";
+  - a certified member must positively show replica protocol 1 and task
+    schema 7 or later: another protocol, an older schema or none refuses
+    (`member_downgraded`), so a direct member rolled back below the
+    floor-aware build stops the reuse at its next recorded hello;
+- the hold, for a first attempt;
+- the task: holding the certified version, with its floor and raw stored
+  schema.
+
+Anything changed refuses it with its reason, and the caller proves the
+fence afresh. Only the attempt writer writes a certificate, and never one
+that its reuse would refuse: inside the proof's final admission, under the
+catalog lock that every member record write takes, each direct member must
+already agree with the proof by the same rules, or nothing is written. So
+the writer first records each direct member's verified hello (the swarm's
+replica pass does). With that setup a fresh proof's certificate is reused at
+once and on every later attempt, until something it binds changes. `--check` reports
+`certificate` (`valid`, or the first `reason`) and never writes one. A
+certificate is a schema-barrier record only: never consent and never send
+authority.
 
 Cutover boundary (owner decision, 2026-11-05): once a project's tasks cut
 over, the rollback floor for every computer in that swarm is the first

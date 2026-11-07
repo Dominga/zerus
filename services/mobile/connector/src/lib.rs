@@ -50,6 +50,8 @@ pub mod windows_management;
 pub mod workspace;
 pub mod workspace_cli;
 pub mod workspace_lifecycle;
+#[cfg(any(windows, test))]
+pub mod workspace_provenance;
 pub mod workspace_service;
 
 pub use error::ConnectorError;

@@ -3,6 +3,11 @@
 import json
 import os
 import signal
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
 import time
 import unittest
 import uuid
@@ -30,6 +35,51 @@ FAKE = FAKE.replace(r"os.write(1,b'\x1b[2J\x1b[HReady for your first message')",
 assert 'suffix' in FAKE and 'Ready for your first message' not in FAKE
 AFTER_REPLY = Path(__file__).parent/'fixtures/claude-auto-mode-after-reply.txt'
 
+
+def guarded_agent():
+    """review-q2's paint/Enter probe, with a shared clock instead of a race.
+
+    The model is the reported 150 ms guard, not independent evidence of that
+    value in Claude. The fixture clock advances only when hgs waits; its pipe
+    barrier ensures the fake has painted before hgs observes the next frame.
+    """
+    helpers = r'''
+clock_path=root/'native-clock'
+os.mkfifo(root/'clock-events',0o600)
+clock_events=os.open(root/'clock-events',os.O_RDWR|os.O_NONBLOCK)
+def clock_now():
+ return int.from_bytes(clock_path.read_bytes()[:8],sys.byteorder) if clock_path.exists() else 0
+def input_stamp():
+ return int.from_bytes((root/'queued-enter').read_bytes(),sys.byteorder)
+def acknowledge():
+ if clock_path.exists():
+  with clock_path.open('r+b',buffering=0) as f:f.seek(8);f.write(clock_now().to_bytes(8,sys.byteorder))
+def variant():
+ return (root/'change-in-guard').exists() and 0<clock_now()<80000000
+def clock_tick():
+ if variant()!=paint_variant:render()
+ acknowledge()
+'''
+    fake=FAKE.replace('def render(*args):',helpers+'\ndef render(*args):')
+    fake=fake.replace('select.select([fd, wake], [], [])','select.select([fd, wake, clock_events], [], [])')
+    fake=fake.replace('        if fd in ready:',
+        '        if clock_events in ready:\n            os.read(clock_events,4096);clock_tick()\n        if fd in ready:')
+    paint=r" os.write(1,b'\x1b[2J\x1b[H'+screen.replace('\n','\r\n').encode())"
+    assert fake.count(paint)==1
+    fake=fake.replace(paint,
+        " if variant():screen=screen.replace('No, keep ','No, keep changed ')\n"+paint+
+        "\n globals()['painted']=clock_now();globals()['paint_variant']=variant();acknowledge()")
+    enter="   elif buf.startswith(b'\\r'):\n    buf=buf[1:];"
+    assert fake.count(enter)==1
+    fake=fake.replace(enter,
+        "   elif buf.startswith(b'\\r') and input_stamp()-painted<150000000:\n"
+        "    buf=buf[1:];painted=clock_now()\n"
+        "    with (root/'refused').open('a') as f:f.write('enter\\n')\n"+enter)
+    fake=fake.replace('  while buf:\n',
+        "  while buf:\n   if buf.startswith(b'\\r'):\n"
+        "    with (root/'enter-clock').open('a') as f:f.write(str(input_stamp())+'\\n')\n")
+    return fake
+
 class PermissionMode(unittest.TestCase):
     script = fixtures.InputTransport.script
     tmux = fixtures.InputTransport.tmux
@@ -48,7 +98,7 @@ class PermissionMode(unittest.TestCase):
         self.addCleanup(lambda:os.environ.pop('CLAUDE_TRUST_FIXTURE',None))
         original=fixtures.FAKE_AGENT
         try:
-            fixtures.FAKE_AGENT=FAKE;fixtures.InputTransport.setUp(self)
+            fixtures.FAKE_AGENT=getattr(self,'agent_source',FAKE);fixtures.InputTransport.setUp(self)
         finally:fixtures.FAKE_AGENT=original
         self.record.update(agent='claude',run_identity_version=1,supervisor={},
             launch_dir='/work/example',phase='idle',activity='idle',last_event_at=time.time())
@@ -127,6 +177,7 @@ class PermissionMode(unittest.TestCase):
     def test_missing_acknowledgement_is_never_retried(self):
         (self.root/'hold-dialog').touch();p=self.payload()
         self.assertIn('delivery uncertain',self.answer(p,success=False));before=self.received()
+        self.assertEqual(before.count(b'\r'),1)
         self.assertIn('delivery uncertain',self.answer(p,success=False));self.assertEqual(self.received(),before)
 
     def test_after_reply_offer_is_answered_from_activity(self):
@@ -159,5 +210,91 @@ class PermissionMode(unittest.TestCase):
         self.record['conversation_id']=None;self.write_record()
         self.assertEqual(self.inspect()['pending_questions'],[])
         self.assertEqual(self.received(),b'')
+
+@unittest.skipUnless(sys.platform=='linux','the controlled-clock fixture uses Linux preloading')
+class PermissionModeGuard(unittest.TestCase):
+    script = PermissionMode.script
+    tmux = PermissionMode.tmux
+    wait_for = PermissionMode.wait_for
+    received = PermissionMode.received
+    write_record = PermissionMode.write_record
+    tearDown = PermissionMode.tearDown
+    inspect = PermissionMode.inspect
+    payload = PermissionMode.payload
+    agent_source = guarded_agent()
+
+    @classmethod
+    def setUpClass(cls):
+        cls.directory=tempfile.TemporaryDirectory(prefix='hgs-permission-clock-')
+        cls.addClassCleanup(cls.directory.cleanup)
+        cls.library=Path(cls.directory.name)/'clock.so'
+        compiler=shutil.which('cc')
+        if not compiler:raise AssertionError('the Linux guard control requires the native C compiler')
+        source=Path(__file__).parent/'fixtures/claude_permission_clock.c'
+        result=subprocess.run([compiler,'-std=c11','-Wall','-Wextra','-Werror','-shared','-fPIC',
+                               '-O2',str(source),'-o',str(cls.library)],capture_output=True,text=True)
+        if result.returncode:raise AssertionError(result.stderr)
+
+    def setUp(self):
+        PermissionMode.setUp(self)
+        self.start_clock()
+
+    def start_clock(self):
+        self.clock=self.root/'native-clock'
+        self.clock.write_bytes(struct.pack('=QQQ',0,2**64-1,0))
+        os.kill(self.record['pid'],signal.SIGUSR1)
+        self.wait_for(lambda:self.clock_state()[1]==0)
+        # Preserve the key's causal timestamp: post-send acknowledgement polls
+        # may advance the clock before the TUI consumes an already queued key.
+        self.script('tmux','#!'+sys.executable+'\n'+
+            'import os,sys\nfrom pathlib import Path\n'+
+            f'CLOCK=Path({str(self.clock)!r})\nSTAMP=Path({str(self.root/"queued-enter")!r})\n'+
+            'args=sys.argv[1:]\n'+
+            "if args and args[0]=='send-keys':STAMP.write_bytes(CLOCK.read_bytes()[:8])\n"+
+            f'os.execv({fixtures.TMUX!r},[{fixtures.TMUX!r},"-S",{str(self.socket)!r},"-f","/dev/null",*args])\n')
+
+    def clock_state(self):
+        return struct.unpack('=QQQ',self.clock.read_bytes())
+
+    def call(self,payload):
+        events=os.open(self.root/'clock-events',os.O_WRONLY|os.O_NONBLOCK|os.O_NOFOLLOW)
+        try:
+            env=dict(self.env,LD_PRELOAD=str(self.library),TEST_CLAUDE_CLOCK=str(self.clock),
+                     TEST_CLAUDE_CLOCK_EVENTS=str(events))
+            env.pop('TEST_CLAUDE_CLOCK_OWNER',None)
+            result=subprocess.run([str(questions.HGS),'answer',self.name,'--json'],
+                input=json.dumps(payload),capture_output=True,text=True,env=env,
+                pass_fds=(events,),timeout=20)
+        finally:os.close(events)
+        self.assertGreater(self.clock_state()[2],0,'the CLI did not load the fixture clock')
+        return result
+
+    def test_fresh_paint_waits_out_the_native_guard_before_its_one_enter(self):
+        payload=self.payload(0)
+        result=self.call(payload)
+        self.assertEqual(result.returncode,0,result.stderr)
+        receipt=json.loads(result.stdout)
+        self.assertEqual(receipt['status'],'answered')
+        self.assertFalse((self.root/'refused').exists())
+        self.assertEqual((self.root/'submitted').read_text(),
+                         'Yes, set auto mode as my default permission mode')
+        self.assertEqual((self.root/'enter-clock').read_text(),'150000000\n')
+        self.assertEqual(self.received(),b'\r')
+        repeated=self.call(payload)
+        self.assertEqual(json.loads(repeated.stdout),receipt)
+        self.assertEqual(self.received(),b'\r')
+
+    def test_a_panel_change_inside_the_guard_refuses_before_enter(self):
+        # It changes at 40 ms and returns at 80 ms. A final check alone would
+        # miss it: the in-guard observation must refuse before any Enter.
+        (self.root/'change-in-guard').touch()
+        result=self.call(self.payload(0))
+        self.assertNotEqual(result.returncode,0)
+        self.assertEqual(self.received(),b'',result.stderr)
+        self.assertIn('Terminal changed during the native confirmation guard',result.stderr)
+        self.assertEqual(self.clock_state()[0],40000000)
+        self.assertFalse((self.root/'submitted').exists())
+        self.assertFalse((self.root/'enter-clock').exists())
+
 
 if __name__=='__main__':unittest.main()

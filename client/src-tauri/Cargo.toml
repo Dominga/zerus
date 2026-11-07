@@ -64,6 +64,8 @@ zerus-client-media = { path = "../media", optional = true }
 # so drafts reach the disk.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Close-only mutation custody remains held by helpers and their descendants.
+tempfile = "3"
 # Bound activation connect as well as write when an exiting GUI stops accepting.
 socket2 = "0.6"
 

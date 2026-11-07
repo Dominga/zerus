@@ -1,6 +1,7 @@
 import { showQtUpgradeNotice } from "./store/qtUpgrade";
 import { DesktopServiceStatus } from "./ui/components/DesktopServiceStatus";
 import { desktopService, serviceStatus, servicePaused, firstChoicePending } from "./store/desktopService";
+import { BackgroundTasksChip } from "./ui/screens/BackgroundTasks";
 import { CleanupChip } from "./ui/screens/CleanupChip";
 import { worktreeReviewDialog } from "./store/worktreeCleanup";
 import { cleanupDialog } from "./store/terminationCleanup";
@@ -109,6 +110,7 @@ function StatusBar(props: { mode: () => BridgeMode | "starting" }) {
           onClick={() => { void updateCommands.restart().catch((error) => toast("Updates", String(error), "error", true)); }}>{tr("Restart to finish update")}</button>
       </Show>
       <LoginItemButton />
+      <BackgroundTasksChip />
       <CleanupChip />
       <span class="grow" />
       <SessionUsageStrip />

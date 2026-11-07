@@ -24,7 +24,11 @@ use std::time::Duration;
 
 use tauri::State;
 mod local_read_capture;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod program_termination;
 mod read_barrier;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use program_termination::dispatch_program_termination;
 pub(crate) use read_barrier::{CapturedReads, FrozenReads};
 use zerus_client_core::actions::{
     change_notifications, classify, invocation, parse_reference, recovery_preflight,
@@ -203,6 +207,12 @@ pub(crate) struct Running {
     _write: Option<WriteMark>,
     _claim: Arc<Claim>,
 }
+impl Running {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn claim(&self) -> Arc<Claim> {
+        self._claim.clone()
+    }
+}
 
 impl Drop for Running {
     fn drop(&mut self) {
@@ -377,6 +387,12 @@ impl Actions {
         self.flight
             .claim(Lane::key(target, &Action::Archive))
             .map(Arc::new)
+    }
+
+    pub(crate) fn owns_end_claim(&self, claim: &Arc<Claim>, target: &Target) -> bool {
+        Arc::ptr_eq(&claim.keys, &self.flight.keys)
+            && claim.key == Lane::key(target, &Action::Terminate)
+            && claim.active.load(Ordering::Acquire)
     }
 
     fn activate(&self, claim: Arc<Claim>, action: &Action) -> Option<Running> {

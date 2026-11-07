@@ -421,7 +421,9 @@ pub(super) fn write(record: &mut Value) -> Result<()> {
 pub(super) fn atomic_record(path: &Path, record: &mut Value) -> Result<()> {
     ensure_session_id(record);
     processes::compact(record);
-    atomic(path, &format!("{record}\n"))
+    atomic(path, &format!("{record}\n"))?;
+    super::archive_references::note(path, record);
+    Ok(())
 }
 
 /// Names are mutable; provider hooks and already-running supervisors retain

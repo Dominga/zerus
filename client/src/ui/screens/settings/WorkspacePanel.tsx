@@ -6,6 +6,8 @@ import {Group,Row,Select,Actions,Status,Lines} from "./ui";
 import type {View} from "./mobile-page";
 import {createWorkspaceEnrollment,enrollmentLabel,STOP_UNAVAILABLE,relayError,codeError,type WorkspaceMode} from "./workspace-enrollment";
 import {createConnectorActions,canStartConnector,canStopConnector} from "./connector-actions";
+import {autostartStatus,autostartSaveWarning} from "./connector-autostart";
+import {loginEntryMobileLine,type LoginEntry} from "./login-entry";
 import ComputerInvitations from "./ComputerInvitations";
 import { tr, trNoop } from "../../../i18n";
 const WorkspaceConfirm=lazy(()=>import("./WorkspaceConfirm"));
@@ -15,6 +17,10 @@ export default function WorkspacePanel(props:{view?:View;refresh:(afterAction?:b
  const actions=createWorkspaceEnrollment({open:(target,request)=>invoke("mobile_workspace_open",{target,request}),check:(target,allowLocal)=>invoke("mobile_workspace_check_open",{target,allowLocal}),apply:handle=>invoke("mobile_workspace_apply",{handle}),advance:handle=>invoke("mobile_workspace_continue",{handle}),close:handle=>invoke("mobile_workspace_close",{handle}),refresh:()=>props.refresh(true),connected:text=>toast("Workspace",text)});
  const connector=createConnectorActions({open:(target,kind)=>invoke("mobile_connector_open",{target,kind}),apply:handle=>invoke("mobile_connector_apply",{handle}),close:handle=>invoke("mobile_connector_close",{handle}),refresh:()=>props.refresh(true)});
  const [notice,setNotice]=createSignal("");
+ const [login,setLogin]=createSignal<LoginEntry>();
+ onMount(()=>void invoke<LoginEntry>("login_entry_view").then(setLogin,()=>{}));
+ const openLoginSetting=()=>void import("./sections").then(({openSettings})=>openSettings("about"));
+ const autostart=()=>autostartStatus(props.view?.autostart);
  createEffect(()=>{actions.busy();setNotice(actions.notice());});createEffect(()=>{connector.busy();setNotice(connector.notice());});
  createEffect(()=>{actions.observe(read());connector.observe(read());});onCleanup(()=>connector.dispose());
  onMount(()=>{const timer=setInterval(()=>void actions.advance(),1000);onCleanup(()=>clearInterval(timer));});onCleanup(()=>actions.dispose());
@@ -28,6 +34,9 @@ export default function WorkspacePanel(props:{view?:View;refresh:(afterAction?:b
   </div>
   <Show when={props.view?.workspace_error}>{text=><Status kind="error">{text()}</Status>}</Show>
   <Show when={stopUnavailable()}><Status kind="warn">{tr(STOP_UNAVAILABLE)}</Status></Show>
+  <Show when={autostart()}>{line=><Status kind={line().kind}>{line().text}</Status>}</Show>
+  <Show when={autostartSaveWarning(props.view?.autostart_save_failed)}>{text=><Status kind="warn">{text()}</Status>}</Show>
+  <Show when={autostart()&&login()?.available?login():undefined}>{entry=><div class="row" style={{gap:"8px","flex-wrap":"wrap"}}><span class="muted">{loginEntryMobileLine(entry().state,props.view?.autostart)}</span> <button type="button" class="btn ghost small" onClick={openLoginSetting}>{tr("Open the setting")}</button></div>}</Show>
   <Actions><Show when={read()?.controls.change&&!actions.open()}><button class="btn" disabled={!writable()} onClick={()=>actions.begin()}>{tr("Change workspace…")}</button></Show>
    <button class="btn" disabled={busy()||!canStartConnector(read())} onClick={e=>void connector.request("start",e.currentTarget)}><Icon name="play" size={13}/>{tr("Start connector")}</button><button class="btn" disabled={busy()||!canStopConnector(read())} onClick={e=>void connector.request("stop",e.currentTarget)}><Icon name="square" size={12}/>{tr("Stop connector")}</button>
    <button class="btn" disabled={busy()||!props.view} onClick={()=>props.refresh()}><Icon name="refresh-cw" size={13}/>{tr("Refresh status")}</button>

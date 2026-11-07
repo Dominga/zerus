@@ -9,6 +9,8 @@
 use serde::Serialize;
 use serde_json::Value;
 
+use super::autostart::{Line, State as Autostart};
+use super::enrollment::Target;
 use super::{Phones, Workspace, DELIVERY};
 
 /// A stale sync service is named after this long (WorkerNoticeMs).
@@ -23,6 +25,10 @@ pub struct View {
     /// Why the last status read failed.
     pub workspace_error: Option<String>,
     pub workspace_busy: bool,
+    /// Automatic connector start, where this computer has it (Windows).
+    pub autostart: Option<Line>,
+    /// The person's connector choice could not be saved.
+    pub autostart_save_failed: bool,
     pub phones: Option<Phones>,
     pub phones_busy: bool,
     /// The shared timing; None until read.
@@ -52,6 +58,7 @@ pub struct Page {
     workspace: Option<Workspace>,
     workspace_error: Option<String>,
     workspace_busy: bool,
+    autostart: Option<Autostart>,
     /// The last connection revision read, kept across failed reads, as Qt
     /// keeps its snapshot and clears only `known`.
     revision: Option<String>,
@@ -112,6 +119,9 @@ impl Page {
                     .as_ref()
                     .is_some_and(|known| *known != workspace.config_revision);
                 self.revision = Some(workspace.config_revision.clone());
+                if let Some(autostart) = &mut self.autostart {
+                    autostart.observe(&workspace);
+                }
                 self.workspace = Some(workspace);
                 self.workspace_error = None;
                 changed
@@ -120,6 +130,86 @@ impl Page {
                 self.workspace = None;
                 self.workspace_error = Some(error);
                 false
+            }
+        }
+    }
+
+    /// This computer starts its connector automatically, from its saved record.
+    pub fn enable_autostart(&mut self, stored: Option<&[u8]>) {
+        self.autostart = Some(Autostart::load(stored));
+    }
+
+    /// The one attempt of this GUI start: the armed workspace last read, with
+    /// the status lane taken in the same step so no read can race the start.
+    pub fn autostart_begin(&mut self) -> Option<Target> {
+        if self.workspace_busy {
+            return None;
+        }
+        let autostart = self.autostart.as_mut()?;
+        let target = autostart.target(self.workspace.as_ref()?)?;
+        autostart.started();
+        self.workspace_busy = true;
+        self.changed();
+        Some(target)
+    }
+
+    /// The attempt ended, with why it failed if it did.
+    pub fn autostart_finished(&mut self, failure: Option<String>) {
+        if let Some(autostart) = &mut self.autostart {
+            autostart.finished(failure);
+            self.changed();
+        }
+    }
+
+    /// The person chose a Stop for this running generation, at its admission.
+    pub fn autostart_stop_chosen(&mut self, node: &str, generation: Option<&str>) {
+        if let Some(autostart) = &mut self.autostart {
+            autostart.stop_chosen(node, generation);
+            self.changed();
+        }
+    }
+
+    /// The connector positively refused this exact Stop before offering it.
+    pub fn autostart_stop_refused(&mut self, node: &str, generation: Option<&str>) {
+        if let Some(autostart) = &mut self.autostart {
+            autostart.stop_refused(node, generation);
+            self.changed();
+        }
+    }
+
+    /// The person's Start connector succeeded with this status.
+    pub fn autostart_person_started(&mut self, workspace: &Workspace) {
+        if let Some(autostart) = &mut self.autostart {
+            autostart.person_started(workspace);
+            self.changed();
+        }
+    }
+
+    /// This Zerus has no packaged connector to start.
+    pub fn autostart_unavailable(&mut self) {
+        if let Some(autostart) = &mut self.autostart {
+            autostart.unavailable();
+            self.changed();
+        }
+    }
+
+    /// The changed record to save, once.
+    pub fn autostart_unsaved(&mut self) -> Option<Vec<u8>> {
+        self.autostart.as_mut()?.take_unsaved()
+    }
+
+    pub fn autostart_save_failed(&mut self) {
+        if let Some(autostart) = &mut self.autostart {
+            autostart.save_failed();
+            self.changed();
+        }
+    }
+
+    pub fn autostart_save_succeeded(&mut self) {
+        if let Some(autostart) = &mut self.autostart {
+            if autostart.save_problem() {
+                autostart.save_succeeded();
+                self.changed();
             }
         }
     }
@@ -330,6 +420,15 @@ impl Page {
             workspace: self.workspace.clone(),
             workspace_error: self.workspace_error.clone(),
             workspace_busy: self.workspace_busy,
+            autostart: self
+                .autostart
+                .as_ref()
+                .zip(self.workspace.as_ref())
+                .and_then(|(autostart, workspace)| autostart.line(workspace)),
+            autostart_save_failed: self
+                .autostart
+                .as_ref()
+                .is_some_and(Autostart::save_problem),
             phones: self.phones.clone(),
             phones_busy: self.phones_busy,
             delivery: self.delivery.clone(),
@@ -358,6 +457,116 @@ mod tests {
         let value =
             json!({"state": "unconfigured", "encrypted": false, "config_revision": revision});
         workspace(value.as_object().unwrap())
+    }
+
+    const ARMED: &[u8] = br#"{"version":1,"node_id":"node-a","armed":true}"#;
+
+    fn workspace_with(connector: &str) -> Workspace {
+        let running = connector != "stopped";
+        let value = json!({
+            "state": "active", "encrypted": true, "config_revision": "a".repeat(64),
+            "server_url": "https://relay.example.invalid", "node_id": "node-a",
+            "running": running, "connector_state": connector,
+            "generation": running.then(|| "e".repeat(32)),
+        });
+        workspace(value.as_object().unwrap())
+    }
+
+    fn answered(page: &mut Page, connector: &str) {
+        assert!(page.read_workspace());
+        page.workspace_answered(Ok(workspace_with(connector)));
+    }
+
+    #[test]
+    fn without_automatic_start_the_page_says_nothing_and_saves_nothing() {
+        let mut page = Page::new();
+        answered(&mut page, "running");
+        assert_eq!(page.view().autostart, None);
+        assert_eq!(page.autostart_unsaved(), None);
+        assert_eq!(page.autostart_begin(), None);
+    }
+
+    #[test]
+    fn a_status_read_arms_the_connector_it_sees_running() {
+        let mut page = Page::new();
+        page.enable_autostart(None);
+        answered(&mut page, "stopped");
+        assert_eq!(page.view().autostart, Some(Line::NotArmed));
+        assert_eq!(page.autostart_unsaved(), None);
+        answered(&mut page, "running");
+        assert_eq!(page.view().autostart, Some(Line::Running));
+        assert!(page.autostart_unsaved().is_some());
+    }
+
+    #[test]
+    fn beginning_the_attempt_takes_the_status_lane_and_can_happen_only_when_armed() {
+        let mut page = Page::new();
+        page.enable_autostart(None);
+        answered(&mut page, "stopped");
+        assert_eq!(page.autostart_begin(), None);
+        assert!(!page.view().workspace_busy, "an idle page was left busy");
+
+        let mut page = Page::new();
+        page.enable_autostart(Some(ARMED));
+        answered(&mut page, "stopped");
+        let before = page.view().version;
+        let target = page.autostart_begin().expect("armed and stopped");
+        assert_eq!(target.node_id, "node-a");
+        let view = page.view();
+        assert!(view.workspace_busy);
+        assert!(view.version > before, "the page was not told");
+        assert_eq!(view.autostart, Some(Line::Starting));
+        assert!(!page.read_workspace(), "a read raced the attempt");
+    }
+
+    #[test]
+    fn a_stop_is_saved_as_the_persons_choice_and_stays_after_the_attempt_ends() {
+        let mut page = Page::new();
+        page.enable_autostart(Some(ARMED));
+        answered(&mut page, "running");
+        page.autostart_stop_chosen("node-a", Some(&"e".repeat(32)));
+        assert!(page.autostart_unsaved().is_some());
+        answered(&mut page, "running");
+        assert_eq!(page.view().autostart, Some(Line::RunningNotArmed));
+        assert_eq!(page.autostart_unsaved(), None, "a stale reply re-armed");
+        answered(&mut page, "stopped");
+        assert_eq!(page.view().autostart, Some(Line::StoppedByYou));
+        assert_eq!(page.autostart_begin(), None);
+    }
+
+    #[test]
+    fn a_failed_attempt_is_shown_until_the_connector_runs() {
+        let mut page = Page::new();
+        page.enable_autostart(Some(ARMED));
+        answered(&mut page, "stopped");
+        page.autostart_begin().unwrap();
+        page.workspace_answered(Err("not confirmed".into()));
+        assert_eq!(page.view().autostart, None, "no workspace to describe");
+        answered(&mut page, "stopped");
+        assert_eq!(page.view().autostart, Some(Line::Starting));
+        page.autostart_finished(Some("not confirmed".into()));
+        assert_eq!(
+            page.view().autostart,
+            Some(Line::Failed {
+                reason: "not confirmed".into()
+            })
+        );
+        answered(&mut page, "running");
+        assert_eq!(page.view().autostart, Some(Line::Running));
+    }
+
+    #[test]
+    fn a_failed_save_is_surfaced_and_offered_again_by_the_page() {
+        let mut page = Page::new();
+        page.enable_autostart(None);
+        answered(&mut page, "running");
+        let bytes = page.autostart_unsaved().unwrap();
+        assert!(!page.view().autostart_save_failed);
+        page.autostart_save_failed();
+        assert!(page.view().autostart_save_failed);
+        assert_eq!(page.autostart_unsaved(), Some(bytes));
+        page.autostart_save_succeeded();
+        assert!(!page.view().autostart_save_failed);
     }
 
     #[test]

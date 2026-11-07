@@ -34,7 +34,7 @@ class NativeHarness(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         fixture.admit_fixture(DSH, HGS)
-        cls.temp = tempfile.TemporaryDirectory(prefix='hgs-dsh-', dir='/tmp')
+        cls.temp = tempfile.TemporaryDirectory(prefix='hgs-dsh-', dir=os.environ.get('ZERUS_TEST_SHORT_TMPDIR', '/tmp'))
         cls.root = Path(cls.temp.name)
         cls.home = cls.root / 'native'
         cls.state = cls.root / 's'
@@ -719,7 +719,7 @@ class NativeHarness(unittest.TestCase):
                 'content': [{'type': 'text', 'text': 'wrong parent'}]})
 
     def test_real_cli_startup_and_native_browser_authentication(self):
-        with tempfile.TemporaryDirectory(prefix='hgs-dsh-launch-', dir='/tmp') as directory:
+        with tempfile.TemporaryDirectory(prefix='hgs-dsh-launch-', dir=os.environ.get('ZERUS_TEST_SHORT_TMPDIR', '/tmp')) as directory:
             root=Path(directory); home=root/'user';home.mkdir();workspace=root/'project';workspace.mkdir()
             env={**self.env,'HOME':str(home),'DSH_HOME':str(root/'native'),'HGS_STATE_DIR':str(root/'state'),'HGS_CONFIG_DIR':str(root/'config')}
             # Match a desktop service, which does not source the user's shell rc.

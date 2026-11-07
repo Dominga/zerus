@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildTranscript, localFileAvailable, mergeLocal, createTranscriptProjection } from "./transcript";
+import { buildTranscript, createActivityProjections, localFileAvailable, mergeLocal, createTranscriptProjection } from "./transcript";
 import type { ActivityEvent, EventAttachment, LocalMessage } from "../../types";
 import type { ActivityItem, MediaMessage } from "./types";
 import { cardTarget, rowScope } from "./attachment-card";
@@ -117,6 +117,59 @@ describe("local-to-recorded display identity", () => {
     expect(projection.build([],{},[]).map(item=>item.id)).toEqual([`local-${row.id}`]);
     expect(projection.build([event(8)],{},[]).map(item=>item.id)).toEqual([`local-${row.id}`]);
     projection.reset();expect(projection.build([event(8)],{},[]).map(item=>item.id)).toEqual(["s8"]);
+  });
+  describe("across a child visit (zerus-isrzi)", () => {
+    const ids = (items: readonly { id: string }[]) => items.map((item) => item.id);
+    const row = local("sent", false, { id: "sent-one" });
+    /** A parent showing `row` after Rust dropped it, still before its journal event. */
+    const inHandoff = () => {
+      const build = createActivityProjections();
+      build(false, "parent", [], {}, [row]);
+      expect(ids(build(false, "parent", [], {}, []))).toEqual(["local-sent-one"]);
+      return build;
+    };
+    it("keeps the parent's receipt through a visit, then binds it to its journal event", () => {
+      const build = inHandoff();
+      expect(build(true, "parent/child", [], {}, [])).toEqual([]);
+      expect(ids(build(false, "parent", [], {}, []))).toEqual(["local-sent-one"]);
+      expect(ids(build(false, "parent", [event(8)], {}, []))).toEqual(["local-sent-one"]);
+    });
+    it("keeps it through several children", () => {
+      const build = inHandoff();
+      build(true, "parent/one", [], {}, []); build(true, "parent/two", [], {}, []);
+      expect(ids(build(false, "parent", [], {}, []))).toEqual(["local-sent-one"]);
+    });
+    it("shows a child's receipt in no other child and not in its parent", () => {
+      const build = createActivityProjections();
+      build(true, "parent/one", [], {}, [row]);
+      expect(ids(build(true, "parent/one", [], {}, []))).toEqual(["local-sent-one"]);
+      expect(build(true, "parent/two", [], {}, [])).toEqual([]);
+      expect(build(true, "parent/one", [], {}, [])).toEqual([]);
+      build(true, "parent/one", [], {}, [row]);
+      expect(build(false, "parent", [], {}, [])).toEqual([]);
+    });
+    it("retains nothing of a session once another is shown", () => {
+      const build = inHandoff();
+      build(true, "parent/child", [], {}, [local("sent", false, { id: "child-one" })]);
+      expect(build(false, "other", [], {}, [])).toEqual([]);
+      expect(build(false, "parent", [], {}, [])).toEqual([]);
+      expect(build(true, "parent/child", [], {}, [])).toEqual([]);
+    });
+    it("keeps its receipt when another session's child opens and that session is never shown", () => {
+      const build = inHandoff();
+      expect(build(true, "other/child", [], {}, [])).toEqual([]);
+      expect(ids(build(false, "parent", [], {}, []))).toEqual(["local-sent-one"]);
+    });
+    it("stays within the projection's bound of 50 receipts", () => {
+      const build = createActivityProjections();
+      const many = Array.from({ length: 60 }, (_, i) => local("sent", false, { id: `sent-${i}`, text: `message ${i}` }));
+      build(false, "parent", [], {}, many);
+      build(true, "parent/child", [], {}, []);
+      const kept = ids(build(false, "parent", [], {}, []));
+      expect(kept).toHaveLength(50);
+      expect(kept).toContain("local-sent-59");
+      expect(kept).not.toContain("local-sent-9");
+    });
   });
   it("never makes two distinct equal-text sends adopt one event or swap already bound keys", () => {
     const projection=createTranscriptProjection(),one=local("sent",false,{id:"one"}),two=local("sent",false,{id:"two",submitted_at:1_793_000_002});

@@ -47,6 +47,11 @@ mod producer_io;
 mod producer_prepared;
 #[allow(dead_code)]
 mod producer_session;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod program_stop;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)] // The private final-cleanup adapter is the next caller.
+pub(crate) mod program_cleanup;
 mod protocol;
 mod registration;
 mod revoke;

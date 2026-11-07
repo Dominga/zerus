@@ -35,6 +35,10 @@ whose fixes were taken separately.
 
 ## Local checks
 
+For an exact-commit Arch preflight before pushing, use the isolated
+[local Linux runner](docs/local-ci.md). It reads that commit's CI bodies,
+continues independent checks after failures, and lists omitted jobs explicitly.
+
 ```sh
 python3 scripts/ci/check-source.py
 python3 -m unittest discover -s tests -p 'test_*publication.py'

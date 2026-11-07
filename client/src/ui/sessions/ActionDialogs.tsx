@@ -15,7 +15,8 @@ import { setSetting } from "../../store/settings";
 import { sessionForks } from "../../store/sessionForks";
 import { FORK_CHECKING, FORK_HINT } from "./fork-ui";
 import { tr } from "../../i18n";
-import { readCleanupOffer } from "./termination-offer";
+import { readCleanupOffer, type CleanupProgram } from "./termination-offer";
+import { TerminationPrograms } from "./TerminationPrograms";
 import { CleanupOfferNotice } from "./CleanupOfferNotice";
 import { captureUntrackedShell, untrackedShell, UNVERIFIED_SHELL } from "../../store/untrackedShell";
 import type { Action } from "../../types";
@@ -205,6 +206,7 @@ export function TerminateDialog(props: { row: ActionRow; close: () => void }) {
   const [terminalError, setTerminalError] = createSignal("");
   const [offer, setOffer] = createSignal<string>();
   const [remove, setRemove] = createSignal(false);
+  const [programs, setPrograms] = createSignal<readonly CleanupProgram[]>([]);
   const [offerError, setOfferError] = createSignal("");
   let closed = false, consumed = false;
   onMount(() => {
@@ -217,15 +219,22 @@ export function TerminateDialog(props: { row: ActionRow; close: () => void }) {
     if (copy.action !== "terminate" || !target) return;
     void readCleanupOffer(target, { offer: terminationCleanupOffer, cancel: terminationCleanupCancel }, () => !closed, (state) => {
       setOffer(state.offer?.id); setRemove(state.offer?.checked ?? false); setOfferError(state.error ?? "");
+      setPrograms(state.offer?.programs ?? []);
     });
   });
   onCleanup(() => { closed = true; const id = offer(); if (id && !consumed) void terminationCleanupCancel(id); });
-  const submit = () => {
+  const submit = async () => {
     if (shell && !terminal()) return;
     const id = remove() ? offer() : undefined;
-    consumed = !!id;
+    const released = !id ? offer() : undefined;
+    consumed = !!id || !!released;
     if (offer() && !remove()) void setSetting("workspace/removeWorktreeAfterTermination", false);
-    props.close(); void end(props.row, terminal() ?? copy.action, id);
+    props.close();
+    if (released) {
+      try { await terminationCleanupCancel(released); }
+      catch (error) { notify("error", String(error), true); return; }
+    }
+    void end(props.row, terminal() ?? copy.action, id);
   };
   return (
     <>
@@ -246,6 +255,7 @@ export function TerminateDialog(props: { row: ActionRow; close: () => void }) {
         } : undefined} /></Show>
         <Show when={offer()}>
           <label class="check" style={{ "margin-top": "10px" }}><input type="checkbox" checked={remove()} onChange={(e) => setRemove(e.currentTarget.checked)} /> {tr("Remove the working folder after stopping")}</label>
+          <Show when={remove()}><TerminationPrograms programs={programs()} /></Show>
           <p class="hint" style={{ "margin-top": "6px" }}>{tr("Removal runs in the background after exact successful termination, only for a verified generated worktree. Unknown local data keeps the folder for review. Computer: %1", props.row.machine)}</p>
         </Show>
       </div>

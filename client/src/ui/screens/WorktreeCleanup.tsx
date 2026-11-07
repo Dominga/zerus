@@ -6,10 +6,12 @@ import { Icon } from "../lib/icons";
 import type { Inspection } from "../../store/terminationCleanup";
 import { terminationCleanupInspect } from "../../bridge";
 import { cleanup, cleanupDialog, closeCleanup, keepCleanup, checkCleanup, removeCleanup, emptyConsents, type CleanupRow } from "../../store/terminationCleanup";
+import { activityLabel } from "../../store/backgroundTasks";
 import { anyCleanupRestore, cleanupRestoring, restoreCleanupRow } from "../../store/cleanupNotices";
 import { tr } from "../../i18n";
+import { ForceStopDialog } from "../sessions/ForceStopDialog";
 
-const labels = { removed: "Removed", kept: "Kept", review: "Review", unknown: "Unknown", ready: "Ready", checking: tr("Checking…"), removing: tr("Checking again and removing…") };
+const labels = { removed: "Removed", kept: "Kept", review: "Review", unknown: "Unknown", ready: "Ready", checking: activityLabel("checking"), removing: activityLabel("removing"), stopping: activityLabel("stopping") };
 /** setup-batch-cleanup, Terminate variant. Opening displays recorded outcomes. */
 export default function WorktreeCleanup() {
   let dialog!: HTMLDialogElement;
@@ -18,6 +20,7 @@ export default function WorktreeCleanup() {
   const [details, setDetails] = createSignal(false);
   const [consents, setConsents] = createSignal(emptyConsents());
   const [inspect, setInspect] = createSignal<CleanupRow>();
+  const [force, setForce] = createSignal<CleanupRow>();
   const current = () => cleanup().rows.find((r) => r.id === selected()) ?? cleanup().rows[0];
   const targets = createMemo(() => cleanup().rows.filter((r) => r.ready));
   const consented = () => (!cleanup().required.local_files || consents().local_files) && (!cleanup().required.discard_changes || consents().discard_changes) && (!cleanup().required.unchecked_processes || consents().unchecked_processes);
@@ -40,6 +43,7 @@ export default function WorktreeCleanup() {
         }</For></tbody></table>
         <div class="row">
           <button class="btn small" disabled={cleanup().busy || anyCleanupRestore() || !current()?.can_check} onClick={() => { const row = current(); if (row) void checkCleanup(row.id); }}>{tr("Check again")}</button>
+          <Show when={current()?.can_force}><button class="btn small danger" disabled={cleanup().busy || anyCleanupRestore()} onClick={() => setForce(current())}>{tr("Force stop…")}</button></Show>
           <button class="btn small" disabled={!current() || cleanup().busy || anyCleanupRestore()} onClick={() => setInspect(current())}>{tr("View files and commits…")}</button>
           <Show when={current()?.restore}>{(source) => <button class="btn small primary" disabled={cleanup().busy || cleanupRestoring(source())} onClick={() => { const row = current(); if (row) void restoreCleanupRow(row); }}><Icon name="play" size={13} />{tr("Restore session")}</button>}</Show>
           <button class="btn small" classList={{ on: details() }} aria-pressed={details()} onClick={() => setDetails(!details())}>{tr("Details")}</button><span class="grow" />
@@ -55,6 +59,7 @@ export default function WorktreeCleanup() {
       <div class="dlg-foot"><span class="bc-summary tabular" role="status">{summary()}<Show when={cleanup().unknown}><span class="warn bc-note">{tr("An unknown result will not be retried.")}</span></Show></span><span class="grow" /><Show when={targets().length}><button type="button" class="btn solid-danger" disabled={cleanup().busy || anyCleanupRestore() || !consented()} onClick={() => void removeCleanup(consents())}>{tr("Remove %1 folders", targets().length)}</button></Show><button type="button" class="btn primary" autofocus disabled={cleanup().busy || anyCleanupRestore()} onClick={() => void keepCleanup()}>{tr("Keep folders")}</button></div>
     </dialog>
     <Show when={inspect()}>{(row) => <CleanupInspection row={row()} close={() => setInspect(undefined)} />}</Show>
+    <Show when={force()}>{(row) => <ForceStopDialog id={row().id} label={row().label} close={() => setForce(undefined)} />}</Show>
   </>;
 }
 

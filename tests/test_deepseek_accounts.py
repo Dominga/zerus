@@ -15,7 +15,7 @@ HGS = Path(os.environ.get('HGS_TEST_BIN', 'target/debug/hgs')).resolve()
 @unittest.skipUnless(shutil.which('dsh') and HGS.exists(), 'official dsh and hgs required')
 class DeepSeekAccounts(unittest.TestCase):
     def test_private_key_write_restore_identity_and_remote_destination(self):
-        with tempfile.TemporaryDirectory(prefix='hgs-key-', dir='/tmp') as directory:
+        with tempfile.TemporaryDirectory(prefix='hgs-key-', dir=os.environ.get('ZERUS_TEST_SHORT_TMPDIR', '/tmp')) as directory:
             root = Path(directory)
             def environment(name):
                 home = root / name

@@ -17,7 +17,7 @@ HGS = Path(os.environ.get("HGS_TEST_BIN", "target/debug/hgs")).resolve()
 class DeepSeekScopedActions(unittest.TestCase):
     def setUp(self):
         # macOS TMPDIR can exceed the Unix socket path limit; keep the private root short.
-        self.temp = tempfile.TemporaryDirectory(prefix="hgs-scoped-dsh-", dir="/tmp")
+        self.temp = tempfile.TemporaryDirectory(prefix="hgs-scoped-dsh-", dir=os.environ.get("ZERUS_TEST_SHORT_TMPDIR", "/tmp"))
         self.root = Path(self.temp.name)
         self.name = "dsh/example/session"
         self.record = {"name": self.name, "backend": "dsh", "agent": "dsh", "run_id": "run", "conversation_id": "session-synthetic", "agent_home": str(self.root / "native"), "cwd": str(self.root)}

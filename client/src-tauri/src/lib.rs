@@ -753,7 +753,7 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 }));
                 app.manage(analytics::start(app.handle()));
                 app.manage(worktree_policy::start(app.handle()));
-                app.manage(mobile::start(app.handle()));
+                app.manage(mobile::start(app.handle(), &dir));
                 // A replay never touches the real read or attention marks.
                 let actions = actions::Actions::new(dir.join(actions::marks_file(replay)));
                 if desktop_service::mode() {
@@ -1835,6 +1835,9 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         termination_cleanup::termination_cleanup_offer,
         termination_cleanup::termination_cleanup_cancel,
         termination_cleanup::termination_cleanup_confirm,
+        termination_cleanup::termination_program_force_offer,
+        termination_cleanup::termination_program_force_confirm,
+        termination_cleanup::termination_program_force_cancel,
         termination_cleanup::termination_cleanup_check,
         termination_cleanup::termination_cleanup_remove,
         termination_cleanup::termination_cleanup_keep,
@@ -1890,6 +1893,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         updates::updates_copy_command,
         updates::updates_restart,
         updates::updates_fix_login_item,
+        login_item::login_entry_view,
+        login_item::login_entry_set,
         #[cfg(feature = "media")]
         voice::voice_open,
         #[cfg(feature = "media")]

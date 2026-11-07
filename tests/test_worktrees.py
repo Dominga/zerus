@@ -328,6 +328,12 @@ class Cleanup(Repository,unittest.TestCase):
         lost=self.linked('lost');self.git('-C',str(lost),'checkout','-q','--detach');self.commit(lost,'only here')
         kept=self.linked('kept');self.git('-C',str(kept),'checkout','-q','--detach','main')
         for path in (locked,parent,nested,busy,bound,deep,archived,lost,kept):self.age(path)
+        # Raw fixture files have no verified compact coverage yet. Review must
+        # stay conservative until an ordinary archive read reconciles them.
+        cold=self.row(archived,self.review())
+        self.assertIn('archives_unavailable',codes(cold['notes']))
+        page=subprocess.run([str(HGS),'archives','--json'],input='{"limit":1}',env=self.env,text=True,capture_output=True,timeout=20)
+        self.assertEqual(page.returncode,0,page.stdout+page.stderr)
         data=self.review()
         row=self.row(locked,data);self.assertEqual(codes(row['reasons']),['locked']);self.assertIn('in use',row['reasons'][0]['message'])
         row=self.row(parent,data);self.assertEqual(codes(row['reasons']),['nested']);self.assertEqual(row['nested'],[str(nested.resolve())])

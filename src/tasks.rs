@@ -18,6 +18,7 @@ use zerus_replica::{
 };
 
 mod answers;
+mod attempts;
 mod cancellation;
 mod cutover;
 mod dispatch;
@@ -186,19 +187,75 @@ struct Reference {
 }
 
 fn reference(config: &Config, args: &[String], who: &Actor) -> Result<Reference> {
+    reference_by(config, args, who, None)
+}
+
+/// `reference`, its catalog reads within `entry` when given: the machines'
+/// identity and projects read there, and the agent's own project read by
+/// then (#1519 review: an attempt's whole entry counts against its budget).
+fn reference_by(
+    config: &Config,
+    args: &[String],
+    who: &Actor,
+    entry: Option<(&[(String, String)], std::time::Instant)>,
+) -> Result<Reference> {
     let value = args.first().ok_or_else(|| fail(USAGE))?;
     let (project_name, task) = match value.rsplit_once('/') {
         Some((project, task)) => (Some(project), task),
         None => (option(args, "--project")?, value.as_str()),
     };
-    let found = match project_name {
-        Some(name) => project(config, name)?,
-        None => own_project(config, who, "name the project: PROJECT/T-xxxxxx or --project P")?,
+    let missing = "name the project: PROJECT/T-xxxxxx or --project P";
+    let found = match (project_name, entry) {
+        (Some(name), None) => project(config, name)?,
+        (Some(name), Some((projects, _))) => project_in(projects, name)?,
+        (None, None) => own_project(config, who, missing)?,
+        (None, Some((_, deadline))) => {
+            let Actor::Agent(own) = who else {
+                return Err(fail(missing));
+            };
+            crate::swarm::session_project_until(config, &own.session, deadline)
+                .map_err(fail)?
+                .ok_or_else(|| fail(BUSY))?
+                .ok_or_else(|| {
+                    fail(format!(
+                        "{} belongs to no project; name one: PROJECT/T-xxxxxx or --project P",
+                        own.session
+                    ))
+                })?
+        }
     };
     Ok(Reference {
         project: found,
         task: task.to_owned(),
     })
+}
+
+/// An attempt command's entry, refused past its budget: nothing was sent.
+const BUSY: &str = "the project's tasks are busy past this command's budget; nothing was sent";
+
+/// This computer's machines and the catalog's projects, read in one catalog
+/// admission no later than `deadline`.
+fn entry_until(
+    config: &Config,
+    deadline: std::time::Instant,
+) -> Result<(Machines, Vec<(String, String)>)> {
+    let (here, projects) = crate::swarm::identity_and_projects_until(config, deadline)
+        .map_err(fail)?
+        .ok_or_else(|| fail(BUSY))?;
+    Ok((machines_for(config, here)?, projects))
+}
+
+/// The project's store, its lock waited for no later than `deadline`.
+fn store_until(
+    config: &Config,
+    project_id: &str,
+    deadline: std::time::Instant,
+) -> Result<ProjectStore> {
+    let wait = deadline.saturating_duration_since(std::time::Instant::now());
+    ProjectStore::open_within(&config.state.join("replica"), project_id, wait)
+        .map_err(fail)?
+        .filter(|_| std::time::Instant::now() < deadline)
+        .ok_or_else(|| fail(BUSY))
 }
 
 fn store(config: &Config, project_id: &str) -> Result<ProjectStore> {
@@ -216,7 +273,10 @@ struct Machines {
 }
 
 fn machines(config: &Config) -> Result<Machines> {
-    let here = crate::swarm::local_node_id(config).map_err(fail)?;
+    machines_for(config, crate::swarm::local_node_id(config).map_err(fail)?)
+}
+
+fn machines_for(config: &Config, here: String) -> Result<Machines> {
     #[cfg(unix)]
     let peers = crate::swarm::verified_bindings(config, &here);
     #[cfg(not(unix))]
@@ -419,11 +479,20 @@ fn find(store: &ProjectStore, reference: &str) -> Result<TaskDoc> {
 
 /// How many tasks agents started since `since` (Unix milliseconds), from the
 /// task index when it can answer.
-pub(super) fn agent_starts_since(store: &ProjectStore, since: i64) -> Result<usize> {
-    if let Some(Ok(count)) = index::Index::open(store).map(|index| index.agent_starts_since(since)) {
-        return Ok(count);
-    }
-    store.agent_starts_since(since).map_err(fail)
+pub(super) fn agent_starts_since(
+    store: &ProjectStore,
+    since: i64,
+    deadline: std::time::Instant,
+) -> Result<usize> {
+    // Every quota decision, legacy route included, counts the tasks as
+    // saved, reservations included, never the index's sent history alone;
+    // bounded, and failing closed (#1519 R2).
+    let mut admitted = store.admit_until(deadline).ok_or_else(|| fail(BUSY))?;
+    admitted.agent_starts_since(since, deadline).map_err(|error| {
+        fail(format!(
+            "this project's agent starts in the last hour cannot be counted ({error}); nothing was sent"
+        ))
+    })
 }
 
 pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
@@ -887,6 +956,8 @@ fn change_within(config: &Config, action: &str, args: &[String], wait: Option<st
 }
 
 fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<std::time::Duration>, guard: Option<&cancellation::Guard>) -> Result<Value> {
+    // A send's or handoff's attempt has one budget from here (C3 A3).
+    let deadline = std::time::Instant::now() + attempts::BUDGET;
     let content = if action == "edit" || (action == "comment" && flag(args, "--content-json")) { Some(stdin_content(args)?) } else { None };
     let text = match action {
         "edit" => Some(content.as_ref().expect("edit content").text.clone()),
@@ -895,13 +966,21 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         "rename" => Some(stdin_text("title")?.trim().to_owned()),
         _ => None,
     };
-    let machines = machines(config)?;
+    // A send or handoff reads the catalog and waits for the project within
+    // its one budget, from here (#1519 review, zerus-9gzdp).
+    let attempted = matches!(action, "send" | "handoff");
+    let (machines, projects) = if attempted {
+        let (machines, projects) = entry_until(config, deadline)?;
+        (machines, Some(projects))
+    } else {
+        (machines(config)?, None)
+    };
     let here = machines.here.as_str();
     let who = actor(here, args, matches!(action, "send" | "handoff" | "cancel"))?;
     if let Some(text) = &text {
         if action != "edit" || !text.is_empty() { agent_text(text, action, &who)?; }
     }
-    let r = reference(config, args, &who)?;
+    let r = reference_by(config, args, &who, projects.as_deref().map(|p| (p, deadline)))?;
     let (project_id, project_name) = (&r.project.0, &r.project.1);
     // An agent reads a refused send as "SESSION cannot take it now: …"; a paste
     // that happened is never reworded. A command another computer forwards
@@ -930,10 +1009,18 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         Some(worker)
     } else { None };
     let store = match wait {
+        None if attempted => store_until(config, project_id, deadline)?,
         None => store(config, project_id)?,
-        Some(wait) => ProjectStore::open_within(&config.state.join("replica"), project_id, wait)
-            .map_err(fail)?
-            .ok_or_else(|| fail("the project's tasks are busy; try again"))?,
+        Some(wait) => {
+            let wait = if attempted {
+                wait.min(deadline.saturating_duration_since(std::time::Instant::now()))
+            } else {
+                wait
+            };
+            ProjectStore::open_within(&config.state.join("replica"), project_id, wait)
+                .map_err(fail)?
+                .ok_or_else(|| fail("the project's tasks are busy; try again"))?
+        }
     };
     let mut task = find(&store, &r.task)?;
     if let Some(guard) = guard { guard.check(&task)?; }
@@ -947,7 +1034,7 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
     // A send or cancel for a session another computer runs happens there.
     let session = match action {
         "handoff" => {
-            task.check_handoff(&who).map_err(fail)?;
+            handoff_check(&task, &who)?;
             let name = option(args, "--session")?.ok_or_else(|| fail("handoff needs --session SESSION [--host ALIAS]"))?;
             let to = machines.target(machines.node(option(args, "--host")?)?, name, args)?;
             if task.session().as_ref() == Some(&to) { return Err(fail("choose another session for the handoff")); }
@@ -969,7 +1056,7 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         // This computer's copy refuses first: a task it shows In progress, or
         // in a stage that is not sent, never reaches the other computer.
         if action == "send" {
-            task.check_send().map_err(|e| refuse(fail(e), &to))?;
+            send_check(&task).map_err(|e| refuse(e, &to))?;
         }
         let uuid = task.uuid().to_owned();
         drop(store);
@@ -983,6 +1070,49 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         };
         return Ok(with_answer(&who, action, out, 0, &to));
     }
+    // C3 activation A3: a send or handoff goes through the fence's attempt
+    // admission; only its explicit `Legacy` keeps the paste below.
+    let (store, mut task) = match session
+        .clone()
+        .filter(|_| matches!(action, "send" | "handoff"))
+    {
+        Some((to, pin)) => {
+            let handoff = action == "handoff";
+            let frozen = attempts::freeze(&store, &task, project_name, &to, pin, &who, handoff)
+                .map_err(|e| refuse(e, &to.session))?;
+            let uuid = task.uuid().to_owned();
+            drop(store);
+            let sent = attempts::send(
+                config,
+                project_id,
+                project_name,
+                &uuid,
+                &frozen,
+                &to,
+                pin,
+                &who,
+                handoff,
+                &machines,
+                args,
+                deadline,
+            )
+            .map_err(|e| refuse(e, &to.session))?;
+            match sent {
+                Some(receipt) => {
+                    let task = self::store(config, project_id)?.load(&uuid).map_err(fail)?;
+                    let out = json!({"task": view(&task, project_name, guard.is_none(), &machines)?, "receipt": receipt});
+                    return Ok(with_answer(&who, action, out, 0, &to.session));
+                }
+                None => {
+                    let store = self::store(config, project_id)?;
+                    let mut task = store.load(&uuid).map_err(fail)?;
+                    enrich(&mut task, &machines)?;
+                    (store, task)
+                }
+            }
+        }
+        None => (store, task),
+    };
     let text = text.unwrap_or_default();
     let mut extra = json!({});
     let mut destination = String::new();
@@ -1048,8 +1178,17 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         "send" | "handoff" => {
             let (session, pin) = session.expect("a send has its session");
             destination = session.session.clone();
-            extra = send(&store, &mut task, project_name, session, pin, &who, action == "handoff")
-                .map_err(|e| refuse(e, &destination))?;
+            extra = send(
+                &store,
+                &mut task,
+                project_name,
+                session,
+                pin,
+                &who,
+                action == "handoff",
+                deadline,
+            )
+            .map_err(|e| refuse(e, &destination))?;
         }
         "cancel" => extra = cancel(&store, &machines, &mut task, project_name, cancellation::reason(args, guard)?, &who, None)?,
         _ => return Err(fail(USAGE)),
@@ -1090,6 +1229,27 @@ fn enrich(task: &mut TaskDoc, machines: &Machines) -> Result<()> {
 /// The session a send goes to, and whether it pins the task there: --session
 /// (with --host on another computer; an agent's choice also pins the task),
 /// the pinned session, or for an Any task the agent's own session.
+/// Whether the task could be sent now: a managed task through its next
+/// attempt (the legacy guard left out), any other as before.
+fn send_check(task: &TaskDoc) -> Result<()> {
+    if task.execution_managed() {
+        task.check_attempt_send()
+    } else {
+        task.check_send()
+    }
+    .map_err(fail)
+}
+
+/// Whether `who` could hand the task off now, as `send_check` for a send.
+fn handoff_check(task: &TaskDoc, who: &Actor) -> Result<()> {
+    if task.execution_managed() {
+        task.check_attempt_handoff(who)
+    } else {
+        task.check_handoff(who)
+    }
+    .map_err(fail)
+}
+
 fn send_session(task: &TaskDoc, args: &[String], who: &Actor, machines: &Machines) -> Result<(SessionKey, bool)> {
     let mut view = task.view().map_err(fail)?;
     if let Target::Session(pinned) = &view.target {
@@ -1228,6 +1388,7 @@ fn cancel_here(
 }
 
 /// Pastes the task prompt into its session on this computer.
+#[allow(clippy::too_many_arguments)]
 fn send(
     store: &ProjectStore,
     task: &mut TaskDoc,
@@ -1236,13 +1397,19 @@ fn send(
     pin: bool,
     who: &Actor,
     handoff: bool,
+    deadline: std::time::Instant,
 ) -> Result<Value> {
     // Everything that could stop the send from being recorded is checked
     // before the paste; only I/O can fail after it.
     if handoff { task.check_handoff(who).map_err(fail)?; } else { task.check_send().map_err(fail)?; }
     let view = task.view().map_err(fail)?;
     let settings = store.project().map_err(fail)?.settings();
-    let starts = agent_starts_since(store, now() - 3_600_000)?;
+    // Only an agent's start under a limit is counted.
+    let starts = if matches!(who, Actor::Agent(_)) && settings.agent_limit > 0 {
+        agent_starts_since(store, now() - 3_600_000, deadline)?
+    } else {
+        0
+    };
     settings
         .check_agent(who, &session, true, starts)
         .map_err(fail)?;

@@ -487,6 +487,39 @@ pub fn message_delivered(reply: &Map<String, Value>, task: &str, id: &str) -> Re
     }
 }
 
+/// What a managed reopen's reply says of its own attempt (A4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reopen {
+    /// The attempt's own receipt shows that the change request was submitted.
+    Submitted,
+    /// Its input was refused before it was admitted: nothing was sent, and
+    /// the text stays in the task as a note.
+    Refused,
+    /// It may have reached the executor. It is never sent again.
+    Uncertain,
+}
+
+/// The attempt a message reply names (`hgs task message` reopening a task
+/// with execution attempts), `None` for a reply without one: a send, a queue,
+/// a note or a legacy reopen. Only its own `submitted` state is a sent
+/// change request; any other or unreadable state stays uncertain, and an
+/// attempt of another request is an identity mismatch.
+pub fn reopen_attempt(reply: &Map<String, Value>, id: &str) -> Result<Option<Reopen>, String> {
+    let Some(attempt) = reply.get("attempt") else {
+        return Ok(None);
+    };
+    if attempt["id"].as_str() != Some(id) {
+        return Err(
+            "The message reply did not match its original identity. Recovery data was kept.".into(),
+        );
+    }
+    Ok(Some(match attempt["state"].as_str() {
+        Some("submitted") => Reopen::Submitted,
+        Some("refused") => Reopen::Refused,
+        _ => Reopen::Uncertain,
+    }))
+}
+
 /// A reserved message: its record `{id, intent}`, whether it recovers an
 /// earlier attempt, and whether that attempt's intent differs from this one.
 #[derive(Clone, Debug, PartialEq)]
@@ -1893,6 +1926,54 @@ mod outbox_tests {
             outbox::handed_off(&root.0, "alpha", "t-1", &fresh.record),
             Ok(false)
         );
+    }
+
+    #[test]
+    fn only_a_reopens_own_submitted_attempt_is_a_sent_change_request() {
+        let reply = |attempt: Option<Value>| {
+            let mut reply = json!({"task": {"uuid": "t-1"}, "message": {"request_id": ID}});
+            if let Some(attempt) = attempt {
+                reply["attempt"] = attempt;
+            }
+            reply.as_object().unwrap().clone()
+        };
+        assert_eq!(reopen_attempt(&reply(None), ID), Ok(None));
+        let state = |state: Value| {
+            reopen_attempt(
+                &reply(Some(json!({"id": ID, "state": state, "error": ""}))),
+                ID,
+            )
+        };
+        assert_eq!(state(json!("submitted")), Ok(Some(Reopen::Submitted)));
+        assert_eq!(state(json!("refused")), Ok(Some(Reopen::Refused)));
+        for unclear in [
+            json!("uncertain"),
+            json!("cutting_over"),
+            json!("Submitted"),
+            json!(null),
+            json!(1),
+        ] {
+            assert_eq!(
+                state(unclear.clone()),
+                Ok(Some(Reopen::Uncertain)),
+                "{unclear}"
+            );
+        }
+        assert_eq!(
+            reopen_attempt(&reply(Some(json!({"id": ID}))), ID),
+            Ok(Some(Reopen::Uncertain))
+        );
+        for other in [
+            json!({"id": OTHER, "state": "submitted"}),
+            json!({"state": "submitted"}),
+            json!(null),
+            json!("submitted"),
+        ] {
+            assert!(
+                reopen_attempt(&reply(Some(other.clone())), ID).is_err(),
+                "{other}"
+            );
+        }
     }
 
     #[test]

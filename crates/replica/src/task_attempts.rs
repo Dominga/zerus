@@ -107,6 +107,20 @@ impl TaskDoc {
 
     /// A path that starts an execution without an attempt refuses a task
     /// that records them.
+    /// Whether a send could reserve this task's next attempt now: its stage,
+    /// the hold and no attempt whose delivery is unknown. `reserve_attempt`
+    /// checks it again in its admission; the legacy guard is not part of it.
+    pub fn check_attempt_send(&self) -> Result<()> {
+        self.sendable()
+    }
+
+    /// Whether `actor` could hand this task off through its next attempt
+    /// now; `reserve_attempt` checks it again in its admission. The legacy
+    /// guard is not part of it.
+    pub fn check_attempt_handoff(&self, actor: &Actor) -> Result<()> {
+        self.handoffable(actor)
+    }
+
     pub(super) fn legacy_start(&self) -> Result<()> {
         if self.executes_attempts() {
             return Err(Error::new(
@@ -166,6 +180,65 @@ impl TaskDoc {
         self.upgrade_schema(execution::EXECUTION_TASK_SCHEMA)?;
         list.push(serde_json::to_string(&event)?)?;
         Ok(())
+    }
+
+    /// How many starts agents made of this task since `since` (Unix
+    /// milliseconds), charged from the reservation (#1519 review): every
+    /// send or handoff an agent reserved in that window counts once, settled
+    /// or not, unless it was positively never admitted (`not_started`): a
+    /// reservation whose delivery is unknown may already have delivered.
+    /// History an agent wrote that no attempt explains (a legacy start)
+    /// counts too; a settled attempt's own entry is not counted again.
+    pub fn agent_starts_since(&self, since: i64) -> Result<usize> {
+        let (attempts, _) = self.execution_records()?;
+        let mut count = 0;
+        for attempt in &attempts {
+            let starting = matches!(attempt.origin, Origin::Send | Origin::Handoff);
+            if attempt.at >= since && starting && matches!(attempt.actor, Actor::Agent(_)) {
+                let (own, _) = self.facts_of(attempt)?;
+                if !own.contains(&EventKind::NotStarted) {
+                    count += 1;
+                }
+            }
+        }
+        let attempted: std::collections::BTreeSet<&str> =
+            attempts.iter().map(|attempt| attempt.id.as_str()).collect();
+        count += self
+            .view()?
+            .log
+            .iter()
+            .filter(|e| {
+                e.kind == "sent"
+                    && e.at >= since
+                    && matches!(e.actor, Actor::Agent(_))
+                    && !e
+                        .request_id
+                        .as_deref()
+                        .is_some_and(|id| attempted.contains(id))
+            })
+            .count();
+        Ok(count)
+    }
+
+    /// What is recorded of attempt `id` itself: its own facts, in order;
+    /// `None` when no attempt is recorded under that ID.
+    pub fn attempt_facts(&self, id: &str) -> Result<Option<Vec<EventKind>>> {
+        let Some(attempt) = self.attempt(id)? else {
+            return Ok(None);
+        };
+        Ok(Some(self.facts_of(&attempt)?.0))
+    }
+
+    /// Every recorded attempt's origin and its own phase, by attempt ID, as
+    /// the execution projects each one: only an input's own submitted
+    /// receipt makes it Submitted or later, and a rebound record is Unknown.
+    pub fn attempt_phases(&self) -> Result<std::collections::BTreeMap<String, (Origin, Phase)>> {
+        let (attempts, events) = self.execution_records()?;
+        let (phases, _) = execution::phases(&attempts, &events);
+        Ok(phases
+            .into_iter()
+            .map(|(attempt, (phase, ..))| (attempt.id.clone(), (attempt.origin, phase)))
+            .collect())
     }
 
     /// The facts about `attempt`: those bound to this exact record, and those
@@ -1545,6 +1618,65 @@ mod tests {
         assert!(d.sendable().is_err());
     }
 
+    /// #1519 review (zerus-v3rtj): an agent's start counts from its
+    /// reservation, while its delivery is unknown, and once settled it is
+    /// counted once, by its history entry; a person's start never counts.
+    #[test]
+    fn an_agent_start_counts_from_its_reservation_and_once() {
+        let mut task = task();
+        task.set_target(&Target::Session(run("api")), &Actor::Person, 2)
+            .unwrap();
+        assert_eq!(task.agent_starts_since(0).unwrap(), 0);
+        task.reserve_attempt(
+            ONE,
+            Origin::Send,
+            &run("api"),
+            native("api"),
+            &agent("api"),
+            10,
+        )
+        .unwrap();
+        assert_eq!(task.agent_starts_since(0).unwrap(), 1, "in flight");
+        assert_eq!(
+            task.agent_starts_since(11).unwrap(),
+            0,
+            "older than the window"
+        );
+        let receipt = receipt(&task, ONE);
+        task.settle_attempt(ONE, Settlement::Receipt(&receipt), &agent("api"), 20)
+            .unwrap();
+        assert_eq!(task.agent_starts_since(0).unwrap(), 1, "settled: once");
+        let mut person = self::task();
+        send(&mut person, TWO, "api");
+        assert_eq!(person.agent_starts_since(0).unwrap(), 0);
+        // Positively never admitted: released.
+        let mut refused = self::task();
+        refused
+            .set_target(&Target::Session(run("api")), &Actor::Person, 2)
+            .unwrap();
+        refused
+            .reserve_attempt(
+                ONE,
+                Origin::Send,
+                &run("api"),
+                native("api"),
+                &agent("api"),
+                10,
+            )
+            .unwrap();
+        assert_eq!(refused.agent_starts_since(0).unwrap(), 1);
+        refused
+            .settle_attempt(ONE, Settlement::NotAdmitted, &agent("api"), 11)
+            .unwrap();
+        assert_eq!(refused.agent_starts_since(0).unwrap(), 0);
+        // A legacy start an agent recorded counts.
+        let mut legacy = self::task();
+        legacy
+            .record_send(&run("api"), "legacy-send", &agent("api"), 12)
+            .unwrap();
+        assert_eq!(legacy.agent_starts_since(0).unwrap(), 1);
+    }
+
     #[test]
     fn a_reopen_continues_with_the_session_holding_the_task() {
         let mut task = task();
@@ -1579,6 +1711,42 @@ mod tests {
             view.session,
             view.execution.unwrap().current.unwrap().executor
         );
+    }
+
+    #[test]
+    fn each_attempt_keeps_its_own_phase_for_the_history() {
+        // A reopen's note shows its own attempt's phase (A4): Unknown while
+        // reserved, Submitted only by its own receipt, NotStarted when its
+        // input was never admitted, whatever the task's current attempt is.
+        let phase = |task: &TaskDoc, id: &str| task.attempt_phases().unwrap().get(id).copied();
+        let reviewed = || {
+            let mut task = task();
+            assert!(task.attempt_phases().unwrap().is_empty());
+            send(&mut task, ONE, "api");
+            assert_eq!(phase(&task, ONE), Some((Origin::Send, Phase::Unknown)));
+            settle(&mut task, ONE);
+            task.record_report("Done", &agent("api"), 21).unwrap();
+            let reopen = native("api");
+            task.reserve_attempt(TWO, Origin::Reopen, &run("api"), reopen, &Actor::Person, 22)
+                .unwrap();
+            task
+        };
+        let mut task = reviewed();
+        assert_eq!(phase(&task, ONE), Some((Origin::Send, Phase::Ready)));
+        assert_eq!(phase(&task, TWO), Some((Origin::Reopen, Phase::Unknown)));
+        settle(&mut task, TWO);
+        assert_eq!(phase(&task, TWO), Some((Origin::Reopen, Phase::Submitted)));
+        assert_eq!(phase(&task, THREE), None);
+        let mut refused = reviewed();
+        refused
+            .settle_attempt(TWO, Settlement::NotAdmitted, &Actor::Person, 23)
+            .unwrap();
+        assert_eq!(
+            phase(&refused, TWO),
+            Some((Origin::Reopen, Phase::NotStarted))
+        );
+        // The current execution is still the delivered send, in review.
+        assert_eq!(current(&refused).id, ONE);
     }
 
     #[test]

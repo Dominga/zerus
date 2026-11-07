@@ -30,13 +30,14 @@ export function endTitles(captures: readonly EndCapture[], rows: Iterable<Titled
   return titles;
 }
 export interface EndPort {
-  begin(id: string, captures: EndCapture[]): Promise<void>;
+  begin(id: string, captures: EndCapture[], cleanupId?: string): Promise<void>;
   wait(id: string): Promise<boolean>;
   cancel(id: string): Promise<void>;
 }
 export interface EndOptions {
   key?: string;
   remove?: boolean;
+  cleanupId?: string;
   current?: () => boolean;
 }
 export function actionVerb(c: EndCapture) {
@@ -87,7 +88,8 @@ export function createEndActions(port: EndPort, notices: NoticeBus, uuid: () => 
     pending.set(id, { cancel, note: (text) => { setNote(text); clearTimeout(noteTimer); noteTimer = setTimeout(() => setNote(""), NOTICE_MS); } });
     try {
       const start = now();
-      await port.begin(id, captures);
+      if (options.cleanupId) await port.begin(id, captures, options.cleanupId);
+      else await port.begin(id, captures);
       if (!active || closed) { await port.cancel(id).catch(() => {}); return; }
       // Single and batch toasts name sessions the way the session list does.
       const listed = titles(captures).join(", ");

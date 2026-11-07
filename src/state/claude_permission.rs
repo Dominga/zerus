@@ -198,7 +198,15 @@ pub(super) fn answer(record: &Value, question: &Value, answers: &Value) -> Resul
         Some("mode_1") => 1,
         _ => return Err("Choose whether to use auto mode or keep the current mode".into()),
     };
-    kimi_tui_choice::answer(record, question, chosen, 2, snapshot, answered, false)
+    kimi_tui_choice::answer_after_observation(
+        record,
+        question,
+        chosen,
+        2,
+        snapshot,
+        answered,
+        kimi_tui_choice::CLAUDE_CONFIRMATION_GUARD,
+    )
 }
 
 #[cfg(test)]

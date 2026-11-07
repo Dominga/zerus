@@ -8,6 +8,7 @@ import { SectionHead } from "./ui";
 import { ServiceModeReview } from "./ServiceModeReview";
 import { ServiceRefresh } from "./ServiceRefresh";
 import { ServiceFirstChoice } from "./ServiceFirstChoice";
+import LoginEntrySetting from "./LoginEntrySetting";
 import { installedAppName } from "./about-version";
 import { appBuildInfo, refreshAppBuildInfo } from "../../../store/buildInfo";
 import { tr, trNoop } from "../../../i18n";
@@ -44,6 +45,7 @@ export function AboutSection() {
       <SectionHead title={trNoop("About")} />
       <p class="selectable">{zerus()}</p>
       <p class="selectable">{cli()}</p>
+      <LoginEntrySetting />
       <DesktopServiceStatus counts />
       <ServiceModeReview />
       <ServiceFirstChoice />

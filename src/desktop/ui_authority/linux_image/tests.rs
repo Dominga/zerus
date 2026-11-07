@@ -193,11 +193,11 @@ fn native_child() {
         1,
         "expired auth must release the original owner loan"
     );
-    caller.sealed_image = Some(
+    caller.linux_freshness = Some(Arc::new(super::super::LinuxFreshness::Service(
         reference
             .observe(&caller, Instant::now() + Duration::from_secs(2))
             .unwrap(),
-    );
+    )));
     let original = caller.clone();
     use zerus_client_core::{
         Target,

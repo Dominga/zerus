@@ -984,8 +984,12 @@ export const sessionFolderStatus = (computer: string, directory: string) => desk
 export const sessionFolderOpen = (input: import("./store/sessionFolders").FolderRequest, kind: "folder" | "shell") => desktop<string | null>("session_folder_open", { input, kind });
 
 export const terminationCleanupConfirm = (id: string, delay?: import("./store/endActionBusy").EndReference) => desktop<Outcome>("termination_cleanup_confirm", { id, delay });
-export const terminationCleanupOffer = (target: Target) => desktop<{ id: string; checked: boolean } | null>("termination_cleanup_offer", { target });
+export const terminationCleanupOffer = (target: Target) => desktop<import("./ui/sessions/termination-offer").CleanupOffer | null>("termination_cleanup_offer", { target });
 export const terminationCleanupCancel = (id: string) => desktop<void>("termination_cleanup_cancel", { id });
+export interface ProgramForceOffer { confirmation: string; programs: readonly import("./ui/sessions/termination-offer").CleanupProgram[] }
+export const terminationProgramForceOffer = (id: string) => desktop<ProgramForceOffer>("termination_program_force_offer", { id });
+export const terminationProgramForceConfirm = (id: string, confirmation: string) => desktop<import("./store/terminationCleanup").CleanupView>("termination_program_force_confirm", { id, confirmation });
+export const terminationProgramForceCancel = (id: string, confirmation: string) => desktop<import("./store/terminationCleanup").CleanupView>("termination_program_force_cancel", { id, confirmation });
 export const terminationCleanupView = () => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_view", {});
 export const terminationCleanupCheck = (id: string) => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_check", { id });
 export const terminationCleanupRemove = (revision: number, consents: import("./store/terminationCleanup").Consents) => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_remove", { revision, consents });
@@ -1023,7 +1027,7 @@ export async function attachmentMedia(computer: string, file: AttachmentRef, vid
 }
 
 /** Timing/reservations only: every effect still uses its original native writer. */
-export const actionDelayBegin = (id: string, captures: import("./store/endActionBusy").EndCapture[]) => desktop<void>("action_delay_begin", { id, captures });
+export const actionDelayBegin = (id: string, captures: import("./store/endActionBusy").EndCapture[], cleanupId?: string) => desktop<void>("action_delay_begin", { id, captures, ...(cleanupId ? { cleanupId } : {}) });
 export const untrackedShellIdentity = (target: Target) => desktop<import("./types").UntrackedShellIdentity>("untracked_shell_identity", { target });
 export const actionDelayWait = (id: string) => desktop<boolean>("action_delay_wait", { id });
 export const actionDelayCancel = (id: string) => desktop<void>("action_delay_cancel", { id });

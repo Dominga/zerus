@@ -16,6 +16,7 @@ mod native_ui;
 mod phones;
 mod platform;
 mod presence;
+mod project_launcher;
 mod screen;
 mod self_exec;
 mod session_reference;

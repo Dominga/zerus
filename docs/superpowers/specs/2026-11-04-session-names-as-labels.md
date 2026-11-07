@@ -255,11 +255,15 @@ Project membership currently uses `src/swarm/catalog.rs`'s causal operation grap
 
 ### Rollback
 
-The rollback floor for labels that repeat is the first build that contains P3a, P3b and P3c (desktop-u G1, coordinator 2026-11-05):
+The complete rollback floor for labels that repeat contains P3a, P3b and P3c plus the native-continuity corrections found before activation (desktop-u G1, coordinator 2026-11-05 and 2026-11-08):
 - the resolver and the in-place handling of the ID layout (P3a);
 - `terminal_name` routing for every native target, including rename's `Target::Name`, tmux `=NAME` targets and the Windows host registry (P3b);
 - exact selection by expected IDs (P3c);
 - releasing an owned `zerus:` worktree lock on archive and forget, so that no lock lingers after a rollback to the floor (P3c; nothing creates such a lock before P3e, coordinator 2026-11-05).
+
+The native-continuity corrections include fixed ID-layout DeepSeek/OpenCode bindings, launch liveness by `HGS_SESSION_ID`, and pending DeepSeek forks keyed by the source session ID. Two same-label sources with different native conversations retain separate pending request UUIDs; an explicit retry retains its own original destination and UUID through a rename, and a changed host leaves the unknown request for manual review. Reader/reference-only P3d builds do not establish that complete floor.
+
+The outer CLI session-label observation/cache must carry a narrow required `native_continuity` boolean before activation. P3e writers need a fresh positive from every CLI; a missing, false or unknown value keeps writers closed. This is separate from the connector Context schema and adds no native consent or general inventory. P3d reference emission can use its existing reader gate. Canonical connector deployment remains separately owner-approved; no resident bridge is reloaded for the transition.
 
 They stay separate PRs. A computer rolled back from P3e to that floor or later keeps every session that shares a label working, and never writes one to `sha256(label)`, where it would overwrite that label's first holder. Any later native dispatcher, helper or Service actor must also sit at that floor. Only a rollback below the floor after P3e is the "invisible but never deleted" case in the table.
 
@@ -293,7 +297,7 @@ They stay separate PRs. A computer rolled back from P3e to that floor or later k
    - the checkout of an ID-layout session is protected by the worktree lock, under its rules below;
    - `docs/reference.md` states the rollback rules: sessions in the ID layout are invisible to older builds but never deleted; to use one on an older build, archive it first; and its checkout stays locked until it is archived or forgotten.
 
-   Preconditions: read delivery selects among sessions that share a label (P3c), and the floor, P3a–P3c, is installed on every computer.
+   Preconditions: read delivery selects among sessions that share a label (P3c), and the complete native-continuity floor is installed on every computer.
 
    With the gate closed, it behaves as P2, with the `-2` suffix and its hint for new sessions and forks.
 6. **P3f, desktop and phone.**
@@ -303,7 +307,7 @@ They stay separate PRs. A computer rolled back from P3e to that floor or later k
 
    Live connector and gateway updates stay owner-gated.
 
-P3e merges only after P3a–P3c, the rollback floor for labels that repeat, are installed on every computer, and P3d on every computer of the swarm and on the gateway connector. The fleet gate then opens by itself, computer by computer.
+P3e merges only after the complete native-continuity rollback floor for labels that repeat is installed on every computer, and P3d on every computer of the swarm and on the gateway connector. The fleet gate then opens by itself, computer by computer.
 
 ### The worktree lock (P3e; desktop-u and review-q2, coordinator 2026-11-05)
 

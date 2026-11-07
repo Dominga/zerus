@@ -276,7 +276,7 @@ pub(super) fn ensure_manifest() -> Result<()> {
 pub(super) fn repair() {
     // Without `sessions/` nothing is in the ID layout: nothing to prove, and
     // resolution then writes nothing.
-    if root().join("sessions").is_dir() && manifest().is_none() {
+    if id_directories().iter().any(|(dir, _)| dir.is_dir()) && manifest().is_none() {
         if let Ok(Some(_guard)) = storage::writer_until(Instant::now()) {
             let _ = ensure_manifest();
         }
@@ -286,40 +286,55 @@ pub(super) fn repair() {
 /// Every live or saved session in `sessions/`, read within the bounds and
 /// `deadline`; an error when they cannot cover it, or when a record there
 /// cannot be read.
+/// All three fixed namespaces share the same scan count and deadline.
+fn id_directories() -> Vec<(PathBuf, Option<provider_binding::Provider>)> {
+    use provider_binding::Provider;
+    vec![(root().join("sessions"), None), (Provider::DeepSeek.directory(), Some(Provider::DeepSeek)),
+        (Provider::OpenCode.directory(), Some(Provider::OpenCode))]
+}
 fn enumerate(deadline: Instant) -> Result<Vec<(String, Value)>> {
-    let dir = root().join("sessions");
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error.to_string()),
-    };
     let late = || "the sessions in the ID layout could not all be read in time; choose one with --session-id".to_owned();
     let mut found = Vec::new();
-    for (count, entry) in entries.enumerate() {
-        if count >= SCAN_RECORDS || Instant::now() >= deadline {
-            return Err(late());
-        }
-        let entry = entry.map_err(|error| error.to_string())?;
-        let Some(id) = entry
-            .path()
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .filter(|id| session_id::canonical(id))
-            .map(str::to_owned)
-        else {
-            continue;
+    let mut count = 0;
+    for (dir, provider) in id_directories() {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.to_string()),
         };
-        let record = storage::read_id(&id).map_err(|error| {
-            format!("a session in the ID layout could not be read ({error}); choose one with --session-id")
-        })?;
-        if string(&record, "archive_id").is_empty() && record["rename_shadow"] != true {
-            found.push((id, record));
+        for entry in entries {
+            if count >= SCAN_RECORDS || Instant::now() >= deadline { return Err(late()); }
+            count += 1;
+            let path = entry.map_err(|error| error.to_string())?.path();
+            if path.extension().is_none_or(|s| s != "json") { continue; }
+            let Some(id) = path.file_stem().and_then(|s| s.to_str()).filter(|id| session_id::canonical(id)) else { continue; };
+            let record = match provider { Some(provider) => provider.read_id(id), None => storage::read_id(id) }
+                .map_err(|error| format!("a session in the ID layout could not be read ({error}); choose one with --session-id"))?;
+            if string(&record, "archive_id").is_empty() && record["rename_shadow"] != true { found.push((id.to_owned(), record)); }
         }
     }
-    if Instant::now() >= deadline {
-        return Err(late());
-    }
+    if Instant::now() >= deadline { return Err(late()); }
     Ok(found)
+}
+
+/// Native provider routes are fixed namespaces, never a fallback to a label.
+pub(super) fn read_id_for_label(label: &str, id: &str) -> Result<Value> {
+    match provider_binding::Provider::named(label) {
+        Some(provider) => provider.read_id(id),
+        None => storage::read_id(id),
+    }
+}
+pub(super) fn id_path_for_label(label: &str, id: &str) -> Option<PathBuf> {
+    match provider_binding::Provider::named(label) {
+        Some(provider) => provider.id_path(id),
+        None => storage::id_record_path(id),
+    }
+}
+pub(super) fn first_path(label: &str) -> PathBuf {
+    provider_binding::Provider::named(label).map_or_else(|| storage::label_record_path(label), |provider| provider.label_path(label))
+}
+pub(super) fn read_first(label: &str) -> Result<Value> {
+    provider_binding::Provider::named(label).map_or_else(|| storage::read_label(label), |provider| provider.read_label(label))
 }
 
 /// Whether `record`, read from the ID layout, is the live or saved session
@@ -353,7 +368,7 @@ fn scan(label: &str) -> Result<Vec<String>> {
 /// FIFO included, is never taken as absent: the set cannot be proven
 /// complete, so it is an error (#1437 review).
 fn verified(id: &str, label: &str) -> Result<Option<Value>> {
-    let Some(path) = storage::id_record_path(id) else {
+    let Some(path) = id_path_for_label(label, id) else {
         return Ok(None);
     };
     match std::fs::symlink_metadata(&path) {
@@ -361,7 +376,7 @@ fn verified(id: &str, label: &str) -> Result<Option<Value>> {
         Err(error) => return Err(format!("{label}: {error}")),
         Ok(_) => {}
     }
-    let record = storage::read_id(id).map_err(|error| {
+    let record = read_id_for_label(label, id).map_err(|error| {
         format!("{label}: a session that may share this label could not be read ({error}); choose one with --session-id")
     })?;
     Ok(holds(&record, id, label).then_some(record))
@@ -389,7 +404,11 @@ pub(super) fn candidates(label: &str) -> Result<Candidates> {
         }
     }
     Ok(Candidates {
-        first: storage::label_record_path(label).is_file(),
+        first: match std::fs::symlink_metadata(first_path(label)) {
+            Ok(_) => true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error.to_string()),
+        },
         by_id,
     })
 }

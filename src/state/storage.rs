@@ -635,29 +635,38 @@ pub(super) fn panes_of<'a>(snapshot: &'a Snapshot, record: &Value) -> Option<&'a
     snapshot.get(terminal_name(record))
 }
 
-/// Whether `record`'s own terminal holds this session (#1445 review): its
-/// pane and run match the record, or a launch of this same label (its
-/// `HGS_SESSION`) holds it, such as the session's own resume still starting.
-/// A terminal under that name that another session's launch started, or that
-/// hgs never started, never makes the session live. An environment that
-/// cannot be read is an error, never absence.
+/// The original pane/run proves liveness first. A still-starting launch
+/// instead identifies its durable session through the terminal's environment.
+/// An unreadable environment is never evidence that the launch is absent.
 pub(super) fn terminal_live(snapshot: &Snapshot, record: &Value) -> Result<bool> {
     if matches(record, panes_of(snapshot, record)) {
         return Ok(true);
     }
-    launched_as(snapshot, terminal_name(record), string(record, "name"))
+    launched_as(snapshot, terminal_name(record), record)
 }
 
-/// Whether the live terminal `terminal` was started by a launch of the label
-/// `label`; false when it is not live or another launch, or none, started it.
-pub(super) fn launched_as(snapshot: &Snapshot, terminal: &str, label: &str) -> Result<bool> {
+pub(super) fn launched_as(snapshot: &Snapshot, terminal: &str, record: &Value) -> Result<bool> {
     if !snapshot.contains_key(terminal) {
         return Ok(false);
     }
-    let launched = backend::current().session_variable(terminal, "HGS_SESSION").map_err(|error| {
-        format!("{error}; it may be this session's own launch, so nothing was changed")
-    })?;
-    Ok(launched.as_deref() == Some(label))
+    launch_identity(record, |key| backend::current().session_variable(terminal, key))
+        .map_err(|error| format!("{error}; it may be this session's own launch, so nothing was changed"))
+}
+
+fn launch_identity(record: &Value, mut variable: impl FnMut(&str) -> Result<Option<String>>) -> Result<bool> {
+    // New launches/resumes carry their own ID. The rollback floor already
+    // carries HGS_RESUME_SESSION_ID when it resumes an ID-layout session.
+    for key in ["HGS_SESSION_ID", "HGS_RESUME_SESSION_ID"] {
+        if let Some(id) = variable(key)? {
+            if !session_id::canonical(&id) || uuid::Uuid::parse_str(&id).is_ok_and(|id| id.is_nil()) {
+                return Err("the terminal's launch session ID is invalid".into());
+            }
+            return Ok(id == string(record, "session_id"));
+        }
+    }
+    // Only the legacy first holder can have been launched without either
+    // marker. A label-only launch cannot establish an ID twin's liveness.
+    Ok(!in_id_layout(record) && variable("HGS_SESSION")?.as_deref() == Some(string(record, "name")))
 }
 
 pub(super) fn matches(record: &Value, panes: Option<&Vec<Pane>>) -> bool {
@@ -839,6 +848,28 @@ mod agent_hint_tests {
 #[cfg(test)]
 mod session_id_tests {
     use super::*;
+
+    #[test]
+    fn a_launch_identity_never_borrows_another_twin_s_label() {
+        let one = "11111111-1111-4111-8111-111111111111";
+        let two = "22222222-2222-4222-8222-222222222222";
+        let record = json!({"name":"codex/example/shared","session_id":one,"layout":"id"});
+        let env = |id: Option<&str>, resume: Option<&str>, label: Option<&str>| {
+            let fields = [("HGS_SESSION_ID",id),("HGS_RESUME_SESSION_ID",resume),("HGS_SESSION",label)];
+            launch_identity(&record, |key| Ok(fields.iter().find(|(k,_)|*k==key).unwrap().1.map(str::to_owned)))
+        };
+        assert_eq!(env(Some(one),None,Some("codex/example/old-label")),Ok(true));
+        assert_eq!(env(Some(two),None,Some("codex/example/shared")),Ok(false));
+        assert_eq!(env(None,Some(one),Some("codex/example/shared")),Ok(true));
+        assert_eq!(env(None,Some(two),Some("codex/example/shared")),Ok(false));
+        assert_eq!(env(None,None,Some("codex/example/shared")),Ok(false));
+        assert!(env(Some("damaged"),Some(one),Some("codex/example/shared")).is_err());
+        assert!(env(Some("00000000-0000-0000-0000-000000000000"),None,None).is_err());
+        let mut legacy = record.clone(); legacy.as_object_mut().unwrap().remove("layout");
+        assert_eq!(launch_identity(&legacy, |key|Ok((key=="HGS_SESSION").then(||"codex/example/shared".into()))),Ok(true));
+        assert!(launch_identity(&record, |_|Err("unreadable".into())).is_err());
+    }
+
     /// zerus-ucck P1, #1317 R5: every write of this hgs keeps a session's ID,
     /// an older writer's strip leads to one new ID, and no two records ever
     /// share one. The fixture runs in a child process with a private state

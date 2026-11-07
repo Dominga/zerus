@@ -6,7 +6,7 @@ import { coordinatorActivity, activity } from "../../store/session";
 import { memberRow, showCatalog, showTeam, teams } from "../../store/teams";
 import { SHARE, SIDE, dragShare, dragSide, teamLayout, type TeamLayout } from "../../store/teamLayout";
 import { selected, setDetailTab, setSelectedKey, toast } from "../../store/ui";
-import { teamAction, teamTests, teamTimeline, teamsProfile } from "../../bridge";
+import { teamTests, teamTimeline, teamsProfile } from "../../bridge";
 import { PlanView } from "./PlanView";
 import { TeamCatalogEditor } from "./TeamCatalogEditor";
 import { TeamSettingsDialog } from "./TeamSettingsDialog";
@@ -18,12 +18,13 @@ import { QueuePanel } from "../sessions/QueuePanel";
 import { sendBackMessage } from "./actions";
 import { duration, memberProgress, memberStatus, progress, shownMembers, stateLabel, stateTone, teamState, unreadBadge, type MemberLive, type MemberStatus } from "./team-model";
 import { roleStyle } from "./roles";
-import { TeamProposals } from "./ProposalCards";
+import { TeamProposals, windowPort } from "./ProposalCards";
+import { approvePhaseCall } from "./decisions";
 import { TeamReports } from "./TeamReports";
 import { WaitingBanner } from "./Waiting";
 import { Blockers, PhaseModeControl, TaskActions, TeamBarActions, TeamBarChips, TeamModeControl, TeamQuestions } from "./TeamActions";
 import { composer } from "../../store/composer";
-import type { ComputerId, TeamCall, TeamMemberView, TeamPulseView, TeamView } from "../../types";
+import type { ComputerId, TeamMemberView, TeamPulseView, TeamView } from "../../types";
 import type { Session } from "../sessions/types";
 
 // The Team tab (Qt's TeamWorkspace, design D3, HANDOFF §14): the team bar and
@@ -72,13 +73,11 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
   // The same call Waiting for you sends; a confirmation the core asks for is
   // shown and sent again only on the owner's yes.
   const approvePhase = async (n: number) => {
-    const call = { computer: props.computer, team: props.team.id, team_name: props.team.name, action: { kind: "approve", phase: n } as TeamCall["action"] };
     try {
-      let outcome = await teamAction(call);
-      if (outcome.outcome === "confirm") {
-        if (!window.confirm(outcome.confirmation.text)) return;
-        outcome = await teamAction({ ...call, confirmed: true });
-      }
+      // The same confirmed call Waiting for you sends: the core's
+      // confirmation text is asked in the app's dialog, Cancel sends nothing.
+      const outcome = await approvePhaseCall(windowPort, { computer: props.computer, team: props.team.id, teamName: props.team.name }, n);
+      if (outcome === "cancelled") return;
       if (outcome.outcome === "failed" || outcome.outcome === "uncertain") toast(tr("Approve phase"), outcome.detail, "error", true);
     } catch (cause) {
       toast(tr("Approve phase"), String(cause), "error", true);

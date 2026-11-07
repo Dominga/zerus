@@ -45,7 +45,7 @@ export function hgsWords(message: string): string {
  * gives `cancelled` and sends nothing; the confirming button sends it again,
  * confirmed. `requestId` repeats an earlier request whose outcome was unknown.
  */
-export async function act(port: DecisionPort, call: Omit<TeamCall, "confirmed">, requestId?: string): Promise<TeamOutcome | "cancelled"> {
+export async function act(port: Pick<DecisionPort, "send" | "confirm">, call: Omit<TeamCall, "confirmed">, requestId?: string): Promise<TeamOutcome | "cancelled"> {
   const sent: TeamCall = { ...call, confirmed: false, request_id: requestId ?? null };
   let outcome: TeamOutcome;
   try { outcome = await port.send(sent); } catch (reason) { return { outcome: "failed", detail: String(reason instanceof Error ? reason.message : reason), request_id: requestId ?? "" }; }
@@ -584,6 +584,24 @@ export function nativeAnswer(question: TeamMemberQuestion): { question_id: strin
 export function phaseApproval(team: TeamView, phase: number): TeamConfirmation {
   const count = team.tasks.filter((task) => task.phase === phase).length;
   return { name: "teamApprovePhaseConfirm", title: tr("Approve phase?"), text: tr("Hand phase %1's %2 tasks to the members?", phase, count), action: tr("Approve phase") };
+}
+
+/**
+ * The plan's Approve on a draft phase (the Team tab): the same call Waiting
+ * for you makes, so the core's confirmation is asked in the app's own dialog
+ * and only a yes sends it again, confirmed.
+ */
+export function approvePhaseCall(
+  port: Pick<DecisionPort, "send" | "confirm">,
+  where: { computer: ComputerId; team: string; teamName: string },
+  phase: number,
+): Promise<TeamOutcome | "cancelled"> {
+  return act(port, {
+    computer: where.computer,
+    team: where.team,
+    team_name: where.teamName,
+    action: { kind: "approve", phase },
+  });
 }
 
 /** Why an item no longer waits, read from the team as it is now; "" while it still does. */

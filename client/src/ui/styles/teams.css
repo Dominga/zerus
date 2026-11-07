@@ -168,3 +168,13 @@
 }
   .team-tab { position: relative; }
   .team-tab .nt-settings, .team-tab .cat-editor { position: absolute; z-index: 3; }
+
+/* Task #218: the member menu and its Swap dialog. */
+.team-member { position: relative; }
+.team-member-menu { position: absolute; right: 6px; top: 34px; z-index: 30; }
+.team-swap-dialog { width: min(640px, 94vw); }
+.team-swap-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding-left: 22px; }
+.team-swap-fields.disabled { opacity: .55; }
+.team-swap-field { display: flex; flex-direction: column; gap: 3px; font-size: var(--fs-sm); }
+.team-swap-mode { display: flex; align-items: center; gap: 6px; font-size: var(--fs-sm); }
+.team-swap-session { margin-left: 22px; width: calc(100% - 22px); }

@@ -20,6 +20,7 @@ import { duration, memberProgress, memberStatus, progress, shownMembers, stateLa
 import { roleStyle } from "./roles";
 import { TeamProposals, windowPort } from "./ProposalCards";
 import { approvePhaseCall } from "./decisions";
+import { SwapMemberDialog } from "./SwapMemberDialog";
 import { TeamReports } from "./TeamReports";
 import { WaitingBanner } from "./Waiting";
 import { Blockers, PhaseModeControl, TaskActions, TeamBarActions, TeamBarChips, TeamModeControl, TeamQuestions } from "./TeamActions";
@@ -309,6 +310,8 @@ function MemberRow(props: { computer: ComputerId; team: TeamView; member: TeamMe
   const row = () => memberRow(props.computer, props.member);
   const own = createMemo(() => memberProgress(props.team, props.member));
   const model = () => [props.member.model, props.member.effort].filter(Boolean).join(" ");
+  const [menu, setMenu] = createSignal(false);
+  const [swap, setSwap] = createSignal(false);
   return (
     <div class="team-member" classList={{ problem: props.status.problem, [`tone-${props.status.tone}`]: true, lead: props.member.lead, planned: props.status.kind === "not_created" }}
       data-kind={props.status.kind}>
@@ -340,6 +343,14 @@ function MemberRow(props: { computer: ComputerId; team: TeamView; member: TeamMe
       </div>
       <button class="icon-btn small" disabled={!row()} aria-label={tr("Open session")} data-tip={row() ? tr("Open session") : tr("No session yet")}
         onClick={() => openRow(row())}><Icon name="external-link" size={13} /></button>
+      <button class="icon-btn small" aria-label={tr("Member actions")} aria-expanded={menu()} data-tip={tr("Member actions")}
+        onClick={() => setMenu((shown) => !shown)}><Icon name="ellipsis" size={13} /></button>
+      <Show when={menu()}>
+        <div class="menu team-member-menu" role="menu">
+          <button type="button" class="menu-item" role="menuitem" onClick={() => { setMenu(false); setSwap(true); }}>{tr("Swap member…")}</button>
+        </div>
+      </Show>
+      <Show when={swap()}><SwapMemberDialog computer={props.computer} team={props.team} member={props.member} close={() => setSwap(false)} /></Show>
     </div>
   );
 }

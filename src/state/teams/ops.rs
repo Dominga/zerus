@@ -396,6 +396,20 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
     if let Some(needs) = &task.needs {
         super::rights::check_needs(needs).map_err(field("needs"))?;
     }
+    // Task 135: the control questions a fresh session must answer from the brief.
+    ensure!(task.control.len() <= 12, "{who}: field \"control\": at most 12 control questions");
+    for control in &mut task.control {
+        control.q = clean_text(&control.q, 300, "A control question").map_err(field("control"))?;
+        ensure!(!control.q.is_empty(), "{who}: field \"control\": a question is empty");
+        ensure!(
+            (1..=6).contains(&control.keys.len()),
+            "{who}: field \"control\": a question names 1 to 6 keys, the strings its answer holds"
+        );
+        for key in &mut control.keys {
+            *key = clean_text(key, 120, "A control key").map_err(field("control"))?;
+            ensure!(!key.is_empty(), "{who}: field \"control\": a key is empty");
+        }
+    }
     let mut seen = BTreeSet::new();
     task.deps.retain(|dep| seen.insert(dep.task));
     ensure!(task.deps.iter().all(|dep| dep.task != task.id), "{who}: field \"deps\": the task depends on itself");
@@ -4034,11 +4048,21 @@ fn swap_one(team: &mut Team, input: &Value, id: &str, keep_session: bool, actor:
         }
         let fields =
             [("agent", &mut member.agent), ("model", &mut member.model), ("effort", &mut member.effort), ("account", &mut member.account)];
+        // Task 135: what the swap changes, for the new session's handoff brief.
+        let mut said = Vec::new();
         for (key, field) in fields {
             if let Some(value) = input[key].as_str().map(str::trim).filter(|value| !value.is_empty()) {
+                if field.as_str() != value {
+                    said.push(format!("{key} {} -> {value}", if field.is_empty() { "(default)" } else { field.as_str() }));
+                }
                 *field = value.to_owned();
                 changed.push(key);
             }
+        }
+        if !keep_session {
+            // A new session, whatever it is made of: it knows nothing the team
+            // knew, so its first message is the handoff brief (task 135).
+            member.handoff = Some(HandoffNeed { why: "swap".to_owned(), at, from: from.clone(), changes: said });
         }
         // Feedback 12: a swap's role prompt was ignored; it changes now.
         if let Some(prompt) = input["prompt"].as_str().filter(|prompt| !prompt.trim().is_empty()) {

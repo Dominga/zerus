@@ -7,6 +7,7 @@ pub(crate) mod commands;
 pub(crate) mod dispatcher;
 pub(crate) mod baseline;
 pub(crate) mod estimates;
+pub(crate) mod handoff;
 pub(crate) mod inbox;
 pub(crate) mod isolation;
 pub(crate) mod lead_stall;

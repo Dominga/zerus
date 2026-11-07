@@ -2929,6 +2929,52 @@ fn test_command(input: &Value) -> anyhow::Result<Value> {
 /// Task 139: `hgs team look`: one member's compact verified snapshot - its
 /// screen read now, every source's view, the reconciled state, its task and
 /// pulse and what Zerus does next. Reads only; changes nothing.
+/// Task 135: the handoff briefs a team kept. With a `task`, the latest brief of
+/// it (or the given `version`) with its text and the control questions it could
+/// not answer; without one, the latest of every task. Read only; the team is the
+/// caller's own when none is named.
+fn handoff_view(input: &Value) -> anyhow::Result<Value> {
+    let named = text(input, "team");
+    let store = Store::open(false)?;
+    let team = if named.is_empty() {
+        let teams = store.active_teams(ACTIVE_TEAMS)?;
+        let record = caller_record();
+        let (team, _) = current_team(&teams, "", |team| record.as_ref().and_then(|record| calling_member(team, record)))?;
+        team.clone()
+    } else {
+        store.load(named)?.context("Unknown team")?
+    };
+    let brief = |handoff: &Handoff, with_text: bool| {
+        let mut value = json!({"task":handoff.task,"version":handoff.version,"member":handoff.member,"why":handoff.why,
+            "at":handoff.at,"units":handoff.text.encode_utf16().count(),"misses":handoff.misses});
+        if with_text {
+            value["text"] = json!(handoff.text);
+            value["versions"] = json!(team.handoffs.iter().filter(|other| other.task == handoff.task).map(|other| other.version).collect::<Vec<_>>());
+        }
+        value
+    };
+    match input["task"].as_u64() {
+        Some(task) => {
+            let version = input["version"].as_u64().map(|version| version as u32);
+            let found = super::handoff::find(&team, task as u32, version).with_context(|| format!("The team kept no handoff brief for task #{task}"))?;
+            let mut value = brief(found, true);
+            value["team"] = json!(team.id);
+            Ok(value)
+        }
+        None => {
+            let mut latest: Vec<&Handoff> = Vec::new();
+            for handoff in &team.handoffs {
+                match latest.iter_mut().find(|other| other.task == handoff.task) {
+                    Some(other) if other.version < handoff.version => *other = handoff,
+                    Some(_) => {}
+                    None => latest.push(handoff),
+                }
+            }
+            Ok(json!({"team":team.id,"briefs":latest.into_iter().map(|handoff| brief(handoff, false)).collect::<Vec<_>>()}))
+        }
+    }
+}
+
 fn look(input: &Value) -> anyhow::Result<Value> {
     let wanted = text(input, "member").trim();
     ensure!(!wanted.is_empty(), "hgs team look needs a member: its id or role");
@@ -4785,6 +4831,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             };
             Ok(json!({"team":team.id,"pulses":list.iter().map(super::pulses::Pulse::json).collect::<Vec<_>>()}))
         }
+        "handoff" => handoff_view(input),
         "escalate" => escalate(input),
         op if MUTATIONS.contains(&op) => {
             let request = text(input, "request_id");
@@ -5085,6 +5132,21 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     if args.first().map(String::as_str) == Some("look") && args.get(1).is_some_and(|arg| !arg.starts_with("--")) && file.is_none() {
         let team = args.iter().position(|arg| arg == "--team").and_then(|index| args.get(index + 1)).cloned().unwrap_or_default();
         let result = run("look", &json!({"member":args[1],"team":team}), false).map_err(|e| e.to_string())?;
+        println!("{result}");
+        return Ok(0);
+    }
+    // Task 135: `hgs team handoff [TASK] [--team ID] [--version N]`: the briefs
+    // a team kept for its fresh sessions.
+    if args.first().map(String::as_str) == Some("handoff") && file.is_none() {
+        let flag = |name: &str| args.iter().position(|arg| arg == name).and_then(|index| args.get(index + 1)).cloned();
+        let mut input = json!({"team":flag("--team").unwrap_or_default()});
+        if let Some(task) = args.get(1).filter(|arg| !arg.starts_with("--")) {
+            input["task"] = json!(task.trim_start_matches('#').parse::<u64>().map_err(|_| format!("{task} is not a task number"))?);
+        }
+        if let Some(version) = flag("--version") {
+            input["version"] = json!(version.parse::<u64>().map_err(|_| format!("{version} is not a version number"))?);
+        }
+        let result = run("handoff", &input, false).map_err(|e| e.to_string())?;
         println!("{result}");
         return Ok(0);
     }

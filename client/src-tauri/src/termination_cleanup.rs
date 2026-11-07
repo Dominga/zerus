@@ -88,6 +88,12 @@ struct Job {
     programs: Option<program_pipeline::ProgramJob>,
 }
 impl Job {
+    fn has_launch_owner(&self) -> bool {
+        self.cleanup
+            .entries
+            .iter()
+            .all(|entry| entry.exit_cleanup && !entry.expected_owner_id.is_empty())
+    }
     fn clearable(&self) -> bool {
         !self.busy
             && !self.unfinished_programs()
@@ -541,7 +547,7 @@ impl Model {
                 } else {
                     review::summary_line(&entry.row)
                 };
-                let r = if job.manual_review {
+                let r = if job.manual_review && job.has_launch_owner() {
                     job.cleanup.required()
                 } else {
                     Consents::default()
@@ -648,6 +654,7 @@ impl Model {
                         && !job.busy
                         && !job.has_programs()
                         && job.manual_review
+                        && job.has_launch_owner()
                         && ready(entry)
                         && zerus_client_core::creation::canonical_uuid(&entry.machine),
                     busy: job.busy,
@@ -1355,6 +1362,7 @@ pub fn termination_cleanup_remove(
         if j.dismissed
             || unknown_folders.contains(&presentation::job_key(j))
             || !j.manual_review
+            || !j.has_launch_owner()
             || j.has_programs()
         {
             continue;

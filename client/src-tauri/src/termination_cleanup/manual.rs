@@ -153,7 +153,7 @@ impl Model {
         id: &str,
         token: &str,
         mut consents: Consents,
-    ) -> Result<(String, review::Removal), String> {
+    ) -> Result<(String, review::Removal, Vec<String>), String> {
         // Consumed even on refusal. An old dialog cannot authorize another call.
         let mut offer = self
             .manual
@@ -170,17 +170,42 @@ impl Model {
             return Err("Confirm the reviewed discard choices. Sessions and programs must stop before removal.".into());
         };
         debug_assert!(!removal.delete_branch && !removal.preserve_archive_restore);
-        let job = self
+        let key = self
+            .jobs
+            .iter()
+            .find(|j| j.id == id)
+            .map(presentation::job_key)
+            .ok_or(STATE_CHANGED)?;
+        let mut members = Vec::new();
+        for job in self
             .jobs
             .iter_mut()
-            .find(|j| j.id == id)
-            .ok_or(STATE_CHANGED)?;
-        job.busy = true;
-        job.phase = "removing";
-        job.manual_review = false;
-        Ok((host, removal))
+            .filter(|j| !j.dismissed && presentation::job_key(j) == key)
+        {
+            job.busy = true;
+            job.phase = "removing";
+            job.manual_review = false;
+            members.push(job.id.clone());
+        }
+        Ok((host, removal, members))
     }
-    fn manual_result(&mut self, id: &str, result: review::Removed) {
+    fn manual_result(&mut self, id: &str, result: review::Removed, members: &[String]) {
+        // Only the original admitted group is updated. A newly retained job at
+        // this pathname cannot inherit an earlier folder's completion.
+        for job in self
+            .jobs
+            .iter_mut()
+            .filter(|j| members.contains(&j.id) && j.id != id)
+        {
+            job.busy = false;
+            if let review::Removed::Done { reply } = &result {
+                for entry in &mut job.cleanup.entries {
+                    entry.status = Some(Status::Removed);
+                    entry.detail = reply["branch_error"].as_str().unwrap_or("").into();
+                    entry.verified = false;
+                }
+            }
+        }
         let Some(job) = self.jobs.iter_mut().find(|j| j.id == id) else {
             return;
         };
@@ -291,7 +316,7 @@ pub fn termination_cleanup_manual_confirm(
         model.manual = None;
         return Err("An unknown result will not be retried.".into());
     }
-    let (host, removal) = model.confirm_manual(&id, &confirmation, consents)?;
+    let (host, removal, members) = model.confirm_manual(&id, &confirmation, consents)?;
     changed(&app, &mut model);
     let view = model.view();
     drop(model);
@@ -299,7 +324,7 @@ pub fn termination_cleanup_manual_confirm(
     tauri::async_runtime::spawn_blocking(move || {
         let result = crate::worktree_cleanup::remove(&host, &entry.machine, &removal);
         let mut model = lock(&own.model);
-        model.manual_result(&id, result);
+        model.manual_result(&id, result, &members);
         changed(&app, &mut model);
     });
     Ok(view)
@@ -346,12 +371,20 @@ mod tests {
     #[test]
     fn unowned_manual_review_never_auto_runs_and_keeps_branch_and_original_identity() {
         let mut m = model();
+        m.jobs[0].manual_review = true;
+        m.jobs[0].cleanup.entries[0].verified = true;
+        m.jobs[0].cleanup.entries[0].row = data()["worktrees"][0].clone();
+        assert!(!m.jobs[0].has_launch_owner());
+        assert!(
+            !m.view().rows[0].ready,
+            "unowned folders require their separate confirmation"
+        );
         let original = m.jobs[0].cleanup.entries[0].clone();
         let v = offer(&mut m, data());
         assert!(v.ready);
         assert!(!m.jobs[0].busy);
         assert!(!m.manual.as_ref().unwrap().cleanup.busy());
-        let (_, removal) = m
+        let (_, removal, _) = m
             .confirm_manual(
                 "original",
                 &v.confirmation,
@@ -372,6 +405,7 @@ mod tests {
             review::Removed::Unknown {
                 detail: "lost reply".into(),
             },
+            &["original".into()],
         );
         assert_eq!(
             m.jobs[0].cleanup.entries[0].status,
@@ -418,7 +452,7 @@ mod tests {
         r["ignored_count"] = json!(1);
         r["ignored_fingerprint"] = json!("local");
         let v = offer(&mut m, d);
-        let (_, r) = m
+        let (_, r, _) = m
             .confirm_manual(
                 "original",
                 &v.confirmation,
@@ -498,6 +532,40 @@ mod tests {
                 .confirm_manual("original", &v.confirmation, Consents::default())
                 .is_err());
             assert!(m.manual.is_none());
+        }
+    }
+    #[test]
+    fn one_folder_effect_settles_all_original_sources_but_not_a_later_replacement() {
+        let mut m = model();
+        let mut twin = model().jobs.pop_front().unwrap();
+        twin.id = "twin".into();
+        m.jobs.push_back(twin);
+        let v = offer(&mut m, data());
+        let (_, _, members) = m
+            .confirm_manual("original", &v.confirmation, Consents::default())
+            .unwrap();
+        assert_eq!(members.len(), 2);
+        assert!(m.jobs.iter().all(|j| j.busy));
+        let mut later = model().jobs.pop_front().unwrap();
+        later.id = "later".into();
+        m.jobs.push_back(later);
+        m.manual_result(
+            "original",
+            review::Removed::Done {
+                reply: json!({"status":"removed"}),
+            },
+            &members,
+        );
+        assert!(m.jobs.iter().all(|j| !j.busy));
+        for j in &m.jobs {
+            assert_eq!(
+                j.cleanup.entries[0].status,
+                Some(if j.id == "later" {
+                    Status::Kept
+                } else {
+                    Status::Removed
+                })
+            );
         }
     }
 }

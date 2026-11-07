@@ -18,13 +18,13 @@ use std::{
 pub const WINDOWS_PROBE: &str = r#"echo "hgs-remote-v2|%OS%|%SystemRoot%|$env:OS|$env:SystemRoot""#;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Shell {
+enum Login {
     Posix,
     PowerShell(String),
     Cmd(String),
 }
 
-fn parse_probe(bytes: &[u8]) -> Option<Shell> {
+fn parse_probe(bytes: &[u8]) -> Option<Login> {
     let text = std::str::from_utf8(bytes).ok()?.trim();
     let text = text
         .strip_prefix('"')
@@ -43,7 +43,7 @@ fn parse_probe(bytes: &[u8]) -> Option<Shell> {
             && fields[2] == "%SystemRoot%"
             && fields[3].strip_suffix(":OS")? == fields[4].strip_suffix(":SystemRoot")?
         {
-            return Some(Shell::Posix);
+            return Some(Login::Posix);
         } else {
             return None;
         };
@@ -64,16 +64,16 @@ fn parse_probe(bytes: &[u8]) -> Option<Shell> {
         root.trim_end_matches(['\\', '/'])
     );
     Some(if cmd {
-        Shell::Cmd(path)
+        Login::Cmd(path)
     } else {
-        Shell::PowerShell(path)
+        Login::PowerShell(path)
     })
 }
 
 /// Process-local discovery cache, bound to alias, SSH program and connection
 /// overrides. Later CLI calls rediscover; no metadata/credentials are persisted.
-fn discover(config: &Config, peer: &str) -> Result<Shell> {
-    static CACHE: OnceLock<Mutex<BTreeMap<Vec<String>, Shell>>> = OnceLock::new();
+fn discover(config: &Config, peer: &str) -> Result<Login> {
+    static CACHE: OnceLock<Mutex<BTreeMap<Vec<String>, Login>>> = OnceLock::new();
     let mut key = vec![
         platform::ssh_program().to_string_lossy().into_owned(),
         peer.into(),
@@ -113,7 +113,7 @@ fn discover(config: &Config, peer: &str) -> Result<Shell> {
 }
 
 pub fn windows(config: &Config, peer: &str) -> Result<bool> {
-    Ok(!matches!(discover(config, peer)?, Shell::Posix))
+    Ok(!matches!(discover(config, peer)?, Login::Posix))
 }
 
 pub fn hgs<S: AsRef<str>>(config: &Config, peer: &str, words: &[S]) -> Result<String> {
@@ -167,7 +167,7 @@ pub fn windows_command<S: AsRef<str>>(config: &Config, peer: &str, words: &[S]) 
     encode(&discover(config, peer)?, words)
 }
 
-fn encode<S: AsRef<str>>(shell: &Shell, words: &[S]) -> Result<String> {
+fn encode<S: AsRef<str>>(shell: &Login, words: &[S]) -> Result<String> {
     if words.iter().any(|word| word.as_ref().contains('\0')) {
         return Err(Error::new(1, "A remote argument contains NUL"));
     }
@@ -178,12 +178,12 @@ fn encode<S: AsRef<str>>(shell: &Shell, words: &[S]) -> Result<String> {
     );
     let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
     let program = match shell {
-        Shell::PowerShell(path) => format!(
+        Login::PowerShell(path) => format!(
             "$LASTEXITCODE=127;$PSNativeCommandUseErrorActionPreference=$false;& '{}'",
             path
         ),
-        Shell::Cmd(path) => format!("\"{}\"", path),
-        Shell::Posix => {
+        Login::Cmd(path) => format!("\"{}\"", path),
+        Login::Posix => {
             return Err(Error::new(
                 1,
                 "Windows transport requires a verified Windows shell",
@@ -194,7 +194,7 @@ fn encode<S: AsRef<str>>(shell: &Shell, words: &[S]) -> Result<String> {
         "{program} -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
         STANDARD.encode(bytes)
     );
-    if matches!(shell, Shell::PowerShell(_)) {
+    if matches!(shell, Login::PowerShell(_)) {
         // A native command in PowerShell's -Command otherwise flattens nonzero
         // exit codes to 1. Initialize refusal before dispatch, then pass it on.
         command.push_str(";exit $LASTEXITCODE");
@@ -299,14 +299,14 @@ mod tests {
     fn discovery_requires_a_complete_receipt_and_a_literal_absolute_interpreter() {
         assert_eq!(
             parse_probe(b"hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot\n"),
-            Some(Shell::Posix)
+            Some(Login::Posix)
         );
         let ps =
             parse_probe(b"hgs-remote-v2|%OS%|%SystemRoot%|Windows_NT|D:\\Windows\r\n").unwrap();
-        assert!(matches!(ps, Shell::PowerShell(_)));
+        assert!(matches!(ps, Login::PowerShell(_)));
         let cmd = parse_probe(br#""hgs-remote-v2|Windows_NT|D:\Windows|$env:OS|$env:SystemRoot""#)
             .unwrap();
-        assert!(matches!(cmd, Shell::Cmd(_)));
+        assert!(matches!(cmd, Login::Cmd(_)));
         for root in [
             "relative",
             "C:\\Win%PATH%",
@@ -322,7 +322,7 @@ mod tests {
         }
         assert!(parse_probe(b"hgs-remote-v2|%OS%|%SystemRoot%|unknown|unknown").is_none());
         assert!(parse_probe(b"hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot\nhidden").is_none());
-        assert!(encode(&Shell::Posix, &["send"]).is_err());
+        assert!(encode(&Login::Posix, &["send"]).is_err());
     }
 
     #[test]

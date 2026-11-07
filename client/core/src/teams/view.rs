@@ -303,6 +303,34 @@ pub struct MemberView {
     /// state `compacting`); the card shows Compacting instead of Working.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub compacting: bool,
+    /// Task 199 (Qt member card): the member it reports to (`parent`, the
+    /// lead when empty) and whether it is a sub-lead with reports of its own.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub parent: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub sub: bool,
+    /// U49: it finishes its open work, takes nothing new, then leaves.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub draining: bool,
+    /// H1: stopped at a usage limit (its reset time, when known), and whether
+    /// Zerus continues it after the reset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limited: Option<LimitView>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub limit_resume: bool,
+    /// U54: the account its session really runs on; None from an hgs that
+    /// does not say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_account: Option<String>,
+    /// G7: the services its session runs (MCP servers and the like), bounded.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<ServiceView>,
+    /// C12: its background job's declared time budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget: Option<BudgetView>,
+    /// U45: the models Zerus may switch it to before a task ({model, effort}).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<Value>,
 }
 
 /// Task 209: a member's native context reading as the member card shows it.
@@ -349,6 +377,43 @@ fn pulse(value: &Value) -> Option<PulseView> {
         source: name(pulse, "source"),
     })
 }
+
+/// Task 199: an intake key of the team.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct IntakeView {
+    pub id: String,
+    pub label: String,
+    pub created: f64,
+}
+
+/// Task 199: a member stopped at a usage limit.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct LimitView {
+    pub at: f64,
+    pub resets_at: f64,
+    pub detail: String,
+}
+
+/// Task 199: one service a member's session runs.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct ServiceView {
+    pub name: String,
+    pub since: f64,
+    pub command: String,
+}
+
+/// Task 199: a member's background job budget.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct BudgetView {
+    pub label: String,
+    pub state: String,
+    pub minutes: u64,
+    pub red_minutes: u64,
+    pub elapsed_minutes: u64,
+}
+
+/// Task 199: the services kept per member.
+const SERVICES_KEPT: usize = 12;
 
 /// One dependency: the task it waits for, hard or soft.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -399,6 +464,12 @@ pub struct TaskView {
     /// Task 55: the newest attempt's open questions to the lead (A3): the
     /// owner answers them with `hgs team reply` too.
     pub questions: Vec<QuestionView>,
+    /// Task 196: what the plan's task editor shows of a task not yet handed
+    /// out (draft or pending): its description (bounded) and criteria.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub criteria: Vec<String>,
 }
 
 /// Task 55: one open question of a member to the lead.
@@ -493,6 +564,46 @@ pub struct PhaseView {
     /// Task #58: the mode the phase plans in, "standard" or "free" (its own,
     /// else the team's); "" from an hgs that sends no phase modes.
     pub mode: String,
+    /// Task 196: the phase header's details from the phase's record (Qt's
+    /// TeamWorkspace phase header): the lead's note, the owner's send-back
+    /// comment and whether the lead reworked it, who proposed it and when,
+    /// whether Auto accepted it, why it waits ("Starts after ..."), its
+    /// pause's author and reason, the lead's edits since, and whether it
+    /// waits for the owner's acceptance.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub note: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub rejection: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub reworked: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub added_by: String,
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub added_at: f64,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub accepted_by_auto: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub start_ahead: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub waiting: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub pause_by: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub pause_reason: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub pause_owner: bool,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub changes: u64,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub owner_accepts: bool,
+}
+
+fn is_zero_f64(value: &f64) -> bool {
+    *value == 0.0
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 /// One open proposal, as its card shows it: hgs's own summary when the change
@@ -608,6 +719,10 @@ pub struct TeamView {
     /// Task 40: the plan's permission widenings ({member, role, from, to}),
     /// which Approve & Run confirms separately (Qt Team::widenings).
     pub widenings: Vec<Value>,
+    /// Task 199 (Qt TeamSettingsDialog, U51): the team's intake keys, never
+    /// the secret, which hgs shows once at creation.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub intakes: Vec<IntakeView>,
     /// Task 40: the team's direct sub-teams ({team, name, status}), for the
     /// tree confirmations of Pause and Stop.
     pub children: Vec<Value>,
@@ -663,6 +778,39 @@ fn member(value: &Value, lead: &str) -> MemberView {
         input_raised: value.get("input_block").is_some_and(|block| flag(block, "raised")),
         unread: value.get("unread").map_or(0, |unread| count(unread, "count")),
         unread_urgent: value.get("unread").map_or(0, |unread| count(unread, "urgent")),
+        parent: name(value, "parent"),
+        sub: flag(value, "sub"),
+        draining: flag(value, "draining"),
+        limited: value.get("limited").filter(|limit| limit.is_object()).map(|limit| LimitView {
+            at: number(limit, "at"),
+            resets_at: number(limit, "resets_at"),
+            detail: text(limit, "detail", LINE_CHARS),
+        }),
+        limit_resume: flag(value, "limit_resume"),
+        session_account: value.get("session_account").and_then(Value::as_str).map(|account| account.chars().take(200).collect()),
+        services: array(value, "services")
+            .iter()
+            .take(SERVICES_KEPT)
+            .map(|service| ServiceView {
+                name: text(service, "name", 120),
+                since: number(service, "since"),
+                command: text(service, "command", LINE_CHARS),
+            })
+            .filter(|service| !service.name.is_empty())
+            .collect(),
+        models: array(value, "models")
+            .iter()
+            .take(16)
+            .filter(|choice| choice.get("model").and_then(Value::as_str).is_some_and(|model| !model.is_empty()))
+            .map(|choice| json!({"model": name(choice, "model"), "effort": name(choice, "effort")}))
+            .collect(),
+        budget: value.get("budget").filter(|budget| budget.is_object()).map(|budget| BudgetView {
+            label: text(budget, "label", LINE_CHARS),
+            state: name(budget, "state"),
+            minutes: count(budget, "minutes"),
+            red_minutes: count(budget, "red_minutes"),
+            elapsed_minutes: count(budget, "elapsed_minutes"),
+        }),
         permission: bounded(
             value
                 .get("question")
@@ -724,7 +872,17 @@ fn task(value: &Value) -> TaskView {
         subteam_team: value.get("subteam").map(|subteam| name(subteam, "team")).unwrap_or_default(),
         origin: value.get("origin").and_then(Value::as_u64).filter(|origin| *origin > 0),
         questions: open_questions(value),
+        description: if editable_task(value) { text(value, "description", EDITOR_CHARS) } else { String::new() },
+        criteria: if editable_task(value) { lines(value, "criteria", LINE_CHARS) } else { Vec::new() },
     }
+}
+
+/// Task 196: the longest description the plan's task editor is given.
+const EDITOR_CHARS: usize = 4000;
+
+/// Task 196: a task the plan's editor may change: not yet handed out.
+fn editable_task(value: &Value) -> bool {
+    matches!(name(value, "status").as_str(), "draft" | "pending") && array(value, "attempts").is_empty()
 }
 
 /// Task #58: phase `n`'s mode from status's `phase_modes`, else the team's
@@ -754,6 +912,35 @@ fn phase(value: &Value) -> PhaseView {
         paused: value.get("pause").is_some_and(|pause| !pause.is_null()),
         health: text(value, "health_line", LINE_CHARS),
         mode: String::new(),
+        start_ahead: flag(value, "start_ahead"),
+        pause_by: value.get("pause").map(|pause| name(pause, "by")).unwrap_or_default(),
+        pause_reason: value.get("pause").map(|pause| text(pause, "reason", LINE_CHARS)).unwrap_or_default(),
+        pause_owner: value.get("pause").is_some_and(|pause| flag(pause, "owner")),
+        owner_accepts: name(value, "acceptance") == "owner",
+        ..PhaseView::default()
+    }
+}
+
+/// Task 196: the details only the phase's record carries (`phases`).
+fn phase_record(view: &mut PhaseView, record: &Value) {
+    view.note = text(record, "note", TEXT_CHARS);
+    if let Some(rejection) = record.get("rejection").filter(|rejection| rejection.is_object()) {
+        view.rejection = text(rejection, "comment", TEXT_CHARS);
+        view.reworked = number(rejection, "reworked_at") > 0.0;
+    }
+    view.added_by = name(record, "added_by");
+    view.added_at = number(record, "added_at");
+    view.accepted_by_auto = matches!(name(record, "state").as_str(), "approved" | "queued") && name(record, "decided_by") == "Auto";
+    if let Some(waiting) = record.get("waiting").filter(|waiting| waiting.is_object()) {
+        view.waiting = text(waiting, "text", LINE_CHARS);
+    }
+    view.changes = record.get("changes").and_then(Value::as_array).map_or(0, |changes| changes.len() as u64);
+    if view.pause_by.is_empty() {
+        if let Some(pause) = record.get("pause").filter(|pause| pause.is_object()) {
+            view.pause_by = name(pause, "by");
+            view.pause_reason = text(pause, "reason", LINE_CHARS);
+            view.pause_owner = flag(pause, "owner");
+        }
     }
 }
 
@@ -858,6 +1045,9 @@ pub fn team(value: &Value) -> TeamView {
             .map(|found| {
                 let mut view = phase(found);
                 view.mode = phase_mode(value, view.n);
+                if let Some(record) = array(value, "phases").iter().find(|record| count(record, "n") == view.n) {
+                    phase_record(&mut view, record);
+                }
                 view
             })
             .collect(),
@@ -877,6 +1067,12 @@ pub fn team(value: &Value) -> TeamView {
             .map(|item| bounded(Some(item)))
             .collect(),
         widenings: widenings(value),
+        intakes: array(value, "intakes")
+            .iter()
+            .take(8)
+            .map(|intake| IntakeView { id: name(intake, "id"), label: text(intake, "label", 120), created: number(intake, "created") })
+            .filter(|intake| !intake.id.is_empty())
+            .collect(),
         children: array(value, "children")
             .iter()
             .take(ITEMS_KEPT)
@@ -1784,6 +1980,104 @@ pub fn catalog(value: &Value) -> CatalogView {
                     value: bounded(Some(&change)),
                     at: number(proposal, "at"),
                 }
+            })
+            .collect(),
+    }
+}
+
+
+/// Task 199: the Tests tab's Builds (Qt TeamTests builds): the build
+/// broker's shared folders, bounded.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct BuildsView {
+    pub team: String,
+    /// The build broker is on: members sharing a folder build in snapshots.
+    pub enabled: bool,
+    pub folders: Vec<BuildFolderView>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct BuildFolderView {
+    pub folder: String,
+    pub members: Vec<String>,
+    pub build_folders: Vec<BuildGroupView>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct BuildGroupView {
+    pub name: String,
+    pub usual_ms: f64,
+    /// The share of recent requests served from an earlier build; None
+    /// before any finished.
+    pub hit_rate: Option<f64>,
+    pub running: Vec<BuildItemView>,
+    pub queue: Vec<BuildItemView>,
+    pub recent: Vec<BuildItemView>,
+}
+
+/// One build: running, waiting or finished.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct BuildItemView {
+    pub member: String,
+    pub template: String,
+    /// When it started, began waiting or finished.
+    pub at: f64,
+    pub seconds: f64,
+    pub usual_ms: f64,
+    pub snapshot: bool,
+    pub hit: bool,
+    pub by: String,
+    pub ms: f64,
+    pub exit: Option<i64>,
+    pub timed_out: bool,
+    pub error: String,
+    pub coalesced_with: String,
+    pub waiting_for: Vec<String>,
+}
+
+/// Task 199: the bounds of the Builds view.
+const BUILD_FOLDERS_KEPT: usize = 20;
+const BUILD_ITEMS_KEPT: usize = 20;
+
+pub fn builds(team: &str, value: &Value) -> BuildsView {
+    let item = |entry: &Value| BuildItemView {
+        member: name(entry, "member"),
+        template: name(entry, "template"),
+        at: [number(entry, "started"), number(entry, "since"), number(entry, "at")].into_iter().find(|at| *at > 0.0).unwrap_or(0.0),
+        seconds: number(entry, "seconds"),
+        usual_ms: number(entry, "usual_ms"),
+        snapshot: entry.get("snapshot").and_then(Value::as_bool).unwrap_or(false),
+        hit: flag(entry, "hit"),
+        by: name(entry, "by"),
+        ms: number(entry, "ms"),
+        exit: entry.get("exit").and_then(Value::as_i64),
+        timed_out: flag(entry, "timed_out"),
+        error: text(entry, "error", LINE_CHARS),
+        coalesced_with: name(entry, "coalesced_with"),
+        waiting_for: array(entry, "waiting_for").iter().take(BUILD_ITEMS_KEPT).filter_map(Value::as_str).map(str::to_owned).collect(),
+    };
+    let items = |entry: &Value, key: &str| array(entry, key).iter().take(BUILD_ITEMS_KEPT).map(item).collect::<Vec<_>>();
+    BuildsView {
+        team: team.to_owned(),
+        enabled: flag(value, "enabled"),
+        folders: array(value, "folders")
+            .iter()
+            .take(BUILD_FOLDERS_KEPT)
+            .map(|folder| BuildFolderView {
+                folder: text(folder, "folder", LINE_CHARS),
+                members: array(folder, "members").iter().take(ITEMS_KEPT).filter_map(Value::as_str).map(str::to_owned).collect(),
+                build_folders: array(folder, "build_folders")
+                    .iter()
+                    .take(BUILD_FOLDERS_KEPT)
+                    .map(|group| BuildGroupView {
+                        name: text(group, "name", LINE_CHARS),
+                        usual_ms: number(group, "usual_ms"),
+                        hit_rate: group.get("hit_rate").and_then(Value::as_f64),
+                        running: items(group, "running"),
+                        queue: items(group, "queue"),
+                        recent: items(group, "timeline"),
+                    })
+                    .collect(),
             })
             .collect(),
     }

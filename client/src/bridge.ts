@@ -135,6 +135,9 @@ export const hgsSetting = (call: { setting: HgsSettingName; value?: boolean; req
   inTauri() ? invoke<HgsSettingOutcome>("hgs_setting", { call }) : Promise.reject(new Error("hgs settings need the desktop app."));/** Task 41: the Tests mode's queue and one bounded result page through the core. */
 export const teamTests = (computer: ComputerId, team: string, before: number | null) =>
   inTauri() ? invoke<import("./types").TeamTestsView>("team_tests", { computer, team, before }) : Promise.reject(new Error("Teams need the desktop app."));
+/** Task 199: the Tests tab's Builds through the core, read while the tab shows them. */
+export const teamBuilds = (computer: ComputerId, team: string) =>
+  inTauri() ? invoke<import("./types").TeamBuildsView>("team_builds", { computer, team }) : Promise.reject(new Error("Teams need the desktop app."));
 /** Task 92: the profile's Time view of one scope (a phase, or the plan with null), read on request through the core. */
 export const teamTimeline = (computer: ComputerId, team: string, phase: number | null) =>
   inTauri() ? invoke<import("./types").TeamTimelineView>("team_timeline", { computer, team, phase }) : Promise.reject(new Error("Teams need the desktop app."));

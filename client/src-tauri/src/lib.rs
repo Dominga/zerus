@@ -1807,6 +1807,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         teams::teams_spans,
         teams::teams_profile,
         teams::team_tests,
+        teams::team_builds,
         teams::team_timeline,
         teams::team_action,
         teams::team_read,

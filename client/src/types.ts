@@ -1086,11 +1086,32 @@ export interface TeamMemberView {
   permission?: TeamMemberQuestion | null;
   /** Task 133: the member's latest pulse: what it did, does next and is blocked on; null without one. */
   pulse?: TeamPulseView | null;
+  /** Task 199 (Qt member card): who it reports to (the lead when empty), whether it is a sub-lead, a drain. */
+  parent?: string; sub?: boolean; draining?: boolean;
+  /** H1: stopped at a usage limit, and whether Zerus continues it after the reset. */
+  limited?: { at: number; resets_at: number; detail: string } | null; limit_resume?: boolean;
+  /** U54: the account its session really runs on (absent from an hgs that does not say). */
+  session_account?: string | null;
+  /** G7: the services its session runs; C12: its job budget; U45: the models it may switch to. */
+  services?: { name: string; since: number; command: string }[];
+  budget?: { label: string; state: string; minutes: number; red_minutes: number; elapsed_minutes: number } | null;
+  models?: { model: string; effort: string }[];
 }
 
 /** Task 133: a member's pulse (`members[].pulse`), its own note or Zerus's summary of its last turn. */
 export interface TeamPulseView {
   task: number | null; done: string; next: string; blocked: string; at: number; source: string;
+}
+
+
+/** Task 199: the Tests tab's Builds (`hgs team builds`, core BuildsView). */
+export interface TeamBuildItem {
+  member: string; template: string; at: number; seconds: number; usual_ms: number; snapshot: boolean; hit: boolean; by: string;
+  ms: number; exit: number | null; timed_out: boolean; error: string; coalesced_with: string; waiting_for: string[];
+}
+export interface TeamBuildsView {
+  team: string; enabled: boolean;
+  folders: { folder: string; members: string[]; build_folders: { name: string; usual_ms: number; hit_rate: number | null; running: TeamBuildItem[]; queue: TeamBuildItem[]; recent: TeamBuildItem[] }[] }[];
 }
 
 /** A member's pending question (`members[].question`): its id and hash, what it asks and the card's allow and deny ids. */
@@ -1118,7 +1139,15 @@ export interface TeamTaskView {
   origin?: number | null;
   /** Task 160: "parked until <condition>, ETA HH:MM (in N min)"; absent when not parked. */
   parked?: string;
+  /** Task 196: a task not yet handed out: its description and criteria, for the plan's task editor. */
+  description?: string; criteria?: string[];
 }
+
+/** Task 196: one edit of the plan while the team plans (core plan_edit.rs `PlanChange`). */
+export type TeamPlanChange =
+  | { edit: "link"; dependency: number; task: number; add: boolean; soft?: boolean }
+  | { edit: "task"; task: Record<string, unknown> }
+  | { edit: "remove_task"; task: number };
 
 /** A task's pipeline run (core PipelineRunView). */
 export interface TeamPipelineRun {
@@ -1204,6 +1233,10 @@ export interface TeamPhaseView {
   acceptance: string; paused: boolean; health: string;
   /** Task #58: the mode the phase plans in, "standard" or "free"; "" from an older hgs. */
   mode?: string;
+  /** Task 196: the header's details from the phase record (core PhaseView). */
+  note?: string; rejection?: string; reworked?: boolean; added_by?: string; added_at?: number; accepted_by_auto?: boolean;
+  start_ahead?: boolean; waiting?: string; pause_by?: string; pause_reason?: string; pause_owner?: boolean; changes?: number;
+  owner_accepts?: boolean;
 }
 
 export interface TeamFinding { kind: string; text: string; task: number | null; member: string }
@@ -1223,6 +1256,8 @@ export interface TeamView {
   /** Task 40: permission widenings Approve & Run confirms, and the direct sub-teams. */
   widenings?: { member?: string; role?: string; from?: string; to?: string }[];
   children?: { team: string; name?: string; status?: string }[];
+  /** Task 199 (U51): the team's intake keys, never their secrets. */
+  intakes?: { id: string; label: string; created: number }[];
   validation: { errors: TeamFinding[]; warnings: TeamFinding[] };
   health: { critical_path: number; parallelism: number; warnings: string[] };
   ready: number[]; cycle: number[]; draft: { revision: number; unseen: string[]; owner_edited: string[] } | null; truncated: boolean;
@@ -1264,7 +1299,32 @@ export type TeamAction =
   | { kind: "decide_proposal"; proposal: string; accept: boolean; expected_hash: string; reason?: string; answer?: string }
   | { kind: "use_last_reply"; task: number; attempt: string }
   | { kind: "answer"; member: string; question_id: string; expected_question_hash: string; answers: unknown[] }
-  | { kind: "add_to_phase"; phase: number; confirm: string; confirmation?: string; decline?: boolean }
+  | { kind: "add_to_phase"; phase: number; confirm?: string; confirmation?: string; decline?: boolean; tasks?: Record<string, unknown>[] }
+  /** Task 196: the phase header's actions (Qt TeamWorkspace phase header) and the plan's edits. */
+  | { kind: "reject_phase"; phase: number; comment: string; revision?: number | null }
+  | { kind: "undo_reject_phase"; phase: number }
+  | { kind: "discard_phase"; phase: number; tasks?: number; accepted?: boolean }
+  | { kind: "return_to_draft"; phase: number }
+  | { kind: "move_phase"; phase: number; to: number; position: "before" | "after" }
+  | { kind: "pause_phase"; phase: number; reason?: string }
+  | { kind: "unpause_phase"; phase: number }
+  | { kind: "phase_acceptance"; phase: number; owner: boolean }
+  | { kind: "edit_draft"; phase: number; revision?: number | null; title?: string; barrier?: boolean; tasks_update?: Record<string, unknown>[] }
+  | { kind: "plan_edit"; revision: number; change: TeamPlanChange }
+  /** Task 199: the member menu, "+ Member", Force run and intake keys. */
+  | { kind: "pause_member"; member: string }
+  | { kind: "resume_member"; member: string }
+  | { kind: "relaunch"; member: string }
+  | { kind: "drain"; member: string; role?: string; cancel?: boolean }
+  | { kind: "remove_member"; member: string; role?: string }
+  | { kind: "reports_to"; member: string; parent: string }
+  | { kind: "sub_lead"; member: string; sub: boolean }
+  | { kind: "scale"; role: string; agent: string; count: number; model?: string; effort?: string; account?: string }
+  | { kind: "swap_member"; member: string; agent?: string; model?: string; effort?: string; account?: string; fresh?: boolean }
+  | { kind: "move_account"; provider: string; from_account: string; to_account: string }
+  | { kind: "add_member"; member: Record<string, unknown> }
+  | { kind: "force_test"; suite: string }
+  | { kind: "intake_key"; label?: string; revoke?: string }
   | { kind: "accept_phase"; phase: number }
   | { kind: "phase_mode"; phase: number; mode: "free" | "standard"; reason?: string }
   | { kind: "send_back_phase"; phase: number; comment: string }

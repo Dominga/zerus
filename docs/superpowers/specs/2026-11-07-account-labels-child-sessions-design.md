@@ -331,6 +331,12 @@ same collapse toggle; the summary joins the row's accessible description.
   derived, not a position.
 * **from PARENT** chip on a child whose parent is not shown nested (1.4): link
   style, opens the parent when listed.
+* A new child row starts compact (owner, 2026-11-07, zerus-sa9qn.14): when a
+  link's `at` is newer than what this device recorded for the computer that
+  stamped it (`sessions/childRowsSeen`), the row is made compact once. A
+  computer seen for the first time is only recorded, so existing rows never
+  change; a row the person expands stays expanded. Settings > Sessions >
+  **Start new child sessions as compact rows**, on by default, turns it off.
 
 ### 3.4 Supervised indicator
 

@@ -572,6 +572,24 @@ fn account_marks_can_be_hidden_per_account_and_everywhere() {
 }
 
 #[test]
+fn new_child_rows_start_compact_unless_turned_off() {
+    // zerus-sa9qn.14: a client flag, on by default, and the device's record.
+    let scratch = Scratch::new("compact-new-children");
+    let settings = Settings::open(scratch.0.join("settings.json"), None);
+    assert_eq!(settings.get("sessions/compactNewChildren"), true);
+    assert_eq!(
+        settings.set("sessions/compactNewChildren", json!(false)),
+        Ok(json!(false))
+    );
+    assert_eq!(settings.get("sessions/childRowsSeen"), "");
+    let seen = r#"{"11111111-1111-4111-8111-111111111111":[1,["a"]]}"#;
+    assert_eq!(
+        settings.set("sessions/childRowsSeen", json!(seen)),
+        Ok(json!(seen))
+    );
+}
+
+#[test]
 fn set_normalizes_persists_and_tells_listeners() {
     let scratch = Scratch::new("set");
     let path = scratch.0.join("data/settings.json");

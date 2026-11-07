@@ -1127,7 +1127,15 @@ restores the full row. The row remains selectable and keeps its normal context a
 remembers the preference for that conversation across restarts. **Expand all
 collapsed** in the Sessions menu restores every compact row, including sessions
 hidden by the current filters. Row density never compacts the agent's context
-or changes its runtime state. A muted session keeps its mute icon in either size.
+or changes its runtime state. Settings > Sessions > **Start new child sessions
+as compact rows** (on by default) makes the row of a session that another
+session launches or adopts start compact. "New" means a parent link recorded
+after this desktop last looked: the device remembers, for each computer whose
+clock stamped the links, the latest link time it handled and the children
+handled in that second (`sessions/childRowsSeen`). A computer seen for the first
+time only records its current children, so existing rows never change, and a
+row the person expands afterwards stays expanded across restarts. Turned off,
+new child rows keep the full card. A muted session keeps its mute icon in either size.
 The folder/branch line also shows native outline Git badges: a diff with the
 number of changed/new files, upload/download with outgoing/incoming commit counts,
 and a green cloud check for a clean checkout matching its verified upstream.

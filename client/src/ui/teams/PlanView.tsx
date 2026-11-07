@@ -31,6 +31,7 @@ export interface PlanViewProps {
   graph: PlanGraph;
   /** Opens the task in the host's inspector; without it the plan shows its own card. */
   onOpenTask?: (id: number) => void;
+  onOpenReport?: (id: number) => void;
   onApprovePhase?: (n: number) => void;
   onDiscardPhase?: (n: number) => void;
   profile?: TeamProfileView | null;
@@ -154,6 +155,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         <Icon name={isCollapsed ? "chevron-right" : "chevron-down"} size={14} />
         <span class="pt-pn">{phase.phase.n}</span>
         <b class="pt-phase-title">{phase.phase.title || tr("Phase %1", phase.phase.n)}</b>
+        <Show when={phase.phase.archived}><span class="pt-badge">{tr("Archived")}</span></Show>
         <span class={`pt-chip pt-chip-${status.kind}`}>{statusLabel(status.kind)}</span>
         <Show when={phase.phase.acceptance}>
           <span class="pt-acceptance">{short(phase.phase.acceptance, 80)}</span>
@@ -215,7 +217,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     const blocks = task ? externalDeps(phase.phase.n, task, byId()) : [];
     const waits = task?.waits?.trim();
     const attempt = task?.attempts ? tr("Attempt %1", task.attempts) : "";
-    const stateText = task?.attempt_state?.trim() || "";
+    const stateText = task?.archived ? tr("Archived") : task?.attempt_state?.trim() || "";
     const classes = ["pt-card", `pt-card-${state}`];
     const stages = stageChips(task?.pipeline_run);
     const heat = heatShare(props.profile, placed.node.id);
@@ -320,6 +322,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           </button>
         </div>
         <div class="pt-detail-meta">
+          <Show when={task.archived}><span class="pt-chip">{tr("Archived")}</span></Show>
           <span class="pt-chip">{short(task.status || "pending", 24)}</span>
           <span class="pt-chip">{tr("Phase %1", phase?.phase.n ?? task.phase)}</span>
           <span class="pt-chip">{task.assignee || tr("Unassigned")}</span>
@@ -327,6 +330,9 @@ export function PlanView(props: PlanViewProps): JSX.Element {
             <span class="pt-chip">{tr("%1 min", task.estimate_minutes)}</span>
           </Show>
         </div>
+        <Show when={task.archived}>
+          <button class="btn small" onClick={() => props.onOpenReport?.(task.id)}>{tr("Open archived report")}</button>
+        </Show>
         <Show when={task.waits}>
           <p class="pt-detail-note">{task.waits}</p>
         </Show>
@@ -396,6 +402,12 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           <button type="button" class="btn ghost small" onClick={expandAll}>{tr("Expand all")}</button>
         </Show>
       </header>
+      <Show when={props.team.archived_phases_not_shown}>
+        <p class="pt-detail-note">{tr("%1 older archived phases are not shown here", props.team.archived_phases_not_shown ?? 0)}</p>
+      </Show>
+      <Show when={props.team.tasks.some((task) => task.archived)}>
+        <p class="pt-detail-note">{tr("Showing the status window of up to 1000 archived tasks and 200 archived phase headers")}</p>
+      </Show>
       <Show when={mode() === "graph"}>
         <div class="pt-plan-body">
           <div class="pt-plan-scroll" ref={scroller} onPointerLeave={() => setHover(null)}>
@@ -427,7 +439,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         <LayersView phases={phases()} includeCancelled={includeCancelled()} profile={props.profile} onOpen={open} />
       </Show>
       <Show when={mode() === "profile"}>
-        <ProfilePanel profile={props.profile} />
+        <ProfilePanel profile={props.profile} team={props.team} onOpenReport={props.onOpenReport} />
       </Show>
       <Show when={mode() === "tests"}>
         <TestsPanel tests={props.tests} onMore={() => props.onLoadTests?.(props.tests?.next ?? null)} />

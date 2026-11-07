@@ -9,6 +9,8 @@ use serde_json::{json, Map, Value};
 pub const NAME_CHARS: usize = 200;
 /// The longest free text kept (a goal, a reason, a role prompt).
 pub const TEXT_CHARS: usize = 8000;
+/// One report opened explicitly; full history never enters the webview.
+pub const REPORT_CHARS: usize = 64 * 1024;
 /// The longest line kept (a finding, a summary).
 pub const LINE_CHARS: usize = 600;
 /// Teams one list keeps.
@@ -277,6 +279,8 @@ pub struct DepView {
 /// One task, as the plan, its cards and the graph show it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct TaskView {
+    pub archived: bool,
+    pub worked_s: Option<u64>,
     pub id: u64,
     pub title: String,
     pub status: String,
@@ -389,6 +393,7 @@ fn pipeline_run(value: &Value) -> Option<PipelineRunView> {
 /// One phase of the plan (`phase_summary`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct PhaseView {
+    pub archived: bool,
     pub n: u64,
     pub title: String,
     pub state: String,
@@ -481,6 +486,7 @@ pub struct DraftView {
 /// `team status` for the Team tab.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct TeamView {
+    pub archived_phases_not_shown: u64,
     pub id: String,
     pub name: String,
     pub status: String,
@@ -568,7 +574,11 @@ fn member(value: &Value, lead: &str) -> MemberView {
 
 fn task(value: &Value) -> TaskView {
     let attempts = array(value, "attempts");
+    let archive = value.get("archived").filter(|archive| archive.is_object());
+    let timing = archive.and_then(|archive| archive.get("timing")).or_else(|| value.get("timing"));
     TaskView {
+        archived: archive.is_some(),
+        worked_s: timing.and_then(|timing| timing["worked_s"].as_u64()),
         id: count(value, "id"),
         title: name(value, "title"),
         status: name(value, "status"),
@@ -618,6 +628,7 @@ fn task(value: &Value) -> TaskView {
 
 fn phase(value: &Value) -> PhaseView {
     PhaseView {
+        archived: value.get("archived").is_some_and(Value::is_object),
         n: count(value, "n"),
         title: name(value, "title"),
         state: name(value, "state"),
@@ -629,6 +640,25 @@ fn phase(value: &Value) -> PhaseView {
         acceptance: name(value, "acceptance"),
         paused: value.get("pause").is_some_and(|pause| !pause.is_null()),
         health: text(value, "health_line", LINE_CHARS),
+    }
+}
+
+/// One explicitly opened task; only the newest available report is retained.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct TaskDetailView {
+    pub task: TaskView,
+    pub report: String,
+    pub report_truncated: bool,
+}
+
+pub fn task_detail(value: &Value) -> TaskDetailView {
+    let report = array(value, "attempts").iter().rev()
+        .find_map(|attempt| attempt.get("report").and_then(|report| report.get("text")).and_then(Value::as_str))
+        .unwrap_or_default();
+    TaskDetailView {
+        task: task(value),
+        report: cut(report, REPORT_CHARS),
+        report_truncated: report.chars().nth(REPORT_CHARS).is_some(),
     }
 }
 
@@ -702,6 +732,8 @@ pub fn team(value: &Value) -> TeamView {
         .get("health")
         .or_else(|| validation.and_then(|found| found.get("health")));
     TeamView {
+        archived_phases_not_shown: value["archive_totals"]["phases"].as_u64().unwrap_or(0)
+            .saturating_sub(array(value, "phases").iter().filter(|phase| phase["archived"].is_object()).count() as u64),
         id: name(value, "id"),
         name: name(value, "name"),
         status: name(value, "status"),
@@ -727,7 +759,12 @@ pub fn team(value: &Value) -> TeamView {
         phases: array(value, "phase_summary")
             .iter()
             .take(ITEMS_KEPT)
-            .map(phase)
+            .map(|summary| {
+                let mut shown = phase(summary);
+                shown.archived = array(value, "phases").iter()
+                    .any(|phase| phase["n"] == summary["n"] && phase["archived"].is_object());
+                shown
+            })
             .collect(),
         proposals: open
             .iter()

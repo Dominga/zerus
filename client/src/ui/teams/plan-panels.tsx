@@ -1,7 +1,7 @@
 import { For, Show } from "solid-js";
 import type { JSX } from "solid-js";
 import { tr } from "../../i18n";
-import type { TeamProfileView, TeamTestsView } from "../../types";
+import type { TeamProfileView, TeamTestsView, TeamView } from "../../types";
 import type { PlacedNode } from "./plan";
 import {
   boardColumns,
@@ -215,9 +215,21 @@ export function LayersView(props: {
   );
 }
 
-export function ProfilePanel(props: { profile?: TeamProfileView | null }): JSX.Element {
+export function ProfilePanel(props: { profile?: TeamProfileView | null; team?: TeamView; onOpenReport?: (id: number) => void }): JSX.Element {
   return (
     <div class="pm-profile">
+      <Show when={props.team?.tasks.some((task) => task.archived)}>
+        <h3>{tr("Archived tasks in this window")}</h3>
+        <For each={props.team?.tasks.filter((task) => task.archived)}>{(task) => (
+          <div class="pm-role-row">
+            <button class="btn small" onClick={() => props.onOpenReport?.(task.id)}>{`#${task.id} ${task.title}`}</button>
+            <span>{tr("Phase %1", task.phase)}</span>
+            <span>{task.status}</span>
+            <span class="grow" />
+            <span>{task.worked_s == null ? tr("Time unknown") : formatSeconds(task.worked_s)}</span>
+          </div>
+        )}</For>
+      </Show>
       <Show when={props.profile} fallback={<p class="pm-empty">{tr("Reading the profile…")}</p>}>
         {(profile) => (
           <>

@@ -1,7 +1,6 @@
 Work in an agent team (hgs guide team)
 
-A team: a lead and members on any agent, model or computer. The lead plans;
-Zerus hands ready tasks to free members and reports to the lead.
+The lead plans; Zerus assigns ready tasks and returns member reports.
 Requests use canonical lowercase UUIDs (uuidgen); reuse one to retry.
 
 Lead, in-session:
@@ -38,6 +37,7 @@ Member: the message names your task and attempt. Do it, report once:
   Your task: {"attempt":"ATTEMPT"} | hgs team current --json
   A question goes through hgs team ask, never a report; a progress line
   is interim; captured, it holds new work.
+  Tauri shows archive stubs; open a report to read that task only.
   Codex on Windows: git-commit template, powershell.exe (team-run).
 Say what changed and how you checked it; a taken task's report is
 refused. Sub-teams: hgs guide team-tree.

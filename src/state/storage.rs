@@ -655,7 +655,9 @@ fn launch_identity(record: &Value, mut variable: impl FnMut(&str) -> Result<Opti
     // New launches/resumes carry their own ID. The rollback floor already
     // carries HGS_RESUME_SESSION_ID when it resumes an ID-layout session.
     for key in ["HGS_SESSION_ID", "HGS_RESUME_SESSION_ID"] {
-        if let Some(id) = variable(key)? {
+        // Older launchers explicitly clear the unused marker. Only a
+        // nonempty value declares identity; malformed declarations still refuse.
+        if let Some(id) = variable(key)?.filter(|id| !id.is_empty()) {
             if !session_id::canonical(&id) || uuid::Uuid::parse_str(&id).is_ok_and(|id| id.is_nil()) {
                 return Err("the terminal's launch session ID is invalid".into());
             }
@@ -866,6 +868,31 @@ mod session_id_tests {
         let mut legacy = record.clone(); legacy.as_object_mut().unwrap().remove("layout");
         assert_eq!(launch_identity(&legacy, |key|Ok((key=="HGS_SESSION").then(||"codex/example/shared".into()))),Ok(true));
         assert!(launch_identity(&record, |_|Err("unreadable".into())).is_err());
+    }
+
+    #[test]
+    fn empty_launch_markers_keep_only_the_legacy_liveness_fallback() {
+        let id = "11111111-1111-4111-8111-111111111111";
+        let legacy = json!({"name":"codex/example/shared","session_id":id});
+        let mut by_id = legacy.clone(); by_id["layout"] = json!("id");
+        let mut old = legacy.clone(); old.as_object_mut().unwrap().remove("session_id");
+        let check = |record: &Value, primary: Option<&str>, resume: Option<&str>| {
+            launch_identity(record, |key| Ok(match key {
+                "HGS_SESSION_ID" => primary.map(str::to_owned),
+                "HGS_RESUME_SESSION_ID" => resume.map(str::to_owned),
+                "HGS_SESSION" => Some("codex/example/shared".into()),
+                _ => unreachable!(),
+            }))
+        };
+        for record in [&legacy, &old] {
+            assert_eq!(check(record,None,Some("")),Ok(true));
+            assert_eq!(check(record,Some(""),Some("")),Ok(true));
+        }
+        assert_eq!(check(&by_id,Some(""),Some("")),Ok(false));
+        assert_eq!(check(&by_id,Some(""),Some(id)),Ok(true));
+        assert!(check(&legacy,Some(" "),Some(id)).is_err());
+        assert!(check(&legacy,Some(""),Some("damaged")).is_err());
+        assert!(launch_identity(&legacy, |_|Err("unavailable".into())).is_err());
     }
 
     /// zerus-ucck P1, #1317 R5: every write of this hgs keeps a session's ID,

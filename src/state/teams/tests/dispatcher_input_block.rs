@@ -96,7 +96,9 @@ fn a_foreign_draft_raises_one_item_after_three_refusals_and_is_never_submitted()
     // One item for the lead, and one for the owner, with what to do.
     let lead: Vec<_> = super::super::inbox::items(&after).into_iter().filter(|item| item.kind == "input_blocked").collect();
     assert_eq!(lead.len(), 1);
-    assert!(lead[0].summary.contains("refused 3 hand-outs") && lead[0].detail.contains("Hello there"), "{:?}", lead[0]);
+    // Task 165: one item per member, saying the terminal is busy and why.
+    assert!(lead[0].summary.contains("terminal is busy: agent busy") && lead[0].detail.contains("Hello there"), "{:?}", lead[0]);
+    assert_eq!(lead[0].key, "input_blocked:dev");
     assert!(lead[0].detail.contains("never submits a draft it did not paste"));
     let waiting = super::super::owner_waiting::items(std::slice::from_ref(&after), now());
     let owner: Vec<_> = waiting.iter().filter(|item| item["kind"] == "input_blocked").collect();

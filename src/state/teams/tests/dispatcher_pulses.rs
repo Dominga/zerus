@@ -36,7 +36,10 @@ fn a_turn_end_writes_the_members_pulse() {
         assert_eq!(pulse.done, "#1 API; changed src/api.rs");
         assert_eq!(pulse.next, "last: Bash: hgs team run --json");
         assert!(!format!("{pulse:?}").contains("CHAT-MARKER"), "no chat text is stored");
-        assert_eq!(asked.borrow()[0], ["inspect", "codex/x/dev", "--after", "0"]);
+        // Task 163: the turn end also reads the last reply (an inspect without
+        // --after); the pulse reads the turn's events once.
+        let reads = |asked: &[Vec<String>]| asked.iter().filter(|args| args.iter().any(|arg| arg == "--after")).cloned().collect::<Vec<_>>();
+        assert_eq!(reads(&asked.borrow()), [["inspect", "codex/x/dev", "--after", "0"]]);
         let after = store.load(&t.id).unwrap().unwrap();
         assert_eq!(after.task(1).unwrap().attempts.last().unwrap().pulse_at, Some(50.0));
         // The member's own note of the next turn stands instead of a summary.
@@ -49,7 +52,7 @@ fn a_turn_end_writes_the_members_pulse() {
         set_fake_hgs(None);
         let latest = store.latest_pulses(&t.id, crate::state::now() + 2.0);
         assert_eq!((latest[0].source.as_str(), latest[0].done.as_str()), ("note", "wired the API route"));
-        assert_eq!(asked.borrow().len(), 1, "a noted turn reads no events");
+        assert_eq!(reads(&asked.borrow()).len(), 1, "a noted turn reads no events");
     });
 }
 

@@ -183,6 +183,12 @@ pub(crate) struct Settings {
     /// 95 by default; the owner sets it.
     #[serde(default = "default_context_compact_percent")]
     pub context_compact_percent: u8,
+    /// Task 254 (owner, 2026-11-08): a session whose prompt cache is cold and
+    /// whose context holds at least this share of its window is compacted
+    /// before a hand-out or a crash give-back; 30 by default, 0 never. The
+    /// owner sets it.
+    #[serde(default = "default_cold_compact_percent")]
+    pub cold_compact_percent: u8,
     /// N19 (spec 7, 12): folders whose images and HTML the desktop previews
     /// as report evidence, besides the team and member folders.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -334,6 +340,10 @@ fn default_background_red() -> u64 {
 }
 /// Task 209: a member's context is compacted at 95% of its native window.
 pub(crate) const DEFAULT_CONTEXT_COMPACT_PERCENT: u8 = 95;
+pub(crate) const DEFAULT_COLD_COMPACT_PERCENT: u8 = 30;
+fn default_cold_compact_percent() -> u8 {
+    DEFAULT_COLD_COMPACT_PERCENT
+}
 fn default_context_compact_percent() -> u8 {
     DEFAULT_CONTEXT_COMPACT_PERCENT
 }
@@ -364,6 +374,7 @@ impl Default for Settings {
             worktrees_forbidden: false,
             resume_after_limits: false,
             context_compact_percent: DEFAULT_CONTEXT_COMPACT_PERCENT,
+            cold_compact_percent: DEFAULT_COLD_COMPACT_PERCENT,
             evidence_folders: Vec::new(),
             tree_depth: default_tree_depth(),
             tree_sessions: default_tree_sessions(),
@@ -646,6 +657,10 @@ pub(crate) struct Member {
     pub seen_activity: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seen_event_at: Option<f64>,
+    /// Task 254: its session's prompt cache was cold at the last listing
+    /// (`session_state` cold, or its cache TTL passed since it was last active).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub seen_cold: bool,
     /// U56: a busy member with no session event for stuck_minutes, with the
     /// reason and the phase it was in.
     #[serde(default, skip_serializing_if = "Option::is_none")]

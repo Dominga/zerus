@@ -112,6 +112,22 @@ pub(crate) struct Seen {
     pub agent: String,
     /// U54: the account its session really runs on, from the listing.
     pub account_id: String,
+    /// Task 254: its prompt cache is cold: the listing's `session_state` says
+    /// so, or (from a listing without it) the cache TTL passed since it was
+    /// last active.
+    pub cold: bool,
+}
+
+/// Task 254: whether a listed session's prompt cache is cold.
+pub(crate) fn cache_cold(record: &Value, now: f64) -> bool {
+    match record["session_state"].as_str() {
+        Some(state) => state == "cold",
+        None => {
+            let ttl = record["cache_ttl"]["seconds"].as_f64().unwrap_or(0.0);
+            let active = record["last_active"].as_f64().unwrap_or(0.0);
+            ttl > 0.0 && active > 0.0 && now - active >= ttl
+        }
+    }
 }
 
 /// The newest Background job of a session (C12).
@@ -242,6 +258,7 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 model: field("model").to_owned(),
                 effort: field("effort").to_owned(),
                 account_id: field("account_id").to_owned(),
+                cold: cache_cold(record, now()),
             });
         }
     }
@@ -407,6 +424,9 @@ pub(crate) enum Step {
     /// idle mid-task: compact it (or give it a fresh conversation) and continue
     /// the same attempt.
     CompactIdle { member: String },
+    /// Task 254: a crashed attempt waits for its member's cold, large context
+    /// to be compacted before it is given back.
+    CompactCold { member: String },
     /// Task 209: the started compaction is confirmed (or failed): the member is
     /// told to go on and the attempt stays open.
     CheckCompact { member: String },
@@ -422,7 +442,7 @@ pub(crate) enum Step {
     AutoAcceptDraft { phase: u32 },
     /// U56: the member's phase and activity as the dispatcher saw them, so
     /// status shows them without an inspect.
-    Watch { member: String, phase: String, activity: String, last_event_at: Option<f64> },
+    Watch { member: String, phase: String, activity: String, last_event_at: Option<f64>, cold: bool },
     /// U56: a busy member with no session event for stuck_minutes is stuck.
     /// #728: `since` is the last progress Zerus saw, so the item says the
     /// real minutes.
@@ -925,12 +945,13 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 (None, None) => false,
                 (old, new) => new.is_none_or(|at| old.is_none_or(|old| (at - old).abs() >= 60.0)),
             };
-            if member.seen_phase != found.phase || member.seen_activity != found.activity || moved {
+            if member.seen_phase != found.phase || member.seen_activity != found.activity || moved || member.seen_cold != found.cold {
                 steps.push(Step::Watch {
                     member: member.id.clone(),
                     phase: found.phase.clone(),
                     activity: found.activity.clone(),
                     last_event_at: found.last_event_at,
+                    cold: found.cold,
                 });
             }
             if member.id == team.lead {
@@ -1116,6 +1137,11 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             continue;
         };
         let Some(member) = team.member(&attempt.member) else { continue };
+        // Task 254: nothing goes back to a paused team, phase or member, a
+        // draining member or a held task; the tick after the pause does it.
+        if crash_held(team, task, member).is_some() {
+            continue;
+        }
         let Some(found) = session_of(member, seen) else { continue };
         if !found.live {
             continue;
@@ -1125,6 +1151,15 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         // names it, or it holds no other attempt. A run busy elsewhere is left
         // alone rather than told to start this one over.
         if busy && !crash_same_task(team, member, task.id) {
+            continue;
+        }
+        // Task 254: a cold, large context is compacted before the attempt goes
+        // back; the give-back follows on the tick after it is confirmed.
+        if !busy && member.context_compact.is_some() {
+            continue;
+        }
+        if !busy && cold_large(team, member) {
+            steps.push(Step::CompactCold { member: attempt.member.clone() });
             continue;
         }
         steps.push(Step::RecoverCrash { task: task.id, member: attempt.member.clone(), busy });
@@ -4928,15 +4963,57 @@ fn no_report_or_claim(team: &Team, task: &Task, at: f64) -> Step {
 /// before a hand-out: `compact` when its agent compacts natively, `fresh` when
 /// it does not, and empty when today's hand-out stands.
 fn due_context_action(team: &Team, member: &Member) -> String {
-    let Some(context) = member.context.filter(|context| context.fresh(now())) else { return String::new() };
-    if !context.reached(team.settings.context_compact_percent) || member.context_retry_at.is_some_and(|retry| retry > now()) {
-        return String::new();
+    due_context(team, member).0
+}
+
+/// Task 209 and 254: the context action due before a member works, and
+/// whether only its cold cache asks for it: at the team's threshold (95%), or
+/// with a cold prompt cache from `cold_compact_percent` (30%) up, since a cold
+/// session re-reads its whole context at full price before anything else.
+fn due_context(team: &Team, member: &Member) -> (String, bool) {
+    let Some(context) = member.context.filter(|context| context.fresh(now())) else { return (String::new(), false) };
+    if member.context_retry_at.is_some_and(|retry| retry > now()) {
+        return (String::new(), false);
     }
-    if native_context(&member.agent, "compact") {
-        "compact".into()
-    } else {
-        "fresh".into()
+    let threshold = context.reached(team.settings.context_compact_percent);
+    let cold = !threshold && cold_large(team, member);
+    if !threshold && !cold {
+        return (String::new(), false);
     }
+    let action = if native_context(&member.agent, "compact") { "compact" } else { "fresh" };
+    (action.into(), cold)
+}
+
+/// Task 254: a cold prompt cache under a context of at least the team's
+/// `cold_compact_percent` (0: never) of the window, by a fresh reading.
+fn cold_large(team: &Team, member: &Member) -> bool {
+    let percent = team.settings.cold_compact_percent;
+    member.seen_cold
+        && percent > 0
+        && member.context.is_some_and(|context| context.fresh(now()) && context.reached(percent))
+        && !member.context_retry_at.is_some_and(|retry| retry > now())
+}
+
+/// Task 254 (owner, 2026-11-08): why a crashed attempt is not given back now:
+/// its team or its phase is paused, its member is paused or draining, or the
+/// task is held. The next tick after the pause gives it back.
+pub(crate) fn crash_held(team: &Team, task: &Task, member: &Member) -> Option<&'static str> {
+    if team.status != TeamStatus::Running {
+        return Some("the team is not running");
+    }
+    if super::plan::phase_pause(team, task.phase).is_some() {
+        return Some("its phase is paused");
+    }
+    if member.state == MemberState::Paused {
+        return Some("the member is paused");
+    }
+    if member.draining {
+        return Some("the member is draining");
+    }
+    if task.hold.is_some() {
+        return Some("the task is held");
+    }
+    None
 }
 
 /// Task 209: reads how many tokens a member's session holds and updates the
@@ -5110,6 +5187,9 @@ fn finish_member_compact(store: &mut Store, team_id: &str, member_id: &str, reas
     let recent = recent_events(store, team_id);
     let pulses = handoff::pulse_lines(&team, member_id, &recent, now());
     let mut built = handoff::build(&team, member_id, handoff::Why::Compaction, &pulses, handoff::RECALL_UNITS);
+    // Task 254: an attempt a crash left unconfirmed goes back by its own
+    // hand-out on the next tick, not by "continue" here.
+    let task = task.filter(|task| task.open_attempt().is_some_and(|attempt| attempt.state != AttemptState::Unconfirmed));
     if let Some(task) = &task {
         built.text.push_str(&format!(
             "\nContinue task #{} (attempt {}): the compaction changed nothing else; work from the files and report with hgs team report.\n",
@@ -5831,8 +5911,10 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
     // U46: the role's or the member's own action; Task 209: else the collected
     // meter: at the team's threshold the task waits for a compact (or a fresh
     // conversation for an agent without one) before it is sent.
-    let action = context_before_task(&team, &member);
-    let action = if action.is_empty() { due_context_action(&team, &member) } else { action };
+    let own = context_before_task(&team, &member);
+    // Task 254: `cold`: only the member's cold prompt cache asks for the
+    // action; its failure still hands the task out and tells the lead.
+    let (action, cold) = if own.is_empty() { due_context(&team, &member) } else { (own, false) };
     if action == "fresh" {
         change(store, team_id, |team, events| {
             let role = team.role_of(member_id);
@@ -5851,13 +5933,56 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
     };
     match run_context(&member, &session, &action) {
         // The action is submitted: record it and look again on the next tick.
-        ContextStart::Started(request) => record_context_start(store, team_id, task_id, member_id, from, request),
+        ContextStart::Started(request) => {
+            record_context_start(store, team_id, task_id, member_id, from, request)?;
+            if cold {
+                change(store, team_id, |team, _| {
+                    if let Some(wait) = team.task_mut(task_id).and_then(|task| task.waits.as_mut()) {
+                        wait.reason = COLD_REASON.into();
+                    }
+                    Ok(())
+                })?;
+            }
+            Ok(())
+        }
         ContextStart::Done { step, conversation } => {
             let conversation = conversation.map(|new| (session.run_id.clone(), new));
             hand_out_now(store, team_id, task_id, member_id, from, host, Preparation { steps: vec![step], conversation, resume: false })
         }
+        ContextStart::Failed { step } if cold => {
+            cold_compact_failed(store, &team, task_id, member_id, &step.reason);
+            hand_out_now(store, team_id, task_id, member_id, from, host, Preparation::default())
+        }
         ContextStart::Failed { step } => record_waits(store, team_id, task_id, member_id, from, step),
     }
+}
+
+/// Task 254: the waiting reason of a hand-out whose compaction only its
+/// member's cold cache asked for.
+const COLD_REASON: &str = "cold cache";
+
+/// Task 254: a cold session's compaction failed: the task goes out anyway and
+/// the lead's inbox says so once, with the reason.
+fn cold_compact_failed(store: &mut Store, team: &Team, task_id: u32, member_id: &str, reason: &str) {
+    let role = team.role_of(member_id);
+    let _ = change(store, &team.id, |team, events| {
+        events.push(Event::new("context_compact_failed", json!({"member":role,"task":task_id,"reason":"cold","result":reason})));
+        if let Some(task) = team.task_mut(task_id) {
+            task.waits = None;
+        }
+        Ok(())
+    });
+    tell_lead(
+        store,
+        team,
+        "context",
+        &format!(
+            "[Zerus team \u{b7} from: Zerus \u{b7} task: #{task_id} \u{b7} compaction failed]\n\
+             {role}'s prompt cache was cold and its context large, so Zerus compacted it before task #{task_id}; the compaction failed ({}). \
+             The task was handed out anyway.",
+            if reason.is_empty() { "no reason given" } else { reason }
+        ),
+    );
 }
 
 fn hand_out_now(
@@ -6738,6 +6863,15 @@ fn check_context_step(store: &mut Store, team_id: &str, task_id: u32, member_id:
                 lead_hand_out_now(store, team_id, task_id, preparation)
             } else {
                 hand_out_now(store, team_id, task_id, member_id, None, host, preparation)
+            }
+        }
+        // Task 254: only a cold cache asked for it: the task goes out anyway.
+        ContextCheck::Refused(reason) | ContextCheck::Uncertain(reason) if wait.reason == COLD_REASON => {
+            cold_compact_failed(store, &team, task_id, member_id, &reason);
+            if member_id == team.lead {
+                lead_hand_out_now(store, team_id, task_id, Preparation::default())
+            } else {
+                hand_out_now(store, team_id, task_id, member_id, None, host, Preparation::default())
             }
         }
         ContextCheck::Refused(reason) => {
@@ -7988,11 +8122,28 @@ pub(crate) fn recover_crashed(store: &mut Store, seen: &[Seen], _now: f64) -> an
             else {
                 continue;
             };
-            let Some(found) = team.member(&attempt.member).and_then(|member| session_of(member, seen)) else { continue };
+            let Some(member) = team.member(&attempt.member) else { continue };
+            // Task 254: a paused team, phase or member, a draining member or a
+            // held task keeps its attempt until the pause ends.
+            if crash_held(&team, &task, member).is_some() {
+                continue;
+            }
+            let Some(found) = session_of(member, seen) else { continue };
             if !found.live {
                 continue;
             }
-            if let Some(result) = recover_crash(store, &team, task.id, &attempt.member, !found.free)? {
+            let busy = !found.free;
+            if !busy && member.context_compact.is_some() {
+                continue;
+            }
+            // Task 254: a cold, large context is compacted first; the tick
+            // gives the attempt back once that is confirmed.
+            if !busy && cold_large(&team, member) {
+                start_member_compact(store, &team.id, &attempt.member, "cold")?;
+                done.push(json!({"task":task.id,"attempt":attempt.n,"how":"compacting"}));
+                continue;
+            }
+            if let Some(result) = recover_crash(store, &team, task.id, &attempt.member, busy)? {
                 done.push(result);
             }
         }
@@ -8810,6 +8961,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::RelaunchRights { member } => relaunch_rights(store, &team.id, member),
         // Task 209: the context meter's three steps.
         Step::CompactIdle { member } => start_member_compact(store, &team.id, member, "threshold"),
+        Step::CompactCold { member } => start_member_compact(store, &team.id, member, "cold"),
         Step::CheckCompact { member } => check_member_compact(store, &team.id, member),
         Step::SendHandoff { member } => send_handoff_now(store, &team.id, member),
         Step::AnswerContextClaim { task } => answer_context_claim(store, &team.id, *task),
@@ -8939,11 +9091,12 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             }
             Ok(())
         }),
-        Step::Watch { member, phase, activity, last_event_at } => change(store, &team.id, |team, _| {
+        Step::Watch { member, phase, activity, last_event_at, cold } => change(store, &team.id, |team, _| {
             let found = team.members.iter_mut().find(|found| found.id == *member).context("unknown member")?;
             found.seen_phase = phase.clone();
             found.seen_activity = activity.clone();
             found.seen_event_at = *last_event_at;
+            found.seen_cold = *cold;
             Ok(())
         }),
         Step::MarkStuck { member, reason, phase, since } => {
@@ -10181,6 +10334,10 @@ mod dispatcher_restart;
 #[cfg(test)]
 #[path = "tests/dispatcher_crash.rs"]
 mod dispatcher_crash;
+
+#[cfg(test)]
+#[path = "tests/dispatcher_pause_cold.rs"]
+mod dispatcher_pause_cold;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_host_start.rs"]

@@ -2328,6 +2328,19 @@ cannot be disproved and is not refused. A relaunch gives a fresh conversation
 with the handoff brief, never the same conversation, and the lead may propose
 one for a stuck member, not only for one whose start failed.
 
+Task 254 (owner, 2026-11-08): a cold prompt cache counts too. A session whose
+listing says `session_state` cold (or, from a listing without it, whose cache
+TTL passed since it was last active) and whose context holds at least
+`cold_compact_percent` of its window (a team setting, 30 by default, 0 never,
+set by the owner) is compacted the same way before a hand-out and before a
+crashed attempt goes back to it; a warm session or a small context is
+delivered at once. A failed compaction for a cold cache still delivers the
+task and tells the lead (`context_compact_failed` with reason `cold`); at the
+95% threshold a failure still makes the task wait for the lead, as before. A
+crashed attempt is not given back to a paused team, a paused phase, a paused or
+draining member or a held task, by the tick or by the sweep after an update; it
+waits, unconfirmed, and goes back on the first tick after the pause ends.
+
 ### Stages Zerus runs itself: a command, a land, a branch per task
 
 The owner's catalog may give a preset a `command` stage — a command, its

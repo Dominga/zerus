@@ -197,6 +197,12 @@ fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
         (50..=100).contains(&settings.context_compact_percent),
         "context_compact_percent is 50 to 100 (the share of the context window at which Zerus compacts a member)"
     );
+    // Task 254: a cold session at this share of its window is compacted
+    // before it works; 0 never compacts for a cold cache.
+    ensure!(
+        settings.cold_compact_percent <= 100,
+        "cold_compact_percent is 0 to 100 (the share of the context window at which a cold session is compacted before it works; 0 never)"
+    );
     ensure!(
         (30..=3600).contains(&settings.start_timeout_seconds),
         "The start warning waits 30 to 3600 seconds after delivery"
@@ -1232,7 +1238,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-pub(crate) const OWNER_SETTINGS: [&str; 26] = [
+pub(crate) const OWNER_SETTINGS: [&str; 27] = [
     "approval",
     // Task 126: the owner chooses the team's memory and its store.
     "memory",
@@ -1275,6 +1281,8 @@ pub(crate) const OWNER_SETTINGS: [&str; 26] = [
     // Task 209: only the owner sets what Zerus does to a member's context (the
     // share of the window at which it compacts, 95% by default).
     "context_compact_percent",
+    // Task 254: and when a cold session is compacted before it works.
+    "cold_compact_percent",
 ];
 
 /// Task 126: a lead's whole settings object that leaves out `memory` keeps

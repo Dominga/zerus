@@ -160,8 +160,9 @@ impl Binding {
             call.args.extend(["--label".into(), label.into()]);
         }
         if kind == Kind::Permissions {
+            // `default` returns to the Zerus default (T-6hcfnu).
             if self.provider == "opencode"
-                || !["provider", "bypass"].contains(&values.mode.as_str())
+                || !["provider", "bypass", "default"].contains(&values.mode.as_str())
             {
                 return Err("Choose provider or bypass permission mode.".into());
             }

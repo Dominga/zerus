@@ -141,6 +141,21 @@ with open(home / "argv.jsonl", "a") as f:''').replace('"codex_home": os.environ.
         self.start('codex','model-explicit','--new','--account','work','--','--model','explicit-choice')
         self.assertIn('explicit-choice',calls()[-1]['argv']);self.assertNotIn('fixture-two',calls()[-1]['argv'])
 
+    def test_a_connected_account_without_a_choice_starts_in_bypass(self):
+        # Owner, 2026-11-07 (T-6hcfnu): bypass is the default; an explicit
+        # provider choice and an explicit launch flag still win.
+        self.script('shell', '#!/bin/sh\nshift\nexec /bin/bash -c "$@"\n')
+        last=lambda:json.loads((self.root/'argv.jsonl').read_text().splitlines()[-1])['argv']
+        for provider,flag in [('codex','--dangerously-bypass-approvals-and-sandbox'),('claude','--permission-mode'),('kimi','--auto')]:
+            self.start(provider,'default-'+provider)
+            self.assertIn(flag,last())
+            self.hgs('account','permissions','native-'+provider,'--mode','provider')
+            self.start(provider,'explicit-'+provider)
+            self.assertNotIn(flag,last())
+            self.hgs('account','permissions','native-'+provider,'--mode','default')
+        self.start('codex','asked','--','--ask-for-approval','on-request')
+        self.assertNotIn('--dangerously-bypass-approvals-and-sandbox',last())
+
     def test_permission_modes_start_resume_and_fork_without_baking_in_flags(self):
         self.script('shell', '#!/bin/sh\nshift\nexec /bin/bash -c "$@"\n')
         for provider,flag in [('codex','--dangerously-bypass-approvals-and-sandbox'),('claude','--permission-mode'),('kimi','--auto')]:

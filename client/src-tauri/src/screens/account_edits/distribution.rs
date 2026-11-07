@@ -288,8 +288,16 @@ impl Screens {
             model: member
                 .model_supported
                 .then(|| (member.model.clone(), member.effort.clone())),
-            permission: (!selected.permissions_per_computer && member.provider != "opencode")
-                .then(|| member.permission_mode.clone()),
+            // The Zerus default is carried as such, a choice as that choice.
+            permission: (!selected.permissions_per_computer && member.provider != "opencode").then(
+                || {
+                    if member.permission_default {
+                        "default".into()
+                    } else {
+                        member.permission_mode.clone()
+                    }
+                },
+            ),
             account: selected.key.clone(),
         };
         edits.distributions.push_back((

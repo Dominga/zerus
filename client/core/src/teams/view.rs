@@ -166,6 +166,13 @@ pub struct TeamSummary {
     /// Task #58: the phases that plan in free mode, from the list's
     /// `phase_modes` (empty from an older hgs).
     pub free_phases: Vec<u64>,
+    /// The phase in work and its two mini bars (Qt `Teams::phaseProgress`):
+    /// the lowest unfinished phase's done/total, and all phases' done/total.
+    pub phase: u64,
+    pub phase_done: u64,
+    pub phase_total: u64,
+    pub phases_done: u64,
+    pub phases_total: u64,
 }
 
 impl TeamSummary {
@@ -181,6 +188,41 @@ pub struct TeamList {
     pub truncated: bool,
 }
 
+/// The phase in work and the two bars (Qt `Teams::phaseProgress`): the lowest
+/// non-draft phase with open tasks, else the next draft, else the last phase.
+/// A team whose list has no phase records still gets one bar over all tasks.
+struct Progress {
+    phase: u64,
+    phase_done: u64,
+    phase_total: u64,
+    phases_done: u64,
+    phases_total: u64,
+}
+
+fn phase_progress(item: &Value) -> Progress {
+    use std::collections::BTreeMap;
+    let mut groups: BTreeMap<u64, (u64, u64)> = BTreeMap::new();
+    for task in array(item, "tasks") {
+        let phase = task.get("phase").and_then(Value::as_u64).unwrap_or(1);
+        let finished = matches!(task.get("status").and_then(Value::as_str), Some("accepted" | "cancelled"));
+        let entry = groups.entry(phase).or_default();
+        entry.1 += 1;
+        if finished { entry.0 += 1; }
+    }
+    let phases_total = groups.len() as u64;
+    let phases_done = groups.values().filter(|(done, total)| done == total).count() as u64;
+    if groups.is_empty() {
+        return Progress { phase: 0, phase_done: 0, phase_total: 0, phases_done, phases_total };
+    }
+    let (phase, (phase_done, phase_total)) = groups
+        .iter()
+        .find(|(_, (done, total))| done < total)
+        .or_else(|| groups.iter().next_back())
+        .map(|(phase, counts)| (*phase, *counts))
+        .unwrap();
+    Progress { phase, phase_done, phase_total, phases_done, phases_total }
+}
+
 pub fn list(value: &Value) -> TeamList {
     let items = array(value, "items");
     let teams = items
@@ -188,6 +230,7 @@ pub fn list(value: &Value) -> TeamList {
         .take(LIST_KEPT)
         .map(|item| {
             let lead = name(item, "lead");
+            let progress = phase_progress(item);
             TeamSummary {
                 id: name(item, "id"),
                 name: name(item, "name"),
@@ -223,6 +266,11 @@ pub fn list(value: &Value) -> TeamList {
                 updated: number(item, "updated"),
                 revision: count(item, "revision"),
                 parent: item.get("parent").map(|parent| name(parent, "team")).unwrap_or_default(),
+                phase: progress.phase,
+                phase_done: progress.phase_done,
+                phase_total: progress.phase_total,
+                phases_done: progress.phases_done,
+                phases_total: progress.phases_total,
                 free_phases: item
                     .get("phase_modes")
                     .and_then(Value::as_object)

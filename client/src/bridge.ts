@@ -693,7 +693,17 @@ export async function accountEditClose(handle: string): Promise<void> {
 export type AccountSetupKind="add"|"login"|"install"|"start"|"key";
 export interface AccountSetupHost {key:string;machine:string;label:string;online:boolean;providers:string[];saved:{id:string;provider:string;label:string;installed:boolean}[];listed:string[];deepseek_installed:boolean}
 export interface AccountSetupView {handle:string;kind:AccountSetupKind;hosts:AccountSetupHost[];host:string;provider:string;label:string}
-export interface AccountSetupValues {host?:string;provider?:string;saved?:string;label?:string;api_key?:string}
+export interface AccountSetupValues {host?:string;provider?:string;saved?:string;label?:string;api_key?:string;
+ ollama_model?:string;ollama_endpoint?:string;ollama_context?:number;ollama_prepare?:string}
+export interface AccountBindRequest {host:string;request_id:string;name:string;conversation_id:string;directory:string;agent_home?:string;preview?:boolean;expected_identity?:string}
+export async function accountBindExisting(request:AccountBindRequest):Promise<unknown> {
+  if(!inTauri())throw new Error(DESKTOP_ONLY);
+  return invoke("account_bind_existing",{request});
+}
+export async function accountOllamaModels(host:string,endpoint:string):Promise<{models?:{name?:string}[]}|unknown> {
+  if(!inTauri())throw new Error(DESKTOP_ONLY);
+  return invoke("account_ollama_models",{host,endpoint});
+}
 export interface AccountSetupResult {notices:string[];errors:string[];profile:string|null}
 export async function accountSetupOpen(kind:AccountSetupKind,account="",profile=""):Promise<AccountSetupView> {
   if(!inTauri())throw new Error(DESKTOP_ONLY);

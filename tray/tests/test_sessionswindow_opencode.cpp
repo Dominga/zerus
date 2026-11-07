@@ -1025,7 +1025,10 @@ else: print('{}')
     auto *composer = window.findChild<MessageComposer *>("messageComposer"); auto *editor = composer->findChild<QPlainTextEdit *>(); QVERIFY(editor);
     setComposerText(composer, "Keep this first message");
     auto *send = composer->findChild<QPushButton *>("sendMessage"); QVERIFY(send); QVERIFY(!send->isEnabled());
-    auto *activity = window.findChild<ActivityView *>("mainActivity")->browser();
+    auto *panel = window.findChild<ActivityView *>("mainActivity"); QVERIFY(panel);
+    auto *activity = panel->browser();
+    QSignalSpy draws(panel, &ActivityView::rendered);
+    const int drawn = draws.size();
     WAIT_VERIFY(activity->toPlainText().contains("After signing in"));
     // The native tab requests a private URL; this fixture intentionally has
     // no browser endpoint. It must not open an external browser automatically.
@@ -1041,6 +1044,8 @@ else: print('{}')
     details["auth_required"] = false; details["phase"] = "idle"; details["activity"] = "idle"; details["activity_summary"] = "Ready";QVERIFY(save());
     client->inspectionReady({}, session.name, details);
     QVERIFY(!banner->isVisible()); QVERIFY(send->isEnabled()); QCOMPARE(editor->toPlainText(), QString("Keep this first message"));
+    // The draw is asynchronous: wait for its signal, then read the installed text.
+    WAIT_VERIFY(draws.size() > drawn);
     WAIT_VERIFY2(activity->toPlainText().contains("Ready for your first message"), qPrintable(activity->toPlainText()));
 }
 
@@ -1084,3 +1089,4 @@ else: print('{}')
 
 QTEST_MAIN(TestSessionsWindow)
 #include "test_sessionswindow_opencode.moc"
+

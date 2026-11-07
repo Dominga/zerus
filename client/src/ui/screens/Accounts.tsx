@@ -28,6 +28,9 @@ import { trText } from "../../text";
 
 const AccountDistributionDialog=lazy(()=>import("./AccountDistributionDialog"));
 const AccountSetupDialog = lazy(() => import("./AccountSetupDialog"));
+const OpenCodeBindDialog = lazy(() => import("./OpenCodeBindDialog"));
+const [bindPrompt, setBindPrompt] = createSignal<{ host: string; machine: string; home: string } | null>(null);
+const [bindNotice, setBindNotice] = createSignal("");
 const managementBusy=()=>accountManagement.busy()||accountSetup.busy()||accountDistribution.busy();
 const closeManagement=()=>{accountManagement.close();accountSetup.close();accountDistribution.close();};
 const clearManagementNotice=()=>{accountManagement.clearNotice();accountSetup.clearNotice();accountDistribution.clearNotice();};
@@ -249,6 +252,9 @@ function Detail(props: { a: Account }) {
             <Show when={m().opencode?.stopped}>
               <button class="btn" disabled={!m().online||managementBusy()} onClick={event=>{accountManagement.close();accountManagement.clearNotice();void accountSetup.open("start",event.currentTarget,props.a.key,m().key);}}><Icon name="play" size={13} />{tr("Start OpenCode on %1", m().machine)}</button>
             </Show>
+            <Show when={m().id==="native-opencode"&&!!m().home&&m().online}>
+              <button class="btn" disabled={managementBusy()} onClick={()=>{setBindNotice("");setBindPrompt({host:m().host,machine:m().machine,home:m().home});}}><Icon name="link" size={13} />{tr("Bind existing conversation…")}</button>
+            </Show>
           </Actions>
         </div>
         <Show when={m().opencode}>{(oc) => (
@@ -396,7 +402,8 @@ export function AccountsScreen() {
         </div>
       </main>
       <Show when={accountDistribution.prompt()}>{prompt=><Suspense><AccountDistributionDialog prompt={prompt()}/></Suspense>}</Show>
-      <Show when={accountSetup.prompt()}>{prompt=><Suspense><AccountSetupDialog prompt={prompt()} busy={accountSetup.busy()} close={accountSetup.close} confirm={(values,handle)=>void accountSetup.confirm(values,handle)}/></Suspense>}</Show>
+      <Show when={accountSetup.prompt()}>{prompt=><Suspense><AccountSetupDialog prompt={prompt()} busy={accountSetup.busy()} close={accountSetup.close} confirm={(values,handle)=>void accountSetup.confirm(values,handle)}/></Suspense>}</Show><Show when={bindNotice()}>{text=><Status kind="ok">{text()}</Status>}</Show>
+      <Show when={bindPrompt()}>{p=><Suspense><OpenCodeBindDialog host={p().host} machine={p().machine} agentHome={p().home} close={()=>setBindPrompt(null)} bound={(name)=>{setBindPrompt(null);setBindNotice(tr("Existing OpenCode conversation is bound as %1. Native history was preserved.",name));void loadAccounts();}}/></Suspense>}</Show>
       <Show when={accountManagement.prompt()}>{prompt=><Suspense><Switch><Match when={prompt().kind==="permissions" && prompt().permissions}>{editor=><AccountPermissionsDialog prompt={prompt()} editor={editor()} close={accountManagement.close} confirm={(values,handle)=>void accountManagement.confirm(values,handle)}/>}</Match><Match when={prompt().kind==="permissions" || prompt().kind==="model"}><AccountDefaultsDialog prompt={prompt()} close={accountManagement.close} confirm={(values,handle)=>void accountManagement.confirm(values,handle)}/></Match><Match when={true}><AccountCatalogDialog prompt={prompt()} close={accountManagement.close} confirm={(label,handle)=>void accountManagement.confirm(label,handle)}/></Match></Switch></Suspense>}</Show>
     </div>
   );

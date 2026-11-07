@@ -40,7 +40,7 @@ import {
   selectedKey, setSelectedKey, setExpandedChildren, expandedChildren,
   setCompactRows, compactRows, expandCompactRows, hasCompactRows, stateFilter, setStateFilter, search, setSearch, stripMode, setStripMode,
   setMenu, visibleMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter, accountFilterSet, setAccountFilter, folderFilter, setPage,
-  multi, setMulti, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, commitSessionsWidth, menu, subagentOpen,
+  multi, setMulti, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, commitSessionsWidth, menu, subagentOpen, teamsCollapsed, setTeamCollapsed,
   revealing, setRevealing, setDetailTab,
   type StateFilter, type MenuEntry,
 } from "../../store/ui";
@@ -848,8 +848,10 @@ function ListRow(props: { id: string; list: RowSource }) {
             onDblClick={(e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey) setRowCompact(v().session.key, !compactRows[v().session.key]); }}>
             <Show when={!v().compactRow} fallback={<CompactCard session={v().session} selected={selectedKey() === v().session.key || !!multi[v().session.key]} onExpand={() => setRowCompact(v().session.key, false)} />}>
               <SessionCard session={v().session} selected={(selectedKey() === v().session.key && !subagentOpen()) || !!multi[v().session.key]} expandable={v().expandable}
-                expanded={!!expandedChildren[v().session.key]} onToggleChildren={() => setExpandedChildren(v().session.key, !expandedChildren[v().session.key])}
-                onCold={(action) => coldAction(v().session, action)} onChip={(kind) => openChip(v().session, kind)} />
+                expanded={v().team ? !teamsCollapsed(v().team!.id) : !!expandedChildren[v().session.key]}
+                onToggleChildren={() => v().team ? setTeamCollapsed(v().team!.id, !teamsCollapsed(v().team!.id)) : setExpandedChildren(v().session.key, !expandedChildren[v().session.key])}
+                onCold={(action) => coldAction(v().session, action)} onChip={(kind) => openChip(v().session, kind)}
+                team={v().team} depth={v().depth} teamFirst={v().teamFirst} teamLast={v().teamLast} />
             </Show>
           </div>
         )}
@@ -1018,3 +1020,5 @@ function StripTile(props: { row: Extract<Row, { type: "card" }> }) {
     </button>
   );
 }
+
+

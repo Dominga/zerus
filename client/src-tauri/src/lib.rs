@@ -1936,6 +1936,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         screens::account_edits::setup::account_setup_open,
         screens::account_edits::setup::account_setup_apply,
         screens::account_edits::setup::account_setup_close,
+        screens::account_edits::setup::account_bind_existing,
+        screens::account_edits::setup::account_ollama_models,
         screens::account_edits::distribution::account_distribution_open,
         screens::account_edits::distribution::account_distribution_apply,
         screens::account_edits::distribution::account_distribution_close,
@@ -2517,3 +2519,4 @@ mod tests {
         );
     }
 }
+

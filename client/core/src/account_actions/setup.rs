@@ -105,6 +105,75 @@ impl Host {
         ]);
         run_catalog(hgs, &call)
     }
+
+    /// Bind one OpenCode native conversation from an exact selection. The
+    /// request keeps Qt's wire shape; the reply is hgs's exact preview/bind
+    /// result, which the dialog verifies before showing it.
+    pub fn bind_existing(&self, hgs: &Path, request: &Value) -> Result<Value, String> {
+        run_catalog(hgs, &self.bind_call(request))
+    }
+
+    fn bind_call(&self, request: &Value) -> Invocation {
+        let mut call = self.invocation(&["bind-existing", "native-opencode", "--json"]);
+        call.stdin = Some(request.to_string().into_bytes());
+        call.timeout = std::time::Duration::from_secs(60);
+        call
+    }
+
+    /// The models Ollama lists at `endpoint` on this machine.
+    pub fn ollama_models(&self, hgs: &Path, endpoint: &str) -> Result<Value, String> {
+        if !endpoint.starts_with("http://") {
+            return Err("The Ollama address must be http://HOST:PORT.".into());
+        }
+        let call = self.invocation(&["ollama-models", "--endpoint", endpoint]);
+        run_catalog(hgs, &call)
+    }
+
+    /// A Claude Code account whose every model slot names one Ollama model.
+    pub fn create_ollama(
+        &self,
+        hgs: &Path,
+        id: &str,
+        label: &str,
+        model: &str,
+        endpoint: &str,
+        context: u64,
+        prepare: &str,
+    ) -> Result<Value, String> {
+        if !valid_id(id) || !valid_label(label) || model.trim().is_empty() || model.len() > 256 {
+            return Err("Enter a valid account name and model.".into());
+        }
+        if !endpoint.starts_with("http://") || context > 4_194_304 {
+            return Err("The Ollama address or context is invalid.".into());
+        }
+        run_catalog(hgs, &self.create_ollama_call(id, label, model, endpoint, context, prepare))
+    }
+
+    fn create_ollama_call(
+        &self,
+        id: &str,
+        label: &str,
+        model: &str,
+        endpoint: &str,
+        context: u64,
+        prepare: &str,
+    ) -> Invocation {
+        let mut call = self.call("add", id);
+        call.args.extend([
+            "--provider".into(), "claude".into(),
+            "--label".into(), label.trim().into(),
+            "--ollama".into(), model.trim().into(),
+            "--endpoint".into(), endpoint.trim().into(),
+        ]);
+        if context > 0 {
+            call.args.extend(["--context".into(), context.to_string()]);
+        }
+        if !prepare.trim().is_empty() {
+            call.args.extend(["--prepare".into(), prepare.trim().into()]);
+        }
+        call
+    }
+
     pub fn restore(&self, hgs: &Path, saved: &Value) -> Result<Value, String> {
         let current = self.fresh(hgs)?;
         let id = saved["id"]
@@ -212,4 +281,25 @@ mod tests {
         assert!(valid_id("codex-example"));
         assert!(!valid_id("--other"));
     }
+
+    #[test]
+    fn bind_and_ollama_calls_keep_the_exact_hgs_shape() {
+        let h = Host::capture(
+            ComputerId("studio".into()),
+            "11111111-1111-4111-8111-111111111111".into(),
+            &json!({"revision":"r1","profiles":[]}),
+        )
+        .unwrap();
+        let request = json!({"schema_version":1,"request_id":"r","name":"opencode/p/s",
+            "conversation_id":"ses_1","directory":"/work/p","agent_home":"/home/u","preview":true});
+        let bind = h.bind_call(&request);
+        assert_eq!(bind.args[3..], ["account", "bind-existing", "native-opencode", "--json"]);
+        assert_eq!(bind.stdin.as_deref(), Some(request.to_string().as_bytes()));
+        assert_eq!(bind.timeout.as_secs(), 60);
+        let ollama = h.create_ollama_call("claude-ollama-x", "Local", "qwen3:30b", "http://127.0.0.1:11434", 32768, "ollama serve");
+        assert_eq!(ollama.args[3..], ["account", "add", "claude-ollama-x", "--revision", "r1",
+            "--provider", "claude", "--label", "Local", "--ollama", "qwen3:30b",
+            "--endpoint", "http://127.0.0.1:11434", "--context", "32768", "--prepare", "ollama serve"]);
+    }
 }
+

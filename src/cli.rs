@@ -1210,7 +1210,7 @@ fn peer_session(command: &str, args: &[String]) -> String {
 fn peer_json_archives(config: &Config, peer: &str, archives: bool) -> Value {
     let words = if archives { vec!["ls", "--local", "--json"] } else { vec!["ls", "--local", "--json", "--no-archives"] };
     let output = crate::remote_shell::hgs(config, peer, &words).map_err(|e| std::io::Error::other(e.message)).and_then(|remote| platform::ssh_output(
-        platform::ssh()
+        crate::ssh_bytes::command(&remote)?
             .args(crate::machines::ssh_options(config, peer))
             .args([
                 "-o",
@@ -1734,6 +1734,13 @@ fn remote_via(
     let _tab = tab
         .as_ref()
         .map(|title| TabGuard::begin(config, title, &platform::tab_color(config, target)));
+    if remote.starts_with(crate::ssh_bytes::PREFIX) {
+        let mut framed = crate::ssh_bytes::command(&remote)?;
+        for (key, value) in ssh.get_envs() {
+            match value { Some(value) => { framed.env(key, value); }, None => { framed.env_remove(key); } }
+        }
+        ssh = framed;
+    }
     flags.push(target.into());
     flags.push(remote);
     let rc = platform::wait_interactive(ssh.args(flags))?;

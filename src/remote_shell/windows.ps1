@@ -1,0 +1,30 @@
+# Fixed transport; only __HGS_ARGUMENTS__ is replaced with encoded JSON argv.
+$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';$p=$null
+try {
+[string[]]$a=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__HGS_ARGUMENTS__'))|ConvertFrom-Json
+function q([string]$s) {'"'+[regex]::Replace($s,'(\\*)("|$)',{param($m)$b=$m.Groups[1].Value;if($m.Groups[2].Value -eq '"'){$b+$b+'\"'}else{$b+$b}})+'"'}
+$i=[Diagnostics.ProcessStartInfo]::new();$i.FileName=Join-Path $env:USERPROFILE '.local\bin\hgs.exe';$i.Arguments=($a|ForEach-Object{q $_})-join ' ';$i.UseShellExecute=$false
+$pipe=[Console]::IsInputRedirected;$i.CreateNoWindow=$pipe;$i.RedirectStandardInput=$pipe;$i.RedirectStandardOutput=$pipe;$i.RedirectStandardError=$pipe
+$p=[Diagnostics.Process]::new();$p.StartInfo=$i;if(-not$p.Start()){throw 'start refused'}
+if($pipe){
+$o=$p.StandardOutput.BaseStream.CopyToAsync([Console]::OpenStandardOutput());$e=$p.StandardError.BaseStream.CopyToAsync([Console]::OpenStandardError())
+$s=[Console]::OpenStandardInput();$b=[byte[]]::new(65536);$n=4;$pos=0;$header=$true;$closed=$false;$w=$null;$clock=[Diagnostics.Stopwatch]::StartNew();$r=$s.ReadAsync($b,0,4)
+while(-not$p.WaitForExit(20)){
+if($o.IsFaulted -or $e.IsFaulted -or $clock.ElapsedMilliseconds -gt 15000){throw 'connection lost'}
+if($null -ne $w){if(-not$w.IsCompleted){continue};[void]$w.GetAwaiter().GetResult();$w=$null;$r=$s.ReadAsync($b,0,4)}
+if(-not$r.IsCompleted){continue}
+$count=$r.GetAwaiter().GetResult();if($count -eq 0){throw 'connection closed'};$clock.Restart();$pos+=$count
+if($pos -lt $n){$r=$s.ReadAsync($b,$pos,$n-$pos);continue}
+$pos=0
+if($header){$len=[BitConverter]::ToUInt32($b,0);if($len -eq [uint32]::MaxValue){$r=$s.ReadAsync($b,0,4);continue};if($len -eq 0){if($closed){throw 'duplicate EOF'};$p.StandardInput.Close();$closed=$true;$r=$s.ReadAsync($b,0,4);continue};if($closed -or $len -gt 65536){throw 'invalid frame'};$n=[int]$len;$header=$false;$r=$s.ReadAsync($b,0,$n)}
+else{$w=$p.StandardInput.BaseStream.WriteAsync($b,0,$n);$n=4;$header=$true}
+}
+if(-not$o.Wait(2000) -or -not$e.Wait(2000)){throw 'output did not settle'};[void]$o.GetAwaiter().GetResult();[void]$e.GetAwaiter().GetResult()
+}else{$p.WaitForExit()}
+exit $p.ExitCode
+}catch{
+# Never look up/adopt a process or stop a session host/agent. The original CLI
+# helper is the only child this transport owns; native sessions are independent.
+if($null -ne $p){try{if(-not$p.HasExited){$p.Kill();$p.WaitForExit()}}catch{}}
+[Console]::Error.WriteLine('hgs: remote Windows invocation failed');exit 127
+}

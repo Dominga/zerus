@@ -1000,7 +1000,7 @@ fn ssh(config: &Config, via: &str, helper: &str) -> Result<Command> {
     // Each helper is a fixed source constant; request bytes stay on stdin.
     let words: Vec<_> = helper.strip_prefix("~/.local/bin/hgs ").context("invalid fixed peer helper")?.split_whitespace().collect();
     let helper = crate::remote_shell::hgs(config, via, &words)?;
-    let mut command = crate::platform::ssh();
+    let mut command = crate::ssh_bytes::command(&helper)?;
     command.args([
         "-T",
         "-o",

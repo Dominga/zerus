@@ -8,13 +8,15 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
+import select
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 HGS = Path(os.environ.get('HGS_TEST_BIN', ROOT / 'target/debug/hgs'))
 PROBE = 'echo "hgs-remote-v2|%OS%|%SystemRoot%|$env:OS|$env:SystemRoot"'
 SSH = r'''#!/usr/bin/env python3
-import base64,json,os,pathlib,sys
+import base64,json,os,pathlib,struct,sys,time
 r=pathlib.Path(os.environ['REMOTE_WINDOWS_FIXTURE'])
 command=sys.argv[-1]
 with (r/'calls').open('a') as f:f.write(json.dumps(sys.argv[1:])+'\n')
@@ -36,12 +38,34 @@ words=json.loads(base64.b64decode(data))
 with (r/'words').open('a') as f:f.write(json.dumps(words)+'\n')
 if words==['--help']:
     print((r/'help').read_text());sys.exit(0)
-body=sys.stdin.read()
+if words[0]=='watch':
+    print(json.dumps({'t':'hello'}),flush=True);print(json.dumps({'t':'snapshot'}),flush=True)
+if (r/'consumer-loss').exists() and words[0]=='watch':
+    import fcntl
+    with (r/'alive').open('w') as alive:
+        fcntl.flock(alive,fcntl.LOCK_EX)
+        (r/'ready').touch()
+        while True:sys.stdout.write('x'*65536);sys.stdout.flush()
+def exact(n):
+    out=b''
+    while len(out)<n:
+        more=sys.stdin.buffer.read(n-len(out))
+        assert more,'transport closed before explicit EOF'
+        out+=more
+    return out
+body=bytearray()
+while True:
+    n=struct.unpack('<I',exact(4))[0]
+    if n==0xffffffff:continue
+    assert n<=65536,n
+    if not n:break
+    body+=exact(n)
+if (r/'binary').exists():sys.stdout.buffer.write(bytes(body));sys.exit(7)
+body=body.decode('utf-8')
 with (r/'operations').open('a') as f:f.write(json.dumps({'argv':words,'stdin':body})+'\n')
 if words==['--version']:print('hgs 9.9.9');sys.exit(0)
 if words==['ls','--local','--json'] and (r/'listing').exists():print((r/'listing').read_text());sys.exit(0)
 if words[0]=='watch':
-    print(json.dumps({'t':'hello'}));print(json.dumps({'t':'snapshot'}))
     print(json.dumps({'t':'echo','stdin':body}));sys.exit(0)
 print(json.dumps({'argv':words,'stdin':body}))
 sys.exit(0)
@@ -94,6 +118,51 @@ class WindowsTarget(unittest.TestCase):
         self.assertEqual(self.operations(),[{'argv':['watch','--json'],'stdin':body}])
         words=[json.loads(v) for v in (self.root/'words').read_text().splitlines()]
         self.assertEqual(words,[['--help'],['watch','--json']])
+
+    def test_explicit_eof_ends_watch_while_the_ssh_input_pipe_stays_open(self):
+        child = subprocess.Popen([str(HGS),'@peer','watch','--json'],env=self.env,
+                                 stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,bufsize=0)
+        try:
+            frames = []
+            for _ in range(2):
+                self.assertTrue(select.select([child.stdout],[],[],8)[0])
+                frames.append(json.loads(child.stdout.readline())['t'])
+            self.assertEqual(frames,['hello','snapshot'])
+            child.stdin.write(b'{"op":"list"}\n');child.stdin.close()
+            # The fake SSH decoder waits for the explicit frame, not OS EOF.
+            child.wait(timeout=8)
+            self.assertEqual(child.returncode,0,child.stderr.read())
+            self.assertEqual(json.loads(child.stdout.readline())['stdin'],'{"op":"list"}\n')
+        finally:
+            if child.poll() is None:child.kill();child.wait()
+            child.stdout.close();child.stderr.close()
+            if not child.stdin.closed:child.stdin.close()
+
+    def test_multiple_frames_preserve_binary_stdin_and_original_exit(self):
+        (self.root/'binary').touch()
+        body=bytes(range(256))*2048
+        child=subprocess.run([str(HGS),'@peer','send','codex/p/t','--json'],input=body,
+                             capture_output=True,env=self.env,timeout=15)
+        self.assertEqual(child.returncode,7,child.stderr)
+        self.assertEqual(child.stdout,body)
+
+    def test_closed_output_settles_the_same_ssh_child(self):
+        import fcntl
+        (self.root/'consumer-loss').touch()
+        child=subprocess.Popen([str(HGS),'@peer','watch','--json'],env=self.env,
+                               stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        try:
+            until=time.monotonic()+8
+            while not (self.root/'ready').exists() and time.monotonic()<until:time.sleep(.01)
+            self.assertTrue((self.root/'ready').exists())
+            child.stdout.close()
+            child.wait(timeout=8)
+            self.assertNotEqual(child.returncode,0)
+            # The original fake client's held lock proves it has settled.
+            with (self.root/'alive').open() as alive:fcntl.flock(alive,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        finally:
+            if child.poll() is None:child.kill();child.wait()
+            child.stdin.close();child.stderr.close()
 
     def test_unknown_probe_is_closed_before_an_operation(self):
         for mode in ('unknown','offline','oversize'):
@@ -178,3 +247,105 @@ class WindowsTarget(unittest.TestCase):
         out=self.hgs('send','codex/project/tag','--json',body='{"text":"synthetic"}')
         self.assertEqual(out.returncode,0,out.stderr)
         self.assertEqual(self.operations(),[{'argv':['send','codex/project/tag','--json'],'stdin':'{"text":"synthetic"}'}])
+
+
+@unittest.skipUnless(os.name == 'nt', 'native PowerShell 5.1/cmd decoder controls run on Windows')
+class WindowsNativeTransport(unittest.TestCase):
+    def run_decoder(self, shell, lease=False, code=0):
+        import base64
+        import shutil
+        import struct
+        import threading
+        fake = Path(os.environ.get('HGS_TEST_FAKE_AGENT', ROOT / 'target/debug/examples/fake_agent.exe'))
+        self.assertTrue(fake.is_file(), 'build the fake_agent example first')
+        with tempfile.TemporaryDirectory(prefix='hgs-remote-bytes-') as temporary:
+            root = Path(temporary)
+            profile = root / 'profile space 日本語'
+            (profile / '.local/bin').mkdir(parents=True)
+            shutil.copy2(fake, profile / '.local/bin/hgs.exe')
+            for name in ('tmp', 'config', 'state', 'appdata', 'localappdata'):
+                (root / name).mkdir()
+            env = {k: os.environ[k] for k in ('SystemRoot', 'WINDIR', 'ComSpec', 'PATHEXT') if k in os.environ}
+            system = Path(env['SystemRoot'])
+            ps = system / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+            cmd = system / 'System32/cmd.exe'
+            ready, record, control = (root / name for name in ('ready.json', 'record.jsonl', 'control'))
+            env.update(HOME=str(profile), USERPROFILE=str(profile), HGS_CONFIG_DIR=str(root/'config'),
+                       HGS_STATE_DIR=str(root/'state'), APPDATA=str(root/'appdata'), LOCALAPPDATA=str(root/'localappdata'),
+                       TEMP=str(root/'tmp'), TMP=str(root/'tmp'), PATH=os.pathsep.join(map(str, (system/'System32', ps.parent))),
+                       FAKE_AGENT_READY=str(ready), FAKE_AGENT_RECORD=str(record), FAKE_AGENT_CONTROL=str(control),
+                       FAKE_AGENT_RAW='0', FAKE_AGENT_MODES='none', FAKE_AGENT_ON_EOF='exit:'+str(code))
+            words = ['', 'a"b', 'back\\', 'two\\\\tail', '日本語', 'Пример', '$(literal);& data', "it's a word"]
+            data = base64.b64encode(json.dumps(words, ensure_ascii=False, separators=(',', ':')).encode()).decode()
+            script = '\n'.join(line.strip() for line in (ROOT/'src/remote_shell/windows.ps1').read_text().splitlines()
+                               if line.strip() and not line.strip().startswith('#')).replace('__HGS_ARGUMENTS__', data)
+            encoded = base64.b64encode(script.encode('utf-16-le')).decode()
+            if shell == 'powershell':
+                invocation = "& ([ScriptBlock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('"+encoded+"'))))"
+                argv, executable = [str(ps), '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', invocation], None
+            else:
+                invocation = '"'+str(ps)+'" -NoLogo -NoProfile -NonInteractive -EncodedCommand '+encoded
+                argv, executable = '"'+str(cmd)+'" /d /s /c "'+invocation+'"', str(cmd)
+            self.assertLess(len(invocation), 8000)
+            child = subprocess.Popen(argv, executable=executable, cwd=root, env=env,
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     creationflags=subprocess.CREATE_NO_WINDOW)
+            readers = []
+            def capture(pipe, path):
+                with path.open('wb', buffering=0) as out:
+                    while True:
+                        chunk = pipe.read(4096)
+                        if not chunk: break
+                        out.write(chunk)
+                pipe.close()
+            for pipe, name in ((child.stdout, 'stdout'), (child.stderr, 'stderr')):
+                reader = threading.Thread(target=capture, args=(pipe, root/name))
+                reader.start(); readers.append(reader)
+            body = bytes(range(256)) + 'π 日本語\r\n'.encode()
+            fallback = False
+            try:
+                child.stdin.write(struct.pack('<I', 0xffffffff)); child.stdin.flush()
+                deadline = time.monotonic()+8
+                while not ready.exists():
+                    self.assertIsNone(child.poll(), (root/'stderr').read_bytes())
+                    self.assertLess(time.monotonic(), deadline, 'original fake did not become ready')
+                    time.sleep(.02)
+                self.assertEqual(json.loads(ready.read_text(encoding='utf-8'))['argv'], words)
+                started = time.monotonic()
+                if not lease:
+                    frame = struct.pack('<I', len(body))+body
+                    child.stdin.write(frame[:2]); child.stdin.flush()
+                    child.stdin.write(frame[2:]+struct.pack('<I', 0)); child.stdin.flush()
+                # Never close the underlying input pipe before the original
+                # wrapper exits: its EOF/lease handling must do the work.
+                child.wait(timeout=20 if lease else 8)
+                self.assertFalse(child.stdin.closed)
+                self.assertEqual(child.returncode, 127 if lease else code)
+                if lease: self.assertGreaterEqual(time.monotonic()-started, 14)
+                for reader in readers:
+                    reader.join(timeout=3); self.assertFalse(reader.is_alive())
+                if lease:
+                    self.assertIn(b'remote Windows invocation failed', (root/'stderr').read_bytes())
+                else:
+                    rows = [json.loads(line) for line in record.read_text().splitlines()]
+                    self.assertEqual(b''.join(bytes.fromhex(row['hex']) for row in rows if 'hex' in row), body)
+                    self.assertEqual((root/'stderr').read_bytes(), b'')
+            finally:
+                if child.poll() is None:
+                    fallback = True
+                    control.write_text('exit 7\n')
+                    try: child.wait(timeout=18)
+                    except subprocess.TimeoutExpired:
+                        child.terminate(); child.wait(timeout=5)  # same original wrapper only
+                child.stdin.close()
+                for reader in readers: reader.join(timeout=3)
+                self.assertFalse(fallback, 'original decoder required fallback; this is a failed control')
+
+    def test_native_decoder_preserves_argv_bytes_eof_and_exit_code(self):
+        for shell in ('powershell', 'cmd'):
+            for code in (0, 7):
+                with self.subTest(shell=shell, code=code): self.run_decoder(shell, code=code)
+
+    def test_lease_loss_ends_only_the_original_native_helper(self):
+        for shell in ('powershell', 'cmd'):
+            with self.subTest(shell=shell): self.run_decoder(shell, lease=True)

@@ -160,8 +160,8 @@ pub fn supports(config: &Config, peer: &str, markers: &[(&str, bool)]) -> Result
 }
 
 /// Only fixed ASCII syntax reaches the remote login shell (PowerShell or cmd).
-/// ProcessStartInfo inherits the original SSH standard handles; PowerShell does
-/// not read, format or buffer the hgs stream. Native argv uses Windows quoting,
+/// A fixed wrapper decodes bounded stdin frames and copies raw output streams.
+/// Native argv uses Windows quoting,
 /// rather than PowerShell 5.1's lossy native argument forwarding.
 pub fn windows_command<S: AsRef<str>>(config: &Config, peer: &str, words: &[S]) -> Result<String> {
     encode(&discover(config, peer)?, words)
@@ -173,9 +173,13 @@ fn encode<S: AsRef<str>>(shell: &Login, words: &[S]) -> Result<String> {
     }
     let words: Vec<&str> = words.iter().map(AsRef::as_ref).collect();
     let data = STANDARD.encode(serde_json::to_vec(&words).unwrap());
-    let script = format!(
-        r#"$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';try{{[string[]]$a=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{data}'))|ConvertFrom-Json;function q([string]$s){{'"'+[regex]::Replace($s,'(\\*)("|$)',{{param($m)$b=$m.Groups[1].Value;if($m.Groups[2].Value -eq '"'){{$b+$b+'\"'}}else{{$b+$b}}}})+'"'}};$i=[Diagnostics.ProcessStartInfo]::new();$i.FileName=Join-Path $env:USERPROFILE '.local\bin\hgs.exe';$i.Arguments=($a|ForEach-Object{{q $_}})-join ' ';$i.UseShellExecute=$false;$pipe=[Console]::IsInputRedirected;$i.CreateNoWindow=$pipe;$i.RedirectStandardInput=$pipe;$i.RedirectStandardOutput=$pipe;$i.RedirectStandardError=$pipe;$p=[Diagnostics.Process]::new();$p.StartInfo=$i;if(-not$p.Start()){{throw 'hgs start refused'}};if($pipe){{$t=[Console]::OpenStandardInput().CopyToAsync($p.StandardInput.BaseStream);$o=$p.StandardOutput.BaseStream.CopyToAsync([Console]::OpenStandardOutput());$e=$p.StandardError.BaseStream.CopyToAsync([Console]::OpenStandardError());$closed=$false;while(-not$p.WaitForExit(50)){{if(-not$closed -and $t.IsCompleted){{$p.StandardInput.BaseStream.Close();$closed=$true}}}};[void]$o.GetAwaiter().GetResult();[void]$e.GetAwaiter().GetResult()}}else{{$p.WaitForExit()}};exit $p.ExitCode}}catch{{[Console]::Error.WriteLine('hgs: remote Windows invocation failed');exit 127}}"#
-    );
+    let script = include_str!("remote_shell/windows.ps1")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .replace("__HGS_ARGUMENTS__", &data);
     let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
     let encoded = STANDARD.encode(bytes);
     let command = match shell {
@@ -193,7 +197,7 @@ fn encode<S: AsRef<str>>(shell: &Login, words: &[S]) -> Result<String> {
             "Remote arguments exceed the Windows shell transport limit; put request data on stdin",
         ));
     }
-    Ok(command)
+    Ok(format!("{}{command}", crate::ssh_bytes::PREFIX))
 }
 
 pub fn output<S: AsRef<str>>(
@@ -211,7 +215,7 @@ fn read(config: &Config, peer: &str, command: &str) -> Result<std::process::Outp
         return Err(Error::new(1, "invalid SSH host alias"));
     }
     const LIMIT: u64 = 256 * 1024;
-    let mut cmd = platform::ssh();
+    let mut cmd = crate::ssh_bytes::command(command)?;
     cmd.args(crate::machines::ssh_options(config, peer))
         .args([
             "-o",

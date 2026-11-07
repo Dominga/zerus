@@ -122,13 +122,15 @@ fn run_within(
         bytes.len() as u64 <= MAX_BYTES,
         "swarm exchange is too large"
     );
+    let remote = crate::remote_shell::hgs(config, alias, words)?;
     #[cfg(test)]
     let mut command = TEST_SSH
         .with(|program| program.borrow().clone())
         .map(std::process::Command::new)
-        .unwrap_or_else(platform::ssh);
+        .map(Ok)
+        .unwrap_or_else(|| crate::ssh_bytes::command(&remote))?;
     #[cfg(not(test))]
-    let mut command = platform::ssh();
+    let mut command = crate::ssh_bytes::command(&remote)?;
     command
         .args([
             "-o",
@@ -142,7 +144,7 @@ fn run_within(
         ])
         .args(crate::machines::ssh_options(config, alias))
         .arg(alias)
-        .arg(crate::remote_shell::hgs(config, alias, words)?);
+        .arg(remote);
     let ssh = platform::spawn_ssh(&mut command, true, true, true).context("start swarm connection")?;
     #[cfg(test)]
     thread::sleep(AFTER_SPAWN.with(|delay| delay.get()));

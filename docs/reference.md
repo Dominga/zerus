@@ -4992,7 +4992,11 @@ shells. Discovery is read-only and cached per alias/connection settings within
 the calling CLI process; an unknown result refuses before sending an operation.
 The Windows route selects `%USERPROFILE%\.local\bin\hgs.exe`, uses fixed encoded
 PowerShell source and Windows-native argument quoting, and relays SSH stdin,
-stdout and stderr as raw bytes. JSON requests and watch controls stay on stdin. Required help
+stdout and stderr as raw bytes. Noninteractive input has bounded byte frames,
+an explicit EOF, and a two-second lease heartbeat. EOF closes the original
+helper's stdin. Connection loss or a fifteen-second lease expiry ends only that
+same original helper; native sessions remain with their session host. No remote
+operation is retried. JSON requests and watch controls stay on stdin. Required help
 capabilities, machine identities and session selectors still gate their commands;
 an old peer is never tried as an unknown agent command. The cmd transport limit
 is checked before dispatch; large request bodies belong on stdin. POSIX peers

@@ -675,5 +675,10 @@ class WindowsClient(unittest.TestCase):
         self.assertTrue(exited(child, 5), 'the job object should end the SSH client with hgs')
 
 
+# The same Windows job builds fake_agent. Keep the fixed remote decoder's
+# native PowerShell/cmd controls in its ordinary client cohort.
+from test_remote_windows import WindowsNativeTransport  # noqa: E402,F401
+
+
 if __name__ == '__main__':
     unittest.main()

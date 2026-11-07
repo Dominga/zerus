@@ -907,7 +907,8 @@ fn transport(
                 "Account transfer requires a configured, enabled machine.",
             ));
         }
-        command = platform::ssh();
+        let remote = crate::remote_shell::hgs(config, host, args)?;
+        command = crate::ssh_bytes::command(&remote)?;
         command.args([
             "-o",
             "BatchMode=yes",
@@ -923,7 +924,7 @@ fn transport(
         command
             .args(crate::machines::ssh_options(config, host))
             .arg(host)
-            .arg(crate::remote_shell::hgs(config, host, args)?);
+            .arg(remote);
     }
     command.stdin(Stdio::null()).stderr(Stdio::null());
     let ssh = platform::spawn_ssh(

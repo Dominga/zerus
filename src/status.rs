@@ -163,7 +163,7 @@ fn ssh(config: &Config, peer: &str, command: &str) -> Result<std::process::Outpu
         return Err(Error::new(1, "invalid SSH host alias"));
     }
     platform::ssh_output(
-        platform::ssh()
+        crate::ssh_bytes::command(command)?
             .args(crate::machines::ssh_options(config, peer))
             .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=3", peer, command])
             .stdin(Stdio::null())

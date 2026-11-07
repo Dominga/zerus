@@ -22,6 +22,7 @@ mod screen;
 mod self_exec;
 mod session_reference;
 mod speech;
+mod ssh_bytes;
 mod sqlite_file;
 mod state;
 mod status;
@@ -67,6 +68,14 @@ fn main() {
     if let Err(error) = desktop::compact_to_send::adopt_custody() {
         eprintln!("hgs: {error}");
         std::process::exit(2);
+    }
+    // Byte framing is local SSH plumbing, before configuration or managers.
+    if std::env::args().nth(1).as_deref() == Some("--ssh-bytes-client") {
+        let code = match ssh_bytes::run(std::env::args().skip(2).collect()) {
+            Ok(code) => code,
+            Err(error) => { eprintln!("hgs: Windows SSH pipe: {error}"); 255 }
+        };
+        std::process::exit(code);
     }
     // COM cold activation cannot load config, create jobs or acquire ownership.
     #[cfg(windows)]

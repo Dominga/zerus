@@ -6,8 +6,11 @@ import { APPROVALS_TITLE, APPROVALS_BODY, APPROVALS_CONFIRM, APPROVALS_WARNING, 
 
 // Read from disk, as styles/motion.test.ts does: the specifier is built so
 // TypeScript (no Node types here) leaves it alone.
-const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as {
+const nodeFs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as {
   readFileSync(path: URL, encoding: "utf8"): string;
+};
+const fs = {
+  readFileSync: (path: URL, encoding: "utf8") => nodeFs.readFileSync(path, encoding).replaceAll("\r\n", "\n"),
 };
 const here = new URL("./", import.meta.url);
 const repo = new URL("../../../../../", import.meta.url);

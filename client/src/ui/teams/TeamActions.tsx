@@ -15,13 +15,15 @@ import { acceptedUnstarted, buttonText, menuText, phaseHeader, type HeaderPhase,
 // (ui/teams/actions.ts holds what they are and what they send).
 
 /** A small modal with a text field: Finish's summary and Send back's comment. */
-function TextDialog(props: {
+export function TextDialog(props: {
   title: string; hint: string; placeholder: string; action: string; danger?: boolean; count?: (text: string) => { count: string; ok: boolean };
+  /** Task 199: the text it opens with (Iron rules edits the member's lines). */
+  initial?: string;
   close: () => void; submit: (text: string) => void;
 }) {
   let dialog!: HTMLDialogElement;
   let field!: HTMLTextAreaElement;
-  const [text, setText] = createSignal("");
+  const [text, setText] = createSignal(props.initial ?? "");
   const state = () => props.count?.(text()) ?? { count: "", ok: text().trim() !== "" };
   onMount(() => { dialog.showModal(); queueMicrotask(() => field.focus()); });
   onCleanup(() => { if (dialog.open) dialog.close(); });

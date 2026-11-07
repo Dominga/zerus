@@ -589,6 +589,7 @@ fn replies(read: &TeamRead) -> Value {
         TeamRead::TestQueue { .. } | TeamRead::TestResults { .. } | TeamRead::TestWindow { .. } => {
             json!({"items":[]})
         }
+        TeamRead::Builds { .. } => json!({"folders":[]}),
     }
 }
 
@@ -1504,4 +1505,60 @@ fn task_196_the_phase_header_reads_the_phase_records() {
     let task = |id: u64| view.tasks.iter().find(|task| task.id == id).unwrap().clone();
     assert_eq!((task(2).description.as_str(), task(2).criteria.clone()), ("Write docs", vec!["Readable".to_owned()]));
     assert!(task(1).description.is_empty() && task(1).criteria.is_empty(), "a handed-out task's text is not sent");
+}
+
+/// Task 199: the member card's details: who it reports to and whether it is a
+/// sub-lead, a drain, a usage limit, the account its session runs on, its
+/// services (bounded) and its budget; an older hgs sends none of them.
+#[test]
+fn task_199_a_member_carries_its_card_details() {
+    let services: Vec<Value> = (0..20).map(|n| json!({"name": format!("mcp-{n}"), "since": 1.0, "command": "npx server"})).collect();
+    let status = json!({"id":"t1","name":"Checkout","status":"running","lead":"lead","members":[
+        {"id":"lead","role":"Lead","agent":"claude"},
+        {"id":"arch","role":"Architect","agent":"claude","sub":true,"session_account":"native-claude"},
+        {"id":"api","role":"Backend","agent":"codex","parent":"arch","draining":true,"limit_resume":true,
+         "limited":{"at":10.0,"resets_at":20.0,"detail":"5-hour limit"},"services":services,
+         "budget":{"label":"build","state":"amber","minutes":15,"red_minutes":30,"elapsed_minutes":18}}]});
+    let view = view::team(&status);
+    let member = |id: &str| view.members.iter().find(|member| member.id == id).unwrap().clone();
+    let arch = member("arch");
+    assert!(arch.sub && arch.parent.is_empty());
+    assert_eq!(arch.session_account.as_deref(), Some("native-claude"));
+    let api = member("api");
+    assert_eq!((api.parent.as_str(), api.draining, api.limit_resume), ("arch", true, true));
+    assert_eq!(api.limited.as_ref().map(|limit| (limit.resets_at, limit.detail.as_str())), Some((20.0, "5-hour limit")));
+    assert_eq!(api.services.len(), 12, "services are bounded");
+    assert_eq!(api.budget.as_ref().map(|budget| (budget.state.as_str(), budget.elapsed_minutes)), Some(("amber", 18)));
+    let lead = member("lead");
+    assert!(lead.session_account.is_none() && lead.limited.is_none() && lead.services.is_empty());
+    let wire = serde_json::to_value(&lead).unwrap();
+    assert!(wire.get("sub").is_none() && wire.get("services").is_none() && wire.get("session_account").is_none(), "{wire}");
+}
+
+/// Task 199: the Builds view of `hgs team builds` (broker.rs builds_view):
+/// each shared folder, its build folders and what runs, waits and finished,
+/// bounded; the read sends `{team}` to `team builds`.
+#[test]
+fn task_199_builds_are_read_and_bounded() {
+    use super::read::{invocation, TeamRead};
+    let read = TeamRead::Builds { team: "t1".into() };
+    let call = invocation(&ComputerId::local(), &read).unwrap();
+    assert_eq!(call.args, ["team", "builds", "--json"]);
+    assert_eq!(serde_json::from_slice::<Value>(call.stdin.as_deref().unwrap()).unwrap(), json!({"team": "t1"}));
+    let timeline: Vec<Value> = (0..30).map(|n| json!({"member":"api","template":"cargo-build","at":n as f64,"hit":n % 2 == 0,"by":"ui","ms":1200,"exit":0})).collect();
+    let value = json!({"team":"t1","enabled":true,"folders":[{"folder":"D:/work/shared","members":["api","ui"],"build_folders":[
+        {"name":".","usual_ms":90000.0,"hit_rate":0.5,
+         "running":[{"member":"api","template":"cargo-build","started":100.0,"seconds":30.0,"usual_ms":90000.0,"snapshot":true}],
+         "queue":[{"member":"ui","template":"cargo-build","since":110.0,"seconds":20.0,"coalesced_with":"api","waiting_for":["qa"]}],
+         "timeline":timeline}],"changes":[],"overlaps":[]}],"members":{}});
+    let view = view::builds("t1", &value);
+    assert!(view.enabled);
+    let group = &view.folders[0].build_folders[0];
+    assert_eq!((view.folders[0].members.len(), group.name.as_str(), group.hit_rate), (2, ".", Some(0.5)));
+    assert_eq!((group.running[0].at, group.running[0].snapshot), (100.0, true));
+    assert_eq!((group.queue[0].coalesced_with.as_str(), group.queue[0].waiting_for.clone()), ("api", vec!["qa".to_owned()]));
+    assert_eq!(group.recent.len(), 20, "recent builds are bounded");
+    assert!(group.recent[0].hit && group.recent[0].by == "ui");
+    let empty = view::builds("t1", &json!({"folders":[]}));
+    assert!(!empty.enabled && empty.folders.is_empty());
 }

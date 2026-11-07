@@ -356,6 +356,85 @@ pub enum TeamAction {
         #[serde(default)]
         members_update: Vec<Value>,
     },
+    /// Task 199: the member menu (Qt TeamWorkspace::memberMenu): pause or
+    /// resume a member, relaunch one whose launch failed, drain it (or cancel
+    /// the drain), remove it (asked first), who it reports to, sub-lead on
+    /// or off, more members of its role, a swap, and the account move of
+    /// every member of an agent (U54); "+ Member" adds one.
+    PauseMember {
+        member: String,
+    },
+    ResumeMember {
+        member: String,
+    },
+    Relaunch {
+        member: String,
+    },
+    Drain {
+        member: String,
+        #[serde(default)]
+        role: String,
+        #[serde(default)]
+        cancel: bool,
+    },
+    RemoveMember {
+        member: String,
+        #[serde(default)]
+        role: String,
+    },
+    ReportsTo {
+        member: String,
+        parent: String,
+    },
+    SubLead {
+        member: String,
+        sub: bool,
+    },
+    Scale {
+        role: String,
+        agent: String,
+        count: u64,
+        #[serde(default)]
+        model: String,
+        #[serde(default)]
+        effort: String,
+        #[serde(default)]
+        account: String,
+    },
+    SwapMember {
+        member: String,
+        #[serde(default)]
+        agent: String,
+        #[serde(default)]
+        model: String,
+        #[serde(default)]
+        effort: String,
+        #[serde(default)]
+        account: String,
+        #[serde(default)]
+        fresh: bool,
+    },
+    MoveAccount {
+        provider: String,
+        from_account: String,
+        to_account: String,
+    },
+    AddMember {
+        member: Value,
+    },
+    /// Task 199 (Qt TeamTests force): the suite goes to the test queue as
+    /// forced: first at the worker's next tick, never a reused result.
+    ForceTest {
+        suite: String,
+    },
+    /// Task 199 (U51): a new intake key named `label`; hgs answers its
+    /// secret once in the receipt (`key`). `revoke` removes one.
+    IntakeKey {
+        #[serde(default)]
+        label: String,
+        #[serde(default)]
+        revoke: String,
+    },
     /// The designer's change, left for the owner to keep or reject.
     CatalogPropose {
         change: Value,
@@ -566,6 +645,18 @@ impl TeamAction {
             | Self::DraftCreate { .. }
             | Self::DraftDiscard { .. } => "draft",
             Self::Settings { .. } => "settings",
+            Self::PauseMember { .. } => "pause-member",
+            Self::ResumeMember { .. } => "resume-member",
+            Self::Relaunch { .. } => "relaunch",
+            Self::Drain { .. } => "drain",
+            Self::RemoveMember { .. } => "remove-member",
+            Self::ReportsTo { .. } => "reports-to",
+            Self::SubLead { .. } => "sub-lead",
+            Self::Scale { .. } => "scale",
+            Self::SwapMember { .. } | Self::MoveAccount { .. } => "swap-member",
+            Self::AddMember { .. } => "add-member",
+            Self::ForceTest { .. } => "test",
+            Self::IntakeKey { .. } => "intake-key",
             Self::CatalogPropose { .. }
             | Self::CatalogDecide { .. }
             | Self::CatalogApply
@@ -776,6 +867,83 @@ impl TeamAction {
                 Ok(())
             }
             Self::PlanEdit { change, .. } => change.check(),
+            Self::PauseMember { member }
+            | Self::ResumeMember { member }
+            | Self::Relaunch { member }
+            | Self::Drain { member, .. }
+            | Self::RemoveMember { member, .. }
+            | Self::SubLead { member, .. } => word(member, "member id"),
+            Self::ReportsTo { member, parent } => {
+                word(member, "member id")?;
+                word(parent, "member id")?;
+                if member == parent {
+                    return Err("A member does not report to itself.".into());
+                }
+                Ok(())
+            }
+            Self::Scale { role, agent, count, model, effort, account } => {
+                if role.trim().is_empty() {
+                    return Err("Name the role to add more of.".into());
+                }
+                plain(role, "A role", 120)?;
+                word(agent, "agent")?;
+                if !(1..=20).contains(count) {
+                    return Err("Add 1 to 20 members at once.".into());
+                }
+                for (value, what) in [(model, "model"), (effort, "effort"), (account, "account")] {
+                    if !value.is_empty() {
+                        word(value, what)?;
+                    }
+                }
+                Ok(())
+            }
+            Self::SwapMember { member, agent, model, effort, account, fresh } => {
+                word(member, "member id")?;
+                let mut changes = false;
+                for (value, what) in [(agent, "agent"), (model, "model"), (effort, "effort"), (account, "account")] {
+                    if !value.is_empty() {
+                        word(value, what)?;
+                        changes = true;
+                    }
+                }
+                if !changes && !*fresh {
+                    return Err("The swap changes nothing: choose its agent, model, effort or account, or a fresh session.".into());
+                }
+                Ok(())
+            }
+            Self::ForceTest { suite } => word(suite, "suite"),
+            // A revoke names the key's id (its label only words the question).
+            Self::IntakeKey { label, revoke } if !revoke.is_empty() => word(revoke, "key id").and(plain(label, "A key's name", 60)),
+            Self::IntakeKey { label, .. } => {
+                if label.trim().is_empty() {
+                    return Err("Name the new key.".into());
+                }
+                plain(label, "A key's name", 60)
+            }
+            Self::MoveAccount { provider, from_account, to_account } => {
+                word(provider, "agent")?;
+                word(from_account, "account")?;
+                word(to_account, "account")?;
+                if from_account == to_account {
+                    return Err("Choose another account to move to.".into());
+                }
+                Ok(())
+            }
+            Self::AddMember { member } => {
+                let Some(fields) = member.as_object() else { return Err("A member is an object.".into()) };
+                for key in ["role", "agent"] {
+                    let value = fields.get(key).and_then(Value::as_str).unwrap_or_default();
+                    if value.trim().is_empty() {
+                        return Err(format!("A new member needs its {key}."));
+                    }
+                }
+                plain(fields.get("role").and_then(Value::as_str).unwrap_or_default(), "A role", 120)?;
+                word(fields.get("agent").and_then(Value::as_str).unwrap_or_default(), "agent")?;
+                if serde_json::to_vec(member).map_or(0, |bytes| bytes.len()) > 16 * 1024 {
+                    return Err("The member is too large.".into());
+                }
+                Ok(())
+            }
             Self::AcceptPhase { phase } => {
                 if *phase == 0 {
                     return Err("Not a phase number.".into());
@@ -1114,6 +1282,63 @@ impl TeamAction {
             }
             // The whole plan is built by `run` from a fresh read of the team.
             Self::PlanEdit { revision, .. } => put("revision", json!(revision)),
+            Self::PauseMember { member } | Self::ResumeMember { member } | Self::Relaunch { member } | Self::RemoveMember { member, .. } => {
+                put("member", json!(member))
+            }
+            Self::Drain { member, cancel, .. } => {
+                put("member", json!(member));
+                if *cancel {
+                    put("draining", json!(false));
+                }
+            }
+            Self::ReportsTo { member, parent } => {
+                put("member", json!(member));
+                put("parent", json!(parent));
+            }
+            Self::SubLead { member, sub } => {
+                put("member", json!(member));
+                put("sub", json!(sub));
+            }
+            Self::Scale { role, agent, count, model, effort, account } => {
+                put("role", json!(role.trim()));
+                put("agent", json!(agent));
+                put("count", json!(count));
+                for (key, value) in [("model", model), ("effort", effort), ("account", account)] {
+                    if !value.is_empty() {
+                        put(key, json!(value));
+                    }
+                }
+            }
+            Self::SwapMember { member, agent, model, effort, account, fresh } => {
+                put("member", json!(member));
+                for (key, value) in [("agent", agent), ("model", model), ("effort", effort), ("account", account)] {
+                    if !value.is_empty() {
+                        put(key, json!(value));
+                    }
+                }
+                if *fresh {
+                    put("fresh", json!(true));
+                }
+            }
+            Self::MoveAccount { provider, from_account, to_account } => {
+                put("provider", json!(provider));
+                put("from_account", json!(from_account));
+                put("to_account", json!(to_account));
+            }
+            Self::AddMember { member } => put("members", json!([member])),
+            Self::IntakeKey { label, revoke } => {
+                if revoke.is_empty() {
+                    put("label", json!(label.trim()));
+                } else {
+                    put("revoke", json!(revoke));
+                }
+            }
+            Self::ForceTest { suite } => {
+                put("action", json!("submit"));
+                put("suite", json!(suite));
+                put("forced", json!(true));
+                put("asked_by", json!("You"));
+            }
             Self::AcceptPhase { phase } => put("phase", json!(phase)),
             Self::PhaseMode { phase, mode, reason } => {
                 put("phase", json!(phase));
@@ -1337,6 +1562,30 @@ impl TeamAction {
                 "Archive",
             )),
             // Task 196: Qt's phase confirmations, word for word.
+            Self::Drain { role, cancel: false, member } => Some(ask(
+                "teamDrainMemberConfirm",
+                "Drain member?",
+                format!(
+                    "{} finishes its current task and review, gets nothing new, then its session is paused and it leaves the team.",
+                    if role.trim().is_empty() { member.as_str() } else { role.trim() }
+                ),
+                "Drain",
+            )),
+            Self::IntakeKey { label, revoke } if !revoke.is_empty() => Some(ask(
+                "teamRevokeIntakeConfirm",
+                "Revoke intake key",
+                format!("Revoke the key \"{}\"?", if label.trim().is_empty() { revoke.as_str() } else { label.trim() }),
+                "Revoke",
+            )),
+            Self::RemoveMember { member, role } => Some(ask(
+                "teamRemoveMemberConfirm",
+                "Remove member?",
+                format!(
+                    "Remove {} from {name}? Its session keeps running; it gets no more tasks.",
+                    if role.trim().is_empty() { member.as_str() } else { role.trim() }
+                ),
+                "Remove",
+            )),
             Self::DiscardPhase { phase, tasks, accepted } => Some(ask(
                 "teamDiscardPhaseConfirm",
                 "Discard phase?",

@@ -3,7 +3,7 @@ import { createVirtualizer } from "@tanstack/solid-virtual";
 import { Icon } from "../lib/icons";
 import { tr } from "../../i18n";
 import type { PlanGraph, TeamView } from "./types";
-import type { TeamProfileView, TeamTestsView, TeamTimelineView } from "../../types";
+import type { TeamBuildsView, TeamProfileView, TeamTestsView, TeamTimelineView } from "../../types";
 import { BoardView, HeatLegend, HeatLine, LayersView, PlanModeBar, ProfilePanel, TestsPanel, runStatusLabel, stageLabel } from "./plan-panels";
 import { ProfileTime } from "./TimeView";
 import { spawnedFrom, heatSeed, stageChips, type PlanMode } from "./planModes";
@@ -59,6 +59,13 @@ export interface PlanViewProps {
    * links them, an edge's click removes it (asked first), and a click on a
    * card edits it while the team plans.
    */
+  /** Task 199: a task the side column opens (a queue row, Needs your answer); each new object opens it again. */
+  openTask?: { task: number } | null;
+  /** Task 199: the Tests mode's Builds tab and Force run (TestsPanel). */
+  builds?: TeamBuildsView | null;
+  buildsError?: string;
+  onLoadBuilds?: () => void;
+  onForceTest?: (suite: string) => Promise<string>;
   editing?: {
     canLink: (task: number) => boolean;
     link: (dependency: number, task: number) => void;
@@ -157,6 +164,12 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   const rows = createMemo(() => buildRows(phases(), collapsed()));
   const rowByKey = createMemo(() => new Map(rows().map((row) => [row.key, row])));
   const selectedTask = createMemo(() => props.team.tasks.find((task) => task.id === selected()));
+  createEffect(() => {
+    const request = props.openTask;
+    if (!request) return;
+    setMode("graph");
+    setSelected(request.task);
+  });
   const lit = createMemo(() => (hover() === null ? null : chain(props.team.tasks, hover()!)));
   const byId = createMemo(() => new Map(props.team.tasks.map((task) => [task.id, task])));
 
@@ -606,7 +619,8 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         </div>
       </Show>
       <Show when={mode() === "tests"}>
-        <TestsPanel tests={props.tests} onMore={() => props.onLoadTests?.(props.tests?.next ?? null)} />
+        <TestsPanel tests={props.tests} onMore={() => props.onLoadTests?.(props.tests?.next ?? null)}
+          builds={props.builds} buildsError={props.buildsError} onLoadBuilds={props.onLoadBuilds} onForce={props.onForceTest} />
       </Show>
     </section>
   );

@@ -416,6 +416,7 @@ impl TeamsModel {
             TeamRead::ScopedProfile { team, .. } => team_key("timeline-profile", team),
             TeamRead::ScopedSpans { team, .. } => team_key("timeline-spans", team),
             TeamRead::TestWindow { team, .. } => team_key("timeline-tests", team),
+            TeamRead::Builds { team } => team_key("builds", team),
         }
     }
 
@@ -554,6 +555,8 @@ impl TeamsModel {
             TeamRead::ScopedProfile { .. }
             | TeamRead::ScopedSpans { .. }
             | TeamRead::TestWindow { .. } => {}
+            // Task 199: the Tests tab's Builds are read on request too.
+            TeamRead::Builds { .. } => {}
         }
         out
     }

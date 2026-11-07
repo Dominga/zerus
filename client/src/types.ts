@@ -1029,6 +1029,26 @@ export interface TeamMemberView {
   iron_rules?: string[];
   /** Task 11: the pending question or permission request as hgs sends it (`members[].question`), null without one. */
   permission?: TeamMemberQuestion | null;
+  /** Task 199 (Qt member card): who it reports to (the lead when empty), whether it is a sub-lead, a drain. */
+  parent?: string; sub?: boolean; draining?: boolean;
+  /** H1: stopped at a usage limit, and whether Zerus continues it after the reset. */
+  limited?: { at: number; resets_at: number; detail: string } | null; limit_resume?: boolean;
+  /** U54: the account its session really runs on (absent from an hgs that does not say). */
+  session_account?: string | null;
+  /** G7: the services its session runs; C12: its job budget; U45: the models it may switch to. */
+  services?: { name: string; since: number; command: string }[];
+  budget?: { label: string; state: string; minutes: number; red_minutes: number; elapsed_minutes: number } | null;
+  models?: { model: string; effort: string }[];
+}
+
+/** Task 199: the Tests tab's Builds (`hgs team builds`, core BuildsView). */
+export interface TeamBuildItem {
+  member: string; template: string; at: number; seconds: number; usual_ms: number; snapshot: boolean; hit: boolean; by: string;
+  ms: number; exit: number | null; timed_out: boolean; error: string; coalesced_with: string; waiting_for: string[];
+}
+export interface TeamBuildsView {
+  team: string; enabled: boolean;
+  folders: { folder: string; members: string[]; build_folders: { name: string; usual_ms: number; hit_rate: number | null; running: TeamBuildItem[]; queue: TeamBuildItem[]; recent: TeamBuildItem[] }[] }[];
 }
 
 /** A member's pending question (`members[].question`): its id and hash, what it asks and the card's allow and deny ids. */
@@ -1171,6 +1191,8 @@ export interface TeamView {
   /** Task 40: permission widenings Approve & Run confirms, and the direct sub-teams. */
   widenings?: { member?: string; role?: string; from?: string; to?: string }[];
   children?: { team: string; name?: string; status?: string }[];
+  /** Task 199 (U51): the team's intake keys, never their secrets. */
+  intakes?: { id: string; label: string; created: number }[];
   validation: { errors: TeamFinding[]; warnings: TeamFinding[] };
   health: { critical_path: number; parallelism: number; warnings: string[] };
   ready: number[]; cycle: number[]; draft: { revision: number; unseen: string[]; owner_edited: string[] } | null; truncated: boolean;
@@ -1224,6 +1246,20 @@ export type TeamAction =
   | { kind: "phase_acceptance"; phase: number; owner: boolean }
   | { kind: "edit_draft"; phase: number; revision?: number | null; title?: string; barrier?: boolean; tasks_update?: Record<string, unknown>[] }
   | { kind: "plan_edit"; revision: number; change: TeamPlanChange }
+  /** Task 199: the member menu, "+ Member", Force run and intake keys. */
+  | { kind: "pause_member"; member: string }
+  | { kind: "resume_member"; member: string }
+  | { kind: "relaunch"; member: string }
+  | { kind: "drain"; member: string; role?: string; cancel?: boolean }
+  | { kind: "remove_member"; member: string; role?: string }
+  | { kind: "reports_to"; member: string; parent: string }
+  | { kind: "sub_lead"; member: string; sub: boolean }
+  | { kind: "scale"; role: string; agent: string; count: number; model?: string; effort?: string; account?: string }
+  | { kind: "swap_member"; member: string; agent?: string; model?: string; effort?: string; account?: string; fresh?: boolean }
+  | { kind: "move_account"; provider: string; from_account: string; to_account: string }
+  | { kind: "add_member"; member: Record<string, unknown> }
+  | { kind: "force_test"; suite: string }
+  | { kind: "intake_key"; label?: string; revoke?: string }
   | { kind: "accept_phase"; phase: number }
   | { kind: "phase_mode"; phase: number; mode: "free" | "standard"; reason?: string }
   | { kind: "send_back_phase"; phase: number; comment: string }

@@ -201,6 +201,56 @@ fn actions() -> Vec<(TeamAction, &'static str, Value)> {
             "add-to-phase",
             json!({"phase": 1, "confirm": "add-1", "decline": true}),
         ),
+        // Task 199: the member menu and "+ Member" (Qt TeamWorkspace::memberMenu).
+        (TeamAction::PauseMember { member: "api".into() }, "pause-member", json!({"member": "api"})),
+        (TeamAction::ResumeMember { member: "api".into() }, "resume-member", json!({"member": "api"})),
+        (TeamAction::Relaunch { member: "api".into() }, "relaunch", json!({"member": "api"})),
+        (
+            TeamAction::Drain { member: "api".into(), role: "Backend".into(), cancel: true },
+            "drain",
+            json!({"member": "api", "draining": false}),
+        ),
+        (
+            TeamAction::ReportsTo { member: "api".into(), parent: "arch".into() },
+            "reports-to",
+            json!({"member": "api", "parent": "arch"}),
+        ),
+        (TeamAction::SubLead { member: "arch".into(), sub: true }, "sub-lead", json!({"member": "arch", "sub": true})),
+        (
+            TeamAction::Scale { role: " Backend ".into(), agent: "codex".into(), count: 2, model: "gpt-5".into(), effort: String::new(), account: String::new() },
+            "scale",
+            json!({"role": "Backend", "agent": "codex", "count": 2, "model": "gpt-5"}),
+        ),
+        (
+            TeamAction::SwapMember { member: "api".into(), agent: String::new(), model: "opus".into(), effort: "high".into(), account: String::new(), fresh: false },
+            "swap-member",
+            json!({"member": "api", "model": "opus", "effort": "high"}),
+        ),
+        (
+            TeamAction::SwapMember { member: "api".into(), agent: String::new(), model: String::new(), effort: String::new(), account: String::new(), fresh: true },
+            "swap-member",
+            json!({"member": "api", "fresh": true}),
+        ),
+        (
+            TeamAction::MoveAccount { provider: "claude".into(), from_account: "native-claude".into(), to_account: "work".into() },
+            "swap-member",
+            json!({"provider": "claude", "from_account": "native-claude", "to_account": "work"}),
+        ),
+        (
+            TeamAction::AddMember { member: json!({"id": "qa", "role": "Tester", "agent": "kimi"}) },
+            "add-member",
+            json!({"members": [{"id": "qa", "role": "Tester", "agent": "kimi"}]}),
+        ),
+        (
+            TeamAction::IntakeKey { label: " watcher ".into(), revoke: String::new() },
+            "intake-key",
+            json!({"label": "watcher"}),
+        ),
+        (
+            TeamAction::ForceTest { suite: "client-core".into() },
+            "test",
+            json!({"action": "submit", "suite": "client-core", "forced": true, "asked_by": "You"}),
+        ),
         // Task 196: the phase header's actions (Qt TeamWorkspace).
         (
             TeamAction::AddToPhase {
@@ -697,6 +747,9 @@ fn destructive_actions_and_approvals_ask_first_and_send_nothing() {
         },
         TeamAction::DiscardPhase { phase: 3, tasks: 4, accepted: false },
         TeamAction::ReturnToDraft { phase: 3 },
+        TeamAction::Drain { member: "api".into(), role: "Backend".into(), cancel: false },
+        TeamAction::RemoveMember { member: "api".into(), role: "Backend".into() },
+        TeamAction::IntakeKey { label: "watcher".into(), revoke: "k1".into() },
     ] {
         reply(&fake, action.op(), "", json!({"stdout": {"status": "ok"}}));
         let outcome = run(
@@ -1235,4 +1288,39 @@ fn a_plan_edit_sends_the_whole_plan_with_the_change_at_the_owners_revision() {
     let outcome = run(&fake.path(), &edit(remove));
     assert!(matches!(&outcome, TeamOutcome::Failed { detail, .. } if detail.contains("no longer plans")), "{outcome:?}");
     assert_eq!(requests(&fake).len(), 5, "only the read ran");
+}
+
+/// Task 199: Drain and Remove ask in Qt's words (Remove names the team),
+/// then send only the member; bad member requests never run.
+#[test]
+fn member_actions_ask_in_qt_words_and_refuse_bad_requests() {
+    let ask = |action: TeamAction| match prepare(&TeamCall { confirmed: false, ..call(action) }) {
+        Err(TeamOutcome::Confirm { confirmation }) => confirmation,
+        other => panic!("asks first: {other:?}"),
+    };
+    let drain = ask(TeamAction::Drain { member: "api".into(), role: "Backend".into(), cancel: false });
+    assert_eq!((drain.name.as_str(), drain.title.as_str(), drain.action.as_str()), ("teamDrainMemberConfirm", "Drain member?", "Drain"));
+    assert!(drain.text.starts_with("Backend finishes its current task and review"), "{}", drain.text);
+    let remove = ask(TeamAction::RemoveMember { member: "api".into(), role: "Backend".into() });
+    assert_eq!((remove.name.as_str(), remove.action.as_str()), ("teamRemoveMemberConfirm", "Remove"));
+    assert_eq!(remove.text, "Remove Backend from Zerus Next for the fork? Its session keeps running; it gets no more tasks.");
+    // Cancelling a drain asks nothing.
+    assert!(prepare(&TeamCall { confirmed: false, ..call(TeamAction::Drain { member: "api".into(), role: String::new(), cancel: true }) }).is_ok());
+    let (invocation, request_id) = prepare(&call(TeamAction::RemoveMember { member: "api".into(), role: "Backend".into() })).unwrap();
+    assert_eq!(invocation.args, ["team", "remove-member", "--json"]);
+    let sent: Value = serde_json::from_slice(invocation.stdin.as_deref().unwrap()).unwrap();
+    assert_eq!(sent, json!({"member": "api", "team": TEAM, "by": "human", "request_id": request_id}));
+    let empty = || String::new();
+    for bad in [
+        TeamAction::PauseMember { member: empty() },
+        TeamAction::ReportsTo { member: "api".into(), parent: "api".into() },
+        TeamAction::Scale { role: "Backend".into(), agent: "codex".into(), count: 0, model: empty(), effort: empty(), account: empty() },
+        TeamAction::Scale { role: " ".into(), agent: "codex".into(), count: 1, model: empty(), effort: empty(), account: empty() },
+        TeamAction::SwapMember { member: "api".into(), agent: empty(), model: empty(), effort: empty(), account: empty(), fresh: false },
+        TeamAction::MoveAccount { provider: "claude".into(), from_account: "work".into(), to_account: "work".into() },
+        TeamAction::AddMember { member: json!({"role": "Tester"}) },
+        TeamAction::AddMember { member: json!("qa") },
+    ] {
+        assert!(matches!(prepare(&call(bad.clone())), Err(TeamOutcome::Failed { .. })), "{bad:?}");
+    }
 }

@@ -6,11 +6,16 @@ import { coordinatorActivity, activity } from "../../store/session";
 import { memberRow, showCatalog, showTeam, teams } from "../../store/teams";
 import { SHARE, SIDE, dragShare, dragSide, teamLayout, type TeamLayout } from "../../store/teamLayout";
 import { selected, setDetailTab, setSelectedKey } from "../../store/ui";
-import { teamTests, teamTimeline, teamsProfile } from "../../bridge";
+import { teamBuilds, teamTests, teamTimeline, teamsProfile } from "../../bridge";
+import { AddMemberDialog, MemberCard, toComposer } from "./MemberCard";
+import { focusedTasks, memberTree } from "./members";
+import { sideLists, type SideTarget } from "./sideLists";
+import { TeamActions as TeamActionsModel } from "./actions";
+import { useModel, windowPort } from "./ProposalCards";
 import { PlanView } from "./PlanView";
 import { TeamCatalogEditor } from "./TeamCatalogEditor";
 import { TeamSettingsDialog } from "./TeamSettingsDialog";
-import type { TeamTestsView } from "../../types";
+import type { TeamBuildsView, TeamTestsView } from "../../types";
 import { ActivityView } from "../sessions/Activity";
 import { Composer } from "../sessions/Composer";
 import { QuestionCard } from "../sessions/QuestionCard";
@@ -81,12 +86,49 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
     const hide = showCatalog(props.computer);
     onCleanup(hide);
   });
+  // Task 199: Load older appends the next page; the first page replaces.
   const loadTests = async (before: number | null) => {
     try {
-      setTests(await teamTests(props.computer, props.team.id, before));
+      const page = await teamTests(props.computer, props.team.id, before);
+      const shown = tests();
+      setTests(before !== null && shown ? { ...page, runs: [...shown.runs, ...page.runs.filter((run) => !shown.runs.some((old) => old.id === run.id))] } : page);
     } catch {
       // The panel keeps what it showed; the follow error strip names reads.
     }
+  };
+  const [builds, setBuilds] = createSignal<TeamBuildsView | null>(null);
+  const [buildsError, setBuildsError] = createSignal("");
+  const loadBuilds = async () => {
+    try { setBuilds(await teamBuilds(props.computer, props.team.id)); setBuildsError(""); }
+    catch (cause) { setBuildsError(String(cause instanceof Error ? cause.message : cause)); }
+  };
+  const { model: actions } = useModel((changed) => new TeamActionsModel(windowPort, () => ({ computer: props.computer, team: props.team }), changed));
+  const forceTest = async (suite: string) => {
+    const outcome = await actions.forceTest(suite);
+    if (outcome && outcome !== "cancelled" && outcome.outcome === "done") void loadTests(null);
+    return outcome && outcome !== "cancelled" && outcome.outcome !== "done" ? actions.notice : "";
+  };
+  // Task 199: a member card's click shows only its tasks; the side column
+  // opens a task in the plan (Needs your answer, a member's queue).
+  const [focus, setFocus] = createSignal<string | null>(null);
+  const [opened, setOpened] = createSignal<{ task: number } | null>(null);
+  const openTask = (task: number) => setOpened({ task });
+  const shownTeam = createMemo(() => {
+    const id = focus();
+    return id ? { ...props.team, tasks: focusedTasks(props.team.tasks, id) } : props.team;
+  });
+  const shownGraph = (graph: NonNullable<ReturnType<typeof teams.graph>>) => {
+    const id = focus();
+    if (!id) return graph;
+    const keep = new Set(focusedTasks(props.team.tasks, id).map((task) => task.id));
+    return { ...graph, nodes: graph.nodes.filter((node) => keep.has(node.id)), edges: graph.edges.filter((edge) => keep.has(edge.from) && keep.has(edge.to)) };
+  };
+  const goTo = (target: SideTarget) => {
+    if (!target) return;
+    if ("task" in target) return openTask(target.task);
+    if ("phase" in target) return body?.querySelector<HTMLElement>(`[data-phase="${target.phase}"]`)?.scrollIntoView({ block: "nearest" });
+    const row = memberRow(props.computer, props.team.members.find((member) => member.id === target.member));
+    if (row) { setSelectedKey(row.key); setDetailTab("activity"); }
   };
   return (
     <>
@@ -102,7 +144,7 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
           <Icon name="triangle-alert" size={14} />
           <b>{tr("Nothing can move without you")}</b>
           <For each={problems()}>{(member) => <span class="team-strip-item">{member.role}: {statuses().get(member.id)?.text}</span>}</For>
-          <Blockers team={props.team} />
+          <Blockers team={props.team} onTask={openTask} />
         </div>
       </Show>
       <Show when={props.team.status === "planning" && props.team.validation.errors.length > 0}>
@@ -124,11 +166,23 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
             </div>
           </Show>
           {plan.dialog()}
+          <Show when={focus()}>{(id) => (
+            <div class="team-focus-strip" role="status">
+              <button type="button" class="team-chip accent" data-action="focus-clear" title={tr("Show every member")} onClick={() => setFocus(null)}>
+                {tr("Only %1's tasks", props.team.members.find((member) => member.id === id())?.role || id())} <Icon name="x" size={11} />
+              </button>
+            </div>
+          )}</Show>
           <Show when={graph()} fallback={<TeamPhases computer={props.computer} team={props.team} />}>
             {(shown) => (
               <PlanView
-                team={props.team}
-                graph={shown()}
+                team={shownTeam()}
+                graph={shownGraph(shown())}
+                openTask={opened()}
+                builds={builds()}
+                buildsError={buildsError()}
+                onLoadBuilds={() => void loadBuilds()}
+                onForceTest={forceTest}
                 profile={profile()}
                 tests={tests()}
                 onLoadProfile={() => { void teamsProfile(props.computer); }}
@@ -150,7 +204,8 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
           start={() => teamLayout.sideWidth()} onCommit={teamLayout.commitSide} onReset={teamLayout.resetSide}
           onStep={(direction) => teamLayout.stepSide(-direction)} />
         <aside class="team-side" style={{ width: `${teamLayout.sideWidth()}px` }} aria-label={tr("Members and coordinator")}>
-          <SideColumn computer={props.computer} team={props.team} statuses={statuses()} />
+          <SideColumn computer={props.computer} team={props.team} statuses={statuses()} focus={focus()}
+            onFocus={(id) => setFocus(focus() === id ? null : id)} onTask={openTask} onGo={goTo} />
         </aside>
       </div>
       <Show when={settingsOpen()}>
@@ -170,22 +225,8 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
  * message waits in its composer for the owner's Send.
  */
 function toCoordinator(computer: ComputerId, team: TeamView, text: string) {
-  const row = memberRow(computer, team.members.find((member) => member.lead));
-  if (!row) return;
-  if (selected()?.key !== row.key) { setSelectedKey(row.key); setDetailTab("team"); }
-  let tries = 0;
-  const put = () => {
-    const view = composer.view();
-    if (selected()?.key === row.key && view && !composer.locked()) {
-      // A draft already typed stays; the message follows it.
-      const draft = composer.text();
-      const next = draft.trim() ? `${draft}\n${text}` : text;
-      composer.input(next, next.length, next.length);
-      return;
-    }
-    if (++tries < 40) setTimeout(put, 50);
-  };
-  put();
+  // A draft already typed stays; the message follows it (MemberCard toComposer).
+  toComposer(computer, team.members.find((member) => member.lead), text);
 }
 
 function TeamBar(props: {
@@ -260,18 +301,42 @@ function TeamPhases(props: { computer: ComputerId; team: TeamView }) {
   );
 }
 
-function SideColumn(props: { computer: ComputerId; team: TeamView; statuses: Map<string, MemberStatus> }) {
+function SideColumn(props: {
+  computer: ComputerId; team: TeamView; statuses: Map<string, MemberStatus>;
+  focus: string | null; onFocus: (id: string) => void; onTask: (id: number) => void; onGo: (target: SideTarget) => void;
+}) {
   const members = createMemo(() => shownMembers(props.team));
   const lead = createMemo(() => props.team.members.find((member) => member.lead));
+  // Spec 5.6: the members as a tree; a folded sub-lead hides its reports.
+  const [folded, setFolded] = createSignal<Set<string>>(new Set());
+  const tree = createMemo(() => {
+    const shown = new Set(members().map((member) => member.id));
+    return memberTree(props.team, folded()).filter((node) => !node.hidden && shown.has(node.member.id));
+  });
+  const fold = (id: string) => { const next = new Set(folded()); if (!next.delete(id)) next.add(id); setFolded(next); };
+  const [adding, setAdding] = createSignal(false);
+  const { model } = useModel((changed) => new TeamActionsModel(windowPort, () => ({ computer: props.computer, team: props.team }), changed));
+  const canAdd = () => ["planning", "running", "paused"].includes(props.team.status);
   let column!: HTMLDivElement;
   return (
     <div class="team-side-inner" ref={column}>
+      <SideLists team={props.team} onGo={props.onGo} />
       <TeamQuestions computer={props.computer} team={props.team} />
       <section class="team-members" style={{ height: `${teamLayout.membersShare()}%` }} aria-label={tr("Members")}>
-        <div class="team-section-head"><b>{tr("Members")}</b><span class="dim mono">{members().length}</span></div>
-        <div class="team-members-list">
-          <For each={members()}>{(member) => <MemberRow computer={props.computer} team={props.team} member={member} status={props.statuses.get(member.id)!} />}</For>
+        <div class="team-section-head"><b>{tr("Members")}</b><span class="dim mono">{members().length}</span>
+          <span class="grow" />
+          <Show when={canAdd()}>
+            <button type="button" class="btn ghost small" data-action="add-member" title={tr("Add a member; it starts with the first task it gets")} onClick={() => setAdding(true)}>{tr("+ Member")}</button>
+          </Show>
         </div>
+        <div class="team-members-list">
+          <For each={tree()}>{(node) => (
+            <MemberCard computer={props.computer} team={props.team} member={node.member as TeamMemberView} status={props.statuses.get(node.member.id)!}
+              depth={node.depth} focused={props.focus === node.member.id} onFocus={() => props.onFocus(node.member.id)}
+              folded={folded().has(node.member.id)} onFold={() => fold(node.member.id)} onTask={props.onTask} />
+          )}</For>
+        </div>
+        <Show when={adding()}><AddMemberDialog close={() => setAdding(false)} submit={(member) => void model.addMember(member)} /></Show>
       </section>
       <Divider orientation="horizontal" label={tr("Members and coordinator")} layout={teamLayout}
         value={teamLayout.membersShare()} min={SHARE.min} max={SHARE.max}
@@ -289,34 +354,35 @@ function openRow(row: Session | undefined) {
   setDetailTab("activity");
 }
 
-function MemberRow(props: { computer: ComputerId; team: TeamView; member: TeamMemberView; status: MemberStatus }) {
-  const row = () => memberRow(props.computer, props.member);
-  const own = createMemo(() => memberProgress(props.team, props.member));
-  const model = () => [props.member.model, props.member.effort].filter(Boolean).join(" ");
+/**
+ * Task 199 (Qt TeamWorkspace.cpp 3617-3700): Needs your attention, Needs your
+ * answer and Plan problems; each row opens what it names.
+ */
+function SideLists(props: { team: TeamView; onGo: (target: SideTarget) => void }) {
+  const lists = createMemo(() => sideLists(props.team));
+  const [open, setOpen] = createSignal<Record<string, boolean>>({});
+  const shown = (id: string, initial: boolean) => open()[id] ?? initial;
   return (
-    <div class="team-member" classList={{ problem: props.status.problem, [`tone-${props.status.tone}`]: true, lead: props.member.lead, planned: props.status.kind === "not_created" }}
-      data-kind={props.status.kind}>
-      <span class="team-tile" title={props.member.agent}><AgentGlyph agent={agentKind(props.member.agent)} size={14} /></span>
-      <div class="team-member-main">
-        <div class="team-member-line">
-          <span class="role-badge ell" style={roleStyle(props.member.role, props.member.lead)}>{props.member.role || props.member.id}</span>
-          <Show when={props.member.question}><span class="team-q" title={tr("Needs your answer")}>?1</span></Show>
-          <Show when={model()}><span class="dim ell team-model">{model()}</span></Show>
-          <span class="grow" />
-          <span class={`team-status tone-${props.status.tone}`} title={props.status.text}><Icon name={props.status.icon} size={12} />{props.status.short}</span>
-        </div>
-        <div class="team-member-line sub">
-          <span class="ell team-member-text" title={props.member.error || props.status.text}>{props.member.error || props.status.text}</span>
-          <span class="grow" />
-          <Show when={own().total > 0}>
-            <span class="team-mini-bar" title={tr("%1 of %2 tasks accepted", own().accepted, own().total)}><i style={{ width: `${(own().accepted / own().total) * 100}%` }} /></span>
-            <span class="mono dim">{own().accepted}/{own().total}</span>
-          </Show>
-        </div>
-      </div>
-      <button class="icon-btn small" disabled={!row()} aria-label={tr("Open session")} data-tip={row() ? tr("Open session") : tr("No session yet")}
-        onClick={() => openRow(row())}><Icon name="external-link" size={13} /></button>
-    </div>
+    <For each={lists()}>{(list) => (
+      <section class={`team-side-list team-side-${list.id}`} data-list={list.id}>
+        <button type="button" class="team-section-head team-side-toggle" aria-expanded={shown(list.id, list.open)}
+          onClick={() => setOpen({ ...open(), [list.id]: !shown(list.id, list.open) })}>
+          <Icon name={shown(list.id, list.open) ? "chevron-down" : "chevron-right"} size={11} />
+          <b>{list.title}</b><span class={`team-side-note ${list.id === "plan" && props.team.validation.errors.length ? "danger" : "warn"}`}>{list.note}</span>
+        </button>
+        <Show when={shown(list.id, list.open)}>
+          <For each={list.rows}>{(row) => (
+            <div class={`team-side-row tone-${row.tone}`} data-row={row.key}>
+              <Show when={row.role}><span class="role-badge ell" style={roleStyle(row.role, false)}>{row.role}</span></Show>
+              <span class="ell grow" title={row.text}>{row.text}</span>
+              <Show when={row.target && row.action}>
+                <button type="button" class="btn ghost small" data-action="side-go" onClick={() => props.onGo(row.target)}>{row.action}</button>
+              </Show>
+            </div>
+          )}</For>
+        </Show>
+      </section>
+    )}</For>
   );
 }
 

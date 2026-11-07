@@ -467,3 +467,43 @@ describe("Task 196: the phase header's actions", () => {
     expect(f.sent.map((call) => call.action)).toEqual([{ kind: "plan_edit", revision: 7, change: { edit: "link", dependency: 1, task: 2, add: true } }]);
   });
 });
+
+describe("Task 199: the member menu and card", () => {
+  it("sends each member action once with its member", async () => {
+    const f = fake();
+    const model = actionsOf(f, team());
+    await model.pauseMember("api");
+    await model.drain("api", "Backend", true);
+    await model.reportsTo("api", "lead");
+    await model.subLead("qa", true);
+    await model.scale({ role: "Backend", agent: "codex", count: 2 });
+    await model.swap("api", { model: "opus" });
+    await model.moveAccount("claude", "native-claude", "work");
+    await model.ironRules("api", ["Run the tests"]);
+    await model.forceTest("client-core");
+    expect(f.sent.map((call) => call.action)).toEqual([
+      { kind: "pause_member", member: "api" },
+      { kind: "drain", member: "api", role: "Backend", cancel: true },
+      { kind: "reports_to", member: "api", parent: "lead" },
+      { kind: "sub_lead", member: "qa", sub: true },
+      { kind: "scale", role: "Backend", agent: "codex", count: 2 },
+      { kind: "swap_member", member: "api", model: "opus" },
+      { kind: "move_account", provider: "claude", from_account: "native-claude", to_account: "work" },
+      { kind: "settings", settings: {}, members_update: [{ id: "api", iron_rules: ["Run the tests"] }] },
+      { kind: "force_test", suite: "client-core" },
+    ]);
+  });
+
+  it("answers a member's permission with the card's own ids, a deny with its reason, and nothing without ids", async () => {
+    const f = fake();
+    const model = actionsOf(f, team());
+    const question = { question_id: "claude-approval:ab", question_hash: "ab", answer: { question_id: "approval", allow: "1", deny: "3" } };
+    await model.answerMember("api", question, true);
+    await model.answerMember("api", question, false, " Not in prod ");
+    await model.answerMember("api", { question_id: "x" }, true);
+    expect(f.sent.map((call) => call.action)).toEqual([
+      { kind: "answer", member: "api", question_id: "claude-approval:ab", expected_question_hash: "ab", answers: [{ question_id: "approval", selected_option_ids: ["1"], text: "" }] },
+      { kind: "answer", member: "api", question_id: "claude-approval:ab", expected_question_hash: "ab", answers: [{ question_id: "approval", selected_option_ids: ["3"], text: "Not in prod" }] },
+    ]);
+  });
+});

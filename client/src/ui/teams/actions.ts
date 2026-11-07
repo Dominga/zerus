@@ -591,6 +591,40 @@ export class TeamActions {
   }
   move(task: ActTask, phase: number) { return this.run(`move:${task.id}`, { kind: "move_task", task: task.id, phase, revision: this.where().team.revision }); }
 
+  // Task 199: the member menu and card (Qt TeamWorkspace::memberMenu, members).
+  pauseMember(member: string) { return this.run(`pause-member:${member}`, { kind: "pause_member", member }); }
+  resumeMember(member: string) { return this.run(`resume-member:${member}`, { kind: "resume_member", member }); }
+  relaunch(member: string) { return this.run(`relaunch:${member}`, { kind: "relaunch", member }); }
+  /** Drain asks first (core words it as Qt); Cancel drain goes at once. */
+  drain(member: string, role: string, cancel = false) { return this.run(`drain:${member}`, { kind: "drain", member, role, cancel }); }
+  removeMember(member: string, role: string) { return this.run(`remove-member:${member}`, { kind: "remove_member", member, role }); }
+  reportsTo(member: string, parent: string) { return this.run(`reports-to:${member}`, { kind: "reports_to", member, parent }); }
+  subLead(member: string, sub: boolean) { return this.run(`sub-lead:${member}`, { kind: "sub_lead", member, sub }); }
+  scale(input: { role: string; agent: string; count: number; model?: string; effort?: string; account?: string }) {
+    return this.run(`scale:${input.role}`, { kind: "scale", ...input });
+  }
+  swap(member: string, change: { agent?: string; model?: string; effort?: string; account?: string; fresh?: boolean }) {
+    return this.run(`swap:${member}`, { kind: "swap_member", member, ...change });
+  }
+  moveAccount(provider: string, from: string, to: string) { return this.run(`move-account:${provider}`, { kind: "move_account", provider, from_account: from, to_account: to }); }
+  addMember(member: Record<string, unknown>) { return this.run(`add-member`, { kind: "add_member", member }); }
+  ironRules(member: string, rules: string[]) {
+    return this.run(`iron-rules:${member}`, { kind: "settings", settings: {}, members_update: [{ id: member, iron_rules: rules }] });
+  }
+  /** C4: Allow or Deny a member's permission with its question id, hash and the card's own answer ids; a deny's reason travels as text. */
+  answerMember(member: string, question: { question_id?: string; question_hash?: string; expected_question_hash?: string; answer?: unknown }, allow: boolean, text = "") {
+    const native = question.answer && typeof question.answer === "object" ? question.answer as { question_id?: string; allow?: string; deny?: string } : undefined;
+    const hash = question.question_hash || question.expected_question_hash || "";
+    if (!question.question_id || !hash || !native?.question_id || !native.allow || !native.deny) return Promise.resolve(undefined);
+    return this.run(`answer:${member}`, { kind: "answer", member, question_id: question.question_id, expected_question_hash: hash,
+      answers: [{ question_id: native.question_id, selected_option_ids: [allow ? native.allow : native.deny], text: allow ? "" : text.trim() }] });
+  }
+  /** #719: Force run queues the suite as forced. */
+  forceTest(suite: string) { return this.run(`force:${suite}`, { kind: "force_test", suite }); }
+  /** U51: a new intake key; hgs answers its secret once in the receipt. */
+  createIntake(label: string) { return this.run(`intake`, { kind: "intake_key", label: label.trim() }); }
+  revokeIntake(id: string, label: string) { return this.run(`intake-revoke:${id}`, { kind: "intake_key", revoke: id, label }); }
+
   // Task 196: the phase header and its menu (Qt TeamWorkspace's phase header).
   approvePhase(phase: number) { return this.run(`approve-phase:${phase}`, { kind: "approve", phase }); }
   rejectPhase(phase: number, comment: string) {

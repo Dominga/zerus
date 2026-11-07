@@ -286,7 +286,72 @@ pub struct MemberView {
     /// sends it (`members[].question`, at most [`DETAIL_BYTES`]): its id,
     /// hash, tool, command, reason and the card's own allow and deny ids.
     pub permission: Value,
+    /// Task 199 (Qt member card): the member it reports to (`parent`, the
+    /// lead when empty) and whether it is a sub-lead with reports of its own.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub parent: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub sub: bool,
+    /// U49: it finishes its open work, takes nothing new, then leaves.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub draining: bool,
+    /// H1: stopped at a usage limit (its reset time, when known), and whether
+    /// Zerus continues it after the reset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limited: Option<LimitView>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub limit_resume: bool,
+    /// U54: the account its session really runs on; None from an hgs that
+    /// does not say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_account: Option<String>,
+    /// G7: the services its session runs (MCP servers and the like), bounded.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<ServiceView>,
+    /// C12: its background job's declared time budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget: Option<BudgetView>,
+    /// U45: the models Zerus may switch it to before a task ({model, effort}).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<Value>,
 }
+
+/// Task 199: an intake key of the team.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct IntakeView {
+    pub id: String,
+    pub label: String,
+    pub created: f64,
+}
+
+/// Task 199: a member stopped at a usage limit.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct LimitView {
+    pub at: f64,
+    pub resets_at: f64,
+    pub detail: String,
+}
+
+/// Task 199: one service a member's session runs.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct ServiceView {
+    pub name: String,
+    pub since: f64,
+    pub command: String,
+}
+
+/// Task 199: a member's background job budget.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct BudgetView {
+    pub label: String,
+    pub state: String,
+    pub minutes: u64,
+    pub red_minutes: u64,
+    pub elapsed_minutes: u64,
+}
+
+/// Task 199: the services kept per member.
+const SERVICES_KEPT: usize = 12;
 
 /// One dependency: the task it waits for, hard or soft.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -588,6 +653,10 @@ pub struct TeamView {
     /// Task 40: the plan's permission widenings ({member, role, from, to}),
     /// which Approve & Run confirms separately (Qt Team::widenings).
     pub widenings: Vec<Value>,
+    /// Task 199 (Qt TeamSettingsDialog, U51): the team's intake keys, never
+    /// the secret, which hgs shows once at creation.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub intakes: Vec<IntakeView>,
     /// Task 40: the team's direct sub-teams ({team, name, status}), for the
     /// tree confirmations of Pause and Stop.
     pub children: Vec<Value>,
@@ -641,6 +710,39 @@ fn member(value: &Value, lead: &str) -> MemberView {
         input_refusals: value.get("input_block").map_or(0, |block| count(block, "count")),
         input_reason: value.get("input_block").map_or_else(String::new, |block| text(block, "reason", LINE_CHARS)),
         input_raised: value.get("input_block").is_some_and(|block| flag(block, "raised")),
+        parent: name(value, "parent"),
+        sub: flag(value, "sub"),
+        draining: flag(value, "draining"),
+        limited: value.get("limited").filter(|limit| limit.is_object()).map(|limit| LimitView {
+            at: number(limit, "at"),
+            resets_at: number(limit, "resets_at"),
+            detail: text(limit, "detail", LINE_CHARS),
+        }),
+        limit_resume: flag(value, "limit_resume"),
+        session_account: value.get("session_account").and_then(Value::as_str).map(|account| account.chars().take(200).collect()),
+        services: array(value, "services")
+            .iter()
+            .take(SERVICES_KEPT)
+            .map(|service| ServiceView {
+                name: text(service, "name", 120),
+                since: number(service, "since"),
+                command: text(service, "command", LINE_CHARS),
+            })
+            .filter(|service| !service.name.is_empty())
+            .collect(),
+        models: array(value, "models")
+            .iter()
+            .take(16)
+            .filter(|choice| choice.get("model").and_then(Value::as_str).is_some_and(|model| !model.is_empty()))
+            .map(|choice| json!({"model": name(choice, "model"), "effort": name(choice, "effort")}))
+            .collect(),
+        budget: value.get("budget").filter(|budget| budget.is_object()).map(|budget| BudgetView {
+            label: text(budget, "label", LINE_CHARS),
+            state: name(budget, "state"),
+            minutes: count(budget, "minutes"),
+            red_minutes: count(budget, "red_minutes"),
+            elapsed_minutes: count(budget, "elapsed_minutes"),
+        }),
         permission: bounded(
             value
                 .get("question")
@@ -892,6 +994,12 @@ pub fn team(value: &Value) -> TeamView {
             .map(|item| bounded(Some(item)))
             .collect(),
         widenings: widenings(value),
+        intakes: array(value, "intakes")
+            .iter()
+            .take(8)
+            .map(|intake| IntakeView { id: name(intake, "id"), label: text(intake, "label", 120), created: number(intake, "created") })
+            .filter(|intake| !intake.id.is_empty())
+            .collect(),
         children: array(value, "children")
             .iter()
             .take(ITEMS_KEPT)
@@ -1799,6 +1907,104 @@ pub fn catalog(value: &Value) -> CatalogView {
                     value: bounded(Some(&change)),
                     at: number(proposal, "at"),
                 }
+            })
+            .collect(),
+    }
+}
+
+
+/// Task 199: the Tests tab's Builds (Qt TeamTests builds): the build
+/// broker's shared folders, bounded.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct BuildsView {
+    pub team: String,
+    /// The build broker is on: members sharing a folder build in snapshots.
+    pub enabled: bool,
+    pub folders: Vec<BuildFolderView>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct BuildFolderView {
+    pub folder: String,
+    pub members: Vec<String>,
+    pub build_folders: Vec<BuildGroupView>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct BuildGroupView {
+    pub name: String,
+    pub usual_ms: f64,
+    /// The share of recent requests served from an earlier build; None
+    /// before any finished.
+    pub hit_rate: Option<f64>,
+    pub running: Vec<BuildItemView>,
+    pub queue: Vec<BuildItemView>,
+    pub recent: Vec<BuildItemView>,
+}
+
+/// One build: running, waiting or finished.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct BuildItemView {
+    pub member: String,
+    pub template: String,
+    /// When it started, began waiting or finished.
+    pub at: f64,
+    pub seconds: f64,
+    pub usual_ms: f64,
+    pub snapshot: bool,
+    pub hit: bool,
+    pub by: String,
+    pub ms: f64,
+    pub exit: Option<i64>,
+    pub timed_out: bool,
+    pub error: String,
+    pub coalesced_with: String,
+    pub waiting_for: Vec<String>,
+}
+
+/// Task 199: the bounds of the Builds view.
+const BUILD_FOLDERS_KEPT: usize = 20;
+const BUILD_ITEMS_KEPT: usize = 20;
+
+pub fn builds(team: &str, value: &Value) -> BuildsView {
+    let item = |entry: &Value| BuildItemView {
+        member: name(entry, "member"),
+        template: name(entry, "template"),
+        at: [number(entry, "started"), number(entry, "since"), number(entry, "at")].into_iter().find(|at| *at > 0.0).unwrap_or(0.0),
+        seconds: number(entry, "seconds"),
+        usual_ms: number(entry, "usual_ms"),
+        snapshot: entry.get("snapshot").and_then(Value::as_bool).unwrap_or(false),
+        hit: flag(entry, "hit"),
+        by: name(entry, "by"),
+        ms: number(entry, "ms"),
+        exit: entry.get("exit").and_then(Value::as_i64),
+        timed_out: flag(entry, "timed_out"),
+        error: text(entry, "error", LINE_CHARS),
+        coalesced_with: name(entry, "coalesced_with"),
+        waiting_for: array(entry, "waiting_for").iter().take(BUILD_ITEMS_KEPT).filter_map(Value::as_str).map(str::to_owned).collect(),
+    };
+    let items = |entry: &Value, key: &str| array(entry, key).iter().take(BUILD_ITEMS_KEPT).map(item).collect::<Vec<_>>();
+    BuildsView {
+        team: team.to_owned(),
+        enabled: flag(value, "enabled"),
+        folders: array(value, "folders")
+            .iter()
+            .take(BUILD_FOLDERS_KEPT)
+            .map(|folder| BuildFolderView {
+                folder: text(folder, "folder", LINE_CHARS),
+                members: array(folder, "members").iter().take(ITEMS_KEPT).filter_map(Value::as_str).map(str::to_owned).collect(),
+                build_folders: array(folder, "build_folders")
+                    .iter()
+                    .take(BUILD_FOLDERS_KEPT)
+                    .map(|group| BuildGroupView {
+                        name: text(group, "name", LINE_CHARS),
+                        usual_ms: number(group, "usual_ms"),
+                        hit_rate: group.get("hit_rate").and_then(Value::as_f64),
+                        running: items(group, "running"),
+                        queue: items(group, "queue"),
+                        recent: items(group, "timeline"),
+                    })
+                    .collect(),
             })
             .collect(),
     }

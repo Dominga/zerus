@@ -937,6 +937,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 background: found.background,
                 building: found.building,
                 tool: found.tool.clone(),
+                tool_since: if in_tool { found.tool_started } else { None },
                 last_event_at: found.last_event_at,
                 quiet,
                 limit,
@@ -3264,8 +3265,15 @@ fn check_member(store: &mut Store, team: &Team, member_id: &str, hooks: &super::
         }
     }
     let (team_id, member_id, hooks) = (team.id.clone(), member_id.to_owned(), hooks.clone());
+    let dsh = team.member(&member_id).is_some_and(|member| member.agent == "dsh");
+    let tool_bound = tool_stuck_minutes(team) * 60.0;
     let done = key.clone();
     let run = move |store: &mut Store| {
+        let mut hooks = hooks;
+        // Task 181: a DeepSeek listing shows no tool call; the session's events do.
+        if dsh && hooks.tool.is_empty() {
+            fold_open_tool(&session, &mut hooks, tool_bound);
+        }
         let screen = read_screen(&session);
         let _ = apply_check(store, &team_id, &member_id, &hooks, screen.as_deref(), now());
         CHECKING.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&done);
@@ -3281,6 +3289,29 @@ fn check_member(store: &mut Store, team: &Team, member_id: &str, hooks: &super::
             }
         });
     }
+}
+
+/// Task 181: a DeepSeek member inside one long tool call (a poll around its own
+/// `hgs run`, a cargo build) is working: the call's start is progress and the
+/// tool bound holds it, as for Claude. The session's events are read once.
+pub(crate) fn fold_open_tool(session: &SessionRef, hooks: &mut super::look::Hooks, bound: f64) {
+    let Ok(record) = inspect_reply(session) else { return };
+    if record["run_id"].as_str().unwrap_or_default() != session.run_id {
+        return;
+    }
+    super::look::note_open_tool(hooks, super::look::open_tool(&record), bound, now());
+}
+
+/// Task 181: asks the session to settle a finished turn its hooks still call
+/// working (`hgs subagent settle`): true when its record now says idle.
+fn settle_session(session: &SessionRef, quiet: f64) -> bool {
+    let input = json!({"request_id":uuid::Uuid::new_v4().to_string(),"expected_run_id":session.run_id,
+        "expected_conversation_id":session.conversation_id,"quiet_seconds":quiet});
+    hgs(&session.host, &["subagent", "settle", &session.name, "--json"], Some(&input), Duration::from_secs(30))
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
+        .is_some_and(|answer| answer["settled"] == true)
 }
 
 /// The member's Terminal as `hgs terminal NAME --json` snapshots it.
@@ -3311,6 +3342,28 @@ pub(crate) fn apply_check(
     let shown = screen.map(|_| look::classify(&member.agent, &lines));
     let record = look::recorded_request(member);
     let compared = look::compare(hooks, record.as_deref(), shown.as_ref().map(|(kind, detail)| (*kind, detail.as_str())));
+    // Task 181: a finished turn (an idle prompt, no agent row or shell) the hooks
+    // still call working is idle for hand-out purposes: its record is corrected
+    // and nobody is told, instead of an `uncertain` notice and a stuck member.
+    let finished = look::settle_due(&member.agent, hooks, record.as_deref(), shown.as_ref().map(|(kind, detail)| (*kind, detail.as_str())), member.check.as_ref(), at);
+    if finished {
+        if let Some(session) = member.session.clone() {
+            if settle_session(&session, hooks.quiet) {
+                change(store, team_id, |team, events| {
+                    let role = team.role_of(member_id);
+                    if let Some(found) = team.members.iter_mut().find(|found| found.id == member_id) {
+                        found.check = None;
+                        found.seen_activity = "idle".into();
+                        found.seen_phase = "idle".into();
+                        found.stuck = None;
+                    }
+                    events.push(Event::new("member_settled", json!({"member":role,"reason":"screen_idle_prompt","quiet_minutes":(hooks.quiet / 60.0).round() as u64})));
+                    Ok(())
+                })?;
+                return Ok(());
+            }
+        }
+    }
     let kept = lines[lines.len().saturating_sub(look::SCREEN_LINES)..].to_vec();
     let check = look::next_check(member.check.as_ref(), &compared, kept, at);
     let tell = check.state == "uncertain" && !check.told;
@@ -6623,10 +6676,14 @@ fn check_dsh_silent(store: &mut Store, team: &Team, task_id: u32, listing_last: 
         Ok(record) => record["run_id"].as_str().unwrap_or_default() != session.run_id,
         Err(_) => true,
     };
-    let newest = inspected
-        .ok()
-        .filter(|record| record["run_id"].as_str().unwrap_or_default() == session.run_id)
-        .and_then(|record| newest_event(&record));
+    let own = inspected.ok().filter(|record| record["run_id"].as_str().unwrap_or_default() == session.run_id);
+    let newest = own.as_ref().and_then(newest_event);
+    // Task 181: a member inside one open tool call is held to the tool bound.
+    let bound = if own.as_ref().is_some_and(|record| super::look::open_tool(record).is_some()) {
+        (SILENT_MINUTES * 60.0).max(tool_stuck_minutes(team) * 60.0)
+    } else {
+        SILENT_MINUTES * 60.0
+    };
     let last = listing_last.max(newest.unwrap_or(0.0));
     let quiet = now() - last;
     let attempt_id = attempt.id.clone();
@@ -6642,7 +6699,7 @@ fn check_dsh_silent(store: &mut Store, team: &Team, task_id: u32, listing_last: 
         }
         Ok(())
     })?;
-    if quiet >= SILENT_MINUTES * 60.0 {
+    if quiet >= bound {
         tell_lead_silent(store, team, task_id, (quiet / 60.0).round().max(1.0) as u64, unreadable)?;
     }
     Ok(())
@@ -6677,6 +6734,8 @@ fn check_dsh_stuck(store: &mut Store, team: &Team, member_id: &str, listing_last
     });
     let phase = record.as_ref().and_then(|record| record["phase"].as_str()).unwrap_or_default().to_owned();
     let last = listing_last.max(newest.unwrap_or(0.0));
+    // Task 181: an open tool call has the tool bound, not the stuck bound.
+    let limit = if record.as_ref().is_some_and(|record| super::look::open_tool(record).is_some()) { limit.max(tool_stuck_minutes(team) * 60.0) } else { limit };
     let stuck = busy && at - last >= limit;
     change(store, &team.id, |team, events| {
         let role = team.role_of(member_id);

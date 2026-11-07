@@ -321,5 +321,176 @@ fn retire_record(record: &mut Value, request: Retire) -> Result<(Value, bool)> {
     Ok((result, true))
 }
 
+/// The shortest silence the record must show before a screen read may settle it.
+const SETTLE_QUIET: f64 = 90.0;
+const SETTLE_ABI: &str = "screen-settle-v1";
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Settle {
+    request_id: String,
+    expected_run_id: String,
+    expected_conversation_id: String,
+    quiet_seconds: f64,
+}
+
+/// Task 181: Zerus read the session's screen twice (a finished turn, an idle
+/// prompt, no agent row, no shell) while its hooks still say working: a Stop or
+/// a SubagentStop never arrived. A subagent cannot outlive its parent's turn,
+/// so the record is settled: idle, the parent's turn done, the children whose
+/// stop never came ended (`completion_source: screen_settle`). Refused while a
+/// request or compaction waits, a native child shows live evidence, or an event
+/// is recent. Idempotent on the request id.
+pub(crate) fn settle(name: &str, bytes: &[u8]) -> Result<Value> {
+    if bytes.len() > 4096 {
+        return Err("Settle request exceeds 4 KiB".into());
+    }
+    let request: Settle = serde_json::from_slice(bytes).map_err(|_| "Invalid settle request")?;
+    if uuid::Uuid::parse_str(&request.request_id).is_err()
+        || request.expected_run_id.is_empty()
+        || request.expected_conversation_id.is_empty()
+        || !request.quiet_seconds.is_finite()
+    {
+        return Err("Invalid settle identity".into());
+    }
+    let _guard = writer_until(std::time::Instant::now() + std::time::Duration::from_secs(2))?
+        .ok_or("Session writer is busy; the settle did not run")?;
+    let mut record = storage::read_bounded(name, 16 * 1024 * 1024)?;
+    let (result, changed) = settle_record(&mut record, request, now())?;
+    if changed {
+        write(&mut record)?;
+    }
+    Ok(result)
+}
+
+fn settle_record(record: &mut Value, request: Settle, at: f64) -> Result<(Value, bool)> {
+    if record["run_id"] != request.expected_run_id || record["conversation_id"] != request.expected_conversation_id {
+        return Err("Selected session generation changed".into());
+    }
+    if let Some(receipt) = record["screen_settles"].get(&request.request_id) {
+        return Ok((receipt["result"].clone(), false));
+    }
+    // A DeepSeek session's state is its host's, never this record's.
+    if string(record, "agent") == "dsh" || !process_alive(record) {
+        return Err("The session is not a running hook-driven agent".into());
+    }
+    let busy = record["activity"] == "busy" || ["working", "tool"].contains(&string(record, "phase"));
+    if !busy {
+        return Ok((json!({"abi":SETTLE_ABI,"request_id":request.request_id,"settled":true,"already_idle":true,"children":[]}), false));
+    }
+    if ["input", "approval", "question", "error", "compacting"].contains(&string(record, "phase"))
+        || record["pending_approval"].is_object()
+    {
+        return Err("The session waits for a request or compaction".into());
+    }
+    let last = record["last_event_at"].as_f64().unwrap_or(0.0);
+    if request.quiet_seconds < SETTLE_QUIET || (last > 0.0 && at - last < SETTLE_QUIET) {
+        return Err("The session had an event too recently".into());
+    }
+    if telemetry::grouped_active(record) > 0 {
+        return Err("A profile group still has work".into());
+    }
+    let clearable = |record: &Value, child: &Value| {
+        child["external"] != true || original_status(record, child) == "ended"
+    };
+    let working: Vec<String> = record["subagents"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, child)| telemetry::child_working(record, child))
+        .map(|(id, _)| id.clone())
+        .collect();
+    if working.iter().any(|id| !clearable(record, &record["subagents"][id])) {
+        return Err("A background job still has current work evidence".into());
+    }
+    for id in &working {
+        let child = &mut record["subagents"][id];
+        child["state"] = json!("ended");
+        child["display_state"] = json!("ended");
+        child["current_tool"] = json!("");
+        child["updated"] = json!(at);
+        child["completion_source"] = json!("screen_settle");
+    }
+    record["activity"] = json!("idle");
+    record["phase"] = json!("idle");
+    record["main_done"] = json!(true);
+    record["active_tools"] = json!({});
+    let result = json!({"abi":SETTLE_ABI,"request_id":request.request_id,"settled":true,"children":working});
+    if !record["screen_settles"].is_object() {
+        record["screen_settles"] = json!({});
+    }
+    let receipts = record["screen_settles"].as_object_mut().unwrap();
+    while receipts.len() >= CAP {
+        let Some(oldest) = receipts.iter().min_by(|a, b| a.1["at"].as_f64().unwrap_or(0.0).total_cmp(&b.1["at"].as_f64().unwrap_or(0.0))).map(|(key, _)| key.clone()) else { break };
+        receipts.remove(&oldest);
+    }
+    receipts.insert(request.request_id.clone(), json!({"at":at,"result":result}));
+    Ok((result, true))
+}
+
+#[cfg(test)]
+mod settle_tests {
+    use super::*;
+
+    fn stale(at: f64) -> Value {
+        json!({"agent":"claude","name":"claude/x/merger","pid":std::process::id(),
+            "process_start":process_start(std::process::id()),"run_id":"run","conversation_id":"conv",
+            "activity":"busy","phase":"working","main_done":true,"last_event_at":at - 600.0,"active_tools":{},
+            "subagents":{"agent-a":{"state":"working","display_state":"working","name":"reviewer","started":1.0,"updated":2.0,"announced":true}}})
+    }
+    fn request(quiet: f64) -> Settle {
+        Settle { request_id: uuid::Uuid::new_v4().to_string(), expected_run_id: "run".into(), expected_conversation_id: "conv".into(), quiet_seconds: quiet }
+    }
+
+    #[test]
+    fn a_finished_turn_whose_subagent_stop_never_came_is_settled() {
+        let at = now();
+        let mut record = stale(at);
+        assert!(telemetry::work_remains(&record), "one subagent that never stopped keeps it working");
+        let asked = request(600.0);
+        let id = asked.request_id.clone();
+        let (result, changed) = settle_record(&mut record, asked, at).unwrap();
+        assert!(changed && result["settled"] == true && result["children"] == json!(["agent-a"]), "{result}");
+        assert_eq!((record["activity"].clone(), record["phase"].clone(), record["main_done"].clone()), (json!("idle"), json!("idle"), json!(true)));
+        assert_eq!(record["subagents"]["agent-a"]["completion_source"], "screen_settle");
+        assert!(!telemetry::work_remains(&record));
+        // The same request again is the same answer, nothing more written.
+        let again = Settle { request_id: id, expected_run_id: "run".into(), expected_conversation_id: "conv".into(), quiet_seconds: 600.0 };
+        let (second, changed) = settle_record(&mut record, again, at + 1.0).unwrap();
+        assert!(!changed && second == result);
+    }
+
+    #[test]
+    fn it_refuses_what_a_screen_cannot_prove() {
+        let at = now();
+        // A recent event, a short quiet, another generation, a question waiting.
+        let mut recent = stale(at);
+        recent["last_event_at"] = json!(at - 10.0);
+        assert!(settle_record(&mut recent, request(600.0), at).is_err());
+        assert!(settle_record(&mut stale(at), request(30.0), at).is_err());
+        let mut other = stale(at);
+        other["run_id"] = json!("other");
+        assert!(settle_record(&mut other, request(600.0), at).is_err());
+        let mut asking = stale(at);
+        asking["phase"] = json!("approval");
+        assert!(settle_record(&mut asking, request(600.0), at).is_err());
+        // A DeepSeek record is its host's; a background job with no proof of exit stays.
+        let mut dsh = stale(at);
+        dsh["agent"] = json!("dsh");
+        assert!(settle_record(&mut dsh, request(600.0), at).is_err());
+        let mut job = stale(at);
+        job["subagents"]["external:codex:x"] = json!({"external":true,"state":"working","display_state":"working","updated":2.0});
+        let kept = job.clone();
+        assert!(settle_record(&mut job, request(600.0), at).is_err());
+        assert_eq!(job, kept, "a refusal changes nothing");
+        // An idle record has nothing to settle.
+        let mut idle = stale(at);
+        idle["activity"] = json!("idle");
+        idle["phase"] = json!("idle");
+        let (result, changed) = settle_record(&mut idle, request(600.0), at).unwrap();
+        assert!(!changed && result["already_idle"] == true);
+    }
+}
+
 #[cfg(test)]
 mod tests;

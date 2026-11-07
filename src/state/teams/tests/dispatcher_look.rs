@@ -261,3 +261,237 @@ fn an_idle_lead_with_decisions_waiting_is_told_once_a_round() {
     assert_eq!(sent.borrow().len(), 1, "once a round");
     assert!(sent.borrow()[0].contains("You are idle while 2 decision(s) wait, the oldest for 30 min"), "{:?}", sent.borrow());
 }
+
+// ---- Task 181 (owner, 2026-11-07): a member inside one long tool call, or
+// waiting on its own build, is not uncertain; the screen reads agent rows and
+// shells; a finished turn the hooks still call working is settled.
+
+/// Claude with its prompt empty while a subagent and a shell run (the merger's
+/// screen on 2026-11-07): the agent list sits under the prompt.
+const CLAUDE_AGENT_ROWS: &str = "● Reviewing the three branches.\n\n────────────────────────────────────────────────────────────\n❯\u{a0}\n────────────────────────────────────────────────────────────\n  ◯ general-purpose  Review task 132 against docs/lore.md · 12.3k tokens\n  ◯ general-purpose  Review task 133 · 8.1k tokens\n  ⏸ manual mode on · ← for agents\n";
+const CLAUDE_SHELLS: &str = "● Shipped the patch notes.\n\n✻ Worked for 10m 30s · done 5:30 PM · 2 shells still running\n\n────────────────────────────────────────────────────────────\n❯\u{a0}\n────────────────────────────────────────────────────────────\n";
+/// Claude at an idle prompt after a finished turn.
+const CLAUDE_DONE: &str = "● Merged and reported.\n\n✻ Worked for 4m 2s · done 10:16 AM\n\n────────────────────────────────────────────────────────────\n❯\u{a0}\n────────────────────────────────────────────────────────────\n  ⏸ manual mode on\n";
+
+/// A DeepSeek session's recorded event stream (dsh_native): the member ran one
+/// Bash call that polls its own `hgs run`, and no result came yet.
+fn dsh_events(at: f64, last: &[(&str, &str, f64)]) -> Value {
+    let mut events = vec![
+        json!({"type":"UserPromptSubmit","seq":1,"at":at - 3000.0,"source":"dsh_native"}),
+        json!({"type":"AgentMessage","seq":2,"at":at - 2990.0,"source":"dsh_native","detail":"Running the tests."}),
+    ];
+    for (index, (kind, tool, ago)) in last.iter().enumerate() {
+        events.push(json!({"type":kind,"tool":tool,"seq":3 + index,"at":at - ago,"detail":"x","source":"dsh_native"}));
+    }
+    json!({"run_id":"r1","conversation_id":"c","activity":"busy","phase":"working","events":events})
+}
+
+#[test]
+fn an_open_dsh_tool_call_is_found_in_the_recorded_events() {
+    let at = 100_000.0;
+    // One call, no result: open since its start.
+    let open = look::open_tool(&dsh_events(at, &[("PreToolUse", "shell", 17.0 * 60.0)]));
+    assert_eq!(open, Some(("shell".to_owned(), at - 17.0 * 60.0)));
+    // A result closes it; so does the next message or a Stop.
+    assert_eq!(look::open_tool(&dsh_events(at, &[("PreToolUse", "shell", 600.0), ("PostToolUse", "shell", 300.0)])), None);
+    assert_eq!(look::open_tool(&dsh_events(at, &[("PreToolUse", "shell", 600.0), ("AgentMessage", "", 300.0)])), None);
+    assert_eq!(look::open_tool(&dsh_events(at, &[("PreToolUse", "shell", 600.0), ("Stop", "", 300.0)])), None);
+    // Two calls, one result: the other is still open, from its own start.
+    let two = dsh_events(at, &[("PreToolUse", "read", 900.0), ("PreToolUse", "shell", 800.0), ("PostToolUse", "read", 700.0)]);
+    assert_eq!(look::open_tool(&two), Some(("shell".to_owned(), at - 800.0)));
+    // No events, or a record without them, is no call.
+    assert_eq!(look::open_tool(&json!({"events":[]})), None);
+    assert_eq!(look::open_tool(&json!({})), None);
+}
+
+#[test]
+fn a_dsh_member_inside_one_long_tool_call_is_not_uncertain() {
+    // 2026-11-07: hgs and ui2 sat 12 to 17 minutes inside one call (a poll around
+    // their own hgs run, a cargo build) and the lead heard 'uncertain' three times.
+    let at = 100_000.0;
+    let record = dsh_events(at, &[("PreToolUse", "shell", 17.0 * 60.0)]);
+    let listing = Hooks { quiet: 17.0 * 60.0, limit: 15.0 * 60.0, ..hooks("busy", "working") };
+    // Before: the listing alone is silent past the bound and disagrees with itself.
+    let before = look::compare(&listing, None, Some((Screen::Working, "")));
+    assert_eq!(before.state, "uncertain", "{:?}", before.disagree);
+    // Now: the open call is progress and the tool bound holds it.
+    let mut folded = listing.clone();
+    look::note_open_tool(&mut folded, look::open_tool(&record), 60.0 * 60.0, at);
+    assert_eq!((folded.tool.as_str(), folded.tool_since), ("shell", Some(at - 17.0 * 60.0)));
+    let after = look::compare(&folded, None, Some((Screen::Working, "")));
+    assert_eq!((after.state.as_str(), after.disagree.len()), ("working", 0), "{:?}", after.disagree);
+    assert_eq!(after.sources["hooks"]["tool"], "shell");
+    // Past the tool bound it is silence again.
+    let mut long = Hooks { quiet: 70.0 * 60.0, ..listing.clone() };
+    look::note_open_tool(&mut long, look::open_tool(&dsh_events(at, &[("PreToolUse", "shell", 70.0 * 60.0)])), 60.0 * 60.0, at);
+    assert_eq!(look::compare(&long, None, Some((Screen::Working, ""))).state, "uncertain");
+}
+
+#[test]
+fn a_member_waiting_on_its_own_build_is_building_not_silent() {
+    let silent = Hooks { quiet: 25.0 * 60.0, building: true, ..hooks("busy", "working") };
+    let compared = look::compare(&silent, None, Some((Screen::Working, "")));
+    assert_eq!((compared.state.as_str(), compared.disagree.len()), ("working", 0), "{:?}", compared.disagree);
+    // And such a member is not even suspect, so its screen is not read for it.
+    let at = 10_000.0;
+    let t = working_qa(at - 3600.0);
+    assert_eq!(look::due(&t, t.member("qa").unwrap(), &silent, at), None);
+    let no_build = Hooks { building: false, ..silent };
+    assert_eq!(look::due(&t, t.member("qa").unwrap(), &no_build, at), Some(true));
+}
+
+#[test]
+fn running_subagents_and_shells_make_an_empty_prompt_a_working_screen() {
+    for (screen, detail) in [(CLAUDE_AGENT_ROWS, "◯ general-purpose"), (CLAUDE_SHELLS, "2 shells still running")] {
+        let (kind, shown) = look::classify("claude", &rows(screen));
+        assert_eq!(kind, Screen::Working, "{screen}");
+        assert!(shown.contains(detail), "{shown}");
+        // Working hooks agree; idle hooks do not.
+        assert_eq!(look::compare(&hooks("busy", "working"), None, Some((kind, shown.as_str()))).state, "working");
+        assert_eq!(look::compare(&hooks("idle", "idle"), None, Some((kind, shown.as_str()))).state, "uncertain");
+    }
+    // The same prompt with nothing running is idle.
+    assert_eq!(look::classify("claude", &rows(CLAUDE_DONE)).0, Screen::Prompt);
+}
+
+#[test]
+fn a_finished_turn_the_hooks_still_call_working_is_settled_in_the_record() {
+    let working = Hooks { quiet: 600.0, ..hooks("busy", "working") };
+    let earlier = MemberCheck { at: 1000.0, state: "pending".into(), since: Some(1000.0),
+        disagree: vec!["hooks say working; the screen shows an idle prompt".into()], ..Default::default() };
+    let prompt = Some((Screen::Prompt, ""));
+    let due = |agent: &str, hooks: &Hooks, record: Option<&str>, screen, previous: Option<&MemberCheck>, at| look::settle_due(agent, hooks, record, screen, previous, at);
+    let later = 1000.0 + look::GRACE;
+    assert!(due("claude", &working, None, prompt, Some(&earlier), later));
+    // The first read only starts the episode.
+    assert!(!due("claude", &working, None, prompt, None, later));
+    assert!(!due("claude", &working, None, prompt, Some(&earlier), 1000.0 + 10.0), "not before the grace");
+    // Nothing is settled while anything shows work, a request, a build or a draft.
+    assert!(!due("claude", &working, None, Some((Screen::Working, "")), Some(&earlier), later));
+    assert!(!due("claude", &working, None, Some((Screen::Draft, "[Pasted text]")), Some(&earlier), later));
+    assert!(!due("claude", &working, Some("Bash: Run?"), prompt, Some(&earlier), later));
+    assert!(!due("claude", &Hooks { building: true, ..working.clone() }, None, prompt, Some(&earlier), later));
+    assert!(!due("claude", &Hooks { quiet: 30.0, ..working.clone() }, None, prompt, Some(&earlier), later), "a recent event");
+    // A DeepSeek session's state is its host's: never corrected here.
+    assert!(!due("dsh", &working, None, prompt, Some(&earlier), later));
+    // Hooks that already say idle have nothing to settle.
+    assert!(!due("claude", &hooks("idle", "idle"), None, prompt, Some(&earlier), later));
+}
+
+#[test]
+fn a_settled_finished_turn_is_corrected_and_nobody_is_told() {
+    // 2026-11-07 10:16: the merger's turn ended (screen done, idle prompt) while
+    // its hooks stayed working, so task 130 was never handed out.
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
+    let at = now();
+    let t = working_qa(at - 900.0);
+    stored(&mut store, &t);
+    let asked: Rc<RefCell<Vec<String>>> = Rc::default();
+    let seen = asked.clone();
+    set_fake_hgs(Some(Box::new(move |_, args: &[&str], input| {
+        seen.borrow_mut().push(format!("{} {}", args[0], args.get(1).copied().unwrap_or_default()));
+        Ok(match args[0] {
+            "subagent" => {
+                assert_eq!((args[1], args[2]), ("settle", "kimi/x/qa"));
+                let input = input.unwrap();
+                assert_eq!((input["expected_run_id"].clone(), input["expected_conversation_id"].clone()), (json!("r3"), json!("session_q")));
+                fake_output(0, r#"{"settled":true,"children":["agent-a"]}"#, "")
+            }
+            other => panic!("unexpected hgs {other}"),
+        })
+    })));
+    let working = Hooks { quiet: 600.0, ..hooks("busy", "working") };
+    // First read: the idle prompt disagrees with the hooks; within the grace.
+    apply_check(&mut store, &t.id, "qa", &working, Some(KIMI_IDLE), at - 90.0).unwrap();
+    let first = store.load(&t.id).unwrap().unwrap();
+    assert_eq!(first.member("qa").unwrap().check.as_ref().unwrap().state, "pending");
+    assert!(asked.borrow().is_empty());
+    // Second read past the grace: settled in the record, no uncertain notice.
+    apply_check(&mut store, &t.id, "qa", &working, Some(KIMI_IDLE), at).unwrap();
+    set_fake_hgs(None);
+    assert_eq!(asked.borrow().as_slice(), ["subagent settle"]);
+    let after = store.load(&t.id).unwrap().unwrap();
+    let qa = after.member("qa").unwrap();
+    assert!(qa.check.is_none(), "the episode is closed");
+    assert_eq!((qa.seen_activity.as_str(), qa.seen_phase.as_str()), ("idle", "idle"));
+    let kinds = event_kinds(&store, &t.id);
+    assert!(kinds.contains(&"member_settled".to_owned()), "{kinds:?}");
+    assert!(!kinds.contains(&"member_uncertain".to_owned()) && !kinds.contains(&"member_uncertain_told".to_owned()), "{kinds:?}");
+}
+
+#[test]
+fn a_refused_settle_leaves_the_member_uncertain_and_the_lead_hears() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
+    let at = now();
+    let t = working_qa(at - 900.0);
+    stored(&mut store, &t);
+    let sent: Rc<RefCell<Vec<String>>> = Rc::default();
+    let seen = sent.clone();
+    set_fake_hgs(Some(Box::new(move |_, args: &[&str], input| {
+        Ok(match args[0] {
+            "subagent" => fake_output(1, "", "A background job still has current work evidence"),
+            "send" => {
+                seen.borrow_mut().push(input.and_then(|input| input["text"].as_str()).unwrap_or_default().to_owned());
+                fake_output(0, r#"{"status":"submitted"}"#, "")
+            }
+            other => panic!("unexpected hgs {other}"),
+        })
+    })));
+    let working = Hooks { quiet: 600.0, ..hooks("busy", "working") };
+    for when in [at - 90.0, at] {
+        apply_check(&mut store, &t.id, "qa", &working, Some(KIMI_IDLE), when).unwrap();
+    }
+    set_fake_hgs(None);
+    let after = store.load(&t.id).unwrap().unwrap();
+    assert_eq!(after.member("qa").unwrap().check.as_ref().unwrap().state, "uncertain");
+    assert_eq!(sent.borrow().len(), 1, "{:?}", sent.borrow());
+}
+
+#[test]
+fn a_dsh_member_inside_one_open_tool_call_is_not_called_silent() {
+    // The same member, task-bound: its listing is 25 minutes old, its session's
+    // newest event is the PreToolUse of a call that has not returned.
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+    let mut t = team();
+    t.status = TeamStatus::Running;
+    {
+        let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        dev.agent = "dsh".into();
+        dev.session = Some(SessionRef { name: "dsh/x/dev".into(), run_id: "r1".into(), conversation_id: "c".into(), ..Default::default() });
+    }
+    {
+        let task = t.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap();
+        task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered,
+            sent_at: 10.0, delivered_at: Some(10.0), started_at: Some(11.0), ..Default::default() });
+        task.status = TaskStatus::InProgress;
+    }
+    let id = t.tasks.iter().find(|task| task.assignee == "dev").unwrap().id;
+    store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+    let at = now();
+    // The call began 25 minutes ago: past the silent bound, far inside the tool bound.
+    let record = dsh_events(at, &[("PreToolUse", "shell", 25.0 * 60.0)]);
+    set_fake_hgs(Some(Box::new(move |_, args: &[&str], _| match args.first().copied() {
+        Some("inspect") => Ok(fake_output(0, &record.to_string(), "")),
+        other => panic!("an open tool call is not silence, nothing is sent: {other:?}"),
+    })));
+    run_step(&mut store, &t, &Step::CheckSilent { task: id, last: at - 25.0 * 60.0 }, "").unwrap();
+    // The same stream with the call long returned is silence again.
+    let closed = dsh_events(at, &[("PreToolUse", "shell", 26.0 * 60.0), ("PostToolUse", "shell", 25.0 * 60.0)]);
+    let sent: Rc<RefCell<Vec<String>>> = Rc::default();
+    let seen = sent.clone();
+    set_fake_hgs(Some(Box::new(move |_, args: &[&str], input| match args.first().copied() {
+        Some("inspect") => Ok(fake_output(0, &closed.to_string(), "")),
+        Some("send") => {
+            seen.borrow_mut().push(input.and_then(|input| input["text"].as_str()).unwrap_or_default().to_owned());
+            Ok(fake_output(0, r#"{"status":"submitted"}"#, ""))
+        }
+        other => panic!("unexpected hgs {other:?}"),
+    })));
+    let saved = store.load(&t.id).unwrap().unwrap();
+    run_step(&mut store, &saved, &Step::CheckSilent { task: id, last: at - 25.0 * 60.0 }, "").unwrap();
+    set_fake_hgs(None);
+    assert_eq!(sent.borrow().len(), 1, "the lead is told once: {:?}", sent.borrow());
+}

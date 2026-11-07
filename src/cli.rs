@@ -1118,13 +1118,13 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
             Ok(0)
         }
         "subagent" => {
-            if args.len() != 3 || args[0] != "retire" || args[2] != "--json" || dry {
-                return Err(Error::new(1,"usage: hgs subagent retire NAME --json (JSON stdin)"));
+            if args.len() != 3 || !["retire", "settle"].contains(&args[0].as_str()) || args[2] != "--json" || dry {
+                return Err(Error::new(1,"usage: hgs subagent retire|settle NAME --json (JSON stdin)"));
             }
             use std::io::Read;
             let mut bytes = Vec::new();
             std::io::stdin().lock().take(8193).read_to_end(&mut bytes)?;
-            let result = state::subagent_lifecycle::retire(&args[1],&bytes).map_err(|e|Error::new(1,e))?;
+            let result = if args[0] == "settle" { state::subagent_lifecycle::settle(&args[1],&bytes) } else { state::subagent_lifecycle::retire(&args[1],&bytes) }.map_err(|e|Error::new(1,e))?;
             println!("{result}"); Ok(0)
         }
         "ls" => list(&config, args, dry),

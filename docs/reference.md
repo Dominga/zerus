@@ -2643,6 +2643,23 @@ member no longer suspect ends it (`member_check_settled`). An idle lead with
 decisions waiting (task 95's stall, reason `idle`) is told itself once a round
 (`lead_idle_told`).
 
+What counts as work, not silence (task 181): a member inside one open tool call
+is held to the tool bound (six times the stuck bound, at least an hour) counted
+from the call's start, for DeepSeek too (its open call is the newest
+PreToolUse with no result, message or Stop after it in the session's events,
+read off the tick), and one waiting on its own Zerus build (`hgs run`, `hgs team
+run`) is Building; neither is `uncertain` or called silent. A Claude screen whose
+prompt is empty but lists running subagents (`◯ general-purpose ... tokens`) or
+`N shells still running` is working. A finished turn the hooks still call
+working (an idle prompt, no agent row, no shell, no request, silent for 2 min,
+two reads a minute apart agreeing) is settled in the record instead of being
+called uncertain: `hgs subagent settle NAME --json` marks it idle and its
+parent's turn done, ends the native subagents whose stop never came (a subagent
+cannot outlive its parent's turn) and leaves a background job with live
+evidence, a waiting request or a recent event alone; the member is then idle
+for hand-outs (feed `member_settled`). A DeepSeek session's state is its host's
+and is never settled this way.
+
 `hgs team look MEMBER [--team ID]`, or `{"member":"dev","team":ID} | hgs team look
 --json`, reads the member's screen now and answers one compact snapshot: the
 reconciled `state` (`uncertain`, `settling` within the grace), `disagree`,

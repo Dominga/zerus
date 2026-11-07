@@ -27,6 +27,8 @@ struct Calls {
     current: Arc<dyn Fn(&policy::Candidate) -> bool + Send + Sync>,
     /// The categories enabled now, read fresh at every check.
     allowed: Arc<dyn Fn() -> policy::Set + Send + Sync>,
+    /// Seconds since the epoch, for the cold-cache rule at each check.
+    now: Arc<dyn Fn() -> f64 + Send + Sync>,
     inspect: Inspect,
     journal: Journal,
     dispatch: Dispatch,
@@ -44,17 +46,17 @@ fn attempt(calls: &Calls, target: &policy::Candidate) -> Result<bool, String> {
     if !(calls.current)(target) {
         return Ok(false);
     }
-    let Some(policy::Selected {
-        question,
-        categories,
-    }) = policy::question(target, &details, (calls.allowed)(), policy::now())
+    let Some(selected) = policy::question(target, &details, (calls.allowed)(), (calls.now)())
     else {
         return Ok(false);
     };
-    // The categories again, right before the durable reservation.
+    // The categories again, right before the durable reservation, at the
+    // current time: a warm cache may have expired since the inspection.
+    let categories = selected.required((calls.now)());
     if !(calls.allowed)().permits(categories) {
         return Ok(false);
     }
+    let question = selected.question.clone();
     let host = if target.target.computer.is_empty() {
         details["machine"]
             .as_str()
@@ -75,7 +77,7 @@ fn attempt(calls: &Calls, target: &policy::Candidate) -> Result<bool, String> {
     };
     let (status, detail) = if !(calls.current)(target) {
         ("cancelled", policy::CANCELLED.into())
-    } else if !(calls.allowed)().permits(categories) {
+    } else if !(calls.allowed)().permits(selected.required((calls.now)())) {
         ("cancelled", policy::CATEGORY_CANCELLED.into())
     } else {
         let action = Action::Answer {
@@ -168,6 +170,7 @@ impl Worker {
                 let settings = settings.clone();
                 Arc::new(move || policy::Set::from_settings(&settings))
             },
+            now: Arc::new(policy::now),
             inspect: Arc::new(|target| {
                 let hgs = zerus_client_core::default_hgs();
                 let inv = zerus_client_core::details::details_invocation(&target.target, None);

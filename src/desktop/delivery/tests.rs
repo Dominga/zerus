@@ -728,6 +728,43 @@ fn paid_requests_stay_manual_and_others_record_their_categories() {
 }
 
 #[test]
+fn a_cache_that_expires_after_inspection_is_not_reserved_without_paid_usage() {
+    // Review of PR #1694: the actor rechecks at the current time, not with
+    // the categories the inspection computed. The same flow reserves when
+    // the cache stays warm (control) and not once it has expired.
+    for (ttl, wait) in [(60.0, 0), (2.0, 2100)] {
+        let run: Runner = Arc::new(move |inv, _, _, _| {
+            if !inv.args.iter().any(|a| a == "inspect") {
+                assert_eq!(ttl, 60.0, "an expired request was answered");
+                return Exit::TimedOut;
+            }
+            let mut q = question();
+            q["questions"][0]["header"] = json!("Bash");
+            let Exit::Code { stdout, .. } = inspected(q) else { unreachable!() };
+            let mut details: Value = serde_json::from_slice(&stdout).unwrap();
+            let expiry = policy::now().floor() + ttl;
+            details["session_usage"] = json!({"prompt_cache":{"status":"warm","expires_at":expiry}});
+            Exit::Code { code: 0, stderr: String::new(), stdout: serde_json::to_vec(&details).unwrap() }
+        });
+        let mut f = Fixture::new(run);
+        f.active();
+        f.enabled(true);
+        f.source(row(), true);
+        f.scan();
+        // Let the inspection select the warm request, then let it expire
+        // before the actor collects the result.
+        let end = Instant::now() + Duration::from_secs(5);
+        while !f.runtime.jobs.iter().all(|job| job.thread.as_ref().is_some_and(|t| t.is_finished())) {
+            assert!(Instant::now() < end);
+            thread::sleep(Duration::from_millis(2));
+        }
+        thread::sleep(Duration::from_millis(wait));
+        f.tick_until(|r| r.jobs.is_empty());
+        assert_eq!(f.runtime.journal.is_some(), wait == 0, "ttl {ttl}");
+    }
+}
+
+#[test]
 fn cached_question_identity_and_broader_grants_never_reserve_or_answer() {
     for case in 0..5 {
         let run: Runner = Arc::new(move |inv, _, _, _| {

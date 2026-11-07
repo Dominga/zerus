@@ -282,17 +282,43 @@ pub fn tool(provider: &str, question: &Value) -> Tool {
     }
 }
 
-/// Every category the request needs: its tool's, plus Paid for a paid tool,
-/// a paid name hint or a cold prompt cache. Answering after the cache
-/// expired processes the whole conversation again. An unknown cache state
-/// is not cold.
-pub fn required(provider: &str, question: &Value, details: &Value, now: f64) -> Set {
+/// What a request needs regardless of time: its tool's category, plus Paid
+/// for a paid tool or a paid name hint.
+pub fn tool_requirement(provider: &str, question: &Value) -> Set {
     let tool = tool(provider, question);
     let set = Set::EMPTY.with(tool.category);
-    if tool.paid || crate::cache::expired(details, now) {
+    if tool.paid {
         set.with(Category::Paid)
     } else {
         set
+    }
+}
+
+/// The prompt-cache fields of one inspection that [`crate::cache::expired`]
+/// reads, kept so the same rule can be applied again at a later time: a warm
+/// cache can expire between selection and delivery.
+pub fn cache_witness(details: &Value) -> Value {
+    let cache = &details["session_usage"]["prompt_cache"];
+    serde_json::json!({
+        "cache_hint": {"status": details["cache_hint"]["status"]},
+        "session_usage": {"prompt_cache": {"status": cache["status"], "expires_at": cache["expires_at"]}},
+    })
+}
+
+/// Every category the request needs at `now`: its tool requirement, plus Paid
+/// once the prompt cache is cold. Answering after the cache expired processes
+/// the whole conversation again. An unknown cache state is not cold.
+pub fn required(provider: &str, question: &Value, details: &Value, now: f64) -> Set {
+    with_cache(tool_requirement(provider, question), details, now)
+}
+
+/// `tool` plus Paid when `cache` (inspection details or their witness) is
+/// cold at `now`.
+pub fn with_cache(tool: Set, cache: &Value, now: f64) -> Set {
+    if crate::cache::expired(cache, now) {
+        tool.with(Category::Paid)
+    } else {
+        tool
     }
 }
 

@@ -145,6 +145,8 @@ impl Phase {
 #[derive(Clone)]
 enum Completion {
     NotStarted,
+    /// A reserved answer its categories no longer admitted; never started.
+    Withheld,
     Unknown,
     Read(reads::Outcome),
     Inspection(Option<policy::Selected>),
@@ -168,6 +170,9 @@ struct Job {
 }
 impl Job {
     fn not_started(phase: Phase, lease: Arc<Lease>) -> Self {
+        Self::settled(phase, lease, Completion::NotStarted)
+    }
+    fn settled(phase: Phase, lease: Arc<Lease>, result: Completion) -> Self {
         let (_, receive) = mpsc::sync_channel(1);
         Self {
             phase,
@@ -175,7 +180,7 @@ impl Job {
             cancel: Arc::new(AtomicBool::new(false)),
             receive,
             thread: None,
-            result: Some(Completion::NotStarted),
+            result: Some(result),
         }
     }
     fn ready(&mut self) -> bool {
@@ -772,6 +777,7 @@ impl Runtime {
             Phase::Answer { audit, .. } => {
                 let (status, detail) = match result {
                     Completion::NotStarted => ("cancelled", policy::CANCELLED),
+                    Completion::Withheld => ("cancelled", policy::CATEGORY_CANCELLED),
                     Completion::Answer { status, detail } if complete => (*status, detail.as_str()),
                     _ => ("unknown", UNKNOWN),
                 };
@@ -803,9 +809,11 @@ impl Runtime {
                     return Ok(false);
                 };
                 let question = &selected.question;
-                // The categories again, right before the durable reservation.
+                // The categories again, right before the durable reservation,
+                // at the current time: a warm cache may have expired since.
+                let categories = selected.required(policy::now());
                 if policy::once(&candidate.target.provider, question).is_none()
-                    || !self.categories().permits(selected.categories)
+                    || !self.categories().permits(categories)
                 {
                     return Ok(false);
                 }
@@ -822,7 +830,7 @@ impl Runtime {
                 };
                 let reply=approval_log::begin(self.journal.as_mut().expect("opened actor journal"),
                     &json!({"host":host,"session":candidate.target.target.name,"provider":candidate.target.provider,"question":question,
-                        "categories":selected.categories.ids()}))
+                        "categories":categories.ids()}))
                     .map_err(|_|anyhow::anyhow!("approval reservation unavailable"))?;
                 let Some(reservation) =
                     policy::reserved(&reply, &candidate.target.provider, question)
@@ -840,11 +848,15 @@ impl Runtime {
                     request: reservation.request,
                 };
                 let inv = actions::invocation(&target, &action, &audit.request);
+                // And once more before native input: a reserved attempt whose
+                // categories no longer admit it finishes cancelled, unsent.
+                let admitted = self.categories().permits(selected.required(policy::now()));
                 let phase = Phase::Answer {
                     candidate: candidate.clone(),
                     audit,
                 };
                 *job = match inv {
+                    _ if !admitted => Job::settled(phase, job.lease.clone(), Completion::Withheld),
                     Ok(inv) => self.launch(
                         phase,
                         inv,

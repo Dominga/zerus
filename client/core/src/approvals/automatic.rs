@@ -10,9 +10,10 @@ pub const ENABLED: &str = "automaticApprovals/enabled";
 pub const ERROR: &str = "automaticApprovals/error";
 pub const CANCELLED: &str =
     "Automatic approvals were disabled or the session changed before delivery.";
-/// A reserved request whose category was turned off before delivery.
+/// A reserved request its categories no longer admit at delivery: a category
+/// was turned off, or its prompt cache expired and Paid usage is off.
 pub const CATEGORY_CANCELLED: &str =
-    "Its approval category was turned off before delivery. No answer was sent.";
+    "Its approval categories no longer allowed it at delivery, because a category was turned off or the prompt cache expired. No answer was sent.";
 pub const INVALID: &str =
     "The approval journal did not confirm a durable request. No answer was sent.";
 pub const MAX_QUESTION: usize = 120 * 1024;
@@ -167,13 +168,23 @@ pub fn once(provider: &str, question: &Value) -> Option<Vec<AnswerItem>> {
         text: String::new(),
     }])
 }
-/// A pending question the enabled categories admit, with the categories it
-/// needs. The worker checks them again before the journal reservation and
-/// before delivery.
+/// A pending question the enabled categories admit. The worker checks
+/// [`Selected::required`] again, at the time of each check, before the
+/// journal reservation and before delivery.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Selected {
     pub question: Value,
-    pub categories: Set,
+    /// The tool's category and any paid-tool requirement.
+    tool: Set,
+    /// The prompt cache as the selecting inspection reported it.
+    cache: Value,
+}
+impl Selected {
+    /// The categories the request needs at `now` (seconds since the epoch):
+    /// a warm cache from the inspection may have expired since.
+    pub fn required(&self, now: f64) -> Set {
+        categories::with_cache(self.tool, &self.cache, now)
+    }
 }
 /// The first verified one-time permission of this exact run and conversation
 /// whose required categories are all in `allowed`. A request kept manual is
@@ -200,11 +211,14 @@ pub fn question(target: &Candidate, details: &Value, allowed: Set, now: f64) -> 
         if once(&target.provider, question).is_none() {
             continue;
         }
-        let categories = categories::required(&target.provider, question, details, now);
-        if allowed.permits(categories) && serde_json::to_writer(&mut bytes, question).is_ok() {
+        let tool = categories::tool_requirement(&target.provider, question);
+        if allowed.permits(categories::with_cache(tool, details, now))
+            && serde_json::to_writer(&mut bytes, question).is_ok()
+        {
             return Some(Selected {
                 question: question.clone(),
-                categories,
+                tool,
+                cache: categories::cache_witness(details),
             });
         }
     }

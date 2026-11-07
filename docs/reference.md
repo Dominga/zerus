@@ -1620,9 +1620,11 @@ cache expired processes the whole conversation again; an unknown cache state
 is not treated as cold. Usage-limit, extra-usage and credit prompts are not
 one-time tool permissions and are never answered automatically. The worker
 checks the categories when it selects a request, again just before the
-journal reservation, which records them, and again before delivery, where a
-category turned off in the meantime finishes the attempt as cancelled without
-sending anything. With `ZERUS_CLIENT_DESKTOP_SERVICE=1` the background service
+journal reservation, which records them, and again before delivery. Each check
+uses the current time with the cache state of the selecting inspection, so a
+warm cache that expires meanwhile needs Paid usage too. A category turned off
+or a cache expired before delivery finishes the reserved attempt as cancelled
+without sending anything. With `ZERUS_CLIENT_DESKTOP_SERVICE=1` the background service
 approves the default categories until its own policy stores the person's
 choices; the page then shows them read-only.
 

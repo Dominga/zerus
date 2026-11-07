@@ -32,6 +32,10 @@ struct Fixture {
     /// they lose Shell: 0 at selection, 1 before begin, 2 before delivery.
     allowed: Arc<Mutex<(policy::Set, usize)>>,
     reads: Arc<std::sync::atomic::AtomicUsize>,
+    /// The clock; the journal fixture can advance it during the reservation.
+    clock: Arc<Mutex<f64>>,
+    advance_during_begin: Arc<Mutex<Option<f64>>>,
+    details: Arc<Mutex<Value>>,
 }
 fn fixture() -> Fixture {
     let log = Arc::new(Mutex::new(Vec::new()));
@@ -46,7 +50,16 @@ fn fixture() -> Fixture {
     let fail_finish = Arc::new(AtomicBool::new(false));
     let allowed = Arc::new(Mutex::new((policy::Set::defaults(), usize::MAX)));
     let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let clock = Arc::new(Mutex::new(100.0));
+    let advance_during_begin = Arc::new(Mutex::new(None::<f64>));
+    let details = Arc::new(Mutex::new(
+        json!({"runtime_state":"live","process_state":"running","run_id":"run-one","conversation_id":"conversation-one","pending_questions":[q()]}),
+    ));
     let calls = Calls {
+        now: {
+            let clock = clock.clone();
+            Arc::new(move || *clock.lock().unwrap())
+        },
         current: {
             let current = current.clone();
             Arc::new(move |_| current.load(Ordering::Acquire))
@@ -65,11 +78,10 @@ fn fixture() -> Fixture {
         },
         inspect: {
             let log = log.clone();
+            let details = details.clone();
             Arc::new(move |_| {
                 log.lock().unwrap().push("inspect".into());
-                Ok(
-                    json!({"runtime_state":"live","process_state":"running","run_id":"run-one","conversation_id":"conversation-one","pending_questions":[q()]}),
-                )
+                Ok(details.lock().unwrap().clone())
             })
         },
         journal: {
@@ -78,10 +90,15 @@ fn fixture() -> Fixture {
             let change = change.clone();
             let malformed = malformed.clone();
             let fail_finish = fail_finish.clone();
+            let clock = clock.clone();
+            let advance_during_begin = advance_during_begin.clone();
             Arc::new(move |operation, value| match operation {
                 Operation::Begin => {
                     assert_eq!(value["categories"], json!(["shell"]));
                     log.lock().unwrap().push("durable begin".into());
+                    if let Some(later) = *advance_during_begin.lock().unwrap() {
+                        *clock.lock().unwrap() = later;
+                    }
                     if change.load(Ordering::Acquire) {
                         current.store(false, Ordering::Release);
                     }
@@ -127,6 +144,9 @@ fn fixture() -> Fixture {
         fail_finish,
         allowed,
         reads,
+        clock,
+        advance_during_begin,
+        details,
     }
 }
 #[test]
@@ -140,17 +160,66 @@ fn a_request_in_a_manual_category_is_never_reserved() {
     assert_eq!(*f.log.lock().unwrap(), ["inspect"]);
     // A cold cache makes it paid usage, which is off by default.
     let f = fixture();
+    f.details.lock().unwrap()["cache_hint"] = json!({"status":"cold"});
+    attempt(&f.calls, &target()).unwrap();
+    assert_eq!(*f.log.lock().unwrap(), ["inspect"]);
+}
+#[test]
+fn a_cache_that_expires_during_the_reservation_cancels_without_native_input() {
+    // Review of PR #1694: warm at selection, expired once Begin returns.
+    let f = fixture();
+    f.details.lock().unwrap()["session_usage"] =
+        json!({"prompt_cache":{"status":"warm","expires_at":102.0}});
+    *f.clock.lock().unwrap() = 100.0;
+    *f.advance_during_begin.lock().unwrap() = Some(102.0);
+    attempt(&f.calls, &target()).unwrap();
+    assert_eq!(
+        *f.log.lock().unwrap(),
+        [
+            "inspect",
+            "durable begin",
+            "finish cancelled",
+            "category turned off"
+        ]
+    );
+    // With Paid usage on, the same expiry still delivers.
+    let f = fixture();
+    f.details.lock().unwrap()["session_usage"] =
+        json!({"prompt_cache":{"status":"warm","expires_at":102.0}});
+    f.allowed.lock().unwrap().0 = policy::Set::defaults().with(policy::Category::Paid);
+    *f.advance_during_begin.lock().unwrap() = Some(102.0);
+    attempt(&f.calls, &target()).unwrap();
+    assert_eq!(
+        *f.log.lock().unwrap(),
+        [
+            "inspect",
+            "durable begin",
+            "shared Answer lane",
+            "finish approved"
+        ]
+    );
+}
+#[test]
+fn a_cache_that_expired_before_the_reservation_reserves_nothing() {
+    let f = fixture();
+    f.details.lock().unwrap()["session_usage"] =
+        json!({"prompt_cache":{"status":"warm","expires_at":102.0}});
+    // Selection reads the clock first; the reservation check reads it again.
     let calls = Calls {
-        inspect: Arc::new(|_| {
-            let mut details = json!({"runtime_state":"live","process_state":"running","run_id":"run-one",
-                "conversation_id":"conversation-one","pending_questions":[q()]});
-            details["cache_hint"] = json!({"status":"cold"});
-            Ok(details)
-        }),
+        now: {
+            let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            Arc::new(move || {
+                if ticks.fetch_add(1, Ordering::AcqRel) == 0 {
+                    100.0
+                } else {
+                    102.0
+                }
+            })
+        },
         ..f.calls
     };
     attempt(&calls, &target()).unwrap();
-    assert!(f.log.lock().unwrap().is_empty());
+    assert_eq!(*f.log.lock().unwrap(), ["inspect"]);
 }
 #[test]
 fn a_category_turned_off_before_the_reservation_reserves_nothing() {

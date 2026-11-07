@@ -278,8 +278,13 @@ pub(crate) fn finish(db: &Connection, payload: &Value) -> Result<Value> {
 }
 
 /// A row's saved categories, read by SQLite without loading the question
-/// into the page: NULL for an older row or an oversized value.
-pub(crate) const CATEGORIES: &str = "CASE WHEN json_valid(question) AND json_type(question,'$.categories')='array' AND length(json_extract(question,'$.categories'))<=1024 THEN json_extract(question,'$.categories') END";
+/// into the page: NULL for an older row or an oversized value. CASE tests
+/// its conditions in order, so a question past the detail bound (192 KiB)
+/// is never given to a JSON function.
+pub(crate) const CATEGORIES: &str = "CASE WHEN length(CAST(question AS BLOB))>196608 THEN NULL
+    WHEN json_valid(question) AND json_type(question,'$.categories')='array'
+        AND length(json_extract(question,'$.categories'))<=1024
+    THEN json_extract(question,'$.categories') END";
 pub(crate) fn saved_categories(raw: Option<String>) -> Value {
     raw.and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
         .and_then(|value| categories(&value))
@@ -567,11 +572,15 @@ mod tests {
             assert_eq!(begin(&mut db, &other).unwrap()["fresh"], true);
         }
         db.execute("INSERT INTO attempts(identity,request_id,at,host,session,provider,prompt,question) VALUES('old','old',1,'h','s','claude','p','{\"question\":{},\"answers\":[]}')", []).unwrap();
+        // A valid row past the detail bound lists no categories, as its
+        // bounded detail refuses it (review of PR #1694).
+        let oversized = json!({"question":{"padding":"x".repeat(4 << 20)},"answers":[],"categories":["shell"]});
+        db.execute("INSERT INTO attempts(identity,request_id,at,host,session,provider,prompt,question) VALUES('big','big',2,'h','s','claude','p',?1)", [oversized.to_string()]).unwrap();
         let page = list(&db, &json!({})).unwrap();
         let entries = page["entries"].as_array().unwrap();
-        assert_eq!(entries.len(), 7);
+        assert_eq!(entries.len(), 8);
         assert_eq!(entries.last().unwrap()["categories"], json!(["shell", "paid"]));
-        assert!(entries[..6].iter().all(|entry| entry["categories"].is_null()));
+        assert!(entries[..7].iter().all(|entry| entry["categories"].is_null()));
         let saved: String = db
             .query_row("SELECT question FROM attempts WHERE id=?1", [first["id"].as_i64().unwrap()], |r| r.get(0))
             .unwrap();

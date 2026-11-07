@@ -898,6 +898,13 @@ elif a[:2]==['team','decide-proposal']:
  if os.path.exists(__file__+'.proposalrefuse'):print(open(__file__+'.proposalrefuse').read(),file=sys.stderr);sys.exit(1)
  status=open(__file__+'.proposalstatus').read() if os.path.exists(__file__+'.proposalstatus') else ('accepted' if body.get('accept') else 'rejected')
  print(json.dumps({'status':status,'proposal':body.get('proposal')}))
+elif a[:2]==['team','settings'] and body.get('members_update'):
+ import time
+ for _ in range(300):
+  if not os.path.exists(__file__+'.memberhold'):break
+  time.sleep(.1)
+ if os.path.exists(__file__+'.memberrefuse'):print(open(__file__+'.memberrefuse').read(),file=sys.stderr);sys.exit(1)
+ print(json.dumps({'status':'ok'}))
 elif a[:2]==['team','reply'] and os.path.exists(__file__+'.replyrefuse'):
  # Task 55: `.replyrefuse` refuses the owner's answer with its words.
  print(open(__file__+'.replyrefuse').read(),file=sys.stderr);sys.exit(1)
@@ -959,6 +966,8 @@ inline void TeamsUiFixture::setUp()
     QFile::remove(script() + ".draftrefuse");
     QFile::remove(script() + ".createrefuse");
     QFile::remove(script() + ".statushold");
+    QFile::remove(script() + ".memberhold");
+    QFile::remove(script() + ".memberrefuse");
     for (const char *suffix : {".task", ".taskhold", ".taskrefuse", ".archivephases", ".archivetasks"}) QFile::remove(script() + QLatin1String(suffix));
     for (const char *suffix : {".swaphold", ".swaprefuse", ".swapreceipt", ".accounts", ".models"}) QFile::remove(script() + QLatin1String(suffix));
     QFile::remove(script() + ".refuse");

@@ -1590,6 +1590,16 @@ mode the member's agent does not have (Codex has no `auto`) is refused in `plan`
 `add-member` and `members_update`, never accepted and left to fail when the
 member starts.
 
+In the Qt team workspace, a member's menu offers **Edit member** once its current
+settings have been read. The dialog starts with that member's prompt, model,
+effort, permissions/profile, per-task context action, allowed models and iron
+rules. Save sends only changed fields in one `members_update`; a refusal stays
+in the dialog and preserves the draft while the stored member stays unchanged.
+A changed prompt reveals **Clear context first**, unchecked by default (only a
+running member can clear). Permissions-profile widening requires the owner's
+explicit checkbox confirmation. Agent, account, computer and folder changes stay
+with **Swap member**.
+
 ### Tasks added to a running phase
 
 A task joins a running phase only on the owner's word twice. The first

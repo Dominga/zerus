@@ -1,3 +1,4 @@
+#include "TeamMemberDialog.h"
 #include "TeamArchive.h"
 #include "IronRulesEditor.h"
 #include "Settings.h"
@@ -4066,6 +4067,16 @@ void TeamWorkspace::memberMenu(const Team &team, const Member &member, const QPo
         sub->setEnabled(!member.lead && !(member.sub && hasReports));
         if (member.lead) sub->setToolTip(tr("Already the coordinator"));
         else if (member.sub && hasReports) sub->setToolTip(tr("Move its reports to another lead first"));
+    }
+    if (team.status == "planning" || team.status == "running" || team.status == "paused") {
+        auto *edit = menu.addAction(tr("Edit member..."), this, [this, teamId = team.id, id = member.id] {
+            const auto *current = currentTeam(teamId);
+            if (const auto *found = current && current->full ? current->member(id) : nullptr)
+                (new TeamMemberDialog(m_teams, *current, *found, m_dark, this))->show();
+        });
+        edit->setObjectName("teamWorkspaceMemberEdit");
+        edit->setEnabled(team.full);
+        if (!team.full) edit->setToolTip(tr("Reading the current member settings..."));
     }
     // H6: swap the session, agent, model or account of any member, the lead too.
     if (team.status == "planning" || team.status == "running" || team.status == "paused") {

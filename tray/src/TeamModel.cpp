@@ -441,6 +441,7 @@ Team parse(const QJsonObject &v)
         member.id = str(m, "id"); member.role = str(m, "role"); member.agent = str(m, "agent"); member.model = str(m, "model");
         member.computer = str(m, "computer"); member.state = str(m, "state"); member.error = str(m, "error");
         member.account = str(m, "account"); member.effort = str(m, "effort"); member.permissions = str(m, "permissions");
+        member.permissionsProfile = str(m, "permissions_profile");
         member.sessionAccountKnown = m.contains("session_account"); member.sessionAccount = str(m, "session_account");
         member.folder = str(m, "folder"); member.directory = str(m, "directory"); member.prompt = str(m, "prompt");
         for (const auto &rule : m.value("iron_rules").toArray()) member.ironRules << rule.toString();
@@ -1063,6 +1064,7 @@ QJsonObject Member::json() const
 {
     QJsonObject o{{"id", id}, {"role", role}, {"agent", agent}, {"account", account}, {"model", model}, {"effort", effort},
                   {"permissions", permissions}, {"computer", computer}, {"directory", directory}, {"prompt", prompt}};
+    if (!permissionsProfile.isEmpty()) o.insert("permissions_profile", permissionsProfile);
     if (!ironRules.isEmpty()) o.insert("iron_rules", QJsonArray::fromStringList(ironRules));
     if (!folder.isEmpty()) o.insert("folder", folder);
     if (!parent.isEmpty()) o.insert("parent", parent);

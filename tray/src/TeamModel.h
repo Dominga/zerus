@@ -73,7 +73,7 @@ struct PermissionAnswer {
 
 struct Member {
     QString id, role, agent, model, computer, state, error;
-    QString account, effort, permissions, folder, directory, prompt;
+    QString account, effort, permissions, permissionsProfile, folder, directory, prompt;
     QStringList ironRules;
     // U54: the account its session really runs on (team status's
     // session_account), which may differ from the configured `account`.

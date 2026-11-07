@@ -288,6 +288,19 @@ impl TerminalBackend for Tmux {
         // tmux reports a failed listing as no sessions, as hgs always has.
         Ok(Listing { clients, sessions })
     }
+    fn last_client_input(&self, name: &str) -> Option<Option<f64>> {
+        let target = format!("={name}");
+        let output = tmux(&owned(&["list-clients", "-t", &target, "-F", "#{client_activity}"]), false).ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let mut latest = None;
+        for row in String::from_utf8_lossy(&output.stdout).lines() {
+            let at = row.trim().parse::<f64>().ok()?;
+            latest = Some(latest.map_or(at, |seen: f64| seen.max(at)));
+        }
+        Some(latest)
+    }
     fn attached_counts(&self) -> Result<Option<Vec<(String, String)>>> {
         let Some(rows) = platform::capture(
             "tmux",

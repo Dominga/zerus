@@ -295,6 +295,7 @@ fn commit(transaction: &Value) -> Result<()> {
     // Publish the canonical copy before retiring the old binding. Hooks share
     // this lock, and recovery completes an interrupted transaction first.
     recovery::rename_job(old,new,string(&record,"run_id"))?;
+    keep_warm::rename(old, new)?;
     write(&mut record)?;
     if transaction["legacy"] == true {
         atomic(

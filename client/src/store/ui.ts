@@ -5,6 +5,7 @@ import { documentVisibility } from "./visibility";
 import { isActive, isWorking, needsAttention } from "./attention";
 import { settings, settingsReady, setSetting, num } from "./settings";
 import { createRowDensity, ROW_DENSITY_KEY } from "./rowDensity";
+import { collapseTeams } from "./collapsed-teams";
 import type { Session, Status } from "../ui/sessions/types";
 import type { FolderScope } from "../ui/sessions/scope-filters";
 import { trNoop } from "../i18n";
@@ -46,6 +47,17 @@ export const [detailTab, setDetailTab] = createSignal<DetailTab>("activity");
 export const [subagentOpen, setSubagentOpen] = createSignal<string | undefined>();
 export const [search, setSearch] = createSignal(params.get("q") ?? "");
 export const [expandedChildren, setExpandedChildren] = createStore<Record<string, boolean>>({});
+
+/** Qt's workspace/collapsedTeams: a lead's members stay folded after a restart and on the other UI. */
+const COLLAPSED_TEAMS_KEY = "workspace/collapsedTeams";
+export const collapsedTeams = createMemo(() => {
+  const stored = settings[COLLAPSED_TEAMS_KEY];
+  return new Set(Array.isArray(stored) ? stored.filter((id): id is string => typeof id === "string") : []);
+});
+export const teamsCollapsed = (id: string) => collapsedTeams().has(id);
+export function setTeamCollapsed(id: string, collapsed: boolean) {
+  void setSetting(COLLAPSED_TEAMS_KEY, collapseTeams([...collapsedTeams()], id, collapsed));
+}
 const rowDensity = createRowDensity({
   stored: () => settings[ROW_DENSITY_KEY], ready: settingsReady,
   save: (keys) => setSetting(ROW_DENSITY_KEY, keys),

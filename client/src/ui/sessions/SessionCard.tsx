@@ -8,6 +8,7 @@ import { now } from "../../store/ui";
 import { settings } from "../../store/settings";
 import { machineAppearance } from "../../store/machineAppearance";
 import type { AgentKind, Session, Status, Subagent } from "./types";
+import type { TeamSummary } from "../../types";
 import { currentChildren, workingChildren } from "./subagents";
 
 // Card anatomy follows tray/src/SessionCardDelegate.h paintCard() at the
@@ -250,17 +251,77 @@ function OptionalQuestionsChip(props: { session: Session }) {
   </Show>;
 }
 
+const TEAM_STATUS: Record<string, string> = {
+  running: trNoop("Running"), planning: trNoop("Planning"), paused: trNoop("Paused"),
+  stuck: trNoop("Stuck"), done: trNoop("Done"), stopped: trNoop("Stopped"), archived: trNoop("Archived"),
+};
+
+/** Qt's 26 x 3 mini bar with its done/total caption (SessionCardDelegate.h:494-507). */
+function TeamBar(props: { label: string; done: number; total: number; muted?: boolean }) {
+  const pct = () => (props.total > 0 ? Math.min(100, Math.round((props.done / props.total) * 100)) : 0);
+  return (
+    <span class="tbar" classList={{ muted: props.muted }}>
+      <span class="tbar-label">{props.label}</span>
+      <span class="tbar-track"><span class="tbar-fill" style={{ width: `${pct()}%` }} /></span>
+    </span>
+  );
+}
+
+/** The lead's team strip (SessionCardDelegate.h:468-541): both bars, status, ?N, members. */
+export function TeamStrip(props: { team: TeamSummary; expanded: boolean; onToggle: () => void }) {
+  const status = () => TEAM_STATUS[props.team.status] ?? props.team.status;
+  return (
+    <div class="team-strip" title={`${props.team.name}\n${tr("%1 of %2 phases finished; discarded drafts do not count", props.team.phases_done, props.team.phases_total)}`}>
+      <button class="team-toggle" aria-expanded={props.expanded} title={props.expanded ? tr("Hide team members") : tr("Show team members")}
+        onClick={(e) => { e.stopPropagation(); props.onToggle(); }}>
+        <Icon name="users" size={14} />
+      </button>
+      <TeamBar label={`${props.team.phase ? `P${props.team.phase} ` : ""}${props.team.phase_done}/${props.team.phase_total}`}
+        done={props.team.phase_done} total={props.team.phase_total} />
+      <TeamBar label={`${props.team.phases_done}/${props.team.phases_total}`} done={props.team.phases_done}
+        total={props.team.phases_total} muted />
+      <span class="team-status" classList={{ stuck: props.team.status === "stuck" }}>{tr(status())}</span>
+      <Show when={props.team.attention > 0}><span class="team-answers">?{props.team.attention}</span></Show>
+      <span class="grow" />
+      <span class="team-members">{props.team.members.length}</span>
+    </div>
+  );
+}
+
+/** Qt's full row tooltip (SessionsWindowRows.cpp:692-716): identity, state, meta, model, attention. */
+export function fullTooltip(s: Session, team?: TeamSummary): string {
+  const lines = [
+    s.name,
+    `${s.machine} / ${s.agent} / ${statusCaption(s)}`,
+    folderOf(s) + (s.branch ? ` / ${s.branch}` : ""),
+    s.cwd,
+    s.model + (s.effort ? `  ${s.effort}` : ""),
+    s.summary,
+    visibleUnreadReply(s, computerFresh(s.computer)) ? tr("New reply (not viewed yet)") : "",
+    (s.subagents ?? []).length ? tr("Subagents: %1", agentsLabel(s)) : "",
+    team ? tr("Team: %1 · %2 of %3 phases", team.name, team.phases_done, team.phases_total) : "",
+  ];
+  return lines.filter(Boolean).join("\n");
+}
+
 export function SessionCard(props: {
   session: Session;
   selected: boolean;
   expandable: boolean;
   expanded: boolean;
   onToggleChildren: () => void;
+  team?: TeamSummary;
+  depth?: number;
+  teamFirst?: boolean;
+  teamLast?: boolean;
 }) {
   const s = () => props.session;
   const kind = () => badgeKind(s());
   return (
-    <div class="scard" classList={{ selected: props.selected, offline: statusOf(s()) === "offline", muted: !!s().muted }} data-emphasis={emphasis(s())}>
+    <div class="scard" classList={{ selected: props.selected, offline: statusOf(s()) === "offline", muted: !!s().muted,
+      "team-lead": !!props.team, "team-member": !!props.depth, "team-first": !!props.teamFirst, "team-last": !!props.teamLast }}
+      style={{ left: `${2 + (props.depth ?? 0) * 22}px` }} data-emphasis={emphasis(s())}
+      title={fullTooltip(s(), props.team)}>
       <div class="sc-l1">
         <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
         <span class="sc-title ell" style={titleReserve(s().title, 72)} title={s().name}>{s().title}</span>
@@ -291,6 +352,7 @@ export function SessionCard(props: {
           <AgentsCounter label={agentsLabel(s())} expandable={props.expandable} expanded={props.expanded} onToggle={props.onToggleChildren} />
         </Show>
       </div>
+      <Show when={props.team}><TeamStrip team={props.team!} expanded={props.expanded} onToggle={props.onToggleChildren} /></Show>
     </div>
   );
 }

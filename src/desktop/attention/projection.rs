@@ -24,13 +24,32 @@ pub(super) struct Candidate {
     pub ready: bool,
 }
 pub(super) struct Projection {
-    pub conversation: String,
+    pub session: String,
     pub state: Map<String, Value>,
     pub candidates: Vec<Candidate>,
     pub cleared: Vec<String>,
 }
 pub(super) fn digest(value: &impl serde::Serialize) -> Result<String> {
     Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(value)?)))
+}
+
+pub(super) fn startup_session(computer: &str, row: &zerus_client_core::ViewRow) -> Result<String> {
+    let run = row.run_id.as_deref().context("attention run missing")?;
+    digest(&(computer, &row.notify.cmd, "startup", run))
+}
+pub(super) fn session(computer: &str, row: &zerus_client_core::ViewRow) -> Result<String> {
+    match row.conversation_id.as_deref().filter(|id| !id.is_empty()) {
+        Some(conversation) => digest(&(computer, &row.notify.cmd, conversation)),
+        None => startup_session(computer, row),
+    }
+}
+pub(super) fn startup_logical(
+    computer: &str,
+    cmd: &str,
+    run: &str,
+    question: &str,
+) -> Result<String> {
+    digest(&(computer, cmd, "startup_question", run, question))
 }
 
 /// Unknown/historical rows can consume a baseline, never raise a new notice.
@@ -55,20 +74,33 @@ pub(super) fn project(
                 .is_none_or(|v| v.len() <= QUESTIONS),
         "attention row exceeds topic limit"
     );
-    let row = view::row(raw);
+    let mut row = view::row(raw);
+    ensure!(
+        raw.get("conversation_id")
+            .is_none_or(|value| value.is_null() || value.is_string()),
+        "invalid attention conversation"
+    );
+    let startup = row.conversation_id.as_deref().is_none_or(str::is_empty);
+    if startup {
+        // Only the mandatory main question has a native identity before
+        // SessionStart. No reply, child, optional or time-only fallback.
+        row.notify.needs_action &= matches!(row.phase.as_deref(), Some("input" | "approval"))
+            && super::identity::question(&row.notify.attention_id);
+        row.notify.children.clear();
+        row.notify.optional_ids.clear();
+        row.notify.optional_reported = false;
+        row.reply_id = None;
+    }
     let run = row.run_id.as_deref().context("attention run missing")?;
-    let conversation = row
-        .conversation_id
-        .as_deref()
-        .context("attention conversation missing")?;
+    let conversation = row.conversation_id.as_deref().unwrap_or("");
     // Reuse the source validation in the canonical ledger key helper.
     ensure!(
-        Key::new(computer, run, conversation, Edge::Reply("validation")).is_some()
+        super::identity::source(computer, run, conversation)
             && !row.notify.cmd.is_empty()
             && row.notify.cmd.len() <= 64,
         "invalid attention identity"
     );
-    let logical_session = digest(&(computer, &row.notify.cmd, conversation))?;
+    let logical_session = session(computer, &row)?;
     let current = row.state == "running" && row.process_state != "exited";
     let focused = foreground || !policy.enabled || !current;
     let mut tracker =
@@ -131,11 +163,18 @@ pub(super) fn project(
         let Some(key) = Key::new(computer, run, conversation, edge) else {
             anyhow::bail!("invalid attention edge")
         };
-        let logical = digest(&(computer, &row.notify.cmd, conversation, &key.identity.edge))?;
+        let logical = if let Edge::StartupQuestion(question) = edge {
+            startup_logical(computer, &row.notify.cmd, run, question)?
+        } else {
+            digest(&(computer, &row.notify.cmd, conversation, &key.identity.edge))?
+        };
         let mut target=token.and_then(attention::target).unwrap_or_else(||json!({"host":computer,"name":row.name,"run":run,"conversation":conversation,"agent":row.notify.cmd,"notice":"pending"}).as_object().unwrap().clone());
         target.insert("notice".into(), json!(key.id));
         target.insert("conversation".into(), json!(conversation));
         target.insert("agent".into(), json!(row.notify.cmd));
+        if let Edge::StartupQuestion(question) = edge {
+            target.insert("startup_question".into(), json!(question));
+        }
         if let Some(question) = question {
             target.insert("question".into(), json!(question));
         }
@@ -171,7 +210,9 @@ pub(super) fn project(
             .and_then(|token| changes.raised.iter().find(|n| n.token == token));
         let request = entry.get("request").and_then(Value::as_str).unwrap_or("");
         let signature;
-        let edge = if entry_key.starts_with("reply:") {
+        let edge = if startup {
+            Edge::StartupQuestion(&row.notify.attention_id)
+        } else if entry_key.starts_with("reply:") {
             Edge::Reply(request)
         } else {
             // A component signature excludes unrelated optional/child changes.
@@ -280,7 +321,7 @@ pub(super) fn project(
         "attention state exceeds byte limit"
     );
     Ok(Projection {
-        conversation: logical_session,
+        session: logical_session,
         state,
         candidates,
         cleared: changes.cleared,

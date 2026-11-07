@@ -1710,6 +1710,7 @@ finally:
 
     @classmethod
     def remove_attention_retention_schema(cls, db):
+        db.execute('DROP INDEX desktop_attention_catalog_run')
         # Rewind the later schema-21 leaf too, never leaving it labelled older.
         cls.remove_catalog_reason_schema(db)
         db.execute('DROP TRIGGER desktop_attention_edge_remove')

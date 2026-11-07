@@ -306,6 +306,7 @@ mod tests {
             computer: "peer.example".into(),
             run: "original-run".into(),
             conversation: "original-conversation".into(),
+            startup_question: None,
         };
         let encoded = zerus_client_core::desktop::activation::encode_navigation(&target).unwrap();
         use zerus_client_core::desktop::activation::NAVIGATION_ENV;
@@ -406,6 +407,7 @@ mod tests {
             computer: "peer.example".into(),
             run: "original-run".into(),
             conversation: "original-conversation".into(),
+            startup_question: None,
         };
         let encoded = wire::encode_navigation(&target).unwrap();
         let Command::Run(options) = parse(&args(&[

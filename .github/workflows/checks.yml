@@ -948,7 +948,8 @@ jobs:
     needs: source
     if: needs.source.outputs.run_linux == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    # Regular runs take 27-30 minutes; the keyless agent checks need headroom.
+    timeout-minutes: 50
     env:
       CARGO_TERM_COLOR: always
       HOMEBREW_NO_AUTO_UPDATE: 1

@@ -1,8 +1,10 @@
 // Run with menu-smoke.py --url pointing to scripts/migration-review-smoke.html.
-// Native IPC is forbidden; this exercises only the existing status projection.
+// Two read-only report commands return synthetic records; all other IPC is forbidden.
 import { render } from "solid-js/web";
 import { desktopService } from "../store/desktopService";
 import { DesktopServiceStatus } from "../ui/components/DesktopServiceStatus";
+import { MachinesStatus } from "../ui/components/MachinesStatus";
+import { applyBatch } from "../store/catalog";
 import type { DesktopService } from "../types";
 import { applySkin, skin } from "../skin/runtime";
 import "../ui/styles/base.css";
@@ -12,16 +14,25 @@ const failures: string[] = [];
 const layouts: unknown[] = [];
 const check = (condition: unknown, message: string) => { if (!condition) failures.push(message); };
 let calls = 0;
-Object.assign(window, { __TAURI_INTERNALS__: { invoke: () => { calls++; throw Error("Review attempted native IPC"); } } });
+const commands: string[] = [];
+const reads: string[] = [];
+Object.assign(window, { __TAURI_INTERNALS__: { invoke: (command: string) => {
+  // The current report dialog reads these bounded native metadata records.
+  // No native backend exists here, and neither fixture admits a write.
+  if (command === "settings_qt_preferences") { reads.push(command); return Promise.resolve({ families: [], unused: [] }); }
+  if (command === "settings_legacy_projects") { reads.push(command); return Promise.resolve({ family: "legacy-projects", state: "empty", keys: [], reasons: [] }); }
+  calls++; commands.push(command); throw Error("Review attempted unexpected native IPC");
+} } });
 const report = { required: true, complete: false, running: false, code: "retained_import_qt_unavailable", phase: null };
 const state: DesktopService = { connected: true, epoch: "fixture", generation: 1,
   background: Object.fromEntries(["fleet", "presence", "reads", "attention", "approvals"].map((key) => [key, { ready: true, code: "ready" }])),
   attention_counts: null, automatic_approvals: false, details_available: true, code: "", retained_source_import: report };
 desktopService.apply(state);
+applyBatch({ upserts: [], removes: [], replaces: [], activity: [], computers: [{ computer: "", status: "reconnecting", attempt: 2 }, { computer: "build-validation-01", status: "reconnecting", attempt: 2 }] });
 applySkin(skin());
 const root = document.getElementById("root")!;
 const dispose = render(() => <div class="app" style={{ width: "900px" }}><nav class="rail" /><main class="page">Synthetic page</main>
-  <footer class="statusbar"><span>this computer: reconnecting (attempt 2); build-validation-01: reconnecting (attempt 2); studio-workstation-02: reconnecting (attempt 2); workspace-verification-03: reconnecting (attempt 2)</span><DesktopServiceStatus />
+  <footer class="statusbar"><MachinesStatus mode={() => "replay"} /><DesktopServiceStatus />
     <span class="grow" /><span class="session-usage-strip" style={{ width: "200px" }}>Synthetic account usage</span></footer></div>, root);
 const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 30));
 async function run() {
@@ -86,16 +97,21 @@ async function run() {
     [{ code: "background_unready", retained_source_import: report, notification_ownership: ownership }, ["Review", "Retry now", "Resume background work"]],
   ] as const) {
     desktopService.apply({ ...baseline, ...patch }); await settle();
-    const actions = [...footer.querySelectorAll("button")].map((b) => b.textContent);
-    const serviceGroup = footer.querySelector<HTMLElement>(".desktop-service-status")!;
+    const serviceGroup = footer.querySelector<HTMLElement>(".desktop-service-status");
+    const actions = [...(serviceGroup?.querySelectorAll("button") ?? [])].map((b) => b.textContent);
     layouts.push({ actions, footer: footer.getBoundingClientRect().width, machine: footer.firstElementChild!.getBoundingClientRect().width,
-      service: serviceGroup.getBoundingClientRect().width, shrink: getComputedStyle(serviceGroup).flexShrink,
-      buttons: [...footer.querySelectorAll("button")].map((b) => [b.textContent, b.getBoundingClientRect().right]) });
+      service: serviceGroup?.getBoundingClientRect().width ?? 0, shrink: serviceGroup ? getComputedStyle(serviceGroup).flexShrink : null,
+      buttons: [...(serviceGroup?.querySelectorAll("button") ?? [])].map((b) => [b.textContent, b.getBoundingClientRect().right]) });
     check(JSON.stringify(actions) === JSON.stringify(expected), `wrong footer actions: ${JSON.stringify(actions)}`);
-    check(!page.querySelector(".desktop-service-status") && footer.querySelector('[role="status"]'), "service status escaped the footer");
+    check(!page.querySelector(".desktop-service-status"), "service status escaped the footer");
     check(JSON.stringify(geometry()) === JSON.stringify(initial) && initial[2] === 28, "service status changed the page or footer geometry");
+    if (Object.keys(patch).length === 0) {
+      check(!serviceGroup && !footer.querySelector(".service-summary"), "healthy service status did not stay hidden");
+      continue;
+    }
+    check(serviceGroup?.getAttribute("role") === "status", "a service fault or review was hidden");
     check(footer.querySelector(".service-summary")?.getAttribute("title"), "full service explanation is unavailable");
-    for (const button of footer.querySelectorAll("button")) {
+    for (const button of serviceGroup?.querySelectorAll("button") ?? []) {
       const box = button.getBoundingClientRect(), frame = footer.getBoundingClientRect(), group = button.closest(".desktop-service-status")!.getBoundingClientRect();
       check(box.left >= frame.left && box.right <= frame.right && box.right <= 900, `footer action overflowed at 900px: ${button.textContent} right=${box.right}`);
       check(box.left >= group.left && box.right <= group.right, `footer action overflowed its group: ${button.textContent} right=${box.right} group=${group.right}`);
@@ -112,7 +128,7 @@ async function run() {
   }
   check(calls === 0, "status presentation attempted native IPC");
   dispose();
-  const result = { failures, calls, layouts, cases: ["Qt refusal detail", "read-only review", "unknown no-replay guidance", "close/cancel focus", "healthy/no retry", "not-ready/retry", "rearm/resume", "pending/check", "fixed page/footer geometry", "900px action bounds", "keyboard status reasons and Escape"] };
+  const result = { failures, calls, commands, reads, layouts, cases: ["Qt refusal detail", "read-only review", "unknown no-replay guidance", "close/cancel focus", "healthy/no retry", "not-ready/retry", "rearm/resume", "pending/check", "fixed page/footer geometry", "900px action bounds", "keyboard status reasons and Escape"] };
   (window as unknown as { webkit: { messageHandlers: { result: { postMessage(text: string): void } } } }).webkit.messageHandlers.result.postMessage(JSON.stringify(result));
 }
 void run().catch((error) => {

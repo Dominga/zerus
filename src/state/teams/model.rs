@@ -431,6 +431,26 @@ pub(crate) struct PromptSnapshot {
     pub context_before_task: String,
 }
 
+/// Task 134: a member's unread team messages, kept in the team record so
+/// status, the lead's inbox and the dispatcher's second ring read it without
+/// the working tier. `oldest` is the id of the oldest unread message.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Unread {
+    pub count: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub urgent: u32,
+    pub oldest: String,
+    pub oldest_at: f64,
+    /// How often the doorbell rang for the oldest one.
+    #[serde(default)]
+    pub rings: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rung_at: Option<f64>,
+    /// The lead was told about the oldest one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lead_told: bool,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Member {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -538,6 +558,10 @@ pub(crate) struct Member {
     /// The lead was told once about this starvation episode (C7).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub starved_told: bool,
+    /// Task 134: the member's unread team messages (the working tier), as
+    /// status shows them ("unread: N"); None when it has read everything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread: Option<Unread>,
     /// Task 98: the member's Terminal refuses hand-outs because its composer
     /// holds a draft, a dialog or a prompt Zerus does not know; cleared by the
     /// next delivery.

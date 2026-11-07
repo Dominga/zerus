@@ -2362,6 +2362,57 @@ folder put back, and the task waits for the lead with the conflicting files and
 `hgs team retry`. The lead's own task and a member working in the team's own
 folder are left alone; a member on another computer gets a `skipped` step.
 
+Team messages are pulled, not pasted (task 134; owner, 2026-11-07). The text
+of a hand-out, a stage hand-out, the lead's (or a sub-lead's) inbox message
+and the starved notice is stored first in the working tier: the
+`working_messages` table of `teams.sqlite3` (docs/lore.md 11.5, the Zerus-state
+form), with `queued`, `rung` and `read`, a read message expiring 7 days after
+its read and an unread one 30 days after it was written (a
+`working_unread_expired` event), cleaned at most 500 rows a pass. The terminal
+then receives only a one-line doorbell under the message's own request id
+(the hand-out's attempt id, the stage run id), so receipts and request
+identities are as before: `[Zerus team · from: Lead · task: #N · attempt: K]
+1 new message for you: hgs team inbox (or hgs team current)`, with `URGENT` in
+it for an urgent one. A doorbell that never submits loses nothing: the text is
+stored, and a refused doorbell withdraws its message, so the retry's message is
+the only copy. A message that cannot be stored is a refused send.
+
+`hgs team inbox --json` (the team may be left out in a member's session or with
+`attempt`) answers the lead's or sub-lead's items as before and the caller's
+own unread `messages` with their text, and marks them read; `hgs team current
+--json` answers the attempt with the same `messages`. These two are the only
+read receipts: `read` names the ids, the request id and `via`, the message keeps
+`read_at`, `read_via` and `read_request`, and the journal gets `message_read`.
+`"peek":true` marks nothing, and anyone but the recipient (you on the desktop)
+only peeks. In a sandbox the receipt waits in the member's folder for the
+worker (`messages-read`), as a report does. Nothing else marks a message read.
+
+Delivery does not depend on the agent's discipline. A Claude or Codex member's
+turn-start hook (`UserPromptSubmit`) gets the unread text Zerus has not put into
+a turn yet as `additionalContext`, each message once (`injected_at`, at most
+24 KiB a turn), without marking it read; the doorbell's own turn is the first
+such turn. An agent without that hook (Kimi, DeepSeek, OpenCode) gets the text
+after the doorbell line in the same paste. A doorbell rings only at an idle
+moment, never into a busy composer; a message posted while the member works
+rings at its next idle moment. An unread message rings once more after 20
+minutes (an urgent one after 10), and after two rings and the same time again
+the lead gets an `unread_messages` inbox item with the member's state and
+session; an urgent message a member's turn kept from ringing for 10 minutes is
+an item at once, and the lead may stop the member natively so it rings at the
+turn end. Status shows each member's `unread` (`count`, `urgent`, the oldest
+message and its rings); Zerus Next's member row shows `unread: N`.
+
+The lead's inbox message is urgent when it names a question, a permission, a
+Terminal question, a crash, a blocked input or a stuck member. `hgs team message
+--json` with `{"request_id","to","text","urgent"}` (`to`: a member id, `lead`
+or `team`, one message per other member) stores a note from the lead, a member
+or you (`by`: the member id, or `owner`) of at most 2,000 characters, and Zerus
+rings it at the recipient's next idle moment. A recipient with 50 unread normal
+or 5 unread urgent messages takes no more of that kind; the sender is refused
+with the count. Zerus's own messages are at most 32 KiB each. A RustCodeLore
+team keeps its team messages here too: hgs does not link the lore crate, and a
+message must not wait for a store on another computer.
+
 ### Scaling and draining the roster
 
 `hgs team scale --json {"request_id":"<uuid>","team":"<id>","role":"Backend",

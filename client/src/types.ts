@@ -1028,6 +1028,8 @@ export interface TeamMemberView {
   queue: number[]; minutes_without_progress: number; host_shared: boolean;
   /** Task 98: hand-outs its Terminal refused in a row, hgs's reason, and whether the lead and the owner were told. */
   input_refusals?: number; input_reason?: string; input_raised?: boolean;
+  /** Task 134: its unread team messages (the working tier), and how many are urgent. */
+  unread?: number; unread_urgent?: number;
   /** The owner's mandatory additions to the member's rules. */
   iron_rules?: string[];
   /** Task 11: the pending question or permission request as hgs sends it (`members[].question`), null without one. */

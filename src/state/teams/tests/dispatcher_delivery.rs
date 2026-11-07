@@ -234,7 +234,7 @@ fn real_task_delivery_carries_four_rule_levels_locally_and_remotely() {
                     "rules":["Session addition"],"effective_rules":"Session addition","start_delivery_supported":true}).to_string(), ""));
                 }
                 assert_eq!(args.first(), Some(&"send"));
-                *sent.borrow_mut() = input.unwrap()["text"].as_str().unwrap().to_owned();
+                *sent.borrow_mut() = crate::state::teams::doorbell::posted_text(input.unwrap());
                 Ok(fake_output(0, r#"{"status":"submitted"}"#, ""))
             })));
             if remote {

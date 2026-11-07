@@ -312,7 +312,7 @@ fn a_refused_hand_out_keeps_the_finding_for_the_next_one() {
     let refusing = refuse.clone();
     set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| {
         assert_eq!(args.first().copied(), Some("send"));
-        record.borrow_mut().push(input.map(|input| input["text"].as_str().unwrap_or_default().to_owned()).unwrap_or_default());
+        record.borrow_mut().push(input.map(crate::state::teams::doorbell::posted_text).unwrap_or_default());
         Ok(if refusing.get() { fake_output(1, "", "hgs: the session is busy") } else { fake_output(0, r#"{"status":"submitted"}"#, "") })
     })));
     let result = hand_out(&mut store, &t.id, 1, "dev", None, "");

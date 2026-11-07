@@ -2985,7 +2985,28 @@ fn look(input: &Value) -> anyhow::Result<Value> {
     Ok(value)
 }
 
+/// Task 134: `hgs team current` gives the member's open attempt and its
+/// unread team messages (the hand-out's text among them), and marks those
+/// read: one of the two read receipts.
 fn current(input: &Value) -> anyhow::Result<Value> {
+    let (team, member) = caller_member(input)?;
+    let (messages, receipt) = take_messages(&team, &member, input, "current", true)?;
+    match current_view(&team, &member) {
+        Ok(mut view) => {
+            view["messages"] = json!(messages);
+            view["read"] = receipt;
+            Ok(view)
+        }
+        Err(error) if !messages.is_empty() => Ok(json!({"team":team.id,"member":member,"messages":messages,"read":receipt,
+            "note":format!("{error:#}")})),
+        Err(error) => Err(error),
+    }
+}
+
+/// Task 134: the team and member whose call this is: by its attempt id (a
+/// member on another computer, N2), else by its session, as `hgs team
+/// current` has always found it.
+fn caller_member(input: &Value) -> anyhow::Result<(Team, String)> {
     let named = text(input, "team");
     // A member on another computer has no local identity: its attempt id names
     // it, as report does (N2).
@@ -3015,7 +3036,7 @@ fn current(input: &Value) -> anyhow::Result<Value> {
                 })
         });
         let (team, member) = found.with_context(|| format!("No attempt {attempt} runs in a team"))?;
-        return current_view(team, &member);
+        return Ok((team.clone(), member));
     }
     let record = caller_record();
     let conversation = nonempty_env("DSH_SESSION_ID").unwrap_or_default();
@@ -3028,7 +3049,171 @@ fn current(input: &Value) -> anyhow::Result<Value> {
         Some(record) => calling_member(team, record),
         None => dsh_member(team, &conversation),
     })?;
-    current_view(team, &member)
+    Ok((team.clone(), member))
+}
+
+/// Task 134: a member's unread team messages, and the read receipt when the
+/// caller is that member (`mark`): only `hgs team inbox` and `hgs team current`
+/// give one, never inferred. A `peek` marks nothing. In a sandbox the store is
+/// read-only: the receipt waits in the member's folder for the team worker,
+/// as a report does (U20).
+fn take_messages(team: &Team, member: &str, input: &Value, via: &str, mark: bool) -> anyhow::Result<(Vec<Value>, Value)> {
+    let now = super::super::now();
+    let list = super::working::unread(Store::open(false)?.connection(), &team.id, member, now)?;
+    let values: Vec<Value> = list.iter().map(super::working::Message::value).collect();
+    if list.is_empty() || !mark || input["peek"].as_bool() == Some(true) {
+        return Ok((values, Value::Null));
+    }
+    let given = text(input, "request_id");
+    let request = if canonical_uuid(given) { given.to_owned() } else { uuid::Uuid::new_v4().to_string() };
+    let ids: Vec<String> = list.iter().map(|message| message.id.clone()).collect();
+    let written = Store::open(true).and_then(|mut store| {
+        store.mutate_working(&team.id, |tx, team, events| read_messages(tx, team, member, &ids, via, &request, events))
+    });
+    match written {
+        Ok(marked) => Ok((values, json!({"read":marked,"request_id":request,"via":via}))),
+        Err(error) if read_only(&error) => {
+            let folder = member_outbox_folder(team, team.member(member).context("Unknown member")?)?;
+            let path = super::outbox::push(&folder, &json!({"op":"messages-read","request_id":request,"team":team.id,"member":member,
+                "attempt":"","input":{"ids":ids,"via":via,"request_id":request}}))?;
+            Ok((values, json!({"queued":ids,"request_id":request,"via":via,"path":path.to_string_lossy(),
+                "note":"The sandbox blocks the team store: the read receipt waits in your folder and the team worker records it."})))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Task 134: marks `member`'s messages `ids` read in one transaction with its
+/// event (the receipt: who, which, how, under which request id).
+pub(crate) fn read_messages(
+    tx: &rusqlite::Transaction,
+    team: &mut Team,
+    member: &str,
+    ids: &[String],
+    via: &str,
+    request: &str,
+    events: &mut Vec<Event>,
+) -> anyhow::Result<Vec<String>> {
+    let now = super::super::now();
+    let marked = super::working::mark_read(tx, &team.id, member, ids, via, request, now)?;
+    super::working::refresh(tx, team, member, now)?;
+    if !marked.is_empty() {
+        events.push(Event::new("message_read", json!({"member":team.role_of(member),"ids":marked,"via":via,"request_id":request})));
+    }
+    Ok(marked)
+}
+
+/// Task 134: `hgs team message`: a note from the lead, a member or you to a
+/// member, the lead or the whole team, stored in the working tier; Zerus rings
+/// the recipient's doorbell at its next idle moment (never into a busy
+/// composer). `urgent` says so in the doorbell and rings again sooner.
+fn message_command(input: &Value) -> anyhow::Result<Value> {
+    let request = text(input, "request_id").to_owned();
+    ensure!(canonical_uuid(&request), "A canonical request_id is required");
+    let team = if text(input, "team").is_empty() {
+        caller_member(input)?.0
+    } else {
+        Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?
+    };
+    let by = match actor(&team, "message", input)? {
+        Actor::Human => "owner".to_owned(),
+        Actor::Member(id) => id,
+        Actor::ParentLead => "parent lead".to_owned(),
+        Actor::Intake(_) => bail!("An intake key only adds an urgent phase"),
+    };
+    let body = text(input, "text").trim().to_owned();
+    ensure!(!body.is_empty(), "A message has text");
+    let length = body.chars().count();
+    ensure!(
+        length <= super::working::MEMBER_TEXT_LIMIT,
+        "A message is at most {} characters; this one has {length}",
+        super::working::MEMBER_TEXT_LIMIT
+    );
+    let urgency = if input["urgent"].as_bool() == Some(true) { super::working::Urgency::Urgent } else { super::working::Urgency::Normal };
+    let to = text(input, "to");
+    let recipients: Vec<String> = match to {
+        "" => bail!("Name the recipient: a member id, lead or team"),
+        "lead" => vec![team.lead.clone()],
+        "team" => team.members.iter().filter(|member| member.state != MemberState::Removed && member.id != by).map(|member| member.id.clone()).collect(),
+        id => {
+            ensure!(team.member(id).is_some_and(|member| member.state != MemberState::Removed), "{id} is no member of this team");
+            vec![id.to_owned()]
+        }
+    };
+    ensure!(!recipients.is_empty(), "Nobody else is in the team");
+    let now = super::super::now();
+    let mut store = Store::open(true)?;
+    let posted = store.mutate_working(&team.id, |tx, team, events| {
+        let mut posted = Vec::new();
+        for recipient in &recipients {
+            // docs/lore.md 11.4: a recipient that does not read takes no more.
+            let waiting = super::working::unread(tx, &team.id, recipient, now)?;
+            let urgent = waiting.iter().filter(|message| message.urgent()).count() as u32;
+            let (count, cap) = if urgency == super::working::Urgency::Urgent {
+                (urgent, super::working::CAP_URGENT)
+            } else {
+                (waiting.len() as u32 - urgent, super::working::CAP_NORMAL)
+            };
+            ensure!(
+                count < cap,
+                "{} has {count} unread {} messages already (at most {cap}); the lead sees that it does not read",
+                team.name_of(recipient),
+                if urgency == super::working::Urgency::Urgent { "urgent" } else { "normal" }
+            );
+            let id = if recipients.len() == 1 { request.clone() } else { format!("{request}:{recipient}") };
+            let new = super::working::NewMessage { request_id: &id, by: &by, to: recipient, kind: "message", urgency, text: &body };
+            let (message, fresh) = super::working::post(tx, &team.id, &new, now)?;
+            if fresh {
+                events.push(Event::new("message_posted", json!({"id":message.id,"to":team.role_of(recipient),"kind":"message",
+                    "urgency":message.urgency,"by":by,"request_id":id})));
+            }
+            super::working::refresh(tx, team, recipient, now)?;
+            posted.push(json!({"id":message.id,"to":recipient}));
+        }
+        Ok(posted)
+    })?;
+    Ok(json!({"status":"queued","team":team.id,"request_id":request,"urgency":urgency,"messages":posted,
+        "note":"Zerus rings each recipient's doorbell at its next idle moment; the text waits in the working tier until it reads it with hgs team inbox."}))
+}
+
+/// Task 134: `hgs team inbox`: the lead's (or a sub-lead's) inbox items, and
+/// the caller's own unread team messages, marked read (a read receipt). Anyone
+/// else sees the messages without marking them (you, on the desktop).
+fn inbox_command(input: &Value) -> anyhow::Result<Value> {
+    let (team, caller) = if text(input, "team").is_empty() {
+        let (team, member) = caller_member(input)?;
+        (team, Some(member))
+    } else {
+        let team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
+        let caller = match actor(&team, "inbox", input) {
+            Ok(Actor::Member(id)) => Some(id),
+            _ => None,
+        };
+        (team, caller)
+    };
+    let mut team = team;
+    ops::withdraw_inapplicable(&mut team, &mut Vec::new());
+    // Spec 5.6: a sub-lead reads its own inbox; you may name one.
+    let named = text(input, "member").to_owned();
+    let reviewer = if !named.is_empty() {
+        named
+    } else {
+        match &caller {
+            Some(id) if team.member(id).is_some_and(|member| member.sub) => id.clone(),
+            _ => team.lead.clone(),
+        }
+    };
+    let reviews = caller.as_ref().is_none_or(|id| *id == team.lead || team.member(id).is_some_and(|member| member.sub));
+    let mut view = if reviews { inbox_view_for(&team, &reviewer) } else { json!({"items":[]}) };
+    let (recipient, mark) = match &caller {
+        Some(id) => (id.clone(), true),
+        None => (reviewer, false),
+    };
+    let (messages, receipt) = take_messages(&team, &recipient, input, "inbox", mark)?;
+    view["messages"] = json!(messages);
+    view["read"] = receipt;
+    view["for"] = json!(recipient);
+    Ok(view)
 }
 
 /// Whether a status request reads the live listing: only a finished team, for
@@ -4520,21 +4705,8 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             }
             Ok(value)
         }
-        "inbox" => {
-            let mut team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
-            ops::withdraw_inapplicable(&mut team, &mut Vec::new());
-            // Spec 5.6: a sub-lead reads its own inbox; you may name one.
-            let named = text(input, "member").to_owned();
-            let reviewer = if !named.is_empty() {
-                named
-            } else {
-                match actor(&team, "inbox", input) {
-                    Ok(Actor::Member(id)) if team.member(&id).is_some_and(|member| member.sub) => id,
-                    _ => team.lead.clone(),
-                }
-            };
-            Ok(inbox_view_for(&team, &reviewer))
-        }
+        "inbox" => inbox_command(input),
+        "message" => message_command(input),
         "events" => {
             let before = match &input["before"] {
                 Value::Null => None,
@@ -4917,6 +5089,9 @@ mod commands_runs;
 #[path = "tests/commands_profile.rs"]
 mod commands_profile;
 
+#[cfg(test)]
+#[path = "tests/commands_messages.rs"]
+mod commands_messages;
 #[cfg(test)]
 #[path = "tests/commands_status.rs"]
 mod commands_status;

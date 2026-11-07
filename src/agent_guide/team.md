@@ -1,7 +1,7 @@
 Work in an agent team (hgs guide team)
 
-A team: a lead and members on any agent, model or computer. The lead plans;
-Zerus hands ready tasks to free members and reports to the lead.
+A team: a lead and members on any agent or computer. The lead plans;
+Zerus hands ready tasks to free members.
 Requests use canonical lowercase UUIDs (uuidgen); reuse one to retry.
 
 Lead, in-session:
@@ -14,7 +14,7 @@ Lead, in-session:
   hard waits for Accepted, soft for In progress. Nothing runs before
   the owner approves.
   {"team":"ID"} | hgs team status --json   tasks, attempts, waits
-  {"team":"ID"} | hgs team inbox --json    reports, questions, your tasks
+  {"team":"ID"} | hgs team inbox --json    items and your unread messages
   Reports arrive as [Zerus team messages; decide:
     {"request_id":"UUID","team":"ID","task":N} | hgs team accept --json
     reject needs "reason"; rework keeps its member, "fresh":true tries a peer.
@@ -29,13 +29,13 @@ Lead, in-session:
   Phases, extend, finish: hgs guide team-lead
   Tests: hgs guide team-tests; a dsh lead is not the owner.
 
-Member: the message names your task and attempt. Do it, report once:
+Member: a doorbell means unread: {} | hgs team inbox --json. Report once:
   {"request_id":"UUID","team":"ID","task":N,"attempt":"ATTEMPT","text":"..."} |
     hgs @LEAD team report --json
   Blocked: ask the lead; the attempt stays open:
     {"request_id":"UUID","team":"ID","attempt":"ATTEMPT","text":"..."} |
     hgs team ask --json
-  Your task: {"attempt":"ATTEMPT"} | hgs team current --json
+  {"request_id":"UUID","to":"lead","text":"...","urgent":true} | hgs team message --json
   A question goes through hgs team ask, never a report; a progress line
   is interim; captured, it holds new work.
   Codex on Windows: git-commit template, powershell.exe (team-run).

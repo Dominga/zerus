@@ -13,6 +13,18 @@ const MESSAGE_ITEMS: usize = 10;
 /// The most characters of a summary the inbox keeps.
 const SUMMARY_CHARS: usize = 300;
 
+/// Task 134: items a member is blocked on make the lead's inbox message
+/// urgent: its doorbell says URGENT and rings at once.
+pub(crate) const URGENT_KINDS: [&str; 6] = ["question", "permission", "terminal_question", "crashed", "input_blocked", "member_stuck"];
+
+pub(crate) fn urgency<'a>(items: impl IntoIterator<Item = &'a Item>) -> super::working::Urgency {
+    if items.into_iter().any(|item| URGENT_KINDS.contains(&item.kind)) {
+        super::working::Urgency::Urgent
+    } else {
+        super::working::Urgency::Normal
+    }
+}
+
 /// One thing on the lead's desk. `key` names it across ticks, so the coalesced
 /// message never names it twice.
 #[derive(Clone, Debug, PartialEq)]
@@ -252,6 +264,32 @@ fn all_items(team: &Team) -> Vec<Item> {
                 json!({"request_id":PLACEHOLDER,"team":team.id,"member":member.id})
             ),
             detail: member.error.clone(),
+        });
+    }
+    // Task 134: a member that does not read its team messages (two doorbells
+    // and the bound again, or an urgent one its turn kept back) is one item for
+    // the lead, with the member's state; the messages stay unread for it.
+    for member in team.members.iter().filter(|member| member.id != team.lead).filter(|_| active) {
+        let Some(why) = super::doorbell::unread_stalled(member, crate::state::now()) else { continue };
+        let unread = member.unread.as_ref().expect("a stall has unread messages");
+        let role = team.name_of(&member.id);
+        let state = serde_json::to_value(member.state).ok().and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_default();
+        let session = member.session.as_ref().map(|session| session.name.clone()).unwrap_or_else(|| "no session".into());
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "unread_messages",
+            key: format!("unread_messages:{}:{}", member.id, unread.oldest),
+            task: None,
+            member: role.clone(),
+            since: unread.oldest_at,
+            summary: summary(&format!("{role} does not read: {why}")),
+            command: format!("{} | hgs team look --json", json!({"team":team.id,"member":member.id})),
+            detail: format!(
+                "Member state: {}, session {session}. Unread: {} ({} urgent). The member reads them with hgs team inbox;                  Zerus never marks them read for it. Look at the member, or stop it natively so the messages reach it at the turn end.",
+                if state.is_empty() { "unknown".to_owned() } else { state },
+                unread.count,
+                unread.urgent
+            ),
         });
     }
     // Spec 0: a task that waits for a step Zerus could not take (U45 model,

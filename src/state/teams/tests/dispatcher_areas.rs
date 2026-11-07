@@ -41,3 +41,6 @@ mod dispatcher_run_settled;
 
 #[path = "dispatcher_outputs.rs"]
 mod dispatcher_outputs;
+
+#[path = "dispatcher_doorbell.rs"]
+mod dispatcher_doorbell;

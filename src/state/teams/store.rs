@@ -292,6 +292,8 @@ impl Store {
                 CREATE INDEX IF NOT EXISTS events_team_kind_at ON events(team,kind,at);
                 CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY,digest TEXT NOT NULL,receipt TEXT NOT NULL,at REAL NOT NULL);",
             )?;
+            // Task 134: the working tier's team messages (docs/lore.md 11.5).
+            db.execute_batch(super::working::SCHEMA)?;
         }
         if write {
             // Build an indexed projection once; triggers keep it in the same
@@ -572,6 +574,37 @@ impl Store {
             Some(text) => Some(serde_json::from_str(&text)?),
             None => None,
         })
+    }
+
+    /// Task 134: the store's connection, for the working tier's reads.
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.db
+    }
+
+    /// Task 134: a team change that also writes the working tier, in one
+    /// transaction: `change` gets the transaction and the team, as `mutate`'s
+    /// closure gets the team; the team record and its events are written
+    /// with it. Answers what `change` answers.
+    pub(crate) fn mutate_working<T>(
+        &mut self,
+        team_id: &str,
+        change: impl FnOnce(&rusqlite::Transaction, &mut Team, &mut Vec<Event>) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let transaction = begin(&self.db)?;
+        let payload: String = transaction
+            .query_row("SELECT payload FROM teams WHERE id=?1", params![team_id], |row| row.get(0))
+            .optional()?
+            .context("Unknown team")?;
+        let mut team: Team = serde_json::from_str(&payload).context("Invalid team record")?;
+        let mut events = Vec::new();
+        let answer = change(&transaction, &mut team, &mut events)?;
+        let at = now();
+        team.revision += 1;
+        team.updated = at;
+        write(&transaction, &team)?;
+        append(&transaction, team_id, at, &events)?;
+        commit(transaction)?;
+        Ok(answer)
     }
 
     pub(crate) fn mutate(

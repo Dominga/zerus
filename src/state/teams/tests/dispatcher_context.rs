@@ -200,7 +200,7 @@ fn a_clear_waits_for_the_new_conversation_before_the_hand_out() {
         assert_eq!(saved.member("dev").unwrap().session.as_ref().unwrap().conversation_id, "c2");
         assert_eq!(sent.borrow()["expected_conversation_id"], "c2");
         // A cleared context gets the task's own input, never "as before".
-        let text = sent.borrow()["text"].as_str().unwrap_or_default().to_owned();
+        let text = crate::state::teams::doorbell::posted_text(&sent.borrow());
         assert!(text.contains("Build the cards API"), "{text}");
         assert!(text.contains("Paged list"), "{text}");
         assert!(!text.to_lowercase().contains("as before"), "{text}");

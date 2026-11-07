@@ -105,6 +105,24 @@ export function memberStatus(team: TeamView, member: TeamMemberView, live: Membe
 }
 
 /**
+ * Task 134: a member that has not read its team messages shows "unread: N";
+ * the tooltip says how many are urgent and how it reads them. Null when it
+ * has read everything.
+ */
+export function unreadBadge(member: TeamMemberView): { text: string; tip: string; urgent: boolean } | null {
+  const count = member.unread ?? 0;
+  if (count <= 0) return null;
+  const urgent = member.unread_urgent ?? 0;
+  return {
+    text: tr("unread: %1", count),
+    tip: urgent > 0
+      ? tr("%1 unread team messages, %2 urgent; the member reads them with hgs team inbox", count, urgent)
+      : tr("%1 unread team messages; the member reads them with hgs team inbox", count),
+    urgent: urgent > 0,
+  };
+}
+
+/**
  * The team's state as its badge shows it (Qt's displayStatus): its own
  * status, except that a running team where no open task can move without you
  * is Stuck.

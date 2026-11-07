@@ -5,6 +5,7 @@
 use super::super::*;
 use super::inbox;
 use super::model::*;
+use super::working::Urgency;
 use super::ops;
 use super::plan;
 use super::safe_actions;
@@ -240,6 +241,9 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
 /// One thing the dispatcher does for a team in a tick.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Step {
+    /// Task 134: the member's unread team messages ring their doorbell (at an
+    /// idle moment only; the second ring after their bound).
+    RingMessages { member: String },
     /// The member's started session appeared, or its identity changed.
     Adopt { member: String, session: SessionRef },
     Launch { member: String },
@@ -1679,6 +1683,24 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 busy.insert(member.id.as_str());
                 steps.push(Step::WorkAhead { task: task.id, member: member.id.clone() });
             }
+        }
+    }
+    // Task 134: unread team messages ring at the member's next idle moment,
+    // never into a busy composer, and once more past their bound; a member
+    // given a task, a stage or a message this tick is not rung again (that
+    // delivery rings for everything unread).
+    for member in team.members.iter().filter(|member| member.state != MemberState::Removed) {
+        let given = steps.iter().any(|step| match step {
+            Step::HandOut { member: to, .. } | Step::StageOut { member: to, .. } | Step::WorkAhead { member: to, .. } => *to == member.id,
+            Step::Rebalance { to, .. } => *to == member.id,
+            Step::Inbox => member.id == team.lead,
+            _ => false,
+        });
+        if given || !super::doorbell::due(member, now) {
+            continue;
+        }
+        if session_of(member, seen).is_some_and(|found| found.free && can_take_a_message(found)) {
+            steps.push(Step::RingMessages { member: member.id.clone() });
         }
     }
     // U49: a draining member finishes its open attempt and stage run, takes
@@ -5068,7 +5090,9 @@ fn hand_out_now(
     if let Some((folder, since)) = git_job {
         text += &git_continuation(&folder, since);
     }
-    let outcome = send(&session, &attempt_id, &text);
+    // Task 134: the hand-out's text goes into the working tier; the terminal
+    // gets the doorbell under the attempt's own request id.
+    let outcome = super::doorbell::post_and_ring(store, team_id, member_id, &session, &attempt_id, "hand_out", "lead", Urgency::Normal, &text);
     if let Err(error) = input_blocked(store, team_id, member_id, &session, &outcome) {
         eprintln!("hgs team worker: {member_id}: blocked input: {error}");
     }
@@ -5276,7 +5300,7 @@ fn stage_hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &st
         return Err(error);
     }
     let (run_id, text) = message.context("no stage message")?;
-    let outcome = send(&session, &run_id, &text);
+    let outcome = super::doorbell::post_and_ring(store, team_id, member_id, &session, &run_id, "stage", "lead", Urgency::Normal, &text);
     if let Err(error) = input_blocked(store, team_id, member_id, &session, &outcome) {
         eprintln!("hgs team worker: {member_id}: blocked input: {error}");
     }
@@ -6342,7 +6366,9 @@ fn tell_lead_inbox(store: &mut Store, team: &Team) -> anyhow::Result<()> {
     if new.is_empty() && again.is_empty() {
         return Ok(());
     }
-    let outcome = send(&lead, &uuid::Uuid::new_v4().to_string(), &inbox::text_with(team, &new, &again, now()));
+    let urgency = inbox::urgency(new.iter().chain(&again));
+    let outcome = super::doorbell::post_and_ring(store, &team.id, &team.lead, &lead, &uuid::Uuid::new_v4().to_string(), "inbox", "zerus", urgency,
+        &inbox::text_with(team, &new, &again, now()));
     if matches!(outcome, Sent::Refused(_)) {
         return Ok(());
     }
@@ -6368,7 +6394,8 @@ fn tell_sub_inbox(store: &mut Store, team: &Team, member: &str) -> anyhow::Resul
     let new: Vec<inbox::Item> =
         inbox::items_for(team, member).into_iter().filter(|item| !sub.inbox.told.contains(&item.key)).collect();
     anyhow::ensure!(!new.is_empty(), "no new inbox items");
-    let outcome = send(&session, &uuid::Uuid::new_v4().to_string(), &inbox::text(team, &new, now()));
+    let outcome = super::doorbell::post_and_ring(store, &team.id, member, &session, &uuid::Uuid::new_v4().to_string(), "inbox", "zerus",
+        inbox::urgency(new.iter()), &inbox::text(team, &new, now()));
     if matches!(outcome, Sent::Refused(_)) {
         return Ok(());
     }
@@ -6678,7 +6705,8 @@ pub(crate) fn starved_text(team: &Team, member: &Member, now: f64) -> String {
 fn tell_lead_starved(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Result<()> {
     let member = team.member(member_id).context("unknown member")?.clone();
     let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
-    let outcome = send(&lead, &uuid::Uuid::new_v4().to_string(), &starved_text(team, &member, now()));
+    let outcome = super::doorbell::post_and_ring(store, &team.id, &team.lead, &lead, &uuid::Uuid::new_v4().to_string(), "starved", "zerus",
+        Urgency::Normal, &starved_text(team, &member, now()));
     if matches!(outcome, Sent::Refused(_)) {
         return Ok(());
     }
@@ -7281,6 +7309,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::Inbox => tell_lead_inbox(store, team),
         Step::SubInbox { member } => tell_sub_inbox(store, team, member),
         Step::SubBrief { member } => send_sub_brief(store, team, member),
+        Step::RingMessages { member } => super::doorbell::ring(store, team, member).map(drop),
         Step::RemindReviewer { task, member } => remind_reviewer(store, team, *task, member),
         Step::RemindReport { task } => remind_report(store, team, *task),
         Step::Starving { member } => change(store, &team.id, |team, _| {
@@ -8469,7 +8498,7 @@ fn run_request(store: &mut Store, folder: &Path, request: &Value) {
 /// (`expect`) has no attempt; the folder itself proves the member.
 fn apply_outbox(store: &mut Store, team: &Team, member: &Member, request: &Value) -> anyhow::Result<Value> {
     let op = request["op"].as_str().unwrap_or_default();
-    anyhow::ensure!(matches!(op, "report" | "ask" | "commit" | "reply" | "expect"), "Unknown outbox request {op}");
+    anyhow::ensure!(matches!(op, "report" | "ask" | "commit" | "reply" | "expect" | "messages-read"), "Unknown outbox request {op}");
     anyhow::ensure!(request["team"] == team.id.as_str(), "a request for another team");
     anyhow::ensure!(request["member"] == member.id.as_str(), "the folder belongs to {}", team.name_of(&member.id));
     // The member's own request, unchanged: a replay keys the same store receipt.
@@ -8479,6 +8508,17 @@ fn apply_outbox(store: &mut Store, team: &Team, member: &Member, request: &Value
     // even after the attempt closed (the store's own idempotence, U20).
     if let Some(receipt) = store.receipt(&request_id, &input)? {
         return Ok(receipt);
+    }
+    // Task 134: a sandboxed member's read receipt, recorded as its own
+    // `hgs team inbox` would have: its own messages only.
+    if op == "messages-read" {
+        let ids: Vec<String> = input["ids"].as_array().into_iter().flatten().filter_map(|id| id.as_str().map(str::to_owned)).take(200).collect();
+        let via = if input["via"] == "current" { "current" } else { "inbox" };
+        let member_id = member.id.clone();
+        let marked = store.mutate_working(&team.id, |tx, team, events| {
+            super::commands::read_messages(tx, team, &member_id, &ids, via, &request_id, events)
+        })?;
+        return Ok(json!({"status":"read","read":marked,"request_id":request_id}));
     }
     if op != "expect" {
         let attempt_id = request["attempt"].as_str().unwrap_or_default();

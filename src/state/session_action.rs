@@ -120,7 +120,7 @@ pub(super) fn summary(record: &Value, live_pane: bool, resumed: &Option<Result<(
     let decisions = [
         (
             "pause",
-            !archived && live_pane && !changing && confirmed
+            !archived && live_pane && !changing && (confirmed || lifecycle::unconfirmed_fresh(record))
                 && lifecycle::pausable(record, || {
                     resume_input::idle_checked(record, resumed.as_ref().is_some_and(Result::is_ok))
                 }),

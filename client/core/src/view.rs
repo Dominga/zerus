@@ -166,6 +166,10 @@ pub struct ViewRow {
     /// checkouts and rows without verified metadata leave the chip absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
+    /// False excludes folder removal only after an available native Git read;
+    /// unavailable or unreported metadata still needs inspection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_worktree: Option<bool>,
     /// The row's `terminal_supported`, else true unless the agent is
     /// `dsh` or `opencode` (`HgsClient.cpp:217`).
     pub terminal_supported: bool,
@@ -1345,6 +1349,10 @@ pub fn row(value: &Value) -> ViewRow {
         cwd: text(value, "cwd").to_owned(),
         cwd_canonical: text(value, "cwd_canonical").to_owned(),
         git_root: text(value, "git_root").to_owned(),
+        git_worktree: match flag("git_worktree") {
+            Some(false) if !matches!(text(value, "git_metadata_state"), "ok" | "not_repo") => None,
+            reported => reported,
+        },
         worktree: (value.get("git_worktree").and_then(Value::as_bool) == Some(true))
             .then(|| {
                 path_parts(text(value, "git_root"))
@@ -2333,6 +2341,37 @@ mod tests {
 mod worktree_chip_tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn a_reported_ordinary_folder_is_distinct_from_unreported_or_invalid_metadata() {
+        for (value, expected) in [
+            (
+                json!({"git_worktree": false, "git_metadata_state": "ok"}),
+                Some(false),
+            ),
+            (
+                json!({"git_worktree": false, "git_metadata_state": "not_repo"}),
+                Some(false),
+            ),
+            (json!({"git_worktree": false}), None),
+            (
+                json!({"git_worktree": false, "git_metadata_state": null}),
+                None,
+            ),
+            (
+                json!({"git_worktree": false, "git_metadata_state": "unavailable"}),
+                None,
+            ),
+            (json!({"git_worktree": true}), Some(true)),
+            (json!({}), None),
+            (json!({"git_worktree": null}), None),
+            (json!({"git_worktree": "false"}), None),
+        ] {
+            let projected = row(&value);
+            assert_eq!(projected.git_worktree, expected);
+            let wire = serde_json::to_value(projected).unwrap();
+            assert_eq!(wire.get("git_worktree").and_then(Value::as_bool), expected);
+        }
+    }
     #[test]
     fn linked_checkout_chip_uses_recorded_git_metadata() {
         assert_eq!(row(&json!({"git_worktree":true,"git_root":"/srv/example/api-work","cwd":"/srv/example/api-work/src"})).worktree.as_deref(), Some("api-work"));

@@ -471,6 +471,7 @@ pub(super) fn safe_to_pause(record: &Value) -> bool {
 pub(super) fn pausable(record: &Value, resumed_idle: impl FnOnce() -> bool) -> bool {
     !telemetry::work_remains(record)
         && ((string(record, "activity") == "idle" && string(record, "expected_id").is_empty())
+            || unconfirmed_fresh(record)
             // Codex defers SessionStart after resume until the next turn; a
             // verified resume waits at its restored conversation's empty composer.
             || resumed_idle())
@@ -494,13 +495,73 @@ fn pause_check(name: &str, snapshot: &Snapshot) -> Result<Value> {
     if !process_alive(&record) {
         return Err(format!("{name}: tracked process is no longer present"));
     }
-    recipes::verify_history(&record, false)?;
-    recipes::resume_argv(
-        string(&record, "agent"),
-        &recipes::argv(&record)?,
-        string(&record, "conversation_id"),
-    )?;
+    pause_recipe(&record)?;
     Ok(record)
+}
+
+fn pause_recipe(record: &Value) -> Result<()> {
+    let argv = recipes::argv(record)?;
+    if unconfirmed_fresh(record) && !telemetry::work_remains(record) {
+        // No native history exists to verify. Keep the supported fresh recipe;
+        // Pause's original pane/process/birth checks still precede every stop.
+        recipes::fresh_argv(string(record, "agent"), &argv)?;
+    } else {
+        recipes::verify_history(record, false)?;
+        recipes::resume_argv(
+            string(record, "agent"),
+            &argv,
+            string(record, "conversation_id"),
+        )?;
+    }
+    Ok(())
+}
+
+/// Only the supervised, ordinary new launch before any native event/input.
+/// An absent binding is distinct from malformed or pending evidence. This is
+/// eligibility only; Pause still verifies the original terminal and PID birth.
+pub(super) fn unconfirmed_fresh(record: &Value) -> bool {
+    input::first_message_candidate(record)
+        && record["startup_kind"] == "new"
+        // The initial launcher record names the supervisor until spawn has
+        // published the actual agent. Never stop that transient custodian.
+        && record["pid"].as_u64().is_some_and(|pid| pid > 0 && pid <= u32::MAX as u64
+            && record["supervisor"]["pid"].as_u64().is_some_and(|parent| parent > 0 && parent <= u32::MAX as u64 && parent != pid))
+        && record["process_start"].as_str().is_some_and(|s| !s.is_empty())
+        // A launch prompt is work even before its hook arrives. The supported
+        // fresh recipe strips prompts, so equality proves none was supplied.
+        && recipes::argv(record).is_ok_and(|argv| {
+            recipes::fresh_argv(string(record, "agent"), &argv).is_ok_and(|fresh| fresh == argv)
+        })
+        && [
+            "conversation_id",
+            "expected_id",
+            "requested_id",
+            "fork_parent_id",
+            "error",
+        ]
+        .iter()
+        .all(|key| {
+            record
+                .get(key)
+                .is_none_or(|v| v.is_null() || v.as_str() == Some(""))
+        })
+        && [
+            "last_event_at",
+            "input_pending_at",
+            "settings_unconfirmed_at",
+        ]
+        .iter()
+        .all(|key| {
+            record
+                .get(key)
+                .is_none_or(|v| v.is_null() || v.as_f64() == Some(0.0))
+        })
+        && ["activity", "phase"].iter().all(|key| {
+            record.get(key).is_none_or(|v| {
+                v.as_str()
+                    .is_some_and(|v| ["", "unknown", "idle"].contains(&v))
+            })
+        })
 }
 
 fn pause_one(record: &Value, scope: Option<&session_action::Scope>) -> Result<()> {
@@ -550,7 +611,7 @@ fn pause_one(record: &Value, scope: Option<&session_action::Scope>) -> Result<()
         }
         std::thread::sleep(Duration::from_millis(100));
     };
-    recipes::verify_history(&read(name)?, false)?;
+    pause_recipe(&read(name)?)?;
     {
         let _guard = lock(None)?;
         let mut current = read(name)?;
@@ -1204,4 +1265,72 @@ fn refuse_unsettled_clear(record: &Value) -> Result<()> {
         return Err("Restored Clear archive cleanup is unfinished; retain the binding for review".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod fresh_pause_tests {
+    use super::*;
+
+    fn fresh() -> Value {
+        json!({"run_identity_version":1,"name":"codex/example/fresh","agent":"codex",
+            "run_id":"original","pid":43,"process_start":"original-agent-birth","supervisor":{"pid":42,"start":"original-birth"},
+            "startup_kind":"new","conversation_id":null,"activity":"unknown","phase":"unknown",
+            "base":["codex","--no-alt-screen"],"launch_dir":"/fixture"})
+    }
+
+    #[test]
+    fn a_supervised_pre_event_launch_may_pause_without_inventing_history() {
+        let record = fresh();
+        assert!(unconfirmed_fresh(&record));
+        assert!(pausable(&record, || false));
+        pause_recipe(&record).unwrap();
+        assert!(record["conversation_id"].is_null());
+        let allowed = session_action::summary(&record, true, &None);
+        assert!(allowed["allowed_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("pause")));
+        assert!(!allowed["allowed_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("resume")));
+    }
+
+    #[test]
+    fn missing_identity_native_work_and_unconfirmed_input_do_not_get_the_fresh_exception() {
+        for (key, value) in [
+            ("run_identity_version", json!(0)),
+            ("pid", json!(42)),
+            ("pid", json!(0)),
+            ("process_start", json!("")),
+            ("base", json!(["codex", "Original launch prompt"])),
+            ("supervisor", Value::Null),
+            ("run_id", json!("")),
+            ("startup_kind", json!("resume")),
+            ("conversation_id", json!("confirmed")),
+            ("conversation_id", json!({"invalid":true})),
+            ("expected_id", json!("awaited")),
+            ("requested_id", json!("requested")),
+            ("expected_id", json!(["invalid"])),
+            ("fork_parent_id", json!("parent")),
+            ("last_event_at", json!(1)),
+            ("last_event_at", json!("invalid")),
+            ("input_pending_at", json!(1)),
+            ("input_pending_at", json!(true)),
+            ("settings_unconfirmed_at", json!(1)),
+            ("settings_unconfirmed_at", json!([])),
+            ("session_end", json!({})),
+            ("activity", json!("busy")),
+            ("phase", json!("tool")),
+            ("error", json!("native failure")),
+            ("error", json!({"invalid":true})),
+            ("activity", json!(true)),
+            ("phase", json!({"invalid":true})),
+        ] {
+            let mut record = fresh();
+            record[key] = value;
+            assert!(!unconfirmed_fresh(&record), "{key}: {record}");
+            assert!(pause_recipe(&record).is_err(), "no history bypass: {key}");
+        }
+    }
 }

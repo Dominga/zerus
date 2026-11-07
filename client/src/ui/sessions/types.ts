@@ -52,6 +52,8 @@ export interface Session {
   cwd: string;
   branch?: string;
   worktree?: string;
+  /** Native reported false: this folder has no worktree-removal offer. */
+  gitWorktree?: boolean;
   git?: { ahead: number; behind: number; changed: number; conflicts?: number; state: "synced" | "diff" | "push" | "pull" | "unknown" };
   status: Status;
   /** The Qt caption for the status (SessionPresentation). */

@@ -169,7 +169,11 @@ The facts the port must keep. References are to `D:/Tools/CodeLore`, HEAD
   and CodeLore's `tests/fixtures/secret-scan-vectors.json` must stay equal, and
   each repository pins the same SHA-256 of the file (its LF form) in a test
   (`crates/lore-bin/tests/lore.rs` here, `tests/secret_vectors.rs` there); a change
-  to the vectors is made in both with the constant.
+  to the vectors is made in both with the constant. The file stores every sample in a
+  real token format split by a `<split>` marker after its prefix, and each reader joins
+  it, so that no literal in a real token format is in either repository (GitHub secret
+  scanning flags them); a test that needs such a text writes it split in the source
+  (`concat!("ghp_", "...")`) and never as one literal.
 - **hgs runs the binary (task 128, lead's decision of 2026-11-07).** hgs
   calls the `lore` binary as a subprocess instead of linking the crate, for
   two reasons:

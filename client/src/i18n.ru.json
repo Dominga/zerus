@@ -812,6 +812,7 @@
   "Copied as Markdown": "Скопировано как Markdown",
   "Copies of large task messages that the background service could not remove. Removing a copy never sends or cancels the message.": "Копии больших сообщений задачам, которые фоновая служба не смогла удалить. Удаление копии не отправляет и не отменяет сообщение.",
   "Copy": "Копировать",
+  "Copy %1": "Копировать: %1",
   "Copy Homebrew command": "Скопировать команду Homebrew",
   "Copy agent ID": "Копировать ID агента",
   "Copy and paste in Terminal": "Копировать и вставлять в терминале",

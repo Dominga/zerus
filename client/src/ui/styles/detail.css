@@ -385,6 +385,9 @@
   .irow-val.mono { font-size: .94em; }
   .irow-label { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--z-color-dim); }
   .irow .icon-btn.small { flex: none; margin-right: -4px; }
+  /* The copy button shows on hover or keyboard focus, so values stay uncluttered (owner 2026-11-07). */
+  .irow .irow-copy { opacity: 0; transition: opacity .12s; }
+  .irow:hover .irow-copy, .irow:focus-within .irow-copy { opacity: 1; }
   .irow.done .irow-ico { color: var(--z-color-accent); }
   .irow.doing .irow-ico { color: var(--z-color-warn); }
   .irow.agent.working .irow-label { color: var(--z-color-status-working); }

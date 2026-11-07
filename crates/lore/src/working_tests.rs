@@ -221,3 +221,98 @@ fn the_plan_clock_reads_closed_items() {
     assert_eq!(clock.closed_at("", "#ship#3"), Some(1_794_009_600));
     assert_eq!(clock.closed_at("", "ship#4"), None);
 }
+
+/// Task 187 (HIGH 7): the cleanup a full file runs before a write knows no
+/// task: a closed task stays closed (OpenClock reopened every one, so their
+/// pulses never expired and the cleanup freed nothing).
+#[test]
+fn a_full_file_cleanup_never_reopens_a_closed_task() {
+    let (_dir, store) = open(Settings::default());
+    let entry = store.pulse(&pulse("dev", "#1", "parsed"), T0).unwrap().entry;
+    let closed = T0 + DAY;
+    store.cleanup(T0 + DAY, &Closed(Some(closed))).unwrap();
+    assert_eq!(store.get(&entry.id, T0 + DAY).unwrap().unwrap().expires, Some(closed + 14 * DAY));
+    // The full file's pass (UnknownClock) keeps the close.
+    store.cleanup(T0 + 2 * DAY, &UnknownClock).unwrap();
+    assert_eq!(store.get(&entry.id, T0 + 2 * DAY).unwrap().unwrap().expires, Some(closed + 14 * DAY));
+    // A clock that does know the task is open still reopens it.
+    store.cleanup(T0 + 3 * DAY, &Closed(None)).unwrap();
+    assert_eq!(store.get(&entry.id, T0 + 3 * DAY).unwrap().unwrap().expires, None);
+}
+
+/// Task 187 (HIGH 6): everything the working row refuses is refused by
+/// `check_brief` before the durable file is committed.
+#[test]
+fn a_brief_is_checked_before_anything_is_written() {
+    let (_dir, store) = open(Settings::default());
+    assert!(store.check_brief("", "text", T0).unwrap_err().message.contains("names its task"));
+    assert!(store.check_brief("#1", "   ", T0).unwrap_err().message.contains("is empty"));
+    assert!(store.check_brief("#1", &"x".repeat(BRIEF_BYTES + 1), T0).unwrap_err().message.contains("8 KiB"));
+    store.check_brief("#1", "the plan", T0).unwrap();
+    assert!(store.brief_of("t", "#1", None, T0).unwrap().is_none(), "a check writes nothing");
+    let (_full_dir, full) = open(Settings { file_bytes: 1, ..Settings::default() });
+    assert_eq!(full.check_brief("#1", "the plan", T0).unwrap_err().message, "the working tier is full (0 MiB)");
+}
+
+/// Task 187 (MEDIUM): search rows are keyed by their entry's rowid: a delete
+/// removes exactly its own, and a version 1 store is reindexed once on open.
+#[test]
+fn search_rows_follow_their_entry_by_rowid_and_old_stores_are_reindexed() {
+    let (dir, store) = open(Settings::default());
+    let keep = store.pulse(&pulse("dev", "", "parsed the scene graph"), T0).unwrap().entry;
+    let gone = store.pulse(&pulse("qa", "", "rendered the black frame"), T0).unwrap().entry;
+    let rowid = |id: &str| store.db.query_row("SELECT rowid FROM entries WHERE id = ?1", [id], |row| row.get::<_, i64>(0)).unwrap();
+    let words_rowid: i64 = store.db.query_row("SELECT rowid FROM words WHERE id = ?1", [&keep.id], |row| row.get(0)).unwrap();
+    assert_eq!(words_rowid, rowid(&keep.id));
+    store.delete_rows(std::slice::from_ref(&gone.id)).unwrap();
+    let left: i64 = store.db.query_row("SELECT COUNT(*) FROM words", [], |row| row.get(0)).unwrap();
+    assert_eq!(left, 1);
+    assert_eq!(store.search("scene", &Viewer::owner(), T0).unwrap().len(), 1);
+    // A version 1 store: search rows with their own rowids, reindexed once.
+    store.db.execute_batch("DELETE FROM words; DELETE FROM terms; PRAGMA user_version = 1;").unwrap();
+    store.db.execute("INSERT INTO words(rowid, id, main) VALUES(9999, ?1, 'parsed the scene graph')", [&keep.id]).unwrap();
+    drop(store);
+    let reopened = Store::open_at(&dir.path().join(FILE_NAME), &Settings::default(), &[]).unwrap();
+    let version: i64 = reopened.db.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+    assert_eq!(version, USER_VERSION);
+    let rowids: Vec<i64> = {
+        let mut statement = reopened.db.prepare("SELECT rowid FROM words").unwrap();
+        statement.query_map([], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    };
+    assert_eq!(rowids, [rowid_of(&reopened, &keep.id)]);
+    assert_eq!(reopened.search("scene", &Viewer::owner(), T0).unwrap().len(), 1);
+}
+
+fn rowid_of(store: &Store, id: &str) -> i64 {
+    store.db.query_row("SELECT rowid FROM entries WHERE id = ?1", [id], |row| row.get(0)).unwrap()
+}
+
+/// Task 187 (MEDIUM): an unread message's expiry event is written in the
+/// same transaction as its delete, so it is in the journal exactly once.
+#[test]
+fn an_unread_expiry_event_is_written_with_its_delete_once() {
+    let (_dir, store) = open(Settings::default());
+    let unread = store.send(&message("owner", "please confirm the release", false), None, T0).unwrap().entry;
+    let cleaned = store.cleanup(T0 + 30 * DAY, &OpenClock).unwrap();
+    assert!(store.get(&unread.id, T0 + 30 * DAY).unwrap().is_none());
+    assert_eq!(cleaned.events.iter().filter(|e| e["kind"] == "working_unread_expired").count(), 1);
+    let journal = store.events(0, 100).unwrap();
+    assert_eq!(journal.iter().filter(|e| e["kind"] == "working_unread_expired").count(), 1);
+    // A second pass finds nothing to tell again.
+    store.cleanup(T0 + 31 * DAY, &OpenClock).unwrap();
+    assert_eq!(store.events(0, 100).unwrap().iter().filter(|e| e["kind"] == "working_unread_expired").count(), 1);
+}
+
+/// Task 187 (MEDIUM): each cleanup transaction deletes at least one row, its
+/// budget counted from BEGIN: a spent budget still finishes the pass instead
+/// of looping on empty transactions.
+#[test]
+fn a_spent_transaction_budget_still_finishes_the_pass() {
+    let (_dir, store) = open(Settings::default());
+    for n in 0..5 {
+        store.pulse(&pulse(&format!("m{n}"), "", "x"), T0).unwrap();
+    }
+    store.budget.set(Duration::ZERO);
+    let cleaned = store.cleanup(T0 + 15 * DAY, &OpenClock).unwrap();
+    assert_eq!((cleaned.deleted, cleaned.more), (5, false));
+}

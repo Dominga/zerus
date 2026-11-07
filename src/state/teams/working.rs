@@ -148,6 +148,9 @@ fn digest(text: &str) -> String {
 
 /// Stores one message; the same request id answers the message it stored
 /// (`false`: not new) and a request id reused for another text is refused.
+/// Task 184: the text is working-tier text (docs/lore.md 11.9), so it is stored
+/// redacted, never refused; the digest is of the redacted text, so a retry of
+/// the same request stays idempotent.
 pub(crate) fn post(tx: &Transaction, team: &str, new: &NewMessage, now: f64) -> anyhow::Result<(Message, bool)> {
     anyhow::ensure!(!new.request_id.is_empty() && !new.to.is_empty(), "A message names its request id and its recipient");
     anyhow::ensure!(!new.text.trim().is_empty(), "A message has text");
@@ -157,7 +160,8 @@ pub(crate) fn post(tx: &Transaction, team: &str, new: &NewMessage, now: f64) -> 
         TEXT_LIMIT / 1024,
         new.text.len()
     );
-    let wanted = digest(new.text);
+    let text = super::secrets::redact_working(new.text);
+    let wanted = digest(&text);
     let existing = tx
         .query_row(&format!("SELECT {COLUMNS} FROM working_messages WHERE request_id=?1"), params![new.request_id], row)
         .optional()?;
@@ -174,7 +178,7 @@ pub(crate) fn post(tx: &Transaction, team: &str, new: &NewMessage, now: f64) -> 
     tx.execute(
         "INSERT INTO working_messages(id,request_id,team,by,to_member,kind,urgency,text,digest,at,state,expires)
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'queued',?11)",
-        params![id, new.request_id, team, new.by, new.to, new.kind, new.urgency.as_str(), new.text, wanted, now, now + UNREAD_DAYS * 86_400.0],
+        params![id, new.request_id, team, new.by, new.to, new.kind, new.urgency.as_str(), text, wanted, now, now + UNREAD_DAYS * 86_400.0],
     )?;
     let stored = tx.query_row(&format!("SELECT {COLUMNS} FROM working_messages WHERE id=?1"), params![id], row)?;
     Ok((stored, true))
@@ -288,7 +292,8 @@ pub(crate) fn cleanup(tx: &Transaction, team: &str, now: f64) -> anyhow::Result<
     let mut events = Vec::new();
     for message in &expired {
         if message.state != "read" {
-            let first: String = message.text.chars().take(80).collect();
+            // Task 184: the snippet is working-tier text still (11.9).
+            let first: String = super::secrets::redact_working(&message.text).chars().take(80).collect();
             events.push(Event::new(
                 "working_unread_expired",
                 json!({"id":message.id,"from":message.by,"to":message.to,"at":message.at,"text":first}),

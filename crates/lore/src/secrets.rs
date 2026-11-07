@@ -4,6 +4,10 @@
 //! entries and history excerpts are redacted instead: a match becomes
 //! `[redacted: <pattern>]`. Best-effort: it finds these patterns and
 //! high-entropy strings; it does not prove a text holds no secret.
+//!
+//! hgs does not link this crate, so `src/state/teams/secrets.rs` carries a copy
+//! of the scanner; both copies run the vectors of
+//! `tests/fixtures/secret-scan-vectors.json`.
 use crate::LoreError;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -42,11 +46,14 @@ fn patterns() -> &'static [Pattern] {
             p("google-api-key", "a Google API key", r"\bAIza[0-9A-Za-z_-]{35}", 0),
             p("jwt", "a JSON Web Token", r"\beyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]+", 0),
             p("url-credentials", "credentials in a URL", r"[A-Za-z][A-Za-z0-9+.-]*://[^\s:/@]+:([^\s@/]+)@", 1),
+            // The name ends with one of these words, so `DB_PASSWORD`,
+            // `access_token`, `client_secret` and a quoted JSON `"password"`
+            // count too; the name is not the secret, its value is.
             p(
                 "secret-assignment",
                 "a secret assigned to a name",
-                r#"(?i)\b(?:password|passwd|secret|token|api_key|apikey)\s*[=:]\s*["']?([^\s"',;]{8,})"#,
-                1,
+                r#"(?i)(?:^|[^A-Za-z0-9])([A-Za-z0-9_.-]*(?:password|passwd|secret|token|api_key|apikey))\s*["']?\s*[=:]\s*["']?([^\s"',;]{8,})"#,
+                2,
             ),
         ]
     })
@@ -78,58 +85,75 @@ pub fn entropy(text: &str) -> f64 {
     }).sum()
 }
 
+/// A value that is a placeholder, not a secret: `<your token>`, `${NAME}`,
+/// `********`, or a run of mask characters (`xxxxxxxxxxxx`). Only a value that
+/// is *all* mask characters is a placeholder: `xxxxK7p2Lq9` is a secret whose
+/// text happens to start with x.
 fn placeholder(value: &str) -> bool {
-    let lower = value.to_lowercase();
-    (value.starts_with('<') && value.ends_with('>')) || value.contains("***") || lower.contains("xxxx") || value.starts_with("${")
+    (value.starts_with('<') && value.ends_with('>'))
+        || value.starts_with("${")
+        || value.contains("***")
+        || (value.chars().any(|ch| ch.is_alphabetic())
+            && value.chars().all(|ch| matches!(ch, 'x' | 'X' | '*' | '-' | '_' | '.' | '#' | ' ')))
 }
 
-/// A name made of word parts (`MSI_CodexSandboxUsers_group`,
-/// `desktop-catalog-changes-v1`): each part a word, a word with a number, or
-/// a number. A random secret's parts are not.
-fn name_like(token: &str) -> bool {
-    let parts: Vec<&str> = token.split(['-', '_']).filter(|part| !part.is_empty()).collect();
-    parts.len() >= 2
-        && parts.iter().all(|part| {
-            let letters = part.trim_end_matches(|ch: char| ch.is_ascii_digit());
-            letters.chars().all(|ch| ch.is_ascii_alphabetic())
-                && (letters.is_empty() || letters.chars().skip(1).all(|ch| ch.is_ascii_lowercase()) || letters.chars().all(|ch| ch.is_ascii_uppercase()) || camel(letters))
-        })
-}
-
-/// `CodexSandboxUsers`: capitalized words run together.
-fn camel(word: &str) -> bool {
-    if !word.starts_with(|ch: char| ch.is_ascii_uppercase()) {
+/// A segment that reads as a word: letters, optionally a trailing number
+/// (`post`, `process2`, `v15`, `2026`). A random token's digits sit between its
+/// letters (`Qx7pL2mZ9vR4...`), so a base64 string is not a word.
+fn word(segment: &str) -> bool {
+    if segment.is_empty() || segment.chars().count() > 40 {
         return false;
     }
-    let mut previous_upper = false;
-    for ch in word.chars() {
-        if ch.is_ascii_uppercase() && previous_upper {
+    if segment.chars().all(|ch| ch.is_ascii_digit()) {
+        return true;
+    }
+    let mut letters = 0;
+    let mut digits_after_letters = false;
+    for ch in segment.chars() {
+        if ch.is_ascii_digit() {
+            digits_after_letters = true;
+            continue;
+        }
+        if !ch.is_ascii_alphabetic() || digits_after_letters {
             return false;
         }
-        previous_upper = ch.is_ascii_uppercase();
+        letters += 1;
     }
-    true
+    letters > 0
 }
 
+/// Whether a token reads as a path or a dotted name (`src/render/post.py`,
+/// `scene.depth_buffer`), so the entropy test may let it pass. A base64 string
+/// with `/` or `.` does not: its parts are not words.
+fn path_or_name(token: &str) -> bool {
+    if token.contains("://") {
+        return true;
+    }
+    let parts: Vec<&str> = token.split(['/', '.', '-', '_']).filter(|part| !part.is_empty()).collect();
+    parts.len() >= 2
+        && parts.len() <= 24
+        && parts.iter().any(|part| part.chars().any(|ch| ch.is_alphabetic()))
+        && parts.iter().all(|part| segment_ok(part))
+}
+
+/// A path segment: a word, a hex commit or hash, or a UUID (a path may hold
+/// any of them, as `.git/objects/<hash>/` does).
+fn segment_ok(segment: &str) -> bool {
+    word(segment)
+        || (segment.len() >= 7 && segment.len() <= 64 && segment.chars().all(|ch| ch.is_ascii_hexdigit()))
+        || uuid_re().is_match(segment)
+}
+
+/// Exempt: a hex string of 7 to 64 characters (a commit or hash, in any
+/// field), a UUID, and a token that reads as a path or a name.
 fn exempt_token(token: &str) -> bool {
     let hex = token.len() >= 7 && token.len() <= 64 && token.chars().all(|ch| ch.is_ascii_hexdigit());
-    hex || uuid_re().is_match(token) || token.contains('/') || token.contains('.') || name_like(token)
+    hex || uuid_re().is_match(token) || path_or_name(token)
 }
-
-/// Fields that hold names, ids, references and stamps, not prose: the
-/// patterns apply, the entropy test does not (a long id slug is not a key).
-const STRUCTURAL: &[&str] = &[
-    "id", "kind", "area", "status", "by", "created", "updated", "plan", "superseded_by", "reversed_by", "decided_by", "measured_at",
-    "refs", "commits", "signals", "records", "deps", "path",
-];
 
 /// Everything in `text` that looks like a secret, in order, without overlaps.
 /// A literal in `allow` is not a match.
 pub fn scan(text: &str, allow: &[String]) -> Vec<Found> {
-    scan_with(text, allow, true)
-}
-
-fn scan_with(text: &str, allow: &[String], entropy_test: bool) -> Vec<Found> {
     let mut found: Vec<Found> = Vec::new();
     let overlaps = |found: &[Found], start: usize, end: usize| found.iter().any(|f| start < f.end && f.start < end);
     for pattern in patterns() {
@@ -145,7 +169,7 @@ fn scan_with(text: &str, allow: &[String], entropy_test: bool) -> Vec<Found> {
             found.push(Found { pattern: pattern.name, start: hit.start(), end: hit.end() });
         }
     }
-    for token in token_re().find_iter(text).filter(|_| entropy_test) {
+    for token in token_re().find_iter(text) {
         // A sentence's full stop is not part of the token.
         let word = token.as_str().trim_end_matches('.');
         let end = token.start() + word.len();
@@ -215,10 +239,9 @@ impl Refused {
 }
 
 fn walk(value: &Value, path: &str, allow: &[String], out: &mut Vec<Refused>) {
-    let top = path.split(['.', '[']).next().unwrap_or_default();
     match value {
         Value::String(text) => {
-            for f in scan_with(text, allow, !STRUCTURAL.contains(&top)) {
+            for f in scan(text, allow) {
                 let secret = &text[f.start..f.end];
                 out.push(Refused { field: path.to_owned(), pattern: f.pattern, length: secret.chars().count(), masked: masked(secret) });
             }
@@ -262,46 +285,18 @@ pub fn guard(record: &Value, allow: &[String]) -> Result<(), LoreError> {
 mod tests {
     use super::*;
 
-    fn first(text: &str) -> Option<&'static str> {
-        scan(text, &[]).first().map(|f| f.pattern)
-    }
-
-    /// 11.15 test 8: one sample per pattern, and the near misses that pass.
+    /// docs/lore.md 11.15 test 8: the shared vectors, one sample per pattern and
+    /// the near misses that pass, are the same for hgs's copy of the scanner.
     #[test]
-    fn each_pattern_is_found_and_near_misses_pass() {
-        let samples = [
-            ("-----BEGIN RSA PRIVATE KEY-----", "pem-private-key"),
-            ("key AKIAABCDEFGHIJKLWXYZ in the log", "aws-access-key-id"),
-            ("ghp_0123456789abcdefghijABCDEFGHIJ012345", "github-token"),
-            ("xoxb-1234567890-abcdefghij", "slack-token"),
-            ("hf_abcdefghijklmnopqrstuvwxyzABCDEF", "huggingface-token"),
-            ("sk-ant-abcdefghijklmnopqrstuv", "api-key"),
-            ("sk-abcdefghijklmnopqrstuv123", "api-key"),
-            ("AIzaSyA1234567890abcdefghijklmnopqrstuv", "google-api-key"),
-            ("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abc123def", "jwt"),
-            ("https://admin:hunter2pass@example.invalid/x", "url-credentials"),
-            ("password = Tr0ub4dor&3x", "secret-assignment"),
-            ("API_KEY: q8Zr2LmPw9", "secret-assignment"),
-            ("value Qx7pL2mZ9vR4tY8wK3nB6cD1fG5hJ0sA here", "high-entropy"),
-        ];
-        for (text, pattern) in samples {
-            assert_eq!(first(text), Some(pattern), "{text}");
+    fn the_shared_vectors_are_found_or_clean() {
+        let vectors: Value = serde_json::from_str(include_str!("../../../tests/fixtures/secret-scan-vectors.json")).expect("the shared secret vectors");
+        for case in vectors["found"].as_array().expect("found vectors") {
+            let text = case["text"].as_str().unwrap();
+            let pattern = case["pattern"].as_str().unwrap();
+            assert_eq!(scan(text, &[]).first().map(|found| found.pattern), Some(pattern), "{text}");
         }
-        let misses = [
-            "commit 3f2a9c1d4e5b6a7c8d9e0f1a2b3c4d5e6f7a8b9c fixed it",
-            "request 0f3571e5-acd5-42d0-b5be-b87e58d5a021",
-            "see src/render/post_process/temporal_resolve_pass.py",
-            "scene.depth_buffer_resolution_multiplier",
-            "password = <your password>",
-            "token: ${GITHUB_TOKEN}",
-            "secret: ********",
-            "api_key = xxxxxxxxxxxx",
-            "the pipeline renders frames in a deferred pass",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "the group MSI_CodexSandboxUsers_group reads it",
-            "nomic_embed_text_v15_weights_q8 and desktop-catalog-changes-v1",
-        ];
-        for text in misses {
+        for case in vectors["clean"].as_array().expect("clean vectors") {
+            let text = case["text"].as_str().unwrap();
             assert_eq!(scan(text, &[]), Vec::new(), "{text}");
         }
     }
@@ -319,12 +314,20 @@ mod tests {
     }
 
     #[test]
-    fn ids_and_references_are_not_entropy_tested() {
-        let slug = "Qx7pL2mZ9vR4tY8wK3nB6cD1fG5hJ0sA";
-        let record = json!({"id": slug, "refs": {"records": [slug]}, "superseded_by": slug, "body": "plain words"});
+    fn ids_and_references_that_read_as_ids_are_not_entropy_tested() {
+        // An id, a commit, a path and a slug read as themselves; a random token
+        // in an id field is still a secret (no field name is a blind spot).
+        let record = json!({
+            "id": "f-3f2a9c1d",
+            "refs": {"records": ["f-3f2a9c1d"], "files": ["src/render/post_process/temporal_resolve_pass.py"]},
+            "commits": ["3f2a9c1d4e5b6a7c8d9e0f1a2b3c4d5e6f7a8b9c"],
+            "path": "src/render/post_process/temporal_resolve_pass.py",
+            "body": "plain words"
+        });
         assert!(guard(&record, &[]).is_ok());
-        let record = json!({"id": "a", "body": slug});
-        assert_eq!(check_record(&record, &[])[0].field, "body");
+        let random = "Qx7pL2mZ9vR4tY8wK3nB6cD1fG5hJ0sA";
+        assert_eq!(check_record(&json!({"id": random}), &[])[0].field, "id");
+        assert_eq!(check_record(&json!({"refs": {"records": [random]}}), &[])[0].field, "refs.records[0]");
         // A pattern still applies to an id field.
         assert!(guard(&json!({"id": "AKIAABCDEFGHIJKLWXYZ"}), &[]).is_err());
     }

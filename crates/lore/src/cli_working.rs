@@ -43,8 +43,16 @@ fn existing(ctx: &Ctx) -> Result<Option<working::Store>> {
     working::Store::open_at(&path, &ctx.config.working, &ctx.config.secrets_allow).map(Some)
 }
 
-/// One cleanup pass when one is due (at open, then every 10 minutes); its
-/// failure is a note, never an error to the caller.
+/// Task 187 (11.4: a read never waits for the cleanup): a read only takes
+/// the note of a failed cleanup; expired entries are filtered by every read
+/// anyway, and the next write runs the pass that is due.
+fn read_notes(store: &working::Store) -> Vec<String> {
+    store.take_cleanup_note().into_iter().collect()
+}
+
+/// One cleanup pass when one is due (at open, then every 10 minutes), before
+/// a write; its failure is a note, never an error to the caller. It never
+/// waits for another pass (the working lock is only tried).
 fn tidy(ctx: &mut Ctx, store: &working::Store) -> Vec<String> {
     let at = now(ctx);
     if !store.cleanup_due(at) {
@@ -122,7 +130,7 @@ pub(super) fn tiers(ctx: &mut Ctx, query: &str, durable: &[search::Found], notes
     let mut notes: Vec<String> = notes.to_vec();
     let mut working: Vec<(Entry, f64, Vec<String>)> = Vec::new();
     if let Some(store) = &store {
-        notes.extend(tidy(ctx, store));
+        notes.extend(read_notes(store));
         working = store.search(query, &viewer(ctx)?, at)?;
     }
     let mut history: Vec<HistoryHit> = Vec::new();
@@ -325,7 +333,7 @@ pub(super) fn run(ctx: &mut Ctx, io: &mut Io) -> Result<i32> {
                 say_list(ctx, io, &[], &[]);
                 return Ok(0);
             };
-            let notes = tidy(ctx, &store);
+            let notes = read_notes(&store);
             let since = ctx.args.one("since").map(|text| since(&text)).transpose()?;
             let by = ctx.args.by.clone();
             let task = ctx.args.one("task");
@@ -358,7 +366,7 @@ pub(super) fn run(ctx: &mut Ctx, io: &mut Io) -> Result<i32> {
                 say_list(ctx, io, &[], &[]);
                 return Ok(0);
             };
-            let notes = tidy(ctx, &store);
+            let notes = read_notes(&store);
             let reader = viewer(ctx)?;
             let (to, from) = (ctx.args.one("to"), ctx.args.one("from"));
             let list = store.messages(&reader, ctx.args.flag("unread"), to.as_deref(), from.as_deref(), at)?;
@@ -392,6 +400,9 @@ pub(super) fn run(ctx: &mut Ctx, io: &mut Io) -> Result<i32> {
             }
             let store = store(ctx)?;
             let mut notes = tidy(ctx, &store);
+            // Task 187 (11.12): everything the working row would refuse is
+            // checked first; only then is the durable file committed.
+            store.check_brief(&task, &text, at)?;
             let team = team(ctx);
             let title = ctx.args.one("title").unwrap_or_else(|| task.clone());
             let version = store.brief_of(&team, &task, None, at)?.map(|entry| entry.version).unwrap_or(0) + 1;
@@ -539,13 +550,18 @@ fn cmd_promote(ctx: &mut Ctx, io: &mut Io) -> Result<i32> {
     if ctx.args.flag("dry-run") {
         return dry_run(ctx, io, &draft);
     }
+    // Task 187: the entry stays protected from the cleanup until its
+    // promotion is recorded on it; a crash after the durable write leaves the
+    // record, which a retry finds (`existing`) and records then.
     store.reading(&id, at);
-    let result = promote::promote(&ctx.config, &entry, draft, &options);
+    let result = promote::promote(&ctx.config, &entry, draft, &options).and_then(|promoted| {
+        if !promoted.existing {
+            store.set_promoted(&id, &promoted.record)?;
+        }
+        Ok(promoted)
+    });
     store.done_reading(&id);
     let promoted = result?;
-    if !promoted.existing {
-        store.set_promoted(&id, &promoted.record)?;
-    }
     say_promoted(ctx, io, &promoted);
     Ok(0)
 }

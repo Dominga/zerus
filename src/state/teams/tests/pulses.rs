@@ -100,3 +100,43 @@ fn the_digest_lists_each_member_once() {
     assert_eq!(text, "What each member is doing (latest pulse):\n- dev (Backend) #12, 10 min ago; done: #12 changed src/post.rs; blocked: cargo failed");
     assert_eq!(digest(&team, &[], 0.0), "");
 }
+
+/// Task 187: a reopened task's pulses lose their expiry and stay; a task
+/// closed without a decision (cancelled before a hand-out) and an open task of
+/// a finished team expire from the first pass that saw them closed, a time
+/// that never moves (team.updated does), so they do expire.
+#[test]
+fn pulse_expiry_follows_reopens_undecided_closes_and_a_finished_team() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let pulse = |member: &str, task: u32, at: f64| Pulse {
+            team: "t".into(), member: member.into(), task, done: "worked".into(), at, source: "auto".into(), ..Pulse::default()
+        };
+        for (member, task) in [("dev", 1), ("qa", 2), ("ops", 3)] {
+            store.put_pulse(&pulse(member, task, 1_000.0)).unwrap();
+        }
+        let mut team = crate::state::teams::model::Team { id: "t".into(), updated: 5_000.0, ..Default::default() };
+        // #1 accepted at 2,000; #2 cancelled with no attempt; #3 open.
+        let mut accepted = Task { id: 1, status: TaskStatus::Accepted, ..Default::default() };
+        accepted.attempts.push(Attempt { decided_at: Some(2_000.0), ..Default::default() });
+        team.tasks.push(accepted);
+        team.tasks.push(Task { id: 2, status: TaskStatus::Cancelled, ..Default::default() });
+        team.tasks.push(Task { id: 3, ..Default::default() });
+        assert_eq!(store.prune_pulses(&team, 3_000.0).unwrap(), 0);
+        // #1 is reopened before its expiry: its pulse stays past it.
+        team.tasks[0].status = TaskStatus::InProgress;
+        team.tasks[0].attempts.clear();
+        assert_eq!(store.prune_pulses(&team, 3_000.0 + KEEP_SECONDS + 10.0).unwrap(), 1, "only the cancelled task's pulse goes");
+        assert_eq!(store.pulses("t", Some("dev"), 9e9, 10).len(), 1, "the reopened task's pulse stays");
+        assert!(store.pulses("t", Some("qa"), 9e9, 10).is_empty(), "the undecided cancel expired 14 days after it was first seen");
+        // The team finishes; its open tasks expire from the first pass that
+        // sees it finished, whatever team.updated does afterwards.
+        team.status = crate::state::teams::model::TeamStatus::Done;
+        let seen = 3_000.0 + KEEP_SECONDS + 20.0;
+        assert_eq!(store.prune_pulses(&team, seen).unwrap(), 0);
+        team.updated = seen + KEEP_SECONDS * 2.0;
+        assert_eq!(store.prune_pulses(&team, seen + KEEP_SECONDS - 1.0).unwrap(), 0);
+        assert_eq!(store.prune_pulses(&team, seen + KEEP_SECONDS).unwrap(), 2, "both open tasks' pulses expire");
+    });
+}

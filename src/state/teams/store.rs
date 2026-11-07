@@ -339,6 +339,12 @@ impl Store {
     pub(crate) fn put_pulse(&self, pulse: &super::pulses::Pulse) -> anyhow::Result<super::pulses::Pulse> {
         use super::pulses::{PER_TEAM, REPLACE_WITHIN};
         let mut pulse = pulse.clone();
+        // Task 184: a pulse is working-tier text (docs/lore.md 11.9): a token in
+        // a command line or a note is stored redacted, never refused, and the
+        // replacement is a visible `[redacted: <pattern>]` marker.
+        pulse.done = super::secrets::redact_working(&pulse.done);
+        pulse.next = super::secrets::redact_working(&pulse.next);
+        pulse.blocked = super::secrets::redact_working(&pulse.blocked);
         let previous: Option<String> = self
             .db
             .query_row(
@@ -377,17 +383,37 @@ impl Store {
 
     /// Task 133: the closed tasks' pulses expire 14 days after the close and
     /// a finished team's after its finish (11.3); at most 500 rows a call.
+    /// Task 187: a task decided at a known time expires from that time; a
+    /// task closed without one (cancelled before any hand-out) and an open
+    /// task of a finished team expire from the first pass that sees them
+    /// closed, a time that never moves again (never `team.updated`, which every
+    /// change moves, so a finished team never expired); a reopened task's
+    /// pulses lose their expiry, so they are never deleted while it is open.
     pub(crate) fn prune_pulses(&self, team: &Team, now: f64) -> anyhow::Result<usize> {
         use super::pulses::{closed_at, KEEP_SECONDS, PRUNE_ROWS};
         let finished = matches!(team.status, super::model::TeamStatus::Done | super::model::TeamStatus::Stopped);
         let mut changed = 0;
         for task in &team.tasks {
-            let closed = if finished { Some(closed_at(task).unwrap_or(team.updated)) } else { closed_at(task) };
-            let Some(closed) = closed else { continue };
-            changed += self.db.execute(
-                "UPDATE working_pulses SET expires=?1 WHERE team=?2 AND task=?3 AND (expires IS NULL OR expires<>?1)",
-                params![closed + KEEP_SECONDS, team.id, task.id],
-            )?;
+            match closed_at(task) {
+                Some(closed) => {
+                    changed += self.db.execute(
+                        "UPDATE working_pulses SET expires=?1 WHERE team=?2 AND task=?3 AND (expires IS NULL OR expires<>?1)",
+                        params![closed + KEEP_SECONDS, team.id, task.id],
+                    )?;
+                }
+                None if finished || task.status.finished() => {
+                    changed += self.db.execute(
+                        "UPDATE working_pulses SET expires=?1 WHERE team=?2 AND task=?3 AND expires IS NULL",
+                        params![now + KEEP_SECONDS, team.id, task.id],
+                    )?;
+                }
+                None => {
+                    changed += self.db.execute(
+                        "UPDATE working_pulses SET expires=NULL WHERE team=?1 AND task=?2 AND expires IS NOT NULL",
+                        params![team.id, task.id],
+                    )?;
+                }
+            }
         }
         let removed = self.db.execute(
             "DELETE FROM working_pulses WHERE id IN (SELECT id FROM working_pulses WHERE team=?1 AND expires IS NOT NULL AND expires<=?2 LIMIT ?3)",

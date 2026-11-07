@@ -25,6 +25,8 @@ struct Request {
     expected_conversation_id: String,
     expected_machine_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     cursor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     swarm_id: Option<String>,
@@ -72,7 +74,8 @@ impl Request {
             .ok_or_else(|| anyhow::anyhow!("Project request must be an object"))?;
         ensure!(
             base.iter().all(|key| object.contains_key(*key))
-                && object.keys().all(|key| base.contains(&key.as_str())
+                && object.keys().all(|key| key == "session_id"
+                    || base.contains(&key.as_str())
                     || if mutation {
                         fields.contains(&key.as_str())
                     } else {
@@ -87,6 +90,10 @@ impl Request {
         Ok(request)
     }
     fn validate(&self, mutation: bool) -> Result<()> {
+        ensure!(
+            self.session_id.as_deref().is_none_or(uuid),
+            "Invalid native session ID"
+        );
         ensure!(uuid(&self.request_id), "Invalid request UUID");
         ensure!(
             uuid(&self.expected_machine_id),
@@ -144,7 +151,11 @@ impl Request {
             record["name"] == self.name
                 && record["run_id"] == self.expected_run_id
                 && record["conversation_id"].as_str().unwrap_or_default()
-                    == self.expected_conversation_id,
+                    == self.expected_conversation_id
+                && self
+                    .session_id
+                    .as_ref()
+                    .is_none_or(|id| record["session_id"] == *id),
             "Session identity changed; no replacement was selected"
         );
         ensure!(
@@ -163,6 +174,9 @@ impl Request {
             "machine_id":self.expected_machine_id});
         if let Some(id) = &self.swarm_id {
             result["swarm_id"] = json!(id);
+        }
+        if let Some(id) = &self.session_id {
+            result["session_id"] = json!(id);
         }
         if let Some(id) = &self.project_id {
             result["project_id"] = json!(id);
@@ -185,12 +199,17 @@ struct Project {
 }
 struct Snapshot {
     key: Key,
+    session_id: Option<String>,
     current: String,
     membership: String,
     epoch: String,
     projects: Vec<Project>,
 }
+#[cfg(test)]
 fn snapshot(store: &Store, request: &Request) -> Result<Snapshot> {
+    snapshot_bound(store, request, request.session_id.as_deref())
+}
+fn snapshot_bound(store: &Store, request: &Request, session_id: Option<&str>) -> Result<Snapshot> {
     ensure!(
         store.imported && uuid(&store.node_id) && store.node_id == request.expected_machine_id,
         "Native computer or initialized project catalog changed"
@@ -200,20 +219,40 @@ fn snapshot(store: &Store, request: &Request) -> Result<Snapshot> {
         machine: store.catalog.machine(&store.node_id),
         session: request.name.clone(),
     };
-    let current = values
+    let primary = store.id_memberships.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("ID project membership is unavailable; refresh before assigning")
+    })?;
+    let resolved = session_id
+        .map(|id| primary.resolve(&store.catalog, &store.node_id, id))
+        .transpose()?
+        .flatten();
+    let (current, heads, conflict) = if let Some(record) = resolved {
+        (
+            record.value.as_str().unwrap_or("ungrouped").to_owned(),
+            record.heads,
+            record.conflict,
+        )
+    } else {
+        (
+            values
         .get(&key)
         .and_then(Value::as_str)
         .unwrap_or("ungrouped")
-        .to_owned();
-    let heads = store
+        .to_owned(),
+            store
         .catalog
         .versions()
         .remove(&key.token())
-        .unwrap_or_default();
-    let membership = hash(
-        &json!({"schema":1,"swarm_id":store.catalog.swarm_id,"machine_id":store.node_id,
-        "key":key,"run_id":request.expected_run_id,"conversation_id":request.expected_conversation_id,"heads":heads,"current":current}),
-    );
+        .unwrap_or_default(),
+            false,
+        )
+    };
+    let mut binding = json!({"schema":1,"swarm_id":store.catalog.swarm_id,"machine_id":store.node_id,
+        "key":key,"run_id":request.expected_run_id,"conversation_id":request.expected_conversation_id,"heads":heads,"current":current,"conflict":conflict});
+    if let Some(id) = session_id {
+        binding["session_id"] = json!(id);
+    }
+    let membership = hash(&binding);
     let mut projects = BTreeMap::new();
     for (key, value) in &values {
         if let Key::Project { id, field } = key {
@@ -257,6 +296,7 @@ fn snapshot(store: &Store, request: &Request) -> Result<Snapshot> {
     let epoch = hash(&json!({"schema":1,"swarm_id":store.catalog.swarm_id,"projects":ordered}));
     Ok(Snapshot {
         key,
+        session_id: session_id.map(str::to_owned),
         current,
         membership,
         epoch,
@@ -392,6 +432,19 @@ fn assign(store: &mut Store, request: &Request, snapshot: &Snapshot) -> Result<(
         snapshot.projects.iter().any(|project| project.id == id),
         "Chosen logical project is no longer live"
     );
+    if let Some(session_id) = &snapshot.session_id {
+        store
+            .id_memberships
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("ID membership unavailable"))?
+            .set(
+                &store.catalog,
+                &store.node_id,
+                &store.node_id,
+                session_id,
+                json!(id),
+            )?;
+    }
     store
         .catalog
         .set(&store.node_id, snapshot.key.clone(), json!(id))?;
@@ -461,11 +514,18 @@ pub(super) fn execute(config: &Config, value: Value, mutation: bool) -> Value {
                 return Ok(result);
             }
         }
-        crate::state::with_session_project_binding(&request.name, |record| {
+        crate::state::with_session_project_binding(&request.name,
+            request.session_id.as_deref(),
+            &request.expected_run_id,
+            &request.expected_conversation_id,
+            |record| {
             let mut store = LockedStore::load_scoped(config)?;
             if !mutation {
                 request.check_binding(record)?;
-                return page(&request, &store.data, &snapshot(&store.data, &request)?);
+                return page(&request, &store.data, &snapshot_bound(&store.data, &request,
+                            record["session_id"].as_str().filter(|id| uuid(id)),
+                        )?,
+                    );
             }
             ensure!(
                 store.data.node_id == request.expected_machine_id && uuid(&store.data.node_id),
@@ -479,7 +539,9 @@ pub(super) fn execute(config: &Config, value: Value, mutation: bool) -> Value {
             check_capacity(&receipts)?;
             let prepared = (|| -> Result<()> {
                 request.check_binding(record)?;
-                let current = snapshot(&store.data, &request)?;
+                let current = snapshot_bound(&store.data, &request,
+                        record["session_id"].as_str().filter(|id| uuid(id)),
+                    )?;
                 assign(&mut store.data, &request, &current)
             })();
             if let Err(error) = prepared {
@@ -494,7 +556,8 @@ pub(super) fn execute(config: &Config, value: Value, mutation: bool) -> Value {
             commit_assignment(&journal, &mut receipts, &request, || {
                 store.save_catalog_only()
             })
-        })
+        },
+        )
     })();
     match attempted {
         Ok(result) => result,
@@ -510,6 +573,7 @@ pub(super) fn execute(config: &Config, value: Value, mutation: bool) -> Value {
 mod tests {
     use super::super::catalog::{new_id, Catalog};
     use super::*;
+    use std::collections::BTreeSet;
     fn fixture() -> (Store, Request) {
         let mut store = Store {
             node_id: new_id(),
@@ -518,6 +582,7 @@ mod tests {
             bindings: BTreeMap::new(),
             peers: BTreeMap::new(),
             twins: Default::default(),
+            id_memberships: None,
         };
         for (id, name) in [
             ("ungrouped", "Inbox"),
@@ -535,12 +600,16 @@ mod tests {
                     .unwrap();
             }
         }
+        store.id_memberships = Some(super::super::session_memberships::Memberships::empty(
+            &store.catalog,
+        ));
         let request = Request {
             request_id: new_id(),
             name: "claude/example/task".into(),
             expected_run_id: "run-1".into(),
             expected_conversation_id: "one".into(),
             expected_machine_id: store.node_id.clone(),
+            session_id: None,
             cursor: None,
             swarm_id: None,
             membership_token: None,
@@ -558,6 +627,37 @@ mod tests {
             project_id: Some("two".into()),
             ..query.clone()
         }
+    }
+    #[test]
+    fn same_label_ids_keep_independent_grouping_through_rename_and_exchange() {
+        let (mut store, mut request)=fixture();
+        let a=new_id();let b=new_id();
+        let mut first=snapshot_bound(&store,&request,Some(&a)).unwrap();
+        request.swarm_id=Some(store.catalog.swarm_id.clone());
+        request.catalog_epoch=Some(first.epoch.clone());
+        request.membership_token=Some(first.membership.clone());
+        request.project_id=Some("one".into());
+        assign(&mut store,&request,&first).unwrap();
+        first=snapshot_bound(&store,&request,Some(&b)).unwrap();
+        request.catalog_epoch=Some(first.epoch.clone());
+        request.membership_token=Some(first.membership.clone());
+        request.project_id=Some("two".into());
+        assign(&mut store,&request,&first).unwrap();
+        assert_eq!(snapshot_bound(&store,&request,Some(&a)).unwrap().current,"one");
+        assert_eq!(snapshot_bound(&store,&request,Some(&b)).unwrap().current,"two");
+        request.name="claude/example/renamed".into();
+        assert_eq!(snapshot_bound(&store,&request,Some(&a)).unwrap().current,"one");
+        let mut peer=super::super::session_memberships::Memberships::empty(&store.catalog);
+        let source=store.id_memberships.as_mut().unwrap();
+        peer.merge(&store.catalog,&store.catalog.swarm_id,source.missing(&BTreeSet::new())).unwrap();
+        source.merge(&store.catalog,&store.catalog.swarm_id,peer.missing(&source.known())).unwrap();
+        assert_eq!(source.digest(),peer.digest());
+        assert_eq!(peer.resolve(&store.catalog,&store.node_id,&a).unwrap().unwrap().value,"one");
+        assert_eq!(peer.resolve(&store.catalog,&store.node_id,&b).unwrap().unwrap().value,"two");
+        source.set(&store.catalog,&store.node_id,&store.node_id,&a,Value::Null).unwrap();
+        assert_eq!(snapshot_bound(&store,&request,Some(&a)).unwrap().current,"ungrouped");
+        store.id_memberships=None;
+        assert!(snapshot_bound(&store,&request,Some(&a)).is_err());
     }
     #[test]
     fn logical_assignment_changes_only_the_exact_session_register() {

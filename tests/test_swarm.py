@@ -74,14 +74,14 @@ if (root / ('nosessionid-' + alias)).exists():
     # kinds without "session_id", shows no twins and, as its exchange denies
     # unknown fields, refuses a request that carries them.
     request = sys.stdin.read()
-    if args[1:] == ['exchange'] and {'twins', 'known_twins'} & set(json.loads(request)):
+    if args[1:] == ['exchange'] and {'twins', 'known_twins', 'id_memberships', 'known_id_memberships'} & set(json.loads(request)):
         print('unknown field from a newer member', file=sys.stderr); sys.exit(1)
     result = subprocess.run([os.environ['SWARM_TEST_HGS'], *args], input=request, env=env, text=True, capture_output=True)
     sys.stderr.write(result.stderr)
     if result.returncode: sys.exit(result.returncode)
     output = json.loads(result.stdout)
-    if 'kinds' in output: output['kinds'] = [kind for kind in output['kinds'] if kind != 'session_id']
-    for field in ('twins', 'known_twins'): output.pop(field, None)
+    if 'kinds' in output: output['kinds'] = [kind for kind in output['kinds'] if kind not in ('session_id', 'session_id_memberships_v1')]
+    for field in ('twins', 'known_twins', 'id_memberships', 'known_id_memberships'): output.pop(field, None)
     print(json.dumps(output)); sys.exit(0)
 if not (root / ('old-' + alias)).exists():
     os.execve(os.environ['SWARM_TEST_HGS'], [os.environ['SWARM_TEST_HGS'], *args], env)
@@ -905,6 +905,81 @@ class Swarm(unittest.TestCase):
         self.assertTrue(self.call('b', 'sync')['c']['ok'])
         self.assertEqual(self.tasks('c'), ['Add rate limiting'])
         self.assertNotIn('tasks_outdated', self.call('b', 'get')['peers']['c'])
+
+    def test_primary_id_grouping_survives_a_label_change_and_a_peer_round_trip(self):
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c'); self.converge()
+        original = self.call('a', 'get')
+        machine, swarm = original['node_id'], original['swarm_id']
+        ids = [str(uuid.uuid4()), str(uuid.uuid4())]
+        state = self.root / 'a/state'
+        (state / 'sessions').mkdir(parents=True, exist_ok=True)
+        name = 'claude/example/shared'
+        # Name layout A and ID layout B coexist. The ID index only routes; the
+        # production reader still verifies the exact record/run/conversation.
+        for index, session in enumerate(ids):
+            record = dict(version=1, agent='claude', name=name, session_id=session,
+                          run_id=f'run-{index}', conversation_id=f'conversation-{index}', state='paused')
+            if index: record['layout'] = 'id'
+            filename = session if index else hashlib.sha256(name.encode()).hexdigest()
+            ((state / 'sessions' if index else state) / (filename + '.json')).write_text(json.dumps(record))
+            (state / 'ids').mkdir(exist_ok=True)
+            (state / 'ids' / (session + '.json')).write_text(json.dumps(dict(version=1, name=name, kind='id' if index else 'record')))
+        def project(session, index, selected=None):
+            request = dict(request_id=str(uuid.uuid4()), name=name, session_id=session,
+                expected_run_id=f'run-{index}', expected_conversation_id=f'conversation-{index}', expected_machine_id=machine)
+            if selected is None:
+                return self.call('a', 'session-project', '--json', data=request)
+            current = self.call('a', 'session-project', '--json', data=request)
+            self.assertEqual(current['status'], 'ok', current)
+            request.update(swarm_id=swarm, membership_token=current['membership_token'],
+                           catalog_epoch=current['catalog_epoch'], project_id=selected)
+            result = self.call('a', 'assign-session', '--json', data=request)
+            self.assertEqual(result['status'], 'assigned', result)
+            self.assertEqual(self.call('a', 'assign-session', '--json', data=request), result)
+        project(ids[0], 0, 'a'); project(ids[1], 1, 'b')
+        self.assertEqual(project(ids[0], 0)['current_project_id'], 'a')
+        self.assertEqual(project(ids[1], 1)['current_project_id'], 'b')
+        # A real saved-session rename uses only an isolated tmux socket.
+        # No server or native agent is started for this metadata fixture.
+        import shlex
+        tmux = shutil.which('tmux')
+        self.assertIsNotNone(tmux)
+        socket_dir = self.root / 'private-sockets'; socket_dir.mkdir(mode=0o700)
+        wrapper = self.root / 'bin/tmux'
+        wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(tmux) + ' -S ' + shlex.quote(str(socket_dir / 'test.sock')) + ' -f /dev/null "$@"\n')
+        wrapper.chmod(0o700)
+        env = dict(self.env, HGS_CONFIG_DIR=str(self.root / 'a'), HGS_STATE_DIR=str(state))
+        renamed = 'claude/example/renamed'
+        result = subprocess.run([str(HGS), 'rename', name, '--session-id', ids[1], renamed], env=env, text=True, capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        name = renamed
+        self.assertEqual(project(ids[1], 1)['current_project_id'], 'b')
+        self.assertTrue(self.call('b', 'sync')['a']['ok'])
+        self.assertTrue(self.call('a', 'sync')['b']['ok'])
+        for node in 'ab':
+            records = self.call(node, 'get')['session_id_memberships']['records']
+            self.assertEqual({r['session_id']: r['project'] for r in records}, dict(zip(ids, ['a', 'b'])))
+            catalog = json.loads((self.root / node / 'swarm/catalog.json').read_text())
+            self.assertFalse(any(op['key']['session'] in ids for op in catalog['catalog']['operations'].values()
+                                 if op['key']['kind'] == 'session'))
+
+    def test_primary_id_operations_are_not_sent_to_an_old_peer(self):
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c'); self.converge()
+        original = self.call('a', 'get')
+        session = str(uuid.uuid4()); opid = str(uuid.uuid4())
+        graph = dict(schema=1, swarm_id=original['swarm_id'], operations={opid: dict(
+            id=opid, actor=original['node_id'], clock=1, parents=[],
+            key=dict(kind='session', machine=original['node_id'], session=session), value='a')})
+        path = self.root / 'a/swarm/session-id-memberships.json'; path.write_text(json.dumps(graph))
+        (self.root / 'nosessionid-b').touch()
+        before = self.call('a', 'get'); desired = copy.deepcopy(before['organization'])
+        desired['projects'][0]['name'] += ' update'
+        self.patch('a', before, desired)
+        self.assertTrue(self.call('a', 'sync')['b']['ok'])
+        self.assertEqual(self.call('b', 'get')['session_id_memberships']['records'], [])
+        (self.root / 'nosessionid-b').unlink()
+        self.assertTrue(self.call('a', 'sync')['b']['ok'])
+        self.assertEqual(self.call('b', 'get')['session_id_memberships']['records'][0]['session_id'], session)
 
     def test_membership_by_id_waits_for_every_member_to_list_the_kind(self):
         # zerus-ucck P2c-1: a desktop may read membership by ID only while

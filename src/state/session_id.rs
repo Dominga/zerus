@@ -106,12 +106,19 @@ pub(crate) fn select(name: &str, id: &str) {
 /// record under `name` is then refused as changed, and no reader reaches the
 /// label's first holder or another candidate's route.
 pub(crate) fn select_guarded(name: &str, id: &str, run: &str, conversation: &str) {
+    select_guarded_route(name, id, run, conversation, in_id_layout_under(name, id));
+}
+
+/// Metadata-only index routing under the state/provider transaction. The index
+/// grants nothing: the caller must verify the actual path, layout, ID, label,
+/// run and conversation. A missing ID route never becomes the label holder.
+pub(super) fn select_guarded_route(name: &str, id: &str, run: &str, conversation: &str, id_layout: bool) {
     set(Selection {
         name: name.into(),
         session_id: id.into(),
         conversation: conversation.into(),
         run: run.into(),
-        id_layout: in_id_layout_under(name, id),
+        id_layout,
         label: "The expected session".into(),
     });
 }

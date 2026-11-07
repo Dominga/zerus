@@ -47,6 +47,8 @@ fn read_store(config: &Config) -> Result<store::Store> {
 /// connector (the connector itself uses it, so querying back would recurse).
 pub(crate) fn context(config: &Config) -> Result<wire::Context> {
     let data = read_store(config)?;
+    let _primary =
+        super::session_memberships::Memberships::load(&config.dir.join("swarm"), &data.catalog)?;
     let members = match read_regular(
         &config.dir.join("swarm/session-id-peers.json"),
         MEMBERS_BYTES,

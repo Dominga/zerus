@@ -113,6 +113,26 @@ fn a_member_without_the_qa_right_and_a_folder_outside_the_root_are_refused() {
 }
 
 #[test]
+fn the_parent_lead_reads_its_scratch_teams_in_the_inbox() {
+    let mut team = team("D:/work/core");
+    team.scratch_teams.push(ScratchChild {
+        id: "s1".into(),
+        name: "Live check".into(),
+        task: 1,
+        member: "qa".into(),
+        at: crate::state::now(),
+        state: "created".into(),
+        stopped_at: None,
+    });
+    let items = super::super::inbox::items(&team);
+    assert!(
+        items.iter().any(|item| item.kind == "scratch_team" && item.summary.contains("Live check")),
+        "{:?}",
+        items.iter().map(|item| item.kind).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn the_creating_tasks_decision_stops_the_scratch_team_and_its_sessions() {
     let dir = work();
     crate::state::with_test_state_root(dir.path(), || {

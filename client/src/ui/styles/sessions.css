@@ -38,8 +38,8 @@
   .sp-notice { font-size: var(--fs-xs); }
   .sp-notice a { color: var(--z-color-accent); }
 
-  /* The list reserves its scroll-bar gutter, so rows never change width. */
-  .sp-scroll { flex: 1; min-height: 0; margin-top: -7px; padding-top: 0; overflow-y: auto; overflow-x: hidden; outline: none; contain: strict;
+  /* Stable classic gutter plus clearance for overlay bars, which consume no gutter. */
+  .sp-scroll { flex: 1; min-height: 0; margin-top: -7px; padding-top: 0; padding-inline-end: 12px; overflow-y: auto; overflow-x: hidden; outline: none; contain: strict;
     scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: var(--z-color-scrollbar) transparent; }
   .sp-foot { display: flex; align-items: center; gap: 2px; height: 30px; margin: 0 -4px; padding: 0 6px 0 12px; border-top: 1px solid var(--z-color-divider); font-size: 11px; color: var(--z-color-muted); }
   .sp-foot .icon-btn.small { width: 26px; height: 26px; }

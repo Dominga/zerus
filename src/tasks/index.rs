@@ -22,12 +22,20 @@ use std::path::Path;
 use std::time::Duration;
 use zerus_replica::ids;
 
-const FILE: &str = "task-index-v1.sqlite3";
+/// v2 (ROWS 5): rows carry their owner session for session-filtered pages
+/// (zerus-cg5h.26). A new file, not a new version of v1: an older hgs keeps
+/// rebuilding any index not of its own schema, so sharing one file would make
+/// an old and a new binary rebuild it in turn. Each keeps its own; this code
+/// never opens, migrates or removes task-index-v1.sqlite3.
+const FILE: &str = "task-index-v2.sqlite3";
 /// 2: the histories of recently read tasks as well (slice B). 3: rows and
 /// history headers carry the task's execution (zerus-cg5h.4), so rows cached
 /// without it are built again rather than mixed with rows that have it.
 /// 4: history entries naming an attempt carry its origin and phase (A4).
-const ROWS: i64 = 4;
+/// 5: rows carry their owner session and whether they are unassigned, and
+/// each loaded task's inventory version and whether it is Done; the meta
+/// holds the project document's version (zerus-cg5h.26, zerus-cg5h.21).
+const ROWS: i64 = 5;
 /// The index's version: its rows' shape and the replica's mark format, since
 /// a row remembers whether its task loaded, which the mark decides. An index
 /// made under another mark rule (before the seal, for one) is built again.
@@ -224,21 +232,42 @@ enum Derived {
         id: String,
         row: String,
         sends: Vec<i64>,
+        held: Option<Held>,
     },
-    Damaged(String),
+    /// A task that does not load, or whose header cannot be read; one that
+    /// loads still holds its inventory version.
+    Damaged(String, Option<Held>),
+}
+
+/// What the phone's inventory holds of a loaded task (zerus-cg5h.21): its
+/// version (canonical JSON) and whether it is Done. None when its stage
+/// cannot be read, so it is in no inventory read from the index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Held {
+    version: String,
+    done: bool,
+}
+
+fn held(task: &TaskDoc) -> Option<Held> {
+    let stage = task.stage().ok()?;
+    Some(Held {
+        version: serde_json::to_string(&task.inventory_version()).ok()?,
+        done: stage == Stage::Done,
+    })
 }
 
 fn derive(store: &ProjectStore, uuid: &str) -> Derived {
     #[cfg(test)]
     DECODED.with(|n| n.set(n.get() + 1));
-    let damaged = |error: String| Derived::Damaged(cut(&error, ERROR_BYTES).to_owned());
+    let damaged = |error: String, held| Derived::Damaged(cut(&error, ERROR_BYTES).to_owned(), held);
     let task = match store.load(uuid) {
         Ok(task) => task,
-        Err(error) => return damaged(error.to_string()),
+        Err(error) => return damaged(error.to_string(), None),
     };
+    let held = held(&task);
     let view = match task.view() {
         Ok(view) => view,
-        Err(error) => return damaged(error.to_string()),
+        Err(error) => return damaged(error.to_string(), held),
     };
     let (stage, rank, id) = (view.stage.as_str(), view.rank.clone(), view.id.clone());
     // What `ProjectStore::agent_starts_since` counts.
@@ -255,8 +284,9 @@ fn derive(store: &ProjectStore, uuid: &str) -> Derived {
             id,
             row: capped(row).to_string(),
             sends,
+            held,
         },
-        Err(error) => damaged(error.message),
+        Err(error) => damaged(error.message, held),
     }
 }
 
@@ -277,6 +307,70 @@ pub(super) struct Page {
     pub position: usize,
     pub next: Option<String>,
     pub previous: Option<String>,
+}
+
+/// The session a filtered page belongs to, by identity, never by name: its
+/// computer and session ID (`launch_id:...` or `run_id:...`).
+#[derive(Clone, Debug)]
+pub(super) struct Scope {
+    owner: String,
+}
+
+impl Scope {
+    pub(super) fn new(machine: &str, session_id: &str) -> Self {
+        Self { owner: owner_key(machine, session_id) }
+    }
+
+    /// Whether `row` (a listed task) belongs to this session's view.
+    pub(super) fn includes(&self, row: &Value) -> bool {
+        let (owner, unassigned) = owner_of_value(row);
+        unassigned || owner.as_deref() == Some(self.owner.as_str())
+    }
+}
+
+fn owner_key(machine: &str, session_id: &str) -> String {
+    format!("{machine}\n{session_id}")
+}
+
+/// A listed task's owner session and whether it is unassigned, as the desktop
+/// inspector shows them (`belongsTo` and `boardRows` in tasks-ui.ts): queued
+/// tasks belong to their target (a new session's or subagent's parent), others
+/// to their executor; a queued task for any session belongs to every session.
+/// A reference without a session ID belongs to none: names never match.
+fn owner_of_value(row: &Value) -> (Option<String>, bool) {
+    let queued = matches!(row["stage"].as_str(), Some("todo" | "backlog"));
+    let target = &row["target"];
+    if queued && target["kind"] == "any" {
+        return (None, true);
+    }
+    let reference = if queued {
+        if target["parent"].is_object() { &target["parent"] } else { target }
+    } else {
+        &row["session"]
+    };
+    let (machine, id) = (reference["machine"].as_str().unwrap_or(""), reference["session_id"].as_str().unwrap_or(""));
+    ((!machine.is_empty() && !id.is_empty()).then(|| owner_key(machine, id)), false)
+}
+
+fn owner_of(row: &str) -> (Option<String>, bool) {
+    serde_json::from_str::<Value>(row).map(|row| owner_of_value(&row)).unwrap_or((None, false))
+}
+
+/// Which rows one keyset range read covers.
+enum Part<'a> {
+    All,
+    Owner(&'a str),
+    Unassigned,
+}
+
+impl Part<'_> {
+    fn predicate(&self) -> &'static str {
+        match self {
+            Part::All => "",
+            Part::Owner(_) => "owner=?5 AND ",
+            Part::Unassigned => "unassigned=1 AND ",
+        }
+    }
 }
 
 fn scope(project: &str, stage: Stage) -> String {
@@ -387,11 +481,12 @@ fn connect(dir: &Path) -> Outcome<Connection> {
     let objects: i64 = db.query_row(
         "SELECT count(*) FROM sqlite_schema WHERE name IN
             ('meta', 'tasks', 'sends', 'tasks_order', 'tasks_short', 'tasks_checked', 'tasks_untrusted',
-             'sends_at', 'sends_uuid', 'histories', 'entries', 'entries_place', 'entries_id')",
+             'sends_at', 'sends_uuid', 'histories', 'entries', 'entries_place', 'entries_id',
+             'tasks_owner', 'tasks_unassigned', 'tasks_held')",
         [],
         |r| r.get(0),
     )?;
-    if version != SCHEMA || objects != 13 {
+    if version != SCHEMA || objects != 16 {
         // The one-task history cache before this index; nothing has it open
         // while the project lock is held.
         for suffix in ["", "-journal", "-wal", "-shm"] {
@@ -404,8 +499,12 @@ fn connect(dir: &Path) -> Outcome<Connection> {
             DROP TABLE IF EXISTS histories; DROP TABLE IF EXISTS entries;
             CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE tasks(uuid TEXT NOT NULL UNIQUE, files TEXT NOT NULL, stage TEXT, rank TEXT,
-                short_id TEXT, row TEXT, error TEXT, checked INTEGER NOT NULL, trusted INTEGER NOT NULL);
+                short_id TEXT, row TEXT, error TEXT, checked INTEGER NOT NULL, trusted INTEGER NOT NULL,
+                owner TEXT, unassigned INTEGER NOT NULL DEFAULT 0, version TEXT, done INTEGER);
             CREATE INDEX tasks_order ON tasks(stage, rank, uuid);
+            CREATE INDEX tasks_owner ON tasks(owner, stage, rank, uuid);
+            CREATE INDEX tasks_unassigned ON tasks(stage, rank, uuid) WHERE unassigned = 1;
+            CREATE INDEX tasks_held ON tasks(done, uuid) WHERE version IS NOT NULL;
             CREATE INDEX tasks_short ON tasks(short_id);
             CREATE INDEX tasks_checked ON tasks(checked);
             CREATE INDEX tasks_untrusted ON tasks(checked) WHERE trusted = 0;
@@ -538,6 +637,15 @@ impl<'a> Index<'a> {
             let list: Vec<String> = suspect.iter().cloned().collect();
             self.refresh(&list, None, Some(&suspect))?;
         }
+        // The project document's version, as the phone's inventory holds it:
+        // read again when the journal names it, and at a full check when its
+        // file changed; kept apart from the rows and their revision.
+        let noted = changes.documents.as_ref().is_some_and(|d| d.contains("project"));
+        let project = if full || noted || self.meta("project_version")?.is_none() {
+            self.project_version(now, noted)?
+        } else {
+            None
+        };
         let tx = self.db.transaction()?;
         {
             let mut set = tx.prepare("INSERT OR REPLACE INTO meta VALUES(?1, ?2)")?;
@@ -547,10 +655,35 @@ impl<'a> Index<'a> {
             if full {
                 set.execute(params!["checked", now.to_string()])?;
             }
+            match project {
+                Some((files, Some(version))) => {
+                    set.execute(params!["project_files", files])?;
+                    set.execute(params!["project_version", version])?;
+                }
+                // Unreadable now: read again at the next sync.
+                Some((_, None)) => {
+                    tx.execute("DELETE FROM meta WHERE key IN ('project_files', 'project_version')", [])?;
+                }
+                None => (),
+            }
             tx.execute("INSERT OR IGNORE INTO meta VALUES('revision', ?1)", [ids::new_uuid()])?;
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// The project document's stamp and version (canonical JSON; None when
+    /// it cannot be read) to keep, or None when the kept ones still hold:
+    /// its file's stamp is unchanged and the journal (`noted`) names no save.
+    /// An unsettled file's stamp is not kept, so it is read again next time.
+    fn project_version(&self, now: i64, noted: bool) -> Outcome<Option<(String, Option<String>)>> {
+        let (files, settled) = stamp_at(&self.store.dir().join("project.loro"), now);
+        let kept = self.meta("project_version")?.is_some() && self.meta("project_files")?.as_deref() == Some(files.as_str());
+        if kept && !noted {
+            return Ok(None);
+        }
+        let version = self.store.project_version().ok().and_then(|v| serde_json::to_string(&v).ok());
+        Ok(Some((if settled { files } else { String::new() }, version)))
     }
 
     /// Rows checked before this are suspect: read before the journal last
@@ -581,10 +714,15 @@ impl<'a> Index<'a> {
                 // When it was read orders the background queue; whether its
                 // files were settled decides if a page may trust it.
                 let (checked, trusted) = (read_at, settled);
-                let stored: Option<(String, Option<String>, Option<String>)> = self
+                #[allow(clippy::type_complexity)]
+                let stored: Option<(String, Option<String>, Option<String>, Option<Held>)> = self
                     .db
-                    .query_row("SELECT files, row, error FROM tasks WHERE uuid=?1", [uuid], |r| {
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                    .query_row("SELECT files, row, error, version, done FROM tasks WHERE uuid=?1", [uuid], |r| {
+                        let held = match (r.get::<_, Option<String>>(3)?, r.get::<_, Option<bool>>(4)?) {
+                            (Some(version), Some(done)) => Some(Held { version, done }),
+                            _ => None,
+                        };
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, held))
                     })
                     .optional()?;
                 let stamps = match known {
@@ -598,8 +736,8 @@ impl<'a> Index<'a> {
                 let derived = (!gone(&now)).then(|| derive(self.store, uuid));
                 // Read again to the same row: only its stamps and time change.
                 let same = match (&derived, &stored) {
-                    (Some(Derived::Row { row, .. }), Some((_, Some(old), None))) => row == old,
-                    (Some(Derived::Damaged(error)), Some((_, None, Some(old)))) => error == old,
+                    (Some(Derived::Row { row, held, .. }), Some((_, Some(old), None, was))) => row == old && held == was,
+                    (Some(Derived::Damaged(error, held)), Some((_, None, Some(old), was))) => error == old && held == was,
                     _ => false,
                 };
                 work.push((uuid, now, derived, same, checked, trusted));
@@ -625,17 +763,22 @@ impl<'a> Index<'a> {
                 tx.execute("DELETE FROM entries WHERE uuid=?1", [uuid])?;
                 match derived {
                     None => (),
-                    Some(Derived::Damaged(error)) => {
+                    Some(Derived::Damaged(error, held)) => {
+                        let (version, done) = held.map(|h| (h.version, h.done)).unzip();
                         tx.execute(
-                            "INSERT INTO tasks(uuid, files, error, checked, trusted) VALUES(?1, ?2, ?3, ?4, ?5)",
-                            params![uuid, files, error, checked, trusted],
+                            "INSERT INTO tasks(uuid, files, error, checked, trusted, version, done)
+                             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            params![uuid, files, error, checked, trusted, version, done],
                         )?;
                     }
-                    Some(Derived::Row { stage, rank, id, row, sends }) => {
+                    Some(Derived::Row { stage, rank, id, row, sends, held }) => {
+                        let (owner, unassigned) = owner_of(&row);
+                        let (version, done) = held.map(|h| (h.version, h.done)).unzip();
                         tx.execute(
-                            "INSERT INTO tasks(uuid, files, stage, rank, short_id, row, checked, trusted)
-                             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                            params![uuid, files, stage, rank, id, row, checked, trusted],
+                            "INSERT INTO tasks(uuid, files, stage, rank, short_id, row, checked, trusted, owner, unassigned,
+                                version, done)
+                             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                            params![uuid, files, stage, rank, id, row, checked, trusted, owner, unassigned, version, done],
                         )?;
                         for at in sends {
                             tx.execute("INSERT INTO sends VALUES(?1, ?2)", params![uuid, at])?;
@@ -660,13 +803,21 @@ impl<'a> Index<'a> {
     /// page, so every row stays reachable both ways; only an empty stage has
     /// none. Each row's files are checked first; a changed task is indexed
     /// again and the page read again.
+    #[cfg(test)]
     pub(super) fn page(&mut self, stage: Stage, limit: usize, from: &Anchor) -> Outcome<Page> {
+        self.page_in(stage, limit, from, None)
+    }
+
+    /// `page`, of only the rows of one session's view when `filter` is set:
+    /// two bounded keyset reads (its own rows, unassigned rows) merged in the
+    /// stage's order, with the same cursors.
+    pub(super) fn page_in(&mut self, stage: Stage, limit: usize, from: &Anchor, filter: Option<&Scope>) -> Outcome<Page> {
         let mut from = from.clone();
         // Rows read from their documents in this call are current even when
         // their files are not yet settled.
         let mut read = BTreeSet::new();
         for _ in 0..4 {
-            let rows = self.rows(stage, limit, &from)?;
+            let rows = self.rows_in(stage, limit, &from, filter)?;
             if rows.is_empty() {
                 match from {
                     Anchor::After(..) => {
@@ -699,9 +850,57 @@ impl<'a> Index<'a> {
                 read.extend(stale);
                 continue;
             }
-            return self.finish(stage, rows);
+            return self.finish(stage, rows, filter);
         }
         Err(Failure::Other)
+    }
+
+    fn parts(filter: Option<&Scope>) -> Vec<Part<'_>> {
+        match filter {
+            None => vec![Part::All],
+            Some(scope) => vec![Part::Owner(&scope.owner), Part::Unassigned],
+        }
+    }
+
+    fn rows_in(&self, stage: Stage, limit: usize, from: &Anchor, filter: Option<&Scope>) -> Outcome<Vec<Listed>> {
+        let Some(_) = filter else { return self.rows(stage, limit, from) };
+        let mut rows = Vec::new();
+        for part in Self::parts(filter) {
+            rows.extend(self.rows_of(stage, limit, from, &part)?);
+        }
+        rows.sort_by(|a, b| (a.1.as_str(), a.0.as_str()).cmp(&(b.1.as_str(), b.0.as_str())));
+        rows.dedup_by(|a, b| a.0 == b.0);
+        // The page's side of the anchor: the first rows going forward, the
+        // last going back.
+        if matches!(from, Anchor::Before(..) | Anchor::End) {
+            let extra = rows.len().saturating_sub(limit);
+            rows.drain(..extra);
+        } else {
+            rows.truncate(limit);
+        }
+        Ok(rows)
+    }
+
+    fn rows_of(&self, stage: Stage, limit: usize, from: &Anchor, part: &Part) -> Outcome<Vec<Listed>> {
+        let predicate = part.predicate();
+        let columns = "SELECT uuid, rank, files, row, checked, trusted, short_id FROM tasks";
+        let (sql, rank, uuid) = match from {
+            Anchor::Start => (format!("{columns} WHERE {predicate}stage=?1 AND (rank, uuid) > (?2, ?3) ORDER BY rank, uuid LIMIT ?4"), "", ""),
+            Anchor::After(rank, uuid) => (format!("{columns} WHERE {predicate}stage=?1 AND (rank, uuid) > (?2, ?3) ORDER BY rank, uuid LIMIT ?4"), rank.as_str(), uuid.as_str()),
+            Anchor::Before(rank, uuid) => (format!("{columns} WHERE {predicate}stage=?1 AND (rank, uuid) < (?2, ?3) ORDER BY rank DESC, uuid DESC LIMIT ?4"), rank.as_str(), uuid.as_str()),
+            Anchor::End => (format!("{columns} WHERE {predicate}stage=?1 AND ?2 = ?3 ORDER BY rank DESC, uuid DESC LIMIT ?4"), "", ""),
+        };
+        let mut query = self.db.prepare_cached(&sql)?;
+        let map = |r: &rusqlite::Row| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?));
+        let mut rows = match part {
+            Part::Owner(owner) => query.query_map(params![stage.as_str(), rank, uuid, limit as i64, owner], map)?,
+            _ => query.query_map(params![stage.as_str(), rank, uuid, limit as i64], map)?,
+        }
+        .collect::<rusqlite::Result<Vec<Listed>>>()?;
+        if matches!(from, Anchor::Before(..) | Anchor::End) {
+            rows.reverse();
+        }
+        Ok(rows)
     }
 
     fn rows(&self, stage: Stage, limit: usize, from: &Anchor) -> Outcome<Vec<Listed>> {
@@ -726,6 +925,40 @@ impl<'a> Index<'a> {
         Ok(rows)
     }
 
+    fn exists_in(&self, stage: Stage, rank: &str, uuid: &str, after: bool, filter: Option<&Scope>) -> Outcome<bool> {
+        if filter.is_none() {
+            return self.exists(stage, rank, uuid, after);
+        }
+        let side = if after { ">" } else { "<" };
+        for part in Self::parts(filter) {
+            let sql = format!("SELECT EXISTS(SELECT 1 FROM tasks WHERE {}stage=?1 AND (rank, uuid) {side} (?2, ?3))", part.predicate());
+            let found: bool = match part {
+                Part::Owner(owner) => self.db.query_row(&sql, params![stage.as_str(), rank, uuid, 0, owner], |r| r.get(0))?,
+                _ => self.db.query_row(&sql, params![stage.as_str(), rank, uuid], |r| r.get(0))?,
+            };
+            if found {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn before_in(&self, stage: Stage, rank: &str, uuid: &str, filter: Option<&Scope>) -> Outcome<usize> {
+        if filter.is_none() {
+            return self.before(stage, rank, uuid);
+        }
+        let mut total = 0;
+        for part in Self::parts(filter) {
+            let sql = format!("SELECT count(*) FROM tasks WHERE {}stage=?1 AND (rank, uuid) < (?2, ?3)", part.predicate());
+            let count: i64 = match part {
+                Part::Owner(owner) => self.db.query_row(&sql, params![stage.as_str(), rank, uuid, 0, owner], |r| r.get(0))?,
+                _ => self.db.query_row(&sql, params![stage.as_str(), rank, uuid], |r| r.get(0))?,
+            };
+            total += count as usize;
+        }
+        Ok(total)
+    }
+
     fn exists(&self, stage: Stage, rank: &str, uuid: &str, after: bool) -> Outcome<bool> {
         let sql = if after {
             "SELECT EXISTS(SELECT 1 FROM tasks WHERE stage=?1 AND (rank, uuid) > (?2, ?3))"
@@ -744,23 +977,44 @@ impl<'a> Index<'a> {
         Ok(count as usize)
     }
 
-    fn finish(&self, stage: Stage, rows: Vec<Listed>) -> Outcome<Page> {
+    fn finish(&self, stage: Stage, rows: Vec<Listed>, filter: Option<&Scope>) -> Outcome<Page> {
         let project = self.store.project_id();
         let (mut next, mut previous, mut position) = (None, None, 0);
         if let (Some(first), Some(last)) = (rows.first(), rows.last()) {
-            if self.exists(stage, &last.1, &last.0, true)? {
+            if self.exists_in(stage, &last.1, &last.0, true, filter)? {
                 next = Some(cursor(project, stage, &last.1, &last.0));
             }
-            if self.exists(stage, &first.1, &first.0, false)? {
+            if self.exists_in(stage, &first.1, &first.0, false, filter)? {
                 previous = Some(cursor(project, stage, &first.1, &first.0));
             }
-            position = self.before(stage, &first.1, &first.0)?;
+            position = self.before_in(stage, &first.1, &first.0, filter)?;
         }
         let rows = rows
             .into_iter()
             .map(|listed| cached_row(&listed.3, &listed, stage))
             .collect::<Outcome<Vec<Value>>>()?;
         Ok(Page { rows, position, next, previous })
+    }
+
+    /// `counts`, of one session's view when `filter` is set.
+    pub(super) fn counts_in(&self, filter: Option<&Scope>) -> Outcome<BTreeMap<String, usize>> {
+        let Some(scope) = filter else { return self.counts() };
+        let mut counts = BTreeMap::new();
+        for (sql, owner) in [
+            ("SELECT stage, count(*) FROM tasks WHERE owner=?1 AND stage IS NOT NULL GROUP BY stage", Some(scope.owner.as_str())),
+            ("SELECT stage, count(*) FROM tasks WHERE unassigned=1 AND stage IS NOT NULL GROUP BY stage", None),
+        ] {
+            let mut query = self.db.prepare_cached(sql)?;
+            let map = |r: &rusqlite::Row| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?));
+            let rows = match owner {
+                Some(owner) => query.query_map([owner], map)?.collect::<rusqlite::Result<Vec<_>>>()?,
+                None => query.query_map([], map)?.collect::<rusqlite::Result<Vec<_>>>()?,
+            };
+            for (stage, count) in rows {
+                *counts.entry(stage).or_insert(0) += count as usize;
+            }
+        }
+        Ok(counts)
     }
 
     /// The number of loadable tasks in each stage, by stage name.

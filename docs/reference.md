@@ -698,8 +698,15 @@ level again. A child whose parent is not shown above it stays at top level with
 **from PARENT**, which opens the parent when it is listed. A parent is matched by
 its computer's machine UUID and session ID, or by conversation for a parent an
 older `hgs` listed without one; names never match. A loop never hides a card.
-Cards show a large colored agent tile at the left. Rows stay transparent and
-paint a surface only on hover and selection.
+Cards show a large agent tile at the left: the agent's mark from the owner's
+design prototype (Claude, Codex, DeepSeek, Kimi and the shell; OpenCode keeps
+its glyph) on a neutral bordered tile, 34 px on cards and 22 px on compact
+rows. The artwork loads lazily, outside the entry bundle; until it arrives the
+tile shows the provider glyph. A compact parent row takes a second line that
+sums up its child sessions: working of all, **Needs you**, **Asking** and
+**Errors** counts, with the same collapse toggle; childless compact rows stay
+one line. The summary is part of the row's accessible description. Rows stay
+transparent and paint a surface only on hover and selection.
 
 Supervised children draw no attention for requests their parent can handle.
 A child is supervised when its own computer lists its parent as `live`; rows

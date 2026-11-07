@@ -1,4 +1,4 @@
-import { For, Show } from "solid-js";
+import { For, Show, createSignal } from "solid-js";
 import { tr, trNoop } from "../../i18n";
 import { AGENT_LABEL, Icon } from "../lib/icons";
 import { computerFresh, computerOffline } from "../../store/catalog";
@@ -10,6 +10,7 @@ import { machineAppearance } from "../../store/machineAppearance";
 import { sessionMark, type AccountMark } from "../../store/accountMarks";
 import type { AgentKind, Session, Status, Subagent } from "./types";
 import type { Team } from "./group-rows";
+import type { LogoPath } from "../lib/agent-logos";
 import { currentChildren, workingChildren } from "./subagents";
 
 // Card anatomy follows tray/src/SessionCardDelegate.h paintCard() at the
@@ -150,12 +151,34 @@ export function SupervisedMark(props: { session: Session }) {
   );
 }
 
-/** The large colored agent mark at the card's left (spec 3.1). */
+// The prototype's agent artwork loads once, outside the entry chunk; until
+// then, and for agents without artwork, tiles show the provider glyph.
+const [agentLogos, setAgentLogos] = createSignal<Readonly<Record<string, readonly LogoPath[]>>>();
+let logosRequested = false;
+function logoOf(agent: AgentKind): readonly LogoPath[] | undefined {
+  if (!logosRequested) {
+    logosRequested = true;
+    void import("../lib/agent-logos").then((module) => setAgentLogos(module.AGENT_LOGOS)).catch(() => {});
+  }
+  return agentLogos()?.[agent];
+}
+
+/** The large agent mark at the card's left, on a bordered tile (spec 3.1, the owner's prototype). */
 export function AgentTile(props: { agent: AgentKind; size?: number }) {
   const size = () => props.size ?? 34;
+  // 20 px artwork on the 34 px tile, 14 px on the compact row's 22 px tile.
+  const mark = () => (size() <= 24 ? 14 : Math.round(size() * 0.59));
   return (
     <span class="agent-tile" style={{ "--agent": `var(--z-agent-${props.agent})`, "--tile": `${size()}px` }} title={AGENT_LABEL[props.agent]}>
-      <svg width={Math.round(size() * 0.56)} height={Math.round(size() * 0.56)} viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" innerHTML={PROVIDER_GLYPH[props.agent]} />
+      <Show when={logoOf(props.agent)} fallback={
+        <svg width={mark()} height={mark()} viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" innerHTML={PROVIDER_GLYPH[props.agent]} />
+      }>
+        {(paths) => (
+          <svg class="agent-logo" width={mark()} height={mark()} viewBox="0 0 24 24" aria-hidden="true">
+            <For each={paths()}>{(path) => <path d={path[0]} fill={path[1]} />}</For>
+          </svg>
+        )}
+      </Show>
     </span>
   );
 }
@@ -417,15 +440,47 @@ export function ChildCard(props: { parent: Session; child: Subagent; last: boole
   );
 }
 
+/** The text of a parent's child sessions summary, for its compact row and its accessible description. */
+export function teamSummary(team: Team): string[] {
+  return [
+    tr("%1 of %2 working", team.working, team.total),
+    team.needsYou ? tr("Needs you: %1", team.needsYou) : "",
+    team.asking ? tr("Asking: %1", team.asking) : "",
+    team.errors ? tr("Errors: %1", team.errors) : "",
+  ].filter(Boolean);
+}
+
+/** A compact parent's second line: its child sessions at a glance, collapsing them. */
+function CompactTeam(props: { team: Team; onToggle?: () => void }) {
+  return (
+    <button class="cc-team" classList={{ open: !props.team.collapsed }} aria-expanded={!props.team.collapsed}
+      title={props.team.collapsed ? tr("Show child sessions") : tr("Hide child sessions")}
+      onClick={(e) => { e.stopPropagation(); props.onToggle?.(); }} onDblClick={(e) => e.stopPropagation()}>
+      <svg class="team-glyph" width="16" height="12" viewBox="0 0 16 12" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+        <circle cx="8" cy="3" r="2" /><circle cx="3" cy="5" r="1.6" /><circle cx="13" cy="5" r="1.6" />
+        <path d="M4 11A4 3 0 0 1 12 11M0 10.5A3 2.4 0 0 1 4.5 9M16 10.5A3 2.4 0 0 0 11.5 9" />
+      </svg>
+      <span class="cc-team-count">{tr("%1 of %2 working", props.team.working, props.team.total)}</span>
+      <Show when={props.team.needsYou}><span class="team-needs">{tr("Needs you: %1", props.team.needsYou ?? 0)}</span></Show>
+      <Show when={props.team.asking}><span class="team-asking">{tr("Asking: %1", props.team.asking ?? 0)}</span></Show>
+      <Show when={props.team.errors}><span class="team-errors">{tr("Errors: %1", props.team.errors ?? 0)}</span></Show>
+      <span class="grow" />
+      <svg class="chev" width="8" height="6" viewBox="0 0 8 6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 2L4 5L7 2" /></svg>
+    </button>
+  );
+}
+
 /**
  * Compact (collapsed) row, 40 px: title, then status, optional questions,
- * provider and mute at the right, then the expand button.
+ * provider and mute at the right, then the expand button. A parent of child
+ * sessions takes a second line with their summary (62 px).
  */
-export function CompactCard(props: { session: Session; selected: boolean; onExpand: () => void }) {
+export function CompactCard(props: { session: Session; selected: boolean; onExpand: () => void; team?: Team; onToggleTeam?: () => void }) {
   const s = () => props.session;
   return (
-    <div class="scard compact" classList={{ selected: props.selected }} data-emphasis={emphasis(s())}
+    <div class="scard compact" classList={{ selected: props.selected, two: !!props.team }} data-emphasis={emphasis(s())}
       aria-description={tr("Collapsed session row. Press Right to expand.")}>
+      <div class="cc-line">
       <span class="cc-tile"><AgentTile agent={s().agent} size={22} /></span>
       <Show when={sessionMark(s())}>{(m) => <span class="cc-mark" title={markTooltip(s(), m())}><AccountMarkCircle mark={m()} size={14} /></span>}</Show>
       <span class="sc-title ell" style={titleReserve(s().title, 60)} title={s().name}>{s().title}</span>
@@ -436,6 +491,8 @@ export function CompactCard(props: { session: Session; selected: boolean; onExpa
       <button class="cc-expand" title={tr("Expand session row")} onClick={(e) => { e.stopPropagation(); props.onExpand(); }} onDblClick={(e) => e.stopPropagation()}>
         <Icon name="expand-row" size={16} />
       </button>
+      </div>
+      <Show when={props.team}>{(team) => <CompactTeam team={team()} onToggle={props.onToggleTeam} />}</Show>
     </div>
   );
 }

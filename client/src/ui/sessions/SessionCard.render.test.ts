@@ -11,7 +11,7 @@ const stores = "\0session-card-stores";
 const translations = "\0session-card-i18n";
 const marks = "\0session-card-marks";
 let server: ViteDevServer | undefined;
-let render: (compact: boolean, session: Session, online?: boolean) => string;
+let render: (compact: boolean, session: Session, online?: boolean, team?: { total: number; working: number; collapsed: boolean; needsYou?: number; asking?: number; errors?: number }) => string;
 
 beforeAll(async () => {
   const { fileURLToPath } = await import(/* @vite-ignore */ ["node", "url"].join(":")) as { fileURLToPath(url: URL): string };
@@ -41,10 +41,10 @@ beforeAll(async () => {
           import {renderToString} from 'solid-js/web';
           import {SessionCard, CompactCard} from '/src/ui/sessions/SessionCard.tsx';
           import {state} from '${stores}';
-          export const render = (compact, session, online = true) => {
+          export const render = (compact, session, online = true, team = undefined) => {
             state.online = online;
             return renderToString(() => createComponent(compact ? CompactCard : SessionCard,
-              {session, selected: false, expandable: false, expanded: false, onToggleChildren() {}, onExpand() {}}));
+              {session, selected: false, expandable: false, expanded: false, onToggleChildren() {}, onExpand() {}, team}));
           };`;
       },
     }, solid({ ssr: true })],
@@ -127,5 +127,19 @@ describe("account marks", () => {
 
   it("shows no mark for a session without a resolved account", () => {
     for (const compact of [false, true]) expect(render(compact, row())).not.toContain("acct-mark");
+  });
+});
+
+describe("compact parents (owner 2026-11-07)", () => {
+  it("adds a second line with the child sessions summary only to a parent", () => {
+    const team = { total: 8, working: 3, collapsed: true, needsYou: 1, asking: 0, errors: 2 };
+    const html = render(true, row(), true, team);
+    expect(html).toContain("cc-team");
+    expect(text(html)).toContain("3 of 8 working");
+    expect(text(html)).toContain("Needs you: 1");
+    expect(text(html)).toContain("Errors: 2");
+    expect(text(html)).not.toContain("Asking");
+    expect(html).toContain('aria-expanded="false"');
+    expect(render(true, row())).not.toContain("cc-team");
   });
 });

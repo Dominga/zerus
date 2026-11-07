@@ -189,8 +189,8 @@
   .qchip.muted { background: var(--z-list-chip); color: var(--z-list-badge-muted); }
 
   /* Agent tile: the large colored provider mark at the card's left; the lines start after it. */
-  .agent-tile { --tile: 34px; flex: none; display: inline-grid; place-items: center; width: var(--tile); height: var(--tile); border-radius: calc(var(--tile) * .26);
-    color: var(--agent); background: color-mix(in srgb, var(--agent) 14%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--agent) 34%, transparent); }
+  .agent-tile { --tile: 34px; box-sizing: border-box; flex: none; display: inline-grid; place-items: center; width: var(--tile); height: var(--tile);
+    border-radius: calc(var(--tile) * .26); color: var(--agent); background: var(--z-color-tile); border: 1px solid var(--z-color-card-border); }
   .scard.tiled .sc-tile { position: absolute; left: 10px; top: 9px; display: inline-flex; }
   .scard.tiled .sc-l1, .scard.tiled .sc-l2, .scard.tiled .sc-l3, .scard.tiled .sc-foot { left: 54px; }
   .cc-tile { flex: none; display: inline-flex; margin-right: 7px; }
@@ -225,6 +225,21 @@
   .scard.compact .sc-title { flex: 1 1 auto; line-height: 22px; }
   .scard.compact .sbadge { flex-shrink: .001; }
   .scard.compact .sbadge, .scard.compact .agent-badge, .scard.compact .sc-mute { margin-left: 6px; margin-right: 0; }
+  /* A compact parent (zerus-sa9qn): a second line sums up its child sessions. */
+  .scard.compact .cc-line { display: contents; }
+  .scard.compact.two { flex-direction: column; align-items: stretch; padding-top: 3px; padding-bottom: 3px; }
+  .scard.compact.two .cc-line { display: flex; align-items: center; min-width: 0; height: 24px; }
+  .cc-team { display: flex; align-items: center; gap: 6px; min-width: 0; height: 20px; margin: 2px 3px 0 29px; padding: 0 6px; border-radius: 4px;
+    font-size: 11px; color: var(--z-list-muted); text-align: left; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; }
+  .cc-team:hover { background: var(--z-list-counter-hover); color: var(--z-list-text); }
+  .cc-team:focus-visible { outline: 1px solid var(--z-color-accent); }
+  .cc-team .team-glyph { flex: none; }
+  .cc-team .chev { flex: none; transition: rotate var(--z-motion-base) var(--ease); }
+  .cc-team.open .chev { rotate: 180deg; }
+  .cc-team .team-asking, .cc-team .team-needs, .cc-team .team-errors { flex: none; padding: 0 4px; border-radius: 3px; font-weight: 600; }
+  .cc-team .team-asking { color: var(--z-list-badge-muted); background: var(--z-list-chip); }
+  .cc-team .team-needs { color: var(--z-list-tone-attention); background: color-mix(in srgb, var(--z-list-tone-attention) 16%, transparent); }
+  .cc-team .team-errors { color: var(--z-list-tone-error); background: color-mix(in srgb, var(--z-list-edge-error) 14%, transparent); }
   .cc-expand { flex: none; margin-left: 6px; width: 24px; height: 24px; border-radius: 4px; display: grid; place-items: center; color: var(--z-list-muted); }
   .cc-expand:hover { background: var(--z-list-counter-hover); color: var(--z-list-text); }
   .cc-expand:focus-visible { outline: 1px solid var(--z-color-accent); }

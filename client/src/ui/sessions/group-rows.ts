@@ -23,7 +23,7 @@ export type Row =
  * for it (`asking`) and requests only the person can answer (`needsYou`).
  * Informational: it never raises the parent's own attention (spec 2.3).
  */
-export interface Team { total: number; working: number; collapsed: boolean; asking?: number; needsYou?: number }
+export interface Team { total: number; working: number; collapsed: boolean; asking?: number; needsYou?: number; errors?: number }
 
 /** Nesting stops after this many levels; deeper children start at top level (spec 1.4). */
 export const MAX_DEPTH = 8;
@@ -135,13 +135,14 @@ export function groupRows(input: ListInput): Row[] {
     for (let i = nodes.length - 1; i >= 0; i--) {
       const { s, parent } = nodes[i];
       if (!parent) continue;
-      const below = teams.get(s.key), sum = teams.get(parent) ?? { total: 0, working: 0, asking: 0, needsYou: 0 };
+      const below = teams.get(s.key), sum = teams.get(parent) ?? { total: 0, working: 0, asking: 0, needsYou: 0, errors: 0 };
       const up = input.online(s);
       // A quiet request waits for the parent; any other one needs the person (spec 2.3).
       const asks = up && s.status === "attention" && s.state !== "archived";
       sum.total += 1 + (below?.total ?? 0);
       sum.working += (isWorking(s, up) ? 1 : 0) + (below?.working ?? 0);
       sum.asking += (asks && s.quiet ? 1 : 0) + (below?.asking ?? 0);
+      sum.errors += (up && s.status === "error" && s.state !== "archived" ? 1 : 0) + (below?.errors ?? 0);
       sum.needsYou += (!s.muted && (asks ? !s.quiet : !s.quiet && needsAttention(s, up)) ? 1 : 0) + (below?.needsYou ?? 0);
       teams.set(parent, sum);
     }

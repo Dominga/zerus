@@ -221,6 +221,8 @@ export interface DesktopService {
   epoch: string | null;
   generation: number | null;
   background: Record<string, { ready: boolean; code: string }>;
+  /** Configured connection presentation only, never source or action authority. */
+  fleet_computers?: null | { id: string; status: string; attempt: number }[];
   attention_counts: null | {
     epoch: string; scope: "shared_host_state"; display_only: true; authority: false; local_marks_included: false;
     aggregate: { complete: boolean; total: number | null; attention: number | null; known_total: number; known_attention: number };

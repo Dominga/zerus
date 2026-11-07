@@ -66,5 +66,6 @@
   "pending_read_import": null,
   "reconnecting": false,
   "retained_source_import": null,
-  "task_message_inputs": null
+  "task_message_inputs": null,
+  "fleet_computers": null
 }

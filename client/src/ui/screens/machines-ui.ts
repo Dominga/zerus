@@ -1,6 +1,6 @@
 import type { ComputerState } from "../../store/catalog";
 import { connectionOf } from "../../store/overview";
-import type { Effective, LocalHost, MachineMeta, MachineRow, MachinesView } from "../../types";
+import type { Effective, HostTest, LocalHost, MachineMeta, MachineRow, MachinesView } from "../../types";
 import type { MachineState } from "../components/MachineTile";
 import { tr } from "../../i18n";
 
@@ -29,6 +29,8 @@ export interface LocalState {
   origin: string;
   /** A Windows control console whose CLI reports a session host (LocalSessionHost::canEnable). */
   canEnable: boolean;
+  /** "Test session host" shows (MachinesPage.cpp:215-219: a Windows computer). */
+  testHost: boolean;
   sessionHost?: string;
   /** The connection form and the peer actions are hidden (updateControls, 400-405). */
   formHidden: boolean;
@@ -45,6 +47,12 @@ export function sessionHostLine(host: LocalHost): string {
   return tr("Session host: %1%2", facts.join(", "), host.error ? `: ${host.error}` : "");
 }
 
+/** "Test session host"'s answer (MachinesPage.cpp:413-423): the host's facts and, running, its sessions. */
+export function hostTestLine(test: HostTest): string {
+  const line = sessionHostLine(test.host);
+  return test.sessions !== null ? tr("%1, %2 sessions", line, test.sessions) : line;
+}
+
 /** This computer (loadSelection, MachinesPage.cpp:328-336); `listedName` is `machine ls .local`. */
 export function localState(meta: MachineMeta | undefined, listedName: string): LocalState {
   const console = meta?.local_sessions === false;
@@ -58,6 +66,7 @@ export function localState(meta: MachineMeta | undefined, listedName: string): L
       ? tr("This computer is a control console: agents run on the remote machines you add here, over SSH.%1", canEnable ? " Enable local sessions to run them on this computer too." : "")
       : tr("This device runs Zerus. Add a remote machine to manage its agents over SSH."),
     canEnable,
+    testHost: windows,
     sessionHost: windows && meta?.local_host ? sessionHostLine(meta.local_host) : undefined,
     formHidden: console || windows,
   };

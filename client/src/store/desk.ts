@@ -53,7 +53,10 @@ export function openSession(target: OpenSession, options: OpenSessionOptions = {
 }
 
 function revealSession(target: OpenSession, options: OpenSessionOptions): void {
+  // A notification opens Activity; a tray-menu session row attaches its
+  // Terminal (Qt `sessionActivated`). A notification's tab wins.
   if (target.attention) setDetailTab("activity");
+  else if (target.terminal) setDetailTab("terminal");
   const id = rowId(target.computer, target.key);
   // The project the list groups the row under; this device's layout keeps
   // the collapse (the Rust side), and the next batch shows it expanded.

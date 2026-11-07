@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { createComputed, createRoot, createSignal } from "solid-js";
 vi.hoisted(() => { vi.stubGlobal("location", new URL("http://localhost/")); });
-vi.mock("../bridge", () => ({ machineChange: vi.fn(), machinePickKey: vi.fn(), machineSsh: vi.fn(), fleetRefresh: vi.fn(), machinesView: vi.fn(), machineResolve: vi.fn(), machineCheck: vi.fn() }));
+vi.mock("../bridge", () => ({ machineChange: vi.fn(), machinePickKey: vi.fn(), machineSsh: vi.fn(), fleetRefresh: vi.fn(), machinesView: vi.fn(), machineResolve: vi.fn(), machineCheck: vi.fn(), machineTestHost: vi.fn() }));
 import { createMachineEditor, LOCAL_MACHINE, NEW_MACHINE, type MachineTools } from "./machineEditor";
 import { emptyMachines, type MachinesView } from "../types";
 
 const view = (revision = "a".repeat(64)): MachinesView => ({ ...emptyMachines(), loaded: true, local: "fixture-local", connection_revision: revision,
-  machines: [{ alias: "fixture-peer", hostname: "peer.invalid", user: "fixture", port: null, identity_file: "", enabled: true, source: "local", inherited: true, origin: "" }] });
+  machines: [{ alias: "fixture-peer", transport: "ssh", wsl: null, test_runner: "", hostname: "peer.invalid", user: "fixture", port: null, identity_file: "", enabled: true, source: "local", inherited: true, origin: "" }] });
 const tick = () => new Promise<void>((done) => queueMicrotask(done));
 function setup(write = vi.fn(async () => {}), tools?: MachineTools) {
   return createRoot((dispose) => {
@@ -56,7 +56,7 @@ describe("Machines connection editor", () => {
       t.editor.choose(NEW_MACHINE);t.editor.edit("alias", " new-peer ");t.editor.edit("enabled", false);
       expect(await t.editor.save()).toBe(true);
       expect(t.write).toHaveBeenCalledExactlyOnceWith({ alias: "new-peer", revision: "a".repeat(64), change: { kind: "set", create: true,
-        connection: { hostname: "", user: "", port: null, identity_file: "", enabled: false } } });
+        connection: { transport: "ssh", wsl: null, test_runner: "", hostname: "", user: "", port: null, identity_file: "", enabled: false } } });
       expect(t.editor.selected()).toBe("new-peer");expect(t.editor.draft().dirty).toBe(false);
       expect(t.changed).toHaveBeenCalledTimes(1);
     } finally { t.dispose(); }
@@ -154,6 +154,48 @@ describe("Machines connection editor", () => {
       t.editor.edit("hostname", "edited.invalid");expect(await t.editor.openSsh()).toBe(false);
       t.editor.choose(NEW_MACHINE);t.editor.confirm();expect(await t.editor.openSsh()).toBe(false);
       expect(ssh).toHaveBeenCalledTimes(1);
+    } finally { t.dispose(); }
+  });
+
+  it("saves a Local WSL connection with its profile and test runner and no SSH values (task 250 G3)", async () => {
+    const t = setup();
+    try {
+      t.editor.choose(NEW_MACHINE);
+      t.editor.edit("alias", "ubuntu-wsl");
+      t.editor.setTransport("wsl-local");
+      // The SSH fields cannot be part of a WSL profile, and a complete one is required.
+      expect(t.editor.valid()).toBe(false);
+      t.editor.edit("hostname", "peer.invalid");
+      expect(t.editor.valid()).toBe(false);
+      t.editor.edit("hostname", "");
+      t.editor.editWsl("distribution", "Ubuntu");
+      t.editor.editWsl("user", "dev");
+      t.editor.editWsl("hgs_path", "/home/dev/.local/bin/hgs");
+      t.editor.edit("test_runner", "linux");
+      expect(t.editor.valid()).toBe(true);
+      expect(await t.editor.save()).toBe(true);
+      expect(t.write).toHaveBeenCalledExactlyOnceWith({
+        alias: "ubuntu-wsl", revision: "a".repeat(64),
+        change: { kind: "set", create: true, connection: {
+          transport: "wsl-local", wsl: { distribution: "Ubuntu", user: "dev", hgs_path: "/home/dev/.local/bin/hgs" },
+          test_runner: "linux", hostname: "", user: "", port: null, identity_file: "", enabled: true,
+        } },
+      });
+    } finally { t.dispose(); }
+  });
+
+  it("seeds a saved WSL machine's transport, profile and test runner back into the form", () => {
+    const t = setup();
+    try {
+      t.setView({ ...view(), machines: [{
+        alias: "ubuntu", transport: "wsl-local", wsl: { distribution: "Ubuntu", user: "dev", hgs_path: "/home/dev/.local/bin/hgs" },
+        test_runner: "linux", hostname: "", user: "", port: null, identity_file: "", enabled: true, source: "local", inherited: false, origin: "",
+      }] });
+      t.editor.choose("ubuntu");
+      expect(t.editor.draft()).toMatchObject({
+        transport: "wsl-local", test_runner: "linux",
+        wsl: { distribution: "Ubuntu", user: "dev", hgs_path: "/home/dev/.local/bin/hgs" },
+      });
     } finally { t.dispose(); }
   });
 

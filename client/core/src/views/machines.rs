@@ -9,6 +9,14 @@ use serde_json::Value;
 /// The most saved machines the screen lists.
 const MACHINES: usize = 64;
 
+/// The explicit local WSL connection of a machine (MachinesPage.cpp:232-238).
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct WslProfile {
+    pub distribution: String,
+    pub user: String,
+    pub hgs_path: String,
+}
+
 /// One saved peer of `machine ls` with its Zerus overrides.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct MachineRow {
@@ -17,11 +25,18 @@ pub struct MachineRow {
     /// `local` (saved in Zerus) or `config` (from HGS configuration).
     pub source: String,
     pub inherited: bool,
+    /// `ssh` or `wsl-local` (MachinesPage.cpp:229-231).
+    pub transport: String,
+    /// The explicit WSL connection, on a `wsl-local` machine.
+    pub wsl: Option<WslProfile>,
+    /// The platform class this machine serves as a test runner, "" for none
+    /// (MachinesPage.cpp:247-252).
+    pub test_runner: String,
     pub hostname: String,
     pub user: String,
     pub port: Option<u64>,
     pub identity_file: String,
-    /// The editor's origin paragraph (MachinesPage.cpp:337-338).
+    /// The editor's origin paragraph (MachinesPage.cpp:641-643).
     pub origin: String,
 }
 
@@ -32,11 +47,16 @@ pub struct Effective {
     pub pending: bool,
     pub error: bool,
     pub text: String,
+    /// `ssh` or `wsl-local` (MachinesPage.cpp:684-688).
+    pub transport: String,
     /// The inherited values for the field placeholders ("Inherited: ...").
     pub hostname: String,
     pub user: String,
     pub port: String,
     pub key: String,
+    /// The WSL distribution and its Linux hgs, on a `wsl-local` machine.
+    pub distribution: String,
+    pub hgs_path: String,
 }
 
 /// The last "Test connection" (`machine check`).
@@ -83,18 +103,32 @@ pub struct MachinesState {
 fn row(machine: &Value, environment: bool) -> MachineRow {
     let connection = machine.get("connection").unwrap_or(&Value::Null);
     let source = text(machine, "source");
+    let transport = if text(connection, "transport") == "wsl-local" { "wsl-local" } else { "ssh" };
+    let wsl = connection.get("wsl").filter(|value| value.is_object()).map(|wsl| WslProfile {
+        distribution: text(wsl, "distribution"),
+        user: text(wsl, "user"),
+        hgs_path: text(wsl, "hgs_path"),
+    });
     let mut origin = String::new();
-    if source == "config" {
-        origin.push_str("This alias comes from HGS configuration. ");
-    }
-    origin.push_str("SSH supplies inherited values from your OpenSSH configuration and defaults. Fields below are Zerus overrides; blank fields keep the inherited value.");
-    if environment {
-        origin.push_str(" HGS_PEERS in the environment overrides the list of monitored machines.");
+    if transport == "wsl-local" {
+        // MachinesPage.cpp:642-643.
+        origin.push_str("Local WSL uses the explicit distribution, user and Linux HGS executable. OpenCode must already be running; Zerus never starts or replaces it in this mode.");
+    } else {
+        if source == "config" {
+            origin.push_str("This alias comes from HGS configuration. ");
+        }
+        origin.push_str("SSH supplies inherited values from your OpenSSH configuration and defaults. Fields below are Zerus overrides; blank fields keep the inherited value.");
+        if environment {
+            origin.push_str(" HGS_PEERS in the environment overrides the list of monitored machines.");
+        }
     }
     MachineRow {
         alias: text(machine, "alias"),
         enabled: flag(machine, "enabled"),
         inherited: flag(machine, "inherited"),
+        transport: transport.to_owned(),
+        wsl,
+        test_runner: text(connection, "test_runner"),
         hostname: text(connection, "hostname"),
         user: text(connection, "user"),
         port: whole(connection, "port").filter(|port| *port > 0),
@@ -104,25 +138,37 @@ fn row(machine: &Value, environment: bool) -> MachineRow {
     }
 }
 
-fn effective(alias: &str, pending: bool, reply: Option<&Result<Value, String>>) -> Effective {
+fn effective(alias: &str, pending: bool, wsl: bool, reply: Option<&Result<Value, String>>) -> Effective {
     let mut out = Effective {
         alias: alias.to_owned(),
         pending,
         error: false,
         text: String::new(),
+        transport: if wsl { "wsl-local".to_owned() } else { "ssh".to_owned() },
         hostname: String::new(),
         user: String::new(),
         port: String::new(),
         key: String::new(),
+        distribution: String::new(),
+        hgs_path: String::new(),
     };
     match reply {
-        None => out.text = "Reading effective SSH connection…".into(),
+        None => out.text = if wsl { "Reading WSL connection…" } else { "Reading effective SSH connection…" }.into(),
         Some(Err(error)) => {
             out.error = true;
             out.text = format!("Could not read effective SSH settings: {error}\nYour connection overrides are shown below.");
         }
         Some(Ok(value)) => {
             let found = value.get("effective").unwrap_or(&Value::Null);
+            if text(found, "transport") == "wsl-local" {
+                // MachinesPage.cpp:684-688.
+                out.transport = "wsl-local".into();
+                out.distribution = text(found, "distribution");
+                out.hgs_path = text(found, "hgs_path");
+                out.user = text(found, "user");
+                out.text = format!("WSL: {}, user {}\nHGS: {}\nOpenCode: existing-only", out.distribution, out.user, out.hgs_path);
+                return out;
+            }
             let keys: Vec<String> = items(found, "identity_files")
                 .iter()
                 .filter_map(Value::as_str)
@@ -155,6 +201,16 @@ fn check(alias: &str, pending: bool, reply: Option<&Result<Value, String>>) -> C
     let (error, message) = match reply {
         None => (false, "Testing SSH and checking HGS…".to_owned()),
         Some(Err(error)) => (true, error.clone()),
+        Some(Ok(data)) if text(data, "transport") == "wsl-local" => {
+            // MachinesPage.cpp:389-393.
+            let ok = flag(data, "ok");
+            let text = if ok {
+                format!("Connected to WSL {} as {}: {}. OpenCode policy: existing-only.", text(data, "distribution"), text(data, "user"), text(data, "hgs"))
+            } else {
+                text(data, "error")
+            };
+            (!ok, text)
+        }
         Some(Ok(data)) if flag(data, "ok") => (
             false,
             format!("Connected: {} {}, {}, {}", text(data, "os"), text(data, "arch"), text(data, "hgs"), text(data, "tmux")),
@@ -267,6 +323,12 @@ impl MachinesState {
     pub fn view(&self) -> MachinesView {
         let list = self.list.as_ref();
         let environment = list.is_some_and(|list| flag(list, "environment_override"));
+        let wsl_local = |alias: &str| {
+            items(list.unwrap_or(&Value::Null), "machines")
+                .iter()
+                .find(|machine| text(machine, "alias") == alias)
+                .is_some_and(|machine| text(machine.get("connection").unwrap_or(&Value::Null), "transport") == "wsl-local")
+        };
         MachinesView {
             loaded: list.is_some(),
             refreshing: self.poll.pending(),
@@ -286,7 +348,7 @@ impl MachinesState {
             effective: self
                 .resolve_alias
                 .as_deref()
-                .map(|alias| effective(alias, self.resolving, self.resolve.as_ref())),
+                .map(|alias| effective(alias, self.resolving, wsl_local(alias), self.resolve.as_ref())),
             check: self
                 .check_alias
                 .as_deref()
@@ -386,6 +448,42 @@ mod tests {
         let failed = state.view().effective.unwrap();
         assert!(failed.error);
         assert_eq!(failed.text, "Could not read effective SSH settings: ssh -G timed out\nYour connection overrides are shown below.");
+    }
+
+    #[test]
+    fn a_wsl_machine_carries_its_profile_test_runner_and_effective_fields() {
+        let mut state = MachinesState::default();
+        state.start_list(0);
+        state.finish_list(Ok(serde_json::json!({
+            "local": "workstation",
+            "revision": "a".repeat(64),
+            "machines": [{
+                "alias": "ubuntu", "enabled": true, "source": "local", "inherited": false,
+                "connection": {"transport": "wsl-local", "enabled": true, "test_runner": "linux",
+                    "wsl": {"distribution": "Ubuntu", "user": "dev", "hgs_path": "/home/dev/.local/bin/hgs"}}
+            }]
+        })));
+        let row = &state.view().machines[0];
+        assert_eq!((row.transport.as_str(), row.test_runner.as_str()), ("wsl-local", "linux"));
+        assert_eq!(row.wsl.as_ref().unwrap(), &WslProfile { distribution: "Ubuntu".into(), user: "dev".into(), hgs_path: "/home/dev/.local/bin/hgs".into() });
+        assert!(row.origin.starts_with("Local WSL uses the explicit distribution"));
+        state.start_resolve("ubuntu");
+        state.finish_resolve("ubuntu", Ok(serde_json::json!({
+            "alias": "ubuntu",
+            "effective": {"transport": "wsl-local", "distribution": "Ubuntu", "user": "dev",
+                "hgs_path": "/home/dev/.local/bin/hgs", "service_policy": "existing-only"}
+        })));
+        let effective = state.view().effective.unwrap();
+        assert_eq!(
+            (effective.transport.as_str(), effective.distribution.as_str(), effective.user.as_str(), effective.hgs_path.as_str()),
+            ("wsl-local", "Ubuntu", "dev", "/home/dev/.local/bin/hgs")
+        );
+        assert_eq!(effective.text, "WSL: Ubuntu, user dev\nHGS: /home/dev/.local/bin/hgs\nOpenCode: existing-only");
+        state.start_check("ubuntu");
+        state.finish_check("ubuntu", Ok(serde_json::json!({"transport": "wsl-local", "ok": true, "distribution": "Ubuntu", "user": "dev", "hgs": "hgs 1.56.0"})));
+        let check = state.view().check.unwrap();
+        assert!(!check.error);
+        assert_eq!(check.text, "Connected to WSL Ubuntu as dev: hgs 1.56.0. OpenCode policy: existing-only.");
     }
 
     #[test]

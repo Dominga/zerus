@@ -50,6 +50,20 @@ describe("waiting notices", () => {
     expect(out.posted).toHaveLength(2);
   });
 
+  it("does not raise an item a restart already showed and saves every change (W2)", () => {
+    const out = port();
+    const saves: Record<string, string>[] = [];
+    const notices = new WaitingNotices(out, [["a", "team-waiting:a"]], (posted) => saves.push(Object.fromEntries(posted)));
+    // "a" was shown before the restart; only the fresh "b" is announced.
+    expect(notices.observe([item("a"), item("b")], false).map((notice) => notice.token)).toEqual(["team-waiting:b"]);
+    expect(saves).toEqual([{ a: "team-waiting:a", b: "team-waiting:b" }]);
+    // A complete read that drops "a" rewrites the saved set without it.
+    notices.observe([item("b")], true);
+    expect(saves.at(-1)).toEqual({ b: "team-waiting:b" });
+    notices.withdraw("b");
+    expect(saves.at(-1)).toEqual({});
+  });
+
   it("withdraws a notice when its item is answered", () => {
     const out = port();
     const notices = new WaitingNotices(out);

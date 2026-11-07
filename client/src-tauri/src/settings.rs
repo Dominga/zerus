@@ -64,7 +64,16 @@ pub fn open(app: &AppHandle, dir: &Path, replay: bool) -> Store {
             "settings-changed",
             json!({ "key": key, "value": value, "revision": revision }),
         );
+        // G1: turning the resident session host on starts it at once; a replay
+        // never reaches a real CLI.
+        if !replay {
+            crate::resident_host::changed(key, value);
+        }
     }));
+    // G1: at startup, and every minute while the app lives (main.cpp:490-493).
+    if !replay {
+        crate::resident_host::spawn(settings.clone());
+    }
     Store(settings)
 }
 
@@ -125,6 +134,24 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
 pub async fn settings_get(store: State<'_, Store>) -> Result<Value, String> {
     let (values, revision) = store.0.all_tracked();
     Ok(json!({ "values": values, "revision": revision }))
+}
+
+/// The two hgs-owned settings Settings > Sessions shows (SettingsPage.h:242-250):
+/// "Ask before an agent starts subagents" and "Block DeepSeek session-log
+/// upload". The core builds the person's own `hgs <command> get|set --json`;
+/// a replay without an explicit hgs never reaches a real CLI.
+#[tauri::command]
+pub async fn hgs_setting(
+    call: zerus_client_core::hgs_settings::HgsSettingCall,
+) -> Result<zerus_client_core::hgs_settings::HgsSettingOutcome, String> {
+    if crate::actions::blocked() {
+        return Err(crate::screens::REPLAY_NEEDS_HGS.into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        zerus_client_core::hgs_settings::run(&zerus_client_core::default_hgs(), &call)
+    })
+    .await
+    .map_err(|error| error.to_string())
 }
 
 /// The release notice applies only to the real switch identity, never a replay.

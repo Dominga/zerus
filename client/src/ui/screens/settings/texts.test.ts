@@ -51,6 +51,12 @@ const SESSIONS = [
   "Include agents whose latest turn has finished in the session list and its counts. Plan & agents always shows all reported agents. Agents with unknown status remain visible.",
   "Notify about optional questions",
   "Off by default. Shows a system notification once for each new optional question, which the agent keeps working without. It is withdrawn when the questions are answered or skipped, or the session is marked as read. Questions that need an answer always notify.",
+  "Ask before an agent starts subagents",
+  "Zerus asks you before a session starts subagents, with how many, which type and model.",
+  "Block DeepSeek session-log upload",
+  "On by default. Zerus starts and resumes every DeepSeek session with the official session-log upload off, without editing your dsh configuration. Off restores dsh's own behaviour.",
+  "Keep the session host running for other computers",
+  "Off by default. On: Zerus keeps this computer's session host running, so the Zerus desktop of another computer can start sessions here over SSH. A session host is never started from an SSH session.",
   "Closing Zerus keeps agents running. Projects and the arrangement of your workspace are saved on this device.",
 ];
 

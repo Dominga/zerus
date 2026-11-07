@@ -12,14 +12,14 @@ import { machineEditor as editor, NEW_MACHINE } from "../../store/machineEditor"
 import { tr, trNoop } from "../../i18n";
 import type { MachineMeta, MachineRow } from "../../types";
 import { catalog } from "../../store/catalog";
-import { machineCards, machinesPage, requestedMachine, resolveMachine, setRequestedMachine, testConnection } from "../../store/machines";
+import { machineCards, machinesPage, requestedMachine, resolveMachine, setRequestedMachine, testConnection, hostTest, testHost } from "../../store/machines";
 import { setAccountMachine } from "../../store/accounts";
 import { connectionOf, osOf } from "../../store/overview";
 import { machineAppearance } from "../../store/machineAppearance";
 import { setSetting, settings, settingsLoaded } from "../../store/settings";
 import { setMachineFilter, setPage } from "../../store/ui";
 import { machineSetupEditor as setup } from "../../store/machineSetup";
-import { LOCAL, localState, peerState, placeholders, summary, testEnabled, type LocalState, type PeerState } from "./machines-ui";
+import { LOCAL, hostTestLine, localState, peerState, placeholders, summary, testEnabled, type LocalState, type PeerState } from "./machines-ui";
 
 // Machines (MachinesPage.cpp), ported from design/webui/src/screens/Machines.tsx:
 // this computer and the saved peers of `hgs machine ls`, each with its stream
@@ -76,6 +76,7 @@ function Editor(props: { local: LocalState; peers: { row: MachineRow; state: Pee
   const setupResult = () => setup.result()?.target === selected() ? setup.result() : undefined;
   const setupCheck = () => setupResult()?.followup ? check() : null;
   const hint = () => placeholders(draft().dirty ? null : effective(), selected());
+  const wsl = () => draft().transport === "wsl-local";
   const formHidden = () => isLocal() && props.local.formHidden;
   const [colorEditor, setColorEditor] = createSignal<{ alias: string; origin: HTMLElement }>();
   const appearance = () => editor.isNew() ? { color: "var(--z-entity-palette-7)", vivid: false } : machineAppearance(settings, name(), `var(--z-entity-palette-${paletteIndex(name())})`);
@@ -126,20 +127,51 @@ function Editor(props: { local: LocalState; peers: { row: MachineRow; state: Pee
             <input id="mach-alias" class="field" value={isLocal() ? props.local.name : draft().alias} placeholder={tr("e.g. studio-mac")} readOnly={!editor.isNew()} disabled={fieldsDisabled()} aria-invalid={editor.isNew() && !!draft().alias && (!editor.valid() || editor.duplicate())} onInput={(e) => editor.edit("alias", e.currentTarget.value)} />
             <Show when={editor.duplicate()}><span class="danger hint">{tr("This name already exists. Select the machine in the list to edit it.")}</span></Show>
           </Field>
-          <Field label={trNoop("Hostname / IP")} id="mach-host">
-            <input id="mach-host" class="field" placeholder={hint().hostname} value={draft().hostname} disabled={fieldsDisabled()} onInput={(e) => editor.edit("hostname", e.currentTarget.value)} />
+          <Field label={trNoop("Connection type")} id="mach-transport">
+            <select id="mach-transport" class="field" value={draft().transport} disabled={fieldsDisabled()}
+              onChange={(e) => editor.setTransport(e.currentTarget.value === "wsl-local" ? "wsl-local" : "ssh")}>
+              <option value="ssh">{tr("SSH")}</option>
+              <option value="wsl-local">{tr("Local WSL (Windows)")}</option>
+            </select>
           </Field>
-          <Field label={trNoop("SSH user")} id="mach-user">
-            <input id="mach-user" class="field" placeholder={hint().user} value={draft().user} disabled={fieldsDisabled()} onInput={(e) => editor.edit("user", e.currentTarget.value)} />
-          </Field>
-          <Field label={trNoop("Port")} id="mach-port">
-            <input id="mach-port" class="field tabular mach-port" placeholder={hint().port} type="number" min={0} max={65535} value={draft().port} disabled={fieldsDisabled()} onInput={(e) => editor.edit("port", e.currentTarget.value)} />
-          </Field>
-          <Field label={trNoop("Private key path")} id="mach-key">
-            <div class="row">
-              <input id="mach-key" class="field mono grow" placeholder={hint().key} value={draft().identity_file} disabled={fieldsDisabled()} onInput={(e) => editor.edit("identity_file", e.currentTarget.value)} />
-              <button class="btn" disabled={fieldsDisabled()} title={tr("Choose SSH private key")} onClick={() => void editor.pickKey()}>{tr("Browse…")}</button>
-            </div>
+          <Show when={wsl()}>
+            <Field label={trNoop("WSL distribution")} id="mach-wsl-distribution">
+              <input id="mach-wsl-distribution" class="field" value={draft().wsl?.distribution ?? ""} disabled={fieldsDisabled()} onInput={(e) => editor.editWsl("distribution", e.currentTarget.value)} />
+            </Field>
+            <Field label={trNoop("WSL user")} id="mach-wsl-user">
+              <input id="mach-wsl-user" class="field" value={draft().wsl?.user ?? ""} disabled={fieldsDisabled()} onInput={(e) => editor.editWsl("user", e.currentTarget.value)} />
+            </Field>
+            <Field label={trNoop("Linux HGS executable")} id="mach-wsl-hgs">
+              <input id="mach-wsl-hgs" class="field mono" placeholder={tr("Absolute Linux path to this fork's hgs")} value={draft().wsl?.hgs_path ?? ""} disabled={fieldsDisabled()} onInput={(e) => editor.editWsl("hgs_path", e.currentTarget.value)} />
+            </Field>
+          </Show>
+          <Show when={!wsl()}>
+            <Field label={trNoop("Hostname / IP")} id="mach-host">
+              <input id="mach-host" class="field" placeholder={hint().hostname} value={draft().hostname} disabled={fieldsDisabled()} onInput={(e) => editor.edit("hostname", e.currentTarget.value)} />
+            </Field>
+            <Field label={trNoop("SSH user")} id="mach-user">
+              <input id="mach-user" class="field" placeholder={hint().user} value={draft().user} disabled={fieldsDisabled()} onInput={(e) => editor.edit("user", e.currentTarget.value)} />
+            </Field>
+            <Field label={trNoop("Port")} id="mach-port">
+              <input id="mach-port" class="field tabular mach-port" placeholder={hint().port} type="number" min={0} max={65535} value={draft().port} disabled={fieldsDisabled()} onInput={(e) => editor.edit("port", e.currentTarget.value)} />
+            </Field>
+            <Field label={trNoop("Private key path")} id="mach-key">
+              <div class="row">
+                <input id="mach-key" class="field mono grow" placeholder={hint().key} value={draft().identity_file} disabled={fieldsDisabled()} onInput={(e) => editor.edit("identity_file", e.currentTarget.value)} />
+                <button class="btn" disabled={fieldsDisabled()} title={tr("Choose SSH private key")} onClick={() => void editor.pickKey()}>{tr("Browse…")}</button>
+              </div>
+            </Field>
+          </Show>
+          <Field label={trNoop("Test runner")} id="mach-test-runner">
+            <select id="mach-test-runner" class="field" value={draft().test_runner} disabled={fieldsDisabled()}
+              title={tr("Test suites of this platform run on this Machine over SSH, each on the exact commit, isolated")}
+              onChange={(e) => editor.edit("test_runner", e.currentTarget.value)}>
+              <option value="">{tr("Not a test runner")}</option>
+              <option value="linux">{tr("Linux")}</option>
+              <option value="macos">{tr("macOS")}</option>
+              <option value="windows">{tr("Windows")}</option>
+              <option value="android">{tr("Android")}</option>
+            </select>
           </Field>
           <div class="form-row mach-form-row">
             <span />
@@ -151,7 +183,7 @@ function Editor(props: { local: LocalState; peers: { row: MachineRow; state: Pee
             <button class="btn primary" disabled={fieldsDisabled() || !view().loaded || !draft().revision || !editor.valid() || editor.duplicate() || !(draft().dirty || editor.isNew())} onClick={() => void editor.save()}>{tr("Save connection")}</button>
             <Show when={editor.isNew()}><button class="btn" disabled={busy()} onClick={() => editor.choose(LOCAL)}>{tr("Discard draft")}</button></Show>
             <button class="btn" disabled={busy() || draft().dirty || editor.isNew() || !testEnabled(selected(), view())} onClick={() => void testConnection(selected())}><Icon name="plug" size={13} />{tr("Test connection")}</button>
-            <button class="btn" disabled={fieldsDisabled() || editor.isNew() || draft().dirty || !draft().revision} onClick={() => void editor.openSsh()}><Icon name="square-terminal" size={13} />{tr("Open SSH terminal")}</button>
+            <button class="btn" disabled={fieldsDisabled() || editor.isNew() || draft().dirty || !draft().revision} onClick={() => void editor.openSsh()}><Icon name="square-terminal" size={13} />{draft().transport === "wsl-local" ? tr("Open WSL terminal") : tr("Open SSH terminal")}</button>
           </Actions>
         </section>
       </Show>
@@ -159,6 +191,9 @@ function Editor(props: { local: LocalState; peers: { row: MachineRow; state: Pee
       <section class="mach-section">
         <h3>{tr("Setup")}</h3>
         <Actions>
+          <Show when={isLocal() && props.local.testHost}>
+            <button class="btn" disabled={busy() || !!hostTest()?.busy} title={tr("Ask the session host on this computer whether it answers")} onClick={() => void testHost()}>{tr("Test session host")}</button>
+          </Show>
           <Show when={isLocal() && props.local.canEnable}>
             <button class="btn primary" disabled={busy() || !setup.canEnable()} title={tr("Run agents on this computer too. Zerus stages the HGS CLI and a session host in your user profile.")} onClick={() => setup.open("enable")}>{tr("Enable local sessions")}</button>
           </Show>
@@ -174,6 +209,11 @@ function Editor(props: { local: LocalState; peers: { row: MachineRow; state: Pee
             </button>
           </Show>
         </Actions>
+        <Show when={hostTest()}>{(t) => (
+          <Status kind={t().busy ? "busy" : t().error || t().test?.host.state !== "running" ? "error" : "muted"}>
+            <Lines text={t().busy ? tr("Testing the session host…") : t().error ? tr("The session host did not answer: %1", t().error!) : hostTestLine(t().test!)} />
+          </Status>
+        )}</Show>
         <Show when={!editor.notice() && setupResult()}>{(r) => <Status kind={(setupCheck()?.error ?? r().error) ? "error" : setup.busy() || setupCheck()?.pending ? "busy" : "muted"}><Lines text={setupCheck()?.text ?? r().text} /></Status>}</Show>
         <Show when={editor.notice()}>{(n) => <Status kind={n().error ? "error" : "muted"}><Lines text={n().text} /></Status>}</Show>
         <Show when={!editor.notice() && !setupResult() && check()}>{(c) => <Status kind={c().pending ? "busy" : c().error ? "error" : "muted"}><Lines text={c().text} /></Status>}</Show>

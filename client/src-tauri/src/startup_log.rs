@@ -33,6 +33,17 @@ fn path() -> Option<PathBuf> {
     }
 }
 
+/// "Open log" (TrayMenu.cpp:242-245): this client's log in the system's text
+/// viewer. The line makes the file exist before the viewer opens it.
+pub fn open(app: &tauri::AppHandle) -> Result<(), String> {
+    let path = path().ok_or("This computer has no log folder.")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    append(&path, &line("open", "tray", None)).map_err(|error| error.to_string())?;
+    crate::external_open::path(app, &path)
+}
+
 fn line(outcome: &str, reason: &str, detail: Option<&str>) -> Vec<u8> {
     let safe = |s: &str, cap: usize| {
         s.chars()

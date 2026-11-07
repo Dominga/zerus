@@ -520,15 +520,43 @@ export interface AccountsView {
   /** Accounts left out by the per-view bound. */
   truncated: number;
 }
-export interface MachineRow { alias: string; enabled: boolean; source: string; inherited: boolean; hostname: string; user: string; port: number | null; identity_file: string; origin: string }
-export interface MachineConnection { hostname: string; user: string; port: number | null; identity_file: string; enabled: boolean }
+/** A local WSL connection's explicit fields (MachinesPage.cpp:232-238). */
+export interface WslProfile { distribution: string; user: string; hgs_path: string }
+export interface MachineRow {
+  alias: string; enabled: boolean; source: string; inherited: boolean;
+  /** "ssh" or "wsl-local" (MachinesPage.cpp:229-231). */
+  transport: "ssh" | "wsl-local";
+  wsl: WslProfile | null;
+  /** The platform class this machine serves as a test runner, "" for none. */
+  test_runner: string;
+  hostname: string; user: string; port: number | null; identity_file: string; origin: string;
+}
+export interface MachineConnection {
+  transport: "ssh" | "wsl-local";
+  wsl: WslProfile | null;
+  test_runner: string;
+  hostname: string; user: string; port: number | null; identity_file: string; enabled: boolean;
+}
 export type MachineChange = { kind: "set"; connection: MachineConnection; create: boolean } | { kind: "reset" | "remove" };
 export interface MachineReference { alias: string; revision: string }
 export type MachineSetupRequest = { kind: "install"; reference: MachineReference; source: string } | { kind: "enable"; machine_id: string };
 export interface MachineSetupOutcome { success: boolean; uncertain: boolean; text: string; output: string }
 export interface MachineChangeRequest { alias: string; revision: string; change: MachineChange }
-export interface Effective { alias: string; pending: boolean; error: boolean; text: string; hostname: string; user: string; port: string; key: string }
+export interface Effective {
+  alias: string; pending: boolean; error: boolean; text: string;
+  /** "ssh" or "wsl-local". */
+  transport: "ssh" | "wsl-local";
+  hostname: string; user: string; port: string; key: string;
+  /** The WSL distribution and its Linux hgs, on a wsl-local machine. */
+  distribution: string; hgs_path: string;
+}
 export interface CheckResult { alias: string; pending: boolean; error: boolean; text: string }
+/** What "Test session host" read (`machine_test_host`). */
+export interface HostTest {
+  host: LocalHost;
+  sessions: number | null;
+  clients: number | null;
+}
 export interface MachinesView {
   /** Computation order from the screens hub; absent on older snapshots. */
   revision?: number;
@@ -537,6 +565,14 @@ export interface MachinesView {
   connection_revision?: string;
   machines: MachineRow[]; effective: Effective | null; check: CheckResult | null; busy: boolean;
 }
+
+/** The hgs-owned settings Settings > Sessions reads (SettingsPage.h:242-250). */
+export type HgsSettingName = "subagents-confirm" | "session-upload-block";
+export interface HgsSettingView { setting: HgsSettingName; value: boolean }
+/** A read or write of one hgs-owned setting; `failed` changes nothing. */
+export type HgsSettingOutcome =
+  | { outcome: "done"; view: HgsSettingView; request_id?: string | null }
+  | { outcome: "failed"; detail: string; request_id?: string | null };
 export interface Folder {
   /** The catalog's id, "" when it has none. */
   id: string;

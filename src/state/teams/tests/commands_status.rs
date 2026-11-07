@@ -130,12 +130,14 @@ fn spans_give_a_task_or_a_page_of_timelines() {
     });
 }
 
-/// U31: the lead's inbox names a report made ahead of its draft phase as
-/// "worked ahead of phase N", through `hgs team inbox`.
+/// U31: the lead's inbox names a report made ahead of its draft phase (an
+/// older record's work ahead; task 158 runs no draft) as "worked ahead of
+/// phase N", through `hgs team inbox`.
 #[test]
 fn a_worked_ahead_report_says_so_in_the_leads_inbox() {
     use crate::state::teams::model::{Attempt, AttemptState, Report, TaskStatus};
     let (mut team, _, _) = review_team();
+    team.phases.iter_mut().find(|phase| phase.n == 2).unwrap().state = crate::state::teams::model::PhaseState::Draft;
     let task = team.task_mut(3).unwrap();
     task.status = TaskStatus::Submitted;
     task.attempts.push(Attempt {
@@ -143,7 +145,6 @@ fn a_worked_ahead_report_says_so_in_the_leads_inbox() {
         id: "00000000-0000-4000-8000-000000000301".into(),
         member: "dev".into(),
         state: AttemptState::Reported,
-        worked_ahead: true,
         report: Some(Report { text: "Docs written".into(), at: 1.0, ..Default::default() }),
         ..Default::default()
     });
@@ -154,7 +155,7 @@ fn a_worked_ahead_report_says_so_in_the_leads_inbox() {
         assert_eq!(item["summary"], "worked ahead of phase 2: Docs written", "{item}");
         // An ordinary report keeps its text alone.
         let mut team = stored();
-        team.task_mut(3).unwrap().attempts[0].worked_ahead = false;
+        team.phases.iter_mut().find(|phase| phase.n == 2).unwrap().state = crate::state::teams::model::PhaseState::Approved;
         let ordinary = super::inbox_view_for(&team, &team.lead);
         assert!(!ordinary.to_string().contains("worked ahead"), "{ordinary}");
     });
@@ -372,7 +373,8 @@ fn status_shows_the_owners_phase_states_and_the_stuck_scope() {
                 rejection: Some(PhaseRejection { comment: "Smaller".into(), by: "You".into(), at: 5.0, reworked_at: None }),
                 ..Default::default()
             },
-            Phase { n: 4, title: "Ship".into(), state: PhaseState::Queued, tasks: vec![4], ..Default::default() },
+            // Task 158: only a barrier phase waits for the phases before it.
+            Phase { n: 4, title: "Ship".into(), state: PhaseState::Approved, barrier: true, tasks: vec![4], ..Default::default() },
         ],
         ..Default::default()
     };
@@ -381,15 +383,15 @@ fn status_shows_the_owners_phase_states_and_the_stuck_scope() {
     assert_eq!(states, vec!["done", "running", "rejected", "queued"]);
     assert_eq!(value["phases"][1]["state"], "rejected");
     assert_eq!(value["phases"][1]["rejection"]["comment"], "Smaller");
-    assert_eq!(value["phases"][2]["waiting"]["text"], "Starts after phase 2");
+    assert_eq!(value["phases"][2]["waiting"]["text"], "Starts when phase 2 is finished");
     // Two approved phases ahead: it names the nearer one, the one it
     // queues behind (phase 43 said "after phase 40" with 41 and 42 ahead).
     {
         let mut ahead = team.clone();
         ahead.tasks.push(task(5, 5, TaskStatus::Pending));
-        ahead.phases.push(Phase { n: 5, title: "Docs".into(), state: PhaseState::Queued, tasks: vec![5], ..Default::default() });
+        ahead.phases.push(Phase { n: 5, title: "Docs".into(), state: PhaseState::Approved, barrier: true, tasks: vec![5], ..Default::default() });
         let value = view_with(&ahead, &[], None);
-        assert_eq!(value["phases"][3]["waiting"]["text"], "Starts after phase 4");
+        assert_eq!(value["phases"][3]["waiting"]["text"], "Starts when phase 4 is finished");
     }
     // Only the running phase can make the team Stuck.
     assert_eq!(value["stuck_scope"], json!([2]));
@@ -1050,6 +1052,39 @@ fn status_shows_each_members_phase_activity_and_minutes_without_progress() {
     assert_eq!(dev["stuck"]["reason"], "no_progress");
     // Task 115: a busy tool reads Working in the same contract.
     assert_eq!(dev["session_state"], "working");
+}
+
+/// Task 209: status carries the member's native context reading, and reads its
+/// state `compacting` while a compaction is being confirmed.
+#[test]
+fn status_shows_a_members_context_and_compacting_state() {
+    use super::super::model::{MemberCompact, MemberContext};
+    let mut team = running_team();
+    {
+        let dev = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        dev.context = Some(MemberContext::of(960_000, 1_000_000, 1000.0));
+    }
+    let value = view_with(&team, &[], None);
+    let dev = value["members"].as_array().unwrap().iter().find(|member| member["id"] == "dev").unwrap();
+    assert_eq!((dev["context"]["used"].as_u64(), dev["context"]["limit"].as_u64()), (Some(960_000), Some(1_000_000)));
+    assert_eq!(dev["context"]["percent"], 96);
+    assert!(dev.get("compacting").is_none(), "no compaction: today's member shape");
+    {
+        let dev = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        dev.context_compact = Some(MemberCompact {
+            action: "compact".into(),
+            started_at: 1000.0,
+            task: 1,
+            reason: "threshold".into(),
+            ..Default::default()
+        });
+    }
+    let value = view_with(&team, &[], None);
+    let dev = value["members"].as_array().unwrap().iter().find(|member| member["id"] == "dev").unwrap();
+    assert_eq!(dev["state"], "compacting");
+    assert_eq!(dev["compacting"]["action"], "compact");
+    assert_eq!(dev["compacting"]["reason"], "threshold");
+    assert_eq!(dev["member_state"], "active", "the stored roster state stays beside it");
 }
 
 /// Task 115: the Adventure team's Integrator (Kimi) sat on a native Bash

@@ -1378,10 +1378,12 @@ void TestTeamsUiWorkspace::workingTimeFollowsTheActivityLabel()
     const auto worked = [&](int id) -> QLabel * { auto *frame = card(id); return frame ? frame->findChild<QLabel *>("teamBoardWorked") : nullptr; };
     QTRY_VERIFY(worked(3));
     QCOMPARE(worked(3)->text(), QStringLiteral("12m"));
+    QVERIFY2(worked(2) && worked(8), "the board shows every task's card");
     QCOMPARE(worked(2)->text(), QStringLiteral("1h 05m"));
     QCOMPARE(worked(8)->text(), QStringLiteral("1h 15m"));
     QVERIFY(!worked(6));
     auto *activity = card(3)->findChild<QLabel *>("teamBoardActivity");
+    QVERIFY2(activity, "a working card names its activity");
     QCOMPARE(activity->text(), QStringLiteral("working"));
     QCOMPARE(worked(3)->font().pixelSize(), activity->font().pixelSize());
     QCOMPARE(worked(3)->palette().color(QPalette::WindowText), activity->palette().color(QPalette::WindowText));
@@ -1390,17 +1392,27 @@ void TestTeamsUiWorkspace::workingTimeFollowsTheActivityLabel()
     // A running time keeps the room it grows to: "12m" becoming "1h 02m"
     // moves nothing after it.
     QVERIFY(worked(3)->minimumWidth() >= worked(3)->fontMetrics().horizontalAdvance(QStringLiteral("1h 02m")));
-    auto *state = card(3)->findChild<QWidget *>("teamBoardState");
     TestWait::settle();
-    const int stateLeft = state->geometry().left();
+    // Task 213: a wait pumps the event queue, and a render queued meanwhile can
+    // rebuild the board. A widget pointer taken before the wait then dangles
+    // (the access violation under four ctest workers): fetch the state label
+    // after each wait, never across it.
+    const auto stateLabel = [&]() -> QWidget * {
+        auto *frame = card(3);
+        return frame ? frame->findChild<QWidget *>("teamBoardState") : nullptr;
+    };
+    QVERIFY2(stateLabel(), "the card has its state chip");
+    const int stateLeft = stateLabel()->geometry().left();
     QPointer<QLabel> label = worked(3);
     now = 12000;
     tick();
     QVERIFY(label);
     QCOMPARE(label->text(), QStringLiteral("1h 02m"));
+    QVERIFY(worked(8));
     QCOMPARE(worked(8)->text(), QStringLiteral("1h 15m"));
     TestWait::settle();
-    QCOMPARE(state->geometry().left(), stateLeft);
+    QVERIFY2(stateLabel(), "the card still has its state chip after the wait");
+    QCOMPARE(stateLabel()->geometry().left(), stateLeft);
     now = 9000; tick();
     shoot("ux-u37-board");
     // The Layers row: the same text after the activity label (the phase
@@ -1418,6 +1430,7 @@ void TestTeamsUiWorkspace::workingTimeFollowsTheActivityLabel()
     QCOMPARE(layer(11)->text(), QStringLiteral("1m"));
     QVERIFY(layer(2)->toolTip().contains("Attempt 1 (backend, rejected): worked 25m"));
     now = 12000; tick();
+    QVERIFY(layer(3));
     QCOMPARE(layer(3)->text(), QStringLiteral("1h 02m"));
     now = 9000; tick();
     shoot("ux-u37-layers");

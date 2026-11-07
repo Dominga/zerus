@@ -16,14 +16,14 @@ import { Composer } from "../sessions/Composer";
 import { QuestionCard } from "../sessions/QuestionCard";
 import { QueuePanel } from "../sessions/QueuePanel";
 import { sendBackMessage } from "./actions";
-import { duration, memberProgress, memberStatus, progress, shownMembers, stateLabel, stateTone, teamState, type MemberLive, type MemberStatus } from "./team-model";
+import { duration, memberProgress, memberStatus, progress, shownMembers, stateLabel, stateTone, teamState, unreadBadge, type MemberLive, type MemberStatus } from "./team-model";
 import { roleStyle } from "./roles";
 import { TeamProposals } from "./ProposalCards";
 import { TeamReports } from "./TeamReports";
 import { WaitingBanner } from "./Waiting";
 import { Blockers, PhaseModeControl, TaskActions, TeamBarActions, TeamBarChips, TeamModeControl, TeamQuestions } from "./TeamActions";
 import { composer } from "../../store/composer";
-import type { ComputerId, TeamCall, TeamMemberView, TeamView } from "../../types";
+import type { ComputerId, TeamCall, TeamMemberView, TeamPulseView, TeamView } from "../../types";
 import type { Session } from "../sessions/types";
 
 // The Team tab (Qt's TeamWorkspace, design D3, HANDOFF §14): the team bar and
@@ -292,6 +292,20 @@ function openRow(row: Session | undefined) {
   setDetailTab("activity");
 }
 
+/** Task 133: a pulse's lines as the member row shows them, at most three. */
+export function pulseLines(pulse: TeamPulseView): string[] {
+  return [
+    pulse.done ? `${tr("Done")}: ${pulse.done}` : "",
+    pulse.next ? `${tr("Next")}: ${pulse.next}` : "",
+    pulse.blocked ? `${tr("Blocked")}: ${pulse.blocked}` : "",
+  ].filter(Boolean);
+}
+
+function pulseText(pulse: TeamPulseView): string {
+  const by = pulse.source === "note" ? tr("the member's own note") : tr("Zerus's summary of its last turn");
+  return [...pulseLines(pulse), by].join("\n");
+}
+
 function MemberRow(props: { computer: ComputerId; team: TeamView; member: TeamMemberView; status: MemberStatus }) {
   const row = () => memberRow(props.computer, props.member);
   const own = createMemo(() => memberProgress(props.team, props.member));
@@ -304,10 +318,18 @@ function MemberRow(props: { computer: ComputerId; team: TeamView; member: TeamMe
         <div class="team-member-line">
           <span class="role-badge ell" style={roleStyle(props.member.role, props.member.lead)}>{props.member.role || props.member.id}</span>
           <Show when={props.member.question}><span class="team-q" title={tr("Needs your answer")}>?1</span></Show>
+          <Show when={unreadBadge(props.member)}>{(badge) => (
+            <span class="team-unread mono" classList={{ urgent: badge().urgent }} title={badge().tip}>{badge().text}</span>
+          )}</Show>
           <Show when={model()}><span class="dim ell team-model">{model()}</span></Show>
           <span class="grow" />
           <span class={`team-status tone-${props.status.tone}`} title={props.status.text}><Icon name={props.status.icon} size={12} />{props.status.short}</span>
         </div>
+        <Show when={props.member.pulse}>{(pulse) => (
+          <div class="team-member-pulse" classList={{ blocked: !!pulse().blocked }} title={pulseText(pulse())}>
+            <For each={pulseLines(pulse())}>{(line) => <span class="ell">{line}</span>}</For>
+          </div>
+        )}</Show>
         <div class="team-member-line sub">
           <span class="ell team-member-text" title={props.member.error || props.status.text}>{props.member.error || props.status.text}</span>
           <span class="grow" />

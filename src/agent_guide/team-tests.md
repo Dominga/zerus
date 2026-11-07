@@ -5,7 +5,16 @@ with their time; run them with hgs team run (the command hgs guide tests
 gives), never a full suite. Ask the lead before a run over 10 minutes.
 
 A hand-out names this rule. A phase integration runs the affected tests of
-the phase's range. The full run happens only before a release: ask the owner
+the phase's range.
+
+Merges (task 174): with [merge_queue] on, an accept merges the reported
+commit into the lead branch (the owner's integration_folder, else the team's
+folder), runs its affected tests there and keeps it or returns the task with
+the failure or the conflicting files. Nobody merges, builds or tests a
+member's work by hand. A merger reviews the diff and the findings and
+resolves the conflicts the queue returns; a phase integration reads the
+queue's results (hgs test affected MERGE_TESTED..HEAD) and the release
+candidate. The full run happens only before a release: ask the owner
 first with the estimate; the owner sets the full_tests policy in the team
 settings (never, ask, allowed) or grants one run for a release.
 

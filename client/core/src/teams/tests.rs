@@ -1470,3 +1470,49 @@ fn the_time_view_reads_a_scope_in_bounded_pages() {
     )
     .is_err());
 }
+
+/// Task 160: a parked task carries hgs status's words; any other task omits
+/// the field, so its wire shape is unchanged.
+#[test]
+fn task_160_a_parked_task_says_until_when() {
+    let status = json!({"id":"t1","name":"Checkout","status":"running","lead":"lead",
+        "members":[{"id":"lead","role":"Lead"},{"id":"dev","role":"Backend"}],
+        "tasks":[{"id":1,"title":"API","status":"pending","assignee":"dev",
+                  "parked":"parked until hgs version 1.58.0 installed, ETA 14:30 (in 25 min)"},
+                 {"id":2,"title":"Docs","status":"pending","assignee":"dev"}]});
+    let view = super::view::team(&status);
+    assert_eq!(view.tasks[0].parked, "parked until hgs version 1.58.0 installed, ETA 14:30 (in 25 min)");
+    assert_eq!(view.tasks[1].parked, "");
+    let wire = serde_json::to_value(&view.tasks[1]).unwrap();
+    assert!(wire.get("parked").is_none(), "{wire}");
+    assert_eq!(serde_json::to_value(&view.tasks[0]).unwrap()["parked"], view.tasks[0].parked.as_str());
+}
+
+/// Task 209: a member card shows its native context reading, and a member
+/// whose context is being compacted reads `compacting`.
+#[test]
+fn task_209_a_member_card_shows_its_context_and_compacting_state() {
+    let status = json!({"id":"t1","name":"Checkout","status":"running","lead":"lead",
+        "members":[
+            {"id":"lead","role":"Lead"},
+            {"id":"dev","role":"Backend","agent":"claude","state":"active",
+             "context":{"used":960000,"limit":1000000,"percent":96,"at":1000.0}},
+            {"id":"qa","role":"Tester","agent":"dsh","state":"compacting",
+             "context":{"used":970000,"limit":1000000,"percent":97,"at":1000.5},
+             "compacting":{"action":"compact","started_at":1000.0,"task":4,"reason":"threshold"}}
+        ],
+        "tasks":[]});
+    let view = super::view::team(&status);
+    let dev = view.members.iter().find(|member| member.id == "dev").unwrap();
+    let context = dev.context.as_ref().expect("the reading is on the card");
+    assert_eq!((context.used, context.limit, context.percent), (960000, 1000000, 96));
+    assert!(!dev.compacting);
+    let qa = view.members.iter().find(|member| member.id == "qa").unwrap();
+    assert!(qa.compacting);
+    assert_eq!(qa.state, "compacting");
+    assert_eq!(qa.context.as_ref().unwrap().percent, 97);
+    // A member with no meter shows none, and its wire shape is unchanged.
+    let lead = view.members.iter().find(|member| member.id == "lead").unwrap();
+    assert!(lead.context.is_none() && !lead.compacting);
+    assert!(serde_json::to_value(lead).unwrap().get("context").is_none());
+}

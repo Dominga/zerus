@@ -27,10 +27,10 @@ const MERGE_RANGES: usize = 500;
 
 /// The project turned the queue on (the owner may override it in the team).
 pub(crate) fn enabled(team: &Team) -> bool {
-    if team.folder.is_empty() {
+    if team.integration_folder().is_empty() {
         return false;
     }
-    crate::test_discipline::config::load(Path::new(&team.folder), team.settings.tests.as_ref())
+    crate::test_discipline::config::load(Path::new(team.integration_folder()), team.settings.tests.as_ref())
         .is_ok_and(|loaded| loaded.active() && loaded.config.merge_queue.enabled)
 }
 
@@ -48,7 +48,7 @@ pub(crate) fn entry(team: &Team, id: u32, by: &str, by_owner: bool, reason: &str
     }
     let member = team.member(&attempt.member)?;
     let folder = super::dispatcher::member_folder_path(team, member).ok()?;
-    if folder.is_empty() || super::dispatcher::same_path(&folder, &team.folder) {
+    if folder.is_empty() || super::dispatcher::same_path(&folder, team.integration_folder()) {
         return None;
     }
     Some(MergeEntry {
@@ -63,6 +63,25 @@ pub(crate) fn entry(team: &Team, id: u32, by: &str, by_owner: bool, reason: &str
         reason: reason.to_owned(),
         ..MergeEntry::default()
     })
+}
+
+/// Task 174: why the owner's integration folder cannot take a merge, or None
+/// (unset, or a git checkout of the team's repository on a branch).
+pub(crate) fn integration_problem(team: &Team) -> Option<String> {
+    let folder = team.settings.integration_folder.trim();
+    if folder.is_empty() {
+        return None;
+    }
+    if !Path::new(folder).is_dir() {
+        return Some(format!("the integration folder {folder} does not exist"));
+    }
+    if !team.folder.is_empty() && !super::dispatcher::same_repository(folder, &team.folder, Instant::now() + GIT_TIMEOUT) {
+        return Some(format!("the integration folder {folder} is not a checkout of the team's repository ({})", team.folder));
+    }
+    match git_text(folder, &["symbolic-ref", "--quiet", "--short", "HEAD"]) {
+        Some(branch) if !branch.is_empty() => None,
+        _ => Some(format!("the integration folder {folder} is not on a branch (detached HEAD)")),
+    }
 }
 
 /// What merging an entry into the lead's folder did.
@@ -150,7 +169,7 @@ pub(crate) fn merge(lead: &str, entry: &MergeEntry, message: &str) -> Merged {
 }
 
 fn range_files(team: &Team, prev: &str, merged: &str) -> anyhow::Result<Vec<String>> {
-    let changed = git_text(&team.folder, &["diff", "--name-only", "--no-renames", prev, merged])
+    let changed = git_text(team.integration_folder(), &["diff", "--name-only", "--no-renames", prev, merged])
         .ok_or_else(|| anyhow::anyhow!("git could not read the range {prev}..{merged}"))?;
     Ok(changed.lines().filter(|line| !line.is_empty()).map(str::to_owned).collect())
 }
@@ -225,7 +244,7 @@ pub(crate) fn affected_requests(
 ) -> anyhow::Result<Affected> {
     use crate::test_discipline::{affected, config, durations, map};
     let TestRange { prev, merged, run_at } = range;
-    let lead = Path::new(&team.folder);
+    let lead = Path::new(team.integration_folder());
     let loaded = config::load(lead, team.settings.tests.as_ref())?;
     let config = &loaded.config;
     let mut files: std::collections::BTreeSet<String> = range_files(team, prev, merged)?.into_iter().collect();
@@ -233,7 +252,7 @@ pub(crate) fn affected_requests(
     // A provider selected only by an older open range still has to run here.
     let mut ranges = Vec::new();
     for range in open_merge_ranges(team) {
-        if ancestry_at(&team.folder, &range.merged, run_at) == Ancestry::Yes {
+        if ancestry_at(team.integration_folder(), &range.merged, run_at) == Ancestry::Yes {
             let changed = range_files(team, &range.prev, &range.merged)?;
             files.extend(changed.iter().cloned());
             ranges.push((range, changed));
@@ -265,7 +284,7 @@ pub(crate) fn affected_requests(
         for run in &selected.runs {
             if !available.contains(run.provider.as_str()) {
                 let start = not_run_since.entry(run.provider.clone()).or_insert_with(|| range.prev.clone());
-                if *start != range.prev && ancestry_at(&team.folder, &range.prev, start) == Ancestry::Yes {
+                if *start != range.prev && ancestry_at(team.integration_folder(), &range.prev, start) == Ancestry::Yes {
                     *start = range.prev.clone();
                 }
             }
@@ -357,7 +376,7 @@ where
         .map(|entry| (task.id, task.status, entry.clone()))).collect();
     for (id, status, entry) in legacy {
         if entry.state == "reverting" && (matches!(status, TaskStatus::Pending | TaskStatus::Cancelled)
-            || entry.merged.is_empty() || ancestry(&team.folder, &entry.merged) == Ancestry::No) {
+            || entry.merged.is_empty() || ancestry(team.integration_folder(), &entry.merged) == Ancestry::No) {
             record_untested_range(team, id, &entry, events);
             team.task_mut(id).unwrap().merge = None;
             events.push(Event::new("merge_migration_dropped", json!({"task":id})));
@@ -391,7 +410,7 @@ where
                 .find(|record| !matches!(record.status.as_str(), "passed" | "flaky" | "reused"))
                 .map(|record| record.excerpt.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"))
                 .unwrap_or_default();
-            let rolled = roll_back(&team.folder, &entry).note();
+            let rolled = roll_back(team.integration_folder(), &entry).note();
             let mut not_run = entry.not_run.clone();
             for message in pending_not_run(team) {
                 push_not_run(&mut not_run, &message);
@@ -422,7 +441,7 @@ where
     let mut entry = team.task(id).and_then(|task| task.merge.clone()).unwrap_or_default();
     let (head, map) = retry_stamps(team);
     if !entry.merged.is_empty() {
-        let reachable = ancestry(&team.folder, &entry.merged);
+        let reachable = ancestry(team.integration_folder(), &entry.merged);
         if reachable != Ancestry::No {
             return resolve_reachable(team, database, id, RecordedMerge { entry, head: &head, reachable }, now, events, affected_hosts).map(|changed| changed || migrated);
         }
@@ -445,10 +464,22 @@ where
             found.retry = false;
         }
     }
+    // Task 174: an owner's integration folder that is not a checkout of the
+    // team's repository holds the queue with that note; nothing is merged.
+    if let Some(note) = integration_problem(team) {
+        if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
+            if found.note == note && found.wait_reason == MergeWaitReason::Busy {
+                return Ok(migrated);
+            }
+            found.note = note;
+            found.wait_reason = MergeWaitReason::Busy;
+        }
+        return Ok(true);
+    }
     let title = team.task(id).map(|task| task.title.clone()).unwrap_or_default();
     let short: String = entry.commit.chars().take(8).collect();
     let message = format!("Merge accepted work from {} ({short}) (#{id}): {title}", team.name_of(&entry.author));
-    match merge(&team.folder, &entry, &message) {
+    match merge(team.integration_folder(), &entry, &message) {
         Merged::Busy(note) => {
             if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
                 if found.note == note && found.wait_reason == MergeWaitReason::Busy {
@@ -556,7 +587,7 @@ fn ancestry_at(folder: &str, commit: &str, head: &str) -> Ancestry {
 
 /// A stable fingerprint of the project's tests map and the team's override.
 fn tests_stamp(team: &Team) -> String {
-    let text = std::fs::read_to_string(Path::new(&team.folder).join(".zerus/tests.toml")).unwrap_or_default();
+    let text = std::fs::read_to_string(Path::new(team.integration_folder()).join(".zerus/tests.toml")).unwrap_or_default();
     let settings = team.settings.tests.as_ref().map(|value| value.to_string()).unwrap_or_default();
     let mut digest = Sha256::new();
     digest.update(text.as_bytes());
@@ -566,7 +597,7 @@ fn tests_stamp(team: &Team) -> String {
 
 /// The HEAD and tests-map fingerprint a queued retry remembers.
 fn retry_stamps(team: &Team) -> (String, String) {
-    (git_text(&team.folder, &["rev-parse", "HEAD"]).unwrap_or_default(), tests_stamp(team))
+    (git_text(team.integration_folder(), &["rev-parse", "HEAD"]).unwrap_or_default(), tests_stamp(team))
 }
 
 /// Store a queued entry's reason once; a changed HEAD or map refreshes the
@@ -623,9 +654,9 @@ where
         if entry.wait_reason == MergeWaitReason::Rollback && !entry.retry && entry.wait_head == head {
             return Ok(false);
         }
-        return match roll_back(&team.folder, &entry) {
+        return match roll_back(team.integration_folder(), &entry) {
             Rollback::Done => {
-                let head = git_text(&team.folder, &["rev-parse", "HEAD"]).unwrap_or_default();
+                let head = git_text(team.integration_folder(), &["rev-parse", "HEAD"]).unwrap_or_default();
                 let map = tests_stamp(team);
                 if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
                     found.state = "queued".into();
@@ -718,11 +749,11 @@ fn requeue_after_error(
     selection: bool,
     events: &mut Vec<Event>,
 ) -> anyhow::Result<bool> {
-    let head = git_text(&team.folder, &["rev-parse", "HEAD"]).unwrap_or_default();
+    let head = git_text(team.integration_folder(), &["rev-parse", "HEAD"]).unwrap_or_default();
     let rolled = if head == merged {
-        roll_back(&team.folder, &MergeEntry { prev: prev.to_owned(), merged: merged.to_owned(), ..Default::default() })
+        roll_back(team.integration_folder(), &MergeEntry { prev: prev.to_owned(), merged: merged.to_owned(), ..Default::default() })
     } else {
-        match ancestry(&team.folder, merged) {
+        match ancestry(team.integration_folder(), merged) {
             Ancestry::No => Rollback::Done,
             Ancestry::Yes => Rollback::Failed(format!("The lead branch moved since; revert {merged} by hand.")),
             Ancestry::Unknown => {
@@ -741,7 +772,7 @@ fn requeue_after_error(
                 events.push(Event::new("merge_affected_failed", json!({"task":id,"reason":reason})));
                 return Ok(true);
             }
-            let head = git_text(&team.folder, &["rev-parse", "HEAD"]).unwrap_or_default();
+            let head = git_text(team.integration_folder(), &["rev-parse", "HEAD"]).unwrap_or_default();
             let map = tests_stamp(team);
             if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
                 found.state = "queued".into();
@@ -855,7 +886,7 @@ fn keep(team: &mut Team, id: u32, entry: &MergeEntry, suites: Vec<String>, now: 
                 suite_since(team, suite)
             };
             let since = previous.get(suite).map(|open| open.since.clone()).filter(|since| !since.is_empty())
-                .map(|old| if candidate != old && ancestry_at(&team.folder, &candidate, &old) == Ancestry::Yes { candidate.clone() } else { old })
+                .map(|old| if candidate != old && ancestry_at(team.integration_folder(), &candidate, &old) == Ancestry::Yes { candidate.clone() } else { old })
                 .unwrap_or(candidate);
             open.insert(suite.to_owned(), OpenNotRun { since, message: message.clone() });
         }
@@ -912,19 +943,19 @@ fn roll_back(lead: &str, entry: &MergeEntry) -> Rollback {
 /// Whether an entry still names a merge reachable from HEAD (or git cannot say).
 pub(crate) fn merge_still_reachable(team: &Team, id: u32) -> bool {
     let Some(entry) = team.task(id).and_then(|task| task.merge.as_ref()) else { return false };
-    !entry.merged.is_empty() && ancestry(&team.folder, &entry.merged) != Ancestry::No
+    !entry.merged.is_empty() && ancestry(team.integration_folder(), &entry.merged) != Ancestry::No
 }
 
 /// Keep a returned task's untested merge range open for the phase build.
 fn record_untested_range(team: &mut Team, id: u32, entry: &MergeEntry, _events: &mut Vec<Event>) {
-    if entry.merged.is_empty() || entry.prev.is_empty() || ancestry(&team.folder, &entry.merged) == Ancestry::No {
+    if entry.merged.is_empty() || entry.prev.is_empty() || ancestry(team.integration_folder(), &entry.merged) == Ancestry::No {
         return;
     }
     let previous = team.task(id).and_then(|task| task.untested_merge.as_ref()).cloned();
     // Only a definite non-ancestor permits replacing the older start. A Git
     // read failure must preserve it while extending the end to this merge.
     let prev = previous
-        .filter(|range| ancestry_at(&team.folder, &range.merged, &entry.merged) != Ancestry::No)
+        .filter(|range| ancestry_at(team.integration_folder(), &range.merged, &entry.merged) != Ancestry::No)
         .map(|range| range.prev)
         .unwrap_or_else(|| entry.prev.clone());
     if let Some(task) = team.task_mut(id) {

@@ -12,7 +12,7 @@ import {
   emphasis, childStatus, gitTooltip, paletteIndex, folderOf, ProviderGlyph,
 } from "./SessionCard";
 import { agentKind, catalog, computerFresh, computerOffline } from "../../store/catalog";
-import { servicePausedEmpty } from "../components/DesktopServiceStatus";
+import { StateRefusalDetail, TakeoverRefusalDetail, servicePausedEmpty, stateRefusal, takeoverRefused } from "../components/DesktopServiceStatus";
 import { visibleUnreadReply } from "../../store/attention";
 import { optionalQuestionCount } from "./optional-questions";
 import { currentChildren } from "./subagents";
@@ -850,12 +850,15 @@ function NoMatches() {
 }
 
 /** Before the first rows: skeleton cards while a computer is still starting, then the empty states;
- * a passive service shows no skeletons, since nothing is loading until Resume. */
+ * a passive service shows no skeletons, since nothing is loading until Resume; a refused state
+ * folder shows the refusal, since nothing loads until it is fixed (task 176). */
 function ListPlaceholder() {
   const computers = () => Object.values(catalog.computers);
   const waiting = () => !computers().length || computers().some((c) => c.status === "probing");
   const unsupported = () => computers().length > 0 && computers().every((c) => c.status === "unsupported");
   return (
+    <Show when={!stateRefusal()} fallback={<StateRefusalDetail />}>
+    <Show when={!(takeoverRefused() && !Object.keys(catalog.computers).length)} fallback={<TakeoverRefusalDetail />}>
     <Show when={!servicePausedEmpty()} fallback={
       <div class="empty sp-empty sp-paused">
         <Icon name="pause" size={30} />
@@ -886,6 +889,8 @@ function ListPlaceholder() {
           <p>{tr("This computer's hgs has no event stream (Event stream ABI: watch-v1). Update hgs to see its sessions here.")}</p>
         </Show>
       </div>
+    </Show>
+    </Show>
     </Show>
     </Show>
   );

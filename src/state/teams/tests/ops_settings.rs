@@ -193,7 +193,7 @@ fn a_wider_profile_waits_for_the_owner() {
     )
     .unwrap_err()
     .to_string();
-    assert_eq!(error, "A member \"dev\": field \"permissions_profile\" is read, write, build, commit or network, not \"root\"");
+    assert_eq!(error, "A member \"dev\": field \"permissions_profile\" is read, write, build, commit, network, operate, not \"root\"");
     // C3: `permissions` stays the launch mode; bypass is accepted.
     let (mut bypass, _) = create("t3", &json!({"name":"T3","lead":{"id":"lead","agent":"claude"}})).unwrap();
     plan(
@@ -214,7 +214,10 @@ fn a_wider_profile_waits_for_the_owner() {
     )
     .unwrap_err()
     .to_string();
-    assert_eq!(error, "A member \"dev\": field \"permissions\" is auto or bypass, not \"root\"");
+    assert_eq!(
+        error,
+        "A member \"dev\": field \"permissions\": \"root\" is not a launch selection: use provider, bypass, auto or native:{...} (the agent's own selection)"
+    );
 }
 
 #[test]
@@ -636,4 +639,51 @@ fn only_the_owner_grants_a_full_test_run() {
     let revoked = apply(&mut team, "full-tests", &json!({"revoke":true}), &Actor::Human, &none, &mut events).unwrap();
     assert_eq!(revoked["status"], "revoked");
     assert!(team.full_tests_grant.is_none());
+}
+
+/// Task 174: only the owner names the integration folder, and it is an
+/// absolute path.
+#[test]
+fn the_integration_folder_is_the_owners_absolute_path() {
+    let mut team = running_team();
+    let none = BTreeSet::new();
+    let mut events = Vec::new();
+    let folder = if cfg!(windows) { "D:\\work\\integration" } else { "/work/integration" };
+    let error = apply(&mut team.clone(), "settings", &json!({"settings":{"integration_folder":folder}}), &Actor::Member("lead".into()), &none, &mut events)
+        .unwrap_err()
+        .to_string();
+    assert!(error.starts_with("Only you change the team's integration_folder"), "{error}");
+    let error = apply(&mut team.clone(), "settings", &json!({"settings":{"integration_folder":"relative/folder"}}), &Actor::Human, &none, &mut events)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("absolute path"), "{error}");
+    apply(&mut team, "settings", &json!({"settings":{"integration_folder":folder}}), &Actor::Human, &none, &mut events).unwrap();
+    assert_eq!(team.integration_folder(), folder);
+    team.settings.integration_folder.clear();
+    assert_eq!(team.integration_folder(), team.folder, "unset: the team's folder");
+}
+
+/// Task 209: the share of a member's context window at which Zerus compacts.
+/// 95% by default; only the owner sets it, and 50 to 100 is the range.
+#[test]
+fn the_context_threshold_defaults_to_95_and_only_the_owner_sets_it() {
+    let mut team = running_team();
+    assert_eq!(team.settings.context_compact_percent, 95);
+    // An older team record without the field reads the default.
+    let mut stored = serde_json::to_value(&team).unwrap();
+    stored["settings"].as_object_mut().unwrap().remove("context_compact_percent");
+    let old: crate::state::teams::model::Team = serde_json::from_value(stored).unwrap();
+    assert_eq!(old.settings.context_compact_percent, 95);
+    let none = BTreeSet::new();
+    let mut events = Vec::new();
+    let error = apply(&mut team.clone(), "settings", &json!({"settings":{"context_compact_percent":90}}), &Actor::Member("lead".into()), &none, &mut events)
+        .unwrap_err()
+        .to_string();
+    assert!(error.starts_with("Only you change the team's context_compact_percent"), "{error}");
+    let error = apply(&mut team.clone(), "settings", &json!({"settings":{"context_compact_percent":20}}), &Actor::Human, &none, &mut events)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("50 to 100"), "{error}");
+    apply(&mut team, "settings", &json!({"settings":{"context_compact_percent":90}}), &Actor::Human, &none, &mut events).unwrap();
+    assert_eq!(team.settings.context_compact_percent, 90);
 }

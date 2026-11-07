@@ -582,6 +582,23 @@ export type RulesOutcome =
   | { outcome: "unsupported"; detail: Text }
   | { outcome: "failed"; detail: Text; request_id?: string }
   | { outcome: "uncertain"; detail: Text; request_id: string };
+/** Task 126: a project's memory, RustCodeLore and its store (client/core project_memory over `hgs project config`). */
+export type MemoryOp =
+  | { op: "read" }
+  | { op: "enable"; enabled: boolean; expected_revision: number; request_id?: string }
+  | { op: "store"; store: string; expected_revision: number; request_id?: string }
+  | { op: "move"; to: string; expected_revision: number; request_id?: string };
+export interface MemoryCall { project: string; op: MemoryOp }
+export interface MemoryView {
+  enabled: boolean; store: string; default_store: string; default: boolean; revision: number; moved_from: string[];
+  exists: boolean; records: number; files: number; bytes: number; index: "none" | "built" | "stale";
+}
+export interface MemoryMoved { from: string; to: string; files: number; bytes: number; old_kept: boolean }
+export type MemoryOutcome =
+  | { outcome: "done"; view: MemoryView; moved?: MemoryMoved; request_id?: string }
+  | { outcome: "unsupported"; detail: Text }
+  | { outcome: "failed"; detail: Text; request_id?: string }
+  | { outcome: "uncertain"; detail: Text; request_id: string };
 /** Task 67: this computer's model servers (client/core model_servers over `hgs model-server`). */
 export interface ModelServer {
   name: string; base_url: string; kind: string; ssh: string; has_key: boolean; up_minutes: number; contexts: unknown;
@@ -651,6 +668,10 @@ export async function wslDialogClose(handle: string): Promise<void> {
 export async function ironRules(call: RulesCall): Promise<RulesOutcome> {
   if (!inTauri()) throw new Error(DESKTOP_ONLY);
   return invoke("iron_rules", { call });
+}
+export async function projectMemory(call: MemoryCall): Promise<MemoryOutcome> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("project_memory", { call });
 }
 export interface AccountEditResult { notices: string[]; errors: string[] }
 export async function accountEditOpen(account: string, profile: string, kind: AccountEditKind): Promise<AccountEditView> {

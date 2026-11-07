@@ -18,6 +18,7 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPointer>
+#include <QEvent>
 #include <QProgressBar>
 #include <QRadioButton>
 #include <QRegularExpression>
@@ -28,6 +29,7 @@
 #include <QTabWidget>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include "TeamMemoryModes.h"
 
 using namespace TeamUi;
 
@@ -277,6 +279,12 @@ QWidget *TeamNewTab::buildSettings()
     og->addWidget(fieldLabel(tr("Approval")), 1, 0); og->addLayout(approval, 1, 1, 1, 3);
     m_max = new QSpinBox; m_max->setObjectName("teamNewMaxMembers"); m_max->setRange(1, 32); m_max->setValue(6); m_max->setFixedWidth(80);
     og->addWidget(fieldLabel(tr("Max members")), 2, 0); og->addWidget(m_max, 2, 1, Qt::AlignLeft);
+    // Task 127 (docs/lore.md 4.1): the team's memory mode. The project's
+    // RustCodeLore decides what is offered and preselected.
+    m_memory = segmented(TeamMemoryModes::all(), m_memoryValue, "teamNewMemory",
+                         [this](const QString &value) { m_memoryValue = value; m_memoryChosen = true; showMemoryModes(); touch("settings"); });
+    og->addWidget(fieldLabel(tr("Memory")), 3, 0); og->addWidget(m_memory, 3, 1, Qt::AlignLeft);
+    showMemoryModes();
     og->setColumnStretch(2, 1);
     v->addWidget(options);
     connect(m_review, &QCheckBox::toggled, this, [this] { touch("settings"); });
@@ -511,6 +519,57 @@ void TeamNewTab::arrange()
     if (wide) m_columns->setSizes({settings, width() - settings});
     const bool table = (wide ? settings : width()) >= tableWidth;
     if (table != m_tableMembers) { m_tableMembers = table; renderMembers(); }
+}
+
+// Task 127: only the modes the project offers are shown, the chosen one checked.
+void TeamNewTab::showMemoryModes()
+{
+    if (!m_memory) return;
+    const QStringList offered = TeamMemoryModes::modes(m_projectMemoryOn);
+    if (!offered.contains(m_memoryValue)) m_memoryValue = TeamMemoryModes::preselected(m_projectMemoryOn);
+    for (auto *b : m_memory->findChildren<QPushButton *>()) {
+        const QString mode = b->property("segment").toString();
+        b->setVisible(offered.contains(mode));
+        b->setChecked(mode == m_memoryValue);
+        b->setToolTip(TeamMemoryModes::hint(mode));
+    }
+    m_memory->setToolTip(TeamMemoryModes::hint(m_memoryValue));
+}
+
+void TeamNewTab::setProjectMemoryOn(bool on)
+{
+    m_projectMemoryOn = on;
+    if (!m_memoryChosen) m_memoryValue = TeamMemoryModes::preselected(on);
+    showMemoryModes();
+}
+
+QStringList TeamNewTab::memoryModesShown() const
+{
+    QStringList shown;
+    if (!m_memory) return shown;
+    for (auto *b : m_memory->findChildren<QPushButton *>())
+        if (!b->isHidden()) shown << b->property("segment").toString();
+    return shown;
+}
+
+// Task 127: the project's memory switch, read when the form learns its project.
+void TeamNewTab::readProjectMemory()
+{
+    const QString project = property("ironRulesProjectId").toString();
+    if (!m_client || project.isEmpty()) { setProjectMemoryOn(false); return; }
+    m_client->memoryTransport()(QString(), QStringLiteral("get"), QJsonObject{{"project", project}},
+        [guard = QPointer<TeamNewTab>(this), project](const QJsonObject &reply, const QString &error) {
+            if (!guard || guard->property("ironRulesProjectId").toString() != project) return;
+            guard->setProjectMemoryOn(error.isEmpty() && reply.value("enabled").toBool());
+        });
+}
+
+bool TeamNewTab::event(QEvent *event)
+{
+    if (event->type() == QEvent::DynamicPropertyChange
+        && static_cast<QDynamicPropertyChangeEvent *>(event)->propertyName() == "ironRulesProjectId")
+        readProjectMemory();
+    return QWidget::event(event);
 }
 
 void TeamNewTab::showEvent(QShowEvent *event)
@@ -1058,6 +1117,8 @@ QJsonObject TeamNewTab::settingsJson() const
     const QString phase = m_phaseApproval->currentData().toString();
     if (phase.isEmpty()) settings.remove("phase_approval"); else settings.insert("phase_approval", phase);
     settings.insert("max_members", m_max->value());
+    // Task 126: only the mode; Zerus fills the store at Create team.
+    settings.insert("memory", QJsonObject{{"mode", m_memoryValue}});
     return settings;
 }
 
@@ -1251,6 +1312,9 @@ void TeamNewTab::applyDraft(const Teams::Team &team, const QJsonObject &settings
             m_review->setChecked(team.approval != "auto");
             m_phaseApproval->setCurrentIndex(qMax(0, m_phaseApproval->findData(team.phaseApproval)));
             if (team.maxMembers > 0) m_max->setValue(team.maxMembers);
+            m_memoryChosen = settings.value("memory").toObject().contains("mode");
+            m_memoryValue = TeamMemoryModes::of(settings, m_projectMemoryOn);
+            showMemoryModes();
         }
         if (!m_dirty.contains("members")) {
             m_members.clear();
@@ -1377,5 +1441,8 @@ void TeamNewTab::resetDraft()
     m_draft.clear(); m_leadSessionName.clear(); m_revision = m_appliedRevision = m_serverRevision = 0;
     m_dirty.clear(); m_keptFields.clear(); m_unseen.clear(); m_preflightErrors.clear(); m_preflightWarnings.clear();
     m_tasks.clear(); m_settings = {}; m_saveError.clear(); m_readError.clear(); m_createError.clear(); m_savedAt = {};
+    m_memoryChosen = false;
+    m_memoryValue = TeamMemoryModes::preselected(m_projectMemoryOn);
+    showMemoryModes();
     renderLead(); renderPlan(); renderUnseen(); renderMembers();
 }

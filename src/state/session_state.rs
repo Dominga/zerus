@@ -98,6 +98,10 @@ fn apply(session: &mut Value, mut ttl: Value, team: Option<&teams::waiting::Wait
     let (state, reason) = compute(session, team.map(|team| (team.lead, team.reason.as_ref())), at);
     session["session_state"] = json!(state);
     session["state_reason"] = reason.unwrap_or(Value::Null);
+    if let Some(team) = team {
+        session["team_id"] = json!(team.team);
+        session["team_lead"] = json!(team.lead);
+    }
 }
 
 /// U30: the oldest `hgs run` build the session started that still runs.
@@ -780,3 +784,4 @@ mod tests {
         assert_eq!(member_state(&stopped), ("stopped", None));
     }
 }
+

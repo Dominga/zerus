@@ -80,6 +80,14 @@ public:
 protected:
     void resizeEvent(QResizeEvent *event) override;
     void showEvent(QShowEvent *event) override;
+    bool event(QEvent *event) override;
+public:
+    // Task 127: the project's RustCodeLore is on (project and read-only are
+    // offered, project preselected) or off (team preselected).
+    void setProjectMemoryOn(bool on);
+    QString memoryMode() const { return m_memoryValue; }
+    QStringList memoryModesShown() const;
+protected:
     void hideEvent(QHideEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 private:
@@ -156,6 +164,14 @@ private:
     bool m_forcedShared = false;
     QWidget *m_planning = nullptr;
     QString m_planningValue = QStringLiteral("lead");
+    // Task 127 (docs/lore.md 4.1): the team's memory mode; the preselected one
+    // follows the project's RustCodeLore until the owner chooses.
+    QWidget *m_memory = nullptr;
+    QString m_memoryValue = QStringLiteral("team");
+    bool m_memoryChosen = false;
+    bool m_projectMemoryOn = false;
+    void showMemoryModes();
+    void readProjectMemory();
     QSpinBox *m_max = nullptr;
     QPushButton *m_addMember = nullptr, *m_create = nullptr, *m_discard = nullptr, *m_start = nullptr, *m_useLead = nullptr;
     QProgressBar *m_progress = nullptr;

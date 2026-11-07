@@ -75,11 +75,17 @@
   .team-member-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
   .team-member-line.sub { font-size: 11px; color: var(--z-color-text-3); }
   .team-member-text { min-width: 0; }
+  /* Task 133: the latest pulse, at most three short lines. */
+  .team-member-pulse { display: flex; flex-direction: column; min-width: 0; font-size: 11px; color: var(--z-color-muted); }
+  .team-member-pulse.blocked span:last-child { color: var(--z-color-danger, inherit); }
   .team-model { font-size: 11px; min-width: 0; }
   .team-tile { flex: none; display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: var(--z-color-tile, var(--z-color-field)); color: var(--z-color-text-2); }
   .team-section-head .team-tile { width: 22px; height: 22px; }
   .team-status { flex: none; display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; max-width: 112px; color: var(--tone); font-size: 11px; white-space: nowrap; overflow: hidden; }
   .team-q { flex: none; padding: 0 5px; border-radius: 7px; font-size: 10.5px; font-weight: 600; color: var(--z-color-warn); background: var(--z-color-warn-bg); }
+  /* Task 134: a member that has not read its team messages. */
+  .team-unread { flex: none; padding: 0 5px; border-radius: 7px; font-size: 10.5px; color: var(--z-color-muted); background: var(--z-color-field); }
+  .team-unread.urgent { color: var(--z-color-warn); background: var(--z-color-warn-bg); font-weight: 600; }
   .team-mini-bar { flex: none; width: 26px; height: 4px; border-radius: 2px; background: var(--z-color-tile, var(--z-color-field)); overflow: hidden; }
   .team-mini-bar i { display: block; height: 100%; background: var(--z-color-accent-muted); }
 

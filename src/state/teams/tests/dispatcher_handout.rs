@@ -67,9 +67,8 @@ fn a_member_with_no_ready_work_starves_the_plan_and_the_lead_hears_once() {
     // Not before 20 minutes, then once.
     assert!(!steps(&team, &seen, 10.0 + 20.0 * 60.0 - 1.0).iter().any(|step| matches!(step, Step::PlanStarved { .. })));
     let late = steps(&team, &seen, 10.0 + 20.0 * 60.0);
-    assert!(late.contains(&Step::PlanStarved { member: "dev".into() }), "{late:?}");
-    let member = team.member("dev").unwrap().clone();
-    let text = starved_text(&team, &member, 10.0 + 20.0 * 60.0);
+    assert!(late.contains(&Step::PlanStarved { members: vec!["dev".into()] }), "{late:?}");
+    let text = starved_text(&team, &["dev".into()], 10.0 + 20.0 * 60.0).unwrap();
     assert!(text.contains("starved") && text.contains("Backend") && text.contains("20 min"), "{text}");
     assert!(text.contains("#1") && text.contains("hgs guide team-lead"), "{text}");
     // Told once per episode.
@@ -287,6 +286,13 @@ fn a_fresh_retry_leaves_the_failed_member_even_with_other_work() {
                 for member in &mut team.members { member.model = "test-model".into(); }
             }
             let next = Step::Rebalance { task: 1, from: "dev".into(), to: "dev2".into() };
+            if overlapping {
+                // Task 155: #2 writes the same file and runs: the retry waits
+                // for it rather than run beside it on another branch.
+                assert!(!steps(&team, &seen, 100.0).iter().any(|step| matches!(step, Step::Rebalance { task: 1, .. } | Step::HandOut { task: 1, .. })),
+                    "modeled={modeled}");
+                continue;
+            }
             assert!(steps(&team, &seen, 100.0).contains(&next), "overlapping={overlapping} modeled={modeled}");
             let dir = tempfile::tempdir().unwrap();
             let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
@@ -412,8 +418,13 @@ fn a_rework_keeps_its_member_and_reserves_it_until_decided() {
             &BTreeSet::new(), &mut Vec::new()).unwrap();
         assert!(steps(&draining, &seen, 3.0).iter().any(|step| matches!(step, Step::Drain { member, .. } if member == "dev")));
     }
-    // Even a held return reserves its member, independently of ready ordering.
+    // Task 160 (owner, 2026-11-07): a held return reserves nobody; the
+    // member takes other work meanwhile, and the release reserves it again.
     ops::apply(&mut team, "hold", &json!({"task":1}), &Actor::Member("lead".into()),
+        &BTreeSet::new(), &mut Vec::new()).unwrap();
+    let now = steps(&team, &seen, 2.0);
+    assert!(now.contains(&Step::Rebalance { task: 2, from: "dev2".into(), to: "dev".into() }), "{now:?}");
+    ops::apply(&mut team, "release", &json!({"task":1}), &Actor::Member("lead".into()),
         &BTreeSet::new(), &mut Vec::new()).unwrap();
     let now = steps(&team, &seen, 2.0);
     assert!(!now.iter().any(|step| matches!(step, Step::Rebalance { to, .. } if to == "dev")), "{now:?}");
@@ -549,4 +560,51 @@ fn send_outcomes_are_classified_conservatively() {
     assert!(matches!(classify(&output(1, "", "delivery uncertain: x")), Sent::Uncertain(_)));
     assert!(matches!(classify(&output(255, "", "ssh: connection reset")), Sent::Uncertain(_)));
     assert!(matches!(classify(&Err(anyhow::anyhow!("timed out"))), Sent::Uncertain(_)));
+}
+
+/// Owner, 2026-11-07: a report is only an explicit `hgs team report`; the
+/// hand-out must not invite a captured last reply.
+#[test]
+fn the_hand_out_never_invites_a_captured_last_reply() {
+    let team = team();
+    let attempt = Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() };
+    let text = hand_off_text(&team, team.task(1).unwrap(), &attempt, "", "");
+    assert!(!text.contains("end your turn with"), "{text}");
+    assert!(!text.contains("Zerus gives it"), "{text}");
+    assert!(!text.contains("report as your last message"), "{text}");
+    // It still names the explicit report and No report, and keeps a question a
+    // question.
+    assert!(text.contains("A report is an explicit `hgs "), "{text}");
+    assert!(text.contains("No report"), "{text}");
+    assert!(text.contains("A progress line is not a report; a question is not a report."), "{text}");
+    assert!(text.contains("Report once at the end: hgs "), "{text}");
+}
+
+#[test]
+fn a_repeated_refusal_backs_off_to_fifteen_minutes() {
+    assert_eq!(crate::state::teams::dispatcher::refusal_pause(1), 30.0);
+    assert_eq!(crate::state::teams::dispatcher::refusal_pause(2), 60.0);
+    assert_eq!(crate::state::teams::dispatcher::refusal_pause(3), 120.0);
+    assert_eq!(crate::state::teams::dispatcher::refusal_pause(9), 15.0 * 60.0);
+}
+
+#[test]
+fn repeated_refusals_stay_one_attempt_with_a_count() {
+    let (team, _seen) = team_with_two_backends();
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
+    store.create("11111111-1111-4111-8111-111111111111", &json!({}), team.clone(), vec![]).unwrap();
+    set_fake_hgs(Some(Box::new(|_, _, _| Ok(fake_output(1, "", "terminal is busy")))));
+    run_step(&mut store, &team, &Step::HandOut { task: 1, member: "dev".into() }, "").unwrap();
+    // Move the stored refusal past its pause so the next hand-out is tried.
+    change(&mut store, &team.id, |saved, _| {
+        saved.task_mut(1).unwrap().attempts.last_mut().unwrap().sent_at = crate::state::now() - 31.0;
+        Ok(())
+    }).unwrap();
+    run_step(&mut store, &team, &Step::HandOut { task: 1, member: "dev".into() }, "").unwrap();
+    set_fake_hgs(None);
+    let task = store.load(&team.id).unwrap().unwrap().task(1).unwrap().clone();
+    assert_eq!(task.attempts.len(), 1, "one attempt carries every refusal");
+    assert_eq!(task.attempts[0].refusal_count, 2);
+    assert_eq!(task.attempts[0].refusal_reason, "terminal is busy");
 }

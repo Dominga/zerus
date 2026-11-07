@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { currentTask, duration, memberProgress, memberStatus, progress, shownMembers, stateLabel, stateTone, teamState, type MemberLive } from "./team-model";
+import { currentTask, duration, memberProgress, memberStatus, progress, shownMembers, stateLabel, stateTone, teamState, unreadBadge, type MemberLive } from "./team-model";
 import { roleColor } from "./roles";
 import type { TeamMemberView, TeamTaskView, TeamView } from "../../types";
 
@@ -52,6 +52,15 @@ describe("member states", () => {
     expect(memberStatus(t, dev)).toMatchObject({ kind: "input_blocked", short: "Blocked", tone: "warn", problem: true, icon: "terminal",
       text: "Terminal refused 4 hand-outs: terminal has a draft, dialog, or unrecognized prompt" });
     expect(memberStatus(t, { ...dev, input_refusals: 0 }).kind).toBe("idle");
+  });
+
+  it("a member with unread team messages shows unread: N, urgent ones marked (task 134)", () => {
+    expect(unreadBadge(member({ id: "dev" }))).toBeNull();
+    expect(unreadBadge(member({ id: "dev", unread: 0 }))).toBeNull();
+    expect(unreadBadge(member({ id: "dev", unread: 3 }))).toEqual({ text: "unread: 3", urgent: false,
+      tip: "3 unread team messages; the member reads them with hgs team inbox" });
+    expect(unreadBadge(member({ id: "dev", unread: 2, unread_urgent: 1 }))).toMatchObject({ urgent: true,
+      tip: "2 unread team messages, 1 urgent; the member reads them with hgs team inbox" });
   });
 
   it("Running: working names its task, sending, submitted, idle and a member that starts later", () => {

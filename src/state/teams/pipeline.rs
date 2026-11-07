@@ -918,17 +918,20 @@ mod tests {
     }
 
     #[test]
-    fn a_captured_reply_never_enters_the_stages_and_the_real_report_does() {
+    fn an_old_captured_reply_never_enters_the_stages_and_the_real_report_does() {
         let mut team = team_with("code", &builtin());
         let attempt = hand(&mut team);
-        // #538 C1: Zerus captures the member's last reply: it stays Submitted,
-        // for the lead and for the member's real report, and holds the member.
-        let (value, events) = feed(&mut team, "capture-report", json!({"task":1,"attempt":attempt,"text":"Queued, after #12"}), &member("dev"));
-        assert_eq!(value["status"], "submitted");
-        assert!(!kinds(&events).contains(&"stage_started"), "{:?}", kinds(&events));
-        let task = team.task(1).unwrap();
-        assert_eq!((task.status, task.attempts[0].notice), (TaskStatus::Submitted, Notice::Pending));
-        assert!(task.attempts[0].report.as_ref().unwrap().captured);
+        // #538 C1: a captured report from an older record (before 2026-11-07)
+        // stays Submitted, for the lead and the member's real report, and holds
+        // the member; no stage reads it.
+        {
+            let task = team.task_mut(1).unwrap();
+            task.status = TaskStatus::Submitted;
+            let attempt = task.attempts.last_mut().unwrap();
+            attempt.state = AttemptState::Reported;
+            attempt.report = Some(Report { text: "Queued, after #12".into(), at: 1.0, captured: true, ..Default::default() });
+            attempt.notice = Notice::Pending;
+        }
         assert!(pipeline(&team).runs.is_empty(), "no stage reads a captured reply");
         assert_eq!(team.captured_hold("dev"), Some(1));
         assert!(crate::state::teams::stages::waiting(&team).is_empty());
@@ -943,7 +946,7 @@ mod tests {
         // its member there too.
         team.task_mut(1).unwrap().attempts[0].report.as_mut().unwrap().captured = true;
         assert_eq!(team.captured_hold("dev"), Some(1));
-        // Only the dispatcher captures: no command names it, and you cannot.
+        // No command names a capture, and you cannot run one.
         assert!(!crate::state::teams::commands::USAGE.contains("capture-report"));
         assert!(run(&mut team, "capture-report", json!({"task":1,"attempt":attempt,"text":"x"}), &Actor::Human).is_err());
     }

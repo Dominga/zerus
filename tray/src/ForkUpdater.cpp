@@ -252,11 +252,24 @@ if ($banner -and $banner.Visible) { Finish "Zerus build $Build is running." $fal
 namespace {
 // A folder with its links resolved. Qt 6.10 on Windows keeps a junction in
 // canonicalFilePath(), so a junction resolves through its target first.
+//
+// Qt 6.10.3's junctionTarget() reports the NT substitute name ("\??\D:\...")
+// as "<junction folder>/Global/D:/...": the part after the first "Global/" is
+// the target itself. Resolve that form; any other path stays as Qt gave it.
+QString junctionPath(const QString &target)
+{
+    const int global = target.indexOf(QStringLiteral("/Global/"), Qt::CaseInsensitive);
+    if (global >= 0) {
+        const QString rest = target.mid(global + 8);
+        if (QFileInfo(rest).isAbsolute()) return rest;
+    }
+    return target;
+}
 QString resolvedFolder(const QString &path)
 {
     const QFileInfo info(path);
     QString target = path;
-    if (info.isJunction()) target = info.junctionTarget();
+    if (info.isJunction()) target = junctionPath(info.junctionTarget());
     else if (info.isSymLink()) target = info.symLinkTarget();
     const QString canonical = QFileInfo(target).canonicalFilePath();
     return canonical.isEmpty() ? QFileInfo(target).absoluteFilePath() : canonical;

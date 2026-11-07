@@ -577,6 +577,14 @@ pub(crate) fn shell(command: &str, cwd: &Path) -> Command {
 pub(crate) fn run_due(store: &TestStore, project: &Path, requests: &[Request], now: f64, policy: &super::test_results::Policy) -> anyhow::Result<Vec<Record>> {
     let mut written = Vec::new();
     let began = std::time::Instant::now();
+    // Task 174: a queued suite gets what the members' templates get: the
+    // build cache, and for CMake or CTest the tools and Qt's settings.
+    let command = |request: &Request| {
+        let text = request.command_for(project);
+        let mut process = shell(&text, project);
+        process.envs(super::templates::queue_environment(project, &text));
+        process
+    };
     for request in requests {
         let started = std::time::Instant::now();
         let at = now + began.elapsed().as_secs_f64();
@@ -588,7 +596,7 @@ pub(crate) fn run_due(store: &TestStore, project: &Path, requests: &[Request], n
             let _ = std::fs::remove_file(path);
         }
         let limit = Duration::from_secs((request.budget_minutes.max(1.0) * 60.0) as u64);
-        let mut outcome = run_tree(&mut shell(&request.command_for(project), project), limit, None);
+        let mut outcome = run_tree(&mut command(request), limit, None);
         let mut flags = Vec::new();
         let crash = super::test_results::crashed(outcome.exit, &outcome.tail);
         let mut status = if crash {
@@ -606,7 +614,7 @@ pub(crate) fn run_due(store: &TestStore, project: &Path, requests: &[Request], n
         let mut retries = 0;
         while status == "failed" && retries < policy.retries {
             retries += 1;
-            let again = run_tree(&mut shell(&request.command_for(project), project), limit, None);
+            let again = run_tree(&mut command(request), limit, None);
             if super::test_results::crashed(again.exit, &again.tail) {
                 flags.push("crash".to_owned());
                 status = "crashed".into();
@@ -1002,6 +1010,38 @@ results = { format = \"junit\", path = \"out/junit.xml\" }
         // Opening again changes nothing.
         drop(store);
         assert_eq!(TestStore::open_at(&path, false).unwrap().pending("t").unwrap().len(), 1);
+    }
+
+    /// Task 174: the project's build cache serves the queue's runs too: a
+    /// merged commit's cargo suites get the members' sccache wrapper.
+    #[test]
+    fn a_queued_run_uses_the_projects_build_cache() {
+        use super::super::templates::{settings_override, tools_override};
+        let dir = tempfile::tempdir().unwrap();
+        settings_override(Some(dir.path().join("templates.json")));
+        let wrapper = dir.path().join("sccache");
+        tools_override(Some(std::collections::HashMap::from([("sccache".to_owned(), wrapper.clone())])));
+        std::fs::create_dir_all(dir.path().join(".zerus")).unwrap();
+        let shared = dir.path().join("cache");
+        std::fs::write(dir.path().join(".zerus/tests.toml"), format!("version = 1\n[build_cache]\nenabled = true\ndir = '{}'\n", shared.display())).unwrap();
+        let store = TestStore::open_at(&dir.path().join("tests.sqlite3"), false).unwrap();
+        let mut probe = request("cache", "cargo", 1.0, true, "small");
+        probe.command = if cfg!(windows) { "echo %RUSTC_WRAPPER%> wrapper.txt".into() } else { "printf '%s' \"$RUSTC_WRAPPER\" > wrapper.txt".into() };
+        store.enqueue(&probe).unwrap();
+        let written = run_due(&store, dir.path(), &store.queued("t").unwrap(), 100.0, &Default::default()).unwrap();
+        assert_eq!(written[0].status, "passed", "{}", written[0].excerpt);
+        let seen = std::fs::read_to_string(dir.path().join("wrapper.txt")).unwrap();
+        assert_eq!(seen.trim(), wrapper.display().to_string());
+        // Off: the run gets no wrapper.
+        std::fs::write(dir.path().join(".zerus/tests.toml"), "version = 1\n[build_cache]\nenabled = false\n").unwrap();
+        let mut off = request("off", "cargo", 1.0, true, "small");
+        off.command = probe.command.clone();
+        store.enqueue(&off).unwrap();
+        run_due(&store, dir.path(), &store.queued("t").unwrap(), 101.0, &Default::default()).unwrap();
+        let seen = std::fs::read_to_string(dir.path().join("wrapper.txt")).unwrap();
+        assert_ne!(seen.trim(), wrapper.display().to_string());
+        tools_override(None);
+        settings_override(None);
     }
 
     #[test]

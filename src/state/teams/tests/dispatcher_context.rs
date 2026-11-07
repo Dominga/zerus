@@ -200,7 +200,7 @@ fn a_clear_waits_for_the_new_conversation_before_the_hand_out() {
         assert_eq!(saved.member("dev").unwrap().session.as_ref().unwrap().conversation_id, "c2");
         assert_eq!(sent.borrow()["expected_conversation_id"], "c2");
         // A cleared context gets the task's own input, never "as before".
-        let text = sent.borrow()["text"].as_str().unwrap_or_default().to_owned();
+        let text = crate::state::teams::doorbell::posted_text(&sent.borrow());
         assert!(text.contains("Build the cards API"), "{text}");
         assert!(text.contains("Paged list"), "{text}");
         assert!(!text.to_lowercase().contains("as before"), "{text}");
@@ -399,5 +399,269 @@ fn an_agent_without_context_actions_gets_none_with_one_feed_note() {
         assert!(saved.member("dev").unwrap().context_noted);
         let noted = event_kinds(&store, &t.id).into_iter().filter(|kind| kind == "context_skipped").count();
         assert_eq!(noted, 1, "one feed note per member");
+    });
+}
+
+/// Task 209: a member whose collected reading reached the team's threshold is
+/// compacted before the hand-out, and the task goes once the compaction is
+/// confirmed, as any U46 action does.
+#[test]
+fn the_context_threshold_compacts_before_a_hand_out() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        let at = crate::state::now();
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().context = Some(MemberContext::of(960_000, 1_000_000, at));
+        stored(&mut store, &t);
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let request = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        let inspects = std::rc::Rc::new(std::cell::Cell::new(0));
+        let (seen, seen_request, seen_inspects) = (calls.clone(), request.clone(), inspects.clone());
+        set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| {
+            let call = args.first().copied().unwrap_or_default().to_owned();
+            seen.borrow_mut().push(call.clone());
+            match call.as_str() {
+                "compact-context" => {
+                    let id = input.unwrap()["request_id"].as_str().unwrap().to_owned();
+                    *seen_request.borrow_mut() = id.clone();
+                    Ok(fake_output(0, &json!({"request_id":id,"status":"submitted"}).to_string(), ""))
+                }
+                "inspect" => {
+                    seen_inspects.set(seen_inspects.get() + 1);
+                    let status = if seen_inspects.get() == 1 { "compacting" } else { "completed" };
+                    Ok(fake_output(0, &json!({"run_id":"r1","conversation_id":"c1","activity":"idle","phase":"idle",
+                        "compact_context_request":{"request_id":seen_request.borrow().clone(),"run_id":"r1",
+                            "conversation_id":"c1","status":status}}).to_string(), ""))
+                }
+                "send" => Ok(fake_output(0, r#"{"status":"submitted"}"#, "")),
+                other => panic!("unexpected hgs {other}"),
+            }
+        })));
+        hand_out(&mut store, &t.id, 1, "dev", None, "").unwrap();
+        // The reading chose the compact; nothing is sent yet.
+        assert_eq!(*calls.borrow(), ["compact-context"]);
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let wait = saved.task(1).unwrap().waits.as_ref().expect("the wait is recorded");
+        assert_eq!((wait.state.as_str(), wait.action.as_str()), ("waiting", "compact"));
+        assert!(saved.task(1).unwrap().attempts.is_empty());
+        assert!(prepare_tick(&mut store, &t.id));
+        assert!(prepare_tick(&mut store, &t.id));
+        set_fake_hgs(None);
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let attempt = saved.task(1).unwrap().attempts.last().unwrap();
+        assert_eq!(attempt.state, AttemptState::Delivered);
+        assert_eq!(
+            (attempt.prepare[0].step.as_str(), attempt.prepare[0].to.as_str(), attempt.prepare[0].result.as_str()),
+            ("context", "compact", "done")
+        );
+        assert_eq!(*calls.borrow(), ["compact-context", "inspect", "inspect", "send"]);
+        let kinds = event_kinds(&store, &t.id);
+        assert!(kinds.contains(&"context_prepared".to_owned()), "{kinds:?}");
+    });
+}
+
+/// Task 209: an idle member mid-task whose meter reached the threshold is
+/// compacted and told to continue the same attempt; the attempt is not ended.
+#[test]
+fn an_idle_member_at_the_threshold_is_compacted_and_continues_its_attempt() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        delivered(&mut t);
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().context =
+            Some(MemberContext::of(970_000, 1_000_000, crate::state::now()));
+        stored(&mut store, &t);
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let request = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Value::Null));
+        let (seen, seen_request, seen_sent) = (calls.clone(), request.clone(), sent.clone());
+        set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| {
+            let call = args.first().copied().unwrap_or_default().to_owned();
+            seen.borrow_mut().push(call.clone());
+            match call.as_str() {
+                "compact-context" => {
+                    let id = input.unwrap()["request_id"].as_str().unwrap().to_owned();
+                    *seen_request.borrow_mut() = id.clone();
+                    Ok(fake_output(0, &json!({"request_id":id,"status":"submitted"}).to_string(), ""))
+                }
+                "inspect" => Ok(fake_output(0, &json!({"run_id":"r1","conversation_id":"c1","activity":"idle","phase":"idle",
+                    "compact_context_request":{"request_id":seen_request.borrow().clone(),"run_id":"r1",
+                        "conversation_id":"c1","status":"completed"}}).to_string(), "")),
+                "send" => {
+                    *seen_sent.borrow_mut() = input.cloned().unwrap_or_default();
+                    Ok(fake_output(0, r#"{"status":"submitted"}"#, ""))
+                }
+                other => panic!("unexpected hgs {other}"),
+            }
+        })));
+        let step = steps(&t, &free_sessions(), crate::state::now())
+            .into_iter()
+            .find(|step| matches!(step, Step::CompactIdle { member } if member == "dev"))
+            .expect("the threshold asks for a compaction");
+        run_step(&mut store, &t, &step, "").unwrap();
+        let pending = store.load(&t.id).unwrap().unwrap().member("dev").unwrap().context_compact.clone().expect("the compaction is recorded");
+        assert_eq!((pending.action.as_str(), pending.task, pending.reason.as_str()), ("compact", 1, "threshold"));
+        let saved = store.load(&t.id).unwrap().unwrap();
+        assert_eq!(saved.task(1).unwrap().attempts.last().unwrap().state, AttemptState::Delivered, "the attempt stays open");
+        // The confirmation arrives: the member is told to go on, the same attempt.
+        run_step(&mut store, &saved, &Step::CheckCompact { member: "dev".into() }, "").unwrap();
+        set_fake_hgs(None);
+        let saved = store.load(&t.id).unwrap().unwrap();
+        assert!(saved.member("dev").unwrap().context_compact.is_none());
+        assert_eq!(saved.task(1).unwrap().attempts.last().unwrap().state, AttemptState::Delivered);
+        let text = crate::state::teams::doorbell::posted_text(&sent.borrow());
+        assert!(text.contains("context was compacted") || text.contains("handoff brief"), "{text}");
+        assert!(text.contains("Continue task #1"), "{text}");
+        let kinds = event_kinds(&store, &t.id);
+        assert!(kinds.contains(&"context_compact_started".to_owned()), "{kinds:?}");
+        assert!(kinds.contains(&"context_compacted".to_owned()), "{kinds:?}");
+        assert_eq!(*calls.borrow(), ["compact-context", "inspect", "send"]);
+    });
+}
+
+/// Task 209: a report that claims there is no context left while the meter is
+/// below the threshold is not a report: the member hears the figure and keeps
+/// the attempt.
+#[test]
+fn a_false_context_claim_is_answered_with_the_meter_and_keeps_the_attempt() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        delivered(&mut t);
+        stored(&mut store, &t);
+        set_fake_hgs(Some(Box::new(|_, args: &[&str], _| match args.first().copied() {
+            Some("inspect") => Ok(fake_output(0, r#"{"run_id":"r1","conversation_id":"c1","activity":"idle","phase":"idle",
+                "session_usage":{"context":{"used":206000,"limit":1000000}}}"#, "")),
+            other => panic!("unexpected hgs {other:?}"),
+        })));
+        let attempt = t.task(1).unwrap().attempts.last().unwrap().id.clone();
+        let answer = report_context_answer(
+            &mut store,
+            &t.id,
+            &json!({"task":1,"attempt":attempt,"text":"I have no context budget left, stopping here."}),
+        )
+        .unwrap()
+        .expect("the claim is answered");
+        set_fake_hgs(None);
+        assert!(answer.contains("20%") && answer.contains("206000 of 1000000"), "{answer}");
+        assert!(answer.contains("below the team's 95% threshold"), "{answer}");
+        let saved = store.load(&t.id).unwrap().unwrap();
+        assert_eq!(saved.task(1).unwrap().status, TaskStatus::InProgress, "no report was taken");
+        assert_eq!(saved.task(1).unwrap().attempts.last().unwrap().state, AttemptState::Delivered);
+        assert_eq!(saved.member("dev").unwrap().context.unwrap().percent, 20);
+        let kinds = event_kinds(&store, &t.id);
+        assert!(kinds.contains(&"context_claim_refused".to_owned()), "{kinds:?}");
+        // An ordinary report is a report.
+        set_fake_hgs(Some(Box::new(|_, args: &[&str], _| panic!("no inspect for a plain report: {args:?}"))));
+        assert!(report_context_answer(&mut store, &t.id, &json!({"task":1,"attempt":attempt,"text":"Done: the API is in place."}))
+            .unwrap()
+            .is_none());
+        set_fake_hgs(None);
+    });
+}
+
+/// Task 209: a claim at or above the threshold starts the compaction instead;
+/// the report is still not taken.
+#[test]
+fn a_context_claim_at_the_threshold_compacts_instead_of_reporting() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        delivered(&mut t);
+        stored(&mut store, &t);
+        set_fake_hgs(Some(Box::new(|_, args: &[&str], _| match args.first().copied() {
+            Some("inspect") => Ok(fake_output(0, r#"{"run_id":"r1","conversation_id":"c1","activity":"idle","phase":"idle",
+                "session_usage":{"context":{"used":970000,"limit":1000000}}}"#, "")),
+            other => panic!("unexpected hgs {other:?}"),
+        })));
+        let attempt = t.task(1).unwrap().attempts.last().unwrap().id.clone();
+        let answer = report_context_answer(&mut store, &t.id, &json!({"task":1,"attempt":attempt,"text":"Out of context."}))
+            .unwrap()
+            .expect("the claim is answered");
+        set_fake_hgs(None);
+        assert!(answer.contains("97%") && answer.contains("compacting"), "{answer}");
+        let saved = store.load(&t.id).unwrap().unwrap();
+        assert_eq!(saved.task(1).unwrap().status, TaskStatus::InProgress);
+        assert_eq!(saved.task(1).unwrap().attempts.last().unwrap().state, AttemptState::Delivered);
+        let kinds = event_kinds(&store, &t.id);
+        assert!(kinds.contains(&"context_compact_requested".to_owned()), "{kinds:?}");
+    });
+}
+
+/// Task 209: a No report reply that says there is no context left is answered
+/// with the meter and the attempt stays open.
+#[test]
+fn a_context_claim_reply_is_answered_instead_of_no_report() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        delivered(&mut t);
+        let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        dev.context = Some(MemberContext::of(206_000, 1_000_000, crate::state::now()));
+        t.task_mut(1).unwrap().attempts.last_mut().unwrap().last_reply = "I ran out of context and cannot continue.".into();
+        stored(&mut store, &t);
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Value::Null));
+        let seen = sent.clone();
+        set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| match args.first().copied() {
+            Some("send") => {
+                *seen.borrow_mut() = input.cloned().unwrap_or_default();
+                Ok(fake_output(0, r#"{"status":"submitted"}"#, ""))
+            }
+            other => panic!("unexpected hgs {other:?}"),
+        })));
+        run_step(&mut store, &t, &Step::AnswerContextClaim { task: 1 }, "").unwrap();
+        set_fake_hgs(None);
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let attempt = saved.task(1).unwrap().attempts.last().unwrap();
+        assert!(attempt.context_answered_at.is_some());
+        assert!(!attempt.no_report, "not a No report");
+        assert_eq!(attempt.state, AttemptState::Delivered);
+        let text = crate::state::teams::doorbell::posted_text(&sent.borrow());
+        assert!(text.contains("20%") && text.contains("Continue task #1"), "{text}");
+        assert!(event_kinds(&store, &t.id).contains(&"context_claim_refused".to_owned()));
+    });
+}
+
+/// Task 135/209: a fresh session with an open attempt gets the handoff brief
+/// and continues the attempt.
+#[test]
+fn a_fresh_sessions_handoff_brief_continues_the_open_attempt() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        delivered(&mut t);
+        let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        dev.handoff = Some(crate::state::teams::model::HandoffNeed {
+            why: "relaunch".into(),
+            at: crate::state::now() - 60.0,
+            from: "codex/x/dev".into(),
+            changes: Vec::new(),
+        });
+        stored(&mut store, &t);
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Value::Null));
+        let seen = sent.clone();
+        set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| match args.first().copied() {
+            Some("send") => {
+                *seen.borrow_mut() = input.cloned().unwrap_or_default();
+                Ok(fake_output(0, r#"{"status":"submitted"}"#, ""))
+            }
+            other => panic!("unexpected hgs {other:?}"),
+        })));
+        run_step(&mut store, &t, &Step::SendHandoff { member: "dev".into() }, "").unwrap();
+        set_fake_hgs(None);
+        let saved = store.load(&t.id).unwrap().unwrap();
+        assert!(saved.member("dev").unwrap().handoff.is_none());
+        assert_eq!(saved.task(1).unwrap().attempts.last().unwrap().n, 1, "the same attempt");
+        assert_eq!(saved.task(1).unwrap().attempts.last().unwrap().state, AttemptState::Delivered);
+        let text = crate::state::teams::doorbell::posted_text(&sent.borrow());
+        assert!(text.contains("handoff brief") && text.contains("relaunched in a fresh conversation"), "{text}");
+        assert!(text.contains("Continue task #1"), "{text}");
+        assert!(event_kinds(&store, &t.id).contains(&"handoff_sent".to_owned()));
     });
 }

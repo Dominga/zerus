@@ -182,6 +182,8 @@ export interface FirstChoiceOffer {
 export interface NotificationOwnership {
   /** Local startup recovery presentation; never a service grant. */
   native_recovery?: boolean;
+  /** Task 180: the check that refused the native takeover, by its fixed code. */
+  native_recovery_reason?: { code: string; check: string };
   /** Native helper observation only; never permission to start a writer. */
   activation?: { pending: boolean; running: boolean; needs_resume: boolean; code: string;
     review?: ModeReview | null; automatic_blocked?: boolean; request_id?: string | null; active?: boolean; business_ready?: boolean;
@@ -237,6 +239,9 @@ export interface DesktopService {
   retained_source_import?: null | { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null; creations_capture?: { code: string; paused: boolean; capture_id: string | null }; local_read_capture?: { code: string; paused: boolean; capture_id: string | null; view_ready?: boolean; view_revision?: string }; drafts_capture?: { code: string; writes: boolean; paused: boolean; capture_id: string | null; manifests: number }; downloads_capture?: null | { code: string; capture_id: string | null }; downloads_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null }; drafts_report?: { required: boolean; complete: boolean; partial?: boolean; running: boolean; code: string; phase: string | null }; worktree_cache_capture?: { code: string; paused: boolean; capture_id: string | null }; worktree_cache_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null }; local_reads_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null }; creations_report?: { required: boolean; complete: boolean; running: boolean; code: string; phase: string | null } };
   notification_ownership?: NotificationOwnership;
   code: string;
+  /** Task 176: hgs refused this computer's session state folder as not private;
+   * its own words name the folder, the access entry and the repair. */
+  state_refusal?: string | null;
 }
 
 export interface Batch {
@@ -1027,10 +1032,19 @@ export interface TeamMemberView {
   queue: number[]; minutes_without_progress: number; host_shared: boolean;
   /** Task 98: hand-outs its Terminal refused in a row, hgs's reason, and whether the lead and the owner were told. */
   input_refusals?: number; input_reason?: string; input_raised?: boolean;
+  /** Task 134: its unread team messages (the working tier), and how many are urgent. */
+  unread?: number; unread_urgent?: number;
   /** The owner's mandatory additions to the member's rules. */
   iron_rules?: string[];
   /** Task 11: the pending question or permission request as hgs sends it (`members[].question`), null without one. */
   permission?: TeamMemberQuestion | null;
+  /** Task 133: the member's latest pulse: what it did, does next and is blocked on; null without one. */
+  pulse?: TeamPulseView | null;
+}
+
+/** Task 133: a member's pulse (`members[].pulse`), its own note or Zerus's summary of its last turn. */
+export interface TeamPulseView {
+  task: number | null; done: string; next: string; blocked: string; at: number; source: string;
 }
 
 /** A member's pending question (`members[].question`): its id and hash, what it asks and the card's allow and deny ids. */
@@ -1056,6 +1070,8 @@ export interface TeamTaskView {
   questions?: { id: string; text: string; at: number }[];
   /** Task #60: the task this follow-up was spawned from; never a dependency. */
   origin?: number | null;
+  /** Task 160: "parked until <condition>, ETA HH:MM (in N min)"; absent when not parked. */
+  parked?: string;
 }
 
 /** A task's pipeline run (core PipelineRunView). */

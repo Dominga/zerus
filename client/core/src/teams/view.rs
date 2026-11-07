@@ -330,10 +330,72 @@ pub struct MemberView {
     pub input_refusals: u64,
     pub input_reason: String,
     pub input_raised: bool,
+    /// Task 134: the member's unread team messages (status's
+    /// `members[].unread`), and how many of them are urgent.
+    pub unread: u64,
+    pub unread_urgent: u64,
     /// Task 11: the member's pending question or permission request as hgs
     /// sends it (`members[].question`, at most [`DETAIL_BYTES`]): its id,
     /// hash, tool, command, reason and the card's own allow and deny ids.
     pub permission: Value,
+    /// Task 133: the member's latest pulse (`members[].pulse`): what it did,
+    /// does next and is blocked on, in at most three short lines; None
+    /// without one.
+    pub pulse: Option<PulseView>,
+    /// Task 209: the member's native context reading (`members[].context`):
+    /// tokens used, the window and their percentage, so the card shows it
+    /// without an inspect of its own. None when its agent keeps no meter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<ContextView>,
+    /// Task 209: the member's context is being compacted (status reads its
+    /// state `compacting`); the card shows Compacting instead of Working.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub compacting: bool,
+}
+
+/// Task 209: a member's native context reading as the member card shows it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct ContextView {
+    pub used: u64,
+    pub limit: u64,
+    /// Whole percent of the window, rounded down by hgs.
+    pub percent: u64,
+    /// When hgs read it.
+    pub at: f64,
+}
+
+fn context(value: &Value) -> Option<ContextView> {
+    let context = value.get("context").filter(|context| context.is_object())?;
+    Some(ContextView {
+        used: count(context, "used"),
+        limit: count(context, "limit"),
+        percent: count(context, "percent").min(100),
+        at: number(context, "at"),
+    })
+}
+
+/// A member's pulse as the Team tab shows it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct PulseView {
+    pub task: Option<u64>,
+    pub done: String,
+    pub next: String,
+    pub blocked: String,
+    pub at: f64,
+    /// `note` (the member's own) or `auto` (Zerus's summary of the turn).
+    pub source: String,
+}
+
+fn pulse(value: &Value) -> Option<PulseView> {
+    let pulse = value.get("pulse").filter(|pulse| pulse.is_object())?;
+    Some(PulseView {
+        task: pulse.get("task").and_then(Value::as_u64),
+        done: text(pulse, "done", LINE_CHARS),
+        next: text(pulse, "next", LINE_CHARS),
+        blocked: text(pulse, "blocked", LINE_CHARS),
+        at: pulse.get("at").and_then(Value::as_f64).unwrap_or_default(),
+        source: name(pulse, "source"),
+    })
 }
 
 /// One dependency: the task it waits for, hard or soft.
@@ -367,6 +429,10 @@ pub struct TaskView {
     pub waits: String,
     /// Task 40: the owner holds it (`held`).
     pub held: bool,
+    /// Task 160: "parked until <condition>, ETA HH:MM (in N min)", as hgs
+    /// status words it; empty when the task is not parked.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub parked: String,
     /// Task 40: the pipeline chosen in the plan, and its run (stages and the
     /// open stage) when one started.
     pub pipeline: String,
@@ -643,11 +709,17 @@ fn member(value: &Value, lead: &str) -> MemberView {
         input_refusals: value.get("input_block").map_or(0, |block| count(block, "count")),
         input_reason: value.get("input_block").map_or_else(String::new, |block| text(block, "reason", LINE_CHARS)),
         input_raised: value.get("input_block").is_some_and(|block| flag(block, "raised")),
+        unread: value.get("unread").map_or(0, |unread| count(unread, "count")),
+        unread_urgent: value.get("unread").map_or(0, |unread| count(unread, "urgent")),
         permission: bounded(
             value
                 .get("question")
                 .filter(|question| question.is_object()),
         ),
+        pulse: pulse(value),
+        context: context(value),
+        compacting: value.get("state").and_then(Value::as_str) == Some("compacting")
+            || value.get("compacting").is_some_and(Value::is_object),
     }
 }
 
@@ -693,6 +765,7 @@ fn task(value: &Value) -> TaskView {
             .map(|waits| text(waits, "unblock", LINE_CHARS))
             .unwrap_or_default(),
         held: flag(value, "held"),
+        parked: text(value, "parked", LINE_CHARS),
         pipeline: name(value, "pipeline"),
         pipeline_run: pipeline_run(value),
         subteam: value.get("subteam").is_some_and(Value::is_object),

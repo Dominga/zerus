@@ -1,4 +1,5 @@
 #include "TeamNewDialog.h"
+#include "TeamMemoryModes.h"
 #include "PathProbe.h"
 #include "HgsClient.h"
 #include "TeamController.h"
@@ -14,6 +15,7 @@
 #include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QPointer>
+#include <QEvent>
 #include <QScrollArea>
 #include <QSpinBox>
 #include <QStandardItemModel>
@@ -202,6 +204,12 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     options->addRow(tr("Planning"), m_planning);
     m_review = new QCheckBox(tr("Review plan before running")); m_review->setObjectName("teamNewReview"); m_review->setChecked(true);
     options->addRow(tr("Approval"), m_review);
+    // Task 127 (docs/lore.md 4.1): the team's memory mode; the project's
+    // RustCodeLore decides what is offered and preselected.
+    m_memory = combo("teamNewMemory", 200);
+    connect(m_memory, qOverload<int>(&QComboBox::activated), this, [this] { m_memoryChosen = true; m_memory->setToolTip(TeamMemoryModes::hint(memoryMode())); });
+    options->addRow(tr("Memory"), m_memory);
+    showMemoryModes();
     outer->addLayout(options);
     // Footer.
     auto *footer = new QHBoxLayout;
@@ -595,7 +603,7 @@ void TeamNewDialog::create()
     const bool worktrees = m_worktrees->isChecked();
     const QString folderPolicy = m_folderPolicy ? m_folderPolicy->currentData().toString() : (worktrees ? QStringLiteral("worktree") : QStringLiteral("shared"));
     QJsonObject settings{{"folder_policy", folderPolicy}, {"approval", m_review->isChecked() ? "review" : "auto"},
-                         {"max_members", m_maxMembers->value()}};
+                         {"max_members", m_maxMembers->value()}, {"memory", QJsonObject{{"mode", memoryMode()}}}};
     if (t && !t->phaseApproval.isEmpty()) settings.insert("phase_approval", t->phaseApproval);
     QJsonObject input{{"name", m_name->text().trimmed()}, {"goal", m_goal->toPlainText().trimmed()}, {"folder", m_folder->text().trimmed()},
                       {"project", m_project}, {"project_id", property("ironRulesProjectId").toString()}, {"template", t ? t->id : QString()}, {"lead", lead}, {"members", members}, {"tasks", tasks},
@@ -608,4 +616,54 @@ void TeamNewDialog::create()
         m_created = result.value("team").toString();
         accept();
     });
+}
+
+// Task 127: the modes the project offers, the preselected one until chosen.
+void TeamNewDialog::showMemoryModes()
+{
+    if (!m_memory) return;
+    const QString kept = m_memoryChosen ? memoryMode() : QString();
+    m_memory->clear();
+    for (const auto &mode : TeamMemoryModes::modes(m_projectMemoryOn)) m_memory->addItem(TeamMemoryModes::label(mode), mode);
+    const int at = m_memory->findData(kept.isEmpty() ? TeamMemoryModes::preselected(m_projectMemoryOn) : kept);
+    m_memory->setCurrentIndex(at >= 0 ? at : m_memory->findData(TeamMemoryModes::preselected(m_projectMemoryOn)));
+    if (at < 0) m_memoryChosen = false;
+    m_memory->setToolTip(TeamMemoryModes::hint(memoryMode()));
+}
+
+void TeamNewDialog::setProjectMemoryOn(bool on)
+{
+    m_projectMemoryOn = on;
+    showMemoryModes();
+}
+
+QString TeamNewDialog::memoryMode() const
+{
+    return m_memory ? m_memory->currentData().toString() : QString();
+}
+
+QStringList TeamNewDialog::memoryModesShown() const
+{
+    QStringList shown;
+    for (int i = 0; m_memory && i < m_memory->count(); ++i) shown << m_memory->itemData(i).toString();
+    return shown;
+}
+
+void TeamNewDialog::readProjectMemory()
+{
+    const QString project = property("ironRulesProjectId").toString();
+    if (!m_client || project.isEmpty()) { setProjectMemoryOn(false); return; }
+    m_client->memoryTransport()(QString(), QStringLiteral("get"), QJsonObject{{"project", project}},
+        [guard = QPointer<TeamNewDialog>(this), project](const QJsonObject &reply, const QString &error) {
+            if (!guard || guard->property("ironRulesProjectId").toString() != project) return;
+            guard->setProjectMemoryOn(error.isEmpty() && reply.value("enabled").toBool());
+        });
+}
+
+bool TeamNewDialog::event(QEvent *event)
+{
+    if (event->type() == QEvent::DynamicPropertyChange
+        && static_cast<QDynamicPropertyChangeEvent *>(event)->propertyName() == "ironRulesProjectId")
+        readProjectMemory();
+    return QDialog::event(event);
 }

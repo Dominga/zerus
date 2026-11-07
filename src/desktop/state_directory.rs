@@ -26,10 +26,13 @@ pub(super) fn prepare(config: &Config, location: &Location) -> Result<()> {
         for path in [location.root.parent().context("missing state folder")?, &location.root] {
             match crate::platform::verify_private(path, crate::platform::Private::Directory) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                _ => anyhow::ensure!(
-                    crate::private_stores::ensure(path, crate::platform::Private::Directory)?,
-                    "desktop folders must be private directories"
-                ),
+                _ => {
+                    // Task 176: a folder that stays open is refused with its
+                    // owner or access entry, so the desktop can show why.
+                    if !crate::private_stores::ensure(path, crate::platform::Private::Directory)? {
+                        return Err(super::store::not_private(path, None));
+                    }
+                }
             }
         }
     }
@@ -103,6 +106,90 @@ fn tighten(selected: &std::path::Path, canonical: &std::path::Path) -> Result<()
         "desktop state directory changed"
     );
     Ok(())
+}
+
+/// Task 176 (owner, 2026-11-07): Codex grants its sandbox group read access on
+/// `~/.local`, and the session state folder below inherits it. The read-only
+/// check names the folder and that access entry; the service start's repair
+/// makes the owned folder private in place; a refusal that stays says why.
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use crate::platform::{self, Private};
+    use std::{fs, path::Path, process::Command};
+
+    fn icacls(path: &Path, args: &[&str]) {
+        let output = Command::new("icacls").arg(path).args(args).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+    }
+
+    fn config(root: &Path) -> Config {
+        Config {
+            home: root.to_string_lossy().into_owned(),
+            dir: root.join("config"),
+            state: root.join(".local").join("sessions"),
+            selves: vec![],
+            peers: vec![],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: Default::default(),
+            tab: false,
+            tab_colors: String::new(),
+        }
+    }
+
+    #[test]
+    fn an_inherited_sandbox_read_is_named_then_repaired_by_the_service_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = platform::canonical(temp.path()).unwrap();
+        crate::state::with_test_state_root(&root, || {
+            let local = root.join(".local");
+            fs::create_dir(&local).unwrap();
+            // As Codex leaves ~/.local: its group may read, and folders below inherit it.
+            icacls(&local, &["/grant", "*S-1-5-32-545:(OI)(CI)RX"]);
+            let sessions = local.join("sessions");
+            fs::create_dir(&sessions).unwrap();
+            assert!(!platform::verify_private(&sessions, Private::Directory).unwrap(), "the state folder inherited the read");
+            let location = Location { root: sessions.join("desktop"), configuration: "c".into() };
+            // The read-only path refuses, naming the folder, the entry and the repair.
+            let error = format!("{:#}", location.check_existing().unwrap_err());
+            assert!(error.starts_with(super::super::store::NOT_PRIVATE), "{error}");
+            assert!(error.contains(&sessions.display().to_string()), "{error}");
+            assert!(error.contains("S-1-5-32-545") && error.contains("read and execute (RX)"), "{error}");
+            assert!(error.contains("inherited from its parent folder"), "{error}");
+            assert!(error.contains("hgs desktop prepare-state --json"), "{error}");
+            assert!(!sessions.join("desktop").exists(), "the read-only path creates nothing");
+            // The service start's repair makes the owned folder private in place.
+            prepare(&config(&root), &location).unwrap();
+            assert!(platform::verify_private(&sessions, Private::Directory).unwrap());
+            location.check_existing().unwrap();
+            assert!(platform::describe_private(&sessions, Private::Directory).unwrap().is_none());
+            // An explicit grant reads as such, without "inherited".
+            let open = root.join("open");
+            fs::create_dir(&open).unwrap();
+            icacls(&open, &["/inheritance:r", "/grant:r", &format!("*{}:(OI)(CI)F", platform::user_sid_string().unwrap())]);
+            icacls(&open, &["/grant", "*S-1-5-32-545:(OI)(CI)M"]);
+            let reason = platform::describe_private(&open, Private::Directory).unwrap().unwrap();
+            assert!(reason.contains("S-1-5-32-545") && reason.contains("modify (M)") && !reason.contains("inherited"), "{reason}");
+        });
+    }
+
+    #[test]
+    fn a_refusal_the_repair_cannot_fix_says_why() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = platform::canonical(temp.path()).unwrap();
+        crate::state::with_test_state_root(&root, || {
+            let local = root.join(".local");
+            fs::create_dir(&local).unwrap();
+            // A file where the state folder belongs: no repair makes it a folder.
+            fs::write(local.join("sessions"), b"x").unwrap();
+            let location = Location { root: local.join("sessions").join("desktop"), configuration: "c".into() };
+            let error = format!("{:#}", prepare(&config(&root), &location).unwrap_err());
+            assert!(error.starts_with(super::super::store::NOT_PRIVATE) && error.contains("it is not a folder"), "{error}");
+            let error = format!("{:#}", location.check_existing().unwrap_err());
+            assert!(error.contains("it is not a folder"), "{error}");
+        });
+    }
 }
 
 #[cfg(all(test, unix))]

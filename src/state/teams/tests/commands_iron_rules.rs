@@ -138,17 +138,10 @@ fn a_lead_changes_iron_rules_only_on_the_owners_verified_word() {
         assert!(run("settings", &input, false).is_err());
         input["request_id"] = json!("33333333-3333-4333-8333-333333333333");
         input["owner_word"] = json!({"text":said});
-        run("settings", &input, false).unwrap();
-        assert_eq!(
-            Store::open(false)
-                .unwrap()
-                .load(&id)
-                .unwrap()
-                .unwrap()
-                .settings
-                .iron_rules,
-            vec!["Owner requirement"]
-        );
+        // Task 162: the typed word is no longer taken; the iron-rules card is.
+        let error = run("settings", &input, false).unwrap_err().to_string();
+        assert!(error.contains("no longer taken for settings"), "{error}");
+        assert!(Store::open(false).unwrap().load(&id).unwrap().unwrap().settings.iron_rules.is_empty());
         set_test_caller_identities(Some((None, None, None)));
         run(
             "settings",
@@ -258,9 +251,11 @@ fn removing_a_member_with_rules_needs_only_the_roster_word() {
         team.members.iter_mut().find(|m|m.id=="m1").unwrap().iron_rules=vec!["Member rule".into()];
         Store::open(true).unwrap().create("11111111-1111-4111-8111-111111111111",&json!({}),team,vec![]).unwrap();
         set_test_caller_identities(Some((Some("c1".into()),None,None)));
-        run("remove-member",&json!({"team":id,"member":"m1","owner_word":{"text":said},"request_id":"22222222-2222-4222-8222-222222222222"}),false).unwrap();
+        // Task 162: the typed word is no longer taken; the remove-member card is.
+        let error=run("remove-member",&json!({"team":id,"member":"m1","owner_word":{"text":said},"request_id":"22222222-2222-4222-8222-222222222222"}),false).unwrap_err().to_string();
+        assert!(error.contains("no longer taken for remove-member"),"{error}");
         let after=Store::open(false).unwrap().load(&id).unwrap().unwrap();
-        assert!(after.member("m1").is_none_or(|m|m.state==MemberState::Removed));
+        assert!(after.member("m1").is_some_and(|m|m.state!=MemberState::Removed));
     });
 }
 

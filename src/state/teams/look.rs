@@ -331,6 +331,10 @@ pub(crate) fn next_action(team: &Team, member: &Member, state: &str) -> String {
     if member.terminal_question.is_some() {
         return "Only its Terminal takes the request: the owner sees it at once, with the screen after the defer time.".into();
     }
+    // Task 173: work outside any hand-out is the lead's to stop or hand out.
+    if let Some(flag) = &member.unassigned {
+        return format!("It {} with no task handed to it: the lead hands the task out (retry or reassign) or tells it to stop.", flag.what);
+    }
     if member.pending.is_some() {
         return "Its request waits for the lead's answer (hgs team answer), or the owner queue after the defer time.".into();
     }
@@ -356,10 +360,12 @@ pub(crate) fn snapshot(team: &Team, member: &Member, check: &MemberCheck, now: f
     let minutes = |at: Option<f64>| at.map(|at| ((now - at).max(0.0) / 60.0).round() as u64);
     json!({"team":team.id,"team_name":team.name,"member":member.id,"role":member.role,"agent":member.agent,
         "session":session.map(|s| s.name.clone()),"host":session.map(|s| s.host.clone()).unwrap_or_default(),
-        "state":if check.state == "uncertain" { "uncertain".into() } else { check_state(check) },
+        "state":if check.state == "uncertain" { "uncertain".into() } else if member.unassigned.is_some() { "unassigned_work".into() } else { check_state(check) },
         "uncertain":check.state == "uncertain","settling":check.state == "pending",
         "disagree":check.disagree,"uncertain_since":check.since,"checked_at":check.at,
         "sources":check.sources,"screen":check.screen,"task":task,
+        // Task 173: never shown as idle while it works with no task handed.
+        "unassigned":member.unassigned.as_ref().map(|flag| json!({"what":flag.what,"since":flag.since})),
         "pulse":{"minutes_since_event":minutes(member.seen_event_at),"stuck":member.stuck,
             "minutes_since_check":minutes(Some(check.at))},
         "next":next_action(team, member, &check.state)})

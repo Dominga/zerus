@@ -977,19 +977,45 @@ fn publish_frontend(
 /// link or reparse point, a single link, at most `FRONTEND_BYTES`, the exact
 /// schema with absolute paths. Anything else is no binding.
 pub fn read_frontend(images: &Path) -> Option<FrontendBinding> {
-    let _chain = private_chain(images).ok()?;
-    let file = private_record(&images.join(FRONTEND_BINDING)).ok()?;
-    let metadata = file.metadata().ok()?;
+    frontend_binding(images).ok()
+}
+
+/// Task 180: the refusals a frontend admission prints for the portable
+/// binding; the desktop maps each exact line to its check.
+pub const FOLDERS_NOT_PRIVATE: &str = "frontend folders are not private";
+pub const BINDING_UNAVAILABLE: &str = "frontend binding unavailable";
+
+/// Task 180: the binding, or why there is none, for a refusal the desktop
+/// shows: the folders of its chain are not guarded (another account can
+/// change one, or the images folder is not private), or the record itself is
+/// missing, not private or not valid. Fixed words only.
+pub fn frontend_binding(images: &Path) -> Result<FrontendBinding, &'static str> {
+    let _chain = private_chain(images).map_err(|_| FOLDERS_NOT_PRIVATE)?;
+    let file = private_record(&images.join(FRONTEND_BINDING)).map_err(|_| BINDING_UNAVAILABLE)?;
+    let metadata = file.metadata().map_err(|_| BINDING_UNAVAILABLE)?;
     if !metadata.is_file() || metadata.len() > FRONTEND_BYTES {
-        return None;
+        return Err(BINDING_UNAVAILABLE);
     }
     let mut bytes = Vec::new();
-    file.take(FRONTEND_BYTES + 1).read_to_end(&mut bytes).ok()?;
+    file.take(FRONTEND_BYTES + 1).read_to_end(&mut bytes).map_err(|_| BINDING_UNAVAILABLE)?;
     if bytes.len() as u64 > FRONTEND_BYTES {
-        return None;
+        return Err(BINDING_UNAVAILABLE);
     }
-    let binding: FrontendBinding = serde_json::from_slice(&bytes).ok()?;
-    binding.valid().then_some(binding)
+    let binding: FrontendBinding = serde_json::from_slice(&bytes).map_err(|_| BINDING_UNAVAILABLE)?;
+    binding.valid().then_some(binding).ok_or(BINDING_UNAVAILABLE)
+}
+
+/// Task 180: a temporary root private to this user, so a test's folders never
+/// inherit the runner's access entries (a worktree on a data drive lets
+/// Authenticated Users change it; Codex's sandbox group reads `~/.local`). The
+/// binding's chain checks then see only what a test sets itself.
+#[cfg(test)]
+pub(crate) fn private_tempdir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    if let platform::PrivateRepair::Refused(why) = platform::repair_private(dir.path(), platform::Private::Directory).unwrap() {
+        panic!("the test's temporary root could not be made private: {why}");
+    }
+    dir
 }
 
 #[cfg(all(test, windows))]
@@ -1040,6 +1066,22 @@ mod guarded_chain_tests {
         let _ = platform::repair_private(&layout.images, platform::Private::Directory);
         assert!(private_chain(&layout.images).is_ok());
     }
+
+    /// Task 180: the refusal names the check that failed: a folder of the
+    /// chain another account can change, or a missing binding below private
+    /// folders. The desktop shows each with its next step.
+    #[test]
+    fn a_missing_binding_and_a_changeable_folder_are_named_apart() {
+        let dir = private_tempdir();
+        let home = dir.path().join("home");
+        let layout = Layout::new(&home.to_string_lossy(), &home.join("config"));
+        std::fs::create_dir_all(&layout.images).unwrap();
+        assert_eq!(frontend_binding(&layout.images).err(), Some(BINDING_UNAVAILABLE));
+        assert!(read_frontend(&layout.images).is_none());
+        // BUILTIN\Users may change a folder above the images folder.
+        icacls(&home.join(".local"), &["/grant", "*S-1-5-32-545:(OI)(CI)M"]);
+        assert_eq!(frontend_binding(&layout.images).err(), Some(FOLDERS_NOT_PRIVATE));
+    }
 }
 
 #[cfg(test)]
@@ -1088,7 +1130,7 @@ mod tests {
 
     #[test]
     fn hashes_and_names_are_fixed() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let path = dir.path().join("abc");
         fs::write(&path, b"abc").unwrap();
         assert_eq!(sha256(&path).unwrap(), ABC);
@@ -1121,7 +1163,7 @@ mod tests {
 
     #[test]
     fn the_pointer_names_only_a_complete_image() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let images = dir.path();
         assert_eq!(current_image_in(images), None);
         let name = "0123456789abcdef";
@@ -1143,7 +1185,7 @@ mod tests {
 
     #[test]
     fn the_cli_is_replaced_by_rename_and_never_written() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let one = source(dir.path(), "one", b"build one", &[]);
         let two = source(dir.path(), "two", b"build two", &[]);
         let target = dir.path().join("bin").join(EXECUTABLE);
@@ -1190,7 +1232,7 @@ mod tests {
 
     #[test]
     fn images_are_content_addressed_and_the_pointer_comes_last() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let images = dir.path().join("host");
         let one = source(dir.path(), "one", b"build one", &PAIR);
         let two = source(dir.path(), "two", b"build two", &[]);
@@ -1260,7 +1302,7 @@ mod tests {
 
     #[test]
     fn a_copy_that_differs_from_its_source_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let from = dir.path().join("from");
         let to = dir.path().join("to");
         fs::write(&from, b"abd").unwrap();
@@ -1276,7 +1318,7 @@ mod tests {
 
     #[test]
     fn an_altered_image_is_replaced_and_leftovers_are_cleared() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let images = dir.path().join("host");
         let one = source(dir.path(), "one", b"build one", &PAIR);
         let name = image_name(&sha256(&one).unwrap()).to_owned();
@@ -1305,7 +1347,7 @@ mod tests {
 
     #[test]
     fn service_cli_install_does_not_enable_or_disable_local_sessions() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let layout = Layout::new(
             &dir.path().join("home").to_string_lossy(),
             &dir.path().join("config"),
@@ -1360,7 +1402,7 @@ mod tests {
 
     #[test]
     fn a_frontend_binding_is_read_only_in_its_exact_bounded_form() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let images = private_images(dir.path());
         let path = images.join(FRONTEND_BINDING);
         assert_eq!(read_frontend(&images), None);
@@ -1438,7 +1480,7 @@ mod tests {
     #[test]
     fn a_binding_that_is_not_a_private_record_of_this_user_is_refused() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let images = private_images(dir.path());
         let path = images.join(FRONTEND_BINDING);
         let bytes = serde_json::to_vec(&sample_binding(dir.path())).unwrap();
@@ -1491,7 +1533,7 @@ mod tests {
 
     #[test]
     fn only_a_binder_records_the_app_after_staging_and_any_install_unbinds_first() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let layout = Layout::new(
             &dir.path().join("home").to_string_lossy(),
             &dir.path().join("config"),
@@ -1561,7 +1603,7 @@ mod tests {
 
     #[test]
     fn a_refused_commit_publishes_nothing_and_leaves_no_candidate() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let images = private_images(dir.path());
         let layout = Layout::new(
             &dir.path().join("home").to_string_lossy(),
@@ -1589,7 +1631,7 @@ mod tests {
 
     #[test]
     fn install_stages_both_then_enables_and_uninstall_keeps_the_files() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let layout = Layout::new(
             &dir.path().join("home").to_string_lossy(),
             &dir.path().join("config"),
@@ -1673,7 +1715,7 @@ mod tests {
 
     #[test]
     fn the_marker_and_pointer_are_found_through_the_environment() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let home = dir.path().join("home");
         fs::create_dir(&home).unwrap();
         let text = home.to_string_lossy().into_owned();
@@ -1770,7 +1812,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_running_cli_is_renamed_aside_and_removed_once_it_ends() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let this = std::env::current_exe().unwrap();
         let other = other_build(dir.path());
         let target = dir.path().join("bin").join(EXECUTABLE);
@@ -1802,7 +1844,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn an_image_a_host_runs_from_stays_until_it_ends() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let images = dir.path().join("host");
         let this = std::env::current_exe().unwrap();
         let other = other_build(dir.path());
@@ -1835,7 +1877,7 @@ mod tests {
 
     #[test]
     fn installs_run_one_at_a_time() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let held = lock(dir.path()).unwrap();
         let waiting = {
             let dir = dir.path().to_owned();
@@ -1852,7 +1894,7 @@ mod tests {
 
     #[test]
     fn files_nobody_runs_are_not_in_use() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let path = dir.path().join("file");
         fs::write(&path, b"x").unwrap();
         assert!(!in_use(&path));

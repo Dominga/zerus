@@ -66,7 +66,9 @@ fn a_sub_lead_hands_out_its_reports_tasks_and_hears_its_own_inbox() {
     let text = hand_off_text(&t, &task, &attempt, "", "");
     assert!(text.starts_with(&format!("[Zerus team \u{b7} from: QA lead \u{b7} task: #{qa} \u{b7} attempt: 1]")), "{text}");
     assert!(text.contains("Questions for QA lead:"), "{text}");
-    assert!(text.contains("Zerus gives it to QA lead. A blocker goes to QA lead too"), "{text}");
+    assert!(text.contains("A report is an explicit `hgs "), "{text}");
+    assert!(text.contains("No report"), "{text}");
+    assert!(text.contains("A blocker goes to QA lead too"), "{text}");
     // U30: every hand-out says how a build shows as work.
     assert!(text.contains("(hgs team run, or hgs run: hgs guide run) so your session shows as Building"), "{text}");
     // The lead's own reports keep the old words.
@@ -450,6 +452,8 @@ fn the_worker_answers_a_sandboxed_members_read_and_starts_its_run_at_low_integri
         let folder = dir.path().join("work");
         std::fs::create_dir_all(&folder).unwrap();
         t.folder = folder.display().to_string();
+        // Task 173: dev's run belongs to its handed task.
+        delivered(&mut t);
         store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
         let read = "88888888-8888-4888-8888-888888888888";
         let send = "99999999-9999-4999-8999-999999999999";
@@ -482,7 +486,7 @@ fn the_worker_answers_a_sandboxed_members_read_and_starts_its_run_at_low_integri
         assert_eq!(*calls.borrow(), vec![vec!["ls".to_owned(), "--json".to_owned()]], "only the read reached hgs");
         let refused = super::super::outbox::result(&folder, send).unwrap();
         assert_eq!(refused["status"], "refused", "{refused}");
-        assert!(refused["error"].as_str().unwrap().contains("only for hgs ls and hgs inspect"), "{refused}");
+        assert!(refused["error"].as_str().unwrap().contains("only for hgs ls, inspect and task reads"), "{refused}");
         assert_eq!(super::super::outbox::result(&folder, run).unwrap()["status"], "running");
         let claim = crate::state::builds::record(run, now()).unwrap();
         assert_eq!((claim["integrity"].as_str(), claim["session"]["name"].as_str()), (Some("low"), Some("codex/x/dev")), "{claim}");

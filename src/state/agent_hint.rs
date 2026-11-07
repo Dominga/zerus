@@ -115,6 +115,12 @@ fn decide(record: &mut Value, event: &Value, enabled: bool) -> Option<&'static s
 /// One stable UTF-8 JSON document, serialized before the first stdout write.
 /// Field order is explicit and does not depend on serde_json map features.
 pub(super) fn output(writer: &mut impl Write, context: &str) -> Result<()> {
+    output_event(writer, context, "SessionStart")
+}
+
+/// Task 134: the same one JSON document for another hook event (a turn's
+/// `UserPromptSubmit`), whose name the agent requires to match.
+pub(super) fn output_event(writer: &mut impl Write, context: &str, event_name: &'static str) -> Result<()> {
     #[derive(serde::Serialize)]
     struct Fields<'a> {
         #[serde(rename = "additionalContext")]
@@ -130,7 +136,7 @@ pub(super) fn output(writer: &mut impl Write, context: &str) -> Result<()> {
     let output = Output {
         fields: Fields {
             context,
-            event: "SessionStart",
+            event: event_name,
         },
     };
     let mut bytes =

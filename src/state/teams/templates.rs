@@ -135,7 +135,7 @@ pub(crate) const BUILTIN: &[Template] = &[
     // provider's job.
     Template {
         id: "py-test",
-        summary: "the project .venv interpreter runs pytest (typed -k expression, -m mark, node names and test file or folder paths; JUnit XML in .zerus-team/python)",
+        summary: "the project .venv interpreter runs pytest (typed -k expression, -m mark, node names and test file or folder paths; JUnit XML in .zerus-team/python); project: a Python project in a subfolder, run there",
         program: "python",
         args: &["-m", "pytest", "-q", "--junitxml=.zerus-team/python/junit.xml", "-k={filter}", "-m={mark}", "{tests}", "{paths}"],
         params: &[
@@ -144,15 +144,18 @@ pub(crate) const BUILTIN: &[Template] = &[
             optional("tests", Kind::Identifiers),
             // Task 137: the test files `hgs test affected` chose.
             optional("paths", Kind::Paths),
+            // Task 153: a Python project in a subfolder: its environment, and
+            // the folder pytest runs in.
+            optional("project", Kind::Path),
         ],
         timeout_secs: 1800,
     },
     Template {
         id: "cython-build",
-        summary: "the project .venv interpreter rebuilds the Cython extensions in place (setup.py build_ext --inplace)",
+        summary: "the project .venv interpreter rebuilds the Cython extensions in place (setup.py build_ext --inplace); project: a Python project in a subfolder, built there",
         program: "python",
         args: &["setup.py", "build_ext", "--inplace", "{sources}"],
-        params: &[optional("sources", Kind::Paths)],
+        params: &[optional("sources", Kind::Paths), optional("project", Kind::Path)],
         timeout_secs: 1800,
     },    // Owner, 2026-10-28: QA ran the Android tests by hand, a permission each.
     Template {
@@ -162,6 +165,25 @@ pub(crate) const BUILTIN: &[Template] = &[
         args: &["-p", "mobile/android", ":app:testDebugUnitTest", "--no-daemon"],
         params: &[],
         timeout_secs: 3600,
+    },
+    // Task 157: the release candidate's local leg a Windows worker runs before
+    // the release branch moves: the fork-windows steps, recorded per commit.
+    // Task 169 review: a built-in template runs for any member without an
+    // approval, so it never takes --exp-tag (that pushes a tag to origin): the
+    // runner leg stays the owner's step by hand (docs/release-candidate.md).
+    Template {
+        id: "release-candidate",
+        summary: "the fork release candidate's local leg on a Windows worker: Qt offscreen suites, fork handoff/update, the Tauri build and portable zip self-test with the fork build and feed, recorded for the commit",
+        program: "python",
+        args: &["scripts/release-candidate.py", "--commit={commit}", "--fork-build={fork_build}", "--fork-feed={fork_feed}"],
+        params: &[
+            optional("commit", Kind::Identifier),
+            // Task 213: the local leg has no tag, so the fork identity the
+            // workflow takes from it is passed explicitly; both or neither.
+            optional("fork_build", Kind::Identifier),
+            optional("fork_feed", Kind::Text),
+        ],
+        timeout_secs: 10800,
     },
     // Owner, 2026-10-28: a stale generated build folder (an AAPT intermediate)
     // needed a permission to remove; only a build output can go.
@@ -286,6 +308,10 @@ pub(crate) struct Plan {
     pub commit: Option<Value>,
     /// #741: further commands of the same run, in turn (several Qt suites).
     pub more: Vec<(String, Vec<String>)>,
+    /// Task 153: the folder the commands run in, relative to the member's
+    /// folder and inside it (a Python project in a subfolder); None is the
+    /// member's folder itself.
+    pub cwd: Option<String>,
 }
 
 /// The built-in template with `id`, if the set has one.
@@ -316,7 +342,7 @@ pub(crate) fn settings_override(path: Option<PathBuf>) {
 /// The settings file: the global switch and the owner's additions. It lives in
 /// Zerus state, never in a member's folder, so a sandboxed member can neither
 /// read nor write it (U21, attempt 2).
-fn read_settings() -> Value {
+pub(crate) fn read_settings() -> Value {
     std::fs::read(settings_path())
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
@@ -324,7 +350,7 @@ fn read_settings() -> Value {
         .unwrap_or_else(|| json!({"enabled":true}))
 }
 
-fn write_settings(value: &Value) -> anyhow::Result<()> {
+pub(crate) fn write_settings(value: &Value) -> anyhow::Result<()> {
     let path = settings_path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -836,7 +862,7 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
             if let Some((key, _)) = args.as_object().into_iter().flatten().next() {
                 bail!("The project template {id} takes no placeholders (got \"{key}\")");
             }
-            return Ok(Plan { template: id.to_owned(), program, argv, commit: None, more: Vec::new() });
+            return Ok(Plan { template: id.to_owned(), program, argv, commit: None, more: Vec::new(), cwd: None });
         }
         // Task 85: a [[template]] of the folder's .zerus/tests.toml, typed like
         // a built-in, once the owner accepted its exact content.
@@ -893,11 +919,23 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
             check_path(path, "paths")?;
             ensure!(folder.join(path).lexists(), "The template's path {path} does not exist in your folder");
         }
-        return Ok(Plan { template: "git-commit".to_owned(), program: "hgs".into(), argv: vec!["team".into(), "commit".into(), "--json".into()], commit: Some(json!({"message":message,"paths":paths})), more: Vec::new() });
+        return Ok(Plan { template: "git-commit".to_owned(), program: "hgs".into(), argv: vec!["team".into(), "commit".into(), "--json".into()], commit: Some(json!({"message":message,"paths":paths})), more: Vec::new(), cwd: None });
     }
+    // Task 153: a Python project in a subfolder resolves its environment and
+    // setup.py there and runs there; every path it is given stays the
+    // member's, made absolute so the project's folder reads it the same.
+    let python_project = if matches!(template.id, "py-test" | "cython-build") { python_project(template, args, folder)? } else { None };
+    let cwd = python_project.clone();
     let (mut program, prefix) = if matches!(template.id, "py-test" | "cython-build") {
-        let (python, prefix) = interpreter(folder)?;
+        let project_dir = python_project.as_ref().map_or_else(|| folder.to_path_buf(), |project| folder.join(project));
+        let (python, prefix) = interpreter(&project_dir)?;
         if template.id == "py-test" { let _ = std::fs::create_dir_all(folder.join(".zerus-team").join("python")); }
+        // A relative venv interpreter is the project's own.
+        let python = if python_project.is_some() && (python.contains('/') || python.contains('\\')) && Path::new(&python).is_relative() {
+            project_dir.join(&python).display().to_string()
+        } else {
+            python
+        };
         (python, prefix)
     } else {
         (template.program.to_owned(), Vec::new())
@@ -1045,10 +1083,49 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
         let home = folder.join(".zerus-team").join("gradle");
         argv.extend(["-g".to_owned(), home.join("home").display().to_string(), "--project-cache-dir".to_owned(), home.join("cache").display().to_string()]);
     }
-    Ok(Plan { template: template.id.to_owned(), program, argv, commit: None, more })
+    if cwd.is_some() {
+        argv = argv.into_iter().map(|word| member_path_absolute(template, args, folder, word)).collect();
+    }
+    Ok(Plan { template: template.id.to_owned(), program, argv, commit: None, more, cwd })
 }
 
 /// One optional placeholder of a built-in as a single word.
+/// Task 153: the Python project folder of py-test or cython-build: a folder
+/// inside the member's folder (its real path too, so no link leads out), or
+/// None for the member's folder itself.
+fn python_project(template: &Template, args: &Value, folder: &Path) -> anyhow::Result<Option<String>> {
+    let Some(project) = one(template, args, "project", folder)? else { return Ok(None) };
+    let project = project.replace('\\', "/").trim_end_matches('/').to_owned();
+    if project == "." {
+        return Ok(None);
+    }
+    let dir = folder.join(&project);
+    ensure!(dir.is_dir(), "The template's project {project} is not a folder in your folder");
+    let real = std::fs::canonicalize(&dir).context("The project folder cannot be read")?;
+    let base = std::fs::canonicalize(folder).context("Your folder cannot be read")?;
+    ensure!(real.starts_with(&base), "The template's project {project} leads outside your folder");
+    Ok(Some(project))
+}
+
+/// Task 153: in a project subfolder, the member-relative paths a Python
+/// template was given (test files, sources, its JUnit report) as absolute
+/// paths, so they name the same files from the project's folder.
+fn member_path_absolute(template: &Template, args: &Value, folder: &Path, word: String) -> String {
+    if let Some(report) = word.strip_prefix("--junitxml=") {
+        return format!("--junitxml={}", folder.join(report).display());
+    }
+    let given = |name: &str| -> bool {
+        template.params.iter().any(|param| param.name == name && param.kind == Kind::Paths)
+            && args[name].as_array().is_some_and(|items| items.iter().any(|item| item.as_str() == Some(word.as_str())))
+            || args[name].as_str() == Some(word.as_str())
+    };
+    if given("paths") || given("sources") {
+        folder.join(&word).display().to_string()
+    } else {
+        word
+    }
+}
+
 fn one(template: &Template, args: &Value, name: &str, folder: &Path) -> anyhow::Result<Option<String>> {
     Ok(match value_of(template.params, args, name, folder)? {
         Some(Words::One(word)) => Some(word),
@@ -1089,13 +1166,18 @@ pub(crate) fn cmake_configure_argv(source: &str, build_dir: &str, generator: Opt
 }
 
 fn plain(template: &str, program: &str, argv: Vec<String>) -> Plan {
-    Plan { template: template.to_owned(), program: program.to_owned(), argv, commit: None, more: Vec::new() }
+    Plan { template: template.to_owned(), program: program.to_owned(), argv, commit: None, more: Vec::new(), cwd: None }
 }
 
 fn cmake_configure(template: &Template, args: &Value, folder: &Path) -> anyhow::Result<Plan> {
     let launcher = cache_use(template.id, folder).launcher;
     if template.id == "qt-configure" {
-        return Ok(plain(template.id, "cmake", cmake_configure_argv("tray", ".ci-build/gui", Some("Ninja"), Some("Release"), None, launcher.as_deref())));
+        // Task 190: a fresh worktree has no build folder yet, so the template
+        // finds the installed Qt itself and passes it as -DQt6_DIR; a failure
+        // names every place it searched.
+        let mut argv = cmake_configure_argv("tray", ".ci-build/gui", Some("Ninja"), Some("Release"), None, launcher.as_deref());
+        argv.push(format!("-DQt6_DIR={}", qt6_dir(folder)?));
+        return Ok(plain(template.id, "cmake", argv));
     }
     let source = one(template, args, "source", folder)?.unwrap_or_else(|| ".".into());
     ensure!(folder.join(&source).join("CMakeLists.txt").is_file(), "There is no CMakeLists.txt in {source} of your folder");
@@ -1474,6 +1556,294 @@ fn qt_bin(folder: &Path) -> Option<PathBuf> {
     bin.is_dir().then_some(bin)
 }
 
+// -- Task 190: finding the installed Qt for a fresh worktree ----------------
+
+#[cfg(test)]
+thread_local! {
+    /// A test's Qt environment and install roots, instead of this computer's.
+    static QT_TEST: std::cell::RefCell<Option<(Vec<(String, String)>, Vec<PathBuf>)>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn qt_override(vars: Option<Vec<(String, String)>>, roots: Option<Vec<PathBuf>>) {
+    QT_TEST.with(|test| *test.borrow_mut() = vars.map(|vars| (vars, roots.unwrap_or_default())));
+}
+
+/// An environment variable, or the test's value for it.
+fn qt_var(name: &str) -> Option<String> {
+    #[cfg(test)]
+    if let Some((vars, _)) = QT_TEST.with(|test| test.borrow().clone()) {
+        return vars.into_iter().find(|(key, _)| key == name).map(|(_, value)| value);
+    }
+    std::env::var(name).ok()
+}
+
+/// The install roots Qt may live under: this machine's `zerus-deps`, `C:/Qt`,
+/// the Qt online installer's and aqtinstall's folders in the person's home.
+fn qt_roots() -> Vec<PathBuf> {
+    #[cfg(test)]
+    if let Some((_, roots)) = QT_TEST.with(|test| test.borrow().clone()) {
+        return roots;
+    }
+    let mut roots = vec![PathBuf::from("D:/Tools/zerus-deps/Qt"), PathBuf::from("C:/Qt")];
+    if let Some(home) = crate::platform::home_dir() {
+        roots.push(home.join("Qt"));
+        roots.push(home.join("aqtinstall"));
+    }
+    roots
+}
+
+/// The Qt 6 package folder under `path`: `path` itself or its
+/// `lib/cmake/Qt6`, when `Qt6Config.cmake` is there. Normalized to forward
+/// slashes, the way CMake writes the cache.
+fn qt6_package(path: &Path) -> Option<String> {
+    let packages = [path.join("lib").join("cmake").join("Qt6"), path.to_path_buf()];
+    for package in packages {
+        if package.join("Qt6Config.cmake").is_file() {
+            let shown = package.display().to_string().replace('\\', "/");
+            return Some(shown.trim_end_matches('/').to_owned());
+        }
+    }
+    None
+}
+
+/// The `Qt6_DIR` a configured build folder recorded, when it has one.
+fn qt6_from_cache(path: &Path) -> Option<String> {
+    let cache = std::fs::read_to_string(path).ok()?;
+    cache
+        .lines()
+        .find_map(|line| line.strip_prefix("Qt6_DIR:PATH=").or_else(|| line.strip_prefix("Qt6_DIR:UNINITIALIZED=")))
+        .map(|dir| dir.trim().to_owned())
+}
+
+/// The checkout a worktree belongs to: the parent of Git's common folder.
+fn main_checkout(folder: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args(["-C", &folder.display().to_string(), "rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let common = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let base = if common.file_name().is_some_and(|name| name == ".git") { common.parent()?.to_path_buf() } else { common };
+    (base != folder).then_some(base)
+}
+
+/// The path the project's `.zerus/tests.toml` names for Qt under `[tools]`
+/// (`qt`, `qt6`, `qt6_dir` or `qt_dir`, case aside).
+fn project_qt_tool(folder: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(folder.join(".zerus").join("tests.toml")).ok()?;
+    let document = text.parse::<toml_edit::DocumentMut>().ok()?;
+    let table = document.get("tools").and_then(toml_edit::Item::as_table_like)?;
+    for (key, item) in table.iter() {
+        if !matches!(key.to_ascii_lowercase().as_str(), "qt" | "qt6" | "qt6_dir" | "qt_dir") {
+            continue;
+        }
+        let value = item.as_value().and_then(toml_edit::Value::as_str)?.trim();
+        if !value.is_empty() {
+            return Some(value.to_owned());
+        }
+    }
+    None
+}
+
+/// Whether `text` is a dotted version (`6`, `6.10.3`).
+fn is_version(text: &str) -> bool {
+    text.split('.').all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+/// The Qt version `tray/CMakeLists.txt` asks for in `find_package(Qt6 VERSION
+/// …)`, when it names one (this repository's asks for none).
+fn requested_qt_version(cmake: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(cmake).ok()?;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !trimmed.to_ascii_lowercase().starts_with("find_package") {
+            continue;
+        }
+        let mut parts = trimmed.split(|ch: char| ch.is_whitespace() || matches!(ch, '(' | ')'));
+        while let Some(part) = parts.next() {
+            if part.trim_matches(|ch| matches!(ch, '"' | '\'')).eq_ignore_ascii_case("qt6") {
+                let next = parts.next().unwrap_or_default().trim_matches(|ch| matches!(ch, '"' | '\''));
+                return is_version(next).then(|| next.to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Where a found version stands against the requested one.
+fn compare_versions(found: &[u32], wanted: &str) -> std::cmp::Ordering {
+    let wanted: Vec<u32> = wanted.split('.').filter_map(|part| part.parse().ok()).collect();
+    for index in 0..found.len().max(wanted.len()) {
+        let left = found.get(index).copied().unwrap_or(0);
+        let right = wanted.get(index).copied().unwrap_or(0);
+        match left.cmp(&right) {
+            std::cmp::Ordering::Equal => {}
+            other => return other,
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// The Qt 6 package folder under a known install root: a root that is itself
+/// an install, else `<root>/<version>/<arch>` for the requested version (or the
+/// newest), the Windows kit's `msvc2022_64` first.
+fn scan_qt_roots(roots: &[PathBuf], version: Option<&str>) -> Option<String> {
+    const ARCHITECTURES: &[&str] = &["msvc2022_64", "msvc2019_64", "mingw_64", "gcc_64", "clang_64", "macos"];
+    for root in roots {
+        if let Some(found) = qt6_package(root) {
+            return Some(found);
+        }
+        let mut versions: Vec<(Vec<u32>, PathBuf)> = std::fs::read_dir(root)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let parts: Vec<u32> = name.split('.').map(|part| part.parse::<u32>()).collect::<std::result::Result<_, _>>().ok()?;
+                (parts.len() >= 2 && entry.path().is_dir()).then_some((parts, entry.path()))
+            })
+            .collect();
+        versions.sort_by(|left, right| right.0.cmp(&left.0));
+        for (parts, path) in versions {
+            if let Some(wanted) = version {
+                if compare_versions(&parts, wanted) == std::cmp::Ordering::Less {
+                    continue;
+                }
+            }
+            for arch in ARCHITECTURES {
+                if let Some(found) = qt6_package(&path.join(arch)) {
+                    return Some(found);
+                }
+            }
+            if let Some(found) = qt6_package(&path) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+/// Task 190: the Qt 6 package folder (`…/lib/cmake/Qt6`) for `tray/` of
+/// `folder`, found without a configured build folder. The order is the merger's
+/// review's: `QT_ROOT_DIR`/`Qt6_DIR` in the environment, the project's
+/// `.zerus/tests.toml` `[tools] qt` or the per-computer `qt` of the templates
+/// settings, a build folder's or the main checkout's `CMakeCache.txt`, then the
+/// known install roots for the version `tray/CMakeLists.txt` asks for (the
+/// newest when it asks for none). A failure names what it searched.
+fn qt6_dir(folder: &Path) -> anyhow::Result<String> {
+    let mut searched: Vec<String> = Vec::new();
+    let version = requested_qt_version(&folder.join("tray").join("CMakeLists.txt"));
+    let wanted = version.as_ref().map(|version| format!(" {version}")).unwrap_or_default();
+    let free = |path: &Path| qt6_package(path);
+    for name in ["QT_ROOT_DIR", "Qt6_DIR"] {
+        match qt_var(name).map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()) {
+            Some(value) => {
+                searched.push(format!("{name}={value}"));
+                if let Some(found) = free(Path::new(&value)) {
+                    return Ok(found);
+                }
+            }
+            None => searched.push(format!("{name} (unset)")),
+        }
+    }
+    match project_qt_tool(folder) {
+        Some(value) => {
+            searched.push(format!(".zerus/tests.toml [tools] qt={value}"));
+            if let Some(found) = free(Path::new(&value)) {
+                return Ok(found);
+            }
+        }
+        None => searched.push(".zerus/tests.toml [tools] qt (none)".into()),
+    }
+    match read_settings().get("qt").and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => {
+            searched.push(format!("the qt setting={value}"));
+            if let Some(found) = free(Path::new(value)) {
+                return Ok(found);
+            }
+        }
+        None => searched.push("the qt setting (none)".into()),
+    }
+    let caches = [Some(folder.to_path_buf()), main_checkout(folder)];
+    for (index, checkout) in caches.into_iter().enumerate() {
+        let Some(checkout) = checkout else { continue };
+        let path = checkout.join(".ci-build").join("gui").join("CMakeCache.txt");
+        let label = if index == 0 { path.display().to_string() } else { format!("{} (main checkout)", path.display()) };
+        match qt6_from_cache(&path) {
+            Some(value) => {
+                searched.push(format!("{label}={value}"));
+                if let Some(found) = free(Path::new(&value)) {
+                    return Ok(found);
+                }
+            }
+            None => searched.push(format!("{label} (no Qt6_DIR)")),
+        }
+    }
+    let roots = qt_roots();
+    for root in &roots {
+        searched.push(format!("the install root {}", root.display()));
+    }
+    if let Some(found) = scan_qt_roots(&roots, version.as_deref()) {
+        return Ok(found);
+    }
+    anyhow::bail!(
+        "Qt{wanted} was not found for tray/ in {}: searched {}. Set QT_ROOT_DIR or Qt6_DIR, or name it in .zerus/tests.toml as [tools] qt = \"<the Qt install or its lib/cmake/Qt6>\".",
+        folder.display(),
+        searched.join("; ")
+    )
+}
+
+/// A Qt test's environment: its output on the pipe, Qt's DLLs first on PATH
+/// and the fonts.
+fn qt_test_environment(env: &mut Vec<(String, String)>, folder: &Path) {
+    // Task 53: QtTest's plain logger writes to OutputDebugString instead of
+    // stdout when stderr has no console (Qt's shouldLogToStderr), and the
+    // worker has none: the suite's lines (FAIL!, Totals) never reached the
+    // pipe and the tail was empty. Qt's own switch sends them to the
+    // stream on every platform.
+    env.push(("QT_FORCE_STDERR_LOGGING".into(), "1".into()));
+    if let Some(bin) = qt_bin(folder) {
+        let path = env.iter().find(|(key, _)| key.eq_ignore_ascii_case("PATH")).map(|(_, value)| value.clone())
+            .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
+        let separator = if cfg!(windows) { ';' } else { ':' };
+        env.retain(|(key, _)| !key.eq_ignore_ascii_case("PATH"));
+        env.push(("PATH".into(), format!("{}{separator}{path}", bin.display())));
+    }
+    #[cfg(windows)]
+    if std::env::var_os("QT_QPA_FONTDIR").is_none() {
+        env.push(("QT_QPA_FONTDIR".into(), "C:/Windows/Fonts".into()));
+    }
+}
+
+/// Task 174: the environment the test queue gives a queued suite: the build
+/// cache for cargo; for a CMake or CTest command also what the qt templates
+/// give (the Visual Studio tools on Windows, the C++ cache, Qt's DLLs, the
+/// offscreen platform), so a merged commit's Qt suites build and run as the
+/// members' do.
+pub(crate) fn queue_environment(project: &Path, command: &str) -> Vec<(String, String)> {
+    let mut env = cache_use("cargo-test", project).env;
+    let cmake = command
+        .split(|ch: char| ch.is_whitespace() || matches!(ch, '&' | ';' | '|' | '(' | ')' | '"'))
+        .any(|word| matches!(word.to_ascii_lowercase().as_str(), "ctest" | "cmake" | "ctest.exe" | "cmake.exe"));
+    if !cmake {
+        return env;
+    }
+    #[cfg(windows)]
+    if let Some(msvc) = msvc_environment() {
+        env.extend(msvc);
+    }
+    env.extend(cache_use("qt-build", project).env);
+    qt_test_environment(&mut env, project);
+    env.push(("QT_QPA_PLATFORM".into(), "offscreen".into()));
+    env
+}
+
 /// The environment a template needs beyond the worker's own (owner,
 /// 2026-10-28): the Visual Studio tools for the Qt configure and build on
 /// Windows, Qt's DLLs and the fonts for a Qt test, Gradle's home in the folder.
@@ -1486,23 +1856,7 @@ fn template_environment(plan: &Plan, folder: &Path) -> Vec<(String, String)> {
         }
     }
     if plan.template == "qt-test" {
-        // Task 53: QtTest's plain logger writes to OutputDebugString instead of
-        // stdout when stderr has no console (Qt's shouldLogToStderr), and the
-        // worker has none: the suite's lines (FAIL!, Totals) never reached the
-        // pipe and the tail was empty. Qt's own switch sends them to the
-        // stream on every platform.
-        env.push(("QT_FORCE_STDERR_LOGGING".into(), "1".into()));
-        if let Some(bin) = qt_bin(folder) {
-            let path = env.iter().find(|(key, _)| key.eq_ignore_ascii_case("PATH")).map(|(_, value)| value.clone())
-                .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
-            let separator = if cfg!(windows) { ';' } else { ':' };
-            env.retain(|(key, _)| !key.eq_ignore_ascii_case("PATH"));
-            env.push(("PATH".into(), format!("{}{separator}{path}", bin.display())));
-        }
-        #[cfg(windows)]
-        if std::env::var_os("QT_QPA_FONTDIR").is_none() {
-            env.push(("QT_QPA_FONTDIR".into(), "C:/Windows/Fonts".into()));
-        }
+        qt_test_environment(&mut env, folder);
     }
     if plan.template == "ue-test" {
         let ue = folder.join(".zerus-team").join("ue");
@@ -1517,7 +1871,8 @@ fn template_environment(plan: &Plan, folder: &Path) -> Vec<(String, String)> {
         let _ = std::fs::create_dir_all(python.join("pytest-cache"));
         env.push(("PIP_CACHE_DIR".into(), python.join("pip-cache").display().to_string()));
         env.push(("PYTHONPYCACHEPREFIX".into(), python.join("pycache").display().to_string()));
-        env.push(("PYTEST_ADDOPTS".into(), "-o cache_dir=.zerus-team/python/pytest-cache".into()));
+        // Absolute, so a project run in a subfolder (task 153) keeps it in the member's folder.
+        env.push(("PYTEST_ADDOPTS".into(), format!("-o cache_dir={}", python.join("pytest-cache").display())));
     }
     if plan.template == "android-test" {
         env.push(("GRADLE_USER_HOME".into(), folder.join(".zerus-team").join("gradle").join("home").display().to_string()));
@@ -1651,7 +2006,7 @@ pub(crate) fn execute_as(plan: &Plan, folder: &Path, timeout: Duration, env: &[(
         let mut command = Command::new(program);
         command
             .args(argv)
-            .current_dir(folder)
+            .current_dir(plan.cwd.as_ref().map_or_else(|| folder.to_path_buf(), |cwd| folder.join(cwd)))
             .env("TEMP", &temp)
             .env("TMP", &temp)
             .env("QT_QPA_PLATFORM", "offscreen")
@@ -2005,8 +2360,8 @@ mod tests {
         // The set the owner asked for, by id.
         let ids: Vec<&str> = BUILTIN.iter().map(|template| template.id).collect();
         // Task 85: the CMake and MSBuild templates of any project after them; task 86: the Python and Cython ones; task 87: Unreal.
-        assert_eq!(ids, ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test", "py-test", "cython-build", "android-test", "clean-build",
-                         "git-merge-lead", "git-commit", "ue-build", "ue-test", "cmake-configure", "cmake-build", "ctest", "msbuild-build", "vstest"]);
+        assert_eq!(ids, ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test", "py-test", "cython-build", "android-test", "release-candidate",
+                         "clean-build", "git-merge-lead", "git-commit", "ue-build", "ue-test", "cmake-configure", "cmake-build", "ctest", "msbuild-build", "vstest"]);
     }
 
     // Run by hand on a Windows machine with Visual Studio (cargo test -- --ignored).
@@ -2046,7 +2401,7 @@ mod tests {
         std::fs::write(dir.path().join(".ci-build").join("gui").join("CMakeCache.txt"),
                        format!("Qt6_DIR:PATH={}\n", qt.join("lib").join("cmake").join("Qt6").display())).unwrap();
         assert_eq!(qt_bin(dir.path()), Some(qt.join("bin")));
-        let test = Plan { template: "qt-test".into(), program: "t".into(), argv: vec![], commit: None, more: Vec::new() };
+        let test = Plan { template: "qt-test".into(), program: "t".into(), argv: vec![], commit: None, more: Vec::new(), cwd: None };
         let env = template_environment(&test, dir.path());
         let path = env.iter().find(|(key, _)| key == "PATH").map(|(_, value)| value.clone()).unwrap();
         assert!(path.starts_with(&qt.join("bin").display().to_string()), "{path}");
@@ -2061,6 +2416,131 @@ mod tests {
         assert!(planned.argv.iter().any(|arg| arg.starts_with(&dir.path().join(".zerus-team").display().to_string())));
         let env = template_environment(&planned, dir.path());
         assert!(env.iter().any(|(key, value)| key == "GRADLE_USER_HOME" && value.contains(".zerus-team")));
+    }
+
+    /// Task 190: a fake Qt install at `<dir>/deps/Qt/<version>/msvc2022_64`.
+    fn qt_tree(dir: &Path, version: &str) -> PathBuf {
+        let qt = dir.join("deps").join("Qt").join(version).join("msvc2022_64");
+        std::fs::create_dir_all(qt.join("lib").join("cmake").join("Qt6")).unwrap();
+        std::fs::write(qt.join("lib").join("cmake").join("Qt6").join("Qt6Config.cmake"), "").unwrap();
+        qt
+    }
+
+    /// The `tray/CMakeLists.txt` that asks for `wanted` (this repository's names
+    /// no version).
+    fn tray(dir: &Path, wanted: &str) {
+        std::fs::create_dir_all(dir.join("tray")).unwrap();
+        std::fs::write(dir.join("tray").join("CMakeLists.txt"), format!("find_package(Qt6 {wanted} REQUIRED COMPONENTS Widgets)\n")).unwrap();
+    }
+
+    fn qt_arg(qt: &Path) -> String {
+        format!("-DQt6_DIR={}", qt.join("lib").join("cmake").join("Qt6").display().to_string().replace('\\', "/"))
+    }
+
+    /// Task 190: a fresh worktree has no `.ci-build/gui/CMakeCache.txt`; the
+    /// template finds the newest installed Qt itself, for the version asked for.
+    #[test]
+    fn qt_configure_finds_the_newest_installed_qt_itself() {
+        let dir = temp();
+        settings_override(Some(dir.path().join("templates.json")));
+        tray(dir.path(), "6.5");
+        // An older kit is installed too: the version asked for decides.
+        let old = qt_tree(dir.path(), "6.2.4");
+        let qt = qt_tree(dir.path(), "6.10.3");
+        assert!(old.is_dir());
+        qt_override(Some(Vec::new()), Some(vec![dir.path().join("deps").join("Qt")]));
+        let planned = plan("qt-configure", &json!({}), dir.path()).unwrap();
+        qt_override(None, None);
+        settings_override(None);
+        assert!(planned.argv.contains(&qt_arg(&qt)), "{:?}", planned.argv);
+        assert!(!planned.argv.contains(&qt_arg(&old)));
+    }
+
+    #[test]
+    fn qt_configure_takes_qt_from_the_environment() {
+        let dir = temp();
+        settings_override(Some(dir.path().join("templates.json")));
+        tray(dir.path(), "6.5");
+        let qt = qt_tree(dir.path(), "6.10.3");
+        for (name, value) in [
+            ("QT_ROOT_DIR", qt.display().to_string()),
+            ("Qt6_DIR", qt.join("lib").join("cmake").join("Qt6").display().to_string()),
+        ] {
+            qt_override(Some(vec![(name.into(), value)]), Some(Vec::new()));
+            let planned = plan("qt-configure", &json!({}), dir.path()).unwrap();
+            qt_override(None, None);
+            assert!(planned.argv.contains(&qt_arg(&qt)), "{name}: {:?}", planned.argv);
+        }
+        settings_override(None);
+    }
+
+    #[test]
+    fn qt_configure_takes_qt_from_the_project_or_the_computer_setting() {
+        let dir = temp();
+        settings_override(Some(dir.path().join("templates.json")));
+        tray(dir.path(), "6.5");
+        let qt = qt_tree(dir.path(), "6.10.3");
+        std::fs::create_dir_all(dir.path().join(".zerus")).unwrap();
+        // A TOML literal string keeps Windows backslashes from being escapes.
+        let named = qt.display().to_string();
+        std::fs::write(dir.path().join(".zerus").join("tests.toml"), format!("version = 1\n[tools]\nqt = '{named}'\n")).unwrap();
+        qt_override(Some(Vec::new()), Some(Vec::new()));
+        let planned = plan("qt-configure", &json!({}), dir.path()).unwrap();
+        assert!(planned.argv.contains(&qt_arg(&qt)), "{:?}", planned.argv);
+        // The per-computer `qt` setting answers when the project names none.
+        std::fs::remove_file(dir.path().join(".zerus").join("tests.toml")).unwrap();
+        write_settings(&json!({"enabled": true, "qt": qt.display().to_string()})).unwrap();
+        let planned = plan("qt-configure", &json!({}), dir.path()).unwrap();
+        qt_override(None, None);
+        settings_override(None);
+        assert!(planned.argv.contains(&qt_arg(&qt)), "{:?}", planned.argv);
+    }
+
+    #[test]
+    fn qt_configure_takes_qt_from_the_main_checkouts_cache() {
+        let dir = temp();
+        settings_override(Some(dir.path().join("templates.json")));
+        let main = dir.path().join("main");
+        std::fs::create_dir_all(main.join("member")).unwrap();
+        std::fs::create_dir_all(main.join(".ci-build").join("gui")).unwrap();
+        tray(&main.join("member"), "6.5");
+        let qt = qt_tree(dir.path(), "6.10.3");
+        std::fs::write(
+            main.join(".ci-build").join("gui").join("CMakeCache.txt"),
+            format!("Qt6_DIR:PATH={}\n", qt.join("lib").join("cmake").join("Qt6").display()),
+        )
+        .unwrap();
+        let git = std::process::Command::new("git").args(["init", "-q"]).current_dir(&main).output().unwrap();
+        assert!(git.status.success(), "git init: {}", String::from_utf8_lossy(&git.stderr));
+        qt_override(Some(Vec::new()), Some(Vec::new()));
+        let planned = plan("qt-configure", &json!({}), &main.join("member")).unwrap();
+        qt_override(None, None);
+        settings_override(None);
+        assert!(planned.argv.contains(&qt_arg(&qt)), "{:?}", planned.argv);
+    }
+
+    #[test]
+    fn qt_configure_names_what_it_searched_when_qt_is_missing() {
+        let dir = temp();
+        settings_override(Some(dir.path().join("templates.json")));
+        tray(dir.path(), "6.5");
+        let empty = dir.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        qt_override(Some(Vec::new()), Some(vec![empty.clone()]));
+        let error = plan("qt-configure", &json!({}), dir.path()).unwrap_err().to_string();
+        qt_override(None, None);
+        settings_override(None);
+        let mut wanted = vec![
+            "Qt 6.5".to_owned(),
+            "QT_ROOT_DIR".to_owned(),
+            "Qt6_DIR".to_owned(),
+            "[tools] qt".to_owned(),
+            "CMakeCache.txt".to_owned(),
+        ];
+        wanted.push(empty.display().to_string());
+        for wanted in wanted {
+            assert!(error.contains(&wanted), "missing {wanted} in: {error}");
+        }
     }
 
     #[test]
@@ -2090,6 +2570,28 @@ mod tests {
         assert_eq!(plan("qt-build", &json!({"targets":["hgs-tray"]}), dir.path()).unwrap().argv, ["--build", ".ci-build/gui", "--target", "hgs-tray"]);
         // An absent filter adds no argument at all.
         assert_eq!(plan("cargo-build", &json!({}), dir.path()).unwrap().argv, ["build", "--locked"]);
+    }
+
+    /// Task 213: the release candidate takes the fork identity as two explicit
+    /// inputs (the workflow takes them from its tag and run number), so a local
+    /// leg embeds and packages the same build and feed.
+    #[test]
+    fn the_release_candidate_takes_the_fork_identity() {
+        let dir = temp();
+        let feed = "https://github.com/WhiteWh/zerus/releases/latest/download/zerus-fork-feed.json";
+        let full = plan("release-candidate", &json!({"commit":"abc1234","fork_build":"41","fork_feed":feed}), dir.path()).unwrap();
+        assert_eq!(
+            full.argv,
+            ["scripts/release-candidate.py", "--commit=abc1234", "--fork-build=41", "--fork-feed=https://github.com/WhiteWh/zerus/releases/latest/download/zerus-fork-feed.json"]
+        );
+        // Both are optional: an experimental leg (neither) passes no flag, and
+        // one alone is the script's own refusal (both or neither).
+        assert_eq!(plan("release-candidate", &json!({}), dir.path()).unwrap().argv, ["scripts/release-candidate.py"]);
+        assert_eq!(
+            plan("release-candidate", &json!({"fork_build":"41"}), dir.path()).unwrap().argv,
+            ["scripts/release-candidate.py", "--fork-build=41"]
+        );
+        assert!(plan("release-candidate", &json!({"fork_build":"41 42"}), dir.path()).is_err(), "a build number is one word");
     }
 
     #[test]
@@ -2232,7 +2734,7 @@ mod tests {
                 program: "cmd".into(),
                 argv: vec!["/c".into(), format!("start /b {}", script.display())],
                 commit: None,
-                more: Vec::new(),
+                more: Vec::new(), cwd: None,
             }
         };
         #[cfg(unix)]
@@ -2241,7 +2743,7 @@ mod tests {
             program: "sh".into(),
             argv: vec!["-c".into(), format!("(sleep 3; echo late > '{}') &", marker.display())],
             commit: None,
-            more: Vec::new(),
+            more: Vec::new(), cwd: None,
         };
         let started = Instant::now();
         let outcome = execute(&plan, dir.path(), Duration::from_secs(120), &[]);
@@ -2263,7 +2765,7 @@ mod tests {
 
     fn shell_plan(windows: &str, unix: &str) -> Plan {
         let (program, flag, command) = if cfg!(windows) { ("cmd", "/c", windows) } else { ("sh", "-c", unix) };
-        Plan { template: "test".into(), program: program.into(), argv: vec![flag.into(), command.into()], commit: None, more: Vec::new() }
+        Plan { template: "test".into(), program: program.into(), argv: vec![flag.into(), command.into()], commit: None, more: Vec::new(), cwd: None }
     }
 
     /// Task #35: team 33fbafeb's qt-build in a DeepSeek member's clone stopped
@@ -2476,6 +2978,24 @@ mod tests {
     // U62 (#721): the build cache is the project's choice. Without
     // `[build_cache]` (or with it off) builds run as before: no wrapper, no
     // launcher, the Qt configure unchanged.
+    /// Task 174: a queued CMake or CTest suite runs as the qt templates do
+    /// (offscreen, its output on the pipe); a cargo suite only gets the cache.
+    #[test]
+    fn a_queued_qt_suite_gets_the_qt_test_environment() {
+        let dir = temp();
+        settings_override(Some(dir.path().join("templates.json")));
+        let folder = dir.path().join("integration");
+        std::fs::create_dir_all(&folder).unwrap();
+        let qt = queue_environment(&folder, "cmake --build .ci-build/gui && ctest --test-dir .ci-build/gui -R \"^(test_a)$\"");
+        let value = |env: &[(String, String)], key: &str| env.iter().rev().find(|(name, _)| name == key).map(|(_, value)| value.clone());
+        assert_eq!(value(&qt, "QT_QPA_PLATFORM").as_deref(), Some("offscreen"));
+        assert_eq!(value(&qt, "QT_FORCE_STDERR_LOGGING").as_deref(), Some("1"));
+        let cargo = queue_environment(&folder, "cargo test --locked state::");
+        assert_eq!(value(&cargo, "QT_QPA_PLATFORM"), None);
+        assert!(queue_environment(&folder, "python -m unittest test_cmake_notes").is_empty(), "a word containing cmake is not cmake");
+        settings_override(None);
+    }
+
     #[test]
     fn a_project_without_a_build_cache_builds_as_before() {
         let dir = temp();
@@ -2644,13 +3164,21 @@ mod tests {
     }
 
     /// Task 85: qt-configure and qt-build are the CMake templates with their
-    /// fixed values; their argv is exactly what it was for this repository.
+    /// fixed values; task 190 adds the Qt the configure found itself.
     #[test]
     fn qt_templates_keep_their_argv_as_aliases_of_the_cmake_ones() {
         let dir = temp();
+        settings_override(Some(dir.path().join("templates.json")));
+        tray(dir.path(), "6.5");
+        let qt = qt_tree(dir.path(), "6.10.3");
+        qt_override(Some(vec![("QT_ROOT_DIR".into(), qt.display().to_string())]), Some(Vec::new()));
         let configure = plan("qt-configure", &json!({}), dir.path()).unwrap();
-        assert_eq!((configure.program.as_str(), configure.argv.clone()),
-                   ("cmake", ["-S", "tray", "-B", ".ci-build/gui", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release"].map(str::to_owned).to_vec()));
+        qt_override(None, None);
+        settings_override(None);
+        // Task 190: the fixed cmake argv, then the Qt the template found itself.
+        let mut expected: Vec<String> = ["-S", "tray", "-B", ".ci-build/gui", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release"].map(str::to_owned).to_vec();
+        expected.push(qt_arg(&qt));
+        assert_eq!((configure.program.as_str(), configure.argv.clone()), ("cmake", expected));
         assert_eq!(cmake_configure_argv("tray", ".ci-build/gui", Some("Ninja"), Some("Release"), None, Some("ccache")).last().unwrap().as_str(),
                    "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache");
         let build = plan("qt-build", &json!({"targets":["hgs-tray","test_teams"]}), dir.path()).unwrap();
@@ -2965,6 +3493,67 @@ kind = "path"
         assert!(plan("py-test", &json!({}), empty.path()).is_err());
     }
 
+    /// Task 153: a Python project in a subfolder (a monorepo, a provider's
+    /// root): both templates take its environment and setup.py, run there,
+    /// and keep every path the member's.
+    #[test]
+    fn a_nested_python_project_runs_through_both_templates_inside_the_folder() {
+        let dir = temp();
+        let project = dir.path().join("services").join("app");
+        std::fs::create_dir_all(project.join(".venv/Scripts")).unwrap();
+        std::fs::write(project.join(".venv/Scripts/python.exe"), "").unwrap();
+        std::fs::create_dir_all(project.join("tests")).unwrap();
+        std::fs::write(project.join("tests/test_app.py"), "").unwrap();
+        std::fs::write(project.join("setup.py"), "").unwrap();
+        std::fs::write(project.join("ext.pyx"), "").unwrap();
+        // Without the project the member's root has no environment.
+        let refused = plan("py-test", &json!({"paths":["services/app/tests/test_app.py"]}), dir.path()).unwrap_err().to_string();
+        assert!(refused.contains("No project Python environment"), "{refused}");
+        let py = plan("py-test", &json!({"project":"services/app","paths":["services/app/tests/test_app.py"],"tests":["test_app.py::test_one"]}), dir.path()).unwrap();
+        assert_eq!(py.cwd.as_deref(), Some("services/app"));
+        assert!(Path::new(&py.program).is_absolute() && Path::new(&py.program).starts_with(&project), "{}", py.program);
+        let junit = format!("--junitxml={}", dir.path().join(".zerus-team/python/junit.xml").display());
+        assert!(py.argv.contains(&junit), "{:?}", py.argv);
+        assert!(py.argv.contains(&dir.path().join("services/app/tests/test_app.py").display().to_string()), "{:?}", py.argv);
+        // A node id names the test from the project's folder, as pytest reads it there.
+        assert!(py.argv.contains(&"test_app.py::test_one".to_owned()));
+        let cy = plan("cython-build", &json!({"project":"services/app","sources":["services/app/ext.pyx"]}), dir.path()).unwrap();
+        assert_eq!(cy.cwd.as_deref(), Some("services/app"));
+        assert!(Path::new(&cy.program).starts_with(&project));
+        assert_eq!(&cy.argv[..3], ["setup.py", "build_ext", "--inplace"]);
+        assert_eq!(cy.argv[3], dir.path().join("services/app/ext.pyx").display().to_string());
+        // The member's root and "." are the folder itself, as before.
+        std::fs::create_dir_all(dir.path().join(".venv/Scripts")).unwrap();
+        std::fs::write(dir.path().join(".venv/Scripts/python.exe"), "").unwrap();
+        let root = plan("py-test", &json!({"project":"."}), dir.path()).unwrap();
+        assert_eq!((root.cwd, root.program.as_str()), (None, ".venv/Scripts/python.exe"));
+        assert!(root.argv.contains(&"--junitxml=.zerus-team/python/junit.xml".to_owned()));
+        // Confined to the member's folder.
+        for outside in ["../app", "/tmp/app", "C:/app", "services/missing", "services/app/setup.py"] {
+            assert!(plan("cython-build", &json!({"project": outside}), dir.path()).is_err(), "{outside}");
+        }
+        #[cfg(unix)]
+        {
+            let elsewhere = temp();
+            std::os::unix::fs::symlink(elsewhere.path(), dir.path().join("linked")).unwrap();
+            let error = plan("cython-build", &json!({"project":"linked"}), dir.path()).unwrap_err().to_string();
+            assert!(error.contains("leads outside your folder"), "{error}");
+        }
+    }
+
+    /// Task 153: a plan's folder is where its commands run.
+    #[test]
+    fn a_plan_runs_in_its_project_folder() {
+        let dir = temp();
+        std::fs::create_dir_all(dir.path().join("services").join("app")).unwrap();
+        let mut plan = shell_plan("cd", "pwd");
+        plan.cwd = Some("services/app".into());
+        let outcome = execute(&plan, dir.path(), Duration::from_secs(60), &[]);
+        assert_eq!(outcome.exit, Some(0), "{}", outcome.tail);
+        let tail = outcome.tail.replace('\\', "/");
+        assert!(tail.trim_end().ends_with("services/app"), "{tail}");
+    }
+
     #[test]
     fn unreal_templates_are_typed_argv() {
         let dir = temp();
@@ -3074,4 +3663,3 @@ kind = "path"
         assert!(error.contains("HKCU") && error.contains("ZERUS_UE_ENGINE"), "{error}");
     }
 }
-

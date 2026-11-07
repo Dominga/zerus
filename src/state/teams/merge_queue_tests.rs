@@ -1105,3 +1105,68 @@ fn a_saved_synthetic_merge_suite_migrates_with_its_original_start() {
     assert_eq!(head(&repo), merged);
     assert!(database.queued("t1").unwrap().is_empty());
 }
+
+/// Task 174: this team's layout: the team's folder stays on its own branch,
+/// the owner's integration folder (a worktree on the integration branch)
+/// takes the merge and its tests, and members merge from it.
+#[test]
+fn the_owners_integration_folder_takes_the_merge_and_its_tests() {
+    let repo = repo();
+    let integration = repo.lead.parent().unwrap().join("integration");
+    run_git(&repo.lead, &["worktree", "add", "-q", "-b", "phase3", &integration.to_string_lossy()]);
+    // The team's folder moves on alone: the queue never merges there.
+    write(&repo.lead, "lead-only.txt", "lead\n");
+    run_git(&repo.lead, &["add", "."]);
+    run_git(&repo.lead, &["commit", "-q", "-m", "lead only"]);
+    let lead_before = head(&repo);
+    write(&repo.member, "b.txt", "work\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "work"]);
+    let mut team = team(&repo);
+    team.settings.integration_folder = integration.to_string_lossy().into_owned();
+    assert_eq!(team.integration_folder(), integration.to_string_lossy());
+    assert_eq!(accept(&mut team)["status"], "merge_queued");
+    let database = database(&repo);
+    let events = settle(&mut team, &database, &integration);
+    assert_eq!(head(&repo), lead_before, "the team's folder is untouched");
+    assert!(integration.join("b.txt").is_file(), "the work is merged into the integration branch");
+    assert!(!integration.join("lead-only.txt").exists());
+    assert_eq!(run_git(&integration, &["rev-parse", "--abbrev-ref", "HEAD"]), "phase3");
+    let task = team.task(1).unwrap();
+    assert_eq!(task.status, TaskStatus::Accepted, "{events:?}");
+    assert!(events.iter().any(|event| event.kind == "merged"), "{events:?}");
+}
+
+/// Task 174: an integration folder that cannot take a merge (missing, another
+/// repository, a detached HEAD) holds the queue with that note.
+#[test]
+fn an_unusable_integration_folder_holds_the_queue_with_its_note() {
+    let repo = repo();
+    write(&repo.member, "b.txt", "work\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "work"]);
+    let mut team = team(&repo);
+    assert_eq!(accept(&mut team)["status"], "merge_queued");
+    let parent = repo.lead.parent().unwrap().to_path_buf();
+    let other = parent.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    run_git(&other, &["init", "-q"]);
+    write(&other, "x.txt", "x\n");
+    run_git(&other, &["add", "."]);
+    run_git(&other, &["commit", "-q", "-m", "other"]);
+    let detached = parent.join("detached");
+    run_git(&repo.lead, &["worktree", "add", "-q", "--detach", &detached.to_string_lossy()]);
+    let lead_before = head(&repo);
+    let database = database(&repo);
+    for (folder, said) in [(parent.join("missing"), "does not exist"), (other, "is not a checkout of the team's repository"), (detached, "detached HEAD")] {
+        team.settings.integration_folder = folder.to_string_lossy().into_owned();
+        let mut events = Vec::new();
+        step_here(&mut team, &database, 100.0, &mut events).unwrap();
+        let entry = team.task(1).unwrap().merge.clone().unwrap();
+        assert_eq!(entry.state, "queued");
+        assert!(entry.note.contains(said), "{said}: {}", entry.note);
+        assert_eq!(entry.wait_reason, MergeWaitReason::Busy);
+    }
+    assert_eq!(head(&repo), lead_before, "nothing was merged anywhere");
+    assert!(database.queued(&team.id).unwrap().is_empty(), "nor tested");
+}

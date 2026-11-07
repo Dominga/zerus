@@ -142,27 +142,11 @@ fn an_auto_draft_with_a_plan_blocker_is_not_accepted_on_hand_out() {
     assert!(!events.iter().any(|event| event.kind == "phase_auto_accepted"));
 }
 
-/// U61 #709 N3: work ahead keeps its meaning for review drafts; it never
-/// takes an auto-accepted draft (only start-ahead or phases-ahead do).
+/// U61, task 158: an auto draft behind a running phase is accepted by Auto
+/// and runs alongside it: its independent task goes out, a task that depends
+/// on it waits. There is no start-ahead any more.
 #[test]
-fn work_ahead_skips_an_auto_draft() {
-    let mut t = team();
-    t.settings.work_ahead = true;
-    t.settings.auto_accept = true;
-    t.phases.push(Phase { n: 2, order: 2, title: "Auto".into(), approval: Approval::Auto, state: PhaseState::Draft, tasks: vec![4], ..Default::default() });
-    t.phases.push(Phase { n: 3, order: 3, title: "Review".into(), approval: Approval::Review, state: PhaseState::Draft, tasks: vec![5], ..Default::default() });
-    t.tasks.push(Task { id: 4, title: "Auto task".into(), phase: 2, status: TaskStatus::Pending, assignee: "dev".into(), ..Default::default() });
-    t.tasks.push(Task { id: 5, title: "Review task".into(), phase: 3, status: TaskStatus::Pending, assignee: "dev".into(), ..Default::default() });
-    let ahead = work_ahead_tasks(&t);
-    assert!(!ahead.contains(&4), "an auto draft is not work-ahead: {ahead:?}");
-    assert!(ahead.contains(&5), "a review draft keeps its work ahead: {ahead:?}");
-}
-
-/// U61: started ahead, an idle member takes an independent task of the draft
-/// while the current phase runs; the hand-out accepts the draft, and a task
-/// that depends on it is not handed out.
-#[test]
-fn a_started_ahead_draft_hands_out_its_independent_task_and_is_accepted() {
+fn an_auto_draft_behind_open_work_is_accepted_and_runs_alongside() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
     let mut t = team();
@@ -171,11 +155,9 @@ fn a_started_ahead_draft_hands_out_its_independent_task_and_is_accepted() {
         n: 2,
         order: 2,
         title: "Ahead".into(),
-        barrier: true,
         approval: Approval::Auto,
         state: PhaseState::Draft,
         tasks: vec![4, 5],
-        start_ahead: true,
         ..Default::default()
     });
     t.tasks.push(Task { id: 4, title: "Ahead one".into(), phase: 2, status: TaskStatus::Draft, assignee: "dev".into(), ..Default::default() });
@@ -197,17 +179,19 @@ fn a_started_ahead_draft_hands_out_its_independent_task_and_is_accepted() {
     store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
     let seen = [session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
     let found = steps(&t, &seen, 100.0);
-    assert!(found.contains(&Step::WorkAhead { task: 4, member: "dev".into() }), "the independent task: {found:?}");
-    assert!(!found.iter().any(|step| matches!(step, Step::WorkAhead { task: 5, .. })), "the dependent task waits: {found:?}");
-    run_step(&mut store, &t, &Step::WorkAhead { task: 4, member: "dev".into() }, "").unwrap();
+    assert!(found.contains(&Step::AutoAcceptDraft { phase: 2 }), "{found:?}");
+    assert!(!found.iter().any(|step| matches!(step, Step::HandOut { task: 4 | 5, .. })), "a draft runs nothing: {found:?}");
+    run_step(&mut store, &t, &Step::AutoAcceptDraft { phase: 2 }, "").unwrap();
     let saved = store.load(&t.id).unwrap().unwrap();
-    assert!(saved.phases[0].state.is_accepted(), "{:?}", saved.phases[0].state);
-    // #5 depends on #4, which is now open: it is not handed out.
-    assert!(!steps(&saved, &seen, 101.0).iter().any(|step| matches!(step, Step::WorkAhead { task: 5, .. })));
+    assert_eq!(saved.phases[0].state, PhaseState::Approved, "running beside phase 1, not queued");
+    assert!(!saved.task(1).unwrap().status.finished(), "phase 1 is still open");
+    let found = steps(&saved, &seen, 101.0);
+    assert!(found.contains(&Step::HandOut { task: 4, member: "dev".into() }), "the independent task: {found:?}");
+    assert!(!found.iter().any(|step| matches!(step, Step::HandOut { task: 5, .. })), "the dependent task waits: {found:?}");
 }
 
-/// U61: the lead's edit and the first hand-out racing in one tick: before the
-/// hand-out the draft is still editable, after it the phase is accepted and
+/// U61: the lead's edit and Auto's acceptance racing in one tick: before the
+/// acceptance the draft is still editable, after it the phase is accepted and
 /// the edit is refused.
 #[test]
 fn an_edit_racing_the_first_hand_out_is_either_early_or_refused() {
@@ -225,7 +209,6 @@ fn an_edit_racing_the_first_hand_out_is_either_early_or_refused() {
         approval: Approval::Auto,
         state: PhaseState::Draft,
         tasks: vec![4],
-        start_ahead: true,
         ..Default::default()
     });
     t.tasks.push(Task { id: 4, title: "Racy".into(), phase: 2, status: TaskStatus::Draft, assignee: "dev".into(), ..Default::default() });
@@ -235,18 +218,28 @@ fn an_edit_racing_the_first_hand_out_is_either_early_or_refused() {
     ops::apply(&mut t, "edit-draft", &json!({"phase":2,"tasks_update":[{"id":4,"title":"Racy edited"}]}), &lead, &BTreeSet::new(), &mut events).unwrap();
     assert_eq!(t.phases[0].state, PhaseState::Draft);
     assert_eq!(t.task(4).unwrap().title, "Racy edited");
-    // The hand-out runs (a task is really handed out), then the edit is refused
-    // because the accepted phase has started work.
+    // Auto accepts the draft, then the edit is refused because the phase is
+    // no longer a draft.
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
     store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
     t.status = TeamStatus::Running;
-    run_step(&mut store, &t, &Step::WorkAhead { task: 4, member: "dev".into() }, "").unwrap();
+    run_step(&mut store, &t, &Step::AutoAcceptDraft { phase: 2 }, "").unwrap();
     let saved = store.load(&t.id).unwrap().unwrap();
     assert!(saved.phases[0].state.is_accepted());
+    // Task 162 (wave 2 merge): inside the approved goal the lead still edits
+    // the accepted phase while its work has not started; the change is
+    // recorded for the owner's digest, who may revert it.
+    let mut edited = saved.clone();
     let mut later = Vec::new();
-    let error = ops::apply(&mut saved.clone(), "edit-draft", &json!({"phase":2,"tasks_update":[{"id":4,"title":"Too late"}]}), &lead, &BTreeSet::new(), &mut later)
+    ops::apply(&mut edited, "edit-draft", &json!({"phase":2,"tasks_update":[{"id":4,"title":"After Auto"}]}), &lead, &BTreeSet::new(), &mut later).unwrap();
+    assert_eq!(edited.task(4).unwrap().title, "After Auto");
+    assert_eq!(edited.lead_changes.len(), 1, "{:?}", edited.lead_changes);
+    // Once its work started, the edit is refused.
+    let mut started = saved.clone();
+    started.task_mut(4).unwrap().attempts.push(Attempt { member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+    let error = ops::apply(&mut started, "edit-draft", &json!({"phase":2,"tasks_update":[{"id":4,"title":"Too late"}]}), &lead, &BTreeSet::new(), &mut later)
         .unwrap_err()
         .to_string();
-    assert!(!error.is_empty(), "the edit after the fix is refused");
+    assert!(error.contains("has started"), "{error}");
 }

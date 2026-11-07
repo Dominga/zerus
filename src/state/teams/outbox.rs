@@ -405,6 +405,11 @@ mod tests {
             &["task", "get", "RogueDod/T-abc123"], &["task", "get", "T-abc123", "--project", "RogueDod", "--history-limit", "20"]] {
             assert!(sandbox_read_allowed(&argv(allowed)), "{allowed:?}");
         }
+        // Task 130: team lore reads start lore processes; the worker answers
+        // brokered reads in its tick and as itself, so they are not brokered.
+        for refused in [&["team", "lore", "find", "x", "--team", "t"][..], &["team", "lore", "plans", "--team", "t"]] {
+            assert!(!sandbox_read_allowed(&argv(refused)), "{refused:?}");
+        }
         for refused in [&["task", "list"][..], &["task", "get", "T-abc123"], &["task", "list", "--project"], &["task", "list", "--project", "-x"],
             &["task", "list", "--project", "P", "--project", "Q"], &["task", "add", "--project", "P"], &["task", "report", "P/T-1"],
             &["task", "stage", "P/T-1", "done"], &["task", "get", "P/T-1", "--set"], &["task", "send", "P/T-1"]] {

@@ -129,6 +129,13 @@ impl Scope {
     ) -> Option<std::sync::Arc<super::portable_frontend::GuiProof>> {
         self.portable.as_ref()?.running(original, until)
     }
+    /// Task 180: why the portable app was not admitted, for its refusal line.
+    #[cfg(windows)]
+    pub(super) fn portable_refusal(&self) -> &'static str {
+        self.portable
+            .as_ref()
+            .map_or("canonical frontend is not the installed application", |scope| scope.refusal())
+    }
     /// With the UI closed: the bound portable app pinned and proven for a launch.
     #[cfg(windows)]
     pub(super) fn portable_closed(
@@ -899,12 +906,14 @@ pub(super) fn authenticate(location: &Scope, peer_pid: u32, value: &Value) -> Re
     let portable = if location.selected_frontend(Path::new(&frontend.executable)) {
         None
     } else {
+        // Task 180: the refusal names the check (the binding's folders, the
+        // binding, the bound app), so the desktop can say why.
         Some(
             frontend
                 .original
                 .as_deref()
                 .and_then(|original| location.portable_running(original, until))
-                .context("canonical frontend is not the installed application")?,
+                .ok_or_else(|| anyhow::anyhow!(location.portable_refusal()))?,
         )
     };
     #[cfg(not(windows))]

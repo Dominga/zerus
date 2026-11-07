@@ -104,6 +104,8 @@ mod selection_diagnostic;
 mod session_files;
 #[cfg(feature = "live")]
 mod session_folders;
+// Task 180: a refused native takeover names its check in the app.
+mod takeover_refusal;
 #[cfg(feature = "live")]
 pub mod settings;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1764,6 +1766,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         teams::team_read,
         teams::team_role_models,
         teams::iron_rules,
+        teams::project_memory,
         wsl_mapping::wsl_mapping_open,
         wsl_mapping::wsl_mapping_preview,
         wsl_mapping::wsl_mapping_use,

@@ -25,13 +25,6 @@ branch_per_task {template} and base_branch are the owner's settings: with a
 template each task gets its own branch from base_branch (default: the lead's
 branch); without one a member keeps one branch. A dirty folder waits.
 
-Scale and drain (U49): scale {role, agent, count, model?, effort?, account?}
-adds members; drain {member} lets it finish, pauses the session and removes it
-("draining":false undoes it). Both need the owner's word: the role and count for
-scale, the member for drain.
-
-The owner's gates (U51, U52): an intake key (hgs team intake-key) lets a
-process add up to 5 tasks as one urgent phase, one open phase per key;
-restart_crashed (on) restarts a crashed member 3 times an hour, then it stays
-stopped - an exit the owner types in the member's terminal counts too, so turn
+Scale and drain are cards (hgs guide team-propose). restart_crashed (on) restarts a
+crashed member 3 times an hour; an exit typed in the member's terminal counts, so turn
 it off before stopping a member by hand.

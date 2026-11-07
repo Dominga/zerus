@@ -34,13 +34,20 @@ fn notices_name_members_by_id_and_role() {
     assert!(start_late_text(&team, &task, &attempt, 1000.0).contains("delivered to dev (Backend)"));
     assert!(blocked_text(&team, &task, &attempt, 1000.0).contains("dev (Backend)'s turn"));
     team.members.iter_mut().find(|member| member.id == "dev").unwrap().starved_since = Some(10.0);
-    let member = team.member("dev").unwrap().clone();
-    assert!(starved_text(&team, &member, 1210.0).contains("dev (Backend) has had no ready task"));
+    // Task 164: the digest needs an action; #3 waiting hard on #1 is one.
+    let mut waiting = team.clone();
+    waiting.task_mut(3).unwrap().deps[0].kind = DependencyKind::Hard;
+    let text = starved_text(&waiting, &["dev".into()], 1210.0).unwrap();
+    assert!(text.contains("Idle with no ready task: dev (Backend) 20 min") && text.contains("#3 Tests waits for deps: accept #1"), "{text}");
     team.task_mut(1).unwrap().attempts[0].no_report = true;
+    team.task_mut(1).unwrap().attempts[0].turn_ended_at = Some(crate::state::now() - 10_000.0);
+    team.task_mut(1).unwrap().attempts[0].last_reply = "Waiting for the build".into();
     let items = inbox::items(&team);
-    let stalled = items.iter().find(|item| item.kind == "stalled").expect("a stalled item");
-    assert_eq!(stalled.member, "dev (Backend)");
-    assert!(stalled.summary.starts_with("dev (Backend) ended its turn"), "{}", stalled.summary);
+    let no_report = items.iter().find(|item| item.kind == "no_report").expect("a no report item");
+    assert_eq!(no_report.member, "dev (Backend)");
+    assert!(no_report.summary.contains("without a report"), "{}", no_report.summary);
+    assert!(no_report.command.contains("use-last-reply"), "{}", no_report.command);
+    assert_eq!(no_report.detail, "Waiting for the build");
     assert!(inbox::text(&team, &items, 1000.0).contains("dev (Backend)"));
 }
 
@@ -312,7 +319,7 @@ fn a_refused_hand_out_keeps_the_finding_for_the_next_one() {
     let refusing = refuse.clone();
     set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| {
         assert_eq!(args.first().copied(), Some("send"));
-        record.borrow_mut().push(input.map(|input| input["text"].as_str().unwrap_or_default().to_owned()).unwrap_or_default());
+        record.borrow_mut().push(input.map(crate::state::teams::doorbell::posted_text).unwrap_or_default());
         Ok(if refusing.get() { fake_output(1, "", "hgs: the session is busy") } else { fake_output(0, r#"{"status":"submitted"}"#, "") })
     })));
     let result = hand_out(&mut store, &t.id, 1, "dev", None, "");

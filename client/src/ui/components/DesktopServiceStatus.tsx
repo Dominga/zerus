@@ -1,9 +1,10 @@
 import { Show, createMemo, createSignal } from "solid-js";
 import { Portal } from "solid-js/web";
-import { desktopService, serviceStatus, servicePaused, retryDesktopService, ownershipActions, pausedSettingsBody, firstChoicePending } from "../../store/desktopService";
+import { desktopService, serviceStatus, servicePaused, retryDesktopService, ownershipActions, pausedSettingsBody, firstChoicePending, takeoverRefusal } from "../../store/desktopService";
 import { catalog } from "../../store/catalog";
 import { toast } from "../../store/ui";
 import { tr } from "../../i18n";
+import { Icon } from "../lib/icons";
 import { MigrationReportDialog } from "./MigrationReportDialog";
 import { TaskMessageInputsDialog } from "./TaskMessageInputsDialog";
 
@@ -16,6 +17,46 @@ const resumeBlocked = () => ownershipActions.busy() || !!desktopService.state()?
 /** Settings > About shows the service state (and, after an interrupted change, its review). */
 const openServiceSettings = () => void import("../screens/settings/sections").then(({ openSettings }) => openSettings("about"));
 
+/** Task 176: hgs refused the session state folder and the repair did not fix it. */
+export const stateRefusal = () => desktopService.state()?.state_refusal || "";
+
+/**
+ * The session list while hgs refuses the session state folder: the refusal in
+ * hgs's own words (folder, access entry, repair) and Retry, never loading rows.
+ */
+export function StateRefusalDetail() {
+  return (
+    <div class="empty sp-empty sp-refused" role="alert">
+      <Icon name="triangle-alert" size={30} />
+      <h3>{tr("Sessions cannot load")}</h3>
+      <p class="sp-refusal">{stateRefusal()}</p>
+      <p>{tr("Zerus makes a folder you own private when the background service starts. A folder another account owns must be fixed by its owner; then retry.")}</p>
+      <button type="button" class="btn small" onClick={() => void retryDesktopService().catch(error => toast(tr("Background service"), String(error), "error", true))}>{tr("Retry now")}</button>
+    </div>
+  );
+}
+
+/** Task 180: the check that refused the native takeover, with its next step. */
+export const takeoverRefused = () => takeoverRefusal(desktopService.state()?.notification_ownership);
+
+/**
+ * Task 180 (owner, 2026-11-07, local build 152: the list stayed empty): the
+ * session list while the native takeover is refused: which check, why, and
+ * the next step, never an empty list or a bare "paused".
+ */
+export function TakeoverRefusalDetail() {
+  return (
+    <Show when={takeoverRefused()}>{(refused) => (
+      <div class="empty sp-empty sp-refused" role="alert">
+        <Icon name="triangle-alert" size={30} />
+        <h3>{tr("Zerus could not take over its sessions")}</h3>
+        <p class="sp-refusal"><strong>{refused().check}</strong>: {refused().reason}</p>
+        <p>{refused().next}</p>
+      </div>
+    )}</Show>
+  );
+}
+
 /**
  * The empty main area while background work is paused. Its one action is
  * Resume where the native helper offers it, otherwise the Settings page that
@@ -26,6 +67,9 @@ export function PausedServiceDetail() {
   return (
     <div class="detail-empty paused-service">
       <h2>{firstChoicePending(desktopService.state()) ? tr("Turning on background mode") : tr("Background work is paused")}</h2>
+      <Show when={takeoverRefused()}>{(refused) => (
+        <p class="paused-reason" role="alert"><strong>{refused().check}</strong>: {refused().reason} {refused().next}</p>
+      )}</Show>
       <Show when={settings()} fallback={<>
         <p>{tr("Zerus runs your sessions through a background service, which stays paused until you resume it.")}</p>
         <button type="button" class="btn primary" disabled={resumeBlocked()} onClick={resume}>{tr("Resume background work")}</button>

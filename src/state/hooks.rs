@@ -1271,6 +1271,43 @@ pub(super) fn hook() -> Result<i32> {
 
 /// Claude Code 2.1.312 refuses a hook output of two JSON objects: the agent
 /// hint and the task commands go out as one SessionStart additionalContext.
+/// Task 135 (docs/lore.md 6.2 and 11.12): the start context of a team member's
+/// session after a compaction or a clear gets the handoff brief in recall form,
+/// at most `RECALL_UNITS`, and never so much that the whole start context passes
+/// `MAX_START_CONTEXT` (the iron rules and the hint keep their room: a recall
+/// that would not leave 600 units is left out). It reads the team's record only
+/// and writes nothing.
+fn with_team_recall(hint: Option<String>, tasks: Option<&Value>, record: &Value, event: &Value) -> Option<String> {
+    if string(event, "hook_event_name") != "SessionStart"
+        || !string(event, "agent_id").is_empty()
+        || !matches!(string(event, "source"), "compact" | "clear")
+    {
+        return hint;
+    }
+    let used = hint.as_deref().map_or(0, |text| text.encode_utf16().count())
+        + tasks
+            .and_then(|context| context["hookSpecificOutput"]["additionalContext"].as_str())
+            .map_or(0, |text| text.encode_utf16().count())
+        + 4;
+    let room = super::iron_rules::MAX_START_CONTEXT.saturating_sub(used).min(teams::handoff::RECALL_UNITS);
+    if room < 600 {
+        return hint;
+    }
+    let Some(recall) = team_recall(record, room) else { return hint };
+    Some(match hint {
+        Some(hint) if !hint.is_empty() => format!("{hint}\n\n{recall}"),
+        _ => recall,
+    })
+}
+
+fn team_recall(record: &Value, room: usize) -> Option<String> {
+    let store = teams::store::Store::open(false).ok()?;
+    let (team, member) = store.rules_member(record).ok()??;
+    let items = store.events(&team.id, None, 60).ok().and_then(|page| page["items"].as_array().cloned()).unwrap_or_default();
+    let pulses = teams::handoff::pulse_lines(&team, &member, &items, now());
+    Some(teams::handoff::build(&team, &member, teams::handoff::Why::Compaction, &pulses, room).text)
+}
+
 fn start_context(hint: Option<String>, tasks: Option<Value>) -> Option<String> {
     let tasks = tasks.and_then(|context| context["hookSpecificOutput"]["additionalContext"].as_str().map(str::to_owned));
     let parts: Vec<String> = hint.into_iter().chain(tasks).collect();
@@ -1567,6 +1604,9 @@ fn track(name: String, token: String, mut event: Value, output: &mut impl std::i
     let tasks = own_start
         .then(|| nonempty_env("HGS_AGENT").and_then(|agent| crate::tasks::session_context(&agent)))
         .flatten();
+    // Task 135: a team session whose context was compacted or cleared starts
+    // with the team's recall, the handoff brief built from its own record.
+    let hint = with_team_recall(hint, tasks.as_ref(), &record, &event);
     if let Some(context) = start_context(hint, tasks) {
         // A failed write or flush leaves only the early invalidation persisted.
         // Never expose a fresh conversation as started before this succeeds.
@@ -1577,6 +1617,14 @@ fn track(name: String, token: String, mut event: Value, output: &mut impl std::i
             record["iron_rules_start_digest"] = json!(teams::store::digest(&json!(text)));
             record["iron_rules_start_run"] = record["run_id"].clone();
             record["iron_rules_start_conversation"] = record["conversation_id"].clone();
+        }
+    }
+    // Task 134: a team member's unread messages go into this turn as the
+    // turn-start hook's added context (the agent reads it; nothing is typed).
+    // They stay unread until the member reads them with hgs team inbox.
+    if kind == "UserPromptSubmit" && string(&event, "agent_id").is_empty() && teams::doorbell::turn_hook(&agent) {
+        if let Some(context) = teams::working::turn_context_for(string(&record, "name"), string(&record, "run_id")) {
+            agent_hint::output_event(output, &context, "UserPromptSubmit")?;
         }
     }
     // The ready conversation and its proof become visible in the same atomic
@@ -2909,6 +2957,63 @@ mod tests {
         fs::remove_file(&claude).unwrap();
         assert_eq!(launch().registered_version(&program), None);
         assert_eq!(asked(), 4);
+    }
+
+    /// Task 135: a team member's session that starts after a compaction or a
+    /// clear gets the handoff brief in recall form, within what the start
+    /// context leaves; a plain start, a subagent's start and a full context get
+    /// none, and a session outside every team gets none.
+    #[test]
+    fn a_compacted_team_session_starts_with_the_teams_recall() {
+        use crate::state::teams::{model::Team, ops, store::Store};
+        let dir = tempfile::tempdir().unwrap();
+        super::super::with_test_state_root(dir.path(), || {
+            let (mut team, _) = ops::create(
+                "t",
+                &json!({"name":"Recall","goal":"Ship the recall","lead":{"id":"lead","agent":"claude","session":{"name":"claude/x/lead","run_id":"r0","conversation_id":"c0"}}}),
+            )
+            .unwrap();
+            let mut events = Vec::new();
+            ops::apply(
+                &mut team,
+                "plan",
+                &json!({"members":[{"id":"dev","role":"Backend","agent":"claude","session":{"name":"claude/x/dev","run_id":"run-dev","conversation_id":"c1"}}],
+                    "tasks":[{"id":1,"title":"Recall task","assignee":"dev","pipeline":"none","description":"Make the recall work"}]}),
+                &ops::Actor::Human,
+                &std::collections::BTreeSet::new(),
+                &mut events,
+            )
+            .unwrap();
+            ops::apply(&mut team, "approve", &json!({}), &ops::Actor::Human, &std::collections::BTreeSet::new(), &mut events).unwrap();
+            let team: Team = team;
+            let mut store = Store::open(true).unwrap();
+            store.create("11111111-1111-4111-8111-111111111136", &json!({}), team, vec![]).unwrap();
+            let record = json!({"agent":"claude","name":"claude/x/dev","run_id":"run-dev","conversation_id":"c1"});
+            let compact = json!({"hook_event_name":"SessionStart","source":"compact"});
+            let context = with_team_recall(None, None, &record, &compact).expect("a compacted team session gets the recall");
+            for wanted in ["handoff brief", "You are Backend in the team Recall", "your context was compacted or cleared", "Goal: Ship the recall", "Your work: #1 Recall task", "Make the recall work", "hgs team current"] {
+                assert!(context.contains(wanted), "{wanted:?} missing in\n{context}");
+            }
+            assert!(context.encode_utf16().count() <= crate::state::teams::handoff::RECALL_UNITS);
+            // Joined with what the start context already holds, never replacing it.
+            let joined = with_team_recall(Some("Agent hint".into()), None, &record, &json!({"hook_event_name":"SessionStart","source":"clear"})).unwrap();
+            assert!(joined.starts_with("Agent hint\n\n") && joined.contains("handoff brief"), "{joined}");
+            // A plain start, a resume, a subagent and another event get none.
+            for event in [
+                json!({"hook_event_name":"SessionStart","source":"startup"}),
+                json!({"hook_event_name":"SessionStart","source":"resume"}),
+                json!({"hook_event_name":"SessionStart","source":"compact","agent_id":"child"}),
+                json!({"hook_event_name":"UserPromptSubmit","source":"compact"}),
+            ] {
+                assert_eq!(with_team_recall(Some("keep".into()), None, &record, &event).as_deref(), Some("keep"), "{event}");
+            }
+            // A full start context leaves no room: the rules keep theirs.
+            let full = "x".repeat(super::super::iron_rules::MAX_START_CONTEXT - 200);
+            assert_eq!(with_team_recall(Some(full.clone()), None, &record, &compact), Some(full));
+            // A session that belongs to no team gets none.
+            let stranger = json!({"agent":"claude","name":"claude/x/other","run_id":"run-other","conversation_id":"c9"});
+            assert_eq!(with_team_recall(None, None, &stranger, &compact), None);
+        });
     }
 
     /// Task 121: the heartbeat hook is a fast append. While another delivery

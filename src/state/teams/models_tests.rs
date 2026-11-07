@@ -419,7 +419,7 @@ fn a_switching_member_takes_no_stage_and_gets_its_task_once() {
     // Once it shows, dev gets #1 and only #1: no stage beside it.
     let now_on = [lead_seen(), on("codex/x/dev", "gpt-5.5", "high", true), on("codex/x/imp", "gpt-5", "", false)];
     let found = steps(&t, &now_on, 110.0);
-    let dev: Vec<&Step> = found.iter().filter(|step| matches!(step, Step::StageOut { member, .. } | Step::HandOut { member, .. } | Step::Rebalance { to: member, .. } | Step::WorkAhead { member, .. } if member == "dev")).collect();
+    let dev: Vec<&Step> = found.iter().filter(|step| matches!(step, Step::StageOut { member, .. } | Step::HandOut { member, .. } | Step::Rebalance { to: member, .. } if member == "dev")).collect();
     assert_eq!(dev, vec![&Step::HandOut { task: 1, member: "dev".into() }], "{found:?}");
 }
 

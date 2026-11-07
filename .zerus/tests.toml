@@ -73,12 +73,19 @@ logs = ["~/AppData/Roaming/hgdev/hgs-tray.ini"]
 [isolation.unix]
 logs = ["~/.config/hgdev/hgs-tray.conf"]
 
+# Task 174 (owner, 2026-11-07): the build cache serves every member's cargo
+# and CMake templates and the merge queue's cargo runs (sccache for Rust,
+# ccache for C++), in one shared folder under Zerus's state.
 [build_cache]
-enabled = false
+enabled = true
 tool = "sccache"
+compilers = ["rust", "cxx"]
 
+# Task 174: an accept merges the reported commit into the lead branch (the
+# owner's integration folder, else the team's folder), tests it there and keeps
+# it or returns the task; the merger reviews and resolves, never builds by hand.
 [merge_queue]
-enabled = false
+enabled = true
 
 # #742: tools beyond the providers' runners. Zerus offers a missing one to the
 # owner once per computer (Waiting for you); nobody else installs it.
@@ -175,6 +182,15 @@ kind = "cargo"
 root = "crates/watch-protocol"
 sources = ["crates/watch-protocol/**"]
 
+# RustCodeLore: the CodeLore implementation of docs/lore.md, with its own lock
+# and its own target folder like the other storage crates.
+[[provider]]
+name = "lore"
+kind = "cargo"
+root = "crates/lore"
+sources = ["crates/lore/**"]
+command = "cargo test --locked --target-dir ../../target/lore {targets}"
+
 # The Qt desktop: CMake's link lists and the include graph name the files each
 # test binary uses. The build folder is this checkout's; the owner may move it.
 [[provider]]
@@ -182,6 +198,11 @@ name = "tray"
 budget_lines = 86000
 kind = "ctest"
 build_dir = ".ci-build/gui"
+# Task 174: the merge queue builds the merged commit before its suites run
+# (the folder is configured once with qt-configure); members use qt-build and
+# qt-test. The whole Qt set takes about 45 minutes on this computer.
+command = "cmake --build .ci-build/gui && ctest --test-dir .ci-build/gui --output-on-failure {targets}"
+budget_minutes = 60
 sources = ["tray/**"]
 tests = ["tray/tests/test_*.cpp", "tray/tests/test_*.mm"]
 manual = ["tray/tests/test_guiprofile.cpp"]

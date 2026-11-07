@@ -1126,7 +1126,15 @@ pub fn open_updates(app: &AppHandle) {
     });
 }
 
-fn open_if(app: &AppHandle, target: OpenSession, current: impl Fn() -> bool + Send + 'static) {
+
+/// Task 175: a tray-menu session row asks the window to open that session.
+pub fn menu_session(app: &AppHandle, computer: String, key: String) {
+    open_if(
+        app,
+        OpenSession { computer, key, attention: false, expected: None },
+        || true,
+    );
+}fn open_if(app: &AppHandle, target: OpenSession, current: impl Fn() -> bool + Send + 'static) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         if !current() {
@@ -1210,6 +1218,8 @@ pub enum MenuAction {
     Updates,
     Restart,
     Refresh,
+    /// Task 175: open an active session chosen in the tray menu.
+    Session { computer: String, key: String },
     Quit,
 }
 
@@ -1336,6 +1346,11 @@ impl Bar {
                     text: render(text),
                 },
                 Entry::Refresh => chosen_by(&text!("Refresh"), MenuAction::Refresh),
+                Entry::Session { computer, key, title } => chosen_by(
+                    title,
+                    MenuAction::Session { computer: computer.clone(), key: key.clone() },
+                ),
+                Entry::More(n) => chosen_by(&text!("+%1 more", *n), MenuAction::Open),
                 Entry::Quit => chosen_by(&text!("Quit"), MenuAction::Quit),
             });
         }
@@ -2695,3 +2710,6 @@ mod tests {
         );
     }
 }
+
+
+

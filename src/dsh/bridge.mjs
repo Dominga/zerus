@@ -14,6 +14,18 @@ import { isDeepStrictEqual } from 'node:util';
 export const name = 'hgs-native-dsh';
 export const inject = ['sessionController', 'agents', 'goals', 'llm', 'agentDefaultModel', 'sessionQuery', 'userQuestions', 'workspaceRegistry', 'subagents', 'permissionPresets', 'approval', 'commands', 'sessions'];
 
+// Task 209: the `/compact` slash command is a human-command adapter plugin; a
+// headless host composition may not register it while the native compaction
+// seam (`@deepseek-ai/dsh-compaction`) is there. Support is either one, never a
+// member's momentary phase: being busy means "not now", not "never".
+const COMPACT_DEFINITION = '@deepseek-ai/dsh-command-compact';
+export function compactCommand(command) {
+  return command?.definitionId === COMPACT_DEFINITION ? command : undefined;
+}
+export function compactAvailable(command, compaction) {
+  return Boolean(compactCommand(command) || typeof compaction?.compactNow === 'function');
+}
+
 // Whether a create/resume call may finish an explicit permission preset on an
 // already-live agent. Ordinary ensures and retries never switch a live
 // session; only a pending initial-setup recovery may, and only while idle.
@@ -495,7 +507,7 @@ export function apply(ctx, config) {
       childMode: child?.mode, childSendSupported: !unstarted && child?.mode === 'continuable' && Boolean(parentLive), goal,
       pendingQuestions: publicQuestions(sessionId), selection, accountStatus: status, authRequired: needsSignIn(selection, status),
       live: Boolean(live), owned: owned.has(sessionId), nativeRecovery: recoveryPublic(sessionId), interruptSupported: typeof api.cancel === 'function',
-      compactSupported: Boolean(live && ctx.commands.find(live,'compact')?.definitionId === '@deepseek-ai/dsh-command-compact'), compactRequest: agentId ? null : compactionPublic(sessionId),
+      compactSupported: Boolean(live && compactAvailable(ctx.commands.find(live,'compact'), ctx.get('compaction'))), compactRequest: agentId ? null : compactionPublic(sessionId),
       // Native fork copies the latest completed-turn prefix. An older page
       // can hold it; the native operation remains the authoritative check.
       forkSupported: !agentId && typeof api.fork === 'function',
@@ -663,17 +675,28 @@ export function apply(ctx, config) {
       case 'compact': {
         if (p.generation !== generation) throw new Error('DeepSeek host changed');
         const agent = topLevel(ctx.agents.get(p.sessionId));
-        if (!agent || ctx.commands.find(agent,'compact')?.definitionId !== '@deepseek-ai/dsh-command-compact') throw new Error('Native compaction is unavailable');
+        const command = agent ? ctx.commands.find(agent,'compact') : undefined;
+        const compaction = ctx.get('compaction');
+        if (!agent || !compactAvailable(command, compaction)) throw new Error('Native compaction is unavailable');
         if (compactReceipts.has(p.requestId) || compactionPublic(p.sessionId)?.status === 'compacting') throw new Error('Compaction was already requested');
         const abort = new AbortController();
-        const operation = ctx.commands.execute(agent, '/compact', [], abort.signal);
+        // The slash command's own receipt when it is registered; else the seam it
+        // runs, so a headless composition compacts all the same.
+        const operation = compactCommand(command)
+          ? ctx.commands.execute(agent, '/compact', [], abort.signal)
+          : compaction.compactNow(agent, abort.signal);
         const state = { public: { request_id: p.requestId, status: 'compacting', at: Date.now() / 1000 }, abort };
         compactions.set(p.sessionId, state); compactReceipts.add(p.requestId);
         operation.then(async result => {
           if (state.public.status !== 'compacting') return;
           state.revision = (await api.projections({sessionId:p.sessionId}, new AbortController().signal)).asOfSeq;
-          state.public.status = result?.result.kind !== 'success' ? 'failed' : result.result.sourceEventSeq !== undefined ? 'completed' : 'unchanged';
-          state.public.error = result?.result.kind === 'error' ? result.result.text : undefined;
+          if (result?.result) {
+            state.public.status = result.result.kind !== 'success' ? 'failed' : result.result.sourceEventSeq !== undefined ? 'completed' : 'unchanged';
+            state.public.error = result.result.kind === 'error' ? result.result.text : undefined;
+          } else {
+            // The seam: null means there was no compactable history yet.
+            state.public.status = result === null ? 'unchanged' : 'completed';
+          }
           state.public.completed_at = Date.now() / 1000;
         }).catch(error => { state.public.status = 'failed'; state.public.error = String(error?.message ?? error); });
         return { status: 'submitted' };

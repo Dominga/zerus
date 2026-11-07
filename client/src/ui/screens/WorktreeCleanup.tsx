@@ -28,8 +28,12 @@ export default function WorktreeCleanup() {
   const [blockerDetails] = createResource(() => {
     const row = current();
     return row && !row.busy && ["kept", "review"].includes(row.status) ? { id: row.id, revision: cleanup().revision } : undefined;
-  }, ({ id }) => terminationCleanupInspect(id));
-  const liveReview = () => !blockerDetails.error && blockerDetails()?.path === current()?.path ? blockerDetails()?.review : undefined;
+  }, async ({ id, revision }) => ({ id, revision, inspection: await terminationCleanupInspect(id) }));
+  const liveReview = () => {
+    if (blockerDetails.error) return undefined;
+    const data = blockerDetails();
+    return data?.id === current()?.id && data?.revision === cleanup().revision && data?.inspection.path === current()?.path ? data.inspection.review : undefined;
+  };
   const blockerSessions = () => [...new Set(liveReview()?.sessions ?? currentFolder()?.rows.flatMap((row) => row.sessions ?? []) ?? [])];
   const blockerPrograms = () => {
     const fresh = liveReview()?.processes?.map((p) => ({pid: p.pid, label: p.command ?? p.label ?? "Program"}));

@@ -158,3 +158,13 @@ it("preserves raw pending metadata and keeps computers and repositories separate
   button(host, "Restore session first").click(); button(host, "Restore session second").click();
   expect(native.restore.mock.calls.map(([row]) => row.id)).toEqual(["first", "second"]);
 });
+
+it("never displays a previous computer's blocker during the next same-path inspection", async () => {
+  const alpha = row({id:"alpha", computer:"alpha", can_force:false, folder_key:"alpha-folder", sessions:[]});
+  const beta = row({id:"beta", computer:"beta", can_force:false, folder_key:"beta-folder", sessions:[]});
+  native.inspect.mockImplementation((id:string)=>id==="alpha" ? Promise.resolve({path:alpha.path,review:{sessions:["alpha-only-blocker"]}}) : new Promise(()=>{}));
+  applyCleanup({...emptyCleanup(),revision:++revision,rows:[alpha,beta],kept:2});
+  const host=mount();review(host).click();await flush();expect(host.textContent).toContain("alpha-only-blocker");
+  host.querySelectorAll<HTMLTableRowElement>("tbody tr")[1].click();await flush();
+  expect(host.textContent).not.toContain("alpha-only-blocker");
+});

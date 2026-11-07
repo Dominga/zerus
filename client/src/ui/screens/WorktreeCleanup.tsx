@@ -9,6 +9,7 @@ import { cleanup, cleanupDialog, closeCleanup, clearCleanupResults, dismissClean
 import { activityLabel } from "../../store/backgroundTasks";
 import { anyCleanupRestore, cleanupRestoring, restoreCleanupRow } from "../../store/cleanupNotices";
 import { tr } from "../../i18n";
+import { RemoveAnywayDialog } from "../sessions/RemoveAnywayDialog";
 import { ForceStopDialog } from "../sessions/ForceStopDialog";
 import { programReviewMessage } from "../sessions/program-review";
 
@@ -22,6 +23,7 @@ export default function WorktreeCleanup() {
   const [consents, setConsents] = createSignal(emptyConsents());
   const [inspect, setInspect] = createSignal<CleanupRow>();
   const [force, setForce] = createSignal<CleanupRow>();
+  const [manual, setManual] = createSignal<CleanupRow>();
   const folders = createMemo(() => groupCleanupRows(cleanup().rows));
   const currentFolder = () => folders().find((folder) => folder.rows.some((row) => row.id === selected())) ?? folders()[0];
   const current = () => currentFolder()?.primary;
@@ -78,6 +80,7 @@ export default function WorktreeCleanup() {
           </tr>
         ); }}</For></tbody></table>
         <div class="row">
+          <Show when={currentFolder()?.rows.find((row) => row.can_remove_anyway)}>{(row) => <button class="btn small danger" disabled={cleanup().busy || anyCleanupRestore()} onClick={() => setManual(row())}>{tr("Remove anyway…")}</button>}</Show>
           <button class="btn small" disabled={cleanup().busy || anyCleanupRestore() || !current()?.can_check} onClick={() => { const row = current(); if (row) void checkCleanup(row.id); }}>{tr("Check again")}</button>
           <For each={currentFolder()?.rows.filter((row) => row.can_force)}>{(row) => <button class="btn small danger" disabled={cleanup().busy || anyCleanupRestore()} onClick={() => setForce(row)}>{tr("Force stop…")}<Show when={(currentFolder()?.rows.filter((member) => member.can_force).length ?? 0) > 1}> {row.source?.name ?? row.label}</Show></button>}</For>
           <button class="btn small" disabled={!current() || cleanup().busy || anyCleanupRestore()} onClick={() => setInspect(current())}>{tr("View files and commits…")}</button>
@@ -105,6 +108,7 @@ export default function WorktreeCleanup() {
       </div>
     </dialog>
     <Show when={inspect()}>{(row) => <CleanupInspection row={row()} close={() => setInspect(undefined)} />}</Show>
+    <Show when={manual()}>{(row) => <RemoveAnywayDialog id={row().id} close={() => setManual(undefined)} />}</Show>
     <Show when={force()}>{(row) => <ForceStopDialog id={row().id} label={row().label} close={() => setForce(undefined)} />}</Show>
   </>;
 }

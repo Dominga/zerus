@@ -22,6 +22,7 @@ mod program_pipeline;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::desktop_service::termination_outcome::programs::pipeline as programs;
 
+pub mod manual;
 mod presentation;
 
 const LIMIT: usize = review::CLEANUP_TARGETS;
@@ -38,6 +39,7 @@ struct Inner {
 #[derive(Default)]
 struct Model {
     offers: VecDeque<Offer>,
+    manual: Option<manual::Offer>,
     jobs: VecDeque<Job>,
     reserved: usize,
     revision: u64,
@@ -313,6 +315,7 @@ pub struct Row {
     id: String,
     folder_key: String,
     can_dismiss: bool,
+    can_remove_anyway: bool,
     sessions: Vec<String>,
     processes: Vec<ProgramView>,
     label: String,
@@ -557,6 +560,7 @@ impl Model {
                     id: job.id.clone(),
                     folder_key: presentation::folder_key(entry),
                     can_dismiss: self.can_dismiss(job),
+                    can_remove_anyway: self.manual_entry(&job.id).is_ok(),
                     sessions: entry.row["sessions"]
                         .as_array()
                         .into_iter()

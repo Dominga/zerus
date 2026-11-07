@@ -107,6 +107,13 @@ replaced ownership, unknown local data, source changes, other session references
 and unconfirmed process use require fresh manual review, except for the explicit
 permission-denial rule below. Background maintenance continues to preserve all
 ignored data. Uncertain removals are never replayed.
+An explicit manual review may also remove a registered linked worktree that
+Zerus did not create, after a separate destructive confirmation showing its
+native-selected path, computer, kept branch and reviewed local data. Fresh
+session/process/file checks and matching discard consents still apply. Never
+remove the primary checkout or a plain folder, fabricate launch ownership, use
+this exception automatically or replay an unknown result. Preserve branches and
+archive identities; an unowned checkout may need manual recreation for Restore.
 Termination cleanup runs in the background after its original confirmation.
 Show removed, kept and unknown outcomes with explicit review actions. Only a
 verified refusal before deletion may be checked for a new removal; never replay

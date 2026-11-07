@@ -2,8 +2,8 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createComponent, Show, type Accessor } from "solid-js";
 import { render } from "solid-js/web";
-const native = vi.hoisted(() => ({ clear: vi.fn(), offer: vi.fn(), cancel: vi.fn(), confirm: vi.fn(), sync: vi.fn(), dismiss: vi.fn(), remove: vi.fn(), inspect: vi.fn(), restore: vi.fn() }));
-vi.mock("../../bridge", () => ({ inTauri: () => false, terminationCleanupKeep: native.clear, terminationCleanupDismiss: native.dismiss, terminationCleanupRemove: native.remove, terminationCleanupInspect: native.inspect,
+const native = vi.hoisted(() => ({ clear: vi.fn(), offer: vi.fn(), cancel: vi.fn(), confirm: vi.fn(), sync: vi.fn(), dismiss: vi.fn(), remove: vi.fn(), inspect: vi.fn(), restore: vi.fn(), manual: vi.fn(), manualCancel: vi.fn() }));
+vi.mock("../../bridge", () => ({ inTauri: () => false, terminationCleanupKeep: native.clear, terminationCleanupDismiss: native.dismiss, terminationCleanupRemove: native.remove, terminationCleanupInspect: native.inspect, terminationCleanupManualOffer: native.manual, terminationCleanupManualCancel: native.manualCancel,
   terminationProgramForceOffer: native.offer, terminationProgramForceCancel: native.cancel, terminationProgramForceConfirm: native.confirm }));
 const catalogState = vi.hoisted(() => ({ rows: {} as Record<string, { key: string; computer: string; name: string }> }));
 const navigation = vi.hoisted(() => ({ select: vi.fn(), tab: vi.fn(), page: vi.fn() }));
@@ -194,4 +194,12 @@ it("keeps the pending raw Force ID beside an expired unknown member of the same 
   expect(native.confirm).not.toHaveBeenCalled(); expect(native.dismiss).not.toHaveBeenCalled();
   button(host, "Cancel").click(); await flush();
   expect(native.cancel).toHaveBeenCalledExactlyOnceWith("current-original", "native-handle");
+});
+
+it("opens manual removal only through the original native row handle",async()=>{
+ native.manual.mockResolvedValue({confirmation:"native-manual",path:"/srv/example/hand-made",computer:"fixture",branch:"kept",size:"0 B",changes:0,untracked:0,ignored:[],required:{local_files:false,discard_changes:false,unchecked_processes:false,merged_branches:false},ready:false,reason:"Current session still uses it",sessions:[],processes:[]});
+ applyCleanup({...emptyCleanup(),revision:++revision,rows:[row({id:"unowned-original",can_force:false,can_remove_anyway:true,status:"review"})],kept:1});
+ const host=mount();review(host).click();button(host,"Remove anyway…").click();await flush();
+ expect(native.manual).toHaveBeenCalledExactlyOnceWith("unowned-original");expect(host.textContent).toContain("/srv/example/hand-made");
+ expect(button(host,"Remove working folder").disabled).toBe(true);button(host,"Cancel").click();await flush();expect(native.manualCancel).toHaveBeenCalledExactlyOnceWith("native-manual");
 });

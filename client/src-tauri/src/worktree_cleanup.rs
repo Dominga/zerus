@@ -115,7 +115,7 @@ pub(crate) fn inspect(
     review::inspected(exit, path, common, file, offset)
 }
 /// The maintained exact request-bound removal path, shared by manual surfaces.
-fn remove(computer: &str, expected: &str, removal: &review::Removal) -> review::Removed {
+pub(crate) fn remove(computer: &str, expected: &str, removal: &review::Removal) -> review::Removed {
     let request = uuid::Uuid::new_v4().to_string();
     let mut inv = review::remove_invocation(&ComputerId(computer.into()), removal, &request);
     worktrees::guard(&mut inv.args, expected);

@@ -4,12 +4,13 @@ use std::ffi::OsString;
 use std::io;
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle};
+use std::time::Duration;
 use windows_sys::Win32::{
-    Foundation::{FILETIME, HANDLE, WAIT_TIMEOUT},
+    Foundation::{FILETIME, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT},
     System::Threading::{
-        GetCurrentProcess, GetProcessTimes, OpenProcess, QueryFullProcessImageNameW,
-        WaitForSingleObject, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-        PROCESS_SYNCHRONIZE,
+        GetCurrentProcess, GetExitCodeProcess, GetProcessTimes, OpenProcess,
+        QueryFullProcessImageNameW, WaitForSingleObject, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
     },
 };
 
@@ -120,6 +121,47 @@ impl OriginalProcess {
         }
         Ok(())
     }
+
+    /// Whether this exact instance ended within the bound. Only a signaled handle says
+    /// yes: a failed wait is an error, so missing evidence never reads as an exit.
+    pub fn wait_for_exit(&self, bound: Duration) -> io::Result<bool> {
+        // Below INFINITE, whatever the bound.
+        let millis = u32::try_from(bound.as_millis()).map_or(u32::MAX - 1, |m| m.min(u32::MAX - 1));
+        // SAFETY: the owned handle has synchronize access and stays open throughout.
+        match unsafe { WaitForSingleObject(self.handle.as_raw_handle() as HANDLE, millis) } {
+            WAIT_OBJECT_0 => Ok(true),
+            WAIT_TIMEOUT => Ok(false),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+
+    /// The exit code and kernel exit time (FILETIME ticks) of this instance, once it
+    /// has ended. Refuses while it is still running.
+    pub fn exit_record(&self) -> io::Result<(u32, u64)> {
+        if !self.wait_for_exit(Duration::ZERO)? {
+            return Err(io::Error::other("the process is still running"));
+        }
+        let raw = self.handle.as_raw_handle() as HANDLE;
+        let mut code = 0;
+        // SAFETY: the owned handle has query access and stays open; `code` is live.
+        if unsafe { GetExitCodeProcess(raw, &mut code) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // Deliberately not shared with `birth_of`, which Stop's identity check uses.
+        let empty = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let (mut created, mut exited, mut kernel, mut user) = (empty, empty, empty, empty);
+        // SAFETY: the owned handle stays open; all four outputs are live stack values.
+        if unsafe { GetProcessTimes(raw, &mut created, &mut exited, &mut kernel, &mut user) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((
+            code,
+            (u64::from(exited.dwHighDateTime) << 32) | u64::from(exited.dwLowDateTime),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -168,8 +210,16 @@ mod tests {
         let identity = identity_of(child.id(), child.as_handle()).unwrap();
         let held = OriginalProcess::open(&identity).unwrap();
         held.verify().unwrap();
+        assert!(held.exit_record().is_err(), "no record while it runs");
+        assert!(
+            !held.wait_for_exit(Duration::ZERO).unwrap(),
+            "still running"
+        );
         drop(child.stdin.take());
         child.wait().unwrap();
+        assert!(held.wait_for_exit(Duration::from_secs(30)).unwrap());
+        let (_, exited) = held.exit_record().unwrap();
+        assert!(exited >= identity.birth, "{exited} {identity:?}");
         assert!(held.verify().is_err());
         assert!(OriginalProcess::open(&identity).is_err());
     }

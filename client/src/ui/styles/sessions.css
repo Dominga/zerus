@@ -266,6 +266,7 @@
   .cc-expand { flex: none; margin-left: 6px; width: 24px; height: 24px; border-radius: 4px; display: grid; place-items: center; color: var(--z-list-muted); }
   .cc-expand:hover { background: var(--z-list-counter-hover); color: var(--z-list-text); }
   .cc-expand:focus-visible { outline: 1px solid var(--z-color-accent); }
+  .cc-slot { visibility: hidden; }
   .scard.compact.archived { position: relative; inset: auto; height: 36px; margin: 2px 2px; gap: 8px; }
   .scard.compact.archived .hint { font-size: var(--fs-xs); }
 

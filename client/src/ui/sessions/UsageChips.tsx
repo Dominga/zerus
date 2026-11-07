@@ -12,7 +12,7 @@ import { text } from "../../store/settings";
 import { composer } from "../../store/composer";
 import { computerOffline } from "../../store/catalog";
 import { followedFor } from "../../store/actions";
-import { accountTooltip, exhausted, exhaustedSummary, usageChipPercent, usageLoading, windowsAt } from "../lib/usage";
+import { accountTooltip, exhausted, exhaustedSummary, rateLimitNotice, usageRetryWaiting, usageChipPercent, usageLoading, windowsAt } from "../lib/usage";
 import { recoveryInspection, recoveryUsageNotice } from "./recovery-ui";
 import { footerUsageSummary } from "./session-usage-ui";
 import type { Session } from "./types";
@@ -44,9 +44,10 @@ export function AccountUsageChip(props: { session: Session }) {
         <button type="button" class="sb-usage account-usage" title={accountTooltip(u(), now())} aria-label={`${tr("Account usage")}\n${exhausted(u(), now())}\n${accountTooltip(u(), now())}`} onClick={openAccount}>
           <Show when={u().provider}><AgentBadge agent={props.session.agent} /></Show>
           <UsageMeters windows={windowsAt(u().windows, now())} loading={usageLoading(u())} summary={footerUsageSummary(u())} indicator={text("workspace/usageIndicator") as UsageIndicator} />
+          <Show when={rateLimitNotice(u(), now())}><span class="dim">{rateLimitNotice(u(), now())}</span></Show>
         </button>
-        <button type="button" class="icon-btn small usage-refresh" disabled={!online() || u().refreshing} aria-label={tr("Refresh usage")}
-          title={u().refreshing ? tr("Updating account usage…") : tr("Refresh usage")} onClick={() => void refreshSessionUsage(true)}>
+        <button type="button" class="icon-btn small usage-refresh" disabled={!online() || u().refreshing || usageRetryWaiting(u(), now())} aria-label={tr("Refresh usage")}
+          title={usageRetryWaiting(u(), now()) ? rateLimitNotice(u(), now()) : u().refreshing ? tr("Updating account usage…") : tr("Refresh usage")} onClick={() => void refreshSessionUsage(true)}>
           <Show when={!u().refreshing} fallback={<span class="su-spin"><Icon name="refresh-cw" size={12} /></span>}><Icon name="refresh-cw" size={12} /></Show>
         </button>
       </span>

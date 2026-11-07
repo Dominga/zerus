@@ -273,7 +273,12 @@ impl AccountsState {
                 .as_ref()
                 .is_some_and(|data| text(data, "status") == "unavailable");
         slot.failed = failed;
-        if !failed {
+        let changed = matches
+            && reply
+                .as_ref()
+                .zip(slot.data.as_ref())
+                .is_some_and(|(next, old)| super::usage::changed_claude_account(old, next));
+        if !failed || changed {
             slot.data = reply;
         }
     }
@@ -324,6 +329,46 @@ impl AccountsState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_quota_for_a_changed_claude_account_cannot_keep_previous_windows() {
+        let mut state = AccountsState::default();
+        let reference = r("claude-a");
+        state.ensure_usage(&reference, true, 0, true);
+        let make = |email, status, windows| {
+            serde_json::json!({"id":reference.id,"home":reference.home,
+            "provider":"claude","auth_status":"signed_in","status":status,
+            "identity":{"email":email},"windows":windows})
+        };
+        let old = make(
+            "alpha@example.test",
+            "ok",
+            serde_json::json!([{"used_percent":20}]),
+        );
+        state.finish_usage(&reference, Some(old.clone()));
+        state.finish_usage(
+            &reference,
+            Some(make(
+                "alpha@example.test",
+                "unavailable",
+                serde_json::json!([]),
+            )),
+        );
+        assert_eq!(state.usage[&reference.key()].data, Some(old));
+        state.finish_usage(
+            &reference,
+            Some(make(
+                "beta@example.test",
+                "unavailable",
+                serde_json::json!([]),
+            )),
+        );
+        let slot = &state.usage[&reference.key()];
+        assert!(slot.failed);
+        let data = slot.data.as_ref().unwrap();
+        assert_eq!(data["identity"]["email"], "beta@example.test");
+        assert_eq!(data["windows"], serde_json::json!([]));
+    }
     use serde_json::json;
 
     fn r(id: &str) -> UsageRef {

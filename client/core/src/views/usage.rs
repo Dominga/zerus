@@ -12,6 +12,25 @@ use serde_json::Value;
 const WINDOWS: usize = 16;
 const BALANCES: usize = 8;
 
+/// A failed quota read may still positively identify a changed native account.
+/// Last-good display fallback must not carry the previous account's windows.
+pub(super) fn changed_claude_account(previous: &Value, current: &Value) -> bool {
+    let next = current.get("identity").unwrap_or(&Value::Null);
+    let old = previous.get("identity").unwrap_or(&Value::Null);
+    text(current, "provider") == "claude"
+        && text(current, "auth_status") == "signed_in"
+        && !text(next, "email").is_empty()
+        && [
+            "email",
+            "organization",
+            "organization_id",
+            "plan",
+            "auth_method",
+        ]
+        .iter()
+        .any(|field| text(old, field) != text(next, field))
+}
+
 /// One limit window.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Window {
@@ -62,6 +81,8 @@ pub struct Usage {
     pub label: String,
     pub auth_status: String,
     pub checked_at: Option<f64>,
+    /// Provider cooldown in Unix seconds; Refresh must also respect it.
+    pub retry_at: Option<f64>,
     pub identity: Identity,
     pub windows: Vec<Window>,
     pub balances: Vec<Balance>,
@@ -202,6 +223,7 @@ pub fn usage(value: &Value) -> Usage {
         label: text(value, "label"),
         auth_status: text(value, "auth_status"),
         checked_at: number(value, "checked_at"),
+        retry_at: number(value, "retry_at"),
         identity: Identity {
             email: text(identity, "email"),
             name: text(identity, "name"),
@@ -239,6 +261,19 @@ pub fn usage(value: &Value) -> Usage {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn rate_limited_sample_keeps_its_age_and_server_retry_time() {
+        let sample = usage(
+            &json!({"provider":"claude","status":"rate_limited","auth_status":"signed_in",
+            "checked_at":100,"retry_at":300,"windows":[{"id":"five_hour","used_percent":42,"window_minutes":300}]}),
+        );
+        assert_eq!(sample.status, "rate_limited");
+        assert_eq!(sample.auth_status, "signed_in");
+        assert_eq!(sample.checked_at, Some(100.0));
+        assert_eq!(sample.retry_at, Some(300.0));
+        assert_eq!(sample.windows[0].used, 42.0);
+    }
 
     #[test]
     fn iso_and_number_resets_become_seconds() {

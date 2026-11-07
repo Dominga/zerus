@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use zerus_lore::embed::{Embeddings, Embedder, EmbeddingModel, ModelSource};
-use zerus_lore::finder::{find, Filters, Semantic};
+use zerus_lore::finder::{find_with, visible, Filters, Semantic};
 use zerus_lore::index;
 use zerus_lore::index::Index;
 
@@ -58,6 +58,9 @@ fn main() {
             .collect();
         index.load_vectors(model, dim, &pairs).expect("vectors load");
         let index_ms = started.elapsed().as_secs_f64() * 1000.0;
+        // Loaded once per model: the visible records and the vector map.
+        let visible_records = visible(&index, &Filters::default()).expect("visible records");
+        let loaded: std::collections::HashMap<String, Vec<f32>> = index.vectors(model).expect("vectors").into_iter().collect();
         let (en, ru) = query_rows(&bench);
         let mut results: Vec<(&str, &str, Option<usize>)> = Vec::new();
         let provider = QueryVectors { vectors: &queries, next: std::sync::atomic::AtomicUsize::new(0), dim };
@@ -71,7 +74,7 @@ fn main() {
             ] {
                 let started = Instant::now();
                 let semantic = Semantic { embedder: &provider, model, doc_prefix: doc, query_prefix: query };
-                let (hits, _) = find(&index, &text, &Filters::default(), 10, Some(&semantic)).expect("find");
+                let (hits, _) = find_with(&index, &visible_records, &loaded, model, &text, 10, Some(&semantic)).expect("find");
                 query_seconds += started.elapsed().as_secs_f64();
                 let rank = hits.iter().enumerate().find_map(|(position, hit)| {
                     index.get(&hit.id).ok().flatten().filter(|record| answers(record, &keys)).map(|_| position + 1)

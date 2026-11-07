@@ -371,3 +371,27 @@ fn a_model_or_dimension_change_rebuilds_the_vectors() {
     assert!(index.vectors("bge-m3").unwrap().is_empty());
     assert_eq!(index.vectors("multilingual-e5-base").unwrap().len(), 3);
 }
+
+/// Task 177: the preloaded variant ranks exactly as `find` does.
+fn bge_semantic<'a>(embedder: &'a dyn Embeddings) -> Semantic<'a> {
+    Semantic { embedder, model: "bge-m3", doc_prefix: "", query_prefix: "" }
+}
+
+#[test]
+fn find_with_the_preloaded_vectors_ranks_as_find() {
+    use std::collections::HashMap;
+    use zerus_lore::finder::{find, find_with, visible};
+    let repo = Repo::new();
+    let index = repo.index();
+    let fixed = zerus_lore::embed::Fixed(vec![vec![1.0; 1024]; 3]);
+    index.ensure_vectors(&fixed, "bge-m3", "").unwrap();
+    let vectors: HashMap<String, Vec<f32>> = index.vectors("bge-m3").unwrap().into_iter().collect();
+    let visible_records = visible(&index, &Filters::default()).unwrap();
+    let provider = zerus_lore::embed::Fixed(vec![vec![1.0; 1024]]);
+    for query in ["the device was lost", "damaged tar archive", "old thing"] {
+        let (a, _) = find(&index, query, &Filters::default(), 5, Some(&bge_semantic(&provider))).unwrap();
+        let (b, _) = find_with(&index, &visible_records, &vectors, "bge-m3", query, 5, Some(&bge_semantic(&provider))).unwrap();
+        let ids = |hits: &[zerus_lore::finder::Hit]| hits.iter().map(|hit| hit.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&a), ids(&b), "{query}");
+    }
+}

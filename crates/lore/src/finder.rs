@@ -64,7 +64,7 @@ fn text<'a>(record: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 /// The records a search may return: by id, in the order the index holds them.
-fn visible(index: &Index, filters: &Filters) -> Result<Vec<(String, Value)>, LoreError> {
+pub fn visible(index: &Index, filters: &Filters) -> Result<Vec<(String, Value)>, LoreError> {
     let mut order: Vec<(String, Value)> = Vec::new();
     let mut position: HashMap<String, usize> = HashMap::new();
     for record in index.all()? {
@@ -249,32 +249,70 @@ pub fn find(
 ) -> Result<(Vec<Hit>, Vec<String>), LoreError> {
     let mut notes: Vec<String> = Vec::new();
     let visible = visible(index, filters)?;
+    let loaded = match semantic {
+        Some(semantic) => match index.ensure_vectors(semantic.embedder, semantic.model, semantic.doc_prefix) {
+            Ok(()) => match index.vectors(semantic.model) {
+                Ok(vectors) => Some((semantic.model.to_owned(), vectors.into_iter().collect::<HashMap<String, Vec<f32>>>())),
+                Err(error) => {
+                    notes.push(format!("semantic search unavailable: {error}; text only"));
+                    None
+                }
+            },
+            Err(error) => {
+                notes.push(format!("semantic search unavailable: {error}; text only"));
+                None
+            }
+        },
+        None => None,
+    };
+    let vectors = loaded.as_ref().map(|(model, vectors)| (model.as_str(), vectors));
+    find_ranked(index, &visible, vectors, query, limit, semantic, notes)
+}
+
+/// The same ranking over records and vectors the caller loaded once: a caller
+/// that asks many queries of one store (the bench) reads the visible records
+/// and the model's vectors once and reuses them.
+pub fn find_with(
+    index: &Index,
+    visible: &[(String, Value)],
+    vectors: &HashMap<String, Vec<f32>>,
+    model: &str,
+    query: &str,
+    limit: usize,
+    semantic: Option<&Semantic<'_>>,
+) -> Result<(Vec<Hit>, Vec<String>), LoreError> {
+    find_ranked(index, visible, Some((model, vectors)), query, limit, semantic, Vec::new())
+}
+
+fn find_ranked(
+    index: &Index,
+    visible: &[(String, Value)],
+    vectors: Option<(&str, &HashMap<String, Vec<f32>>)>,
+    query: &str,
+    limit: usize,
+    semantic: Option<&Semantic<'_>>,
+    mut notes: Vec<String>,
+) -> Result<(Vec<Hit>, Vec<String>), LoreError> {
     let visible_ids: HashSet<&str> = visible.iter().map(|(id, _)| id.as_str()).collect();
     let take = |ids: Vec<String>| -> Vec<String> { ids.into_iter().filter(|id| visible_ids.contains(id.as_str())).take(DEPTH).collect() };
     let mut lists: Vec<(&str, Vec<String>)> = Vec::new();
     lists.push(("words", take(fts(index, "words", &word_query(query), true))));
     lists.push(("terms", take(fts(index, "terms", &term_query(query), false))));
-    if let Some(semantic) = semantic {
-        match index.ensure_vectors(semantic.embedder, semantic.model, semantic.doc_prefix) {
-            Ok(()) => {
-                let truncated: String = query.chars().take(4000).collect();
-                match semantic.embedder.embed(&[format!("{}{truncated}", semantic.query_prefix)]) {
-                    Ok(mut vectors) if !vectors.is_empty() => {
-                        let wanted = vectors.remove(0);
-                        let mut scored: Vec<(f64, String)> = index
-                            .vectors(semantic.model)?
-                            .into_iter()
-                            .filter(|(id, _)| visible_ids.contains(id.as_str()))
-                            .map(|(id, vector)| (dot(&wanted, &vector), id))
-                            .collect();
-                        // Python sorts (score, id) pairs in reverse.
-                        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then_with(|| b.1.cmp(&a.1)));
-                        lists.push(("meaning", scored.into_iter().take(DEPTH).map(|(_, id)| id).collect()));
-                    }
-                    Ok(_) => notes.push("semantic search unavailable: the provider returned no vector; text only".into()),
-                    Err(error) => notes.push(format!("semantic search unavailable: {error}; text only")),
-                }
+    if let (Some(semantic), Some((_model, loaded))) = (semantic, vectors) {
+        let truncated: String = query.chars().take(4000).collect();
+        match semantic.embedder.embed(&[format!("{}{truncated}", semantic.query_prefix)]) {
+            Ok(mut wanted) if !wanted.is_empty() => {
+                let wanted = wanted.remove(0);
+                let mut scored: Vec<(f64, String)> = loaded
+                    .iter()
+                    .filter(|(id, _)| visible_ids.contains(id.as_str()))
+                    .map(|(id, vector)| (dot(&wanted, vector), id.clone()))
+                    .collect();
+                // Python sorts (score, id) pairs in reverse.
+                scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then_with(|| b.1.cmp(&a.1)));
+                lists.push(("meaning", scored.into_iter().take(DEPTH).map(|(_, id)| id).collect()));
             }
+            Ok(_) => notes.push("semantic search unavailable: the provider returned no vector; text only".into()),
             Err(error) => notes.push(format!("semantic search unavailable: {error}; text only")),
         }
     }
@@ -284,10 +322,10 @@ pub fn find(
             scores.add(id, 1.0 / (RRF_K + rank as f64 + 1.0), name, false);
         }
     }
-    for id in phrase_hits(query, &visible) {
+    for id in phrase_hits(query, visible) {
         scores.add(&id, 0.5, "phrase", true);
     }
-    for (id, length) in signal_hits(query, &visible) {
+    for (id, length) in signal_hits(query, visible) {
         scores.add(&id, 1.0 + length as f64 / 1000.0, "signal", true);
     }
     let mut rows = scores.rows;

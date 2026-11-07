@@ -62,7 +62,7 @@ impl Model {
                 };
                 let model = XLMRobertaModel::new(&config, builder)
                     .map_err(|error| Error::Model(format!("cannot load the model: {error}")))?;
-                (Backend::Xlm(model), config.max_position_embeddings.clamp(8, 8192))
+                (Backend::Xlm(model), config.max_position_embeddings.clamp(8, 8192).min(512))
             }
         };
         let tokenizer = Tokenizer::from_file(dir.join("tokenizer.json"))

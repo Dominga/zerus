@@ -640,3 +640,25 @@ fn only_the_owner_grants_a_full_test_run() {
     assert_eq!(revoked["status"], "revoked");
     assert!(team.full_tests_grant.is_none());
 }
+
+/// Task 174: only the owner names the integration folder, and it is an
+/// absolute path.
+#[test]
+fn the_integration_folder_is_the_owners_absolute_path() {
+    let mut team = running_team();
+    let none = BTreeSet::new();
+    let mut events = Vec::new();
+    let folder = if cfg!(windows) { "D:\\work\\integration" } else { "/work/integration" };
+    let error = apply(&mut team.clone(), "settings", &json!({"settings":{"integration_folder":folder}}), &Actor::Member("lead".into()), &none, &mut events)
+        .unwrap_err()
+        .to_string();
+    assert!(error.starts_with("Only you change the team's integration_folder"), "{error}");
+    let error = apply(&mut team.clone(), "settings", &json!({"settings":{"integration_folder":"relative/folder"}}), &Actor::Human, &none, &mut events)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("absolute path"), "{error}");
+    apply(&mut team, "settings", &json!({"settings":{"integration_folder":folder}}), &Actor::Human, &none, &mut events).unwrap();
+    assert_eq!(team.integration_folder(), folder);
+    team.settings.integration_folder.clear();
+    assert_eq!(team.integration_folder(), team.folder, "unset: the team's folder");
+}

@@ -2808,7 +2808,8 @@ fn test_command(input: &Value) -> anyhow::Result<Value> {
     let team = store.load(&team_id)?.context("Unknown team")?;
     let action = text(input, "action");
     let database = TestStore::open(false)?;
-    let project = std::path::PathBuf::from(&team.folder);
+    // Task 174: suites are selected and run where the lead branch is.
+    let project = std::path::PathBuf::from(team.integration_folder());
     let asked_by = if text(input, "by").is_empty() { input["asked_by"].as_str().unwrap_or_default().to_owned() } else { text(input, "by").to_owned() };
     let load = Load {
         cpu_free: input["cpu_free"].as_u64().map_or(16, |n| n as u32),

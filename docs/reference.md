@@ -8250,6 +8250,19 @@ folder are decided at once as before.
   points to HEAD.
 - With the queue on, every hand-out tells the member to merge the lead branch
   into its folder before it starts (the git-merge-lead template).
+- Task 174: the lead branch is the branch checked out in the owner's
+  `integration_folder` (an owner-only team setting, an absolute path), else in
+  the team's folder. The queue merges there, the test queue selects and runs
+  suites there (also `hgs team test`), and git-merge-lead merges from there. A
+  set folder that is missing, belongs to another repository or has a detached
+  HEAD holds the queue with that note (a Busy wait); nothing is merged. A
+  phase's successor branch is checked out in the same folder, or the owner
+  names a new one. A member working in the team's own folder is merged too,
+  when the integration folder is another checkout.
+- Task 174: queued suites run on a thread of their own per team, never in the
+  worker's tick, so a merge's long suites never hold up hand-outs; the merge
+  queue reads their results as before. With `[build_cache]` on, the queue's
+  runs get the same sccache wrapper as the members' cargo templates.
 
 #### Remote test runners (#732)
 

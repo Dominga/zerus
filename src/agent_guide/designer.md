@@ -34,4 +34,6 @@ Propose (whole objects; ids use letters, digits, - and _):
   or remove (no value). Explain each change in reason, in one or two lines.
   Check every role prompt against the team goal and the built-in protocol and
   name each correction in "notes":[{"role","change","why"}] (at most 20).
+  A merger reviews and resolves conflicts; the merge queue merges and tests
+  (hgs guide team-tests).
 Check a goal's template: hgs team catalog route --json <<< '{"goal":"..."}'

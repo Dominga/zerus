@@ -47,7 +47,7 @@ elif args[3] == "rm":
     catalog["profiles"].remove(profile)
 elif args[3] == "permissions":
     mode = args[args.index("--mode") + 1]
-    assert mode in ("provider", "bypass")
+    assert mode in ("provider", "bypass", "default")
     if "--expect-scope" in args and profile.get("permission_scope", "account") != args[args.index("--expect-scope") + 1]:
         print("Permissions on this account changed between shared and per computer. Refresh before saving.", file=sys.stderr)
         sys.exit(1)

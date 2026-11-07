@@ -500,6 +500,8 @@ export interface Profile {
   native: boolean; installed: boolean; is_default: boolean; home: string; auth_revision: string; online: boolean;
   state: MemberState; detail: Text; signed_in: boolean;
   permission: string; permission_mode?: string; permission_label: Text; permission_hint: Text; model_supported: boolean; model_text: Text;
+  /** The mode is the Zerus default (bypass for Claude, Codex and Kimi), not a choice (T-6hcfnu). */
+  permission_default?: boolean;
   /** This computer's model and effort defaults, empty for provider settings (zerus-f0uz8). */
   model?: string; effort?: string;
   /** `account` (shared), `computer`, or empty when this computer keeps no scope. */

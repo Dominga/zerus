@@ -265,7 +265,7 @@ function Detail(props: { a: Account }) {
         <div class="acct-setting">
           <span title={trText(m().permission_hint)}>
             {perComputer() ? tr("Permissions on %1:", m().machine) : tr("Permissions:")} <b classList={{ danger: m().permission === "bypass" }}>{trText(m().permission_label)}</b>
-            <span class="dim acct-src">{m().permission_mode === "bypass" ? tr("set in Zerus") : tr("from provider settings")}</span>
+            <span class="dim acct-src">{m().permission_default ? tr("Zerus default") : m().permission_mode === "bypass" ? tr("set in Zerus") : tr("from provider settings")}</span>
           </span>
           <span class="acct-actions">
             <Show when={!perComputer() && props.a.permission_differs && !nativeConfig()}>

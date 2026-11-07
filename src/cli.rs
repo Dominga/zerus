@@ -176,6 +176,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] account default [ID]   show or select the default account for new sessions
        hgs [@host] account model-settings ID   inspect this account's native model catalog and launch defaults
        hgs [@host] account model-defaults ID --model MODEL [--effort LEVEL] [--revision REV]   defaults for new sessions
+       hgs [@host] account permissions ID --mode bypass|provider|default [--revision REV]   default: bypass for Claude, Codex and Kimi
        hgs [@host] account permission-scope ID --scope account|computer [--revision REV]   share the permission mode across the account's computers, or keep it per computer
        hgs [@host] account set-key native-dsh --json   save API key from private JSON stdin
        hgs [@host] account start native-opencode   start the shared OpenCode service if none runs; inspection never starts it

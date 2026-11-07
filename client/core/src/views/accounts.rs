@@ -160,6 +160,9 @@ pub struct Profile {
     pub permission: String,
     /// Zerus override, separate from the provider's effective permission mode.
     pub permission_mode: String,
+    /// The mode is the Zerus default, not a choice (owner, 2026-11-07,
+    /// T-6hcfnu: bypass for Claude, Codex and Kimi).
+    pub permission_default: bool,
     pub permission_label: Text,
     pub permission_hint: Text,
     pub model_supported: bool,
@@ -472,18 +475,26 @@ pub fn permission_label(mode: &str) -> &'static str {
 
 /// permissionHint (AccountsPage.cpp:89-92).
 fn permission_hint(raw: &Value) -> Text {
-    let source = if text(raw, "permission_mode") == "bypass" {
+    let source = if text(raw, "permission_mode_source") == "default" {
+        // Bypass for Claude, Codex and Kimi without a choice (T-6hcfnu).
+        crate::text!("Zerus default")
+    } else if text(raw, "permission_mode") == "bypass" {
         crate::text!("Set in Zerus")
     } else {
         crate::text!("From provider settings")
     };
-    // The provider's own detail is shown as it reports it.
-    let detail = Some(text(raw, "permission_detail"))
-        .filter(|detail| !detail.is_empty())
-        .map_or_else(
-            || crate::text!("Provider defaults have not been verified."),
-            Text::verbatim,
-        );
+    // The provider's own detail is shown as it reports it; the default says
+    // what it is.
+    let detail = if text(raw, "permission_mode_source") == "default" {
+        crate::text!("Without a choice, Claude, Codex and Kimi accounts bypass permissions.")
+    } else {
+        Some(text(raw, "permission_detail"))
+            .filter(|detail| !detail.is_empty())
+            .map_or_else(
+                || crate::text!("Provider defaults have not been verified."),
+                Text::verbatim,
+            )
+    };
     crate::text!(
         "%1\n%2\n%3",
         source,
@@ -635,6 +646,7 @@ fn profile(entry: &FleetEntry, raw: &Value, state: &AccountsState) -> Profile {
             "provider"
         }
         .into(),
+        permission_default: text(raw, "permission_mode_source") == "default",
         model_supported: flag(raw, "model_defaults_supported"),
         model_text: model_text(raw),
         model: text(raw.get("model_defaults").unwrap_or(&Value::Null), "model"),
@@ -1165,6 +1177,45 @@ mod tests {
             );
         }
         state
+    }
+
+    #[test]
+    fn the_zerus_default_permission_mode_says_so() {
+        // Owner, 2026-11-07 (T-6hcfnu): bypass without a choice.
+        let mut state = with_inspects();
+        let data = state
+            .catalogs
+            .get_mut(&ComputerId::from(""))
+            .unwrap()
+            .data
+            .as_mut()
+            .unwrap();
+        let rows = data["profiles"].as_array_mut().unwrap();
+        rows[0]["permission_mode"] = json!("bypass");
+        rows[0]["permission_mode_source"] = json!("default");
+        rows[1]["permission_mode"] = json!("provider");
+        rows[1]["permission_mode_source"] = json!("zerus");
+        let (first, second) = (rows[0]["id"].clone(), rows[1]["id"].clone());
+        let view = project(
+            &[entry("", "live", 0)],
+            &state,
+            &mut AccountsDisplay::default(),
+        );
+        let member = |id: &Value| {
+            view.accounts
+                .iter()
+                .flat_map(|a| &a.members)
+                .find(|m| json!(m.id) == *id)
+                .unwrap()
+                .clone()
+        };
+        let default = member(&first);
+        assert!(default.permission_default);
+        assert!(default
+            .permission_hint
+            .english()
+            .starts_with("Zerus default\nWithout a choice"));
+        assert!(!member(&second).permission_default);
     }
 
     #[test]

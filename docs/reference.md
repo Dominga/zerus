@@ -4274,6 +4274,20 @@ to save a choice. Omit effort to inherit the selected model's provider default;
 pass `--model ''` to return to provider settings. Revisions prevent overwriting
 another account edit made while the dialog was open.
 
+Without a choice, a Claude, Codex or Kimi account bypasses permissions (owner,
+2026-11-07, T-6hcfnu): each provider's own bypass switch is added at launch
+(`--permission-mode bypassPermissions`,
+`--dangerously-bypass-approvals-and-sandbox`, `--auto`), unless the launch
+names its own mode after `--`. The account shows **Zerus default**, and New
+session shows the selected account's effective mode. **Change…** saves an
+explicit choice, **Bypass permissions** or **Provider settings** (the
+provider's own ask, plan or default mode), which always wins; `hgs account
+permissions ID --mode default` returns to the default. The CLI lists
+`permission_mode_source` (`default` or `zerus`). OpenCode and DeepSeek keep their
+native configuration. Choices saved before this default existed as provider
+settings were stored as no choice, so they now read as the default. Zerus's
+automatic tool approvals are a separate opt-in and stay off.
+
 The Zerus permission mode (**Permissions: … Change…**) is likewise shared by every
 computer with the account by default, with the same per-computer results and
 **Use everywhere** mark. **Keep per computer…** switches the account to

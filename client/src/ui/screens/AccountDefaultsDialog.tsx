@@ -39,8 +39,8 @@ export default function AccountDefaultsDialog(props:{prompt:AccountPrompt;close(
           <Show when={data().provider_defaults.model||data().provider_defaults.effort}><p class="muted">Account settings: {inherited()}</p></Show>
           <p class="hint">{state()?.hint}</p><p class="hint">{many ? tr("New conversations with this account on these computers. Existing conversations keep their model and effort. Explicit launch choices take precedence.") : tr("New conversations with this account on this machine. Existing conversations keep their model and effort. Explicit launch choices take precedence.")}</p>
         </>}</Show>}>
-          <select class="field acct-perm-select" aria-label={tr("Permission mode")} value={mode()} onChange={event=>setMode(event.currentTarget.value)}><option value="provider">{tr("Default (provider settings)")}</option><option value="bypass">{tr("Bypass permissions")}</option></select>
-          <p classList={{danger:mode()==="bypass"}}>{permissionExplanation(view,mode())}</p><p class="hint">{tr("New and resumed sessions only. Running sessions keep their mode.")}</p>
+          <select class="field acct-perm-select" aria-label={tr("Permission mode")} value={mode()} onChange={event=>setMode(event.currentTarget.value)}><option value="bypass">{tr("Bypass permissions")}</option><option value="provider">{tr("Provider settings")}</option></select>
+          <p classList={{danger:mode()==="bypass"}}>{permissionExplanation(view,mode())}</p><p class="hint">{tr("New and resumed sessions only. Running sessions keep their mode.")}</p><p class="hint">{tr("Without a choice, Claude, Codex and Kimi accounts bypass permissions.")}</p>
         </Show>
         </Show>
       </div>

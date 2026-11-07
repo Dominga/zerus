@@ -137,6 +137,27 @@ impl WorktreeCleanup {
             .unknown
             .contains_key(&(machine.into(), common.into(), path.into()))
     }
+    /// Admission only, no I/O. Existing Worktrees projection already uses the
+    /// Worktrees -> termination model order; keep Unknown stable in that order
+    /// while the selected native termination job is rechecked and marked busy.
+    pub(crate) fn with_known_removal<T>(
+        &self,
+        machine: &str,
+        common: &str,
+        path: &str,
+        admit: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let model = lock(&self.0);
+        if model
+            .unknown
+            .contains_key(&(machine.into(), common.into(), path.into()))
+        {
+            return Err("An unknown result will not be retried.".into());
+        }
+        let result = admit();
+        drop(model);
+        result
+    }
 }
 fn rows(value: &Value, focus: &str) -> Result<Vec<Item>, String> {
     let mut seen = BTreeSet::new();
@@ -979,5 +1000,27 @@ mod tests {
             ""
         )
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod known_removal_admission_tests {
+    use super::*;
+    #[test]
+    fn retained_unknown_never_enters_the_admission_callback() {
+        let state = WorktreeCleanup::default();
+        lock(&state.0).unknown.insert(
+            ("machine".into(), "/repo/.git".into(), "/repo/work".into()),
+            "unconfirmed".into(),
+        );
+        let mut called = false;
+        assert!(state
+            .with_known_removal("machine", "/repo/.git", "/repo/work", || {
+                called = true;
+                Ok(())
+            })
+            .is_err());
+        assert!(!called);
+        assert!(state.unknown("machine", "/repo/.git", "/repo/work"));
     }
 }

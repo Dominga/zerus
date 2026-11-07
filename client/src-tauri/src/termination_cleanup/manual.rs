@@ -29,6 +29,9 @@ pub struct ManualView {
 }
 impl Model {
     pub(super) fn manual_entry(&self, id: &str) -> Result<Entry, String> {
+        if self.overflow_unknown > 0 {
+            return Err("Too many unconfirmed removals are retained. Review them before removing more worktrees.".into());
+        }
         let job = self.jobs.iter().find(|j| j.id == id).ok_or(STATE_CHANGED)?;
         let entry = job.cleanup.entries.first().ok_or(STATE_CHANGED)?;
         let key = presentation::job_key(job);
@@ -155,11 +158,14 @@ impl Model {
         mut consents: Consents,
     ) -> Result<(String, review::Removal, Vec<String>), String> {
         // Consumed even on refusal. An old dialog cannot authorize another call.
-        let mut offer = self
+        if !self
             .manual
-            .take()
-            .filter(|o| o.job == id && o.confirmation == token)
-            .ok_or(STATE_CHANGED)?;
+            .as_ref()
+            .is_some_and(|offer| offer.job == id && offer.confirmation == token)
+        {
+            return Err(STATE_CHANGED.into());
+        }
+        let mut offer = self.manual.take().ok_or(STATE_CHANGED)?;
         if offer.at.elapsed() >= Duration::from_secs(5 * 60)
             || self.manual_entry(id)? != offer.original
         {
@@ -235,6 +241,66 @@ impl Model {
         job.busy = false;
     }
 }
+struct Admitted {
+    entry: Entry,
+    host: String,
+    removal: review::Removal,
+    members: Vec<String>,
+    view: View,
+}
+/// Never retain the termination model while acquiring Worktrees. The only
+/// nested section follows the existing Worktrees -> termination model order.
+fn admit_manual(
+    inner: &Arc<Inner>,
+    worktrees: &crate::worktree_cleanup::WorktreeCleanup,
+    id: &str,
+    confirmation: &str,
+    consents: Consents,
+) -> Result<Admitted, String> {
+    let entry = {
+        let model = lock(&inner.model);
+        model
+            .manual
+            .as_ref()
+            .filter(|offer| offer.job == id && offer.confirmation == confirmation)
+            .ok_or(STATE_CHANGED)?
+            .original
+            .clone()
+    };
+    let result = worktrees.with_known_removal(
+        &entry.machine,
+        &entry.common_dir,
+        entry.row["path"].as_str().ok_or(STATE_CHANGED)?,
+        || {
+            let mut model = lock(&inner.model);
+            // Consumes the token and rechecks retained/overflow Unknowns, original
+            // entry, group exclusion and deadline while both models are held.
+            let (host, removal, members) = model.confirm_manual(id, confirmation, consents)?;
+            model.revision = model.revision.wrapping_add(1);
+            Ok(Admitted {
+                entry: entry.clone(),
+                host,
+                removal,
+                members,
+                view: model.view(),
+            })
+        },
+    );
+    if result.is_err() {
+        // with_known_removal has released Worktrees before this cleanup. Never
+        // discard a newer offer that arrived during a refusal.
+        let mut model = lock(&inner.model);
+        if model
+            .manual
+            .as_ref()
+            .is_some_and(|offer| offer.job == id && offer.confirmation == confirmation)
+        {
+            model.manual = None;
+        }
+    }
+    result
+}
+
 #[tauri::command]
 pub async fn termination_cleanup_manual_offer(
     window: tauri::Webview,
@@ -302,24 +368,22 @@ pub fn termination_cleanup_manual_confirm(
     if crate::actions::blocked() {
         return Err(crate::actions::REPLAY_NEEDS_HGS.into());
     }
-    let mut model = lock(&state.0.model);
-    let entry = model.manual_entry(&id)?;
     use tauri::Manager;
-    if app
-        .state::<crate::worktree_cleanup::WorktreeCleanup>()
-        .unknown(
-            &entry.machine,
-            &entry.common_dir,
-            entry.row["path"].as_str().unwrap_or(""),
-        )
-    {
-        model.manual = None;
-        return Err("An unknown result will not be retried.".into());
-    }
-    let (host, removal, members) = model.confirm_manual(&id, &confirmation, consents)?;
-    changed(&app, &mut model);
-    let view = model.view();
-    drop(model);
+    let Admitted {
+        entry,
+        host,
+        removal,
+        members,
+        view,
+    } = admit_manual(
+        &state.0,
+        app.state::<crate::worktree_cleanup::WorktreeCleanup>()
+            .inner(),
+        &id,
+        &confirmation,
+        consents,
+    )?;
+    let _ = app.emit("termination-cleanup-changed", ());
     let own = state.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let result = crate::worktree_cleanup::remove(&host, &entry.machine, &removal);
@@ -567,5 +631,90 @@ mod tests {
                 })
             );
         }
+    }
+    #[test]
+    fn overflow_unknown_refuses_before_review_and_after_an_original_offer() {
+        let mut initial = model();
+        let original = initial.manual_entry("original").unwrap();
+        initial.overflow_unknown = 1;
+        assert!(initial.manual_entry("original").is_err());
+        assert!(initial.offer_manual("original", original, data()).is_err());
+        assert!(!initial.view().rows[0].can_remove_anyway);
+        assert!(!initial.jobs[0].busy);
+        assert!(initial.manual.is_none());
+        let inner = Arc::new(Inner::default());
+        let token = {
+            let mut m = lock(&inner.model);
+            *m = model();
+            let v = offer(&mut m, data());
+            m.overflow_unknown = 1;
+            v.confirmation
+        };
+        assert!(admit_manual(
+            &inner,
+            &crate::worktree_cleanup::WorktreeCleanup::default(),
+            "original",
+            &token,
+            Consents::default()
+        )
+        .is_err());
+        let m = lock(&inner.model);
+        assert_eq!(m.overflow_unknown, 1);
+        assert!(!m.jobs[0].busy);
+        assert!(m.manual.is_none());
+    }
+    #[test]
+    fn manual_admission_waits_for_worktrees_without_retaining_the_termination_model() {
+        let inner = Arc::new(Inner::default());
+        let token = {
+            let mut m = lock(&inner.model);
+            *m = model();
+            offer(&mut m, data()).confirmation
+        };
+        let work = crate::worktree_cleanup::WorktreeCleanup::default();
+        let (started, ready) = std::sync::mpsc::sync_channel(0);
+        let (finished, done) = std::sync::mpsc::sync_channel(1);
+        let mut worker = None;
+        let mut available = false;
+        work.with_known_removal("machine", "/repo/.git", "/repo/work", || {
+            let target = inner.clone();
+            let other = work.clone();
+            worker = Some(std::thread::spawn(move || {
+                started.send(()).unwrap();
+                let result = admit_manual(&target, &other, "original", &token, Consents::default());
+                finished.send(()).unwrap();
+                result
+            }));
+            ready.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert!(
+                done.recv_timeout(Duration::from_millis(100)).is_err(),
+                "admission waits for the held Worktrees model"
+            );
+            // Existing Worktrees completion needs this exact mutex. Probe it
+            // without hanging even if a future regression restores the cycle.
+            available = inner.model.try_lock().is_ok();
+            Ok(())
+        })
+        .unwrap();
+        let result = worker.unwrap().join().unwrap();
+        assert!(
+            available,
+            "confirmation must never retain Termination while waiting for Worktrees"
+        );
+        assert!(result.is_ok());
+        assert!(lock(&inner.model).jobs[0].busy);
+    }
+    #[test]
+    fn a_stale_confirmation_never_consumes_a_newer_offer() {
+        let mut m = model();
+        let old = offer(&mut m, data());
+        let new = offer(&mut m, data());
+        assert!(m
+            .confirm_manual("original", &old.confirmation, Consents::default())
+            .is_err());
+        assert_eq!(m.manual.as_ref().unwrap().confirmation, new.confirmation);
+        assert!(m
+            .confirm_manual("original", &new.confirmation, Consents::default())
+            .is_ok());
     }
 }

@@ -967,10 +967,9 @@ class NativeHarness(unittest.TestCase):
         for key in ('agent_home', 'cwd'):
             self.assertEqual(fork[key], source[key])
         self.assertEqual((fork['fork_parent_id'], fork['fork_source_name']), (source['conversation_id'], source['name']))
-        # zerus-ucck P1: the fork is a new session with its own durable ID; the
-        # source, written as an older hgs did, gains one only when next written.
+        # Both bindings carry durable IDs; the fork never borrows the source's.
         self.assertEqual(str(uuid.UUID(fork['session_id'])), fork['session_id'])
-        self.assertNotIn('session_id', source)
+        self.assertNotEqual(fork['session_id'], source['session_id'])
         self.assertEqual(self.cli('inspect', fork).get('session_id'), fork['session_id'])
         self.assertEqual(self.project_of(fork, node), 'work')
         self.assertFalse(list((self.state / 'dsh/forks').glob('*.json')))

@@ -252,6 +252,29 @@ class DeepSeekScopedActions(unittest.TestCase):
         self.assertEqual(original[0].read_bytes(), retained)
         self.assertEqual(len([call for call in self.calls if call["method"] == "fork"]), 1)
 
+    def test_an_old_binding_gets_a_stable_source_id_only_when_fork_is_admitted(self):
+        self.native = True
+        self.record.pop("session_id")
+        self.binding.write_text(json.dumps(self.record))
+        original = self.binding.read_bytes()
+        dry = self.hgs("fork", self.name, "-n", "copy", "--dry-run")
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        stale = self.hgs("fork", self.name, "-n", "copy", "-d", "--expected-run-id", "wrong-run")
+        self.assertNotEqual(stale.returncode, 0)
+        self.assertEqual(self.binding.read_bytes(), original)
+        self.assertEqual(self.calls, [])
+        self.fork_reply = False
+        for _ in range(2):
+            lost = self.hgs("fork", self.name, "-n", "copy", "-d")
+            self.assertIn("delivery uncertain", lost.stderr)
+        saved = json.loads(self.binding.read_text())
+        sid = saved.pop("session_id")
+        self.assertEqual(str(uuid.UUID(sid)), sid)
+        self.assertEqual(saved, self.record)
+        forks = [c["params"] for c in self.calls if c["method"] == "fork"]
+        self.assertEqual(len(forks), 2)
+        self.assertEqual(forks[0], forks[1])
+
     def test_a_legacy_unknown_intent_is_migrated_not_erased_or_reminted(self):
         self.native = True
         self.fork_reply = False

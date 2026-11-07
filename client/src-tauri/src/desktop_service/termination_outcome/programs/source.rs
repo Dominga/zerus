@@ -13,6 +13,7 @@ pub(crate) struct Source {
     context: Arc<Origin>,
     owner: Mutex<Owner>,
     manifest: Manifest,
+    presentation: Option<zerus_client_core::worktree_programs::presentation::Presentation>,
     pipeline: String,
     holder: NativeChild,
     socket: String,
@@ -79,7 +80,7 @@ impl Origin {
             Self::Native(c) => c.prepare_request(request),
         }
     }
-    fn check_stop_capability(&self) -> Result<(), String> {
+    fn check_stop_capability(&self) -> Result<bool, String> {
         let args = vec!["--help".into()];
         let bytes = match self {
             Self::Service(c) => match c.read(&Invocation {
@@ -107,7 +108,9 @@ impl Origin {
                 return Err("termination_program_stop_unavailable".into());
             }
         }
-        Ok(())
+        Ok(text.lines().any(|line| {
+            line.trim() == zerus_client_core::worktree_programs::presentation::HELP_MARKER
+        }))
     }
     fn spawn(
         &self,
@@ -172,7 +175,7 @@ impl Source {
         if !capture.target.computer.is_empty() {
             return Err("termination_programs_remote_custody_unavailable".into());
         }
-        context.check_stop_capability()?;
+        let presentation_supported = context.check_stop_capability()?;
         let pipeline = uuid::Uuid::new_v4().to_string();
         let original_holder = Arc::new(Mutex::new(None));
         let observed = original_holder.clone();
@@ -180,6 +183,7 @@ impl Source {
         let mut owner = Owner::begin(
             context.executable(),
             Control::Open {
+                presentation: presentation_supported,
                 pipeline: pipeline.clone(),
                 discovery: Discovery {
                     capture: capture.clone(),
@@ -201,6 +205,7 @@ impl Source {
         .map_err(|_| UNCONFIRMED)?;
         let not_after = owner.deadline();
         let Reply::Ready {
+            presentation,
             manifest,
             holder,
             socket,
@@ -225,6 +230,7 @@ impl Source {
             context,
             owner: Mutex::new(owner),
             manifest: *manifest,
+            presentation: presentation_supported.then_some(presentation).flatten(),
             pipeline,
             holder,
             socket,
@@ -353,6 +359,14 @@ impl Source {
             move |command| selected.spawn(command).map(|(child, _)| child),
         )
         .unwrap_or_else(|_| Exit::StartFailed(UNCONFIRMED.into()))
+    }
+    /// Display projection only. All stop, cleanup and Force paths retain the
+    /// complete original manifest through this same Source.
+    pub(super) fn visible_programs(&self) -> Vec<&zerus_client_core::worktree_programs::Program> {
+        zerus_client_core::worktree_programs::presentation::Presentation::visible(
+            self.presentation.as_ref(),
+            &self.manifest,
+        )
     }
     pub(super) fn manifest(&self) -> &Manifest {
         &self.manifest

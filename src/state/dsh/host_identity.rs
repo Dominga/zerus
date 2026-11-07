@@ -1,4 +1,4 @@
-//! Cold-start exclusion, not authority to stop or recover a native host.
+//! Cold-start exclusion, never authority to stop a native host.
 //! The start lock in `ensure_host` serializes readers and publishers.
 use super::*;
 use std::process::Child;
@@ -6,22 +6,101 @@ use std::process::Child;
 const FILE: &str = "host.identity.json";
 const UNVERIFIABLE: &str = "The previous DeepSeek host could not be verified; it has been left untouched. Check its private host.log before recovering";
 const STILL_RUNNING: &str = "The previous DeepSeek host is still running but its adapter is unavailable; it has been left running. Reconnect through its native UI instead of starting another host";
+const UNCONFIRMED: &str = "The previous DeepSeek launch is in progress or unconfirmed; its processes have been left untouched. Retry after its launcher finishes or reconnect through the existing native UI. If a possible start cannot be verified, save any running work before restarting the computer and retrying";
 
-#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 struct Stamp(u64, u64, i64, i64);
 
+#[derive(Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct Running {
+    version: u8,
+    pid: u32,
+    birth: String,
+    pid_file: Stamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    boot: Option<String>,
+}
+#[derive(Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct Launcher {
+    pid: u32,
+    birth: String,
+}
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum StartPhase {
+    Prepared,
+    Spawning,
+}
+#[derive(Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct Starting {
+    version: u8,
+    attempt: String,
+    boot: String,
+    launcher: Launcher,
+    phase: StartPhase,
+    pid_file: Option<(u32, Stamp)>,
+    // Flat proof only: interrupted attempts cannot grow a recursive journal.
+    previous: Option<Running>,
+}
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 enum Record {
-    Starting {
-        version: u8,
-    },
-    Running {
-        version: u8,
-        pid: u32,
-        birth: String,
-        pid_file: Stamp,
-    },
+    Starting(Starting),
+    Running(Running),
+}
+
+fn canonical_uuid(value: &str) -> bool {
+    uuid::Uuid::parse_str(value).is_ok_and(|id| !id.is_nil() && id.to_string() == value)
+}
+
+// The same bounded native boot sources used by worktree process discovery.
+#[cfg(target_os = "linux")]
+fn boot() -> Result<String> {
+    let mut value = String::new();
+    fs::File::open("/proc/sys/kernel/random/boot_id")
+        .map_err(|_| UNVERIFIABLE)?
+        .take(129)
+        .read_to_string(&mut value)
+        .map_err(|_| UNVERIFIABLE)?;
+    if value.len() > 128 {
+        return Err(UNVERIFIABLE.into());
+    }
+    let id = uuid::Uuid::parse_str(value.trim()).map_err(|_| UNVERIFIABLE)?;
+    if id.is_nil() {
+        return Err(UNVERIFIABLE.into());
+    }
+    Ok(id.to_string())
+}
+#[cfg(target_os = "macos")]
+fn boot() -> Result<String> {
+    let mut bytes = [0u8; 129];
+    let mut size = bytes.len();
+    if unsafe {
+        libc::sysctlbyname(
+            c"kern.bootsessionuuid".as_ptr(),
+            bytes.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+        || !(1..=128).contains(&size)
+    {
+        return Err(UNVERIFIABLE.into());
+    }
+    let value = std::str::from_utf8(&bytes[..size]).map_err(|_| UNVERIFIABLE)?;
+    let id = uuid::Uuid::parse_str(value.trim_end_matches('\0')).map_err(|_| UNVERIFIABLE)?;
+    if id.is_nil() {
+        return Err(UNVERIFIABLE.into());
+    }
+    Ok(id.to_string())
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn boot() -> Result<String> {
+    Err(UNVERIFIABLE.into())
 }
 
 /// A fixed, small, private regular file. Never follow a link or wait on a FIFO.
@@ -102,76 +181,248 @@ fn valid_birth(birth: &str) -> bool {
     }
 }
 
-pub(super) fn before_start(dir: &Path) -> Result<()> {
-    if let Some((bytes, _)) = read(&dir.join(FILE), 1024)? {
-        let record: Record = serde_json::from_slice(&bytes).map_err(|_| UNVERIFIABLE)?;
-        let Record::Running {
-            version: 1,
-            pid,
-            birth,
-            pid_file,
-        } = record
-        else {
-            return Err(UNVERIFIABLE.into());
-        };
-        if !valid_pid(pid) || !valid_birth(&birth) {
-            return Err(UNVERIFIABLE.into());
+fn valid_running(value: &Running) -> bool {
+    valid_pid(value.pid)
+        && valid_birth(&value.birth)
+        && match (value.version, value.boot.as_deref()) {
+            (1, None) => true,
+            (2, Some(boot)) => canonical_uuid(boot),
+            _ => false,
         }
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        return match crate::platform::process_state(pid, Some(&birth)) {
-            Ok(crate::platform::ProcessState::Exited) => {
-                let (current_pid, stamp) = legacy(dir)?.ok_or(UNVERIFIABLE)?;
-                if current_pid == pid && stamp == pid_file {
-                    Ok(())
-                }
-                // A rolled-back launcher may have published another PID since
-                // our birth record. Its newer PID-only evidence is conservative,
-                // including a rewrite that happens to reuse the same PID.
-                else {
-                    legacy_gone(current_pid)
-                }
-            }
-            Ok(_) => Err(STILL_RUNNING.into()),
-            Err(_) => Err(UNVERIFIABLE.into()),
-        };
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+}
+
+fn parse_record(bytes: &[u8]) -> Result<Record> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|_| UNVERIFIABLE)?;
+    // Null is an observed absence; a missing snapshot/backup is not evidence.
+    if value["state"] == "starting"
+        && !value
+            .as_object()
+            .is_some_and(|v| v.contains_key("pid_file") && v.contains_key("previous"))
+    {
         return Err(UNVERIFIABLE.into());
     }
-    // Older launchers saved only this PID. A live PID without a recorded birth
-    // cannot establish reuse; leave it alone. A healthy old adapter was already
-    // accepted by ensure_host's ping and does not reach this cold-start guard.
-    if let Some((pid, _)) = legacy(dir)? {
-        return legacy_gone(pid);
+    if value["state"] == "running"
+        && value["version"] == 1
+        && value.as_object().is_some_and(|v| v.contains_key("boot"))
+    {
+        return Err(UNVERIFIABLE.into());
+    }
+    serde_json::from_value(value).map_err(|_| UNVERIFIABLE.into())
+}
+
+struct Assessment {
+    boot: String,
+    original: Option<Vec<u8>>,
+    previous: Option<Running>,
+    pid_file: Option<(u32, Stamp)>,
+}
+
+fn assess(dir: &Path) -> Result<Assessment> {
+    let current_boot = boot()?;
+    let pid_file = legacy(dir)?;
+    let original = read(&dir.join(FILE), 1024)?.map(|(bytes, _)| bytes);
+    let previous = if let Some(bytes) = &original {
+        match parse_record(bytes)? {
+            Record::Running(mut saved) => {
+                if !valid_running(&saved) {
+                    return Err(UNVERIFIABLE.into());
+                }
+                let previous_boot = saved.boot.as_ref().is_some_and(|b| b != &current_boot);
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                if !previous_boot {
+                    match crate::platform::process_state(saved.pid, Some(&saved.birth)) {
+                        Ok(crate::platform::ProcessState::Exited) => {}
+                        Ok(_) => {
+                            return Err(if saved.boot.is_some() {
+                                STILL_RUNNING
+                            } else {
+                                UNVERIFIABLE
+                            }
+                            .into());
+                        }
+                        Err(_) => return Err(UNVERIFIABLE.into()),
+                    }
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                return Err(UNVERIFIABLE.into());
+                // Never use an old birth/boot to hide a newer legacy publication.
+                let (pid, stamp) = pid_file.as_ref().ok_or(UNVERIFIABLE)?;
+                if *pid != saved.pid || stamp != &saved.pid_file {
+                    legacy_gone(*pid)?;
+                }
+                // The old original is proven gone on this boot. Give a legacy
+                // backup that same upper bound without inventing a live host.
+                saved.version = 2;
+                saved.boot.get_or_insert_with(|| current_boot.clone());
+                Some(saved)
+            }
+            Record::Starting(saved) => {
+                if saved.version != 2
+                    || !canonical_uuid(&saved.attempt)
+                    || !canonical_uuid(&saved.boot)
+                    || !valid_pid(saved.launcher.pid)
+                    || !valid_birth(&saved.launcher.birth)
+                    || saved
+                        .previous
+                        .as_ref()
+                        .is_some_and(|p| !valid_running(p) || p.version != 2)
+                {
+                    return Err(UNVERIFIABLE.into());
+                }
+                let previous_boot = saved.boot != current_boot;
+                if !previous_boot {
+                    if saved.phase != StartPhase::Prepared {
+                        // Launcher death and a missing PID file do not prove
+                        // that a detached host was never spawned.
+                        return Err(UNCONFIRMED.into());
+                    }
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    if !matches!(
+                        crate::platform::process_state(
+                            saved.launcher.pid,
+                            Some(&saved.launcher.birth)
+                        ),
+                        Ok(crate::platform::ProcessState::Exited)
+                    ) {
+                        return Err(UNCONFIRMED.into());
+                    }
+                    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                    return Err(UNVERIFIABLE.into());
+                }
+                if pid_file != saved.pid_file {
+                    // On a later boot the old attempt is gone, but another
+                    // launcher's current PID-only evidence still protects it.
+                    if !previous_boot {
+                        return Err(UNVERIFIABLE.into());
+                    }
+                    let (pid, _) = pid_file.as_ref().ok_or(UNVERIFIABLE)?;
+                    legacy_gone(*pid)?;
+                }
+                saved.previous
+            }
+        }
+    } else {
+        if let Some((pid, _)) = &pid_file {
+            legacy_gone(*pid)?;
+        }
+        None
+    };
+    Ok(Assessment {
+        boot: current_boot,
+        original,
+        previous,
+        pid_file,
+    })
+}
+
+pub(super) fn before_start(dir: &Path) -> Result<()> {
+    assess(dir).map(|_| ())
+}
+
+fn publish(dir: &Path, starting: &Starting) -> Result<()> {
+    let bytes =
+        serde_json::to_string(&Record::Starting(starting.clone())).map_err(|_| UNVERIFIABLE)?;
+    if bytes.len() > 1024 {
+        return Err(UNVERIFIABLE.into());
+    }
+    atomic(&dir.join(FILE), &bytes)
+}
+
+fn check_starting(dir: &Path, starting: &Starting) -> Result<()> {
+    let current = read(&dir.join(FILE), 1024)?.ok_or(UNVERIFIABLE)?.0;
+    if !matches!(parse_record(&current)?, Record::Starting(ref owned) if owned == starting)
+        || legacy(dir)? != starting.pid_file
+    {
+        return Err(UNVERIFIABLE.into());
     }
     Ok(())
 }
 
-/// Persist the possible launch before spawning. If a launcher is interrupted
-/// before it publishes the original identity, the next caller must not guess
-/// that no host was started. This marker is never automatic restart authority.
+// Only a positively unstarted local attempt may restore its previous proof.
+// An error after a Child exists never comes here.
+fn restore_unstarted(dir: &Path, starting: &Starting, original: &Option<Vec<u8>>) -> Result<()> {
+    let current = read(&dir.join(FILE), 1024)?.map(|(bytes, _)| bytes);
+    if &current == original {
+        return Ok(());
+    }
+    let Some(bytes) = current else {
+        return Err(UNVERIFIABLE.into());
+    };
+    let Record::Starting(mut owned) = parse_record(&bytes)? else {
+        return Err(UNVERIFIABLE.into());
+    };
+    owned.phase = starting.phase;
+    if &owned != starting {
+        return Err(UNVERIFIABLE.into());
+    }
+    if let Some(bytes) = original {
+        atomic(
+            &dir.join(FILE),
+            std::str::from_utf8(bytes).map_err(|_| UNVERIFIABLE)?,
+        )
+    } else {
+        fs::remove_file(dir.join(FILE)).map_err(|_| UNVERIFIABLE)?;
+        crate::platform::sync_dir(dir).map_err(|_| UNVERIFIABLE.into())
+    }
+}
+
+/// Prepared is a durable no-spawn boundary. The second publication precedes
+/// every spawn; once it succeeds only a definite spawn refusal can roll back.
+/// Uncertain publication/identity after a Child exists stays unconfirmed.
 pub(super) fn spawn(dir: &Path, command: &mut Command) -> Result<Child> {
-    atomic(
-        &dir.join(FILE),
-        &serde_json::to_string(&Record::Starting { version: 1 }).unwrap(),
-    )?;
+    let previous = assess(dir)?;
+    let identity = crate::platform::process_identity(std::process::id())
+        .filter(|p| valid_birth(&p.birth))
+        .ok_or(UNVERIFIABLE)?;
+    let mut starting = Starting {
+        version: 2,
+        attempt: uuid::Uuid::new_v4().to_string(),
+        boot: previous.boot,
+        launcher: Launcher {
+            pid: std::process::id(),
+            birth: identity.birth,
+        },
+        phase: StartPhase::Prepared,
+        pid_file: previous.pid_file,
+        previous: previous.previous,
+    };
+    if let Err(error) = publish(dir, &starting) {
+        restore_unstarted(dir, &starting, &previous.original)?;
+        return Err(error);
+    }
+    #[cfg(test)]
+    tests::after_marker(dir, starting.phase);
+    if let Err(error) = check_starting(dir, &starting) {
+        restore_unstarted(dir, &starting, &previous.original)?;
+        return Err(error);
+    }
+    starting.phase = StartPhase::Spawning;
+    if let Err(error) = publish(dir, &starting) {
+        restore_unstarted(dir, &starting, &previous.original)?;
+        return Err(error);
+    }
+    #[cfg(test)]
+    tests::after_marker(dir, starting.phase);
+    if let Err(error) = check_starting(dir, &starting) {
+        restore_unstarted(dir, &starting, &previous.original)?;
+        return Err(error);
+    }
     let mut child = match crate::platform::spawn_detached(command) {
         Ok(child) => child,
         Err(error) => {
-            // Command::spawn failed: there is no successfully spawned Child.
-            fs::remove_file(dir.join(FILE)).map_err(|_| UNVERIFIABLE)?;
+            restore_unstarted(dir, &starting, &previous.original)?;
             return Err(error.to_string());
         }
     };
+    #[cfg(test)]
+    tests::after_child(&mut child);
     let identity = crate::platform::process_identity(child.id()).filter(|p| valid_birth(&p.birth));
     let Some(identity) = identity else {
-        if child.try_wait().map_err(|_| UNVERIFIABLE)?.is_some() {
-            fs::remove_file(dir.join(FILE)).map_err(|_| UNVERIFIABLE)?;
-        }
-        // Otherwise keep the Starting marker. Never signal this host.
-        return Err(UNVERIFIABLE.into());
+        // Even an exited wrapper is not proof about an unidentified detached
+        // host. Keep the possible-start boundary; never signal or replay it.
+        let _ = child.try_wait(); // Reap this original if it has already exited.
+        return Err(UNCONFIRMED.into());
     };
-    // Publish the compatible PID first. Until the birth record is committed,
-    // the Starting marker continues to refuse another possible launch.
     atomic(&dir.join("host.pid"), &child.id().to_string())?;
     let (pid, pid_file) = legacy(dir)?.ok_or(UNVERIFIABLE)?;
     if pid != child.id() {
@@ -179,13 +430,14 @@ pub(super) fn spawn(dir: &Path, command: &mut Command) -> Result<Child> {
     }
     atomic(
         &dir.join(FILE),
-        &serde_json::to_string(&Record::Running {
-            version: 1,
+        &serde_json::to_string(&Record::Running(Running {
+            version: 2,
             pid: child.id(),
             birth: identity.birth,
             pid_file,
-        })
-        .unwrap(),
+            boot: Some(starting.boot),
+        }))
+        .map_err(|_| UNVERIFIABLE)?,
     )?;
     Ok(child)
 }

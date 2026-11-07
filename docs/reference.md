@@ -1839,7 +1839,7 @@ that reference is an ancestor of the configured base branch (the team folder's
 unresolved, with their reasons. File-existence requirements are not supported.
 
 Draft mutations save `phases[].checks` for approval cards; reads and GUI refreshes
-never invoke Git. Each Git call has five seconds within a shared 30-second
+never invoke Git. Each Git call has five seconds within a shared ten-second
 check deadline; approval rechecks the current plan and Git ancestry. With the prerequisite check enabled,
 unresolved requirements refuse ordinary `approve-phase`. The card offers
 **Approve anyway**, sending `approve_anyway:true`; the override only bypasses

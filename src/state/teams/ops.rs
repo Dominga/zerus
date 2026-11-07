@@ -1,6 +1,6 @@
 //! WhiteWh fork: the team state machine shared by the CLI and dispatcher.
 //! Only the opt-in prerequisite check spawns Git, for draft commit/branch
-//! requirements. Calls get five seconds, within a shared 30-second deadline.
+//! requirements. Calls get five seconds, within a shared ten-second deadline.
 use super::super::now;
 use super::model::*;
 use super::plan;

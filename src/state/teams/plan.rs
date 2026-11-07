@@ -1030,7 +1030,7 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
     found
 }
 
-pub(crate) const PHASE_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+pub(crate) const PHASE_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[cfg(test)]
 thread_local! {

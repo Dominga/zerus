@@ -115,8 +115,9 @@ pub struct ViewRow {
     /// `running` when the row lists none (a live session).
     pub state: String,
     /// Task 175: the shared session state (working, build, user, deps, cooling,
-    /// cold, stopped).
-    #[serde(default)]
+    /// cold, stopped). Left out of the wire when hgs sent none, so the shared
+    /// row fixtures stay as they are.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub session_state: String,
     /// Task 175: the team that owns this session, and whether it is its lead.
     #[serde(default, skip_serializing_if = "String::is_empty")]

@@ -77,7 +77,7 @@ def main() -> int:
     fork_build, fork_feed = fork_identity(args.fork_build, args.fork_feed)
     print(f"fork identity: build {fork_build or 'none (experimental)'}, feed {fork_feed or 'none (experimental)'}", flush=True)
     run(["cargo", "build", "--locked", "--release", "--bin", "hgs"], dry=args.dry_run)
-    run(["cargo", "build", "--locked", "--release", "--manifest-path", "crates/lore/Cargo.toml", "--target-dir", "target/lore"], dry=args.dry_run)
+    run(["cargo", "build", "--locked", "--release", "--manifest-path", "crates/lore-bin/Cargo.toml", "--target-dir", "target/lore"], dry=args.dry_run)
     run(["cargo", "build", "--locked", "--release", "--manifest-path", "services/mobile/connector/Cargo.toml"], dry=args.dry_run)
     run(["cargo", "build", "--locked", "--release", "--manifest-path", "services/mobile/relay/Cargo.toml"], dry=args.dry_run)
     conpty = Path(os.environ.get("RUNNER_TEMP", ROOT / ".zerus-team/tmp")) / "conpty"

@@ -35,9 +35,10 @@ class LinuxPackaging(unittest.TestCase):
         for size in (16, 24, 32, 48, 64, 128, 256, 512, 1024):
             self.file(f"source/tray/resources/icons/hgs-zerus-{size}.png")
         self.file("source/VERSION", "1.2.3\n")
-        for name in ("Cargo.toml", "services/mobile/connector/Cargo.toml", "crates/lore/Cargo.toml"):
+        for name in ("Cargo.toml", "services/mobile/connector/Cargo.toml", "crates/lore-bin/Cargo.toml"):
             self.file("source/" + name, '[package]\nversion = "1.2.3"\n')
-        self.file("source/crates/lore/src/lib.rs", 'pub const VERSION: &str = "1.2.3";\n')
+        # The lore the package ships is the codelore package its wrapper's lock pins.
+        self.file("source/crates/lore-bin/Cargo.lock", '[[package]]\nname = "codelore"\nversion = "1.2.3"\n')
         licenses = self.file("licenses/inventory.json", '{"packages": [{"name": "tauri"}]}').parent
         binaries = [self.file("bin/" + name) for name in ("hgs", "lore", "hgs-tray", "connector")]
         dest = self.root / "package"

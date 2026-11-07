@@ -36,11 +36,11 @@ export MACOSX_DEPLOYMENT_TARGET=14.0
 mkdir -p artifacts/test-results
 cargo build --locked --release
 # Task 182: lore runs as hgs's subprocess from the same MacOS folder.
-cargo build --locked --release --manifest-path crates/lore/Cargo.toml --target-dir target/lore
+cargo build --locked --release --manifest-path crates/lore-bin/Cargo.toml --target-dir target/lore
 cargo build --locked --release --manifest-path services/mobile/connector/Cargo.toml
 rm -rf artifacts/macos-licenses artifacts/macos-client-licenses artifacts/macos-frontend-licenses
 python3 scripts/collect-licenses.py artifacts/macos-licenses \
-    --manifest-path Cargo.toml --manifest-path services/mobile/connector/Cargo.toml
+    --manifest-path Cargo.toml --manifest-path services/mobile/connector/Cargo.toml --manifest-path crates/lore-bin/Cargo.toml
 switch_config="$PWD/target/macos-switch.conf.json"
 python3 client/scripts/switch-config.py "$switch_config" --release "$release"
 (cd client && npm exec -- tauri build --config "$switch_config" --bundles app --features video --ci --no-sign -- --locked)

@@ -19,6 +19,7 @@ import tomllib
 import zipfile
 
 import conpty_pair
+from lore_dependency import lore_version
 from release_common import require
 from windows_portable import TOP, inspect
 
@@ -132,7 +133,7 @@ def main():
     cli_version = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
     manifest = {"product": "Zerus", "version": version, "cli_version": cli_version, "platform": "Windows",
                 "architecture": "x86_64", "desktop": "tauri", "webview2_runtime": "evergreen", "native_agents_bundled": False, "mobile_connector_bundled": True,
-                "lore_version": re.search(r'pub const VERSION: &str = "([^"]+)"', (ROOT / "crates/lore/src/lib.rs").read_text(encoding="utf-8")).group(1),
+                "lore_version": lore_version(ROOT),
                 "source_commit": source_commit()}
     if args.fork:
         build = args.fork_build.strip()
@@ -183,7 +184,8 @@ def main():
             relay = ["--manifest-path", str(ROOT / "services/mobile/relay/Cargo.toml")] if args.mobile_relay else []
             subprocess.run([sys.executable, str(ROOT / "scripts/collect-licenses.py"), str(licenses / "rust"),
                             "--manifest-path", str(ROOT / "Cargo.toml"),
-                            "--manifest-path", str(ROOT / "services/mobile/connector/Cargo.toml"), *relay],
+                            "--manifest-path", str(ROOT / "services/mobile/connector/Cargo.toml"),
+                            "--manifest-path", str(ROOT / "crates/lore-bin/Cargo.toml"), *relay],
                            cwd=ROOT, check=True)
             subprocess.run([sys.executable, str(ROOT / "scripts/collect-licenses.py"), str(licenses / "rust/desktop"),
                             "--manifest-path", str(ROOT / "client/src-tauri/Cargo.toml"),

@@ -1,4 +1,4 @@
-import { tr } from "../i18n";
+import { tr, trNoop } from "../i18n";
 import type { Catalog, CatalogRole } from "../ui/teams/catalog";
 import type { DraftMember, TaskView, TeamSettings } from "../ui/teams/types";
 
@@ -178,11 +178,28 @@ export function createReason(input: {
 }
 
 /** The limit counts the members besides the lead. */
-/** Task 126: the team's memory mode as New team offers it: RustCodeLore ("lore") unless plain was chosen. */
-export type MemoryMode = "plain" | "lore";
-export const memoryMode = (settings: TeamSettings): MemoryMode => {
-  const memory = settings.memory as { mode?: unknown } | undefined;
-  return memory?.mode === "plain" ? "plain" : "lore";
+/**
+ * Task 127 (docs/lore.md 4.1): the team's memory modes. With the project's
+ * RustCodeLore on, New team offers all five and preselects `project` (a shared
+ * workspace in the project's store); with it off, `team` (RustCodeLore in the
+ * team's own store), `plain` and `off`, preselecting `team`.
+ */
+export type MemoryMode = "project" | "team" | "read-only" | "plain" | "off";
+export const memoryModes = (projectOn: boolean): MemoryMode[] =>
+  projectOn ? ["project", "team", "read-only", "plain", "off"] : ["team", "plain", "off"];
+export const defaultMemory = (projectOn: boolean): MemoryMode => (projectOn ? "project" : "team");
+/** The mode the settings name, when the project offers it; else the default. Task 126's `lore` is the default. */
+export const memoryMode = (settings: TeamSettings, projectOn = false): MemoryMode => {
+  const mode = (settings.memory as { mode?: unknown } | undefined)?.mode;
+  return memoryModes(projectOn).find((offered) => offered === mode) ?? defaultMemory(projectOn);
+};
+/** Each mode's label and what it does, as the form shows them. */
+export const MEMORY_LABELS: Record<MemoryMode, { label: string; hint: string }> = {
+  project: { label: trNoop("Project memory"), hint: trNoop("A shared workspace in the project's RustCodeLore store; the team reads the project's records too") },
+  team: { label: trNoop("Team memory"), hint: trNoop("RustCodeLore for this team only: its workspace (in the project's store when it has one, else under Zerus's data)") },
+  "read-only": { label: trNoop("Read only"), hint: trNoop("Reads the project's memory and writes nothing") },
+  plain: { label: trNoop("Plain memory"), hint: trNoop("The team's own record and a generated digest; no RustCodeLore store") },
+  off: { label: trNoop("Off"), hint: trNoop("The team's own record only; no digest and no store") },
 };
 /** The settings with the chosen memory mode; Zerus fills its store at Create team. */
 export const withMemory = (settings: TeamSettings, mode: MemoryMode): TeamSettings => ({ ...settings, memory: { mode } });

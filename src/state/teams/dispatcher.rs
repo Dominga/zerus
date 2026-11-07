@@ -6467,6 +6467,11 @@ fn tell_lead_inbox(store: &mut Store, team: &Team) -> anyhow::Result<()> {
     if !block.is_empty() {
         text = format!("{text}\n\n{block}");
     }
+    // Task 128: the team memory's open items and newest decisions.
+    let memory = super::lore_sync::digest(team);
+    if !memory.is_empty() {
+        text = format!("{text}\n\n{memory}");
+    }
     // Task 134: the text is stored and one line rings.
     let urgency = inbox::urgency(new.iter().chain(&again));
     let outcome = super::doorbell::post_and_ring(store, &team.id, &team.lead, &lead, &uuid::Uuid::new_v4().to_string(), "inbox", "zerus", urgency, &text);
@@ -8227,7 +8232,7 @@ fn sandbox_request(member: &Member, folder: &Path, request: &Value) -> Value {
             let argv: Vec<String> =
                 request["input"]["argv"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
             if !super::outbox::sandbox_read_allowed(&argv) {
-                return refused(format!("a sandbox asks only for hgs ls and hgs inspect, not: hgs {}", argv.join(" ")));
+                return refused(format!("a sandbox asks only for hgs ls, inspect, task reads and team lore reads, not: hgs {}", argv.join(" ")));
             }
             let words: Vec<&str> = argv.iter().map(String::as_str).collect();
             match hgs("", &words, None, Duration::from_secs(45)) {
@@ -8875,6 +8880,8 @@ pub(crate) fn worker() -> Result<i32> {
     }
     let mut last_work = Instant::now();
     let mut last_reason = String::new();
+    // Task 128: the lore writer runs beside the ticks, never inside one.
+    super::lore_sync::start_background(|line| eprintln!("hgs team worker: {line}"));
     let exit = loop {
         if fs::metadata(&executable).and_then(|m| m.modified()).ok() != started {
             // An update replaced hgs: the new one carries on with the teams.

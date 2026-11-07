@@ -198,33 +198,50 @@ fn a_failed_copy_removes_only_its_own_copy() {
     assert!(from.join("lore/decisions.jsonl").exists());
 }
 
+fn memory(mode: &str) -> teams::model::TeamMemory {
+    teams::model::TeamMemory { mode: mode.into(), ..Default::default() }
+}
+
+/// Task 127 (docs/lore.md 4.1): the five modes, their defaults and where each
+/// one keeps the team's memory, with the project's store off and on.
 #[test]
 fn a_team_gets_the_projects_workspace_or_its_chosen_mode() {
     let dir = isolated();
     with_test_state_root(dir.path(), || {
         let team = "abcdef12-0000-4000-8000-000000000000";
-        let lore = teams::model::TeamMemory { mode: "lore".into(), ..Default::default() };
-        let plain = teams::model::TeamMemory { mode: "plain".into(), ..Default::default() };
-        // The project is off: the team's choice, RustCodeLore in its own private store.
-        let own = team_memory(PROJECT, team, Some(&lore)).unwrap().unwrap();
-        assert_eq!((own.mode.as_str(), own.source.as_str()), ("lore", "team"));
+        // The project is off: team (the default), plain and off are offered.
+        assert_eq!(modes_for(PROJECT), (vec!["team", "plain", "off"], "team"));
+        let own = team_memory(PROJECT, team, Some(&memory("team"))).unwrap().unwrap();
+        assert_eq!((own.mode.as_str(), own.source.as_str()), ("team", "team"));
         assert_eq!(own.store, team_store("abcdef12").display().to_string());
         assert!(is_private(Path::new(&own.store)) && mode_of(Path::new(&own.store)) == "plain");
-        assert_eq!(team_memory(PROJECT, team, Some(&plain)).unwrap().unwrap(), plain);
-        assert_eq!(team_memory(PROJECT, team, None).unwrap(), None);
+        // Task 126's `lore` is the default RustCodeLore mode.
+        assert_eq!(team_memory(PROJECT, team, Some(&memory("lore"))).unwrap().unwrap().mode, "team");
+        assert_eq!(team_memory(PROJECT, team, Some(&memory("plain"))).unwrap().unwrap(), memory("plain"));
+        assert_eq!(team_memory(PROJECT, team, Some(&memory("off"))).unwrap().unwrap(), memory("off"));
+        assert_eq!(team_memory(PROJECT, team, None).unwrap(), None, "without a choice: plain, as before");
         assert_eq!(team_memory("", team, None).unwrap(), None);
-        // The project is on: a shared workspace in its store, whatever was chosen,
-        // committed into the store's own repository.
+        for unavailable in ["project", "read-only"] {
+            let error = team_memory(PROJECT, team, Some(&memory(unavailable))).unwrap_err().to_string();
+            assert!(error.contains("The project's memory is off"), "{error}");
+        }
+        // The project is on: project is preselected and every mode offered.
         run("set", &set_input(1, 0, json!({"enabled":true}))).unwrap();
-        for chosen in [None, Some(&plain), Some(&lore)] {
-            let memory = team_memory(PROJECT, team, chosen).unwrap().unwrap();
-            assert_eq!((memory.mode.as_str(), memory.source.as_str()), ("lore", "project"));
-            assert_eq!(memory.store, default_store(PROJECT).display().to_string());
-            let workspace = default_store(PROJECT).join("teams").join("abcdef12");
-            assert_eq!(memory.workspace, workspace.display().to_string());
+        assert_eq!(modes_for(PROJECT), (vec!["project", "team", "read-only", "plain", "off"], "project"));
+        let workspace = default_store(PROJECT).join("teams").join("abcdef12");
+        for (chosen, mode) in [(None, "project"), (Some(memory("lore")), "project"), (Some(memory("project")), "project"), (Some(memory("team")), "team")] {
+            let found = team_memory(PROJECT, team, chosen.as_ref()).unwrap().unwrap();
+            assert_eq!((found.mode.as_str(), found.source.as_str()), (mode, "project"));
+            assert_eq!(found.store, default_store(PROJECT).display().to_string());
+            assert_eq!(found.workspace, workspace.display().to_string());
             assert!(workspace.join("lore/plans").is_dir() && mode_of(&workspace) == "plain");
             assert!(!workspace.join(".git").exists(), "a workspace is part of the store's repository");
         }
+        // Read only: the project's store and the workspace, nothing new.
+        let read_only = team_memory(PROJECT, team, Some(&memory("read-only"))).unwrap().unwrap();
+        assert_eq!((read_only.mode.as_str(), read_only.workspace.as_str()), ("read-only", workspace.display().to_string().as_str()));
+        // The owner may turn the workspace off: plain and off are kept.
+        assert_eq!(team_memory(PROJECT, team, Some(&memory("plain"))).unwrap().unwrap(), memory("plain"));
         let store = default_store(PROJECT);
         assert_eq!(git(&store, &["log", "--format=%s"]).unwrap(), "lore: a new team workspace\nlore: a new store");
         assert_eq!(git(&store, &["status", "--porcelain"]).unwrap(), "");
@@ -236,16 +253,73 @@ fn a_draft_created_in_a_project_with_memory_gets_its_workspace() {
     let dir = isolated();
     with_test_state_root(dir.path(), || {
         run("set", &set_input(1, 0, json!({"enabled":true}))).unwrap();
-        let (mut team, _) = teams::ops::create("abcdef12-0000-4000-8000-000000000000",
-            &json!({"name":"T","lead":{"id":"lead","agent":"claude"},"project_id":PROJECT,"settings":{"memory":{"mode":"plain"}}})).unwrap();
-        team.status = teams::model::TeamStatus::Draft;
-        team.draft = Some(Default::default());
-        team.tasks.push(teams::model::Task { id: 1, title: "A".into(), assignee: "lead".into(), status: teams::model::TaskStatus::Draft, phase: 1, ..Default::default() });
+        let create = |mode: &str| {
+            let (mut team, _) = teams::ops::create("abcdef12-0000-4000-8000-000000000000",
+                &json!({"name":"T","lead":{"id":"lead","agent":"claude"},"project_id":PROJECT,"settings":{"memory":{"mode":mode}}})).unwrap();
+            team.status = teams::model::TeamStatus::Draft;
+            team.draft = Some(Default::default());
+            team.tasks.push(teams::model::Task { id: 1, title: "A".into(), assignee: "lead".into(), status: teams::model::TaskStatus::Draft, phase: 1, ..Default::default() });
+            team
+        };
+        // Opening and drafting create nothing; Create team creates the workspace.
+        let mut team = create("project");
+        assert!(!default_store(PROJECT).join("teams").join("abcdef12").exists(), "a draft creates no workspace");
         teams::ops::apply(&mut team, "draft", &json!({"action":"create"}), &teams::ops::Actor::Human, &Default::default(), &mut Vec::new()).unwrap();
         let memory = team.settings.memory.clone().unwrap();
-        assert_eq!((memory.mode.as_str(), memory.source.as_str()), ("lore", "project"));
+        assert_eq!((memory.mode.as_str(), memory.source.as_str()), ("project", "project"));
         assert!(Path::new(&memory.workspace).join("lore.toml").exists());
-        // A mode outside plain and lore is refused.
-        assert!(teams::ops::create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"},"settings":{"memory":{"mode":"vector"}}})).is_err());
+        // The owner turned the workspace off: plain memory, no store.
+        let mut plain = create("plain");
+        teams::ops::apply(&mut plain, "draft", &json!({"action":"create"}), &teams::ops::Actor::Human, &Default::default(), &mut Vec::new()).unwrap();
+        assert_eq!(plain.settings.memory.clone().unwrap().mode, "plain");
+        // A mode outside the five (and task 126's lore) is refused by name.
+        let error = teams::ops::create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"},"settings":{"memory":{"mode":"vector"}}})).unwrap_err();
+        assert!(format!("{error:#}").contains("plain, off, team, project, read-only"), "{error:#}");
+    });
+}
+
+/// Task 127 (docs/lore.md 4.2): the owner switches a running team's memory
+/// mode; the lead proposes it on a card, which stores the offer and creates
+/// nothing until Allow.
+#[test]
+fn the_memory_mode_switches_by_the_owner_or_the_leads_card() {
+    let dir = isolated();
+    with_test_state_root(dir.path(), || {
+        let id = "abcdef12-0000-4000-8000-000000000000";
+        let (mut team, _) = teams::ops::create(id, &json!({"name":"T","lead":{"id":"lead","agent":"claude"},"project_id":PROJECT,
+            "settings":{"memory":{"mode":"plain"}}})).unwrap();
+        let none = Default::default();
+        let mut events = Vec::new();
+        let lead = teams::ops::Actor::Member("lead".into());
+        // The lead cannot switch it itself; the refusal names the card.
+        let error = teams::ops::apply(&mut team, "switch-memory-mode", &json!({"mode":"team"}), &lead, &none, &mut events).unwrap_err().to_string();
+        assert!(error.contains("\"kind\":\"switch-memory-mode\""), "{error}");
+        // The lead's card stores the offer and creates no store.
+        let proposed = teams::ops::apply(&mut team, "propose", &json!({"kind":"switch-memory-mode","mode":"team","reason":"keep the faults"}), &lead, &none, &mut events).unwrap();
+        assert_eq!(proposed["status"], "proposed", "{proposed}");
+        assert_eq!((team.memory_mode_offer.as_str(), team.memory_mode_reason.as_str()), ("team", "keep the faults"));
+        assert!(!team_store("abcdef12").exists(), "trying the card touches no store");
+        // A mode the project does not allow is refused on the card already.
+        let error = teams::ops::apply(&mut team, "propose", &json!({"kind":"switch-memory-mode","mode":"project","reason":"x"}), &lead, &none, &mut events).unwrap_err();
+        assert!(format!("{error:#}").contains("The project's memory is off"), "{error:#}");
+        // The owner switches: the team's own store is created, one event.
+        let switched = teams::ops::apply(&mut team, "switch-memory-mode", &json!({"mode":"team","reason":"keep the faults"}), &teams::ops::Actor::Human, &none, &mut events).unwrap();
+        assert_eq!((switched["from"].as_str(), switched["to"].as_str()), (Some("plain"), Some("team")));
+        let memory = team.settings.memory.clone().unwrap();
+        assert!(is_private(Path::new(&memory.workspace)));
+        assert!(team.memory_mode_offer.is_empty());
+        assert!(events.iter().any(|event| event.kind == "memory_mode_changed" && event.payload["to"] == "team"));
+        // Back to plain keeps the workspace on disk and named.
+        teams::ops::apply(&mut team, "switch-memory-mode", &json!({"mode":"plain"}), &teams::ops::Actor::Human, &none, &mut events).unwrap();
+        let kept = team.settings.memory.clone().unwrap();
+        assert_eq!((kept.mode.as_str(), kept.workspace.as_str()), ("plain", memory.workspace.as_str()));
+        assert!(Path::new(&memory.workspace).join("lore.toml").exists());
+        // A denied card clears the offer and records the reason.
+        teams::ops::apply(&mut team, "propose", &json!({"kind":"switch-memory-mode","mode":"off","reason":"no digest"}), &lead, &none, &mut events).unwrap();
+        let card = team.proposals.last().unwrap().clone();
+        teams::ops::apply(&mut team, "decide-proposal", &json!({"proposal":card["id"],"expected_hash":card["hash"],"accept":false,"reason":"keep it"}),
+            &teams::ops::Actor::Human, &none, &mut events).unwrap();
+        assert!(team.memory_mode_offer.is_empty());
+        assert!(events.iter().any(|event| event.kind == "memory_mode_denied"));
     });
 }

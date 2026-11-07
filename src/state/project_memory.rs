@@ -26,7 +26,13 @@ use std::fs;
 /// The CLI's help marker for `hgs project config`.
 pub(crate) const MARKER: &str = "project-memory-v1";
 /// Memory modes a team may have.
-pub(crate) const MODES: [&str; 2] = ["plain", "lore"];
+/// Task 127 (docs/lore.md 4.1): a team's memory modes. `lore`, task 126's
+/// name for RustCodeLore, is still read: `project` when the project's store
+/// is on, else `team`.
+pub(crate) const MODES: [&str; 5] = ["plain", "off", "team", "project", "read-only"];
+pub(crate) const LEGACY_LORE: &str = "lore";
+/// The kinds a team's export moves into the project store (docs/lore.md 4.5).
+pub(crate) const KNOWLEDGE_KINDS: [&str; 5] = ["fault", "reading", "decision", "topic", "recipe"];
 /// At most this many files are walked for a status or a move.
 const FILE_LIMIT: usize = 200_000;
 const CACHE: &str = ".cache";
@@ -292,6 +298,18 @@ fn make_private(dir: &Path, subject: &str) -> anyhow::Result<()> {
     fs::write(dir.join(".gitignore"), format!("{CACHE}/\n"))?;
     git(dir, &["add", "-A"])?;
     git(dir, &["commit", "-q", "-m", subject])?;
+    Ok(())
+}
+
+/// Task 128: commits a changed `lore.toml` where a private Zerus store owns
+/// the history; in a project's own working tree it is left for the person.
+pub(crate) fn commit_config(dir: &Path, subject: &str) -> anyhow::Result<()> {
+    let Some(top) = working_tree(dir) else { return Ok(()) };
+    if !is_private(&top) {
+        return Ok(());
+    }
+    git(dir, &["add", "--", "lore.toml"])?;
+    git(dir, &["commit", "-q", "-m", subject, "--", "lore.toml"])?;
     Ok(())
 }
 
@@ -577,37 +595,86 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
 /// gives the team a shared workspace in the project's store; otherwise the
 /// team keeps the mode New team chose, with RustCodeLore in its own store
 /// under the state folder. None leaves the team's memory as it is (plain).
+/// Whether the project's RustCodeLore store is on.
+pub(crate) fn project_enabled(project: &str) -> bool {
+    !project.is_empty() && entry(project).is_ok_and(|entry| entry.enabled)
+}
+
+/// Task 127 (docs/lore.md 4.1): the modes New team offers for a project and
+/// the one it preselects: `project` when the project's store is on, `team`
+/// when it is off. `project` and `read-only` need the store on.
+pub(crate) fn modes_for(project: &str) -> (Vec<&'static str>, &'static str) {
+    if project_enabled(project) {
+        (vec!["project", "team", "read-only", "plain", "off"], "project")
+    } else {
+        (vec!["team", "plain", "off"], "team")
+    }
+}
+
+/// The mode a chosen memory names: task 126's `lore` is the default of the
+/// RustCodeLore modes.
+pub(crate) fn resolved_mode(chosen: &str, enabled: bool) -> String {
+    if chosen == LEGACY_LORE {
+        return if enabled { "project".into() } else { "team".into() };
+    }
+    chosen.to_owned()
+}
+
+/// A team's memory at Create team (or a mode switch, docs/lore.md 4.1-4.2):
+/// - `project` and `team` with the project's store on: a shared workspace
+///   `<store>/teams/<team8>`, committed into the store's repository;
+/// - `team` without it: the team's own private store under the state folder;
+/// - `read-only`: the project's store, and the workspace when there is one;
+/// - `plain` and `off`: no store; a workspace the team had stays named, kept
+///   on disk, so switching back attaches the same records.
+///
+/// Without a choice the team keeps task 126's rule: a workspace when the
+/// project's store is on, else plain memory (New team sends the preselected
+/// mode itself). A mode the project does not allow is refused by name.
 pub(crate) fn team_memory(project: &str, team: &str, chosen: Option<&teams::model::TeamMemory>) -> anyhow::Result<Option<teams::model::TeamMemory>> {
     let short = &team[..8.min(team.len())];
-    if !project.is_empty() {
-        let entry = entry(project)?;
-        if entry.enabled {
+    let enabled = project_enabled(project);
+    let mode = match chosen {
+        Some(memory) => resolved_mode(&memory.mode, enabled),
+        None if enabled => "project".into(),
+        None => return Ok(None),
+    };
+    ensure!(MODES.contains(&mode.as_str()), "The team's memory mode is one of {}, not {mode}", MODES.join(", "));
+    ensure!(
+        enabled || !matches!(mode.as_str(), "project" | "read-only"),
+        "The project's memory is off, so the {mode} memory mode is not available: turn RustCodeLore on for the project (Projects > Memory), or choose team, plain or off"
+    );
+    let kept = chosen.cloned().unwrap_or_default();
+    let memory = match mode.as_str() {
+        "project" | "team" if enabled => {
+            let entry = entry(project)?;
             let store = entry.store_path(project);
             let workspace = store.join("teams").join(folder_name(short));
             init_store(&store)?;
             init_store(&workspace)?;
-            return Ok(Some(teams::model::TeamMemory {
-                mode: "lore".into(),
-                source: "project".into(),
-                store: store.display().to_string(),
-                workspace: workspace.display().to_string(),
-            }));
+            teams::model::TeamMemory { mode, source: "project".into(), store: store.display().to_string(), workspace: workspace.display().to_string() }
         }
-    }
-    match chosen {
-        Some(memory) if memory.mode == "lore" => {
-            let workspace = team_store(short);
-            init_store(&workspace)?;
-            Ok(Some(teams::model::TeamMemory {
-                mode: "lore".into(),
-                source: "team".into(),
-                store: workspace.display().to_string(),
-                workspace: workspace.display().to_string(),
-            }))
+        "team" => {
+            // A kept workspace in a project store whose memory is off now
+            // stays where it is (docs/lore.md 4.7); else the team's own store.
+            if kept.source == "project" && !kept.workspace.is_empty() && Path::new(&kept.workspace).is_dir() {
+                teams::model::TeamMemory { mode, ..kept }
+            } else {
+                let workspace = team_store(short);
+                init_store(&workspace)?;
+                teams::model::TeamMemory { mode, source: "team".into(), store: workspace.display().to_string(), workspace: workspace.display().to_string() }
+            }
         }
-        Some(memory) => Ok(Some(teams::model::TeamMemory { mode: memory.mode.clone(), ..Default::default() })),
-        None => Ok(None),
-    }
+        "read-only" => {
+            let store = entry(project)?.store_path(project);
+            init_store(&store)?;
+            let workspace = store.join("teams").join(folder_name(short));
+            let workspace = if workspace.is_dir() { workspace.display().to_string() } else { kept.workspace.clone() };
+            teams::model::TeamMemory { mode, source: "project".into(), store: store.display().to_string(), workspace }
+        }
+        _ => teams::model::TeamMemory { mode, ..kept },
+    };
+    Ok(Some(memory))
 }
 
 #[cfg(test)]

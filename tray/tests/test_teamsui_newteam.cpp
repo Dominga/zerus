@@ -99,6 +99,7 @@ private slots:
     void draftIsDecidedWithoutADesignerSession();
     void designerQuestionIsAnsweredInTheWindow();
     void memberColumnsShareAWideWindow();
+    void newTeamOffersTheMemoryModes();
 };
 
 void TestTeamsUiNewteam::newTeamStartsTheLeadWithTheTemplate()
@@ -1655,4 +1656,59 @@ void TestTeamsUiNewteam::memberColumnsShareAWideWindow()
 }
 
 QTEST_MAIN(TestTeamsUiNewteam)
+
+// Task 127 (docs/lore.md 4.1): both New team forms offer the memory modes the
+// project allows. With its RustCodeLore off: team (preselected), plain and
+// off; with it on, all five and project preselected. A mode the owner chose
+// is kept while it is offered, and Create team sends it.
+void TestTeamsUiNewteam::newTeamOffersTheMemoryModes()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.refreshCatalog();
+    QTRY_VERIFY(controller.catalogReady());
+    QTemporaryDir folder;
+    const QStringList off{"team", "plain", "off"};
+    const QStringList on{"project", "team", "read-only", "plain", "off"};
+    {
+        TeamNewTab tab(&controller, &client, {{QString(), "this computer", true}},
+                       TeamNewTab::Coordinator{"claude/checkout/coord", "claude", "Opus", "", QDir::toNativeSeparators(folder.path()), "msi", "Ready", false}, "Checkout");
+        tab.resize(1300, 860); tab.show();
+        QCOMPARE(tab.memoryModesShown(), off);
+        QCOMPARE(tab.memoryMode(), QString("team"));
+        tab.setProjectMemoryOn(true);
+        QCOMPARE(tab.memoryModesShown(), on);
+        QCOMPARE(tab.memoryMode(), QString("project"));
+        // The owner turns the workspace off: plain stays when the project's memory goes off.
+        auto *memory = tab.findChild<QWidget *>("teamNewMemory");
+        QVERIFY(memory);
+        QPushButton *plain = nullptr;
+        for (auto *button : memory->findChildren<QPushButton *>()) if (button->property("segment") == "plain") plain = button;
+        QVERIFY(plain);
+        plain->click();
+        QCOMPARE(tab.memoryMode(), QString("plain"));
+        tab.setProjectMemoryOn(false);
+        QCOMPARE(tab.memoryMode(), QString("plain"));
+        QCOMPARE(tab.memoryModesShown(), off);
+    }
+    {
+        TeamNewDialog dialog(&controller, &client, {{QString(), "this computer", true}}, {}, QDir::toNativeSeparators(folder.path()), "Checkout");
+        dialog.show();
+        QCOMPARE(dialog.memoryModesShown(), off);
+        QCOMPARE(dialog.memoryMode(), QString("team"));
+        dialog.setProjectMemoryOn(true);
+        QCOMPARE(dialog.memoryModesShown(), on);
+        QCOMPARE(dialog.memoryMode(), QString("project"));
+        // A chosen mode the project no longer offers falls back to the default.
+        auto *memory = dialog.findChild<QComboBox *>("teamNewMemory");
+        QVERIFY(memory);
+        memory->setCurrentIndex(memory->findData("read-only"));
+        emit memory->activated(memory->currentIndex());
+        QCOMPARE(dialog.memoryMode(), QString("read-only"));
+        dialog.setProjectMemoryOn(false);
+        QCOMPARE(dialog.memoryMode(), QString("team"));
+    }
+    QVERIFY(calls(script(), "create").isEmpty());
+}
+
 #include "test_teamsui_newteam.moc"

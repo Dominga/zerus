@@ -25,15 +25,26 @@ pub enum Choice {
 
 /// Whether `stdout` lists the marker as a whole line.
 pub fn has_marker(stdout: &[u8]) -> bool {
-    stdout.split(|&b| b == b'\n').any(|line| line.trim_ascii() == MARKER.as_bytes())
+    stdout
+        .split(|&b| b == b'\n')
+        .any(|line| line.trim_ascii() == MARKER.as_bytes())
 }
 
 /// `hgs [@host] keep-warm NAME --json`; 15 s here and 35 s on a peer.
-pub fn invocation(target: &Target, choice: Choice, expected_revision: i64) -> Result<Invocation, String> {
+pub fn invocation(
+    target: &Target,
+    choice: Choice,
+    expected_revision: i64,
+) -> Result<Invocation, String> {
     let identity = |value: &str, maximum: usize| {
-        !value.is_empty() && value.len() <= maximum && !value.chars().any(|c| c < ' ' || c == '\u{7f}')
+        !value.is_empty()
+            && value.len() <= maximum
+            && !value.chars().any(|c| c < ' ' || c == '\u{7f}')
     };
-    if target.name.is_empty() || !identity(&target.run_id, 128) || !identity(&target.conversation_id, 256) {
+    if target.name.is_empty()
+        || !identity(&target.run_id, 128)
+        || !identity(&target.conversation_id, 256)
+    {
         return Err(IDENTITY.to_owned());
     }
     if expected_revision < 0 {
@@ -51,7 +62,11 @@ pub fn invocation(target: &Target, choice: Choice, expected_revision: i64) -> Re
         Choice::Hours { .. } => return Err("Choose 1 to 7 hours or Always.".to_owned()),
         Choice::Always => input["always"] = json!(true),
     }
-    let mut args = vec!["keep-warm".to_owned(), target.name.clone(), "--json".to_owned()];
+    let mut args = vec![
+        "keep-warm".to_owned(),
+        target.name.clone(),
+        "--json".to_owned(),
+    ];
     let peer = prepend_alias(&mut args, &target.computer);
     Ok(Invocation {
         args,
@@ -64,7 +79,9 @@ pub fn invocation(target: &Target, choice: Choice, expected_revision: i64) -> Re
 /// The words for a refusal code the host gave without its own reason.
 fn refusal(error: &str) -> &'static str {
     match error {
-        "conflict" => "Keep cache warm changed on another device. Refresh the session and try again.",
+        "conflict" => {
+            "Keep cache warm changed on another device. Refresh the session and try again."
+        }
         "capacity" => "At most 64 sessions on one computer can keep their cache warm.",
         "stale_identity" | "not_found" => "The session changed. Refresh it and try again.",
         "unsupported" => "This agent cannot keep its cache warm.",
@@ -73,29 +90,54 @@ fn refusal(error: &str) -> &'static str {
 }
 
 /// The confirmed `keep_warm` object, or the reason the host gave.
-pub fn classify(target: &Target, choice: Choice, expected_revision: i64, exit: Exit) -> Result<Value, String> {
+pub fn classify(
+    target: &Target,
+    choice: Choice,
+    expected_revision: i64,
+    exit: Exit,
+) -> Result<Value, String> {
     let (code, stdout, stderr) = match &exit {
-        Exit::Code { code, stdout, stderr } => (*code, stdout.as_slice(), stderr.as_str()),
+        Exit::Code {
+            code,
+            stdout,
+            stderr,
+        } => (*code, stdout.as_slice(), stderr.as_str()),
         Exit::Abnormal { stderr } => (-1, &[][..], stderr.as_str()),
         _ => return Err(UNCONFIRMED.to_owned()),
     };
-    let reply = serde_json::from_slice::<Value>(stdout).ok().filter(Value::is_object);
+    let reply = serde_json::from_slice::<Value>(stdout)
+        .ok()
+        .filter(Value::is_object);
     if code != 0 {
         if let Some(reply) = reply.filter(|reply| reply["ok"] == false) {
-            let reason = reply["reason"].as_str().map(str::trim).filter(|reason| !reason.is_empty());
-            return Err(reason.map_or_else(|| refusal(reply["error"].as_str().unwrap_or("")).to_owned(), |reason| reason.chars().take(500).collect()));
+            let reason = reply["reason"]
+                .as_str()
+                .map(str::trim)
+                .filter(|reason| !reason.is_empty());
+            return Err(reason.map_or_else(
+                || refusal(reply["error"].as_str().unwrap_or("")).to_owned(),
+                |reason| reason.chars().take(500).collect(),
+            ));
         }
         let text = stderr.trim();
-        return Err(if text.is_empty() { UNCONFIRMED.to_owned() } else { text.chars().take(500).collect() });
+        return Err(if text.is_empty() {
+            UNCONFIRMED.to_owned()
+        } else {
+            text.chars().take(500).collect()
+        });
     }
-    let Some(mut reply) = reply else { return Err(UNCONFIRMED.to_owned()) };
+    let Some(mut reply) = reply else {
+        return Err(UNCONFIRMED.to_owned());
+    };
     let warm = &reply["keep_warm"];
     let revision = warm["revision"].as_i64();
     let applied = reply["applied"].as_bool();
     let enabled = choice != Choice::Off;
     let until_matches = match choice {
         Choice::Always => warm["until"].is_null(),
-        Choice::Hours { .. } => warm["until"].as_f64().is_some_and(|until| until.is_finite() && until > 0.0),
+        Choice::Hours { .. } => warm["until"]
+            .as_f64()
+            .is_some_and(|until| until.is_finite() && until > 0.0),
         Choice::Off => true,
     };
     let confirmed = reply["ok"] == true
@@ -115,14 +157,25 @@ pub fn classify(target: &Target, choice: Choice, expected_revision: i64, exit: E
 }
 
 /// The whole change: the local help probe, the call and its classification. Blocks.
-pub fn change(hgs: &std::path::Path, target: &Target, choice: Choice, expected_revision: i64) -> Result<Value, String> {
+pub fn change(
+    hgs: &std::path::Path,
+    target: &Target,
+    choice: Choice,
+    expected_revision: i64,
+) -> Result<Value, String> {
     let call = invocation(target, choice, expected_revision)?;
     let probe = crate::run::run_limited(hgs, &help_invocation(), &[], HELP_CAP);
-    if !probe.as_ref().is_ok_and(|exit| matches!(exit, Exit::Code { code: 0, stdout, .. } if has_marker(stdout))) {
+    if !probe
+        .as_ref()
+        .is_ok_and(|exit| matches!(exit, Exit::Code { code: 0, stdout, .. } if has_marker(stdout)))
+    {
         return Err(UPDATE.to_owned());
     }
-    let exit = crate::run::run_limited(hgs, &call, &[], REPLY_CAP)
-        .unwrap_or_else(|too_large| Exit::Abnormal { stderr: too_large.stderr });
+    let exit = crate::run::run_limited(hgs, &call, &[], REPLY_CAP).unwrap_or_else(|too_large| {
+        Exit::Abnormal {
+            stderr: too_large.stderr,
+        }
+    });
     classify(target, choice, expected_revision, exit)
 }
 
@@ -131,11 +184,20 @@ mod tests {
     use super::*;
 
     fn target(computer: &str) -> Target {
-        Target { computer: computer.into(), name: "codex/project/warm".into(), run_id: "run-1".into(), conversation_id: "conversation-1".into() }
+        Target {
+            computer: computer.into(),
+            name: "codex/project/warm".into(),
+            run_id: "run-1".into(),
+            conversation_id: "conversation-1".into(),
+        }
     }
 
     fn reply(value: Value, code: i32) -> Exit {
-        Exit::Code { code, stdout: serde_json::to_vec(&value).unwrap(), stderr: String::new() }
+        Exit::Code {
+            code,
+            stdout: serde_json::to_vec(&value).unwrap(),
+            stderr: String::new(),
+        }
     }
 
     fn confirmed(enabled: bool, until: Value, revision: i64) -> Value {
@@ -149,15 +211,31 @@ mod tests {
         assert_eq!(call.args, ["keep-warm", "codex/project/warm", "--json"]);
         assert_eq!(call.timeout, Duration::from_secs(15));
         let body: Value = serde_json::from_slice(call.stdin.as_ref().unwrap()).unwrap();
-        assert_eq!(body, json!({"expected_run_id":"run-1","expected_conversation_id":"conversation-1",
-            "expected_revision":4,"enabled":true,"hours":3}));
+        assert_eq!(
+            body,
+            json!({"expected_run_id":"run-1","expected_conversation_id":"conversation-1",
+            "expected_revision":4,"enabled":true,"hours":3})
+        );
         let peer = invocation(&target("mac"), Choice::Always, 0).unwrap();
         assert_eq!(peer.args[0], "@mac");
         assert_eq!(peer.timeout, Duration::from_secs(35));
         let body: Value = serde_json::from_slice(peer.stdin.as_ref().unwrap()).unwrap();
-        assert_eq!((body["always"].clone(), body.get("hours")), (json!(true), None));
-        let off: Value = serde_json::from_slice(invocation(&target(""), Choice::Off, 2).unwrap().stdin.as_ref().unwrap()).unwrap();
-        assert_eq!((off["enabled"].clone(), off.get("hours"), off.get("always")), (json!(false), None, None));
+        assert_eq!(
+            (body["always"].clone(), body.get("hours")),
+            (json!(true), None)
+        );
+        let off: Value = serde_json::from_slice(
+            invocation(&target(""), Choice::Off, 2)
+                .unwrap()
+                .stdin
+                .as_ref()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            (off["enabled"].clone(), off.get("hours"), off.get("always")),
+            (json!(false), None, None)
+        );
         for hours in [0, 8] {
             assert!(invocation(&target(""), Choice::Hours { hours }, 0).is_err());
         }
@@ -172,10 +250,25 @@ mod tests {
         let t = target("");
         let hours = Choice::Hours { hours: 2 };
         let ok = classify(&t, hours, 3, reply(confirmed(true, json!(1.0e9), 4), 0)).unwrap();
-        assert_eq!((ok["enabled"].clone(), ok["revision"].clone()), (json!(true), json!(4)));
-        let always = classify(&t, Choice::Always, 3, reply(confirmed(true, Value::Null, 4), 0)).unwrap();
+        assert_eq!(
+            (ok["enabled"].clone(), ok["revision"].clone()),
+            (json!(true), json!(4))
+        );
+        let always = classify(
+            &t,
+            Choice::Always,
+            3,
+            reply(confirmed(true, Value::Null, 4), 0),
+        )
+        .unwrap();
         assert_eq!(always["until"], Value::Null);
-        assert!(classify(&t, Choice::Off, 3, reply(confirmed(false, Value::Null, 4), 0)).is_ok());
+        assert!(classify(
+            &t,
+            Choice::Off,
+            3,
+            reply(confirmed(false, Value::Null, 4), 0)
+        )
+        .is_ok());
         // A repeated off is confirmed without a new revision.
         let mut unchanged = confirmed(false, Value::Null, 3);
         unchanged["applied"] = json!(false);
@@ -191,7 +284,10 @@ mod tests {
             confirmed(false, Value::Null, 4),
             confirmed(true, Value::Null, 4),
         ] {
-            assert_eq!(classify(&t, hours, 3, reply(bad, 0)).unwrap_err(), UNCONFIRMED);
+            assert_eq!(
+                classify(&t, hours, 3, reply(bad, 0)).unwrap_err(),
+                UNCONFIRMED
+            );
         }
     }
 
@@ -199,15 +295,37 @@ mod tests {
     fn refusals_keep_the_hosts_reason() {
         let t = target("");
         let refused = json!({"ok":false,"error":"unsupported","reason":"OpenAI keeps a 30-minute cache only for GPT-5.6 and later."});
-        assert_eq!(classify(&t, Choice::Always, 0, reply(refused, 1)).unwrap_err(),
-            "OpenAI keeps a 30-minute cache only for GPT-5.6 and later.");
-        for (error, text) in [("conflict", "changed on another device"), ("capacity", "64 sessions"), ("stale_identity", "Refresh")] {
-            let message = classify(&t, Choice::Always, 0, reply(json!({"ok":false,"error":error}), 1)).unwrap_err();
+        assert_eq!(
+            classify(&t, Choice::Always, 0, reply(refused, 1)).unwrap_err(),
+            "OpenAI keeps a 30-minute cache only for GPT-5.6 and later."
+        );
+        for (error, text) in [
+            ("conflict", "changed on another device"),
+            ("capacity", "64 sessions"),
+            ("stale_identity", "Refresh"),
+        ] {
+            let message = classify(
+                &t,
+                Choice::Always,
+                0,
+                reply(json!({"ok":false,"error":error}), 1),
+            )
+            .unwrap_err();
             assert!(message.contains(text), "{error}: {message}");
         }
-        let stderr = Exit::Code { code: 1, stdout: Vec::new(), stderr: "hgs: update the selected computer to keep the prompt cache warm\n".into() };
-        assert_eq!(classify(&t, Choice::Always, 0, stderr).unwrap_err(), "hgs: update the selected computer to keep the prompt cache warm");
-        assert_eq!(classify(&t, Choice::Always, 0, Exit::TimedOut).unwrap_err(), UNCONFIRMED);
+        let stderr = Exit::Code {
+            code: 1,
+            stdout: Vec::new(),
+            stderr: "hgs: update the selected computer to keep the prompt cache warm\n".into(),
+        };
+        assert_eq!(
+            classify(&t, Choice::Always, 0, stderr).unwrap_err(),
+            "hgs: update the selected computer to keep the prompt cache warm"
+        );
+        assert_eq!(
+            classify(&t, Choice::Always, 0, Exit::TimedOut).unwrap_err(),
+            UNCONFIRMED
+        );
     }
 
     #[test]

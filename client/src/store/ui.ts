@@ -1,4 +1,4 @@
-import { createMemo, createSignal } from "solid-js";
+import { batch, createMemo, createSignal, untrack } from "solid-js";
 import { createStore } from "solid-js/store";
 import { catalog, computerFresh, orderedRows } from "./catalog";
 import { documentVisibility } from "./visibility";
@@ -28,7 +28,17 @@ const params = new URLSearchParams(location.search);
 const PAGES: Page[] = ["dashboard", "sessions", "projects", "machines", "accounts", "settings"];
 // `?page=settings` opens a screen (headless screenshots), as in the mockup.
 export const [page, setPage] = createSignal<Page>(PAGES.find((p) => p === params.get("page")) ?? "sessions");
-export const [selectedKey, setSelectedKey] = createSignal<string | undefined>();
+const [selectedKey, setSelectedKeyRaw] = createSignal<string | undefined>();
+export { selectedKey };
+/** Task View belongs to an explicit task navigation, not the next session. */
+export function setSelectedKey(value?: string | ((previous: string | undefined) => string | undefined)) {
+  return batch(() => {
+    const previous = untrack(selectedKey);
+    const next = setSelectedKeyRaw((current) => typeof value === "function" ? value(current) : value);
+    if (next !== previous && untrack(detailTab) === "taskview") setDetailTab("activity");
+    return next;
+  });
+}
 export const [stateFilter, setStateFilterRaw] = createSignal<StateFilter>("all");
 /** Qt clears an exact-folder scope when All sessions is chosen. */
 export function setStateFilter(filter: StateFilter) { if (filter === "all") setFolderFilter(undefined); return setStateFilterRaw(filter); }

@@ -195,7 +195,6 @@ struct Attempt {
     double deliveredAt = 0, startedAt = 0, replyAt = 0, turnEndedAt = 0;
     bool startWarned = false;
     // U31: this attempt worked a task of a draft phase.
-    bool workedAhead = false;
     // The reply id kept with turn_ended_at, so a newer turn is not captured (A2).
     QString turnReply;
     double reportAt = 0;
@@ -360,7 +359,6 @@ struct Task {
     bool inStage() const { return status == QLatin1String("in_review") || status == QLatin1String("in_test"); }
     bool isCheck() const { return kind == "check" || !check.command.isEmpty(); }
     const Attempt *last() const { return attempts.isEmpty() ? nullptr : &attempts.last(); }
-    bool workedAhead() const { const auto *a = last(); return a && a->workedAhead; }
     bool finished() const { return status == "accepted" || status == "rejected" || status == "cancelled"; }
     QJsonObject json() const;
 };
@@ -414,9 +412,6 @@ struct Phase {
     bool draft() const { return state == "draft"; }
     bool rejected() const { return state == "rejected"; }
     bool queued() const { return state == "queued"; }
-    // U61: a draft Auto accepts at its first hand-out; until then the lead
-    // edits it. The lead may let idle members start it early (start_ahead).
-    bool startAhead = false;
     // U63: the pause on an accepted phase, and "owner" when the owner accepts
     // the phase once its tasks are decided (absent or "lead" otherwise). The
     // state then reads awaiting_acceptance, and done once he accepted it.
@@ -599,7 +594,6 @@ struct Team {
     // #58: whichever phase it is), or the team's mode from an older hgs.
     bool freeMode() const { return phaseModesKnown ? freePhase.known : planMode == QLatin1String("free"); }
     // U31: idle members may take independent tasks of the next draft phase.
-    bool workAhead = false;
     // #756: the build broker (owner setting, off by default) and, while it
     // is on, each member's build state by member id, from team status.
     bool buildBroker = false;
@@ -715,7 +709,7 @@ struct PhaseProgress {
     bool draft = false;     // that phase waits for approval
     // U61: that draft is Auto's (accepted at its first hand-out), started
     // ahead by the lead; or that running phase was accepted by Auto.
-    bool autoDraft = false, startAhead = false, byAuto = false;
+    bool autoDraft = false, byAuto = false;
     int done = 0, total = 0;
     int phasesDone = 0, phasesTotal = 0;
     bool valid() const { return phase > 0 && total > 0; }
@@ -727,7 +721,7 @@ PhaseProgress phaseProgress(const Team &team);
 // U61: the words of an auto-accepted draft, the same in the phase header,
 // the plan's band, the progress tooltip and the Auto-accept switch.
 QString autoDraftBadge();                         // "Draft (auto)"
-QString autoDraftTip(bool startAhead);            // when Auto fixes it
+QString autoDraftTip();                                      // when Auto fixes it
 QString autoAcceptSwitchTip(bool on);
 // Why phase N may not be approved yet (spec 10), empty when it may: every
 // lower phase must be approved. An approved phase still at work no longer

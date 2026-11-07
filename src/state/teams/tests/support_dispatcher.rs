@@ -412,7 +412,7 @@ pub(crate) fn deliver_all() {
 /// A team whose running phase has no ready work, and a draft phase 2 with
 /// #4 (dev), #5 (qa) that depends on #4, and #6 (dev) that depends on the
 /// running #1.
-pub(crate) fn work_ahead_team() -> Team {
+pub(crate) fn draft_phase_team() -> Team {
     let mut t = team();
     for task in &mut t.tasks {
         if task.phase == 1 {
@@ -426,7 +426,6 @@ pub(crate) fn work_ahead_team() -> Team {
         {"id":5,"title":"Tests of the docs","assignee":"qa","deps":[{"task":4,"kind":"hard"}]},
         {"id":6,"title":"After the API","assignee":"dev","deps":[{"task":1,"kind":"soft"}]}]}),
         &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
-    t.settings.work_ahead = true;
     t.members.iter_mut().find(|member| member.id == "qa").unwrap().session =
         Some(SessionRef { name: "kimi/x/qa".into(), run_id: "r3".into(), ..Default::default() });
     t

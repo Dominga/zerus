@@ -784,9 +784,10 @@ fn all_items(team: &Team) -> Vec<Item> {
                         task: Some(task.id),
                         member: team.name_of(&attempt.member),
                         since: report.at,
-                        // U31: a report made ahead of its draft phase waits for
-                        // the owner's approval of that phase.
-                        summary: if attempt.worked_ahead {
+                        // U31: a report made ahead of its draft phase (an older
+                        // record's work ahead; task 158 runs no draft) waits
+                        // for the owner's approval of that phase.
+                        summary: if team.phases.iter().any(|phase| phase.n == task.phase && phase.state.is_draft()) {
                             format!("worked ahead of phase {}: {}", task.phase, summary(&report.text))
                         } else if !report.replaced.is_empty() {
                             format!("replaces the earlier report: {}", summary(&report.text))

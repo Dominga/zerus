@@ -142,21 +142,22 @@ mod tests {
         assert!(lead.contains("unknown, never zero"), "{lead}");
     }
 
-    /// U61: the lead protocol says an auto-accepted draft stays editable until
-    /// its first hand-out, when to start it ahead, and keeps the review rule.
+    /// U61, task 158: the lead protocol says an approved phase runs alongside,
+    /// what a task still waits for, how Auto accepts a draft, and keeps the
+    /// review rule; start ahead and work ahead are gone.
     #[test]
-    fn the_lead_protocol_names_auto_drafts_and_start_ahead() {
+    fn the_lead_protocol_names_the_one_phase_start_model() {
         let lead = TOPICS.iter().find(|(name, _)| *name == "team-lead").unwrap().1;
         assert!(lead.contains("Auto drafts (U61)"), "{lead}");
-        assert!(lead.contains("stays a draft you edit"), "{lead}");
-        assert!(lead.contains("hgs team start-ahead --json"), "{lead}");
-        assert!(lead.contains("members are idle") && lead.contains("independent"), "{lead}");
+        assert!(lead.contains("an approved phase runs alongside earlier ones"), "{lead}");
+        assert!(lead.contains("files an open task writes"), "{lead}");
+        assert!(!lead.contains("start-ahead") && !lead.contains("Work ahead"), "{lead}");
         assert!(lead.contains("Review drafts") && lead.contains("need the owner"), "{lead}");
         // #740: a question to the owner is a proposal, never only prose.
         assert!(lead.contains("a question for the owner is a proposal, never only"), "{lead}");
         let propose = pages().into_iter().find(|(name, _)| *name == "team-propose").unwrap().1;
         assert!(propose.contains(r#"{"kind":"question","question""#) && propose.contains("never only in your reply"), "{propose}");
-        assert!(lead.contains("Work ahead is for review drafts"), "{lead}");
+        assert!(lead.contains("no draft runs before approval"), "{lead}");
     }
 
     /// #742: no agent installs a tool; the lead's and the tests' pages say a

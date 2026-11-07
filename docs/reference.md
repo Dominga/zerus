@@ -2038,8 +2038,7 @@ mode.
 
 - Standard to free opens a running phase (approved, or phase 1) for tasks as
   they come: `extend` without a phase adds to it with no new phase and no
-  approval, its empty queue is idle and never done, and no queued phase starts
-  behind it. One phase is free at a time: opening another while one is free is
+  approval, and its empty queue is idle and never done. One phase is free at a time: opening another while one is free is
   refused ("Phase 2 already takes tasks as they come; switch it to standard
   first"). The free phase is the open (latest running) phase when it plans in
   free mode, else the running phase whose own mode is free; `integrate-build`
@@ -2128,40 +2127,43 @@ continues in standard mode. The feed records `plan_mode_proposed`,
 `plan_mode_switched`, `plan_mode_denied`, `phase_build_added`,
 `free_phase_close_pending`, `free_phase_closed` and `free_phase_build_failed`.
 
-### Auto-accepted drafts: start-ahead
+### When a phase starts
 
-With Auto-accept drafts on (`settings.auto_accept`), a drafted phase whose
-approval is `auto` is not accepted when it is added. While the current phase
-runs and no member has taken one of its tasks, it stays a draft the lead edits
-freely: `extend`, `edit-draft`, `move-task` and `cancel` all work on it. Status
-carries each phase's `state` (`draft` and the rest), `auto` (true for these) and
-`start_ahead`.
+One phase-start model (task 158; owner, 2026-11-07). A task of any approved
+phase is ready when its dependencies are satisfied; phases keep their order for
+display, acceptance and the owner's acceptance gate, not for scheduling. An
+approved phase therefore runs alongside the phases before it: approving a phase
+while earlier work is open no longer queues it, and the receipt's
+`phase_state` is `running` (`"alongside":true` changes nothing any more and is
+only echoed). A task still waits for:
 
-The phase is accepted with `phase_auto_accepted`, by Auto, at the moment its
-first task is handed out: when every phase ahead of it is done, or earlier when
-the lead starts it ahead. Its tasks' reports need no owner approval. The lead
-starts a phase ahead per phase (not the owner):
+- its dependencies (`hard` until accepted, `soft` until reported);
+- the outputs an open task holds (task 155): a task whose `output` overlaps an
+  open, unchained task's is refused at planning (`outputs`, chain them with a
+  hard dependency) and held at the hand-out, also across phases;
+- a barrier: only a phase marked `barrier` waits until every task of a lower
+  phase is finished;
+- a pause on its phase (U63), or a phase before it that waits for the owner's
+  acceptance (U63).
 
-```sh
-{"request_id":"<uuid>","team":"<id>","phase":2} | hgs team start-ahead --json
-{"request_id":"<uuid>","team":"<id>","phase":2,"undo":true} | hgs team start-ahead --json
-```
+A draft runs nothing: its tasks are `draft` until the phase is approved, by
+the owner or, for an `auto` draft with Auto-accept drafts on
+(`settings.auto_accept`), by Auto (`phase_auto_accepted`) as soon as its plan
+has no blocker and no earlier phase is a draft. Until then the lead edits it
+freely (`extend`, `edit-draft`, `move-task`, `cancel`). Status carries each
+phase's `state` and `auto`.
 
-Only an `auto` draft is eligible, only while the team runs or is paused, and
-only before any of its tasks was handed out; `undo` takes the start-ahead back
-the same way, before the first hand-out. The feed records `phase_started_ahead`
-and `phase_start_ahead_undone`. The hand-out admits the draft's independent
-tasks (dependencies met, no barrier, not held or waiting) through the same
-work-ahead step, and the first hand-out accepts the phase in the same change by
-turning its `draft` tasks `pending`; a second hand-out does not accept it again.
-
-A review draft keeps the owner's approval, and `settings.work_ahead` keeps its
-meaning for review drafts: starting an auto draft ahead is the lead's decision,
-not a change of the review rules.
+This replaces start-ahead (U61) and work-ahead (U31) and the queued phase of
+U25. A record stored before reads a phase's `queued` state as approved, and
+drops `start_ahead` and `settings.work_ahead`; `hgs team start-ahead` and
+`settings` with `"work_ahead":true` are refused with that reason. A report an
+older record made ahead of a draft (`worked ahead of phase N`) still waits for
+that phase's approval, and sending the draft back still tells its member to
+stop.
 
 ### Changing, pausing and accepting a phase
 
-An approved or queued phase whose work has not started (no task has a
+An approved phase whose work has not started (no task has a
 delivered attempt) is changed in place and stays accepted, with its number,
 its place and its task ids: `edit-draft`, `extend` with `"phase"` and
 `move-phase` work on it. The owner does it directly; the lead only with
@@ -2172,8 +2174,8 @@ phase's number, place and task ids. Discarding or moving a draft renumbers
 only the drafts after the last accepted phase.
 
 `pause-phase` `{"phase":N,"reason":"..."}` holds such a phase: its tasks are
-not handed out, and it keeps its place, so a later barrier or queued phase
-waits for it. The owner pauses, and the lead may pause on its own;
+not handed out, and it keeps its place, so a later barrier phase waits for
+it. The owner pauses, and the lead may pause on its own;
 `unpause-phase` removes the pause. Only the owner removes the owner's pause;
 the lead removes its own pause on the owner's word, or by itself when the
 owner set `lead_removes_own_pause` (off by default).

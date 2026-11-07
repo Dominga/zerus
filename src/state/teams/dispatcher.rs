@@ -264,8 +264,6 @@ pub(crate) enum Step {
     /// U46: a hand-out waits for its context action's confirmation: one look
     /// per tick, then the hand-out itself or the waiting reason.
     PrepareContext { task: u32, member: String },
-    /// U31: an idle member takes an independent task of the next draft phase.
-    WorkAhead { task: u32, member: String },
     /// U49: a draining member owes nothing: pause its session, then remove it.
     /// `pause` is false when there is no live session to keep (an agent with no
     /// separate process, or a session already stopped).
@@ -1664,44 +1662,16 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         busy.insert(member.id.as_str());
         steps.push(if member.needs_settings() { Step::Settings { member: member.id.clone() } } else { Step::HandOut { task: id, member: member.id.clone() } });
     }
-    // U31: work ahead. An idle member may take an independent task of the next
-    // draft phase (#511 N2: every dependency accepted). U61: the same path takes
-    // the tasks of an auto-accepted draft whose phases ahead are done, or that
-    // the lead started ahead; that hand-out accepts the phase by Auto.
-    let ahead: Vec<u32> = {
-        let mut ids = work_ahead_tasks(team);
-        for id in plan::auto_draft_tasks(team) {
-            if !ids.contains(&id) {
-                ids.push(id);
-            }
-        }
-        ids
-    };
-    if !ahead.is_empty() {
-        for member in &team.members {
-            if !available(member, &busy, None) || busy.contains(member.id.as_str()) {
-                continue;
-            }
-            // Task 155: work ahead never runs beside a task writing the same files.
-            if let Some(task) = ahead.iter().filter_map(|id| team.task(*id)).find(|task| {
-                task.assignee == member.id
-                    && super::rights::missing(task, member).is_empty()
-                    && plan::output_holders(team, task).is_empty()
-                    && !claimed.iter().any(|other| other.output_overlaps(task))
-            }) {
-                claimed.push(task);
-                busy.insert(member.id.as_str());
-                steps.push(Step::WorkAhead { task: task.id, member: member.id.clone() });
-            }
-        }
-    }
+    // Task 158 (owner, 2026-11-07): there is no work ahead or start ahead any
+    // more; a draft's tasks wait for its approval, and an approved phase's
+    // tasks are on the ready path above, alongside the phases before it.
     // Task 134: unread team messages ring at the member's next idle moment,
     // never into a busy composer, and once more past their bound; a member
     // given a task, a stage or a message this tick is not rung again (that
     // delivery rings for everything unread).
     for member in team.members.iter().filter(|member| member.state != MemberState::Removed) {
         let given = steps.iter().any(|step| match step {
-            Step::HandOut { member: to, .. } | Step::StageOut { member: to, .. } | Step::WorkAhead { member: to, .. } => *to == member.id,
+            Step::HandOut { member: to, .. } | Step::StageOut { member: to, .. } => *to == member.id,
             Step::Rebalance { to, .. } => *to == member.id,
             Step::Inbox => member.id == team.lead,
             _ => false,
@@ -2052,61 +2022,9 @@ fn test_queue_tick(store: &mut Store, team_id: &str, now: f64) -> anyhow::Result
     })
 }
 
-/// U31: the tasks of the next draft phase an idle member may work ahead on: a
-/// task (not a check) still waiting for its phase, whose dependencies are all
-/// accepted (#511 N2: a dependency inside a draft or queued phase counts too)
-/// and that names no file an open running task also names.
-pub(crate) fn work_ahead_tasks(team: &Team) -> Vec<u32> {
-    if !team.settings.work_ahead {
-        return Vec::new();
-    }
-    // U61: work ahead keeps its meaning for review drafts; an auto-accepted
-    // draft starts early only on the lead's start-ahead (or when the phases
-    // ahead are done, which the Auto path above handles).
-    let Some(draft) = team
-        .phases
-        .iter()
-        .filter(|phase| phase.state == PhaseState::Draft && phase.approval != Approval::Auto)
-        .map(|phase| phase.n)
-        .min()
-    else {
-        return Vec::new();
-    };
-    let running: Vec<&Task> = team
-        .tasks
-        .iter()
-        .filter(|task| {
-            !task.status.finished() && team.phases.iter().find(|phase| phase.n == task.phase).is_none_or(|phase| phase.state == PhaseState::Approved)
-        })
-        .collect();
-    let files = |text: &str| -> BTreeSet<String> {
-        text.split_whitespace()
-            .map(|word| word.trim_matches(|c: char| "`'\",;()[]{}".contains(c)))
-            .filter(|word| word.contains('/') || word.contains('\\') || word.rsplit_once('.').is_some_and(|(_, ext)| !ext.is_empty() && ext.len() <= 4))
-            .map(str::to_lowercase)
-            .collect()
-    };
-    let running_files: BTreeSet<String> = running.iter().flat_map(|task| files(&format!("{} {}", task.title, task.description))).collect();
-    team.tasks
-        .iter()
-        .filter(|task| {
-            task.phase == draft
-                && matches!(task.status, TaskStatus::Pending | TaskStatus::Draft)
-                && task.kind == TaskKind::Task
-                && task.hold.is_none()
-                && task.waits.is_none()
-                // U63: nothing works ahead behind a phase awaiting the owner's acceptance.
-                && plan::acceptance_block(team, task.phase).is_none()
-                && task.deps.iter().all(|dep| plan::satisfied(team, dep.task, DependencyKind::Hard))
-                && files(&format!("{} {}", task.title, task.description)).is_disjoint(&running_files)
-        })
-        .map(|task| task.id)
-        .collect()
-}
-
-/// Whether Zerus may hand `task_id` out now: a ready task of the running plan,
-/// or (U31) a task of the next draft phase an idle member works ahead on. A
-/// draft phase's tasks are Draft, which `plan::ready` never lists.
+/// Whether Zerus may hand `task_id` out now: a ready task of an approved phase
+/// (task 158: alongside the phases before it). A draft phase's tasks are
+/// Draft, which `plan::ready` never lists.
 fn can_hand_out(team: &Team, task_id: u32) -> bool {
     if team.status != TeamStatus::Running {
         return false;
@@ -2116,13 +2034,7 @@ fn can_hand_out(team: &Team, task_id: u32) -> bool {
     if team.task(task_id).is_some_and(|task| !plan::output_holders(team, task).is_empty()) {
         return false;
     }
-    if plan::ready(team).contains(&task_id) || work_ahead_tasks(team).contains(&task_id) {
-        return true;
-    }
-    // U61: an auto-accepted draft whose phases ahead are done, or that the lead
-    // started ahead, hands out its independent draft tasks; the first hand-out
-    // accepts the phase.
-    plan::auto_draft_tasks(team).contains(&task_id)
+    plan::ready(team).contains(&task_id)
 }
 
 /// At most one message reaches the free lead per tick; the others wait for the
@@ -7667,14 +7579,6 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             super::ops::accept_auto_draft(team, *phase, &BTreeSet::new(), events);
             Ok(())
         }),
-        Step::WorkAhead { task, member } => {
-            hand_out(store, &team.id, *task, member, None, host)?;            change(store, &team.id, |team, _| {
-                if let Some(attempt) = team.task_mut(*task).and_then(|task| task.attempts.last_mut()) {
-                    attempt.worked_ahead = true;
-                }
-                Ok(())
-            })
-        }
         Step::Drain { member, pause } => drain_member(store, team, member, *pause),
         Step::Rebalance { task, from, to } => hand_out(store, &team.id, *task, to, Some(from), host),
         Step::StageOut { task, member } => stage_hand_out(store, &team.id, *task, member, host),

@@ -65,9 +65,8 @@ fn deciding_a_captured_report_releases_its_member() {
 }
 
 #[test]
-fn a_captured_report_holds_work_ahead_and_the_lead_is_never_held() {
+fn a_captured_report_holds_a_later_phase_and_the_lead_is_never_held() {
     let mut t = team();
-    t.settings.work_ahead = true;
     for task in &mut t.tasks {
         if task.phase == 1 {
             task.status = TaskStatus::Submitted;
@@ -77,13 +76,15 @@ fn a_captured_report_holds_work_ahead_and_the_lead_is_never_held() {
     let mut events = Vec::new();
     ops::apply(&mut t, "extend", &json!({"phase_title":"Next","tasks":[{"id":4,"title":"Independent docs","assignee":"dev"}]}),
         &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    // Task 158: the approved phase 2 runs alongside phase 1.
+    ops::apply(&mut t, "approve-phase", &json!({"phase":2}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
     let seen = vec![session("claude/x/lead", "r0", true), session("codex/x/dev", "r1", true)];
-    assert!(steps(&t, &seen, 100.0).contains(&Step::WorkAhead { task: 4, member: "dev".into() }));
-    // A captured report on #2 holds dev back from working ahead.
+    assert!(steps(&t, &seen, 100.0).contains(&Step::HandOut { task: 4, member: "dev".into() }));
+    // A captured report on #2 holds dev back from the next phase's task.
     t.task_mut(2).unwrap().attempts.last_mut().unwrap().report =
         Some(Report { text: "Queued".into(), at: 1.0, captured: true, ..Default::default() });
     let found = steps(&t, &seen, 100.0);
-    assert!(!found.iter().any(|step| matches!(step, Step::WorkAhead { .. })), "{found:?}");
+    assert!(!found.iter().any(|step| matches!(step, Step::HandOut { member, .. } if member == "dev")), "{found:?}");
     // C1: the lead's own tasks never hold it.
     let lead = t.lead.clone();
     submit(&mut t, 3, &lead, true);

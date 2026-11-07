@@ -26,10 +26,10 @@ hgs guide team-tests.
 Reject reworks on its member (reserved; unavailable: reassign); "fresh":true
 tries a free peer of its role.
 
-Auto drafts (U61): with Auto-accept, a phase stays a draft you edit until first hand-out.
-If members are idle and tasks independent:
-{"team":"ID","phase":N} | hgs team start-ahead --json.
-Review drafts need the owner; Work ahead is for review drafts.
+Phases: an approved phase runs alongside earlier ones; a task waits for
+deps, a barrier, an owner gate, files an open task writes.
+Auto drafts (U61): Auto-accept approves a clean draft.
+Review drafts need the owner; no draft runs before approval.
 
 Modes: standard (default); free: extend the free phase; owner closes it.
 

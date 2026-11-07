@@ -480,6 +480,47 @@ fn a_staged_phone_cli_receives_the_exact_connector_without_global_environment_ch
     assert!(phone_connector(&hgs, &remote, Some(&bundle.0)).is_none());
 }
 
+/// zerus-ihrzs: on every platform a local nested phone call carries the
+/// connector the status probe selected. With no connector beside a separately
+/// staged hgs, the probe picks the one packaged beside the app; the nested CLI
+/// must not fall back to a different connector found on PATH.
+#[cfg(unix)]
+#[test]
+fn a_local_phone_call_carries_the_probe_selection_when_no_sibling_exists() {
+    let app = Scratch::new("phone-app");
+    let stage = Scratch::new("phone-lone-stage");
+    let on_path = Scratch::new("phone-path");
+    let (packaged, _) = app.program(
+        "zerus-mobile-connector",
+        &[("*", "echo '{\"packaged\":true}'")],
+    );
+    on_path.program("zerus-mobile-connector", &[("*", "echo stale; exit 9")]);
+    // Mirrors src/phones.rs: the exact selection, else the sibling, else PATH.
+    let fallback = format!(
+        "if [ -n \"${{ZERUS_CLIENT_MOBILE_CONNECTOR_PATH+x}}\" ]; then \"$ZERUS_CLIENT_MOBILE_CONNECTOR_PATH\" --workspace status; elif [ -x \"$here/zerus-mobile-connector\" ]; then \"$here/zerus-mobile-connector\" --workspace status; else PATH='{}':\"$PATH\" zerus-mobile-connector --workspace status; fi",
+        on_path.0.display()
+    );
+    let (hgs, _) = stage.program("hgs", &[("*", fallback.as_str())]);
+    assert_eq!(connector_program(&hgs, Some(&app.0)), packaged);
+    let call = invocation(&["mobile", "phones", "--json"], Duration::from_secs(5));
+    let result = run_phone_cli_from(&hgs, &call, 4096, Some(&app.0)).unwrap();
+    assert!(
+        matches!(result, Exit::Code { code: 0, ref stdout, .. } if stdout == b"{\"packaged\":true}\n"),
+        "{result:?}"
+    );
+    assert_eq!(
+        on_path.calls("zerus-mobile-connector"),
+        "",
+        "the stale PATH connector was reached"
+    );
+    // A remote call still carries no local selection.
+    let remote = invocation(
+        &["@lab", "mobile", "phones", "--json"],
+        Duration::from_secs(5),
+    );
+    assert!(phone_connector(&hgs, &remote, Some(&app.0)).is_none());
+}
+
 #[cfg(windows)]
 #[test]
 fn the_packaged_windows_connector_wins_over_a_legacy_cli_sibling() {

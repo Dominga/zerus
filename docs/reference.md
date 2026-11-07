@@ -4397,7 +4397,11 @@ phone's changes and answers a page of what the phone lacks, at most 512 KiB of
 updates, with a larger task in parts. A task the phone holds keeps coming to it
 after it becomes Done. A request may cover a range of task UUIDs, so a large
 inventory goes in parts; a refusal prints `{"schema": 1, "ok": false, "error":
-…}` with exit status 1. The phone's Send now and Cancel run on the session's
+…}` with exit status 1. Both read what the phone holds from the project's task
+index, which keeps each task's version and the project document's version, so
+a call reads again only what the change journal or the periodic full check
+finds changed, and neither rewrites the store's inventory cache; when the index
+cannot answer, they read the documents as before, with the same digest. The phone's Send now and Cancel run on the session's
 computer as `hgs task mobile-send --json` and `mobile-cancel --json`, which do
 what `send` and `cancel` do and answer only the task's stage (a refusal says
 `"uncertain": true` when the prompt was pasted but could not be recorded);

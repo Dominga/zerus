@@ -6,7 +6,9 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use zerus_replica::execution::EXECUTION_TASK_SCHEMA as EXECUTION;
-use zerus_replica::phone::{answer, Answer, Budget, Exchange, Progress, Request};
+use zerus_replica::phone::{
+    answer, answer_with, Answer, Budget, Exchange, Inventories, Progress, Request,
+};
 use zerus_replica::{Actor, Inventory, NewTask, ProjectStore, SessionKey, Stage, Target, TaskDoc};
 
 fn store(root: &Path) -> ProjectStore {
@@ -942,4 +944,55 @@ fn held_tasks_arrive_at_the_execution_schema_across_pages() {
         assert!(!copy.needs_schema_repair());
     }
     assert_eq!(live_digest(&phone), live_digest(&computer));
+}
+
+/// Inventories from the store itself, recording what each call saw.
+struct Recorded<'a> {
+    store: &'a ProjectStore,
+    calls: Vec<String>,
+}
+
+impl Inventories for Recorded<'_> {
+    fn phone(&mut self, theirs: &Inventory) -> zerus_replica::Result<Inventory> {
+        let ours = self.store.phone_inventory(theirs)?;
+        self.calls.push(format!("phone {}", ours.tasks.len()));
+        Ok(ours)
+    }
+
+    fn live_digest(&mut self) -> zerus_replica::Result<String> {
+        self.calls.push("live".into());
+        Ok(self.store.live_inventory()?.0.digest())
+    }
+}
+
+#[test]
+fn an_answer_reads_its_inventories_from_the_source_it_is_given_after_the_import() {
+    let (phone_root, computer_root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (phone, computer) = (store(phone_root.path()), store(computer_root.path()));
+    add(&computer, "Add rate limiting");
+    let mut done = add(&computer, "Document the limits");
+    accept(&computer, &mut done);
+    // The phone brings a task the computer does not hold yet.
+    let new = add(&phone, "Written on the phone");
+    let bytes = phone.load(new.uuid()).unwrap().snapshot().unwrap();
+    let ask = json!({"schema": 1, "project": "project-1", "inventory": {"project": {}, "tasks": {}},
+        "updates": [{"task": new.uuid(), "bytes": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes)}]});
+    let mut recorded = Recorded {
+        store: &computer,
+        calls: Vec::new(),
+    };
+    let given = answer_with(&computer, request(ask.clone()), &mut recorded).unwrap();
+    // Asked once each, after the phone's task was imported: two live tasks.
+    assert_eq!(recorded.calls, ["phone 2", "live"]);
+    assert_eq!(given.imported, 1);
+    // The store's own inventories give the same answer (the task is already here now).
+    let again = answer(&computer, request(ask)).unwrap();
+    assert_eq!(again.imported, 0);
+    assert_eq!(
+        Answer {
+            imported: 1,
+            ..again
+        },
+        given
+    );
 }

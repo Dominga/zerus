@@ -1326,3 +1326,34 @@ fn the_index_holds_the_inventory_of_every_loaded_task_and_the_project() {
     assert_holds_the_inventory(&store, &index);
     assert_eq!(index.revision().unwrap(), revision);
 }
+
+#[test]
+fn the_phone_s_inventories_come_from_the_index_without_reading_every_task() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = project(temp.path());
+    for uuid in store.uuids().unwrap() {
+        age(&store, &uuid);
+    }
+    let mut index = Index::open(&store).unwrap();
+    assert_eq!(index.live_inventory().unwrap(), store.live_inventory().unwrap().0);
+    // A phone holding a Done task and one this computer never had.
+    let (all, _) = store.inventory().unwrap();
+    let done = all.tasks.keys().find(|uuid| !store.live_inventory().unwrap().0.tasks.contains_key(*uuid)).unwrap();
+    let mut theirs = Inventory::default();
+    theirs.tasks.insert(done.clone(), Default::default());
+    theirs.tasks.insert(ids::new_uuid(), Default::default());
+    assert_eq!(index.phone_inventory(&theirs).unwrap(), store.phone_inventory(&theirs).unwrap());
+    assert!(index.phone_inventory(&theirs).unwrap().tasks.contains_key(done));
+    // A quiet read decodes no task and stamps only the task folder.
+    let (_, decoded, stamped) = counted(|| index.live_inventory().unwrap());
+    assert_eq!((decoded, stamped), (0, 1));
+    // A save through the store is in the next read: only that task is decoded.
+    let uuid = store.live_inventory().unwrap().0.tasks.keys().next().unwrap().clone();
+    let mut task = store.load(&uuid).unwrap();
+    task.comment("From the phone's side", &Actor::Person, 9).unwrap();
+    aged_save(&store, &mut task);
+    let (live, decoded, _) = counted(|| index.live_inventory().unwrap());
+    assert_eq!(decoded, 1);
+    assert_eq!(live, store.live_inventory().unwrap().0);
+    assert_eq!(live.digest(), store.live_inventory().unwrap().0.digest());
+}

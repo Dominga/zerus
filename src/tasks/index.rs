@@ -20,7 +20,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
-use zerus_replica::ids;
+use zerus_replica::{ids, Inventory};
 
 /// v2 (ROWS 5): rows carry their owner session for session-filtered pages
 /// (zerus-cg5h.26). A new file, not a new version of v1: an older hgs keeps
@@ -792,6 +792,44 @@ impl<'a> Index<'a> {
             tx.commit()?;
         }
         Ok(())
+    }
+
+    /// What a phone holds of this project (zerus-cg5h.21), as
+    /// `ProjectStore::live_inventory` reads it: the project document and
+    /// every loaded task that is not Done, read again only where the journal
+    /// or the periodic check finds a change.
+    pub(super) fn live_inventory(&mut self) -> Outcome<Inventory> {
+        self.sync()?;
+        // Missing while the project document cannot be read: the caller
+        // reads the store, which says why.
+        let project = self.meta("project_version")?.ok_or(Failure::Other)?;
+        let mut inventory = Inventory {
+            project: serde_json::from_str(&project).map_err(|_| Failure::Damaged)?,
+            tasks: BTreeMap::new(),
+        };
+        let mut query = self.db.prepare_cached("SELECT uuid, version FROM tasks WHERE done = 0 AND version IS NOT NULL")?;
+        let rows = query.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (uuid, version) = row?;
+            inventory.tasks.insert(uuid, serde_json::from_str(&version).map_err(|_| Failure::Damaged)?);
+        }
+        Ok(inventory)
+    }
+
+    /// What a phone holding `theirs` is answered from, as
+    /// `ProjectStore::phone_inventory` reads it: the live view and every
+    /// loaded task it already holds, Done ones included.
+    pub(super) fn phone_inventory(&mut self, theirs: &Inventory) -> Outcome<Inventory> {
+        let mut inventory = self.live_inventory()?;
+        let mut query = self.db.prepare_cached("SELECT version FROM tasks WHERE uuid = ?1 AND done = 1 AND version IS NOT NULL")?;
+        let mut held = Vec::new();
+        for uuid in theirs.tasks.keys().filter(|uuid| !inventory.tasks.contains_key(*uuid)) {
+            if let Some(version) = query.query_row([uuid], |r| r.get::<_, String>(0)).optional()? {
+                held.push((uuid.clone(), serde_json::from_str(&version).map_err(|_| Failure::Damaged)?));
+            }
+        }
+        inventory.tasks.extend(held);
+        Ok(inventory)
     }
 
     /// Changes whenever any indexed row changes, including after a rebuild.

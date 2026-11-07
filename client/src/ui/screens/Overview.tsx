@@ -11,7 +11,7 @@ import type { Account } from "../../types";
 import { agentKind, catalog, plainComputers, plainRows } from "../../store/catalog";
 import { machineCards, requestMachine } from "../../store/machines";
 import { accountsPage, loadAccounts, setAccountMachine, setRequestedProfile } from "../../store/accounts";
-import { createOverview, overviewStats, type MachineCardModel, type OverviewStats } from "../../store/overview";
+import { createOverview, mainSessions, overviewStats, type MachineCardModel, type OverviewStats } from "../../store/overview";
 import { setMachineFilter, setPage, setProjectFilter, setAccountFilter, setFolderFilter, setSelectedKey, setStateFilter, type StateFilter } from "../../store/ui";
 import { flag, num, setSetting } from "../../store/settings";
 import { accountTooltip, clock, summaryText, usageLoading, windowsAt } from "../lib/usage";
@@ -222,7 +222,7 @@ export function OverviewScreen() {
   // Plain rows for the tiles and the live order, one dependency per batch;
   // each live card renders its store row (zerus-5wmh.66.50).
   const ov = createOverview(plainRows, plainComputers, () => machineCards, overviewStats, (s) => catalog.rows[s.key] ?? s);
-  const live = createMemo(() => { const all = ov.live(); if (withSubSessions()) return all; const parentOf = parentKeyOf(); return all.filter((s) => parentOf(s) === undefined); });
+  const live = createMemo(() => (withSubSessions() ? ov.live() : mainSessions(ov.live(), parentKeyOf())));
   // Ages, resets and pace re-render every 15 s while shown (DashboardPage.cpp:322); nothing else runs on a timer.
   const now = useNow(15_000);
   const view = accountsPage;

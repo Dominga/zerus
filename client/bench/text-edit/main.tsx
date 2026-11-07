@@ -50,6 +50,15 @@ async function run(){
  key(n(),"y",{ctrlKey:true});eq("empty numeric field redo",n().value,"");
  command("insertText","0012");eq("numeric model echoes preserve raw leading zeros",n().value,"0012");
  key(n(),"z",{ctrlKey:true});eq("raw numeric undo",n().value,"");key(n(),"y",{ctrlKey:true});eq("raw numeric redo",n().value,"0012");
+ // A refused native replacement must restore the caret captured BEFORE
+ // select-all, even when rebuilding an edited field is necessary.
+ d().focus();d().select();command("insertText","abcdef");await tick();d().setSelectionRange(2,2);
+ const native=document.execCommand.bind(document);
+ try {
+   document.execCommand=((name:string,show?:boolean,value?:string)=>name==="insertText"?false:native(name,show,value)) as typeof document.execCommand;
+   setDialog("ABCDEF");await tick();
+ } finally {document.execCommand=native;}
+ eq("refused native replacement preserves original caret",[d().value,d().selectionStart,d().selectionEnd],["ABCDEF",2,2]);
  // No synthetic key here: the Python driver also runs real X11 key events.
  (window as any).textEditFixture={results,editor,model,replaceText,sends};
  (window as any).webkit?.messageHandlers.result.postMessage(JSON.stringify({stage:"ready",results}));

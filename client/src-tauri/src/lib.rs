@@ -1684,6 +1684,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::inspect_subagent_identity,
         session_folders::session_folder_status,
         session_folders::session_folder_open,
+        session_folders::session_terminal_open,
         actions::inspect_subagent_activity,
         commands::tasks_follow,
         task_details::task_details,

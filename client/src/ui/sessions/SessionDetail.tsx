@@ -41,6 +41,7 @@ import { inspectorOpen, inspectorTab, setInspectorOpen, openInspector, inspector
 import { sessionGoal } from "./inspector-data";
 import { PausedServiceDetail, servicePausedEmpty } from "../components/DesktopServiceStatus";
 
+import { expandedEntries } from "./session-extra-entries";
 import { folderEntries, folderRequest } from "../../store/sessionFolders";
 import { watchDetailRemoval } from "./detail-removal";
 
@@ -111,6 +112,10 @@ function Header() {
     act().fork,
     { separator: true },
     copies().command,
+    copies().name,
+    copies().reference,
+    copies().folder,
+    ...expandedEntries(s()),
     ...(nativeEntry(s()) ? [nativeEntry(s())!] : []),
     act().change,
     ...(mark() ? [mark()!] : []),
@@ -134,7 +139,7 @@ function Header() {
             aria-label={clear()?.running ? tr("Clearing…") : tr("Clear session")} disabled={!clear()?.enabled} onClick={() => composer.openClear()}><Icon name="clear" size={15} /></button>
         </Show>
         <Show when={!subagentOpen() && (s().status === "ended" || s().state === "archived")}><button class="btn small primary" title={act().change.hint} disabled={act().change.disabled} onClick={() => act().change.action()}><Icon name="play" size={12} />{tr("Restore")}</button></Show>
-        <button class="icon-btn" data-tip={tr("Session actions")} onClick={(e) => setMenu({ x: e.clientX - 200, y: e.clientY + 12, items: actions() })}><Icon name="ellipsis" size={16} /></button>
+        <button class="icon-btn" data-tip={tr("Session actions")} aria-label={tr("Session actions")} onClick={(e) => setMenu({ x: e.clientX - 200, y: e.clientY + 12, items: actions() })}><Icon name="ellipsis" size={16} /></button>
       </div>
       <div class="dh-row2">
         <AgentBadge agent={s().agent} />

@@ -319,6 +319,12 @@ impl Stopped {
                 .as_ref()
                 .is_ok_and(|report| report.state == State::Refused)
     }
+    pub(crate) fn remaining_millis(&self) -> u64 {
+        self.continuation.source.remaining_millis()
+    }
+    pub(crate) fn holder_unavailable(&self) -> bool {
+        self.continuation.source.holder_unavailable()
+    }
     pub(crate) fn can_force(&self) -> bool {
         matches!(self.attempt.input.stop, Kind::Normal)
             && self
@@ -402,6 +408,12 @@ pub(crate) struct ForceOffer {
     input: Input,
 }
 impl ForceOffer {
+    pub(crate) fn remaining_millis(&self) -> u64 {
+        self.previous.remaining_millis()
+    }
+    pub(crate) fn holder_unavailable(&self) -> bool {
+        self.previous.holder_unavailable()
+    }
     pub(crate) fn cancel(self) -> Stopped {
         self.previous
     }

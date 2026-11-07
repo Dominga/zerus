@@ -263,6 +263,26 @@ impl Context {
 }
 
 impl Source {
+    /// Original monotonic owner budget, for presentation only. No new phase,
+    /// proof, clock domain or consent lifetime is created by reading it.
+    pub(super) fn remaining_millis(&self) -> u64 {
+        u64::try_from(
+            self.not_after
+                .saturating_duration_since(Instant::now())
+                .as_millis(),
+        )
+        .unwrap_or(0)
+    }
+    pub(super) fn holder_unavailable(&self) -> bool {
+        // Never wait for a holder exchange while projecting the GUI model.
+        // Contention supplies no new evidence; the native effect gates remain
+        // unchanged and a later observation can report the worker's end.
+        match self.owner.try_lock() {
+            Ok(owner) => owner.worker_finished(),
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner().worker_finished(),
+            Err(std::sync::TryLockError::WouldBlock) => false,
+        }
+    }
     pub(super) fn current(&self) -> bool {
         let current = !self.closed.load(Ordering::Acquire)
             && Instant::now() < self.not_after

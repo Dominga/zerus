@@ -9390,18 +9390,41 @@ fn spawn_runner(folder: &Path, request: &Value) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Task #239: the last lines of the team worker's log, for a run whose runner
+/// stopped without a result — the crash is an outcome with its log, never
+/// silence.
+pub(crate) fn worker_log_tail() -> String {
+    let Ok(bytes) = fs::read(worker_dir().join("worker.log")) else { return String::new() };
+    let text = String::from_utf8_lossy(&bytes);
+    let lines: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty()).collect();
+    let tail = lines[lines.len().saturating_sub(12)..].join("\n");
+    if tail.chars().count() > 1500 {
+        tail.chars().skip(tail.chars().count() - 1500).collect()
+    } else {
+        tail
+    }
+}
+
 /// C1: a claim whose runner never settled (it crashed, the computer restarted)
-/// is answered once its own bound has long passed, so a member never waits on a
-/// result that cannot come.
+/// is answered once its runner is gone or its own bound has long passed, so a
+/// member never waits on a result that cannot come. The answer carries the
+/// worker log's tail: a crash is an outcome, never silence.
 fn settle_stale_runs(folder: &Path, team: &Team) {
     const GRACE_SECONDS: f64 = 120.0;
     for (_, marker) in super::outbox::running_all(folder) {
         let id = marker["request_id"].as_str().unwrap_or_default();
         let started = marker["started"].as_f64().unwrap_or(0.0);
         let bound = marker["timeout_secs"].as_u64().unwrap_or(1800) as f64;
-        if !id.is_empty() && now() > started + bound + GRACE_SECONDS {
+        // Task #239: the runner records its own pid; a pid that is gone is a
+        // crash now, not after the bound.
+        let runner_gone = marker["pid"]
+            .as_u64()
+            .and_then(|pid| u32::try_from(pid).ok())
+            .is_some_and(|pid| crate::platform::process_identity(pid).is_none());
+        if !id.is_empty() && (runner_gone || now() > started + bound + GRACE_SECONDS) {
+            let log = worker_log_tail();
             let outcome = json!({"status":"refused","request_id":id,
-                "error":"the run stopped without a result (the runner ended, this computer restarted, or the command outlived its bound); ask again with a new request_id"});
+                "error":format!("the run stopped without a result (its runner ended, this computer restarted, or the command outlived its bound); Zerus's worker log{}", if log.is_empty() { " is empty".to_owned() } else { format!(" ends with:\n{log}") })});
             let _ = super::outbox::settle_running(folder, id, &outcome);
             eprintln!("hgs team worker: {}: run {id} stopped without a result", team.name);
         }
@@ -9451,10 +9474,25 @@ pub(crate) fn worker_run() -> Result<i32> {
             return Ok(1);
         }
     };
-    run_request(&mut store, &folder, &request);
+    // Task #239: the runner records itself in the claim, so a dead runner is
+    // recognized as one by the worker's own poll, and a panic below is still an
+    // outcome with the worker log's tail.
+    let id = request["request_id"].as_str().unwrap_or_default().to_owned();
+    if super::outbox::result(&folder, &id).is_none() {
+        if let Some(mut marker) = super::outbox::running(&folder, &id) {
+            marker["pid"] = json!(std::process::id());
+            let _ = super::outbox::write_running(&folder, &id, &marker);
+        }
+    }
+    let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_request(&mut store, &folder, &request)));
+    if ran.is_err() {
+        let log = worker_log_tail();
+        let outcome = json!({"status":"refused","request_id":id,
+            "error":format!("the run stopped without a result: its worker panicked. Zerus's worker log{}", if log.is_empty() { " is empty".to_owned() } else { format!(" ends with:\n{log}") })});
+        let _ = super::outbox::settle_running(&folder, &id, &outcome);
+    }
     Ok(0)
 }
-
 /// C1: one claimed request from the runner's folder. Its outcome, good or bad,
 /// is left in the outbox; the runner never holds the worker or another team.
 fn run_request(store: &mut Store, folder: &Path, request: &Value) {

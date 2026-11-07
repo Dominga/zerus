@@ -133,6 +133,10 @@ fn start(input: &Value, wait: bool) -> Result<Value> {
         if claim["session"]["run_id"] != caller["run_id"] {
             return Err(format!("request_id {id} belongs to another session; use a new UUID"));
         }
+        // Task #239: a claim its runner left behind is answered, never waited on.
+        if let Some(done) = settle_dead(&id, &claim) {
+            return Ok(done);
+        }
         return Ok(if wait { wait_for(&id) } else { running_note(&claim) });
     }
     let (label, command, cwd, minutes) = fields(input)?;
@@ -215,6 +219,12 @@ fn sandboxed_start(id: &str, caller: &Value, request: &Value, wait: bool) -> Res
             return Ok(refused);
         }
         let claim = read(&running_path(id));
+        // Task #239: a runner that died is answered here, with the worker log.
+        if let Some(claim) = claim.as_ref() {
+            if let Some(done) = settle_dead(id, claim) {
+                return Ok(done);
+            }
+        }
         if let Some(claim) = claim.as_ref().filter(|_| !wait) {
             return Ok(running_note(claim));
         }
@@ -285,6 +295,10 @@ pub(crate) fn start_for_sandbox(id: &str, input: &Value, session: Value, folder:
         if claim["session"]["run_id"] != session["run_id"] {
             return Err(format!("request_id {id} belongs to another session; use a new UUID"));
         }
+        // Task #239: a runner that ended without a result is an outcome here.
+        if let Some(done) = settle_dead(id, &claim) {
+            return Ok(done);
+        }
         return Ok(running_note(&claim));
     }
     let (label, command, cwd, minutes) = fields(input)?;
@@ -293,12 +307,17 @@ pub(crate) fn start_for_sandbox(id: &str, input: &Value, session: Value, folder:
     }
     let temp = folder.join(".zerus-team").join("tmp");
     fs::create_dir_all(&temp).map_err(|error| format!("the member's temporary folder: {error}"))?;
+    // Task #239: a web tool in a sandboxed member's run (npm, npx, vitest)
+    // keeps its cache in the member's folder, never the person's own — ui3 met
+    // npm's cache EPERM exactly there.
+    let npm = folder.join(".zerus-team").join("npm");
+    fs::create_dir_all(&npm).map_err(|error| format!("the member's npm cache: {error}"))?;
     private_dir(&dir())?;
     prune();
     let temp = temp.display().to_string();
     let mut claim = json!({"request_id":id,"label":label,"command":command,"cwd":cwd.display().to_string(),
         "session":session,"started":now(),"timeout_secs":minutes * 60,"source":"hgs_run",
-        "env":{"TEMP":temp,"TMP":temp}});
+        "env":{"TEMP":temp,"TMP":temp,"npm_config_cache":npm.display().to_string()}});
     match sandbox {
         Sandbox::Low => claim["integrity"] = json!("low"),
         Sandbox::Codex => claim["sandbox"] = json!("codex"),
@@ -597,6 +616,30 @@ fn live(claim: &Value, at: f64) -> bool {
     }
 }
 
+/// Task #239: a claim whose runner is gone is answered where the member waits,
+/// with the command, its folder and the worker log's tail — never as "running"
+/// forever, and never as silence.
+fn settle_dead(id: &str, claim: &Value) -> Option<Value> {
+    if live(claim, now()) || id.is_empty() {
+        return None;
+    }
+    let mut done = claim.clone();
+    if let Some(record) = done.as_object_mut() {
+        record.remove("pid");
+    }
+    done["status"] = json!("refused");
+    let log = crate::state::teams::dispatcher::worker_log_tail();
+    done["error"] = json!(format!(
+        "the run stopped without a result (its runner ended, it never started, or this computer restarted): {} in {}. Zerus's worker log{}",
+        string(&done, "command"),
+        string(&done, "cwd"),
+        if log.is_empty() { " is empty".to_owned() } else { format!(" ends with:\n{log}") }
+    ));
+    let _ = storage::atomic(&result_path(id), &done.to_string());
+    let _ = fs::remove_file(running_path(id));
+    Some(done)
+}
+
 /// The live runs whose folder is `folder`: #680's N11 check sees the stage's
 /// own `team_stage` runs beside the outbox claims.
 pub(super) fn running_in(folder: &Path, at: f64) -> Vec<Value> {
@@ -699,12 +742,8 @@ fn prune() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if let Some(id) = name.strip_suffix(".running.json") {
             if let Some(claim) = read(&entry.path()).filter(|claim| !live(claim, at)) {
-                let mut stopped = claim.clone();
-                stopped["status"] = json!("refused");
-                stopped["error"] = json!("the run stopped without a result (the runner ended or this computer restarted)");
-                if storage::atomic(&result_path(id), &stopped.to_string()).is_ok() {
-                    let _ = fs::remove_file(entry.path());
-                }
+                // Task #239: the same answer a waiting member gets, with the log.
+                let _ = settle_dead(id, &claim);
             }
         } else if name.ends_with(".json") {
             let modified = entry.metadata().and_then(|meta| meta.modified()).ok();
@@ -1127,9 +1166,53 @@ pub(crate) mod tests {
         });
     }
 
+    /// Task #239: a member's run whose runner died is answered with the
+    /// command, the folder and the worker log's tail; a live runner is left
+    /// alone; and a sandboxed run keeps npm's cache in the member's folder.
     #[test]
-    fn an_argv_claim_runs_without_a_shell() {
+    fn a_claim_whose_runner_died_is_answered_with_the_worker_log() {
         let root = tempfile::tempdir().unwrap();
+        with_test_state_root(root.path(), || {
+            private_dir(&dir()).unwrap();
+            let log = crate::state::teams::dispatcher::worker_dir().join("worker.log");
+            std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+            std::fs::write(&log, "start pid=1\nhgs team worker: run dead: the runner ended while vitest started\n").unwrap();
+            let folder = root.path().join("member");
+            std::fs::create_dir_all(&folder).unwrap();
+            let id = "33333333-3333-4333-8333-333333333333";
+            let claim = json!({"request_id":id,"label":"web tests","command":"npx --no-install vitest run",
+                "cwd":folder.display().to_string(),"session":{"name":"dsh/x/dev","run_id":"r","conversation_id":"c"},
+                "started":now() - 300.0,"timeout_secs":600,"pid":4294967290u32});
+            storage::atomic(&running_path(id), &claim.to_string()).unwrap();
+            let done = settle_dead(id, &claim).expect("answered");
+            assert_eq!(done["status"], "refused", "{done}");
+            let error = done["error"].as_str().unwrap();
+            assert!(error.contains("vitest") && error.contains("Zerus's worker log") && error.contains("the runner ended while vitest started"), "{error}");
+            assert!(read(&result_path(id)).is_some() && !running_path(id).exists());
+            // A live runner is left alone.
+            let live = json!({"request_id":"44444444-4444-4444-8444-444444444444","started":now(),"timeout_secs":600,"pid":std::process::id()});
+            assert!(settle_dead("44444444-4444-4444-8444-444444444444", &live).is_none());
+            // A sandboxed member's web tools keep npm's cache in its folder.
+            let member = root.path().join("member2");
+            std::fs::create_dir_all(&member).unwrap();
+            HELD_RUNNER.with(|flag| flag.set(true));
+            let running = start_for_sandbox(
+                "55555555-5555-4555-8555-555555555555",
+                &json!({"label":"web tests","command":"npx --no-install vitest run","cwd":member.display().to_string(),"timeout_minutes":10}),
+                json!({"name":"dsh/x/qa","run_id":"r","conversation_id":"c"}),
+                &member,
+                Sandbox::Low,
+            )
+            .unwrap();
+            HELD_RUNNER.with(|flag| flag.set(false));
+            assert_eq!(running["status"], "running", "{running}");
+            let claim = read(&running_path("55555555-5555-4555-8555-555555555555")).unwrap();
+            assert!(claim["env"]["npm_config_cache"].as_str().unwrap().contains(".zerus-team"), "{claim}");
+        });
+    }
+
+    #[test]
+    fn an_argv_claim_runs_without_a_shell() {        let root = tempfile::tempdir().unwrap();
         with_test_state_root(root.path(), || {
             private_dir(&dir()).unwrap();
             let id = "44444444-4444-4444-8444-444444444444";

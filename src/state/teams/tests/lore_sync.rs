@@ -12,18 +12,16 @@ fn passing(template: &str, at: f64, ms: u64) -> RunRecord {
 }
 
 fn report(text: &str) -> Option<Report> {
-    Some(Report { text: text.into(), ..Default::default() })
+    Some(Report { text: text.into(), at: 15.0, ..Default::default() })
 }
 
-/// A running team with one approved phase and one draft, its tasks in every
-/// state a record maps, the owner's decisions and three findings.
+/// A running team on its initial plan (phase 1 has no `Phase` record: it is
+/// the approved plan itself) with one draft phase, its tasks in every state a
+/// record maps, the owner's decisions and three findings.
 fn team(workspace: &Path) -> Team {
     let mut team = Team { id: TEAM.into(), name: "Core".into(), goal: "Teams keep their memory".into(), status: TeamStatus::Running, ..Default::default() };
     team.settings.memory = Some(TeamMemory { mode: "team".into(), source: "team".into(), store: workspace.display().to_string(), workspace: workspace.display().to_string() });
-    team.phases = vec![
-        Phase { n: 1, title: "Memory".into(), state: PhaseState::Approved, ..Default::default() },
-        Phase { n: 2, title: "Later".into(), state: PhaseState::Draft, ..Default::default() },
-    ];
+    team.phases = vec![Phase { n: 2, title: "Later".into(), state: PhaseState::Draft, ..Default::default() }];
     let accepted = Task {
         id: 1,
         phase: 1,
@@ -57,7 +55,7 @@ fn team(workspace: &Path) -> Team {
         json!({"id":"p3","kind":"switch-memory-mode","state":"rejected","reason":"try the team mode"}),
     ];
     team.findings = vec![
-        Finding { id: "f1".into(), from_task: 1, task: Some(1), state: "fixed".into(), title: "The digest lost the decisions".into(),
+        Finding { id: "f1".into(), from_task: 1, task: Some(1), state: "fixed".into(), title: "The digest lost the decisions".into(), at: 5.0,
             scenario: "a lead reads the inbox after an allowed card and sees no decision".into(), file: r"src\state\teams\inbox.rs".into(), ..Default::default() },
         Finding { id: "f2".into(), from_task: 6, state: "fixed".into(), title: "Docs skipped the export".into(), scenario: "the guide names no export".into(),
             note: "named the export".into(), ..Default::default() },
@@ -82,7 +80,7 @@ fn the_team_maps_to_records_that_carry_every_required_field() {
     let plan = &found["t33fbafeb-phase-1"];
     assert_eq!(plan["kind"], "plan");
     assert_eq!(plan["status"], "live", "a running team's plan is live");
-    assert_eq!(plan["title"], "Core: Memory");
+    assert_eq!(plan["title"], "Core: phase 1", "the initial plan has no Phase record and is written all the same");
     assert_eq!(plan["goal"], "Teams keep their memory");
     assert!(!found.keys().any(|id| id.starts_with("t33fbafeb-phase-2")), "a draft phase is no plan yet");
 
@@ -125,6 +123,11 @@ fn the_team_maps_to_records_that_carry_every_required_field() {
     let waiting = pending.iter().find(|item| item.id == "t33fbafeb-finding-f2").expect("f2 waits");
     assert_eq!(waiting.missing, ["check"]);
     assert!(!found.contains_key("t33fbafeb-finding-f3"), "an open finding is no fault");
+    let mut late = team.clone();
+    late.findings[0].at = 30.0;
+    let (records, pending) = desired(&late);
+    assert!(!by_id(&records).contains_key("t33fbafeb-finding-f1"), "the run and the report before the finding do not fix it");
+    assert!(pending.iter().any(|item| item.id == "t33fbafeb-finding-f1" && item.missing == ["fix", "check"]), "{pending:?}");
     // The rework's cause is the reviewer's exact reason.
     let rework = &found["t33fbafeb-rework-1-1"];
     assert_eq!(rework["cause"], "the digest drops the owner's decisions");
@@ -304,7 +307,7 @@ fn the_plain_digest_keeps_what_the_spec_defines_within_six_kib() {
     let text = plain_digest(&team);
     for expected in [
         "Team Core (33fbafeb-8291-4eda-a00c-6e1448ec6f20): Teams keep their memory",
-        "Phase 1 Memory",
+        "Phase 1\n- #1 Write the records",
         "- #1 Write the records: accepted by Lead: complete and tested",
         "- #2 Old idea: cancelled by You: out of scope",
         "- #3 Relay: held: waits for the relay",
@@ -326,4 +329,33 @@ fn the_plain_digest_keeps_what_the_spec_defines_within_six_kib() {
     assert!(text.contains("(earlier phases left out)"), "{text}");
     assert!(text.contains("Phase 59 Phase title 59") && text.contains("Last test result per template"), "{text}");
     assert!(!text.contains("Phase 3 Phase title 3\n"), "the oldest phases went first");
+}
+
+/// Task 130: a team whose plan grew phases writes each approved one; a
+/// finally rejected task is a dropped item.
+#[test]
+fn every_approved_phase_and_a_rejected_task_are_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut team = team(dir.path());
+    team.phases.push(Phase { n: 3, title: "Export".into(), state: PhaseState::Approved, ..Default::default() });
+    team.tasks.push(Task { id: 7, phase: 3, title: "Export it".into(), status: TaskStatus::Rejected, decision_reason: "wrong store".into(), ..Default::default() });
+    let found = by_id(&desired(&team).0);
+    assert!(found.contains_key("t33fbafeb-phase-1") && found.contains_key("t33fbafeb-phase-3"));
+    assert!(!found.contains_key("t33fbafeb-phase-2"), "a draft phase is no plan");
+    assert_eq!(found["t33fbafeb-phase-3"]["title"], "Core: Export");
+    let rejected = &found["t33fbafeb-phase-3#7"];
+    assert_eq!((rejected["status"].as_str(), rejected["reason"].as_str(), rejected["decided_by"].as_str()), (Some("dropped"), Some("wrong store"), Some("Lead")));
+    assert_eq!(plan_phases(&team, false).iter().map(|(n, _)| *n).collect::<Vec<_>>(), [1, 3]);
+    assert_eq!(plan_phases(&team, true).iter().map(|(n, _)| *n).collect::<Vec<_>>(), [1, 2, 3]);
+    // A team still planning has no plan in its memory.
+    team.status = TeamStatus::Planning;
+    assert!(plan_phases(&team, false).is_empty());
+}
+
+/// Task 130: a held writer lock is not a refusal of the record.
+#[test]
+fn a_held_lock_is_temporary() {
+    assert!(is_transient("another writer holds the store (agent:zerus); nothing was written"));
+    assert!(is_transient("lore/x.jsonl: another process holds the file, so it could not be replaced; nothing was committed - try again when it is free"));
+    assert!(!is_transient("refused, nothing was written: fault x: `cause` is required"));
 }

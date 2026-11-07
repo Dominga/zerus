@@ -8529,7 +8529,9 @@ changes per pass, through the `lore` binary (`HGS_LORE`, beside hgs, then
 ids. The lead's inbox message ends with the workspace's open items and the
 newest decisions, at most 10 lines. Reads, from a member's session or with
 `--team ID`: `hgs team lore find WORDS`, `hgs team lore plans` (with the
-open items of the newest three phases) and `hgs team lore show ID`; JSON
+open items of the newest three phases, phase 1 included) and
+`hgs team lore show ID`; a sandboxed member asks the lead, since brokered
+reads run in the worker's tick; JSON
 forms `lore-find {team, query, n}`, `lore-plans {team}`, `lore-show {team,
 id}`. A finished team's workspace gets `.closed` and stays searchable;
 `hgs team lore export --team ID` (the owner only) copies its faults,

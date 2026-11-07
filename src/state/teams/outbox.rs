@@ -295,9 +295,6 @@ pub(crate) fn sandbox_read_allowed(argv: &[String]) -> bool {
             plain(reference) && task_options(options, &["--history-limit", "--history-before"], reference.contains('/'))
         }
         ["ls", options @ ..] => options.iter().all(|option| matches!(*option, "--json" | "--local" | "--no-archives")),
-        // Task 128: the team memory's reads, of a named team (the worker
-        // answers as itself, so the team cannot come from the caller).
-        ["team", "lore", "find" | "plans" | "show", rest @ ..] => lore_read_options(words[2], rest),
         ["inspect", name, options @ ..] => {
             let name_ok = !name.is_empty()
                 && name.chars().count() <= 300
@@ -317,32 +314,6 @@ pub(crate) fn sandbox_read_allowed(argv: &[String]) -> bool {
         }
         _ => false,
     }
-}
-
-/// Task 128: `--team ID` once, and the plain words of a find or the one id of
-/// a show.
-fn lore_read_options(command: &str, rest: &[&str]) -> bool {
-    let mut team = 0;
-    let mut words = 0;
-    let mut items = rest.iter();
-    while let Some(word) = items.next() {
-        if *word == "--team" {
-            team += 1;
-            if !items.next().is_some_and(|id| plain(id)) {
-                return false;
-            }
-        } else if plain(word) {
-            words += 1;
-        } else {
-            return false;
-        }
-    }
-    team == 1
-        && match command {
-            "find" => (1..=20).contains(&words),
-            "show" => words == 1,
-            _ => words == 0,
-        }
 }
 
 /// A value a brokered read passes on: a name, never an option or a control.
@@ -434,14 +405,9 @@ mod tests {
             &["task", "get", "RogueDod/T-abc123"], &["task", "get", "T-abc123", "--project", "RogueDod", "--history-limit", "20"]] {
             assert!(sandbox_read_allowed(&argv(allowed)), "{allowed:?}");
         }
-        // Task 128: the team memory's reads of a named team.
-        for allowed in [&["team", "lore", "find", "flaky", "test", "--team", "33fbafeb"][..], &["team", "lore", "plans", "--team", "33fbafeb"],
-            &["team", "lore", "show", "t33fbafeb-phase-1#4", "--team", "33fbafeb"]] {
-            assert!(sandbox_read_allowed(&argv(allowed)), "{allowed:?}");
-        }
-        for refused in [&["team", "lore", "find", "x"][..], &["team", "lore", "plans"], &["team", "lore", "export", "--team", "t"],
-            &["team", "lore", "show", "--team", "t"], &["team", "lore", "show", "a", "b", "--team", "t"], &["team", "lore", "plans", "x", "--team", "t"],
-            &["team", "lore", "find", "--team", "t"], &["team", "lore", "find", "x", "--team", "t", "--team", "u"], &["team", "lore", "find", "-x", "--team", "t"]] {
+        // Task 130: team lore reads start lore processes; the worker answers
+        // brokered reads in its tick and as itself, so they are not brokered.
+        for refused in [&["team", "lore", "find", "x", "--team", "t"][..], &["team", "lore", "plans", "--team", "t"]] {
             assert!(!sandbox_read_allowed(&argv(refused)), "{refused:?}");
         }
         for refused in [&["task", "list"][..], &["task", "get", "T-abc123"], &["task", "list", "--project"], &["task", "list", "--project", "-x"],

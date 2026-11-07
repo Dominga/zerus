@@ -11,7 +11,8 @@ Search before you ask or diagnose:
   hgs team lore show ID [--team ID]      one record
 After a compaction, recall the plan before anything else:
   hgs team lore plans [--team ID]        plans, counts and the open items
-From a member's session --team may be left out; a sandboxed member names it.
+From a member's session --team may be left out. A sandbox cannot run lore:
+ask the lead.
 
 A record Zerus cannot complete (a commit, a cause, a fix or a check is
 missing) waits in the lead's inbox with the command that writes it; it is

@@ -118,6 +118,22 @@ fn passing_run(task: &Task) -> Option<String> {
     })
 }
 
+/// A passing test run after `since` on a commit, as `template args`.
+fn passing_run_after(task: &Task, since: f64) -> Option<String> {
+    task.attempts.iter().rev().filter(|attempt| attempt.commits.iter().any(|commit| !commit.sha.is_empty())).find_map(|attempt| {
+        let run = attempt.runs.iter().rev().find(|run| run.at > since && run.exit == Some(0) && !run.timed_out && test_template(&run.template))?;
+        let args = if run.args.is_null() || run.args == json!({}) { String::new() } else { format!(" {}", run.args) };
+        Some(cut(&format!("{}{args}", run.template), 300))
+    })
+}
+
+/// A report made after `since` by an attempt that was not sent back.
+fn report_after(task: &Task, since: f64) -> Option<String> {
+    let attempt = task.attempts.iter().rev().find(|attempt| attempt.state != AttemptState::Rejected && attempt.report.as_ref().is_some_and(|report| report.at > since))?;
+    let text = attempt.report.as_ref()?.text.trim().to_owned();
+    (!text.is_empty()).then_some(text)
+}
+
 /// The accepted attempt's report, the text a fault's fix quotes.
 fn report_text(task: &Task) -> Option<String> {
     let attempt = task.attempts.iter().rev().find(|attempt| attempt.state != AttemptState::Rejected && attempt.report.is_some())?;
@@ -129,6 +145,34 @@ fn test_template(template: &str) -> bool {
     matches!(template, "cargo-test" | "qt-test" | "py-test" | "ctest" | "vstest" | "ue-test" | "android-test")
 }
 
+/// The team's phases with their titles, in order: phase 1, the approved
+/// initial plan, has no `Phase` record (`Team.phases`); `all` keeps drafts
+/// and sent-back phases too (the plain digest), else only approved ones.
+pub(crate) fn plan_phases(team: &Team, all: bool) -> Vec<(u32, String)> {
+    let mut phases: Vec<(u32, String)> = Vec::new();
+    let started = !matches!(team.status, TeamStatus::Draft | TeamStatus::Planning);
+    if !team.phases.iter().any(|phase| phase.n == 1) && (started || all) && team.tasks.iter().any(|task| task.phase <= 1) {
+        phases.push((1, String::new()));
+    }
+    for phase in &team.phases {
+        let shown = match phase.state {
+            PhaseState::Discarded => false,
+            PhaseState::Draft | PhaseState::Rejected => all,
+            _ => started || all,
+        };
+        if shown {
+            phases.push((phase.n, phase.title.clone()));
+        }
+    }
+    phases.sort_by_key(|(n, _)| *n);
+    phases
+}
+
+/// The tasks of a phase; a task stored before phases (0) is phase 1's.
+fn in_phase(task: &Task, n: u32) -> bool {
+    task.phase == n || (n == 1 && task.phase == 0)
+}
+
 /// What Zerus would write for the team now (docs/lore.md 6.1), and the
 /// records that wait on a field only a person can give.
 pub(crate) fn desired(team: &Team) -> (Vec<Value>, Vec<LorePending>) {
@@ -136,12 +180,9 @@ pub(crate) fn desired(team: &Team) -> (Vec<Value>, Vec<LorePending>) {
     let mut pending: Vec<LorePending> = Vec::new();
     let finished = matches!(team.status, TeamStatus::Done | TeamStatus::Stopped);
     // A plan per approved phase, an item per task of it.
-    for phase in &team.phases {
-        if matches!(phase.state, PhaseState::Draft | PhaseState::Discarded | PhaseState::Rejected) || matches!(team.status, TeamStatus::Draft | TeamStatus::Planning) {
-            continue;
-        }
-        let plan = plan_id(team, phase.n);
-        let tasks: Vec<&Task> = team.tasks.iter().filter(|task| task.phase == phase.n && task.status != TaskStatus::Draft).collect();
+    for (n, phase_title) in plan_phases(team, false) {
+        let plan = plan_id(team, n);
+        let tasks: Vec<&Task> = team.tasks.iter().filter(|task| in_phase(task, n) && task.status != TaskStatus::Draft).collect();
         if tasks.is_empty() {
             continue;
         }
@@ -187,8 +228,9 @@ pub(crate) fn desired(team: &Team) -> (Vec<Value>, Vec<LorePending>) {
                         "done"
                     }
                 }
-                TaskStatus::Cancelled => {
-                    item.insert("reason".into(), json!(cut(if task.decision_reason.is_empty() { "cancelled" } else { &task.decision_reason }, 600)));
+                TaskStatus::Cancelled | TaskStatus::Rejected => {
+                    let word = if task.status == TaskStatus::Rejected { "rejected" } else { "cancelled" };
+                    item.insert("reason".into(), json!(cut(if task.decision_reason.is_empty() { word } else { &task.decision_reason }, 600)));
                     item.insert("decided_by".into(), json!(decider(task)));
                     "dropped"
                 }
@@ -208,7 +250,7 @@ pub(crate) fn desired(team: &Team) -> (Vec<Value>, Vec<LorePending>) {
         let mut record = Map::new();
         record.insert("kind".into(), json!("plan"));
         record.insert("id".into(), json!(plan));
-        let title = if phase.title.trim().is_empty() { format!("{}: phase {}", team.name, phase.n) } else { format!("{}: {}", team.name, phase.title.trim()) };
+        let title = if phase_title.trim().is_empty() { format!("{}: phase {n}", team.name) } else { format!("{}: {}", team.name, phase_title.trim()) };
         record.insert("title".into(), json!(cut(&title, 120)));
         record.insert("goal".into(), json!(cut(if team.goal.trim().is_empty() { &team.name } else { &team.goal }, 800)));
         if finished && !undecided {
@@ -248,9 +290,16 @@ pub(crate) fn desired(team: &Team) -> (Vec<Value>, Vec<LorePending>) {
             continue;
         }
         let id = format!("{}finding-{}", prefix(team), finding.id.to_lowercase());
-        let fixing = finding.task.and_then(|task| team.task(task)).or_else(|| team.task(finding.from_task));
-        let check = fixing.and_then(passing_run);
-        let fix = fixing.filter(|task| task.status == TaskStatus::Accepted).and_then(report_text).unwrap_or_else(|| finding.note.clone());
+        // The task it names (reopened to fix it) or the follow-ups that name
+        // that task as their origin: only their work after the finding counts.
+        let source = finding.task.unwrap_or(finding.from_task);
+        let fixing: Vec<&Task> = team.tasks.iter().filter(|task| task.id == source || task.origin == Some(source)).collect();
+        let check = fixing.iter().find_map(|task| passing_run_after(task, finding.at));
+        let fix = if finding.note.trim().is_empty() {
+            fixing.iter().filter(|task| task.status == TaskStatus::Accepted).find_map(|task| report_after(task, finding.at)).unwrap_or_default()
+        } else {
+            finding.note.clone()
+        };
         let mut missing = Vec::new();
         if finding.scenario.trim().is_empty() {
             missing.push("symptom".to_owned());
@@ -624,7 +673,10 @@ pub(crate) fn sync(store: &mut Store, team_id: &str, bin: Option<&Path>) -> anyh
 
 /// lore did not start or did not finish: not a refusal of the record.
 fn is_transient(error: &str) -> bool {
-    error.starts_with("lore did not start") || error.starts_with("lore failed")
+    error.starts_with("lore did not start")
+        || error.starts_with("lore failed")
+        || error.contains("another writer holds the store")
+        || error.contains("another process holds the file")
 }
 
 /// The background writer: every 30 s, each active team with a workspace.
@@ -649,17 +701,31 @@ pub(crate) fn start_background(log: impl Fn(&str) + Send + 'static) {
 /// Task 128: the lead's digest block: the workspace's open items and newest
 /// decisions, at most 10 lines; empty without a workspace.
 pub(crate) fn digest(team: &Team) -> String {
-    let Some((workspace, _)) = workspace(team) else { return String::new() };
-    let records = current(&workspace);
-    let prefix = prefix(team);
-    let open: Vec<&Value> = records.values().filter(|record| record["kind"] == "item" && matches!(record["status"].as_str(), Some("open" | "deferred"))).collect();
-    let mut decisions: Vec<&Value> = records.values().filter(|record| record["kind"] == "decision").collect();
-    decisions.sort_by(|a, b| b["updated"].as_str().cmp(&a["updated"].as_str()).then(b["id"].as_str().cmp(&a["id"].as_str())));
-    if open.is_empty() && decisions.is_empty() && team.lore.recent.is_empty() {
+    // It runs in the dispatcher's inbox step: no file is read, the records
+    // come from the team as the writer computes them.
+    let Some((workspace, writes)) = workspace(team) else { return String::new() };
+    let records = if writes { desired(team).0 } else { Vec::new() };
+    let open = records.iter().filter(|record| record["kind"] == "item" && matches!(record["status"].as_str(), Some("open" | "deferred"))).count();
+    let mut decided: Vec<(f64, &Value)> = team
+        .proposals
+        .iter()
+        .filter(|proposal| matches!(proposal["state"].as_str(), Some("accepted" | "rejected")))
+        .map(|proposal| (proposal["decided_at"].as_f64().unwrap_or(0.0), proposal))
+        .collect();
+    decided.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let decisions: Vec<&Value> = decided
+        .iter()
+        .filter_map(|(_, proposal)| {
+            let id = format!("{}{}", prefix(team), proposal["id"].as_str().unwrap_or_default().to_lowercase());
+            records.iter().find(|record| record["id"] == id.as_str())
+        })
+        .take(3)
+        .collect();
+    if open == 0 && decisions.is_empty() && team.lore.pending.is_empty() {
         return String::new();
     }
-    let mut lines = vec![format!("Team memory ({}): {} open item(s); hgs team lore plans recalls them, hgs team lore find searches.", workspace.display(), open.len())];
-    for record in decisions.iter().filter(|record| record["id"].as_str().is_some_and(|id| id.starts_with(&prefix))).take(3) {
+    let mut lines = vec![format!("Team memory ({}): {open} open item(s); hgs team lore plans recalls them, hgs team lore find searches.", workspace.display())];
+    for record in decisions {
         lines.push(format!("- decision {}: {} ({})", record["id"].as_str().unwrap_or_default(), first_line(record["choice"].as_str().unwrap_or_default(), 120),
             first_line(record["reason"].as_str().unwrap_or_default(), 80)));
     }
@@ -684,9 +750,9 @@ pub(crate) fn plain_digest(team: &Team) -> String {
         head.truncate(head.len() - 2);
     }
     sections.push(head);
-    for phase in team.phases.iter().filter(|phase| !matches!(phase.state, PhaseState::Discarded)) {
-        let mut lines = vec![format!("Phase {} {}", phase.n, first_line(&phase.title, 100)).trim_end().to_owned()];
-        for task in team.tasks.iter().filter(|task| task.phase == phase.n) {
+    for (n, title) in plan_phases(team, true) {
+        let mut lines = vec![format!("Phase {n} {}", first_line(&title, 100)).trim_end().to_owned()];
+        for task in team.tasks.iter().filter(|task| in_phase(task, n)) {
             let outcome = match task.status {
                 TaskStatus::Accepted => format!("accepted by {}", decider(task)),
                 TaskStatus::Rejected => format!("rejected by {}", decider(task)),

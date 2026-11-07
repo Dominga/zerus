@@ -8232,7 +8232,7 @@ fn sandbox_request(member: &Member, folder: &Path, request: &Value) -> Value {
             let argv: Vec<String> =
                 request["input"]["argv"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
             if !super::outbox::sandbox_read_allowed(&argv) {
-                return refused(format!("a sandbox asks only for hgs ls, inspect, task reads and team lore reads, not: hgs {}", argv.join(" ")));
+                return refused(format!("a sandbox asks only for hgs ls, inspect and task reads, not: hgs {}", argv.join(" ")));
             }
             let words: Vec<&str> = argv.iter().map(String::as_str).collect();
             match hgs("", &words, None, Duration::from_secs(45)) {

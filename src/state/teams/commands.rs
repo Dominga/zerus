@@ -3082,8 +3082,8 @@ fn lore_read(op: &str, input: &Value) -> anyhow::Result<Value> {
     if command == "plans" {
         let prefix = super::lore_sync::prefix(&team);
         let mut open = Vec::new();
-        for phase in team.phases.iter().rev().take(3) {
-            let plan = super::lore_sync::plan_id(&team, phase.n);
+        for (n, _) in super::lore_sync::plan_phases(&team, false).iter().rev().take(3) {
+            let plan = super::lore_sync::plan_id(&team, *n);
             if let Ok(items) = super::lore_sync::read(&team, "items", &["--plan".into(), plan.clone()]) {
                 open.push(json!({"plan":plan,"items":items["stores"]["workspace"].clone()}));
             }

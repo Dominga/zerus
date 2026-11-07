@@ -704,10 +704,12 @@ paint a surface only on hover and selection.
 Supervised children draw no attention for requests their parent can handle.
 A child is supervised when its own computer lists its parent as `live`; rows
 with a parent then also carry `human_request`, true while the child holds a
-request only the person can answer: a tool or permission approval, a folder
-or Codex hooks trust prompt, or signing in (an authentication failure or
-**Sign in required**). A supervised child without one is quiet, like a muted
-session: no system notification, no rail, tray, menu bar or project header
+request only the person can answer: a tool or permission approval, its own or
+a native subagent's, a folder or Codex hooks trust prompt, or signing in (an
+authentication failure or **Sign in required**). A supervised child is quiet
+only when its host reports `human_request: false` and the row itself shows no
+such approval or sign-in; a host that does not report it keeps every request
+visible. A quiet child behaves like a muted session: no system notification, no rail, tray, menu bar or project header
 count, and gray badges and edge, while its status, Activity, unread reply,
 questions and approvals stay as they are and it remains in the Active and
 Needs attention filters. Nothing is marked read. Review later, the person's

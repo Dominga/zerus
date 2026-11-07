@@ -147,7 +147,11 @@ only the rows of the same listing and no machine identity; it is computed in
 waits on the shared catalog, and a launch reads its machine identity without
 the catalog lock, only after proving its caller.
 
-A row is **supervised** when `parent.state == "live"`. Every consumer, the
+A row is **supervised** when `parent.state == "live"`. It is **quiet** only
+when its host also reports `human_request: false` and the core sees no
+person-only request in the row itself (an approval of the session or a native
+subagent, a failed or required sign-in); a host that does not classify keeps
+every request visible. Every consumer, the
 desktop list, the desktop notification tracker in `client/core`, the desktop
 service (which projects each row through the same tracker) and later Android,
 reads the same fact from the row. When the parent is unknown, saved, archived or
@@ -209,7 +213,7 @@ with owned jobs shows Background and stays in Active) is preserved.
 | Waiting, Scheduled | quiet (never attention today) | unchanged |
 | Optional questions | quiet | the agent continues without an answer |
 | Blocking question (AskUserQuestion, Codex input, plan question) | quiet | the parent can answer with `hgs answer`; the parent card shows it (2.3) |
-| Tool or permission approval | **human** | an approval is the person's security gate; an agent never approves another agent's tool use (automatic approvals are a separate desktop opt-in) |
+| Tool or permission approval, the session's own or a native subagent's | **human** | an approval is the person's security gate; an agent never approves another agent's tool use (automatic approvals are a separate desktop opt-in) |
 | Startup folder trust prompt (`*-trust:` questions) | **human** | only the owner may confirm folder trust (`hgs guide launch`) |
 | Codex hooks trust, Sign in, sign-in failed, expired login | **human** | only the person can trust hooks or sign in |
 | Usage limit reached, rate limit, model unavailable | quiet | the parent moves the work to another account or model |

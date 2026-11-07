@@ -1281,6 +1281,49 @@ mod tests {
         );
     }
 
+    /// A listing row of a supervised child, through the public projection.
+    fn listed_child(extra: Value) -> ViewRow {
+        let mut raw = json!({"name":"claude/p/kid","agent":"claude","cmd":"claude","state":"running",
+            "process_state":"running","tracked":true,"run_id":"run-kid","conversation_id":"conv-kid","created":100,
+            "parent":{"schema":1,"machine":"11111111-1111-4111-8111-111111111111","host":"arch",
+                "session_id":"22222222-2222-4222-8222-222222222222","name":"claude/p/lead",
+                "conversation_id":"c","run_id":"r","source":"launch","at":1,"state":"live"}});
+        raw.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        crate::view::row(&raw)
+    }
+
+    #[test]
+    fn a_supervised_childs_approvals_alert_whatever_the_host_reports() {
+        // zerus-b5oin: an unclassified (older host) approval keeps attention.
+        let approval = json!({"activity":"waiting","phase":"approval","attention_id":"tool-1","attention_started":5});
+        let row = listed_child(approval.clone());
+        assert!(!row.quiet);
+        assert_eq!(Fixture::new().observe(vec![row]).raised.len(), 1);
+        let mut misread = approval;
+        misread["human_request"] = json!(false);
+        assert_eq!(
+            Fixture::new()
+                .observe(vec![listed_child(misread)])
+                .raised
+                .len(),
+            1
+        );
+        // zerus-dn4ia: a native subagent's tool approval is the person's.
+        let child = json!({"activity":"busy","phase":"tool","human_request":false,"subagents":{"w1":{
+            "name":"Reviewer","state":"working","display_state":"approval","attention_id":"a1","attention_started":5}}});
+        let row = listed_child(child.clone());
+        assert!(!row.quiet);
+        assert_eq!(Fixture::new().observe(vec![row]).raised.len(), 1);
+        // The same child asking a question is the parent's.
+        let mut question = child;
+        question["subagents"]["w1"]["display_state"] = json!("input");
+        let row = listed_child(question);
+        assert!(row.quiet);
+        assert!(Fixture::new().observe(vec![row]).raised.is_empty());
+    }
+
     #[test]
     fn a_supervised_childs_replies_are_remembered_silently_and_never_replayed() {
         let mut fixture = Fixture::new();

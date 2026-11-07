@@ -160,7 +160,13 @@ const PERSON_ONLY_QUESTIONS: [&str; 4] = ["claude-trust:", "codex-trust:", "kimi
 /// a tool or permission approval, folder or hook trust, or signing in. A
 /// supervised child's other requests are its parent's to answer.
 pub(super) fn human_request(session: &Value, questions: Option<&[Value]>) -> bool {
+    // A native subagent's tool approval is the person's too (zerus-dn4ia).
+    let approval = |child: &Value| {
+        ["display_state", "state"].iter().any(|key| child[*key] == "approval")
+    };
     string(session, "phase") == "approval"
+        || session["subagents"].as_object().is_some_and(|children| children.values().any(approval))
+        || session["subagent_previews"].as_array().is_some_and(|children| children.iter().any(approval))
         || session["provider_error"]["error_kind"] == "authentication"
         || string(session, "activity_summary") == "Sign in required"
         || questions.is_some_and(|questions| {
@@ -370,6 +376,10 @@ mod tests {
         assert!(human_request(&json!({"phase":"error","provider_error":{"error_kind":"authentication"}}), None));
         assert!(!human_request(&json!({"phase":"error","provider_error":{"error_kind":"quota"}}), None));
         assert!(human_request(&json!({"phase":"input","activity_summary":"Sign in required"}), None));
+        let child = |state: &str| json!({"phase":"tool","subagents":{"kid":{"state":"working","display_state":state}}});
+        assert!(human_request(&child("approval"), None), "a native subagent's approval");
+        assert!(!human_request(&child("input"), None));
+        assert!(human_request(&json!({"phase":"tool","subagent_previews":[{"state":"approval"}]}), None));
     }
 
     #[test]

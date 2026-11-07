@@ -542,6 +542,27 @@ impl<'a> Session<'a> {
             && self.read_mark("reply_id") != reply
     }
 
+    /// A request only the person can answer that this row shows by itself: a
+    /// tool or permission approval of the session or of a native subagent
+    /// (zerus-dn4ia), a failed sign-in or a required one. The host adds folder
+    /// and hook trust, which only its pending questions show.
+    fn person_only_request(&self) -> bool {
+        let approval = |child: &Value| {
+            ["display_state", "state"]
+                .iter()
+                .any(|key| child.get(*key).and_then(Value::as_str) == Some("approval"))
+        };
+        self.phase == "approval"
+            || self.error_kind() == "authentication"
+            || text(self.row, "activity_summary") == "Sign in required"
+            || object(self.row, "subagents").is_some_and(|map| map.values().any(approval))
+            || self
+                .row
+                .get("subagent_previews")
+                .and_then(Value::as_array)
+                .is_some_and(|list| list.iter().any(approval))
+    }
+
     fn child_needs_input(&self) -> bool {
         if text(self.row, "subagent_source") == "hook_profiles" {
             return false;
@@ -1316,8 +1337,11 @@ pub fn row(value: &Value) -> ViewRow {
         session_id: some(text(value, "session_id"))
             .filter(|id| crate::creation::canonical_uuid(id)),
         parent: ParentLink::from_row(value),
+        // Only an explicit host classification quiets a row; an older or
+        // unknown host keeps the person's attention (zerus-b5oin).
         quiet: ParentLink::from_row(value).is_some_and(|parent| parent.live())
-            && value.get("human_request") != Some(&Value::Bool(true)),
+            && value.get("human_request") == Some(&Value::Bool(false))
+            && !session.person_only_request(),
         // A live row lists no state; Qt reads it as running (`HgsClient.cpp`).
         state: session.state.to_owned(),
         tracked: session.tracked,

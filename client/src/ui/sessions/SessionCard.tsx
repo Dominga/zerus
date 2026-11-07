@@ -67,6 +67,8 @@ export type BadgeKind =
 export function badgeKind(s: Session): BadgeKind {
   const status = statusOf(s);
   if (status === "attention") return quietAttention(s) ? "muted-attention" : "attention";
+  // A supervised child's error is its parent's to handle: gray, like its other requests (zerus-rxz9k).
+  if (status === "error" && s.quiet && !s.muted) return "muted-attention";
   if (status === "error" || status === "working" || status === "background") return status;
   if (s.draft && status !== "offline") return "draft";
   if (visibleUnreadReply(s, computerFresh(s.computer))) return quietAttention(s) ? "muted-unread" : "unread";
@@ -79,7 +81,7 @@ export function emphasis(s: Session): string | undefined {
   const status = statusOf(s);
   if (quietAttention(s) && !(s.quiet && !s.muted && s.reviewLater) && (status === "attention" || visibleUnreadReply(s, computerFresh(s.computer)))) return "muted";
   if (status === "attention" || s.reviewLater) return "attention";
-  if (status === "error") return "error";
+  if (status === "error") return s.quiet && !s.muted ? "muted" : "error";
   if (s.draft) return "draft";
   if (visibleUnreadReply(s, computerFresh(s.computer))) return "unread";
   return undefined;

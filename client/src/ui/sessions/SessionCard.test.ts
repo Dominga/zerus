@@ -25,6 +25,19 @@ const row = (extra: Partial<Session> = {}): Session => ({
   computer: "", state: "running", status: "ready", unread: false, unreadReply: true, unreadCandidate: false, draft: false, ...extra,
 }) as Session;
 
+describe("supervised child presentation (zerus-sa9qn.3)", () => {
+  it("shows a quiet child's request, reply and error in gray, and its Review later mark as usual", () => {
+    mocks.online.mockReturnValue(true);
+    expect(badgeKind(row({ status: "attention", quiet: true }))).toBe("muted-attention");
+    expect(emphasis(row({ status: "attention", quiet: true }))).toBe("muted");
+    expect(badgeKind(row({ status: "error", quiet: true }))).toBe("muted-attention");
+    expect(emphasis(row({ status: "error", quiet: true }))).toBe("muted");
+    expect(badgeKind(row({ status: "error" }))).toBe("error");
+    expect(emphasis(row({ status: "error" }))).toBe("error");
+    expect(emphasis(row({ quiet: true, reviewLater: true }))).toBe("attention");
+  });
+});
+
 describe("session card unread presentation", () => {
   beforeEach(() => mocks.online.mockReset());
 

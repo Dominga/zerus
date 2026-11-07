@@ -828,7 +828,7 @@ fn already_live(record: &Value, snapshot: &Snapshot) -> Result<bool> {
         names.push(format!("{label}~{id}"));
     }
     for name in names {
-        if launched_as(snapshot, &name, label)? {
+        if launched_as(snapshot, &name, record)? {
             return Ok(true);
         }
     }
@@ -857,6 +857,7 @@ fn session_spec(
     let launch = supervisor_command(record, &executable, argv, &hint_environment);
     let mut environment = BTreeMap::from([
         ("HGS_SESSION", name.to_owned()),
+        ("HGS_SESSION_ID", string(record, "session_id").to_owned()),
         // The terminal this launch asks for; its supervisor keeps the label.
         ("HGS_TERMINAL_NAME", terminal.clone()),
         ("HGS_AGENT", string(record, "agent").to_owned()),

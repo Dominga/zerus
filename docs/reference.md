@@ -651,6 +651,50 @@ terminal, agent process and native conversation. `SessionEnd` alone does not pro
 process exit. A live process without verified activity shows **Status unknown**;
 **Agent exited** means the process ended while its tmux terminal still exists.
 
+### Child sessions
+
+A session that a live tracked agent launches, or forks, on the same computer is
+that agent's child. The launching `hgs` proves its caller by native process
+ancestry, exactly as `hgs self` does, and passes it to the new session as
+`HGS_PARENT`; it always sets the variable, empty when no live agent owns the
+launch, so an inherited or typed value never reaches the record. The new
+session's first record keeps it as `parent`: the parent's machine UUID and
+durable `session_id`, its name, conversation and run as hints, `source`
+(`launch` or `adopt`) and the time. A resume never adopts its launcher. Resume,
+Clear, fresh starts, rename, pause, archive and restore keep the link, as they
+keep `session_id`; an older `hgs` that rebuilds the record drops it. Claude,
+Codex and Kimi sessions carry links; DeepSeek and OpenCode sessions do not yet.
+A launch on another computer (`hgs @peer …`) records no parent yet.
+
+`hgs [@host] parent SESSION --json` reads JSON stdin with
+`expected_run_id`, `expected_conversation_id` and `action`: `read`, `adopt` or
+`clear`, plus optional `replace`. `adopt` makes the calling agent, proven the
+same way, the session's parent. It refuses a caller that no live agent owns, a
+session adopting itself, archived sessions, a target that already leads the
+caller on this computer (a cycle), and a session with another parent unless
+`replace` is true. Coordinators use it for workers they direct but did not
+launch. The answer names the link now in effect and the previous one. Links
+are presentation and attention routing only: they never authorize a send,
+answer, approval, stop or removal, and never change project membership.
+`hgs wait` dependencies, native subagents, names and folders never create one.
+
+`hgs ls --json` rows carry `parent` with `state` from the same listing: `live`
+(running, its agent not exited), `saved` (paused, stopped or exited),
+`archived`, `missing`, or `remote` for a parent on another computer.
+
+The desktop session list nests a child under its parent when both are shown in
+the same project group, 26 px per level up to three levels, with a connector
+from the parent above. The parent's footer shows **Team** with working and all
+child sessions (`2 of 5`); it collapses or expands them for this window, and
+Left and Right do the same from the keyboard, Left then moving from a child to
+its parent. A child whose parent is not shown above it stays at top level with
+**from PARENT**, which opens the parent when it is listed. A parent is matched by
+its computer's machine UUID and session ID, or by conversation for a parent an
+older `hgs` listed without one; names never match. A loop never hides a card.
+Cards show a large colored agent tile at the left and always paint their
+surface. See
+`docs/superpowers/specs/2026-11-07-account-labels-child-sessions-design.md`.
+
 ### Rename, Saved and Archive
 
 **Rename…** changes the label after the project name without replacing the process

@@ -458,6 +458,9 @@ fn observed_summary(record: &Value, live_pane: bool) -> Value {
     if !string(record, "session_id").is_empty() {
         output["session_id"] = record["session_id"].clone();
     }
+    if let Some(parent) = parent_link::listed(record) {
+        output["parent"] = parent;
+    }
     let last_tool = record["active_tools"]
         .as_object()
         .filter(|_| live_pane && output["activity"] == "busy")

@@ -45,6 +45,8 @@ export const [detailTab, setDetailTab] = createSignal<DetailTab>("activity");
 export const [subagentOpen, setSubagentOpen] = createSignal<string | undefined>();
 export const [search, setSearch] = createSignal(params.get("q") ?? "");
 export const [expandedChildren, setExpandedChildren] = createStore<Record<string, boolean>>({});
+/** Parents whose child sessions are collapsed in the list (device-local, this window only). */
+export const [collapsedTeams, setCollapsedTeams] = createStore<Record<string, boolean>>({});
 const rowDensity = createRowDensity({
   stored: () => settings[ROW_DENSITY_KEY], ready: settingsReady,
   save: (keys) => setSetting(ROW_DENSITY_KEY, keys),

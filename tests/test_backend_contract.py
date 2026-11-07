@@ -13,6 +13,7 @@ process still runs) and the terminal client that attaches.
 Build the agent with `cargo build --locked --example fake_agent`; HGS_TEST_BIN and
 HGS_TEST_FAKE_AGENT name other builds.
 """
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -794,6 +795,39 @@ class Sessions(Contract):
         self.hgs("kill", name)
         self.assertNotIn(name, self.sessions())
         self.assertNotIn(row["launch_id"], self.ended_launches())
+
+    @unittest.skipIf(os.name == "nt", "POSIX native-process ancestry fixture")
+    def test_a_launch_run_by_a_live_agent_records_it_as_the_parent(self):
+        # This test process stands in for a live tracked agent: its record
+        # names this process, so the launching hgs proves it as the caller.
+        start = subprocess.check_output(["ps", "-p", str(os.getpid()), "-o", "lstart="],
+                                        env=dict(self.env, LC_ALL="C", TZ="UTC"), text=True).strip()
+        lead_id = str(uuid.uuid4())
+        lead = dict(version=1, name="claude/project/lead", agent="claude", run_id="run-lead",
+                    conversation_id="conversation-lead", session_id=lead_id, subagents={},
+                    pid=os.getpid(), process_start=start)
+        state = self.root / "state"
+        state.mkdir(exist_ok=True)
+        lead_path = state / (hashlib.sha256(lead["name"].encode()).hexdigest() + ".json")
+        lead_path.write_text(json.dumps(lead))
+        # Teardown stops every recorded process; this one is the test itself.
+        self.addCleanup(lead_path.unlink, missing_ok=True)
+        # A value inherited from a surrounding session never reaches the record.
+        self.env.update(HGS_SESSION=lead["name"], HGS_RUN_ID="run-lead", HGS_PARENT='{"forged": true}')
+        name, row, _ = self.launch("kid")
+        parent = row["parent"]
+        self.assertEqual((parent["session_id"], parent["name"], parent["run_id"], parent["source"]),
+                         (lead_id, lead["name"], "run-lead", "launch"))
+        # The lead is not running in this backend, so the child is not supervised.
+        self.assertEqual(parent["state"], "saved")
+        # A launch the person runs outside any agent records no parent.
+        for key in ("HGS_SESSION", "HGS_RUN_ID"):
+            self.env.pop(key)
+        _, plain, _ = self.launch("plain")
+        self.assertNotIn("parent", plain)
+        # Pause and resume keep the link.
+        self.hgs("pause", name)
+        self.assertEqual(self.sessions()[name]["parent"]["session_id"], lead_id)
 
 
 class Input(Contract):

@@ -74,6 +74,7 @@ mod codex_goal_resume;
 mod codex_rate_limit;
 mod read_marks;
 mod notifications;
+pub(crate) mod parent_link;
 mod recipes;
 mod rename;
 mod resume_input;
@@ -590,6 +591,7 @@ fn finish_rows(sessions: &mut [Value], marks: &Value, names: &BTreeMap<String, S
     // rename keeps, to the names that `snapshot` listed (zerus-18u1).
     workspace::enrich(sessions, &workspace::snapshot_cwds(names));
     waits::decorate(sessions);
+    parent_link::decorate(sessions);
 }
 
 /// The rows a terminal listing starts from, before `merge_listing` adds what
@@ -1184,6 +1186,7 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if command == "clear-context" { return clear_context::dispatch(args); }
     if command == "interrupt" { return interrupt::dispatch(args); }
     if command == "processes" { return processes::dispatch(args); }
+    if command == "parent" { return parent_link::dispatch(args); }
     if args.first().is_some_and(|name| opencode::exists(name)) { return opencode::dispatch(command,args); }
     if args.first().is_some_and(|name| dsh::exists(name)) {
         return dsh::dispatch(command, args);

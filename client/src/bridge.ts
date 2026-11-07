@@ -531,9 +531,9 @@ export async function accountDistributionProgress(handle:string,receive:(row:Acc
   return listen<AccountDistributionProgress>("account-distribution-progress",event=>{if(event.payload.handle===handle)receive(event.payload);});
 }
 /** Sessions' explicit account chooser reads catalogs, without profile inspects. */
-export async function accountFiltersView(force = false): Promise<AccountsView> {
+export async function accountFiltersView(force = false, hosts?: string[]): Promise<AccountsView> {
   if (!inTauri()) return emptyAccounts([DESKTOP_ONLY]);
-  return invoke<AccountsView>("account_filters_view", { force });
+  return invoke<AccountsView>("account_filters_view", hosts ? { force, hosts } : { force });
 }
 
 /** The Machines view; `force` is Refresh. */

@@ -132,6 +132,7 @@ const STARTUP_POLL: Duration = Duration::from_millis(100);
 /// runs; a Claude Code that finds it refuses to start as one nested in another.
 const SESSION_CONTEXT: &[&str] = &[
     "CLAUDECODE",
+    "HGS_PARENT",
     "TMUX",
     "TMUX_PANE",
     "HGS_HOST_SESSION",

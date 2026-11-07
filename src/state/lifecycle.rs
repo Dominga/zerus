@@ -216,6 +216,13 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             "transcript": null, "startup_kind":startup_kind,"launch_id":nonempty_env("HGS_LAUNCH_ID"), "account_id": nonempty_env("HGS_ACCOUNT_ID"), "agent_home": nonempty_env(home_var(&agent)?), "pid": std::process::id(),
             "process_start": process_start(std::process::id()),
             "supervisor": {"pid": std::process::id(), "start": process_start(std::process::id())}});
+        // The live tracked agent that launched this new session, proven by the
+        // launching hgs (zerus-sa9qn.2). A resume never adopts its launcher.
+        if startup_kind == "new" || nonempty_env("HGS_FORK_PARENT_ID").is_some() {
+            if let Some(link) = parent_link::from_env() {
+                record["parent"] = link;
+            }
+        }
         // A fork starts in its source session's project (zerus-zjsj).
         let mut fork_source = None;
         if let Some(parent) = nonempty_env("HGS_FORK_PARENT_ID") {
@@ -290,6 +297,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
                 "session_id",
                 "launch_label",
                 "layout",
+                "parent",
             ] {
                 if let Some(value) = previous.get(key) {
                     record[key] = value.clone();

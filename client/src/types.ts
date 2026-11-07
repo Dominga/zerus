@@ -108,6 +108,8 @@ export interface ViewRow {
   git_root?: string;
   /** Verified linked checkout name; absent for main or unknown checkouts. */
   worktree?: string | null;
+  /** The session that launched or adopted this one (core `ParentLink`). */
+  parent?: ParentLinkOut | null;
   terminal_supported?: boolean;
   terminal_reported?: boolean;
   terminal_attach_supported?: boolean;
@@ -115,6 +117,8 @@ export interface ViewRow {
   bulk_lifecycle_supported?: boolean;
 }
 
+/** A child's parent as its computer lists it; `state` is live, saved, archived, missing or remote. */
+export interface ParentLinkOut { machine: string; session_id: string; name: string; conversation_id: string; run_id: string; state: string }
 export interface RowOut { computer: ComputerId; key: string; row: ViewRow }
 export interface KeyOut { computer: ComputerId; key: string; reason?: string | null }
 export interface ReplaceOut { computer: ComputerId; rows: RowOut[] }

@@ -269,6 +269,8 @@ pub struct ParentLink {
     pub conversation_id: String,
     pub run_id: String,
     pub state: String,
+    /// When the link was recorded (launch or adoption), Unix seconds; 0 unknown.
+    pub at: i64,
 }
 
 impl ParentLink {
@@ -288,6 +290,11 @@ impl ParentLink {
             conversation_id: field("conversation_id"),
             run_id: field("run_id"),
             state: field("state"),
+            at: link
+                .get("at")
+                .and_then(Value::as_i64)
+                .filter(|at| *at > 0)
+                .unwrap_or(0),
         };
         let identity = crate::creation::canonical_uuid(&parent.session_id)
             || (parent.session_id.is_empty() && !parent.conversation_id.is_empty());
@@ -1442,6 +1449,16 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&listed).unwrap()["parent"]["state"],
             "live"
+        );
+        // The link time: when a new child row starts compact (zerus-sa9qn.14).
+        assert_eq!(serde_json::to_value(&listed).unwrap()["parent"]["at"], 1);
+        let mut undated = link.clone();
+        undated["at"] = json!(-5);
+        assert_eq!(
+            row(&json!({"name":"codex/p/kid","parent":undated}))
+                .parent
+                .map(|parent| parent.at),
+            Some(0)
         );
         let mut older = link.clone();
         older["session_id"] = json!("");

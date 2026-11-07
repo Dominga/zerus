@@ -121,7 +121,9 @@ export interface ViewRow {
 }
 
 /** A child's parent as its computer lists it; `state` is live, saved, archived or missing. */
-export interface ParentLinkOut { machine: string; session_id: string; name: string; conversation_id: string; run_id: string; state: string }
+export interface ParentLinkOut { machine: string; session_id: string; name: string; conversation_id: string; run_id: string; state: string;
+  /** When the link was recorded, Unix seconds; 0 when unknown. */
+  at?: number }
 export interface RowOut { computer: ComputerId; key: string; row: ViewRow }
 export interface KeyOut { computer: ComputerId; key: string; reason?: string | null }
 export interface ReplaceOut { computer: ComputerId; rows: RowOut[] }

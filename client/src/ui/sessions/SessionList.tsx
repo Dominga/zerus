@@ -50,6 +50,7 @@ import { filterAccounts, selectedFilterAccounts, chooseFilterAccounts, toggleFil
 import { loadMarkCatalogs } from "../../store/accounts";
 import { setParentDialog } from "../../store/parentLinks";
 import { clearFolderScope } from "../../store/folderFilter";
+import { compactNewChildren } from "../../store/childRowsWatch";
 import { leaf, native } from "./paths";
 import { appendAccountChoices, bindingState, type AccountChoice } from "./scope-filters";
 import type { ClearControl, SessionRef } from "../../types";
@@ -554,6 +555,7 @@ function slideOpenLater(el: () => HTMLElement | undefined, width: () => number) 
 }
 
 export function SessionList() {
+  compactNewChildren();
   const refreshAccounts = () => { void openFilterAccounts().catch(() => {}); };
   onCleanup(cancelFilterAccountReads);
   // Account marks need each live computer's account catalog (bindings only, no

@@ -144,6 +144,10 @@ pub const KEYS: &[Key] = &[
     client("sessions/accountMarks", Kind::Choice(&["letter", "emoji"])),
     // Session cards show account marks at all (zerus-sa9qn.13).
     client("sessions/showAccountMarks", Kind::Flag(true)),
+    // A new child session's row starts compact (zerus-sa9qn.14); the second
+    // key is the device's record of the child links it already handled.
+    client("sessions/compactNewChildren", Kind::Flag(true)),
+    client("sessions/childRowsSeen", Kind::Text("")),
     key("workspace/animateActivity", Kind::Flag(true)),
     key("workspace/showCompletedSubagents", Kind::Flag(false)),
     key("workspace/reduceMotion", Kind::Flag(false)),

@@ -26,7 +26,7 @@ const PROBE: &str = "[isolation]\ntemplates = [\"probe\"]\n";
 
 fn shell(template: &str, windows: &str, unix: &str) -> Plan {
     let (program, flag, command) = if cfg!(windows) { ("cmd", "/c", windows) } else { ("sh", "-c", unix) };
-    Plan { template: template.into(), program: program.into(), argv: vec![flag.into(), command.into()], commit: None, more: Vec::new() }
+    Plan { template: template.into(), program: program.into(), argv: vec![flag.into(), command.into()], commit: None, more: Vec::new(), cwd: None }
 }
 
 fn run(fixture: &Fixture, plan: &Plan) -> crate::state::teams::templates::Outcome {

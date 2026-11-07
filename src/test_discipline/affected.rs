@@ -405,12 +405,15 @@ fn team_steps(provider: &Provider, section: &ProviderMap, group: Option<&str>, i
         }
         Kind::Pytest | Kind::Cython => {
             let mut test = Map::new();
-            // The template takes at most 64 paths: more run the provider's folder.
-            let paths: Vec<String> = if whole || runs.len() > 64 {
-                if provider.root.is_empty() || provider.root == "." { Vec::new() } else { vec![provider.root.trim_end_matches('/').to_owned()] }
-            } else {
-                runs.iter().map(|path| in_project(provider, path)).collect()
-            };
+            // Task 153: a provider in a subfolder is its own Python project:
+            // its environment, setup.py and pytest's folder are there.
+            let project = (!provider.root.is_empty() && provider.root != ".").then(|| provider.root.trim_end_matches('/').to_owned());
+            // The template takes at most 64 paths: more run the project's
+            // whole set, which pytest finds from the folder it runs in.
+            let paths: Vec<String> = if whole || runs.len() > 64 { Vec::new() } else { runs.iter().map(|path| in_project(provider, path)).collect() };
+            if let Some(project) = &project {
+                test.insert("project".into(), project.clone().into());
+            }
             if !paths.is_empty() {
                 test.insert("paths".into(), json!(paths));
             }
@@ -420,7 +423,13 @@ fn team_steps(provider: &Provider, section: &ProviderMap, group: Option<&str>, i
                 let lower = file.to_ascii_lowercase();
                 [".pyx", ".pxd", ".pxi", ".c", ".cpp", ".h"].iter().any(|ext| lower.ends_with(ext)) || lower.ends_with("setup.py")
             };
-            let build = (provider.kind == Kind::Cython && (changed.is_empty() || changed.iter().any(extension))).then(|| request("cython-build", Map::new()));
+            let build = (provider.kind == Kind::Cython && (changed.is_empty() || changed.iter().any(extension))).then(|| {
+                let mut build = Map::new();
+                if let Some(project) = &project {
+                    build.insert("project".into(), project.clone().into());
+                }
+                request("cython-build", build)
+            });
             (build, Some(request("py-test", test)))
         }
         Kind::Msbuild => {

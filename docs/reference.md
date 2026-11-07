@@ -7992,6 +7992,11 @@ and nothing is enforced: a team without a configuration keeps today's flow.
   - pytest: `py-test` with the chosen test files as `paths`;
   - cython: `cython-build` when an extension source (`.pyx`, `.pxd`, `.pxi`,
     C or C++, `setup.py`) changed or for the whole set, then `py-test`;
+  - a Python provider with a `root` (task 153) passes it as both templates'
+    `project`: the environment (`.venv`, `venv`, uv, Poetry) and `setup.py`
+    are that folder's and the commands run there; it must be a folder inside
+    the member's folder, its real path too. Paths stay member-relative and
+    the JUnit report and pytest cache stay in the member's `.zerus-team`;
   - msbuild: `msbuild-build` of the chosen test project (its configuration
     and platform), or of `manifest` for the whole set, then `vstest` with its
     assemblies; without a test project the build is the run;

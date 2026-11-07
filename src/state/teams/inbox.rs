@@ -860,20 +860,17 @@ fn all_items(team: &Team) -> Vec<Item> {
             continue;
         }
         let member = team.member(&attempt.member);
-        let kind = if attempt.no_report {
-            Some("no_report")
-        } else if member.and_then(|member| member.seen).is_some_and(|seen| !seen.live) {
+        // Owner, 2026-11-07: a turn that ended without a report is No report
+        // (the item below offers the lead its last reply); it is not a stalled
+        // session and Zerus never stores the reply as the report.
+        let kind = if member.and_then(|member| member.seen).is_some_and(|seen| !seen.live) {
             Some("stopped")
         } else {
             None
         };
         if let Some(kind) = kind {
             let role = team.name_of(&attempt.member);
-            let what = if kind == "no_report" {
-                format!("{role} ended its turn on #{} with neither a report nor a reply", task.id)
-            } else {
-                format!("{role}'s session stopped on #{}", task.id)
-            };
+            let what = format!("{role}'s session stopped on #{}", task.id);
             items.push(Item {
                 subagents: Value::Null,
                 kind: "stalled",
@@ -974,10 +971,12 @@ fn all_items(team: &Team) -> Vec<Item> {
         });
     }
     // U20: a delivered attempt whose turn ended long ago and still has no
-    // report is an item, whatever the capture did. The owner (2026-11-01):
-    // waiting for the answer to the member's own question or for its Background
-    // work is not a stall, so that wait is no missing report; the budget or the
-    // block timeout reaches the lead as the blocked message instead.
+    // report is an item. Owner, 2026-11-07: it is No report, never a capture
+    // from the member's last reply; the reply is shown here and the one action
+    // is to use it as the report. Waiting for the answer to the member's own
+    // question or for its Background work is not a stall, so that wait is no
+    // missing report; the budget or the block timeout reaches the lead as the
+    // blocked message instead.
     let now = crate::state::now();
     for task in &team.tasks {
         let Some(attempt) = task.open_attempt() else { continue };
@@ -1004,11 +1003,13 @@ fn all_items(team: &Team) -> Vec<Item> {
             member: role.clone(),
             since: ended,
             summary: summary(&format!("{role} ended its turn {minutes} min ago on #{} without a report: {}", task.id, task.title)),
+            // One action: this reply as the report. The CLI reads the attempt's
+            // kept reply (or its session's last one); the lead decides.
             command: format!(
-                "{} | hgs team report --json",
-                json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id,"attempt":attempt.id,"text":"..."})
+                "{} | hgs team use-last-reply --json",
+                json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id,"attempt":attempt.id})
             ),
-            detail: attempt.turn_reply.clone(),
+            detail: summary(&attempt.last_reply),
         });
     }
     // H1: a member stopped by a usage limit is one item, with its reset time
@@ -1624,11 +1625,15 @@ mod tests {
             let attempt = &mut team.task_mut(1).unwrap().attempts[0];
             attempt.turn_ended_at = Some(ended);
             attempt.turn_reply = "Done: the report is the last message".into();
+            attempt.last_reply = "Done: the report is the last message".into();
         }
         let list = items(&team);
         let found = list.iter().find(|item| item.kind == "no_report").unwrap();
         assert!(found.summary.contains("without a report"), "{}", found.summary);
+        // The lead sees the kept reply and the one action that uses it.
         assert_eq!(found.detail, "Done: the report is the last message");
+        assert!(found.command.contains("hgs team use-last-reply"), "{}", found.command);
+        assert!(!found.command.contains("team report"), "{}", found.command);
         // A report ends the item.
         team.task_mut(1).unwrap().attempts[0].report = Some(crate::state::teams::model::Report {
             text: "Done".into(),

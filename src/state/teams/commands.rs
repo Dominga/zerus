@@ -4472,13 +4472,19 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 filled["attempt"] = json!(task.open_attempt().context("The task has no open attempt")?.id);
             }
             if op == "use-last-reply" && text(input, "text").trim().is_empty() {
-                // The member's last reply becomes the report; reading it is not
+                // This reply becomes the report: the attempt keeps the reply
+                // that ended its turn (owner, 2026-11-07); an old record
+                // without it reads the member's session. Reading either is not
                 // part of the request's identity.
                 let team = store.load(team_id)?.context("Unknown team")?;
                 let task = team.task(input["task"].as_u64().unwrap_or_default() as u32).context("Unknown task")?;
                 let attempt = task.attempts.iter().find(|a| a.id == text(&filled, "attempt")).context("Unknown attempt")?;
-                let session = team.member(&attempt.member).and_then(|m| m.session.clone()).context("The member has no session")?;
-                filled["text"] = json!(super::dispatcher::last_reply(&session)?);
+                if !attempt.last_reply.trim().is_empty() {
+                    filled["text"] = json!(attempt.last_reply);
+                } else {
+                    let session = team.member(&attempt.member).and_then(|m| m.session.clone()).context("The member has no session")?;
+                    filled["text"] = json!(super::dispatcher::last_reply(&session)?);
+                }
             }
             if matches!(op, "plan" | "add-member" | "swap-member" | "draft") {
                 // An existing session must run here and be free of another

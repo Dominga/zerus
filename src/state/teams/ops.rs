@@ -5927,13 +5927,6 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
             ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
             report(team, input, actor, events)
         }
-        // A2: the dispatcher's capture of a member's last reply; no command
-        // reaches this operation.
-        "capture-report" => {
-            ensure!(matches!(actor, Actor::Member(_)), "Zerus captures a member's reply");
-            ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
-            report_with(team, input, actor, true, events)
-        }
         "ask" => ask(team, input, actor, events),
         "reply" => reply(team, input, actor, events),
         "hold" => hold(team, input, actor, events),

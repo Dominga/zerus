@@ -324,10 +324,10 @@ pub(crate) enum Step {
     RunAwaited { task: u32, run: String, label: String },
     /// Task 36: the awaited run settled. `wake`: the member's turn is over
     /// (the session is quiet), so it is told once to read the result and go
-    /// on, and its finished turn is not captured; otherwise the member already
+    /// on, and its finished turn is not taken as its report; otherwise the member already
     /// works again and the run is only forgotten.
     RunSettled { task: u32, wake: bool },
-    /// The capture gate was seen open: the report timeout counts from here (C2).
+    /// The report gate was seen open: the report timeout counts from here (C2).
     GateOpen { task: u32 },
     /// A question or Background work holds a finished turn: the timeout
     /// restarts and a long block reaches the lead (C2, N5).
@@ -703,7 +703,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                     }
                 }
             }
-            // A2/C2: the capture gate. A turn end is recorded only for a quiet
+            // A2/C2: the report gate. A turn end is recorded only for a quiet
             // session: idle, no question, input or approval, no Background work
             // and no open team question. The report timeout counts from the
             // tick that first saw the gate open, not from the reply.
@@ -720,9 +720,9 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                             // A2: the session is quiet but the listing carries no
                             // reply mark for the turn (its replies were never read),
                             // so no turn end could be recorded. After the timeout the
-                            // attempt is decided all the same: No report captures the
-                            // quiet session's last reply instead of leaving the task
-                            // in progress for hours (U20, #343 attempt 2).
+                            // attempt is decided all the same: No report keeps the
+                            // quiet session's last reply for the lead instead of
+                            // leaving the task in progress for hours (U20, #343 attempt 2).
                             steps.push(Step::NoReport { task: task.id });
                         }
                     } else if found.live && found.idle && replied.is_some() && attempt.blocked_since.is_none() {
@@ -741,7 +741,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                     let quiet = found.is_some_and(capture_open) && attempt.open_question().is_none() && same;
                     let ready = attempt.report_ready_at.unwrap_or(ended);
                     if found.is_none_or(|found| !found.live) {
-                        // L6: the session is gone; the old fallback captures what
+                        // L6: the session is gone; the old fallback keeps what
                         // it can, else marks No report.
                         if !attempt.no_report && now - ready >= team.settings.report_timeout_seconds as f64 {
                             steps.push(Step::NoReport { task: task.id });
@@ -766,7 +766,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                     // A2: the member's session is not in the listing at all (it
                     // stopped or was renamed) and no turn end was recorded. After
                     // the timeout the attempt is decided as for a session that went
-                    // away: its last reply is captured from the session's record,
+                    // away: its last reply is kept from the session's record,
                     // or it shows No report (U20). N7: only while its computer is
                     // listed - an absent listing is not a stopped session.
                     if !attempt.no_report
@@ -2115,8 +2115,9 @@ fn hand_off_text_rules(
          Never repair file permissions or ACLs yourself; report the exact error to {boss} with the folder and the command.\n\
          Never install a tool yourself: a missing test or build tool is offered to the owner in Waiting for you \
          (hgs test tools); ask {boss} about it and work without it.\n\
-         Summarize what changed, where, and how you checked it. If you cannot run that command, end your turn with \
-         the report as your last message: Zerus gives it to {boss}. A blocker goes to {boss} too: ask it, not the owner.",
+         Summarize what changed, where, and how you checked it. A report is an explicit `hgs {at}team report`: \
+         ending your turn without one leaves the task as No report, and {boss} reads your last reply and decides. \
+         A blocker goes to {boss} too: ask it, not the owner.",
         ask = json!({"request_id":uuid::Uuid::new_v4().to_string(),"team":team.id,"task":task.id,"attempt":attempt.id,"text":"..."}),
         current = json!({"attempt":attempt.id}),
         report = report
@@ -2593,7 +2594,7 @@ pub(crate) fn question_text(team: &Team, member: &Member, card: &Value) -> Strin
         format!("[Zerus team \u{b7} from: {role} \u{b7} permission]\n{role} asks you, the lead, for a permission instead of the owner. \
                  You decide: allow what its task needs inside the team's folder; deny what would change other folders, the \
                  system or permissions, or delete what it cannot restore, and ask the owner only for those. Access only to \
-                 send its report is never needed: deny it, Zerus takes the report from its folder or its last reply.\n")
+                 send its report is never needed: deny it; if it ends its turn without one, you can use its last reply as the report.\n")
     } else {
         format!("[Zerus team \u{b7} from: {role} \u{b7} question]\n{role} asks you, the lead, instead of the owner:\n")
     };
@@ -5407,7 +5408,7 @@ fn run_settled(store: &mut Store, team: &Team, task_id: u32, wake: bool) -> anyh
         attempt.awaited_label.clear();
         if let Some(sent) = sent {
             // Woken once, whatever the delivery: a refused wake leaves the
-            // finished turn to the usual capture.
+            // finished turn to the usual No report.
             if !matches!(sent, Sent::Refused(_)) {
                 attempt.turn_ended_at = None;
                 attempt.turn_reply.clear();
@@ -6632,118 +6633,6 @@ fn send_all_decided(store: &mut Store, team_id: &str) -> anyhow::Result<()> {
     })
 }
 
-/// U58: a reply that only says it waits (a build lock, a queue) is the member's
-/// status, never its report: the attempt shows No report instead of storing the
-/// wait as the task's outcome.
-fn waits_only(reply: &str) -> bool {
-    let text = reply.trim().to_lowercase();
-    if text.is_empty() || text.chars().count() > 400 {
-        return false;
-    }
-    let waits = [
-        "waiting", "wait for", "wait until", "waiting on", "blocked", "queued", "in the queue", "build lock",
-        "lock is held", "жду", "ожида", "в очереди", "заблокир", "подож",
-    ];
-    if !waits.iter().any(|phrase| text.contains(phrase)) {
-        return false;
-    }
-    let reports = [
-        "report", "done", "finished", "complete", "passed", "failed", "commit", "pushed", "merged", "tests", "fixed",
-        "implemented", "acceptance", "отчёт", "готово", "сделал", "прошл", "провал", "коммит", "исправ", "тест", "принят",
-    ];
-    !reports.iter().any(|marker| text.contains(marker))
-}
-
-/// U56: a reply whose last line says the member still waits ("waiting for the
-/// editor to close", "I'll report once the build ends") is not its report,
-/// whatever work the lines before name; a wait for the lead's review is.
-fn still_waits(reply: &str) -> bool {
-    let Some(last) = reply.lines().map(str::trim).rfind(|line| !line.is_empty()) else { return false };
-    let last = last.to_lowercase();
-    // A report ends waiting for its decision: that wait is the lead's, not one.
-    let decision = ["review", "accept", "decision", "approv", "feedback", "ревью", "решени", "одобр", "приём", "прием"];
-    if decision.iter().any(|word| last.contains(word)) {
-        return false;
-    }
-    let still = [
-        "still waiting", "still wait", "i'll report once", "i'll report when", "i will report once", "i will report when",
-        "report as soon as", "ещё жду", "еще жду", "всё ещё жду", "все еще жду", "отчитаюсь, когда", "отчитаюсь когда",
-        "отчитаюсь после", "дождусь",
-    ];
-    if still.iter().any(|phrase| last.contains(phrase)) {
-        return true;
-    }
-    // "waiting for the editor to close": a wait for something to end.
-    let ends = [" to close", " to finish", " to complete", " to end", " to exit", " to be released", " to unlock", " to free"];
-    ["waiting for", "wait for", "waiting on", "waiting until"].iter().any(|wait| {
-        last.match_indices(wait).any(|(at, _)| {
-            let rest: String = last[at + wait.len()..].chars().take(60).collect();
-            ends.iter().any(|end| rest.contains(end))
-        })
-    }) || ["жду, пока", "жду пока", "жду заверш", "жду оконч"].iter().any(|phrase| last.contains(phrase))
-}
-
-/// What capture refuses to make a report: a waiting-only reply (U58) or one
-/// that ends saying it still waits (U56). The attempt then shows No report.
-fn not_a_report(reply: &str) -> bool {
-    waits_only(reply) || still_waits(reply)
-}
-
-/// A2: records the member's last reply as the attempt's report and marks it
-/// captured, so the member may replace it while the task is undecided (A6).
-fn capture_report(store: &mut Store, team_id: &str, task_id: u32, reply: &str, expected_reply: &str) -> anyhow::Result<()> {
-    // U58/U56: a reply that only waits, or still waits, is a status; the attempt then shows No report.
-    anyhow::ensure!(!not_a_report(reply), "the reply only says it waits; it is a status, not a report");
-    change(store, team_id, |team, events| {
-        let task = team.task(task_id).context("unknown task")?;
-        anyhow::ensure!(!task.is_check(), "a check task reports its exit code, not a reply");
-        let attempt = task.attempts.last().context("the task has no attempt")?;
-        // The gate was checked before the reply was read, which can take up to
-        // 45 s: re-check it here, including the reply identity (N1).
-        anyhow::ensure!(
-            attempt.state == AttemptState::Delivered
-                && attempt.turn_ended_at.is_some()
-                && attempt.open_question().is_none()
-                && (expected_reply.is_empty() || attempt.turn_reply == expected_reply),
-            "the attempt changed before its report was captured"
-        );
-        let name = team.name_of(&attempt.member);
-        let (attempt_id, member) = (attempt.id.clone(), attempt.member.clone());
-        let input = json!({"task":task_id,"attempt":attempt_id,
-            "text":format!("(From the last reply of {name}; it ran no hgs team report.)\n\n{reply}")});
-        ops::apply(team, "capture-report", &input, &ops::Actor::Member(member), &BTreeSet::new(), events)?;
-        Ok(())
-    })
-}
-
-/// A2/U20: an attempt whose turn end never reached the listing (a quiet session
-/// the listing carried no reply mark for): records the turn end and the member's
-/// last reply as its report in one change, so the next tick cannot read it as a
-/// resumed turn and clear it.
-fn capture_quiet(store: &mut Store, team_id: &str, task_id: u32, reply: &str) -> anyhow::Result<()> {
-    // U58/U56: a reply that only waits, or still waits, is a status; the attempt then shows No report.
-    anyhow::ensure!(!not_a_report(reply), "the reply only says it waits; it is a status, not a report");
-    change(store, team_id, |team, events| {
-        let task = team.task(task_id).context("unknown task")?;
-        anyhow::ensure!(!task.is_check(), "a check task reports its exit code, not a reply");
-        let attempt = task.attempts.last().context("the task has no attempt")?;
-        anyhow::ensure!(
-            attempt.state == AttemptState::Delivered && attempt.turn_ended_at.is_none() && attempt.open_question().is_none(),
-            "the attempt changed before its report was captured"
-        );
-        let at = now();
-        let name = team.name_of(&attempt.member);
-        let (attempt_id, member) = (attempt.id.clone(), attempt.member.clone());
-        let input = json!({"task":task_id,"attempt":attempt_id,
-            "text":format!("(From the last reply of {name}; it ran no hgs team report.)\n\n{reply}")});
-        ops::apply(team, "capture-report", &input, &ops::Actor::Member(member), &BTreeSet::new(), events)?;
-        let found = team.task_mut(task_id).and_then(|task| task.attempts.last_mut()).context("the captured attempt")?;
-        found.turn_ended_at = Some(at);
-        found.turn_reply.clear();
-        Ok(())
-    })
-}
-
 fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::Result<()> {
     if matches!(step, Step::Brief | Step::SubBrief{..} | Step::Launch{..} | Step::HandOut{..} | Step::StageOut{..}) {
         match super::super::iron_rules::project_identity(team) {
@@ -7066,18 +6955,31 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::TellStop { stop } => tell_stop(store, team, stop),
         Step::InterruptStop { stop } => interrupt_stop(store, team, stop),
         Step::Rebalanced { tasks } => tell_lead_rebalanced(store, team, tasks),
-        Step::TurnEnded { task, at, reply } => change(store, &team.id, |team, _| {
+        Step::TurnEnded { task, at, reply } => {
+            // The reply that ended the turn is kept for the lead to read and to
+            // use as the report explicitly; it is never the report by itself.
+            let session = team
+                .task(*task)
+                .and_then(|t| t.attempts.last())
+                .and_then(|a| team.member(&a.member))
+                .and_then(|m| m.session.clone());
+            let last_reply = session.and_then(|session| last_reply_of(&session, reply).ok().flatten());
+            change(store, &team.id, |team, _| {
             if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
                 if attempt.state == AttemptState::Delivered && attempt.turn_ended_at.is_none() {
                     attempt.turn_ended_at = Some(*at);
                     attempt.turn_reply = reply.clone();
+                    if let Some(last_reply) = last_reply.clone() {
+                        attempt.last_reply = last_reply;
+                    }
                     // The gate is open at this tick: the timeout starts here (C2).
                     attempt.report_ready_at = Some(now());
                     attempt.blocked_since = None;
                 }
             }
             Ok(())
-        }),
+            })
+        },
         Step::RunAwaited { task, run, label } => change(store, &team.id, |team, _| {
             if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
                 if attempt.state == AttemptState::Delivered {
@@ -7256,62 +7158,41 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::TellStartLate { task } => tell_lead_start_late(store, team, *task),
         Step::AnswerQuestion { task, question } => send_answer(store, team, *task, question),
         Step::NoReport { task } => {
-            // The report timeout passed with the capture gate holding (A2): the
-            // member's last reply becomes its report, marked captured so the
-            // member may replace it (A6); only without a reply does the task
-            // show No report.
+            // Owner, 2026-11-07: Zerus never makes the member's last reply its
+            // report. The turn ended without `hgs team report`; the task shows
+            // No report, and the lead reads the reply and decides (one action:
+            // use it as the report). The reply is read now only to show it.
             let attempt = team.task(*task).and_then(|t| t.attempts.last()).cloned();
             let session = attempt.as_ref().and_then(|a| team.member(&a.member)).and_then(|m| m.session.clone());
-            if let (Some(attempt), Some(session)) = (attempt, session) {
-                if attempt.turn_ended_at.is_none() {
-                    // A2/U20: no turn end reached the listing (a quiet session whose
-                    // replies were never marked), so there is no recorded reply to
-                    // compare with. N6: only a reply written after this attempt was
-                    // delivered is its outcome; the session's older last message (an
-                    // earlier attempt's report, another task's) is not.
-                    if let Ok(Some(reply)) = last_reply_after(&session, attempt.delivered_at.unwrap_or(attempt.sent_at)) {
-                        if capture_quiet(store, &team.id, *task, &reply).is_ok() {
-                            return Ok(());
-                        }
-                    }
-                } else {
-                    match last_reply_of(&session, &attempt.turn_reply) {
-                        Ok(Some(reply)) => {
-                            if capture_report(store, &team.id, *task, &reply, &attempt.turn_reply).is_ok() {
-                                return Ok(());
-                            }
-                        }
-                        Ok(None) => {
-                            // A newer reply: the turn ended again, so record that one
-                            // (A2). The next tick captures it once its timeout passed.
-                            change(store, &team.id, |team, _| {
-                                if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
-                                    if attempt.state == AttemptState::Delivered {
-                                        attempt.turn_ended_at = None;
-                                        attempt.turn_reply.clear();
-                                        attempt.no_report = false;
-                                        attempt.report_ready_at = None;
-                                        attempt.blocked_since = None;
-                                    }
-                                }
-                                Ok(())
-                            })?;
-                            return Ok(());
-                        }
-                        Err(_) => {}
-                    }
+            let mut last_reply = attempt.as_ref().map(|a| a.last_reply.clone()).unwrap_or_default();
+            if last_reply.is_empty() {
+                if let (Some(attempt), Some(session)) = (&attempt, &session) {
+                    last_reply = if attempt.turn_ended_at.is_some() {
+                        // A2/U20: without a recorded reply mark there is no id to
+                        // compare with; N6 takes only a reply written after the
+                        // attempt was delivered.
+                        last_reply_of(session, &attempt.turn_reply).ok().flatten().unwrap_or_default()
+                    } else {
+                        last_reply_after(session, attempt.delivered_at.unwrap_or(attempt.sent_at))
+                            .ok()
+                            .flatten()
+                            .unwrap_or_default()
+                    };
                 }
             }
             change(store, &team.id, |team, events| {
-            let role = team.task(*task).and_then(|t| t.attempts.last()).map(|a| team.role_of(&a.member)).unwrap_or_default();
-            if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
-                if attempt.state == AttemptState::Delivered && !attempt.no_report {
-                    attempt.no_report = true;
-                    attempt.report_ready_at = None;
-                    events.push(Event::new("no_report", json!({"member":role,"task":task,"attempt":attempt.n})));
+                let role = team.task(*task).and_then(|t| t.attempts.last()).map(|a| team.role_of(&a.member)).unwrap_or_default();
+                if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
+                    if attempt.state == AttemptState::Delivered && !attempt.no_report {
+                        attempt.no_report = true;
+                        attempt.report_ready_at = None;
+                        if !last_reply.is_empty() {
+                            attempt.last_reply = last_reply;
+                        }
+                        events.push(Event::new("no_report", json!({"member":role,"task":task,"attempt":attempt.n})));
+                    }
                 }
-            }
-            Ok(())
+                Ok(())
             })
         }
     }

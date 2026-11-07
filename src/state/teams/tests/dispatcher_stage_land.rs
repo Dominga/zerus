@@ -329,17 +329,16 @@ fn a_replaced_captured_report_refreshes_the_folder_head_for_the_land_stage() {
         hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
         let team = store.load(STAGE_TEAM).unwrap().unwrap();
         let attempt = team.task(1).unwrap().open_attempt().unwrap().id.clone();
-        // A captured reply at HEAD A.
+        // An old captured reply at HEAD A (a record from before 2026-11-07).
         store
-            .mutate(None, STAGE_TEAM, None, |team, events| {
-                ops::apply(
-                    team,
-                    "capture-report",
-                    &json!({"task":1,"attempt":attempt,"text":"Queued, after #12"}),
-                    &Actor::Member("dev".into()),
-                    &BTreeSet::new(),
-                    events,
-                )
+            .mutate(None, STAGE_TEAM, None, |team, _| {
+                let task = team.task_mut(1).unwrap();
+                task.status = TaskStatus::Submitted;
+                let attempt = task.attempts.last_mut().unwrap();
+                attempt.state = AttemptState::Reported;
+                attempt.report = Some(Report { text: "Queued, after #12".into(), at: 1.0, captured: true, ..Default::default() });
+                attempt.notice = Notice::Pending;
+                Ok(json!({}))
             })
             .unwrap();
         // The member then commits with plain git (HEAD B) and sends the real report.

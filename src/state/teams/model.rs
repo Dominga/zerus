@@ -2250,6 +2250,38 @@ pub(crate) struct AddedLate {
 
 /// U29: an addition to a running phase that waits for the owner's
 /// confirmation of the warning. One per phase; it expires after 30 minutes.
+/// Task 162: one change of the plan the lead made inside the approved goal.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct LeadChange {
+    /// "lcN", in order.
+    pub id: String,
+    pub op: String,
+    /// What changed, in words ("added #12 Fix the login crash to phase 3").
+    pub summary: String,
+    pub by: String,
+    pub at: f64,
+    /// The tasks it changed as they were before it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks_before: Vec<Task>,
+    /// The tasks it added.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub added: Vec<u32>,
+    /// The phases it changed as they were before it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phases_before: Vec<Phase>,
+    /// The owner looked at it in the digest (it leaves Waiting).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub seen: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverted_at: Option<f64>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reverted_by: String,
+}
+
+/// Task 162: at most this many lead changes are kept (the oldest seen or
+/// reverted ones leave first).
+pub(crate) const LEAD_CHANGES_KEPT: usize = 300;
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct PendingAddition {
     pub id: String,
@@ -2742,6 +2774,12 @@ pub(crate) struct Team {
     /// U29: additions to running phases waiting for the owner's confirmation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_additions: Vec<PendingAddition>,
+    /// Task 162: the lead's changes of the plan inside the approved goal
+    /// (tasks added, moved, split or edited in accepted phases), each with
+    /// what it replaced, so the owner sees them in a digest and can revert
+    /// any; newest last, at most `LEAD_CHANGES_KEPT`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lead_changes: Vec<LeadChange>,
     /// #511 N3: members to tell that their worked-ahead attempt was revoked
     /// with its phase, newest last, at most 20. Task 24: also a member whose
     /// attempt in progress was revoked by a reassign, a take-over or a cancel

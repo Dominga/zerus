@@ -1848,14 +1848,52 @@ A refusal is never the owner's word: a sentence carrying a negation ("Don't
 remove backend2", "не надо добавлять второго тестера") authorizes no roster,
 scale, drain or phase change in either language.
 
+### The lead plans inside the approved goal (task 162)
+
+Owner, 2026-11-07: the owner gates the team's goal and plan approval, roster
+changes (add, remove, swap, scale, drain, relaunch), wider rights, paid
+resources and budgets, release and publication, and destructive actions.
+Inside an approved goal (a running or paused team) the lead plans by itself:
+`add-to-phase` (the tasks join at once, `added_late` with the confirmation
+"inside the approved goal"), `extend` with `"phase"` into an accepted phase,
+`edit-draft` and `move-phase` of an accepted phase that has not started,
+`move-task`, and `cancel` (a split is an addition plus the cancel of the
+empty task). None of these is a card any more: a proposal of add-to-phase,
+edit-draft, move-phase, move-task or extend into a phase on a running team is
+refused with the operation to run instead.
+
+Each such change that touches accepted work is recorded in the team's
+`lead_changes` (`lcN`: the operation, a summary such as "added #12 Fix the
+login crash to phase 3; moved #9 from phase 2 to 3", who, when, the tasks and
+phases as they were before, the tasks it added), journaled
+`lead_changed_plan`. A change only of drafts, which the owner approves anyway,
+is not recorded. Waiting for you shows one `lead_changes` item per team (action
+`open_team`), which blocks nothing: the unseen changes, newest first, each
+with its revert request. `{"team","change":"lcN","by":"human"} | hgs team
+revert-lead-change --json` (the owner only) puts the tasks it changed back as
+they were, removes the tasks it added and restores its phases; it is refused
+while a later change touched the same work (revert that first), when a touched
+task has started since, or when another task depends on a task it added.
+`{"team","by":"human"} | hgs team seen-lead-changes --json` marks the digest
+seen (with `"change"`, up to that one). `hgs team lead-changes --json` lists
+them. At most 300 are kept, seen or reverted ones leaving first.
+
+The owner's typed word (`owner_word`) is no longer taken where a card exists:
+approve, approve-phase, discard-phase, return-to-draft, unpause-phase,
+phase-acceptance, accept-phase, add-member, scale, drain, swap-member,
+remove-member, relaunch and settings refuse it with the card to propose; for
+the lead's planning operations it is ignored. The owner's own add-to-phase
+keeps the warning and confirmation below.
+
 ### Tasks added to a running phase
 
-A task joins a running phase only on the owner's word twice. The first
-`hgs team add-to-phase` call (`{"team","phase","tasks"}`, the lead's with
-`owner_word`) changes nothing: it keeps the addition pending and answers with a
-warning and its `pending` id. The confirmation names that id in `confirm`, with
-the owner's newer word (the lead) or the typed `"confirmation":"add"` or the
-phase number (the owner on the desktop); only then the tasks join as Pending.
+The owner's task joins a running phase on a warning and a confirmation. The
+first `hgs team add-to-phase` call (`{"team","phase","tasks"}`) changes
+nothing: it keeps the addition pending and answers with a warning and its
+`pending` id. The confirmation names that id in `confirm`, with the typed
+`"confirmation":"add"` or the phase number (the owner on the desktop); only
+then the tasks join as Pending. The lead's addition inside the approved goal
+joins at once (above).
 An addition waits 30 minutes. An expired one is no longer listed in Waiting for
 you, cannot be confirmed and leaves the team on its next change.
 

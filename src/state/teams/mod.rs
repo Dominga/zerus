@@ -12,6 +12,7 @@ pub(crate) mod handoff;
 pub(crate) mod inbox;
 pub(crate) mod isolation;
 pub(crate) mod lead_stall;
+pub(crate) mod lead_plan;
 pub(crate) mod look;
 pub(crate) mod model;
 pub(crate) mod models;

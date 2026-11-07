@@ -4384,6 +4384,16 @@ without the option retain their existing behavior. Next uses the capability,
 exact computer identity and fresh catalog snapshot; unsupported or uncertain
 setup is never replayed.
 
+Signing in on another computer (`hgs @mac account login work`, or **Sign in** for
+an account there) runs that computer's native sign-in in a terminal here. Codex
+finishes its browser sign-in on the signing computer's `localhost:1455`, which a
+browser on this computer could not reach, so the SSH connection forwards this
+computer's port 1455 there (`-L 1455:localhost:1455`). Open the sign-in link
+Codex prints in a browser on this computer. The connection has its own SSH
+session, never a shared master, so the forward ends with the sign-in. If port 1455
+is already in use here, for example by another Codex sign-in, SSH only warns, and
+the browser cannot finish until that sign-in ends.
+
 `accounts.json` stores metadata and selected permission modes; authorization stays
 in the profile's own directory. Managed profiles clear inherited API tokens;
 native defaults keep the user's normal environment. Tokens are not displayed in

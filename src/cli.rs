@@ -1534,6 +1534,29 @@ fn remote(
 /// `remote`, optionally as the one verified hop of a session reference: the
 /// peer runs the command guarded by `--expect-machine MACHINE`, with the same
 /// SSH options the command has without it (zerus-ucck P1c).
+/// The port Codex's browser sign-in waits on, on the signing computer.
+const CALLBACK_PORT: u16 = 1455;
+/// SSH options for a remote sign-in: this computer's loopback port 1455
+/// forwarded to the peer's, on a connection of its own (never a shared
+/// master, which would keep the port after sign-in), continuing when the
+/// local port is busy.
+const CALLBACK_FORWARD: [&str; 6] = ["-o", "ExitOnForwardFailure=no", "-o", "ControlPath=none", "-L", "1455:localhost:1455"];
+
+/// Whether a peer call signs an account in (`account login`, guarded or not).
+fn account_sign_in(command: &str, args: &[String]) -> bool {
+    let rest = if command == "--expect-machine" {
+        if args.get(1).map(String::as_str) != Some("account") {
+            return false;
+        }
+        args.get(2..).unwrap_or_default()
+    } else if command == "account" {
+        args
+    } else {
+        return false;
+    };
+    rest.first().is_some_and(|operation| operation == "login")
+}
+
 fn remote_via(
     config: &Config,
     target: &str,
@@ -1654,6 +1677,17 @@ fn remote_via(
             all
         }
     };
+    if account_sign_in(command, &args) {
+        // Codex finishes a browser sign-in on the signing computer's
+        // localhost:1455, which a browser on this computer cannot reach.
+        // Forward this computer's port there, as OpenAI documents for
+        // headless sign-in (T-tknwyr). A busy local port only warns, and
+        // a connection of its own releases the forward when sign-in ends.
+        flags.extend(CALLBACK_FORWARD.map(String::from));
+        if !global_dry && !has(&args, "--dry-run") {
+            eprintln!("hgs: Signing in on {target}. Open the sign-in link in a browser on this computer; this computer's localhost:{CALLBACK_PORT} is forwarded to {target} so the browser can finish.");
+        }
+    }
     flags.extend(crate::machines::ssh_options(config, target));
     let remote_args: Vec<String> = match machine {
         Some(machine) => ["--expect-machine".to_owned(), machine.to_owned()].into_iter().chain(remote_args).collect(),

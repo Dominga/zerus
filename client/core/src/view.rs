@@ -111,6 +111,11 @@ pub struct ViewRow {
     /// session by it as well (`session_selector`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// The session that launched or adopted this one (zerus-sa9qn.2), when the
+    /// listing reports a well-formed link. Presentation and attention routing
+    /// only; it never authorizes an action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ParentLink>,
     /// The raw `state` (`running`, `paused`, `stopped`, `archived`, ...);
     /// `running` when the row lists none (a live session).
     pub state: String,
@@ -238,6 +243,51 @@ pub struct ChildFacts {
     pub phase: String,
     pub request: String,
     pub started: Option<f64>,
+}
+
+/// A child's parent session as the child's computer lists it (`parent` in
+/// `hgs ls --json`): the parent's machine and durable session ID, hints to
+/// match an older parent record and to name it, and its state in that same
+/// listing (`live`, `saved`, `archived` or `missing`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ParentLink {
+    pub machine: String,
+    pub session_id: String,
+    pub name: String,
+    pub conversation_id: String,
+    pub run_id: String,
+    pub state: String,
+}
+
+impl ParentLink {
+    fn from_row(row: &Value) -> Option<Self> {
+        let link = row.get("parent")?.as_object()?;
+        let field = |key: &str| {
+            link.get(key)
+                .and_then(Value::as_str)
+                .filter(|s| s.len() <= 512 && !s.chars().any(char::is_control))
+                .unwrap_or("")
+                .to_owned()
+        };
+        let parent = Self {
+            machine: field("machine"),
+            session_id: field("session_id"),
+            name: field("name"),
+            conversation_id: field("conversation_id"),
+            run_id: field("run_id"),
+            state: field("state"),
+        };
+        let identity = crate::creation::canonical_uuid(&parent.session_id)
+            || (parent.session_id.is_empty() && !parent.conversation_id.is_empty());
+        (crate::creation::canonical_uuid(&parent.machine) && identity && !parent.name.is_empty())
+            .then_some(parent)
+    }
+
+    /// The child's computer verified this parent running there.
+    pub fn live(&self) -> bool {
+        self.state == "live"
+    }
 }
 
 /// Valid shared notification preferences: muted, and the suppressed baseline.
@@ -1254,6 +1304,7 @@ pub fn row(value: &Value) -> ViewRow {
         conversation_id: some(session.conversation_id),
         session_id: some(text(value, "session_id"))
             .filter(|id| crate::creation::canonical_uuid(id)),
+        parent: ParentLink::from_row(value),
         // A live row lists no state; Qt reads it as running (`HgsClient.cpp`).
         state: session.state.to_owned(),
         tracked: session.tracked,
@@ -1330,6 +1381,62 @@ mod tests {
 
     /// zerus-ucck P1c: a row keeps the listing's durable session ID only in
     /// its canonical form, and a row without one serializes as before.
+    #[test]
+    fn a_row_keeps_a_well_formed_parent_link() {
+        let machine = "11111111-1111-4111-8111-111111111111";
+        let session = "22222222-2222-4222-8222-222222222222";
+        let link = json!({"schema":1,"machine":machine,"host":"arch","session_id":session,
+            "name":"claude/p/lead","conversation_id":"c","run_id":"r","source":"launch","at":1,"state":"live"});
+        let listed = row(&json!({"name":"codex/p/kid","parent":link}));
+        let parent = listed.parent.clone().unwrap();
+        assert_eq!(
+            (
+                parent.machine.as_str(),
+                parent.session_id.as_str(),
+                parent.name.as_str()
+            ),
+            (machine, session, "claude/p/lead")
+        );
+        assert!(parent.live());
+        assert_eq!(
+            serde_json::to_value(&listed).unwrap()["parent"]["state"],
+            "live"
+        );
+        let mut older = link.clone();
+        older["session_id"] = json!("");
+        assert!(
+            row(&json!({"name":"codex/p/kid","parent":older}))
+                .parent
+                .is_some(),
+            "conversation fallback"
+        );
+        for (key, value) in [
+            ("machine", json!("arch")),
+            ("session_id", json!("X")),
+            ("name", json!("")),
+            ("machine", json!(7)),
+        ] {
+            let mut bad = link.clone();
+            bad[key] = value;
+            assert_eq!(
+                row(&json!({"name":"codex/p/kid","parent":bad})).parent,
+                None,
+                "{key}"
+            );
+        }
+        let mut saved = link;
+        saved["state"] = json!("saved");
+        assert!(!row(&json!({"name":"codex/p/kid","parent":saved}))
+            .parent
+            .unwrap()
+            .live());
+        assert_eq!(row(&json!({"name":"codex/p/kid"})).parent, None);
+        assert!(serde_json::to_value(row(&json!({"name":"codex/p/kid"})))
+            .unwrap()
+            .get("parent")
+            .is_none());
+    }
+
     #[test]
     fn a_row_keeps_only_a_canonical_session_id() {
         let id = "3f2a9c1d-0b4e-4d6a-9c1d-2e3f4a5b6c7d";

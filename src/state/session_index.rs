@@ -243,6 +243,12 @@ fn carries(record: &Value, id: &str, name: &str) -> bool {
 /// The live or saved session `id`, when its entry still verifies: the record
 /// of that kind under that label carries the ID, with no archive and no rename
 /// shadow. None is a miss; the caller scans.
+/// The index entry alone, read without blocking and never following a record:
+/// the label and kind it names, unverified (zerus-mzgfh).
+pub(super) fn indexed(id: &str) -> Option<(String, Kind)> {
+    entry(id)
+}
+
 pub(super) fn find(id: &str) -> Option<Found> {
     let (name, kind) = entry(id)?;
     let record = match kind {

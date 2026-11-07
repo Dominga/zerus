@@ -6,7 +6,7 @@ import { catalog, computerFresh, hasDraftKey, orderedRows } from "../../store/ca
 import { machineCards } from "../../store/machines";
 import { archiveMachineChoices, archiveProjectChoices } from "./archive-filters";
 import { defaultProject, grouping, groups } from "../../store/organization";
-import { stateFilter, matchesFilter, listedByFilter, search,machineFilter, projectFilter, accountFilter, folderFilter, expandedChildren, compactRows, selected, selectedKey, subagentOpen } from "../../store/ui";
+import { stateFilter, matchesFilter, listedByFilter, search,machineFilter, projectFilter, accountFilter, folderFilter, expandedChildren, compactRows, selected, selectedKey, subagentOpen, collapsedTeams } from "../../store/ui";
 import { compileScopes, scopeCounts } from "./scope-filters";
 import { withCreations } from "../../store/creations";
 import { isWorking, needsAttention } from "../../store/attention";
@@ -81,6 +81,31 @@ export function listedSessionIgnoringCollapse(id: string): boolean {
     && compileScopes(scopes())(s, groups[id]?.group ?? defaultProject());
 }
 
+/**
+ * Each listed row by its computer's machine UUID and durable session ID, and
+ * by conversation for a parent an older hgs listed without one (spec 1.4).
+ * Rebuilt with the catalog in one pass; names never match.
+ */
+export function parentIndex(rows: Iterable<Session>, machineOf: (computer: string) => string | undefined) {
+  const bySession = new Map<string, string>(), byConversation = new Map<string, Session>();
+  for (const s of rows) {
+    const machine = machineOf(s.computer);
+    if (!machine) continue;
+    if (s.sessionId) bySession.set(`${machine}\n${s.sessionId}`, s.key);
+    if (s.conversationId) byConversation.set(`${machine}\n${s.conversationId}`, s);
+  }
+  return (s: Session): string | undefined => {
+    const p = s.parent;
+    if (!p) return undefined;
+    const found = p.session_id ? bySession.get(`${p.machine}\n${p.session_id}`) : undefined;
+    if (found) return found;
+    const old = p.conversation_id ? byConversation.get(`${p.machine}\n${p.conversation_id}`) : undefined;
+    // An identified link only falls back to a parent row that lists no session ID.
+    return old && (!p.session_id || !old.sessionId) ? old.key : undefined;
+  };
+}
+const parentKeyOf = createMemo(() => parentIndex(orderedRows(), (computer) => machineCards[computer]?.machine_id));
+
 export const listRows = createMemo<Row[]>(() => {
   if (stateFilter() === "archived") return archiveRows();
   const f = stateFilter();
@@ -95,6 +120,7 @@ export const listRows = createMemo<Row[]>(() => {
     selected: { key: selectedKey(), subagent: subagentOpen(), conversation: selected()?.conversationId },
     roster: (s: Session) => rosterFor(s, s.key === selectedKey() ? followedFor(s.key).value : undefined),
     childDraft: (s: Session, child: { id: string }) => hasDraftKey(`${s.computer}\n${s.name}\n${s.conversationId ?? ""}\n${child.id}`),
+    parentKey: parentKeyOf(), teamCollapsed: (k: string) => !!collapsedTeams[k],
   };
   const out = groupRows(scope);
   return withCreations(out, scope);

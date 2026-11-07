@@ -66,14 +66,20 @@ export function validEmoji(text: string): boolean {
 
 export const validColor = (value: unknown): value is string => typeof value === "string" && HEX.test(value);
 
-/** Dark ink on light colors, light ink on dark ones (WCAG relative luminance). */
-export function inkFor(hex: string): string {
+/** WCAG relative luminance of a #rrggbb color. */
+function luminance(hex: string): number {
   const channel = (at: number) => {
     const c = parseInt(hex.slice(at, at + 2), 16) / 255;
     return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
   };
-  const luminance = 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
-  return luminance > 0.36 ? "#10151b" : "#ffffff";
+  return 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
+}
+const DARK_INK = "#10151b", LIGHT_INK = "#ffffff";
+/** The ink with the stronger contrast on the color (WCAG contrast ratio). */
+export function inkFor(hex: string): string {
+  const color = luminance(hex);
+  const ratio = (ink: string) => { const l = luminance(ink); return (Math.max(l, color) + 0.05) / (Math.min(l, color) + 0.05); };
+  return ratio(DARK_INK) >= ratio(LIGHT_INK) ? DARK_INK : LIGHT_INK;
 }
 
 /** The appearance a desktop keeps for an account: the first member profile's choice wins. */

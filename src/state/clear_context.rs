@@ -83,6 +83,8 @@ pub(super) fn carry_fresh_start(previous: &Value, record: &mut Value) {
     // that session lives: a session in the ID layout stays there (P3a).
     if let Some(id) = previous.get("session_id") { record["session_id"] = id.clone(); }
     if let Some(layout) = previous.get("layout") { record["layout"] = layout.clone(); }
+    // The session keeps the parent that launched or adopted it (zerus-sa9qn.2).
+    if let Some(parent) = previous.get("parent") { record["parent"] = parent.clone(); }
 }
 
 // Earlier conversations of this session's Activity, oldest first. Only

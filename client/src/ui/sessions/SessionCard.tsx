@@ -9,6 +9,7 @@ import { settings } from "../../store/settings";
 import { machineAppearance } from "../../store/machineAppearance";
 import { sessionMark, type AccountMark } from "../../store/accountMarks";
 import type { AgentKind, Session, Status, Subagent } from "./types";
+import type { Team } from "./group-rows";
 import { currentChildren, workingChildren } from "./subagents";
 
 // Card anatomy follows tray/src/SessionCardDelegate.h paintCard() at the
@@ -131,6 +132,43 @@ export function AgentBadge(props: { agent: AgentKind; narrow?: boolean; max?: nu
       <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" innerHTML={PROVIDER_GLYPH[props.agent]} />
       <Show when={!props.narrow}><span class="ab-label">{AGENT_LABEL[props.agent]}</span></Show>
     </span>
+  );
+}
+
+/** The large colored agent mark at the card's left (spec 3.1). */
+export function AgentTile(props: { agent: AgentKind; size?: number }) {
+  const size = () => props.size ?? 34;
+  return (
+    <span class="agent-tile" style={{ "--agent": `var(--z-agent-${props.agent})`, "--tile": `${size()}px` }} title={AGENT_LABEL[props.agent]}>
+      <svg width={Math.round(size() * 0.56)} height={Math.round(size() * 0.56)} viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" innerHTML={PROVIDER_GLYPH[props.agent]} />
+    </span>
+  );
+}
+
+/** A parent's child sessions: working of all, collapsing them (spec 3.3). */
+export function TeamToggle(props: { team: Team; onToggle?: () => void }) {
+  return (
+    <button class="sc-team" classList={{ open: !props.team.collapsed }} aria-expanded={!props.team.collapsed}
+      title={props.team.collapsed ? tr("Show child sessions") : tr("Hide child sessions")}
+      onClick={(e) => { e.stopPropagation(); props.onToggle?.(); }} onDblClick={(e) => e.stopPropagation()}>
+      <svg class="team-glyph" width="16" height="12" viewBox="0 0 16 12" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+        <circle cx="8" cy="3" r="2" /><circle cx="3" cy="5" r="1.6" /><circle cx="13" cy="5" r="1.6" />
+        <path d="M4 11A4 3 0 0 1 12 11M0 10.5A3 2.4 0 0 1 4.5 9M16 10.5A3 2.4 0 0 0 11.5 9" />
+      </svg>
+      <span>{tr("%1 of %2", props.team.working, props.team.total)}</span>
+      <svg class="chev" width="8" height="6" viewBox="0 0 8 6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 2L4 5L7 2" /></svg>
+    </button>
+  );
+}
+
+/** A child shown away from its parent: the parent's name, opening it when listed. */
+export function FromParent(props: { parent: { name: string; key?: string }; onOpen?: (key: string) => void }) {
+  const short = () => props.parent.name.split("/").pop() || props.parent.name;
+  return (
+    <Show when={props.parent.key} fallback={<span class="sc-from" title={tr("Started by %1\nThat session is not listed.", props.parent.name)}>{tr("from %1", short())}</span>}>
+      {(key) => <button class="sc-from link" title={tr("Started by %1\nClick to open it.", props.parent.name)}
+        onClick={(e) => { e.stopPropagation(); props.onOpen?.(key()); }} onDblClick={(e) => e.stopPropagation()}>{tr("from %1", short())}</button>}
+    </Show>
   );
 }
 
@@ -283,11 +321,16 @@ export function SessionCard(props: {
   expandable: boolean;
   expanded: boolean;
   onToggleChildren: () => void;
+  team?: Team;
+  onToggleTeam?: () => void;
+  fromParent?: { name: string; key?: string };
+  onOpenParent?: (key: string) => void;
 }) {
   const s = () => props.session;
   const kind = () => badgeKind(s());
   return (
-    <div class="scard" classList={{ selected: props.selected, offline: statusOf(s()) === "offline", muted: !!s().muted }} data-emphasis={emphasis(s())}>
+    <div class="scard tiled" classList={{ selected: props.selected, offline: statusOf(s()) === "offline", muted: !!s().muted }} data-emphasis={emphasis(s())}>
+      <span class="sc-tile"><AgentTile agent={s().agent} /></span>
       <div class="sc-l1">
         <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
         <span class="sc-title ell" style={titleReserve(s().title, 72)} title={s().name}>{s().title}</span>
@@ -297,7 +340,6 @@ export function SessionCard(props: {
         </Show>
         <OptionalQuestionsChip session={s()} />
         <span class="grow" />
-        <AgentBadge agent={s().agent} />
       </div>
       <div class="sc-l2">
         <Icon name={s().branch ? "git-branch" : "folder"} size={14} class="sc-meta-ico" />
@@ -307,6 +349,7 @@ export function SessionCard(props: {
         <MachineBadge alias={s().machine} computer={s().computer} offline={statusOf(s()) === "offline"} />
       </div>
       <div class="sc-l3">
+        <Show when={props.fromParent}>{(parent) => <FromParent parent={parent()} onOpen={props.onOpenParent} />}</Show>
         <Show when={s().reviewLater}><Icon name="attention" size={14} class="sc-review" /></Show>
         <span class="ell">{detailText(s())}</span>
       </div>
@@ -318,6 +361,7 @@ export function SessionCard(props: {
         <Show when={(s().subagents ?? []).length}>
           <AgentsCounter label={agentsLabel(s())} expandable={props.expandable} expanded={props.expanded} onToggle={props.onToggleChildren} />
         </Show>
+        <Show when={props.team}>{(team) => <TeamToggle team={team()} onToggle={props.onToggleTeam} />}</Show>
       </div>
     </div>
   );
@@ -364,11 +408,11 @@ export function CompactCard(props: { session: Session; selected: boolean; onExpa
   return (
     <div class="scard compact" classList={{ selected: props.selected }} data-emphasis={emphasis(s())}
       aria-description={tr("Collapsed session row. Press Right to expand.")}>
+      <span class="cc-tile"><AgentTile agent={s().agent} size={22} /></span>
       <Show when={sessionMark(s())}>{(m) => <span class="cc-mark" title={markTooltip(s(), m())}><AccountMarkCircle mark={m()} size={14} /></span>}</Show>
       <span class="sc-title ell" style={titleReserve(s().title, 60)} title={s().name}>{s().title}</span>
       <StatusBadge kind={badgeKind(s())} caption={statusCaption(s())} />
       <OptionalQuestionsChip session={s()} />
-      <AgentBadge agent={s().agent} />
       <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
       <button class="cc-expand" title={tr("Expand session row")} onClick={(e) => { e.stopPropagation(); props.onExpand(); }} onDblClick={(e) => e.stopPropagation()}>
         <Icon name="expand-row" size={16} />

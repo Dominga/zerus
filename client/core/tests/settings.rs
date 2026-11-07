@@ -532,8 +532,15 @@ fn account_marks_are_local_per_profile_and_removable() {
     let mark = "accounts/mark/studio%1Fclaude-a1";
     assert_eq!(settings.set(color, json!("#2b97ff")), Ok(json!("#2b97ff")));
     assert_eq!(settings.set(mark, json!("x")), Ok(json!("x")));
-    for invalid in ["accounts/color/", "accounts/color/a/b", "accounts/mark/a\\b"] {
-        assert!(settings.set(invalid, json!("#2b97ff")).is_err(), "{invalid}");
+    for invalid in [
+        "accounts/color/",
+        "accounts/color/a/b",
+        "accounts/mark/a\\b",
+    ] {
+        assert!(
+            settings.set(invalid, json!("#2b97ff")).is_err(),
+            "{invalid}"
+        );
     }
     assert!(settings.all().contains_key(color));
     assert_eq!(settings.set(mark, Value::Null), Ok(Value::Null));

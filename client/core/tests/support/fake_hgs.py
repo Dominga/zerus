@@ -136,6 +136,12 @@ def serve(host, writer, until_file=None):
                           "cursor": 1})
         elif control.get("op") == "ping":
             writer.frame({"t": "pong", "id": control.get("id")})
+        elif control.get("op") == "subscribe" and control.get("topic") == "git":
+            path = control.get("path")
+            writer.frame({"t": "state", "topic": "git", "key": path, "rev": 1,
+                          "value": {"state": "ok", "root": path, "branch": "fixture",
+                                    "changed_files": 3, "ahead": 2, "behind": 1,
+                                    "remote_state": "verified", "remote_age_seconds": 0}})
     receipt("stdin-eof", host)
     log({"host": host, "eof": True})
     return 0

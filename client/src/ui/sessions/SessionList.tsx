@@ -42,7 +42,7 @@ import {
   setCompactRows, compactRows, expandCompactRows, hasCompactRows, stateFilter, setStateFilter, search, setSearch, stripMode, setStripMode,
   setMenu, visibleMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter, accountFilterSet, setAccountFilter, folderFilter, setPage,
   multi, setMulti, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, commitSessionsWidth, menu, subagentOpen,
-  revealing, setRevealing, setDetailTab, collapsedTeams, setCollapsedTeams,
+  revealing, setRevealing, setDetailTab,
   type StateFilter, type MenuEntry,
 } from "../../store/ui";
 import type { Session } from "./types";
@@ -51,6 +51,7 @@ import { loadMarkCatalogs } from "../../store/accounts";
 import { setParentDialog } from "../../store/parentLinks";
 import { clearFolderScope } from "../../store/folderFilter";
 import { compactNewChildren } from "../../store/childRowsWatch";
+import { setTeamCollapsed, teamCollapsed } from "../../store/teamCollapse";
 import { leaf, native } from "./paths";
 import { appendAccountChoices, bindingState, type AccountChoice } from "./scope-filters";
 import type { ClearControl, SessionRef } from "../../types";
@@ -656,7 +657,7 @@ export function SessionList() {
       if (r.type === "card" && r.compactRow && right) setRowCompact(r.session.key, false);
       else if (r.type === "card" && r.expandable && (right ? !expandedChildren[r.session.key] : !!expandedChildren[r.session.key])) setExpandedChildren(r.session.key, right);
       // Child sessions (zerus-sa9qn.2): Right expands, Left collapses, then moves to the parent.
-      else if (r.type === "card" && r.team && r.team.collapsed === right) setCollapsedTeams(r.session.key, !right);
+      else if (r.type === "card" && r.team && r.team.collapsed === right) setTeamCollapsed(r.session.key, !right);
       else if (r.type === "card" && !right && r.parentKey) setSelectedKey(r.parentKey);
       else if (r.type === "card" && r.expandable) setExpandedChildren(r.session.key, right);
       else if (r.type === "child" && !right) setSelectedKey(r.parent.key);
@@ -897,10 +898,10 @@ function ListRow(props: { id: string; list: RowSource }) {
             onContextMenu={(e) => sessionContextMenu(e, v().session)}
             onDblClick={(e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey) setRowCompact(v().session.key, !compactRows[v().session.key]); }}>
             <Show when={!v().compactRow} fallback={<CompactCard session={v().session} selected={selectedKey() === v().session.key || !!multi[v().session.key]} onExpand={() => setRowCompact(v().session.key, false)}
-              team={v().team} onToggleTeam={() => setCollapsedTeams(v().session.key, !collapsedTeams[v().session.key])} />}>
+              team={v().team} onToggleTeam={() => setTeamCollapsed(v().session.key, !teamCollapsed(v().session.key))} />}>
               <SessionCard session={v().session} selected={(selectedKey() === v().session.key && !subagentOpen()) || !!multi[v().session.key]} expandable={v().expandable}
                 expanded={!!expandedChildren[v().session.key]} onToggleChildren={() => setExpandedChildren(v().session.key, !expandedChildren[v().session.key])}
-                team={v().team} onToggleTeam={() => setCollapsedTeams(v().session.key, !collapsedTeams[v().session.key])}
+                team={v().team} onToggleTeam={() => setTeamCollapsed(v().session.key, !teamCollapsed(v().session.key))}
                 fromParent={v().fromParent} onOpenParent={(key) => { setSelectedKey(key); setRevealing(key); }} />
             </Show>
           </div>

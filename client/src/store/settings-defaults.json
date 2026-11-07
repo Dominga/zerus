@@ -18,6 +18,7 @@
   "recovery/sharedPolicy": "",
   "sessions/accountMarks": "letter",
   "sessions/childRowsSeen": "",
+  "sessions/collapsedTeams": "",
   "sessions/compactNewChildren": true,
   "sessions/showAccountMarks": true,
   "speech/host": "",

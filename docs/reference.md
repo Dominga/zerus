@@ -712,9 +712,13 @@ the catalog lock, and a launch without a readable identity records no parent.
 The desktop session list nests a child under its parent when both are shown in
 the same project group, 26 px per level up to three levels, with a connector
 from the parent above. The parent's footer shows **Team** with working and all
-child sessions (`2 of 5`); it collapses or expands them for this window, and
-Left and Right do the same from the keyboard, Left then moving from a child to
-its parent. Nesting stops after eight levels; a deeper child starts at top
+child sessions (`2 of 5`); it collapses or expands them, and Left and Right do
+the same from the keyboard, Left then moving from a child to its parent. This
+device remembers a collapsed parent across relaunches by its computer's machine
+UUID and session ID (`sessions/collapsedTeams`, at most 2048 parents, the oldest
+forgotten first), so a rename, resume or restart keeps the choice; a parent
+without those IDs keeps it for this window only. A child row's compact or full
+form is remembered like any row's. Nesting stops after eight levels; a deeper child starts at top
 level again. A child whose parent is not shown above it stays at top level with
 **from PARENT**, which opens the parent when it is listed. A parent is matched by
 its computer's machine UUID and session ID, or by conversation for a parent an

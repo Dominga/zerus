@@ -96,6 +96,13 @@ pub(super) fn identity(original: &Value) -> Result<Value> {
     input::checked_terminal(&record, false)?;
     Ok(record)
 }
+// Claude Code 2.1.319's shared permission dialog and auto-default nudge
+// reject confirmation for 150 ms after first paint. Observe the SAME panel
+// throughout this native guard before our ONE Enter. This does not promise
+// that a future release accepts it: an unconfirmed selection stays uncertain
+// and requires Terminal recovery, without replay.
+pub(super) const CLAUDE_CONFIRMATION_GUARD: Duration = Duration::from_millis(150);
+
 // The parser returns the exact question hash and highlighted option. A trust
 // decline can legitimately exit the pinned process after Enter; other choices
 // must observe the dialog disappear while the same process owns the terminal.
@@ -193,6 +200,8 @@ pub(super) fn answer_handoff(
 
 // Claude shows queued tool approvals one after another, so the next complete
 // approval may replace the answered one before any other screen is drawn.
+// These approvals share the auto-default nudge's native confirmation guard,
+// including when Yes is already highlighted and no arrow was needed.
 pub(super) fn answer_queued(
     record: &Value,
     question: &Value,
@@ -202,7 +211,7 @@ pub(super) fn answer_queued(
     acknowledged: fn(&str) -> bool,
     navigation_settle: Duration,
 ) -> Result<()> {
-    navigate(record, question, chosen, option_count, parse, acknowledged, false, true, navigation_settle, None, Duration::ZERO)
+    navigate(record, question, chosen, option_count, parse, acknowledged, false, true, navigation_settle, None, CLAUDE_CONFIRMATION_GUARD)
         .map(drop)
 }
 

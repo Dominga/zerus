@@ -237,6 +237,9 @@ class PermissionModeGuard(unittest.TestCase):
 
     def setUp(self):
         PermissionMode.setUp(self)
+        self.start_clock()
+
+    def start_clock(self):
         self.clock=self.root/'native-clock'
         self.clock.write_bytes(struct.pack('=QQQ',0,2**64-1,0))
         os.kill(self.record['pid'],signal.SIGUSR1)

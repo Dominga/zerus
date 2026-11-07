@@ -310,6 +310,15 @@ pub(crate) struct Stopped {
     attempt: StopAttempt,
 }
 impl Stopped {
+    /// Presentation DATA only. Publication still waits for physical retirement.
+    pub(crate) fn normal_refusal(&self) -> bool {
+        matches!(self.attempt.input.stop, Kind::Normal)
+            && self
+                .attempt
+                .result
+                .as_ref()
+                .is_ok_and(|report| report.state == State::Refused)
+    }
     pub(crate) fn can_force(&self) -> bool {
         matches!(self.attempt.input.stop, Kind::Normal)
             && self

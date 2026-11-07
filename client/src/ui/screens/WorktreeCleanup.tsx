@@ -5,7 +5,7 @@ import { MachineLabel } from "../components/MachineLabel";
 import { Icon } from "../lib/icons";
 import type { Inspection } from "../../store/terminationCleanup";
 import { terminationCleanupInspect } from "../../bridge";
-import { cleanup, cleanupDialog, closeCleanup, clearCleanupResults, checkCleanup, removeCleanup, emptyConsents, type CleanupRow } from "../../store/terminationCleanup";
+import { cleanup, cleanupDialog, closeCleanup, clearCleanupResults, dismissCleanup, groupCleanupRows, checkCleanup, removeCleanup, emptyConsents, type CleanupRow } from "../../store/terminationCleanup";
 import { activityLabel } from "../../store/backgroundTasks";
 import { anyCleanupRestore, cleanupRestoring, restoreCleanupRow } from "../../store/cleanupNotices";
 import { tr } from "../../i18n";
@@ -21,8 +21,37 @@ export default function WorktreeCleanup() {
   const [consents, setConsents] = createSignal(emptyConsents());
   const [inspect, setInspect] = createSignal<CleanupRow>();
   const [force, setForce] = createSignal<CleanupRow>();
-  const current = () => cleanup().rows.find((r) => r.id === selected()) ?? cleanup().rows[0];
-  const targets = createMemo(() => cleanup().rows.filter((r) => r.ready));
+  const folders = createMemo(() => groupCleanupRows(cleanup().rows));
+  const currentFolder = () => folders().find((folder) => folder.rows.some((row) => row.id === selected())) ?? folders()[0];
+  const current = () => currentFolder()?.primary;
+  // Read-only current blocker evidence never updates native removal fingerprints.
+  const [blockerDetails] = createResource(() => {
+    const row = current();
+    return row && !row.busy && ["kept", "review"].includes(row.status) ? { id: row.id, revision: cleanup().revision } : undefined;
+  }, ({ id }) => terminationCleanupInspect(id));
+  const liveReview = () => !blockerDetails.error && blockerDetails()?.path === current()?.path ? blockerDetails()?.review : undefined;
+  const blockerSessions = () => [...new Set(liveReview()?.sessions ?? currentFolder()?.rows.flatMap((row) => row.sessions ?? []) ?? [])];
+  const blockerPrograms = () => {
+    const fresh = liveReview()?.processes?.map((p) => ({pid: p.pid, label: p.command ?? p.label ?? "Program"}));
+    return (fresh ?? currentFolder()?.rows.flatMap((row) => row.processes ?? []) ?? []).filter((p, i, all) => all.findIndex((other) => other.pid === p.pid && other.label === p.label) === i);
+  };
+  const blockerIndex = createMemo(() => {
+    const computers = new Set(currentFolder()?.rows.map((row) => row.computer));
+    const names = new Set(blockerSessions());
+    const matches = new Map<string, (typeof catalog.rows)[string][]>();
+    for (const row of Object.values(catalog.rows)) if (computers.has(row.computer) && names.has(row.name)) {
+      const found = matches.get(row.name) ?? []; found.push(row); matches.set(row.name, found);
+    }
+    return matches;
+  });
+  const blockerSession = (name: string) => { const matches = blockerIndex().get(name); return matches?.length === 1 ? matches[0] : undefined; };
+  const openBlocker = (name: string) => { const row = blockerSession(name); if (row) { closeCleanup(); setSelectedKey(row.key); setDetailTab("activity"); setPage("sessions"); } };
+  const dismissCurrent = () => {
+    const folder = currentFolder(); if (!folder) return;
+    const row = folder.rows.find((row) => row.status === "unknown") ?? folder.primary;
+    void dismissCleanup(row.id);
+  };
+  const targets = createMemo(() => folders().filter((folder) => folder.status !== "unknown" && folder.primary.ready));
   const consented = () => (!cleanup().required.local_files || consents().local_files) && (!cleanup().required.discard_changes || consents().discard_changes) && (!cleanup().required.unchecked_processes || consents().unchecked_processes);
   const summary = () => tr("%1 removed  %2 kept  %3 unknown", cleanup().removed, cleanup().kept, cleanup().unknown);
   createEffect(() => { cleanup().revision; setConsents(emptyConsents()); });
@@ -34,22 +63,25 @@ export default function WorktreeCleanup() {
       <div class="dlg-head"><Icon name="trash" size={18} class="accent" /><h2 id="cleanup-title">{tr("Remove working folders")}</h2><span class="grow" /><button class="icon-btn" aria-label={tr("Close")} onClick={closeCleanup}><Icon name="x" size={16} /></button></div>
       <div class="dlg-body bc-body">
         <Show when={cleanup().rows.length || cleanup().kept || cleanup().unknown} fallback={<p class="muted" role="status">{tr("No working folders need review.")}</p>}>
-        <h3 class="section-title">{cleanup().rows.length === 1 ? tr("Review 1 selected worktree") : tr("Review %1 selected worktrees", cleanup().rows.length)}</h3>
+        <h3 class="section-title">{folders().length === 1 ? tr("Review 1 selected worktree") : tr("Review %1 selected worktrees", folders().length)}</h3>
         <p class="muted">{tr("Conversations and branches are kept. Removing a working folder permanently deletes its local files.")}</p>
-        <table class="su-table bc-table"><thead><tr><th>{tr("Folder / branch")}</th><th>{tr("Computer")}</th><th>{tr("Size")}</th><th>{tr("Result")}</th></tr></thead><tbody><For each={cleanup().rows}>{(row) =>
-          <tr classList={{ on: current()?.id === row.id }} onClick={() => setSelected(row.id)} title={row.path}>
-            <td><div class="ell"><b>{row.label}</b></div><div class="mono dim ell">{row.branch}</div></td><td><MachineLabel alias={row.machine} class="mbadge" /></td><td class="tabular">{row.size}</td>
-            <td title={row.reason}><div class="bc-result" data-outcome={row.status}><Show when={row.status === "checking" || row.status === "removing"}><Icon name="loader-circle" size={12} class="su-spin" /></Show><b>{labels[row.status]}</b><Show when={row.status !== "removed"}><span class="hint ell wtc-reason">{row.reason}</span></Show></div></td>
+        <table class="su-table bc-table"><thead><tr><th>{tr("Folder / branch")}</th><th>{tr("Computer")}</th><th>{tr("Size")}</th><th>{tr("Result")}</th></tr></thead><tbody><For each={folders()}>{(folder) => { const row = folder.primary; return (
+          <tr classList={{ on: currentFolder()?.key === folder.key }} onClick={() => setSelected(row.id)} title={row.path}>
+            <td><div class="ell"><b>{row.label}</b></div><div class="mono dim ell">{row.branch}</div><For each={folder.sources}>{(source) => <div class="hint cleanup-source">{source.name}</div>}</For></td><td><MachineLabel alias={row.machine} class="mbadge" /></td><td class="tabular">{row.size}</td>
+            <td title={row.reason}><div class="bc-result" data-outcome={folder.status}><Show when={folder.status === "checking" || folder.status === "removing"}><Icon name="loader-circle" size={12} class="su-spin" /></Show><b>{labels[folder.status]}</b><Show when={folder.status !== "removed"}><span class="hint wtc-reason" style={{ "white-space": "pre-wrap", "overflow-wrap": "anywhere" }}>{[...new Set(folder.rows.map((member) => member.reason).filter(Boolean))].join("\n")}</span></Show></div></td>
           </tr>
-        }</For></tbody></table>
+        ); }}</For></tbody></table>
         <div class="row">
           <button class="btn small" disabled={cleanup().busy || anyCleanupRestore() || !current()?.can_check} onClick={() => { const row = current(); if (row) void checkCleanup(row.id); }}>{tr("Check again")}</button>
-          <Show when={current()?.can_force}><button class="btn small danger" disabled={cleanup().busy || anyCleanupRestore()} onClick={() => setForce(current())}>{tr("Force stop…")}</button></Show>
+          <For each={currentFolder()?.rows.filter((row) => row.can_force)}>{(row) => <button class="btn small danger" disabled={cleanup().busy || anyCleanupRestore()} onClick={() => setForce(row)}>{tr("Force stop…")}<Show when={(currentFolder()?.rows.filter((member) => member.can_force).length ?? 0) > 1}> {row.source?.name ?? row.label}</Show></button>}</For>
           <button class="btn small" disabled={!current() || cleanup().busy || anyCleanupRestore()} onClick={() => setInspect(current())}>{tr("View files and commits…")}</button>
-          <Show when={current()?.restore}>{(source) => <button class="btn small primary" disabled={cleanup().busy || cleanupRestoring(source())} onClick={() => { const row = current(); if (row) void restoreCleanupRow(row); }}><Icon name="play" size={13} />{tr("Restore session")}</button>}</Show>
+          <For each={currentFolder()?.rows.filter((row) => row.restore)}>{(row) => <button class="btn small primary" disabled={cleanup().busy || cleanupRestoring(row.restore!)} onClick={() => void restoreCleanupRow(row)}><Icon name="play" size={13} />{tr("Restore session")}<Show when={(currentFolder()?.rows.filter((member) => member.restore).length ?? 0) > 1}> {row.source?.name ?? row.label}</Show></button>}</For>
+          <Show when={currentFolder()?.rows.every((row) => row.can_dismiss && !row.busy && !row.can_force)}><button class="btn small" disabled={anyCleanupRestore()} onClick={dismissCurrent}>{tr("Dismiss")}</button></Show>
           <button class="btn small" classList={{ on: details() }} aria-pressed={details()} onClick={() => setDetails(!details())}>{tr("Details")}</button><span class="grow" />
         </div>
-        <Show when={details()}><pre class="bc-details mono">{current()?.details}</pre></Show>
+        <Show when={blockerSessions().length}><ul class="cleanup-blockers"><For each={blockerSessions()}>{(name) => <li><span>{name}</span> <button class="btn small" disabled={!blockerSession(name)} onClick={() => openBlocker(name)}>{tr("Open session")}</button></li>}</For></ul></Show>
+        <Show when={blockerPrograms().length}><ul class="cleanup-blockers"><For each={blockerPrograms()}>{(program) => <li>{program.label} (PID {program.pid})</li>}</For></ul></Show>
+        <Show when={details()}><For each={currentFolder()?.rows}>{(row) => <pre class="bc-details mono">{row.details}</pre>}</For></Show>
         <div class="bc-consent">
           <Show when={targets().length && cleanup().required.local_files}><label class="check"><input type="checkbox" checked={consents().local_files} disabled={cleanup().busy} onChange={(e) => setConsents({ ...consents(), local_files: e.currentTarget.checked })} />{tr("Delete the local files outside Git too")}</label></Show>
           <Show when={targets().length && cleanup().required.discard_changes}><label class="check"><input type="checkbox" checked={consents().discard_changes} disabled={cleanup().busy} onChange={(e) => setConsents({ ...consents(), discard_changes: e.currentTarget.checked })} />{tr("Permanently discard uncommitted and untracked files")}</label></Show>

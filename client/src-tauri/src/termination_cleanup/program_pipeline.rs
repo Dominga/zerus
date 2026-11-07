@@ -51,6 +51,9 @@ impl ProgramJob {
             Self::Force { offer, .. } => offer.close(),
         }
     }
+    pub(super) fn normal_refusal(&self) -> bool {
+        matches!(self, Self::Stopped(stopped) if stopped.normal_refusal())
+    }
     pub(super) fn can_force(&self) -> bool {
         matches!(self, Self::Stopped(stopped) if stopped.can_force())
     }
@@ -106,6 +109,7 @@ pub(super) async fn confirm(
                 busy: true,
                 phase: "stopping",
                 manual_review: false,
+                dismissed: false,
                 program_review_pending: true,
                 source: Some(capture.target.clone()),
                 restore_supported: true,
@@ -174,6 +178,9 @@ fn publish(
     job.phase = "checking";
     let (detail, live) = match stopped {
         Ok(stopped) => {
+            if stopped.normal_refusal() {
+                job.program_review_pending = false;
+            }
             let detail = match stopped.report() {
                 Ok(report) if report.state == StopState::Complete => zerus_client_core::source!("Programs have stopped. Checking the working folder…"),
                 Ok(report) if report.state == StopState::Incomplete => zerus_client_core::source!("Some programs are still running. Review them before choosing Force stop."),
@@ -354,6 +361,7 @@ fn finish_cleanup(inner: Arc<Inner>, app: AppHandle, id: String, stopped: progra
     // No model lock across native preparation, child I/O, deletion or join.
     // Taking Stopped consumes the only live Remove continuation. Every result,
     // including a lost reply, ends this pipeline; there is no automatic retry.
+    let mut physically_closed = false;
     let result = stopped.cleanup().and_then(|mut removal| {
         while removal.current() {
             if removal.try_retire()? {
@@ -361,6 +369,7 @@ fn finish_cleanup(inner: Arc<Inner>, app: AppHandle, id: String, stopped: progra
                 // The read-only holder closes only AFTER the mutating helper,
                 // descendants, all readers and its loan physically retire.
                 removal.close()?;
+                physically_closed = true;
                 return report;
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -372,31 +381,7 @@ fn finish_cleanup(inner: Arc<Inner>, app: AppHandle, id: String, stopped: progra
     let Some(job) = model.jobs.iter_mut().find(|job| job.id == id) else {
         return;
     };
-    job.busy = false;
-    job.phase = "checking";
-    job.programs = None;
-    use zerus_client_core::worktree_programs::cleanup::State;
-    let removed = result
-        .as_ref()
-        .is_ok_and(|report| report.state == State::Removed);
-    for entry in &mut job.cleanup.entries {
-        entry.status = Some(match &result {
-            Ok(report) if report.state == State::Removed => Status::Removed,
-            Ok(report) if report.state == State::Kept => Status::Kept,
-            _ => Status::Unconfirmed,
-        });
-        entry.detail = match &result {
-            Ok(report) if report.state == State::Removed => String::new(),
-            Ok(report) if report.state == State::Kept => zerus_client_core::source!(
-                "The working folder changed or is still in use. Review it before removing it."
-            )
-            .into(),
-            _ => zerus_client_core::source!(
-                "Removal could not be confirmed. Check the original result before continuing."
-            )
-            .into(),
-        };
-    }
+    let removed = record_cleanup_result(job, &result, physically_closed);
     if removed {
         let labels: Vec<_> = job
             .cleanup
@@ -410,4 +395,43 @@ fn finish_cleanup(inner: Arc<Inner>, app: AppHandle, id: String, stopped: progra
         }
     }
     changed(&app, &mut model);
+}
+
+/// Called only after the known-complete stop's cleanup and holder close return.
+/// This is result retention, not an execution or custody admission.
+pub(super) fn record_cleanup_result(
+    job: &mut Job,
+    result: &Result<zerus_client_core::worktree_programs::cleanup::Report, String>,
+    physically_closed: bool,
+) -> bool {
+    job.busy = false;
+    job.phase = "checking";
+    job.programs = None;
+    use zerus_client_core::worktree_programs::cleanup::State;
+    let removed = result
+        .as_ref()
+        .is_ok_and(|report| report.state == State::Removed);
+    // A parsed reply alone is not physical retirement. This observation is
+    // set only after try_retire AND holder close above, never worker_finished.
+    // A settled missing/invalid reply is Unknown and may be dismissed singly.
+    job.program_review_pending = !physically_closed;
+    for entry in &mut job.cleanup.entries {
+        entry.status = Some(match result {
+            Ok(report) if report.state == State::Removed => Status::Removed,
+            Ok(report) if report.state == State::Kept => Status::Kept,
+            _ => Status::Unconfirmed,
+        });
+        entry.detail = match result {
+            Ok(report) if report.state == State::Removed => String::new(),
+            Ok(report) if report.state == State::Kept => zerus_client_core::source!(
+                "The working folder changed or is still in use. Review it before removing it."
+            )
+            .into(),
+            _ => zerus_client_core::source!(
+                "Removal could not be confirmed. Check the original result before continuing."
+            )
+            .into(),
+        };
+    }
+    removed
 }

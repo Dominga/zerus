@@ -142,6 +142,8 @@ pub const KEYS: &[Key] = &[
     key("workspace/hideEmptyProjects", Kind::Flag(true)),
     // Session cards mark their account with its letter, or its emoji when set.
     client("sessions/accountMarks", Kind::Choice(&["letter", "emoji"])),
+    // Session cards show account marks at all (zerus-sa9qn.13).
+    client("sessions/showAccountMarks", Kind::Flag(true)),
     key("workspace/animateActivity", Kind::Flag(true)),
     key("workspace/showCompletedSubagents", Kind::Flag(false)),
     key("workspace/reduceMotion", Kind::Flag(false)),
@@ -310,10 +312,18 @@ pub fn find(name: &str) -> Option<Key> {
 /// these are this desktop's preferences, never the host's catalog.
 pub const ACCOUNT_COLORS: &str = "accounts/color/";
 pub const ACCOUNT_MARKS: &str = "accounts/mark/";
+/// The account's mark is not shown on session cards (zerus-sa9qn.13).
+pub const ACCOUNT_HIDDEN: &str = "accounts/hide/";
 fn account_family(name: &str) -> Option<Key> {
-    let token = name
-        .strip_prefix(ACCOUNT_COLORS)
-        .or_else(|| name.strip_prefix(ACCOUNT_MARKS))?;
+    let (token, kind) = if let Some(token) = name.strip_prefix(ACCOUNT_HIDDEN) {
+        (token, Kind::Flag(false))
+    } else {
+        (
+            name.strip_prefix(ACCOUNT_COLORS)
+                .or_else(|| name.strip_prefix(ACCOUNT_MARKS))?,
+            Kind::Text(""),
+        )
+    };
     (!token.is_empty()
         && token.len() <= 512
         && !token
@@ -321,7 +331,7 @@ fn account_family(name: &str) -> Option<Key> {
             .any(|c| c.is_control() || c == '/' || c == '\\'))
     .then_some(Key {
         name: "accounts/",
-        kind: Kind::Text(""),
+        kind,
         seeded: false,
     })
 }
@@ -973,6 +983,7 @@ impl Settings {
             {
                 None
             }
+            (Kind::Flag(_), Value::Null) if name.starts_with(ACCOUNT_HIDDEN) => None,
             (Kind::AutoFlag, Value::String(s)) if s == "auto" => Some(Value::from("auto")),
             (Kind::AutoFlag | Kind::Flag(_), Value::Bool(_))
             | (Kind::Choice(_) | Kind::Text(_) | Kind::Bytes, Value::String(_))

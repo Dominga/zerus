@@ -12,6 +12,10 @@ import { accountChoices, rowBinding, type BoundRow } from "../ui/sessions/scope-
 export const ACCOUNT_COLOR = "accounts/color/";
 export const ACCOUNT_MARK = "accounts/mark/";
 export const MARK_STYLE = "sessions/accountMarks";
+/** Session cards show account marks at all (zerus-sa9qn.13; default on). */
+export const SHOW_MARKS = "sessions/showAccountMarks";
+/** One account's mark is not shown on session cards (presentation only). */
+export const ACCOUNT_HIDE = "accounts/hide/";
 const SEPARATOR = String.fromCharCode(31);
 const HEX = /^#[\da-f]{6}$/iu;
 
@@ -83,16 +87,21 @@ export function inkFor(hex: string): string {
 }
 
 /** The appearance a desktop keeps for an account: the first member profile's choice wins. */
-export function accountAppearance(values: Readonly<Settings>, members: readonly Pick<Profile, "host" | "id">[]): { color: string; emoji: string } {
-  let color = "", emoji = "";
+export function accountAppearance(values: Readonly<Settings>, members: readonly Pick<Profile, "host" | "id">[]): { color: string; emoji: string; hidden: boolean } {
+  let color = "", emoji = "", hidden = false;
   for (const m of members) {
     const token = profileToken(m.host, m.id);
     const c = values[ACCOUNT_COLOR + token], e = values[ACCOUNT_MARK + token];
     if (!color && validColor(c)) color = c.toLowerCase();
     if (!emoji && typeof e === "string" && validEmoji(e)) emoji = e.trim();
+    // The account's choice is stored on every member; any of them hides it.
+    if (values[ACCOUNT_HIDE + token] === true) hidden = true;
   }
-  return { color, emoji };
+  return { color, emoji, hidden };
 }
+
+/** Whether session cards show account marks at all (Settings > Sessions; default on). */
+export const marksShown = (values: Readonly<Settings>) => values[SHOW_MARKS] !== false;
 
 /** The mark of one grouped account. */
 export function accountMark(account: Account, values: Readonly<Settings>, machine = ""): AccountMark {
@@ -122,10 +131,13 @@ export function markIndex(view: Pick<AccountsView, "accounts" | "binding_evidenc
 
 /** A row's mark, or undefined when its binding is not reported or not in the loaded catalog. */
 export function rowMark(row: BoundRow, index: ReadonlyMap<string, { account: Account }>, values: Readonly<Settings>): AccountMark | undefined {
+  // Hiding is presentation only: the label and the binding stay as they are.
+  if (!marksShown(values)) return undefined;
   if (row.accountReported === false || (!row.accountId && !row.accountHome)) return undefined;
   const found = index.get(rowBinding(row));
   if (!found) return undefined;
   const profile = found.account.members.find((p) => p.host === row.computer && (row.accountId ? p.id === row.accountId : p.home === row.accountHome));
+  if (accountAppearance(values, found.account.members).hidden) return undefined;
   return accountMark(found.account, values, profile?.machine ?? "");
 }
 
@@ -134,7 +146,7 @@ const index = createMemo(() => markIndex(accountsPage()));
 export const sessionMark = (row: BoundRow) => rowMark(row, index(), settings);
 
 /** Store one account's color and emoji on every member profile; null clears the choice. */
-export async function saveAccountAppearance(account: Pick<Account, "members">, color: string | null, emoji: string | null) {
+export async function saveAccountAppearance(account: Pick<Account, "members">, color: string | null, emoji: string | null, hidden = false) {
   if (color !== null && !validColor(color)) throw new Error("Invalid color");
   if (emoji !== null && !validEmoji(emoji)) throw new Error("Invalid emoji");
   let stored = true;
@@ -142,6 +154,7 @@ export async function saveAccountAppearance(account: Pick<Account, "members">, c
     const token = profileToken(m.host, m.id);
     stored = (await setSetting(ACCOUNT_COLOR + token, color === null ? null : color.toLowerCase())) && stored;
     stored = (await setSetting(ACCOUNT_MARK + token, emoji === null ? null : emoji.trim())) && stored;
+    stored = (await setSetting(ACCOUNT_HIDE + token, hidden ? true : null)) && stored;
   }
   return stored;
 }

@@ -1,3 +1,4 @@
+import { TextInput } from "../lib/TextField";
 import { Index, Show, createEffect, createMemo, createSignal, lazy, on, type JSX } from "solid-js";
 import { Icon } from "../lib/icons";
 import { OS_NAME } from "../lib/os-icons";
@@ -123,21 +124,21 @@ function Editor(props: { local: LocalState; peers: { row: MachineRow; state: Pee
             </Show>
           )}</Show>
           <Field label={trNoop("Name / SSH alias")} id="mach-alias">
-            <input id="mach-alias" class="field" value={isLocal() ? props.local.name : draft().alias} placeholder={tr("e.g. studio-mac")} readOnly={!editor.isNew()} disabled={fieldsDisabled()} aria-invalid={editor.isNew() && !!draft().alias && (!editor.valid() || editor.duplicate())} onInput={(e) => editor.edit("alias", e.currentTarget.value)} />
+            <TextInput id="mach-alias" class="field" value={isLocal() ? props.local.name : draft().alias} placeholder={tr("e.g. studio-mac")} readOnly={!editor.isNew()} disabled={fieldsDisabled()} aria-invalid={editor.isNew() && !!draft().alias && (!editor.valid() || editor.duplicate())} onInput={(e) => editor.edit("alias", e.currentTarget.value)} />
             <Show when={editor.duplicate()}><span class="danger hint">{tr("This name already exists. Select the machine in the list to edit it.")}</span></Show>
           </Field>
           <Field label={trNoop("Hostname / IP")} id="mach-host">
-            <input id="mach-host" class="field" placeholder={hint().hostname} value={draft().hostname} disabled={fieldsDisabled()} onInput={(e) => editor.edit("hostname", e.currentTarget.value)} />
+            <TextInput id="mach-host" class="field" placeholder={hint().hostname} value={draft().hostname} disabled={fieldsDisabled()} onInput={(e) => editor.edit("hostname", e.currentTarget.value)} />
           </Field>
           <Field label={trNoop("SSH user")} id="mach-user">
-            <input id="mach-user" class="field" placeholder={hint().user} value={draft().user} disabled={fieldsDisabled()} onInput={(e) => editor.edit("user", e.currentTarget.value)} />
+            <TextInput id="mach-user" class="field" placeholder={hint().user} value={draft().user} disabled={fieldsDisabled()} onInput={(e) => editor.edit("user", e.currentTarget.value)} />
           </Field>
           <Field label={trNoop("Port")} id="mach-port">
-            <input id="mach-port" class="field tabular mach-port" placeholder={hint().port} type="number" min={0} max={65535} value={draft().port} disabled={fieldsDisabled()} onInput={(e) => editor.edit("port", e.currentTarget.value)} />
+            <TextInput id="mach-port" class="field tabular mach-port" placeholder={hint().port} type="number" min={0} max={65535} value={draft().port} disabled={fieldsDisabled()} onInput={(e) => editor.edit("port", e.currentTarget.value)} />
           </Field>
           <Field label={trNoop("Private key path")} id="mach-key">
             <div class="row">
-              <input id="mach-key" class="field mono grow" placeholder={hint().key} value={draft().identity_file} disabled={fieldsDisabled()} onInput={(e) => editor.edit("identity_file", e.currentTarget.value)} />
+              <TextInput id="mach-key" class="field mono grow" placeholder={hint().key} value={draft().identity_file} disabled={fieldsDisabled()} onInput={(e) => editor.edit("identity_file", e.currentTarget.value)} />
               <button class="btn" disabled={fieldsDisabled()} title={tr("Choose SSH private key")} onClick={() => void editor.pickKey()}>{tr("Browse…")}</button>
             </div>
           </Field>

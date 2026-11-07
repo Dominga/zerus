@@ -1,3 +1,4 @@
+import { TextInput } from "../lib/TextField";
 import { For, Show, createEffect, createSignal } from "solid-js";
 import { Icon } from "../lib/icons";
 import * as organization from "../../store/organization";
@@ -48,7 +49,7 @@ function NameDialog(props: { title: string; initial: string }) {
       <div class="dlg-head"><Icon name="folder" size={18} class="accent" /><h2 id="org-dlg-title">{props.title}</h2></div>
       <div class="dlg-body">
         <label class="dlg-label" for="org-name">{tr("Project name")}</label>
-        <input id="org-name" data-initial class="dlg-input" value={value()} onInput={(e) => setValue(e.currentTarget.value)} />
+        <TextInput id="org-name" data-initial class="dlg-input" value={value()} onInput={(e) => setValue(e.currentTarget.value)} />
       </div>
       <div class="dlg-foot">
         <span class="spacer" />

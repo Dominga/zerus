@@ -1,3 +1,4 @@
+import { TextInput } from "../lib/TextField";
 import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 import { Icon } from "../lib/icons";
 import { catalogName, type ProjectPrompt } from "./project-catalog";
@@ -50,7 +51,7 @@ export default function ProjectCatalogDialog(props: {
       </div>
       <div class="dlg-body">
         <Show when={prompt.kind === "delete" ? prompt : undefined} fallback={
-          <div class="form-row"><label for="np-name">{tr("Name")}</label><input id="np-name" class="field" maxLength={80} data-initial value={value()} onInput={(event) => setValue(event.currentTarget.value)} /></div>
+          <div class="form-row"><label for="np-name">{tr("Name")}</label><TextInput id="np-name" class="field" maxLength={80} data-initial value={value()} onInput={(event) => setValue(event.currentTarget.value)} /></div>
         }>{(p) => <>
           <p class="confirm-body">{p().text}</p>
           <select ref={enhance} class="field su-rsel" aria-label={tr("Project that receives the sessions")} value={value()} onChange={(event) => setValue(event.currentTarget.value)}>

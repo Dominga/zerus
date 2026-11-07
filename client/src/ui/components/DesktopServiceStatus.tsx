@@ -46,6 +46,7 @@ export function DesktopServiceStatus(props: { counts?: boolean }) {
   const counts = () => desktopService.state()?.attention_counts?.aggregate;
   const details = () => [status()?.details, props.counts ? `${tr("Shared host attention (excludes this device's review marks)")}: ${counts()?.attention ?? tr("Unknown")}${counts()?.complete ? "" : `; ${tr("Incomplete")}`}` : ""].filter(Boolean).join("\n");
   return <Show when={status()}>{(view) => <>
+    <Show when={props.counts || !view().healthy || view().review || view().inputsReview || view().ownership || view().manualRefresh || view().modeReview}>
     <div class="desktop-service-status" role="status" classList={{ healthy: view().healthy }}>
       <span ref={summary} class="service-summary" title={details()} aria-label={details()} tabIndex={0}
         aria-describedby={focused() ? "service-status-details" : undefined}
@@ -79,6 +80,7 @@ export function DesktopServiceStatus(props: { counts?: boolean }) {
       </Show>
     </div>
     <Show when={focused()}><Portal><div id="service-status-details" class="service-status-details" role="tooltip">{details()}</div></Portal></Show>
+    </Show>
     <Show when={reviewOrigin()}>{(origin) => <MigrationReportDialog origin={origin()} close={() => setReviewOrigin(undefined)} />}</Show>
     <Show when={inputsOrigin()}>{(origin) => <TaskMessageInputsDialog origin={origin()} fallback={() => summary} close={() => setInputsOrigin(undefined)} />}</Show>
   </>}</Show>;

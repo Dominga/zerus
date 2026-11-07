@@ -306,6 +306,17 @@ describe("composer commands in the one map", () => {
     off.forEach((f) => f());
     await setSetting("shortcuts/go.anywhere", null);
   });
+  it("tracks a replaced editor and never promotes a missing editor to window scope", () => {
+    const a = focus({marked:"composer",tag:"TEXTAREA"}), b = focus({marked:"composer",tag:"TEXTAREA"});
+    const root = (field: EventTarget) => ({contains:(node:Node|null)=>node===(field as unknown as Node)});
+    let current: ReturnType<typeof root> | undefined = root(a);
+    const off=onCommand("message.send",()=>{},()=>current);
+    try {
+      expect(handlerFor("message.send",a)).toBeDefined();expect(handlerFor("message.send",b)).toBeUndefined();
+      current=root(b);expect(handlerFor("message.send",a)).toBeUndefined();expect(handlerFor("message.send",b)).toBeDefined();
+      current=undefined;expect(handlerFor("message.send",b)).toBeUndefined();
+    }finally{off();}
+  });
   const composer = (selection?: [number, number]) => focus({ marked: "composer", tag: "TEXTAREA", selection: selection ?? [2, 2] });
   it("sends and pushes from a message field only", () => {
     const ran: string[] = [];

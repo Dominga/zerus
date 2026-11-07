@@ -1,3 +1,4 @@
+import { TextInput } from "../lib/TextField";
 import { For, Match, Show, Switch, createEffect, createMemo, createSignal, on, onCleanup, type JSX } from "solid-js";
 import { trText } from "../../text";
 import * as bridge from "../../bridge";
@@ -349,7 +350,7 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
           <div class="form-row">
             <label for="ns-new-project" classList={{ "ns-reserved": !s().newProjectVisible }}>{tr("New project")}</label>
             <Show when={s().newProjectVisible} fallback={<span class="ns-reserved-field" />}>
-              <input id="ns-new-project" class="field" data-keys="text" maxLength={80} placeholder={tr("Project name")} value={s().newProjectName} disabled={!fields()}
+              <TextInput id="ns-new-project" class="field" data-keys="text" maxLength={80} placeholder={tr("Project name")} value={s().newProjectName} disabled={!fields()}
                 onInput={(e) => act.setNewProjectName(e.currentTarget.value)} />
             </Show>
           </div>
@@ -369,7 +370,7 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
           <>
             <div class="form-row">
               <label for="ns-url">{tr("Repository")}</label>
-              <input id="ns-url" ref={url} class="field mono" data-keys="text" maxLength={4096} placeholder="https://github.com/owner/repository.git"
+              <TextInput id="ns-url" ref={url} class="field mono" data-keys="text" maxLength={4096} placeholder="https://github.com/owner/repository.git"
                 title={tr("An SSH or HTTPS repository URL, on GitHub or another Git server.")} value={s().url} disabled={!fields() || !online()}
                 onInput={(e) => act.setUrl(e.currentTarget.value)} />
             </div>
@@ -377,7 +378,7 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
               <label for="ns-destination">{tr("Clone to")}</label>
               <div class="ns-src-detail">
                 <div class="row">
-                  <input id="ns-destination" class="field mono grow" data-keys="text" maxLength={8192} value={s().destination} disabled={!fields() || !online()}
+                  <TextInput id="ns-destination" class="field mono grow" data-keys="text" maxLength={8192} value={s().destination} disabled={!fields() || !online()}
                     title={tr("The complete new checkout path. Edit its folder name or choose a parent folder with Browse.")}
                     onInput={(e) => act.setDestination(e.currentTarget.value)} />
                   <button type="button" id="ns-browse-repository" class="btn" data-keys="button" disabled={!fields() || !online()} onClick={browseRepository}>{tr("Browse…")}</button>
@@ -502,7 +503,7 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
 
         <div class="form-row">
           <label for="ns-name">{tr("Session name")}</label>
-          <input id="ns-name" class="field mono" data-keys="text" value={s().name} disabled={!fields()} aria-invalid={!!form()?.name_problem}
+          <TextInput id="ns-name" class="field mono" data-keys="text" value={s().name} disabled={!fields()} aria-invalid={!!form()?.name_problem}
             aria-describedby={form()?.name_problem ? "ns-name-problem" : undefined} onInput={(e) => act.setName(e.currentTarget.value)} />
         </div>
         <Show when={form()?.name_problem}>

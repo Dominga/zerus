@@ -23,11 +23,11 @@ beforeAll(async () => {
         if (id === entry) return `import {createComponent} from 'solid-js';
           import {renderToString} from 'solid-js/web';
           import {BackgroundTasksChip} from '/src/ui/screens/BackgroundTasks.tsx';
-          import {CleanupChip} from '/src/ui/screens/CleanupChip.tsx';
+          import {CleanupChip,CleanupReviewButton} from '/src/ui/screens/CleanupChip.tsx';
           import {applyCleanup, emptyCleanup} from '/src/store/terminationCleanup.ts';
           let revision = 0;
           export const render = (view) => { applyCleanup({...emptyCleanup(), ...view, revision: ++revision});
-            return renderToString(() => [createComponent(BackgroundTasksChip, {}), createComponent(CleanupChip, {})]); };`;
+            return renderToString(() => [createComponent(CleanupReviewButton, {}), createComponent(BackgroundTasksChip, {}), createComponent(CleanupChip, {})]); };`;
       },
     }, solid({ ssr: true })],
   });

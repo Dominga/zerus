@@ -1,3 +1,4 @@
+import { TextArea } from "../lib/TextField";
 import { descriptionEditing, setDescriptionEditing } from "../../store/taskStart";
 import { noteOnly, setNoteOnly, queuedTask, messageChoice, messageLabel, messagePlaceholder, messageDelivery } from "../../store/taskMessage";
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
@@ -43,7 +44,7 @@ export function TaskInput(props: { project: string; task: Task; describing: bool
     setReleaseReview(undefined);
     void taskEditor.release(review.handle, review.record).then((released) => { if (released) { toast(tr("Recovery record released"), tr("The comment stays in the task; nothing was cancelled or sent again.")); if (alive && view()?.handle === review.handle) queueMicrotask(() => editor.focus()); } });
   };
-  onMount(() => { onCleanup(onCommand("message.send", () => void save(), editor)); });
+  onMount(() => { onCleanup(onCommand("message.send", () => void save(), () => editor)); });
   const cursor = () => {
     const position = editor.selectionDirection === "backward" ? editor.selectionStart : editor.selectionEnd;
     const anchor = editor.selectionDirection === "backward" ? editor.selectionEnd : editor.selectionStart;
@@ -68,7 +69,7 @@ export function TaskInput(props: { project: string; task: Task; describing: bool
       <Show when={view()?.recovery && !props.describing}><button class="tchip warn" title={tr("Keep the previous comment in the task and check its delivery. It will not be sent again.")} disabled={locked()} onClick={() => void save(true)} onContextMenu={(e) => { e.preventDefault(); recoveryMenu(e.currentTarget, { x: e.clientX, y: e.clientY }); }} onKeyDown={(e) => { if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) { e.preventDefault(); recoveryMenu(e.currentTarget); } }}><Icon name="rotate-ccw" size={12} />{tr("Recover saved comment")}</button></Show>
       <span class="grow" /><button class="tchip icon" title={tr("Jump to the latest discussion")} onClick={() => { const scroll = document.querySelector(".tv-scroll"); scroll?.scrollTo({ top: scroll.scrollHeight, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" }); }}><Icon name="chevrons-down" size={13} /></button>
     </div>
-    <textarea ref={editor} class="cmp-editor" aria-label={props.describing ? tr("Task description") : tr("Comment on this task")} placeholder={!props.task.writable ? tr("Update Zerus to comment on this task") : props.describing ? tr("Describe the task…") : messagePlaceholder(props.task, noteOnly())} value={text()} readOnly={locked()} onInput={cursor}
+    <TextArea ref={editor} historyKey={view()?.handle} class="cmp-editor" aria-label={props.describing ? tr("Task description") : tr("Comment on this task")} placeholder={!props.task.writable ? tr("Update Zerus to comment on this task") : props.describing ? tr("Describe the task…") : messagePlaceholder(props.task, noteOnly())} value={text()} readOnly={locked()} onInput={cursor}
       onSelect={() => { const v = view(); if (v && document.activeElement === editor && (v.position !== editor.selectionEnd || v.anchor !== editor.selectionStart)) cursor(); }} onBlur={() => void taskEditor.flush().catch(() => {})}
       onKeyDown={(e) => { if (!e.defaultPrevented && e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); void save(); } }} />
     <div class="cmp-actions"><button class="icon-btn cmp-attach" aria-label={tr("Attach files")} title={tr("Attach files (up to 8 files, 10 MiB each, 20 MiB per task)")} disabled={locked()} onClick={() => void taskEditor.pick().then(() => { if (alive) editor.focus(); })}><Icon name="paperclip" size={17} /></button><span class="cmp-status ell">{props.describing ? tr("Save updates the canonical task document. Comments remain separate.") : ""}</span><span class="grow" />

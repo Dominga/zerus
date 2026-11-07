@@ -119,6 +119,26 @@ pub struct ViewRow {
     /// row fixtures stay as they are.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub session_state: String,
+    /// Task 195: what the host says about that state (`state_reason`), the
+    /// build the session waits for (`build`), its idle clock (`last_active`,
+    /// `reply_at`) and the prompt cache's lifetime (`cache_ttl`): the facts the
+    /// card turns into its badge and third line (`SessionStates::facts`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_reason: Option<StateReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<BuildFact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_active: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_at: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_ttl: Option<CacheTtl>,
+    /// `process_work.services`: what the session runs apart from its jobs
+    /// (never Background work), and `process_work.command` of its jobs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<ServiceFact>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub background_command: String,
     /// Task 175: the team that owns this session, and whether it is its lead.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub team_id: String,
@@ -189,6 +209,40 @@ pub struct ViewRow {
     /// What the menu bar and notifications read; never sent to the frontend.
     #[serde(skip)]
     pub notify: NotifyFacts,
+}
+
+/// `state_reason`: the kind and the text the state card shows as its reason.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StateReason {
+    pub kind: String,
+    pub text: String,
+}
+
+/// `build`: the `hgs run` or `hgs team run` build the session waits for.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BuildFact {
+    pub label: String,
+    pub command: String,
+    pub since: f64,
+}
+
+/// `cache_ttl`: the prompt cache's lifetime in seconds and whether it is kept warm.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CacheTtl {
+    pub seconds: f64,
+    pub kept_warm: bool,
+}
+
+/// One entry of `process_work.services`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServiceFact {
+    pub name: String,
+    pub command: String,
+    pub since: f64,
 }
 
 /// What the menu bar and attention notifications read beyond the card,
@@ -291,6 +345,10 @@ pub fn json_equal(a: &Value, b: &Value) -> bool {
 
 fn text<'a>(row: &'a Value, field: &str) -> &'a str {
     row.get(field).and_then(Value::as_str).unwrap_or("")
+}
+
+fn text_in(map: &Map<String, Value>, field: &str) -> String {
+    map.get(field).and_then(Value::as_str).unwrap_or("").to_owned()
 }
 
 fn object<'a>(row: &'a Value, field: &str) -> Option<&'a Map<String, Value>> {
@@ -1270,6 +1328,41 @@ pub fn row(value: &Value) -> ViewRow {
         // A live row lists no state; Qt reads it as running (`HgsClient.cpp`).
         state: session.state.to_owned(),
         session_state: text(value, "session_state").to_owned(),
+        state_reason: object(value, "state_reason").map(|reason| StateReason {
+            kind: text_in(reason, "kind"),
+            text: text_in(reason, "text"),
+        }),
+        build: object(value, "build")
+            .filter(|build| !build.is_empty())
+            .map(|build| BuildFact {
+                label: text_in(build, "label"),
+                command: text_in(build, "command"),
+                since: build.get("since").and_then(Value::as_f64).unwrap_or(0.0),
+            }),
+        last_active: number(value, "last_active").filter(|at| *at > 0.0),
+        reply_at: number(value, "reply_at").filter(|at| *at > 0.0),
+        cache_ttl: object(value, "cache_ttl").map(|ttl| CacheTtl {
+            seconds: ttl.get("seconds").and_then(Value::as_f64).unwrap_or(0.0),
+            kept_warm: ttl.get("kept_warm").and_then(Value::as_bool).unwrap_or(false),
+        }),
+        services: object(value, "process_work")
+            .and_then(|work| work.get("services"))
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(Value::as_object)
+                    .map(|service| ServiceFact {
+                        name: text_in(service, "name"),
+                        command: text_in(service, "command"),
+                        since: service.get("since").and_then(Value::as_f64).unwrap_or(0.0),
+                    })
+                    .filter(|service| !service.name.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        background_command: object(value, "process_work")
+            .map(|work| text_in(work, "command"))
+            .unwrap_or_default(),
         team_id: text(value, "team_id").to_owned(),
         team_lead: value["team_lead"].as_bool().unwrap_or(false),
         subagent: !text(value, "fork_parent_id").is_empty(),
@@ -1343,6 +1436,34 @@ mod tests {
             assert!(!row.local_read_reply);
             assert!(!row.local_read_attention);
         }
+    }
+
+    /// Task 195: the state facts the card needs come through as listed, and a
+    /// row of an older host carries none of them (nothing new on its wire).
+    #[test]
+    fn a_row_carries_the_hosts_state_facts_and_services() {
+        let listed = row(&json!({
+            "name":"codex/example/one","session_state":"build",
+            "state_reason":{"kind":"build","text":"Running cargo test"},
+            "build":{"label":"cargo test","command":"cargo test --workspace","since":990.5},
+            "last_active":999.0,"reply_at":998.0,
+            "cache_ttl":{"seconds":300,"source":"default","kept_warm":true},
+            "process_work":{"count":2,"command":"npm run dev","services":[
+                {"name":"vite","command":"npm run dev","since":900.0},{"name":"","command":"x"}]}
+        }));
+        assert_eq!(listed.state_reason, Some(StateReason { kind: "build".into(), text: "Running cargo test".into() }));
+        assert_eq!(listed.build, Some(BuildFact { label: "cargo test".into(), command: "cargo test --workspace".into(), since: 990.5 }));
+        assert_eq!(listed.last_active, Some(999.0));
+        assert_eq!(listed.reply_at, Some(998.0));
+        assert_eq!(listed.cache_ttl, Some(CacheTtl { seconds: 300.0, kept_warm: true }));
+        assert_eq!(listed.services, vec![ServiceFact { name: "vite".into(), command: "npm run dev".into(), since: 900.0 }]);
+        assert_eq!(listed.background_command, "npm run dev");
+        let old = serde_json::to_value(row(&json!({"name":"codex/example/one"}))).unwrap();
+        for field in ["state_reason", "build", "last_active", "reply_at", "cache_ttl", "services", "background_command"] {
+            assert!(old.get(field).is_none(), "{field}");
+        }
+        // The idle build row of a host that lists an empty build has none.
+        assert_eq!(row(&json!({"name":"a/b/c","build":{}})).build, None);
     }
 
     /// zerus-ucck P1c: a row keeps the listing's durable session ID only in

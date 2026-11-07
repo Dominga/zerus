@@ -719,10 +719,37 @@ fn decide(entry: &Entry, runtime: &Value, observed: Option<&Observed>, facts: im
 
 /// The enabled session's current record: by its session ID, so a rename
 /// keeps it, else by its saved label with the same owner key.
-fn bound_record(owner: &str, entry: &Entry) -> Option<Value> {
-    let record = if session_id::canonical(owner) { storage::read_id(owner).ok()? } else { read(&entry.name).ok()? };
+/// None only when the session is positively gone; a record that exists but
+/// cannot be read now is an error, and the round changes nothing.
+fn bound_record(owner: &str, entry: &Entry) -> Result<Option<Value>> {
+    let by_id = session_id::canonical(owner);
+    let path = if by_id { storage::id_record_path(owner).ok_or("invalid keep-warm owner")? } else { record_path(&entry.name) };
+    match fs::symlink_metadata(&path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("keep-warm session {}: {error}", path.display())),
+    }
+    let record = if by_id { storage::read_id(owner)? } else { read(&entry.name)? };
     let archived = !string(&record, "archive_id").is_empty() || record["state"] == "archived";
-    (storage::owner_key(&record) == owner && !archived).then_some(record)
+    Ok((storage::owner_key(&record) == owner && !archived).then_some(record))
+}
+
+/// The worker state left when the setting turns off. A delivery fence stays:
+/// turning the setting on again must not make an unknown ping a first use.
+fn off_runtime(previous: &Value, state: &str, reason: &str, now: f64) -> Value {
+    match string(previous, "state") {
+        "uncertain" | "dispatching" | "warming" => {
+            let kept = string(previous, "reason");
+            let reason = if string(previous, "state") == "uncertain" && !kept.is_empty() {
+                kept.to_owned()
+            } else {
+                format!("A keep-warm ping may have been delivered when keep-warm turned off. {RESUMES}")
+            };
+            json!({"state":"uncertain","reason":reason,"since":previous["since"].as_f64().unwrap_or(now),"pings":previous["pings"]})
+        }
+        "stopped" => previous.clone(),
+        _ => json!({"state":state,"reason":reason,"since":now,"pings":previous["pings"]}),
+    }
 }
 
 fn save_runtime(owner: &str, value: &Value) -> Result<()> {
@@ -786,7 +813,7 @@ fn round(owner: &str, entry: &Entry, panes: &Snapshot, now: f64) -> Result<()> {
             return save_runtime(owner, &json!({"state":state,"reason":reason,"since":since}));
         }
     };
-    let record = bound_record(owner, entry);
+    let record = bound_record(owner, entry)?;
     let observed = record.as_ref().map(|record| Observed {
         record,
         live: matches(record, panes_of(panes, record)) && process_alive(record),
@@ -798,7 +825,7 @@ fn round(owner: &str, entry: &Entry, panes: &Snapshot, now: f64) -> Result<()> {
     match step {
         Step::Off(state, reason) => {
             turn_off(owner, entry)?;
-            save_runtime(owner, &json!({"state":state,"reason":reason,"since":now,"pings":runtime["pings"]}))
+            save_runtime(owner, &off_runtime(&runtime, state, reason, now))
         }
         Step::Hold { state, reason, next_at, since } => {
             let mut next = runtime.clone();
@@ -952,17 +979,24 @@ pub(super) fn rename(old: &str, new: &str) -> Result<()> {
     if !moving && !moved {
         return Ok(());
     }
-    let present = |path: &Path| fs::symlink_metadata(path).is_ok();
-    if present(&from_state) {
+    // Present or absent; anything else (permission denied) stops the rename
+    // before a step, never reads as absence.
+    let present = |path: &Path| match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("keep-warm state {}: {error}", path.display())),
+    };
+    let (had_state, had_destination) = (present(&from_state)?, present(&to_state)?);
+    if had_state {
         // Carried as it is: an unreadable state stays unknown. A state already
         // at the destination after an interrupted move is never trusted over it.
         let carried = match read_regular(&from_state, 64 * 1024) {
-            Ok(Some(bytes)) if !(moved && present(&to_state)) => String::from_utf8(bytes).unwrap_or_else(|_| carried_fence()),
+            Ok(Some(bytes)) if !(moved && had_destination) => String::from_utf8(bytes).unwrap_or_else(|_| carried_fence()),
             _ => carried_fence(),
         };
         private_dir(to_state.parent().ok_or("invalid keep-warm state path")?)?;
         atomic(&to_state, &carried)?;
-    } else if moving && present(&to_state) {
+    } else if moving && had_destination {
         // The destination's state belonged to a session that is gone.
         fs::remove_file(&to_state).map_err(|e| e.to_string())?;
     }
@@ -970,7 +1004,7 @@ pub(super) fn rename(old: &str, new: &str) -> Result<()> {
         rename_entry(&mut store, old, new);
         persist(&path(), &store)?;
     }
-    if present(&from_state) {
+    if had_state {
         fs::remove_file(&from_state).map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -1556,6 +1590,21 @@ mod tests {
         failed["recovery_user_at"] = json!(NOW - 20.0);
         failed["keep_warm_prompt_at"] = json!(NOW - 20.0);
         assert!(held("stopped")(&step(&enabled(), Value::Null, Some(&failed), quiet(), Some(None))));
+    }
+
+    #[test]
+    fn turning_the_setting_off_keeps_a_delivery_fence() {
+        for fenced in ["uncertain", "dispatching", "warming"] {
+            let previous = json!({"state":fenced,"reason":"kept","since":NOW - 50.0,"request_id":"ping-1","sent_at":NOW - 60.0});
+            let off = off_runtime(&previous, "gone", "The session is no longer available.", NOW);
+            assert_eq!((off["state"].clone(), off["since"].clone()), (json!("uncertain"), json!(NOW - 50.0)), "{fenced}");
+            assert!(runtime_valid(&off));
+        }
+        let stopped = json!({"state":"stopped","reason":"failed","since":NOW - 50.0});
+        assert_eq!(off_runtime(&stopped, "expired", "ended", NOW), stopped);
+        let plain = off_runtime(&json!({"state":"waiting","pings":3}), "expired", "ended", NOW);
+        assert_eq!(plain, json!({"state":"expired","reason":"ended","since":NOW,"pings":3}));
+        assert_eq!(off_runtime(&Value::Null, "gone", "x", NOW)["state"], "gone");
     }
 
     #[test]

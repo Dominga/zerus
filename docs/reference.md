@@ -2494,8 +2494,11 @@ IDs or label keys; the worker's state of each session is under
 `recovery/keep-warm/`. Both are read as bounded regular files: a special file is
 refused without blocking, and a worker state that is unreadable or not one
 the worker writes holds keep-warm as uncertain until the next real turn. A
-legacy-label rename carries the worker state before the setting and repairs an
-interrupted move when the rename resumes. See the
+legacy-label rename carries the worker state before the setting, stops when it
+cannot tell whether a state exists (permission denied is not absence), and
+repairs an interrupted move when the rename resumes. A session record that exists
+but cannot be read skips the round; only a session that is gone turns the
+setting off, and turning it off keeps an uncertain-delivery fence. See the
 [design note](superpowers/specs/2026-11-07-keep-cache-warm-design.md).
 
 ## Projects and P2P synchronization

@@ -310,13 +310,20 @@ class KeepWarm(unittest.TestCase):
             self.assertEqual(self.received(), b"", unknown)
             self.assertEqual(self.inspect()["keep_warm"]["state"], "uncertain")
 
-    def test_an_interrupted_legacy_rename_keeps_the_delivery_fence(self):
+    def test_a_rename_interrupted_by_a_read_only_state_keeps_the_delivery_fence(self):
+        self.interrupted_rename(0o500)
+
+    def test_a_rename_that_cannot_see_the_state_keeps_the_delivery_fence(self):
+        # Permission denied is not absence: the rename must not leave the fence behind.
+        self.interrupted_rename(0o000)
+
+    def interrupted_rename(self, mode):
         self.due()
         self.change(hours=1)
         old_runtime = self.runtime_file()
         old_runtime.write_text(json.dumps(dict(state="uncertain", reason="kept", since=time.time())))
         directory = old_runtime.parent
-        directory.chmod(0o500)
+        directory.chmod(mode)
         try:
             renamed = "codex/input-test/renamed"
             failed = subprocess.run([str(fixtures.HGS), "rename", self.name, renamed], env=self.env, text=True,
@@ -340,6 +347,23 @@ class KeepWarm(unittest.TestCase):
         self.assertEqual(entry["name"], renamed)
         self.assertEqual(json.loads((directory / f"{owner}.json").read_text())["state"], "uncertain")
         self.assertEqual(sorted(path.name for path in directory.glob("*.json")), [f"{owner}.json"])
+
+    def test_an_unreadable_session_record_is_not_a_gone_session(self):
+        self.due()
+        self.change(hours=1)
+        runtime = self.runtime_file()
+        runtime.write_text(json.dumps(dict(state="uncertain", reason="kept", since=time.time())))
+        self.record_path.chmod(0o000)
+        try:
+            self.command("recovery", "tick", ok=False)
+        finally:
+            self.record_path.chmod(0o600)
+        store = json.loads((self.state / "keep-warm.json").read_text())
+        self.assertEqual([entry["enabled"] for entry in store["sessions"].values()], [True])
+        self.assertEqual(json.loads(runtime.read_text())["state"], "uncertain")
+        self.tick()
+        time.sleep(0.3)
+        self.assertEqual(self.received(), b"")
 
     def test_a_stale_conversation_is_refused(self):
         stale = self.command("keep-warm", self.name, "--json", ok=False, payload=dict(

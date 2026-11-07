@@ -95,6 +95,7 @@ mod supervisor;
 mod tasks;
 mod telemetry;
 mod terminate;
+mod terminating;
 mod untracked_shell;
 mod session_action;
 pub(crate) use session_action::{

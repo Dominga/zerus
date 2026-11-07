@@ -209,7 +209,7 @@ pub(super) fn forget(id: &str) -> Result<()> {
 pub(super) fn test_native_publication(root: &Path) {
     use std::{io::Write, os::windows::fs::OpenOptionsExt};
     use windows_sys::Win32::{
-        Foundation::GENERIC_WRITE,
+        Foundation::{ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, GENERIC_WRITE},
         Storage::FileSystem::{DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE},
     };
     let path = root.join("native-publication");
@@ -281,7 +281,15 @@ pub(super) fn test_native_publication(root: &Path) {
     next.write_all(b"replacement receipt").unwrap();
     next.sync_all().unwrap();
     let error = unsafe { windows::rename_same_parent(&next, &name) }.unwrap_err();
-    assert_eq!(error.raw_os_error(), Some(32));
+    // Native replacement of an open target can report access denied instead
+    // of a sharing violation. Both must leave its bytes and pins unchanged.
+    assert!(
+        matches!(
+            error.raw_os_error().map(|code| code as u32),
+            Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION)
+        ),
+        "{error}"
+    );
     assert_eq!(fs::read(&target).unwrap(), b"first receipt");
     directory.verify().unwrap();
     drop(reader);

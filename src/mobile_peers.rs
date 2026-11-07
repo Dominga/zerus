@@ -890,6 +890,9 @@ fn transport(
     deadline: Instant,
     cap: usize,
 ) -> Result<Output> {
+    // Sample the wire clock first: the conversion may shorten, never renew,
+    // the caller's absolute budget while preparation/serialization runs.
+    let now_ms = monotonic_ms()?;
     let remaining = deadline
         .saturating_duration_since(Instant::now())
         .as_millis();
@@ -903,7 +906,7 @@ fn transport(
         helper,
         request,
         parent_pid: std::process::id(),
-        deadline_ms: monotonic_ms()? + remaining as u64,
+        deadline_ms: now_ms + remaining as u64,
     };
     let bytes = serde_json::to_vec(&envelope)?;
     ensure!(bytes.len() <= MAX_BYTES, "mobile request is too large");
@@ -922,6 +925,7 @@ fn supervise() -> Result<i32> {
         );
     }
     let envelope: TransportRequest = input()?;
+    let started = Instant::now();
     let now = monotonic_ms()?;
     ensure!(
         envelope.schema == 1
@@ -936,6 +940,10 @@ fn supervise() -> Result<i32> {
                 <= transport_budget(envelope.helper, envelope.request.as_ref()).as_millis(),
         "invalid mobile transport deadline"
     );
+    // The wire clock is rounded down to milliseconds. Discard that partial
+    // millisecond so converting back to Instant cannot extend the wire budget.
+    let remaining = (envelope.deadline_ms - now).saturating_sub(1);
+    let deadline = started + Duration::from_millis(remaining);
     let config = Config::load()?;
     let (command, bytes, cap) = match envelope.helper {
         Helper::OwnIdentity => {
@@ -957,7 +965,7 @@ fn supervise() -> Result<i32> {
             } else {
                 (IDENTITY_HELPER, 4096)
             };
-            (ssh(&config, &envelope.via, helper)?, vec![], cap)
+            (ssh(&config, &envelope.via, helper, deadline)?, vec![], cap)
         }
         Helper::Local => {
             ensure!(
@@ -969,7 +977,7 @@ fn supervise() -> Result<i32> {
                 .context("missing mobile transport request")?;
             validate(&request)?;
             (
-                ssh(&config, &envelope.via, LOCAL_HELPER)?,
+                ssh(&config, &envelope.via, LOCAL_HELPER, deadline)?,
                 serde_json::to_vec(&request)?,
                 MAX_BYTES,
             )
@@ -980,11 +988,10 @@ fn supervise() -> Result<i32> {
             && !TRANSPORT_STOP.load(Ordering::Relaxed),
         "mobile transport parent changed"
     );
-    let remaining = envelope.deadline_ms.saturating_sub(monotonic_ms()?);
     let output = capture_control(
         command,
         &bytes,
-        Instant::now() + Duration::from_millis(remaining),
+        deadline,
         cap,
         CaptureMode::OwnedSsh {
             parent_pid: envelope.parent_pid,
@@ -996,10 +1003,10 @@ fn supervise() -> Result<i32> {
     Ok(output.code)
 }
 
-fn ssh(config: &Config, via: &str, helper: &str) -> Result<Command> {
+fn ssh(config: &Config, via: &str, helper: &str, deadline: Instant) -> Result<Command> {
     // Each helper is a fixed source constant; request bytes stay on stdin.
     let words: Vec<_> = helper.strip_prefix("~/.local/bin/hgs ").context("invalid fixed peer helper")?.split_whitespace().collect();
-    let helper = crate::remote_shell::hgs(config, via, &words)?;
+    let helper = crate::remote_shell::hgs_within(config, via, &words, deadline)?;
     let mut command = crate::ssh_bytes::command(&helper)?;
     command.args([
         "-T",

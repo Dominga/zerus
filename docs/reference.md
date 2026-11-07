@@ -3240,6 +3240,14 @@ removed or restored, the status bar also shows **Background tasks** with a count
 Its list names each folder and its current state, and offers the same review.
 It adds no cancel or retry, and goes away only when the work has really ended.
 A kept or unknown result stays on the working-folder entry while other folders run.
+Review groups results for the same folder and lists their original sessions.
+Blockers name the current sessions (with **Open session**) and programs with PIDs;
+full reasons remain readable. **Clear settled results** clears settled kept
+folders, including folders retained for another session or external program.
+**Dismiss** removes one folder from this review; unknown results must be dismissed
+individually and retain their native no-replay fence. Busy folders, live Force
+offers and unfinished program stops cannot be cleared or dismissed. Closing the
+review only closes it; it never clears results or releases an action.
 
 The original folder is checked on its owning computer. A verified Zerus-created,
 clean, integrated checkout can be removed with tool-declared generated caches

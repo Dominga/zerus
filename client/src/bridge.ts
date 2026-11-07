@@ -993,6 +993,7 @@ export const terminationProgramForceCancel = (id: string, confirmation: string) 
 export const terminationCleanupView = () => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_view", {});
 export const terminationCleanupCheck = (id: string) => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_check", { id });
 export const terminationCleanupRemove = (revision: number, consents: import("./store/terminationCleanup").Consents) => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_remove", { revision, consents });
+export const terminationCleanupDismiss = (id: string, revision: number) => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_dismiss", { id, revision });
 export const terminationCleanupKeep = (revision: number) => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_keep", { revision });
 export const terminationCleanupRestore = (source: import("./store/terminationCleanup").RestoreSource) => desktop<Outcome>("termination_cleanup_restore", { source });
 export const terminationCleanupInspect = (id: string, file = "", offset = 0) => desktop<import("./store/terminationCleanup").Inspection>("termination_cleanup_inspect", { id, file, offset });

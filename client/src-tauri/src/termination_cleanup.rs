@@ -22,6 +22,8 @@ mod program_pipeline;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::desktop_service::termination_outcome::programs::pipeline as programs;
 
+mod presentation;
+
 const LIMIT: usize = review::CLEANUP_TARGETS;
 const PREF: &str = "workspace/removeWorktreeAfterTermination";
 const OFFER_AGE: Duration = Duration::from_secs(10 * 60);
@@ -72,6 +74,7 @@ struct Job {
     busy: bool,
     phase: &'static str,
     manual_review: bool,
+    dismissed: bool,
     // Presentation retention, not consent/custody: expiry may release the
     // program pipeline while its incomplete/unknown result still needs review.
     program_review_pending: bool,
@@ -84,18 +87,29 @@ struct Job {
 impl Job {
     fn clearable(&self) -> bool {
         !self.busy
-            && !self.has_programs()
+            && !self.unfinished_programs()
             && !self.program_review_pending
-            && self.cleanup.entries.iter().all(|entry| {
-                entry.status != Some(Status::Unconfirmed)
-                    && entry.row["process_count"].as_u64().unwrap_or(0) == 0
-                    && !entry.row["processes"]
-                        .as_array()
-                        .is_some_and(|p| !p.is_empty())
-                    && !entry.row["reasons"]
-                        .as_array()
-                        .is_some_and(|reasons| reasons.iter().any(|r| r["code"] == "processes"))
-            })
+            && self
+                .cleanup
+                .entries
+                .iter()
+                .all(|entry| entry.status != Some(Status::Unconfirmed))
+    }
+    fn dismissible(&self) -> bool {
+        !self.busy && !self.unfinished_programs() && !self.program_review_pending
+    }
+
+    fn unfinished_programs(&self) -> bool {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            self.programs
+                .as_ref()
+                .is_some_and(|program| !program.normal_refusal())
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            false
+        }
     }
     fn has_programs(&self) -> bool {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -281,6 +295,10 @@ pub fn termination_program_force_cancel(
 #[derive(Serialize)]
 pub struct Row {
     id: String,
+    folder_key: String,
+    can_dismiss: bool,
+    sessions: Vec<String>,
+    processes: Vec<ProgramView>,
     label: String,
     path: String,
     machine: String,
@@ -326,12 +344,6 @@ fn ready(entry: &zerus_client_core::termination_cleanup::Entry) -> bool {
     entry.eligible()
 }
 impl Model {
-    fn clear_settled_results(&mut self) {
-        self.jobs.retain(|job| !job.clearable());
-        self.overflow_kept = 0;
-        // Unknown outcomes still fence future removal; clearing presentation
-        // must not erase that protection or reconstruct an execution permit.
-    }
     fn retain(
         &mut self,
         target: &Target,
@@ -339,6 +351,7 @@ impl Model {
         report: &zerus_client_core::WorktreeCleanup,
         restore_supported: bool,
     ) -> Option<RetainedCapture> {
+        self.prune_dismissed();
         self.offers.retain(|offer| offer.at.elapsed() < OFFER_AGE);
         if !matches!(report.status.as_str(), "kept" | "unconfirmed")
             || report.path.len() > 32 * 1024
@@ -450,6 +463,7 @@ impl Model {
             busy: false,
             phase: "checking",
             manual_review: false,
+            dismissed: false,
             program_review_pending: false,
             source: Some(target.clone()),
             archive,
@@ -465,9 +479,8 @@ impl Model {
     }
     fn view(&self) -> View {
         let mut rows = Vec::new();
-        let (mut removed, mut kept, mut unknown) = (0, self.overflow_kept, self.overflow_unknown);
         let mut required = Consents::default();
-        for job in &self.jobs {
+        for job in self.jobs.iter().filter(|job| !job.dismissed) {
             let restoring =
                 job.source
                     .as_ref()
@@ -482,18 +495,9 @@ impl Model {
                     "stopping"
                 } else {
                     match entry.status {
-                        Some(Status::Removed) => {
-                            removed += 1;
-                            "removed"
-                        }
-                        Some(Status::Unconfirmed) => {
-                            unknown += 1;
-                            "unknown"
-                        }
-                        Some(Status::Kept) => {
-                            kept += 1;
-                            "kept"
-                        }
+                        Some(Status::Removed) => "removed",
+                        Some(Status::Unconfirmed) => "unknown",
+                        Some(Status::Kept) => "kept",
                         None => {
                             if job.busy && !restoring {
                                 job.phase
@@ -532,6 +536,34 @@ impl Model {
                 let details=format!("Folder: {path}\nComputer: {}\n{}\n{}\nAfter removal: conversations and branches remain. Restoring an archived session may require recreating its working folder.", computer,reason,review::decision(&presentation).join("\n"));
                 rows.push(Row {
                     id: job.id.clone(),
+                    folder_key: presentation::folder_key(entry),
+                    can_dismiss: self.can_dismiss(job),
+                    sessions: entry.row["sessions"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .take(1024)
+                        .map(str::to_owned)
+                        .collect(),
+                    processes: entry.row["processes"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .take(64)
+                        .filter_map(|p| {
+                            Some(ProgramView {
+                                pid: u32::try_from(p["pid"].as_u64()?).ok()?,
+                                label: p["command"]
+                                    .as_str()
+                                    .or_else(|| p["label"].as_str())
+                                    .unwrap_or("Program")
+                                    .chars()
+                                    .take(2000)
+                                    .collect(),
+                            })
+                        })
+                        .collect(),
                     label: leaf(path),
                     path: path.into(),
                     machine: if entry.host.is_empty() {
@@ -563,11 +595,15 @@ impl Model {
                             false
                         }
                     },
-                    can_check: !job.busy
+                    can_check: self.can_dismiss(job)
+                        && !self.unknown_folder(job)
+                        && !job.busy
                         && !job.has_programs()
                         && job.cleanup.can_refresh()
                         && zerus_client_core::creation::canonical_uuid(&entry.machine),
-                    ready: !job.busy
+                    ready: self.can_dismiss(job)
+                        && !self.unknown_folder(job)
+                        && !job.busy
                         && !job.has_programs()
                         && job.manual_review
                         && ready(entry)
@@ -625,6 +661,10 @@ impl Model {
                     },
                 )
         });
+        let counts = presentation::folder_counts(&rows);
+        let removed = counts.0;
+        let kept = self.overflow_kept.saturating_add(counts.1);
+        let unknown = self.overflow_unknown.saturating_add(counts.2);
         // Running work has its own status bar item, so a held result always
         // names itself here, even while another folder is still running.
         let held = removed > 0 || kept > 0 || unknown > 0;
@@ -650,7 +690,12 @@ impl Model {
             }
         };
         let mut title = text.clone();
-        if let Some(reason) = self.jobs.iter().find_map(|j| j.cleanup.retained_reason()) {
+        if let Some(reason) = self
+            .jobs
+            .iter()
+            .filter(|j| !j.dismissed)
+            .find_map(|j| j.cleanup.retained_reason())
+        {
             title.push(' ');
             title.push_str(&reason);
         }
@@ -669,7 +714,7 @@ impl Model {
             busy,
             cleaning,
             can_clear: self.restoring.is_empty()
-                && (self.overflow_kept > 0 || self.jobs.iter().any(Job::clearable)),
+                && (self.overflow_kept > 0 || self.jobs.iter().any(|job| self.clearable(job))),
             removed,
             kept,
             unknown,
@@ -1016,6 +1061,7 @@ pub async fn termination_cleanup_offer(
         let id = uuid::Uuid::new_v4().to_string();
         let mut m = lock(&state.0.model);
         m.offers.retain(|o| o.at.elapsed() < OFFER_AGE);
+        m.prune_dismissed();
         if m.offers.len() + m.jobs.len() + m.reserved >= LIMIT {
             return Err(
                 "Review the retained working folders before starting another cleanup.".into(),
@@ -1067,6 +1113,7 @@ pub async fn termination_cleanup_offer(
     };
     let mut m = lock(&state.0.model);
     m.offers.retain(|o| o.at.elapsed() < OFFER_AGE);
+    m.prune_dismissed();
     if m.offers.len() + m.jobs.len() + m.reserved >= LIMIT {
         return Err("Review the retained working folders before starting another cleanup.".into());
     }
@@ -1187,6 +1234,7 @@ pub async fn termination_cleanup_confirm(
                 busy: true,
                 phase: "checking",
                 manual_review: false,
+                dismissed: false,
                 program_review_pending: false,
                 source: Some(capture.target.clone()),
                 restore_supported: true,
@@ -1219,6 +1267,13 @@ pub fn termination_cleanup_check(
     id: String,
 ) -> Result<View, String> {
     let mut m = lock(&state.0.model);
+    if m.jobs
+        .iter()
+        .find(|j| j.id == id)
+        .is_some_and(|j| j.dismissed || m.unknown_folder(j))
+    {
+        return Err("An unknown result will not be retried.".into());
+    }
     let j = m
         .jobs
         .iter_mut()
@@ -1251,12 +1306,22 @@ pub fn termination_cleanup_remove(
     }
     consents.merged_branches = false;
     let mut calls = Vec::new();
+    let unknown_folders = m.unknown_folders();
+    let mut removing_folders = BTreeSet::new();
     for j in &mut m.jobs {
-        if !j.manual_review || j.has_programs() {
+        if j.dismissed
+            || unknown_folders.contains(&presentation::job_key(j))
+            || !j.manual_review
+            || j.has_programs()
+        {
+            continue;
+        }
+        if removing_folders.contains(&presentation::job_key(j)) {
             continue;
         }
         let step = j.cleanup.remove(consents);
         if matches!(step, Step::Remove { .. }) {
+            removing_folders.insert(presentation::job_key(j));
             j.busy = true;
             j.phase = "removing";
             j.manual_review = false;
@@ -1284,6 +1349,23 @@ pub fn termination_cleanup_keep(
     m.clear_settled_results();
     changed(&app, &mut m);
     Ok(m.view())
+}
+
+/// Dismiss one folder result. Unknown evidence stays in the native model.
+#[tauri::command]
+pub fn termination_cleanup_dismiss(
+    app: AppHandle,
+    state: State<'_, TerminationCleanup>,
+    id: String,
+    revision: u64,
+) -> Result<View, String> {
+    let mut model = lock(&state.0.model);
+    if model.revision != revision {
+        return Err(STATE_CHANGED.into());
+    }
+    model.dismiss(&id)?;
+    changed(&app, &mut model);
+    Ok(model.view())
 }
 
 /// Read-only inspection of an opaque recorded row; never accepts a local root
@@ -1508,7 +1590,10 @@ mod tests {
         assert!(capture.notice.ends_with("an unknown result."));
         let view = model.view();
         assert_eq!(view.rows.len(), LIMIT);
-        assert_eq!(view.kept, LIMIT);
+        assert_eq!(
+            view.kept, 1,
+            "the native capacity counts jobs; the view counts folders"
+        );
         assert_eq!(view.unknown, 1);
         assert!(view
             .title
@@ -1603,6 +1688,7 @@ mod tests {
             busy: false,
             phase: "checking",
             manual_review: false,
+            dismissed: false,
             program_review_pending: false,
             source: None,
             archive: None,
@@ -1643,17 +1729,21 @@ mod tests {
         );
         m.jobs.push_back(job(Some(Status::Kept)));
         let view = m.view();
-        assert_eq!(view.kept, 1);
-        assert!(view.rows[1].can_check);
-        assert_eq!(view.text, "Working folders: 1 kept  1 unknown");
+        assert_eq!(view.kept, 0);
+        assert!(
+            !view.rows[1].can_check,
+            "an unknown sibling fences the whole folder"
+        );
+        assert_eq!(view.text, "Working folders: 1 unknown");
         m.jobs[1].busy = true;
-        assert_eq!(m.view().text, "Working folders: 1 kept  1 unknown");
+        assert_eq!(m.view().text, "Working folders: 1 unknown");
     }
     #[test]
     fn clearing_settled_results_preserves_program_review_busy_and_unknown_rows() {
         let mut m = Model::default();
         let mut settled = job(Some(Status::Kept));
         settled.id = "settled".into();
+        settled.cleanup.entries[0].row["path"] = json!("/srv/example/settled");
         m.jobs.push_back(settled);
         let mut programs = job(Some(Status::Kept));
         programs.id = "programs".into();
@@ -1689,7 +1779,7 @@ mod tests {
         assert_eq!(m.jobs.len(), 3);
     }
     #[test]
-    fn clearing_results_never_forgets_known_use_from_an_ordinary_review() {
+    fn ordinary_known_use_is_a_settled_kept_result() {
         for row in [
             json!({"process_count":1}),
             json!({"processes":[{"pid":42}]}),
@@ -1699,11 +1789,136 @@ mod tests {
             j.cleanup.entries[0].row = row;
             let mut m = Model::default();
             m.jobs.push_back(j);
-            assert!(!m.view().can_clear);
+            assert!(m.view().can_clear);
             m.clear_settled_results();
-            assert_eq!(m.jobs.len(), 1);
+            assert!(m.jobs.is_empty());
         }
     }
+    #[test]
+    fn a_shared_folder_is_counted_once_and_dismisses_settled_origins_together() {
+        let mut m = Model::default();
+        for id in ["first", "second", "third"] {
+            let mut j = job(Some(Status::Kept));
+            j.id = id.into();
+            j.cleanup.entries[0].row["sessions"] = json!(["claude/example/live"]);
+            j.cleanup.entries[0].row["processes"] = json!([{"pid":42,"command":"report-server"}]);
+            m.jobs.push_back(j);
+        }
+        let view = m.view();
+        assert_eq!(view.kept, 1);
+        assert_eq!(view.rows.len(), 3);
+        assert!(view.rows.iter().all(|r| r.can_dismiss));
+        assert_eq!(view.rows[0].sessions, ["claude/example/live"]);
+        assert_eq!(view.rows[0].processes[0].pid, 42);
+        m.dismiss("second").unwrap();
+        assert!(m.jobs.is_empty());
+    }
+    #[test]
+    fn a_pending_stop_keeps_every_origin_of_its_folder_in_review() {
+        for busy in [false, true] {
+            let mut m = Model::default();
+            let mut pending = job(Some(Status::Kept));
+            pending.id = "pending".into();
+            pending.busy = busy;
+            pending.program_review_pending = !busy;
+            m.jobs.push_back(pending);
+            let mut settled = job(Some(Status::Kept));
+            settled.id = "settled".into();
+            m.jobs.push_back(settled);
+            let before: Vec<_> = m.jobs.iter().map(|j| j.cleanup.clone()).collect();
+            assert!(!m.view().can_clear);
+            assert!(m.dismiss("settled").is_err());
+            m.clear_settled_results();
+            assert_eq!(m.jobs.len(), 2);
+            assert_eq!(
+                m.jobs.iter().map(|j| j.cleanup.clone()).collect::<Vec<_>>(),
+                before
+            );
+        }
+    }
+    #[test]
+    fn unknown_dismissal_hides_only_one_result_and_preserves_its_native_fence() {
+        let state = TerminationCleanup::default();
+        {
+            let mut m = lock(&state.0.model);
+            for id in ["first", "second"] {
+                let mut j = job(Some(Status::Unconfirmed));
+                j.id = id.into();
+                m.jobs.push_back(j);
+            }
+            m.clear_settled_results();
+            assert_eq!(m.view().rows.len(), 2);
+            let before = m.jobs[0].cleanup.clone();
+            m.dismiss("first").unwrap();
+            assert_eq!(m.view().rows.len(), 1);
+            assert_eq!(m.jobs[0].cleanup, before);
+            m.dismiss("second").unwrap();
+            m.prune_dismissed();
+            assert!(m.view().rows.is_empty());
+            assert_eq!(m.jobs.len(), 2);
+            assert_eq!(m.unknown_folders().len(), 1);
+            let mut later = job(Some(Status::Kept));
+            later.id = "later".into();
+            later.manual_review = true;
+            m.jobs.push_back(later);
+            let row = m.view().rows.pop().unwrap();
+            assert!(!row.can_check && !row.ready);
+        }
+        assert!(state.unknown(MACHINE, "/srv/example/.git", "/srv/example/work"));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn physically_settled_program_cleanup_kept_or_unknown_can_be_dismissed() {
+        use zerus_client_core::worktree_programs::cleanup::{Reason, Report, State};
+        for status in [State::Kept, State::Unknown] {
+            let state = TerminationCleanup::default();
+            {
+                let mut m = lock(&state.0.model);
+                let mut j = job(Some(Status::Kept));
+                j.program_review_pending = true;
+                j.busy = true;
+                j.cleanup.entries[0].row["process_count"] = json!(1);
+                let report = Report {
+                    request_id: "original-removal".into(),
+                    binding: "original-binding".into(),
+                    state: status,
+                    reason: Some(if status == State::Kept {
+                        Reason::Changed
+                    } else {
+                        Reason::Unconfirmed
+                    }),
+                };
+                assert!(!program_pipeline::record_cleanup_result(
+                    &mut j,
+                    &Ok(report),
+                    true
+                ));
+                m.jobs.push_back(j);
+                assert!(m.view().rows[0].can_dismiss);
+                assert_eq!(m.view().can_clear, status == State::Kept);
+                m.dismiss("job-1").unwrap();
+                assert!(m.view().rows.is_empty());
+            }
+            assert_eq!(
+                state.unknown(MACHINE, "/srv/example/.git", "/srv/example/work"),
+                status == State::Unknown
+            );
+        }
+        let mut j = job(Some(Status::Kept));
+        j.program_review_pending = true;
+        j.busy = true;
+        assert!(!program_pipeline::record_cleanup_result(
+            &mut j,
+            &Err("physical close unconfirmed".into()),
+            false
+        ));
+        let mut m = Model::default();
+        m.jobs.push_back(j);
+        assert!(!m.view().can_clear && !m.view().rows[0].can_dismiss);
+        assert!(m.dismiss("job-1").is_err());
+    }
+
     #[test]
     fn a_running_folder_never_replaces_a_held_result_in_the_chip_text() {
         let mut m = Model::default();

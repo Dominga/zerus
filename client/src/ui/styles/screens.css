@@ -182,6 +182,10 @@
   .bc-table th:nth-child(4) { width: 36%; }
   .bc-table td { height: 46px; }
   .bc-result { display: flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden; white-space: nowrap; }
+  .worktree-cleanup .bc-result { flex-wrap: wrap; overflow: visible; white-space: normal; }
+  .cleanup-source, .cleanup-blockers { white-space: normal; overflow-wrap: anywhere; }
+  .cleanup-blockers { margin: 0; padding-inline-start: 20px; }
+  .cleanup-blockers li { margin-block: 4px; }
   .bc-result b { flex: none; }
   .bc-result[data-outcome="removed"] b, .bc-result[data-outcome="forgotten"] b { color: var(--z-color-accent); }
   .bc-result[data-outcome="unknown"] b { color: var(--z-color-warn); }

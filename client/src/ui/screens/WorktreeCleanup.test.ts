@@ -2,24 +2,28 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createComponent, Show, type Accessor } from "solid-js";
 import { render } from "solid-js/web";
-const native = vi.hoisted(() => ({ clear: vi.fn(), offer: vi.fn(), cancel: vi.fn(), confirm: vi.fn(), sync: vi.fn() }));
-vi.mock("../../bridge", () => ({ inTauri: () => false, terminationCleanupKeep: native.clear,
+const native = vi.hoisted(() => ({ clear: vi.fn(), offer: vi.fn(), cancel: vi.fn(), confirm: vi.fn(), sync: vi.fn(), dismiss: vi.fn(), remove: vi.fn(), inspect: vi.fn(), restore: vi.fn() }));
+vi.mock("../../bridge", () => ({ inTauri: () => false, terminationCleanupKeep: native.clear, terminationCleanupDismiss: native.dismiss, terminationCleanupRemove: native.remove, terminationCleanupInspect: native.inspect,
   terminationProgramForceOffer: native.offer, terminationProgramForceCancel: native.cancel, terminationProgramForceConfirm: native.confirm }));
-vi.mock("../../store/catalog", () => ({ catalog: { rows: {} } }));
-vi.mock("../../store/ui", () => ({ setPage: vi.fn(), setSelectedKey: vi.fn(), setDetailTab: vi.fn() }));
-vi.mock("../../store/cleanupNotices", () => ({ anyCleanupRestore: () => false, cleanupRestoring: () => false, restoreCleanupRow: vi.fn(), syncCleanupNotices: native.sync }));
+const catalogState = vi.hoisted(() => ({ rows: {} as Record<string, { key: string; computer: string; name: string }> }));
+const navigation = vi.hoisted(() => ({ select: vi.fn(), tab: vi.fn(), page: vi.fn() }));
+vi.mock("../../store/catalog", () => ({ catalog: catalogState }));
+vi.mock("../../store/ui", () => ({ setPage: navigation.page, setSelectedKey: navigation.select, setDetailTab: navigation.tab }));
+vi.mock("../../store/cleanupNotices", () => ({ anyCleanupRestore: () => false, cleanupRestoring: () => false, restoreCleanupRow: native.restore, syncCleanupNotices: native.sync }));
 vi.mock("../../store/actions", () => ({ notify: vi.fn() }));
 vi.mock("../../i18n", () => ({ tr: (s: string, ...args: unknown[]) => s.replace(/%(\d+)/g, (_, n) => String(args[Number(n) - 1])), trNoop: (s: string) => s }));
 vi.mock("../lib/icons", () => ({ Icon: () => null }));
 vi.mock("../components/MachineLabel", () => ({ MachineLabel: () => null }));
 import WorktreeCleanup from "./WorktreeCleanup";
 import { CleanupChip } from "./CleanupChip";
-import { applyCleanup, cleanup, cleanupDialog, closeCleanup, emptyCleanup, openCleanup, type CleanupRow } from "../../store/terminationCleanup";
+import { applyCleanup, cleanup, cleanupDialog, closeCleanup, emptyCleanup, openCleanup, type CleanupRow, groupCleanupRows } from "../../store/terminationCleanup";
 const row = (over: Partial<CleanupRow> = {}): CleanupRow => ({ id: "original", label: "worktree-fixture", path: "/srv/example/work", machine: "this computer", computer: "", branch: "kept-branch", size: "Not measured", status: "kept", reason: "Some programs are still running.", details: "", can_check: false, can_force: true, ready: false, ...over });
 const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
 let revision = 0, dispose: (() => void) | undefined;
 beforeEach(() => {
-  vi.clearAllMocks(); closeCleanup(); applyCleanup({ ...emptyCleanup(), revision: ++revision });
+  vi.clearAllMocks(); catalogState.rows = {}; closeCleanup(); applyCleanup({ ...emptyCleanup(), revision: ++revision });
+  native.inspect.mockResolvedValue({ path: "unrelated fixture response" });
+  native.dismiss.mockImplementation(async () => ({ ...emptyCleanup(), revision: ++revision }));
   native.clear.mockImplementation(async () => ({ ...emptyCleanup(), revision: ++revision }));
   native.offer.mockResolvedValue({ confirmation: "native-handle", programs: [{ pid: 42, label: "original-survivor" }] });
   native.cancel.mockResolvedValue({ ...emptyCleanup(), revision: ++revision });
@@ -76,4 +80,91 @@ it("clears only on the explicit action and keeps retained rows and their review 
   expect(native.clear).toHaveBeenCalledTimes(1); expect(cleanup().rows).toEqual([retained]);
   expect(cleanupDialog()).toBeTruthy(); expect(button(host, "Force stop…")).toBeTruthy(); await vi.waitFor(() => expect(native.sync).toHaveBeenCalled());
   expect(button(host, "Clear settled results")).toBeUndefined();
+});
+
+it("renders one folder with every source and names the session and program blockers", () => {
+  const reason = "Cannot remove this folder while another session is working. " + "Full readable reason. ".repeat(50);
+  const sources = ["claude/example/first", "claude/example/second", "claude/example/third"];
+  catalogState.rows.live = { key: "run:live", computer: "", name: "claude/example/fourth" };
+  const rows = sources.map((name, i) => row({ id: `origin-${i}`, can_force: false, can_dismiss: true, folder_key: "same-native-folder", source: { computer: "", name, run_id: `run-${i}`, conversation_id: `conv-${i}` }, sessions: ["claude/example/fourth"], processes: [{ pid: 42, label: "report-server" }], reason }));
+  applyCleanup({ ...emptyCleanup(), revision: ++revision, rows, kept: 1, can_clear: true });
+  const host = mount(); review(host).click();
+  expect(host.querySelectorAll("tbody tr")).toHaveLength(1);
+  for (const name of sources) expect(host.textContent).toContain(name);
+  expect(host.textContent).toContain("claude/example/fourth");
+  expect(host.textContent).toContain("report-server (PID 42)");
+  expect(host.querySelector(".wtc-reason")!.textContent).toBe(reason);
+  expect(host.querySelector(".wtc-reason")!.classList.contains("ell")).toBe(false);
+  button(host, "Open session").click();
+  expect(navigation.select).toHaveBeenCalledExactlyOnceWith("run:live");
+  expect(navigation.page).toHaveBeenCalledWith("sessions");
+  expect(native.clear).not.toHaveBeenCalled(); expect(native.confirm).not.toHaveBeenCalled();
+});
+
+it("dismisses one unknown result explicitly and never bulk clears or removes it", async () => {
+  const unknown = row({ id: "unknown-original", status: "unknown", can_force: false, can_dismiss: true });
+  applyCleanup({ ...emptyCleanup(), revision: ++revision, rows: [unknown], unknown: 1, can_clear: false });
+  const expectedRevision = revision;
+  const host = mount(); review(host).click();
+  expect(button(host, "Clear settled results")).toBeUndefined();
+  button(host, "Dismiss").click(); await flush();
+  expect(native.dismiss).toHaveBeenCalledExactlyOnceWith("unknown-original", expectedRevision);
+  expect(native.clear).not.toHaveBeenCalled(); expect(native.remove).not.toHaveBeenCalled();
+  expect(native.confirm).not.toHaveBeenCalled();
+  expect(host.textContent).toContain("No working folders need review.");
+});
+
+it("keeps the pending original Force identity in a grouped folder and offers no Dismiss", async () => {
+  const settled = row({ id: "settled", can_force: false, can_dismiss: false, folder_key: "shared" });
+  const pending = row({ id: "original-live", can_force: true, can_dismiss: false, folder_key: "shared" });
+  applyCleanup({ ...emptyCleanup(), revision: ++revision, rows: [settled, pending], kept: 1, can_clear: false });
+  const host = mount(); review(host).click();
+  expect(host.querySelectorAll("tbody tr")).toHaveLength(1);
+  expect(button(host, "Dismiss")).toBeUndefined();
+  button(host, "Force stop…").click(); await flush();
+  expect(native.offer).toHaveBeenCalledExactlyOnceWith("original-live");
+  expect(native.dismiss).not.toHaveBeenCalled();
+  button(host, "Cancel").click(); await flush();
+  expect(native.cancel).toHaveBeenCalledWith("original-live", "native-handle");
+});
+
+it("reads current blockers without changing the recorded removal decision", async () => {
+  const original = row({ can_force: false, can_dismiss: true, sessions: [], processes: [], reason: "The folder is still in use." });
+  native.inspect.mockResolvedValue({ path: original.path, common_dir: "/srv/example/.git", review: {sessions: ["claude/example/current"], processes: [{pid: 84, command: "current-report-server"}]} });
+  applyCleanup({ ...emptyCleanup(), revision: ++revision, rows: [original], kept: 1 });
+  const host = mount(); review(host).click(); await flush();
+  expect(host.textContent).toContain("claude/example/current");
+  expect(host.textContent).toContain("current-report-server (PID 84)");
+  expect(cleanup().rows[0]).toBe(original);
+  expect(native.remove).not.toHaveBeenCalled(); expect(native.confirm).not.toHaveBeenCalled();
+});
+
+it("preserves raw pending metadata and keeps computers and repositories separate", () => {
+  const pending = { ...row({folder_key: "machine-repository-a", can_force: true}), force_revision: 7 };
+  const groups = groupCleanupRows([row({id:"settled", folder_key:"machine-repository-a", can_force:false}), pending, row({id:"other-repo", folder_key:"machine-repository-b"}), row({id:"other-computer", computer:"other", folder_key:"other-machine"})]);
+  expect(groups).toHaveLength(3);
+  expect(groups[0].primary).toBe(pending);
+  expect(groups[0].rows[1]).toBe(pending);
+  expect((groups[0].primary as typeof pending).force_revision).toBe(7);
+});
+
+ it("preserves each archived source restore action in a grouped folder", () => {
+  const rows = ["first", "second"].map((name) => {
+    const target = {computer: "", name, run_id: name + "-run", conversation_id: name + "-conversation"};
+    return row({id: name, can_force: false, folder_key: "shared-folder", source: target, restore: {target, machine: "machine", archive_id: name + "-archive", status: "kept", overflow: false}});
+  });
+  applyCleanup({...emptyCleanup(), revision: ++revision, rows, kept: 1});
+  const host = mount(); review(host).click();
+  button(host, "Restore session first").click(); button(host, "Restore session second").click();
+  expect(native.restore.mock.calls.map(([row]) => row.id)).toEqual(["first", "second"]);
+});
+
+it("never displays a previous computer's blocker during the next same-path inspection", async () => {
+  const alpha = row({id:"alpha", computer:"alpha", can_force:false, folder_key:"alpha-folder", sessions:[]});
+  const beta = row({id:"beta", computer:"beta", can_force:false, folder_key:"beta-folder", sessions:[]});
+  native.inspect.mockImplementation((id:string)=>id==="alpha" ? Promise.resolve({path:alpha.path,review:{sessions:["alpha-only-blocker"]}}) : new Promise(()=>{}));
+  applyCleanup({...emptyCleanup(),revision:++revision,rows:[alpha,beta],kept:2});
+  const host=mount();review(host).click();await flush();expect(host.textContent).toContain("alpha-only-blocker");
+  host.querySelectorAll<HTMLTableRowElement>("tbody tr")[1].click();await flush();
+  expect(host.textContent).not.toContain("alpha-only-blocker");
 });

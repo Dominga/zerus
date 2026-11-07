@@ -1841,6 +1841,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         termination_cleanup::termination_cleanup_check,
         termination_cleanup::termination_cleanup_remove,
         termination_cleanup::termination_cleanup_keep,
+        termination_cleanup::termination_cleanup_dismiss,
         termination_cleanup::termination_cleanup_restore,
         worktree_cleanup::worktree_cleanup_open,
         worktree_cleanup::reminder::worktree_cleanup_reminder,

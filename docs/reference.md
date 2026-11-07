@@ -45,7 +45,7 @@ the account profile that the calling session runs under is not passed on.
 
 ### Session references
 
-**Copy session reference** in the desktop session context menu copies a
+**Copy session reference** in the desktop session window's **Session actions** menu copies a
 `zerus://session?...` URI. Android offers the same action in the
 session toolbar and menu. It contains the stable computer UUID, a native machine
 name for routing, the session name and exact conversation identity; child and
@@ -108,7 +108,7 @@ icon immediately after the exact identifier. The desktop icon uses the same
 borderless style as header actions. The ID stays on one line whenever the pane
 has room. The icon copies the ID as plain text, as does the **Copy session ID**
 icon in the desktop session header, which copies without showing the ID;
-**Copy session reference** remains in the desktop session context menu and copies
+**Copy session reference** is in the desktop session window's **Session actions** menu and copies
 the portable URI. Successful text copies use the window's status confirmation
 without a system notification on Linux or macOS. Before that ID is reported,
 **Run ID** identifies the current
@@ -120,18 +120,36 @@ Machine, project and state filters still apply. Desktop ID results show the
 matched identifier and expose its complete value in the tooltip.
 
 The desktop session header keeps frequent actions as icons: open the session
-folder, open a shell there, **Copy session ID** and **Clear session**. Its **⋯**
-menu names the same actions (**Open folder**, **Open shell in session folder**,
-**Copy session ID** and **Clear session…**, each available exactly when its icon
-is) and also holds **Rename…**, **Fork session…**, **Copy connect command**
-(**Open externally** without clipboard mode, or the native DeepSeek UI), **Pause
-session** or **Resume session**, **Start fresh…**, **Move to archive** and
-**Terminate session…**. A stopped session hides the Clear session icon and offers
+folder, open a shell there, **Copy session ID** and **Clear session**. Its
+**Session actions** menu shares the same checked handlers. A stopped session
+hides the Clear session icon and offers
 **Start fresh…** in the menu; an archived session shows **Restore session** in its
 place. The session list context menu offers **Clear session…** for a live session
 where a stopped one offers **Start fresh…**. For a session that is not open, it
 becomes available once that session's own inspection confirms the conversation
 listed for it; choosing it opens the session and asks the same confirmation.
+
+### Session row and window menus
+
+A session row's right-click menu keeps Mark needs attention, Mute, Compact/Expand
+row, Open terminal, Copy connect command, Copy session ID, Clear, Rename,
+Move to project and Terminate. Paused and archived rows keep the corresponding
+available actions, such as Start fresh, Copy restore command and Forget.
+Multi-selection keeps its batch menu.
+
+Open terminal connects to the selected existing run in the external terminal
+configured for this computer, including connections to remote computers. It uses
+`hgs [@computer] a NAME --existing --run-id ID`, so a delayed terminal cannot
+resume a stopped agent or connect to a replacement run under the same name.
+Offline, paused, unidentified and unsupported adapters show a disabled reason;
+DeepSeek's Native UI remains in Session actions. Copy session ID copies the
+native conversation ID shown as Session ID in the header and Details, rather
+than its name or run ID. Rows without this identity show a disabled reason.
+
+The session window's top-right Session actions menu retains Expand all collapsed,
+Open folder, Open shell in session folder, Pause, Fork, Set parent (and Detach),
+Copy session name, Copy session reference and Copy folder path. Show running
+commands is there when available. Their existing checks and confirmations apply.
 
 Identifiers such as `zerus-ab12` are Beads task numbers, not session IDs. Desktop
 message search finds their public mentions; Android session search finds mentions
@@ -712,9 +730,16 @@ the catalog lock, and a launch without a readable identity records no parent.
 The desktop session list nests a child under its parent when both are shown in
 the same project group, 26 px per level up to three levels, with a connector
 from the parent above. The parent's footer shows **Team** with working and all
-child sessions (`2 of 5`); it collapses or expands them for this window, and
-Left and Right do the same from the keyboard, Left then moving from a child to
-its parent. Nesting stops after eight levels; a deeper child starts at top
+child sessions and native subagents together, working of all (`2 of 5`); this
+one toggle shows or hides both (owner, 2026-11-07, zerus-sa9qn.16), and Left
+and Right do the same from the keyboard, Left then moving from a child to its
+parent. A native subagent row looks like a compact session row (the agent's
+tile, its name and status, the summary as its tooltip) and never expands. This
+device remembers a collapsed parent across relaunches by its computer's machine
+UUID and session ID (`sessions/collapsedTeams`, at most 2048 parents, the oldest
+forgotten first), so a rename, resume or restart keeps the choice; a parent
+without those IDs keeps it for this window only. A child row's compact or full
+form is remembered like any row's. Nesting stops after eight levels; a deeper child starts at top
 level again. A child whose parent is not shown above it stays at top level with
 **from PARENT**, which opens the parent when it is listed. A parent is matched by
 its computer's machine UUID and session ID, or by conversation for a parent an
@@ -753,9 +778,10 @@ own mark, still counts. A person-only request notifies as for any session.
 When the parent is paused, stopped, exited, archived, not listed on the
 child's computer (including a parent on another computer) or gone, the child
 is ordinary again: a pending request that waited quietly is announced once,
-while replies seen meanwhile are not replayed. A supervised child shows the
-crossed bell of Mute, dim, before its title (its tooltip and accessible name
-say which session supervises it); the parent's **Team**
+while replies seen meanwhile are not replayed. A supervised child shows a dim
+arrow turning down and right before its title, meaning its parent above
+handles it (its tooltip and accessible name say which session supervises it;
+owner, 2026-11-07, zerus-sa9qn.16, replacing the crossed bell); the parent's **Team**
 toggle adds **Asking** (quiet requests waiting for it) and **Needs you**
 (person-only requests), which never raise the parent's own attention.
 `client/core/tests/fixtures/supervised-attention.json` lists the cases the
@@ -951,9 +977,12 @@ Spotlight and System Settings for the unchanged `hgs-tray.app` bundle.
 
 Settings → Mobile connection also lists and pairs [phones](#machines-and-accounts). Settings → Mobile connection → Phone notifications sets when the phone notifies: immediately, as soon as you are away from every Zerus computer, or after 5, 10, 15 or 30 minutes away. The choice is shared through the swarm catalog; computers this one synchronizes with directly whose hgs is too old to receive it are named there.
 
-The tray has two counters: all sessions and **Needs attention**. Attention includes
-input, approvals, errors and unread main-agent replies. An offline host retains
-its last total but adds no live attention requests; a dot marks incomplete data.
+The tray has two counters: **active** sessions (the session list's Active filter:
+working or Background, Scheduled or Waiting, or needing attention, a subagent
+that asks included) and **Needs attention**. Attention includes input, approvals,
+errors and unread main-agent replies. An offline host adds only its Review later
+sessions to either counter; a dot marks incomplete data. The tooltip keeps the
+total number of sessions.
 Linux application badges and the macOS Dock show the attention count, hiding zero.
 
 Zerus Next's tray menu (on Linux, macOS and Windows) has:
@@ -1135,7 +1164,9 @@ clock stamped the links, the latest link time it handled and the children
 handled in that second (`sessions/childRowsSeen`). A computer seen for the first
 time only records its current children, so existing rows never change, and a
 row the person expands afterwards stays expanded across restarts. Turned off,
-new child rows keep the full card. A muted session keeps its mute icon in either size.
+new child rows keep the full card. A muted session keeps its mute icon in either size, right after its name; a
+supervised child shows its arrow before the name whether muted or not
+(owner, 2026-11-08).
 The folder/branch line also shows native outline Git badges: a diff with the
 number of changed/new files, upload/download with outgoing/incoming commit counts,
 and a green cloud check for a clean checkout matching its verified upstream.
@@ -1585,6 +1616,49 @@ tool permissions qualify. Ordinary questions, startup trust, incomplete panels a
 persistent permission changes remain manual. Existing native identity and
 delivery guards still apply.
 
+Below the switch, **Categories** choose which of those requests are approved
+automatically; a request in a category that is off waits for the person. The
+categories apply only while the switch is on and are stored per computer as
+`automaticApprovals/category/<id>`, beside the switch. Every category except
+Paid usage is on by default, and an enabled switch from before categories
+keeps that default. A request's category comes only from the tool name in its
+verified native question: Claude's permission hook `tool_name` (the card's
+header), OpenCode 2's permission `action` (the card's `permission_action`) and
+the DeepSeek tool in Zerus's own `Allow <tool>?` approval. Matching is exact;
+commands, paths and other text are never parsed to choose a category.
+
+| Category (ID) | Claude | OpenCode 2 | DeepSeek |
+|---|---|---|---|
+| Read files and search (`read`) | Read, Glob, Grep, LS, LSP, NotebookRead | read, glob, grep, list, lsp | read, read_image, glob, grep, terminal_list, terminal_read, job_list, job_output |
+| Edit files (`edit`) | Edit, Write, MultiEdit, NotebookEdit, EnterWorktree | edit | edit, write, apply_patch, str_replace_editor |
+| Shell commands (`shell`) | Bash, PowerShell, Monitor | shell, execute | bash, pwsh, terminal_open, terminal_send, terminal_signal, terminal_close, job_kill |
+| Web pages (`web`) | WebFetch | webfetch | web_fetch |
+| MCP tools (`mcp`) | `mcp__<server>__<tool>`, ListMcpResourcesTool, ReadMcpResourceTool | none | `mcp__<server>__<tool>` |
+| Subagents and skills (`agents`) | Agent, Task, Skill, Workflow | subagent, skill | skill, subagent, workflow, spawn_teammate, send_message, interrupt_agent, wait_agent |
+| Other tools (`other`) | any other tool | any other action | any other tool |
+| Paid usage (`paid`) | WebSearch | websearch | web_search |
+
+Shell commands are one category: Zerus does not tell safe commands from
+destructive ones. OpenCode names MCP tools `<server>_<tool>` without a prefix,
+so any underscored OpenCode action (such as `external_directory`) is Other, as
+is a card from an older CLI without `permission_action`. Other tools also
+covers a tool name that cannot be read; it may include paid tools. Paid usage
+always wins: a paid tool, OpenCode's image generation
+(`experimental_image_generate`, Other by name) and any request while the
+prompt cache is cold, which the agent reports or whose estimated lifetime has
+ended, also need Paid usage, whatever else they match. Answering after the
+cache expired processes the whole conversation again; an unknown cache state
+is not treated as cold. Usage-limit, extra-usage and credit prompts are not
+one-time tool permissions and are never answered automatically. The worker
+checks the categories when it selects a request, again just before the
+journal reservation, which records them, and again before delivery. Each check
+uses the current time with the cache state of the selecting inspection, so a
+warm cache that expires meanwhile needs Paid usage too. A category turned off
+or a cache expired before delivery finishes the reserved attempt as cancelled
+without sending anything. With `ZERUS_CLIENT_DESKTOP_SERVICE=1` the background service
+approves the default categories until its own policy stores the person's
+choices; the page then shows them read-only.
+
 Zerus Next uses its live event-stream catalog for the same bounded discovery;
 it does not add a peer poller. Its opt-in is device-local and is never seeded
 from Qt or imported by migration. Confirm it separately in Next. Cached,
@@ -1593,7 +1667,8 @@ freshly inspected, and its exact identities are checked again before the
 existing native Answer lane runs under the journal's original request UUID.
 
 The same Settings page contains this computer's private approval journal, naming
-the computer, session, time, question, selected answer and confirmed outcome.
+the computer, session, time, question, approval categories, selected answer and
+confirmed outcome.
 Each attempt is durably reserved before native input. Failed, cancelled and
 unconfirmed attempts remain visible; an unconfirmed delivery is never retried
 automatically, including after a restart. If the journal cannot be saved,
@@ -2570,6 +2645,33 @@ stay unassigned rather than sharing a guessed project. The label form is still
 written for compatibility. `swarm export --kinds`
 takes the kinds its requester parses on stdin; without them it exports only
 the kinds hgs v0.47.0 parses.
+
+Primary project placement is stored separately in the bounded causal
+`swarm/session-id-memberships.json`, exchanged only with peers advertising
+`session_id_memberships_v1`. It preserves concurrent concrete placements for
+review; a concrete project beats concurrent default placement, and a later
+explicit Inbox/unassignment wins. Valid twins are migrated under the catalog
+lock without replacing an existing ID record. An exact primary null/conflict
+means unassigned; only an absent ID record allows name membership fallback.
+Unreadable primary data stays unavailable and is not repaired automatically.
+Older builds preserve this file but cannot edit its ID grouping.
+
+The `session-labels-v1` transition gate requires fresh positives from this
+computer, every configured peer and every catalog machine. An unaddressed,
+unknown or unreachable member keeps it closed. `hgs swarm session-labels-gate
+--json` reads the bounded ten-minute cache without starting a worker or making
+connections. Each hello retires the previous observation; ordinary hello never
+waits for a connector, and the existing sync worker performs that bounded query
+separately. The answering CLI must report both ID membership readiness and its
+complete ID routing capability; the earlier observation-only build cannot open
+the gate. Configuration, route, membership or connector changes invalidate the
+answer. The cache grants no native authority and never weakens exact selector,
+original receipt or no-replay checks.
+
+While the gate is open, `hgs reference`, `hgs self` and sender envelopes include
+the stored canonical session ID. Older parsers continue to receive the earlier
+reference form while it is closed. This capability leaf does not yet enable
+new duplicate-label writers.
 
 The session-label transition gate's supported connector inventory consists of
 the maintained installer's connector using the canonical mobile configuration
@@ -4810,7 +4912,7 @@ beside Activity and Terminal, or Native UI for DeepSeek. When disabled, its list
 count and output are not polled; normal Activity, fleet and account updates continue.
 The small **Background** summary is part of ordinary fleet polling even
 when this tab is disabled. Full process history and output remain opt-in. A
-background session's context menu offers **Show running commands** when Processes
+background session's **Session actions** menu offers **Show running commands** when Processes
 is enabled.
 
 **Live shells / processes** shows verified shells and independent command trees.
@@ -6388,7 +6490,10 @@ notification preferences, waits, launches, renames, name routes, the archive
 folder and the DeepSeek and OpenCode bindings, and holds a read-only connection
 to the Activity journal. A changed binding, or new journal rows of its session,
 derives only that session's row again, through the steps and under the lock of
-the listing. Any other change lists all rows again. Both wait 150 ms after a
+the listing; every row's parent state is then read again from all listed rows,
+so a derived child never reads its listed parent as missing and a parent's
+change reaches its children at once (zerus-sa9qn.16). Any other change lists
+all rows again. Both wait 150 ms after a
 change and start at most every 500 ms and at most once per four durations of
 the previous one. Every 5 s the stream probes what no file shows: tmux sessions
 that start, end, are renamed, attached or detached, exited agent processes,

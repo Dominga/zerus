@@ -218,7 +218,12 @@
   :root[data-appearance="light"] .vm-time { background: color-mix(in srgb, var(--z-color-entity-ink-base) 52%, transparent); }
   .vm-text { margin-top: 6px; white-space: pre-wrap; line-height: 1.5; color: var(--z-color-text); animation: fadeIn var(--z-motion-base) both; }
   .vm-error { margin-top: 6px; color: var(--z-color-warn); }
-  .subagent-bar { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-radius: var(--z-radius-lg); background: var(--z-color-tile); font-size: var(--fs-sm); }
+  /* A subagent's history keeps its way back on top while scrolling, floating like the goal pill
+     (owner 2026-11-07); the main goal pill hides meanwhile (SessionDetail). */
+  .subagent-bar { position: sticky; top: 8px; z-index: 2; display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 4px 10px;
+    border-radius: 10px; border: 1px solid var(--z-color-border); background: var(--z-color-raised); font-size: var(--fs-sm);
+    box-shadow: 0 6px 18px -8px rgba(0, 0, 0, .45); }
+  :root[data-appearance="light"] .subagent-bar { box-shadow: 0 6px 18px -10px rgba(20, 30, 40, .25); }
   .queued { padding: 8px 12px; border-radius: var(--z-radius-lg); border: 1px dashed var(--z-color-border); font-size: var(--fs-sm); display: grid; gap: 4px; }
 
   .question-card { border: 1px solid color-mix(in srgb, var(--z-color-accent-muted) 60%, transparent); border-radius: var(--z-radius-xl); padding: 12px 14px; background: color-mix(in srgb, var(--z-color-accent-bg) 60%, var(--z-color-surface)); display: flex; flex-direction: column; gap: 10px; animation: rise var(--z-motion-slow) var(--ease) both; }
@@ -385,6 +390,22 @@
   .irow-val.mono { font-size: .94em; }
   .irow-label { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--z-color-dim); }
   .irow .icon-btn.small { flex: none; margin-right: -4px; }
+  /* A copyable row highlights on hover or keyboard focus and shows its copy mark (owner 2026-11-07).
+     The mark takes no space, so labels and numbers stay aligned with plain rows: in a Details
+     row it replaces the label at the right end; in Session usage it sits just left of the number. */
+  .copy-mark { position: absolute; display: grid; place-items: center; color: var(--z-color-muted); opacity: 0; pointer-events: none; transition: opacity .12s; }
+  .copyable { cursor: pointer; }
+  .copyable:hover .copy-mark, .copyable:focus-visible .copy-mark { opacity: 1; }
+  button.irow.copyable { position: relative; }
+  button.irow.copyable .copy-mark { top: 0; bottom: 0; right: 6px; }
+  button.irow.copyable .irow-label { transition: opacity .12s; }
+  button.irow.copyable:hover .irow-label, button.irow.copyable:focus-visible .irow-label { opacity: 0; }
+  .usage .u-val { position: relative; }
+  .usage .u-val .copy-mark { top: 0; bottom: 0; right: calc(100% + 6px); }
+  .usage tr.copyable td { transition: background var(--z-motion-fast); }
+  .usage tr.copyable:hover td, .usage tr.copyable:focus-visible td { background: var(--z-color-hover); }
+  .usage tr.copyable:focus-visible { outline: none; }
+  .usage tr.copyable:focus-visible td { box-shadow: inset 0 1px 0 var(--z-color-accent), inset 0 -1px 0 var(--z-color-accent); }
   .irow.done .irow-ico { color: var(--z-color-accent); }
   .irow.doing .irow-ico { color: var(--z-color-warn); }
   .irow.agent.working .irow-label { color: var(--z-color-status-working); }

@@ -113,6 +113,22 @@ describe("full and compact session question presentation", () => {
   });
 });
 
+describe("supervised and muted children (owner 2026-11-08)", () => {
+  const parent = { machine: "11111111-1111-4111-8111-111111111111", session_id: "22222222-2222-4222-8222-222222222222",
+    name: "codex/project/lead", conversation_id: "c", run_id: "r", state: "live" };
+  // The order of the arrow, the name and the crossed bell in the first line.
+  const order = (html: string) => [...html.matchAll(/class="(sc-supervised|sc-title ell|sc-mute)[" ]/g)].map((m) => m[1].split(" ")[0]);
+  it("shows the supervised arrow whether muted or not, and the bell right after the name", () => {
+    for (const compact of [false, true]) {
+      expect(order(render(compact, row({ parent, muted: true })))).toEqual(["sc-supervised", "sc-title", "sc-mute"]);
+      expect(order(render(compact, row({ parent })))).toEqual(["sc-supervised", "sc-title"]);
+      expect(order(render(compact, row({ muted: true })))).toEqual(["sc-title", "sc-mute"]);
+      // A parent that is not live supervises nothing.
+      expect(order(render(compact, row({ parent: { ...parent, state: "missing" }, muted: true })))).toEqual(["sc-title", "sc-mute"]);
+    }
+  });
+});
+
 describe("account marks", () => {
   it("marks the recorded account with its letter in both views and its label on full cards", () => {
     const compact = render(true, row({ accountId: "claude-a1" }));
@@ -147,7 +163,7 @@ describe("compact parents (owner 2026-11-07)", () => {
     const html = render(true, row(), true, { total: 8, working: 3, collapsed: false, needsYou: 1, asking: 2, errors: 2 });
     const label = /class="cc-team[^"]*"[^>]*aria-label="([^"]*)"/.exec(html)?.[1] ?? /aria-label="([^"]*)"[^>]*class="cc-team/.exec(html)?.[1];
     expect(label).toBeDefined();
-    for (const words of ["Hide child sessions", "3 of 8 working", "Needs you: 1", "Asking: 2", "Errors: 2"]) expect(label).toContain(words);
+    for (const words of ["Hide subagents and child sessions", "3 of 8 working", "Needs you: 1", "Asking: 2", "Errors: 2"]) expect(label).toContain(words);
     expect(html).toContain('class="short" aria-hidden="true"');
     expect(html).toContain('class="cc-team-body"');
     expect(html.indexOf('class="chev"')).toBeGreaterThan(html.lastIndexOf('class="cc-team-body"'));

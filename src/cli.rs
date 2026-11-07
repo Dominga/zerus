@@ -138,6 +138,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        lifecycle-receipt-status-v1
        hgs [@host] <command> --session-id ID ...   select a live or saved session by its durable ID instead of its name
        session-id-selector-v1
+       session-labels-v1
        hgs [@host] <command> 'zerus://session?...' ...   select the session a reference names, on every session command
        session-reference-selector-v1
        hgs [@host] compact-context <session> --json compact the idle agent context using its native command

@@ -2,7 +2,7 @@ import { TextInput } from "../lib/TextField";
 import { For, Show, createEffect, createMemo, createSignal, lazy, onCleanup, onMount, untrack } from "solid-js";
 import { Icon } from "../lib/icons";
 import { catalog, computerOffline } from "../../store/catalog";
-import { GONE, change, copyCommand, copyFolder, copyName, copyReference, end, forget, interrupting, notify, perform, stillListed, pendingNotifications, toggleMute, updating } from "../../store/actions";
+import { GONE, change, copyCommand, copyFolder, copyName, copySessionId, copyReference, end, forget, interrupting, notify, perform, stillListed, pendingNotifications, toggleMute, updating } from "../../store/actions";
 import { bindBatchConfirm, running } from "../../store/batch";
 import { cancelRestoreFollow, forgetArchived, refreshArchiveWhenDone, restoreSession } from "../../store/restores";
 import type { MenuEntry } from "../../store/ui";
@@ -105,11 +105,12 @@ export function forkEntry(s: Session, details?: Details): Item {
  * only for the selected session, whose folder and run they prefer. They
  * show no hint when off, as Qt shows none.
  */
-export function copyEntries(s: Session, details?: Details): { command: Item; name: Item; reference: Item; folder: Item } {
+export function copyEntries(s: Session, details?: Details): { command: Item; id: Item; name: Item; reference: Item; folder: Item } {
   const row = snapshotOf(s);
   const c = copyState(row, !computerOffline(s.computer), details);
   return {
     command: { label: tr(c.command.label), icon: "link", disabled: !c.command.enabled, action: () => { void copyCommand(row); } },
+    id: { label: tr("Copy session ID"), icon: "copy", disabled: !row.conversationId, hint: row.conversationId ? undefined : tr("This session has no recorded conversation ID."), action: () => { void copySessionId(row); } },
     name: { label: tr("Copy session name"), icon: "copy", action: () => { void copyName(row); } },
     reference: { label: tr("Copy session reference"), icon: "link", disabled: !c.reference, action: () => { void copyReference(row, details); } },
     folder: { label: tr("Copy folder path"), icon: "copy", disabled: !c.folder.enabled, action: () => { void copyFolder(row, details); } },

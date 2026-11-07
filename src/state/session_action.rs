@@ -54,6 +54,7 @@ impl Scope {
     }
     pub(super) fn check(&self, record: &Value) -> Result<()> {
         self.check_base(record)?;
+        terminating::check_mutation(record)?;
         if record["archive_id"].as_str().filter(|s| !s.is_empty()) != self.archive.as_deref() {
             return Err("Archive identity changed; select the exact saved archive".into());
         }
@@ -112,6 +113,7 @@ impl Scope {
 /// `resumed` is the summary's single verification of a pending resume.
 pub(super) fn summary(record: &Value, live_pane: bool, resumed: &Option<Result<()>>) -> Value {
     let archived = !string(record, "archive_id").is_empty();
+    let terminating = terminating::pending(record);
     let changing = record.get("pausing").is_some() || record["resume_pending"] == true;
     let confirmed = !string(record, "conversation_id").is_empty();
     let recipe = record["base"].is_array() && (Path::new(string(record, "launch_dir")).is_dir() || super::worktree_lifecycle::restorable(record));
@@ -145,12 +147,12 @@ pub(super) fn summary(record: &Value, live_pane: bool, resumed: &Option<Result<(
     let mut allowed = Vec::new();
     let mut reasons = serde_json::Map::new();
     for (action, enabled) in decisions {
-        if enabled {
+        if enabled && !terminating {
             allowed.push(action);
         } else {
             reasons.insert(
                 action.into(),
-                json!(match action {
+                json!(if terminating { terminating::WAIT } else { match action {
                     "pause" => "Wait for a confirmed idle live session before pausing",
                     "resume" =>
                         "Resume requires a saved session and available native launch recipe",
@@ -161,7 +163,7 @@ pub(super) fn summary(record: &Value, live_pane: bool, resumed: &Option<Result<(
                     "forget" =>
                         "Wait for the active pause or restore before forgetting this session",
                     _ => "Wait for the active pause or restore before renaming",
-                }),
+                }}),
             );
         }
     }

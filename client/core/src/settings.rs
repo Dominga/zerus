@@ -107,6 +107,47 @@ pub const KEYS: &[Key] = &[
         kind: Kind::Text(""),
         seeded: false,
     },
+    // Its categories (zerus-sz42x): all except paid usage until changed.
+    Key {
+        name: "automaticApprovals/category/read",
+        kind: Kind::Flag(true),
+        seeded: false,
+    },
+    Key {
+        name: "automaticApprovals/category/edit",
+        kind: Kind::Flag(true),
+        seeded: false,
+    },
+    Key {
+        name: "automaticApprovals/category/shell",
+        kind: Kind::Flag(true),
+        seeded: false,
+    },
+    Key {
+        name: "automaticApprovals/category/web",
+        kind: Kind::Flag(true),
+        seeded: false,
+    },
+    Key {
+        name: "automaticApprovals/category/mcp",
+        kind: Kind::Flag(true),
+        seeded: false,
+    },
+    Key {
+        name: "automaticApprovals/category/agents",
+        kind: Kind::Flag(true),
+        seeded: false,
+    },
+    Key {
+        name: "automaticApprovals/category/other",
+        kind: Kind::Flag(true),
+        seeded: false,
+    },
+    Key {
+        name: "automaticApprovals/category/paid",
+        kind: Kind::Flag(false),
+        seeded: false,
+    },
     // Appearance (SettingsPage.h:46-95, UiLanguage.h, ContentScale.h,
     // ActivityWidth.h, WindowLayer.cpp).
     key(
@@ -148,6 +189,9 @@ pub const KEYS: &[Key] = &[
     // key is the device's record of the child links it already handled.
     client("sessions/compactNewChildren", Kind::Flag(true)),
     client("sessions/childRowsSeen", Kind::Text("")),
+    // Parents whose child sessions are hidden, by machine UUID and session
+    // ID, so the choice survives a relaunch (zerus-sa9qn.15).
+    client("sessions/collapsedTeams", Kind::Text("")),
     key("workspace/animateActivity", Kind::Flag(true)),
     key("workspace/showCompletedSubagents", Kind::Flag(false)),
     key("workspace/reduceMotion", Kind::Flag(false)),
@@ -256,6 +300,7 @@ pub const KEYS: &[Key] = &[
         },
     ),
     client("client/overviewFullWidth", Kind::Flag(false)),
+    client("client/overviewSubSessions", Kind::Flag(false)),
     client("workspace/inspectorOpen", Kind::AutoFlag),
     client(
         "workspace/inspectorTab",

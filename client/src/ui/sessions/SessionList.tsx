@@ -1,6 +1,6 @@
 import { TextInput } from "../lib/TextField";
-import { inspectSession, sessionFolderStatus } from "../../bridge";
-import { folderEntries, folderRequest, type FolderStatus } from "../../store/sessionFolders";
+import { inspectSession } from "../../bridge";
+import { sessionTerminalEntry } from "../../store/sessionTerminal";
 import { groupOf } from "../../store/organization";
 import { taskDragOver, taskDrop } from "../../store/taskAssignment";
 import { For, Show, Suspense, createMemo, createEffect, createSignal, lazy, on, onCleanup } from "solid-js";
@@ -18,8 +18,6 @@ import { CleanupReviewButton } from "../screens/CleanupChip";
 import { visibleUnreadReply } from "../../store/attention";
 import { optionalQuestionCount } from "./optional-questions";
 import { currentChildren } from "./subagents";
-import { runningCommandsEntry } from "../../store/processes";
-import { flag } from "../../store/settings";
 import { archiveCount, archiveTip } from "../../store/archive";
 import { ArchiveBar, datePanelOpen } from "./ArchiveBar";
 import { detailsFor, followedFor, notify, updating } from "../../store/actions";
@@ -28,7 +26,7 @@ import { running } from "../../store/batch";
 import { grouping, headerOf, moveProject, setProjectCollapsed, setProjectToShow, sortProject } from "../../store/organization";
 import { TOOL_WIDTH, clearArchiveMenuEntry, machineMenu, runSelection, selectedRows, selectionContextMenu, selectionCount } from "./selection-live";
 import { barTools, splitTools, toolEntry } from "./selection-ui";
-import { actionEntries, copyEntries, freshActionEntry, forkEntry, muteEntry } from "./ActionDialogs";
+import { actionEntries, copyEntries, freshActionEntry, muteEntry } from "./ActionDialogs";
 import { markAllEntry, markAllTip, markEntry, runMarkAll } from "./mark-entries";
 import { moveEntry, openCreateProjectDialog, openDeleteProjectDialog, openRenameProjectDialog } from "./OrganizationDialogs";
 import { backgroundEntries } from "./background-menu";
@@ -39,18 +37,18 @@ import { accessibleText as creationText } from "./creations-ui";
 import { creationCount, creationFooter, creationStatusMenu } from "../../store/creations";
 import {
   selectedKey, setSelectedKey, setExpandedChildren, expandedChildren,
-  setCompactRows, compactRows, expandCompactRows, hasCompactRows, stateFilter, setStateFilter, search, setSearch, stripMode, setStripMode,
+  setCompactRows, compactRows, expandCompactRows, stateFilter, setStateFilter, search, setSearch, stripMode, setStripMode,
   setMenu, visibleMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter, accountFilterSet, setAccountFilter, folderFilter, setPage,
   multi, setMulti, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, commitSessionsWidth, menu, subagentOpen,
-  revealing, setRevealing, setDetailTab, collapsedTeams, setCollapsedTeams,
+  revealing, setRevealing, setDetailTab,
   type StateFilter, type MenuEntry,
 } from "../../store/ui";
 import type { Session } from "./types";
 import { filterAccounts, selectedFilterAccounts, chooseFilterAccounts, toggleFilterAccount, openFilterAccounts, cancelFilterAccountReads } from "../../store/accountFilters";
 import { loadMarkCatalogs } from "../../store/accounts";
-import { setParentDialog } from "../../store/parentLinks";
 import { clearFolderScope } from "../../store/folderFilter";
 import { compactNewChildren } from "../../store/childRowsWatch";
+import { setTeamCollapsed, teamCollapsed } from "../../store/teamCollapse";
 import { leaf, native } from "./paths";
 import { appendAccountChoices, bindingState, type AccountChoice } from "./scope-filters";
 import type { ClearControl, SessionRef } from "../../types";
@@ -61,13 +59,9 @@ import { bulkSelect, clearMulti, multiCount, setAnchor, dragItem, setDragItem, d
 import { POINTER_DRAG, pointerDrag } from "../lib/pointerDrag";
 
 import { SearchResults } from "./SearchResults";
-import { nativeEntry } from "./native-entry";
 import "../styles/content-search.css";
 
 const SavedDraftsDialog = lazy(() => import("./SavedDrafts").then((m) => ({ default: m.SavedDraftsDialog })));
-
-/** Actions that go through guarded `hgs` calls arrive in phase 2; their menu entries show disabled. */
-const LATER = true;
 
 // Five state filters, in SessionsWindow order, then the scope filters.
 const FILTERS: { id: StateFilter; icon: string; tip: string; count: () => string; tipText?: () => string }[] = [
@@ -234,80 +228,42 @@ function clearEntry(s: Session, prepared?: ClearRead): MenuEntry {
   };
 }
 
-export function sessionMenu(s: Session, folderStatus?: { request: ReturnType<typeof folderRequest>; status: FolderStatus }, forkDetails?: import("../../types").Details, preparedClear?: ClearRead): MenuEntry[] {
-  // The selected row's menu reads the same details as the header (Qt's m_details).
-  const details = s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined;
+export function sessionMenu(s: Session, inspected?: import("../../types").Details, preparedClear?: ClearRead): MenuEntry[] {
+  const details = inspected ?? (s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined);
   const act = actionEntries(s, undefined, { context: true });
   const cp = copyEntries(s, details);
-  const request = folderRequest(s, details);
-  const folders = folderEntries(s, request, folderStatus && JSON.stringify(folderStatus.request) === JSON.stringify(request) ? folderStatus.status : undefined);
-  const mute = muteEntry(s);
-  const mark = markEntry(s);
-  const fresh = freshActionEntry(s);
+  const mute = muteEntry(s), mark = markEntry(s), fresh = freshActionEntry(s);
   const archived = s.state === "archived";
-  const commands = runningCommandsEntry(s, () => computerFresh(s.computer), () => flag("processes/enabled"), () => { setSelectedKey(s.key); setSubagentOpen(undefined); setDetailTab("processes"); });
   return [
-    // Keep attention actions first, with Mark before Mute.
     ...(archived ? [] : [...(mark ? [mark] : []), ...(mute ? [mute] : []), { separator: true } as const]),
     { label: compactRows[s.key] ? tr("Expand session row") : tr("Compact session row"), icon: compactRows[s.key] ? "expand-row" : "compact-row", action: () => setRowCompact(s.key, !compactRows[s.key]) },
-    { label: tr("Expand all collapsed"), icon: "expand-row", disabled: !hasCompactRows(), action: expandCompactRows },
     { separator: true },
-    // An archived row has no terminal, and no Mute or Mark group (Qt's `if (!archived)`).
-    ...(archived ? [] : [nativeEntry(s) ?? { label: tr("Open terminal"), icon: "square-terminal", disabled: LATER }]),
-    ...(commands ? [commands] : []),
-    folders.folder,
-    { ...folders.shell, icon: "terminal" },
+    ...(archived ? [] : [sessionTerminalEntry(s, details)]),
     cp.command,
+    cp.id,
     { separator: true },
-    act.change,
     ...(fresh ? [fresh] : archived ? [] : [clearEntry(s, preparedClear)]),
     act.rename,
-    forkEntry(s, forkDetails ?? details),
-    ...(act.archive ? [act.archive] : []),
     moveEntry(s),
-    ...parentEntries(s),
-    { separator: true },
-    cp.name,
-    cp.reference,
-    cp.folder,
     { separator: true },
     act.end,
   ];
 }
 
-/** Set parent… and Detach from PARENT… (zerus-sa9qn.9); both open a confirmation. */
-function parentEntries(s: Session): MenuEntry[] {
-  if (s.state === "archived") return [];
-  const linked = ["claude", "codex", "kimi"].includes(s.cmd) && !!s.sessionId;
-  const why = linked ? undefined : tr("Parent sessions are recorded for Claude, Codex and Kimi sessions that have started.");
-  const entries: MenuEntry[] = [{ label: tr("Set parent…"), icon: "git-branch", disabled: !linked, hint: why, action: () => setParentDialog({ kind: "set", child: s }) }];
-  if (s.parent) entries.push({ label: tr("Detach from %1…", s.parent.name.split("/").pop() || s.parent.name), icon: "git-branch", disabled: !linked, hint: why,
-    action: () => setParentDialog({ kind: "detach", child: s }) });
-  return entries;
-}
-
-/** Only an explicitly opened menu checks its folder; no per-row filesystem reads. */
+/** Read only the capabilities needed by this opening; folders and Fork live in the header menu. */
 function openSessionMenu(e: MouseEvent, s: Session) {
-  const details = s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined;
-  const request = folderRequest(s, details);
-  const items = sessionMenu(s), read = clearRead?.id === clearReadIdentity(s) ? clearRead : undefined;
-  let folderStatus: { request: ReturnType<typeof folderRequest>; status: FolderStatus } | undefined, forkDetails = details;
+  let details = s.key === selectedKey() && !subagentOpen() ? detailsFor(s, !computerOffline(s.computer), followedFor(s.key)) : undefined;
+  const items = sessionMenu(s, details), read = clearRead?.id === clearReadIdentity(s) ? clearRead : undefined;
   let update: ReturnType<typeof setMenu>;
-  const snapshot = () => sessionMenu(s, folderStatus, forkDetails, read);
+  const snapshot = () => sessionMenu(s, details, read);
   const refresh = () => update?.(snapshot());
-  // Local reads can finish before the bounded opening; slower replies update
-  // the same slots through this opening's revision guard, without refocusing.
-  const folders = sessionFolderStatus(request.target.computer, request.directory).catch(() => undefined).then((status) => {
-    folderStatus = status ? { request, status } : undefined; refresh();
-  });
-  const fork = !details && !computerOffline(s.computer)
-    ? inspectSession({ computer: s.computer, name: s.name, run_id: s.runId ?? "", conversation_id: s.conversationId ?? "" }, s.archiveId ?? null).catch(() => undefined)
-    : Promise.resolve(details);
-  const inspected = fork.then((value) => { forkDetails = value ?? undefined; refresh(); });
+  const inspected = !details && !computerOffline(s.computer)
+    ? inspectSession({ computer: s.computer, name: s.name, run_id: s.runId ?? "", conversation_id: s.conversationId ?? "" }, s.archiveId ?? null).catch(() => undefined).then((value) => { details = value ?? undefined; refresh(); })
+    : Promise.resolve();
   const cleared = read?.pending?.then(refresh);
   e.preventDefault();
   e.stopPropagation();
-  update = setMenu({ x: e.clientX, y: e.clientY, items, sessionKey: s.key }, Promise.all([folders, inspected, cleared]).then(snapshot));
+  update = setMenu({ x: e.clientX, y: e.clientY, items, sessionKey: s.key }, Promise.all([inspected, cleared]).then(snapshot));
 }
 
 /** A context target is independent of the open conversation and selection. */
@@ -656,7 +612,7 @@ export function SessionList() {
       if (r.type === "card" && r.compactRow && right) setRowCompact(r.session.key, false);
       else if (r.type === "card" && r.expandable && (right ? !expandedChildren[r.session.key] : !!expandedChildren[r.session.key])) setExpandedChildren(r.session.key, right);
       // Child sessions (zerus-sa9qn.2): Right expands, Left collapses, then moves to the parent.
-      else if (r.type === "card" && r.team && r.team.collapsed === right) setCollapsedTeams(r.session.key, !right);
+      else if (r.type === "card" && r.team && r.team.collapsed === right) setTeamCollapsed(r.session.key, !right);
       else if (r.type === "card" && !right && r.parentKey) setSelectedKey(r.parentKey);
       else if (r.type === "card" && r.expandable) setExpandedChildren(r.session.key, right);
       else if (r.type === "child" && !right) setSelectedKey(r.parent.key);
@@ -729,7 +685,8 @@ export function SessionList() {
         </Show>
         <Show when={!search().trim()}><SelectionBar /></Show>
         <footer class="sp-foot">
-          <span class="tabular ell">{search().trim() ? "" : shownSummary().shown ? tr("%1 shown, %2 working, %3 attention", shownSummary().shown, shownSummary().working, shownSummary().attention) + creationFooter(true) : creationFooter(false) || (catalog.order.length ? tr("No matching sessions") : "")}</span>
+          {/* The filters above already say what is listed (owner, 2026-11-07): only creations or no matches. */}
+          <span class="tabular ell">{search().trim() ? "" : creationFooter(false) || (catalog.order.length && !shownSummary().shown ? tr("No matching sessions") : "")}</span>
           <span class="grow" />
           <CleanupReviewButton />
           <button class="icon-btn small" data-tip={tr("Session creation status")} onClick={(e) => openMenu(e, creationStatusMenu())}><Icon name="clock" size={16} /></button>
@@ -897,10 +854,10 @@ function ListRow(props: { id: string; list: RowSource }) {
             onContextMenu={(e) => sessionContextMenu(e, v().session)}
             onDblClick={(e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey) setRowCompact(v().session.key, !compactRows[v().session.key]); }}>
             <Show when={!v().compactRow} fallback={<CompactCard session={v().session} selected={selectedKey() === v().session.key || !!multi[v().session.key]} onExpand={() => setRowCompact(v().session.key, false)}
-              team={v().team} onToggleTeam={() => setCollapsedTeams(v().session.key, !collapsedTeams[v().session.key])} />}>
+              team={v().team} onToggleTeam={() => setTeamCollapsed(v().session.key, !teamCollapsed(v().session.key))} />}>
               <SessionCard session={v().session} selected={(selectedKey() === v().session.key && !subagentOpen()) || !!multi[v().session.key]} expandable={v().expandable}
                 expanded={!!expandedChildren[v().session.key]} onToggleChildren={() => setExpandedChildren(v().session.key, !expandedChildren[v().session.key])}
-                team={v().team} onToggleTeam={() => setCollapsedTeams(v().session.key, !collapsedTeams[v().session.key])}
+                team={v().team} onToggleTeam={() => setTeamCollapsed(v().session.key, !teamCollapsed(v().session.key))}
                 fromParent={v().fromParent} onOpenParent={(key) => { setSelectedKey(key); setRevealing(key); }} />
             </Show>
           </div>

@@ -188,6 +188,9 @@ pub struct Entry {
     pub prompt: String,
     /// The status as the page shows it.
     pub result: String,
+    /// The approval categories the request needed, by ID; empty for an
+    /// entry saved before categories or by an older CLI.
+    pub categories: Vec<String>,
 }
 
 /// One page and its cursors (0: none that way).
@@ -232,6 +235,7 @@ pub fn page(reply: &Map<String, Value>) -> Result<Page, String> {
                 session: text(&entry["session"]),
                 prompt: text(&entry["prompt"]),
                 result: status_text(entry["status"].as_str().unwrap_or_default()).into(),
+                categories: known_categories(&entry["categories"]),
             })
             .collect(),
         next: reply.get("next").map_or(0, integer),
@@ -239,8 +243,22 @@ pub fn page(reply: &Map<String, Value>) -> Result<Page, String> {
     })
 }
 
-/// A detail reply as Qt shows it: the outcome, each question with its body
-/// and the answers chosen for it, then the outcome's detail.
+/// The category IDs this client knows, in the page's order.
+fn known_categories(value: &Value) -> Vec<String> {
+    let ids: Vec<&str> = value
+        .as_array()
+        .map(|ids| ids.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    automatic::Category::ALL
+        .into_iter()
+        .filter(|category| ids.contains(&category.id()))
+        .map(|category| category.id().to_owned())
+        .collect()
+}
+
+/// A detail reply as Qt shows it: the outcome, the approval categories when
+/// recorded, each question with its body and the answers chosen for it, then
+/// the outcome's detail.
 pub fn detail(reply: &Map<String, Value>) -> String {
     let mut parts = vec![status_text(
         reply
@@ -249,6 +267,17 @@ pub fn detail(reply: &Map<String, Value>) -> String {
             .unwrap_or_default(),
     )
     .to_owned()];
+    let categories = known_categories(reply.get("categories").unwrap_or(&Value::Null));
+    if !categories.is_empty() {
+        let set = categories
+            .iter()
+            .filter_map(|id| automatic::Category::from_id(id))
+            .fold(automatic::Set::EMPTY, automatic::Set::with);
+        parts.push(format!(
+            "Categories: {}",
+            automatic::categories::labels(set)
+        ));
+    }
     let empty = Vec::new();
     let answers = reply
         .get("answers")

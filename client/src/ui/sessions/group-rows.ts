@@ -53,6 +53,21 @@ export interface ListInput {
 }
 
 /** Qt's grouped rows (SessionsWindowRows.cpp:289-338, header counts 393-411). */
+/**
+ * A parent's team with its shown native subagents counted in (zerus-sa9qn.16):
+ * they add to all and working. Their requests and errors are the parent's
+ * own and already show on its card, so they are not counted twice.
+ */
+export function withSubagents(team: Team | undefined, kids: readonly Subagent[], collapsed: boolean): Team | undefined {
+  if (!kids.length) return team;
+  return {
+    ...(team ?? { asking: 0, needsYou: 0, errors: 0 }),
+    total: (team?.total ?? 0) + kids.length,
+    working: (team?.working ?? 0) + kids.filter((child) => child.state === "working").length,
+    collapsed: team?.collapsed ?? collapsed,
+  };
+}
+
 export function groupRows(input: ListInput): Row[] {
   const out: Row[] = [];
   const card = (s: Session, extra: Partial<Extract<Row, { type: "card" }>> = {}) => {
@@ -64,10 +79,14 @@ export function groupRows(input: ListInput): Row[] {
           && (!input.selected.conversation || input.selected.conversation === (s.conversationId ?? "")))
         || (!child.group && input.childDraft?.(s, child))
         || child.inactive === false).map((child): Subagent => !current && child.state === "working" ? { ...child, state: "unknown" } : child);
-      const expanded = kids.length > 0 && input.expanded(s.key);
+      // One counter and one toggle for a parent's subagents and child
+      // sessions (owner, 2026-11-07, zerus-sa9qn.16): the toggle shows or
+      // hides both, and is remembered across relaunches (zerus-sa9qn.15).
+      const team = withSubagents(extra.team, kids, !!input.teamCollapsed?.(s.key));
+      const expanded = kids.length > 0 && !team?.collapsed;
       const changed = kids.length !== roster.length || kids.some((child, index) => child !== roster[index]);
       const shown = changed ? { ...s, subagents: kids } : s;
-      out.push({ type: "card", id: s.key, session: shown, expandable: kids.length > 0, expanded, compactRow: input.compact(s.key), ...extra });
+      out.push({ type: "card", id: s.key, session: shown, expandable: false, expanded, compactRow: input.compact(s.key), ...extra, team });
       if (expanded) kids.forEach((child, i) => out.push({ type: "child", id: `${s.key}/${child.id}`, parent: shown, child, first: i === 0, last: i === kids.length - 1 }));
   };
   // One project group's visible cards in rank order, child sessions nested

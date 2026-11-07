@@ -91,9 +91,42 @@ impl FakeHgs {
     }
 
     pub fn eofs(&self, host: &str) -> usize {
-        self.log()
-            .into_iter()
-            .filter(|entry| entry["host"] == host && entry.get("eof").is_some())
+        self.receipts("stdin-eof", host)
+    }
+
+    pub fn serve_ready(&self, host: &str) -> bool {
+        self.receipts("serve-ready", host) > 0
+    }
+
+    fn receipts(&self, event: &str, host: &str) -> usize {
+        use std::io::Read;
+        std::fs::read_dir(&self.dir)
+            .unwrap()
+            .take(1024)
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("{event}-"))
+            })
+            .filter_map(|entry| {
+                let mut bytes = Vec::new();
+                std::fs::File::open(entry.path())
+                    .ok()?
+                    .take(4097)
+                    .read_to_end(&mut bytes)
+                    .ok()?;
+                if bytes.len() > 4096 {
+                    return None;
+                }
+                // A writer may not have closed its new receipt yet. A partial
+                // record proves nothing; the next bounded poll can observe it.
+                serde_json::from_slice::<Value>(&bytes).ok()
+            })
+            .filter(|entry| {
+                entry["schema"] == 1 && entry["event"] == event && entry["host"] == host
+            })
             .count()
     }
 }

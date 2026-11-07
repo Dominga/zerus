@@ -139,16 +139,17 @@ export function AgentBadge(props: { agent: AgentKind; narrow?: boolean; max?: nu
 }
 
 /**
- * A supervised child: its parent handles its requests (spec 3.4). The crossed
- * bell of Mute, dim, before the title, as in the owner's prototype (owner
- * feedback 2026-11-07: a plain bell read as "notifications coming").
+ * A supervised child: its parent handles its requests (spec 3.4). A dim
+ * arrow turning down and right, before the title: handled by the parent
+ * above (owner, 2026-11-07, zerus-sa9qn.16; a bell read as notifications, a
+ * crossed bell as muted).
  */
 export function SupervisedMark(props: { session: Session }) {
   const name = () => props.session.parent?.name.split("/").pop() || props.session.parent?.name || "";
   return (
     <span class="sc-supervised" role="img" aria-label={tr("Supervised by %1", name())}
       title={tr("Supervised by %1\nOnly requests that need you notify you.", props.session.parent?.name ?? "")}>
-      <Icon name="mute" size={13} />
+      <Icon name="corner-down-right" size={13} />
     </span>
   );
 }
@@ -189,7 +190,7 @@ export function AgentTile(props: { agent: AgentKind; size?: number }) {
 export function TeamToggle(props: { team: Team; onToggle?: () => void }) {
   return (
     <button class="sc-team" classList={{ open: !props.team.collapsed }} aria-expanded={!props.team.collapsed}
-      title={props.team.collapsed ? tr("Show child sessions") : tr("Hide child sessions")}
+      title={props.team.collapsed ? tr("Show subagents and child sessions") : tr("Hide subagents and child sessions")}
       onClick={(e) => { e.stopPropagation(); props.onToggle?.(); }} onDblClick={(e) => e.stopPropagation()}>
       <svg class="team-glyph" width="16" height="12" viewBox="0 0 16 12" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
         <circle cx="8" cy="3" r="2" /><circle cx="3" cy="5" r="1.6" /><circle cx="13" cy="5" r="1.6" />
@@ -374,9 +375,11 @@ export function SessionCard(props: {
     <div class="scard tiled" classList={{ selected: props.selected, offline: statusOf(s()) === "offline", muted: !!s().muted }} data-emphasis={emphasis(s())}>
       <span class="sc-tile"><AgentTile agent={s().agent} /></span>
       <div class="sc-l1">
-        <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
-        <Show when={!s().muted && s().parent?.state === "live"}><SupervisedMark session={s()} /></Show>
+        {/* Supervision and Mute are independent: the arrow before the name,
+            the crossed bell right after it (owner, 2026-11-08). */}
+        <Show when={s().parent?.state === "live"}><SupervisedMark session={s()} /></Show>
         <span class="sc-title ell" style={titleReserve(s().title, 72)} title={s().name}>{s().title}</span>
+        <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
         <StatusBadge kind={kind()} caption={statusCaption(s())} />
         <Show when={visibleUnreadReply(s(), computerFresh(s().computer)) && (s().status === "working" || s().status === "attention" || s().draft)}>
           <span class="sc-extra"><StatusBadge kind={quietAttention(s()) ? "muted-unread" : "unread"} caption="" iconOnly /></span>
@@ -401,7 +404,7 @@ export function SessionCard(props: {
         <Show when={s().effort}><span class="sc-effort">{s().effort}</span></Show>
         <AccountChip session={s()} />
         <span class="grow" />
-        <Show when={(s().subagents ?? []).length}>
+        <Show when={!props.team && (s().subagents ?? []).length}>
           <AgentsCounter label={agentsLabel(s())} expandable={props.expandable} expanded={props.expanded} onToggle={props.onToggleChildren} />
         </Show>
         <Show when={props.team}>{(team) => <TeamToggle team={team()} onToggle={props.onToggleTeam} />}</Show>
@@ -423,20 +426,20 @@ export const childStatus = (c: Subagent, current = true): { kind: BadgeKind; cap
   ? { ...CHILD_STATUS[c.state], caption: tr(CHILD_STATUS[c.state].caption) }
   : { kind: "neutral", caption: tr("Recorded") };
 
-/** Native subagent row (64 px): card indented 24 px, one muted detail line. */
+/**
+ * Native subagent row (40 px), indented under its parent: a compact session
+ * row that never expands (owner, 2026-11-07, zerus-sa9qn.16): the agent's
+ * tile, the name and the status; the summary is its tooltip.
+ */
 export function ChildCard(props: { parent: Session; child: Subagent; last: boolean; first: boolean; selected: boolean }) {
   const status = () => childStatus(props.child, currentChildren(props.parent, !computerOffline(props.parent.computer)));
   return (
     <div class="child-row" classList={{ last: props.last, first: props.first }}>
       <i class="tree" aria-hidden="true" />
-      <div class="scard child" classList={{ selected: props.selected }}>
-        <div class="sc-l1">
-          <span class="sc-title ell" style={titleReserve(props.child.name, 72)}>{props.child.name}</span>
-          <StatusBadge kind={status().kind} caption={status().caption} />
-          <span class="grow" />
-          <AgentBadge agent={props.parent.agent} max={85} />
-        </div>
-        <div class="sc-child-detail ell">{props.child.summary}</div>
+      <div class="scard compact child" classList={{ selected: props.selected }} title={props.child.summary || undefined}>
+        <span class="cc-tile"><AgentTile agent={props.parent.agent} size={22} /></span>
+        <span class="sc-title ell" style={titleReserve(props.child.name, 60)}>{props.child.name}</span>
+        <StatusBadge kind={status().kind} caption={status().caption} />
       </div>
     </div>
   );
@@ -469,7 +472,7 @@ export function fitCounters(state: { narrow: boolean; needed: number }, scrollWi
 }
 
 function CompactTeam(props: { team: Team; onToggle?: () => void }) {
-  const title = () => (props.team.collapsed ? tr("Show child sessions") : tr("Hide child sessions"));
+  const title = () => (props.team.collapsed ? tr("Show subagents and child sessions") : tr("Hide subagents and child sessions"));
   // Short counters when the long ones do not fit; the container query below
   // about 300 px is the first approximation before any measurement.
   let body: HTMLSpanElement | undefined;
@@ -530,11 +533,11 @@ export function CompactCard(props: { session: Session; selected: boolean; onExpa
       <div class="cc-line">
       <span class="cc-tile"><AgentTile agent={s().agent} size={22} /></span>
       <Show when={sessionMark(s())}>{(m) => <span class="cc-mark" title={markTooltip(s(), m())}><AccountMarkCircle mark={m()} size={14} /></span>}</Show>
-      <Show when={!s().muted && s().parent?.state === "live"}><SupervisedMark session={s()} /></Show>
+      <Show when={s().parent?.state === "live"}><SupervisedMark session={s()} /></Show>
       <span class="sc-title ell" style={titleReserve(s().title, 60)} title={s().name}>{s().title}</span>
+      <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
       <StatusBadge kind={badgeKind(s())} caption={statusCaption(s())} />
       <OptionalQuestionsChip session={s()} />
-      <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
       <button class="cc-expand" title={tr("Expand session row")} onClick={(e) => { e.stopPropagation(); props.onExpand(); }} onDblClick={(e) => e.stopPropagation()}>
         <Icon name="expand-row" size={16} />
       </button>

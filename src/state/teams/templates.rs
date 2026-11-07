@@ -1153,7 +1153,12 @@ fn plain(template: &str, program: &str, argv: Vec<String>) -> Plan {
 fn cmake_configure(template: &Template, args: &Value, folder: &Path) -> anyhow::Result<Plan> {
     let launcher = cache_use(template.id, folder).launcher;
     if template.id == "qt-configure" {
-        return Ok(plain(template.id, "cmake", cmake_configure_argv("tray", ".ci-build/gui", Some("Ninja"), Some("Release"), None, launcher.as_deref())));
+        // Task 190: a fresh worktree has no build folder yet, so the template
+        // finds the installed Qt itself and passes it as -DQt6_DIR; a failure
+        // names every place it searched.
+        let mut argv = cmake_configure_argv("tray", ".ci-build/gui", Some("Ninja"), Some("Release"), None, launcher.as_deref());
+        argv.push(format!("-DQt6_DIR={}", qt6_dir(folder)?));
+        return Ok(plain(template.id, "cmake", argv));
     }
     let source = one(template, args, "source", folder)?.unwrap_or_else(|| ".".into());
     ensure!(folder.join(&source).join("CMakeLists.txt").is_file(), "There is no CMakeLists.txt in {source} of your folder");
@@ -1530,6 +1535,249 @@ fn qt_bin(folder: &Path) -> Option<PathBuf> {
     let dir = cache.lines().find_map(|line| line.strip_prefix("Qt6_DIR:PATH=").or_else(|| line.strip_prefix("Qt6_DIR:UNINITIALIZED=")))?;
     let bin = Path::new(dir.trim()).parent()?.parent()?.parent()?.join("bin");
     bin.is_dir().then_some(bin)
+}
+
+// -- Task 190: finding the installed Qt for a fresh worktree ----------------
+
+#[cfg(test)]
+thread_local! {
+    /// A test's Qt environment and install roots, instead of this computer's.
+    static QT_TEST: std::cell::RefCell<Option<(Vec<(String, String)>, Vec<PathBuf>)>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn qt_override(vars: Option<Vec<(String, String)>>, roots: Option<Vec<PathBuf>>) {
+    QT_TEST.with(|test| *test.borrow_mut() = vars.map(|vars| (vars, roots.unwrap_or_default())));
+}
+
+/// An environment variable, or the test's value for it.
+fn qt_var(name: &str) -> Option<String> {
+    #[cfg(test)]
+    if let Some((vars, _)) = QT_TEST.with(|test| test.borrow().clone()) {
+        return vars.into_iter().find(|(key, _)| key == name).map(|(_, value)| value);
+    }
+    std::env::var(name).ok()
+}
+
+/// The install roots Qt may live under: this machine's `zerus-deps`, `C:/Qt`,
+/// the Qt online installer's and aqtinstall's folders in the person's home.
+fn qt_roots() -> Vec<PathBuf> {
+    #[cfg(test)]
+    if let Some((_, roots)) = QT_TEST.with(|test| test.borrow().clone()) {
+        return roots;
+    }
+    let mut roots = vec![PathBuf::from("D:/Tools/zerus-deps/Qt"), PathBuf::from("C:/Qt")];
+    if let Some(home) = crate::platform::home_dir() {
+        roots.push(home.join("Qt"));
+        roots.push(home.join("aqtinstall"));
+    }
+    roots
+}
+
+/// The Qt 6 package folder under `path`: `path` itself or its
+/// `lib/cmake/Qt6`, when `Qt6Config.cmake` is there. Normalized to forward
+/// slashes, the way CMake writes the cache.
+fn qt6_package(path: &Path) -> Option<String> {
+    let packages = [path.join("lib").join("cmake").join("Qt6"), path.to_path_buf()];
+    for package in packages {
+        if package.join("Qt6Config.cmake").is_file() {
+            let shown = package.display().to_string().replace('\\', "/");
+            return Some(shown.trim_end_matches('/').to_owned());
+        }
+    }
+    None
+}
+
+/// The `Qt6_DIR` a configured build folder recorded, when it has one.
+fn qt6_from_cache(path: &Path) -> Option<String> {
+    let cache = std::fs::read_to_string(path).ok()?;
+    cache
+        .lines()
+        .find_map(|line| line.strip_prefix("Qt6_DIR:PATH=").or_else(|| line.strip_prefix("Qt6_DIR:UNINITIALIZED=")))
+        .map(|dir| dir.trim().to_owned())
+}
+
+/// The checkout a worktree belongs to: the parent of Git's common folder.
+fn main_checkout(folder: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args(["-C", &folder.display().to_string(), "rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let common = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let base = if common.file_name().is_some_and(|name| name == ".git") { common.parent()?.to_path_buf() } else { common };
+    (base != folder).then_some(base)
+}
+
+/// The path the project's `.zerus/tests.toml` names for Qt under `[tools]`
+/// (`qt`, `qt6`, `qt6_dir` or `qt_dir`, case aside).
+fn project_qt_tool(folder: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(folder.join(".zerus").join("tests.toml")).ok()?;
+    let document = text.parse::<toml_edit::DocumentMut>().ok()?;
+    let table = document.get("tools").and_then(toml_edit::Item::as_table_like)?;
+    for (key, item) in table.iter() {
+        if !matches!(key.to_ascii_lowercase().as_str(), "qt" | "qt6" | "qt6_dir" | "qt_dir") {
+            continue;
+        }
+        let value = item.as_value().and_then(toml_edit::Value::as_str)?.trim();
+        if !value.is_empty() {
+            return Some(value.to_owned());
+        }
+    }
+    None
+}
+
+/// Whether `text` is a dotted version (`6`, `6.10.3`).
+fn is_version(text: &str) -> bool {
+    text.split('.').all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+/// The Qt version `tray/CMakeLists.txt` asks for in `find_package(Qt6 VERSION
+/// …)`, when it names one (this repository's asks for none).
+fn requested_qt_version(cmake: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(cmake).ok()?;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !trimmed.to_ascii_lowercase().starts_with("find_package") {
+            continue;
+        }
+        let mut parts = trimmed.split(|ch: char| ch.is_whitespace() || matches!(ch, '(' | ')'));
+        while let Some(part) = parts.next() {
+            if part.trim_matches(|ch| matches!(ch, '"' | '\'')).eq_ignore_ascii_case("qt6") {
+                let next = parts.next().unwrap_or_default().trim_matches(|ch| matches!(ch, '"' | '\''));
+                return is_version(next).then(|| next.to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Where a found version stands against the requested one.
+fn compare_versions(found: &[u32], wanted: &str) -> std::cmp::Ordering {
+    let wanted: Vec<u32> = wanted.split('.').filter_map(|part| part.parse().ok()).collect();
+    for index in 0..found.len().max(wanted.len()) {
+        let left = found.get(index).copied().unwrap_or(0);
+        let right = wanted.get(index).copied().unwrap_or(0);
+        match left.cmp(&right) {
+            std::cmp::Ordering::Equal => {}
+            other => return other,
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// The Qt 6 package folder under a known install root: a root that is itself
+/// an install, else `<root>/<version>/<arch>` for the requested version (or the
+/// newest), the Windows kit's `msvc2022_64` first.
+fn scan_qt_roots(roots: &[PathBuf], version: Option<&str>) -> Option<String> {
+    const ARCHITECTURES: &[&str] = &["msvc2022_64", "msvc2019_64", "mingw_64", "gcc_64", "clang_64", "macos"];
+    for root in roots {
+        if let Some(found) = qt6_package(root) {
+            return Some(found);
+        }
+        let mut versions: Vec<(Vec<u32>, PathBuf)> = std::fs::read_dir(root)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let parts: Vec<u32> = name.split('.').map(|part| part.parse::<u32>()).collect::<std::result::Result<_, _>>().ok()?;
+                (parts.len() >= 2 && entry.path().is_dir()).then_some((parts, entry.path()))
+            })
+            .collect();
+        versions.sort_by(|left, right| right.0.cmp(&left.0));
+        for (parts, path) in versions {
+            if let Some(wanted) = version {
+                if compare_versions(&parts, wanted) == std::cmp::Ordering::Less {
+                    continue;
+                }
+            }
+            for arch in ARCHITECTURES {
+                if let Some(found) = qt6_package(&path.join(arch)) {
+                    return Some(found);
+                }
+            }
+            if let Some(found) = qt6_package(&path) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+/// Task 190: the Qt 6 package folder (`…/lib/cmake/Qt6`) for `tray/` of
+/// `folder`, found without a configured build folder. The order is the merger's
+/// review's: `QT_ROOT_DIR`/`Qt6_DIR` in the environment, the project's
+/// `.zerus/tests.toml` `[tools] qt` or the per-computer `qt` of the templates
+/// settings, a build folder's or the main checkout's `CMakeCache.txt`, then the
+/// known install roots for the version `tray/CMakeLists.txt` asks for (the
+/// newest when it asks for none). A failure names what it searched.
+fn qt6_dir(folder: &Path) -> anyhow::Result<String> {
+    let mut searched: Vec<String> = Vec::new();
+    let version = requested_qt_version(&folder.join("tray").join("CMakeLists.txt"));
+    let wanted = version.as_ref().map(|version| format!(" {version}")).unwrap_or_default();
+    let free = |path: &Path| qt6_package(path);
+    for name in ["QT_ROOT_DIR", "Qt6_DIR"] {
+        match qt_var(name).map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()) {
+            Some(value) => {
+                searched.push(format!("{name}={value}"));
+                if let Some(found) = free(Path::new(&value)) {
+                    return Ok(found);
+                }
+            }
+            None => searched.push(format!("{name} (unset)")),
+        }
+    }
+    match project_qt_tool(folder) {
+        Some(value) => {
+            searched.push(format!(".zerus/tests.toml [tools] qt={value}"));
+            if let Some(found) = free(Path::new(&value)) {
+                return Ok(found);
+            }
+        }
+        None => searched.push(".zerus/tests.toml [tools] qt (none)".into()),
+    }
+    match read_settings().get("qt").and_then(Value::as_str).map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => {
+            searched.push(format!("the qt setting={value}"));
+            if let Some(found) = free(Path::new(value)) {
+                return Ok(found);
+            }
+        }
+        None => searched.push("the qt setting (none)".into()),
+    }
+    let caches = [Some(folder.to_path_buf()), main_checkout(folder)];
+    for (index, checkout) in caches.into_iter().enumerate() {
+        let Some(checkout) = checkout else { continue };
+        let path = checkout.join(".ci-build").join("gui").join("CMakeCache.txt");
+        let label = if index == 0 { path.display().to_string() } else { format!("{} (main checkout)", path.display()) };
+        match qt6_from_cache(&path) {
+            Some(value) => {
+                searched.push(format!("{label}={value}"));
+                if let Some(found) = free(Path::new(&value)) {
+                    return Ok(found);
+                }
+            }
+            None => searched.push(format!("{label} (no Qt6_DIR)")),
+        }
+    }
+    let roots = qt_roots();
+    for root in &roots {
+        searched.push(format!("the install root {}", root.display()));
+    }
+    if let Some(found) = scan_qt_roots(&roots, version.as_deref()) {
+        return Ok(found);
+    }
+    anyhow::bail!(
+        "Qt{wanted} was not found for tray/ in {}: searched {}. Set QT_ROOT_DIR or Qt6_DIR, or name it in .zerus/tests.toml as [tools] qt = \"<the Qt install or its lib/cmake/Qt6>\".",
+        folder.display(),
+        searched.join("; ")
+    )
 }
 
 /// A Qt test's environment: its output on the pipe, Qt's DLLs first on PATH
@@ -2151,6 +2399,131 @@ mod tests {
         assert!(env.iter().any(|(key, value)| key == "GRADLE_USER_HOME" && value.contains(".zerus-team")));
     }
 
+    /// Task 190: a fake Qt install at `<dir>/deps/Qt/<version>/msvc2022_64`.
+    fn qt_tree(dir: &Path, version: &str) -> PathBuf {
+        let qt = dir.join("deps").join("Qt").join(version).join("msvc2022_64");
+        std::fs::create_dir_all(qt.join("lib").join("cmake").join("Qt6")).unwrap();
+        std::fs::write(qt.join("lib").join("cmake").join("Qt6").join("Qt6Config.cmake"), "").unwrap();
+        qt
+    }
+
+    /// The `tray/CMakeLists.txt` that asks for `wanted` (this repository's names
+    /// no version).
+    fn tray(dir: &Path, wanted: &str) {
+        std::fs::create_dir_all(dir.join("tray")).unwrap();
+        std::fs::write(dir.join("tray").join("CMakeLists.txt"), format!("find_package(Qt6 {wanted} REQUIRED COMPONENTS Widgets)\n")).unwrap();
+    }
+
+    fn qt_arg(qt: &Path) -> String {
+        format!("-DQt6_DIR={}", qt.join("lib").join("cmake").join("Qt6").display().to_string().replace('\\', "/"))
+    }
+
+    /// Task 190: a fresh worktree has no `.ci-build/gui/CMakeCache.txt`; the
+    /// template finds the newest installed Qt itself, for the version asked for.
+    #[test]
+    fn qt_configure_finds_the_newest_installed_qt_itself() {
+        let dir = temp();
+        settings_override(Some(dir.path().join("templates.json")));
+        tray(dir.path(), "6.5");
+        // An older kit is installed too: the version asked for decides.
+        let old = qt_tree(dir.path(), "6.2.4");
+        let qt = qt_tree(dir.path(), "6.10.3");
+        assert!(old.is_dir());
+        qt_override(Some(Vec::new()), Some(vec![dir.path().join("deps").join("Qt")]));
+        let planned = plan("qt-configure", &json!({}), dir.path()).unwrap();
+        qt_override(None, None);
+        settings_override(None);
+        assert!(planned.argv.contains(&qt_arg(&qt)), "{:?}", planned.argv);
+        assert!(!planned.argv.contains(&qt_arg(&old)));
+    }
+
+    #[test]
+    fn qt_configure_takes_qt_from_the_environment() {
+        let dir = temp();
+        settings_override(Some(dir.path().join("templates.json")));
+        tray(dir.path(), "6.5");
+        let qt = qt_tree(dir.path(), "6.10.3");
+        for (name, value) in [
+            ("QT_ROOT_DIR", qt.display().to_string()),
+            ("Qt6_DIR", qt.join("lib").join("cmake").join("Qt6").display().to_string()),
+        ] {
+            qt_override(Some(vec![(name.into(), value)]), Some(Vec::new()));
+            let planned = plan("qt-configure", &json!({}), dir.path()).unwrap();
+            qt_override(None, None);
+            assert!(planned.argv.contains(&qt_arg(&qt)), "{name}: {:?}", planned.argv);
+        }
+        settings_override(None);
+    }
+
+    #[test]
+    fn qt_configure_takes_qt_from_the_project_or_the_computer_setting() {
+        let dir = temp();
+        settings_override(Some(dir.path().join("templates.json")));
+        tray(dir.path(), "6.5");
+        let qt = qt_tree(dir.path(), "6.10.3");
+        std::fs::create_dir_all(dir.path().join(".zerus")).unwrap();
+        // A TOML literal string keeps Windows backslashes from being escapes.
+        let named = qt.display().to_string();
+        std::fs::write(dir.path().join(".zerus").join("tests.toml"), format!("version = 1\n[tools]\nqt = '{named}'\n")).unwrap();
+        qt_override(Some(Vec::new()), Some(Vec::new()));
+        let planned = plan("qt-configure", &json!({}), dir.path()).unwrap();
+        assert!(planned.argv.contains(&qt_arg(&qt)), "{:?}", planned.argv);
+        // The per-computer `qt` setting answers when the project names none.
+        std::fs::remove_file(dir.path().join(".zerus").join("tests.toml")).unwrap();
+        write_settings(&json!({"enabled": true, "qt": qt.display().to_string()})).unwrap();
+        let planned = plan("qt-configure", &json!({}), dir.path()).unwrap();
+        qt_override(None, None);
+        settings_override(None);
+        assert!(planned.argv.contains(&qt_arg(&qt)), "{:?}", planned.argv);
+    }
+
+    #[test]
+    fn qt_configure_takes_qt_from_the_main_checkouts_cache() {
+        let dir = temp();
+        settings_override(Some(dir.path().join("templates.json")));
+        let main = dir.path().join("main");
+        std::fs::create_dir_all(main.join("member")).unwrap();
+        std::fs::create_dir_all(main.join(".ci-build").join("gui")).unwrap();
+        tray(&main.join("member"), "6.5");
+        let qt = qt_tree(dir.path(), "6.10.3");
+        std::fs::write(
+            main.join(".ci-build").join("gui").join("CMakeCache.txt"),
+            format!("Qt6_DIR:PATH={}\n", qt.join("lib").join("cmake").join("Qt6").display()),
+        )
+        .unwrap();
+        let git = std::process::Command::new("git").args(["init", "-q"]).current_dir(&main).output().unwrap();
+        assert!(git.status.success(), "git init: {}", String::from_utf8_lossy(&git.stderr));
+        qt_override(Some(Vec::new()), Some(Vec::new()));
+        let planned = plan("qt-configure", &json!({}), &main.join("member")).unwrap();
+        qt_override(None, None);
+        settings_override(None);
+        assert!(planned.argv.contains(&qt_arg(&qt)), "{:?}", planned.argv);
+    }
+
+    #[test]
+    fn qt_configure_names_what_it_searched_when_qt_is_missing() {
+        let dir = temp();
+        settings_override(Some(dir.path().join("templates.json")));
+        tray(dir.path(), "6.5");
+        let empty = dir.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        qt_override(Some(Vec::new()), Some(vec![empty.clone()]));
+        let error = plan("qt-configure", &json!({}), dir.path()).unwrap_err().to_string();
+        qt_override(None, None);
+        settings_override(None);
+        let mut wanted = vec![
+            "Qt 6.5".to_owned(),
+            "QT_ROOT_DIR".to_owned(),
+            "Qt6_DIR".to_owned(),
+            "[tools] qt".to_owned(),
+            "CMakeCache.txt".to_owned(),
+        ];
+        wanted.push(empty.display().to_string());
+        for wanted in wanted {
+            assert!(error.contains(&wanted), "missing {wanted} in: {error}");
+        }
+    }
+
     #[test]
     fn an_unknown_template_is_refused() {
         let dir = temp();
@@ -2750,13 +3123,21 @@ mod tests {
     }
 
     /// Task 85: qt-configure and qt-build are the CMake templates with their
-    /// fixed values; their argv is exactly what it was for this repository.
+    /// fixed values; task 190 adds the Qt the configure found itself.
     #[test]
     fn qt_templates_keep_their_argv_as_aliases_of_the_cmake_ones() {
         let dir = temp();
+        settings_override(Some(dir.path().join("templates.json")));
+        tray(dir.path(), "6.5");
+        let qt = qt_tree(dir.path(), "6.10.3");
+        qt_override(Some(vec![("QT_ROOT_DIR".into(), qt.display().to_string())]), Some(Vec::new()));
         let configure = plan("qt-configure", &json!({}), dir.path()).unwrap();
-        assert_eq!((configure.program.as_str(), configure.argv.clone()),
-                   ("cmake", ["-S", "tray", "-B", ".ci-build/gui", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release"].map(str::to_owned).to_vec()));
+        qt_override(None, None);
+        settings_override(None);
+        // Task 190: the fixed cmake argv, then the Qt the template found itself.
+        let mut expected: Vec<String> = ["-S", "tray", "-B", ".ci-build/gui", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release"].map(str::to_owned).to_vec();
+        expected.push(qt_arg(&qt));
+        assert_eq!((configure.program.as_str(), configure.argv.clone()), ("cmake", expected));
         assert_eq!(cmake_configure_argv("tray", ".ci-build/gui", Some("Ninja"), Some("Release"), None, Some("ccache")).last().unwrap().as_str(),
                    "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache");
         let build = plan("qt-build", &json!({"targets":["hgs-tray","test_teams"]}), dir.path()).unwrap();

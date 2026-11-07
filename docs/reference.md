@@ -1377,7 +1377,21 @@ folder (it may not exist yet), a target or test name a plain word, a regex,
 generator, platform or filter one line of text. On Windows these templates load
 the Visual Studio environment as the Qt ones do, and the build cache and the
 scanning retry apply to them. `qt-configure` and `qt-build` are `cmake-configure`
-and `cmake-build` with this repository's fixed values; their argv is unchanged.
+and `cmake-build` with this repository's fixed values; `qt-build`'s argv is
+unchanged.
+
+`qt-configure` finds the installed Qt itself, so a fresh worktree needs no hand
+edit: it tries, in order, `QT_ROOT_DIR` and then `Qt6_DIR` from the environment;
+the project's `.zerus/tests.toml` `[tools] qt = "<install or lib/cmake/Qt6>"`
+(a literal string in single quotes keeps Windows backslashes; the per-computer
+`qt` of the templates settings file answers when the project names none); the
+`Qt6_DIR` of the folder's own or the main checkout's
+`.ci-build/gui/CMakeCache.txt`; and the known install roots (`D:/Tools/zerus-deps/Qt`,
+`C:/Qt`, the Qt online installer's and aqtinstall's folders in the person's
+home) for the version `tray/CMakeLists.txt` asks for, newest otherwise, trying
+`msvc2022_64` before the other kits. It passes the result as `-DQt6_DIR=<…>`.
+When nothing is found the run is refused with a line naming every place it
+searched and the version it wanted, so the missing piece is one setting away.
 
 `ctest` and `vstest` read their report (CTest's JUnit XML, VSTest's TRX, under
 `.zerus-team/results` in the member's folder, removed before each run) into one

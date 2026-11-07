@@ -101,8 +101,13 @@ class WorkflowBodies(unittest.TestCase):
             self.assertFalse((job / 'shadow-ran').exists())
             self.assertFalse((job / 'unittest.py').exists())
             original_workflow = subprocess.check_output(['git', '-C', str(source), 'show', commit + ':' + WINDOWS.CI.WORKFLOW])
-            planned = WINDOWS.plan(WINDOWS.CI.load_workflow(original_workflow))
-            self.assertEqual(planned[0]['steps'][0]['body'], 'bash check.sh')
+            try:
+                planned = WINDOWS.plan(WINDOWS.CI.load_workflow(original_workflow))
+            except ValueError as error:
+                self.assertIsInstance(error.__cause__, ImportError)
+                self.assertEqual(str(error), 'local runner requires python-yaml (PyYAML); no checks started')
+            else:
+                self.assertEqual(planned[0]['steps'][0]['body'], 'bash check.sh')
             self.assertEqual((source / 'check.sh').read_text(), 'exit 0\n')
 
     def test_unassigned_original_worker_gets_eof_without_a_release(self):

@@ -551,18 +551,23 @@ class UpdateFlow(Flow):
     def test_a_failed_quit_event_reports_its_reason_and_replaces_nothing(self):
         self.install('client-1', 'tauri', self.installed)
         reason = 'execution error: a synthetic osascript failure (-1)'
+        command = ['osascript', '-e', f'ignoring application responses\ntell application id "{updater.LABEL}" to quit\nend ignoring']
+        failure = subprocess.CalledProcessError(1, command, output='', stderr=reason + '\n')
         def run(args, **kwargs):
             if args[0] == 'osascript':
-                raise subprocess.CalledProcessError(1, args, output='', stderr=reason + '\n')
+                self.assertEqual(args, command)
+                raise failure
             return ''
         errors = io.StringIO()
         argv = ['update-installed.py', str(self.bundle('client-2', 'tauri')), str(self.installed)]
         with mock.patch.multiple(updater, run=run, quit_gui=QUIT_GUI, running_image_matches=lambda pid, installed: False), \
                 mock.patch.object(sys, 'argv', argv), mock.patch.object(sys, 'stderr', errors):
             self.assertEqual(updater.main(), 1)
-        self.assertTrue(errors.getvalue().startswith("hgs-tray update failed: Command '['osascript'"), errors.getvalue())
-        self.assertTrue(errors.getvalue().endswith(f'returned non-zero exit status 1: {reason}\n'), errors.getvalue())
+        self.assertEqual(errors.getvalue(),
+                         f'hgs-tray update failed: {str(failure).removesuffix(".")}: {reason}\n')
         self.assertEqual(self.variant(self.installed), 'client-1')
+        self.assertFalse(self.slot.exists())
+        self.assertEqual(self.events, [])
         self.assertTrue(self.running)
 
     def test_stopped_pair_refresh_failure_cannot_report_success_or_start_gui(self):

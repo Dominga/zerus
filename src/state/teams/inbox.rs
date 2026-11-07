@@ -385,10 +385,10 @@ fn all_items(team: &Team) -> Vec<Item> {
                     format!("{} Reassigning it to {peer} frees it now.", wait.reason),
                 ),
                 (None, MemberState::Paused) => (resume, format!("{} Resume the member to free it.", wait.reason)),
-                (None, _) if !live => (relaunch, format!("{} Relaunch its session to free it.", wait.reason)),
+                (None, _) if !live => (relaunch, format!("{} Relaunch its session in a fresh conversation with a handoff brief to free it.", wait.reason)),
                 (None, _) if team.settings.lead_restarts_stuck && member_stuck => (
                     relaunch,
-                    format!("{} Restart it: relaunch interrupts its stuck turn, or relaunches it in its conversation.", wait.reason),
+                    format!("{} Relaunch it: a fresh conversation with a handoff brief continues the task.", wait.reason),
                 ),
                 (None, _) => (
                     owner,
@@ -487,7 +487,7 @@ fn all_items(team: &Team) -> Vec<Item> {
                     json!({"request_id":PLACEHOLDER,"team":team.id,"member":member.id})
                 ),
                 format!(
-                    "You may restart it: hgs team relaunch {} interrupts its stuck turn and continues it, or relaunches the session in its own conversation.",
+                    "You may relaunch it: hgs team relaunch {} gives it a fresh conversation with a handoff brief that continues the task.",
                     member.id
                 ),
             )

@@ -2228,6 +2228,24 @@ pub(crate) fn inspect(name: &str, agent_id: Option<&str>) -> Result<Value> {
     // Internal recovery/input checks never need a process inventory.
     inspect_with_processes(name, agent_id, false)
 }
+/// Task 209: whether the host can compact this session natively. Capability is
+/// the host's (`compactSupported`, from the command or the native seam), never
+/// the member being idle at the moment of the read.
+fn compact_capability(agent_id: Option<&str>, inspected: &Value) -> bool {
+    agent_id.is_none() && inspected["compactSupported"] == true
+}
+
+/// Task 209: why a native compaction cannot run now (empty when it can).
+fn compact_reason(supported: bool, phase: &str) -> &'static str {
+    if !supported {
+        "Native DeepSeek compaction is unavailable"
+    } else if !matches!(phase, "" | "idle" | "ready") {
+        "Wait for the DeepSeek agent to become idle before compacting its context"
+    } else {
+        ""
+    }
+}
+
 /// Reads the session's token counters and records them as a sample (a team
 /// profile takes a window's tokens from the samples at its two ends). `force`
 /// records even closer than the minimum gap to the previous sample, for an
@@ -2347,7 +2365,13 @@ fn inspect_with_processes(name: &str, agent_id: Option<&str>, include_processes:
         let _ = usage_samples::record(string(&record, "name"), string(&record, "conversation_id"), now(), &inspected["baseline"]["values"], false);
     }
     if include_processes { result["processes"] = process_snapshot; }
-    result["compact_context_supported"] = json!(agent_id.is_none() && inspected["compactSupported"] == true && result["phase"] == "idle");
+    // Task 209: the host's capability, never the member's momentary phase: an
+    // idle check here made a session that was merely busy report that its agent
+    // cannot compact at all. The reason says why a command cannot run now, and
+    // the command itself refuses a busy agent.
+    let compact_supported = compact_capability(agent_id, &inspected);
+    result["compact_context_supported"] = json!(compact_supported);
+    result["compact_context_reason"] = json!(compact_reason(compact_supported, &string(&result, "phase")));
     result["compact_context_request"] = inspected["compactRequest"].clone();
     if result["compact_context_request"].is_object() {
         result["compact_context_request"]["run_id"] = record["run_id"].clone();
@@ -2355,7 +2379,7 @@ fn inspect_with_processes(name: &str, agent_id: Option<&str>, include_processes:
         if result["compact_context_request"]["status"] == "compacting" {
             result["phase"] = json!("compacting"); result["activity"] = json!("busy");
             result["compaction_started"] = result["compact_context_request"]["at"].clone();
-            result["compact_context_supported"] = json!(false);
+            result["compact_context_reason"] = json!("A compaction is already running");
         }
     }
     result["interrupt_supported"] = json!(inspected["interruptSupported"] == true &&
@@ -2656,7 +2680,13 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
         "compact-context" => {
             let request = checked_request(&record)?;
             let current = inspect(name, None)?;
-            if current["compact_context_supported"] != true { return Err("Native compaction is unavailable or the agent is busy".into()); }
+            // Task 209: supported says the host can compact; this says it can
+            // do it now.
+            if current["compact_context_supported"] != true
+                || !matches!(string(&current, "phase"), "" | "idle" | "ready")
+            {
+                return Err("Wait for the DeepSeek agent to become idle before compacting its context".into());
+            }
             rpc(&record, "compact", json!({"sessionId":record["conversation_id"],"generation":current["host_generation"],"requestId":request["request_id"]}))?;
             println!("{}",json!({"request_id":request["request_id"],"name":name,"run_id":record["run_id"],"conversation_id":record["conversation_id"],"status":"submitted"}));
         }
@@ -4223,5 +4253,25 @@ mod delivery_tests {
                 format!("Interrupt delivery uncertain: {after}")
             );
         }
+    }
+}
+
+/// Task 209: a session's compaction capability is its host's, not its phase;
+/// the phase only says why the command cannot run right now.
+#[cfg(test)]
+mod compact_support_tests {
+    use super::*;
+
+    #[test]
+    fn compact_support_does_not_depend_on_the_member_being_idle() {
+        assert!(compact_capability(None, &json!({"compactSupported": true})));
+        assert!(!compact_capability(None, &json!({"compactSupported": false})));
+        assert!(!compact_capability(Some("child"), &json!({"compactSupported": true})), "a subagent has no compaction of its own");
+        // Busy is a reason, never a loss of capability: the reported bug said
+        // "cannot compact" while the host supported it and the member was busy.
+        assert_eq!(compact_reason(true, "idle"), "");
+        assert_eq!(compact_reason(true, "ready"), "");
+        assert_eq!(compact_reason(true, "working"), "Wait for the DeepSeek agent to become idle before compacting its context");
+        assert_eq!(compact_reason(false, "idle"), "Native DeepSeek compaction is unavailable");
     }
 }

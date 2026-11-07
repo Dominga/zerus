@@ -1054,6 +1054,39 @@ fn status_shows_each_members_phase_activity_and_minutes_without_progress() {
     assert_eq!(dev["session_state"], "working");
 }
 
+/// Task 209: status carries the member's native context reading, and reads its
+/// state `compacting` while a compaction is being confirmed.
+#[test]
+fn status_shows_a_members_context_and_compacting_state() {
+    use super::super::model::{MemberCompact, MemberContext};
+    let mut team = running_team();
+    {
+        let dev = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        dev.context = Some(MemberContext::of(960_000, 1_000_000, 1000.0));
+    }
+    let value = view_with(&team, &[], None);
+    let dev = value["members"].as_array().unwrap().iter().find(|member| member["id"] == "dev").unwrap();
+    assert_eq!((dev["context"]["used"].as_u64(), dev["context"]["limit"].as_u64()), (Some(960_000), Some(1_000_000)));
+    assert_eq!(dev["context"]["percent"], 96);
+    assert!(dev.get("compacting").is_none(), "no compaction: today's member shape");
+    {
+        let dev = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        dev.context_compact = Some(MemberCompact {
+            action: "compact".into(),
+            started_at: 1000.0,
+            task: 1,
+            reason: "threshold".into(),
+            ..Default::default()
+        });
+    }
+    let value = view_with(&team, &[], None);
+    let dev = value["members"].as_array().unwrap().iter().find(|member| member["id"] == "dev").unwrap();
+    assert_eq!(dev["state"], "compacting");
+    assert_eq!(dev["compacting"]["action"], "compact");
+    assert_eq!(dev["compacting"]["reason"], "threshold");
+    assert_eq!(dev["member_state"], "active", "the stored roster state stays beside it");
+}
+
 /// Task 115: the Adventure team's Integrator (Kimi) sat on a native Bash
 /// permission while the last tick still stored it busy/working, so the lead
 /// read "active" from `hgs team status`. The member entry now carries the

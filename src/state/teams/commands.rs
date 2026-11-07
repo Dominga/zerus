@@ -1001,6 +1001,17 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
             let (state, reason) = crate::state::session_state::member_state(member);
             entry["session_state"] = json!(state);
             entry["state_reason"] = reason.unwrap_or(Value::Null);
+            // Task 209: while its context is being compacted the member says so
+            // on its card; the stored roster state stays beside it. The context
+            // reading is on the member already (serde), so a card shows the
+            // percentage without an inspect of its own.
+            if let Some(pending) = &member.context_compact {
+                entry["member_state"] = json!(member.state);
+                entry["state"] = json!("compacting");
+                entry["compacting"] = json!({
+                    "action":pending.action,"started_at":pending.started_at,"task":pending.task,"reason":pending.reason
+                });
+            }
             entry["minutes_without_progress"] =
                 json!(member.seen_event_at.map(|at| ((crate::state::now() - at) / 60.0).max(0.0).round() as u64));
             entry["stuck"] = serde_json::to_value(&member.stuck).unwrap_or(Value::Null);
@@ -5460,6 +5471,20 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 let team = store.load(team_id)?.context("Unknown team")?;
                 let caller = actor(&team, op, &filled)?;
                 check_phase_word(&team, input, &mut filled, &caller, super::owner_word::verify_phase)?;
+            }
+            // Task 209: a report that claims there is no context left while the
+            // meter says otherwise is not a report. The member hears the actual
+            // figure, its attempt stays open, and a compaction starts when the
+            // meter reached the threshold.
+            if op == "report" && filled["interim"].as_bool() != Some(true) {
+                match super::dispatcher::report_context_answer(&mut store, team_id, &filled) {
+                    Ok(Some(answer)) => bail!("{answer}"),
+                    Ok(None) => {}
+                    // A sandboxed member's store is read-only: the worker
+                    // answers the claim from its outbox instead.
+                    Err(error) if read_only(&error) => {}
+                    Err(error) => return Err(super::store::write_error(error)),
+                }
             }
             // N7: a replayed discard does not stop the lead's session twice.
             let replayed = op == "draft"

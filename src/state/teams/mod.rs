@@ -4,6 +4,7 @@
 pub(crate) mod broker;
 pub(crate) mod catalog;
 pub(crate) mod commands;
+pub(crate) mod context;
 pub(crate) mod decisions;
 pub(crate) mod dispatcher;
 pub(crate) mod baseline;

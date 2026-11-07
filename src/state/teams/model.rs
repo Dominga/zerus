@@ -178,6 +178,11 @@ pub(crate) struct Settings {
     /// shared automatic-recovery policy is off.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub resume_after_limits: bool,
+    /// Task 209 (owner, 2026-11-07): the native context pressure, in percent of
+    /// the agent's window, at which Zerus compacts a member before it continues.
+    /// 95 by default; the owner sets it.
+    #[serde(default = "default_context_compact_percent")]
+    pub context_compact_percent: u8,
     /// N19 (spec 7, 12): folders whose images and HTML the desktop previews
     /// as report evidence, besides the team and member folders.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -327,6 +332,11 @@ fn default_defer() -> u64 {
 fn default_background_red() -> u64 {
     30
 }
+/// Task 209: a member's context is compacted at 95% of its native window.
+pub(crate) const DEFAULT_CONTEXT_COMPACT_PERCENT: u8 = 95;
+fn default_context_compact_percent() -> u8 {
+    DEFAULT_CONTEXT_COMPACT_PERCENT
+}
 fn default_phase() -> u32 {
     1
 }
@@ -353,6 +363,7 @@ impl Default for Settings {
             background_red_minutes: default_background_red(),
             worktrees_forbidden: false,
             resume_after_limits: false,
+            context_compact_percent: DEFAULT_CONTEXT_COMPACT_PERCENT,
             evidence_folders: Vec::new(),
             tree_depth: default_tree_depth(),
             tree_sessions: default_tree_sessions(),
@@ -473,6 +484,19 @@ pub(crate) struct Member {
     /// context action; it is written once per member.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub context_noted: bool,
+    /// Task 209: the last native context reading of the member's session: the
+    /// used tokens, the window and their ratio, as its agent reports them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<MemberContext>,
+    /// Task 209: a compaction, or a fresh conversation, Zerus is waiting to
+    /// confirm before the member continues; the request survives a worker
+    /// restart, so the action is never run twice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_compact: Option<MemberCompact>,
+    /// Task 209: a compaction that refused or stayed unconfirmed is retried no
+    /// sooner than this moment, so a broken agent is not asked every tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_retry_at: Option<f64>,
     pub agent: String,
     #[serde(default)]
     pub account: String,
@@ -1148,6 +1172,60 @@ pub(crate) struct Continuation {
     pub questions: Vec<String>,
 }
 
+/// Task 209: one native context reading of a member's session.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct MemberContext {
+    /// The tokens the agent's window holds now (`contextPressure`).
+    pub used: u64,
+    /// The agent's context window.
+    pub limit: u64,
+    /// `used` in whole percent of `limit`, rounded down.
+    pub percent: u8,
+    /// When Zerus read it (epoch seconds).
+    pub at: f64,
+}
+
+impl MemberContext {
+    pub(crate) fn of(used: u64, limit: u64, at: f64) -> Self {
+        Self { used, limit, percent: super::context::percent(used, limit), at }
+    }
+    /// Whether the reading reached `threshold` percent of the window.
+    pub(crate) fn reached(&self, threshold: u8) -> bool {
+        self.limit > 0 && self.percent >= threshold
+    }
+    /// Whether the reading still stands for a claim (a turn moved it since).
+    pub(crate) fn fresh(&self, now: f64) -> bool {
+        self.at > 0.0 && now - self.at <= super::context::CLAIM_FRESH
+    }
+}
+
+/// Task 209: a compaction, or a fresh conversation, Zerus waits to confirm
+/// before the member continues. Kept on the member, so a restarted worker reads
+/// the same request instead of running it again.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct MemberCompact {
+    /// `compact`: the agent compacts its own conversation; `fresh`: the member
+    /// gets a new conversation with a handoff brief.
+    pub action: String,
+    /// The native request id a compaction is confirmed by (empty for fresh).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub run_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub conversation: String,
+    pub started_at: f64,
+    /// The task whose open attempt continues after the compaction; 0 without one.
+    #[serde(default)]
+    pub task: u32,
+    /// That attempt's id.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub attempt: String,
+    /// Why Zerus did it: `threshold`, `claim` or `relaunch`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+}
+
 /// Task 135: what a fresh session of a member still has to be told. Set by a
 /// swap (a new agent, model or account ends the old session) and cleared when
 /// the handoff brief goes out with the session's first message.
@@ -1775,6 +1853,11 @@ pub(crate) struct Attempt {
     /// The member's turn ended long enough ago without a report.
     #[serde(default)]
     pub no_report: bool,
+    /// Task 209: a reply that claimed there was no context left while the
+    /// member's meter said otherwise was answered with the meter; the attempt
+    /// stays open and its report is still what ends it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_answered_at: Option<f64>,
     /// Task 36 (audit P8): the Zerus build the member's session was seen
     /// Building on for this attempt (a claimed `hgs team run`, or `hgs run`):
     /// its request id, or "build" when the listing names none. While it is

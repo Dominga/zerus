@@ -4467,6 +4467,15 @@ or revoke for another relay or workspace, and a code for another workspace is
 never shown. A revocation that fails or cannot be confirmed stays reported until
 **Refresh**; it is never retried automatically.
 
+For an encrypted workspace these commands run the mobile connector. The desktop
+runs them on its own computer with the exact connector its status probe uses,
+in `ZERUS_CLIENT_MOBILE_CONNECTOR_PATH`: on Windows the one packaged beside the
+app first, elsewhere the one beside the selected hgs, then beside the app, then
+on PATH. The CLI runs that program and never falls back from an empty, relative,
+missing or unusable selection to its own sibling or PATH. Without a selection
+the CLI keeps its order: the connector beside the running hgs, then PATH. The
+desktop never sends its local selection to another computer.
+
 On Windows, these phone-management commands pass a nonempty `CURL_CA_BUNDLE`
 path explicitly to curl's `--cacert`, so Schannel verifies the relay using that
 PEM CA bundle. If the variable is absent or empty, curl keeps its default

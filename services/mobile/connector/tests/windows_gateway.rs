@@ -363,11 +363,21 @@ impl Encrypted {
             .flatten()
     }
 
+    /// A generation other than `previous`. Just after a restart, status can still name
+    /// the last run's generation (zerus-vsfy0), so every launch after the first must pass it.
     fn running(&self, previous: Option<&str>) -> String {
         let deadline = Instant::now() + Duration::from_secs(60);
+        let mut stale = 0;
         loop {
-            if let Some(generation) = self.generation().filter(|g| Some(g.as_str()) != previous) {
-                return generation;
+            match self.generation() {
+                Some(generation) if Some(generation.as_str()) != previous => {
+                    if stale > 0 {
+                        println!("status named the previous generation {stale} time(s) first");
+                    }
+                    return generation;
+                }
+                Some(_) => stale += 1,
+                None => {}
             }
             assert!(Instant::now() < deadline, "the connector never ran");
             std::thread::sleep(Duration::from_millis(100));
@@ -394,7 +404,12 @@ impl Encrypted {
     }
 
     /// Launched without a Start, and refused: nothing changes, and it still runs.
-    fn direct_launch_is_refused(&self, arguments: &[&std::ffi::OsStr], previous: Option<&str>) {
+    fn direct_launch_is_refused(
+        &self,
+        label: &str,
+        arguments: &[&std::ffi::OsStr],
+        previous: Option<&str>,
+    ) -> String {
         let marker = self.marker();
         let mut direct = Direct(
             Command::new(CONNECTOR)
@@ -407,15 +422,78 @@ impl Encrypted {
         );
         let generation = self.running(previous);
         let (code, reply) = self.stop(&generation);
-        assert_eq!(code, 1, "{reply}");
-        assert_eq!(reply["ok"], false, "{reply}");
-        assert_eq!(reply["refusal"], "stop-refused-before-effect", "{reply}");
-        assert_eq!(reply["generation"], generation.as_str(), "{reply}");
-        assert_eq!(self.marker(), marker);
-        assert_eq!(self.generation().as_deref(), Some(generation.as_str()));
+        assert_eq!(code, 1, "{label}: {reply}");
+        assert_eq!(reply["ok"], false, "{label}: {reply}");
+        assert_eq!(
+            reply["refusal"], "stop-refused-before-effect",
+            "{label}: {reply}"
+        );
+        assert_eq!(reply["generation"], generation.as_str(), "{label}: {reply}");
+        assert_eq!(self.marker(), marker, "{label}");
+        assert_eq!(
+            self.generation().as_deref(),
+            Some(generation.as_str()),
+            "{label}"
+        );
         direct.0.kill().unwrap();
         direct.0.wait().unwrap();
         self.stopped();
+        generation
+    }
+
+    /// Writes the Stop marker for the generation in the control record, if it can.
+    fn ask_to_stop(&self) -> Option<String> {
+        let control = std::fs::read(self.state.join("workspace-control.json")).ok()?;
+        let control: serde_json::Value = serde_json::from_slice(&control).ok()?;
+        let generation = control["generation"].as_str()?.to_owned();
+        let marker = json!({"version":1,"generation":generation}).to_string();
+        let name = "workspace-stop.json";
+        let store = Store::lock(&self.state, false).ok()?;
+        let previous = store.read(name).ok()?;
+        store
+            .replace(
+                name,
+                &Store::revision(previous.as_deref()),
+                marker.as_bytes(),
+            )
+            .ok()?;
+        Some(generation)
+    }
+
+    /// Ends a detached fixture connector through its own Stop marker, and never signals:
+    /// a PID read from a file could be another process by now, and a stale control under
+    /// another lock holder names a generation that holder ignores. Anything it can't
+    /// confirm within the bound is an error, so a cleanup that didn't happen can't pass
+    /// for one that did. Returns how many lock probes came back unknown on the way.
+    fn end(&self) -> Result<u32, String> {
+        let lock = self.state.join("connector.lock");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut unknown = 0;
+        let mut asked: Option<String> = None;
+        loop {
+            match probe_lock(&lock) {
+                LockState::Absent | LockState::Free => return Ok(unknown),
+                LockState::Unknown => unknown += 1,
+                LockState::Held => {
+                    // Asks again if the control record moved on, as it does when the
+                    // first read landed before this connector published.
+                    let current = std::fs::read(self.state.join("workspace-control.json"))
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                        .and_then(|control| control["generation"].as_str().map(str::to_owned));
+                    if asked.is_none() || (current.is_some() && current != asked) {
+                        asked = self.ask_to_stop().or(asked);
+                    }
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "lock {} after 30 s, marker for {asked:?}, {unknown} unknown probes",
+                    probe_lock(&lock).name()
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 }
 
@@ -429,35 +507,16 @@ impl Drop for Direct {
 }
 
 /// A failed assertion must not leave a detached fixture connector holding the test
-/// runner's inherited handles. This asks through the connector's own Stop marker and
-/// never signals: a PID read from a file could be another process by now, and a stale
-/// control under another lock holder names a generation that holder ignores.
+/// runner's inherited handles. A cleanup that couldn't be confirmed fails the test, or
+/// is reported if the test is already failing.
 impl Drop for Encrypted {
     fn drop(&mut self) {
-        let lock = self.state.join("connector.lock");
-        if probe_lock(&lock) != LockState::Held {
-            return;
-        }
-        let control = std::fs::read(self.state.join("workspace-control.json")).ok();
-        let generation = control
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .and_then(|control| control["generation"].as_str().map(str::to_owned));
-        let Some(generation) = generation else {
-            return;
-        };
-        let marker = json!({"version":1,"generation":generation}).to_string();
-        let name = "workspace-stop.json";
-        if let Ok(store) = Store::lock(&self.state, false) {
-            let previous = store.read(name).ok().flatten();
-            let _ = store.replace(
-                name,
-                &Store::revision(previous.as_deref()),
-                marker.as_bytes(),
-            );
-        }
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while probe_lock(&lock) == LockState::Held && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(100));
+        if let Err(error) = self.end() {
+            if std::thread::panicking() {
+                eprintln!("fixture cleanup failed: {error}");
+            } else {
+                panic!("fixture cleanup failed: {error}");
+            }
         }
     }
 }
@@ -477,12 +536,17 @@ fn cleanup_ends_a_detached_connector_through_its_own_stop_marker() {
     })
     .unwrap();
     original.verify().unwrap();
-    drop(encrypted);
+    let unknown = encrypted.end().unwrap();
     // The journal lock frees before the process has finished ending, so wait for the
     // exit itself. An error here is missing evidence, not an exit.
+    let freed = Instant::now();
     assert!(
         original.wait_for_exit(Duration::from_secs(30)).unwrap(),
         "the connector is still running"
+    );
+    println!(
+        "cleanup: {unknown} unknown lock probes, exit {} ms after the lock freed",
+        freed.elapsed().as_millis()
     );
 }
 
@@ -498,12 +562,12 @@ fn only_the_exact_child_of_a_full_start_can_be_stopped() {
         config,
     ];
     let bare = [OsStr::new("--config"), config];
-    encrypted.direct_launch_is_refused(&copied_flag, None);
-    encrypted.direct_launch_is_refused(&bare, None);
+    let first = encrypted.direct_launch_is_refused("copied flag", &copied_flag, None);
+    let second = encrypted.direct_launch_is_refused("bare config", &bare, Some(&first));
 
     let (code, started) = encrypted.call("start", &json!({"expected_revision":encrypted.revision}));
     assert_eq!(code, 0, "{started}");
-    let generation = encrypted.running(None);
+    let generation = encrypted.running(Some(&second));
     assert_eq!(started["generation"], generation.as_str());
     let (code, stopped) = encrypted.stop(&generation);
     assert_eq!(code, 0, "{stopped}");
@@ -514,7 +578,7 @@ fn only_the_exact_child_of_a_full_start_can_be_stopped() {
 
     // The earlier Start's receipt proves nothing about a later process, and this
     // refusal leaves the earlier marker byte for byte.
-    encrypted.direct_launch_is_refused(&copied_flag, Some(&generation));
+    encrypted.direct_launch_is_refused("replayed receipt", &copied_flag, Some(&generation));
     assert_eq!(encrypted.marker().unwrap(), marker);
 
     // A full Start again gets its own receipt.

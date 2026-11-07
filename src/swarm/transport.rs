@@ -66,10 +66,11 @@ pub fn remote_until(
 }
 
 #[cfg(test)]
+pub(crate) use crate::remote_shell::TEST_SSH;
+
+#[cfg(test)]
 thread_local! {
-    /// The program a test runs in place of ssh, and delays a test puts after
-    /// the spawn and after a successful wait (review-n's seams on #1452).
-    pub(crate) static TEST_SSH: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
+    /// Delays after spawn and successful wait (review-n's seams on #1452).
     pub(crate) static AFTER_SPAWN: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
     pub(crate) static AFTER_WAIT: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
 }
@@ -122,7 +123,7 @@ fn run_within(
         bytes.len() as u64 <= MAX_BYTES,
         "swarm exchange is too large"
     );
-    let remote = crate::remote_shell::hgs(config, alias, words)?;
+    let remote = crate::remote_shell::hgs_within(config, alias, words, deadline)?;
     #[cfg(test)]
     let mut command = TEST_SSH
         .with(|program| program.borrow().clone())
@@ -145,6 +146,7 @@ fn run_within(
         .args(crate::machines::ssh_options(config, alias))
         .arg(alias)
         .arg(remote);
+    ensure!(Instant::now() < deadline, "connection to {alias} timed out before start");
     let ssh = platform::spawn_ssh(&mut command, true, true, true).context("start swarm connection")?;
     #[cfg(test)]
     thread::sleep(AFTER_SPAWN.with(|delay| delay.get()));

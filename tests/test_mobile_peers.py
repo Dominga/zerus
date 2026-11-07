@@ -552,6 +552,19 @@ time.sleep(10)
         return dict(schema=1, via='b', helper=helper, request=request, parent_pid=os.getpid(),
                     deadline_ms=int(time.monotonic()*1000)+budget)
 
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux-only short transport-budget control')
+    def test_delayed_shell_discovery_cannot_outlive_the_original_transport_budget(self):
+        script = self.root/'home/.local/bin/ssh'
+        script.write_text("#!/usr/bin/env python3\nimport os,pathlib,sys,time\nr=pathlib.Path(os.environ['MOBILE_PEERS_TEST_ROOT'])\nif sys.argv[-1].startswith('echo '+chr(34)+'hgs-remote-v2|'):\n (r/'short-probe-started').touch();time.sleep(3);print('hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot');sys.exit(0)\n(r/'short-operation-started').touch();print('unexpected operation')\n")
+        started = time.monotonic()
+        result = self.call('a', 'swarm', '__mobile-peer-transport', '--json',
+                           data=self.transport_envelope('help', None, 150), ok=False, timeout=5)
+        elapsed = time.monotonic()-started
+        self.assertLess(elapsed, 1.0, result.stderr)
+        self.assertIn('timed out', result.stderr)
+        self.assertTrue((self.root/'short-probe-started').exists())
+        self.assertFalse((self.root/'short-operation-started').exists())
+
     def test_supervisor_extended_deadline_accepts_valid_local_clone(self):
         (self.root / 'repository-probe').touch()
         local = self.request(self.repository_clone_argv())

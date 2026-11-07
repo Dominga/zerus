@@ -2,10 +2,24 @@
 //! Native Windows filesystem, lock, configuration and generation controls.
 //! Synthetic private state only; this suite neither installs nor contacts a relay.
 use serde_json::json;
+use std::ffi::{OsStr, OsString};
+use std::io::Write;
+use std::os::windows::io::AsHandle;
 use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 use zerus_mobile_connector::{
-    config::Environment, journal::Journal, start, windows_management::manage,
+    config::Environment,
+    fsguard::{probe_lock, LockState},
+    journal::Journal,
+    private_state::Store,
+    start,
+    windows_management::manage,
+    workspace::Profile,
+    workspace_cli,
+    workspace_provenance::{admit, record_start, Target},
 };
+use zerus_windows_private::{identity_of, ProcessIdentity};
 struct Scratch(PathBuf, tempfile::TempDir);
 impl Scratch {
     fn new() -> Self {
@@ -248,4 +262,291 @@ fn configuration_is_redacted_revision_guarded_and_stop_is_generation_bound() {
     assert!(PathBuf::from(saved["state_dir"].as_str().unwrap())
         .join("journal.sqlite3")
         .exists());
+}
+
+// zerus-9ysdg: which running connector a Stop may address, through the real binary.
+// The relay address is reserved and never reached; the connector keeps retrying it.
+const CONNECTOR: &str = env!("CARGO_BIN_EXE_zerus-mobile-connector");
+
+struct Encrypted {
+    config: PathBuf,
+    state: PathBuf,
+    revision: String,
+    scratch: Scratch,
+}
+
+impl Encrypted {
+    fn new() -> Self {
+        use zerus_mobile_crypto::{
+            encode, Identity, MembershipAction, MembershipState, MembershipStatement, Role,
+            SignedMembership,
+        };
+        let scratch = Scratch::new();
+        let config = scratch.0.join("connector.json");
+        let private = scratch.0.join("workspace-private");
+        let node = "00000000-0000-4000-8000-000000000350";
+        let identity = Identity::generate(node.into(), Role::Computer).unwrap();
+        let genesis = SignedMembership::sign(
+            MembershipStatement {
+                workspace_id: uuid::Uuid::new_v4().to_string(),
+                revision: 0,
+                previous_head: encode(&[0; 32]),
+                issuer_device_id: node.into(),
+                issuer_key_generation: 1,
+                action: MembershipAction::Add,
+                device: Some(identity.public().clone()),
+                revoked_device_id: None,
+            },
+            &identity,
+        )
+        .unwrap();
+        let membership = MembershipState::from_genesis(&genesis).unwrap();
+        let state = private.join(format!("receipts-{node}"));
+        let profile = Profile {
+            server_url: "https://relay.example.test".into(),
+            workspace_name: "Fixture".into(),
+            computer_name: "Fixture".into(),
+            node_token: encode(&[32; 32]),
+            identity: identity.to_record(),
+            historical_heads: std::collections::BTreeMap::from([(0, membership.head.clone())]),
+            membership,
+            state_dir: state.clone(),
+        };
+        let store = Store::lock(&private, true).unwrap();
+        store
+            .replace(
+                "active.json",
+                &Store::revision(None),
+                &serde_json::to_vec(&profile).unwrap(),
+            )
+            .unwrap();
+        drop(store);
+        let revision = workspace_cli::replace_config(
+            &config,
+            "",
+            &json!({"server_url":profile.server_url,"state_dir":state,"hgs_path":"hgs",
+                "encrypted_workspace":{"version":1,"state_dir":private}}),
+        )
+        .unwrap();
+        Self {
+            config,
+            state,
+            revision,
+            scratch,
+        }
+    }
+
+    /// One `--workspace` call. Its reply goes to a file, because a Start's detached
+    /// child inherits the handles of the call that launched it.
+    fn call(&self, action: &str, input: &serde_json::Value) -> (i32, serde_json::Value) {
+        let reply = tempfile::NamedTempFile::new_in(self.scratch.1.path()).unwrap();
+        let mut call = Command::new(CONNECTOR)
+            .args(["--workspace", action, "--config"])
+            .arg(&self.config)
+            .stdin(Stdio::piped())
+            .stdout(reply.reopen().unwrap())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdin = call.stdin.take().unwrap();
+        stdin.write_all(input.to_string().as_bytes()).unwrap();
+        drop(stdin);
+        let code = call.wait().unwrap().code().unwrap();
+        let bytes = std::fs::read(reply.path()).unwrap();
+        (code, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    fn generation(&self) -> Option<String> {
+        let (_, status) = self.call("status", &json!({}));
+        (status["running"] == true)
+            .then(|| status["generation"].as_str().map(str::to_owned))
+            .flatten()
+    }
+
+    fn running(&self, previous: Option<&str>) -> String {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if let Some(generation) = self.generation().filter(|g| Some(g.as_str()) != previous) {
+                return generation;
+            }
+            assert!(Instant::now() < deadline, "the connector never ran");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn stopped(&self) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while self.generation().is_some() {
+            assert!(Instant::now() < deadline, "the connector never stopped");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn marker(&self) -> Option<Vec<u8>> {
+        std::fs::read(self.state.join("workspace-stop.json")).ok()
+    }
+
+    fn stop(&self, generation: &str) -> (i32, serde_json::Value) {
+        self.call(
+            "stop",
+            &json!({"expected_revision":self.revision,"generation":generation}),
+        )
+    }
+
+    /// Launched without a Start, and refused: nothing changes, and it still runs.
+    fn direct_launch_is_refused(&self, arguments: &[&std::ffi::OsStr], previous: Option<&str>) {
+        let marker = self.marker();
+        let mut direct = Direct(
+            Command::new(CONNECTOR)
+                .args(arguments)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let generation = self.running(previous);
+        let (code, reply) = self.stop(&generation);
+        assert_eq!(code, 1, "{reply}");
+        assert_eq!(reply["ok"], false, "{reply}");
+        assert_eq!(reply["refusal"], "stop-refused-before-effect", "{reply}");
+        assert_eq!(reply["generation"], generation.as_str(), "{reply}");
+        assert_eq!(self.marker(), marker);
+        assert_eq!(self.generation().as_deref(), Some(generation.as_str()));
+        direct.0.kill().unwrap();
+        direct.0.wait().unwrap();
+        self.stopped();
+    }
+}
+
+/// A fixture connector this test launched itself.
+struct Direct(Child);
+impl Drop for Direct {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// A failed assertion must not leave a detached fixture connector holding the test
+/// runner's inherited handles. Only this fixture's own journal owner, proven by its
+/// held lock and control record, is ended.
+impl Drop for Encrypted {
+    fn drop(&mut self) {
+        if probe_lock(&self.state.join("connector.lock")) != LockState::Held {
+            return;
+        }
+        let control = std::fs::read(self.state.join("workspace-control.json")).ok();
+        let pid = control
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|control| control["pid"].as_u64());
+        if let Some(pid) = pid {
+            let _ = Command::new("taskkill")
+                .args(["/F", "/PID", &pid.to_string()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+}
+
+#[test]
+fn only_the_exact_child_of_a_full_start_can_be_stopped() {
+    let encrypted = Encrypted::new();
+    let revision = OsString::from(&encrypted.revision);
+    let config = encrypted.config.as_os_str();
+    let copied_flag = [
+        OsStr::new("--admit-revision"),
+        revision.as_os_str(),
+        OsStr::new("--config"),
+        config,
+    ];
+    let bare = [OsStr::new("--config"), config];
+    encrypted.direct_launch_is_refused(&copied_flag, None);
+    encrypted.direct_launch_is_refused(&bare, None);
+
+    let (code, started) = encrypted.call("start", &json!({"expected_revision":encrypted.revision}));
+    assert_eq!(code, 0, "{started}");
+    let generation = encrypted.running(None);
+    assert_eq!(started["generation"], generation.as_str());
+    let (code, stopped) = encrypted.stop(&generation);
+    assert_eq!(code, 0, "{stopped}");
+    assert!(stopped.get("refusal").is_none(), "{stopped}");
+    encrypted.stopped();
+    let marker = encrypted.marker().unwrap();
+    assert!(String::from_utf8_lossy(&marker).contains(&generation));
+
+    // The earlier Start's receipt proves nothing about a later process, and this
+    // refusal leaves the earlier marker byte for byte.
+    encrypted.direct_launch_is_refused(&copied_flag, Some(&generation));
+    assert_eq!(encrypted.marker().unwrap(), marker);
+
+    // A full Start again gets its own receipt.
+    let (code, started) = encrypted.call("start", &json!({"expected_revision":encrypted.revision}));
+    assert_eq!(code, 0, "{started}");
+    let again = encrypted.running(Some(&generation));
+    let (code, stopped) = encrypted.stop(&again);
+    assert_eq!(code, 0, "{stopped}");
+    encrypted.stopped();
+}
+
+#[test]
+fn a_stop_admission_needs_the_receipt_the_control_and_the_running_process_to_agree() {
+    let scratch = Scratch::new();
+    let lifecycle = scratch.0.join("lifecycle");
+    let store = Store::lock(&lifecycle, true).unwrap();
+    let (config, state) = (scratch.0.join("connector.json"), scratch.0.join("state"));
+    let target = Target {
+        revision: "r",
+        config: &config,
+        state_dir: &state,
+        node_id: "node",
+    };
+    let mut child = Command::new("cmd.exe")
+        .args(["/C", "more"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let identity = identity_of(child.id(), child.as_handle()).unwrap();
+    let control = json!({"version":1,"generation":"g","pid":identity.pid,"birth":identity.birth});
+
+    // Absent: a launch no Start recorded.
+    assert!(admit(&lifecycle, &target, &control).is_err());
+    record_start(&store, &target, &identity).unwrap();
+    let original = admit(&lifecycle, &target, &control).unwrap();
+    original.verify().unwrap();
+
+    // Another holder that replaced the control, and a reused PID's creation time.
+    let another =
+        json!({"version":1,"generation":"h","pid":std::process::id(),"birth":identity.birth});
+    assert!(admit(&lifecycle, &target, &another).is_err());
+    let reused =
+        json!({"version":1,"generation":"g","pid":identity.pid,"birth":identity.birth + 1});
+    assert!(admit(&lifecycle, &target, &reused).is_err());
+    let stale = ProcessIdentity {
+        birth: identity.birth + 1,
+        ..identity.clone()
+    };
+    record_start(&store, &target, &stale).unwrap();
+    let stale_control = json!({"version":1,"generation":"g","pid":stale.pid,"birth":stale.birth});
+    assert!(admit(&lifecycle, &target, &stale_control).is_err());
+    record_start(&store, &target, &identity).unwrap();
+
+    // Another configuration.
+    let other = Target {
+        revision: "other",
+        config: &config,
+        state_dir: &state,
+        node_id: "node",
+    };
+    assert!(admit(&lifecycle, &other, &control).is_err());
+
+    // The original ended, even though this test still holds a handle to it.
+    drop(child.stdin.take());
+    child.wait().unwrap();
+    assert!(original.verify().is_err());
+    assert!(admit(&lifecycle, &target, &control).is_err());
 }

@@ -23,8 +23,8 @@ options:
     };
 }
 /// Clients offer a running Stop from the ABI line alone, so it appears only where
-/// the connector can admit one (`workspace_service::stop_preflight`).
-pub const HELP: &str = if cfg!(target_os = "linux") {
+/// the connector can admit one (`workspace_lifecycle::manage_stop`).
+pub const HELP: &str = if cfg!(any(target_os = "linux", windows)) {
     concat!(help_text!(), "\n\nWorkspace stop ABI: service-preflight-v1")
 } else {
     help_text!()

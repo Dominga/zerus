@@ -188,8 +188,14 @@ impl State {
         }
         match self.stop.take().and_then(|stop| stop.before) {
             Some(record) => self.store(record),
-            // No earlier choice: the next read of this running connector arms it.
-            None => self.arm(node),
+            // There was no choice, so a refusal must not make one: this reads as
+            // never started, and only a Start or a fresh running read can arm it.
+            None => self.store(Record {
+                version: VERSION,
+                node_id: node.to_owned(),
+                armed: false,
+                stopped_generation: None,
+            }),
         }
     }
 
@@ -257,6 +263,7 @@ impl State {
             "running" => Some(Line::RunningNotArmed),
             "stopped" => Some(match record {
                 None => Line::NotArmed,
+                Some(record) if !armed && record.stopped_generation.is_none() => Line::NotArmed,
                 Some(_) if !armed => Line::StoppedByYou,
                 Some(_) => match &self.attempt {
                     Attempt::None => Line::WillStart,

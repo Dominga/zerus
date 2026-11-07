@@ -120,13 +120,43 @@ impl Provider {
         session_id::verify(&record)?;
         Ok(record)
     }
+    /// A uniqueness guard never interprets ambiguity or unreadable coverage as
+    /// absence. This does not choose a holder or authorize creation.
     pub(super) fn exists(self, name: &str) -> bool {
         if !name.starts_with(&format!("{}/", self.backend())) {
             return false;
         }
-        session_id::selected().is_some_and(|s| s.name == name && s.id_layout)
-            || std::fs::symlink_metadata(self.path(name))
-                .map_or_else(|e| e.kind() != io::ErrorKind::NotFound, |_| true)
+        session_id::selected().is_some_and(|s| s.name == name)
+            || labels::candidates(name).map_or(true, |c| c.first || !c.by_id.is_empty())
+    }
+    /// Native launch commands do not pass through the ordinary command
+    /// resolver. Resolve once, under the provider lock, BEFORE starting or
+    /// contacting a host/service. A stale explicit selection never becomes a
+    /// new launch, and a name with several holders never gains a third one.
+    pub(super) fn existing_for_launch(self, name: &str) -> Result<Option<Value>> {
+        if !name.starts_with(&format!("{}/", self.backend())) {
+            return Err("The native launch provider changed".into());
+        }
+        if session_id::selected().is_some_and(|s| s.name == name) {
+            return self.read(name).map(Some);
+        }
+        let candidates = labels::candidates(name)?;
+        match (candidates.first, candidates.by_id.as_slice()) {
+            (false, []) => Ok(None),
+            (true, []) => self.read(name).map(Some),
+            (false, [only]) => {
+                session_id::select(name, string(only, "session_id"));
+                self.read(name).map(Some)
+            }
+            _ => Err(session_id::refuse(ambiguity_report(name, &candidates))),
+        }
+    }
+    pub(super) fn vacant(self, name: &str) -> Result<bool> {
+        if !name.starts_with(&format!("{}/", self.backend())) {
+            return Err("The native target provider changed".into());
+        }
+        let candidates = labels::candidates(name)?;
+        Ok(!candidates.first && candidates.by_id.is_empty())
     }
     /// Listings are bounded metadata, never a native admission or absence
     /// proof. Malformed entries do not become another session's binding.

@@ -399,7 +399,8 @@ pub(crate) fn launch(
     if mode != "provider" {
         return Err("OpenCode uses its native permission configuration; select Provider settings for this account".into());
     }
-    let present = exists(name);
+    let existing = PROVIDER.existing_for_launch(name)?;
+    let present = existing.is_some();
     if present && new_only {
         return Err("This OpenCode session name already exists".into());
     }
@@ -413,8 +414,7 @@ pub(crate) fn launch(
         Some(cwd)
     };
     let service = service::ensure_started()?;
-    if present {
-        let mut record = binding(name)?;
+    if let Some(mut record) = existing {
         if resumes_pending(&record) {
             return resume_pending(&service, record);
         }

@@ -396,11 +396,10 @@ pub(crate) fn launch(
         return Ok(());
     }
     let _guard = lock(Some(&root().join("dsh/bindings.lock")))?;
-    if exists(name) {
+    if let Some(mut record) = PROVIDER.existing_for_launch(name)? {
         if new_only {
             return Err("This DeepSeek session name already exists".into());
         }
-        let mut record = binding(name)?;
         ensure_host(&record)?;
         create_session(&mut record)?;
         record["paused"] = json!(false);
@@ -937,6 +936,9 @@ pub(super) fn fork(
         }
         target = original_target.to_owned();
         request_id = string(&intent, "request_id").to_owned();
+    }
+    if !PROVIDER.vacant(&target)? || storage::label_taken(&target) {
+        return Err("The original fork destination is not vacant; check Native UI".into());
     }
     if previous.is_none() {
         private_dir(pending.parent().unwrap())?;

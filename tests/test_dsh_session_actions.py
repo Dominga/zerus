@@ -58,7 +58,7 @@ class DeepSeekScopedActions(unittest.TestCase):
                 method = request["method"]
                 params = request["params"]
                 if method == "ping":
-                    value = {"generation": self.generation, "sessionActions": self.supported}
+                    value = {"generation": self.generation, "sessionActions": self.supported, "version": "0.2.1-rc.2", "protocol": 1}
                     if self.native:
                         value["nativeOperations"] = ["fork", "history-search", "schedules"]
                 elif method == "inspect":
@@ -251,6 +251,53 @@ class DeepSeekScopedActions(unittest.TestCase):
         self.assertNotEqual(retried.returncode, 0, retried.stderr)
         self.assertEqual(original[0].read_bytes(), retained)
         self.assertEqual(len([call for call in self.calls if call["method"] == "fork"]), 1)
+
+    def ambiguous_launch(self, new, damaged=False):
+        self.binding.unlink()
+        folder = self.root / "state/dsh/sessions"
+        folder.mkdir()
+        for index in range(2):
+            sid = str(uuid.uuid4())
+            record = dict(self.record, layout="id", session_id=sid, conversation_id="session-original-" + str(index))
+            (folder / (sid + ".json")).write_text(json.dumps(record))
+        if damaged:
+            next(folder.glob("*.json")).write_text("{damaged")
+        before = {p.name: p.read_bytes() for p in folder.glob("*.json")}
+        workspace = self.root / "example"
+        workspace.mkdir()
+        self.env["DSH_HOME"] = self.record["agent_home"]
+        result = self.hgs("dsh", str(workspace), "-n", "session", "-d", *(["--new"] if new else []))
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.calls, [], "ambiguous/unreadable label reached the native host")
+        self.assertFalse(self.binding.exists(), "a third legacy binding was created")
+        self.assertEqual({p.name: p.read_bytes() for p in folder.glob("*.json")}, before)
+
+    def test_ordinary_launch_refuses_native_twins_before_host_contact(self):
+        self.ambiguous_launch(False)
+    def test_new_launch_refuses_native_twins_before_host_contact(self):
+        self.ambiguous_launch(True)
+    def test_ordinary_launch_refuses_unreadable_native_labels(self):
+        self.ambiguous_launch(False, damaged=True)
+    def test_new_launch_refuses_unreadable_native_labels(self):
+        self.ambiguous_launch(True, damaged=True)
+
+    def test_fork_cannot_treat_unreadable_target_coverage_as_a_free_label(self):
+        self.native = True
+        index = self.root / "state/ids"
+        index.mkdir()
+        (index / (self.record["session_id"] + ".json")).write_text(json.dumps(
+            dict(version=1, kind="dsh", name=self.name)))
+        folder = self.root / "state/dsh/sessions"
+        folder.mkdir()
+        bad = folder / (str(uuid.uuid4()) + ".json")
+        bad.write_text("{damaged")
+        original = self.binding.read_bytes()
+        refused = self.hgs("fork", self.name, "--session-id", self.record["session_id"], "-n", "copy", "-d")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertFalse([c for c in self.calls if c["method"] == "fork"])
+        self.assertEqual(self.binding.read_bytes(), original)
+        self.assertEqual(bad.read_text(), "{damaged")
+        self.assertFalse(list((self.root / "state/dsh/forks").glob("*.json")))
 
     def test_an_old_binding_gets_a_stable_source_id_only_when_fork_is_admitted(self):
         self.native = True

@@ -26,6 +26,7 @@
 pub mod fetch;
 pub mod files;
 pub mod handed;
+mod history_hint;
 pub mod questions;
 pub mod queue;
 pub mod saved;
@@ -326,6 +327,8 @@ pub struct ComposerView {
     pub recording: bool,
     pub waiting: Option<String>,
     pub uncertain: bool,
+    /// Advisory text match in the loaded history, never request-id evidence.
+    pub history_text_match: bool,
     /// The desktop service still sends this draft's message: no Allow
     /// retry, and the status is not an error.
     pub delivery_pending: bool,
@@ -1595,12 +1598,18 @@ impl Composers {
             None => false,
         };
         let touched = hub.open.as_ref().is_some_and(|open| touches(batch, open));
+        let history_hint = new_events
+            && hub
+                .open_key
+                .as_ref()
+                .and_then(|key| hub.composers.get(key))
+                .is_some_and(|c| c.uncertain && c.checkpoint.is_some());
         drop(hub);
         if state_changed {
             self.after_observe(accepted_details);
         } else if new_events {
-            // New events alone change the view only when they reconcile a row.
-            if self.reconcile() || touched {
+            // An uncertain draft's advisory can change without a local row.
+            if self.reconcile() || touched || history_hint {
                 self.changed();
             }
         } else if touched {
@@ -1762,6 +1771,7 @@ impl Composers {
             recording: composer.recording_owner.is_some(),
             waiting: composer.waiting.clone(),
             uncertain: composer.uncertain,
+            history_text_match: history_hint::shown(hub, composer),
             delivery_pending: composer.handed.is_some(),
             status,
             status_error,

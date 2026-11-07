@@ -17,6 +17,7 @@ import { actionEntries } from "./ActionDialogs";
 import { snapshotOf } from "./actions-ui";
 import { markReadChip, runMarkRead } from "./mark-entries";
 import { ModelSettingsButton } from "./ModelSettings";
+import { DeliveryHistoryHint } from "./DeliveryHistoryHint";
 import { AttachmentsChip } from "./Attachments";
 import { RecoveryChip } from "./RecoveryChip";
 import { SessionUsageChip, UsageLimitChip } from "./UsageChips";
@@ -312,6 +313,7 @@ export function Composer() {
         onSelect={remember} onKeyUp={remember} onMouseUp={remember}
         onBlur={() => { void composer.flush(); }} onKeyDown={onKey} onPaste={onPaste} />
       <Show when={input() && composer.hint()}><div class="cmp-hint" role="status">{composer.hint()}</div></Show>
+      <DeliveryHistoryHint view={v()} text={composer.text()} shown={input()} />
       <div class="cmp-actions" hidden={!input()}>
         <span class="cmp-files">
           <button type="button" class="icon-btn cmp-attach" disabled={!v() || composer.locked() || !v()!.attachments_available} aria-label={tr("Attach files to message")}

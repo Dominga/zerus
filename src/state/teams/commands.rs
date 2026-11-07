@@ -1615,13 +1615,46 @@ fn decide_tool_lead(input: &Value) -> anyhow::Result<Value> {
     ensure!(input["allow"].as_bool() != Some(true), "The lead never installs a tool: ask the owner with hgs team propose --json, kind install-tool");
     let reason: String = text(input, "reason").trim().chars().take(500).collect();
     ensure!(!reason.is_empty(), "A Deny says why: add \"reason\"");
+    let before = crate::test_discipline::tools::offer(&id).map(|offer| offer.state);
     let denied = crate::test_discipline::tools::lead_deny(&team.id, &id, &reason)?;
     // The team's feed names the decision, so its member reads it there too.
     store.mutate(Some((&request, input)), &team.id, None, |_, events| {
         events.push(Event::new("tool_denied", json!({"offer":denied.id,"tool":denied.tool,"by":caller.label(&team),"reason":reason})));
         Ok(Value::Null)
     })?;
+    // Task #220: the member whose run asked for it hears the answer once.
+    if before.as_deref() != Some("denied") {
+        tell_tool_outcome(&mut store, &team.id, &denied.id, false, &reason)?;
+    }
     Ok(json!({"status":"denied","offer":denied.id,"tool":denied.tool,"reason":reason}))
+}
+
+/// Task #220: the member whose run raised a tool offer hears what became of it:
+/// the lead's Deny, or the owner's Allow or Deny on the lead's card.
+fn tell_tool_outcome(store: &mut Store, team_id: &str, offer: &str, allowed: bool, reason: &str) -> anyhow::Result<()> {
+    let Some(found) = crate::test_discipline::tools::offer(offer) else { return Ok(()) };
+    let team = store.load(team_id)?.context("Unknown team")?;
+    let Some(member) = team.member(&found.member) else { return Ok(()) };
+    let Some(session) = member.session.clone() else { return Ok(()) };
+    let text = if allowed {
+        format!(
+            "Your run found `{}` missing and asked for it. The owner allowed the install: {} (in {}). Work without it until a run finds it, and never install it yourself.",
+            found.tool,
+            found.command.join(" "),
+            found.folder
+        )
+    } else {
+        format!(
+            "Your run found `{}` missing and asked for it. Installing it was denied: {reason}. Work without it, and never install it yourself.",
+            found.tool
+        )
+    };
+    let request = uuid::Uuid::new_v4().to_string();
+    let outcome = super::doorbell::post_and_ring(store, team_id, &member.id, &session, &request, "tool_outcome", "zerus", super::working::Urgency::Normal, &text);
+    if let super::dispatcher::Sent::Refused(why) = outcome {
+        eprintln!("hgs: the tool outcome did not reach {}: {why}", member.id);
+    }
+    Ok(())
 }
 
 /// F8: the owner decides a proposal. An accepted one runs as the owner: an
@@ -1793,6 +1826,8 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
     let reason = text(input, "reason").trim().to_owned();
     ensure!(reason.chars().count() <= 2000, "A reason has at most 2000 characters");
     let kind = team.proposals[at]["kind"].as_str().unwrap_or_default().to_owned();
+    // Task #220: an install card names the offer its answer reports to.
+    let card_offer = team.proposals[at]["change"]["offer"].as_str().unwrap_or_default().to_owned();
     // U57: the owner's Allow is bound to this id and the proposal's content
     // hash; a changed proposal never applies. An older proposal without a hash
     // stays decidable.
@@ -1834,6 +1869,10 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
             }
             Ok(Value::Null)
         })?;
+        // Task #220: the member whose run asked for the tool hears the Deny.
+        if kind == "install-tool" {
+            tell_tool_outcome(store, &team_id, &card_offer, false, &reason)?;
+        }
         return Ok(json!({"status":"rejected","proposal":id}));
     }
     if kind == "question" {
@@ -2021,6 +2060,10 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
         }
         Ok(Value::Null)
     })?;
+    // Task #220: the member whose run asked for the tool hears the Allow.
+    if kind == "install-tool" {
+        tell_tool_outcome(store, &team_id, &card_offer, true, "")?;
+    }
     Ok(json!({"status":"accepted","proposal":id,"kind":kind,"result":result}))
 }
 

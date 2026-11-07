@@ -176,3 +176,50 @@ fn the_leads_card_installs_the_tool_or_keeps_the_owners_deny() {
         assert!(tools::offers_of(&id).is_empty());
     });
 }
+
+#[test]
+fn the_member_whose_run_asked_hears_the_outcome() {
+    let state = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(state.path(), || {
+        let id = stored_review_team();
+        let project = tempfile::tempdir().unwrap();
+        let (good, bad): (&[&str], &[&str]) = if cfg!(windows) {
+            (&["cmd", "/C", "echo installed fine"], &["cmd", "/C", "echo no such package & exit /b 7"])
+        } else {
+            (&["sh", "-c", "echo installed fine"], &["sh", "-c", "echo no such package; exit 7"])
+        };
+        let sccache = Need { command: good.iter().map(|word| (*word).to_owned()).collect(), ..need("sccache") };
+        let ccache = Need { command: bad.iter().map(|word| (*word).to_owned()).collect(), ..need("ccache") };
+        as_qa(|| tools::record(project.path(), &[(sccache, false), (ccache, false), (need("gcovr"), false)])).unwrap();
+        let offers = tools::offers_of(&id);
+        let of = |tool: &str| offers.iter().find(|offer| offer.tool == tool).unwrap().id.clone();
+        let (sccache, ccache, gcovr) = (of("sccache"), of("ccache"), of("gcovr"));
+        // The member's session takes the messages; each one is kept here.
+        let told = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let heard = told.clone();
+        set_fake_hgs(Some(Box::new(move |_, args, input| {
+            if args == ["--help"] {
+                return Ok(fake_output(0, "", ""));
+            }
+            if let Some(input) = input {
+                heard.borrow_mut().push(crate::state::teams::doorbell::posted_text(input));
+            }
+            Ok(fake_output(0, r#"{"status":"submitted"}"#, ""))
+        })));
+        let told_any = |text: &str| told.borrow().iter().any(|sent| sent.contains(text));
+        // The lead's Deny reaches the member.
+        as_lead(|| call("decide-tool", json!({"offer":gcovr,"allow":false,"reason":"not needed here"}))).unwrap();
+        assert!(told_any("denied: not needed here") && told_any("gcovr"), "{:?}", told.borrow());
+        // The owner's Allow reaches it too.
+        let proposed = as_lead(|| call("propose", json!({"kind":"install-tool","offer":sccache,"reason":"the build cache needs it"}))).unwrap();
+        tools::inline_install(true);
+        call("decide-proposal", json!({"proposal":proposed["proposal"],"accept":true,"expected_hash":proposed["hash"],"by":"human"})).unwrap();
+        tools::inline_install(false);
+        assert!(told_any("The owner allowed the install") && told_any("sccache"), "{:?}", told.borrow());
+        // And the owner's Deny, with the reason.
+        let proposed = as_lead(|| call("propose", json!({"kind":"install-tool","offer":ccache,"reason":"the C++ cache needs it"}))).unwrap();
+        call("decide-proposal", json!({"proposal":proposed["proposal"],"accept":false,"expected_hash":proposed["hash"],"reason":"we build without it","by":"human"})).unwrap();
+        assert!(told_any("denied: we build without it") && told_any("ccache"), "{:?}", told.borrow());
+        set_fake_hgs(None);
+    });
+}

@@ -10,7 +10,6 @@ import supplement from "./i18n.next-ru.json";
 // trNoop() tables or from literal component props, never from session text,
 // agent output, identities or file names.
 const DYNAMIC_FILES: Record<string, string> = {
-  "./App.tsx": "connection state names from its STATE_TEXT table",
   "./ui/components/Rail.tsx": "its own screen table",
   "./ui/screens/Machines.tsx": "field labels passed as literal props",
   "./ui/screens/MachineConnectionDialog.tsx": "its own option tables",

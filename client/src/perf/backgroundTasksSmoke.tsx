@@ -5,13 +5,16 @@
 // ?hold=<ms> keeps the final open list on screen for a capture before reporting.
 import { render } from "solid-js/web";
 import { BackgroundTasksChip } from "../ui/screens/BackgroundTasks";
-import { CleanupChip } from "../ui/screens/CleanupChip";
+import { CleanupChip, CleanupReviewButton } from "../ui/screens/CleanupChip";
+import { MachinesStatus } from "../ui/components/MachinesStatus";
+import { applyBatch } from "../store/catalog";
 import { applyCleanup, cleanupDialog, closeCleanup, emptyCleanup, type CleanupRow, type CleanupView } from "../store/terminationCleanup";
 import { applySkin, skins } from "../skin/runtime";
 import "../ui/styles/base.css";
 import "../ui/styles/app.css";
 import "../ui/styles/detail.css";
 import "../ui/styles/screens.css";
+import "../ui/styles/sessions.css";
 import "../ui/styles/motion.css";
 
 const failures: string[] = [];
@@ -28,22 +31,29 @@ const show = async (rows: CleanupRow[], over: Partial<CleanupView> = {}) => {
 };
 const bar = () => document.querySelector<HTMLElement>(".statusbar")!;
 const chip = () => bar().querySelector<HTMLButtonElement>(".bg-tasks-chip");
-const result = () => bar().querySelector<HTMLButtonElement>("button.warn-chip");
+const result = () => bar().querySelector<HTMLButtonElement>(".cleanup-result");
+const review = () => document.querySelector<HTMLButtonElement>(".sp-foot .cleanup-review")!;
+const workButtons = () => bar().querySelectorAll(".bg-tasks-chip, .cleanup-result");
 const list = () => document.querySelector<HTMLElement>(".menu.bg-tasks");
 const open = async () => { chip()!.click(); await settle(); };
 const press = async (key: string) => { (document.activeElement ?? document.body).dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true })); await settle(); };
 const pointer = async (target: Element) => { target.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true })); await settle(); };
 
 async function walk() {
-  applySkin(skins[0]);
-  render(() => <footer class="statusbar" style={{ position: "fixed", inset: "auto 0 0 72px" }}><span>4 of 5 machines connected</span><BackgroundTasksChip /><CleanupChip /><span class="grow" /></footer>, document.getElementById("root")!);
+  const requestedSkin = new URLSearchParams(location.search).get("skin");
+  applySkin(skins.find((s) => s.appearance === requestedSkin) ?? skins[0]);
+  applyBatch({ upserts: [], removes: [], replaces: [], activity: [], computers: [{ computer: "", status: "live", attempt: 0 }] });
+  render(() => <><footer class="sp-foot" style={{ position: "fixed", inset: "auto auto 28px 72px", width: "320px" }}><span class="grow" /><CleanupReviewButton /></footer>
+    <footer class="statusbar" style={{ position: "fixed", inset: "auto 0 0 72px" }}><MachinesStatus mode={() => "replay"} /><BackgroundTasksChip /><CleanupChip /><span class="grow" /></footer></>, document.getElementById("root")!);
   await settle();
-  check(!bar().querySelector("button"), "an empty store showed a chip");
+  check(workButtons().length === 0, "an empty store showed a work-result chip");
+  check(review() && !review().classList.contains("attention") && !review().querySelector(".worktree-review-count"), "idle footer review is not calm and available");
+  const idleColor = getComputedStyle(review()).color;
 
   // Only running work: one item, no cleanup chip repeating it.
   await show([row("first"), row("second", { status: "removing", activity: "removing" })], { text: "Cleaning working folders…" });
   check(chip()?.textContent === "Background tasks 2", `count: ${chip()?.textContent}`);
-  check(bar().querySelectorAll("button").length === 1, "the cleanup chip repeated running work");
+  check(workButtons().length === 1, "the cleanup chip repeated running work");
   check(chip()!.querySelector(".su-spin"), "the running item has no spinner");
   check(chip()!.getBoundingClientRect().height === 20, "the chip left the status bar's chip height");
 
@@ -96,6 +106,9 @@ async function walk() {
   await show([row("running"), kept], { kept: 1, text: "Folder kept: kept.", title: "Folder kept: kept." });
   check(chip()?.textContent === "Background tasks 1", `mixed count: ${chip()?.textContent}`);
   check(result()?.textContent === "Folder kept: kept.", `mixed result: ${result()?.textContent}`);
+  check(review().classList.contains("warn") && review().textContent === "1", "the footer did not count the held folder");
+  check(getComputedStyle(review()).color !== idleColor, "the held-folder count did not change the footer icon colour");
+  check(review().getBoundingClientRect().width >= 26 && review().scrollWidth <= review().clientWidth, "the footer count clipped or overlapped its icon");
   check(result()!.getBoundingClientRect().right <= bar().getBoundingClientRect().right, "the status bar clipped the held result");
   await show([row("running")], { unknown: 1, text: "Working folders: 1 unknown" });
   check(result()?.textContent === "Working folders: 1 unknown", "running work hid a result past the row cap");

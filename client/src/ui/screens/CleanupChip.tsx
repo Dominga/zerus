@@ -1,8 +1,10 @@
 import { Show } from "solid-js";
 import { showsCleanupChip } from "../../store/backgroundTasks";
 import { cleanup, openCleanup } from "../../store/terminationCleanup";
+import { tr } from "../../i18n";
+import { Icon } from "../lib/icons";
 
-/** Held results and their review; running work has the Background tasks item. */
+/** Review is always reachable, including after a notice expires or is closed. */
 export function CleanupChip() {
-  return <Show when={showsCleanupChip(cleanup())}><button type="button" class="chip-accent" style={{ "white-space": "pre" }} classList={{ "warn-chip": cleanup().kept > 0 || cleanup().unknown > 0 }} title={cleanup().title} aria-label={cleanup().title} onClick={() => openCleanup()}>{cleanup().text}</button></Show>;
+  return <button type="button" class="chip-accent cleanup-review" classList={{ "warn-chip": cleanup().kept > 0 || cleanup().unknown > 0 }} title={cleanup().rows.length || cleanup().kept || cleanup().unknown ? cleanup().title : tr("Review working folders")} aria-label={tr("Review working folders")} onClick={() => openCleanup()}><Icon name="git-branch" size={13} /><Show when={showsCleanupChip(cleanup())}><span>{cleanup().text}</span></Show></button>;
 }

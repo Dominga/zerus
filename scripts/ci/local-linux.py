@@ -475,6 +475,7 @@ class Runner:
         if job["id"] == "android":
             env.update(JAVA_HOME="/mnt/android-cache/java17", JAVA_HOME_17_X64="/mnt/android-cache/java17",
                        ANDROID_HOME="/mnt/android-cache/android-sdk", ANDROID_SDK_ROOT="/mnt/android-cache/android-sdk",
+                       GRADLE_USER_HOME="/home/test/.gradle",
                        GRADLE_OPTS=f"-Dorg.gradle.workers.max={self.args.workers}")
             env["PATH"] = "/mnt/android-cache/java17/bin:" + env["PATH"]
         (home / "runner-temp").mkdir(exist_ok=True)

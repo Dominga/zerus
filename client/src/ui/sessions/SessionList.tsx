@@ -47,6 +47,7 @@ import {
 import type { Session } from "./types";
 import { filterAccounts, selectedFilterAccounts, chooseFilterAccounts, toggleFilterAccount, openFilterAccounts, cancelFilterAccountReads } from "../../store/accountFilters";
 import { loadMarkCatalogs } from "../../store/accounts";
+import { setParentDialog } from "../../store/parentLinks";
 import { clearFolderScope } from "../../store/folderFilter";
 import { leaf, native } from "./paths";
 import { appendAccountChoices, bindingState, type AccountChoice } from "./scope-filters";
@@ -262,6 +263,7 @@ export function sessionMenu(s: Session, folderStatus?: { request: ReturnType<typ
     forkEntry(s, forkDetails ?? details),
     ...(act.archive ? [act.archive] : []),
     moveEntry(s),
+    ...parentEntries(s),
     { separator: true },
     cp.name,
     cp.reference,
@@ -269,6 +271,17 @@ export function sessionMenu(s: Session, folderStatus?: { request: ReturnType<typ
     { separator: true },
     act.end,
   ];
+}
+
+/** Set parent… and Detach from PARENT… (zerus-sa9qn.9); both open a confirmation. */
+function parentEntries(s: Session): MenuEntry[] {
+  if (s.state === "archived") return [];
+  const linked = ["claude", "codex", "kimi"].includes(s.cmd) && !!s.sessionId;
+  const why = linked ? undefined : tr("Parent sessions are recorded for Claude, Codex and Kimi sessions that have started.");
+  const entries: MenuEntry[] = [{ label: tr("Set parent…"), icon: "git-branch", disabled: !linked, hint: why, action: () => setParentDialog({ kind: "set", child: s }) }];
+  if (s.parent) entries.push({ label: tr("Detach from %1…", s.parent.name.split("/").pop() || s.parent.name), icon: "git-branch", disabled: !linked, hint: why,
+    action: () => setParentDialog({ kind: "detach", child: s }) });
+  return entries;
 }
 
 /** Only an explicitly opened menu checks its folder; no per-row filesystem reads. */

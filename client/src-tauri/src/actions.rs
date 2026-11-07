@@ -1835,6 +1835,29 @@ pub async fn set_notifications(
     Ok(confirmed)
 }
 
+/// Sets or clears a session's parent link (zerus-sa9qn.9) after the person
+/// confirmed it. The host verifies the exact session, the chosen parent and
+/// cycles; the listing shows the result.
+#[tauri::command]
+pub async fn set_parent(
+    state: State<'_, Actions>,
+    target: Target,
+    change: zerus_client_core::parent_change::ParentChange,
+) -> Result<serde_json::Value, String> {
+    if blocked() {
+        return Err(REPLAY_NEEDS_HGS.into());
+    }
+    let Some(_claim) = state.claim_lane(&target.computer, &target.name, Lane::Write) else {
+        return Err("busy".into());
+    };
+    let hgs = default_hgs();
+    tauri::async_runtime::spawn_blocking(move || {
+        zerus_client_core::parent_change::change(&hgs, &target, &change)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 pub(crate) fn change_notifications_projected(
     hgs: &std::path::Path,
     target: &Target,

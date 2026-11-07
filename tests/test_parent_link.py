@@ -178,6 +178,36 @@ class ParentLink(unittest.TestCase):
         with open(self.state / '.lock', 'a+b') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
+    def choose(self, target, parent, success=True, **extra):
+        choice = dict(session_id=parent['session_id'], name=parent['name'], conversation_id=parent['conversation_id'],
+                      run_id=parent['run_id'])
+        return self.parent(target, 'set', success=success, parent=choice, **extra)
+
+    def test_a_person_sets_an_explicit_parent_on_this_computer(self):
+        # zerus-sa9qn.9: the desktop names the parent; no calling agent is needed.
+        link = self.choose(self.worker, self.lead)['parent']
+        self.assertEqual((link['session_id'], link['name'], link['source']), (LEAD_ID, self.lead['name'], 'manual'))
+        self.assertEqual(self.listed()[self.worker['name']]['parent']['session_id'], LEAD_ID)
+        # Changing it to another session needs replace; the same parent does not.
+        other = dict(self.lead, name='claude/example/other', run_id='run-other', conversation_id='conversation-other',
+                     session_id='44444444-4444-4444-8444-444444444444', pid=1, process_start='elsewhere')
+        self.write(other)
+        self.assertEqual(self.choose(self.worker, self.lead)['parent']['session_id'], LEAD_ID)
+        self.assertIn('already has the parent', self.choose(self.worker, other, success=False))
+        self.assertEqual(self.choose(self.worker, other, replace=True)['previous']['session_id'], LEAD_ID)
+
+    def test_an_explicit_parent_must_be_exact_and_never_close_a_loop(self):
+        self.assertIn('own parent', self.choose(self.lead, self.lead, success=False))
+        self.assertIn('changed', self.choose(self.worker, dict(self.lead, run_id='run-old'), success=False))
+        gone = dict(self.lead, session_id='55555555-5555-4555-8555-555555555555', name='claude/example/gone')
+        self.assertIn('not a session on this computer', self.choose(self.worker, gone, success=False))
+        self.parent(self.worker, 'set', success=False)  # set needs a parent
+        self.parent(self.worker, 'clear', success=False, parent=dict(session_id=LEAD_ID))  # only set names one
+        # worker leads lead; making worker a child of lead would close the loop.
+        self.choose(self.lead, self.worker)
+        self.assertIn('cycle', self.choose(self.worker, self.lead, success=False))
+        self.assertNotIn('parent', self.read(self.worker))
+
     def test_adoption_needs_a_proven_caller_and_the_exact_target(self):
         self.assertIn('no live Zerus session', self.parent(self.worker, 'adopt', success=False))
         self.assertIn('cannot adopt itself', self.parent(self.lead, 'adopt', caller=self.lead, success=False))

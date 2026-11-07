@@ -14,7 +14,7 @@ use std::{fs, io::Read};
 /// launcher always sets it, empty when no live tracked agent owns it, so an
 /// inherited value never reaches the record.
 pub(crate) const ENV: &str = "HGS_PARENT";
-const USAGE: &str = "usage: hgs parent <session> --json   (JSON stdin: expected_run_id, expected_conversation_id, action read|adopt|clear, optional replace)";
+const USAGE: &str = "usage: hgs parent <session> --json   (JSON stdin: expected_run_id, expected_conversation_id, action read|adopt|set|clear, optional replace; set names parent {session_id, name, conversation_id, run_id})";
 /// The longest parent chain walked when refusing a cycle.
 const DEPTH: usize = 8;
 
@@ -47,7 +47,7 @@ pub(crate) fn valid(link: &Value) -> bool {
         && (!session.is_empty()
             || !string(link, "conversation_id").is_empty()
             || !string(link, "run_id").is_empty())
-        && matches!(string(link, "source"), "launch" | "adopt")
+        && matches!(string(link, "source"), "launch" | "adopt" | "manual")
         && object.get("at").is_some_and(Value::is_i64)
 }
 
@@ -187,6 +187,20 @@ fn unindexed(id: &str, name: &str) -> Option<Value> {
         .filter(|record| string(record, "session_id") == id)
 }
 
+/// The parent a person chose on the desktop: a session on this computer, by
+/// its durable ID, with the name, conversation and run the desktop listed.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Choice {
+    session_id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    conversation_id: String,
+    #[serde(default)]
+    run_id: String,
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
@@ -195,6 +209,29 @@ struct Request {
     action: String,
     #[serde(default)]
     replace: bool,
+    #[serde(default)]
+    parent: Option<Choice>,
+}
+
+/// The session `id` on this computer: through its index entry, else its ID
+/// layout record or the label `name` hints, each read bounded, regular,
+/// no-follow and nonblocking. None when this computer has no such session;
+/// an indexed record that cannot be read safely is an error.
+fn read_session(id: &str, name: &str) -> Result<Option<Value>> {
+    let unsafe_read = |_| "A session cannot be read safely; retry later".to_owned();
+    let found = match session_index::indexed(id) {
+        Some((label, session_index::Kind::Record)) => {
+            Some(storage::read_label_bounded(&label, storage::ID_RECORD_BYTES).map_err(unsafe_read)?)
+        }
+        Some((_, session_index::Kind::IdRecord)) => Some(storage::read_id(id).map_err(unsafe_read)?),
+        // DeepSeek and OpenCode sessions carry no parent links.
+        Some(_) => None,
+        None => unindexed(id, name),
+    };
+    match found {
+        Some(record) if string(&record, "session_id") != id => Err("A session changed while it was read; retry".into()),
+        found => Ok(found),
+    }
 }
 
 /// `hgs parent <session> --json`: read, adopt (set the link to the proven
@@ -215,7 +252,9 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         return Err("parent request exceeds limits".into());
     }
     let request: Request = serde_json::from_slice(&bytes).map_err(|_| USAGE.to_owned())?;
-    if !matches!(request.action.as_str(), "read" | "adopt" | "clear") {
+    if !matches!(request.action.as_str(), "read" | "adopt" | "set" | "clear")
+        || (request.action == "set") != request.parent.is_some()
+    {
         return Err(USAGE.into());
     }
     if opencode::exists(name) || dsh::exists(name) {
@@ -229,7 +268,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         None
     };
     let config = crate::config::Config::load().map_err(|e| e.message)?;
-    let machine = if request.action == "adopt" {
+    let machine = if matches!(request.action.as_str(), "adopt" | "set") {
         observed_machine(&config).ok_or("This computer's identity cannot be read yet; retry later")?
     } else {
         String::new()
@@ -253,19 +292,40 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             }
         }
         _ => {
-            let caller = caller.unwrap();
+            // adopt: the proven calling agent; set: the session a person chose.
+            let (chosen, source) = match (caller, request.parent.as_ref()) {
+                (Some(caller), _) => (caller, "adopt"),
+                (None, Some(choice)) => {
+                    if !session_id::canonical(&choice.session_id) {
+                        return Err("Choose the parent by its session ID".into());
+                    }
+                    let parent = read_session(&choice.session_id, &choice.name)?
+                        .ok_or("The chosen parent is not a session on this computer")?;
+                    if [(&choice.conversation_id, "conversation_id"), (&choice.run_id, "run_id")]
+                        .iter()
+                        .any(|(expected, key)| !expected.is_empty() && string(&parent, key) != expected.as_str())
+                    {
+                        return Err("The chosen parent changed; refresh and retry".into());
+                    }
+                    if !string(&parent, "archive_id").is_empty() || parent["state"] == "archived" {
+                        return Err("An archived session cannot be a parent".into());
+                    }
+                    (parent, "manual")
+                }
+                _ => return Err(USAGE.into()),
+            };
             let target = string(&record, "session_id");
-            if string(&caller, "session_id") == target && !target.is_empty()
-                || string(&caller, "run_id") == string(&record, "run_id")
+            if string(&chosen, "session_id") == target && !target.is_empty()
+                || string(&chosen, "run_id") == string(&record, "run_id")
             {
-                return Err("A session cannot adopt itself".into());
+                return Err(if source == "adopt" { "A session cannot adopt itself" } else { "A session cannot be its own parent" }.into());
             }
-            if ancestors(&caller)?.contains(&target.to_owned()) {
-                return Err("This session already leads the caller; adopting it would make a cycle".into());
+            if ancestors(&chosen)?.contains(&target.to_owned()) {
+                return Err("This session already leads the chosen parent; the link would make a cycle".into());
             }
             if let Some(old) = previous.as_ref() {
                 let same = string(old, "machine") == machine
-                    && string(old, "session_id") == string(&caller, "session_id");
+                    && string(old, "session_id") == string(&chosen, "session_id");
                 if !same && !request.replace {
                     return Err(format!(
                         "{name} already has the parent {}; pass \"replace\": true to change it",
@@ -273,8 +333,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
                     ));
                 }
             }
-            let link = link_of(&caller, &machine, config.host(), "adopt")
-                .ok_or("The calling session has no complete identity yet; retry after it starts")?;
+            let link = link_of(&chosen, &machine, config.host(), source)
+                .ok_or("The parent session has no complete identity yet; retry after it starts")?;
             record["parent"] = link;
             write(&mut record)?;
         }

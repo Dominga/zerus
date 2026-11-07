@@ -5869,7 +5869,12 @@ eight conversations per session, and follow `hgs rename`.
 
 Private stores (read marks, the analytics store, the approval journal, the
 history index, voice storage and the Windows mobile configuration) are checked
-before use. A store that is this user's, lies in the hgs state or configuration
+before use. On Windows, each missing directory created for private storage gets
+a protected, inheritable DACL granting only the current user FullControl. New
+files inside it inherit that protection. Existing directories keep their ACLs,
+including a directory another process creates during the creation race; private
+directory creation does not silently repair them or relax the privacy check.
+A store that is this user's, lies in the hgs state or configuration
 folder and is only too open (another tool added a group to its ACL, or Unix mode
 bits wider than 0600/0700) is made private again in place: on Windows a
 protected DACL granting this user FullControl through a handle that never
@@ -6826,7 +6831,7 @@ folder. An incremental build therefore uses the merged sources instead of
 running old binaries. Probe, configuration, build, CTest and any retries share
 one existing suite deadline and bounded output capture. Configuration/build
 failures after a successful probe fail the suite and follow ordinary merge
-rollback. A probe failure, missing probe executable or unresolved placeholder
+rollback, with a `build` flag and no flaky-test retry. A probe failure, missing probe executable or unresolved placeholder
 records `not_run` with a bounded `not run here: SUITE runs on ...; reason` message.
 It remains an untested range, never a pass or a green result eligible for reuse.
 
@@ -6858,8 +6863,10 @@ QT_QUICK_BACKEND = "software"
 ```
 
 Use the local machine's actual SDK and compiler values. On Windows the local
-`toolchain` value can invoke `scripts/ci/msvc-env.py`; the local environment
-must also put the selected Qt kit's `bin` directory on `PATH` for CTest. Local
+`toolchain` value can invoke `scripts/ci/msvc-env.py`. Local `env` entries replace
+the entire variable; they perform no expansion. Have the toolchain wrapper
+prepend the selected Qt kit's `bin` directory to `PATH` before invoking tools,
+or supply the complete `PATH` through local `env` for CTest. Local
 values cannot replace command strings or the reserved `build_dir`/`targets`
 placeholders. The local file is limited to 64 KiB, with at most 64 vars and 64
 environment entries per provider, and is excluded from exported project

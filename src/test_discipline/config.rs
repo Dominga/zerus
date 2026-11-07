@@ -598,7 +598,7 @@ fn local_providers(root: &Path, config: &TestsConfig) -> anyhow::Result<std::col
     command.args(["--no-optional-locks", "-c", "core.fsmonitor=false", "-C"]).arg(root).args(["ls-files", "--error-unmatch", "--", LOCAL_FILE]);
     for key in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_CONFIG_COUNT"] { command.env_remove(key); }
     let (status, _, _) = crate::platform::run_bounded(&mut command, [4096, 4096],
-        std::time::Instant::now() + std::time::Duration::from_secs(3), &|| false)
+        std::time::Instant::now() + std::time::Duration::from_secs(10), &|| false)
         .map_err(|error| anyhow::anyhow!("Cannot verify local test configuration is untracked: {error:?}"))?;
     anyhow::ensure!(!status.success(), "The local test configuration {LOCAL_FILE} must not be tracked");
     anyhow::ensure!(status.code() == Some(1), "Cannot verify local test configuration is untracked");

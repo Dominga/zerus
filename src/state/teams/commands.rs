@@ -2826,7 +2826,7 @@ fn test_command(input: &Value) -> anyhow::Result<Value> {
             if reused.is_none() && action == "force" {
                 let queued = database.queued(&team_id)?;
                 let chosen = test_queue::schedule(&queued, &classes, &load);
-                records = test_queue::run_due(&database, &project, &chosen, now, &policy)?;
+                records = test_queue::run_due(&database, &project, &chosen, now, &policy, team.settings.tests.as_ref())?;
             }
             let estimate = super::test_results::full_estimate(&project, &loaded.config);
             if !records.is_empty() || size.is_some() {

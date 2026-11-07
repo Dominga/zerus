@@ -1,8 +1,7 @@
 Run only the tests your change touches (hgs guide tests)
 
-A project says how in .zerus/tests.toml; the owner may override it in the team
-settings. Without the file Zerus only proposes what it detects, nothing is
-enforced, and the team keeps today's flow.
+.zerus/tests.toml sets the rules; the owner may override them in team settings.
+Without it Zerus only proposes what it detects and enforces nothing.
 
   hgs test affected                 tests for your uncommitted changes, with time
   hgs test affected BASE..HEAD      the same for a range; --staged for the index
@@ -16,9 +15,8 @@ enforced, and the team keeps today's flow.
   hgs test durations --record LOG --provider NAME   keep a run's times
   hgs test tools                    the tools the tests need here
 
-The map is read from the sources when you ask, so a merge never leaves it
-behind; the committed file stands in only for a build this checkout cannot
-read (the Qt build in the CI). Only tracked files count: git add a new test.
+Sources refresh the map; its snapshot covers unavailable builds. Only tracked
+files count: git add a new test.
 Each run line is a command for its folder. A team member sends the printed
 "hgs team run" request (cargo-test with filters and skips, qt-test with
 suites and suite:function); hgs run takes the other kinds. A QtTest change
@@ -30,17 +28,12 @@ Every action takes --dir DIR, --team TEAM (the owner's override) and --json.
 Never install a tool: Zerus offers a missing one to the owner (Waiting for
 you). Propose it on the question card and work without it.
 
-.zerus/tests.toml: [map], [full] (where, policy), [retries], [budgets],
-[isolation], [build_cache], [merge_queue], [resources.NAME] and [[provider]]
-(name, kind cargo|ctest|pytest|unittest|gradle|npm|command, root, sources,
-tests, manual, elsewhere, affected build|paths|all, [[provider.paths]],
-command, widen, build_dir); every field: docs/reference.md, Affected tests.
+Windows private-store fixtures use owner_only_dir on a missing tempdir child;
+existing ACLs stay unchanged. Never repair Temp or weaken privacy checks.
 
-Local merge-queue CTest preparation: optional provider configure/build/probe
-commands in .zerus/tests.toml; configure on a missing CMakeCache.txt, always
-build selected targets, then CTest, under one suite timeout. Build {targets}
-expands to --target plus CMake targets, or nothing for (all). Probe failure
-or missing local placeholders means not run here, never passed/reusable.
-Machine values and environment belong only in ignored .zerus/tests.local.toml,
-[provider.NAME.vars] and [provider.NAME.env]. A tracked or unknown local setting
-is refused. Remote runners and providers without stages keep their behavior.
+Configuration: docs/reference.md, Affected tests.
+
+Local merge-queue CTest can probe, configure missing builds, always build, then
+test under one deadline. Build failures are not retried as flaky tests. Machine
+vars/env stay in untracked .zerus/tests.local.toml; probe failure is not run here,
+never green. Owner overrides apply to every stage. Remote runners are unchanged.

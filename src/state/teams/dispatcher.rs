@@ -1704,6 +1704,7 @@ fn test_queue_tick(store: &mut Store, team_id: &str, now: f64) -> anyhow::Result
         super::test_queue::load_now,
         &policy,
         &places,
+        team.settings.tests.as_ref(),
     )?;
     if !read {
         return Ok(());

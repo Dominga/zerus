@@ -381,11 +381,14 @@ where
         for record in results.iter().filter(|record| record.status == "not_run") {
             push_not_run(&mut entry.not_run, &record.excerpt);
             entry.not_run_since.entry(record.suite.clone()).or_insert_with(|| entry.prev.clone());
-            // A range is closed only when every selected suite actually ran.
-            entry.tested_ranges.clear();
         }
         let not_run: Vec<&str> = results.iter().filter(|record| record.status == "not_run").map(|record| record.excerpt.as_str()).collect();
-        if !not_run.is_empty() { events.push(Event::new("merge_not_run", json!({"task":id,"suites":not_run}))); }
+        if !not_run.is_empty() {
+            // The persisted entry has no suite selection per range. Keep all
+            // ranges open rather than closing one whose missing suite is unknown.
+            entry.tested_ranges.clear();
+            events.push(Event::new("merge_not_run", json!({"task":id,"suites":not_run})));
+        }
         let failed: Vec<String> = results
             .iter()
             .filter(|record| !matches!(record.status.as_str(), "passed" | "flaky" | "reused" | "not_run"))

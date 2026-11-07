@@ -34,7 +34,7 @@ fn digests(config: &Config) -> Result<BTreeMap<String, String>> {
     let root = root(config);
     let mut out = BTreeMap::new();
     for id in ProjectStore::stored(&root)? {
-        match ProjectStore::open_within(&root, &id, PROJECT_WAIT) {
+        match ProjectStore::open_within(&crate::tasks::replica_root(config)?, &id, PROJECT_WAIT) {
             Ok(Some(store)) => match store.inventory() {
                 Ok((inventory, _)) => {
                     out.insert(id, inventory.digest());
@@ -128,7 +128,7 @@ fn alive(config: &Config, store: &LockedStore) -> BTreeSet<String> {
 /// `swarm replica-inventory`: what this member holds of the project.
 pub fn inventory(config: &Config, request: Request) -> Result<Value> {
     let node = admit(config, &request)?;
-    let store = ProjectStore::open(&root(config), &request.project)?;
+    let store = ProjectStore::open(&crate::tasks::replica_root(config)?, &request.project)?;
     Ok(json!({"node_id": node, "inventory": store.inventory()?.0}))
 }
 
@@ -139,7 +139,7 @@ pub fn exchange(config: &Config, request: Request) -> Result<Value> {
     let theirs = request
         .inventory
         .ok_or_else(|| anyhow::anyhow!("a replica exchange needs the requester's inventory"))?;
-    let store = ProjectStore::open(&root(config), &request.project)?;
+    let store = ProjectStore::open(&crate::tasks::replica_root(config)?, &request.project)?;
     let imported = store.import_updates(decode(request.updates)?)?;
     let (ours, _) = store.inventory()?;
     let (updates, more) = store.updates_for(&ours, &theirs, PAGE)?;
@@ -197,7 +197,7 @@ pub fn replicate(config: &Config, alias: &str, project: &str) -> Result<()> {
     drop(store);
     ensure!(identity["replica"]["protocol"] == PROTOCOL, "update Zerus on {alias} to send tasks there");
     // Copies that already agree need no exchange.
-    let ours = ProjectStore::open(&root(config), project)?.inventory()?.0.digest();
+    let ours = ProjectStore::open(&crate::tasks::replica_root(config)?, project)?.inventory()?.0.digest();
     if identity["replica"]["projects"][project].as_str() == Some(ours.as_str()) {
         return Ok(());
     }
@@ -206,7 +206,6 @@ pub fn replicate(config: &Config, alias: &str, project: &str) -> Result<()> {
 
 /// Exchanges one project's tasks with the member behind `alias`, page by page.
 pub fn exchange_project(config: &Config, alias: &str, project: &str) -> Result<()> {
-    let root = root(config);
     let (node, swarm) = {
         let store = LockedStore::load(config)?;
         let peer = store
@@ -227,7 +226,7 @@ pub fn exchange_project(config: &Config, alias: &str, project: &str) -> Result<(
         let theirs: Inventory = serde_json::from_value(reply["inventory"].clone())?;
         // The project's lock is held only between network calls.
         let (mine, page, more_mine) = {
-            let store = ProjectStore::open(&root, project)?;
+            let store = ProjectStore::open(&crate::tasks::replica_root(config)?, project)?;
             let (mine, _) = store.inventory()?;
             let (page, more) = store.updates_for(&mine, &theirs, PAGE)?;
             (mine, page, more)
@@ -243,7 +242,7 @@ pub fn exchange_project(config: &Config, alias: &str, project: &str) -> Result<(
         ensure!(response["more"].is_boolean(), "{alias} sent an invalid replica exchange");
         let mut changed = response["imported"].as_u64().unwrap_or(0) as usize;
         if !updates.is_empty() {
-            let imported = ProjectStore::open(&root, project)?.import_updates(updates)?;
+            let imported = ProjectStore::open(&crate::tasks::replica_root(config)?, project)?.import_updates(updates)?;
             changed += imported.changed;
             // A refused document is named in the worker's log; the others are kept.
             for refused in imported.refused {

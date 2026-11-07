@@ -8,6 +8,7 @@ use crate::test_discipline::config::{self, Resources};
 use super::templates::{last_chars, run_tree, Outcome};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -466,6 +467,7 @@ pub(crate) fn tick(
     read_load: impl FnOnce() -> Load,
     policy: &super::test_results::Policy,
     places: &Places,
+    overrides: Option<&Value>,
 ) -> anyhow::Result<(Vec<Record>, bool)> {
     let queued = store.queued(team)?;
     if queued.is_empty() || now - last_load_at < 30.0 {
@@ -480,7 +482,7 @@ pub(crate) fn tick(
         let mut load = read_load();
         load.at_night = config::is_night(local_hour, night);
         let chosen = schedule(&here, classes, &load);
-        records = run_due(store, project, &chosen, now, policy)?;
+        records = run_due(store, project, &chosen, now, policy, overrides)?;
     }
     if !elsewhere.is_empty() {
         records.extend(super::test_runners::dispatch(store, project, &elsewhere, &places.runners, places.remote, now, policy)?);
@@ -586,23 +588,26 @@ fn expand_stage(template: &str, build_dir: &str, targets: &str, local: &config::
     Ok(out)
 }
 
-fn preparation_not_run(suite: &str, reason: &str) -> (Outcome, bool) {
+#[derive(PartialEq)]
+enum PreparationFailure { NotRun, Build }
+
+fn preparation_not_run(suite: &str, reason: &str) -> (Outcome, Option<PreparationFailure>) {
     let prefix = format!("not run here: {suite} runs on this computer; ");
     let tail = format!("{prefix}{}", last_chars(reason, EXCERPT_BYTES.saturating_sub(prefix.chars().count())));
-    (Outcome { tail, ..Default::default() }, true)
+    (Outcome { tail, ..Default::default() }, Some(PreparationFailure::NotRun))
 }
 
 /// Only local merge requests prepare CTest. All stages and retries share the
 /// suite deadline; no new queue metadata or team-record read is needed.
-fn run_request(request: &Request, project: &Path, limit: Duration, deadline: Instant, loaded: Option<&Result<config::Loaded, String>>) -> (Outcome, bool) {
+fn run_request(request: &Request, project: &Path, limit: Duration, deadline: Instant, loaded: Option<&Result<config::Loaded, String>>) -> (Outcome, Option<PreparationFailure>) {
     let loaded = match loaded {
-        None => return (run_tree(&mut shell(&request.command_for(project), project), limit, None), false),
+        None => return (run_tree(&mut shell(&request.command_for(project), project), limit, None), None),
         Some(Ok(loaded)) => loaded,
-        Some(Err(error)) => return (Outcome { exit: Some(1), tail: format!("Test configuration refused: {error}"), ..Default::default() }, false),
+        Some(Err(error)) => return (Outcome { exit: Some(1), tail: format!("Test configuration refused: {error}"), ..Default::default() }, None),
     };
     let provider = loaded.config.providers.iter().find(|provider| provider.name == request.suite);
     let Some(provider) = provider.filter(|provider| provider.kind == config::Kind::Ctest && !provider.build.is_empty()) else {
-        return (run_tree(&mut shell(&request.command_for(project), project), limit, None), false);
+        return (run_tree(&mut shell(&request.command_for(project), project), limit, None), None);
     };
     let local = loaded.local.get(&provider.name).cloned().unwrap_or_default();
     let build_dir = crate::test_discipline::affected::relative_to(&provider.build_dir, &provider.root);
@@ -626,7 +631,7 @@ fn run_request(request: &Request, project: &Path, limit: Duration, deadline: Ins
     let mut outcome = Outcome::default();
     for (stage, command, cwd) in expanded.into_iter().filter(|(_, command, _)| !command.is_empty()) {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() { return (Outcome { timed_out: true, tail: last_chars(&combined, EXCERPT_BYTES), ..Default::default() }, false); }
+        if remaining.is_zero() { return (Outcome { timed_out: true, tail: last_chars(&combined, EXCERPT_BYTES), ..Default::default() }, None); }
         let mut process = shell(&command, cwd);
         process.envs(&local.env);
         outcome = run_tree(&mut process, remaining, None);
@@ -636,11 +641,12 @@ fn run_request(request: &Request, project: &Path, limit: Duration, deadline: Ins
                 return preparation_not_run(&request.suite, &combined);
             }
             outcome.tail = combined;
-            return (outcome, false);
+            let failure = matches!(stage, "configure" | "build").then_some(PreparationFailure::Build);
+            return (outcome, failure);
         }
     }
     outcome.tail = combined;
-    (outcome, false)
+    (outcome, None)
 }
 
 /// Runs the scheduled requests in order and writes one result each. The command
@@ -649,7 +655,7 @@ fn run_request(request: &Request, project: &Path, limit: Duration, deadline: Ins
 /// policy says and a pass on a retry is flaky (with its episode recorded); a
 /// crash is never retried; a run slower than its recorded time by more than the
 /// growth share, or over its time budget, is flagged.
-pub(crate) fn run_due(store: &TestStore, project: &Path, requests: &[Request], now: f64, policy: &super::test_results::Policy) -> anyhow::Result<Vec<Record>> {
+pub(crate) fn run_due(store: &TestStore, project: &Path, requests: &[Request], now: f64, policy: &super::test_results::Policy, overrides: Option<&Value>) -> anyhow::Result<Vec<Record>> {
     let mut written = Vec::new();
     let began = std::time::Instant::now();
     for request in requests {
@@ -658,12 +664,15 @@ pub(crate) fn run_due(store: &TestStore, project: &Path, requests: &[Request], n
         store.start(&request.id, at)?;
         let limit = Duration::from_secs((request.budget_minutes.max(1.0) * 60.0) as u64);
         let deadline = started + limit;
-        let loaded = (request.asked_by == "merge queue").then(|| config::load(project, None).map_err(|error| error.to_string()));
-        let (mut outcome, not_run) = run_request(request, project, limit, deadline, loaded.as_ref());
+        let loaded = (request.asked_by == "merge queue").then(|| config::load(project, overrides).map_err(|error| error.to_string()));
+        let (mut outcome, preparation) = run_request(request, project, limit, deadline, loaded.as_ref());
         let mut flags = Vec::new();
         let crash = super::test_results::crashed(outcome.exit, &outcome.tail);
-        let mut status = if not_run {
+        let mut status = if preparation == Some(PreparationFailure::NotRun) {
             "not_run".to_owned()
+        } else if preparation == Some(PreparationFailure::Build) {
+            flags.push("build".to_owned());
+            "failed".to_owned()
         } else if crash {
             flags.push("crash".to_owned());
             "crashed".to_owned()
@@ -675,13 +684,18 @@ pub(crate) fn run_due(store: &TestStore, project: &Path, requests: &[Request], n
             "failed".to_owned()
         };
         let first = outcome.clone();
-        // Never a crash or a timeout: only a plain failure is tried again.
+        // Build failures, crashes and timeouts are not flaky test evidence.
         let mut retries = 0;
-        while status == "failed" && retries < policy.retries {
+        while status == "failed" && preparation != Some(PreparationFailure::Build) && retries < policy.retries {
             retries += 1;
-            let (again, not_run) = run_request(request, project, limit, deadline, loaded.as_ref());
-            if not_run {
+            let (again, preparation) = run_request(request, project, limit, deadline, loaded.as_ref());
+            if preparation == Some(PreparationFailure::NotRun) {
                 status = "not_run".into();
+                outcome = again;
+                break;
+            }
+            if preparation == Some(PreparationFailure::Build) {
+                flags.push("build".to_owned());
                 outcome = again;
                 break;
             }
@@ -808,16 +822,16 @@ mod tests {
             Load { cpu_free: 8, ram_free_mb: 8000, gpu_free: true, at_night: false }
         };
         // An empty queue: no read at all.
-        let (records, read) = tick(&store, dir.path(), "t", &classes, &night, 12, 0.0, 100.0, load, &Default::default(), &Places::here()).unwrap();
+        let (records, read) = tick(&store, dir.path(), "t", &classes, &night, 12, 0.0, 100.0, load, &Default::default(), &Places::here(), None).unwrap();
         assert!(records.is_empty() && !read && reads.get() == 0, "an empty queue reads no load");
         let mut queued = request("r1", "unit", 10.0, false, "small");
         queued.command = if cfg!(windows) { "cmd /d /s /c exit 0".into() } else { "true".into() };
         store.enqueue(&queued).unwrap();
         // The last read was a moment ago: no second read.
-        let (records, read) = tick(&store, dir.path(), "t", &classes, &night, 12, 90.0, 100.0, load, &Default::default(), &Places::here()).unwrap();
+        let (records, read) = tick(&store, dir.path(), "t", &classes, &night, 12, 90.0, 100.0, load, &Default::default(), &Places::here(), None).unwrap();
         assert!(records.is_empty() && !read && reads.get() == 0, "a read waits 30 s");
         // Enough time passed and the queue has work: one read, one run.
-        let (records, read) = tick(&store, dir.path(), "t", &classes, &night, 12, 0.0, 100.0, load, &Default::default(), &Places::here()).unwrap();
+        let (records, read) = tick(&store, dir.path(), "t", &classes, &night, 12, 0.0, 100.0, load, &Default::default(), &Places::here(), None).unwrap();
         assert!(read && reads.get() == 1, "the tick read the load once");
         assert_eq!(records.len(), 1, "{records:?}");
         assert_eq!(records[0].status, "passed");
@@ -924,7 +938,7 @@ mod tests {
         request.command = if cfg!(windows) { "echo hello & exit /b 0".into() } else { "echo hello".into() };
         store.enqueue(&request).unwrap();
         assert_eq!(store.queued("t").unwrap().len(), 1);
-        let written = run_due(&store, dir.path(), &store.queued("t").unwrap(), 100.0, &Default::default()).unwrap();
+        let written = run_due(&store, dir.path(), &store.queued("t").unwrap(), 100.0, &Default::default(), None).unwrap();
         assert_eq!(written.len(), 1);
         assert_eq!(written[0].status, "passed");
         assert!(written[0].excerpt.contains("hello"), "{}", written[0].excerpt);
@@ -950,7 +964,7 @@ mod tests {
             "cd \"quoted folder\" && cat marker.txt".into()
         };
         store.enqueue(&request).unwrap();
-        let written = run_due(&store, dir.path(), &store.queued("t").unwrap(), 100.0, &Default::default()).unwrap();
+        let written = run_due(&store, dir.path(), &store.queued("t").unwrap(), 100.0, &Default::default(), None).unwrap();
         assert_eq!(written.len(), 1);
         assert_eq!(written[0].status, "passed", "{}", written[0].excerpt);
         assert!(written[0].excerpt.contains("quoted-folder-ok"), "{}", written[0].excerpt);
@@ -980,7 +994,7 @@ mod tests {
         assert_eq!(serde_json::to_value(&pending[0]).unwrap()["suite"], "echo", "the request's fields sit beside its state");
         // The scheduler never picks a running request again.
         assert!(store.queued("t").unwrap().iter().all(|item| item.id != "running"));
-        let written = run_due(&store, dir.path(), &[running], 100.0, &Default::default()).unwrap();
+        let written = run_due(&store, dir.path(), &[running], 100.0, &Default::default(), None).unwrap();
         assert_eq!(written[0].task, Some(7));
         assert!(store.pending("t").unwrap().iter().all(|item| item.request.id != "running"));
         let other = Record { id: "other".into(), task: Some(8), at: 200.0, ..written[0].clone() };

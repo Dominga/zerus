@@ -1,7 +1,7 @@
 use super::*;
 use std::cell::Cell;
 use std::time::Instant;
-use zerus_replica::{NewTask, SessionKey, Target, TaskAttachment};
+use zerus_replica::{Inventory, NewTask, SessionKey, Target, TaskAttachment};
 
 /// What `f` decoded and stamped.
 fn counted<T>(f: impl FnOnce() -> T) -> (T, usize, usize) {
@@ -1088,4 +1088,241 @@ fn an_index_from_before_the_seal_is_built_again() {
     assert!(page.rows.iter().all(|r| r["uuid"] != json!(uuid)), "{:?}", page.rows);
     assert_eq!(index.damaged().unwrap().1, 1);
     assert_eq!(fs::read(&path).unwrap(), unsealed);
+}
+
+fn session(machine: &str, name: &str, id: &str) -> SessionKey {
+    SessionKey { machine: machine.into(), session: name.into(), session_id: id.into() }
+}
+
+fn targeted(store: &ProjectStore, id: &str, stage: Stage, rank: &str, target: Target) -> TaskDoc {
+    let mut task = TaskDoc::create(NewTask {
+        project: store.project_id(),
+        id,
+        text: id,
+        stage,
+        target,
+        author: Actor::Person,
+        rank,
+        now: 1,
+    })
+    .unwrap();
+    aged_save(store, &mut task);
+    task
+}
+
+/// Every page of `stage` for `scope`, from the index and from the documents,
+/// which must agree page by page.
+fn scoped_pages(store: &ProjectStore, stage: Stage, limit: usize, scope: &Scope) -> Vec<String> {
+    let mut index = Index::open(store).unwrap();
+    let mut anchor = Anchor::Start;
+    let mut ids = Vec::new();
+    loop {
+        let page = index.page_in(stage, limit, &anchor, Some(scope)).unwrap();
+        let documents = super::super::documents_page_in(store, stage, limit, &anchor, None, Some(scope)).unwrap();
+        assert_eq!(json!(page.rows), documents["tasks"], "{stage:?} {limit}");
+        assert_eq!(json!(page.next), documents["page"]["next"]);
+        assert_eq!(json!(page.previous), documents["page"]["previous"]);
+        assert_eq!(json!(page.position), documents["page"]["position"]);
+        assert_eq!(page.position, ids.len());
+        ids.extend(page.rows.iter().map(|row| row["id"].as_str().unwrap().to_owned()));
+        match page.next {
+            Some(next) => {
+                let (rank, uuid) = parse_cursor(store.project_id(), stage, &next).unwrap();
+                anchor = Anchor::After(rank, uuid);
+            }
+            None => break,
+        }
+    }
+    ids
+}
+
+#[test]
+fn a_session_reads_exactly_its_own_tasks_even_past_the_first_page() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let mine = session("computer-a", "codex/example/same", "launch_id:mine");
+    // Another session with the same name on the same computer stays separate.
+    let twin = session("computer-a", "codex/example/same", "launch_id:twin");
+    let elsewhere = session("computer-b", "codex/example/same", "launch_id:mine");
+    for n in 0..6 {
+        targeted(&store, &format!("T-bbbb0{n}"), Stage::Todo, &format!("B{}", n + 1), Target::Session(twin.clone()));
+    }
+    targeted(&store, "T-cccc01", Stage::Todo, "C1", Target::Session(elsewhere.clone()));
+    targeted(&store, "T-aaaa01", Stage::Todo, "D1", Target::Any);
+    targeted(&store, "T-aaaa02", Stage::Todo, "E1", Target::Session(mine.clone()));
+    targeted(&store, "T-aaaa03", Stage::Todo, "F1", Target::Subagent { parent: mine.clone() });
+    targeted(&store, "T-aaaa04", Stage::Backlog, "A1", Target::Session(mine.clone()));
+    let mut running = targeted(&store, "T-aaaa05", Stage::Todo, "G1", Target::Any);
+    running.record_send(&mine, "request-mine", &Actor::Agent(mine.clone()), now()).unwrap();
+    aged_save(&store, &mut running);
+    let mut other = targeted(&store, "T-bbbb10", Stage::Todo, "G2", Target::Session(mine.clone()));
+    other.record_send(&twin, "request-twin", &Actor::Agent(twin.clone()), now()).unwrap();
+    aged_save(&store, &mut other);
+    // The session's To do task sits past the first unfiltered page of two.
+    let mut index = Index::open(&store).unwrap();
+    let first = index.page(Stage::Todo, 2, &Anchor::Start).unwrap();
+    assert!(first.rows.iter().all(|row| row["id"] != "T-aaaa02"));
+    drop(index);
+    let scope = Scope::new("computer-a", "launch_id:mine");
+    for limit in 1..=4 {
+        // Unassigned tasks, the session's own targets and subagent plans; never the twin's.
+        assert_eq!(scoped_pages(&store, Stage::Todo, limit, &scope), ["T-aaaa01", "T-aaaa02", "T-aaaa03"], "{limit}");
+        assert_eq!(scoped_pages(&store, Stage::Backlog, limit, &scope), ["T-aaaa04"]);
+        // A running task belongs to its executor, whatever its target said.
+        assert_eq!(scoped_pages(&store, Stage::Active, limit, &scope), ["T-aaaa05"]);
+    }
+    let twins = Scope::new("computer-a", "launch_id:twin");
+    assert_eq!(scoped_pages(&store, Stage::Todo, 3, &twins).len(), 7, "the twin's six and the unassigned task");
+    assert_eq!(scoped_pages(&store, Stage::Active, 3, &twins), ["T-bbbb10"]);
+    let index = Index::open(&store).unwrap();
+    let counts = index.counts_in(Some(&scope)).unwrap();
+    assert_eq!((counts["todo"], counts["backlog"], counts["active"]), (3, 1, 1));
+    assert_eq!(index.counts_in(None).unwrap(), index.counts().unwrap());
+}
+
+#[test]
+fn a_session_cursor_holds_its_place_as_tasks_arrive() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let mine = session("computer-a", "codex/example/worker", "launch_id:mine");
+    for n in 0..4 {
+        targeted(&store, &format!("T-aaaa0{n}"), Stage::Todo, &format!("M{}", n + 1), Target::Session(mine.clone()));
+    }
+    let scope = Scope::new("computer-a", "launch_id:mine");
+    let mut index = Index::open(&store).unwrap();
+    let first = index.page_in(Stage::Todo, 2, &Anchor::Start, Some(&scope)).unwrap();
+    let next = first.next.clone().unwrap();
+    drop(index);
+    // New tasks before and after the cursor, for this session and others.
+    targeted(&store, "T-bbbb01", Stage::Todo, "A1", Target::Session(mine.clone()));
+    targeted(&store, "T-bbbb02", Stage::Todo, "M15", Target::Session(session("computer-a", "codex/example/worker", "launch_id:other")));
+    targeted(&store, "T-bbbb03", Stage::Todo, "Z1", Target::Session(mine.clone()));
+    let (rank, uuid) = parse_cursor(store.project_id(), Stage::Todo, &next).unwrap();
+    let mut index = Index::open(&store).unwrap();
+    let second = index.page_in(Stage::Todo, 2, &Anchor::After(rank, uuid), Some(&scope)).unwrap();
+    let ids: Vec<&str> = second.rows.iter().map(|row| row["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["T-aaaa02", "T-aaaa03"]);
+    assert_eq!(second.position, 3, "the task added above shifts the position, never the rows");
+    let third = second.next.clone().unwrap();
+    let (rank, uuid) = parse_cursor(store.project_id(), Stage::Todo, &third).unwrap();
+    let last = index.page_in(Stage::Todo, 2, &Anchor::After(rank, uuid), Some(&scope)).unwrap();
+    assert_eq!(last.rows.iter().map(|row| row["id"].as_str().unwrap()).collect::<Vec<_>>(), ["T-bbbb03"]);
+    assert!(last.next.is_none());
+}
+
+#[test]
+fn scoped_queries_use_their_indexes() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = project(temp.path());
+    let index = Index::open(&store).unwrap();
+    let plan = |sql: &str| -> String {
+        let mut query = index.db.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        query.query_map([], |r| r.get::<_, String>(3)).unwrap().map(|r| r.unwrap()).collect::<Vec<_>>().join("; ")
+    };
+    for (sql, wanted) in [
+        ("SELECT uuid, rank, files, row FROM tasks WHERE owner='m\nid' AND stage='todo' AND (rank, uuid) > ('V', 'u') ORDER BY rank, uuid LIMIT 3", "tasks_owner"),
+        ("SELECT uuid, rank, files, row FROM tasks WHERE owner='m\nid' AND stage='todo' AND (rank, uuid) < ('V', 'u') ORDER BY rank DESC, uuid DESC LIMIT 3", "tasks_owner"),
+        ("SELECT uuid, rank, files, row FROM tasks WHERE unassigned=1 AND stage='todo' AND (rank, uuid) > ('V', 'u') ORDER BY rank, uuid LIMIT 3", "tasks_unassigned"),
+        ("SELECT count(*) FROM tasks WHERE owner='m\nid' AND stage='todo' AND (rank, uuid) < ('V', 'u')", "tasks_owner"),
+        ("SELECT count(*) FROM tasks WHERE unassigned=1 AND stage='todo' AND (rank, uuid) < ('V', 'u')", "tasks_unassigned"),
+    ] {
+        let found = plan(sql);
+        assert!(found.contains(wanted) && !found.contains("TEMP B-TREE"), "{sql}: {found}");
+    }
+}
+
+#[test]
+fn an_older_hgs_index_is_never_touched() {
+    // An older hgs keeps its own task-index-v1.sqlite3 (ROWS 4) and rebuilds
+    // any index not of its schema. This index lives in another file, so the
+    // two never rebuild each other's while both binaries are in use.
+    let temp = tempfile::tempdir().unwrap();
+    let store = project(temp.path());
+    let old = store.dir().join("task-index-v1.sqlite3");
+    fs::write(&old, b"an older hgs's index").unwrap();
+    let mut index = Index::open(&store).unwrap();
+    index.page(Stage::Todo, 2, &Anchor::Start).unwrap();
+    drop(index);
+    assert_eq!(fs::read(&old).unwrap(), b"an older hgs's index");
+    assert!(store.dir().join(FILE).exists());
+    assert_ne!(FILE, "task-index-v1.sqlite3");
+}
+
+/// What the index holds for the phone's inventory (zerus-cg5h.21): the
+/// project document's version, and each loaded task's version by whether it
+/// is Done.
+fn held(index: &Index) -> (Option<zerus_replica::Version>, Inventory, Inventory) {
+    let project = index.meta("project_version").unwrap().map(|v| serde_json::from_str(&v).unwrap());
+    let (mut live, mut done) = (Inventory::default(), Inventory::default());
+    let mut query = index.db.prepare("SELECT uuid, version, done FROM tasks WHERE version IS NOT NULL").unwrap();
+    let rows = query
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?)))
+        .unwrap();
+    for row in rows {
+        let (uuid, version, is_done) = row.unwrap();
+        let into = if is_done { &mut done } else { &mut live };
+        into.tasks.insert(uuid, serde_json::from_str(&version).unwrap());
+    }
+    (project, live, done)
+}
+
+/// The index's inventory against the store's own: the live view, and every
+/// loaded task (Done ones included).
+fn assert_holds_the_inventory(store: &ProjectStore, index: &Index) {
+    let (project, live, done) = held(index);
+    let (expected_live, _) = store.live_inventory().unwrap();
+    let (everything, _) = store.inventory().unwrap();
+    assert_eq!(project.as_ref(), Some(&expected_live.project));
+    assert_eq!(live.tasks, expected_live.tasks);
+    let mut all = live.tasks.clone();
+    all.extend(done.tasks);
+    assert_eq!(all, everything.tasks);
+}
+
+#[test]
+fn the_index_holds_the_inventory_of_every_loaded_task_and_the_project() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = project(temp.path());
+    let index = Index::open(&store).unwrap();
+    // Before the project document was ever saved its version is empty.
+    assert_eq!(held(&index).0, Some(Default::default()));
+    assert_holds_the_inventory(&store, &index);
+    // The damaged task file holds no version.
+    let damaged: i64 = index
+        .db
+        .query_row("SELECT count(*) FROM tasks WHERE error IS NOT NULL AND version IS NULL", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(damaged, 1);
+    drop(index);
+    // Saves through the store: a note, a task completed, the project's settings.
+    let uuids: Vec<String> = store.uuids().unwrap();
+    let mut noted = store.load(&uuids[0]).unwrap();
+    noted.comment("More detail", &Actor::Person, 5).unwrap();
+    store.save(&mut noted).unwrap();
+    let mut finished = uuids
+        .iter()
+        .map(|uuid| store.load(uuid))
+        .filter_map(std::result::Result::ok)
+        .find(|task| task.stage().unwrap() == Stage::Review)
+        .unwrap();
+    finished.set_stage(Stage::Done, &Actor::Person, now()).unwrap();
+    store.save(&mut finished).unwrap();
+    let mut doc = store.project().unwrap();
+    doc.set_settings(&zerus_replica::Settings { agent_limit: 3, ..doc.settings() }).unwrap();
+    store.save_project(&doc).unwrap();
+    let index = Index::open(&store).unwrap();
+    assert!(!held(&index).0.unwrap().is_empty());
+    assert_holds_the_inventory(&store, &index);
+    let revision = index.revision().unwrap();
+    drop(index);
+    // A project write without the journal is found by the full check; it
+    // leaves the task rows, and with them the revision, alone.
+    doc.set_settings(&zerus_replica::Settings { agent_limit: 4, ..doc.settings() }).unwrap();
+    fs::write(store.dir().join("project.loro"), doc.snapshot().unwrap()).unwrap();
+    let index = Index::open(&store).unwrap();
+    index.db.execute("UPDATE meta SET value='0' WHERE key='checked'", []).unwrap();
+    drop(index);
+    let index = Index::open(&store).unwrap();
+    assert_holds_the_inventory(&store, &index);
+    assert_eq!(index.revision().unwrap(), revision);
 }

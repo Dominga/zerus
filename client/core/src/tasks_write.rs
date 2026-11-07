@@ -180,11 +180,25 @@ impl TaskCall {
     }
 
     /// One page of a stage: `task list --stage S --limit N [--after CURSOR]`.
-    pub fn list_page(project: &str, stage: &str, limit: usize, after: Option<&str>) -> TaskCall {
+    /// `scope` is `(host, session ID)` of one session's view; an empty host
+    /// is this computer.
+    pub fn list_page(
+        project: &str,
+        stage: &str,
+        limit: usize,
+        after: Option<&str>,
+        scope: Option<(&str, &str)>,
+    ) -> TaskCall {
         let mut args = words(&["list", "--stage", stage, "--limit"]);
         args.push(limit.to_string());
         if let Some(after) = after {
             args.extend(["--after".to_owned(), after.to_owned()]);
+        }
+        if let Some((host, session_id)) = scope {
+            args.extend(["--session".to_owned(), session_id.to_owned()]);
+            if !host.is_empty() {
+                args.extend(["--host".to_owned(), host.to_owned()]);
+            }
         }
         TaskCall::new(with_project(args, project), "")
     }

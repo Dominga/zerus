@@ -3757,7 +3757,7 @@ hgs task add --project orchard [--backlog] [--target codex/api|any [--host ALIAS
 hgs task add --project orchard --title "Task title" --request-id UUID < description.txt
 hgs task rename orchard/T-a1b2c3 < title.txt
 hgs task list --project orchard [--stage todo]
-hgs task list --project orchard --stage todo --limit 50 [--after CURSOR|--before CURSOR] [--if-revision REVISION]
+hgs task list --project orchard --stage todo --limit 50 [--after CURSOR|--before CURSOR] [--if-revision REVISION] [--session ID [--host ALIAS]]
 hgs task get orchard/T-a1b2c3
 hgs task get TASK_UUID --project orchard --history-limit 80 [--history-before CURSOR] [--attachments metadata]
 hgs task attachment TASK_UUID --project orchard --file 1 [--entry ENTRY_ID]
@@ -3895,10 +3895,25 @@ page, and only an empty stage has no rows. `--if-revision` with the last
 `revision` answers `{"unchanged": true, "revision": ...}` without rows when
 nothing changed, after checking that page's rows against their files.
 
+`--session ID` (`launch_id:...` or `run_id:...`, with `--host` for a session on
+another computer) pages one session's view of the stage: the tasks its
+identity owns, the session of a task in progress, in review or done, or the
+target of a queued one (a sub-agent or new-session target counts for its
+parent), plus To do and Backlog tasks for any session. A session's name never
+matches: two sessions with the same name keep separate views. Rows, order,
+cursors and `revision` are those of the unfiltered stage; `position`, `total`
+and `counts` count the view, `damaged` stays the project's, and the reply adds
+`session` (`host`, `session_id`). A cursor names a row, so tasks added to the
+view before it never shift the page after it. The view reads two bounded
+ranges of the index (the owner's rows and the unassigned rows), never every
+row of the stage.
+
 Pages come from a local index of task headers in the project's replica folder
-(`task-index-v1.sqlite3`): a disposable cache, never replicated, rebuilt
+(`task-index-v2.sqlite3`): a disposable cache, never replicated, rebuilt
 silently from the task documents when it is missing, damaged or of another
-version, and never a reason for a read to fail. Each save notes the task in the
+version, and never a reason for a read to fail. An older hgs that shares the
+state folder keeps its own `task-index-v1.sqlite3`, which this one never
+opens, migrates or removes, so the two never rebuild each other's index. Each save notes the task in the
 project's change journal (`changes`, a bounded hint that is only ever replaced,
 never written through), so a read decodes only changed tasks. Every task
 file's stamp (length, modification time, inode) is also checked at least every

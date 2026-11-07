@@ -2012,11 +2012,13 @@ impl Task {
     /// Paths are normalized at task creation/editing; directory containment
     /// compares components so `src/api` never contains `src/apis`.
     pub(crate) fn output_overlaps(&self, other: &Task) -> bool {
-        self.output.iter().any(|a| other.output.iter().any(|b| {
-            let a: Vec<_> = a.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
-            let b: Vec<_> = b.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
-            a.starts_with(&b) || b.starts_with(&a)
-        }))
+        self.output.iter().any(|a| other.output.iter().any(|b| Self::paths_overlap(a, b)))
+    }
+    /// One output path contains the other, compared by components.
+    pub(crate) fn paths_overlap(a: &str, b: &str) -> bool {
+        let a: Vec<_> = a.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
+        let b: Vec<_> = b.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
+        a.starts_with(&b) || b.starts_with(&a)
     }
 
     pub(crate) fn rework(&self) -> bool {

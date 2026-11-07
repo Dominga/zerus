@@ -2337,6 +2337,31 @@ member's folder from the base or checks it out; a returned or reopened task
 gets its existing branch. Branches are never deleted. Without `branch_per_task`
 a member keeps one branch, as before.
 
+Tasks that write the same files never run apart (owner, 2026-11-07). Two open
+tasks whose `output` paths overlap (one path contains the other, by
+components) must be chained: unless one waits for the other's acceptance
+through hard dependencies (or `all_hard`), plan validation reports an
+`outputs` error naming both tasks and the shared paths, so the plan does not
+run and an `extend` or `add-to-phase` with such a task is refused. The
+dispatcher enforces the same rule team-wide, whatever the plan says: a task
+waits while an open task with an overlapping output has reached a member and is
+not decided (assigned, in progress, reported, in a stage, or sent back), and of
+two ready ones only the first in dispatch order starts; it never goes to
+another member to run beside it. Two returned tasks never wait on each other:
+the lower number goes first. A task without `output` is not held by this rule.
+
+Before a hand-out, after its task branch, Zerus merges the accepted work of the
+task's dependencies (direct or through another dependency) into the member's
+branch: for each accepted task, the commit its accepted report named
+(`folder_head`), fetched from its author's folder when the member's folder
+lacks it, oldest task first, skipped when the branch holds it already. The
+attempt records a `dependencies` prepare step and the hand-out says what was
+merged. A folder with uncommitted changes, a commit that cannot be fetched or a
+conflicting merge is never left to the member: a conflict is aborted, the
+folder put back, and the task waits for the lead with the conflicting files and
+`hgs team retry`. The lead's own task and a member working in the team's own
+folder are left alone; a member on another computer gets a `skipped` step.
+
 ### Scaling and draining the roster
 
 `hgs team scale --json {"request_id":"<uuid>","team":"<id>","role":"Backend",

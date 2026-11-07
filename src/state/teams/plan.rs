@@ -1,7 +1,7 @@
 //! WhiteWh fork: pure rules of a team's task graph, as the prototype
 //! (design/agent-teams/index.html: cycleNodes, layersOf, chainOf, readyTasks,
 //! planErrors) defines them. Edges run from a dependency to its dependent.
-use super::model::{Approval, DependencyKind, MemberState, Phase, PhaseAcceptance, PhasePause, PhaseState, Task, TaskStatus, Team};
+use super::model::{Approval, AttemptState, DependencyKind, MemberState, Phase, PhaseAcceptance, PhasePause, PhaseState, Task, TaskStatus, Team};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -343,8 +343,8 @@ fn urgent(team: &Team, id: u32) -> bool {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub(crate) struct Finding {
-    /// `assignee`, `cycle`, `dependency`, `member`, `offline`, `members` or
-    /// `models` (U45).
+    /// `assignee`, `cycle`, `dependency`, `member`, `offline`, `members`,
+    /// `models` (U45) or `outputs` (task 155: `tasks` names the pair).
     pub kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task: Option<u32>,
@@ -455,6 +455,75 @@ pub(crate) fn phases_health(team: &Team) -> BTreeMap<String, Health> {
         .into_iter()
         .map(|phase| (phase.to_string(), phase_health(team, phase)))
         .collect()
+}
+
+/// Task 155 (owner, 2026-11-07): a task that reached a member and is not
+/// decided holds its outputs: its work sits on a branch nobody merged yet.
+pub(crate) fn holds_outputs(task: &Task) -> bool {
+    !task.status.finished()
+        && !task.output.is_empty()
+        && (!matches!(task.status, TaskStatus::Pending | TaskStatus::Draft)
+            || task.attempts.iter().any(|attempt| attempt.state != AttemptState::Refused))
+}
+
+/// Task 155: the open tasks whose outputs overlap `task`'s and that already
+/// run, so `task` may not start beside them. A task with a member now always
+/// holds; when both only wait to be handed out again (a returned task), the
+/// lower number goes first, so two never wait on each other. A task without
+/// declared outputs is never held here.
+pub(crate) fn output_holders(team: &Team, task: &Task) -> Vec<u32> {
+    if task.output.is_empty() || task.status.finished() {
+        return Vec::new();
+    }
+    let started = holds_outputs(task);
+    team.tasks
+        .iter()
+        .filter(|other| other.id != task.id && holds_outputs(other) && task.output_overlaps(other))
+        .filter(|other| !(started && matches!(other.status, TaskStatus::Pending | TaskStatus::Draft) && other.id > task.id))
+        .map(|other| other.id)
+        .collect()
+}
+
+/// Every task `id` waits for through dependencies that hold it until they are
+/// accepted (hard ones, or all with `all_hard`).
+fn hard_ancestors(tasks: &[Task], id: u32, all_hard: bool) -> BTreeSet<u32> {
+    let mut seen = BTreeSet::new();
+    let mut pending = vec![id];
+    while let Some(x) = pending.pop() {
+        if let Some(task) = tasks.iter().find(|task| task.id == x) {
+            for dep in hard_deps(task, all_hard) {
+                if seen.insert(dep) {
+                    pending.push(dep);
+                }
+            }
+        }
+    }
+    seen
+}
+
+/// Task 155: pairs of open tasks whose outputs overlap and neither of which
+/// waits for the other's acceptance, lower number first. They would run on
+/// separate branches at once; the plan chains them instead.
+pub(crate) fn unchained_overlaps(team: &Team) -> Vec<(u32, u32)> {
+    let open: Vec<&Task> = team.tasks.iter().filter(|task| !task.status.finished() && !task.output.is_empty()).collect();
+    let mut ancestors: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+    let mut pairs = Vec::new();
+    for (i, a) in open.iter().enumerate() {
+        for b in &open[i + 1..] {
+            if !a.output_overlaps(b) {
+                continue;
+            }
+            let (first, second) = if a.id < b.id { (a.id, b.id) } else { (b.id, a.id) };
+            let chained = [(first, second), (second, first)].iter().any(|(up, down)| {
+                ancestors.entry(*down).or_insert_with(|| hard_ancestors(&team.tasks, *down, team.settings.all_hard)).contains(up)
+            });
+            if !chained {
+                pairs.push((first, second));
+            }
+        }
+    }
+    pairs.sort_unstable();
+    pairs
 }
 
 fn hard_deps(task: &Task, all_hard: bool) -> Vec<u32> {
@@ -932,6 +1001,22 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
                 ));
             }
         }
+    }
+    // Task 155 (owner, 2026-11-07): open tasks whose outputs overlap never run
+    // apart on separate branches; the lead chains them with a dependency.
+    for (first, second) in unchained_overlaps(team) {
+        let (Some(a), Some(b)) = (team.task(first), team.task(second)) else { continue };
+        let shared: Vec<&str> = a.output.iter().filter(|path| b.output.iter().any(|other| Task::paths_overlap(path, other))).map(String::as_str).collect();
+        found.errors.push(Finding {
+            kind: "outputs",
+            task: Some(second),
+            member: None,
+            tasks: vec![first, second],
+            text: format!(
+                "#{first} {} and #{second} {} both write {}: chain them (a hard dependency of #{second} on #{first}) so #{second} starts from #{first}'s accepted work",
+                a.title, b.title, shared.join(", ")
+            ),
+        });
     }
     let cycles = cycle_tasks(&team.tasks);
     if !cycles.is_empty() {

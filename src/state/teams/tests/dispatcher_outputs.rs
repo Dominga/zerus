@@ -1,0 +1,209 @@
+// Task 155 (owner, 2026-11-07): tasks that write the same files never run
+// apart, and a dependent task starts from its predecessors' accepted work.
+use super::*;
+
+fn outputs(team: &mut Team, id: u32, paths: &[&str]) {
+    team.task_mut(id).unwrap().output = paths.iter().map(|path| path.to_string()).collect();
+}
+
+fn overlap_errors(team: &Team) -> Vec<plan::Finding> {
+    plan::validate(team, &BTreeSet::new()).errors.into_iter().filter(|finding| finding.kind == "outputs").collect()
+}
+
+#[test]
+fn overlapping_outputs_must_be_chained_by_the_plan() {
+    let mut team = team();
+    // #1 and #2 both write crates/lore; #3 writes elsewhere.
+    outputs(&mut team, 1, &["crates/lore"]);
+    outputs(&mut team, 2, &["crates/lore/src/lib.rs"]);
+    outputs(&mut team, 3, &["docs/lore.md"]);
+    let found = overlap_errors(&team);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!((found[0].task, found[0].tasks.clone()), (Some(2), vec![1, 2]));
+    assert!(found[0].text.contains("#1 API and #2 More API both write crates/lore") && found[0].text.contains("chain them"), "{}", found[0].text);
+    // A soft dependency lets both run at once: still an error.
+    team.task_mut(2).unwrap().deps = vec![Dependency { task: 1, kind: DependencyKind::Soft }];
+    assert_eq!(overlap_errors(&team).len(), 1);
+    // A hard one, or every dependency hard, chains them.
+    team.settings.all_hard = true;
+    assert!(overlap_errors(&team).is_empty());
+    team.settings.all_hard = false;
+    team.task_mut(2).unwrap().deps = vec![Dependency { task: 1, kind: DependencyKind::Hard }];
+    assert!(overlap_errors(&team).is_empty());
+    // Through another task too: #3 waits for #2, which waits for #1.
+    outputs(&mut team, 3, &["crates"]);
+    assert_eq!(overlap_errors(&team).iter().map(|finding| finding.tasks.clone()).collect::<Vec<_>>(), vec![vec![1, 3], vec![2, 3]]);
+    team.task_mut(3).unwrap().deps = vec![Dependency { task: 2, kind: DependencyKind::Hard }];
+    assert!(overlap_errors(&team).is_empty());
+    // A decided task no longer holds its outputs.
+    team.task_mut(3).unwrap().deps.clear();
+    for id in [1, 2] {
+        team.task_mut(id).unwrap().status = TaskStatus::Accepted;
+    }
+    assert!(overlap_errors(&team).is_empty());
+}
+
+#[test]
+fn a_plan_or_a_phase_with_unchained_overlapping_outputs_is_refused() {
+    let none = BTreeSet::new();
+    let mut events = Vec::new();
+    let (mut team, _) = ops::create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+    ops::apply(&mut team, "plan", &json!({"tasks":[
+        {"id":1,"title":"Lore core","assignee":"lead","output":["crates/lore"]},
+        {"id":2,"title":"Lore search","assignee":"lead","output":["crates/lore/src/search.rs"]}]}), &Actor::Human, &none, &mut events).unwrap();
+    let error = ops::apply(&mut team, "approve", &json!({}), &Actor::Human, &none, &mut events).unwrap_err().to_string();
+    assert!(error.contains("both write crates/lore") && error.contains("hard dependency of #2 on #1"), "{error}");
+    // Chained, the plan runs.
+    team.task_mut(2).unwrap().deps = vec![Dependency { task: 1, kind: DependencyKind::Hard }];
+    ops::apply(&mut team, "approve", &json!({}), &Actor::Human, &none, &mut events).unwrap();
+    // A later phase whose task writes the same crate as an open one is refused
+    // until it is chained to it.
+    let error = ops::apply(&mut team, "extend", &json!({"tasks":[{"id":3,"title":"Lore CLI","assignee":"lead","output":["crates/lore/src/cli.rs"]}]}),
+        &Actor::Human, &none, &mut events).unwrap_err().to_string();
+    assert!(error.contains("phase error") && error.contains("#3 Lore CLI"), "{error}");
+    ops::apply(&mut team, "extend", &json!({"tasks":[{"id":3,"title":"Lore CLI","assignee":"lead","output":["crates/lore/src/cli.rs"],
+        "deps":[{"task":2,"kind":"hard"}]}]}), &Actor::Human, &none, &mut events).unwrap();
+}
+
+#[test]
+fn a_task_never_starts_beside_an_open_task_writing_the_same_files() {
+    let (mut team, seen) = team_with_two_backends();
+    // #1 runs on dev; #2 is dev2's and writes inside #1's output.
+    team.task_mut(1).unwrap().attempts.push(Attempt { n: 1, member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+    team.task_mut(1).unwrap().status = TaskStatus::InProgress;
+    team.task_mut(2).unwrap().assignee = "dev2".into();
+    outputs(&mut team, 1, &["crates/lore"]);
+    outputs(&mut team, 2, &["crates/lore/src/cli.rs"]);
+    let started = |team: &Team| steps(team, &seen, 1.0).into_iter().filter(|step| matches!(step, Step::HandOut { task: 2, .. } | Step::Rebalance { task: 2, .. })).count();
+    assert_eq!(started(&team), 0, "a free member never runs it beside #1");
+    assert_eq!(plan::output_holders(&team, team.task(2).unwrap()), vec![1]);
+    assert!(!can_hand_out(&team, 2), "the hand-out itself rechecks it");
+    // Reported and undecided, #1's work is still on its own branch.
+    team.task_mut(1).unwrap().status = TaskStatus::Submitted;
+    team.task_mut(1).unwrap().attempts[0].state = AttemptState::Reported;
+    assert_eq!(started(&team), 0);
+    // Sent back, #1 still holds its outputs while it waits for dev again.
+    team.task_mut(1).unwrap().status = TaskStatus::Pending;
+    team.task_mut(1).unwrap().attempts[0].state = AttemptState::Rejected;
+    assert_eq!(plan::output_holders(&team, team.task(2).unwrap()), vec![1]);
+    // Decided, #2 starts.
+    team.task_mut(1).unwrap().status = TaskStatus::Accepted;
+    assert!(steps(&team, &seen, 1.0).contains(&Step::HandOut { task: 2, member: "dev2".into() }));
+    assert!(can_hand_out(&team, 2));
+    // Separate files run side by side as before.
+    team.task_mut(1).unwrap().status = TaskStatus::InProgress;
+    outputs(&mut team, 2, &["crates/watch"]);
+    assert!(steps(&team, &seen, 1.0).contains(&Step::HandOut { task: 2, member: "dev2".into() }));
+}
+
+#[test]
+fn two_ready_tasks_writing_the_same_files_start_one_at_a_time() {
+    let (mut team, seen) = team_with_two_backends();
+    team.task_mut(2).unwrap().assignee = "dev2".into();
+    outputs(&mut team, 1, &["crates/lore"]);
+    outputs(&mut team, 2, &["crates/lore"]);
+    // Both members are free; only the first in the dispatch order starts.
+    let now = steps(&team, &seen, 1.0);
+    assert!(now.contains(&Step::HandOut { task: 1, member: "dev".into() }), "{now:?}");
+    assert!(!now.iter().any(|step| matches!(step, Step::HandOut { task: 2, .. } | Step::Rebalance { task: 2, .. })), "{now:?}");
+    // Two returned tasks never wait on each other: the lower number goes first.
+    for (id, member) in [(1, "dev"), (2, "dev2")] {
+        team.task_mut(id).unwrap().attempts.push(Attempt { n: 1, member: member.into(), state: AttemptState::Rejected, ..Default::default() });
+    }
+    assert!(plan::output_holders(&team, team.task(1).unwrap()).is_empty());
+    assert_eq!(plan::output_holders(&team, team.task(2).unwrap()), vec![1]);
+    // A refused hand-out never reached anyone and holds nothing.
+    let mut refused = team.clone();
+    refused.task_mut(1).unwrap().attempts[0].state = AttemptState::Refused;
+    assert!(!plan::holds_outputs(refused.task(1).unwrap()));
+}
+
+#[test]
+fn a_dependent_task_starts_from_its_accepted_predecessors_commits() {
+    let root = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(root.path(), || {
+        let (lead, dev) = stage_repo(root.path());
+        // dev2 works in its own clone: its accepted commit is not in dev's worktree.
+        let other = root.path().join("dev2");
+        git_in(root.path(), &["clone", "-q", &lead.display().to_string(), &other.display().to_string()]);
+        git_in(&other, &["config", "user.name", "Zerus Test"]);
+        git_in(&other, &["config", "user.email", "test@example.com"]);
+        git_in(&other, &["checkout", "-q", "-b", "team/x/dev2"]);
+        std::fs::write(other.join("lore.txt"), "core\n").unwrap();
+        git_in(&other, &["add", "-A"]);
+        git_in(&other, &["commit", "-q", "-m", "Lore core"]);
+        let core = git_in(&other, &["rev-parse", "HEAD"]);
+        std::fs::write(other.join("gate.txt"), "dev2\n").unwrap();
+        git_in(&other, &["commit", "-q", "-am", "Gate by dev2"]);
+        let gate = git_in(&other, &["rev-parse", "HEAD"]);
+        let mut team = stage_team(&lead, &dev, "none", &|_| super::super::super::catalog::builtin());
+        let mut dev2 = team.member("dev").unwrap().clone();
+        dev2.id = "dev2".into();
+        dev2.folder = MemberFolder::Clone;
+        dev2.directory = other.display().to_string();
+        dev2.session = Some(SessionRef { name: "codex/x/dev2".into(), run_id: "r3".into(), ..Default::default() });
+        team.members.push(dev2);
+        let accepted = |id: u32, title: &str, commit: &str| Task {
+            id,
+            title: title.into(),
+            assignee: "dev2".into(),
+            status: TaskStatus::Accepted,
+            attempts: vec![Attempt { n: 1, member: "dev2".into(), state: AttemptState::Reported, folder_head: commit.into(), folder_branch: "team/x/dev2".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        team.tasks.push(accepted(3, "Lore core", &core));
+        team.tasks.push(accepted(4, "Gate by dev2", &gate));
+        team.task_mut(1).unwrap().deps = vec![Dependency { task: 3, kind: DependencyKind::Hard }];
+        team.task_mut(2).unwrap().deps = vec![Dependency { task: 4, kind: DependencyKind::Hard }];
+        let mut store = Store::open_at(&super::super::super::store::path(), true).unwrap();
+        store.create(&uuid::Uuid::new_v4().to_string(), &json!({}), team, vec![]).unwrap();
+        // #1 depends on the accepted #3: its commit is fetched from dev2's
+        // clone and merged into dev's branch before the hand-out says so.
+        let texts = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let sent = texts.clone();
+        set_fake_hgs(Some(Box::new(move |_, args: &[&str], _| {
+            assert_eq!(args.first().copied(), Some("send"));
+            sent.borrow_mut().push(args.join(" "));
+            Ok(fake_output(0, r#"{"status":"submitted"}"#, ""))
+        })));
+        hand_out(&mut store, STAGE_TEAM, 1, "dev", None, "").unwrap();
+        let saved = store.load(STAGE_TEAM).unwrap().unwrap();
+        let attempt = saved.task(1).unwrap().attempts.last().unwrap().clone();
+        assert_eq!(attempt.state, AttemptState::Delivered);
+        let step = attempt.prepare.iter().find(|step| step.step == "dependencies").expect("the merge step goes with the attempt");
+        assert_eq!((step.to.as_str(), step.result.as_str()), ("#3", "done"), "{step:?}");
+        assert!(step.reason.contains(&format!("merged #3 ({})", &core[..9])), "{step:?}");
+        assert!(!git_fails(&dev, &["merge-base", "--is-ancestor", &core, "HEAD"]), "dev's branch holds #3's accepted commit");
+        assert_eq!(std::fs::read_to_string(dev.join("lore.txt")).unwrap().trim(), "core");
+        assert_eq!(git_in(&dev, &["status", "--porcelain"]), "");
+        let text = hand_off_text(&saved, saved.task(1).unwrap(), &attempt, "", "");
+        assert!(text.contains("Zerus merged #3") && text.contains("into your branch before this hand-out"), "{text}");
+        // Once it is there, the next hand-out finds nothing to merge.
+        assert_eq!(prepare_dependencies(&saved, 1, "dev").unwrap().result, "skipped");
+        // Nothing accepted yet, or the lead's own task: no step at all.
+        assert!(prepare_dependencies(&saved, 3, "dev").is_none());
+        assert!(prepare_dependencies(&saved, 1, "lead").is_none());
+        // #2 depends on #4, whose commit conflicts with dev's own gate.txt: the
+        // merge is aborted, the folder put back and the lead told; nothing is
+        // left to the member and nothing is sent.
+        std::fs::write(dev.join("gate.txt"), "dev\n").unwrap();
+        git_in(&dev, &["commit", "-q", "-am", "Gate by dev"]);
+        let before = git_in(&dev, &["rev-parse", "HEAD"]);
+        let count = texts.borrow().len();
+        hand_out(&mut store, STAGE_TEAM, 2, "dev", None, "").unwrap();
+        set_fake_hgs(None);
+        assert_eq!(texts.borrow().len(), count, "nothing is sent while the merge conflicts");
+        assert_eq!(git_in(&dev, &["rev-parse", "HEAD"]), before);
+        assert_eq!(git_in(&dev, &["status", "--porcelain", "--untracked-files=no"]), "");
+        assert!(git_fails(&dev, &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]), "no merge is left in progress");
+        let saved = store.load(STAGE_TEAM).unwrap().unwrap();
+        let task = saved.task(2).unwrap();
+        assert!(task.attempts.is_empty());
+        let waits = task.waits.as_ref().unwrap();
+        assert_eq!((waits.on.as_slice(), waits.state.as_str()), (&["dependencies".to_owned()][..], "refused"));
+        assert!(waits.reason.contains("#4's accepted commit") && waits.reason.contains("conflicts in gate.txt") && waits.reason.contains("put the folder back"), "{}", waits.reason);
+        let item = inbox::items(&saved).into_iter().find(|item| item.kind == "task_waits" && item.task == Some(2)).expect("one inbox item for the lead");
+        assert!(item.summary.contains("gate.txt") && item.command.contains("hgs team retry"), "{item:?}");
+        assert!(!plan::ready(&saved).contains(&2), "never retried on its own");
+    });
+}

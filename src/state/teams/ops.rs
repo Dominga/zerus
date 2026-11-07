@@ -880,6 +880,8 @@ fn phase_errors(validation: &plan::Validation, ids: &BTreeSet<u32>, any_cycle: b
         .iter()
         .filter(|finding| {
             finding.task.is_some_and(|task| ids.contains(&task))
+                // Task 155: an overlap with an existing task is the new task's.
+                || (finding.kind == "outputs" && finding.tasks.iter().any(|task| ids.contains(task)))
                 || (finding.kind == "cycle" && (any_cycle || finding.tasks.iter().any(|task| ids.contains(task))))
                 || finding.kind == "folder"
         })

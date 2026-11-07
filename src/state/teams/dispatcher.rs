@@ -1434,6 +1434,9 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     // C6: among a member's ready tasks the one with the most transitive
     // dependants goes first, then the lowest number.
     let ready = plan::dispatch_order(team, ready_ids);
+    // Task 155: the outputs of the tasks taken in this tick's order; a later
+    // task writing the same files waits for them.
+    let mut claimed: Vec<&Task> = Vec::new();
     for id in ready {
         let Some(task) = team.task(id) else { continue };
         // Spec 0: a refused or unconfirmed step waits for the lead or you.
@@ -1448,6 +1451,16 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             })
         }) {
             continue;
+        }
+        // Task 155 (owner, 2026-11-07): tasks writing the same files never run
+        // apart on separate branches. One waits while an open task with an
+        // overlapping output runs, or while an earlier one in this order waits
+        // for its member; it never goes to another member to run beside it.
+        if !plan::output_holders(team, task).is_empty() || claimed.iter().any(|other| other.output_overlaps(task)) {
+            continue;
+        }
+        if !task.output.is_empty() {
+            claimed.push(task);
         }
         // U45: a task with models or for a role goes to a member that can run
         // one of its models, switched first when it must be.
@@ -1587,7 +1600,11 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             if !available(member, &busy, None) || busy.contains(member.id.as_str()) {
                 continue;
             }
-            if let Some(task) = ahead.iter().filter_map(|id| team.task(*id)).find(|task| task.assignee == member.id) {
+            // Task 155: work ahead never runs beside a task writing the same files.
+            if let Some(task) = ahead.iter().filter_map(|id| team.task(*id)).find(|task| {
+                task.assignee == member.id && plan::output_holders(team, task).is_empty() && !claimed.iter().any(|other| other.output_overlaps(task))
+            }) {
+                claimed.push(task);
                 busy.insert(member.id.as_str());
                 steps.push(Step::WorkAhead { task: task.id, member: member.id.clone() });
             }
@@ -1831,6 +1848,11 @@ fn can_hand_out(team: &Team, task_id: u32) -> bool {
     if team.status != TeamStatus::Running {
         return false;
     }
+    // Task 155: rechecked at the hand-out itself: an open task writing the
+    // same files that started meanwhile holds this one back.
+    if team.task(task_id).is_some_and(|task| !plan::output_holders(team, task).is_empty()) {
+        return false;
+    }
     if plan::ready(team).contains(&task_id) || work_ahead_tasks(team).contains(&task_id) {
         return true;
     }
@@ -2072,6 +2094,10 @@ fn hand_off_text_rules(
         .collect();
     if !deps.is_empty() {
         text += &format!("\nDepends on: {}\n", deps.join(", "));
+    }
+    // Task 155: the accepted work Zerus merged into the member's branch.
+    if let Some(step) = attempt.prepare.iter().find(|step| step.step == "dependencies" && step.result == "done") {
+        text += &format!("Zerus {} into your branch before this hand-out; build on it.\n", step.reason);
     }
     text += &dependencies_text(team, task, report_host);
     // Owner 2026-10-31: the hand-out says the task's time estimate.
@@ -4191,6 +4217,150 @@ pub(crate) fn prepare_branch(team: &Team, task_id: u32, member_id: &str) -> Opti
     }
 }
 
+/// Task 155 (owner, 2026-11-07): an accepted task a hand-out builds on: the
+/// commit its accepted report named, who made it and on which branch.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AcceptedWork {
+    pub task: u32,
+    pub commit: String,
+    pub author: String,
+    pub branch: String,
+}
+
+/// Task 155: the accepted work `task_id` starts from: every accepted task it
+/// depends on, directly or through another dependency, whose accepted report
+/// named a commit; in number order, so a predecessor merges before the tasks
+/// built on it.
+pub(crate) fn accepted_predecessors(team: &Team, task_id: u32) -> Vec<AcceptedWork> {
+    let mut seen = BTreeSet::new();
+    let mut pending = vec![task_id];
+    while let Some(id) = pending.pop() {
+        for dep in team.task(id).map(|task| task.deps.as_slice()).unwrap_or_default() {
+            if dep.task != task_id && seen.insert(dep.task) {
+                pending.push(dep.task);
+            }
+        }
+    }
+    seen.into_iter()
+        .filter_map(|id| team.task(id))
+        .filter(|task| task.status == TaskStatus::Accepted)
+        .filter_map(|task| {
+            let attempt = task.attempts.iter().rev().find(|attempt| attempt.state == AttemptState::Reported && !attempt.folder_head.is_empty())?;
+            Some(AcceptedWork { task: task.id, commit: attempt.folder_head.clone(), author: attempt.member.clone(), branch: attempt.folder_branch.clone() })
+        })
+        .collect()
+}
+
+/// Task 155 (owner, 2026-11-07): before the hand-out, the accepted work of
+/// the task's dependencies is merged into the member's branch, outside any
+/// sandbox, so a dependent task starts from its predecessors' accepted
+/// commits. A commit the folder lacks is fetched from its author's folder; one
+/// the branch holds already is skipped. A conflict is aborted, the folder put
+/// back and the task waits for the lead with the files: it is never left to
+/// the member. None when nothing is accepted yet, for the lead's own task and
+/// for a member working in the team's own folder (the lead merges there).
+pub(crate) fn prepare_dependencies(team: &Team, task_id: u32, member_id: &str) -> Option<PrepareStep> {
+    let wanted = accepted_predecessors(team, task_id);
+    if wanted.is_empty() || member_id == team.lead {
+        return None;
+    }
+    let member = team.member(member_id)?;
+    if member.folder == MemberFolder::Shared {
+        return None;
+    }
+    let names = wanted.iter().map(|work| format!("#{}", work.task)).collect::<Vec<_>>().join(", ");
+    let step = |from: &str, result: &str, reason: String| PrepareStep {
+        step: "dependencies".into(),
+        member: String::new(),
+        from: from.to_owned(),
+        to: names.clone(),
+        at: now(),
+        result: result.into(),
+        reason,
+    };
+    if !member.computer.is_empty() {
+        return Some(step("", "skipped", format!("the accepted work of {names} is merged only in a folder on this computer, not on {}", member.computer)));
+    }
+    let folder = match member_folder_path(team, member) {
+        Ok(folder) if !folder.is_empty() => folder,
+        Ok(_) => return Some(step("", "refused", "the member has no folder".into())),
+        Err(error) => return Some(step("", "refused", format!("{error:#}"))),
+    };
+    if same_path(&folder, &team.folder) {
+        return None;
+    }
+    let head = match git_bounded(&folder, &["rev-parse", "--short", "HEAD"]) {
+        Ok(head) => head,
+        Err((_, error)) => return Some(step("", "refused", format!("the folder's HEAD was not read: {error}"))),
+    };
+    match git_bounded(&folder, &["status", "--porcelain", "--untracked-files=no"]) {
+        Ok(changes) if changes.is_empty() => {}
+        Ok(_) => return Some(step(&head, "refused", format!("folder has changes, so the accepted work of {names} was not merged"))),
+        Err((_, error)) => return Some(step(&head, "refused", format!("the folder's changes were not read: {error}"))),
+    }
+    let short = |commit: &str| commit.chars().take(9).collect::<String>();
+    let mut merged = Vec::new();
+    for work in &wanted {
+        let object = format!("{}^{{commit}}", work.commit);
+        if git_bounded(&folder, &["cat-file", "-e", &object]).is_err() {
+            let source = team
+                .member(&work.author)
+                .filter(|author| author.computer.is_empty())
+                .and_then(|author| member_folder_path(team, author).ok())
+                .filter(|source| !source.is_empty());
+            let Some(source) = source else {
+                return Some(step(&head, "refused", format!(
+                    "#{}'s accepted commit {} is not in this folder and its author's folder is not on this computer",
+                    work.task, short(&work.commit)
+                )));
+            };
+            let refspec = if work.branch.is_empty() || work.branch == "HEAD" { "HEAD".to_owned() } else { work.branch.clone() };
+            match git_bounded(&folder, &["fetch", "--no-tags", "--quiet", &source, &refspec]) {
+                Err((true, error)) => return Some(step(&head, "uncertain", error)),
+                _ if git_bounded(&folder, &["cat-file", "-e", &object]).is_ok() => {}
+                Err((false, error)) => {
+                    return Some(step(&head, "refused", format!("#{}'s accepted commit {} was not fetched from {source}: {error}", work.task, short(&work.commit))))
+                }
+                Ok(_) => return Some(step(&head, "refused", format!("#{}'s accepted commit {} is not on {refspec} in {source}", work.task, short(&work.commit)))),
+            }
+        }
+        match git_bounded(&folder, &["merge-base", "--is-ancestor", &work.commit, "HEAD"]) {
+            Ok(_) => continue,
+            Err((true, error)) => return Some(step(&head, "uncertain", error)),
+            Err((false, _)) => {}
+        }
+        let message = format!("Merge the accepted work of #{} ({}) before task #{task_id}", work.task, short(&work.commit));
+        match git_bounded(&folder, &["merge", "--no-ff", "--no-edit", "-m", &message, &work.commit]) {
+            Ok(_) => merged.push(format!("#{} ({})", work.task, short(&work.commit))),
+            Err((timed_out, error)) => {
+                let files = git_bounded(&folder, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
+                let files: Vec<&str> = files.lines().map(str::trim).filter(|line| !line.is_empty()).take(20).collect();
+                let in_merge = git_bounded(&folder, &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]).is_ok();
+                let restored = !in_merge || git_bounded(&folder, &["merge", "--abort"]).is_ok();
+                let why = if files.is_empty() { format!("was not merged: {error}") } else { format!("conflicts in {}", files.join(", ")) };
+                let earlier = if merged.is_empty() { String::new() } else { format!(" ({} merged before it stay)", merged.join(", ")) };
+                return Some(if timed_out || !restored {
+                    step(&head, "uncertain", format!(
+                        "#{}'s accepted commit {} {why}; the merge into {folder} did not finish cleanly and the folder may still be mid-merge",
+                        work.task, short(&work.commit)
+                    ))
+                } else {
+                    step(&head, "refused", format!(
+                        "#{}'s accepted commit {} {why}. Zerus put the folder back{earlier}; merge it into the member's branch \
+                         ({folder}) and resolve it, or reassign the task, then retry",
+                        work.task, short(&work.commit)
+                    ))
+                });
+            }
+        }
+    }
+    Some(if merged.is_empty() {
+        step(&head, "skipped", format!("the branch holds the accepted work of {names} already"))
+    } else {
+        step(&head, "done", format!("merged {}", merged.join(", ")))
+    })
+}
+
 /// Spec 0: a refused or unconfirmed step before a hand-out leaves the task
 /// waiting with its reason and one inbox item for the lead; it is never
 /// retried on its own.
@@ -4463,6 +4633,19 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
             Ok(())
         })?;
     }
+    // Task 155: the accepted work of the task's dependencies, merged into the
+    // member's branch (after its task branch is checked out); a conflict or an
+    // unconfirmed merge leaves the task waiting for the lead.
+    if let Some(step) = if can_hand_out(&team, task_id) { prepare_dependencies(&team, task_id, member_id) } else { None } {
+        if matches!(step.result.as_str(), "refused" | "uncertain") {
+            return change(store, team_id, |team, events| task_waits(team, task_id, member_id, &step, events));
+        }
+        change(store, team_id, |team, _| {
+            let task = team.task_mut(task_id).context("unknown task")?;
+            super::models::record(task, PrepareStep { member: member_id.to_owned(), ..step });
+            Ok(())
+        })?;
+    }
     let action = context_before_task(&team, &member);
     if action.is_empty() {
         return hand_out_now(store, team_id, task_id, member_id, from, host, Preparation::default());
@@ -4588,13 +4771,15 @@ fn hand_out_now(
             ..Default::default()
         });
         // Spec 1: the steps taken for this hand-out go with its attempt, in
-        // their order: branch (U48), model (U45), context (U46).
+        // their order: branch (U48), dependencies (task 155), model (U45),
+        // context (U46).
         let mut prepared = super::models::take_for_attempt(task, member_id);
         prepared.extend(prepare.iter().cloned());
         prepared.sort_by_key(|step| match step.step.as_str() {
             "branch" => 0,
-            "model" => 1,
-            _ => 2,
+            "dependencies" => 1,
+            "model" => 2,
+            _ => 3,
         });
         for step in &mut prepared {
             step.member.clear();

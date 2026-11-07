@@ -287,6 +287,13 @@ fn a_fresh_retry_leaves_the_failed_member_even_with_other_work() {
                 for member in &mut team.members { member.model = "test-model".into(); }
             }
             let next = Step::Rebalance { task: 1, from: "dev".into(), to: "dev2".into() };
+            if overlapping {
+                // Task 155: #2 writes the same file and runs: the retry waits
+                // for it rather than run beside it on another branch.
+                assert!(!steps(&team, &seen, 100.0).iter().any(|step| matches!(step, Step::Rebalance { task: 1, .. } | Step::HandOut { task: 1, .. })),
+                    "modeled={modeled}");
+                continue;
+            }
             assert!(steps(&team, &seen, 100.0).contains(&next), "overlapping={overlapping} modeled={modeled}");
             let dir = tempfile::tempdir().unwrap();
             let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();

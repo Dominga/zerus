@@ -700,13 +700,21 @@ its computer's machine UUID and session ID, or by conversation for a parent an
 older `hgs` listed without one; names never match. A loop never hides a card.
 Cards show a large agent tile at the left: the agent's mark from the owner's
 design prototype (Claude, Codex, DeepSeek, Kimi and the shell; OpenCode keeps
-its glyph) on a neutral bordered tile, 34 px on cards and 22 px on compact
-rows. The artwork loads lazily, outside the entry bundle; until it arrives the
+its glyph) on a bordered tile, 34 px on cards and 22 px on compact rows. The
+tile uses the skin tokens `list.agent-tile` and `list.agent-tile-border`: the
+prototype's near-black tile with a thin outline in the dark skin, and a white
+tile with a firmer outline in the light skin, where it gives the colored marks
+their best contrast. The artwork loads lazily, outside the entry bundle; until it arrives the
 tile shows the provider glyph. A compact parent row takes a second line that
 sums up its child sessions: working of all, **Needs you**, **Asking** and
 **Errors** counts, with the same collapse toggle; childless compact rows stay
-one line. The summary is part of the row's accessible description. Rows stay
-transparent and paint a surface only on hover and selection.
+one line. On rows narrower than about 340 px the counters show their numbers
+only and the toggle keeps its place; the toggle's label and the row's
+accessible description keep every count in words. Rows stay transparent and
+paint a surface only on hover and selection. A selected card uses the skin's
+green-tinted card surface and an accent border, as in the owner's prototype,
+with attention, unread, draft and error edges drawn on top; while the list has
+keyboard focus the selected card also gets an accent ring.
 
 Supervised children draw no attention for requests their parent can handle.
 A child is supervised when its own computer lists its parent as `live`; rows
@@ -724,8 +732,9 @@ own mark, still counts. A person-only request notifies as for any session.
 When the parent is paused, stopped, exited, archived, not listed on the
 child's computer (including a parent on another computer) or gone, the child
 is ordinary again: a pending request that waited quietly is announced once,
-while replies seen meanwhile are not replayed. A supervised child shows a bell
-with an arrow before its title instead of the mute bell; the parent's **Team**
+while replies seen meanwhile are not replayed. A supervised child shows the
+crossed bell of Mute, dim, before its title (its tooltip and accessible name
+say which session supervises it); the parent's **Team**
 toggle adds **Asking** (quiet requests waiting for it) and **Needs you**
 (person-only requests), which never raise the parent's own attention.
 `client/core/tests/fixtures/supervised-attention.json` lists the cases the

@@ -277,9 +277,11 @@ The card adopts the large agent tile of the owner's prototype:
 
 * **Agent tile.** A 34 px rounded tile at the card's left, replacing the provider
   badge in the first line. Since the owner's 2026-11-07 feedback it shows the
-  prototype's agent artwork (20 px; 14 px on the 22 px compact tile) on a neutral
-  tile with a 1 px border, loaded lazily outside the entry bundle; the provider
-  glyph in the agent's color is the fallback. The account mark stays in the footer with its
+  prototype's agent artwork (20 px; 14 px on the 22 px compact tile) on a tile
+  with a 1 px border, loaded lazily outside the entry bundle; the provider
+  glyph in the agent's color is the fallback. The tile colors are skin tokens
+  (`list.agent-tile`, `list.agent-tile-border`): the prototype's `#0f1318` and
+  `#232932` in the dark skin, white and `#d3dae1` in the light skin. The account mark stays in the footer with its
   label. Compact rows use a 22 px tile before the mark and title.
 * **Card surface.** Rows stay transparent; hover and selection paint the
   surface, as before. An always-painted surface shipped in #1644 and was
@@ -331,9 +333,9 @@ same collapse toggle; the summary joins the row's accessible description.
 
 ### 3.4 Supervised indicator
 
-A supervised child shows a small 12 px "delegated" glyph (a bell with a
-downward arrow to the parent) before its title, in `--z-dim`, instead of the
-mute bell. Tooltip: "Supervised by PARENT. Only requests that need you notify
+A supervised child shows the crossed bell of Mute, 13 px, before its title in
+`--z-color-dim`, as in the owner's prototype (owner feedback 2026-11-07: a
+plain bell read as "notifications coming"). Tooltip: "Supervised by PARENT. Only requests that need you notify
 you." Its quiet badges are gray as for muted rows; a human signal keeps the
 amber badge and edge.
 

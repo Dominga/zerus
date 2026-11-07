@@ -1059,6 +1059,7 @@
   "set in Zerus": "задано в Zerus",
   "status": "статус",
   "stream ended": "поток завершён",
+  "the account keeps permissions per computer": "учетная запись хранит разрешения отдельно для каждого компьютера",
   "winget: %1": "winget: %1",
   "worktree %1": "рабочее дерево %1",
   "~%1 GB estimated": "~%1 ГБ по оценке",

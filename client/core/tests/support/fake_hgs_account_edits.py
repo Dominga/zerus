@@ -65,6 +65,10 @@ elif args[3] == "model-defaults":
     model, effort = args[args.index("--model") + 1], args[args.index("--effort") + 1]
     assert (not model and not effort) or (model == "model-a" and effort in ("", "low", "high"))
     profile["model_defaults"] = {"model": model, "effort": effort}
+    # A test hook: another desktop keeps this profile's permissions per
+    # computer right after the model is saved.
+    if (root / "scope-after-model").exists():
+        profile["permission_scope"] = "computer"
 else:
     raise AssertionError(args)
 catalog["revision"] = "r" + str(int(catalog["revision"][1:]) + 1)

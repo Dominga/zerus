@@ -315,21 +315,31 @@ impl Screens {
         id: &str,
     ) -> (Value, Option<Text>) {
         let mut missed = Vec::new();
-        // The shared mode is carried only while the account still shares
-        // it: a member may have switched to per computer since the dialog
-        // opened (the scope is outside the catalog revision).
-        let shared = carried.permission.is_some()
-            && self
-                .accounts(false)
-                .accounts
-                .iter()
-                .find(|account| account.key == carried.account)
-                .is_some_and(|account| !account.permissions_per_computer);
-        let carried = Carried {
-            permission: carried.permission.clone().filter(|_| shared),
-            ..carried.clone()
-        };
-        for (kind, values) in carried.edits() {
+        for (kind, mut values) in carried.edits() {
+            if kind == Kind::Permissions {
+                // The shared mode is carried only while the account still
+                // shares it, checked right before this write: a member may
+                // switch to per computer meanwhile, and the scope is outside
+                // the catalog revision (zerus-qxb1u, zerus-ii67q).
+                let shared = self
+                    .accounts(false)
+                    .accounts
+                    .iter()
+                    .find(|account| account.key == carried.account)
+                    .is_some_and(|account| !account.permissions_per_computer);
+                if !shared {
+                    missed.push(Arg::Text(zerus_client_core::text!(
+                        "permission mode (%1)",
+                        zerus_client_core::text!("the account keeps permissions per computer")
+                    )));
+                    continue;
+                }
+                // The new profile's computer checks the scope under its
+                // catalog lock; an older hgs keeps none.
+                if catalog["permission_scope_supported"] == true {
+                    values.expect_scope = "account".into();
+                }
+            }
             let saved =
                 Binding::capture(host.computer.clone(), host.machine_id.clone(), &catalog, id)
                     .and_then(|binding| binding.execute_values(&self.0.hgs, kind, &values));
@@ -826,7 +836,7 @@ mod tests {
         let account = screens.accounts(false).accounts[0].key.clone();
         // An account that is gone, or keeps permissions per computer, by
         // now carries no shared mode (zerus-f0uz8 review).
-        let (unshared, _) = screens.carry_settings(
+        let (unshared, note) = screens.carry_settings(
             &Carried {
                 permission: Some("bypass".into()),
                 account: "another account".into(),
@@ -837,6 +847,11 @@ mod tests {
             "work",
         );
         assert_eq!(unshared, catalog);
+        // The skipped setting is named (zerus-ii67q review).
+        assert!(note
+            .unwrap()
+            .english()
+            .contains("permission mode (the account keeps permissions per computer)"));
         let carried = Carried {
             model: Some(("model-a".into(), "high".into())),
             permission: Some("bypass".into()),
@@ -891,5 +906,100 @@ mod tests {
             "{}",
             note.english()
         );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn a_carried_permission_names_the_scope_its_computer_must_still_have() {
+        // zerus-ii67q: the new profile's computer checks the account scope
+        // under its catalog lock, so a restored per-computer profile, or one
+        // switched between the model and the permission write, keeps its
+        // own mode; the add stays and the skipped setting is named.
+        use std::os::unix::fs::PermissionsExt;
+        struct Scratch(std::path::PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let scratch = Scratch(std::env::temp_dir().join(format!(
+            "zerus-account-carry-scope-{}-{stamp}",
+            std::process::id()
+        )));
+        std::fs::create_dir(&scratch.0).unwrap();
+        let hgs = scratch.0.join("hgs");
+        std::fs::copy(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../core/tests/support/fake_hgs_account_edits.py"),
+            &hgs,
+        )
+        .unwrap();
+        std::fs::set_permissions(&hgs, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (screens, _, binding) = super::super::tests::fixture_at(hgs);
+        let mut catalog = screens.lock().accounts.catalogs[&binding.computer]
+            .data
+            .clone()
+            .unwrap();
+        catalog["permission_scope_supported"] = serde_json::json!(true);
+        catalog["profiles"][0]["permission_scope"] = serde_json::json!("account");
+        screens
+            .lock()
+            .accounts
+            .catalogs
+            .get_mut(&binding.computer)
+            .unwrap()
+            .data = Some(catalog.clone());
+        let host = HostBinding::capture(
+            binding.computer.clone(),
+            binding.machine_id.clone(),
+            &catalog,
+        )
+        .unwrap();
+        let account = screens.accounts(false).accounts[0].key.clone();
+        assert!(!screens.accounts(false).accounts[0].permissions_per_computer);
+        let carried = Carried {
+            model: Some(("model-a".into(), "high".into())),
+            permission: Some("bypass".into()),
+            account,
+        };
+        let mode = |value: &Value| value["profiles"][0]["permission_mode"].clone();
+        // A restored profile that keeps its permissions per computer, which
+        // the desktop has not heard of yet.
+        let mut restored = catalog.clone();
+        restored["profiles"][0]["permission_scope"] = serde_json::json!("computer");
+        std::fs::write(scratch.0.join("catalog.json"), restored.to_string()).unwrap();
+        let (after, note) = screens.carry_settings(&carried, &host, catalog.clone(), "work");
+        assert_eq!(
+            after["profiles"][0]["model_defaults"],
+            serde_json::json!({"model":"model-a","effort":"high"})
+        );
+        assert_ne!(mode(&after), "bypass");
+        let note = note
+            .expect("the skipped permission mode is named")
+            .english();
+        assert!(note.starts_with("Not copied: permission mode ("), "{note}");
+        let calls = std::fs::read_to_string(scratch.0.join("calls.jsonl")).unwrap();
+        assert!(calls.contains("\"--expect-scope\", \"account\""), "{calls}");
+        // A switch to per computer between the model and the permission write.
+        std::fs::write(scratch.0.join("catalog.json"), catalog.to_string()).unwrap();
+        std::fs::write(scratch.0.join("scope-after-model"), "").unwrap();
+        let (after, note) = screens.carry_settings(&carried, &host, catalog.clone(), "work");
+        assert_eq!(
+            after["profiles"][0]["model_defaults"],
+            serde_json::json!({"model":"model-a","effort":"high"})
+        );
+        assert_ne!(mode(&after), "bypass");
+        assert!(note
+            .expect("named")
+            .english()
+            .starts_with("Not copied: permission mode ("));
+        let saved: Value =
+            serde_json::from_slice(&std::fs::read(scratch.0.join("catalog.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved["profiles"][0]["permission_scope"], "computer");
+        assert_ne!(mode(&saved), "bypass");
     }
 }

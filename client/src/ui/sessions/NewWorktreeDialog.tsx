@@ -1,3 +1,4 @@
+import { TextInput } from "../lib/TextField";
 import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import type { CreatedWorktree } from "../../types";
 import { Icon } from "../lib/icons";
@@ -59,7 +60,7 @@ function BaseField(props: {
   });
   return (
     <div class="nw-base" ref={root}>
-      <input id="nw-base" class="field mono grow" role="combobox" aria-expanded={props.open} aria-controls="nw-base-list" aria-autocomplete="none"
+      <TextInput id="nw-base" class="field mono grow" role="combobox" aria-expanded={props.open} aria-controls="nw-base-list" aria-autocomplete="none"
         aria-activedescendant={props.open && active() >= 0 ? `nw-base-o-${active()}` : undefined}
         title={tr("Local branch, tag, commit or an already fetched remote branch (for example origin/main).")} value={props.value} disabled={props.disabled}
         onInput={(e) => props.onInput(e.currentTarget.value)} onKeyDown={keys} />
@@ -159,7 +160,7 @@ export function NewWorktreeDialog(props: {
           <p class="nw-context">{v().context}</p>
           <div class="form-row">
             <label for="nw-branch">{tr("New branch")}</label>
-            <input id="nw-branch" ref={branch} class="field mono" placeholder="feature/my-task" value={v().branch} disabled={v().busy}
+            <TextInput id="nw-branch" ref={branch} class="field mono" placeholder="feature/my-task" value={v().branch} disabled={v().busy}
               onInput={(e) => form.setBranch(e.currentTarget.value)} />
           </div>
           <div class="form-row">
@@ -170,7 +171,7 @@ export function NewWorktreeDialog(props: {
           <div class="form-row">
             <label for="nw-destination">{tr("New folder")}</label>
             <div class="row">
-              <input id="nw-destination" class="field mono grow" value={v().destination} disabled={v().busy} onInput={(e) => form.setDestination(e.currentTarget.value)} />
+              <TextInput id="nw-destination" class="field mono grow" value={v().destination} disabled={v().busy} onInput={(e) => form.setDestination(e.currentTarget.value)} />
               <button type="button" class="btn" disabled={v().busy} onClick={() => void parentFolder()}>{tr("Parent folder…")}</button>
             </div>
           </div>

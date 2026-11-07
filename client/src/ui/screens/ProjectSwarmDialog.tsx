@@ -1,3 +1,4 @@
+import { TextInput } from "../lib/TextField";
 import { For, Match, Show, Suspense, Switch, createEffect, createMemo, createSignal, lazy, onCleanup, onMount } from "solid-js";
 import { listen } from "@tauri-apps/api/event";
 import { Icon } from "../lib/icons";
@@ -89,7 +90,7 @@ export default function ProjectSwarmDialog(props: { projects: Project[]; connect
         <Show when={tab() === "conflicts"}><div id="swarm-conflicts" class="sw-page" role="tabpanel" aria-labelledby="swarm-conflicts-tab"><Suspense><SwarmConflicts view={view} working={state.working} changed={state.changed} resolve={state.resolve} report={setReviewError} /></Suspense></div></Show>
         <Show when={tab() === "computers"}>
           <div id="swarm-computers" class="sw-page" role="tabpanel" aria-labelledby="swarm-computers-tab">
-            <div class="row"><input class="field grow" type="search" maxLength={4096} placeholder={tr("Find a computer or connection…")} value={filter()} onInput={(e) => setFilter(e.currentTarget.value)} /><span class="hint tabular">{filter() ? `${rows().length} of ${computers().length} computers` : `${computers().length} computers`}</span></div>
+            <div class="row"><TextInput class="field grow" type="search" maxLength={4096} placeholder={tr("Find a computer or connection…")} value={filter()} onInput={(e) => setFilter(e.currentTarget.value)} /><span class="hint tabular">{filter() ? `${rows().length} of ${computers().length} computers` : `${computers().length} computers`}</span></div>
             <div class="su-tablewrap grow"><table class="su-table sw-table"><thead><tr>{header(0, "Computer")}{header(1, tr("Local access"))}{header(2, tr("Sync connection"))}</tr></thead><tbody>
               <For each={rows().map((r) => r.id)}>{(id) => { const row = () => computerById().get(id)!; return <tr><td title={`${row().name}\n${row().id}`}><MachineLabel alias={row().name} class="mbadge" /></td><td title={row().access} classList={{ dim: row().access === "Not configured" }}>{row().access}</td><td title={syncText(row())} classList={{ danger: row().sync.state === "error", warn: row().tasks_outdated }}>{syncText(row())}</td></tr>; }}</For>
             </tbody></table></div>

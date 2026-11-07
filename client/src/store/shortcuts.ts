@@ -404,7 +404,8 @@ const listPopupKey = (target: EventTarget | null, c: Combo) =>
 
 /** What a handler is limited to: the focus must be inside it (a message field). */
 export interface Root { contains(target: Node | null): boolean }
-interface Handler { run: () => void; root?: Root }
+type HandlerRoot = Root | (() => Root | undefined);
+interface Handler { run: () => void; root?: HandlerRoot }
 
 // The handlers per command: the newest one whose root holds the focus runs,
 // and removing it restores the one before.
@@ -416,12 +417,13 @@ const handlers = new Map<string, Handler[]>();
  */
 export function handlerFor(id: string, target: EventTarget | null): (() => void) | undefined {
   const stack = handlers.get(id) ?? [];
-  let best: Handler | undefined;
+  let best: Handler | undefined, bestRoot: Root | undefined;
   for (let i = stack.length - 1; i >= 0; i--) {
     const entry = stack[i];
-    if (entry.root && !entry.root.contains(target as Node | null)) continue;
-    const inner = !best || (entry.root && (!best.root || (best.root !== entry.root && best.root.contains(entry.root as unknown as Node))));
-    if (inner) best = entry;
+    const root = typeof entry.root === "function" ? entry.root() : entry.root;
+    if ((typeof entry.root === "function" && !root) || (root && !root.contains(target as Node | null))) continue;
+    const inner = !best || (root && (!bestRoot || (bestRoot !== root && bestRoot.contains(root as unknown as Node))));
+    if (inner) { best = entry; bestRoot = root; }
   }
   return best?.run;
 }
@@ -431,7 +433,7 @@ export function handlerFor(id: string, target: EventTarget | null): (() => void)
  * composer command while the focus is inside `root`, its message field.
  * Returns the unregister function.
  */
-export function onCommand(id: string, handler: () => void, root?: Root): () => void {
+export function onCommand(id: string, handler: () => void, root?: HandlerRoot): () => void {
   const entry: Handler = { run: handler, root };
   const stack = handlers.get(id) ?? [];
   stack.push(entry);

@@ -15,9 +15,21 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location('local_mac_ci', ROOT / 'scripts/ci/local-macos.py')
 MAC = importlib.util.module_from_spec(SPEC)
+YAML_MISSING = False
 with patch.object(sys, 'path', [str(ROOT / 'scripts/ci'), *sys.path]):
     SPEC.loader.exec_module(MAC)
-    MAC.CI = MAC.load_ci_sources({p.name: p.read_bytes() for p in (ROOT / 'scripts/ci').glob('local*.py')}, ROOT / 'scripts/ci')
+    try:
+        MAC.CI = MAC.load_ci_sources({p.name: p.read_bytes() for p in (ROOT / 'scripts/ci').glob('local*.py')}, ROOT / 'scripts/ci')
+    except ModuleNotFoundError as error:
+        if error.name != 'yaml':
+            raise
+        YAML_MISSING = True
+
+
+def setUpModule():
+    # The local Mac runner refuses to plan without PyYAML; hosted Mac Python has none.
+    if YAML_MISSING:
+        raise unittest.SkipTest('the local Mac planner requires PyYAML')
 
 
 class MacPlan(unittest.TestCase):

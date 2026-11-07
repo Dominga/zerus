@@ -1,3 +1,4 @@
+import { Dropdown } from "../lib/Dropdown";
 import { TextInput } from "../lib/TextField";
 import { For, Show, createEffect, createSignal } from "solid-js";
 import { Icon } from "../lib/icons";
@@ -67,9 +68,7 @@ function DeleteDialog(props: Extract<OrgDialog, { kind: "delete" }>) {
       <div class="dlg-head"><Icon name="triangle-alert" size={18} class="accent" /><h2 id="org-dlg-title">{tr("Delete project")}</h2></div>
       <div class="dlg-body">
         <p class="confirm-body" id="org-dlg-body">{deleteText(props.name)}</p>
-        <select class="field" style={{ width: "100%", "margin-top": "12px" }} aria-label={tr("Project that receives the sessions")} value={target()} onChange={(e) => setTarget(e.currentTarget.value)}>
-          <For each={props.options}>{(p) => <option value={p.id}>{p.name}</option>}</For>
-        </select>
+        <Dropdown class="field" style={{ width: "100%", "margin-top": "12px" }} aria-label={tr("Project that receives the sessions")} value={target()} onChange={(value) => setTarget(value)} options={[...((props.options) ?? []).map((p) => ({ value: p.id, label: p.name }))]} />
       </div>
       <div class="dlg-foot">
         <span class="spacer" />

@@ -1,4 +1,5 @@
-import { For, Show, onCleanup, onMount } from "solid-js";
+import { Dropdown } from "../lib/Dropdown";
+import { Show, onCleanup, onMount } from "solid-js";
 import { sessionModels as models } from "../../store/sessionModels";
 import { terminal } from "../../store/terminal";
 import { setDetailTab } from "../../store/ui";
@@ -41,20 +42,16 @@ function SettingsDialog(props: { anchor: () => HTMLButtonElement | undefined }) 
       <div class="dlg-body">
         <Show when={!native()}>
           <div class="form-row"><label for="session-model-choice">{tr("Model")}</label><Show when={v().openCode} fallback={
-            <select id="session-model-choice" class="field" aria-label={tr("Model")} value={models.model()} disabled={!v().enabled || choices().length < 2}
-              onChange={(e) => models.chooseModel(e.currentTarget.value)}>
-              <For each={choices()}>{(m) => <option value={m.id} selected={m.id === models.model()}>{m.label}</option>}</For>
-            </select>
+            <Dropdown id="session-model-choice" class="field" aria-label={tr("Model")} value={models.model()} disabled={!v().enabled || choices().length < 2}
+              onChange={(value) => models.chooseModel(value)} options={[...((choices()) ?? []).map((m) => ({ value: m.id, label: m.label }))]} />
           }>
             <fieldset disabled={!v().enabled} class="cmp-settings-models" aria-label={tr("Model")}>
               <ModelList view={models.picker} act={models.pickerActions} disabled={!v().enabled} />
             </fieldset>
           </Show></div>
           <div class="form-row"><label for="session-effort-choice">{tr("Reasoning effort")}</label>
-            <select id="session-effort-choice" class="field" aria-label={tr("Reasoning effort")} value={models.effort()} disabled={!effortEnabled()}
-              onChange={(e) => models.chooseEffort(e.currentTarget.value)}>
-              <For each={models.efforts()}>{(e) => <option value={e.value} selected={e.value === models.effort()}>{e.label}</option>}</For>
-            </select>
+            <Dropdown id="session-effort-choice" class="field" aria-label={tr("Reasoning effort")} value={models.effort()} disabled={!effortEnabled()}
+              onChange={(value) => models.chooseEffort(value)} options={[...((models.efforts()) ?? []).map((e) => ({ value: e.value, label: e.label }))]} />
           </div>
         </Show>
         <p class="cmp-settings-hint hint" role="status">{v().hint}<Show when={models.catalogError()}>{`\n${models.catalogError()}`}</Show></p>

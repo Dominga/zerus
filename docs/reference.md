@@ -1210,6 +1210,15 @@ height. The height is a local preference shared by sessions and retained across
 restarts; smaller windows temporarily limit it so the conversation stays visible.
 With the handle focused, Up/Down resize it and Home restores the default.
 
+Settings and dialog selection fields use the same themed dropdown. The list
+uses Zerus menu colors in light and dark skins, marks the current value and
+scrolls within the window. Arrows skip disabled choices; Enter or Space opens
+the list and confirms a choice, Escape closes it without changing the value,
+and typing finds choices by prefix. Closed arrows change the value directly,
+as with the former native selection fields. Tab confirms the highlighted choice
+and continues to the next control. The popup returns focus to its trigger on
+selection or Escape, including inside modal dialogs.
+
 **Settings → Appearance → Activity width** keeps Activity readable in a wide or
 fullscreen window: the transcript, its queued input, questions and the message
 field share one centered column of at most 900 px by default (480–2400 px). The

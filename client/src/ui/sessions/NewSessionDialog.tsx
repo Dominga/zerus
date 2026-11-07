@@ -1,3 +1,4 @@
+import { Dropdown } from "../lib/Dropdown";
 import { TextInput } from "../lib/TextField";
 import { For, Match, Show, Switch, createEffect, createMemo, createSignal, on, onCleanup, type JSX } from "solid-js";
 import { trText } from "../../text";
@@ -498,10 +499,8 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
         <Show when={s().effortVisible}>
           <div class="form-row">
             <label for="ns-effort">{tr("Effort")}</label>
-            <select id="ns-effort" class="field ns-effort" data-keys="select" aria-label={tr("Effort")} title={tr("Variants of the selected model. Default uses the model's own setting.")}
-              disabled={!fields()} value={s().effort} onChange={(e) => act.chooseEffort(e.currentTarget.value)}>
-              <For each={s().efforts}>{(effort) => <option value={effort.value} selected={effort.value === s().effort}>{effort.label}</option>}</For>
-            </select>
+            <Dropdown id="ns-effort" class="field ns-effort" data-keys="select" aria-label={tr("Effort")} title={tr("Variants of the selected model. Default uses the model's own setting.")}
+              disabled={!fields()} value={s().effort} onChange={(value) => act.chooseEffort(value)} options={[...((s().efforts) ?? []).map((effort) => ({ value: effort.value, label: effort.label }))]} />
           </div>
         </Show>
 

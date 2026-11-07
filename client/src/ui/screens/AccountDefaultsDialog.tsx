@@ -1,4 +1,5 @@
-import {For,Show,createSignal,onMount,onCleanup} from "solid-js";
+import { Dropdown } from "../lib/Dropdown";
+import {Show,createSignal,onMount,onCleanup} from "solid-js";
 import {Icon} from "../lib/icons";
 import type {AccountPrompt} from "../../store/accountManagement";
 import type {AccountEditValues} from "../../bridge";
@@ -22,16 +23,12 @@ export default function AccountDefaultsDialog(props:{prompt:AccountPrompt;close(
       <div class="dlg-head"><Icon name={permissions?"shield-check":"sparkles"} size={18} class="accent"/><h2 id={titleId}>{permissions?tr("Account permissions"):tr("Default model and effort")}</h2><span class="grow"/><button type="button" class="icon-btn" aria-label={tr("Close")} onClick={()=>props.close(view.handle)}><Icon name="x" size={16}/></button></div>
       <div class="dlg-body"><p>{view.label} on {view.machine}</p>
         <Show when={permissions} fallback={<Show when={catalog}>{data=><>
-          <div class="form-row"><label for="md-model">{tr("Model")}</label><select id="md-model" class="field" value={model()} onChange={event=>choose(event.currentTarget.value)}>
-            <option value="">{tr("Provider settings")}</option><For each={accountModelChoices(data())}>{option=><option value={option.id}>{option.label}</option>}</For>
-          </select></div>
-          <div class="form-row"><label for="md-effort">{tr("Effort")}</label><select id="md-effort" class="field" value={effort()} disabled={!state()?.effortEnabled} onChange={event=>setEffort(event.currentTarget.value)}>
-            <option value="">{tr("Provider default")}</option><For each={state()?.efforts}>{value=><option value={value}>{value}</option>}</For>
-          </select></div>
+          <div class="form-row"><label for="md-model">{tr("Model")}</label><Dropdown id="md-model" class="field" value={model()} onChange={(value) =>choose(value)} options={[{ value: "", label: tr("Provider settings") }, ...((accountModelChoices(data())) ?? []).map((option) => ({ value: option.id, label: option.label }))]} /></div>
+          <div class="form-row"><label for="md-effort">{tr("Effort")}</label><Dropdown id="md-effort" class="field" value={effort()} disabled={!state()?.effortEnabled} onChange={(value) =>setEffort(value)} options={[{ value: "", label: tr("Provider default") }, ...((state()?.efforts) ?? []).map((value) => ({ value: value, label: value }))]} /></div>
           <Show when={data().provider_defaults.model||data().provider_defaults.effort}><p class="muted">Account settings: {inherited()}</p></Show>
           <p class="hint">{state()?.hint}</p><p class="hint">{tr("New conversations with this account on this machine. Existing conversations keep their model and effort. Explicit launch choices take precedence.")}</p>
         </>}</Show>}>
-          <select class="field acct-perm-select" aria-label={tr("Permission mode")} value={mode()} onChange={event=>setMode(event.currentTarget.value)}><option value="provider">{tr("Default (provider settings)")}</option><option value="bypass">{tr("Bypass permissions")}</option></select>
+          <Dropdown class="field acct-perm-select" aria-label={tr("Permission mode")} value={mode()} onChange={(value) =>setMode(value)} options={[{ value: "provider", label: tr("Default (provider settings)") }, { value: "bypass", label: tr("Bypass permissions") }]} />
           <p classList={{danger:mode()==="bypass"}}>{permissionExplanation(view,mode())}</p><p class="hint">{tr("New and resumed sessions only. Running sessions keep their mode.")}</p>
         </Show>
       </div>

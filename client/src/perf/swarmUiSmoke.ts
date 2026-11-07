@@ -1,3 +1,4 @@
+import { chooseDropdown } from "./dropdown";
 /** Private built-app walk; enabled only with replay and an explicitly fake CLI. */
 import { invoke } from "@tauri-apps/api/core";
 import { projectsPage } from "../store/projects";
@@ -11,7 +12,7 @@ export async function swarmUiSmoke(allowed: boolean) {
   const dialog = () => document.querySelector<HTMLDialogElement>('dialog[aria-labelledby="project-swarm-title"]');
   const button = (text: string, root: ParentNode = dialog() ?? document) => [...root.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === text)!;
   const capture = async (name: string) => { await until(() => !!dialog() && getComputedStyle(dialog()!).opacity === "1"); await log(name); await sleep(500); };
-  const choose = (value: string) => { const select = dialog()!.querySelector<HTMLSelectElement>('[aria-label="Computer to connect"]')!; select.value = value; select.dispatchEvent(new Event("change", { bubbles: true })); };
+  const choose = (value: string) => { const select = dialog()!.querySelector<HTMLButtonElement>('[aria-label="Computer to connect"]')!; chooseDropdown(select, value); };
   const preview = () => button("Preview connection").click();
   const status = () => dialog()!.querySelector('[role="status"]')?.textContent ?? "";
   try {
@@ -19,7 +20,7 @@ export async function swarmUiSmoke(allowed: boolean) {
     await until(() => !!button("Connect project catalogs…", document));
     button("Connect project catalogs…", document).click();
     await until(() => dialog()?.open && !button("Preview connection").disabled);
-    need(dialog()!.querySelector<HTMLSelectElement>('[aria-label="Computer to connect"]')?.value === "fixture-uninitialized", "notice did not preselect the unconnected computer");
+    need(dialog()!.querySelector<HTMLButtonElement>('[aria-label="Computer to connect"]')?.value === "fixture-uninitialized", "notice did not preselect the unconnected computer");
     await capture("PRESELECTED"); button("Close").click(); await until(() => !dialog());
     const origin = button("Swarm…", document); origin.focus(); origin.click();
     await until(() => dialog()?.open && !button("Sync now").disabled);
@@ -33,10 +34,10 @@ export async function swarmUiSmoke(allowed: boolean) {
     button("Connect computer").click(); await until(() => !button("Preview connection").disabled);
     choose("fixture-peer"); preview(); await until(() => dialog()!.querySelector('[role="progressbar"]')); await capture("LOADING");
     await until(() => !!dialog()!.querySelector(".sw-map") && !button("Join and merge projects").disabled);
-    const choices = [...dialog()!.querySelectorAll<HTMLSelectElement>(".sw-map select")];
+    const choices = [...dialog()!.querySelectorAll<HTMLButtonElement>('.sw-map [role="combobox"]')];
     await log("MAP_VALUES " + JSON.stringify({ total: choices.length, inbox: choices.find((s) => s.getAttribute("aria-label") === "Match Inbox")?.value, separate: choices.filter((s) => !s.value).length }));
     need(choices.length === projectsPage().projects.length && choices.every((s) => s.getAttribute("aria-label") === "Match Inbox" ? s.value === "ungrouped" : s.value === ""), "identical Inbox ID must match; distinct IDs must stay separate");
-    choices[0].value = "remote-project"; choices[0].dispatchEvent(new Event("change", { bubbles: true }));
+    chooseDropdown(choices[0], "remote-project");
     need(dialog()!.querySelector<HTMLInputElement>('.check input')?.checked, "keep-placement default missing"); await capture("MAP");
     choose("fixture-uninitialized"); need(button("Connect this member").disabled, "changing computer reused a Preview"); preview();
     await until(() => status().startsWith("Open Projects in Zerus on fixture-uninitialized"));

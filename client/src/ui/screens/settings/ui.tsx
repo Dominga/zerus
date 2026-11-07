@@ -1,3 +1,4 @@
+import { Dropdown } from "../../lib/Dropdown";
 import { TextInput } from "../../lib/TextField";
 import { For, Show, batch, createEffect, createSignal, type JSX } from "solid-js";
 import { Icon } from "../../lib/icons";
@@ -120,10 +121,8 @@ export interface Option { value: string; label: string }
 
 export function Select(props: { value: string; options: Option[]; onChange: (value: string) => void; label?: string; id?: string; disabled?: boolean }) {
   return (
-    <select id={props.id} class="field set-select" value={props.value} aria-label={typeof props.label === "string" ? tr(props.label) : props.label} disabled={props.disabled}
-      onChange={(e) => props.onChange(e.currentTarget.value)}>
-      <For each={props.options}>{(o) => <option value={o.value} selected={o.value === props.value}>{tr(o.label)}</option>}</For>
-    </select>
+    <Dropdown id={props.id} class="field set-select" value={props.value} aria-label={typeof props.label === "string" ? tr(props.label) : props.label} disabled={props.disabled}
+      onChange={(value) => props.onChange(value)} options={[...((props.options) ?? []).map((o) => ({ value: o.value, label: tr(o.label) }))]} />
   );
 }
 

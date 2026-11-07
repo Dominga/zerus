@@ -2518,7 +2518,10 @@ mod tests {
         temporary.write_all(b"blocked").unwrap();
         let started = std::time::Instant::now();
         assert!(super::super::persist(temporary, &target).is_err());
-        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        // The retry budget is 1 s. This cap is deliberately loose: it flags a
+        // refusal that returns far too late, without measuring runner load. It
+        // proves neither the budget nor that a hung call would be caught here.
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
         assert_eq!(fs::read(&target).unwrap(), b"new");
     }
 

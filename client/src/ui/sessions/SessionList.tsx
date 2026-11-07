@@ -10,7 +10,7 @@ import { tr, trNoop } from "../../i18n";
 import { listRows, rowHeight, shownSummary, machineChoices, projectChoices, filterCounts as counts, pickerCounts, type Row } from "./model";
 import {
   SessionCard, ChildCard, CompactCard, teamSummary, AgentBadge, StatusBadge, badgeKind, statusCaption, stripCaption,
-  emphasis, childStatus, gitTooltip, paletteIndex, folderOf, ProviderGlyph,
+  emphasis, childStatus, captionText, gitTooltip, paletteIndex, folderOf, ProviderGlyph,
 } from "./SessionCard";
 import { agentKind, catalog, computerFresh, computerOffline } from "../../store/catalog";
 import { servicePausedEmpty } from "../components/DesktopServiceStatus";
@@ -35,6 +35,7 @@ import { backgroundEntries } from "./background-menu";
 import { chipColor, headerEntries, projectColor, type FilterChip } from "./organization-ui";
 import { newSessionForProject, newSessionFromPanel } from "./newsession-view";
 import { CreationCard, CreationTile } from "./CreationCard";
+import { accessibleText as creationText } from "./creations-ui";
 import { creationCount, creationFooter, creationStatusMenu } from "../../store/creations";
 import {
   selectedKey, setSelectedKey, setExpandedChildren, expandedChildren,
@@ -714,7 +715,7 @@ export function SessionList() {
               onDragOver={(e) => organizeOver(e, list)} onDrop={(e) => organizeDrop(e)} onDragLeave={(e) => { if (!(e.currentTarget as Element).contains(e.relatedTarget as Node)) setDrop(undefined); }}
               aria-label={tr("Agent sessions; Ctrl-click to select several; drag to organize, left/right to collapse or expand a group")}>
               <Show when={list.rows().length} fallback={<NoMatches />}>
-                <div style={{ height: `${list.virtualizer.getTotalSize()}px`, position: "relative" }}>
+                <div role="presentation" style={{ height: `${list.virtualizer.getTotalSize()}px`, position: "relative" }}>
                   <DropIndicator />
                   <For each={list.keys()}>{(id) => <ListRow id={id} list={list} />}</For>
                 </div>
@@ -834,6 +835,23 @@ type RowSource = ReturnType<typeof useRows>;
 /** Child session indentation: 26 px per level, at most three levels (spec 3.3). */
 const indentOf = (depth = 0) => Math.min(Math.max(depth, 1), 3) * 26 - 26;
 const cardLevel = (row: Row | undefined) => row?.type === "card" && row.depth ? row.depth + 1 : undefined;
+
+/** Name the tree item itself; webviews do not reliably derive it from the card's groups.
+ * Keep the working clock out so every timer tick does not rename the focused item. */
+export function sessionRowName(row: Row | undefined): string | undefined {
+  if (!row) return undefined;
+  if (row.type === "header") return row.name;
+  if (row.type === "creation") return [creationText(row.creation), row.creation.target].filter(Boolean).join(", ");
+  if (row.type === "child") return [row.child.name,
+    childStatus(row.child, currentChildren(row.parent, !computerOffline(row.parent.computer))).caption,
+    folderOf(row.parent) || row.parent.project, row.parent.machine].filter(Boolean).join(", ");
+  const s = row.session;
+  const state = computerOffline(s.computer) ? tr("Offline") : s.status === "ready" && s.draft ? tr("Draft") : captionText(s.caption);
+  return [s.title, state, folderOf(s) || s.project, s.machine,
+    row.team ? tr(row.team.collapsed ? "%1 child sessions, collapsed" : "%1 child sessions, expanded", row.team.total) : "",
+    s.subagents?.length ? tr("Subagents: %1", s.subagents.length) : ""].filter(Boolean).join(", ");
+}
+
 function cardDescription(row: Row | undefined): string | undefined {
   if (row?.type !== "card") return undefined;
   const parts: string[] = [];
@@ -851,7 +869,7 @@ function ListRow(props: { id: string; list: RowSource }) {
   const top = () => props.list.startOf().get(props.id) ?? 0;
   return (
     <div class="vrow" data-type={row()?.type} data-key={props.id} style={{ transform: `translateY(${top()}px)`, height: `${props.list.heightOf(props.id)}px` }}
-      role="treeitem" aria-selected={props.id === selectedKey()} aria-level={cardLevel(row())}
+      role="treeitem" aria-label={sessionRowName(row())} aria-selected={props.id === selectedKey()} aria-level={cardLevel(row())}
       aria-expanded={row()?.type === "card" && (row() as Extract<Row, { type: "card" }>).team ? !(row() as Extract<Row, { type: "card" }>).team!.collapsed : undefined}
       aria-description={cardDescription(row())}>
       <Show when={row()?.type === "header" ? (row() as Extract<Row, { type: "header" }>) : undefined}>{(h) => <Header row={h()} list={props.list} />}</Show>

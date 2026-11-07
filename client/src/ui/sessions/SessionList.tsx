@@ -729,7 +729,8 @@ export function SessionList() {
         </Show>
         <Show when={!search().trim()}><SelectionBar /></Show>
         <footer class="sp-foot">
-          <span class="tabular ell">{search().trim() ? "" : shownSummary().shown ? tr("%1 shown, %2 working, %3 attention", shownSummary().shown, shownSummary().working, shownSummary().attention) + creationFooter(true) : creationFooter(false) || (catalog.order.length ? tr("No matching sessions") : "")}</span>
+          {/* The filters above already say what is listed (owner, 2026-11-07): only creations or no matches. */}
+          <span class="tabular ell">{search().trim() ? "" : creationFooter(false) || (catalog.order.length && !shownSummary().shown ? tr("No matching sessions") : "")}</span>
           <span class="grow" />
           <CleanupReviewButton />
           <button class="icon-btn small" data-tip={tr("Session creation status")} onClick={(e) => openMenu(e, creationStatusMenu())}><Icon name="clock" size={16} /></button>

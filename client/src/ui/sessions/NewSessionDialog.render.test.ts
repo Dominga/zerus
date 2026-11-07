@@ -24,6 +24,7 @@ vi.mock("../../store/newSession", async () => {
   return {
     newSession: state, closeNewSession: () => setState(undefined), startNewSession: vi.fn(),
     newSessionActions: {
+      chooseProject: vi.fn((project: number) => update({ project })),
       setName: (name: string) => update({ name }), setUrl: (url: string) => update({ url }),
       setDestination: (destination: string) => update({ destination }),
       setNewProjectName: (newProjectName: string) => update({ newProjectName }),
@@ -61,12 +62,60 @@ function state(): NewSessionState {
   };
 }
 beforeEach(async () => {
+  vi.mocked(newSessionActions.chooseProject).mockClear();
   fixture.write(state());
   vi.spyOn(HTMLDialogElement.prototype, "showModal").mockImplementation(function (this: HTMLDialogElement) { this.open = true; });
   vi.spyOn(HTMLDialogElement.prototype, "close").mockImplementation(function (this: HTMLDialogElement) { this.open = false; });
   const host = document.createElement("div"); document.body.append(host);
   dispose = render(() => createComponent(NewSessionDialog, {}), host);
   await settle();
+});
+
+describe("explicit Destination choices", () => {
+  const button = () => document.querySelector<HTMLButtonElement>('[aria-controls="ns-project-list"]')!;
+  const options = () => document.querySelectorAll<HTMLElement>("#ns-project-list [role=option]");
+  const destinations = async () => {
+    const s = fixture.read()!;
+    fixture.write({ ...s, projects: [
+      { id: "ungrouped", name: "General", color: null, palette: 0, newProject: false },
+      { id: "zerus", name: "Zerus", color: null, palette: 1, newProject: false },
+    ], project: 0 });
+    await settle();
+  };
+
+  it.each(["pointer", "open keyboard", "closed keyboard"])("records reselecting renamed Inbox by %s", async (method) => {
+    await destinations();
+    if (method === "closed keyboard") {
+      button().dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true }));
+    } else {
+      button().click(); await settle();
+      expect(options()[0].textContent).toContain("General");
+      expect(options()[0].getAttribute("aria-selected")).toBe("true");
+      if (method === "pointer") options()[0].click();
+      else button().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    }
+    await settle();
+    expect(newSessionActions.chooseProject).toHaveBeenCalledExactlyOnceWith(0);
+    expect(fixture.read()!.project).toBe(0);
+    expect(button().getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("records choosing another project", async () => {
+    await destinations();
+    button().click(); await settle();
+    options()[1].click(); await settle();
+    expect(newSessionActions.chooseProject).toHaveBeenCalledExactlyOnceWith(1);
+    expect(fixture.read()!.project).toBe(1);
+  });
+
+  it("keeps the default untouched when the list is only opened and dismissed", async () => {
+    await destinations();
+    button().click(); await settle();
+    fixture.refresh(); await settle();
+    button().click(); await settle();
+    expect(newSessionActions.chooseProject).not.toHaveBeenCalled();
+    expect(fixture.read()!.project).toBe(0);
+  });
 });
 afterEach(() => { dispose?.(); dispose = undefined; fixture.write(undefined); document.body.replaceChildren(); vi.restoreAllMocks(); });
 

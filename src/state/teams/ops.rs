@@ -1263,7 +1263,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-pub(crate) const OWNER_SETTINGS: [&str; 27] = [
+pub(crate) const OWNER_SETTINGS: [&str; 28] = [
     "approval",
     // Task 126: the owner chooses the team's memory and its store.
     "memory",

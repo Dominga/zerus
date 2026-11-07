@@ -174,8 +174,9 @@ class LocalLegForkIdentityTests(unittest.TestCase):
     def test_the_ctest_leg_uses_two_workers(self):
         # Task 213: four suites fail under four workers and pass alone.
         text = (ROOT / "scripts/release-candidate.py").read_text(encoding="utf-8")
-        self.assertIn('"--parallel", "2"', text)
+        self.assertIn('"--parallel", os.environ.get("ZERUS_TEST_JOBS", "2")', text)
         self.assertNotIn('"--parallel", "4"', text)
+        self.assertNotIn('ZERUS_TEST_JOBS", "4"', text)
         self.assertIn("--fork-build", text)
         self.assertIn("--fork-feed", text)
 

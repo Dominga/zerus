@@ -67,7 +67,7 @@ pub(crate) fn post_and_ring(
         Ok(found) => found,
         Err(error) => return Sent::Refused(format!("the team message was not stored, so nothing was sent: {error:#}")),
     };
-    let outcome = send(session, request_id, &paste(&agent, working::header_of(text), &list));
+    let outcome = send(session, request_id, &paste(&agent, working::header_of(&text), &list));
     settle(store, team_id, member_id, &agent, request_id, &list, &outcome, "idle", false);
     outcome
 }

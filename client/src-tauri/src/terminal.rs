@@ -12,9 +12,9 @@
 //! view shown again gets exactly that before the live output, so no byte
 //! arrives twice or goes missing.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -209,16 +209,16 @@ struct Inner {
     /// One connect at a time, so two never start an attach for one view.
     connecting: Mutex<()>,
     next: AtomicU64,
-    /// Qt's one `m_terminalDropRequest` for the whole window.
-    dropping: AtomicBool,
+    /// One transfer per actual attached session, independent of other sessions.
+    dropping: Mutex<HashSet<(String, String)>>,
 }
 
 /// Release the transfer on every exit, including cancellation and unwinding.
-struct Dropping<'a>(&'a AtomicBool);
+struct Dropping<'a>(&'a Mutex<HashSet<(String, String)>>, (String, String));
 
 impl Drop for Dropping<'_> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
+        lock(self.0).remove(&self.1);
     }
 }
 
@@ -240,7 +240,7 @@ impl Terminals {
             targets: Mutex::new(HashMap::new()),
             connecting: Mutex::new(()),
             next: AtomicU64::new(0),
-            dropping: AtomicBool::new(false),
+            dropping: Mutex::new(HashSet::new()),
         }))
     }
 
@@ -455,14 +455,18 @@ impl Terminals {
     where
         F: std::future::Future<Output = Result<zerus_client_core::Outcome, String>>,
     {
-        if self.generation(view) != Some(generation) {
-            return Ok(None);
-        }
-        // Qt checks the transfer before even a local paste (2650-2651).
-        if self.0.dropping.swap(true, Ordering::SeqCst) {
+        // The retained attach determines exclusion, not caller-supplied drop
+        // fields. Reconnection still invalidates the eventual paste.
+        let key = match lock(&self.0.views).get(view) {
+            Some(open) if open.generation == generation => {
+                (open.target.computer.clone(), open.target.name.clone())
+            }
+            _ => return Ok(None),
+        };
+        if !lock(&self.0.dropping).insert(key.clone()) {
             return Ok(Some("Wait for the current file transfer to finish.".into()));
         }
-        let _dropping = Dropping(&self.0.dropping);
+        let _dropping = Dropping(&self.0.dropping, key);
         if target.computer.is_empty() {
             self.paste(
                 view,
@@ -1015,8 +1019,21 @@ mod tests {
             zerus_client_core::Action,
         ) -> Result<zerus_client_core::Outcome, String>,
     ) -> Result<Option<String>, String> {
+        drop_view_with(t, "main", generation, target, dispatch)
+    }
+
+    fn drop_view_with(
+        t: &Terminals,
+        view: &str,
+        generation: u64,
+        target: DropTarget,
+        dispatch: impl FnOnce(
+            zerus_client_core::Target,
+            zerus_client_core::Action,
+        ) -> Result<zerus_client_core::Outcome, String>,
+    ) -> Result<Option<String>, String> {
         let mut future = Box::pin(t.drop_files_with(
-            "main",
+            view,
             generation,
             target,
             dropped_paths(),
@@ -1160,7 +1177,7 @@ mod tests {
             }),
             Err("Update hgs on studio to drop files into an untracked session.".into())
         );
-        assert!(!t.0.dropping.load(Ordering::SeqCst));
+        assert!(lock(&t.0.dropping).is_empty());
         t.disconnect("main");
     }
 
@@ -1198,7 +1215,7 @@ mod tests {
                 }),
                 Err(expected)
             );
-            assert!(!t.0.dropping.load(Ordering::SeqCst));
+            assert!(lock(&t.0.dropping).is_empty());
         }
         assert_eq!(calls, 3);
         t.write("main", c.generation, b"echo probe\r").unwrap();
@@ -1230,12 +1247,12 @@ mod tests {
             s.text().contains("echo probe")
         });
         assert!(!second.text().contains("staged"));
-        assert!(!t.0.dropping.load(Ordering::SeqCst));
+        assert!(lock(&t.0.dropping).is_empty());
         t.disconnect("main");
     }
 
     #[test]
-    fn a_transfer_blocks_other_peer_and_local_drops() {
+    fn a_transfer_blocks_only_the_same_attached_target_even_with_changed_drop_fields() {
         let _tree = crate::PROCESS_TREE.read().unwrap();
         let t = terminals();
         let sink = Arc::new(Collect::default());
@@ -1255,7 +1272,7 @@ mod tests {
                         Ok(Some("Wait for the current file transfer to finish.".into()))
                     );
                     assert!(
-                        t.0.dropping.load(Ordering::SeqCst),
+                        !lock(&t.0.dropping).is_empty(),
                         "refused drops cannot release the first claim"
                     );
                 }
@@ -1266,7 +1283,48 @@ mod tests {
         t.write("main", c.generation, b"\recho probe\r").unwrap();
         until(&t, c.generation, &sink, |s| s.text().contains("echo probe"));
         assert!(!sink.text().contains("source"));
-        assert!(!t.0.dropping.load(Ordering::SeqCst));
+        assert!(lock(&t.0.dropping).is_empty());
+        t.disconnect("main");
+    }
+
+    #[test]
+    fn transfers_to_other_sessions_and_computers_reach_dispatch_independently() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let sink = Arc::new(Collect::default());
+        let c = t.connect("main", target("run-1"), 80, 24, sink).unwrap();
+        for (computer, name) in [
+            ("mac", "claude/sample-project/other"),
+            ("laptop", "claude/sample-project/review"),
+        ] {
+            let mut other = target("run-2");
+            other.computer = computer.into();
+            other.name = name.into();
+            let second = t
+                .connect("other", other, 80, 24, Arc::new(Collect::default()))
+                .unwrap();
+            assert_eq!(
+                drop_with(&t, c.generation, drop_target(), |_, _| {
+                    let mut destination = drop_target();
+                    destination.computer = computer.into();
+                    destination.name = name.into();
+                    let result =
+                        drop_view_with(&t, "other", second.generation, destination, |_, _| {
+                            Err("other target reached dispatch".into())
+                        });
+                    assert_eq!(result, Err("other target reached dispatch".into()));
+                    assert_eq!(
+                        lock(&t.0.dropping).len(),
+                        1,
+                        "only the original transfer remains held"
+                    );
+                    Err("original target reached dispatch".into())
+                }),
+                Err("original target reached dispatch".into())
+            );
+            assert!(lock(&t.0.dropping).is_empty());
+            t.disconnect("other");
+        }
         t.disconnect("main");
     }
 
@@ -1282,7 +1340,7 @@ mod tests {
             })
         }));
         assert!(panic.is_err());
-        assert!(!t.0.dropping.load(Ordering::SeqCst));
+        assert!(lock(&t.0.dropping).is_empty());
         assert_eq!(
             drop_with(&t, c.generation, drop_target(), |_, _| Err(
                 "next transfer reached dispatch".into()
@@ -1307,9 +1365,9 @@ mod tests {
         ));
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());
         assert!(std::future::Future::poll(pending.as_mut(), &mut context).is_pending());
-        assert!(t.0.dropping.load(Ordering::SeqCst));
+        assert!(!lock(&t.0.dropping).is_empty());
         drop(pending);
-        assert!(!t.0.dropping.load(Ordering::SeqCst));
+        assert!(lock(&t.0.dropping).is_empty());
         assert_eq!(
             drop_with(&t, c.generation, drop_target(), |_, _| Err(
                 "next transfer reached dispatch".into()
@@ -1339,7 +1397,7 @@ mod tests {
                 }
             ))
             .is_err());
-            assert!(!t.0.dropping.load(Ordering::SeqCst));
+            assert!(lock(&t.0.dropping).is_empty());
         }
         t.write("main", c.generation, b"echo probe\r").unwrap();
         until(&t, c.generation, &sink, |s| s.text().contains("echo probe"));
@@ -1425,7 +1483,7 @@ mod tests {
             Ok(Some("Wait for the session update to finish.".into()))
         );
         assert_eq!(calls, 1);
-        assert!(!t.0.dropping.load(Ordering::SeqCst));
+        assert!(lock(&t.0.dropping).is_empty());
         t.disconnect("main");
     }
 

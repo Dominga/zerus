@@ -4953,6 +4953,8 @@ pub(crate) mod tests {
         let root = dir("write-hook");
         let actions = Actions::new(root.join("marks.json"));
         let facts = actions.clone();
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let calls = delivered.clone();
         let c = Composers::new(
             drafts(&root),
             Config {
@@ -4972,7 +4974,10 @@ pub(crate) mod tests {
                 }),
                 reconnect: Arc::new(|_| {}),
                 inspect: Arc::new(|_, _, _| Err("timed out".into())),
-                dispatch: Arc::new(|_, _, _| Err("no call in these tests".into())),
+                dispatch: Arc::new(move |_, action, id| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(receipt(&action, &id))
+                }),
             },
         );
         actions.on_writes(c.changed_hook());
@@ -4980,7 +4985,7 @@ pub(crate) mod tests {
         assert!(c.take_view().unwrap().available);
         let target = zerus_client_core::Target {
             computer: "studio".into(),
-            name: "claude/sample-project/other".into(),
+            name: "claude/sample-project/review".into(),
             run_id: "run-2".into(),
             conversation_id: "conv-2".into(),
         };
@@ -4993,10 +4998,80 @@ pub(crate) mod tests {
         assert_eq!(
             c.take_view().unwrap().block_reason.as_deref(),
             Some("Wait for the session update to finish."),
-            "another session's write, shown before any tick"
+            "the target's own write, shown before any tick"
         );
         drop(pause);
         assert!(c.take_view().unwrap().available);
+        for (computer, name) in [
+            ("studio", "claude/sample-project/other"),
+            ("laptop", "claude/sample-project/review"),
+        ] {
+            let mut other = target.clone();
+            other.computer = computer.into();
+            other.name = name.into();
+            for action in [
+                zerus_client_core::Action::Pause,
+                zerus_client_core::Action::Terminate,
+            ] {
+                let held = actions.begin(Lane::key(&other, &action), &action).unwrap();
+                assert!(
+                    c.current().unwrap().available,
+                    "another target's write never blocks input"
+                );
+                drop(held);
+                assert!(c.current().unwrap().available);
+            }
+        }
+        // The original write remains held while another target's saved
+        // message reaches delivery, including the final native facts check.
+        let mut other = target.clone();
+        other.name = "claude/sample-project/other".into();
+        let held = actions
+            .begin(
+                Lane::key(&other, &zerus_client_core::Action::Terminate),
+                &zerus_client_core::Action::Terminate,
+            )
+            .unwrap();
+        let view = c.current().unwrap();
+        assert_eq!(
+            c.send_message(view.handle, 1, view.text_epoch, "allowed".into(), 7, 7),
+            SendReply::Sending
+        );
+        until(&c, |view| !view.sending);
+        assert_eq!(delivered.load(Ordering::SeqCst), 1);
+        assert!(
+            actions
+                .begin(
+                    Lane::key(&other, &zerus_client_core::Action::Pause),
+                    &zerus_client_core::Action::Pause
+                )
+                .is_none(),
+            "delivery never releases the other target's custody"
+        );
+        drop(held);
+        // Question availability consumes the same scoped native fact.
+        use crate::composer::questions::tests::{asking, card_json, with_card};
+        c.observe(&state(asking(vec![card_json("tool:t1")])));
+        assert!(with_card(&c).question.unwrap().view.available);
+        let mut other = target.clone();
+        other.name = "claude/sample-project/other".into();
+        let held = actions
+            .begin(
+                Lane::key(&other, &zerus_client_core::Action::Terminate),
+                &zerus_client_core::Action::Terminate,
+            )
+            .unwrap();
+        assert!(c.current().unwrap().question.unwrap().view.available);
+        drop(held);
+        let held = actions
+            .begin(
+                Lane::key(&target, &zerus_client_core::Action::Terminate),
+                &zerus_client_core::Action::Terminate,
+            )
+            .unwrap();
+        assert!(!c.current().unwrap().question.unwrap().view.available);
+        drop(held);
+        assert!(c.current().unwrap().question.unwrap().view.available);
     }
 
     pub(crate) fn receipt(action: &Action, id: &str) -> Outcome {
@@ -5627,7 +5702,7 @@ pub(crate) mod tests {
             c.send_message(view.handle, 1, view.text_epoch, "mid write".into(), 9, 9),
             SendReply::Sending
         );
-        // Qt's `m_pending`: any session's update now runs.
+        // This target's update begins while its draft save is pending.
         *lock(&fake.write) = Some(WriteKind::Update);
         release.send(()).unwrap();
         let view = until(&c, |v| !v.sending);
@@ -5635,8 +5710,7 @@ pub(crate) mod tests {
         assert_eq!(view.text, "mid write");
         std::thread::sleep(Duration::from_millis(50));
         assert!(sent(&fake).is_empty());
-        // The same with another session open: the write alone stops it,
-        // as Qt's `m_pending` does (4889).
+        // The same target must still be checked when another session is open.
         *lock(&fake.write) = None;
         let view = c.current().unwrap();
         let release = hold(&store);

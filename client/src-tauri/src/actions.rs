@@ -223,14 +223,10 @@ impl Drop for Running {
     }
 }
 
-/// Whether a call blocks messages while it runs: a write that sets Qt's
-/// window-wide `m_pending` (`SessionsWindow.h:554`; set at
-/// `SessionsWindow.cpp:2876, 2881, 4699, 4758, 5554, 5575, 5693, 5752, 5808,
-/// 5815`). A context reset and a compaction have their own per-session block
-/// (`m_clearKey`, `m_compacts`, 4668 and 4544): `begin` marks a reset as
-/// `WriteKind::Clear` for its own session, and compact-to-send keeps its
-/// own fact in the composer. A Terminal file drop (`m_terminalDropRequest`,
-/// 2657) blocks nothing, though all three share the write lane.
+/// Whether a call blocks its target's messages while it runs. A context
+/// reset has its own write kind, and compact-to-send keeps its own fact in
+/// the composer. A Terminal file drop blocks no messages, though all three
+/// share the target's write lane.
 fn blocks_messages(action: &Action) -> bool {
     Lane::of(action) == Lane::Write
         && !matches!(
@@ -335,25 +331,18 @@ impl Actions {
         let _ = self.termination_pump.set(pump.downgrade());
     }
 
-    /// The running write as the send rules see it from the session
-    /// `(computer, name)`: its own Terminate or Kill is a termination
-    /// (`isTerminating`), and any other message-blocking write, of any
-    /// session or computer, is an update, since Qt's `m_pending` is one
-    /// window-wide flag (`messageBlockReason`, `SessionsWindow.cpp:4394`).
-    /// A context reset is the session's own (Qt keys it by `m_clearKey`) and
-    /// comes first, as `messageBlockReason` reads it first (4390); another
-    /// session's reset is no update anywhere.
+    /// Only the target's own write blocks its input. Pause all and Resume
+    /// all use an empty name and affect sessions on that computer only.
     pub fn write_kind(&self, computer: &str, name: &str) -> Option<WriteKind> {
         let writes = self.writes.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(own @ (WriteKind::Terminate | WriteKind::Clear | WriteKind::Settings)) =
-            writes.get(&(computer.to_owned(), name.to_owned()))
-        {
-            return Some(*own);
-        }
         writes
-            .values()
-            .any(|kind| !matches!(kind, WriteKind::Clear | WriteKind::Settings))
-            .then_some(WriteKind::Update)
+            .get(&(computer.to_owned(), name.to_owned()))
+            .copied()
+            .or_else(|| {
+                writes
+                    .contains_key(&(computer.to_owned(), String::new()))
+                    .then_some(WriteKind::Update)
+            })
     }
 
     fn mark_write(&self, computer: &str, name: &str, action: &Action) -> WriteMark {
@@ -444,9 +433,9 @@ impl Actions {
     }
 
     /// The write the send rules see from the session: its own termination,
-    /// running or succeeded while its run still shows, else any running
-    /// write as an update (`write_kind`). `live` gives the computer's live
-    /// row of that name and whether the computer is online; it is asked
+    /// running or succeeded while its run still shows, else its running
+    /// write or its computer's batch update (`write_kind`). `live` gives the
+    /// computer's live row of that name and whether the computer is online; it is asked
     /// only while such a termination is kept. As in Qt, the row must be the
     /// run the termination ended (`isTerminating`, `SessionsWindow.cpp:3100-3104`),
     /// and only an online computer whose row no longer runs that run lets it
@@ -2807,14 +2796,14 @@ mod tests {
     }
 
     #[test]
-    fn any_write_anywhere_is_an_update_and_only_ones_own_end_a_termination() {
+    fn writes_block_only_their_session_or_their_computers_batch() {
         let actions = Actions::new(std::env::temp_dir().join("zerus-global-test-marks.json"));
         let mine = || actions.write_kind("studio", "claude/sample-project/review");
-        // Another session's pause, as Qt's one `m_pending`.
+        // Another session's pause does not block this session.
         let pause = actions
             .begin(Lane::key(&other(), &Action::Pause), &Action::Pause)
             .unwrap();
-        assert_eq!(mine(), Some(WriteKind::Update));
+        assert_eq!(mine(), None);
         drop(pause);
         assert_eq!(mine(), None);
         // Another computer's rename.
@@ -2825,32 +2814,41 @@ mod tests {
             archive_id: None,
         };
         let renaming = actions.begin(Lane::key(&away, &rename), &rename).unwrap();
-        assert_eq!(mine(), Some(WriteKind::Update));
+        assert_eq!(mine(), None);
         drop(renaming);
-        // Another session's termination is an update here, its own there.
+        // A termination blocks only its own target.
         let ending = actions
             .begin(Lane::key(&other(), &Action::Terminate), &Action::Terminate)
             .unwrap();
-        assert_eq!(mine(), Some(WriteKind::Update));
+        assert_eq!(mine(), None);
         assert_eq!(
             actions.write_kind("studio", "claude/sample-project/other"),
             Some(WriteKind::Terminate)
         );
-        // Its own termination wins over another's update.
+        // Its own termination remains excluded.
         let killing = actions
             .begin(Lane::key(&review(), &Action::Kill), &Action::Kill)
             .unwrap();
         assert_eq!(mine(), Some(WriteKind::Terminate));
         drop((ending, killing));
         assert_eq!(mine(), None);
-        // Pause all of another computer.
-        let mut key = Lane::key(&away, &Action::PauseAll { count: 2 });
-        key.1 = String::new();
-        let all = actions.begin(key, &Action::PauseAll { count: 2 }).unwrap();
-        assert_eq!(mine(), Some(WriteKind::Update));
-        drop(all);
-        assert_eq!(mine(), None);
-        // A retained termination of its own wins over another's update.
+        // Computer-wide actions affect only their selected computer.
+        for action in [
+            Action::PauseAll { count: 2 },
+            Action::ResumeAll { count: 2 },
+        ] {
+            let mut key = Lane::key(&away, &action);
+            key.1 = String::new();
+            let all = actions.begin(key, &action).unwrap();
+            assert_eq!(mine(), None);
+            assert_eq!(
+                actions.write_kind("laptop", "another-session"),
+                Some(WriteKind::Update)
+            );
+            drop(all);
+            assert_eq!(mine(), None);
+        }
+        // A retained termination remains local to the terminated run.
         let done = Outcome::Done {
             receipt: serde_json::Value::Null,
             cleanup: None,
@@ -2867,6 +2865,47 @@ mod tests {
         );
         assert_eq!(seen("claude/sample-project/other"), Some(WriteKind::Update));
         drop(pause);
+    }
+
+    #[test]
+    fn every_write_kind_preserves_other_sessions_and_same_target_exclusion() {
+        let actions = Actions::new(std::env::temp_dir().join("zerus-scoped-write-marks.json"));
+        for action in [
+            Action::Pause,
+            Action::Terminate,
+            Action::ClearContext {
+                dismiss_prompt: true,
+            },
+            Action::Settings {
+                model: "model-a".into(),
+                effort: "high".into(),
+                expected_pending_id: None,
+                without_terminal: false,
+            },
+        ] {
+            let target = review();
+            let key = Lane::key(&target, &action);
+            let held = actions.begin(key.clone(), &action).unwrap();
+            assert_eq!(
+                actions.write_kind(&target.computer, &target.name),
+                Some(WriteKind::of(&action))
+            );
+            assert_eq!(
+                actions.write_kind(&target.computer, "another-session"),
+                None
+            );
+            assert_eq!(actions.write_kind("another-computer", &target.name), None);
+            assert!(actions.begin(key.clone(), &action).is_none());
+            let other_key = (
+                "another-computer".into(),
+                target.name.clone(),
+                key.2,
+                key.3.clone(),
+            );
+            assert!(actions.begin(other_key, &action).is_some());
+            drop(held);
+            assert!(actions.begin(key, &action).is_some());
+        }
     }
 
     #[test]

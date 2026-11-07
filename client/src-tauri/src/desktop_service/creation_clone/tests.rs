@@ -100,6 +100,48 @@ async fn answer(service: Arc<Service>, id: String, value: Value, fresh: bool) ->
         .expect("a service answer, not the direct path")
 }
 #[test]
+fn a_launch_help_failure_is_unsent_and_never_falls_back_or_dispatches() {
+    if !private_case("desktop_service::creation_clone::tests::a_launch_help_failure_is_unsent_and_never_falls_back_or_dispatches") { return }
+    tauri::async_runtime::block_on(async {
+        let f = fixture(json!({"clone_help_fail": true}));
+        let (service, _cache) = connected(&f).await;
+        let id = uuid::Uuid::new_v4().to_string();
+        let value = json!({"id":id,"creation_schema":1,"created":1,"revision":7,
+            "cmd":"codex","tag":"example","host":"","target":"/srv/repo",
+            "state":"launching","launch_dispatched":true,"launch_id":id,
+            "expected_machine":"22222222-2222-4222-8222-222222222222"});
+        let selected = service.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            crate::desktop_service::creation_launch::call(
+                Some(selected),
+                &id,
+                &value,
+                true,
+                &AtomicBool::new(false),
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            result,
+            crate::desktop_service::creation_launch::LaunchAnswer::Unsent(
+                crate::desktop_service::creation_launch::NOT_SENT.into(),
+            )
+        );
+        assert!(calls(&f).is_empty(), "no effect request was sent");
+        assert!(
+            !f.calls()
+                .iter()
+                .any(|c| c["args"].as_array().is_some_and(|args| {
+                    args.iter()
+                        .any(|arg| arg == "codex" || arg == "frontend-request")
+                })),
+            "no direct launch or authenticated input"
+        );
+        service.join().await.unwrap();
+    });
+}
+#[test]
 fn original_clone_child_is_bound_and_lost_reply_only_allows_a_scoped_read() {
     if !private_case("desktop_service::creation_clone::tests::original_clone_child_is_bound_and_lost_reply_only_allows_a_scoped_read") {return}
     tauri::async_runtime::block_on(async {

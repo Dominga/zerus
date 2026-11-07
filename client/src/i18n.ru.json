@@ -259,7 +259,6 @@
   "Activity": "Активность",
   "Activity is not tracked for this session. Sessions started with HGS 1.9 report their tools and status here.": "Активность в этой сессии не отслеживается. Сессии, начатые с HGS 1.9, сообщают о своих инструментах и статусе здесь.",
   "Activity is unavailable from the desktop service. Retry to reconnect.": "Активность недоступна в фоновой службе. Повторите подключение.",
-  "Activity stays on %1. Closing this window does not stop your agent.": "Активность остаётся на %1. Закрытие этого окна не останавливает агента.",
   "Activity width": "Ширина активности",
   "Activity will appear here": "Здесь будет отображаться активность",
   "Activity, processes and project tasks are unavailable with this background service connection.": "История, процессы и задачи проекта недоступны при этом подключении к фоновой службе.",

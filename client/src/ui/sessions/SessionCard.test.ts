@@ -13,7 +13,7 @@ vi.mock("../../store/catalog", async (orig) => ({
   computerOffline: (computer: string) => !mocks.online(computer),
 }));
 
-import { agentsLabel, badgeKind, childStatus, emphasis } from "./SessionCard";
+import { agentsLabel, badgeKind, childStatus, emphasis, fitCounters } from "./SessionCard";
 import type { Session } from "./types";
 import { toSession } from "../../store/catalog";
 import { currentChildren, workingChildren } from "./subagents";
@@ -87,5 +87,18 @@ describe("recorded child captions shared with Android", () => {
     expect(list.flatMap((item) => item.type === "child" ? [stripChildStatus(item)] : [])).toEqual(captions);
     expect(JSON.stringify(session)).toBe(before);
     if (example.current) expect(list[0].type === "card" && list[0].session).toBe(session);
+  });
+});
+
+describe("compact summary fit (zerus-sa9qn.12)", () => {
+  it("shortens once the long labels overflow and lengthens only when their width returns", () => {
+    let state = { narrow: false, needed: 0 };
+    state = fitCounters(state, 300, 300);
+    expect(state).toEqual({ narrow: false, needed: 0 });
+    state = fitCounters(state, 342, 300);
+    expect(state).toEqual({ narrow: true, needed: 342 });
+    // Short labels now fit; a little more room is not enough for the long ones.
+    expect(fitCounters(state, 180, 320)).toEqual(state);
+    expect(fitCounters(state, 180, 342)).toEqual({ narrow: false, needed: 0 });
   });
 });

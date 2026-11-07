@@ -1724,7 +1724,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let (dir, config) = fixture();
         let script = dir.path().join("answer");
-        std::fs::write(&script, format!("#!/bin/sh\ncat > /dev/null\nprintf '{{\"node_id\":\"{PEER}\"}}'\n")).unwrap();
+        std::fs::write(&script, format!(r#"#!/bin/sh
+case "$*" in *hgs-remote-v2*) printf '%s\n' 'hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot'; exit 0;; esac
+cat > /dev/null
+printf '{{"node_id":"{PEER}"}}'
+"#)).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         transport::TEST_SSH.with(|program| *program.borrow_mut() = Some(script.clone()));
         let answered = transport::remote_until(&config, "peer", "hello", None, Instant::now() + Duration::from_secs(5));
@@ -1739,6 +1743,28 @@ mod tests {
         for (seam, late) in ["spawn", "wait"].iter().zip(late) {
             assert!(format!("{:#}", late.unwrap_err()).contains("timed out"), "{seam}");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shell_discovery_uses_the_original_swarm_deadline_before_any_operation() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, config) = fixture();
+        let script = dir.path().join("delayed-discovery");
+        let operation = dir.path().join("operation");
+        std::fs::write(&script, format!(r#"#!/bin/sh
+case "$*" in *hgs-remote-v2*) sleep 3; printf '%s\n' 'hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot'; exit 0;; esac
+: > '{}'
+printf '{{"node_id":"{PEER}"}}'
+"#, operation.display())).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        transport::TEST_SSH.with(|program| *program.borrow_mut() = Some(script));
+        let started = Instant::now();
+        let result = transport::remote_until(&config, "peer", "hello", None, started + Duration::from_millis(150));
+        transport::TEST_SSH.with(|program| *program.borrow_mut() = None);
+        assert!(format!("{:#}", result.unwrap_err()).contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+        assert!(!operation.exists(), "an operation was started after discovery expired");
     }
 
     /// desktop-u on #1452 R2: a universe without this computer's membership

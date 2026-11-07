@@ -17,6 +17,30 @@ use std::{
 
 pub const WINDOWS_PROBE: &str = r#"echo "hgs-remote-v2|%OS%|%SystemRoot%|$env:OS|$env:SystemRoot""#;
 
+const PROBE_LIMIT: Duration = Duration::from_secs(6);
+
+#[cfg(test)]
+thread_local! {
+    // One scoped SSH stand-in covers both planning and the subsequent operation.
+    pub(crate) static TEST_SSH: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+fn ssh_program() -> std::ffi::OsString {
+    #[cfg(test)]
+    if let Some(program) = TEST_SSH.with(|program| program.borrow().clone()) {
+        return program.into_os_string();
+    }
+    platform::ssh_program()
+}
+
+fn available(deadline: Instant) -> Result<()> {
+    if Instant::now() >= deadline {
+        Err(Error::new(3, "Remote SSH request timed out"))
+    } else {
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Login {
     Posix,
@@ -72,20 +96,20 @@ fn parse_probe(bytes: &[u8]) -> Option<Login> {
 
 /// Process-local discovery cache, bound to alias, SSH program and connection
 /// overrides. Later CLI calls rediscover; no metadata/credentials are persisted.
-fn discover(config: &Config, peer: &str) -> Result<Login> {
+fn discover(config: &Config, peer: &str, deadline: Instant) -> Result<Login> {
+    available(deadline)?;
     static CACHE: OnceLock<Mutex<BTreeMap<Vec<String>, Login>>> = OnceLock::new();
-    let mut key = vec![
-        platform::ssh_program().to_string_lossy().into_owned(),
-        peer.into(),
-    ];
+    let mut key = vec![ssh_program().to_string_lossy().into_owned(), peer.into()];
     key.extend(crate::machines::ssh_options(config, peer));
     let cache = CACHE.get_or_init(Default::default);
     if let Some(value) = cache.lock().unwrap().get(&key) {
+        available(deadline)?;
         return Ok(value.clone());
     }
     // `echo` is a builtin in each supported login shell. No new executable is
     // searched for on remote PATH merely to discover the platform.
-    let output = read(config, peer, WINDOWS_PROBE)?;
+    let output = read(config, peer, WINDOWS_PROBE, deadline)?;
+    available(deadline)?;
     let value = if output.status.success() {
         parse_probe(&output.stdout)
     } else {
@@ -113,18 +137,32 @@ fn discover(config: &Config, peer: &str) -> Result<Login> {
 }
 
 pub fn windows(config: &Config, peer: &str) -> Result<bool> {
-    Ok(!matches!(discover(config, peer)?, Login::Posix))
+    Ok(!matches!(
+        discover(config, peer, Instant::now() + PROBE_LIMIT)?,
+        Login::Posix
+    ))
 }
 
 pub fn hgs<S: AsRef<str>>(config: &Config, peer: &str, words: &[S]) -> Result<String> {
-    adapt(
-        config,
-        peer,
-        words,
-        &format!("~/.local/bin/hgs {}", platform::remote_join(words)),
-        &[],
-        "",
-    )
+    hgs_within(config, peer, words, Instant::now() + PROBE_LIMIT)
+}
+
+/// Planning shares the caller's absolute deadline, including a cached lookup.
+/// Returning a command never renews the time left to spawn or supply input.
+pub(crate) fn hgs_within<S: AsRef<str>>(
+    config: &Config,
+    peer: &str,
+    words: &[S],
+    deadline: Instant,
+) -> Result<String> {
+    let shell = discover(config, peer, deadline)?;
+    let command = if matches!(shell, Login::Posix) {
+        format!("~/.local/bin/hgs {}", platform::remote_join(words))
+    } else {
+        encode(&shell, words)?
+    };
+    available(deadline)?;
+    Ok(command)
 }
 
 /// `exact` markers match a whole trimmed help line; the others retain the
@@ -137,26 +175,43 @@ pub fn adapt<S: AsRef<str>>(
     markers: &[(&str, bool)],
     missing: &str,
 ) -> Result<String> {
-    if !windows(config, peer)? {
+    let deadline = Instant::now() + PROBE_LIMIT;
+    let shell = discover(config, peer, deadline)?;
+    if matches!(shell, Login::Posix) {
+        available(deadline)?;
         return Ok(unix.into());
     }
-    if !markers.is_empty() && !supports(config, peer, markers)? {
+    if !markers.is_empty() && !supports_within(config, peer, markers, deadline)? {
         return Err(Error::new(1, missing));
     }
-    windows_command(config, peer, words)
+    let command = encode(&shell, words)?;
+    available(deadline)?;
+    Ok(command)
 }
 
 pub fn supports(config: &Config, peer: &str, markers: &[(&str, bool)]) -> Result<bool> {
-    let output = read(config, peer, &windows_command(config, peer, &["--help"])?)?;
+    supports_within(config, peer, markers, Instant::now() + PROBE_LIMIT)
+}
+
+fn supports_within(
+    config: &Config,
+    peer: &str,
+    markers: &[(&str, bool)],
+    deadline: Instant,
+) -> Result<bool> {
+    let command = encode(&discover(config, peer, deadline)?, &["--help"])?;
+    let output = read(config, peer, &command, deadline)?;
     let help = String::from_utf8_lossy(&output.stdout);
-    Ok(output.status.success()
+    let supported = output.status.success()
         && markers.iter().all(|(marker, exact)| {
             if *exact {
                 help.lines().any(|line| line.trim() == *marker)
             } else {
                 help.contains(marker)
             }
-        }))
+        });
+    available(deadline)?;
+    Ok(supported)
 }
 
 /// Only fixed ASCII syntax reaches the remote login shell (PowerShell or cmd).
@@ -164,7 +219,10 @@ pub fn supports(config: &Config, peer: &str, markers: &[(&str, bool)]) -> Result
 /// Native argv uses Windows quoting,
 /// rather than PowerShell 5.1's lossy native argument forwarding.
 pub fn windows_command<S: AsRef<str>>(config: &Config, peer: &str, words: &[S]) -> Result<String> {
-    encode(&discover(config, peer)?, words)
+    let deadline = Instant::now() + PROBE_LIMIT;
+    let command = encode(&discover(config, peer, deadline)?, words)?;
+    available(deadline)?;
+    Ok(command)
 }
 
 fn encode<S: AsRef<str>>(shell: &Login, words: &[S]) -> Result<String> {
@@ -206,16 +264,35 @@ pub fn output<S: AsRef<str>>(
     peer: &str,
     words: &[S],
 ) -> Result<std::process::Output> {
-    read(config, peer, &hgs(config, peer, words)?)
+    let deadline = Instant::now() + PROBE_LIMIT;
+    read(
+        config,
+        peer,
+        &hgs_within(config, peer, words, deadline)?,
+        deadline,
+    )
 }
 
 /// Bound the discovery/help subprocess, both output streams and reader waits.
 /// `spawn_ssh` retains the platform's overlapped pipes/job custody on Windows.
-fn read(config: &Config, peer: &str, command: &str) -> Result<std::process::Output> {
+fn read(
+    config: &Config,
+    peer: &str,
+    command: &str,
+    deadline: Instant,
+) -> Result<std::process::Output> {
+    let deadline = deadline.min(Instant::now() + PROBE_LIMIT);
+    available(deadline)?;
     if peer.is_empty() || peer.starts_with('-') || peer.chars().any(char::is_whitespace) {
         return Err(Error::new(1, "invalid SSH host alias"));
     }
     const LIMIT: u64 = 256 * 1024;
+    #[cfg(test)]
+    let mut cmd = match TEST_SSH.with(|program| program.borrow().clone()) {
+        Some(program) => std::process::Command::new(program),
+        None => crate::ssh_bytes::command(command)?,
+    };
+    #[cfg(not(test))]
     let mut cmd = crate::ssh_bytes::command(command)?;
     cmd.args(crate::machines::ssh_options(config, peer))
         .args([
@@ -231,6 +308,7 @@ fn read(config: &Config, peer: &str, command: &str) -> Result<std::process::Outp
             command,
         ])
         .stdin(Stdio::null());
+    available(deadline)?;
     let mut child = platform::spawn_ssh(platform::own_process_group(&mut cmd), false, true, true)?;
     let (tx, rx) = mpsc::channel();
     for (index, pipe) in [child.stdout.take(), child.stderr.take()]
@@ -249,7 +327,6 @@ fn read(config: &Config, peer: &str, command: &str) -> Result<std::process::Outp
         });
     }
     drop(tx);
-    let deadline = Instant::now() + Duration::from_secs(6);
     let result = (|| {
         let mut streams = [None, None];
         loop {
@@ -260,12 +337,13 @@ fn read(config: &Config, peer: &str, command: &str) -> Result<std::process::Outp
                 .iter()
                 .flatten()
                 .any(|bytes| bytes.len() as u64 > LIMIT)
-                || Instant::now() >= deadline
             {
                 return Err(Error::new(3, "Remote shell discovery exceeded its output or time bound; no operation was sent"));
             }
+            available(deadline)?;
             if let Some(status) = child.child.try_wait()? {
                 if streams.iter().all(Option::is_some) {
+                    available(deadline)?;
                     return Ok(std::process::Output {
                         status,
                         stdout: streams[0].take().unwrap(),
@@ -286,6 +364,112 @@ fn read(config: &Config, peer: &str, command: &str) -> Result<std::process::Outp
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    fn fixture(script: &str) -> (tempfile::TempDir, Config, ScopedSsh) {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let program = root.path().join("ssh");
+        std::fs::write(&program, script).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let previous = TEST_SSH.with(|value| value.replace(Some(program)));
+        let config = Config {
+            home: root.path().to_string_lossy().into_owned(),
+            dir: root.path().join("config"),
+            state: root.path().join("state"),
+            selves: vec!["local-fixture".into()],
+            peers: vec!["peer".into()],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: BTreeMap::new(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        (root, config, ScopedSsh(previous))
+    }
+
+    #[cfg(target_os = "linux")]
+    struct ScopedSsh(Option<std::path::PathBuf>);
+    #[cfg(target_os = "linux")]
+    impl Drop for ScopedSsh {
+        fn drop(&mut self) {
+            TEST_SSH.with(|value| {
+                value.replace(self.0.take());
+            });
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn slow_discovery_cannot_renew_a_short_caller_budget() {
+        let (_root, config, _ssh) = fixture("#!/bin/sh\nsleep 3\nprintf '%s\\n' 'hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot'\n");
+        let started = Instant::now();
+        let error = hgs_within(
+            &config,
+            "peer",
+            &["swarm", "hello"],
+            started + Duration::from_millis(150),
+        )
+        .unwrap_err();
+        assert!(error.message.contains("timed out"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cached_discovery_never_admits_an_expired_plan() {
+        let (_root, config, _ssh) = fixture(
+            "#!/bin/sh\nprintf '%s\\n' 'hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot'\n",
+        );
+        hgs_within(
+            &config,
+            "peer",
+            &["swarm", "hello"],
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        let error = hgs_within(&config, "peer", &["swarm", "hello"], Instant::now()).unwrap_err();
+        assert!(error.message.contains("timed out"), "{error}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn discovery_and_help_consume_the_same_absolute_budget() {
+        let (root, config, _ssh) = fixture(
+            r#"#!/bin/sh
+case "$*" in
+*hgs-remote-v2*) sleep 0.2; printf '%s\n' 'hgs-remote-v2|%OS%|%SystemRoot%|Windows_NT|C:\Windows';;
+*) if [ ! -f "$0.fast" ]; then sleep 3; fi; printf '%s\n' 'fixture-capability';;
+esac
+"#,
+        );
+        let started = Instant::now();
+        let error = supports_within(
+            &config,
+            "peer",
+            &[("fixture-capability", true)],
+            started + Duration::from_millis(400),
+        )
+        .unwrap_err();
+        assert!(error.message.contains("timed out"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+        std::fs::write(root.path().join("ssh.fast"), "").unwrap();
+        assert!(supports_within(
+            &config,
+            "peer",
+            &[("fixture-capability", true)],
+            Instant::now() + Duration::from_secs(2)
+        )
+        .unwrap());
+    }
+
     #[test]
     fn discovery_requires_a_complete_receipt_and_a_literal_absolute_interpreter() {
         assert_eq!(

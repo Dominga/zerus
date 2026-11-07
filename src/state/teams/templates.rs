@@ -293,6 +293,17 @@ pub(crate) const BUILTIN: &[Template] = &[
         params: &[param("tests", Kind::Paths), optional("filter", Kind::Text), optional("files", Kind::Paths)],
         timeout_secs: 1800,
     },
+    // Task #239: the web client's tests (vitest) run through the worker from
+    // the project's own node_modules, installing them first when they are
+    // missing; the JUnit report gives one count and failure per test file.
+    Template {
+        id: "web-test",
+        summary: "vitest run in the web project (default client/), from its own node_modules; npm ci through the worker when they are missing; a JUnit report per test file",
+        program: "npx",
+        args: &[],
+        params: &[optional("project", Kind::Path), optional("paths", Kind::Paths), optional("files", Kind::Paths)],
+        timeout_secs: 1800,
+    },
 ];
 
 /// Task 85: the build folder a CMake template uses when none is named.
@@ -943,6 +954,7 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
         "ctest" => return ctest(template, args, folder),
         "msbuild-build" => return msbuild_build(template, args, folder),
         "vstest" => return vstest(template, args, folder),
+        "web-test" => return web_test(template, args, folder),
         _ => {}
     }
     if template.id == "git-commit" {
@@ -1255,6 +1267,8 @@ pub(crate) fn report_path(folder: &Path, template: &str) -> Option<(PathBuf, sup
     match template {
         "ctest" => Some((results.join("ctest.xml"), Format::Junit)),
         "vstest" => Some((results.join("vstest.trx"), Format::Trx)),
+        // Task #239: vitest's own JUnit report, one suite per test file.
+        "web-test" => Some((results.join("vitest.xml"), Format::Junit)),
         _ => project_report(folder, template),
     }
 }
@@ -1329,6 +1343,79 @@ fn vstest(template: &Template, args: &Value, folder: &Path) -> anyhow::Result<Pl
 /// Task 85: the MSBuild the templates run, for the broker's version line.
 pub(crate) fn msbuild_path() -> String {
     msbuild_program()
+}
+
+/// Task #239: the web project's vitest run. The project (default the member's
+/// folder, `client` for this repository) must carry package.json; its own
+/// node_modules run the tests, and a project without them installs first
+/// through the worker (`npm ci`, or `npm install` without a lock file), so a
+/// sandboxed member never needs npm. The run writes a JUnit report: one
+/// suite per test file, each failure by name.
+fn web_test(template: &Template, args: &Value, folder: &Path) -> anyhow::Result<Plan> {
+    let project = one(template, args, "project", folder)?
+        .map(|project| project.replace('\\', "/").trim_end_matches('/').to_owned())
+        .filter(|project| project != ".");
+    let dir = project.as_ref().map_or_else(|| folder.to_path_buf(), |project| folder.join(project));
+    if let Some(project) = &project {
+        let real = std::fs::canonicalize(&dir).with_context(|| format!("The template's project {project} is not a folder in your folder"))?;
+        let base = std::fs::canonicalize(folder).context("Your folder cannot be read")?;
+        ensure!(real.starts_with(&base), "The template's project {project} leads outside your folder");
+    }
+    ensure!(dir.join("package.json").is_file(), "The web project has no package.json ({})", dir.display());
+    let (report, _) = report_path(folder, template.id).context("the vitest report")?;
+    if let Some(parent) = report.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let (program, mut argv) = match local_vitest(&dir) {
+        // The project's own vitest, run by node: no npm lookup, no PATH, and
+        // the same binary the member's own editor uses.
+        Some(script) => ("node".to_owned(), vec![script.display().to_string()]),
+        // A project whose vitest comes from a parent node_modules (a workspace)
+        // resolves it through npx without installing anything.
+        #[cfg(windows)]
+        None => ("cmd".to_owned(), vec!["/C".into(), "npx".to_owned(), "--no-install".to_owned(), "vitest".to_owned()]),
+        #[cfg(not(windows))]
+        None => ("npx".to_owned(), vec!["--no-install".to_owned(), "vitest".to_owned()]),
+    };
+    argv.push("run".to_owned());
+    argv.push("--reporter=default".to_owned());
+    argv.push("--reporter=junit".to_owned());
+    argv.push(format!("--outputFile.junit={}", report.display()));
+    for path in many(template, args, "paths", folder)? {
+        argv.push(folder.join(&path).display().to_string());
+    }
+    if dir.join("node_modules").is_dir() {
+        return Ok(Plan { template: template.id.to_owned(), program, argv, commit: None, more: Vec::new(), cwd: project });
+    }
+    let (install, install_argv) = web_install(&dir);
+    Ok(Plan { template: template.id.to_owned(), program: install, argv: install_argv, commit: None, more: vec![(program, argv)], cwd: project })
+}
+
+/// The vitest script of a project's own node_modules, or None when they do not
+/// carry one (npx resolves it instead).
+fn local_vitest(dir: &Path) -> Option<PathBuf> {
+    let script = dir.join("node_modules").join("vitest").join("vitest.mjs");
+    script.is_file().then_some(script)
+}
+
+/// The install a missing node_modules needs: `npm ci`, or `npm install` when
+/// the project has no lock file.
+fn web_install(dir: &Path) -> (String, Vec<String>) {
+    let ci = if dir.join("package-lock.json").is_file() || dir.join("npm-shrinkwrap.json").is_file() { "ci" } else { "install" };
+    let fixed = ["--no-audit", "--no-fund", "--loglevel", "error"];
+    #[cfg(windows)]
+    {
+        // npm is a .cmd; cmd is what runs it, with fixed words only.
+        let mut argv = vec!["/C".to_owned(), "npm".to_owned(), ci.to_owned()];
+        argv.extend(fixed.iter().map(|word| (*word).to_owned()));
+        ("cmd".to_owned(), argv)
+    }
+    #[cfg(not(windows))]
+    {
+        let mut argv = vec![ci.to_owned()];
+        argv.extend(fixed.iter().map(|word| (*word).to_owned()));
+        ("npm".to_owned(), argv)
+    }
 }
 
 /// Visual Studio's MSBuild, as vswhere names it; `msbuild` on PATH otherwise.
@@ -1913,6 +2000,17 @@ fn template_environment(plan: &Plan, folder: &Path) -> Vec<(String, String)> {
     if plan.template == "android-test" {
         env.push(("GRADLE_USER_HOME".into(), folder.join(".zerus-team").join("gradle").join("home").display().to_string()));
     }
+    // Task #239: the web project's npm cache lives in the member's folder, so a
+    // sandboxed member never reads or writes the person's own cache (the
+    // EPERM ui3 met) and two members never share one download.
+    if plan.template == "web-test" {
+        let npm = folder.join(".zerus-team").join("npm");
+        let _ = std::fs::create_dir_all(&npm);
+        env.push(("npm_config_cache".into(), npm.display().to_string()));
+        env.push(("npm_config_fund".into(), "false".into()));
+        env.push(("npm_config_audit".into(), "false".into()));
+        env.push(("CI".into(), "1".into()));
+    }
     env
 }
 
@@ -2412,7 +2510,7 @@ mod tests {
         let ids: Vec<&str> = BUILTIN.iter().map(|template| template.id).collect();
         // Task 85: the CMake and MSBuild templates of any project after them; task 86: the Python and Cython ones; task 87: Unreal.
         assert_eq!(ids, ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test", "py-test", "cython-build", "android-test", "release-candidate",
-                         "clean-build", "git-merge-lead", "git-commit", "ue-build", "ue-test", "cmake-configure", "cmake-build", "ctest", "msbuild-build", "vstest"]);
+                         "clean-build", "git-merge-lead", "git-commit", "ue-build", "ue-test", "cmake-configure", "cmake-build", "ctest", "msbuild-build", "vstest", "web-test"]);
     }
 
     // Run by hand on a Windows machine with Visual Studio (cargo test -- --ignored).
@@ -3024,6 +3122,96 @@ mod tests {
     fn project(folder: &Path, text: &str) {
         std::fs::create_dir_all(folder.join(".zerus")).unwrap();
         std::fs::write(folder.join(".zerus").join("tests.toml"), text).unwrap();
+    }
+
+    /// Task #239: a web project's vitest runs from its own node_modules, writes
+    /// the JUnit report the counts and failures are read from, and installs
+    /// through the worker first when node_modules are missing.
+    #[test]
+    fn a_web_project_runs_its_own_vitest_and_reports_each_file() {
+        let dir = temp();
+        let app = dir.path().join("client");
+        std::fs::create_dir_all(app.join("node_modules").join("vitest")).unwrap();
+        std::fs::create_dir_all(app.join("src")).unwrap();
+        std::fs::write(app.join("package.json"), r#"{"scripts":{"test":"vitest"}}"#).unwrap();
+        std::fs::write(app.join("package-lock.json"), "{}").unwrap();
+        std::fs::write(app.join("src").join("app.test.ts"), "// fake").unwrap();
+        // A fake vitest: it writes the report the template asks for and says
+        // what it ran, so a test never needs a real web toolchain.
+        std::fs::write(
+            app.join("node_modules").join("vitest").join("vitest.mjs"),
+            r#"
+import fs from 'node:fs';
+const out = process.argv.find((arg) => arg.startsWith('--outputFile.junit='));
+const text = '<?xml version="1.0"?><testsuites><testsuite name="src/app.test.ts" tests="3" failures="1">' +
+  '<testcase name="adds" classname="src/app.test.ts"/>' +
+  '<testcase name="fails" classname="src/app.test.ts"><failure message="expected 1 to be 2"/></testcase>' +
+  '<testcase name="skips" classname="src/app.test.ts"><skipped/></testcase></testsuite></testsuites>';
+if (out) fs.writeFileSync(out.slice(out.indexOf('=') + 1), text);
+console.log(' Test Files  1 failed | 1 passed (2)');
+console.log(' FAIL  src/app.test.ts > fails');
+"#,
+        )
+        .unwrap();
+        let first = plan("web-test", &json!({"project":"client","paths":["client/src/app.test.ts"]}), dir.path()).unwrap();
+        assert_eq!((first.program.as_str(), first.cwd.as_deref()), ("node", Some("client")), "{first:?}");
+        let report = dir.path().join(".zerus-team").join("results").join("vitest.xml");
+        assert!(first.argv.iter().any(|arg| arg == "--reporter=junit"), "{first:?}");
+        assert!(first.argv.iter().any(|arg| *arg == format!("--outputFile.junit={}", report.display())), "{first:?}");
+        assert!(first.argv.iter().any(|arg| arg.ends_with("app.test.ts")), "{first:?}");
+        let outcome = execute(&first, dir.path(), Duration::from_secs(60), &[]);
+        assert_eq!(outcome.exit, Some(0), "{outcome:?}");
+        assert!(outcome.tail.contains("Test Files"), "{}", outcome.tail);
+        let read = outcome.report.expect("the report is read");
+        assert_eq!((read.passed, read.failed, read.skipped), (1, 1, 1), "{read:?}");
+        assert!(read.results.iter().all(|result| result.suite == "src/app.test.ts"), "{read:?}");
+        assert!(outcome.failures.iter().any(|name| name.contains("fails")), "{:?}", outcome.failures);
+        assert_eq!(report_path(dir.path(), "web-test").map(|(path, format)| (path, format)), Some((report.clone(), super::super::run_results::Format::Junit)));
+        // Two files, one failing: the run's exit, its counts and the failing
+        // name come back per file, not as one blob.
+        std::fs::write(
+            app.join("node_modules").join("vitest").join("vitest.mjs"),
+            r#"
+import fs from 'node:fs';
+const out = process.argv.find((arg) => arg.startsWith('--outputFile.junit='));
+const text = '<?xml version="1.0"?><testsuites>' +
+  '<testsuite name="src/app.test.ts" tests="2" failures="1">' +
+  '<testcase name="adds" classname="src/app.test.ts"/>' +
+  '<testcase name="fails" classname="src/app.test.ts"><failure message="expected 1 to be 2"/></testcase>' +
+  '</testsuite>' +
+  '<testsuite name="src/util.test.ts" tests="1" failures="0"><testcase name="parses" classname="src/util.test.ts"/></testsuite>' +
+  '</testsuites>';
+if (out) fs.writeFileSync(out.slice(out.indexOf('=') + 1), text);
+console.log(' Test Files  1 failed | 1 passed (2)');
+console.log(' FAIL  src/app.test.ts > fails');
+process.exit(1);
+"#,
+        )
+        .unwrap();
+        let failed = execute(&first, dir.path(), Duration::from_secs(60), &[]);
+        assert_eq!(failed.exit, Some(1), "{failed:?}");
+        let read = failed.report.expect("the report is read");
+        assert_eq!((read.passed, read.failed), (2, 1), "{read:?}");
+        let files: std::collections::BTreeSet<&str> = read.results.iter().map(|result| result.suite.as_str()).collect();
+        assert_eq!(files.len(), 2, "one suite per file: {read:?}");
+        assert!(failed.failures.iter().any(|name| name.contains("fails")), "{:?}", failed.failures);
+        // Without node_modules the worker installs them first, then runs the
+        // same tests: the request is npm ci with the vitest run behind it.
+        std::fs::remove_dir_all(app.join("node_modules")).unwrap();
+        let install = plan("web-test", &json!({"project":"client"}), dir.path()).unwrap();
+        assert_eq!(install.more.len(), 1, "{install:?}");
+        assert!(install.more[0].1.iter().any(|arg| arg == "--reporter=junit"), "{install:?}");
+        assert!(install.argv.contains(&"ci".to_owned()), "{install:?}");
+        assert!(install.argv.iter().any(|arg| arg == "npm"), "{install:?}");
+        // A project that leads outside the member's folder is refused.
+        let outside = temp();
+        let error = plan("web-test", &json!({"project": outside.path().display().to_string()}), dir.path()).unwrap_err().to_string();
+        assert!(error.contains("stays inside your folder") || error.contains("leads outside"), "{error}");
+        // A folder with no package.json is named, never run.
+        let empty = temp();
+        std::fs::create_dir_all(empty.path().join("client")).unwrap();
+        let error = plan("web-test", &json!({"project":"client"}), empty.path()).unwrap_err().to_string();
+        assert!(error.contains("package.json"), "{error}");
     }
 
     // U62 (#721): the build cache is the project's choice. Without
@@ -3749,3 +3937,7 @@ kind = "path"
         assert!(error.contains("HKCU") && error.contains("ZERUS_UE_ENGINE"), "{error}");
     }
 }
+
+
+
+

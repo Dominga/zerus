@@ -2768,7 +2768,7 @@
   "The folder removal option could not be checked. The working folder will be kept.": "Не удалось проверить возможность удаления рабочей папки. Папка будет сохранена.",
   "The folder-cache worker could not run. Restart Zerus to retry; the original cache is unchanged.": "Обработчик кэша папок не запустился. Перезапустите Zerus для повторной попытки; исходный кэш не изменён.",
   "The fork continues this conversation in a new session. The original keeps running.": "Этот разговор продолжится в новой сессии. Исходная сессия продолжит работать.",
-  "The fork is placed after its original and opens Terminal": "Ответвление размещается после исходной сессии и открывает терминал",
+  "The fork is placed after its original and opens Activity": "Ответвление размещается после исходной сессии и открывает вкладку «Активность»",
   "The fresh project catalog or computer configuration could not be verified. Reads retry automatically; the original import will not be applied again.": "Не удалось проверить свежий каталог проектов или конфигурацию компьютера. Чтение повторяется автоматически; исходный импорт повторно применяться не будет.",
   "The historical downloaded files report is deferred. Retry keeps the original report identity.": "Исторический отчёт о скачанных файлах отложен. Повторная попытка сохраняет исходный идентификатор отчёта.",
   "The historical downloaded files report needs review. An unconfirmed publication will only be looked up, never resent.": "Исторический отчёт о скачанных файлах требует проверки. Неподтверждённая публикация будет только проверяться, но никогда не будет отправлена повторно.",

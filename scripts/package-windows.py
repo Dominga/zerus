@@ -102,6 +102,7 @@ def main():
     parser.add_argument("--gui", type=Path, required=True, help="tested hgs-tray.exe")
     # WhiteWh fork: a relay for this computer alone (docs/fork-updates.md).
     parser.add_argument("--mobile-relay", type=Path, help="tested zerus-relay.exe")
+    parser.add_argument("--lore", type=Path, help="tested lore.exe (crates/lore), shipped beside hgs.exe for team and project memory")
     parser.add_argument("--output", type=Path, required=True, help="zip to write")
     parser.add_argument("--crt-dir", type=Path, help="Microsoft.VC14*.CRT folder [default: found with vswhere]")
     parser.add_argument("--rust-licenses", type=Path,
@@ -156,6 +157,9 @@ def main():
         copy(args.connector, stage / "zerus-mobile-connector.exe")
         if args.mobile_relay:
             copy(args.mobile_relay, stage / "zerus-relay.exe")
+        if args.lore:
+            copy(args.lore, stage / "lore.exe")
+            manifest["lore_bundled"] = True
         for dll in sorted(crt.glob("*.dll")):
             copy(dll, stage / dll.name)
         missing = [name for name in CRT_REQUIRED if not (stage / name).is_file()]
@@ -180,7 +184,8 @@ def main():
             relay = ["--manifest-path", str(ROOT / "services/mobile/relay/Cargo.toml")] if args.mobile_relay else []
             subprocess.run([sys.executable, str(ROOT / "scripts/collect-licenses.py"), str(licenses / "rust"),
                             "--manifest-path", str(ROOT / "Cargo.toml"),
-                            "--manifest-path", str(ROOT / "services/mobile/connector/Cargo.toml"), *relay],
+                            "--manifest-path", str(ROOT / "services/mobile/connector/Cargo.toml"), *relay,
+                            *(["--manifest-path", str(ROOT / "crates/lore/Cargo.toml")] if args.lore else [])],
                            cwd=ROOT, check=True)
             subprocess.run([sys.executable, str(ROOT / "scripts/collect-licenses.py"), str(licenses / "rust/desktop"),
                             "--manifest-path", str(ROOT / "client/src-tauri/Cargo.toml"),

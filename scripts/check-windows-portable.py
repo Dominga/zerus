@@ -126,6 +126,9 @@ def main():
                 reported = run(program, ["--version"], environment, base)
                 require(reported == expected, f"{program.name} --version: {reported!r}, expected {expected!r}.")
             if manifest.get("mobile_connector_bundled"):
+                if (bundle / "lore.exe").is_file():
+                    lore_version = run(bundle / "lore.exe", ["--version"], environment, base)
+                    require(lore_version.startswith("lore "), "Bundled lore does not start.")
                 connector_version = run(bundle / "zerus-mobile-connector.exe", ["--version"], environment, base)
                 require(connector_version.startswith("zerus-mobile-connector "), "Bundled connector does not start.")
                 status = json.loads(run(bundle / "zerus-mobile-connector.exe", ["--manage", "status", "--config",

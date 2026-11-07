@@ -34,7 +34,7 @@ impl Model {
         // SHA-256 matched (or verified by `verify` for an offline install), and
         // nothing writes it while it is mapped; the mapping is read-only.
         let builder = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[weights.clone()], DType::F32, &device)
+            VarBuilder::from_mmaped_safetensors(std::slice::from_ref(&weights), DType::F32, &device)
         }
         .map_err(|error| Error::Model(format!("cannot map {}: {error}", weights.display())))?;
         let model = NomicBertModel::load(builder, &config)

@@ -601,7 +601,7 @@ impl<'a> Ctx<'a> {
         };
         let mut outcome = ops::apply(&self.config, build, &options)?;
         let mut all = notes;
-        all.extend(outcome.notes.drain(..));
+        all.append(&mut outcome.notes);
         outcome.notes = all;
         let place = format!("{}/{}", self.config.remote, self.config.branch);
         let line = outcome.commit.as_ref().map(|commit| {

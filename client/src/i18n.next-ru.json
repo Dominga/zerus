@@ -331,6 +331,7 @@
   "Full-width Overview": "Обзор во всю ширину",
   "Git branch %1": "Ветка Git %1",
   "Git no longer tracks this folder, but files remain. The removal is never retried.": "Git больше не отслеживает эту папку, но в ней остались файлы. Удаление не повторяется.",
+  "Git status is unavailable or out of date.": "Статус Git недоступен или устарел.",
   "Goal budget limit reached": "Достигнут лимит бюджета цели",
   "Got it": "Понятно",
   "Held message copies": "Удержанные копии сообщений",

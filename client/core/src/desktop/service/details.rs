@@ -46,7 +46,10 @@ pub struct Key {
 }
 impl Key {
     pub fn new(computer: &str, spec: &Subscription) -> Result<Self, &'static str> {
-        if !valid_computer(computer) || spec.refresh.is_some() || spec.path.is_some() {
+        if !valid_computer(computer)
+            || spec.refresh.is_some()
+            || (spec.topic != topic::GIT && spec.path.is_some())
+        {
             return Err("invalid_detail_subscription");
         }
         if let Some(session) = &spec.session {
@@ -61,6 +64,15 @@ impl Key {
             }
         }
         let valid = match spec.topic.as_str() {
+            topic::GIT => {
+                spec.path.as_deref().is_some_and(crate::git::valid_path)
+                    && spec.session.is_none()
+                    && spec.project.is_none()
+                    && spec.after.is_none()
+                    && spec.tail.is_none()
+                    && spec.interval_ms.is_none()
+                    && spec.window.is_none()
+            }
             topic::ACTIVITY => {
                 spec.session.is_some()
                     && spec.project.is_none()
@@ -108,6 +120,7 @@ impl Key {
                 .as_ref()
                 .map(|s| s.key())
                 .or_else(|| spec.project.clone())
+                .or_else(|| spec.path.clone())
                 .unwrap_or_default(),
         })
     }
@@ -156,6 +169,9 @@ impl Route {
     fn reset(&mut self) {
         self.projection = CatalogState::new();
         match self.key.topic.as_str() {
+            topic::GIT => {
+                self.projection.git_mut().follow(&self.key.key);
+            }
             topic::ACTIVITY => self.projection.follow(&self.key.key),
             topic::PROCESSES => self.projection.processes_mut().follow(&self.key.key),
             topic::TASKS => self.projection.tasks_mut().follow(&self.key.key),
@@ -212,6 +228,11 @@ impl Route {
         let message = "The desktop service detail subscription is unavailable. Retry to reconnect."
             .to_owned();
         match self.key.topic.as_str() {
+            topic::GIT => Change::Git {
+                computer,
+                key: self.key.key.clone(),
+                update: crate::GitUpdate::Unavailable { code },
+            },
             topic::ACTIVITY => Change::Activity {
                 computer,
                 key: self.key.key.clone(),

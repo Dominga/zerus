@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import { tr, trNoop } from "../../i18n";
 import { AGENT_LABEL, Icon } from "../lib/icons";
 import { computerFresh, computerOffline } from "../../store/catalog";
@@ -262,39 +262,50 @@ type Git = NonNullable<Session["git"]>;
 interface GitMark { icon: string; count?: string; tone: "muted" | "attention" | "incoming" | "synced" | "conflict" }
 
 // GitStatusBadge::marks: changed files, outgoing, incoming, then unverified or synced.
-export function gitMarks(g: Git): GitMark[] {
-  const verified = g.state !== "unknown";
+function gitFreshness(g: Git, at = Date.now()) {
+  const age = g.receivedAt === undefined ? 0 : at - g.receivedAt;
+  const fresh = (g.localFresh ?? g.state !== "unknown") && age >= 0 && (g.streamed === true || age < 30_000);
+  const verified = fresh && (g.remoteVerified ?? g.state !== "unknown")
+    && (g.remoteAge ?? 0) + age / 1000 < 60 && g.countsKnown !== false;
+  return { fresh, verified };
+}
+export function gitMarks(g: Git, at = Date.now()): GitMark[] {
+  const { fresh, verified } = gitFreshness(g, at);
   const count = (n: number) => (n > 99 ? "99+" : String(n));
   const marks: GitMark[] = [];
-  if (g.changed) marks.push({ icon: "git-diff", count: count(g.changed), tone: !verified ? "muted" : g.conflicts ? "conflict" : "attention" });
+  if (g.changed) marks.push({ icon: "git-diff", count: count(g.changed), tone: !fresh ? "muted" : g.conflicts ? "conflict" : "attention" });
   if (g.ahead) marks.push({ icon: "git-push", count: count(g.ahead), tone: verified ? "attention" : "muted" });
   if (g.behind) marks.push({ icon: "git-pull", count: count(g.behind), tone: verified ? "incoming" : "muted" });
   if (!verified) marks.push({ icon: "git-unknown", tone: "muted" });
-  else if (!g.changed && !g.ahead && !g.behind) marks.push({ icon: "git-synced", tone: "synced" });
+  else if (!g.changed && !g.ahead && !g.behind && !g.detached && !g.unborn) marks.push({ icon: "git-synced", tone: "synced" });
   return marks;
 }
 
-export function gitTooltip(s: Session): string {
+export function gitTooltip(s: Session, at = Date.now()): string {
   const g = s.git!;
-  const verified = g.state !== "unknown";
+  const { fresh, verified } = gitFreshness(g, at);
   const ref = verified ? tr("verified upstream") : tr("last known upstream; remote unverified");
   return [
     tr("Git status (current checkout)"),
-    s.cwd,
+    g.root || s.gitRoot || s.cwdPath || s.cwd,
     s.branch ? tr("Branch: %1", s.branch) : "",
-    s.branch ? tr("Upstream: %1", `origin/${s.branch}`) : "",
-    tr("%1 changed or new files (including staged and untracked files)", g.changed),
+    g.upstream ? tr("Upstream: %1", g.upstream) : "",
+    g.changedKnown !== false ? tr("%1 changed or new files (including staged and untracked files)", g.changed) : "",
     g.conflicts ? tr("%1 files with merge conflicts", g.conflicts) : "",
-    tr("%1 outgoing commits (%2)", g.ahead, ref),
-    tr("%1 incoming commits (%2)", g.behind, ref),
+    g.aheadKnown !== false ? tr("%1 outgoing commits (%2)", g.ahead, ref) : "",
+    g.behindKnown !== false ? tr("%1 incoming commits (%2)", g.behind, ref) : "",
+    !fresh ? tr("Git status is unavailable or out of date.") : "",
     !verified ? tr("Remote publication has not been verified recently.") : !g.changed && !g.ahead && !g.behind ? tr("Clean checkout. Branch matches the verified remote.") : "",
   ].filter(Boolean).join("\n");
 }
 
 export function GitMarks(props: { session: Session }) {
+  const marks = createMemo(() => props.session.git ? gitMarks(props.session.git, now() * 1000) : [], [], {
+    equals: (a, b) => a.length === b.length && a.every((m, i) => m.icon === b[i].icon && m.count === b[i].count && m.tone === b[i].tone),
+  });
   return (
-    <span class="gmarks" title={gitTooltip(props.session)}>
-      <For each={gitMarks(props.session.git!)}>{(m) => (
+    <span class="gmarks" title={props.session.git ? gitTooltip(props.session, now() * 1000) : ""}>
+      <For each={marks()}>{(m) => (
         <span class={`gmark t-${m.tone}`} classList={{ counted: !!m.count }}>
           <Icon name={m.icon} size={16} />
           <Show when={m.count}><span>{m.count}</span></Show>

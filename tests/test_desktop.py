@@ -2178,6 +2178,41 @@ finally:
         self.assertFalse(status['writers_enabled'])
         self.assertFalse((self.root / 'unexpected-tool').exists())
 
+    def test_status_reports_only_bounded_closed_failure_details_from_the_original_ledger(self):
+        process, initial = self.serve()
+        empty = initial['effect_journal']['recent_failures']
+        self.assertEqual(empty, dict(available=True, refused=None, unknown=None))
+        database = self.desktop / 'state.sqlite3'
+        for number, (state, code, kind) in enumerate([
+                ('refused', 'permission_denied', 'post'),
+                ('refused', 'not_ready', 'withdrawal'),
+                ('refused', 'cancelled', 'post'),
+                ('refused', 'getter_failed', 'post'),
+                ('unknown', 'native_error', 'withdrawal')]):
+            identity = json.dumps(dict(kind=kind, target=dict(scope='session', computer='peer.example',
+                                                            run='private-run', conversation='private-conversation'),
+                                       edge=f'private-edge-{number}'), separators=(',', ':'))
+            intent = hashlib.sha256(identity.encode()).hexdigest()
+            receipt = json.dumps(dict(binding=dict(private='private-binding'), outcome=dict(state=state, code=code)))
+            recorded_at = 1700000000000 + number
+            with closing(sqlite3.connect(database)) as db, db:
+                db.execute('INSERT INTO desktop_intents VALUES(?,?,1,?,0,0)',
+                           (intent, identity, json.dumps(dict(title='private-title', body='private-body'))))
+                seq = db.execute('INSERT INTO desktop_attempts(request_id,fingerprint,intent_id,revision,epoch,service_epoch,adapter,lease,state,receipt,recorded_at) '
+                                 'VALUES(?,?,?,1,?,?,?,?,?,?,?)',
+                                 (str(uuid.uuid4()), 'b' * 64, intent, *[str(uuid.uuid4()) for _ in range(4)],
+                                  state, receipt, recorded_at)).lastrowid
+            status = self.cli('desktop', 'status', '--json')
+            journal = status['effect_journal']
+            self.assertEqual(journal['recent_failures'][state],
+                             dict(seq=seq, kind=kind, code=code, recorded_at=recorded_at, details_available=True))
+            self.assertNotIn('private-', json.dumps(journal))
+            self.assertEqual(journal['reason'], initial['effect_journal']['reason'])
+            self.assertEqual(journal['revoked'], initial['effect_journal']['revoked'])
+            self.assertFalse(status['writers_enabled'])
+            self.assertEqual(status['generation'], initial['generation'])
+        self.stop(process)
+
     @unittest.skipIf(os.name == 'nt', 'Unix socket and mode checks')
     def test_unsafe_files_and_socket_targets_are_preserved(self):
         self.desktop.mkdir(mode=0o700, parents=True)

@@ -359,6 +359,14 @@ export function createActions(
     return live ? copy(live.name) : failed(tr(GONE));
   }
 
+  /** The native conversation ID shown as Session ID in the header and Details. */
+  async function copySessionId(row: ActionRow): Promise<Outcome> {
+    const live = stillListed(row);
+    if (!live) return failed(tr(GONE));
+    if (!row.conversationId || live.runId !== row.runId) return failed(tr(CHANGED));
+    return copy(row.conversationId);
+  }
+
   /** The header copies the selected conversation, run or child ID and names it. */
   async function copyIdentity(row: ActionRow, details?: Details, child?: ChildIdentity): Promise<Outcome> {
     const live = current(row);
@@ -413,7 +421,7 @@ export function createActions(
     return out;
   }
 
-  return { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyIdentity, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices: list, dismiss, notify, clearNotice };
+  return { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copySessionId, copyIdentity, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices: list, dismiss, notify, clearNotice };
 }
 
 type FollowSource = { target(): { id: string } | undefined; summary(): Record<string, unknown> | undefined; loaded(): boolean; ended(): boolean; error(): unknown };
@@ -461,4 +469,4 @@ const app = createActions(withArchived(appCatalog, (key) => archivedRow(key) ?? 
       if (cleanupId) await bridge.terminationCleanupCancel(cleanupId).catch(() => {});
     }
   });
-export const { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copyIdentity, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices, dismiss, notify, clearNotice } = app;
+export const { perform, performComputer, end, forget, toggleMute, stillListed, pendingNotifications, copy, copyName, copySessionId, copyIdentity, copyFolder, lastCopied, copyCommand, copyReference, change, updating, interrupting, detailsFor, notices, dismiss, notify, clearNotice } = app;

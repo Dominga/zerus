@@ -339,6 +339,12 @@ export async function copyCommand(computer: string, name: string, archiveId: str
   return invoke<string>("copy_command", { computer, name, archiveId });
 }
 
+/** Open an external terminal attached only to the selected existing run. */
+export async function sessionTerminalOpen(target: Target): Promise<string | null> {
+  if (!inTauri()) throw "Actions need the desktop app.";
+  return invoke<string | null>("session_terminal_open", { target });
+}
+
 /**
  * One checked page of a computer's archive (`archive_page`, `hgs [@alias] archives --json`);
  * `request` is the archive store's request number. Rejects with Qt's text for

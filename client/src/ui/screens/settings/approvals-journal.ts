@@ -5,7 +5,7 @@ import { trNoop, tr } from "../../../i18n";// The approval journal's reads as Au
 // or select after a failed read, and an entry's detail where only the
 // latest selection's answer counts.
 
-export interface Entry { id: number; at: number; host: string; session: string; prompt: string; result: string }
+export interface Entry { id: number; at: number; host: string; session: string; prompt: string; result: string; categories?: string[] }
 /** Read identity only; native code rechecks it against the selected service. */
 export interface JournalScope { configuration: string; epoch: string; generation: number; journal: string; through: number; host: string; session: string }
 export interface Page { entries: Entry[]; next: number; previous: number; scope?: JournalScope }

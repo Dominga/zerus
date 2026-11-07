@@ -1133,7 +1133,8 @@ mod tests {
 
     #[test]
     fn a_journal_read_waits_out_a_writer_and_never_pairs_a_new_anchor_with_an_old_record() {
-        let root = tempfile::tempdir().unwrap();
+        // Task 180: a private root, whatever the runner's folder inherits.
+        let root = crate::host::staging::private_tempdir();
         let root = zerus_desktop_migration::canonical(root.path()).unwrap();
         let (config, location) = layout(&root, root.join("config"));
         std::fs::create_dir_all(&config.dir).unwrap();

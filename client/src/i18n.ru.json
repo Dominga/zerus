@@ -517,7 +517,7 @@
   "Animate working sessions": "Анимировать работающие сессии",
   "Another Zerus is already running as process %1 but did not answer this start. Open it from its icon in the notification area, or quit it, then start Zerus again.": "Другой Zerus уже запущен как процесс %1, но не ответил на этот запуск. Откройте его значком в области уведомлений или завершите его, затем снова запустите Zerus.",
   "Another Zerus is already running but did not answer this start. Open it from its icon in the notification area, or quit it, then start Zerus again.": "Другой Zerus уже запущен, но не ответил на этот запуск. Откройте его значком в области уведомлений или завершите его, затем снова запустите Zerus.",
-  "Another account can change a folder that holds hgs's record of this app (.local\\share\\hgs\\host or a folder above it).": "Другая учётная запись может изменять папку с записью hgs об этом приложении (.local\\share\\hgs\\host или папку выше).",
+  "Another account can change a folder that holds hgs's record of this app (.local/share/hgs/host or a folder above it).": "Другая учётная запись может изменять папку с записью hgs об этом приложении (.local/share/hgs/host или папку выше).",
   "Another active or saved session uses this name. Restore becomes available when that name is free.": "Это имя используется другой активной или сохраненной сессией. Восстановление станет доступным, когда это имя станет свободным.",
   "Another draft already exists here. Recover the previous one from Saved drafts.": "Другой черновик уже существует здесь. Восстановите предыдущий из сохраненных черновиков.",
   "Another launch is allowed. Nothing was stopped or sent again.": "Повторный запуск разрешён. Ничего не остановлено и не отправлено повторно.",

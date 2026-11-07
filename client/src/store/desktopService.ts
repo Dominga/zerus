@@ -457,7 +457,7 @@ export function takeoverRefusal(view: NotificationOwnership | undefined): Takeov
     case "frontend_not_installed_application":
       return { check: tr("App binding"), reason: tr("This app is not the one hgs recorded."), next: tr("Start Zerus from its installed folder, or install this copy again; then restart Zerus.") };
     case "frontend_folders_not_private":
-      return { check: tr("Folder privacy"), reason: tr("Another account can change a folder that holds hgs's record of this app (.local\share\hgs\host or a folder above it)."),
+      return { check: tr("Folder privacy"), reason: tr("Another account can change a folder that holds hgs's record of this app (.local/share/hgs/host or a folder above it)."),
         next: tr("Make that folder changeable only by you (other accounts may keep read access to the folders above it), then restart Zerus.") };
     case "agent_descended_frontend_refused":
       return { check: tr("Process ancestry"), reason: tr("Zerus was started from an agent's session."), next: tr("Close it and start Zerus from the Start menu or its folder.") };

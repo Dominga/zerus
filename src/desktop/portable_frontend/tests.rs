@@ -686,16 +686,20 @@ fn a_binding_that_is_not_a_private_record_of_this_user_is_refused() {
     fs::remove_dir(&hgs).unwrap();
     fs::rename(&moved, &hgs).unwrap();
     assert!(staging::read_frontend(&layout.images).is_some());
-    // Another owner (the Administrators group, which this elevated suite may assign).
-    icacls(&[
-        record.as_os_str(),
-        "/setowner".as_ref(),
-        "*S-1-5-32-544".as_ref(),
-    ]);
-    assert!(
-        staging::read_frontend(&layout.images).is_none(),
-        "foreign owner"
-    );
+    // Another owner (the Administrators group). Only an elevated suite may
+    // assign it (task 180: a runner without elevation skips this one check
+    // instead of failing the others).
+    let program = Path::new(&std::env::var_os("SystemRoot").unwrap()).join(r"System32\icacls.exe");
+    let owned = Command::new(program)
+        .args([record.as_os_str(), "/setowner".as_ref(), "*S-1-5-32-544".as_ref()])
+        .output()
+        .unwrap();
+    if owned.status.success() {
+        assert!(
+            staging::read_frontend(&layout.images).is_none(),
+            "foreign owner"
+        );
+    }
 }
 
 #[test]

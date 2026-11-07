@@ -2200,7 +2200,7 @@
   "hgs's record of this app names another hgs installation.": "Запись hgs об этом приложении указывает на другую установку hgs.",
   "This app is not the one hgs recorded.": "Это не то приложение, которое записал hgs.",
   "Start Zerus from its installed folder, or install this copy again; then restart Zerus.": "Запустите Zerus из папки установки или установите эту копию заново; затем перезапустите Zerus.",
-  "Another account can change a folder that holds hgs's record of this app (.local\\share\\hgs\\host or a folder above it).": "Другая учётная запись может изменять папку с записью hgs об этом приложении (.local\\share\\hgs\\host или папку выше).",
+  "Another account can change a folder that holds hgs's record of this app (.local/share/hgs/host or a folder above it).": "Другая учётная запись может изменять папку с записью hgs об этом приложении (.local/share/hgs/host или папку выше).",
   "Make that folder changeable only by you (other accounts may keep read access to the folders above it), then restart Zerus.": "Сделайте так, чтобы эту папку могли изменять только вы (другим учётным записям можно оставить чтение папок выше), затем перезапустите Zerus.",
   "Zerus was started from an agent's session.": "Zerus запущен из сессии агента.",
   "Close it and start Zerus from the Start menu or its folder.": "Закройте его и запустите Zerus из меню «Пуск» или из его папки.",

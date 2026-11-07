@@ -18,6 +18,7 @@ CASES = [
     "platform::windows_membership::native::file_users::tests::private_native_observations_do_not_turn_coverage_gaps_into_clear",
     "platform::windows_membership::native::resident::tests::native_original_exit_without_eof_cannot_release_admission_or_adopt_old_data",
     "platform::windows_membership::native::qualification::private_measurement",
+    "platform::windows_membership::native::qualification::hosted_measurement",
 ]
 
 
@@ -81,7 +82,7 @@ def package(source, sha, output):
         "buildProfile": "release",
         "executable": {"name": EXE, "sha256": before, "size": target.stat().st_size},
         "allowedExactCases": CASES,
-        "ignoredExactCases": [CASES[-1]],
+        "ignoredExactCases": CASES[-2:],
         "arguments": ["--exact", "--nocapture", "--test-threads=1"],
         "inspectionBudgetSelected": False,
         "removalQualified": False,

@@ -90,6 +90,8 @@ class QualificationArtifact(unittest.TestCase):
         manifest = json.loads((output / "manifest.json").read_text())
         self.assertEqual(manifest["sourceCommit"], sha)
         self.assertEqual(manifest["buildProfile"], "release")
+        self.assertIn("platform::windows_membership::native::qualification::private_measurement", manifest["ignoredExactCases"])
+        self.assertIn("platform::windows_membership::native::qualification::hosted_measurement", manifest["ignoredExactCases"])
         self.assertEqual(manifest["executable"]["sha256"], MODULE.digest(self.exe))
         self.assertEqual(manifest["executable"]["size"], self.exe.stat().st_size)
         self.assertEqual(manifest["kind"], "read-only-membership-test-fixture")

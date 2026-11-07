@@ -643,8 +643,8 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?:
       </div>
     );
   return (
-    <Show when={it.kind !== "tools" && it.kind !== "tool"} fallback={
-      <div class="act-tools" id={`item-${it.id}`} classList={{ open: open(), warn: !!it.warn, inherited: !!it.inherited }}>
+    <Show when={it.kind !== "tools" && it.kind !== "tool" && it.kind !== "warm"} fallback={
+      <div class="act-tools" id={`item-${it.id}`} classList={{ open: open(), warn: !!it.warn, warm: it.kind === "warm", inherited: !!it.inherited }}>
         <button class="act-tools-head" onClick={toggleOpen} aria-expanded={open()}>
           <Icon name="chevron-right" size={12} class="chev" />
           <b>{it.title}</b>

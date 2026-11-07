@@ -17,6 +17,8 @@ const DYNAMIC_FILES: Record<string, string> = {
   "./ui/screens/settings/ui.tsx": "titles, labels and hints passed as literal props",
   "./ui/sessions/SessionList.tsx": "its filter and scope tables",
   "./ui/sessions/SessionCard.tsx": "the core's closed caption vocabulary and child states",
+  "./ui/sessions/keep-warm.ts": "the host's keep-warm reasons, registered with trNoop",
+  "./ui/sessions/KeepWarmRow.tsx": "the core's keep-warm refusals, registered in keep-warm.ts",
   "./ui/sessions/Inspector.tsx": "its own tab table and actions-ui identity titles",
   "./ui/sessions/ActionDialogs.tsx": "actions-ui menu labels, reasons and notices; detail reasons from the core",
   "./ui/sessions/mark-entries.ts": "the actions store notice constants",

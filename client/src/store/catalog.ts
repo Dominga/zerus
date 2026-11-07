@@ -6,6 +6,7 @@ import type { AgentKind, Session, Status } from "../ui/sessions/types";
 import { marks as appMarks, type RowMarks } from "./marks";
 import { connectionOf } from "./overview";
 import { childRows } from "../ui/sessions/subagents";
+import { keepWarmOf } from "../ui/sessions/keep-warm";
 import { draftKey, nameDraftKey } from "./draftKeys";
 import { tr } from "../i18n";
 import { createGitProjection } from "./git";
@@ -197,6 +198,7 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     readAttentionSignature: optional(v.read_attention_signature),
     sharedNotifications: !!v.shared_notifications,
     notificationRevision: typeof v.notification_revision === "number" ? v.notification_revision : undefined,
+    keepWarm: keepWarmOf(v.keep_warm),
   };
   return Object.assign(base, marks.overlay(base));
 }

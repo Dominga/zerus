@@ -42,6 +42,12 @@
   .irow.done .irow-ico { color: var(--z-color-accent); }
   .irow.doing .irow-ico { color: var(--z-color-warn); }
   .irow.agent.working .irow-label { color: var(--z-color-status-working); }
+  /* Keep cache warm (Details > Session): switch, duration slider and its lines. */
+  .kw-row .switch:disabled { opacity: .45; cursor: default; }
+  .kw-range { flex: none; width: 70px; accent-color: var(--z-color-accent); }
+  .kw-value { flex: none; min-width: 5ch; text-align: right; color: var(--z-color-dim); }
+  .icard-body > .kw-hint { margin-top: 0; padding-left: 26px; }
+  .icard-body > .kw-error { color: var(--z-color-danger); }
   .irow.agent.attention .irow-label { color: var(--z-color-status-attention); }
   .selectable { user-select: text; }
   button.irow { width: 100%; border-radius: var(--z-radius-md); margin: 0 -6px; padding: 0 6px; width: calc(100% + 12px); transition: background var(--z-motion-fast); }

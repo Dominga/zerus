@@ -87,6 +87,8 @@ pub enum Lane {
     Read,
     /// A shared notification change: Qt tracks these apart from `m_pending`.
     Notifications,
+    /// A Keep cache warm change.
+    KeepWarm,
     Send,
     Process,
     Queue,
@@ -1829,6 +1831,30 @@ pub async fn set_notifications(
     .await
     .map_err(|error| error.to_string())??;
     Ok(confirmed)
+}
+
+/// Turns Keep cache warm on (1 to 7 hours or always) or off for a session and
+/// returns the host's confirmed `keep_warm`. One change per session at a time,
+/// in its own lane (`Err("busy")` otherwise); the core probes `hgs --help`.
+#[tauri::command]
+pub async fn set_keep_warm(
+    state: State<'_, Actions>,
+    target: Target,
+    choice: zerus_client_core::keep_warm::Choice,
+    expected_revision: i64,
+) -> Result<serde_json::Value, String> {
+    if blocked() {
+        return Err(REPLAY_NEEDS_HGS.into());
+    }
+    let Some(_claim) = state.claim_lane(&target.computer, &target.name, Lane::KeepWarm) else {
+        return Err("busy".into());
+    };
+    let hgs = default_hgs();
+    tauri::async_runtime::spawn_blocking(move || {
+        zerus_client_core::keep_warm::change(&hgs, &target, choice, expected_revision)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// Sets or clears a session's parent link (zerus-sa9qn.9) after the person

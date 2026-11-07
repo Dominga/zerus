@@ -37,7 +37,7 @@ Member: a doorbell means unread: {} | hgs team inbox --json. Report once:
     hgs team ask --json
   {"request_id":"UUID","to":"lead","text":"...","urgent":true} | hgs team message --json
   A question goes through hgs team ask, never a report; a progress line
-  is interim; captured, it holds new work.
+  is interim; only hgs team report reports.
   Codex on Windows: hgs guide team-run. First: hgs team lore find.
 Say what changed and how you checked it; a taken task's report is
 refused. Sub-teams: hgs guide team-tree.

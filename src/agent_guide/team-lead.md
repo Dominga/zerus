@@ -38,7 +38,7 @@ Members:
   prose: hgs guide team-propose.
 - Routine: hgs guide team-run; shapes: hgs guide team-safe. A question is not a report:
   hgs team reply answers it. "hold":true holds a reject; release gives it out.
-  Captured reports hold members; replaceable.
+  No report: hgs team use-last-reply.
 - Budgets: hgs team expect {"label":"x","minutes":15}; red once.
 - Never install a tool; propose it on the question card.
 - Shared folder: hgs guide team-broker.

@@ -83,7 +83,7 @@ fn a_turn_end_is_recorded_only_for_a_quiet_session() {
 }
 
 #[test]
-fn the_capture_gate_holds_with_a_question_or_background_work() {
+fn the_report_timeout_holds_with_a_question_or_background_work() {
     let mut team = team();
     delivered(&mut team);
     let timeout = team.settings.report_timeout_seconds as f64;
@@ -97,25 +97,25 @@ fn the_capture_gate_holds_with_a_question_or_background_work() {
     let mut quiet = session("codex/x/dev", "r1", true);
     quiet.reply_at = Some(50.0);
     quiet.reply_id = "r7".into();
-    // A plain finished turn is captured after its timeout.
+    // A plain finished turn is No report after its timeout.
     assert!(!steps(&team, &[quiet.clone()], 50.0 + timeout - 1.0).iter().any(|s| matches!(s, Step::NoReport { .. })));
     assert!(steps(&team, &[quiet.clone()], 50.0 + timeout).contains(&Step::NoReport { task: 1 }));
-    // An open question from the member blocks the capture.
+    // An open question from the member holds the timeout: it stays a question.
     for phase in ["question", "input", "approval"] {
         let mut asking = quiet.clone();
         asking.phase = phase.into();
         assert!(!steps(&team, &[asking], 50.0 + timeout).iter().any(|s| matches!(s, Step::NoReport { .. })), "{phase}");
     }
-    // Background work blocks it.
+    // Background work holds it too.
     let mut background = quiet.clone();
     background.background = true;
     assert!(!steps(&team, &[background], 50.0 + timeout).iter().any(|s| matches!(s, Step::NoReport { .. })));
-    // An open team question on the attempt blocks it, until the lead answers.
+    // An open team question on the attempt holds it, until the lead answers.
     team.task_mut(1).unwrap().attempts[0].questions.push(Question { id: "q1".into(), text: "Which?".into(), at: 40.0, ..Default::default() });
     assert!(!steps(&team, &[quiet.clone()], 50.0 + timeout).iter().any(|s| matches!(s, Step::NoReport { .. })));
     team.task_mut(1).unwrap().attempts[0].questions[0].answer = "The old one".into();
     assert!(steps(&team, &[quiet.clone()], 50.0 + timeout).contains(&Step::NoReport { task: 1 }));
-    // The member works again: its turn end is cleared, not captured.
+    // The member works again: its turn end is cleared, not taken as a report.
     let mut busy = quiet.clone();
     busy.idle = false;
     assert!(steps(&team, &[busy], 50.0 + timeout).contains(&Step::WorkResumed { task: 1 }));
@@ -126,7 +126,7 @@ fn the_capture_gate_holds_with_a_question_or_background_work() {
 }
 
 #[test]
-fn a_long_background_job_does_not_capture_when_it_ends() {
+fn a_long_background_job_does_not_become_no_report_while_it_runs() {
     let mut team = team();
     delivered(&mut team);
     let timeout = team.settings.report_timeout_seconds as f64;
@@ -141,7 +141,7 @@ fn a_long_background_job_does_not_capture_when_it_ends() {
     quiet.reply_id = "r7".into();
     let mut working = quiet.clone();
     working.background = true;
-    // The gate was never open: the closed gate is recorded, not a capture.
+    // The gate was never open: the closed gate is recorded, not a timeout.
     assert!(steps(&team, &[working.clone()], 60.0).contains(&Step::GateClosed { task: 1 }));
     assert!(!steps(&team, &[working], 1000.0).iter().any(|s| matches!(s, Step::NoReport { .. })));
     // It was recorded at 60; when the job ends at 1000 the gate opens then.
@@ -155,13 +155,15 @@ fn a_long_background_job_does_not_capture_when_it_ends() {
     assert!(steps(&team, &[quiet], 1000.0 + timeout).contains(&Step::NoReport { task: 1 }));
 }
 
+/// Owner, 2026-11-07: a turn that ends without `hgs team report` is No report.
+/// Zerus does not store the member's last reply as the report.
 #[test]
-fn a_question_asked_during_the_inspect_blocks_the_capture() {
+fn a_turn_that_ends_without_a_report_is_no_report_not_a_captured_report() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
-    let mut t = team();
-    t.status = TeamStatus::Running;
-    let task = t.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap();
+    let mut team = team();
+    team.status = TeamStatus::Running;
+    let task = team.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap();
     task.attempts.push(Attempt {
         n: 1,
         id: "A1".into(),
@@ -169,6 +171,7 @@ fn a_question_asked_during_the_inspect_blocks_the_capture() {
         state: AttemptState::Delivered,
         sent_at: 10.0,
         delivered_at: Some(10.0),
+        started_at: Some(11.0),
         turn_ended_at: Some(50.0),
         turn_reply: "r7".into(),
         report_ready_at: Some(50.0),
@@ -176,99 +179,155 @@ fn a_question_asked_during_the_inspect_blocks_the_capture() {
     });
     task.status = TaskStatus::InProgress;
     let id = task.id;
-    store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
-    // The member asks while the dispatcher reads its last reply.
-    store
-        .mutate(None, &t.id, None, |team, events| {
-            ops::apply(team, "ask", &json!({"text":"Which database?"}), &Actor::Member("dev".into()), &BTreeSet::new(), events)
-        })
-        .unwrap();
-    let error = capture_report(&mut store, &t.id, id, "Building and running...", "r7").unwrap_err().to_string();
-    assert_eq!(error, "the attempt changed before its report was captured");
-    let saved = store.load(&t.id).unwrap().unwrap();
+    store.create("11111111-1111-4111-8111-111111111111", &json!({}), team.clone(), vec![]).unwrap();
+    inspect_override(Some(json!({"reply_id": "r7", "reply_at": 50.0, "last_message": "Done: checked"})));
+    run_step(&mut store, &team, &Step::NoReport { task: id }, "").unwrap();
+    inspect_override(None);
+    let saved = store.load(&team.id).unwrap().unwrap();
     let attempt = saved.task(id).unwrap().attempts.last().unwrap();
-    assert_eq!((attempt.state, attempt.report.is_some()), (AttemptState::Delivered, false));
+    assert!(attempt.report.is_none(), "the last reply was stored as the report: {:?}", attempt.report);
+    assert!(attempt.no_report);
+    assert_eq!(attempt.state, AttemptState::Delivered);
     assert_eq!(saved.task(id).unwrap().status, TaskStatus::InProgress);
+    // The reply is kept for the lead to read and to use explicitly.
+    assert_eq!(attempt.last_reply, "Done: checked");
 }
 
 #[test]
-fn a_reply_that_only_waits_is_a_status_not_a_report() {
-    // A reply that only says it waits uses these phrases.
-    for text in [
-        "Waiting for the build lock to be released.",
-        "Still queued behind QA's build; I'll wait.",
-        "Жду, пока освободится сборка.",
-    ] {
-        assert!(waits_only(text), "{text}");
-    }
-    // A reply that reports work, even while it waits, is not only a wait.
-    for text in [
-        "Done: the API is in and its tests passed.",
-        "Waiting for the build; meanwhile I fixed the parser and committed it.",
-        "Tests pass, but the build lock is still queued.",
-    ] {
-        assert!(!waits_only(text), "{text}");
-    }
-    // A captured waiting reply stays a status: no report is stored.
+fn the_last_reply_of_the_finished_turn_is_kept_for_the_lead() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
-    let mut t = team();
-    delivered(&mut t);
-    {
-        let attempt = &mut t.task_mut(1).unwrap().attempts[0];
-        attempt.turn_ended_at = Some(50.0);
-        attempt.turn_reply = "r7".into();
-        attempt.report_ready_at = Some(50.0);
-    }
-    store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
-    let error = capture_report(&mut store, &t.id, 1, "Waiting for the build lock held by QA.", "r7").unwrap_err().to_string();
-    assert_eq!(error, "the reply only says it waits; it is a status, not a report");
-    let saved = store.load(&t.id).unwrap().unwrap();
-    let attempt = saved.task(1).unwrap().attempts.last().unwrap();
-    assert_eq!((attempt.state, attempt.report.is_some()), (AttemptState::Delivered, false));
-    // A real report is still captured on the same attempt.
-    capture_report(&mut store, &t.id, 1, "Done: the API is in and its tests passed.", "r7").unwrap();
-    assert!(store.load(&t.id).unwrap().unwrap().task(1).unwrap().attempts.last().unwrap().report.is_some());
-    // The quiet capture refuses a waiting reply too.
-    let error = capture_quiet(&mut store, &t.id, 2, "Queued behind the build.").unwrap_err().to_string();
-    assert_eq!(error, "the reply only says it waits; it is a status, not a report");
+    let mut team = team();
+    team.status = TeamStatus::Running;
+    let task = team.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap();
+    task.attempts.push(Attempt {
+        n: 1,
+        id: "A1".into(),
+        member: "dev".into(),
+        state: AttemptState::Delivered,
+        sent_at: 10.0,
+        delivered_at: Some(10.0),
+        started_at: Some(11.0),
+        ..Default::default()
+    });
+    task.status = TaskStatus::InProgress;
+    let id = task.id;
+    store.create("11111111-1111-4111-8111-111111111111", &json!({}), team.clone(), vec![]).unwrap();
+    inspect_override(Some(json!({"reply_id": "r7", "reply_at": 50.0, "last_message": "  Done: checked.  "})));
+    run_step(&mut store, &team, &Step::TurnEnded { task: id, at: 50.0, reply: "r7".into() }, "").unwrap();
+    inspect_override(None);
+    let saved = store.load(&team.id).unwrap().unwrap();
+    let attempt = saved.task(id).unwrap().attempts.last().unwrap();
+    assert_eq!(attempt.turn_ended_at, Some(50.0));
+    assert_eq!(attempt.turn_reply, "r7");
+    assert_eq!(attempt.last_reply, "Done: checked.");
+    assert!(attempt.report.is_none() && !attempt.no_report);
 }
 
-/// U56: a reply whose last line says it still waits is not made a report,
-/// whatever work it names before; one waiting for its review is a report.
+/// A reply that only waits is a status like any other: it is kept, never
+/// stored as the report; the task is No report all the same.
 #[test]
-fn a_reply_that_still_waits_is_not_made_a_report() {
-    for text in [
-        "Implemented the parser and committed it.\nWaiting for the editor to close.",
-        "Tests pass. I'm still waiting for the build to finish.",
-        "Done with the API. I'll report once the GUI suite ends.",
-        "Сделал парсер и тесты.\nЖду, пока закроется редактор.",
-    ] {
-        assert!(not_a_report(text), "{text}");
-    }
-    for text in [
-        "Done: the API is in and its tests passed.",
-        "Waiting for the build; meanwhile I fixed the parser and committed it.",
-        "Done, tests pass. Waiting for your review.",
-        "Tests pass, but the build lock is still queued.",
-        "Waiting for the editor to close.\nThen I committed: tests pass, done.",
-    ] {
-        assert!(!not_a_report(text), "{text}");
-    }
+fn a_waiting_reply_is_kept_and_never_stored_as_the_report() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
-    let mut t = team();
-    delivered(&mut t);
-    {
-        let attempt = &mut t.task_mut(1).unwrap().attempts[0];
-        attempt.turn_ended_at = Some(50.0);
-        attempt.turn_reply = "r7".into();
-        attempt.report_ready_at = Some(50.0);
-    }
-    store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
-    let reply = "Implemented the parser, tests pass.\nCommitting now: waiting for the editor to close.";
-    let error = capture_report(&mut store, &t.id, 1, reply, "r7").unwrap_err().to_string();
-    assert_eq!(error, "the reply only says it waits; it is a status, not a report");
-    let attempt = store.load(&t.id).unwrap().unwrap().task(1).unwrap().attempts.last().unwrap().clone();
-    assert_eq!((attempt.state, attempt.report.is_some()), (AttemptState::Delivered, false));
+    let mut team = team();
+    team.status = TeamStatus::Running;
+    let task = team.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap();
+    task.attempts.push(Attempt {
+        n: 1,
+        id: "A1".into(),
+        member: "dev".into(),
+        state: AttemptState::Delivered,
+        sent_at: 10.0,
+        delivered_at: Some(10.0),
+        started_at: Some(11.0),
+        turn_ended_at: Some(50.0),
+        turn_reply: "r7".into(),
+        report_ready_at: Some(50.0),
+        ..Default::default()
+    });
+    task.status = TaskStatus::InProgress;
+    let id = task.id;
+    store.create("11111111-1111-4111-8111-111111111111", &json!({}), team.clone(), vec![]).unwrap();
+    inspect_override(Some(json!({"reply_id": "r7", "reply_at": 50.0, "last_message": "Waiting for the build lock held by QA."})));
+    run_step(&mut store, &team, &Step::NoReport { task: id }, "").unwrap();
+    inspect_override(None);
+    let saved = store.load(&team.id).unwrap().unwrap();
+    let attempt = saved.task(id).unwrap().attempts.last().unwrap();
+    assert!(attempt.report.is_none());
+    assert!(attempt.no_report);
+    assert_eq!(attempt.last_reply, "Waiting for the build lock held by QA.");
+}
+
+/// A member that ends its turn on its own question stays a question: no turn
+/// end, no No report, and the inbox carries the question, not a report item.
+#[test]
+fn a_question_stays_a_question() {
+    let mut team = team();
+    delivered(&mut team);
+    team.status = TeamStatus::Running;
+    team.task_mut(1).unwrap().status = TaskStatus::InProgress;
+    team.task_mut(1).unwrap().attempts[0].questions.push(Question {
+        id: "q1".into(),
+        text: "Which database?".into(),
+        at: 40.0,
+        ..Default::default()
+    });
+    let mut quiet = session("codex/x/dev", "r1", true);
+    quiet.reply_at = Some(50.0);
+    quiet.reply_id = "r7".into();
+    let timeout = team.settings.report_timeout_seconds as f64;
+    let found = steps(&team, &[quiet.clone()], 50.0 + timeout);
+    assert!(!found.iter().any(|s| matches!(s, Step::TurnEnded { .. } | Step::NoReport { .. })), "{found:?}");
+    // The question is in the lead's inbox; no report item is.
+    let items = crate::state::teams::inbox::items(&team);
+    assert!(items.iter().any(|item| item.kind == "question"), "{items:?}");
+    assert!(!items.iter().any(|item| item.kind == "no_report"), "{items:?}");
+}
+
+/// The one action for No report is "use this reply as the report": the item
+/// carries the kept reply and the `use-last-reply` command, not a capture.
+#[test]
+fn the_no_report_item_offers_the_last_reply_as_the_one_action() {
+    let mut team = team();
+    team.status = TeamStatus::Running;
+    let now = crate::state::now();
+    let task = team.tasks.iter_mut().find(|task| task.assignee == "dev").unwrap();
+    task.status = TaskStatus::InProgress;
+    task.attempts.push(Attempt {
+        n: 1,
+        id: "A1".into(),
+        member: "dev".into(),
+        state: AttemptState::Delivered,
+        sent_at: now - 7200.0,
+        delivered_at: Some(now - 7200.0),
+        started_at: Some(now - 7100.0),
+        turn_ended_at: Some(now - 3600.0),
+        turn_reply: "r7".into(),
+        last_reply: "Done: the parser and its tests".into(),
+        no_report: true,
+        ..Default::default()
+    });
+    let id = task.id;
+    let items = crate::state::teams::inbox::items(&team);
+    let item = items.iter().find(|item| item.kind == "no_report").unwrap_or_else(|| panic!("no report item: {items:?}"));
+    assert!(item.command.contains("hgs team use-last-reply"), "{}", item.command);
+    assert!(!item.command.contains("team report"), "{}", item.command);
+    assert_eq!(item.detail, "Done: the parser and its tests");
+    // The use-last-reply op is the explicit action that turns the kept reply
+    // into the report.
+    let mut loaded = team.clone();
+    let mut events = Vec::new();
+    ops::apply(
+        &mut loaded,
+        "use-last-reply",
+        &json!({"task": id, "attempt": "A1", "text": "Done: the parser and its tests"}),
+        &Actor::Human,
+        &BTreeSet::new(),
+        &mut events,
+    )
+    .unwrap();
+    let report = loaded.task(id).unwrap().attempts.last().unwrap().report.as_ref().unwrap();
+    assert_eq!(report.text, "Done: the parser and its tests");
+    assert!(!report.captured);
 }

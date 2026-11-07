@@ -1626,9 +1626,14 @@ pub(crate) struct Attempt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_since: Option<f64>,
     /// The member's session reply id at `turn_ended_at`: a newer turn is never
-    /// captured as this attempt's report (A2).
+    /// taken as this attempt's report (A2).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub turn_reply: String,
+    /// The member's last reply at `turn_ended_at` (or at No report): the lead
+    /// reads it and may use it as the report explicitly. Zerus never stores it
+    /// as the report by itself (owner, 2026-11-07).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub last_reply: String,
     /// The member's turn ended long enough ago without a report.
     #[serde(default)]
     pub no_report: bool,

@@ -66,7 +66,9 @@ fn a_sub_lead_hands_out_its_reports_tasks_and_hears_its_own_inbox() {
     let text = hand_off_text(&t, &task, &attempt, "", "");
     assert!(text.starts_with(&format!("[Zerus team \u{b7} from: QA lead \u{b7} task: #{qa} \u{b7} attempt: 1]")), "{text}");
     assert!(text.contains("Questions for QA lead:"), "{text}");
-    assert!(text.contains("Zerus gives it to QA lead. A blocker goes to QA lead too"), "{text}");
+    assert!(text.contains("A report is an explicit `hgs "), "{text}");
+    assert!(text.contains("No report"), "{text}");
+    assert!(text.contains("A blocker goes to QA lead too"), "{text}");
     // U30: every hand-out says how a build shows as work.
     assert!(text.contains("(hgs team run, or hgs run: hgs guide run) so your session shows as Building"), "{text}");
     // The lead's own reports keep the old words.

@@ -85,27 +85,32 @@ fn a_dsh_member_whose_events_cannot_be_read_is_told_so() {
 }
 
 #[test]
-fn a_quiet_capture_takes_only_a_reply_newer_than_the_delivery() {
+fn a_no_report_keeps_only_a_reply_newer_than_the_delivery() {
     // N6: after a rejection the session's last message is still attempt 1's
     // report (or another task's); without a turn identity only a reply
-    // written after this attempt was delivered is its own.
+    // written after this attempt was delivered is its own. It is kept for the
+    // lead and never stored as the report (owner, 2026-11-07).
     let (_dir, store, team_id, task) = capture_with(json!({"reply_id":"old","reply_at":5.0,"last_message":"attempt 1's report"}));
     let saved = store.load(&team_id).unwrap().unwrap();
     let attempt = saved.task(task).unwrap().attempts.last().unwrap();
-    assert!(attempt.report.is_none(), "an older reply was captured: {:?}", attempt.report);
+    assert!(attempt.report.is_none(), "an older reply was stored as the report: {:?}", attempt.report);
     assert!(attempt.no_report);
+    assert!(attempt.last_reply.is_empty(), "an older reply was kept: {}", attempt.last_reply);
     assert_eq!(attempt.state, AttemptState::Delivered);
-    // A reply written after the delivery is this attempt's report.
+    // A reply written after the delivery is this attempt's last reply.
     let (_dir, store, team_id, task) = capture_with(json!({"reply_id":"new","reply_at":20.0,"last_message":"Done: checked"}));
     let saved = store.load(&team_id).unwrap().unwrap();
     let attempt = saved.task(task).unwrap().attempts.last().unwrap();
-    let report = attempt.report.as_ref().unwrap();
-    assert!(report.captured && report.text.contains("Done: checked"), "{report:?}");
-    assert_eq!(attempt.state, AttemptState::Reported);
+    assert!(attempt.report.is_none());
+    assert!(attempt.no_report);
+    assert_eq!(attempt.last_reply, "Done: checked");
+    assert_eq!(attempt.state, AttemptState::Delivered);
     // No time at all: not proven to be this attempt's.
     let (_dir, store, team_id, task) = capture_with(json!({"reply_id":"none","last_message":"who knows"}));
     let saved = store.load(&team_id).unwrap().unwrap();
-    assert!(saved.task(task).unwrap().attempts.last().unwrap().report.is_none());
+    let attempt = saved.task(task).unwrap().attempts.last().unwrap();
+    assert!(attempt.report.is_none());
+    assert!(attempt.last_reply.is_empty());
 }
 
 #[test]
@@ -173,7 +178,7 @@ fn a_computer_that_did_not_list_is_not_a_stopped_member() {
 }
 
 #[test]
-fn a_quiet_turn_end_that_never_reached_the_listing_is_captured_as_the_report() {
+fn a_quiet_turn_end_that_never_reached_the_listing_is_no_report() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
     let mut t = team();
@@ -192,19 +197,19 @@ fn a_quiet_turn_end_that_never_reached_the_listing_is_captured_as_the_report() {
     task.status = TaskStatus::InProgress;
     let id = task.id;
     store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
-    capture_quiet(&mut store, &t.id, id, "Done: everything checked").unwrap();
+    inspect_override(Some(json!({"reply_id": "new", "reply_at": 20.0, "last_message": "Done: everything checked"})));
+    run_step(&mut store, &t, &Step::NoReport { task: id }, "").unwrap();
+    inspect_override(None);
     let saved = store.load(&t.id).unwrap().unwrap();
     let attempt = saved.task(id).unwrap().attempts.last().unwrap();
-    let report = attempt.report.as_ref().unwrap();
-    assert!(report.captured);
-    assert!(report.text.contains("Done: everything checked"));
-    assert_eq!((attempt.state, attempt.turn_ended_at.is_some()), (AttemptState::Reported, true));
+    assert!(attempt.report.is_none(), "{:?}", attempt.report);
+    assert!(attempt.no_report);
+    assert_eq!(attempt.state, AttemptState::Delivered);
+    assert_eq!(attempt.last_reply, "Done: everything checked");
 }
 
 #[test]
-fn a_captured_reply_is_marked_as_the_report() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+fn using_the_kept_reply_is_the_leads_explicit_choice() {
     let mut t = team();
     t.status = TeamStatus::Running;
     let task = t.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
@@ -217,43 +222,32 @@ fn a_captured_reply_is_marked_as_the_report() {
         delivered_at: Some(10.0),
         turn_ended_at: Some(50.0),
         turn_reply: "r7".into(),
+        last_reply: "Done and checked".into(),
+        no_report: true,
         ..Default::default()
     });
     task.status = TaskStatus::InProgress;
     let id = task.id;
-    store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
-    capture_report(&mut store, &t.id, id, "Done and checked", "r7").unwrap();
-    let saved = store.load(&t.id).unwrap().unwrap();
-    let attempt = saved.task(id).unwrap().attempts.last().unwrap();
-    let report = attempt.report.as_ref().unwrap();
-    assert!(report.captured);
-    assert_eq!(report.text, "(From the last reply of dev (Backend); it ran no hgs team report.)\n\nDone and checked");
-    assert_eq!((attempt.state, saved.task(id).unwrap().status), (AttemptState::Reported, TaskStatus::Submitted));
-    assert_eq!(attempt.notice, Notice::Pending);
-    // The member's real report replaces the captured one (A6) and the lead
-    // hears again.
-    let mut loaded = saved.clone();
     let mut events = Vec::new();
-    let replaced = ops::apply(
-        &mut loaded,
-        "report",
-        &json!({"task":id,"attempt":"A1","text":"Done: 42 tests pass."}),
-        &Actor::Member("dev".into()),
+    let out = ops::apply(
+        &mut t,
+        "use-last-reply",
+        &json!({"task":id,"attempt":"A1","text":"Done and checked"}),
+        &Actor::Human,
         &BTreeSet::new(),
         &mut events,
     )
     .unwrap();
-    assert_eq!(replaced["status"], "submitted");
-    assert_eq!(events.last().unwrap().kind, "report_replaced");
-    let attempt = loaded.task(id).unwrap().attempts.last().unwrap();
+    assert_eq!(out["status"], "submitted");
+    let attempt = t.task(id).unwrap().attempts.last().unwrap();
     let report = attempt.report.as_ref().unwrap();
     assert!(!report.captured);
-    assert_eq!(report.text, "Done: 42 tests pass.");
-    assert_eq!(report.replaced[0].text, "(From the last reply of dev (Backend); it ran no hgs team report.)\n\nDone and checked");
+    assert_eq!(report.text, "Done and checked");
+    assert_eq!(t.task(id).unwrap().status, TaskStatus::Submitted);
 }
 
 #[test]
-fn the_captured_reply_text_comes_from_the_inspect_record() {
+fn the_reply_text_comes_from_the_inspect_record() {
     // A terminal session's last message, trimmed.
     assert_eq!(reply_text(&json!({"last_message":"  Done.  "})), "Done.");
     // DeepSeek reports its replies as the main agent's AgentMessage events;

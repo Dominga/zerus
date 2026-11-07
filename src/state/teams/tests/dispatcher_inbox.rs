@@ -37,10 +37,14 @@ fn notices_name_members_by_id_and_role() {
     let member = team.member("dev").unwrap().clone();
     assert!(starved_text(&team, &member, 1210.0).contains("dev (Backend) has had no ready task"));
     team.task_mut(1).unwrap().attempts[0].no_report = true;
+    team.task_mut(1).unwrap().attempts[0].turn_ended_at = Some(crate::state::now() - 10_000.0);
+    team.task_mut(1).unwrap().attempts[0].last_reply = "Waiting for the build".into();
     let items = inbox::items(&team);
-    let stalled = items.iter().find(|item| item.kind == "stalled").expect("a stalled item");
-    assert_eq!(stalled.member, "dev (Backend)");
-    assert!(stalled.summary.starts_with("dev (Backend) ended its turn"), "{}", stalled.summary);
+    let no_report = items.iter().find(|item| item.kind == "no_report").expect("a no report item");
+    assert_eq!(no_report.member, "dev (Backend)");
+    assert!(no_report.summary.contains("without a report"), "{}", no_report.summary);
+    assert!(no_report.command.contains("use-last-reply"), "{}", no_report.command);
+    assert_eq!(no_report.detail, "Waiting for the build");
     assert!(inbox::text(&team, &items, 1000.0).contains("dev (Backend)"));
 }
 

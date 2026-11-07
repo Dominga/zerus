@@ -557,3 +557,21 @@ fn send_outcomes_are_classified_conservatively() {
     assert!(matches!(classify(&output(255, "", "ssh: connection reset")), Sent::Uncertain(_)));
     assert!(matches!(classify(&Err(anyhow::anyhow!("timed out"))), Sent::Uncertain(_)));
 }
+
+/// Owner, 2026-11-07: a report is only an explicit `hgs team report`; the
+/// hand-out must not invite a captured last reply.
+#[test]
+fn the_hand_out_never_invites_a_captured_last_reply() {
+    let team = team();
+    let attempt = Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() };
+    let text = hand_off_text(&team, team.task(1).unwrap(), &attempt, "", "");
+    assert!(!text.contains("end your turn with"), "{text}");
+    assert!(!text.contains("Zerus gives it"), "{text}");
+    assert!(!text.contains("report as your last message"), "{text}");
+    // It still names the explicit report and No report, and keeps a question a
+    // question.
+    assert!(text.contains("A report is an explicit `hgs "), "{text}");
+    assert!(text.contains("No report"), "{text}");
+    assert!(text.contains("A progress line is not a report; a question is not a report."), "{text}");
+    assert!(text.contains("Report once at the end: hgs "), "{text}");
+}

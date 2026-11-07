@@ -4984,8 +4984,24 @@ Claude Code, Codex and Kimi sessions get hooks that name the stable CLI. `hgs a`
 needs a console such as Windows Terminal, not the pipes of the mintty Git Bash
 window, and detaches with `Ctrl+B d`.
 
-**Commands.** Commands for another machine (`hgs @host …`) work as on Linux; the
-remote command stays `~/.local/bin/hgs` with the same quoting as on Linux. Until local sessions
+**Windows as a remote computer.** A Linux, macOS or Windows client can use a
+Windows OpenSSH alias without changing its server-wide `DefaultShell`. Enable
+local sessions on that Windows account with `hgs session-host install`, then add
+the alias to Zerus's computers. PowerShell 5.1 and cmd are supported as SSH login
+shells. Discovery is read-only and cached per alias/connection settings within
+the calling CLI process; an unknown result refuses before sending an operation.
+The Windows route selects `%USERPROFILE%\.local\bin\hgs.exe`, uses fixed encoded
+PowerShell source and Windows-native argument quoting, and inherits SSH stdin,
+stdout and stderr. JSON requests and watch controls stay on stdin. Required help
+capabilities, machine identities and session selectors still gate their commands;
+an old peer is never tried as an unknown agent command. The cmd transport limit
+is checked before dispatch; large request bodies belong on stdin. POSIX peers
+keep their existing `~/.local/bin/hgs` commands and quoting. `machine check`
+uses the Windows local-session marker instead of requiring tmux; POSIX source
+bootstrap is refused for Windows. Remote downloads also accept absolute drive
+paths such as `C:\work\report.txt` through SFTP.
+
+**Commands.** Commands for another machine (`hgs @host …`) work as on Linux. Until local sessions
 are enabled, `ls`, `machine`, `project`, `swarm`, `presence` and `session-host`
 work locally. `account ls` and `account default` without an ID print an empty
 catalog, and `account copy` works between two remote machines. Every other local

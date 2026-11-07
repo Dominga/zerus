@@ -729,7 +729,7 @@ print('429' if limited else '200',end='')
         source=next(p for p in peer_catalog['profiles'] if p['id']=='native-codex')
         observer=self.root/'observe-import'; count=self.root/'import-bytes.json'
         script=self.bin/'ssh'
-        script.write_text('#!/usr/bin/env python3\nimport json,os,shlex,subprocess,sys\n'
+        script.write_text('#!/usr/bin/env python3\nimport json,os,shlex,subprocess,sys\nimport sys\nif sys.argv[-1]=="cmd.exe /d /c echo hgs-remote-windows-v1": sys.exit(127)\n'
             +'from pathlib import Path\nargs=shlex.split(sys.argv[-1]); assert args[0]=="~/.local/bin/hgs"\n'
             +'program='+repr(HGS)+'; env='+repr(env)+'\n'
             +'if "_import" in args and Path('+repr(str(observer))+').exists():\n'
@@ -777,7 +777,7 @@ print('429' if limited else '200',end='')
             'auth.json':base64.b64encode(b'{"OPENAI_API_KEY":"TEMPORARY-TEST-KEY"}').decode(),
             'config.toml':base64.b64encode(b'cli_auth_credentials_store="file"\n').decode()}})
         script=self.bin/'ssh'
-        script.write_text('#!/usr/bin/env python3\nimport subprocess,sys\nsubprocess.Popen(["sleep","30"])\nprint('+repr(payload)+',flush=True)\n')
+        script.write_text('#!/usr/bin/env python3\nimport subprocess,sys\nimport sys\nif sys.argv[-1]=="cmd.exe /d /c echo hgs-remote-windows-v1": sys.exit(127)\nsubprocess.Popen(["sleep","30"])\nprint('+repr(payload)+',flush=True)\n')
         script.chmod(0o755)
         start=time.monotonic()
         result=self.run_hgs('account','copy','native-codex','--from','remote','--to','@local','--as','copied')
@@ -788,7 +788,7 @@ print('429' if limited else '200',end='')
         self.env['HGS_PEERS']='remote'
         pid_file=self.root/'escaped-helper.pid'
         script=self.bin/'ssh'
-        script.write_text('#!/usr/bin/env python3\nimport pathlib,subprocess\np=subprocess.Popen(["sleep","60"],start_new_session=True)\npathlib.Path('+repr(str(pid_file))+').write_text(str(p.pid))\nprint("{}",flush=True)\n')
+        script.write_text('#!/usr/bin/env python3\nimport pathlib,subprocess\nimport sys\nif sys.argv[-1]=="cmd.exe /d /c echo hgs-remote-windows-v1": sys.exit(127)\np=subprocess.Popen(["sleep","60"],start_new_session=True)\npathlib.Path('+repr(str(pid_file))+').write_text(str(p.pid))\nprint("{}",flush=True)\n')
         script.chmod(0o755)
         start=time.monotonic()
         try:

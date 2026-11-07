@@ -142,10 +142,7 @@ fn run_within(
         ])
         .args(crate::machines::ssh_options(config, alias))
         .arg(alias)
-        .arg(format!(
-            "~/.local/bin/hgs {}",
-            words.iter().map(|word| platform::remote_quote(word)).collect::<Vec<_>>().join(" ")
-        ));
+        .arg(crate::remote_shell::hgs(config, alias, words)?);
     let ssh = platform::spawn_ssh(&mut command, true, true, true).context("start swarm connection")?;
     #[cfg(test)]
     thread::sleep(AFTER_SPAWN.with(|delay| delay.get()));

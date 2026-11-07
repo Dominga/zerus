@@ -28,7 +28,9 @@ pub fn version(config: &Config, target: &str, args: &[String]) -> Result<i32> {
         return Err(Error::new(1, "usage: hgs [@host] version"));
     }
     // Every hgs answers --version without side effects.
-    let output = ssh(config, target, "~/.local/bin/hgs --version")?;
+    let command = crate::remote_shell::hgs(config, target, &["--version"])
+        .map_err(|e| Error::new(3, format!("{target} unreachable: {}", e.message)))?;
+    let output = ssh(config, target, &command)?;
     if !output.status.success() {
         return Err(Error::new(3, format!("{target} unreachable: {}", detail(&output))));
     }
@@ -177,7 +179,15 @@ fn detail(output: &std::process::Output) -> String {
 }
 
 fn peer(config: &Config, peer: &str) -> Value {
-    let output = match ssh(config, peer, &platform::remote_sh(PEER_COMMAND)) {
+    let command = (|| -> Result<String> {
+        if crate::remote_shell::windows(config, peer)? {
+            let words = if crate::remote_shell::supports(config, peer, &[("hgs [@host] status", false)])? {
+                vec!["status", "--local", "--json"]
+            } else { vec!["ls", "--local", "--json"] };
+            crate::remote_shell::windows_command(&words)
+        } else { Ok(platform::remote_sh(PEER_COMMAND)) }
+    })();
+    let output = match command.and_then(|command| ssh(config, peer, &command)) {
         Ok(output) => output,
         Err(error) => return json!({"host":peer,"ok":false,"error":"offline","detail":error.message}),
     };

@@ -957,7 +957,7 @@ fn supervise() -> Result<i32> {
             } else {
                 (IDENTITY_HELPER, 4096)
             };
-            (ssh(&config, &envelope.via, helper), vec![], cap)
+            (ssh(&config, &envelope.via, helper)?, vec![], cap)
         }
         Helper::Local => {
             ensure!(
@@ -969,7 +969,7 @@ fn supervise() -> Result<i32> {
                 .context("missing mobile transport request")?;
             validate(&request)?;
             (
-                ssh(&config, &envelope.via, LOCAL_HELPER),
+                ssh(&config, &envelope.via, LOCAL_HELPER)?,
                 serde_json::to_vec(&request)?,
                 MAX_BYTES,
             )
@@ -996,7 +996,10 @@ fn supervise() -> Result<i32> {
     Ok(output.code)
 }
 
-fn ssh(config: &Config, via: &str, helper: &str) -> Command {
+fn ssh(config: &Config, via: &str, helper: &str) -> Result<Command> {
+    // Each helper is a fixed source constant; request bytes stay on stdin.
+    let words: Vec<_> = helper.strip_prefix("~/.local/bin/hgs ").context("invalid fixed peer helper")?.split_whitespace().collect();
+    let helper = crate::remote_shell::hgs(config, via, &words)?;
     let mut command = crate::platform::ssh();
     command.args([
         "-T",
@@ -1011,7 +1014,7 @@ fn ssh(config: &Config, via: &str, helper: &str) -> Command {
     ]);
     command.args(machines::ssh_options(config, via));
     command.arg(via).arg(helper);
-    command
+    Ok(command)
 }
 
 fn supported(via: &str, deadline: Instant) -> Result<()> {

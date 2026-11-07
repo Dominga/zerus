@@ -1652,7 +1652,7 @@ pub fn paste(config: &Config, session: &str, pane: &str, client: &str) -> Result
                                 "-o",
                                 "ConnectTimeout=3",
                                 who,
-                                "~/.local/bin/hgs clip",
+                                &crate::remote_shell::hgs(config, who, &["clip"]).ok()?,
                             ])
                             .stdout(file)
                             .stderr(Stdio::null())

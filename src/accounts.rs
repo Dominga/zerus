@@ -923,7 +923,7 @@ fn transport(
         command
             .args(crate::machines::ssh_options(config, host))
             .arg(host)
-            .arg(format!("~/.local/bin/hgs {}", platform::remote_join(args)));
+            .arg(crate::remote_shell::hgs(config, host, args)?);
     }
     command.stdin(Stdio::null()).stderr(Stdio::null());
     let ssh = platform::spawn_ssh(

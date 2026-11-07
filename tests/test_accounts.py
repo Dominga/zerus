@@ -243,6 +243,31 @@ class Accounts(unittest.TestCase):
         self.assertTrue(install['dry_run'])
         self.assert_opencode_only_asked_its_version()
 
+    def test_a_remote_sign_in_forwards_the_browser_callback_port(self):
+        # T-tknwyr: Codex finishes a browser sign-in on the signing computer's
+        # localhost:1455; a sign-in on a peer forwards this computer's port there.
+        self.env['HGS_PEERS']='peer'
+        calls=self.root/'ssh-calls.log'
+        ssh=self.bin/'ssh'
+        # A POSIX peer answers the platform probe; every other call is logged.
+        ssh.write_text('#!/bin/sh\ncase "$*" in *hgs-remote-v2*) echo "hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot"; exit 0;; esac\n'
+                       'printf "%s\\n" "$*" >> "'+str(calls)+'"\nexit 7\n'); ssh.chmod(0o755)
+        forward='-o ExitOnForwardFailure=no -o ControlPath=none -L 1455:localhost:1455'
+        machine='11111111-1111-4111-8111-111111111111'
+        def ssh_line(*args, sign_in):
+            calls.write_text('')
+            result=self.run_hgs(*args,ok=False)
+            line=calls.read_text().splitlines()[-1]
+            self.assertEqual(forward in line, sign_in, line)
+            self.assertEqual(b'localhost:1455 is forwarded to peer' in result.stderr, sign_in, result.stderr)
+            return line
+        # The desktop's guarded, interactive sign-in and the plain CLI one.
+        self.assertIn('-t',ssh_line('@peer','--expect-machine',machine,'account','login','work','--revision','r1',sign_in=True).split())
+        ssh_line('@peer','account','login','work',sign_in=True)
+        ssh_line('@peer','account','ls',sign_in=False)
+        ssh_line('@peer','--expect-machine',machine,'account','ls',sign_in=False)
+        ssh_line('@peer','--expect-machine',machine,'account','install','codex','--revision','r1',sign_in=False)
+
     def test_stale_revision_and_duplicate_rejected(self):
         before=self.ls()['revision']; self.add()
         self.run_hgs('account','add','other','--provider','kimi','--revision',before,ok=False)

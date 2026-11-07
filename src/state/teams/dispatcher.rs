@@ -3568,6 +3568,37 @@ fn resume_parked(store: &mut Store, team: &Team, task_id: u32, member_id: &str) 
     Ok(())
 }
 
+/// Task 261: the lead's line when a run restarted the shared sccache server.
+fn cache_restarted_text(team: &Team, member: &str, task: u32, what: &str, exit: Option<i32>) -> String {
+    format!(
+        "[Zerus team] Build cache: {}'s {what}{} failed writing its outputs through the shared sccache server (os error 5: the server was running in a restricted token). \
+         Zerus restarted the server from its worker and ran it again: {}.",
+        team.role_of(member),
+        if task > 0 { format!(" for #{task}") } else { String::new() },
+        match exit {
+            Some(0) => "it passed".to_owned(),
+            Some(code) => format!("exit {code}"),
+            None => "no exit code".to_owned(),
+        }
+    )
+}
+
+/// Task 261: from a run that is not the dispatcher's (`hgs run` of a member):
+/// the lead of `team_id` hears that the shared sccache server was restarted.
+pub(crate) fn tell_lead_cache_restarted(team_id: &str, task: u64, label: &str, exit: Option<i32>) {
+    let Ok(mut store) = Store::open(true) else { return };
+    let Ok(Some(team)) = store.load(team_id) else { return };
+    let member = team
+        .tasks
+        .iter()
+        .find(|found| u64::from(found.id) == task)
+        .and_then(|found| found.attempts.last())
+        .map(|attempt| attempt.member.clone())
+        .unwrap_or_default();
+    let text = cache_restarted_text(&team, &member, u32::try_from(task).unwrap_or(0), label, exit);
+    tell_lead(&mut store, &team, "build_cache", &text);
+}
+
 /// Task 161: one line for the lead, stored and rung; a refusal is left (the
 /// event journal has it).
 fn tell_lead(store: &mut Store, team: &Team, kind: &str, text: &str) {
@@ -9961,6 +9992,11 @@ fn run_request(store: &mut Store, folder: &Path, request: &Value) {
         // stage run given to the member is its attempt too.
         anyhow::ensure!(attempt_of(&team, attempt, &member.id), "attempt {attempt} is not this member's");
         let outcome = run_outcome(&team, &member, folder, request)?;
+        // Task 261: the run restarted the shared sccache server: the lead hears.
+        if outcome.tail.contains(super::super::build_cache_server::RESTART_NOTE) {
+            let task = team.tasks.iter().find(|task| task.attempts.iter().any(|found| found.id == attempt)).map_or(0, |task| task.id);
+            tell_lead(store, &team, "build_cache", &cache_restarted_text(&team, &member.id, task, request["template"].as_str().unwrap_or_default(), outcome.exit));
+        }
         Ok(record_run(store, &team, &member, request, &outcome))
     })();
     let outcome = match outcome {

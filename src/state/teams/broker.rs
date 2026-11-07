@@ -1085,7 +1085,10 @@ pub(crate) fn builds_view(team: &Team, now: f64) -> Value {
         let overlaps: Vec<Value> = by_file.into_iter().filter(|(_, who)| who.len() >= 2).map(|(file, who)| json!({"file":file,"members":who})).collect();
         folders.push(json!({"folder":folder,"members":members,"build_folders":groups,"changes":changes,"overlaps":overlaps}));
     }
-    json!({"team":team.id,"enabled":team.settings.build_broker,"folders":folders,"members":states})
+    // Task 261: the shared sccache server's health: whether it runs, its pid
+    // and integrity (a restricted one breaks every build).
+    json!({"team":team.id,"enabled":team.settings.build_broker,"folders":folders,"members":states,
+        "cache_server":super::super::build_cache_server::health()})
 }
 
 #[cfg(test)]

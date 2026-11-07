@@ -2220,6 +2220,18 @@ pub(crate) fn execute_as(plan: &Plan, folder: &Path, timeout: Duration, env: &[(
             );
         }
     }
+    // Task 261: a cargo build the shared sccache server could not write (it
+    // was started in a restricted token) runs once more after the worker
+    // restarted the server.
+    if matches!(plan.template.as_str(), "cargo-build" | "cargo-test" | "cargo-clippy")
+        && super::super::build_cache_server::worth_restart(outcome.exit, &format!("{}\n{}", outcome.tail, outcome.excerpt))
+        && !timeout.saturating_sub(started.elapsed()).is_zero()
+        && super::super::build_cache_server::restart().is_ok()
+    {
+        outcome = attempt(&mut build(&plan.program, &plan.argv));
+        // At the end: a long output's tail keeps it, and the dispatcher reads it.
+        outcome.tail = last_chars(&format!("{}\n{}", outcome.tail, super::super::build_cache_server::RESTART_NOTE), TAIL_BYTES);
+    }
     outcome.ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     if !cache.note.is_empty() {
         outcome.tail = last_chars(&format!("{}

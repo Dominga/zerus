@@ -100,6 +100,7 @@ mod session_state;
 pub(crate) mod slow_calls;
 mod switch_account;
 mod builds;
+pub(crate) mod build_cache_server;
 pub(crate) mod build_dirs;
 pub(crate) mod subagent_lifecycle;
 mod native_subagents;

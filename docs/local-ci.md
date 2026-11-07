@@ -136,7 +136,10 @@ For a reviewed runner fix against frozen product source, select the separately
 reviewed runner with `--runner-sha FULL_RUNNER_COMMIT`, while `--sha` remains the
 product commit. Supply the unchanged `local*.py` helpers from that runner commit.
 Preparation verifies their bytes against the immutable runner tree before any
-check; the workflow and job checkouts still come from the product tree. The
+helper executes, then compiles those captured bytes directly. Cached bytecode
+and caller package paths cannot supply helper code. The command selects the
+same interpreter in isolated mode before its other imports. The workflow and
+job checkouts still come from the product tree. The
 report records both `runner_commit` and `source_commit`, plus helper hashes.
 This does not establish trust in an unreviewed runner: review is a prerequisite.
 Compare affected target results with the original run rather than replacing its

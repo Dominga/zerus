@@ -6,6 +6,8 @@ import os
 import json
 import re
 import subprocess
+import ast
+import py_compile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -15,6 +17,7 @@ SPEC = importlib.util.spec_from_file_location('local_mac_ci', ROOT / 'scripts/ci
 MAC = importlib.util.module_from_spec(SPEC)
 with patch.object(sys, 'path', [str(ROOT / 'scripts/ci'), *sys.path]):
     SPEC.loader.exec_module(MAC)
+    MAC.CI = MAC.load_ci_sources({p.name: p.read_bytes() for p in (ROOT / 'scripts/ci').glob('local*.py')}, ROOT / 'scripts/ci')
 
 
 class MacPlan(unittest.TestCase):
@@ -259,6 +262,62 @@ class PrivateTools(unittest.TestCase):
 
 
 class RunnerProvenance(unittest.TestCase):
+    def test_real_loading_ignores_timestamp_valid_bytecode_and_package_shadows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            helpers = root / 'scripts/ci'; helpers.mkdir(parents=True)
+            for path in (ROOT / 'scripts/ci').glob('local*.py'):
+                (helpers / path.name).write_bytes(path.read_bytes())
+            git = ['git', '-C', str(root)]
+            subprocess.run([*git, 'init', '-q'], check=True)
+            subprocess.run([*git, 'add', '.'], check=True)
+            subprocess.run([*git, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                            'commit', '-qm', 'reviewed helper bytes'], check=True)
+            commit = subprocess.check_output([*git, 'rev-parse', 'HEAD'], text=True).strip()
+            path = helpers / 'local-linux.py'; original = path.read_bytes()
+            tree = ast.parse(original)
+            node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'summarize')
+            lines = original.splitlines(keepends=True)
+            span = b''.join(lines[node.lineno - 1:node.end_lineno])
+            prefix = b'def summarize(steps):\n    return "pass"\n'
+            replacement = prefix + b'#' + b'x' * (len(span) - len(prefix) - 2) + b'\n'
+            self.assertEqual(len(replacement), len(span))
+            path.write_bytes(b''.join(lines[:node.lineno - 1]) + replacement + b''.join(lines[node.end_lineno:]))
+            os.utime(path, (1700000000, 1700000000))
+            py_compile.compile(str(path), doraise=True, invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP)
+            path.write_bytes(original); os.utime(path, (1700000000, 1700000000))
+            shadow = helpers / 'yaml'; shadow.mkdir()
+            (shadow / '__init__.py').write_text('raise AssertionError("caller package shadow ran")\n')
+            # Test the actual module startup, verifier, loader and aggregator in
+            # a fresh child, with the attack directory first on the caller path.
+            driver = '''import importlib.util,json,subprocess,sys
+from pathlib import Path
+helpers=Path(sys.argv[1]);sys.path.insert(0,str(helpers))
+spec=importlib.util.spec_from_file_location('actual_mac',helpers/'local-macos.py')
+mac=importlib.util.module_from_spec(spec);spec.loader.exec_module(mac)
+assert mac.CI is None, 'no helper may execute before verification'
+sources=mac.verify_runner_source(helpers.parents[1],sys.argv[2],helpers)
+# A later disk replacement must not replace the already verified byte map.
+(helpers/'local_network.py').write_text('raise AssertionError("late helper replacement ran")\\n')
+mac.CI=mac.load_ci_sources(sources,helpers)
+assert mac.CI.load_workflow(b'jobs: {}') == {'jobs': {}}
+code=subprocess.run(['/bin/bash','-c','exit 19']).returncode
+step={'status':'fail' if code else 'pass','exit_code':code}
+assert mac.CI.summarize([step])=='fail',step
+print(json.dumps({'step':step,'job':'fail'}))
+'''
+            result = subprocess.run([sys.executable, '-c', driver, str(helpers), commit],
+                                    capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), {'step': {'status': 'fail', 'exit_code': 19}, 'job': 'fail'})
+            for name in ('argparse', 'json'):
+                (helpers / (name + '.py')).write_text('raise AssertionError("caller stdlib shadow ran")\n')
+            result = subprocess.run([sys.executable, str(helpers / 'local-macos.py'), '--help'],
+                                    env={**os.environ, 'PYTHONPATH': str(helpers)},
+                                    capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('--runner-sha', result.stdout)
+
     def test_runner_commit_is_independent_of_source_checkout_and_rejects_shadows(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

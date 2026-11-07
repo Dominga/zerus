@@ -4,8 +4,16 @@
 GitHub artifact transport is replaced by a local, hash-bound producer. A local
 result never admits a published artifact, installed pair, or release candidate.
 """
+import sys
+
+if __name__ == '__main__' and not sys.flags.isolated:
+    # Before loading anything from the caller's path, select the same public
+    # interpreter without cwd, PYTHONPATH or user-site package participation.
+    import os
+    os.execv(sys.executable, [sys.executable, '-I', __file__, *sys.argv[1:]])
+
 import argparse
-import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,16 +21,16 @@ import re
 import shutil
 import signal
 import shlex
+import site
 import subprocess
-import sys
+import sysconfig
+import types
 import time
 import tarfile
 import tempfile
 import urllib.request
 
-SPEC = importlib.util.spec_from_file_location('local_linux', Path(__file__).with_name('local-linux.py'))
-CI = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(CI)
+CI = None  # Initialized only from verified source bytes during preparation.
 SUPPORTED = {'client-native-macos-core', 'client-native-macos-tauri', 'connector-macos',
              'cli-macos-debug', 'cli-macos-core', 'cli-macos-native'}
 RUST_CACHE = ('echo "rustc=$(rustc{toolchain} -Vv | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"\n'
@@ -154,17 +162,52 @@ def login_shell_script(observation_bin):
 
 
 def verify_runner_source(repository, commit, directory):
-    paths = CI.git(repository, 'ls-tree', '-r', '--name-only', commit, 'scripts/ci').splitlines()
-    expected = {Path(p).name: p for p in paths if Path(p).suffix == '.py'}
+    paths = subprocess.check_output(['git', '-C', str(repository), 'ls-tree', '-r', '--name-only',
+                                     commit, 'scripts/ci'], text=True).splitlines()
+    expected = {Path(p).name: p for p in paths if Path(p).parent == Path('scripts/ci') and Path(p).suffix == '.py'}
     present = {p.name: p for p in directory.glob('*.py')}
     required = {name for name in expected if name.startswith('local')}
     if not required <= present.keys() or not present.keys() <= expected.keys():
         raise ValueError('runner directory has missing or unrecorded Python helpers')
+    verified = {}
     for name, path in present.items():
         recorded = subprocess.check_output(['git', '-C', str(repository), 'show', commit + ':' + expected[name]])
         if path.is_symlink() or path.read_bytes() != recorded:
             raise ValueError('runner helper differs from its immutable commit: ' + name)
-    return {name: CI.file_digest(present[name]) for name in sorted(required)}
+        verified[name] = recorded
+    return verified
+
+
+def load_ci_sources(verified, directory):
+    """Compile the verified bytes; never ask Python to load caller bytecode."""
+    # Discard the caller's cwd, PYTHONPATH and helper/package shadows. Public
+    # interpreter/tool packages remain prerequisites, independently of the tree.
+    paths = sysconfig.get_paths()
+    trusted = {str(Path(paths[k]).resolve()) for k in ('stdlib', 'platstdlib', 'purelib', 'platlib')}
+    trusted.update(str(Path(p).resolve()) for p in site.getsitepackages())
+    if sysconfig.get_config_var('DESTSHARED'):
+        trusted.add(str(Path(sysconfig.get_config_var('DESTSHARED')).resolve()))
+    for prefix in (sys.prefix, sys.base_prefix):
+        prefix = Path(prefix).resolve()
+        archive = 'python' + str(sys.version_info.major) + str(sys.version_info.minor) + '.zip'
+        trusted.update((str(prefix / 'lib' / archive), str(prefix / archive), str(prefix / 'DLLs')))
+    sys.path = sorted(trusted)
+    import yaml
+    if not any(Path(yaml.__file__).resolve().is_relative_to(Path(p)) for p in trusted):
+        raise ValueError('PyYAML came from a caller package shadow')
+    # Preload every local import from the retained, already-verified byte map.
+    # compile() neither reads nor writes __pycache__, including valid stale pyc.
+    for filename in ('local_network.py', 'local_services.py', 'local_container.py', 'local-linux.py'):
+        name = filename.removesuffix('.py').replace('-', '_')
+        module = types.ModuleType(name)
+        module.__file__ = str(directory / filename)
+        sys.modules[name] = module
+        try:
+            exec(compile(verified[filename], module.__file__, 'exec', dont_inherit=True), module.__dict__)
+        except BaseException:
+            sys.modules.pop(name, None)
+            raise
+    return sys.modules['local_linux']
 
 
 def node24(root):
@@ -330,10 +373,28 @@ class Runner:
         harness = self.output / 'harness'; harness.mkdir()
         for path in Path(__file__).parent.glob('local*.py'):
             shutil.copy2(path, harness / path.name)
-        self.report['harness_files'] = {path.name: CI.file_digest(path) for path in harness.iterdir()}
+        self.report['harness_files'] = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in harness.iterdir()}
         self.root.chmod(0o700)
         self.cache.mkdir(exist_ok=True)
         self.target.mkdir(exist_ok=True)
+        self.host_environment = {'PATH': '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
+                                 'HOME': str(self.root), 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null'}
+        subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', 'clone', '--shared', '--no-checkout',
+                        str(self.args.repo), str(self.snapshot)], env=self.host_environment, check=True, timeout=180)
+        subprocess.run(['git', '-C', str(self.snapshot), '-c', 'credential.helper=', 'fetch', '--no-tags',
+                        'https://github.com/ufna/zerus.git', self.report['commit']], env=self.host_environment, check=True, timeout=300)
+        subprocess.run(['git', '-C', str(self.snapshot), '-c', 'core.hooksPath=/dev/null', 'checkout',
+                        '--detach', self.report['commit']], env=self.host_environment, check=True)
+        runner_commit = self.args.runner_sha or self.report['commit']
+        if runner_commit != self.report['commit']:
+            subprocess.run(['git', '-C', str(self.snapshot), '-c', 'credential.helper=', 'fetch', '--no-tags',
+                            'https://github.com/ufna/zerus.git', runner_commit],
+                           env=self.host_environment, check=True, timeout=300)
+        verified = verify_runner_source(self.snapshot, runner_commit, Path(__file__).parent)
+        global CI
+        CI = load_ci_sources(verified, Path(__file__).parent)
+        self.report['runner_source_files'] = {name: hashlib.sha256(data).hexdigest() for name, data in verified.items()}
+        self.report['runner_commit'] = runner_commit
         self.node = node24(self.cache)
         self.temporary.mkdir(mode=0o700)
         self.tools = self.root / 'tools'
@@ -392,21 +453,6 @@ class Runner:
         cargo.mkdir(exist_ok=True)
         if not (cargo / 'registry').exists():
             subprocess.run(['cp', '-cR', str(Path.home() / '.cargo/registry'), str(cargo)], check=True)
-        self.host_environment = {'PATH': '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
-                                 'HOME': str(self.root), 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null'}
-        subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', 'clone', '--shared', '--no-checkout',
-                        str(self.args.repo), str(self.snapshot)], env=self.host_environment, check=True, timeout=180)
-        subprocess.run(['git', '-C', str(self.snapshot), '-c', 'credential.helper=', 'fetch', '--no-tags',
-                        'https://github.com/ufna/zerus.git', self.report['commit']], env=self.host_environment, check=True, timeout=300)
-        subprocess.run(['git', '-C', str(self.snapshot), '-c', 'core.hooksPath=/dev/null', 'checkout',
-                        '--detach', self.report['commit']], env=self.host_environment, check=True)
-        runner_commit = self.args.runner_sha or self.report['commit']
-        if runner_commit != self.report['commit']:
-            subprocess.run(['git', '-C', str(self.snapshot), '-c', 'credential.helper=', 'fetch', '--no-tags',
-                            'https://github.com/ufna/zerus.git', runner_commit],
-                           env=self.host_environment, check=True, timeout=300)
-        self.report['runner_source_files'] = verify_runner_source(self.snapshot, runner_commit, Path(__file__).parent)
-        self.report['runner_commit'] = runner_commit
         for manifest in self.snapshot.rglob('Cargo.toml'):
             path = manifest.parent / 'target'
             if not path.exists():
@@ -536,6 +582,7 @@ def main():
         parser.error('output must be new and below the private root')
     # Bodies are transferred from the exact source separately during preparation.
     report = dict(version=1, commit=args.sha, source_commit=args.sha, runner_commit=None,
+                  isolated_interpreter=bool(sys.flags.isolated),
                   platform='native macOS local preflight', completed=False, jobs=[])
     runner = Runner(args, report)
     try:
@@ -614,7 +661,10 @@ PYPROBE
         raise
     finally:
         if args.output.exists():
-            CI.save(args.output / 'report.json', report)
+            if CI is None:
+                (args.output / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
+            else:
+                CI.save(args.output / 'report.json', report)
         runner.finish()
     print('Report:', args.output / 'report.json')
     return 1 if any(j['status'] == 'fail' for j in report['jobs']) else 2

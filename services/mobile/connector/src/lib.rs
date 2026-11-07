@@ -37,6 +37,7 @@ pub mod pyvalue;
 pub mod repositories;
 pub mod request;
 pub mod runtime;
+mod session_labels;
 pub mod session_notifications;
 pub mod session_projects;
 pub mod session_selector;
@@ -72,6 +73,7 @@ pub struct Started {
     pub journal: journal::Journal,
     /// Findings that do not stop it, logged as warnings.
     pub warnings: Vec<&'static str>,
+    labels: Option<session_labels::Selection>,
     #[cfg(windows)]
     generation: String,
 }
@@ -117,6 +119,7 @@ pub fn start_bound(
     config::bind_workspace(&mut config, path)?;
     let journal = journal::Journal::open(&config.state_dir, &config.binding, now)
         .map_err(|error| ConnectorError::new(error.message()))?;
+    let labels = session_labels::Selection::new(path, text.as_bytes());
     #[cfg(windows)]
     let generation = windows_management::prepare_running(&config.state_dir, &revision)
         .map_err(|_| ConnectorError::new(STARTUP_FAILURE))?;
@@ -126,6 +129,7 @@ pub fn start_bound(
         #[cfg(windows)]
         generation,
         warnings: findings.iter().map(|finding| finding.message).collect(),
+        labels,
     })
 }
 
@@ -164,6 +168,7 @@ pub fn run(started: Started) -> u8 {
     let Started {
         config,
         journal,
+        labels,
         #[cfg(windows)]
         generation,
         ..
@@ -205,29 +210,40 @@ pub fn run(started: Started) -> u8 {
             settings,
             Box::new(now),
         ));
-        if let Some(private_dir) = config.encrypted_workspace {
-            #[cfg(unix)]
-            let stop = signals(&connector.stopping);
-            #[cfg(windows)]
-            let stop = windows_management::signals(&connector.stopping, stop_state, generation);
-            return encrypted_runtime::run(&connector, &relay, &private_dir, stop).await;
-        }
-        #[cfg(unix)]
-        let result = serve(&connector, &relay, signals(&connector.stopping)).await;
-        #[cfg(windows)]
-        let result = serve(
-            &connector,
-            &relay,
-            windows_management::signals(&connector.stopping, stop_state, generation),
-        )
-        .await;
-        match result {
-            Ok(()) => 0,
-            Err(_) => {
-                runtime::log("ERROR", JOURNAL_FAILURE);
-                1
+        let work = async {
+            if let Some(private_dir) = config.encrypted_workspace {
+                #[cfg(unix)]
+                let stop = signals(&connector.stopping);
+                #[cfg(windows)]
+                let stop = windows_management::signals(&connector.stopping, stop_state, generation);
+                return encrypted_runtime::run(&connector, &relay, &private_dir, stop).await;
             }
-        }
+            #[cfg(unix)]
+            let result = serve(&connector, &relay, signals(&connector.stopping)).await;
+            #[cfg(windows)]
+            let result = serve(
+                &connector,
+                &relay,
+                windows_management::signals(&connector.stopping, stop_state, generation),
+            )
+            .await;
+            match result {
+                Ok(()) => 0,
+                Err(_) => {
+                    runtime::log("ERROR", JOURNAL_FAILURE);
+                    1
+                }
+            }
+        };
+        let work = async {
+            let code = work.await;
+            connector.stopping.set();
+            code
+        };
+        let (code, ()) =
+            futures_util::future::join(work, session_labels::serve(&connector, labels.as_ref()))
+                .await;
+        code
     });
     // Usage refreshes still running are dropped, which kills their children.
     {

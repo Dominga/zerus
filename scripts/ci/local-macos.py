@@ -206,6 +206,10 @@ class Runner:
         (self.lock / 'owner').write_text(self.owner + '\n')
         self.held = True
         self.output.mkdir(parents=True, mode=0o700)
+        harness = self.output / 'harness'; harness.mkdir()
+        for path in Path(__file__).parent.glob('local*.py'):
+            shutil.copy2(path, harness / path.name)
+        self.report['harness_files'] = {path.name: CI.file_digest(path) for path in harness.iterdir()}
         self.root.chmod(0o700)
         self.cache.mkdir(exist_ok=True)
         self.target.mkdir(exist_ok=True)

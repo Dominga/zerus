@@ -25,7 +25,7 @@ beforeEach(() => {
   native.inspect.mockResolvedValue({ path: "unrelated fixture response" });
   native.dismiss.mockImplementation(async () => ({ ...emptyCleanup(), revision: ++revision }));
   native.clear.mockImplementation(async () => ({ ...emptyCleanup(), revision: ++revision }));
-  native.offer.mockResolvedValue({ confirmation: "native-handle", programs: [{ pid: 42, label: "original-survivor" }] });
+  native.offer.mockImplementation(async () => ({ confirmation: "native-handle", remaining_millis: 60_000, revision: cleanup().revision + 1, programs: [{ pid: 42, label: "original-survivor" }] }));
   native.cancel.mockResolvedValue({ ...emptyCleanup(), revision: ++revision });
   vi.spyOn(HTMLDialogElement.prototype, "showModal").mockImplementation(function (this: HTMLDialogElement) { this.open = true; });
   vi.spyOn(HTMLDialogElement.prototype, "close").mockImplementation(function (this: HTMLDialogElement) { this.open = false; });
@@ -167,4 +167,31 @@ it("never displays a previous computer's blocker during the next same-path inspe
   const host=mount();review(host).click();await flush();expect(host.textContent).toContain("alpha-only-blocker");
   host.querySelectorAll<HTMLTableRowElement>("tbody tr")[1].click();await flush();
   expect(host.textContent).not.toContain("alpha-only-blocker");
+});
+
+it("keeps the original unknown outcome visible beside a later lease retirement", () => {
+  applyCleanup({ ...emptyCleanup(), revision: ++revision, unknown: 1, rows: [row({ status: "unknown", can_force: false,
+    reason: "Removal could not be confirmed. Check the original result before continuing.", program_retirement: "expired" })] });
+  const host = mount(); review(host).click();
+  expect(host.textContent).toContain("Removal could not be confirmed");
+  expect(host.textContent).toContain("Force stop offer expired");
+  expect(cleanup().rows[0].status).toBe("unknown"); expect(button(host, "Force stop…")).toBeUndefined();
+  expect(native.confirm).not.toHaveBeenCalled(); expect(native.clear).not.toHaveBeenCalled();
+});
+
+it("keeps the pending raw Force ID beside an expired unknown member of the same folder", async () => {
+  const expired = row({ id: "old-unknown", folder_key: "shared-folder", status: "unknown", can_force: false,
+    reason: "Original removal remains unconfirmed.", program_retirement: "expired" });
+  const pending = row({ id: "current-original", folder_key: "shared-folder", can_force: true, can_dismiss: false });
+  applyCleanup({ ...emptyCleanup(), revision: ++revision, unknown: 1, rows: [expired, pending] });
+  const host = mount(); review(host).click();
+  expect(host.querySelectorAll("tbody tr")).toHaveLength(1);
+  expect(host.querySelector('[data-outcome="unknown"]')?.textContent).toContain("Original removal remains unconfirmed.");
+  expect(host.textContent).toContain("Force stop offer expired");
+  button(host, "Force stop…").click(); await flush();
+  expect(native.offer).toHaveBeenCalledExactlyOnceWith("current-original");
+  expect(cleanup().rows[0]).toBe(expired); expect(cleanup().rows[1]).toBe(pending);
+  expect(native.confirm).not.toHaveBeenCalled(); expect(native.dismiss).not.toHaveBeenCalled();
+  button(host, "Cancel").click(); await flush();
+  expect(native.cancel).toHaveBeenCalledExactlyOnceWith("current-original", "native-handle");
 });

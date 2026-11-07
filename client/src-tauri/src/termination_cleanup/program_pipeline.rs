@@ -35,10 +35,23 @@ pub(super) enum ProgramJob {
     Stopped(Box<programs::Stopped>),
     Force {
         id: String,
+        revision: u64,
         offer: Box<programs::ForceOffer>,
     },
 }
 impl ProgramJob {
+    fn remaining_millis(&self) -> u64 {
+        match self {
+            Self::Stopped(stopped) => stopped.remaining_millis(),
+            Self::Force { offer, .. } => offer.remaining_millis(),
+        }
+    }
+    fn holder_unavailable(&self) -> bool {
+        match self {
+            Self::Stopped(stopped) => stopped.holder_unavailable(),
+            Self::Force { offer, .. } => offer.holder_unavailable(),
+        }
+    }
     fn current(&self) -> bool {
         match self {
             Self::Stopped(stopped) => stopped.current(),
@@ -111,6 +124,7 @@ pub(super) async fn confirm(
                 manual_review: false,
                 dismissed: false,
                 program_review_pending: true,
+                program_retirement: None,
                 source: Some(capture.target.clone()),
                 restore_supported: true,
                 archive: Some(ArchiveIdentity {
@@ -181,6 +195,7 @@ fn publish(
             if stopped.normal_refusal() {
                 job.program_review_pending = false;
             }
+            job.program_retirement = None;
             let detail = match stopped.report() {
                 Ok(report) if report.state == StopState::Complete => zerus_client_core::source!("Programs have stopped. Checking the working folder…"),
                 Ok(report) if report.state == StopState::Incomplete => zerus_client_core::source!("Some programs are still running. Review them before choosing Force stop."),
@@ -190,12 +205,15 @@ fn publish(
             job.programs = Some(ProgramJob::Stopped(Box::new(stopped)));
             (detail, true)
         }
-        Err(_) => (
-            zerus_client_core::source!(
-                "The program stop is unconfirmed. Check the original result before continuing."
-            ),
-            false,
-        ),
+        Err(_) => {
+            job.program_retirement = Some(ProgramRetirement::StopUnconfirmed);
+            (
+                zerus_client_core::source!(
+                    "The program stop is unconfirmed. Check the original result before continuing."
+                ),
+                false,
+            )
+        }
     };
     for entry in &mut job.cleanup.entries {
         entry.status = Some(Status::Kept);
@@ -224,8 +242,21 @@ fn watch_job(inner: &Arc<Inner>, app: AppHandle, id: String) {
             return;
         };
         if program.current() {
+            // A finished control worker is observable failure data, never a
+            // physical-drain proof. Keep the original resources/expiry exactly
+            // as before; only disable presentation of a usable Force offer.
+            if program.holder_unavailable() && job.program_retirement.is_none() {
+                job.program_retirement = Some(ProgramRetirement::HolderUnavailable);
+                changed(&app, &mut m);
+            }
             continue;
         }
+        job.program_retirement
+            .get_or_insert(if program.remaining_millis() == 0 {
+                ProgramRetirement::Expired
+            } else {
+                ProgramRetirement::SourceUnavailable
+            });
         let program = job.programs.take();
         changed(&app, &mut m);
         drop(m);
@@ -262,6 +293,7 @@ pub(super) async fn force_offer(
         .await
         .map_err(|error| error.to_string())?;
     let mut m = lock(&inner.model);
+    let revision = m.revision.wrapping_add(1);
     let job = m
         .jobs
         .iter_mut()
@@ -272,16 +304,23 @@ pub(super) async fn force_offer(
         Ok(offer) => {
             let confirmation = uuid::Uuid::new_v4().to_string();
             let programs = offer.programs();
+            let remaining_millis = offer.remaining_millis();
             job.programs = Some(ProgramJob::Force {
                 id: confirmation.clone(),
+                revision,
                 offer: Box::new(offer),
             });
             Ok(super::ForceView {
                 confirmation,
                 programs,
+                remaining_millis,
+                revision,
             })
         }
-        Err(error) => Err(error),
+        Err(error) => {
+            job.program_retirement = Some(ProgramRetirement::OfferUnavailable);
+            Err(error)
+        }
     };
     changed(&app, &mut m);
     drop(m);
@@ -407,6 +446,21 @@ pub(super) fn record_cleanup_result(
     job.busy = false;
     job.phase = "checking";
     job.programs = None;
+    job.program_retirement = Some(
+        if physically_closed
+            && result.as_ref().is_ok_and(|report| {
+                matches!(
+                    report.state,
+                    zerus_client_core::worktree_programs::cleanup::State::Removed
+                        | zerus_client_core::worktree_programs::cleanup::State::Kept
+                )
+            })
+        {
+            ProgramRetirement::CleanupSettled
+        } else {
+            ProgramRetirement::CleanupUnconfirmed
+        },
+    );
     use zerus_client_core::worktree_programs::cleanup::State;
     let removed = result
         .as_ref()

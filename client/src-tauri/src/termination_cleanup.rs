@@ -78,6 +78,7 @@ struct Job {
     // Presentation retention, not consent/custody: expiry may release the
     // program pipeline while its incomplete/unknown result still needs review.
     program_review_pending: bool,
+    program_retirement: Option<ProgramRetirement>,
     source: Option<Target>,
     archive: Option<ArchiveIdentity>,
     restore_supported: bool,
@@ -226,6 +227,21 @@ pub(crate) struct ProgramView {
 pub struct ForceView {
     confirmation: String,
     programs: Vec<ProgramView>,
+    remaining_millis: u64,
+    revision: u64,
+}
+/// Closed presentation evidence; never a permit, effect result or drain proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+pub(crate) enum ProgramRetirement {
+    Expired,
+    SourceUnavailable,
+    HolderUnavailable,
+    OfferUnavailable,
+    StopUnconfirmed,
+    CleanupSettled,
+    CleanupUnconfirmed,
 }
 fn force_window(window: &tauri::Webview) -> Result<(), String> {
     if window.label() != crate::MAIN_WINDOW
@@ -310,6 +326,8 @@ pub struct Row {
     details: String,
     can_check: bool,
     can_force: bool,
+    force_revision: Option<u64>,
+    program_retirement: Option<ProgramRetirement>,
     ready: bool,
     busy: bool,
     /// What the job is doing right now, separate from the entry's outcome.
@@ -465,6 +483,7 @@ impl Model {
             manual_review: false,
             dismissed: false,
             program_review_pending: false,
+            program_retirement: None,
             source: Some(target.clone()),
             archive,
             restore_supported,
@@ -585,6 +604,7 @@ impl Model {
                         #[cfg(any(target_os = "linux", target_os = "macos"))]
                         {
                             !job.busy
+                                && job.program_retirement.is_none()
                                 && job
                                     .programs
                                     .as_ref()
@@ -595,6 +615,24 @@ impl Model {
                             false
                         }
                     },
+                    force_revision: {
+                        #[cfg(any(target_os = "linux", target_os = "macos"))]
+                        {
+                            match &job.programs {
+                                Some(program_pipeline::ProgramJob::Force { revision, .. })
+                                    if !job.busy && job.program_retirement.is_none() =>
+                                {
+                                    Some(*revision)
+                                }
+                                _ => None,
+                            }
+                        }
+                        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                        {
+                            None
+                        }
+                    },
+                    program_retirement: job.program_retirement,
                     can_check: self.can_dismiss(job)
                         && !self.unknown_folder(job)
                         && !job.busy
@@ -1236,6 +1274,7 @@ pub async fn termination_cleanup_confirm(
                 manual_review: false,
                 dismissed: false,
                 program_review_pending: false,
+                program_retirement: None,
                 source: Some(capture.target.clone()),
                 restore_supported: true,
                 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1690,6 +1729,7 @@ mod tests {
             manual_review: false,
             dismissed: false,
             program_review_pending: false,
+            program_retirement: None,
             source: None,
             archive: None,
             restore_supported: false,
@@ -1777,6 +1817,35 @@ mod tests {
         assert!(!m.view().can_clear);
         m.clear_settled_results();
         assert_eq!(m.jobs.len(), 3);
+    }
+    #[test]
+    fn program_retirement_is_closed_presentation_and_never_changes_the_cleanup_outcome() {
+        let mut m = Model::default();
+        let mut j = job(Some(Status::Kept));
+        j.program_review_pending = true;
+        let original = j.cleanup.clone();
+        m.jobs.push_back(j);
+        for (reason, code) in [
+            (ProgramRetirement::Expired, "expired"),
+            (ProgramRetirement::SourceUnavailable, "source_unavailable"),
+            (ProgramRetirement::HolderUnavailable, "holder_unavailable"),
+            (ProgramRetirement::OfferUnavailable, "offer_unavailable"),
+            (ProgramRetirement::StopUnconfirmed, "stop_unconfirmed"),
+            (ProgramRetirement::CleanupSettled, "cleanup_settled"),
+            (ProgramRetirement::CleanupUnconfirmed, "cleanup_unconfirmed"),
+        ] {
+            m.jobs[0].program_retirement = Some(reason);
+            let view = m.view();
+            assert!(!view.rows[0].can_force);
+            assert_eq!(view.rows[0].force_revision, None);
+            assert_eq!(view.rows[0].status, "kept");
+            assert_eq!(
+                serde_json::to_value(view.rows[0].program_retirement).unwrap(),
+                code
+            );
+            m.clear_settled_results();
+            assert_eq!(m.jobs[0].cleanup, original);
+        }
     }
     #[test]
     fn ordinary_known_use_is_a_settled_kept_result() {
@@ -1894,6 +1963,14 @@ mod tests {
                     &Ok(report),
                     true
                 ));
+                assert_eq!(
+                    j.program_retirement,
+                    Some(if status == State::Kept {
+                        ProgramRetirement::CleanupSettled
+                    } else {
+                        ProgramRetirement::CleanupUnconfirmed
+                    })
+                );
                 m.jobs.push_back(j);
                 assert!(m.view().rows[0].can_dismiss);
                 assert_eq!(m.view().can_clear, status == State::Kept);
@@ -1913,6 +1990,10 @@ mod tests {
             &Err("physical close unconfirmed".into()),
             false
         ));
+        assert_eq!(
+            j.program_retirement,
+            Some(ProgramRetirement::CleanupUnconfirmed)
+        );
         let mut m = Model::default();
         m.jobs.push_back(j);
         assert!(!m.view().can_clear && !m.view().rows[0].can_dismiss);

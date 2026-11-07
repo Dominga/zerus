@@ -10,6 +10,7 @@ import { activityLabel } from "../../store/backgroundTasks";
 import { anyCleanupRestore, cleanupRestoring, restoreCleanupRow } from "../../store/cleanupNotices";
 import { tr } from "../../i18n";
 import { ForceStopDialog } from "../sessions/ForceStopDialog";
+import { programReviewMessage } from "../sessions/program-review";
 
 const labels = { removed: "Removed", kept: "Kept", review: "Review", unknown: "Unknown", ready: "Ready", checking: activityLabel("checking"), removing: activityLabel("removing"), stopping: activityLabel("stopping") };
 /** setup-batch-cleanup, Terminate variant. Opening displays recorded outcomes. */
@@ -57,6 +58,7 @@ export default function WorktreeCleanup() {
   };
   const targets = createMemo(() => folders().filter((folder) => folder.status !== "unknown" && folder.primary.ready));
   const consented = () => (!cleanup().required.local_files || consents().local_files) && (!cleanup().required.discard_changes || consents().discard_changes) && (!cleanup().required.unchecked_processes || consents().unchecked_processes);
+  const retirementHint = (row: CleanupRow) => ["expired", "source_unavailable", "holder_unavailable", "offer_unavailable"].includes(row.program_retirement ?? "") ? programReviewMessage(row.program_retirement) : undefined;
   const summary = () => tr("%1 removed  %2 kept  %3 unknown", cleanup().removed, cleanup().kept, cleanup().unknown);
   createEffect(() => { cleanup().revision; setConsents(emptyConsents()); });
   createEffect(() => { const id = cleanupDialog()?.selected; if (id) setSelected(id); });
@@ -72,7 +74,7 @@ export default function WorktreeCleanup() {
         <table class="su-table bc-table"><thead><tr><th>{tr("Folder / branch")}</th><th>{tr("Computer")}</th><th>{tr("Size")}</th><th>{tr("Result")}</th></tr></thead><tbody><For each={folders()}>{(folder) => { const row = folder.primary; return (
           <tr classList={{ on: currentFolder()?.key === folder.key }} onClick={() => setSelected(row.id)} title={row.path}>
             <td><div class="ell"><b>{row.label}</b></div><div class="mono dim ell">{row.branch}</div><For each={folder.sources}>{(source) => <div class="hint cleanup-source">{source.name}</div>}</For></td><td><MachineLabel alias={row.machine} class="mbadge" /></td><td class="tabular">{row.size}</td>
-            <td title={row.reason}><div class="bc-result" data-outcome={folder.status}><Show when={folder.status === "checking" || folder.status === "removing"}><Icon name="loader-circle" size={12} class="su-spin" /></Show><b>{labels[folder.status]}</b><Show when={folder.status !== "removed"}><span class="hint wtc-reason" style={{ "white-space": "pre-wrap", "overflow-wrap": "anywhere" }}>{[...new Set(folder.rows.map((member) => member.reason).filter(Boolean))].join("\n")}</span></Show></div></td>
+            <td title={[...new Set(folder.rows.flatMap((member) => [member.reason, retirementHint(member)]).filter(Boolean))].join("\n")}><div class="bc-result" data-outcome={folder.status}><Show when={folder.status === "checking" || folder.status === "removing"}><Icon name="loader-circle" size={12} class="su-spin" /></Show><b>{labels[folder.status]}</b><Show when={folder.status !== "removed"}><span class="hint wtc-reason" style={{ "white-space": "pre-wrap", "overflow-wrap": "anywhere" }}>{[...new Set(folder.rows.map((member) => member.reason).filter(Boolean))].join("\n")}</span><For each={[...new Set(folder.rows.map(retirementHint).filter(Boolean))]}>{(hint) => <span class="hint wtc-reason">{hint}</span>}</For></Show></div></td>
           </tr>
         ); }}</For></tbody></table>
         <div class="row">

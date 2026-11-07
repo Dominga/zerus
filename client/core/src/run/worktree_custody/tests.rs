@@ -121,6 +121,7 @@ fn the_original_duplex_owner_probes_first_keeps_input_and_joins_every_pipe_on_cl
     else {
         panic!("ready")
     };
+    assert!(!owner.worker_finished());
     let observed = owner
         .observe(Instant::now() + Duration::from_secs(3))
         .unwrap();
@@ -133,6 +134,7 @@ fn the_original_duplex_owner_probes_first_keeps_input_and_joins_every_pipe_on_cl
         ["worktrees", "program-holder", "--json"]
     );
     owner.close().unwrap();
+    assert!(owner.worker_finished());
     assert!(
         released.upgrade().is_some(),
         "the owner separately retains its original native source"

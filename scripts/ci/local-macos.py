@@ -30,6 +30,7 @@ TOOLCHAINS = {'rustup toolchain install 1.99.1 --profile minimal',
               'rustup toolchain install stable --profile minimal && rustup default stable'}
 TRANSPORT = {
     'python3 scripts/ci/macos-debug-artifact.py seal --directory artifacts/mac-cli-debug',
+    'rustup toolchain install "$MAC_DEBUG_RUST" --profile minimal && rustup default "$MAC_DEBUG_RUST"',
     'python3 scripts/ci/macos-debug-artifact.py admit --artifact-id "$MAC_DEBUG_ID" \\\n  --manifest-sha256 "$MAC_DEBUG_SHA" --producer-attempt "$MAC_DEBUG_ATTEMPT" --rust-release "$MAC_DEBUG_RUST"',
     'python3 scripts/ci/macos-debug-artifact.py install --directory "$RUNNER_TEMP/mac-cli-debug" \\\n  --artifact-id "$MAC_DEBUG_ID" --manifest-sha256 "$MAC_DEBUG_SHA" \\\n  --producer-attempt "$MAC_DEBUG_ATTEMPT" --rust-release "$MAC_DEBUG_RUST" --check-rust',
     'python3 scripts/ci/macos-debug-artifact.py install --directory "$RUNNER_TEMP/mac-cli-debug" \\\n  --artifact-id "$MAC_DEBUG_ID" --manifest-sha256 "$MAC_DEBUG_SHA" \\\n  --producer-attempt "$MAC_DEBUG_ATTEMPT" --rust-release "$MAC_DEBUG_RUST"',
@@ -217,6 +218,13 @@ class Runner:
         self.temporary.mkdir(mode=0o700)
         self.tools = self.root / 'tools'
         self.tools.mkdir(exist_ok=True)
+        # BSD mktemp otherwise uses confstr's real per-user directory even
+        # with TMPDIR supplied. Preserve its native implementation and options,
+        # while making the default parent this job's verified private folder.
+        mktemp = self.tools / 'mktemp'
+        mktemp.write_text('#!/bin/sh\n[ -n "$TMPDIR" ] && [ -d "$TMPDIR" ] || exit 125\n'
+                          'exec /usr/bin/mktemp -p "$TMPDIR" "$@"\n')
+        mktemp.chmod(0o755)
         for name in ('cargo', 'rustc', 'rustdoc', 'rustfmt', 'cargo-fmt', 'cargo-clippy', 'clippy-driver', 'rustup'):
             source = Path.home() / '.cargo/bin' / name
             dest = self.tools / name

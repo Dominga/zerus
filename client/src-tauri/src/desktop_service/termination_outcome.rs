@@ -707,10 +707,11 @@ impl Context {
                     before_input: move |_: &mut std::process::Child, _| {
                         #[cfg(all(test, target_os = "linux"))]
                         tests::before_rpc_input();
-                        let valid = current
-                            .current_or_refuse_at(Reason::ContextAfterBinding)
-                            .is_ok();
+                        // THIS admitted call owns busy until physical drain.
+                        // Recheck freshness, not admission for a second call.
+                        let valid = current.current();
                         if !valid {
+                            current.trace.fail(Reason::ContextAfterBinding);
                             current.rejected.store(true, Ordering::Release);
                         }
                         valid

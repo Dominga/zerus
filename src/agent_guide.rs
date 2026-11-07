@@ -182,16 +182,16 @@ mod tests {
         assert!(has(lead, "no draft runs before approval"), "{lead}");
     }
 
-    /// #742: no agent installs a tool; the lead's and the tests' pages say a
-    /// missing one is offered to the owner and proposed on the question card.
+    /// #742 / task #220: no agent installs a tool. The lead's page names the
+    /// tool_missing item and the install-tool card; the tests' page keeps the
+    /// owner's offer for a run outside a team.
     #[test]
     fn agents_propose_a_missing_tool_and_never_install_it() {
-        for name in ["team-lead", "tests"] {
-            let page = TOPICS.iter().find(|(topic, _)| *topic == name).unwrap().1;
-            assert!(page.contains("Never install a tool"), "{name}");
-            assert!(page.contains("question card"), "{name}");
-        }
+        let lead = TOPICS.iter().find(|(topic, _)| *topic == "team-lead").unwrap().1;
+        assert!(lead.contains("Never install a tool") && lead.contains("tool_missing"), "{lead}");
+        assert!(lead.contains("decide-tool") && lead.contains("install-tool") && lead.contains("only the owner allows an install"), "{lead}");
         let tests = TOPICS.iter().find(|(topic, _)| *topic == "tests").unwrap().1;
+        assert!(tests.contains("Never install a tool") && tests.contains("question card"), "{tests}");
         assert!(tests.contains("hgs test tools") && tests.contains("work without it"), "{tests}");
     }
 

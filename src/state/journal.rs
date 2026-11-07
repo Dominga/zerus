@@ -228,6 +228,41 @@ pub(super) fn event_db() -> Result<Connection> {
     event_db_at(&root())
 }
 
+/// A shared read connection to the events database (task 193). The writer keeps
+/// opening its own connection (a write needs `&mut`); a read reuses this
+/// process's connection instead of opening the database once per row, which
+/// cost about 50 ms a row in `hgs ls`.
+pub(super) struct EventDb(std::rc::Rc<Connection>);
+
+impl std::ops::Deref for EventDb {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.0
+    }
+}
+
+thread_local! {
+    /// The read connection and the journal it belongs to: a test (or a command)
+    /// that switches state roots gets its own, never a connection to the other.
+    static READ_DB: std::cell::RefCell<Option<(PathBuf, std::rc::Rc<Connection>)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The shared read connection of this thread, opened once per state root.
+pub(super) fn event_db_shared() -> Result<EventDb> {
+    let root = root();
+    let path = root.join("events.sqlite3");
+    READ_DB.with(|slot| {
+        if let Some((cached, db)) = slot.borrow().as_ref() {
+            if *cached == path {
+                return Ok(EventDb(db.clone()));
+            }
+        }
+        let db = std::rc::Rc::new(event_db_at(&root)?);
+        *slot.borrow_mut() = Some((path, db.clone()));
+        Ok(EventDb(db))
+    })
+}
+
 fn event_db_at(root: &Path) -> Result<Connection> {
     private_dir(root)?;
     let path = root.join("events.sqlite3");
@@ -379,7 +414,8 @@ fn latest_reply(record: &Value, recurring_schedules: Option<u64>) -> Result<Valu
     if conversation.is_empty() {
         return Ok(json!({}));
     }
-    let db = event_db()?;
+    // Task 193: one read connection for every row of a listing.
+    let db = event_db_shared()?;
     let reply = |seq: i64, at: Value, scheduled: bool| {
         json!({"reply_id":format!("{}:{}", seq, at), "reply_at":at, "reply_scheduled":scheduled})
     };
@@ -2964,5 +3000,28 @@ mod lock_regressions {
         }
         let mode = std::fs::symlink_metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "created owner-only");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Task 193: one shared read connection per thread and state root: a write
+    /// from a fresh connection is seen on the next read, and a second call reuses
+    /// the connection instead of opening the events database again.
+    #[test]
+    fn a_shared_read_connection_sees_a_write() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(), || {
+            let shared = event_db_shared().unwrap();
+            let writer = event_db().unwrap();
+            writer.execute("INSERT INTO events(name, conversation, payload) VALUES ('n','c','{}')", []).unwrap();
+            let count: i64 = shared.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0)).unwrap();
+            assert_eq!(count, 1);
+            let again = event_db_shared().unwrap();
+            let count: i64 = again.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0)).unwrap();
+            assert_eq!(count, 1);
+        });
     }
 }

@@ -7088,8 +7088,42 @@ fn safe_match(team: &Team, member: &Member, pending: &PendingQuestion) -> Option
     let answer = permission_answer(card).filter(|answer| answer["allow"].is_string())?;
     let tool = card["tool"].as_str().or_else(|| card["questions"][0]["header"].as_str()).unwrap_or_default();
     let folder = member_folder_path(team, member).ok()?;
-    let action = safe_actions::find(team, member, tool, command, Path::new(&folder))?;
-    Some((action, answer))
+    if let Some(action) = safe_actions::find(team, member, tool, command, Path::new(&folder)) {
+        return Some((action, answer));
+    }
+    // Task #232: the owner's scratch rule trusts its folder at launch, and the
+    // team's own CLI is what a member runs there: Codex's approval of an hgs
+    // command is the rule's to allow once, without the lead.
+    if card["source"] == crate::state::codex_approval::SOURCE && command_is_hgs(command) {
+        if let Some(rule) = scratch_rule_trusting(team, &folder, &member.agent) {
+            return Some((
+                json!({"id":"scratch-hgs","reason":format!(
+                    "the owner's scratch rule {} trusts the team's own CLI in {folder}", rule.id)}),
+                answer,
+            ));
+        }
+    }
+    None
+}
+
+/// The still-granted scratch rule that covers `folder` for `agent`, or None.
+fn scratch_rule_trusting(team: &Team, folder: &str, agent: &str) -> Option<super::owner_steps::ScratchRule> {
+    if team.scratch_rule.is_empty() {
+        return None;
+    }
+    super::owner_steps::rules().into_iter().find(|rule| {
+        rule.id == team.scratch_rule
+            && super::owner_steps::inside(folder, &rule.folder)
+            && super::owner_steps::trusted(rule).contains(agent)
+    })
+}
+
+/// Whether a shell command runs the team's own CLI.
+fn command_is_hgs(command: &str) -> bool {
+    let first = command.trim_start().split_whitespace().next().unwrap_or_default();
+    let first = first.trim_matches(|ch| ch == '"' || ch == '\'');
+    let name = Path::new(first).file_name().and_then(|name| name.to_str()).unwrap_or(first);
+    name.eq_ignore_ascii_case("hgs") || name.eq_ignore_ascii_case("hgs.exe")
 }
 
 /// Sends the reserved one-time allow and records it by the safe action; when
@@ -9880,6 +9914,10 @@ mod dispatcher_stages;
 #[cfg(test)]
 #[path = "tests/dispatcher_restart.rs"]
 mod dispatcher_restart;
+
+#[cfg(test)]
+#[path = "tests/dispatcher_approval.rs"]
+mod dispatcher_approval;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_host_start.rs"]

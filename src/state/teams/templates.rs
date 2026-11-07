@@ -499,8 +499,8 @@ pub(crate) fn cache_use(template: &str, folder: &Path) -> CacheUse {
             }
             None => {
                 // #742: the owner is offered it in Waiting for you, once.
-                crate::test_discipline::tools::offer_missing(folder, "sccache");
-                used.note = "build cache: sccache was not found; this run built without it. Zerus offers it to the owner in Waiting for you; never install it yourself".into();
+                let offer = crate::test_discipline::tools::offer_missing(folder, "sccache");
+                used.note = format!("build cache: sccache was not found; this run built without it. {}; never install it yourself", offer_waits(offer.as_ref()));
             }
         }
     }
@@ -521,12 +521,21 @@ pub(crate) fn cache_use(template: &str, folder: &Path) -> CacheUse {
             }
             None => {
                 used.launcher = Some(String::new());
-                crate::test_discipline::tools::offer_missing(folder, "ccache");
-                used.note = "build cache: ccache was not found; this run built without it. Zerus offers it to the owner in Waiting for you; never install it yourself".into();
+                let offer = crate::test_discipline::tools::offer_missing(folder, "ccache");
+                used.note = format!("build cache: ccache was not found; this run built without it. {}; never install it yourself", offer_waits(offer.as_ref()));
             }
         }
     }
     used
+}
+
+/// Task #220: where a run's missing tool waits for its decision: the team's
+/// lead's inbox when a team's session raised the offer, else the owner.
+fn offer_waits(offer: Option<&crate::test_discipline::tools::Offer>) -> &'static str {
+    match offer {
+        Some(offer) if !offer.team.is_empty() => "Zerus offers it to your lead's inbox",
+        _ => "Zerus offers it to the owner in Waiting for you",
+    }
 }
 
 /// The compiler launcher a Qt build folder was configured with ("" for none),

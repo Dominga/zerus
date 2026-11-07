@@ -1,24 +1,53 @@
-//! Built-in embeddings for RustCodeLore: nomic-embed-text-v1.5 on candle.
+//! Embeddings: the trait the search's index fuses with, and the built-in
+//! RustCodeLore embedder.
 //!
-//! No Ollama, no ONNX runtime, no Python: the model runs in this process on the
-//! CPU (candle-transformers' `nomic_bert`), with mean pooling and L2-normalised
-//! 768-dimensional vectors. The texts carry the model's task prefixes exactly as
-//! the Python CodeLore applies them: `search_document: ` for records and
-//! `search_query: ` for a search query.
-//!
-//! The weights are never in the binary. [`fetch`] downloads them from
-//! Hugging Face into the user cache, each file pinned by size and SHA-256, or
-//! an offline install hands [`ModelSource::Local`] a directory that already
-//! holds them. Without the model the crate answers [`Error::NoEmbeddings`] and
-//! callers (search) fall back to FTS5; nothing here ever panics on its absence.
-//!
-//! The crate never depends on Zerus.
+//! The search seam is [`Embeddings`]: a provider that does not answer is
+//! reported once and the search goes on without it (text only). The built-in
+//! implementation is [`Embedder`], nomic-embed-text-v1.5 on candle
+//! (candle-transformers' `nomic_bert`, CPU, no Ollama and no ONNX runtime):
+//! mean pooling, L2-normalised 768-d vectors, and the Python CodeLore's task
+//! prefixes (`search_document: ` / `search_query: `). The weights are never in
+//! the binary: [`fetch_model`] downloads them from Hugging Face into the user
+//! cache, each file pinned by size and SHA-256, or [`ModelSource::Local`]
+//! verifies an offline install. Without the model the API answers
+//! [`Error::NoEmbeddings`] and search falls back to FTS5.
 mod fetch;
 mod model;
 
-pub use fetch::fetch;
+pub use fetch::verify_all as verify;
+pub use fetch::{fetch, fetch as fetch_model};
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use crate::LoreError;
+
+/// The provider seam the index's semantic list fuses with.
+pub trait Embeddings: Send + Sync {
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, LoreError>;
+}
+
+/// A recorded corpus for tests: each text's vector, never a model call.
+#[derive(Clone, Default)]
+pub struct Fixed(pub Vec<Vec<f32>>);
+
+impl Embeddings for Fixed {
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, LoreError> {
+        if texts.len() > self.0.len() {
+            return Err(LoreError::new("the fixed embedding corpus is too small"));
+        }
+        Ok(self.0[..texts.len()].to_vec())
+    }
+}
+
+pub type Shared = Arc<dyn Embeddings>;
+
+/// The built-in model, when it is installed; None lets search stay text only.
+pub fn builtin_shared() -> Option<Shared> {
+    Embedder::open_cached().ok().map(|embedder| Arc::new(embedder) as Shared)
+}
+
+// -- the built-in model ---------------------------------------------------------
 
 /// The model this crate embeds with.
 pub const MODEL: &str = "nomic-embed-text-v1.5";
@@ -177,21 +206,6 @@ pub fn status() -> Status {
     status_at(&default_model_dir())
 }
 
-/// Checks every pinned file's size and SHA-256.
-pub fn verify(dir: &Path) -> Result<(), Error> {
-    fetch::verify_all(dir)
-}
-
-/// Downloads the model into the cache, or verifies an offline install, and
-/// returns the directory holding it. `progress` is told each file's name, the
-/// bytes so far and the total bytes.
-pub fn fetch_model(
-    source: ModelSource<'_>,
-    progress: &mut dyn FnMut(&str, u64, u64),
-) -> Result<PathBuf, Error> {
-    fetch::fetch(source, progress)
-}
-
 /// The embedder: the loaded model and tokenizer, ready to embed.
 pub struct Embedder {
     model: model::Model,
@@ -279,10 +293,19 @@ impl Embedder {
         vectors.pop().ok_or_else(|| Error::Run("the model returned no vector".into()))
     }
 
-    /// Embeds texts with the prefix they already carry (an escape hatch for
-    /// the conformance corpus and for callers that build their own text).
+    /// Embeds texts with the prefix they already carry (the index's own
+    /// `embed_text` already adds `search_document: `).
     pub fn embed_prefixed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
         self.model.embed(texts, self.batch_size, self.threads)
+    }
+}
+
+/// The index calls `embed` with texts that already carry their prefix.
+impl Embeddings for Embedder {
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, LoreError> {
+        let owned: Vec<String> = texts.to_vec();
+        let references: Vec<&str> = owned.iter().map(String::as_str).collect();
+        self.embed_prefixed(&references).map_err(|error| LoreError::new(error.to_string()))
     }
 }
 
@@ -315,8 +338,6 @@ mod tests {
         assert_eq!(DOCUMENT_PREFIX, "search_document: ");
         assert_eq!(QUERY_PREFIX, "search_query: ");
         assert_eq!(FILES.len(), 3);
-        // The weights are the model's only large file; the two others are the
-        // tokenizer and the config, small enough to hash on every open.
         assert!(FILES[0].bytes > 500 * 1024 * 1024);
         for file in FILES {
             assert_eq!(file.sha256.len(), 64);
@@ -332,12 +353,10 @@ mod tests {
         let status = status_at(&dir);
         assert!(!status.available);
         assert!(status.reason.contains("missing"), "{}", status.reason);
-        // A truncated file is refused before the model is loaded.
         std::fs::write(dir.join(FILES[0].name), b"short").unwrap();
         let status = status_at(&dir);
         assert!(!status.available);
         assert!(status.reason.contains("bytes"), "{}", status.reason);
-        // Opening it answers no embeddings, the fallback search relies on.
         let error = Embedder::open(ModelSource::Local(&dir)).err().expect("no model is installed");
         assert!(matches!(error, Error::NoEmbeddings(_)), "{error}");
         assert!(error.to_string().starts_with("no embeddings:"), "{error}");
@@ -346,21 +365,17 @@ mod tests {
 
     #[test]
     fn the_default_dir_follows_the_environment() {
-        // The pure parts: LORE_MODEL_DIR names the model folder itself, and the
-        // cache root is the platform's codelore folder unless LORE_CACHE says
-        // otherwise. Both read the process environment, so this test does not
-        // set it; it only checks the paths are absolute and end where they do.
         let dir = default_model_dir();
         assert!(dir.is_absolute(), "{}", dir.display());
-        assert!(dir.ends_with(MODEL), "{}", dir.display());
+        if std::env::var_os("LORE_MODEL_DIR").filter(|value| !value.is_empty()).is_none() {
+            assert!(dir.ends_with(MODEL), "{}", dir.display());
+        }
         let root = cache_root();
         assert!(root.is_absolute(), "{}", root.display());
     }
 
     #[test]
     fn the_thread_and_batch_bounds_are_bounded() {
-        // At least one worker, at most four by default: a loaded desktop keeps
-        // a core for the person.
         let threads = default_threads();
         assert!((1..=4).contains(&threads), "{threads}");
         assert_eq!(bounded_batch(0), 1);

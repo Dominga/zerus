@@ -11,7 +11,7 @@
 //! model when it is installed (the user cache, or `LORE_MODEL_DIR`) and skips
 //! with a note otherwise, so `cargo test` works on a machine that never
 //! downloaded the weights.
-use lore::embed::{self, Embedder, ModelSource, DIMENSIONS, DOCUMENT_PREFIX, QUERY_PREFIX};
+use zerus_lore::embed::{self, Embedder, ModelSource, DIMENSIONS, DOCUMENT_PREFIX, QUERY_PREFIX};
 
 const VECTORS: &str = include_str!("reference/lore-parity/vectors.json");
 

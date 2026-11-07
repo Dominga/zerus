@@ -83,7 +83,7 @@ public:
         connect(refresh, &QPushButton::clicked, this, [this] { reload(); });
         connect(m_switch, &QCheckBox::clicked, this, [this](bool on) {
             m_switch->setChecked(m_view.value("enabled").toBool());
-            if (on != m_view.value("enabled").toBool()) write("set", {{"enabled", on}});
+            if (on != m_view.value("enabled").toBool()) write("set", QJsonObject{{"enabled", on}});
         });
         connect(m_browse, &QPushButton::clicked, this, &ProjectMemoryPanel::browse);
         connect(m_default, &QPushButton::clicked, this, &ProjectMemoryPanel::useDefault);
@@ -137,20 +137,20 @@ public:
         const auto before = m_view;
         const auto picked = pickFolder(before.value("store").toString());
         if (picked.isEmpty() || picked == before.value("store").toString() || m_view != before) return;
-        if (records() > 0) moveTo(picked); else write("set", {{"store", picked}});
+        if (records() > 0) moveTo(picked); else write("set", QJsonObject{{"store", picked}});
     }
     void moveTo(const QString &to)
     {
-        if (!editable() || to.trim().isEmpty() || to.trim() == m_view.value("store").toString()) return;
+        if (!editable() || to.trimmed().isEmpty() || to.trimmed() == m_view.value("store").toString()) return;
         const auto before = m_view;
-        if (!confirmMove || !confirmMove(before.value("store").toString(), to.trim(), records())) return;
+        if (!confirmMove || !confirmMove(before.value("store").toString(), to.trimmed(), records())) return;
         if (m_view != before) return;
-        write("move", {{"to", to.trim()}});
+        write("move", QJsonObject{{"to", to.trimmed()}});
     }
     void useDefault()
     {
         if (!editable() || m_view.value("default").toBool()) return;
-        if (records() > 0) moveTo(m_view.value("default_store").toString()); else write("set", {{"store", QString()}});
+        if (records() > 0) moveTo(m_view.value("default_store").toString()); else write("set", QJsonObject{{"store", QString()}});
     }
 
 private:

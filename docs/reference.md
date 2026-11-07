@@ -141,6 +141,10 @@ Open terminal connects to the selected existing run in the external terminal
 configured for this computer, including connections to remote computers. It uses
 `hgs [@computer] a NAME --existing --run-id ID`, so a delayed terminal cannot
 resume a stopped agent or connect to a replacement run under the same name.
+An original live startup run can connect before its first native conversation
+binding, including while it waits for startup trust. This does not resume it or
+answer trust prompts. If its identity changes while the menu is open, reopen the
+menu to use the current row.
 Offline, paused, unidentified and unsupported adapters show a disabled reason;
 DeepSeek's Native UI remains in Session actions. Copy session ID copies the
 native conversation ID shown as Session ID in the header and Details, rather

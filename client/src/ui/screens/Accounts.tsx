@@ -1,3 +1,4 @@
+import { Dropdown } from "../lib/Dropdown";
 import { TextInput } from "../lib/TextField";
 import { For, Index, Show, Switch, Match, createEffect, createMemo, createSignal, lazy, Suspense, onCleanup } from "solid-js";
 import { Icon } from "../lib/icons";
@@ -359,10 +360,7 @@ export function AccountsScreen() {
           <p class="muted acct-summary">{tr("Your accounts across all machines. Choose an account to manage where it is available.")}</p>
           <For each={view().notices}>{(notice) => <Status kind="warn">{notice}</Status>}</For>
           <Show when={!view().no_hosts}>
-            <select class="field acct-filter" aria-label={tr("Machine")} value={accountMachine()} onChange={(e) => {closeManagement();clearManagementNotice();setAccountMachine(e.currentTarget.value);}}>
-              <option value="*">{tr("All machines")}</option>
-              <For each={view().hosts}>{(h) => <option value={h.computer}>{h.label}</option>}</For>
-            </select>
+            <Dropdown class="field acct-filter" aria-label={tr("Machine")} value={accountMachine()} onChange={(value) => {closeManagement();clearManagementNotice();setAccountMachine(value);}} options={[{ value: "*", label: tr("All machines") }, ...((view().hosts) ?? []).map((h) => ({ value: h.computer, label: h.label }))]} />
             <Show when={view().snapshot}>
               <div class="row acct-count"><Show when={view().pending}><Spinner size={12} /></Show><span class="muted ell">{summaryLine(view(), visible().length)}</span></div>
             </Show>

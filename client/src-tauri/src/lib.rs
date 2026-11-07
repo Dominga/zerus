@@ -1680,6 +1680,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         action_delay::action_delay_wait,
         action_delay::action_delay_cancel,
         actions::set_notifications,
+        actions::set_keep_warm,
         actions::set_parent,
         actions::inspect_session,
         actions::inspect_subagent_identity,

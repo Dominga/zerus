@@ -100,7 +100,7 @@ fn manifest() -> Manifest {
 
 #[test]
 fn a_parsed_result_and_holder_ack_cannot_retire_real_readers_or_a_mutator_loan() {
-    if crate::test_context::non_agent() {
+    if crate::test_context::desktop_fixture() {
         return;
     }
     let _process = crate::PROCESS_TREE.read().unwrap();

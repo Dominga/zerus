@@ -738,7 +738,9 @@ child sessions and native subagents together, working of all (`2 of 5`); this
 one toggle shows or hides both (owner, 2026-11-07, zerus-sa9qn.16), and Left
 and Right do the same from the keyboard, Left then moving from a child to its
 parent. A native subagent row looks like a compact session row (the agent's
-tile, its name and status, the summary as its tooltip) and never expands. This
+tile, its parent's account mark, its name and status, the summary as its
+tooltip) and never expands; the expand button's place stays empty, so its
+status lines up with the rows around it (owner, 2026-11-08). This
 device remembers a collapsed parent across relaunches by its computer's machine
 UUID and session ID (`sessions/collapsedTeams`, at most 2048 parents, the oldest
 forgotten first), so a rename, resume or restart keeps the choice; a parent
@@ -2371,9 +2373,14 @@ The expanded session tree hides children whose latest reported turn is finished
 or failed by default. Session and Overview cards then show only the active count, omitting
 an empty indicator when no active or uncertain children remain.
 **Settings → Sessions → Show completed subagents** restores completed rows and
-active/total card counts. The **Plan & agents** inspector always shows the full
-reported roster and its active/total counts, including completed turns.
-Unknown states, paused agents and input/approval requests remain visible.
+active/total card counts. Unknown states, paused agents and input/approval
+requests remain visible. The **Plan & agents** inspector counts the full
+reported roster (active/total) but keeps only working agents, those waiting for
+an answer and the one open in Activity in view; the others fold behind
+**Finished: N** and unfold 50 at a time, so a session with many subagents
+renders and scrolls a bounded list (owner, 2026-11-08, T-ug5hxx). Each session
+starts folded. `client/scripts/inspector-scroll-smoke.html` measures that
+scroll in WebKitGTK under a private Xvfb.
 An open child's Activity and draft stay in place when its turn finishes. A child's
 draft keeps its row visible after returning to main Activity. Finished turns are
 not proof that the agent's task or process has ended.
@@ -2570,6 +2577,31 @@ ping's own prompt arriving later is then shown as ordinary text. A ping turn tha
 fails, for example on a usage limit, never starts automatic recovery, even when
 an earlier finished recovery episode is kept: keep-warm stops
 until the next real turn, and the provider failure stays visible as usual.
+
+In the desktop app, **Details** shows **Keep cache warm** in the **Session**
+card of every live, paused or stopped session. Its switch (accessible name
+"Keep cache warm") turns it on for the chosen duration; while it is on, a
+slider picks 1 to 7 hours or Always (its last position) and the row shows the
+remaining time, such as **2 h 14 m left**, and what keep-warm is doing: the
+next ping, **Warming the cache now**, a cold cache or the host's reason. Its
+tooltip states the cache lifetime and its source, the ping interval, the pings
+per hour and that each ping is a cached read of the whole context. When the
+agent or account is not eligible the switch is disabled and the host's reason
+is shown under it; a computer whose `hgs` lacks `session-keep-warm-v1` shows an
+update hint. While a ping runs, the session reads **Ready** with **Warming
+cache** and counts in neither Active nor Working. Activity folds the ping, its
+reply and its Stop into one dim **Cache kept warm** row that expands to show
+both.
+
+Android follows the same status rule: while a ping runs the session reads
+**Warming cache**, is neither Working nor Active, and holds no reply in progress,
+so an earlier unread reply keeps its badge. The shared session-filter contract
+(`mobile/android/app/src/test/resources/session-filter-contract.json`) pins this
+for desktop core, the desktop frontend and Android. The phone's session Details
+show **Keep cache warm** read only (Off, On always, or the remaining time) and
+one status line: the next ping, **Warming the cache now**, a cold cache or the
+computer's reason, including why an agent is not eligible. Changing the setting
+from the phone needs a relay operation and is not available yet.
 
 ```sh
 hgs [@host] keep-warm SESSION --json
@@ -4449,6 +4481,15 @@ shows, so a gateway whose mobile connection changed meanwhile refuses to invite
 or revoke for another relay or workspace, and a code for another workspace is
 never shown. A revocation that fails or cannot be confirmed stays reported until
 **Refresh**; it is never retried automatically.
+
+For an encrypted workspace these commands run the mobile connector. The desktop
+runs them on its own computer with the exact connector its status probe uses,
+in `ZERUS_CLIENT_MOBILE_CONNECTOR_PATH`: on Windows the one packaged beside the
+app first, elsewhere the one beside the selected hgs, then beside the app, then
+on PATH. The CLI runs that program and never falls back from an empty, relative,
+missing or unusable selection to its own sibling or PATH. Without a selection
+the CLI keeps its order: the connector beside the running hgs, then PATH. The
+desktop never sends its local selection to another computer.
 
 On Windows, these phone-management commands pass a nonempty `CURL_CA_BUNDLE`
 path explicitly to curl's `--cacert`, so Schannel verifies the relay using that

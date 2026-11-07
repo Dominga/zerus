@@ -170,10 +170,12 @@ pub fn packaged_connector(client_dir: &Path) -> Option<PathBuf> {
 }
 
 /// Exact selection for a local nested CLI: PATH alone cannot override an old
-/// connector beside the staged hgs. Never send this local path to a peer.
+/// connector beside the staged hgs, and a CLI without a sibling must not reach
+/// another connector on PATH. Never send this local path to a peer.
 const CONNECTOR_ENV: &str = "ZERUS_CLIENT_MOBILE_CONNECTOR_PATH";
 
-#[cfg(any(windows, test))]
+/// The connector the status probe uses ([`connector_program`] with this app's
+/// folder), for a local call only, and only as an absolute path.
 fn phone_connector(hgs: &Path, call: &Invocation, directory: Option<&Path>) -> Option<String> {
     if call.args.first().is_some_and(|arg| arg.starts_with('@')) {
         return None;
@@ -185,16 +187,23 @@ fn phone_connector(hgs: &Path, call: &Invocation, directory: Option<&Path>) -> O
         .flatten()
 }
 
+/// A phone call through the CLI with the connector the status probe selected,
+/// on every platform (zerus-ihrzs): the probe and the nested launch name the
+/// same program. Without an absolute selection the CLI keeps its own order.
 fn run_phone_cli(hgs: &Path, call: &Invocation, cap: usize) -> Result<Exit, crate::run::TooLarge> {
-    #[cfg(windows)]
-    let connector = {
-        let directory = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(Path::to_path_buf));
-        phone_connector(hgs, call, directory.as_deref())
-    };
-    #[cfg(not(windows))]
-    let connector: Option<String> = None;
+    let directory = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf));
+    run_phone_cli_from(hgs, call, cap, directory.as_deref())
+}
+
+fn run_phone_cli_from(
+    hgs: &Path,
+    call: &Invocation,
+    cap: usize,
+    client_dir: Option<&Path>,
+) -> Result<Exit, crate::run::TooLarge> {
+    let connector = phone_connector(hgs, call, client_dir);
     run_phone_cli_in(hgs, call, cap, connector.as_deref())
 }
 

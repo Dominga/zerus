@@ -458,6 +458,16 @@ export function buildTranscript(given: readonly ActivityEvent[], summary?: Recor
   return transcriptItems(events, summary, !provider.length);
 }
 
+/** The index of the Stop that ends the keep-warm ping at `from`, or -1 while it runs or a person's prompt comes first. */
+function pingStop(events: readonly ActivityEvent[], from: number): number {
+  for (let k = from + 1; k < events.length; k++) {
+    const event = events[k];
+    if (event.turn_origin === "keep_warm") { if (event.type === "Stop") return k; continue; }
+    if (messageRole(event) === "user") return -1;
+  }
+  return -1;
+}
+
 /** Journal identity stays intact in the store; only rendered rows adopt a send's key. */
 function transcriptItems(events: readonly ActivityEvent[], summary?: Record<string, unknown>, context = false): TranscriptItem[] {
   const items: TranscriptItem[] = context ? recordedContext(summary) : [];
@@ -480,6 +490,24 @@ function transcriptItems(events: readonly ActivityEvent[], summary?: Record<stri
     }
     const role = messageRole(e);
     const at = timeText(e.at);
+    if (e.turn_origin === "keep_warm" || e.origin === "keep_warm") {
+      // A keep-warm ping is not the person's message: its prompt, the reply
+      // and its Stop are one dim row. An untagged provider copy of the reply
+      // before the ping's Stop folds in too; a row without its prompt hides.
+      const stop = pingStop(events, i);
+      const lines: string[] = [];
+      let j = i;
+      for (; j < events.length; j++) {
+        const n = events[j];
+        const tagged = n.turn_origin === "keep_warm" || n.origin === "keep_warm";
+        if (!tagged && !(stop >= 0 && j < stop && messageRole(n) === "assistant")) break;
+        const body = (n.detail ?? "").trim();
+        if (body && (n.origin === "keep_warm" || messageRole(n) === "assistant") && lines[lines.length - 1] !== body) lines.push(body);
+        if (j === stop) { j++; break; }
+      }
+      if (e.origin === "keep_warm") items.push({ id, kind: "warm", at, title: tr("Cache kept warm"), lines });
+      i = j; continue;
+    }
     if (e.type === "SessionCleared") {
       items.push({ id, kind: "cleared", at, sender: tr("Session cleared"), body: tr("The agent no longer sees the activity above. New messages start with a fresh conversation context.") });
       i++; continue;

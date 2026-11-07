@@ -416,6 +416,12 @@ describe("service approval intents", () => {
     expect(other.pending()).toEqual({ id: "request-2", enabled: true, categories: ids });
     await expect(other.submitCategories(true, ids)).rejects.toThrow("unconfirmed");
   });
+  it("settles a category change refused for a switch changed elsewhere, so the next edit may go", async () => {
+    const send = vi.fn(async (request_id: string) => ({ request_id, op: "automatic_approvals", accepted: false, durable: false, pending: false, code: "approval_policy_changed" }));
+    const intent = createServiceApprovalIntent(send, () => "request-1");
+    await expect(intent.submitCategories(true, ["read"])).rejects.toThrow("turned on or off elsewhere");
+    expect(intent.pending()).toBeUndefined();
+  });
   it("restores an uncertain category change after a reload and confirms it by its exact set", async () => {
     const send = vi.fn();
     const read = vi.fn(async () => ({ request_id: "native-original", op: "automatic_approvals", enabled: false,

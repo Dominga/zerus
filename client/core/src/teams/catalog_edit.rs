@@ -525,7 +525,9 @@ impl CatalogEditor {
         };
         let mut edited = Map::new();
         for (kind, id) in &self.edited {
-            edited.entry(kind.list()).or_insert_with(|| json!([])).as_array_mut().map(|list| list.push(json!(id)));
+            if let Some(list) = edited.entry(kind.list()).or_insert_with(|| json!([])).as_array_mut() {
+                list.push(json!(id));
+            }
         }
         CatalogEditorView {
             version: self.version(),
@@ -660,7 +662,9 @@ fn push(catalog: &mut Value, kind: Kind, item: Value) {
     if !catalog[kind.list()].is_array() {
         catalog[kind.list()] = json!([]);
     }
-    catalog[kind.list()].as_array_mut().map(|list| list.push(item));
+    if let Some(list) = catalog[kind.list()].as_array_mut() {
+        list.push(item);
+    }
 }
 
 /// A slug of `name`, made unique in the kind's list.

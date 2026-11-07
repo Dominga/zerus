@@ -309,6 +309,20 @@ pub fn diagnostic(value: &str) -> String {
         .collect()
 }
 
+/// The native service effect checkpoint keeps all original fields except the
+/// cached worktree listing. The reducer already selected and verified its exact
+/// target before dispatch; unrelated checkout rows supply no effect authority.
+/// Keep the full catalog in the journal for recovery/queueing, and keep its
+/// common directory and other metadata in this checkpoint. The service's
+/// existing source/envelope caps and complete verifier still apply.
+pub fn effect_checkpoint(operation: &Value) -> Result<String, serde_json::Error> {
+    let mut checkpoint = operation.clone();
+    if let Some(catalog) = checkpoint.get_mut("catalog").and_then(Value::as_object_mut) {
+        catalog.remove("worktrees");
+    }
+    serde_json::to_string(&checkpoint)
+}
+
 /// Whether a journal entry is a well-formed operation with this ID.
 pub fn valid_operation(id: &str, value: &Value) -> bool {
     if !uuid(id)

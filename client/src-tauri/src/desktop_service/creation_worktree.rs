@@ -111,7 +111,7 @@ pub(crate) fn call(
                 creation_id: id.into(),
                 worktree_request_id: plan.worktree_request_id.clone(),
                 revision: operation["revision"].as_u64().ok_or(())?,
-                original: serde_json::to_string(operation).map_err(drop)?,
+                original: creation::effect_checkpoint(operation).map_err(drop)?,
             };
             intent.clone().verify().map_err(drop)?;
             sent.set(true);

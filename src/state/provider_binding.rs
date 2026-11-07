@@ -299,6 +299,41 @@ mod tests {
                 labels::ensure_manifest().unwrap();
             }
             assert_eq!(labels::candidates(&name).unwrap().by_id.len(), 2);
+            assert!(
+                !storage::label_taken(&name),
+                "own provider bindings cannot block launch reconciliation as terminal holders"
+            );
+            let terminal = storage::label_record_path(&name);
+            atomic(&terminal, "unreadable foreign terminal binding").unwrap();
+            assert!(
+                storage::label_taken(&name),
+                "a foreign terminal holder still fences the provider"
+            );
+            std::fs::remove_file(terminal).unwrap();
+            let foreign_id = uuid::Uuid::new_v4().to_string();
+            let foreign = json!({"version":1,"agent":"codex","name":name,"layout":"id","session_id":foreign_id,
+                "run_id":"foreign-run","conversation_id":uuid::Uuid::new_v4().to_string()});
+            let foreign_path = storage::id_record_path(&foreign_id).unwrap();
+            {
+                let _writer = lock(None).unwrap();
+                labels::add(&name, &foreign_id).unwrap();
+            }
+            atomic(&foreign_path, &foreign.to_string()).unwrap();
+            assert!(
+                storage::label_taken(&name),
+                "a terminal ID record still fences the provider"
+            );
+            atomic(&foreign_path, "{bad").unwrap();
+            assert!(
+                storage::label_taken(&name),
+                "unreadable terminal ID evidence is never absence"
+            );
+            std::fs::remove_file(foreign_path).unwrap();
+            {
+                let _writer = lock(None).unwrap();
+                labels::remove(&name, &foreign_id).unwrap();
+            }
+            assert!(!storage::label_taken(&name));
             assert!(resolve_label(&name, LabelGuard::None).is_err());
             for record in &records {
                 assert_eq!(

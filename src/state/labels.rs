@@ -413,6 +413,30 @@ pub(super) fn candidates(label: &str) -> Result<Candidates> {
     })
 }
 
+/// Terminal launch exclusion is one namespace, not every native provider's
+/// binding under that label. Provider launch reconciliation must be able to
+/// find its own pending binding. The same complete index/scan still proves the
+/// candidate set; only exact root-session paths establish a terminal holder.
+pub(super) fn terminal_taken(label: &str) -> Result<bool> {
+    match std::fs::symlink_metadata(storage::label_record_path(label)) {
+        Ok(_) => return Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+        Err(error) => return Err(error.to_string()),
+    }
+    let ids = match listed(label) { Some(ids) => ids, None => scan(label)? };
+    for id in ids {
+        let path = storage::id_record_path(&id).ok_or("Invalid terminal session ID")?;
+        match std::fs::symlink_metadata(path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.to_string()),
+            Ok(_) => {},
+        }
+        let record = storage::read_id(&id)?;
+        if holds(&record,&id,label) { return Ok(true); }
+    }
+    Ok(false)
+}
+
 /// The ID layout end to end (zerus-ucck P3a). Sessions in the ID layout are
 /// written by hand here, as P3e will write them; P3a reads, writes, renames,
 /// archives and forgets them in place and never makes one.

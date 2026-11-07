@@ -212,13 +212,11 @@ pub(super) fn label_key(name: &str) -> String {
     format!("{:x}", Sha256::digest(name.as_bytes()))
 }
 
-/// Whether a live or saved session holds `name`, at its label's path or in
-/// the ID layout. A candidate set that cannot be proven complete counts as
-/// taken, so a uniqueness check fails closed and never makes a second holder.
+/// Whether a live or saved terminal session holds `name`, at its label path
+/// or in the root ID layout. Native providers use this to exclude terminals,
+/// not their own pending bindings. Unknown completeness still counts as taken.
 pub(super) fn label_taken(name: &str) -> bool {
-    labels::candidates(name).map_or(true, |candidates| {
-        candidates.first || !candidates.by_id.is_empty()
-    })
+    labels::terminal_taken(name).unwrap_or(true)
 }
 
 /// The fixed path of the session the command selected in the ID layout under

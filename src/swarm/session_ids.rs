@@ -269,22 +269,47 @@ pub(super) fn write(
 /// for each twin whose name operation is still the selected membership of
 /// its label, with the same project.
 pub(super) fn readable(catalog: &Catalog, twins: &Twins) -> Vec<(String, String, String)> {
-    if twins.entries.is_empty() {
+    let identities = catalog.identities().unwrap_or_default();
+    current_twins(catalog, twins)
+        .into_iter()
+        .filter_map(|twin| {
+            Some((
+                identities
+                    .get(&twin.machine)
+                    .unwrap_or(&twin.machine)
+                    .clone(),
+                twin.session_id.clone(),
+                twin.project.clone()?,
+            ))
+        })
+        .collect()
+}
+
+/// Includes a valid explicit unassignment; migration must preserve null as
+/// primary data too. The derived format and its existing clock rule stay the
+/// same. This does not select one raw concurrent name head for the new graph.
+pub(super) fn current_twins<'a>(catalog: &Catalog, twins: &'a Twins) -> Vec<&'a Twin> {
+    if twins.swarm_id != catalog.swarm_id {
         return Vec::new();
     }
+    let Ok(identities) = catalog.identities() else {
+        return Vec::new();
+    };
     let named = selected_names(catalog);
     twins
         .entries
         .values()
         .filter_map(|twin| {
-            let machine = catalog.machine(&twin.machine);
+            let machine = identities
+                .get(&twin.machine)
+                .unwrap_or(&twin.machine)
+                .clone();
             let op = named.get(&Key::Session {
                 machine: machine.clone(),
                 session: twin.label.clone(),
             })?;
-            let project = twin.project.clone()?;
-            (op.id == twin.op && op.value.as_str() == Some(project.as_str()))
-                .then(|| (machine, twin.session_id.clone(), project))
+            (twin.valid() && op.id == twin.op && op.value.as_str() == twin.project.as_deref())
+                .then_some(twin)
         })
         .collect()
 }
@@ -309,9 +334,11 @@ mod tests {
     const LABEL: &str = "codex/work/one";
 
     fn store_as(node_id: String) -> Store {
+        let catalog=Catalog::default();
+        let primary=super::super::session_memberships::Memberships::empty(&catalog);
         Store {
             node_id: node_id.clone(),
-            catalog: Catalog::default(),
+            catalog,
             imported: false,
             bindings: BTreeMap::from([(
                 "local".into(),
@@ -322,6 +349,7 @@ mod tests {
             )]),
             peers: BTreeMap::new(),
             twins: Twins::default(),
+            id_memberships: Some(primary),
         }
     }
 
@@ -354,7 +382,11 @@ mod tests {
 
     /// The snapshot's members by ID, per project.
     fn by_id(store: &Store) -> BTreeMap<String, Vec<String>> {
-        let snapshot = store.snapshot(&config());
+        // These pre-primary controls pin the DERIVED twin semantics. Primary
+        // precedence, conflicts and explicit null are tested separately.
+        let mut legacy = store.clone();
+        legacy.id_memberships = Some(super::super::session_memberships::Memberships::empty(&store.catalog));
+        let snapshot = legacy.snapshot(&config());
         snapshot["organization"]["projects"]
             .as_array()
             .unwrap()

@@ -2426,7 +2426,7 @@ assignment, so another desktop can launch the session into its chosen project
 without racing an automatic Inbox assignment. Launching or explicitly moving a
 session publishes its project choice, including a deliberate move to Inbox.
 Update the desktops that observe sessions to receive this behavior; existing
-catalog assignments and unresolved conflicts remain available for review.
+catalog assignments and unresolved conflicts remain available for review. When ID grouping is available, it uses a separate bounded causal membership record for each computer and session ID. Explicit unassignment and conflicting project choices are records, not permission to fall back to a shared label. Distinct concurrent project choices stay reviewable; a later explicit choice consumes the observed heads. Only peers advertising `session_id_memberships_v1` exchange these records. Older builds preserve the separate file and keep their existing name/twin protocol, but cannot change ID grouping.
 
 Folder entries contain a machine, path and optional label. Browse works for local
 and remote folders, including ordinary non-Git directories. The desktop folder

@@ -9,6 +9,7 @@ mod infer_project;
 pub(crate) use infer_project::{directory_project, infer_new_session, inherit_fork_project};
 mod session_project;
 mod session_ids;
+mod session_memberships;
 pub(crate) mod session_labels;
 #[cfg(unix)]
 pub(crate) use session_project::validate_payload as validate_session_project;

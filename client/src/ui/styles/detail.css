@@ -218,7 +218,12 @@
   :root[data-appearance="light"] .vm-time { background: color-mix(in srgb, var(--z-color-entity-ink-base) 52%, transparent); }
   .vm-text { margin-top: 6px; white-space: pre-wrap; line-height: 1.5; color: var(--z-color-text); animation: fadeIn var(--z-motion-base) both; }
   .vm-error { margin-top: 6px; color: var(--z-color-warn); }
-  .subagent-bar { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-radius: var(--z-radius-lg); background: var(--z-color-tile); font-size: var(--fs-sm); }
+  /* A subagent's history keeps its way back on top while scrolling, floating like the goal pill
+     (owner 2026-11-07); the main goal pill hides meanwhile (SessionDetail). */
+  .subagent-bar { position: sticky; top: 8px; z-index: 2; display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 4px 10px;
+    border-radius: 10px; border: 1px solid var(--z-color-border); background: var(--z-color-raised); font-size: var(--fs-sm);
+    box-shadow: 0 6px 18px -8px rgba(0, 0, 0, .45); }
+  :root[data-appearance="light"] .subagent-bar { box-shadow: 0 6px 18px -10px rgba(20, 30, 40, .25); }
   .queued { padding: 8px 12px; border-radius: var(--z-radius-lg); border: 1px dashed var(--z-color-border); font-size: var(--fs-sm); display: grid; gap: 4px; }
 
   .question-card { border: 1px solid color-mix(in srgb, var(--z-color-accent-muted) 60%, transparent); border-radius: var(--z-radius-xl); padding: 12px 14px; background: color-mix(in srgb, var(--z-color-accent-bg) 60%, var(--z-color-surface)); display: flex; flex-direction: column; gap: 10px; animation: rise var(--z-motion-slow) var(--ease) both; }

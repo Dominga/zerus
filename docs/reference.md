@@ -4552,6 +4552,19 @@ native configuration. Choices saved before this default existed as provider
 settings were stored as no choice, so they now read as the default. Zerus's
 automatic tool approvals are a separate opt-in and stay off.
 
+OpenCode's Accounts permission line is a read-only account configuration summary.
+It reads `opencode.json` then `opencode.jsonc` in the native account's configuration
+directory (`OPENCODE_CONFIG_DIR`, otherwise `XDG_CONFIG_HOME/opencode` or
+`~/.config/opencode`), an absolute `OPENCODE_CONFIG` file, then the platform's
+system configuration directory. Reads are limited to 1 MiB per file and 4 MiB in
+total. JSONC comments/trailing commas and both current `permissions` arrays and
+legacy `permission` rules are recognized. Without rules, the line shows
+**Allow tools**, OpenCode's [native default](https://opencode.ai/docs/permissions/#defaults).
+Ordered exceptions show **Custom rules**. Unreadable, malformed, oversized,
+unexpanded agent/policy configuration and deployed macOS managed preferences stay
+**Unverified**. Project, agent and session rules can differ. This never writes
+OpenCode configuration or changes a launch or running session.
+
 The Zerus permission mode (**Permissions: … Change…**) is likewise shared by every
 computer with the account by default, with the same per-computer results and
 **Use everywhere** mark. **Keep per computer…** switches the account to

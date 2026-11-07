@@ -2026,13 +2026,24 @@ mod tests {
     fn a_keep_warm_ping_turn_reads_as_ready_not_work() {
         let warm = json!({"enabled": true, "until": null, "revision": 2, "state": "warming",
             "next_at": null, "reason": "", "turn_active": true});
-        let ping = row(&json!({"tracked": true, "state": "running", "process_state": "running",
+        let ping = row(
+            &json!({"tracked": true, "state": "running", "process_state": "running",
             "phase": "working", "activity": "busy", "conversation_id": "c", "run_id": "r",
-            "reply_id": "7:1.0", "keep_warm": warm}));
-        assert_eq!((ping.status.as_str(), ping.caption.as_str()), ("ready", "Warming cache"));
-        assert!(ping.unread_candidate, "the previous reply stays the candidate");
+            "reply_id": "7:1.0", "keep_warm": warm}),
+        );
+        assert_eq!(
+            (ping.status.as_str(), ping.caption.as_str()),
+            ("ready", "Warming cache")
+        );
+        assert!(
+            ping.unread_candidate,
+            "the previous reply stays the candidate"
+        );
         assert_eq!(ping.keep_warm.as_ref().unwrap()["revision"], 2);
-        assert_eq!(serde_json::to_value(&ping).unwrap()["keep_warm"]["turn_active"], true);
+        assert_eq!(
+            serde_json::to_value(&ping).unwrap()["keep_warm"]["turn_active"],
+            true
+        );
         // The person's own turn, or a ping that also needs a decision, is not quiet.
         let mut working = json!({"tracked": true, "phase": "working", "activity": "busy",
             "keep_warm": {"enabled": true, "turn_active": false}});
@@ -2040,7 +2051,10 @@ mod tests {
         working["keep_warm"]["turn_active"] = json!(true);
         working["phase"] = json!("approval");
         assert_eq!(row(&working).status, "attention");
-        assert_eq!(row(&json!({"tracked": true, "activity": "idle"})).keep_warm, None);
+        assert_eq!(
+            row(&json!({"tracked": true, "activity": "idle"})).keep_warm,
+            None
+        );
     }
 
     #[test]

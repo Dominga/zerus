@@ -36,7 +36,6 @@ bindSelection(() => ({ key: selectedKey(), subagent: subagentOpen() }));
 bindForkSession({
   busy: (row) => sessionModels.changing() || (composer.view()?.key === draftKey({ computer: row.computer, key: "", name: row.name, archive_id: null, session_id: row.archiveId ? null : row.sessionId ?? null })
     && (!!composer.view()?.sending || !!composer.view()?.waiting)),
-  terminal: () => { terminal.opened(); setDetailTab("terminal"); },
 });
 
 /** The selected child's own bounded, read-only inspection page. */

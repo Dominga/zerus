@@ -15,7 +15,7 @@ vi.mock("../../i18n", () => ({ tr: (s: string, ...args: unknown[]) => s.replace(
 vi.mock("../lib/icons", () => ({ Icon: () => null }));
 vi.mock("../components/MachineLabel", () => ({ MachineLabel: () => null }));
 import WorktreeCleanup from "./WorktreeCleanup";
-import { CleanupChip } from "./CleanupChip";
+import { CleanupChip, CleanupReviewButton } from "./CleanupChip";
 import { applyCleanup, cleanup, cleanupDialog, closeCleanup, emptyCleanup, openCleanup, type CleanupRow, groupCleanupRows } from "../../store/terminationCleanup";
 const row = (over: Partial<CleanupRow> = {}): CleanupRow => ({ id: "original", label: "worktree-fixture", path: "/srv/example/work", machine: "this computer", computer: "", branch: "kept-branch", size: "Not measured", status: "kept", reason: "Some programs are still running.", details: "", can_check: false, can_force: true, ready: false, ...over });
 const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
@@ -33,11 +33,11 @@ beforeEach(() => {
 afterEach(() => { dispose?.(); dispose = undefined; closeCleanup(); document.body.replaceChildren(); vi.restoreAllMocks(); });
 function mount() {
   const host = document.createElement("div"); document.body.append(host);
-  dispose = render(() => [createComponent(CleanupChip, {}), Show({ get when() { return cleanupDialog(); }, children: (_current: Accessor<NonNullable<ReturnType<typeof cleanupDialog>>>) => createComponent(WorktreeCleanup, {}) })], host);
+  dispose = render(() => [createComponent(CleanupReviewButton, {}), createComponent(CleanupChip, {}), Show({ get when() { return cleanupDialog(); }, children: (_current: Accessor<NonNullable<ReturnType<typeof cleanupDialog>>>) => createComponent(WorktreeCleanup, {}) })], host);
   return host;
 }
 const button = (host: HTMLElement, text: string) => [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === text)!;
-const review = (host: HTMLElement) => host.querySelector<HTMLButtonElement>('button[aria-label="Review working folders"]')!;
+const review = (host: HTMLElement) => host.querySelector<HTMLButtonElement>("button.cleanup-review")!;
 
 it("keeps the permanent review button and opens a truthful empty state", () => {
   const host = mount(); expect(review(host)).toBeTruthy(); review(host).click();

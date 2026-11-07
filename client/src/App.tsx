@@ -1,6 +1,6 @@
 import { showQtUpgradeNotice } from "./store/qtUpgrade";
 import { DesktopServiceStatus } from "./ui/components/DesktopServiceStatus";
-import { desktopService, serviceStatus, servicePaused, firstChoicePending } from "./store/desktopService";
+import { MachinesStatus } from "./ui/components/MachinesStatus";
 import { BackgroundTasksChip } from "./ui/screens/BackgroundTasks";
 import { CleanupChip } from "./ui/screens/CleanupChip";
 import { worktreeReviewDialog } from "./store/worktreeCleanup";
@@ -10,7 +10,7 @@ import { taskExecutorReview } from "./store/taskExecutors";
 import { taskStartReview } from "./store/taskStart";
 import { taskSettings } from "./store/taskSettings";
 import { taskCancellation } from "./store/taskCancel";
-import { For, Match, Show, Suspense, Switch, createEffect, createMemo, createSignal, lazy, onCleanup, onMount } from "solid-js";
+import { Match, Show, Suspense, Switch, createEffect, createSignal, lazy, onCleanup, onMount } from "solid-js";
 import { Rail } from "./ui/components/Rail";
 import { MenuLayer, Toasts } from "./ui/components/Overlays";
 import { ActionDialogs } from "./ui/sessions/ActionDialogs";
@@ -23,7 +23,6 @@ import { selectedCreation } from "./store/creations";
 import { OverviewScreen } from "./ui/screens/Overview";
 import { ProjectsScreen } from "./ui/screens/Projects";
 import { applySkin, skin } from "./skin/runtime";
-import { catalog } from "./store/catalog";
 import { contentScale, page, selectedKey, setContentScale, setPage, toast } from "./store/ui";
 import { num, setSetting } from "./store/settings";
 import { installShortcutRouter, onCommand } from "./store/shortcuts";
@@ -32,7 +31,7 @@ import { rememberRecentSession } from "./ui/sessions/goTo";
 import { updateCommands, updates } from "./store/updates";
 import { openUpdates } from "./store/desk";
 import { SessionUsageStrip } from "./ui/components/SessionUsageStrip";
-import { fleetRefresh, type BridgeMode } from "./bridge";
+import type { BridgeMode } from "./bridge";
 import { installUiLanguage, tr, uiLanguage } from "./i18n";
 
 // The client shell: the rail, the pages and the status bar.
@@ -58,14 +57,6 @@ const GoToDialog = lazy(() => import("./ui/sessions/GoToDialog").then((m) => ({ 
 const ShortcutHelpDialog = lazy(() => import("./ui/sessions/ShortcutHelpDialog").then((m) => ({ default: m.ShortcutHelpDialog })));
 const PerfHost = lazy(() => import("./ui/PerfHost").then((m) => ({ default: m.PerfHost })));
 
-const STATE_TEXT: Record<string, string> = {
-  probing: "checking",
-  unsupported: "no event stream (update hgs)",
-  polled: "polled every 60 s (update hgs for live updates)",
-  reconnecting: "reconnecting",
-  ended: "stream ended",
-};
-
 function LoginItemButton() {
   return (
     <Show when={updates().login_item_deprioritized}>
@@ -75,27 +66,9 @@ function LoginItemButton() {
 }
 
 function StatusBar(props: { mode: () => BridgeMode | "starting" }) {
-  const computers = createMemo(() => Object.values(catalog.computers));
-  const connected = (status: string) => status === "live" || status === "polled";
-  const live = createMemo(() => computers().filter((c) => connected(c.status)).length);
-  const problems = createMemo(() => computers().filter((c) => !connected(c.status)));
-  const label = (id: string) => id || tr("this computer");
-  const connectionError = createMemo(() => problems().some((c) => c.status !== "probing"));
-  const summary = createMemo(() => tr("%1 of %2 machines connected", live(), computers().length) + (problems().length ? tr(", %1 offline", problems().map((c) => label(c.id)).join(", ")) : ""));
   return (
     <footer class="statusbar">
-      <Show when={computers().length} fallback={<Show when={!servicePaused(desktopService.state()) && !firstChoicePending(desktopService.state())}><span>{props.mode() === "starting" ? tr("Starting…") : tr("Connecting…")}</span></Show>}>
-        {connectionError() ? (
-          <>
-            <span class="danger">
-              <For each={problems()}>{(c, i) => <>{i() ? "; " : ""}{label(c.id)}: {tr(STATE_TEXT[c.status] ?? c.status)}{c.status === "reconnecting" && c.attempt ? ` (attempt ${c.attempt})` : ""}</>}</For>
-            </span>
-            <Show when={!serviceStatus(desktopService.state())?.retry}><button type="button" class="btn small ghost" onClick={() => { void fleetRefresh().catch((error) => toast("Connection", String(error), "error", true)); }}>{tr("Retry now")}</button></Show>
-          </>
-        ) : (
-          <span class="conn-ok"><span class="state-dot ready" hidden={problems().length > 0} />{summary()}</span>
-        )}
-      </Show>
+      <MachinesStatus mode={props.mode} />
       <DesktopServiceStatus />
       <Show when={props.mode() === "replay"}>
         <span class="chip-accent" title={tr("Synthetic data from the replay fixture; no hgs is running")}>{tr("Replay")}</span>

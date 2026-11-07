@@ -43,6 +43,10 @@
     scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: var(--z-color-scrollbar) transparent; }
   .sp-foot { display: flex; align-items: center; gap: 2px; height: 30px; margin: 0 -4px; padding: 0 6px 0 12px; border-top: 1px solid var(--z-color-divider); font-size: 11px; color: var(--z-color-muted); }
   .sp-foot .icon-btn.small { width: 26px; height: 26px; }
+  .sp-foot .icon-btn.cleanup-review { width: auto; min-width: 26px; gap: 3px; padding: 0 4px; color: var(--z-color-muted); }
+  .sp-foot .cleanup-review.attention { color: var(--z-color-accent); }
+  .sp-foot .cleanup-review.warn { color: var(--z-color-warn); }
+  .worktree-review-count { font-size: 10px; font-weight: 600; }
   .sp-empty { flex: 1; }
   .sp-paused { align-content: center; }
 

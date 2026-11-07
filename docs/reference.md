@@ -6352,7 +6352,10 @@ notification preferences, waits, launches, renames, name routes, the archive
 folder and the DeepSeek and OpenCode bindings, and holds a read-only connection
 to the Activity journal. A changed binding, or new journal rows of its session,
 derives only that session's row again, through the steps and under the lock of
-the listing. Any other change lists all rows again. Both wait 150 ms after a
+the listing; every row's parent state is then read again from all listed rows,
+so a derived child never reads its listed parent as missing and a parent's
+change reaches its children at once (zerus-sa9qn.16). Any other change lists
+all rows again. Both wait 150 ms after a
 change and start at most every 500 ms and at most once per four durations of
 the previous one. Every 5 s the stream probes what no file shows: tmux sessions
 that start, end, are renamed, attached or detached, exited agent processes,

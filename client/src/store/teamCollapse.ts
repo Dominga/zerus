@@ -2,7 +2,7 @@ import { createMemo } from "solid-js";
 import { createStore } from "solid-js/store";
 import { catalog } from "./catalog";
 import { machineCards } from "./machines";
-import { setSetting, settings } from "./settings";
+import { setSetting, settings, settingsReady } from "./settings";
 
 // A parent's show/hide-children choice survives a relaunch (zerus-sa9qn.15,
 // owner 2026-11-07). The device keeps the collapsed parents by their
@@ -55,13 +55,36 @@ export function teamCollapsed(rowKey: string): boolean {
   return !!id && stored().has(id);
 }
 
+// Choices not yet saved, newest last. Saving waits for the stored values: a
+// choice made while they load joins the saved list instead of replacing it
+// (zerus-xmjgp), as row density does.
+const pending = new Map<string, boolean>();
+
+/** The saved list with the pending choices applied, oldest first (pure). */
+export function mergeTeams(saved: readonly string[], choices: Iterable<[string, boolean]>): string[] {
+  let list = [...saved];
+  for (const [id, collapsed] of choices) list = withTeam(list, id, collapsed);
+  return list;
+}
+
+function save() {
+  void settingsReady.then(() => {
+    if (!pending.size) return;
+    const list = parseTeams(settings[COLLAPSED_TEAMS]);
+    const next = mergeTeams(list, pending);
+    pending.clear();
+    if (next.length === list.length && next.every((known, at) => known === list[at])) return;
+    void setSetting(COLLAPSED_TEAMS, JSON.stringify(next)).catch(() => {});
+  }).catch(() => {});
+}
+
 /** Shows or hides a parent row's children, and remembers it across relaunches. */
 export function setTeamCollapsed(rowKey: string, collapsed: boolean) {
   setOverride(rowKey, collapsed);
   const id = durable(rowKey);
   if (!id) return;
-  const list = parseTeams(settings[COLLAPSED_TEAMS]);
-  const next = withTeam(list, id, collapsed);
-  if (next.length === list.length && next.every((known, at) => known === list[at])) return;
-  void setSetting(COLLAPSED_TEAMS, JSON.stringify(next)).catch(() => {});
+  pending.delete(id);
+  pending.set(id, collapsed);
+  if (pending.size > MAX_COLLAPSED_TEAMS) pending.delete(pending.keys().next().value as string);
+  save();
 }

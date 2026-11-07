@@ -197,6 +197,7 @@ pub(super) fn start_scoped(
     } else {
         read(name)?
     };
+    terminating::check_mutation(&record)?;
     if let Some(scope)=scope {scope.check(&record)?;}
     if expected_run.is_some_and(|id| id != string(&record, "run_id"))
         || expected_conversation.is_some_and(|id| id != string(&record, "conversation_id"))

@@ -91,6 +91,7 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
     }
     if let Some(id) = archive_id {
         let mut record = archive::read_archive(old, id)?;
+        terminating::check_mutation(&record)?;
         if let Some(scope)=scope {scope.check(&record)?;}
         if old != new && !dry {
             anchor(&mut record);
@@ -117,6 +118,7 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
             return Err(format!("{old}: session not found"));
         }
         if let Some(record) = &record {
+            terminating::check_mutation(record)?;
             if live_panes.is_some() && !matches(record, live_panes) {
                 return Err(format!("{old}: live pane does not match its saved binding"));
             }

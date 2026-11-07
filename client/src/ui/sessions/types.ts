@@ -54,7 +54,11 @@ export interface Session {
   worktree?: string;
   /** Native reported false: this folder has no worktree-removal offer. */
   gitWorktree?: boolean;
-  git?: { ahead: number; behind: number; changed: number; conflicts?: number; state: "synced" | "diff" | "push" | "pull" | "unknown" };
+  git?: { ahead: number; behind: number; changed: number; conflicts?: number; state: "synced" | "diff" | "push" | "pull" | "unknown";
+    streamed?: boolean; localFresh?: boolean; remoteVerified?: boolean; receivedAt?: number; remoteAge?: number; countsKnown?: boolean; changedKnown?: boolean; aheadKnown?: boolean; behindKnown?: boolean;
+    root?: string; upstream?: string; detached?: boolean; unborn?: boolean };
+  gitMetadataState?: string;
+  gitDetached?: boolean;
   status: Status;
   /** The Qt caption for the status (SessionPresentation). */
   caption: string;

@@ -1,4 +1,5 @@
-import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
+import { Dropdown } from "../lib/Dropdown";
+import { Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import { Icon } from "../lib/icons";
 import * as bridge from "../../bridge";
 import { flag, setSetting } from "../../store/settings";
@@ -110,11 +111,8 @@ export function VoicePreview(props: { voice: SessionVoice }) {
       <div class="cmp-voice-preview">
         <span class="muted">{shown()?.preview}</span>
         <button type="button" class="btn small" disabled={!shown()?.play_enabled || (shown()?.state !== "preview" && shown()?.state !== "uncertain")} onClick={() => { void play(); }}>{playing() ? trc("media playback", "Pause") : trc("media playback", "Play")}</button>
-        <select class="field" aria-label={tr("Voice provider")} title={shown()?.provider_tooltip} value={shown()?.provider ?? -1} disabled={!shown()?.provider_enabled}
-          onChange={(event) => { void voice.input({ kind: "choose_provider", index: Number(event.currentTarget.value) }); }}>
-          <Show when={shown()?.provider == null}><option value={-1}>{shown()?.provider_placeholder}</option></Show>
-          <For each={shown()?.providers ?? []}>{(provider, i) => <option value={i()}>{provider.label}</option>}</For>
-        </select>
+        <Dropdown class="field" aria-label={tr("Voice provider")} title={shown()?.provider_tooltip} value={shown()?.provider ?? -1} disabled={!shown()?.provider_enabled}
+          onChange={(value) => { void voice.input({ kind: "choose_provider", index: Number(value) }); }} options={[...(shown()?.provider == null ? [{ value: -1, label: shown()?.provider_placeholder }] : []), ...((shown()?.providers ?? []) ?? []).map((provider, i) => ({ value: i, label: provider.label }))]} />
         <button type="button" class="btn small" title={tr("Refresh available voice providers without recording again")} disabled={!shown()?.refresh_enabled} onClick={() => { void voice.input({ kind: "refresh" }); }}>{shown()?.refresh_label}</button>
         <button type="button" class="btn small" disabled={!shown()?.discard_enabled} onClick={() => { void voice.input({ kind: "discard" }); }}>{shown()?.discard_label}</button>
         <button type="button" class="btn small primary" disabled={!shown()?.send_enabled} onClick={() => { void voice.input({ kind: "send" }); }}>{shown()?.send_label}</button>

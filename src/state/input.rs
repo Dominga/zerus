@@ -276,6 +276,7 @@ fn checked_input(
     // share the label.
     expect(name, run_id, conversation_id)?;
     let record = read(name)?;
+    terminating::check_mutation(&record)?;
     if string(&record, "run_id") != run_id || string(&record, "conversation_id") != conversation_id
     {
         return Err("session identity changed; refresh before sending".into());
@@ -706,6 +707,7 @@ fn checked_send_terminal(record: &Value) -> Result<()> {
 }
 
 fn terminal_check(record: &Value, empty: bool, sending: bool) -> Result<()> {
+    terminating::check_mutation(record)?;
     let pane = string(record, "pane");
     if !pane
         .strip_prefix('%')

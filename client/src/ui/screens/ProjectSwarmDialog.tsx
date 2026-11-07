@@ -1,3 +1,4 @@
+import { Dropdown } from "../lib/Dropdown";
 import { TextInput } from "../lib/TextField";
 import { For, Match, Show, Suspense, Switch, createEffect, createMemo, createSignal, lazy, onCleanup, onMount } from "solid-js";
 import { listen } from "@tauri-apps/api/event";
@@ -71,7 +72,7 @@ export default function ProjectSwarmDialog(props: { projects: Project[]; connect
       const stop = inTauri() ? await listen("project-swarm-changed", state.changed) : () => {};
       if (gone) { stop(); return; }
       off = stop; await state.open();
-      if (!gone) dialog.querySelector<HTMLElement>(tab() === "computers" ? "input[type=search]" : "select")?.focus();
+      if (!gone) dialog.querySelector<HTMLElement>(tab() === "computers" ? "input[type=search]" : '[role="combobox"]')?.focus();
     })();
   });
   onCleanup(() => { gone = true; off?.(); state.dispose(); dialog.close(); queueMicrotask(() => { if (props.origin.isConnected) props.origin.focus(); }); });
@@ -99,12 +100,12 @@ export default function ProjectSwarmDialog(props: { projects: Project[]; connect
         </Show>
         <Show when={tab() === "connect"}>
           <div id="swarm-connect" class="sw-page" role="tabpanel" aria-labelledby="swarm-connect-tab">
-            <div class="row"><select class="field grow" aria-label={tr("Computer to connect")} value={alias()} disabled={busy()} onChange={(e) => chooseAlias(e.currentTarget.value)}><For each={view()?.aliases ?? []}>{(a) => <option value={a}>{a}</option>}</For></select><button class="btn" disabled={busy() || !view()?.can_preview || !alias()} onClick={() => void runPreview()}>{tr("Preview connection")}</button></div>
+            <div class="row"><Dropdown class="field grow" aria-label={tr("Computer to connect")} value={alias()} disabled={busy()} onChange={(value) => chooseAlias(value)} options={[...((view()?.aliases ?? []) ?? []).map((a) => ({ value: a, label: a }))]} /><button class="btn" disabled={busy() || !view()?.can_preview || !alias()} onClick={() => void runPreview()}>{tr("Preview connection")}</button></div>
             <div class="sw-preview grow"><Switch>
               <Match when={!busy() && !view()?.aliases.length}><p class="sw-msg">{tr("Add a computer in Manage connections first.")}</p></Match>
               <Match when={loading()}><div class="sw-msg"><p>{tr("Reading the other project catalog…")}</p><div class="su-progress su-indet" role="progressbar" aria-label={tr("Reading the other project catalog")}><i /></div></div></Match>
               <Match when={preview()?.initialized && preview()?.same_swarm}><p class="sw-msg su-pre">{tr("%1 already shares this project catalog.\nConnect directly to synchronize through this computer.", alias())}</p></Match>
-              <Match when={differs()}><p class="muted">{tr("Choose which projects are the same. Projects stay separate unless you match them below.")}</p><div class="su-tablewrap"><table class="su-table sw-map"><thead><tr><th>{tr("Project on this computer")}</th><th>{tr("Project in the other catalog")}</th></tr></thead><tbody><For each={(view()?.projects ?? []).map((p) => p.id)}>{(id) => <tr><td><ProjectLabel project={label(id)} small /></td><td><select class="field" aria-label={`Match ${localById().get(id)?.name ?? id}`} disabled={busy()} value={mapping().get(id) ?? ""} onChange={(e) => setMapping((m) => new Map(m).set(id, e.currentTarget.value))}><option value="" selected={!mapping().get(id)}>{tr("Keep as a separate project")}</option><For each={preview()?.projects ?? []}>{(p) => <option value={p.id} selected={mapping().get(id) === p.id}>{p.name} ({p.id.slice(0, 8)})</option>}</For></select></td></tr>}</For></tbody></table></div></Match>
+              <Match when={differs()}><p class="muted">{tr("Choose which projects are the same. Projects stay separate unless you match them below.")}</p><div class="su-tablewrap"><table class="su-table sw-map"><thead><tr><th>{tr("Project on this computer")}</th><th>{tr("Project in the other catalog")}</th></tr></thead><tbody><For each={(view()?.projects ?? []).map((p) => p.id)}>{(id) => <tr><td><ProjectLabel project={label(id)} small /></td><td><Dropdown class="field" aria-label={`Match ${localById().get(id)?.name ?? id}`} disabled={busy()} value={mapping().get(id) ?? ""} onChange={(value) => setMapping((m) => new Map(m).set(id, value))} options={[{ value: "", label: tr("Keep as a separate project") }, ...((preview()?.projects ?? []) ?? []).map((p) => ({ value: p.id, label: `${p.name} (${p.id.slice(0, 8)})` }))]} /></td></tr>}</For></tbody></table></div></Match>
               <Match when={view()?.status === `Connected to ${alias()}.`}><p class="sw-msg">{tr("Connected to %1.", alias())}</p></Match>
               <Match when={true}><p class="sw-msg">{tr("Choose a computer and preview its project catalog before connecting.")}</p></Match>
             </Switch></div>

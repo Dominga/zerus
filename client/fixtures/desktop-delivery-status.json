@@ -3,6 +3,15 @@
     "case": "passive",
     "status": {
       "abi": "desktop-v1",
+      "automatic_approval_categories": [
+        "read",
+        "edit",
+        "shell",
+        "web",
+        "mcp",
+        "agents",
+        "other"
+      ],
       "automatic_approvals": false,
       "catalog_reads": {
         "abi": "desktop-catalog-v1",
@@ -21,6 +30,15 @@
         "abi": "desktop-lifecycle-v1",
         "background": {
           "approvals": {
+            "categories": [
+              "read",
+              "edit",
+              "shell",
+              "web",
+              "mcp",
+              "agents",
+              "other"
+            ],
             "code": "not_started",
             "drained": false,
             "enabled": false,
@@ -56,6 +74,7 @@
     "case": "awaiting_handoff",
     "status": {
       "abi": "desktop-v1",
+      "automatic_approval_categories": null,
       "automatic_approvals": null,
       "catalog_reads": {
         "abi": "desktop-catalog-v1",
@@ -74,6 +93,7 @@
         "abi": "desktop-lifecycle-v1",
         "background": {
           "approvals": {
+            "categories": null,
             "code": "awaiting_handoff",
             "drained": false,
             "enabled": null,
@@ -109,6 +129,15 @@
     "case": "disabled_but_ready",
     "status": {
       "abi": "desktop-v1",
+      "automatic_approval_categories": [
+        "read",
+        "edit",
+        "shell",
+        "web",
+        "mcp",
+        "agents",
+        "other"
+      ],
       "automatic_approvals": false,
       "catalog_reads": {
         "abi": "desktop-catalog-v1",
@@ -127,6 +156,15 @@
         "abi": "desktop-lifecycle-v1",
         "background": {
           "approvals": {
+            "categories": [
+              "read",
+              "edit",
+              "shell",
+              "web",
+              "mcp",
+              "agents",
+              "other"
+            ],
             "code": "disabled",
             "drained": false,
             "enabled": false,
@@ -162,6 +200,15 @@
     "case": "enabled",
     "status": {
       "abi": "desktop-v1",
+      "automatic_approval_categories": [
+        "read",
+        "edit",
+        "shell",
+        "web",
+        "mcp",
+        "agents",
+        "other"
+      ],
       "automatic_approvals": true,
       "catalog_reads": {
         "abi": "desktop-catalog-v1",
@@ -180,6 +227,15 @@
         "abi": "desktop-lifecycle-v1",
         "background": {
           "approvals": {
+            "categories": [
+              "read",
+              "edit",
+              "shell",
+              "web",
+              "mcp",
+              "agents",
+              "other"
+            ],
             "code": "running",
             "drained": false,
             "enabled": true,
@@ -215,6 +271,15 @@
     "case": "approval_degraded",
     "status": {
       "abi": "desktop-v1",
+      "automatic_approval_categories": [
+        "read",
+        "edit",
+        "shell",
+        "web",
+        "mcp",
+        "agents",
+        "other"
+      ],
       "automatic_approvals": true,
       "catalog_reads": {
         "abi": "desktop-catalog-v1",
@@ -233,6 +298,15 @@
         "abi": "desktop-lifecycle-v1",
         "background": {
           "approvals": {
+            "categories": [
+              "read",
+              "edit",
+              "shell",
+              "web",
+              "mcp",
+              "agents",
+              "other"
+            ],
             "code": "unavailable",
             "drained": false,
             "enabled": true,
@@ -268,6 +342,15 @@
     "case": "disabled_while_degraded",
     "status": {
       "abi": "desktop-v1",
+      "automatic_approval_categories": [
+        "read",
+        "edit",
+        "shell",
+        "web",
+        "mcp",
+        "agents",
+        "other"
+      ],
       "automatic_approvals": false,
       "catalog_reads": {
         "abi": "desktop-catalog-v1",
@@ -286,6 +369,15 @@
         "abi": "desktop-lifecycle-v1",
         "background": {
           "approvals": {
+            "categories": [
+              "read",
+              "edit",
+              "shell",
+              "web",
+              "mcp",
+              "agents",
+              "other"
+            ],
             "code": "unavailable",
             "drained": false,
             "enabled": false,
@@ -321,6 +413,15 @@
     "case": "read_degraded",
     "status": {
       "abi": "desktop-v1",
+      "automatic_approval_categories": [
+        "read",
+        "edit",
+        "shell",
+        "web",
+        "mcp",
+        "agents",
+        "other"
+      ],
       "automatic_approvals": false,
       "catalog_reads": {
         "abi": "desktop-catalog-v1",
@@ -339,6 +440,15 @@
         "abi": "desktop-lifecycle-v1",
         "background": {
           "approvals": {
+            "categories": [
+              "read",
+              "edit",
+              "shell",
+              "web",
+              "mcp",
+              "agents",
+              "other"
+            ],
             "code": "disabled",
             "drained": false,
             "enabled": false,
@@ -374,6 +484,15 @@
     "case": "drained",
     "status": {
       "abi": "desktop-v1",
+      "automatic_approval_categories": [
+        "read",
+        "edit",
+        "shell",
+        "web",
+        "mcp",
+        "agents",
+        "other"
+      ],
       "automatic_approvals": false,
       "catalog_reads": {
         "abi": "desktop-catalog-v1",
@@ -392,6 +511,15 @@
         "abi": "desktop-lifecycle-v1",
         "background": {
           "approvals": {
+            "categories": [
+              "read",
+              "edit",
+              "shell",
+              "web",
+              "mcp",
+              "agents",
+              "other"
+            ],
             "code": "drained",
             "drained": true,
             "enabled": false,

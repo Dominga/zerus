@@ -377,7 +377,7 @@ export function contextOf(target: EventTarget | null, popup: boolean = popupOpen
   if (marked === "terminal" || marked === "composer") return marked;
   // xterm's hidden text area is Terminal, marked or not.
   if (el?.closest(".xterm")) return "terminal";
-  if (el && (el.matches("input, textarea, select") || el.isContentEditable)) return "text-field";
+  if (el && (el.matches('input, textarea, select, [role="combobox"]') || el.isContentEditable)) return "text-field";
   return "window";
 }
 
@@ -399,7 +399,7 @@ export function allowed(context: Context, first: Combo, bound: Sequence, selecti
 
 /** A drop-down list opens with Alt+Up, Alt+Down and F4 (Shortcuts.cpp comboPopupKey). */
 const listPopupKey = (target: EventTarget | null, c: Combo) =>
-  focused(target)?.tagName === "SELECT"
+  (focused(target)?.tagName === "SELECT" || focused(target)?.matches('[role="combobox"]'))
   && ((only(c, { alt: true }) && (c.key === "Up" || c.key === "Down")) || (only(c, {}) && c.key === "F4"));
 
 /** What a handler is limited to: the focus must be inside it (a message field). */

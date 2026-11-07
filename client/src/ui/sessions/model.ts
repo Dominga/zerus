@@ -6,7 +6,8 @@ import { catalog, computerFresh, hasDraftKey, orderedRows } from "../../store/ca
 import { machineCards } from "../../store/machines";
 import { archiveMachineChoices, archiveProjectChoices } from "./archive-filters";
 import { defaultProject, grouping, groups } from "../../store/organization";
-import { stateFilter, matchesFilter, listedByFilter, search,machineFilter, projectFilter, accountFilter, folderFilter, expandedChildren, compactRows, selected, selectedKey, subagentOpen, collapsedTeams } from "../../store/ui";
+import { stateFilter, matchesFilter, listedByFilter, search,machineFilter, projectFilter, accountFilter, folderFilter, expandedChildren, compactRows, selected, selectedKey, subagentOpen } from "../../store/ui";
+import { teamCollapsed } from "../../store/teamCollapse";
 import { compileScopes, scopeCounts } from "./scope-filters";
 import { withCreations } from "../../store/creations";
 import { countedAttention, isWorking, quietAttention } from "../../store/attention";
@@ -17,10 +18,10 @@ import type { Session } from "./types";
 
 // Flattened list model. Heights match tray/src/SessionCardDelegate.h
 // sizeHint at the compact density, the only one in the web client: group
-// header 40, card 94, native child 64, collapsed row 40. Fixed heights per row
+// header 40, card 94, native child 40 (a compact row), collapsed row 40. Fixed heights per row
 // type let the virtualizer place rows without measuring the DOM.
 
-export const ROW_HEIGHT = { header: 40, card: 94, child: 64, collapsedRow: 40, collapsedTeam: 62 } as const;
+export const ROW_HEIGHT = { header: 40, card: 94, child: 40, collapsedRow: 40, collapsedTeam: 62 } as const;
 
 /** In the strip every row keeps its height except compact rows, which show as tiles. */
 export function rowHeight(row: Row, strip = false): number {
@@ -105,7 +106,8 @@ export function parentIndex(rows: Iterable<Session>, machineOf: (computer: strin
     return old && (!p.session_id || !old.sessionId) ? old.key : undefined;
   };
 }
-const parentKeyOf = createMemo(() => parentIndex(orderedRows(), (computer) => machineCards[computer]?.machine_id));
+/** A listed row's parent key: set only when its parent row is listed too (a child session). */
+export const parentKeyOf = createMemo(() => parentIndex(orderedRows(), (computer) => machineCards[computer]?.machine_id));
 
 export const listRows = createMemo<Row[]>(() => {
   if (stateFilter() === "archived") return archiveRows();
@@ -121,7 +123,7 @@ export const listRows = createMemo<Row[]>(() => {
     selected: { key: selectedKey(), subagent: subagentOpen(), conversation: selected()?.conversationId },
     roster: (s: Session) => rosterFor(s, s.key === selectedKey() ? followedFor(s.key).value : undefined),
     childDraft: (s: Session, child: { id: string }) => hasDraftKey(`${s.computer}\n${s.name}\n${s.conversationId ?? ""}\n${child.id}`),
-    parentKey: parentKeyOf(), teamCollapsed: (k: string) => !!collapsedTeams[k],
+    parentKey: parentKeyOf(), teamCollapsed,
   };
   const out = groupRows(scope);
   return withCreations(out, scope);

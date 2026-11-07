@@ -76,6 +76,11 @@ impl WeakPump {
     }
 }
 
+pub(crate) struct GitScope {
+    pub source: Option<(String, u64, u64)>,
+    pub path: String,
+}
+
 impl Pump {
     pub fn approval_candidates(
         &self,
@@ -798,6 +803,13 @@ impl Pump {
             .collect()
     }
 
+    /// Only compact native Git routing facts, never a clone of child/details data.
+    pub(crate) fn git_scope(&self, computer: &str, key: &str) -> Option<GitScope> {
+        let inner = self.lock();
+        let row = inner.mirror.computers.get(computer)?.rows.get(key)?;
+        Some(GitScope { source: row.catalog_source.clone(), path: zerus_client_core::git::path(row)?.to_owned() })
+    }
+
     /// The last-known row of `(computer, catalog key)`.
     pub fn row(&self, computer: &str, key: &str) -> Option<ViewRow> {
         self.lock()
@@ -1195,7 +1207,8 @@ impl Mirror {
             Change::Organization { .. }
             | Change::Activity { .. }
             | Change::Processes { .. }
-            | Change::Tasks { .. } => {}
+            | Change::Tasks { .. }
+            | Change::Git { .. } => {}
         }
     }
 

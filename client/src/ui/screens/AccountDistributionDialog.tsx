@@ -1,3 +1,4 @@
+import { Dropdown } from "../lib/Dropdown";
 import { TextInput } from "../lib/TextField";
 import {For,Show,createEffect,createMemo,createSignal,on,onMount,onCleanup} from "solid-js";
 import {createVirtualizer} from "@tanstack/solid-virtual";
@@ -8,6 +9,7 @@ import {osOf} from "../../store/overview";
 import {accountDistribution,signInDistributedProfile,type DistributionPrompt} from "../../store/accountDistribution";
 import type {AccountDistributionValues,AccountDistributionState} from "../../bridge";
 import { tr } from "../../i18n";
+import { trText } from "../../text";
 const slug=(s:string)=>s.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,48)||"account";
 const RANK:Record<AccountDistributionState,number>={failed:0,unknown:1,"needs-signin":2,working:3,pending:4,added:5};
 /** Approved AddToMachine.tsx layout, driven by a bounded native snapshot. */
@@ -46,7 +48,7 @@ export default function AccountDistributionDialog(props:{prompt:DistributionProm
     <p>{picked().length===1?tr("%1 will get a separate profile on %2. Other accounts and sessions there stay as they are; after sign-in, the provider identity decides which account a profile belongs to.",view.label,view.machines.find(m=>m.key===picked()[0])?.machine??""):tr("%1 will get a separate profile on %2 machines. Other accounts and sessions there stay as they are; after sign-in, the provider identity decides which account a profile belongs to.",view.label,picked().length)}</p>
     <Show when={method()==="apikey"} fallback={<div class="col atm-how" role="radiogroup" aria-label={tr("How to add")}>
      <Show when={savedCount()}><label class="check"><input type="checkbox" checked={useSaved()} onChange={e=>setUseSaved(e.currentTarget.checked)}/>{tr("Use the saved sign-in where a machine already has one (%1 of %2)", savedCount(), picked().length)}</label></Show>
-     <label class="check"><input type="radio" name="atm-how" checked={method()==="copy"} disabled={!view.sources.length} onChange={()=>setMethod("copy")}/>{tr("Copy the existing sign-in over SSH from")}<select class="field atm-src" value={source()} disabled={method()!=="copy"||!view.sources.length} onChange={e=>setSource(e.currentTarget.value)}><For each={view.sources}>{s=><option value={s.key}>{s.label}</option>}</For></select></label>
+     <label class="check"><input type="radio" name="atm-how" checked={method()==="copy"} disabled={!view.sources.length} onChange={()=>setMethod("copy")}/>{tr("Copy the existing sign-in over SSH from")}<Dropdown class="field atm-src" value={source()} disabled={method()!=="copy"||!view.sources.length} onChange={(value) =>setSource(value)} options={[...((view.sources) ?? []).map((s) => ({ value: s.key, label: s.label }))]} /></label>
      <label class="check"><input type="radio" name="atm-how" checked={method()==="signin"} onChange={()=>setMethod("signin")}/>{tr("Create the profile and sign in on each machine (a terminal opens there)")}</label>
     </div>}><div class="form-row"><label for="atm-key">{tr("DeepSeek API key")}</label><TextInput id="atm-key" class="field" type="password" autocomplete="off" maxLength={4096} value={apiKey()} onInput={e=>setApiKey(e.currentTarget.value)}/></div><p class="hint">{tr("The same key is saved on every selected machine.")}</p></Show>
     <div class="form-row"><label for="atm-name">{tr("Account name")}</label><TextInput id="atm-name" class="field" maxLength={160} value={name()} onInput={e=>setName(e.currentTarget.value)}/></div>
@@ -55,7 +57,7 @@ export default function AccountDistributionDialog(props:{prompt:DistributionProm
    </Show>
    <Show when={step()===3}>
     <p class="atm-summary"><Show when={finished()} fallback={<>{state.progress().length===1?tr("Adding %1 to 1 machine…",view.label):tr("Adding %1 to %2 machines…",view.label,state.progress().length)}</>}>{[tr("%1 added",count("added")),count("needs-signin")?tr("%1 need sign-in",count("needs-signin")):"",count("failed")?tr("%1 failed",count("failed")):"",count("unknown")?tr("%1 unknown",count("unknown")):""].filter(Boolean).join(", ")}.</Show></p>
-    <div class="atm-results"><For each={ordered()}>{p=><div class={`atm-result r-${p.state}`}><span class="atm-ricon" aria-hidden="true"><Show when={p.state==="working"} fallback={<Icon name={p.state==="added"?"check":p.state==="needs-signin"?"key-round":p.state==="failed"?"x":p.state==="unknown"?"circle-alert":"clock"} size={14}/>}><i class="atm-spin"/></Show></span><MachineLabel alias={p.machine}/><span class="atm-rtext">{p.text}</span><Show when={p.state==="failed"}><button class="btn small" disabled={state.busy()} onClick={()=>void state.retry(p.host,values())}>{tr("Retry")}</button></Show><Show when={p.state==="needs-signin"&&p.profile}><button class="btn small" disabled={state.busy()} onClick={e=>void signInDistributedProfile(p.profile!,e.currentTarget)}>{tr("Sign in…")}</button></Show></div>}</For></div>
+    <div class="atm-results"><For each={ordered()}>{p=><div class={`atm-result r-${p.state}`}><span class="atm-ricon" aria-hidden="true"><Show when={p.state==="working"} fallback={<Icon name={p.state==="added"?"check":p.state==="needs-signin"?"key-round":p.state==="failed"?"x":p.state==="unknown"?"circle-alert":"clock"} size={14}/>}><i class="atm-spin"/></Show></span><MachineLabel alias={p.machine}/><span class="atm-rtext">{p.text}<Show when={p.note}>{note=><> {trText(note())}</>}</Show></span><Show when={p.state==="failed"}><button class="btn small" disabled={state.busy()} onClick={()=>void state.retry(p.host,values())}>{tr("Retry")}</button></Show><Show when={p.state==="needs-signin"&&p.profile}><button class="btn small" disabled={state.busy()} onClick={e=>void signInDistributedProfile(p.profile!,e.currentTarget)}>{tr("Sign in…")}</button></Show></div>}</For></div>
     <Show when={count("unknown")}><p class="hint">{tr("An unknown result is never retried automatically: the copy may have finished. Open the machine in Accounts to check it.")}</p></Show>
    </Show>
   </div>

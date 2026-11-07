@@ -9,6 +9,7 @@ import { childRows } from "../ui/sessions/subagents";
 import { keepWarmOf } from "../ui/sessions/keep-warm";
 import { draftKey, nameDraftKey } from "./draftKeys";
 import { tr } from "../i18n";
+import { createGitProjection } from "./git";
 
 // The catalog: every live session row of every computer, keyed by
 // computer + "\n" + catalog key. A batch is one reactive transaction. An
@@ -120,6 +121,8 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     worktree: optional(v.worktree),
     gitWorktree: typeof v.git_worktree === "boolean" ? v.git_worktree : undefined,
     git: undefined,
+    gitMetadataState: optional(v.git_metadata_state),
+    gitDetached: v.git_detached === true,
     status,
     caption,
     phase: phase || undefined,
@@ -211,6 +214,11 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
   // per batch: whole-catalog aggregates track this instead of each field of
   // every row (zerus-5wmh.66.50).
   const [revision, setRevision] = createSignal(0);
+  const git = createGitProjection({
+    row: (id) => catalog.rows[id],
+    online: (computer) => catalog.computers[computer]?.status === "live",
+    patch: (id, value) => { if (catalog.rows[id]) setCatalog("rows", id, "git", value); },
+  });
   const changed = () => setRevision((n) => n + 1);
   // A marks change applies the overlay again to the rows it touched, in place.
   // The marks only read the rows, so they scan the plain objects (no proxy reads).
@@ -270,6 +278,7 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
   };
 
   const put = (id: string, next: Session, fresh: string[], delta = true) => {
+    next.git = git.project(next);
     next.draft = drafted(next);
     if (delta && !catalog.rows[id] && !next.archiveId && next.state !== "archived") {
       const identity = nameKey(next), previous = currentNames.get(identity);
@@ -393,6 +402,7 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
         for (const listener of replacedListeners) listener(from, to);
       }
       for (const next of upserted) inheritReplaced(next);
+      git.apply(b.git ?? []);
       if (b.computers.length || b.replaces.length || b.removes.length || b.upserts.length) changed();
     });
   }
@@ -438,11 +448,11 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
     return unwrap(catalog).computers;
   };
 
-  return { catalog, applyBatch, onReplaced, setDraftKeys, hasDraftKey: (key: string) => drafts.has(key), revision, plainRows, plainComputers };
+  return { catalog, applyBatch, onReplaced, setDraftKeys, hasDraftKey: (key: string) => drafts.has(key), revision, plainRows, plainComputers, gitInterests: git.interests };
 }
 
 /** The app's catalog. Tests build their own with `createCatalog`. */
-export const { catalog, applyBatch, onReplaced, setDraftKeys, hasDraftKey, plainRows, plainComputers } = createCatalog(appMarks, applyMachines);
+export const { catalog, applyBatch, onReplaced, setDraftKeys, hasDraftKey, plainRows, plainComputers, gitInterests } = createCatalog(appMarks, applyMachines);
 
 /** Rows in display order. */
 export const orderedRows = () => catalog.order.map((id) => catalog.rows[id]).filter(Boolean);

@@ -1280,6 +1280,10 @@ fn track(name: String, token: String, mut event: Value, output: &mut StartOutput
     if !matches(&record, panes_of(&panes, &record)) {
         return Ok(0);
     }
+    if !terminating::completion_hook(&record, kind) {
+        eprintln!("hgs is terminating this session; no new work or binding was admitted");
+        return Ok(2);
+    }
     if let Some(scoped) = external_agents::route(&mut record, &event) {
         if scoped["hgs_retired_external_hook"] == true { return Ok(0); }
         processes::observe(&mut record, &scoped);

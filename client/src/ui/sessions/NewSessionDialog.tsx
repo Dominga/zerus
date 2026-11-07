@@ -1,3 +1,4 @@
+import { Dropdown } from "../lib/Dropdown";
 import { TextInput } from "../lib/TextField";
 import { For, Match, Show, Switch, createEffect, createMemo, createSignal, on, onCleanup, type JSX } from "solid-js";
 import { trText } from "../../text";
@@ -465,6 +466,12 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
                 );
               }}</For>
             </ul>
+            {/* The effective permission mode of the account (owner, 2026-11-07, T-6hcfnu). */}
+            <Show when={s().accounts[s().account]?.profile?.permission_label.source ? s().accounts[s().account]?.profile : undefined}>{(p) => (
+              <div class="ns-perm dim" title={[trText(p().permission_hint), tr("Change it on the Accounts screen.")].filter(Boolean).join("\n")}>
+                {p().permission_default ? tr("Permissions: %1 (Zerus default)", trText(p().permission_label)) : tr("Permissions: %1", trText(p().permission_label))}
+              </div>
+            )}</Show>
             <div class="row ns-acc-status">
               <span class="grow ns-status">{s().accountStatus}</span>
               <button type="button" class="btn small" data-keys="button" aria-label={tr("Refresh accounts")} disabled={!s().refreshEnabled} onClick={() => act.refreshAccounts()}>
@@ -498,10 +505,8 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
         <Show when={s().effortVisible}>
           <div class="form-row">
             <label for="ns-effort">{tr("Effort")}</label>
-            <select id="ns-effort" class="field ns-effort" data-keys="select" aria-label={tr("Effort")} title={tr("Variants of the selected model. Default uses the model's own setting.")}
-              disabled={!fields()} value={s().effort} onChange={(e) => act.chooseEffort(e.currentTarget.value)}>
-              <For each={s().efforts}>{(effort) => <option value={effort.value} selected={effort.value === s().effort}>{effort.label}</option>}</For>
-            </select>
+            <Dropdown id="ns-effort" class="field ns-effort" data-keys="select" aria-label={tr("Effort")} title={tr("Variants of the selected model. Default uses the model's own setting.")}
+              disabled={!fields()} value={s().effort} onChange={(value) => act.chooseEffort(value)} options={[...((s().efforts) ?? []).map((effort) => ({ value: effort.value, label: effort.label }))]} />
           </div>
         </Show>
 

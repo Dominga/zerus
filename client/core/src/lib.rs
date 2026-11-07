@@ -30,6 +30,7 @@ pub mod external_file;
 pub mod file_download;
 pub mod fleet;
 pub mod fsx;
+pub mod git;
 pub mod image;
 pub mod input_queue;
 pub mod keep_warm;
@@ -119,6 +120,7 @@ pub use batch::ProcessesOut;
 pub use batch::TasksOut;
 pub use batch::{ActivityOut, Batch, Coalescer, ComputerOut, KeyOut, ReplaceOut, RowOut};
 pub use fleet::{Fleet, FollowError};
+pub use git::{GitState, GitStatus, GitUpdate};
 pub use machine::{LocalHost, MachineMeta};
 pub use organization::{OrganizationSnapshot, OrganizationState, OrganizationUpdate};
 pub use processes::{ProcessesState, ProcessesUpdate};
@@ -234,6 +236,11 @@ pub enum ActivityUpdate {
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Change {
+    Git {
+        computer: ComputerId,
+        key: String,
+        update: GitUpdate,
+    },
     Upsert {
         computer: ComputerId,
         key: String,
@@ -296,7 +303,8 @@ impl Change {
             | Self::Processes { computer, .. }
             | Self::Tasks { computer, .. }
             | Self::Machine { computer, .. }
-            | Self::Organization { computer, .. } => computer,
+            | Self::Organization { computer, .. }
+            | Self::Git { computer, .. } => computer,
         }
     }
 }

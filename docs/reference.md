@@ -8104,6 +8104,12 @@ and nothing is enforced: a team without a configuration keeps today's flow.
   changes sources never leaves the check failing or the selection behind; how
   far the snapshot lags is printed, and `--write` refreshes it on a computer
   with the configured build.
+- A CMake project's map comes from the build's file API reply, so it needs a
+  configured build: configure once (`hgs team run` with `cmake-configure` or
+  `qt-configure`), run `hgs test map --write`, then configure again so the next
+  reply covers the map's own test targets. Without the first configure there is
+  no reply to read; without the second, a new test file waits until the next
+  configure.
 - `hgs test affected [RANGE|--staged|--files ...] [--full] [--json]` prints the
   commands to run with their estimate from `.zerus/test-durations.json`. A file
   the map does not know runs its provider's whole set; a file in no area is

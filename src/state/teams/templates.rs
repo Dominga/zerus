@@ -830,6 +830,53 @@ fn unreal_engine(project: &Path, override_path: Option<&str>, registry: &dyn Eng
     }
     bail!("No Unreal engine for EngineAssociation {association}: looked in {root}\\{key} (value {name}), ZERUS_UE_ENGINE, and the engine override")
 }
+
+/// Task 87/210: the two Unreal templates. Both take the project as an absolute
+/// path: Build.bat changes into Engine/Build/BatchFiles and UnrealEditor-Cmd
+/// resolves against the engine, so a path relative to the member's folder finds
+/// nothing (the merger's task 189 report: exit 6 "Unable to find project file",
+/// exit 1 with an empty tail). The test's saved folder, log and report stay in
+/// the member's `.zerus-team`, absolute for the same reason.
+fn unreal(template: &Template, args: &Value, folder: &Path) -> anyhow::Result<Plan> {
+    let id = template.id;
+    let project = one(template, args, "project", folder)?.context("The template needs a project")?;
+    let project = folder.join(&project).display().to_string();
+    let engine = unreal_engine(Path::new(&project), one(template, args, "engine", folder)?.as_deref(), &SystemRegistry)?;
+    let ue = folder.join(".zerus-team").join("ue");
+    if id == "ue-build" {
+        let target = one(template, args, "target", folder)?.context("The template ue-build needs a target")?;
+        let mut argv = vec![project.clone(), target];
+        if let Some(platform) = one(template, args, "platform", folder)? {
+            argv.push(platform);
+        }
+        if let Some(config) = one(template, args, "config", folder)? {
+            argv.push(config);
+        }
+        argv.push(format!("-Project={project}"));
+        let program = format!("{}/Engine/Build/BatchFiles/Build.bat", engine.trim_end_matches(['/', '\\']));
+        return Ok(Plan { template: id.to_owned(), program, argv, commit: None, more: Vec::new(), cwd: None });
+    }
+    // Task 90: -ExecCmds takes `;`-separated console commands, so the filter is
+    // one filter: no `;` and no line break. The engine must hold the editor.
+    let filters = one(template, args, "filters", folder)?.unwrap_or_default();
+    ensure!(!filters.contains(';') && !filters.contains(['\n', '\r']), "The template's \"filters\" is one automation filter: no ';' and no line break");
+    let bin = Path::new(&engine).join("Engine").join("Binaries").join("Win64");
+    let name = ["UnrealEditor-Cmd.exe", "UE4Editor-Cmd.exe"].into_iter().find(|name| bin.join(name).is_file());
+    let Some(name) = name else { bail!("The Unreal engine {engine} holds no Engine/Binaries/Win64/UnrealEditor-Cmd.exe (or UE4Editor-Cmd.exe)") };
+    let mut argv = vec![
+        project,
+        "-nullrhi".to_owned(),
+        "-unattended".to_owned(),
+        format!("-saveddir={}", ue.join("Saved").display()),
+        format!("-abslog={}", ue.join("Unreal.log").display()),
+    ];
+    if !filters.is_empty() {
+        argv.push(format!("-ExecCmds=Automation RunTests {filters};Quit"));
+    }
+    argv.push(format!("-ReportExportPath={}", folder.join(".zerus-team").join("results").join("unreal").display()));
+    let program = format!("{}/Engine/Binaries/Win64/{name}", engine.trim_end_matches(['/', '\\']));
+    Ok(Plan { template: id.to_owned(), program, argv, commit: None, more: Vec::new(), cwd: None })
+}
 /// Validates a run request and builds the exact program and argv (U21). Nothing
 /// here reads a shell: every value is one argv element, or spliced as whole
 /// elements for the list placeholders.
@@ -855,31 +902,14 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
     let Some(template) = builtin(id) else { bail!("Unknown template {id}") };
     ensure!(enabled(), "The built-in command templates are turned off in Settings > Teams");
     let mut args = args.clone();
-    let mut editor: Option<String> = None;
-    if matches!(template.id, "ue-build" | "ue-test") {
-        let project = args["project"].as_str().unwrap_or_default();
-        if project.is_empty() { bail!("The template {id} needs a project"); }
-        let engine = unreal_engine(&folder.join(project), args["engine"].as_str(), &SystemRegistry)?;
-        if template.id == "ue-test" {
-            // Task 90: -ExecCmds takes `;`-separated console commands, so the filter
-            // is one filter: no `;` and no line break. The engine, wherever it is
-            // named from, must hold the editor Zerus runs (4.x names it UE4Editor-Cmd).
-            let filters = args["filters"].as_str().unwrap_or_default();
-            ensure!(!filters.contains(';') && !filters.contains(['\n', '\r']), "The template's \"filters\" is one automation filter: no ';' and no line break");
-            let bin = Path::new(&engine).join("Engine").join("Binaries").join("Win64");
-            let name = ["UnrealEditor-Cmd.exe", "UE4Editor-Cmd.exe"].into_iter().find(|name| bin.join(name).is_file());
-            let Some(name) = name else { bail!("The Unreal engine {engine} holds no Engine/Binaries/Win64/UnrealEditor-Cmd.exe (or UE4Editor-Cmd.exe)") };
-            editor = Some(format!("{}/Engine/Binaries/Win64/{name}", engine.trim_end_matches(['/', '\\'])));
-        }
-        args["engine"] = json!(engine);
-    }
-    let args = &args;
+    let args = &mut args;
     for (key, _) in args.as_object().into_iter().flatten() {
         ensure!(template.params.iter().any(|param| param.name == key), "The template {id} has no \"{key}\"");
     }
-    // Task 85: the CMake and MSBuild templates build their argv themselves;
-    // qt-configure and qt-build are the CMake ones with their fixed values.
+    // Task 85: the CMake, MSBuild, Unreal and Python templates build their own
+    // argv; qt-configure and qt-build are the CMake ones with fixed values.
     match template.id {
+        "ue-build" | "ue-test" => return unreal(template, args, folder),
         "cmake-configure" | "qt-configure" => return cmake_configure(template, args, folder),
         "cmake-build" | "qt-build" => return cmake_build(template, args, folder),
         "ctest" => return ctest(template, args, folder),
@@ -955,9 +985,6 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
             bail!("The template {id} needs a single \"{placeholder}\" for its program");
         };
         program = program.replace(&format!("{{{placeholder}}}"), &word);
-    }
-    if let Some(editor) = editor {
-        program = editor;
     }
     let mut more = Vec::new();
     if template.id == "cargo-test" {
@@ -1792,6 +1819,12 @@ pub(crate) fn execute_as(plan: &Plan, folder: &Path, timeout: Duration, env: &[(
             let _ = std::fs::create_dir_all(parent);
         }
     }
+    // Task 210: UnrealEditor-Cmd writes the run to its own log; an earlier
+    // run's log is never read as this run's.
+    let unreal_log = (plan.template == "ue-test").then(|| folder.join(".zerus-team").join("ue").join("Unreal.log"));
+    if let Some(log) = &unreal_log {
+        let _ = std::fs::remove_file(log);
+    }
     let stdin = plan.commit.as_ref().map(|payload| serde_json::to_vec(payload).unwrap_or_default());
     let before = isolated.as_ref().map(super::isolation::Run::fingerprint);
     let attempt = |command: &mut Command| {
@@ -1826,6 +1859,15 @@ pub(crate) fn execute_as(plan: &Plan, folder: &Path, timeout: Duration, env: &[(
     }
     if let (Some(run), Some(before)) = (&isolated, before) {
         checked(&mut outcome, run, &before, folder);
+    }
+    // Task 210: a failed ue-test says why from the log the editor wrote, since
+    // its own output goes to the file, not the pipe.
+    if let Some(log) = &unreal_log {
+        if outcome.exit != Some(0) {
+            if let Ok(text) = std::fs::read_to_string(log) {
+                outcome.tail = last_chars(&format!("{}\n== Unreal.log\n{}", outcome.tail, last_chars(&text, TAIL_BYTES)), TAIL_BYTES);
+            }
+        }
     }
     if let Some((path, format)) = report {
         let read = super::run_results::read(&path, format);
@@ -3132,23 +3174,58 @@ kind = "path"
         assert!(tail.trim_end().ends_with("services/app"), "{tail}");
     }
 
+    /// Task 87/210: the project and the three `.zerus-team` paths are absolute:
+    /// Build.bat and UnrealEditor-Cmd resolve after changing into the engine, so
+    /// a member-relative path finds nothing.
     #[test]
-    fn unreal_templates_are_typed_argv() {
+    fn unreal_templates_pass_absolute_paths() {
         let dir = temp();
         std::fs::write(dir.path().join("Game.uproject"), "{}").unwrap();
+        let project = dir.path().join("Game.uproject").display().to_string();
         let build = plan("ue-build", &json!({"engine":"UE_5.5","project":"Game.uproject","target":"Game","platform":"Win64","config":"Development"}), dir.path()).unwrap();
         assert!(build.program.ends_with("Engine/Build/BatchFiles/Build.bat"));
-        assert!(build.argv.contains(&"-Project=Game.uproject".to_owned()));
-        assert_eq!(&build.argv[..4], ["Game.uproject", "Game", "Win64", "Development"]);
+        assert!(build.argv.contains(&format!("-Project={project}")), "{:?}", build.argv);
+        let expected: Vec<String> = vec![project.clone(), "Game".into(), "Win64".into(), "Development".into(), format!("-Project={project}")];
+        assert_eq!(build.argv, expected);
         let engine = fake_engine("UnrealEditor-Cmd.exe");
         let root = engine.path().to_string_lossy().into_owned();
         let test = plan("ue-test", &json!({"engine":root,"project":"Game.uproject","filters":"Project.Game"}), dir.path()).unwrap();
         assert!(test.program.ends_with("Engine/Binaries/Win64/UnrealEditor-Cmd.exe"), "{}", test.program);
+        assert_eq!(test.argv[0], project);
         assert!(test.argv.contains(&"-ExecCmds=Automation RunTests Project.Game;Quit".to_owned()));
         assert!(test.argv.contains(&"-nullrhi".to_owned()) && test.argv.contains(&"-unattended".to_owned()));
-        assert!(test.argv.contains(&"-saveddir=.zerus-team/ue/Saved".to_owned()));
-        assert!(test.argv.contains(&"-abslog=.zerus-team/ue/Unreal.log".to_owned()));
+        let ue = dir.path().join(".zerus-team").join("ue");
+        assert!(test.argv.contains(&format!("-saveddir={}", ue.join("Saved").display())), "{:?}", test.argv);
+        assert!(test.argv.contains(&format!("-abslog={}", ue.join("Unreal.log").display())), "{:?}", test.argv);
+        assert!(test.argv.contains(&format!("-ReportExportPath={}", dir.path().join(".zerus-team").join("results").join("unreal").display())), "{:?}", test.argv);
         assert!(plan("ue-build", &json!({"engine":"UE_5.5","project":"Game.uproject","target":"Game"}), dir.path()).is_ok());
+        // A shell-style path is refused as before.
+        let error = plan("ue-build", &json!({"engine":"UE_5.5","project":"../Game.uproject","target":"Game"}), dir.path()).unwrap_err().to_string();
+        assert!(error.contains("stays inside your folder"), "{error}");
+    }
+
+    /// Task 210: UnrealEditor-Cmd writes its run to `-abslog`, so a failed
+    /// ue-test reports that log's tail; a passing one never shows a stale log.
+    #[test]
+    fn a_failed_ue_test_reports_its_unreal_log() {
+        let dir = temp();
+        let ue = dir.path().join(".zerus-team").join("ue");
+        std::fs::create_dir_all(&ue).unwrap();
+        std::fs::write(ue.join("Unreal.log"), "STALE-LOG-LINE\n").unwrap();
+        let mut passing = shell_plan("exit 0", "exit 0");
+        passing.template = "ue-test".into();
+        let outcome = execute(&passing, dir.path(), Duration::from_secs(60), &[]);
+        assert_eq!(outcome.exit, Some(0), "{outcome:?}");
+        assert!(!outcome.tail.contains("STALE-LOG-LINE"), "{}", outcome.tail);
+        let (windows, unix) = (
+            "echo LogAutomation: Error: Test Game.Core failed > .zerus-team\\ue\\Unreal.log & exit /b 1",
+            "echo 'LogAutomation: Error: Test Game.Core failed' > .zerus-team/ue/Unreal.log; exit 1",
+        );
+        let mut failing = shell_plan(windows, unix);
+        failing.template = "ue-test".into();
+        let outcome = execute(&failing, dir.path(), Duration::from_secs(60), &[]);
+        assert_eq!(outcome.exit, Some(1), "{outcome:?}");
+        assert!(outcome.tail.contains("Test Game.Core failed") && outcome.tail.contains("Unreal.log"), "{}", outcome.tail);
     }
 
     /// An engine folder holding the named editor.

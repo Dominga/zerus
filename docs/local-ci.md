@@ -90,3 +90,55 @@ parser. Do not fix the checked source to obtain the control result.
 
 Native macOS and Windows adapters follow the Arch command. Their jobs stay
 not run here; Linux fixture success is not native Mac or Windows qualification.
+
+## Native Mac preflight
+
+Run `scripts/ci/local-macos.py` on the Mac, selecting a full commit hash and a
+new result directory below one private root. It takes the shared
+`~/zerus-dev/.heavy.lock` without displacing another holder and releases only
+its own lock. The Mac adapter reports every workflow job, including other
+platforms and GitHub aggregates as not run.
+
+```sh
+python3 scripts/ci/local-macos.py --repo /path/to/public-source-cache \
+  --sha FULL_COMMIT --root /path/to/private-mac-ci \
+  --output /path/to/private-mac-ci/new-results --workers 4
+```
+
+The host supplies Xcode and Homebrew Python, tmux and build libraries. The
+runner supplies a checksum-verified Node 24 and copies only the pinned public
+Rust toolchain and registry into private caches. Rust components/targets are
+added to that private copy. It does not install packages, select global Xcode,
+accept licenses or use signing identities. Mac filesystem and signal isolation
+uses Seatbelt, private homes and short temporary directories. This is not a
+Linux PID or network namespace: ordinary outbound IP is available. Before any
+test body, real synthetic controls must prove that file contents and process
+signals outside the sandbox are refused, while an owned child can be reaped.
+
+The system's setuid `ps` cannot run in Seatbelt. A private copy keeps its code,
+removes setuid/private entitlements and receives an ad-hoc signature. The report
+records the system and copied hashes and mode. It queries actual current-user
+kernel data; it is not a fake process table or an installed helper observation.
+The system binary and keychains stay untouched. Native original-child/signature
+controls continue to select their own original executables.
+
+Independent exact-source CLI and fake-agent builds precede integration and
+real-agent tests. Their executable hashes bind that local handoff; a failed
+unit suite still fails its job and cannot conceal those independent suites;
+GitHub artifact admission/download/sealing is explicitly local infrastructure,
+not a claimed artifact acceptance. The source script's remaining shell, Python
+and release bodies run independently. Build/test results, sandbox prerequisite
+failures, ignored controls and missing platforms remain distinct in the report.
+
+The default Mac worker limit is six, the load ceiling ten and the disk floor
+10 GiB. Use four workers on the 16 GiB machine, and lower limits when needed.
+No installed GUI, LaunchAgent, agent home or existing tmux server is selected.
+Display tests require the coordinator's current window. GitHub remains the final
+clean matrix and sole release-candidate producer.
+
+Apple's compiler/Python shims also use the OS per-user temporary directory even
+when `TMPDIR` is private. Seatbelt permits only its `xcrun_db` cache names there,
+plus nonrecursive reads of their ancestors. This is public compiler-cache data;
+the rest of that directory, owner preferences and credentials are excluded.
+The private Rustup copies disable self-update, so target installation cannot
+try to replace the read-only runner proxies or the owner's Rustup.

@@ -281,7 +281,7 @@ class Runner:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 subprocess.run(["cp", "-a", "--reflink=auto", str(self.rustup / "toolchains" / toolchain),
                                 str(destination)], check=True)
-            (staged / "settings.toml").write_text(f'version = "12"\ndefault_toolchain = "{toolchain}"\nprofile = "minimal"\n')
+            (staged / "settings.toml").write_text(f'version = "12"\ndefault_toolchain = "{toolchain}"\nprofile = "minimal"\nauto_self_update = "disable"\n')
             self.rustup_source = staged
         if self.args.online:
             if not self.args.slirp or not self.args.slirp.is_file():

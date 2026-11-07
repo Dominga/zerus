@@ -81,6 +81,16 @@ export interface ViewRow {
   process_state?: string;
   /** `process_work.count`, -1 when unknown. */
   background?: number;
+  /** The host's session state (working, build, user, deps, cooling, cold, stopped) and what it rests on (task 195). */
+  session_state?: string;
+  state_reason?: { kind: string; text: string };
+  build?: { label: string; command: string; since: number };
+  last_active?: number;
+  reply_at?: number;
+  cache_ttl?: { seconds: number; kept_warm: boolean };
+  /** `process_work.services` and `process_work.command`. */
+  services?: { name: string; command: string; since: number }[];
+  background_command?: string;
   /** Listed optional-question count; null while unknown, retained by Rust for the same conversation. */
   optional_question_count?: number | null;
   archive_id?: string | null;

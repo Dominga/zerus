@@ -1,44 +1,25 @@
 Work in an agent team (hgs guide team)
 
-A lead and members on any agents and computers; Zerus hands ready
-tasks to free members.
-Requests use lowercase UUIDs; reuse one to retry.
+A lead plans tasks and Zerus hands each ready task to a free member, on any agent and
+computer. Requests are JSON on stdin with a lowercase UUID "request_id"; reuse one to retry.
+A doorbell in your terminal means unread messages: {} | hgs team inbox --json.
+Work only on what hgs team current shows, else ask the lead. A message naming a task you
+do not hold is refused.
 
-Lead, in-session:
-  {"request_id":"UUID","name":"Checkout","goal":"...","folder":"DIR"} |
-    hgs team create --json   (you lead)
-  plan while Planning (whole plan):
-    {"request_id":"UUID","team":"ID","members":[{"id":"api","role":"Backend",
-     "agent":"codex"}],"tasks":[{"id":1,"title":"...","criteria":["..."],
-     "assignee":"api","deps":[{"task":2}]}]} | hgs team plan --json
-  hard waits for Accepted, soft for In progress; the owner approves first.
-  {"team":"ID"} | hgs team status --json   tasks, attempts
-  {"team":"ID"} | hgs team inbox --json    items, unread
-  Reports arrive as [Zerus team messages; decide:
-    {"request_id":"UUID","team":"ID","task":N} | hgs team accept --json
-    reject needs "reason"; rework keeps its member; "fresh":true: a peer.
-    "hold":true keeps it back:
-    {"request_id":"UUID","team":"ID","task":N} | hgs team release --json
-    gives it out; hgs team hold --json holds a pending one.
-  reassign, retry, cancel: same fields; a free peer of the role may get
-  it; reassign pins it. Answer a question: hgs team reply;
-  native questions and permissions: hgs team answer.
-  Allow only what the task needs; else ask the owner.
-  Stopped member: message, retry, reassign, ask the owner.
-  Phases, extend, finish: hgs guide team-lead
-  Tests: hgs guide team-tests; a dsh lead is not the owner.
-
-Member: a doorbell means unread: {} | hgs team inbox --json. Report once:
+Report once, when the task is done:
   {"request_id":"UUID","team":"ID","task":N,"attempt":"ATTEMPT","text":"..."} |
     hgs @LEAD team report --json
-  Blocked: ask the lead; the attempt stays open:
-    {"request_id":"UUID","team":"ID","attempt":"ATTEMPT","text":"..."} |
-    hgs team ask --json
+Say what changed and how you checked it. A progress line is interim; only hgs team
+report reports, and a report on a task you did not take is refused.
+
+Blocked: ask the lead. The attempt stays open:
+  {"request_id":"UUID","team":"ID","attempt":"ATTEMPT","text":"..."} | hgs team ask --json
+A question goes through hgs team ask, never a report. Anything else for the lead:
   {"request_id":"UUID","to":"lead","text":"...","urgent":true} | hgs team message --json
-  A question goes through hgs team ask, never a report; a progress line
-  is interim; only hgs team report reports.
-  First: hgs team lore find. Codex on Windows: hgs guide team-run.
-  Work only on what hgs team current shows, else ask the lead.
-  Never poll CI, installs or cards: hgs guide team-park.
-Say what changed and how you checked it; a taken task's report is
-refused. Sub-teams: hgs guide team-tree.
+A task that can go on only after CI, an install or a card: never poll or sleep, park it
+(hgs guide team-park). A job past its estimate: {"label":"x","minutes":15} | hgs team
+expect --json. Your pulse for the lead, each part at most 500 characters:
+  {"attempt":"ATTEMPT","done":"...","next":"...","blocked":"..."} | hgs team note --json
+
+First: hgs team lore find. Builds and tests: hgs guide team-run and team-tests. Codex on
+Windows: team-run too. Leading a team: hgs guide team-lead.

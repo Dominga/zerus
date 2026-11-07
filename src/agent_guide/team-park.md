@@ -32,9 +32,5 @@ waiting gets the park offered. An attempt that runs a waiting job or
 repeats the same read-only check at intervals is parked by Zerus on a
 guessed condition; the lead is told once and sets the real one.
 
-Lead: waiting is always a park, never an instruction. hgs team reply and
-messages telling a member to wait for an install, a CI run, a card or a
-time are refused; answer a blocked member's question with a park:
-  {"team":"ID","question":"q1","text":"","park":{"condition":{...},
-   "eta_minutes":60}} | hgs team reply --json
-You get every park's outcome: met, failed with the reason, or overdue.
+Lead: waiting is always a park (hgs guide team-lead); a reply or message telling a member
+to wait is refused. You get every park's outcome: met, failed with the reason, or overdue.

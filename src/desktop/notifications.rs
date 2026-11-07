@@ -546,7 +546,13 @@ impl Outbox {
                     let result = serde_json::to_value(receipt)
                         .map_err(anyhow::Error::from)
                         .and_then(|receipt| {
-                            ledger::finish(&mut store.db, &pending.request, state, &receipt)
+                            ledger::finish_recorded(
+                                &mut store.db,
+                                &pending.request,
+                                state,
+                                &receipt,
+                                chrono::Utc::now().timestamp_millis().max(0),
+                            )
                         });
                     if result.is_ok() {
                         pending.committed = true;

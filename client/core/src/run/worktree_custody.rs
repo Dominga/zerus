@@ -70,6 +70,13 @@ impl Owner {
     pub fn deadline(&self) -> Instant {
         self.deadline
     }
+    /// Presentation only. A finished control worker is unavailable for new
+    /// observations; this is NEVER a child/pipe/loan drain or join witness.
+    pub fn worker_finished(&self) -> bool {
+        self.worker
+            .as_ref()
+            .is_none_or(|worker| worker.is_finished())
+    }
     /// Close admission only. Resources remain with their actual worker/child
     /// and pipe owners until release; cancellation is never a drain witness.
     pub fn cancel(&self) {

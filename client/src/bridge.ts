@@ -986,7 +986,7 @@ export const sessionFolderOpen = (input: import("./store/sessionFolders").Folder
 export const terminationCleanupConfirm = (id: string, delay?: import("./store/endActionBusy").EndReference) => desktop<Outcome>("termination_cleanup_confirm", { id, delay });
 export const terminationCleanupOffer = (target: Target) => desktop<import("./ui/sessions/termination-offer").CleanupOffer | null>("termination_cleanup_offer", { target });
 export const terminationCleanupCancel = (id: string) => desktop<void>("termination_cleanup_cancel", { id });
-export interface ProgramForceOffer { confirmation: string; programs: readonly import("./ui/sessions/termination-offer").CleanupProgram[] }
+export interface ProgramForceOffer { confirmation: string; remaining_millis: number; revision: number; programs: readonly import("./ui/sessions/termination-offer").CleanupProgram[] }
 export const terminationProgramForceOffer = (id: string) => desktop<ProgramForceOffer>("termination_program_force_offer", { id });
 export const terminationProgramForceConfirm = (id: string, confirmation: string) => desktop<import("./store/terminationCleanup").CleanupView>("termination_program_force_confirm", { id, confirmation });
 export const terminationProgramForceCancel = (id: string, confirmation: string) => desktop<import("./store/terminationCleanup").CleanupView>("termination_program_force_cancel", { id, confirmation });

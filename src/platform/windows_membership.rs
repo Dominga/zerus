@@ -315,5 +315,6 @@ mod file_users;
 mod handles;
 #[cfg(windows)]
 mod native;
+mod protocol;
 #[cfg(test)]
 mod tests;

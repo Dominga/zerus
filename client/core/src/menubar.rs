@@ -536,8 +536,8 @@ impl Desk {
 
     /// Active sessions, the list's Active filter (`store/attention.ts`
     /// `isActive`): working or Background, Scheduled or Waiting on a current
-    /// computer, or needing attention (Review later anywhere, a request only
-    /// on a current computer). Drafts live in the window, which the tray does
+    /// computer, or needing attention (Review later anywhere, a request or a
+    /// subagent that asks only on a current computer). Drafts live in the window, which the tray does
     /// not see. The tray shows this instead of every listed session (owner
     /// 2026-11-07).
     pub fn active(&self) -> usize {
@@ -559,7 +559,8 @@ impl Desk {
                                     && (matches!(
                                         row.status.as_str(),
                                         "working" | "background" | "scheduled" | "waiting"
-                                    ) || needs_attention(row))))
+                                    ) || needs_attention(row)
+                                        || row.child_attention)))
                     })
                     .count()
             })
@@ -915,11 +916,12 @@ mod tests {
                 ("r", with("claude/p/ready", "ready")),
                 ("p", with("claude/p/paused", "paused")),
                 ("x", ViewRow { status: "working".into(), ..row("claude/p/old", "archived") }),
+                ("c", ViewRow { child_attention: true, ..with("claude/p/child-asks", "ready") }),
             ],
         );
-        assert_eq!(desk.total(), 7, "every listed session, archived excluded");
-        assert_eq!(desk.active(), 5, "working, background, scheduled, waiting and the request");
-        assert_eq!(desk.face().total, "5", "the icon's upper number is the active count");
+        assert_eq!(desk.total(), 8, "every listed session, archived excluded");
+        assert_eq!(desk.active(), 6, "working, background, scheduled, waiting, the request and the asking subagent");
+        assert_eq!(desk.face().total, "6", "the icon's upper number is the active count");
         status(&mut desk, "", ComputerStatus::Reconnecting { attempt: 1 });
         assert_eq!(desk.face().total, "?", "unknown while this computer reconnects");
     }

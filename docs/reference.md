@@ -2492,8 +2492,10 @@ reason, turn_active}`; `until` is null for Always and `state` is `off`,
 The setting is `keep-warm.json` in the state directory, keyed only by session
 IDs or label keys; the worker's state of each session is under
 `recovery/keep-warm/`. Both are read as bounded regular files: a special file is
-refused without blocking, and an unreadable worker state holds keep-warm as
-uncertain until the next real turn. See the
+refused without blocking, and a worker state that is unreadable or not one
+the worker writes holds keep-warm as uncertain until the next real turn. A
+legacy-label rename carries the worker state before the setting and repairs an
+interrupted move when the rename resumes. See the
 [design note](superpowers/specs/2026-11-07-keep-cache-warm-design.md).
 
 ## Projects and P2P synchronization

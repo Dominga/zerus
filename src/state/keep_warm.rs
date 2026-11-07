@@ -172,13 +172,31 @@ fn view(entry: Option<&Entry>, runtime: &Value, record: &Value, now: f64) -> Val
 
 const UNREADABLE: &str = "The keep-warm state of this session is unreadable. Nothing is sent until your next message.";
 
+/// The states the worker writes.
+const STATES: [&str; 10] = ["waiting", "warming", "cold", "uncertain", "stopped", "paused", "unsupported", "dispatching", "expired", "gone"];
+
+/// Whether `value` is a state the worker writes, with the fields that state needs.
+fn runtime_valid(value: &Value) -> bool {
+    let state = value["state"].as_str().unwrap_or("");
+    let time = |key: &str| value.get(key).is_none_or(|v| v.is_null() || v.as_f64().is_some_and(f64::is_finite));
+    let count = |key: &str| value.get(key).is_none_or(|v| v.is_null() || v.is_u64());
+    value.is_object()
+        && STATES.contains(&state)
+        && value.get("reason").is_none_or(Value::is_string)
+        && value.get("request_id").is_none_or(Value::is_string)
+        && ["since", "next_at", "sent_at", "last_ping_at"].iter().all(|key| time(key))
+        && count("pings") && count("revision")
+        && (!matches!(state, "dispatching" | "warming") || value["request_id"].as_str().is_some_and(|id| !id.is_empty()))
+        && (state != "warming" || value["sent_at"].as_f64().is_some())
+}
+
 /// The worker's state: Null when there is none yet, an error when a file
-/// exists but is not a readable state object, which must never read as none.
+/// exists but is not a state the worker writes, which must never read as none.
 fn read_runtime_at(path: &Path) -> Result<Value> {
     let Some(bytes) = read_regular(path, 64 * 1024)? else {
         return Ok(Value::Null);
     };
-    serde_json::from_slice::<Value>(&bytes).ok().filter(Value::is_object)
+    serde_json::from_slice::<Value>(&bytes).ok().filter(runtime_valid)
         .ok_or_else(|| format!("invalid keep-warm state in {}", path.display()))
 }
 
@@ -896,11 +914,12 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     Ok(code)
 }
 
-/// Move a legacy label's setting to its new label's key. False when there is
-/// nothing to move or the new key already has a setting of its own.
+/// Move a legacy label's setting to its new label's key; false when there is
+/// nothing to move. A free legacy label can hold only a stale setting of a
+/// session that is gone, which the renamed session's own setting replaces.
 fn rename_entry(store: &mut Store, old: &str, new: &str) -> bool {
     let (from, to) = (storage::label_key(old), storage::label_key(new));
-    if from == to || store.sessions.contains_key(&to) {
+    if from == to {
         return false;
     }
     let Some(mut entry) = store.sessions.remove(&from) else { return false };
@@ -909,20 +928,50 @@ fn rename_entry(store: &mut Store, old: &str, new: &str) -> bool {
     true
 }
 
-/// A legacy-label rename (`rename.rs`): its setting and worker state follow
-/// the session, as its recovery job does. Replaying it is harmless.
+/// The fence a rename leaves when it cannot carry a worker state as it is.
+fn carried_fence() -> String {
+    json!({"state":"uncertain","reason":UNREADABLE,"since":now()}).to_string()
+}
+
+/// A legacy-label rename (`rename.rs`): the setting and worker state follow the
+/// session, as its recovery job does. The worker state is carried first, then
+/// the setting, then the old state is retired, so an interrupted rename never
+/// leaves a setting without its state; replaying the rename repairs any step.
 pub(super) fn rename(old: &str, new: &str) -> Result<()> {
-    let _guard = lock(Some(&lock_path()))?;
-    let mut store = read_store(&path())?;
-    if !rename_entry(&mut store, old, new) {
+    let (from, to) = (storage::label_key(old), storage::label_key(new));
+    if from == to {
         return Ok(());
     }
-    persist(&path(), &store)?;
-    let (from, to) = (runtime_path(&storage::label_key(old)), runtime_path(&storage::label_key(new)));
-    if let (Some(from), Some(to)) = (from, to) {
-        if fs::symlink_metadata(&from).is_ok() {
-            fs::rename(&from, &to).map_err(|e| e.to_string())?;
-        }
+    let (Some(from_state), Some(to_state)) = (runtime_path(&from), runtime_path(&to)) else {
+        return Err("invalid keep-warm owner".into());
+    };
+    let _guard = lock(Some(&lock_path()))?;
+    let mut store = read_store(&path())?;
+    let moving = store.sessions.contains_key(&from);
+    let moved = !moving && store.sessions.get(&to).is_some_and(|entry| entry.name == new);
+    if !moving && !moved {
+        return Ok(());
+    }
+    let present = |path: &Path| fs::symlink_metadata(path).is_ok();
+    if present(&from_state) {
+        // Carried as it is: an unreadable state stays unknown. A state already
+        // at the destination after an interrupted move is never trusted over it.
+        let carried = match read_regular(&from_state, 64 * 1024) {
+            Ok(Some(bytes)) if !(moved && present(&to_state)) => String::from_utf8(bytes).unwrap_or_else(|_| carried_fence()),
+            _ => carried_fence(),
+        };
+        private_dir(to_state.parent().ok_or("invalid keep-warm state path")?)?;
+        atomic(&to_state, &carried)?;
+    } else if moving && present(&to_state) {
+        // The destination's state belonged to a session that is gone.
+        fs::remove_file(&to_state).map_err(|e| e.to_string())?;
+    }
+    if moving {
+        rename_entry(&mut store, old, new);
+        persist(&path(), &store)?;
+    }
+    if present(&from_state) {
+        fs::remove_file(&from_state).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -1238,11 +1287,14 @@ mod tests {
         assert!(!store.sessions.contains_key(&storage::label_key(old)));
         let moved = store.sessions.get(&storage::label_key(new)).unwrap();
         assert_eq!((moved.name.as_str(), moved.enabled, moved.revision), (new, true, 1));
-        // Replaying the rename changes nothing; an occupied destination is kept.
+        // Replaying the rename changes nothing.
         assert!(!rename_entry(&mut store, old, new));
-        update(&mut store, &storage::label_key("claude/p/other"), &record(), &request(json!({})), NOW, ok);
-        assert!(!rename_entry(&mut store, new, "claude/p/other"));
-        assert!(store.sessions.contains_key(&storage::label_key(new)));
+        // A free legacy label can hold only a stale setting of a session that
+        // is gone: the renamed session's own setting replaces it.
+        update(&mut store, &storage::label_key("claude/p/other"), &record(), &request(json!({"hours":7})), NOW, ok);
+        assert!(rename_entry(&mut store, new, "claude/p/other"));
+        let replaced = store.sessions.get(&storage::label_key("claude/p/other")).unwrap();
+        assert_eq!((replaced.name.as_str(), replaced.until), ("claude/p/other", Some(NOW + 3.0 * 3600.0)));
     }
 
     #[test]
@@ -1309,8 +1361,21 @@ mod tests {
         assert!(read_runtime_at(&path).is_err());
         std::fs::write(&path, "[]").unwrap();
         assert!(read_runtime_at(&path).is_err());
-        std::fs::write(&path, json!({"state":"warming","request_id":"ping-1"}).to_string()).unwrap();
+        std::fs::write(&path, json!({"state":"warming","request_id":"ping-1","sent_at":NOW}).to_string()).unwrap();
         assert_eq!(read_runtime_at(&path).unwrap()["state"], "warming");
+        // A well-formed object that is not a state the worker writes is unknown, not none.
+        for invalid in [json!({}), json!({"state":""}), json!({"state":"bogus"}), json!({"state":5}),
+            json!({"state":"dispatching"}), json!({"state":"dispatching","request_id":""}),
+            json!({"state":"warming","request_id":"ping-1"}), json!({"state":"waiting","since":"yesterday"}),
+            json!({"state":"waiting","reason":7}), json!({"state":"cold","since":f64::MAX * 0.0 + 1.0, "next_at":"soon"})] {
+            std::fs::write(&path, invalid.to_string()).unwrap();
+            assert!(read_runtime_at(&path).is_err(), "{invalid}");
+        }
+        for valid in [json!({"state":"waiting","reason":"","next_at":null,"since":null}), json!({"state":"uncertain","reason":"x","since":NOW}),
+            json!({"state":"dispatching","request_id":"ping-1","revision":1,"since":NOW}), json!({"state":"gone","reason":"x","since":NOW,"pings":null})] {
+            std::fs::write(&path, valid.to_string()).unwrap();
+            assert!(read_runtime_at(&path).is_ok(), "{valid}");
+        }
         // A round that cannot read its state sends nothing until a real turn.
         assert!(matches!(unreadable(NOW), Step::Hold { state: "uncertain", since: Some(at), .. } if at == NOW));
     }

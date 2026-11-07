@@ -289,6 +289,58 @@ class KeepWarm(unittest.TestCase):
         store = json.loads((self.state / "keep-warm.json").read_text())
         self.assertEqual([entry["name"] for entry in store["sessions"].values()], [renamed])
 
+    def runtime_file(self):
+        owner = next(iter(json.loads((self.state / "keep-warm.json").read_text())["sessions"]))
+        directory = self.state / "recovery" / "keep-warm"
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory / f"{owner}.json"
+
+    def test_an_unknown_worker_state_object_sends_nothing(self):
+        self.due()
+        self.change(hours=1)
+        runtime = self.runtime_file()
+        runtime.write_text(json.dumps(dict(state="uncertain", reason="kept", since=time.time())))
+        self.tick()
+        time.sleep(0.3)
+        self.assertEqual(self.received(), b"")
+        for unknown in ({}, {"state": "bogus"}, {"state": "dispatching"}):
+            runtime.write_text(json.dumps(unknown))
+            self.tick()
+            time.sleep(0.3)
+            self.assertEqual(self.received(), b"", unknown)
+            self.assertEqual(self.inspect()["keep_warm"]["state"], "uncertain")
+
+    def test_an_interrupted_legacy_rename_keeps_the_delivery_fence(self):
+        self.due()
+        self.change(hours=1)
+        old_runtime = self.runtime_file()
+        old_runtime.write_text(json.dumps(dict(state="uncertain", reason="kept", since=time.time())))
+        directory = old_runtime.parent
+        directory.chmod(0o500)
+        try:
+            renamed = "codex/input-test/renamed"
+            failed = subprocess.run([str(fixtures.HGS), "rename", self.name, renamed], env=self.env, text=True,
+                                    capture_output=True, timeout=15)
+            self.assertNotEqual(failed.returncode, 0, "the rename must be interrupted")
+            # A round may fail to record its state here; it must type nothing.
+            self.command("recovery", "tick", ok=False)
+            time.sleep(0.3)
+            self.assertEqual(self.received(), b"", failed.stderr)
+        finally:
+            directory.chmod(0o700)
+        # Any later command resumes the rename transaction.
+        self.command("inspect", renamed, ok=False)
+        self.name = renamed
+        self.tick()
+        self.tick()
+        time.sleep(0.3)
+        self.assertEqual(self.received(), b"")
+        store = json.loads((self.state / "keep-warm.json").read_text())
+        (owner, entry), = store["sessions"].items()
+        self.assertEqual(entry["name"], renamed)
+        self.assertEqual(json.loads((directory / f"{owner}.json").read_text())["state"], "uncertain")
+        self.assertEqual(sorted(path.name for path in directory.glob("*.json")), [f"{owner}.json"])
+
     def test_a_stale_conversation_is_refused(self):
         stale = self.command("keep-warm", self.name, "--json", ok=False, payload=dict(
             expected_run_id=self.run_id, expected_conversation_id="other", expected_revision=0,

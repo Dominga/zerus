@@ -5371,7 +5371,15 @@ pub(crate) fn prepare_branch(team: &Team, task_id: u32, member_id: &str) -> Opti
     let (moved, how) = if exists {
         (git_bounded(&folder, &["checkout", &branch]), "checked out".to_owned())
     } else {
-        let base = if team.settings.base_branch.is_empty() {
+        // Task #267: with an integration folder the team's base is named once:
+        // a new task's branch starts from the integration line's head, never
+        // from the member's previous branch or another member's commit.
+        let base = if !team.settings.integration_folder.trim().is_empty() {
+            match super::merge_queue::integration_branch(team) {
+                Some(base) => base,
+                None => return Some(step(&current, "refused", "The integration line's branch was not read".into())),
+            }
+        } else if team.settings.base_branch.is_empty() {
             match lead_branch(team) {
                 Ok(base) => base,
                 Err(error) => return Some(step(&current, "refused", format!("{error:#}"))),
@@ -5428,6 +5436,81 @@ pub(crate) fn accepted_predecessors(team: &Team, task_id: u32) -> Vec<AcceptedWo
         .collect()
 }
 
+/// Task #267: with an integration folder, a new task's folder starts from the
+/// current integration head, never from the member's previous branch; work it
+/// has uncommitted is committed on that branch first, so nothing is lost.
+/// None without an integration folder, for the lead, for a shared folder and
+/// for a task continuing its own branch (a retry or a task branch).
+pub(crate) fn prepare_integration_base(team: &Team, task_id: u32, member_id: &str) -> Option<PrepareStep> {
+    if team.settings.integration_folder.trim().is_empty() || member_id == team.lead {
+        return None;
+    }
+    let member = team.member(member_id)?;
+    if member.folder == MemberFolder::Shared || !member.computer.is_empty() {
+        return None;
+    }
+    let task = team.task(task_id)?;
+    if !task.attempts.is_empty() {
+        return None;
+    }
+    let folder = match member_folder_path(team, member) {
+        Ok(folder) if !folder.is_empty() => folder,
+        Ok(_) => return None,
+        Err(_) => return None,
+    };
+    if same_path(&folder, &team.integration_folder()) || same_path(&folder, &team.folder) {
+        return None;
+    }
+    let step = |from: &str, result: &str, reason: String| PrepareStep {
+        step: "base".into(),
+        member: String::new(),
+        from: from.to_owned(),
+        to: String::new(),
+        at: now(),
+        result: result.into(),
+        reason,
+    };
+    // A task branch is created from the integration head by prepare_branch.
+    if task_branch(team, task_id, member_id).is_some() {
+        return None;
+    }
+    let Some(base) = super::merge_queue::integration_branch(team) else {
+        return Some(step("", "refused", "The integration line's branch was not read".into()));
+    };
+    let current = match git_bounded(&folder, &["rev-parse", "--abbrev-ref", "HEAD"]) {
+        Ok(current) => current,
+        Err((_, error)) => return Some(step("", "refused", format!("the folder's branch was not read: {error}"))),
+    };
+    if current == base {
+        return Some(step(&current, "skipped", "the folder is on the integration line already".into()));
+    }
+    let head = super::merge_queue::integration_head(team).unwrap_or_default();
+    let here = git_bounded(&folder, &["rev-parse", "HEAD"]).unwrap_or_default();
+    if !head.is_empty() && here == head {
+        return Some(step(&current, "skipped", "the folder is at the integration head already".into()));
+    }
+    // Dirty work is committed on its old branch first, as the lead did by hand.
+    let changes = match git_bounded(&folder, &["status", "--porcelain", "--untracked-files=no"]) {
+        Ok(changes) => changes,
+        Err((_, error)) => return Some(step(&current, "refused", format!("the folder's changes were not read: {error}"))),
+    };
+    if !changes.is_empty() {
+        if let Err((_, error)) = git_bounded(&folder, &["add", "-u"]) {
+            return Some(step(&current, "refused", format!("the folder's changes were not staged: {error}")));
+        }
+        let message = format!("Zerus: {member_id}'s unfinished work before task #{task_id}");
+        if let Err((_, error)) = git_bounded(&folder, &["commit", "-q", "-m", &message]) {
+            return Some(step(&current, "refused", format!("the folder's changes were not committed: {error}")));
+        }
+    }
+    let head = super::merge_queue::integration_head(team).unwrap_or_default();
+    match git_bounded(&folder, &["checkout", "-B", &current, &base]) {
+        Ok(_) => Some(step(&current, "done", format!("{} starts from the integration head {base} ({})", if changes.is_empty() { "the folder" } else { "the committed work stays on the old branch; the folder" }, head.chars().take(9).collect::<String>()))),
+        Err((true, error)) => Some(step(&current, "uncertain", error)),
+        Err((false, error)) => Some(step(&current, "refused", error)),
+    }
+}
+
 /// Task 155 (owner, 2026-11-07): before the hand-out, the accepted work of
 /// the task's dependencies is merged into the member's branch, outside any
 /// sandbox, so a dependent task starts from its predecessors' accepted
@@ -5437,6 +5520,42 @@ pub(crate) fn accepted_predecessors(team: &Team, task_id: u32) -> Vec<AcceptedWo
 /// the member. None when nothing is accepted yet, for the lead's own task and
 /// for a member working in the team's own folder (the lead merges there).
 pub(crate) fn prepare_dependencies(team: &Team, task_id: u32, member_id: &str) -> Option<PrepareStep> {
+    // Task #267: with an integration folder the accepted work is already on
+    // the line every hand-out starts from, so no member branch ever merges
+    // another member's commit; the step says so for the lead's status.
+    if !team.settings.integration_folder.trim().is_empty() && member_id != team.lead {
+        let wanted = accepted_predecessors(team, task_id);
+        if wanted.is_empty() {
+            return None;
+        }
+        let names = wanted.iter().map(|work| format!("#{}", work.task)).collect::<Vec<_>>().join(", ");
+        // A dependent starts only from what is on the line: while a landing
+        // waits (the queue, its tests or a conflict's resolve task), it waits
+        // with that reason instead of starting without its predecessor.
+        if let Some(missing) = wanted.iter().find(|work| !super::merge_queue::landed(team, &work.commit)) {
+            let state = team.task(missing.task).and_then(|task| task.merge.as_ref()).map_or_else(|| "no landing".to_owned(), |entry| {
+                if entry.state == "conflict" { format!("its landing conflicts; resolve task #{} waits", entry.resolve_task.unwrap_or_default()) } else { format!("its landing is {}", entry.state) }
+            });
+            return Some(PrepareStep {
+                step: "dependencies".into(),
+                member: String::new(),
+                from: String::new(),
+                to: names,
+                at: now(),
+                result: "refused".into(),
+                reason: format!("#{}'s accepted work ({}) is not on the integration line yet: {state}", missing.task, missing.commit.chars().take(9).collect::<String>()),
+            });
+        }
+        return Some(PrepareStep {
+            step: "dependencies".into(),
+            member: String::new(),
+            from: String::new(),
+            to: names,
+            at: now(),
+            result: "skipped".into(),
+            reason: "the accepted work lands on the integration line; the folder starts from its head".into(),
+        });
+    }
     let wanted = accepted_predecessors(team, task_id);
     if wanted.is_empty() || member_id == team.lead {
         return None;
@@ -5801,6 +5920,19 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
     // a refused or unconfirmed one leaves the task waiting. A confirmed one
     // waits on the task for the attempt that hands it out.
     if let Some(step) = if can_hand_out(&team, task_id) { prepare_branch(&team, task_id, member_id) } else { None } {
+        if matches!(step.result.as_str(), "refused" | "uncertain") {
+            return change(store, team_id, |team, events| task_waits(team, task_id, member_id, &step, events));
+        }
+        change(store, team_id, |team, _| {
+            let task = team.task_mut(task_id).context("unknown task")?;
+            super::models::record(task, PrepareStep { member: member_id.to_owned(), ..step });
+            Ok(())
+        })?;
+    }
+    // Task #267: with an integration folder the folder starts from the
+    // integration head (its dirty work committed on the old branch first); the
+    // predecessors' work is there because it landed.
+    if let Some(step) = if can_hand_out(&team, task_id) { prepare_integration_base(&team, task_id, member_id) } else { None } {
         if matches!(step.result.as_str(), "refused" | "uncertain") {
             return change(store, team_id, |team, events| task_waits(team, task_id, member_id, &step, events));
         }
@@ -10315,3 +10447,4 @@ mod dispatcher_decisions;
 #[cfg(test)]
 #[path = "tests/dispatcher_areas.rs"]
 mod tests;
+

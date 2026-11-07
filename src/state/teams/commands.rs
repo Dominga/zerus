@@ -683,6 +683,11 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
     value["phase_modes"] = ops::phase_modes_view(team);
     // Task #229: the critical tasks open in the team and what each holds.
     value["crit"] = json!(plan::open_crits_all(team).iter().map(|(phase, id)| json!({"phase":phase,"task":id})).collect::<Vec<_>>());
+    // Task #267: the integration line: its branch and head, and where every
+    // accepted task's work landed or why it has not.
+    if !team.settings.integration_folder.trim().is_empty() {
+        value["integration"] = super::merge_queue::landing(team);
+    }
     // U62 (#715): the full-run policy and the owner's one-time grant.
     value["full_tests"] = json!(team.settings.full_tests);
     value["full_tests_grant"] = json!(team.full_tests_grant);
@@ -5730,6 +5735,7 @@ mod commands_other;
 #[cfg(test)]
 #[path = "tests/commands_tools.rs"]
 mod commands_tools;
+
 
 
 

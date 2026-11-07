@@ -954,6 +954,9 @@ pub(crate) enum MergeWaitReason {
     Selection,
     Rollback,
     Ancestry,
+    /// Task #267: the landing conflicts on the integration line; a resolve
+    /// task waits for the reviewer, and later landings queue behind it.
+    Conflict,
     #[default]
     #[serde(other)]
     Other,
@@ -1024,6 +1027,14 @@ pub(crate) struct MergeEntry {
     /// Consecutive test-selection failures; the second returns the task.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub selection_failed: u32,
+    /// Task #267: the resolve task a conflict on the integration line became;
+    /// later landings wait behind it, and the landing retries once it is
+    /// decided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolve_task: Option<u32>,
+    /// Task #267: the files the landing conflicted in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflict_files: Vec<String>,
 }
 
 /// U62 (#760): one merge the queue kept, with the range it tested.

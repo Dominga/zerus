@@ -187,6 +187,32 @@ fn all_items(team: &Team) -> Vec<Item> {
             });
         }
     }
+    // Task #267: accepted work that is not on the integration line waits for
+    // the lead: the queue, its resolve task, or a landing nobody made.
+    if active && !team.settings.integration_folder.trim().is_empty() {
+        let landing = super::merge_queue::landing(team);
+        for entry in landing["unlanded"].as_array().into_iter().flatten() {
+            let task = entry["task"].as_u64().unwrap_or_default() as u32;
+            let why = entry["why"].as_str().unwrap_or_default();
+            let resolve = entry["resolve"].as_u64();
+            let next = match resolve {
+                Some(resolve) => format!("The resolve task #{resolve} resolves the conflict; the landing retries once it is decided."),
+                None => "Retry the landing, or resolve it by hand and accept again.".to_owned(),
+            };
+            let target = resolve.unwrap_or(u64::from(task));
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "unlanded",
+                key: format!("unlanded:{task}"),
+                task: Some(task),
+                member: team.name_of(team.task(task).map(|task| task.assignee.as_str()).unwrap_or_default()),
+                since: team.task(task).and_then(|task| task.merge.as_ref()).map_or(team.updated, |entry| entry.at),
+                summary: summary(&format!("#{task} is accepted but not on the integration line: {why}")),
+                command: format!("{} | hgs team retry --json", json!({"request_id":PLACEHOLDER,"team":team.id,"task":target})),
+                detail: format!("Accepted work lands on {} ({}) at acceptance through the queue. {next}", landing["branch"].as_str().unwrap_or_default(), landing["head"].as_str().unwrap_or_default()),
+            });
+        }
+    }
     // A rework keeps its member indefinitely. Show the wait even when that
     // member has an approval or usage limit rather than a stored task wait.
     for task in team.tasks.iter().filter(|task| active && task.rework() && task.status == TaskStatus::Pending
@@ -2441,3 +2467,4 @@ mod told_tests {
         assert_eq!(told, vec!["proposal:p1".to_owned()]);
     }
 }
+

@@ -8486,22 +8486,47 @@ What the test queue makes of its results, by the project's thresholds:
 - Coverage. `hgs test coverage` also names the targets without unique coverage;
   the monthly run of `test-map-coverage.yml` reports them.
 
+#### One integration line (#267)
+
+Owner, 2026-11-08: with an `integration_folder` the team has one line. An
+accepted task's commit lands on it at acceptance through the merge queue, in
+acceptance order (below). A member's new attempt starts from that line's head,
+never from its own previous branch or another member's commit: the task
+branch is created from the integration branch, and a folder that gets a new
+task with uncommitted work commits it on its old branch first, then moves to
+the integration head (only when it is clean after that). Zerus no longer merges
+predecessors' commits into member branches: the `dependencies` prepare step
+reads "skipped" with that reason, so "a member's accepted commit conflicts"
+cannot occur; the team's base is named once, by the integration branch.
+`hgs team status` carries `integration`: `branch`, `head`, `landed`
+task/commit pairs and every accepted task's `unlanded` state and why (queued,
+testing, conflict with its `resolve` task, or no landing queued); the lead's
+inbox lists each with an `unlanded` item, and an accept answers with its
+`landing`.
+
 #### The merge queue (#760)
 
 With `[merge_queue] enabled = true` (the owner may override it), the lead's or
 the owner's accept of a report does not decide it at once: it answers
-`merge_queued`, the task stays undecided with a `merge` entry (status shows it)
-and the worker takes the queue in accept order, one merge under test at a time.
-A check, a phase build, a sub-team's task and work done in the lead's own
-folder are decided at once as before.
+`merge_queued` with a `landing` (`{state:"queued",line,head}`), the task stays
+undecided with a `merge` entry (status shows it) and the worker takes the queue
+in accept order, one merge under test at a time. A check, a phase build, a
+sub-team's task and work done in the lead's own folder are decided at once as
+before.
 
 - The worker merges the commit the author reported (`folder_head`; a clone's
   branch is fetched first) into the lead's folder: a fast-forward or a merge
   commit "Merge accepted work from MEMBER (SHA) (#N): TITLE", hooks and the
   repository's code-running config off. A lead folder with uncommitted changes
   makes it wait, with that note.
-- A conflict is aborted and the task goes back to its author (pinned, Pending,
-  rejected by Zerus) with the conflicting files.
+- Task #267: a conflict is aborted and becomes ONE resolve task for the
+  reviewer (the lead when the team has none), with the two commits and the
+  conflicting files (`merge_resolve_task` in the feed); the conflicting landing
+  keeps its `merge` entry in state `conflict` and stays undecided, and no later
+  landing runs while one conflict waits. Once the resolve task is decided, the
+  landing is back in the queue and retries even when nothing else changed; its
+  commit is on the line already when the resolution landed it, and the queue
+  then keeps it without merging again.
 - A clean merge queues the task's affected tests of `prev..merged` in the
   test queue (forced, never reused) on the merged commit. All green keeps the
   merge and accepts the task; any failure resets the lead branch to `prev`

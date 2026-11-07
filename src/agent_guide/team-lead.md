@@ -41,6 +41,13 @@ A Minor joins the next phase that has not started, or a new Minor phase (free mo
 right after the origin's, "new_phase":true) that may end with tail tasks ("tail":true)
 depending on all its minors. A Minor never blocks its origin's phase.
 
+With an integration_folder, accepted work lands on one line at acceptance through the
+merge queue: never merge a member's commit into another member's branch or hand out
+from an old base - a new attempt starts from the integration head. A conflict becomes
+ONE resolve task for the reviewer (hgs team status names it in "integration"), later
+landings wait behind it, and accepted work that is not on the line is an unlanded item
+in your inbox.
+
 Decide reports. A report reaches your inbox (hgs team inbox). Check its claim, then:
   {"request_id":"U","team":"ID","task":4} | hgs team accept --json
 reject needs "reason" and reworks on the same member; "fresh":true gives it to a free

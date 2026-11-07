@@ -15,10 +15,12 @@ const mac=/Mac/.test(navigator.platform);
 const key=(el:HTMLElement,key:string,extra:KeyboardEventInit={})=>el.dispatchEvent(new KeyboardEvent("keydown",{key,bubbles:true,cancelable:true,...extra,...(mac && extra.ctrlKey?{ctrlKey:false,metaKey:true}:{})}));
 installTextEditingKeys(window,mac);
 const [dialog,setDialog]=createSignal(""),[epoch,setEpoch]=createSignal(1);
+const [number,setNumber]=createSignal(10);
 const [change,setChange]=createSignal(""),[ime,setIme]=createSignal("");
 let inputs=0;
 render(()=><><Composer/><TextInput id="dialog" value={dialog()} historyKey={epoch()} onInput={e=>{inputs++;setDialog(e.currentTarget.value);}}/>
  <TextInput id="change" value={change()} onChange={e=>setChange(e.currentTarget.value)}/>
+ <TextInput id="number" type="number" value={number()} onInput={e=>setNumber(e.currentTarget.valueAsNumber)}/>
  <TextArea id="ime" value={ime()} onInput={e=>setIme(e.currentTarget.value)}/></>,document.getElementById("fixture")!);
 const editor=()=>document.querySelector<HTMLTextAreaElement>(".cmp-editor")!;
 async function run(){
@@ -43,6 +45,11 @@ async function run(){
  const c=document.querySelector<HTMLInputElement>("#change")!;c.focus();command("insertText","raw typing");await tick();eq("onChange field keeps raw typing",c.value,"raw typing");
  const i=document.querySelector<HTMLTextAreaElement>("#ime")!;i.focus();i.dispatchEvent(new CompositionEvent("compositionstart",{bubbles:true}));setIme("late remote");await tick();eq("IME defers model replacement",i.value,"");
  command("insertText","日本語");i.dispatchEvent(new CompositionEvent("compositionend",{bubbles:true}));await tick(10);eq("final IME input wins stale model",i.value,"日本語");
+ const n=()=>document.querySelector<HTMLInputElement>("#number")!;n().focus();n().select();command("delete");await tick();
+ eq("numeric field can become empty",n().value,"");key(n(),"z",{ctrlKey:true});eq("empty numeric field undo",n().value,"10");
+ key(n(),"y",{ctrlKey:true});eq("empty numeric field redo",n().value,"");
+ command("insertText","0012");eq("numeric model echoes preserve raw leading zeros",n().value,"0012");
+ key(n(),"z",{ctrlKey:true});eq("raw numeric undo",n().value,"");key(n(),"y",{ctrlKey:true});eq("raw numeric redo",n().value,"0012");
  // No synthetic key here: the Python driver also runs real X11 key events.
  (window as any).textEditFixture={results,editor,model,replaceText,sends};
  (window as any).webkit?.messageHandlers.result.postMessage(JSON.stringify({stage:"ready",results}));

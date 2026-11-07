@@ -55,7 +55,13 @@ function field(props: InputProps | AreaProps, area: boolean) {
       editor.removeEventListener("compositionstart", begin); editor.removeEventListener("compositionend", end);
     });
     createRenderEffect(() => {
-      const value = String(local.value ?? ""), revision = local.valueRevision;
+      const incoming = local.value, revision = local.valueRevision;
+      // A numeric model echoes NaN for a temporarily empty/invalid number.
+      // Preserve the browser's raw edit (including leading zeros); serializing
+      // NaN as text would sanitize to empty by replacing this node/history.
+      const numeric = editor instanceof HTMLInputElement && editor.type === "number" && typeof incoming === "number";
+      const value = numeric && !Number.isFinite(incoming) ? ""
+        : numeric && editor.value !== "" && Number(editor.value) === incoming ? editor.value : String(incoming ?? "");
       if (composition() || composing || (value === lastIncoming && revision === lastRevision)) return;
       lastIncoming = value; lastRevision = revision;
       if (editor.value === value) return;

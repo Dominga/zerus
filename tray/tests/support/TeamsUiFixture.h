@@ -792,6 +792,16 @@ if a[:2]==['team','list']:
  print(json.dumps({'items':[t]}))
 elif a[:2]==['team','status']:
  import os,time
+ if 'task' in body:
+  for _ in range(300):
+   if not os.path.exists(__file__+'.taskhold'):break
+   time.sleep(.1)
+  if os.path.exists(__file__+'.taskrefuse'):print('Archive unavailable',file=sys.stderr);sys.exit(1)
+  sys.stdout.write(open(__file__+'.task').read());sys.exit(0)
+ for flag,suffix in [('archived_phases','.archivephases'),('archived_phase','.archivetasks')]:
+  if flag in body:
+   pages=json.load(open(__file__+suffix))
+   print(json.dumps(pages.get(str(body.get('cursor',0)),{'items':[],'next_cursor':None})));sys.exit(0)
  # A test holds the status read back while `.statushold` exists (30 s at most).
  for _ in range(300):
   if not os.path.exists(__file__+'.statushold'):break
@@ -949,6 +959,7 @@ inline void TeamsUiFixture::setUp()
     QFile::remove(script() + ".draftrefuse");
     QFile::remove(script() + ".createrefuse");
     QFile::remove(script() + ".statushold");
+    for (const char *suffix : {".task", ".taskhold", ".taskrefuse", ".archivephases", ".archivetasks"}) QFile::remove(script() + QLatin1String(suffix));
     for (const char *suffix : {".swaphold", ".swaprefuse", ".swapreceipt", ".accounts", ".models"}) QFile::remove(script() + QLatin1String(suffix));
     QFile::remove(script() + ".refuse");
     QFile::remove(script() + ".refuseapply");

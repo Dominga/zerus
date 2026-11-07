@@ -157,6 +157,11 @@ pub struct Batch {
     /// Present only for the default-off desktop-service frontend mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desktop_service: Option<crate::desktop::service::Snapshot>,
+    /// Task 235: computers whose rows came from the last session list on
+    /// disk (when it was saved), or `None` once their live listing replaced
+    /// them. The Tauri pump fills it; the Coalescer leaves it empty.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub stale: std::collections::BTreeMap<String, Option<f64>>,
 }
 
 impl Batch {
@@ -174,6 +179,7 @@ impl Batch {
             && self.groups.is_empty()
             && self.grouping.is_none()
             && self.desktop_service.is_none()
+            && self.stale.is_empty()
     }
 }
 

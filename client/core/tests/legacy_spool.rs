@@ -126,7 +126,7 @@ fn an_older_cli_listing_spools_and_replays_through_the_existing_runner() {
     assert_eq!((result.rows, rows), (1000, 1000));
     assert!(!path.exists());
     assert_eq!(pool.active(), 0);
-    assert_eq!(fake.runs("studio", &["ls", "--json"]).len(), 1);
+    assert_eq!(fake.runs("studio", &["ls", "--json", "--local", "--no-archives"]).len(), 1);
     assert!(fake.runs("studio", &["watch", "--json"]).is_empty());
 }
 

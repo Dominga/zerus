@@ -277,6 +277,8 @@ export interface Batch {
   composer_events?: ComposerEvent[];
   /** The Teams views that changed (core batch.rs `TeamsOut`), at most one per computer and key. */
   teams?: TeamsOut[];
+  /** Task 235: computers whose rows came from the last list on disk (saved at, epoch seconds), or null once their live listing replaced them. */
+  stale?: Record<string, number | null>;
 }
 
 /** A row of the Processes tab (processes.rs `RowView`). */

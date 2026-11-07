@@ -361,3 +361,10 @@
 .acct-switch-notice { margin: 4px; padding: 6px 8px; color: var(--z-color-text-2); font-size: var(--fs-xs); }
 .tchip.locked { opacity: .6; cursor: not-allowed; }
 .acct-switch-row:disabled { cursor: default; }
+
+/* Task 235: rows from the last session list on disk, until the live listing
+   replaces them, and the status bar's note about them. */
+@layer components {
+  .rowhit.stale { opacity: .62; }
+  .statusbar .stale-note { color: var(--z-color-warn); overflow: hidden; text-overflow: ellipsis; }
+}

@@ -13,6 +13,18 @@ const row = (key: string, name: string, extra: Partial<ViewRow> = {}, computer =
 const batchOf = (part: Partial<Batch>): Batch => ({ ...emptyBatch(), ...part });
 
 describe("applyBatch", () => {
+  it("Task 235: marks a computer's cached rows stale until its live listing replaces them", () => {
+    createRoot((dispose) => {
+      const { catalog, applyBatch } = createCatalog();
+      applyBatch(batchOf({ replaces: [{ computer: "", rows: [row("run:a", "codex/p/a"), row("run:old", "codex/p/old")] }], stale: { "": 1_790_000_000 } }));
+      expect(catalog.stale[""]).toBe(1_790_000_000);
+      expect(catalog.order).toHaveLength(2);
+      applyBatch(batchOf({ replaces: [{ computer: "", rows: [row("run:a", "codex/p/a")] }], stale: { "": null } }));
+      expect("" in catalog.stale).toBe(false);
+      expect(catalog.order).toEqual([rowId("", "run:a")]);
+      dispose();
+    });
+  });
   it("retains row identity and order while a service source reconnects", () => {
     createRoot((dispose) => {
       const { catalog, applyBatch } = createCatalog();

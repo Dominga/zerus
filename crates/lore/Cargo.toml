@@ -11,6 +11,11 @@ publish = false
 name = "lore"
 path = "src/main.rs"
 
+[features]
+# Build with candle's CUDA backend; the device is picked at runtime (see
+# embed::models::device) and reported by `lore model status`.
+cuda = ["candle-core/cuda"]
+
 [dependencies]
 anyhow = "1"
 fs2 = "0.4"

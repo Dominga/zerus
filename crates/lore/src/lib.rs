@@ -27,6 +27,7 @@ pub mod refs;
 pub mod schema;
 pub mod search;
 pub mod secrets;
+pub mod stats;
 pub mod store;
 pub mod working;
 pub mod writer;

@@ -134,7 +134,7 @@ impl Config {
             trailers: Vec::new(),
             embed_provider: "ollama".into(),
             embed_url: "http://127.0.0.1:11434".into(),
-            embed_model: "nomic-embed-text".into(),
+            embed_model: "auto".into(),
             embed_timeout: 2.0,
             doc_prefix: None,
             query_prefix: None,
@@ -146,8 +146,19 @@ impl Config {
         }
     }
 
-    pub fn lore_dir(&self) -> PathBuf {
-        self.root.join(&self.dir)
+    /// The embedding model this configuration selects (`auto` follows the
+    /// device: bge-m3 with a GPU, multilingual-e5-base on the CPU).
+    pub fn embedding_model(&self) -> crate::embed::EmbeddingModel {
+        let name = self.embed_model.trim();
+        if name.is_empty() || name == "auto" {
+            let (device, _) = crate::embed::models::device();
+            return crate::embed::EmbeddingModel::default_for(&device);
+        }
+        let (device, _) = crate::embed::models::device();
+        crate::embed::EmbeddingModel::from_name(name).unwrap_or_else(|| crate::embed::EmbeddingModel::default_for(&device))
+    }
+
+    pub fn lore_dir(&self) -> PathBuf {        self.root.join(&self.dir)
     }
 
     /// nomic-embed-text is trained with task prefixes; other models get none
@@ -305,6 +316,12 @@ pub fn parse(data: &toml::Value, root: &Path, place: &str) -> Result<Config, Lor
     }
     if let Some(model) = embed.get("model") {
         config.embed_model = model.as_str().map(str::to_owned).unwrap_or_else(|| model.to_string());
+    }
+    if config.embed_model.trim() != "auto" && crate::embed::EmbeddingModel::from_name(&config.embed_model).is_none() {
+        bad.push(format!(
+            "`embed.model` must be bge-m3, multilingual-e5-base, nomic-embed-text-v1.5 or auto, not `{}`",
+            config.embed_model
+        ));
     }
     if let Some(timeout) = embed.get("timeout") {
         config.embed_timeout = timeout.as_float().or_else(|| timeout.as_integer().map(|n| n as f64)).unwrap_or(config.embed_timeout);

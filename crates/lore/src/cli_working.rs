@@ -135,6 +135,7 @@ pub(super) fn tiers(ctx: &mut Ctx, query: &str, durable: &[search::Found], notes
         return Ok(None);
     }
     // (score, tier order, position, item): durable first on a tie.
+    #[allow(clippy::large_enum_variant)]
     enum Item<'a> {
         Durable(&'a search::Found),
         Working(Entry, Vec<String>),

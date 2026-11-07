@@ -11,7 +11,7 @@
 //! model when it is installed (the user cache, or `LORE_MODEL_DIR`) and skips
 //! with a note otherwise, so `cargo test` works on a machine that never
 //! downloaded the weights.
-use zerus_lore::embed::{self, Embedder, ModelSource, DIMENSIONS, DOCUMENT_PREFIX, QUERY_PREFIX};
+use zerus_lore::embed::{self, EmbeddingModel, Embedder, ModelSource, DIMENSIONS, DOCUMENT_PREFIX, QUERY_PREFIX};
 
 const VECTORS: &str = include_str!("reference/lore-parity/vectors.json");
 
@@ -102,7 +102,7 @@ fn a_missing_model_answers_no_embeddings() {
 #[test]
 fn the_model_vectors_match_the_python_ones() {
     let fixture = fixture();
-    let embedder = match Embedder::open_cached() {
+    let embedder = match Embedder::open_model(EmbeddingModel::Nomic, ModelSource::Cache) {
         Ok(embedder) => embedder,
         Err(error) => {
             eprintln!("skipping the parity run: the model is not installed ({error})");

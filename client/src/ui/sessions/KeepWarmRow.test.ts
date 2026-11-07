@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { createComponent } from "solid-js";
+import { createComponent, createSignal } from "solid-js";
 import { render } from "solid-js/web";
 const native = vi.hoisted(() => ({ setKeepWarm: vi.fn() }));
 vi.mock("../../bridge", () => ({ inTauri: () => true, setKeepWarm: native.setKeepWarm }));
@@ -77,4 +77,43 @@ it("an older computer without keep-warm shows an update hint and an offline one 
   dispose!();
   const offline = mount(session(warm()), {}, false);
   expect(offline.toggle().disabled).toBe(true);
+});
+
+it("a reply for the previously selected session never changes the newly selected one", async () => {
+  let resolve!: (value: Record<string, unknown>) => void;
+  native.setKeepWarm.mockImplementation(() => new Promise((done) => { resolve = done; }));
+  const alpha = { ...session(warm()), key: "alpha", name: "codex/p/alpha" } as Session;
+  const beta = { ...session(warm({ revision: 7 })), key: "beta", name: "codex/p/beta", runId: "run-b", conversationId: "conversation-b" } as Session;
+  const [selected, select] = createSignal<Session>(alpha);
+  dispose = render(() => createComponent(KeepWarmRow, { get session() { return selected(); }, inspected: { keep_warm: { ...warm(), supported: true } }, online: true }), host);
+  const toggle = () => host.querySelector<HTMLButtonElement>("button[role=switch]")!;
+  toggle().click();
+  await flush();
+  expect(toggle().disabled).toBe(true);
+  select(beta);
+  await flush();
+  expect(toggle().disabled).toBe(false);
+  resolve({ ...warm({ enabled: true, until: null, revision: 4, state: "waiting" }), supported: true });
+  await flush();
+  expect(native.setKeepWarm).toHaveBeenCalledTimes(1);
+  expect(toggle().getAttribute("aria-checked")).toBe("false");
+  expect(host.querySelector(".kw-value")).toBeNull();
+  expect(host.querySelector("[role=alert]")).toBeNull();
+});
+
+it("a late failure for the previously selected session shows nothing on the new one", async () => {
+  let reject!: (error: Error) => void;
+  native.setKeepWarm.mockImplementation(() => new Promise((_, fail) => { reject = fail; }));
+  const alpha = { ...session(warm()), key: "alpha" } as Session;
+  const beta = { ...session(warm()), key: "beta", conversationId: "conversation-b" } as Session;
+  const [selected, select] = createSignal<Session>(alpha);
+  dispose = render(() => createComponent(KeepWarmRow, { get session() { return selected(); }, inspected: { keep_warm: { ...warm(), supported: true } }, online: true }), host);
+  host.querySelector<HTMLButtonElement>("button[role=switch]")!.click();
+  await flush();
+  select(beta);
+  await flush();
+  reject(new Error("At most 64 sessions on one computer can keep their cache warm."));
+  await flush();
+  expect(host.querySelector("[role=alert]")).toBeNull();
+  expect(host.querySelector<HTMLButtonElement>("button[role=switch]")!.disabled).toBe(false);
 });

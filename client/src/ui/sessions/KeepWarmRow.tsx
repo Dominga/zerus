@@ -22,8 +22,11 @@ export function KeepWarmRow(props: { session: Session; inspected: unknown; onlin
   const [now, setNow] = createSignal(Date.now() / 1000);
   const timer = setInterval(() => setNow(Date.now() / 1000), 30_000);
   onCleanup(() => clearInterval(timer));
-  // A confirmed change belongs to its session and conversation only.
-  createEffect(on(() => `${props.session.key}\n${props.session.conversationId ?? ""}`, () => { setConfirmed(undefined); setDraft(undefined); setError(""); }, { defer: true }));
+  // A change belongs to the computer, row, run and conversation it was made
+  // for. Selecting another target retires any reply still on its way.
+  let generation = 0;
+  const target = () => `${props.session.computer}\n${props.session.key}\n${props.session.runId ?? ""}\n${props.session.conversationId ?? ""}`;
+  createEffect(on(target, () => { generation++; setConfirmed(undefined); setDraft(undefined); setError(""); setBusy(false); }, { defer: true }));
 
   const state = createMemo(() => mergeKeepWarm(props.session.keepWarm, keepWarmOf(record(props.inspected).keep_warm), confirmed()));
   const on_ = () => !!state()?.enabled;
@@ -38,18 +41,22 @@ export function KeepWarmRow(props: { session: Session; inspected: unknown; onlin
 
   async function change(choice: bridge.KeepWarmChoice) {
     const s = props.session;
+    const mine = ++generation;
     setBusy(true);
     setError("");
     try {
-      const target = { computer: s.computer, name: s.name, run_id: s.runId ?? "", conversation_id: s.conversationId ?? "" };
-      const result = keepWarmOf(await bridge.setKeepWarm(target, choice, state()?.revision ?? 0));
-      if (result) setConfirmed(result);
+      const request = { computer: s.computer, name: s.name, run_id: s.runId ?? "", conversation_id: s.conversationId ?? "" };
+      const result = keepWarmOf(await bridge.setKeepWarm(request, choice, state()?.revision ?? 0));
+      if (mine === generation && result) setConfirmed(result);
     } catch (failure) {
+      if (mine !== generation) return;
       const text = errorText(failure);
       setError(text === "busy" ? tr("A keep-warm change is already in progress.") : tr(text));
     } finally {
-      setBusy(false);
-      setDraft(undefined);
+      if (mine === generation) {
+        setBusy(false);
+        setDraft(undefined);
+      }
     }
   }
   const choiceAt = (position: number): bridge.KeepWarmChoice => (position >= ALWAYS ? { kind: "always" } : { kind: "hours", hours: position });

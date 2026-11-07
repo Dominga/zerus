@@ -68,4 +68,23 @@ describe("waiting notices", () => {
     notices.observe([], true);
     expect(out.withdrawn).toEqual(["team-waiting:a", "team-waiting:b"]);
   });
+
+  it("announces a new proposal card once, and withdraws it when it is decided (task 217)", () => {
+    const out = port();
+    const notices = new WaitingNotices(out);
+    const proposal: TeamWaitingItem = {
+      id: "team-1/owner_word_asked/proposal-p1", kind: "owner_word_asked", team: "team-1", team_name: "Live",
+      title: "The lead proposes: max_members 6 → 8", action: "decide_proposal", since: 1, proposal: "p1", detail: { proposal: "p1" },
+    };
+    // The desktop notification the owner sees when the lead's Activity draws a new card.
+    expect(notices.observe([proposal], true)).toEqual([{
+      token: "team-waiting:team-1/owner_word_asked/proposal-p1", title: "Waiting for you in Live", body: proposal.title,
+    }]);
+    expect(out.posted.map((posted) => posted.body)).toEqual([proposal.title]);
+    // One notice per card, never again for it.
+    expect(notices.observe([proposal], true)).toEqual([]);
+    // Decided: the complete read no longer lists it, so its notice goes.
+    notices.observe([], true);
+    expect(out.withdrawn).toEqual(["team-waiting:team-1/owner_word_asked/proposal-p1"]);
+  });
 });

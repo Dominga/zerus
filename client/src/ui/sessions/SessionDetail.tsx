@@ -10,6 +10,8 @@ import { pageHidden } from "../../store/visibility";
 import { ProcessesTab } from "./Processes";
 import { TeamTab } from "../teams/TeamTab";
 import { WaitingBanner } from "../teams/Waiting";
+import { LeadProposals } from "../teams/ProposalCards";
+import { teamAnswers } from "../teams/leadTeam";
 import { selectedTeam } from "../../store/teams";
 import { drops } from "../../store/drops";
 import { processes, processesTab } from "../../store/processes";
@@ -260,7 +262,7 @@ export function SessionDetail() {
           <div class="work-main">
             <div class="detail-tabs tabs" role="tablist">
               <For each={tabs().filter((t) => t.show)}>{(t) => (
-                <button class="tab" role="tab" classList={{ on: detailTab() === t.id }} aria-selected={detailTab() === t.id} onClick={() => { if (t.id === "terminal") terminal.opened(); setDetailTab(t.id); }}>{t.label}<Show when={t.id === "team" && (selectedTeam()?.attention ?? 0) > 0}><span class="tab-count" data-tip={tr("Needs your answer")}>?{selectedTeam()!.attention}</span></Show></button>
+                <button class="tab" role="tab" classList={{ on: detailTab() === t.id }} aria-selected={detailTab() === t.id} onClick={() => { if (t.id === "terminal") terminal.opened(); setDetailTab(t.id); }}>{t.label}<Show when={t.id === "team" && teamAnswers(selectedTeam()) > 0}><span class="tab-count" data-tip={tr("Needs your answer")}>?{teamAnswers(selectedTeam())}</span></Show></button>
               )}</For>
               <span class="grow" />
               <Show when={!inspectorOpen()}><button class="icon-btn small" data-cmd="show-side-panel" aria-label={tr("Show side panel")} data-tip={inspectorHint(tr("Show tasks, plan, agents, details and worktrees"))} data-tip-pos="left" onClick={() => setInspectorOpen(true)}><Icon name="panel-right" size={15} /></button></Show>
@@ -282,7 +284,7 @@ export function SessionDetail() {
                         <p class="qcard-body">{tr("Sign in to DeepSeek to start using this session. Complete sign-in in the official DeepSeek UI, then return here.")}</p>
                         <div class="qcard-actions"><button class="btn small" onClick={() => nativeRoute(selected())()}>{tr("Sign in to DeepSeek…")}</button></div>
                       </div></div></Show>
-                      <HeldMessage /><QueuePanel /><QuestionCard />
+                      <HeldMessage /><QueuePanel /><LeadProposals /><QuestionCard />
                     </Show>
                     <div class="cmp-col"><Composer /></div>
                   </div>

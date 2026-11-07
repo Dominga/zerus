@@ -8,8 +8,7 @@ import type { TeamWaitingItem } from "../types";
 const item = (id: string, proposal: string): TeamWaitingItem =>
   ({ id: `t1/owner_word_asked/${id}`, kind: "owner_word_asked", team: "t1", team_name: "Live", title: id, action: "decide_proposal", since: 1, proposal, detail: {} });
 
-describe("Waiting for you after a confirmed decision", () => {
-  it("drops the decided item at once and keeps it gone while an older read lists it", () => {
+describe("Waiting for you after a confirmed decision", () => {  it("drops the decided item at once and keeps it gone while an older read lists it", () => {
     const listed = [item("proposal-p1", "p1"), item("proposal-p2", "p2")];
     teams.apply([{ computer: "", key: "waiting", kind: "waiting", payload: { items: listed, total: 2, more: false } }]);
     expect(waiting()?.items.map((shown) => shown.id)).toEqual(["t1/owner_word_asked/proposal-p1", "t1/owner_word_asked/proposal-p2"]);
@@ -25,5 +24,22 @@ describe("Waiting for you after a confirmed decision", () => {
     // The store's read without p1.
     teams.apply([{ computer: "", key: "waiting", kind: "waiting", payload: { items: [listed[1]], total: 1, more: false } }]);
     expect(waiting()?.total).toBe(1);
+  });
+
+  // Task 217: a new card is a new Waiting item, and the Waiting badge the rail
+  // shows counts it from that read (the desktop notification is waitingNotices.test.ts).
+  it("the Waiting badge counts a new proposal card until it is decided", () => {
+    const item = (proposal: string): TeamWaitingItem =>
+      ({ id: `t1/owner_word_asked/proposal-${proposal}`, kind: "owner_word_asked", team: "t1", team_name: "Live",
+        title: "The lead proposes: max_members 6 → 8", action: "decide_proposal", since: 1, proposal, detail: { proposal } });
+    teams.apply([{ computer: "", key: "waiting", kind: "waiting", payload: { items: [], total: 0, more: false } }]);
+    expect(waiting()?.total).toBe(0);
+    const card = item("p1");
+    teams.apply([{ computer: "", key: "waiting", kind: "waiting", payload: { items: [card], total: 1, more: false } }]);
+    expect(waiting()?.total).toBe(1);
+    expect(waiting()?.items.map((shown) => shown.proposal)).toEqual(["p1"]);
+    // Decided: the next complete read drops it and the badge falls back.
+    teams.apply([{ computer: "", key: "waiting", kind: "waiting", payload: { items: [], total: 0, more: false } }]);
+    expect(waiting()?.total).toBe(0);
   });
 });

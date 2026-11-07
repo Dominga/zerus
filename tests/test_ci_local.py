@@ -70,6 +70,24 @@ class WorkflowBodies(unittest.TestCase):
         self.assertIsNone(CI.infrastructure(step, online=True))
         self.assertEqual(CI.infrastructure(step, online=False)[0], "not run")
 
+    def test_only_complete_known_infrastructure_bodies_are_substituted(self):
+        known = [
+            'python3 scripts/ci/ubuntu-disk.py prepare',
+            'python3 scripts/ci/ubuntu-disk.py report after-root-tests',
+            CI.RUST_CACHE.format(toolchain=' +1.99.1'),
+            'rustup toolchain install 1.99.1 --profile minimal --component clippy',
+            *CI.APT_PREREQUISITES,
+        ]
+        for body in known:
+            self.assertEqual(CI.infrastructure(dict(run=body), online=True)[0], 'local')
+            for suffix in ('; printf MISSED; exit 19', '\nprintf MISSED\nexit 19\n'):
+                with self.subTest(body=body, suffix=suffix):
+                    result = CI.infrastructure(dict(name='Rust cache identity', run=body + suffix), online=True)
+                    self.assertTrue(result is None or result[0] == 'not run', result)
+        self.assertIsNone(CI.infrastructure(dict(name='Rust cache identity', run='printf MISSED; exit 19'), online=True))
+        mixed = dict(uses='actions/setup-node@123', run='exit 19', with_={})
+        self.assertEqual(CI.infrastructure(mixed, online=True)[0], 'not run')
+
 
 @unittest.skipUnless(sys.platform == "linux" and shutil.which("bwrap") and shutil.which("dbus-run-session")
                      and hasattr(os, "sched_getaffinity"), "requires unprivileged Linux namespaces")
@@ -81,6 +99,7 @@ class RealIsolation(unittest.TestCase):
         self.args = SimpleNamespace(output=self.base / "out", cache=self.base / "cache",
                                     target=None, workers=1, max_load=99999, min_free_gib=0,
                                     online=False, slirp=None, android_cache=None, tool_bin=[])
+        self.args.plan, self.args.match = False, None
         self.report = {"jobs": [], "completed": False}
         self.runner = CI.Runner(self.args, self.report)
         for folder in (self.runner.output, self.runner.cache / "cargo", self.runner.workspace,
@@ -100,6 +119,19 @@ class RealIsolation(unittest.TestCase):
             self.assertEqual(row["log_sha256"], CI.digest((self.runner.output / row["log"]).read_bytes()))
         self.assertEqual(job["steps"][0]["exit_code"], 19)
         self.assertEqual(CI.summarize(job["steps"]), "fail")
+
+    def test_a_compound_cache_step_executes_and_cannot_make_a_job_pass(self):
+        workflow = {'jobs': {'quick': {'runs-on': 'ubuntu-24.04', 'steps': [
+            {'name': 'real check', 'run': 'printf first > first'},
+            {'name': 'Rust cache identity', 'run': 'echo cache-identity; printf MISSED-CHECK > missed; exit 19'},
+            {'name': 'later check', 'run': 'printf later > later'},
+        ]}}}
+        job = CI.plan(workflow, '')[0]
+        CI.run_job(self.runner, self.args, self.report, job)
+        self.assertEqual(job['status'], 'fail')
+        self.assertEqual(job['steps'][1]['exit_code'], 19)
+        self.assertEqual((self.runner.workspace / 'missed').read_text(), 'MISSED-CHECK')
+        self.assertEqual((self.runner.workspace / 'later').read_text(), 'later')
 
     def test_private_home_pid_net_and_bus_without_inherited_selection(self):
         canary = self.base / "owner-canary"

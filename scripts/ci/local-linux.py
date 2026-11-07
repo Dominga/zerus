@@ -26,6 +26,15 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ".github/workflows/checks.yml"
 RUST = "1.99.1"
 SUPPORTED = {"quick", "client-frontend", "cli", "client-native-linux", "connector", "relay", "arch-package", "android"}
+RUST_CACHE = ('echo "rustc=$(rustc{toolchain} -Vv | git hash-object --stdin | cut -c1-16)" >> "$GITHUB_OUTPUT"\n'
+              'echo "epoch=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"')
+APT_PREREQUISITES = {
+    'sudo apt-get update && sudo apt-get install -y libevent-dev libncurses-dev bison pkg-config fish',
+    'sudo apt-get update && sudo apt-get install --no-install-recommends -y libasound2-dev libgstreamer1.0-dev '
+    'libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good '
+    'gstreamer1.0-plugins-bad gstreamer1.0-libav libgtk-3-dev libwebkit2gtk-4.1-dev '
+    'libayatana-appindicator3-dev librsvg2-dev xvfb dbus-bin dbus-daemon',
+}
 
 
 def digest(data):
@@ -84,6 +93,8 @@ def cli_units(body):
 def infrastructure(step, online=False):
     """Return a local substitution or an unsupported prerequisite, explicitly."""
     action = step.get("uses", "")
+    if action and "run" in step:
+        return "not run", "mixed action and command body; no local substitution"
     if action.startswith("actions/setup-node@"):
         return None if online else ("not run", "online mode supplies the requested official Node major")
     if action.startswith(("actions/checkout@", "actions/cache/",
@@ -92,14 +103,19 @@ def infrastructure(step, online=False):
     if action:
         return "not run", "unsupported GitHub action: " + action
     body = step.get("run", "")
-    name = step.get("name", "")
-    if "scripts/ci/ubuntu-disk.py" in body or name.endswith("cache identity"):
+    exact = body.rstrip("\n")
+    disk = re.fullmatch(r"python3 scripts/ci/ubuntu-disk\.py (?:prepare|relay-before-image|report [a-z0-9-]+)", exact)
+    cache = exact in {RUST_CACHE.format(toolchain=toolchain) for toolchain in ("", " +1.99.1")}
+    cache |= exact == 'echo "epoch=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"'
+    if disk or cache:
         return "local", "hosted disk/cache maintenance excluded; local disk floor enforced"
-    if body.startswith("rustup toolchain install") and len(body.splitlines()) == 1:
+    toolchain = re.fullmatch(r"rustup toolchain install 1\.99\.1 --profile minimal"
+                            r"(?: --component rustfmt)?(?: --component clippy)?", exact)
+    if toolchain or exact == "rustup toolchain install stable --profile minimal && rustup default stable":
         return "local", "preinstalled pinned toolchain; no host toolchain mutation"
     if body.startswith("bash scripts/ci/install-tmux.sh"):
         return None if online else ("not run", "pinned CI tmux build requires online provisioning")
-    if body.startswith("sudo apt-get") and len(body.splitlines()) == 1:
+    if exact in APT_PREREQUISITES:
         return "local", "Arch tools supplied locally; no host package installation"
     if ("sudo " in body or "docker " in body or "${{" in body):
         return "not run", "requires service, container, or unsupported workflow expression"
@@ -155,7 +171,7 @@ def plan(workflow, cli, selected=None, online=False):
                             local_provisioning="preinstalled dbus-daemon replaces only the apt installation line")
             if step.get("uses", "").startswith("actions/setup-node@") and online:
                 major = str(step.get("with", {}).get("node-version", ""))
-                if re.fullmatch(r"[1-9][0-9]", major):
+                if re.fullmatch(r"[1-9][0-9]", major) and "run" not in step:
                     step = dict(step, name=f"Supply official Node {major}", run=(
                         f'python3 /mnt/runner/local_node.py {major} "$RUNNER_TEMP/node"\n'
                         'echo "$RUNNER_TEMP/node/bin" >> "$GITHUB_PATH"\n'

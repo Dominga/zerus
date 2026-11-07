@@ -1035,6 +1035,8 @@ pub(crate) const PHASE_CHECK_TIMEOUT: std::time::Duration = std::time::Duration:
 #[cfg(test)]
 thread_local! {
     pub(crate) static BEFORE_PREREQUISITE_GIT: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
+    pub(crate) static PHASE_CHECK_TIMEOUT_OVERRIDE: std::cell::Cell<Option<std::time::Duration>> =
+        const { std::cell::Cell::new(None) };
 }
 
 fn prerequisite_git(folder: &std::path::Path, args: &[&str], overall: std::time::Instant)
@@ -1064,6 +1066,10 @@ fn prerequisite_branch(folder: &std::path::Path, branch: &str, deadline: std::ti
 /// capped by the caller's overall deadline; repeated refs share cached results.
 pub(crate) fn phase_checks(team: &Team, phase: &Phase, deadline: std::time::Instant) -> super::model::PhaseCheckResult {
     use super::model::{PhaseCheckResult, Prerequisite};
+    #[cfg(test)]
+    let deadline = PHASE_CHECK_TIMEOUT_OVERRIDE.with(|timeout| {
+        timeout.get().map_or(deadline, |timeout| std::time::Instant::now() + timeout)
+    });
     let mut result = PhaseCheckResult::default();
     let tasks: Vec<&Task> = team.tasks.iter().filter(|task| task.phase == phase.n).collect();
     if team.settings.phase_checks.critical_path_target {

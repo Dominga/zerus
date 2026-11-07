@@ -1967,6 +1967,7 @@ fn phase_task_prerequisites_use_phase_order_and_never_add_dependencies() {
 
 #[test]
 fn phase_git_prerequisites_recheck_ancestry_on_approval() {
+    let _guard = crate::state::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let git = |args: &[&str]| {
         let output = std::process::Command::new("git").arg("-C").arg(dir.path()).args(args)
@@ -1994,10 +1995,15 @@ fn phase_git_prerequisites_recheck_ancestry_on_approval() {
     git(&["branch", "tag-only", &base]);
     git(&["merge", "--ff-only", "prerequisite"]);
     // Six ancestry reads together exceed five seconds, but each has its own window.
+    // Leave scheduling headroom for the injected delays under parallel test load.
+    plan::PHASE_CHECK_TIMEOUT_OVERRIDE.with(|timeout| {
+        timeout.set(Some(std::time::Duration::from_secs(60)));
+    });
     plan::BEFORE_PREREQUISITE_GIT.with(|delay| delay.set(Some(|| std::thread::sleep(std::time::Duration::from_secs(1)))));
     let started = std::time::Instant::now();
     let approved = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &BTreeSet::new(), &mut events);
     plan::BEFORE_PREREQUISITE_GIT.with(|delay| delay.set(None));
+    plan::PHASE_CHECK_TIMEOUT_OVERRIDE.with(|timeout| timeout.set(None));
     approved.unwrap();
     assert!(started.elapsed() >= std::time::Duration::from_secs(6));
     assert!(team.phases[0].checks.as_ref().unwrap().unresolved.is_empty());

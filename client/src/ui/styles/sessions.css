@@ -392,5 +392,9 @@
   :root[data-attention-edge="tint"] .scard[data-emphasis="draft"] { background: color-mix(in srgb, var(--z-list-edge-draft) 12%, transparent); }
   :root[data-agent-mark="glyph"] .agent-badge:not(.narrow) { background: transparent; padding-left: 18px; }
   :root[data-agent-mark="glyph"] .agent-badge .ab-label { display: none; }
+  /* Set parent… (zerus-sa9qn.9): a bounded, scrolling list of the computer's sessions. */
+  .parent-choices { display: flex; flex-direction: column; gap: 2px; max-height: 260px; overflow-y: auto; }
+  .parent-choices .menu-item.on { background: var(--z-color-card-selected); }
+  .warn-text { color: var(--z-list-tone-attention); }
 }
 

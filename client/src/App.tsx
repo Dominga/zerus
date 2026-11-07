@@ -16,6 +16,7 @@ import { MenuLayer, Toasts } from "./ui/components/Overlays";
 import { ActionDialogs } from "./ui/sessions/ActionDialogs";
 import { newSessionFromShortcut, newSessionOpened } from "./ui/sessions/newsession-view";
 import { OrganizationDialogs } from "./ui/sessions/OrganizationDialogs";
+import { ParentDialogs } from "./ui/sessions/ParentDialogs";
 import { SessionList } from "./ui/sessions/SessionList";
 import { SessionDetail } from "./ui/sessions/SessionDetail";
 import { CreationPanel } from "./ui/sessions/CreationPanel";
@@ -162,6 +163,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
       <Show when={shortcutHelpOrigin()}><Suspense><ShortcutHelpDialog /></Suspense></Show>
       <Show when={newSessionOpened()}><Suspense><NewSessionDialog /></Suspense></Show>
       <OrganizationDialogs />
+      <ParentDialogs />
       <Suspense><PerfHost /></Suspense>
     </div>
   );

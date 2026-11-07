@@ -148,7 +148,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs @host download --path REMOTE_PATH --output LOCAL_FILE   download a file through configured SSH
        hgs [@host] answer <session> --json   answer an exact pending question from JSON stdin
        hgs [@host] answer <session> --observe --json   read a pending question's consent identity, changing nothing
-       hgs [@host] parent <session> --json   read, adopt (as the calling agent) or clear its parent session from JSON stdin
+       hgs [@host] parent <session> --json   read, adopt (as the calling agent), set or clear its parent session from JSON stdin
        hgs [@host] read <session> --json   mark the current reply/attention read (JSON stdin)
        hgs [@host] subagent retire <session> --json   retire an exact stale child record (JSON stdin)
        Subagent retirement ABI: subagent-retire-v1
@@ -220,6 +220,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        Mobile project assignment ABI: session-project-v1
        Mobile clear-context ABI: dismiss-prompt-v1
        session-notifications-v1
+       session-parent-v1
        hgs [@host] dirs [--hidden] [path]   directories as JSON (default: home)
        hgs [@host] dirs --create <path> [--request-id UUID]   create one folder (existing parent)
        hgs [@host] kill <session> [--archive <id>]
@@ -1676,6 +1677,9 @@ fn remote_via(
         // Probe the same installed executable without consuming JSON stdin.
         // These probes are POSIX scripts; a fish login shell runs them under sh.
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] wait'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to track waits' >&2; exit 1; fi",platform::join(&remote_args)))
+    } else if command == "parent" {
+        // An older peer would read an unknown command as an agent launch.
+        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*session-parent-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to change parent sessions' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "notifications" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*session-notifications-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to change notification preferences' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "hooks" {

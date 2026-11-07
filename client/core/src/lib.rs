@@ -49,6 +49,7 @@ pub mod notification_preferences;
 pub mod operation_recovery;
 pub mod optional_questions;
 pub mod organization;
+pub mod parent_change;
 pub mod paths;
 pub mod process_view;
 pub mod processes;

@@ -85,7 +85,7 @@ describe("the session menu (Qt showSessionMenu 5266-5382)", () => {
       "Mark needs attention", "Mute", "---",
       "Compact session row", "Expand all collapsed", "---",
       "Open terminal", "Open folder", "Open shell in session folder", "Copy connect command", "---",
-      "Pause session", "Clear session…", "Rename…", "Fork session…", "Move to project…", "---",
+      "Pause session", "Clear session…", "Rename…", "Fork session…", "Move to project…", "Set parent…", "---",
       "Copy session name", "Copy session reference", "Copy folder path", "---",
       "Terminate session…",
     ]);

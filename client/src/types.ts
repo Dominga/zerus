@@ -1143,6 +1143,18 @@ export interface TeamTaskView {
   parked?: string;
   /** Task 196: a task not yet handed out: its description and criteria, for the plan's task editor. */
   description?: string; criteria?: string[];
+  /** Task 197: the estimate's source (lead, role, team); absent from an older hgs. */
+  estimate_source?: string;
+  /** Task 197: the minutes hgs counted for the open attempt. */
+  estimate_spent?: number | null;
+  /** Task 197: the running attempt's start and the worked seconds (U37). */
+  running_since?: number;
+  worked_s?: number;
+  /** Task 197: what an open task waits for (deps, owner, member) and on whom. */
+  wait_for?: string;
+  wait_on?: string[];
+  /** Task 197: the newest attempt began (started, or its turn ended). */
+  attempt_begun?: boolean;
 }
 
 /** Task 196: one edit of the plan while the team plans (core plan_edit.rs `PlanChange`). */

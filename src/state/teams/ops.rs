@@ -222,6 +222,7 @@ fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
     // Section 9.2: the tree bounds are set on the master.
     // Task 95: 0 turns the stalled-lead notice off; a day is the longest wait.
     ensure!(settings.lead_stall_minutes <= 1440, "lead_stall_minutes is 0 (off) to 1440");
+    ensure!((1..=120).contains(&settings.urgent_bound_minutes), "urgent_bound_minutes is 1 to 120");
     ensure!(settings.defer_minutes <= 1440, "defer_minutes is 0 (off) to 1440");
     ensure!((1..=8).contains(&settings.tree_depth), "A tree goes 1 to 8 levels below its master");
     ensure!((1..=200).contains(&settings.tree_sessions), "A tree runs 1 to 200 sessions");

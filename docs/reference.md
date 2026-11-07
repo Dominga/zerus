@@ -2697,9 +2697,13 @@ its read and an unread one 30 days after it was written (a
 `working_unread_expired` event), cleaned at most 500 rows a pass. The terminal
 then receives only a one-line doorbell under the message's own request id
 (the hand-out's attempt id, the stage run id), so receipts and request
-identities are as before: `[Zerus team · from: Lead · task: #N · attempt: K]
-1 new message for you: hgs team inbox (or hgs team current)`, with `URGENT` in
-it for an urgent one. A doorbell that never submits loses nothing: the text is
+identities are as before. The doorbell (task 186, docs/lore.md 11.11) is at
+most 200 characters: who, `normal` or `URGENT`, the newest message's id, the
+count when several wait, and where to read them, for example
+`[Zerus team · from: Lead · task: #N · attempt: K · normal · w-message-1a2b3c4d]
+read it with hgs team inbox` or `[Zerus team · message · from zerus · URGENT ·
+w-message-5e6f7a8b · 3 messages] read it with hgs team inbox`; a long header is
+shortened, never the id or the command. A doorbell that never submits loses nothing: the text is
 stored, and a refused doorbell withdraws its message, so the retry's message is
 the only copy. A message that cannot be stored is a refused send.
 
@@ -2710,7 +2714,10 @@ own unread `messages` with their text, and marks them read; `hgs team current
 read receipts: `read` names the ids, the request id and `via`, the message keeps
 `read_at`, `read_via` and `read_request`, and the journal gets `message_read`.
 `"peek":true` marks nothing, and anyone but the recipient (you on the desktop)
-only peeks. In a sandbox the receipt waits in the member's folder for the
+only peeks. Task 186 (docs/lore.md 11.6): only you peek at the lead's messages.
+A call with `team` from a caller Zerus cannot verify (a session outside the
+team, a stale session marker) is refused, never read as yours; a parent lead or
+an intake key reads no team's messages. In a sandbox the receipt waits in the member's folder for the
 worker (`messages-read`), as a report does. Nothing else marks a message read.
 
 Delivery does not depend on the agent's discipline. A Claude or Codex member's
@@ -2719,14 +2726,41 @@ a turn yet as `additionalContext`, each message once (`injected_at`, at most
 24 KiB a turn), without marking it read; the doorbell's own turn is the first
 such turn. An agent without that hook (Kimi, DeepSeek, OpenCode) gets the text
 after the doorbell line in the same paste. A doorbell rings only at an idle
-moment, never into a busy composer; a message posted while the member works
-rings at its next idle moment. An unread message rings once more after 20
-minutes (an urgent one after 10), and after two rings and the same time again
-the lead gets an `unread_messages` inbox item with the member's state and
-session; an urgent message a member's turn kept from ringing for 10 minutes is
-an item at once, and the lead may stop the member natively so it rings at the
-turn end. Status shows each member's `unread` (`count`, `urgent`, the oldest
-message and its rings); Zerus Next's member row shows `unread: N`.
+moment, never into a busy composer (docs/lore.md hard rule 3); a message posted
+while the member works waits for its next safe point (task 186):
+- **Tool boundary:** a Claude session's `PostToolUse` hook returns its urgent
+  unread messages as `additionalContext` (Codex and Kimi have no such hook
+  yet). Until one waits, the hook only checks one file
+  (`teams/urgent/<key>`), so a tool call never opens the team store.
+- **Turn start:** the turn-start hook returns every unread message (above).
+- **Turn end:** the dispatcher rings when the turn ends; the message records
+  `safe_point` `turn_end` (`idle` for one rung when the member was already free,
+  `hook` for one a hook delivered).
+
+Each message rings by its own schedule, not the oldest's. An urgent one rings
+at the first safe point. Normal ones ring at most once per recipient per 5
+minutes, and the doorbell names the count. A message rung once, or put into a
+turn by a hook, rings once more after 20 minutes, or an urgent one after the
+team's `urgent_bound_minutes` (default 10, 1 to 120, a setting the lead may
+change). After two rings and the same time again, the lead gets an
+`unread_messages` inbox item with the member's state and session. An urgent
+message that reaches no safe point within `urgent_bound_minutes` is an item at
+once, and the lead may stop the member natively so it rings at the turn end.
+For an urgent message to the lead, you get the Waiting item instead
+(`lead_message_undelivered`, with Open Terminal): Zerus never stops the lead.
+Hand-outs, stage hand-outs and the lead's inbox message ring at once (the
+inbox keeps its own `inbox_interval_seconds`).
+
+The lead's inbox message reaches a lead in its own turn the same way: for a
+Claude or Codex lead it is stored at once (`InboxWaits`, journal
+`message_waits`) and never typed. A Claude lead takes an urgent one at its next
+tool boundary; both take every one at their next turn start, and the doorbell
+rings at the turn end. A Kimi lead hears when it is free, from a fresh list.
+This replaces the owner's 2026-10-28 paste into a working lead.
+
+Status shows each member's `unread`: `count`, `urgent`, the oldest message and
+its rings, and the schedule `ring_at`, `stall_at` and `held_urgent_at`. Zerus
+Next's member row shows `unread: N`.
 
 The lead's inbox message is urgent when it names a question, a permission, a
 Terminal question, a crash, a blocked input or a stuck member. `hgs team message
@@ -6598,6 +6632,30 @@ the read inside that and lets a failure pass by itself:
   `provider_messages`, `events_open`, `activity`, `waits`, `session_state`,
   `team_store` and others). A call of 1 s or more leaves one JSON line in
   `<state>/logs/slow-calls.log`, which rotates at 256 KiB to one older file.
+- `hgs ls` names its phases the same way (task 193, task 234):
+  - a listing of 1 s or more is an `ls` line: `reads`, `rows` (with `rows_live`,
+    `rows_saved` and their count), `dsh`, `opencode` and `finish_rows`;
+  - parts of 100 ms or more get their own lines: `ls-row` (one live row),
+    `ls-dsh` (`host_rows` is the DeepSeek host's answer), `ls-opencode` and
+    `ls-finish` (`workspace`, `session_state`).
+- Task 234: what made a listing take 6 to 8 s on 65 sessions:
+  - **DeepSeek host replays.** The host builds a stopped session's row by
+    replaying its stored history: about half a second each, 7 s for twelve.
+    The host's last answer for a stopped session is kept in
+    `dsh/hosts/<id>/listing-rows.json` and reused while all of these hold:
+    the host's generation is the same (checked by one `ping`), the binding's
+    run is the same (a launch or resume through Zerus asks again), and the
+    host does not name the session as loaded. A bridge that names its loaded
+    sessions (`loadedSessions` in `ping`) keeps such a row up to an hour, an
+    older one 15 minutes. One row past its bound is refreshed per listing,
+    oldest first.
+  - **Git metadata.** Every listing ran `git` twice for each session folder,
+    and with 27 folders it spent its whole 750 ms budget. A folder's metadata
+    in `metadata-cache/` is now reused while its `HEAD` is unchanged (a branch
+    switch, a detached commit or a removed worktree changes it), up to a day;
+    a folder that is not a repository is read again after 2 minutes. A read
+    that runs out of the budget keeps the last good metadata instead of
+    replacing it with `unavailable`.
 - The team reasons every listing and inspection reads wait at most 300 ms for a
   team writer. A store that stays busy answers with the last good reasons, kept
   in `teams/waiting-cache.json` for 2 minutes. Before, a rollback-journal store

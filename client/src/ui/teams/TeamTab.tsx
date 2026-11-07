@@ -5,14 +5,15 @@ import { agentKind, computerOffline } from "../../store/catalog";
 import { coordinatorActivity, activity } from "../../store/session";
 import { memberRow, showCatalog, showTeam, teams } from "../../store/teams";
 import { SHARE, SIDE, dragShare, dragSide, teamLayout, type TeamLayout } from "../../store/teamLayout";
-import { selected, setDetailTab, setSelectedKey } from "../../store/ui";
-import { teamBuilds, teamTests, teamTimeline, teamsProfile } from "../../bridge";
+import { selected, setDetailTab, setSelectedKey, toast } from "../../store/ui";
+import { teamAction, teamBuilds, teamTests, teamTimeline, teamsProfile } from "../../bridge";
 import { AddMemberDialog, MemberCard, toComposer } from "./MemberCard";
 import { focusedTasks, memberTree } from "./members";
 import { sideLists, type SideTarget } from "./sideLists";
 import { TeamActions as TeamActionsModel } from "./actions";
 import { useModel, windowPort } from "./ProposalCards";
 import { PlanView } from "./PlanView";
+import { problemTasks as planProblemTasks } from "./planTasks";
 import { TeamCatalogEditor } from "./TeamCatalogEditor";
 import { TeamSettingsDialog } from "./TeamSettingsDialog";
 import type { TeamBuildsView, TeamTestsView } from "../../types";
@@ -28,7 +29,7 @@ import { TeamReports } from "./TeamReports";
 import { WaitingBanner } from "./Waiting";
 import { Blockers, PhaseActions, TaskActions, TeamBarActions, TeamBarChips, TeamModeControl, TeamQuestions, createPlanEditing } from "./TeamActions";
 import { composer } from "../../store/composer";
-import type { ComputerId, TeamMemberView, TeamView } from "../../types";
+import type { ComputerId, TeamCall, TeamMemberView, TeamTaskView, TeamView } from "../../types";
 import type { Session } from "../sessions/types";
 
 // The Team tab (Qt's TeamWorkspace, design D3, HANDOFF §14): the team bar and
@@ -67,6 +68,24 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
   const statuses = createMemo(() => new Map(props.team.members.map((member) => [member.id, memberStatus(props.team, member, live(member))])));
   const problems = createMemo(() => shownMembers(props.team).filter((member) => statuses().get(member.id)?.problem));
   const problemTasks = createMemo(() => new Set(problems().map((member) => statuses().get(member.id)!.task).filter((task) => task > 0)));
+  // Task 197 (P2): the plan tints each problem task with its reason (Qt
+  // problemTasks/problemTexts): the members' problems, then each task's own.
+  const planProblems = createMemo(() => planProblemTasks(props.team, statuses()));
+  // Task 197 (P8): a click on a member's card shows only its tasks.
+  const workingOn = (task: TeamTaskView) => {
+    const member = props.team.members.find((candidate) => candidate.id === task.assignee);
+    return !!member && (live(member).working || member.activity === "busy");
+  };
+  // Task 197 (P6): only the switch's own field; the server merges it.
+  const setAutoAccept = async (on: boolean) => {
+    try {
+      const outcome = await teamAction({ computer: props.computer, team: props.team.id, team_name: props.team.name,
+        action: { kind: "settings", settings: { auto_accept: on } } as TeamCall["action"] });
+      if (outcome.outcome === "failed" || outcome.outcome === "uncertain") toast(tr("Auto-accept drafts"), outcome.detail, "error", true);
+    } catch (cause) {
+      toast(tr("Auto-accept drafts"), String(cause), "error", true);
+    }
+  };
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [catalogOpen, setCatalogOpen] = createSignal(false);
   const [tests, setTests] = createSignal<TeamTestsView | null>(null);
@@ -194,6 +213,11 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
                 }}
                 phaseActions={(n) => <PhaseActions computer={props.computer} team={props.team} phase={n} />}
                 editing={plan.editing()}
+                problems={planProblems()}
+                working={workingOn}
+                member={focus() ?? ""}
+                onMember={(id) => setFocus(id || null)}
+                onAutoAccept={(on) => void setAutoAccept(on)}
               />
             )}
           </Show>

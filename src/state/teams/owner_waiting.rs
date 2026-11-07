@@ -89,6 +89,25 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
         found["paused_by"] = json!(team.paused.as_ref().map(|pause| pause.by.clone()).unwrap_or_default());
         out.push(found);
     }
+    // Task 186 (docs/lore.md 11.11): an urgent message to the lead that has
+    // reached no safe point within the team's urgent_bound is the owner's:
+    // Zerus never stops the lead, the owner may.
+    if let Some((held, minutes)) = super::doorbell::lead_undelivered(team, now) {
+        let lead = team.member(&team.lead).map(|lead| team.name_of(&lead.id)).unwrap_or_else(|| "The lead".into());
+        let mut found = item(
+            team,
+            "lead_message_undelivered",
+            &(held as u64).to_string(),
+            format!("URGENT team message to {lead} is undelivered: the lead has worked {minutes} min without a safe point"),
+            held,
+            "open_terminal",
+        );
+        found["member_id"] = json!(team.lead);
+        // Its Terminal is where the owner may stop the lead natively.
+        found["session"] = json!(team.member(&team.lead).and_then(|lead| lead.session.as_ref()).map(|session| session.name.clone()).unwrap_or_default());
+        found["urgent"] = json!(true);
+        out.push(found);
+    }
     // The attention list already decides when a report or a permission is
     // escalated to the owner, and which draft phase is next.
     for attention in super::inbox::attention(team, now) {

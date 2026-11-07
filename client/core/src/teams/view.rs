@@ -518,6 +518,35 @@ pub struct TaskView {
     pub description: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub criteria: Vec<String>,
+    /// Task 197: where the estimate comes from (`lead`, `role`, `team`);
+    /// empty from an older hgs, which names no estimate (Qt estimateKnown).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub estimate_source: String,
+    /// Task 197: the minutes hgs counted for the open attempt
+    /// (`estimate_spent_minutes`), when it names them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimate_spent: Option<f64>,
+    /// Task 197 (U37): the running attempt's start, 0 when none runs
+    /// (`timing.running_since`).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub running_since: f64,
+    /// Task 197 (U37): the seconds the task's attempts worked (`timing.worked_s`).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub worked_s: f64,
+    /// Task 197 (C3): what an open task waits for (`waits.for`: deps, owner,
+    /// member...) and on whom (`waits.on`), for "after #3" on its card.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub wait_for: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub wait_on: Vec<String>,
+    /// Task 197: the newest attempt began (it was started or its turn ended),
+    /// which tells "starting" from "idle" on its card.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub attempt_begun: bool,
+}
+
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
 }
 
 /// Task 55: one open question of a member to the lead.
@@ -922,6 +951,25 @@ fn task(value: &Value) -> TaskView {
         questions: open_questions(value),
         description: if editable_task(value) { text(value, "description", EDITOR_CHARS) } else { String::new() },
         criteria: if editable_task(value) { lines(value, "criteria", LINE_CHARS) } else { Vec::new() },
+        estimate_source: name(value, "estimate_source"),
+        estimate_spent: value.get("estimate_spent_minutes").and_then(Value::as_f64).filter(|minutes| minutes.is_finite() && *minutes >= 0.0),
+        running_since: value.get("timing").map(|timing| number(timing, "running_since")).unwrap_or_default().max(0.0),
+        worked_s: value.get("timing").map(|timing| number(timing, "worked_s")).unwrap_or_default().max(0.0),
+        wait_for: value.get("waits").map(|waits| name(waits, "for")).unwrap_or_default(),
+        wait_on: value
+            .get("waits")
+            .and_then(|waits| waits.get("on"))
+            .and_then(Value::as_array)
+            .map(|on| {
+                on.iter()
+                    .take(ITEMS_KEPT)
+                    .filter_map(|item| item.as_u64().map(|id| id.to_string()).or_else(|| item.as_str().map(|text| text.chars().take(80).collect())))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        attempt_begun: attempts
+            .last()
+            .is_some_and(|attempt| number(attempt, "started_at") > 0.0 || number(attempt, "turn_ended_at") > 0.0),
     }
 }
 

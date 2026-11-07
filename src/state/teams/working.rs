@@ -45,9 +45,46 @@ pub(crate) const CAP_URGENT: u32 = 5;
 /// An unread message rings once more after this long (normal), then the lead
 /// is told after the same time again.
 pub(crate) const RING_AGAIN_SECONDS: f64 = 20.0 * 60.0;
-/// docs/lore.md 11.11 `urgent_bound`: an urgent message the member has not
-/// read in this time rings again, then the lead is told.
+/// docs/lore.md 11.11 `urgent_bound`'s default: an urgent message the member
+/// has not read in this time rings again, then the lead is told. Task 186:
+/// the team's `urgent_bound_minutes` sets it (`urgent_bound`).
 pub(crate) const URGENT_BOUND_SECONDS: f64 = 10.0 * 60.0;
+/// docs/lore.md 11.11: at most one doorbell per recipient per 5 minutes for
+/// normal messages; several waiting are named by their count.
+pub(crate) const COALESCE_SECONDS: f64 = 5.0 * 60.0;
+/// docs/lore.md 11.11: the doorbell line is at most this many characters.
+pub(crate) const DOORBELL_CHARS: usize = 200;
+
+/// Task 186: the team's `urgent_bound` in seconds (1 to 120 minutes).
+pub(crate) fn urgent_bound(team: &Team) -> f64 {
+    (team.settings.urgent_bound_minutes.clamp(1, 120) as f64) * 60.0
+}
+
+/// How long a message waits, rung once, before it rings again, and rung
+/// twice, before the lead hears.
+fn bound_of(message: &Message, urgent: f64) -> f64 {
+    if message.urgent() { urgent } else { RING_AGAIN_SECONDS }
+}
+
+/// Task 186 (11.11): when `message` is due to ring, its own schedule (never
+/// the oldest's): an urgent one that reached no safe point at once, a normal
+/// one at most `COALESCE_SECONDS` after the recipient's last doorbell, one
+/// rung once (or put into a turn by the hook) past its bound. None: it rang
+/// twice (the lead's stall takes it from there).
+pub(crate) fn next_ring(message: &Message, last_ring: Option<f64>, urgent: f64) -> Option<f64> {
+    match (message.rings, message.injected_at) {
+        (0, None) if message.urgent() => Some(message.at),
+        (0, None) => Some(last_ring.map_or(message.at, |last| message.at.max(last + COALESCE_SECONDS))),
+        (0, Some(injected)) => Some(injected + bound_of(message, urgent)),
+        (1, _) => Some(message.rung_at.unwrap_or(message.at) + bound_of(message, urgent)),
+        _ => None,
+    }
+}
+
+/// The recipient's last doorbell among its unread messages.
+pub(crate) fn last_ring(list: &[Message]) -> Option<f64> {
+    list.iter().filter_map(|message| message.rung_at).reduce(f64::max)
+}
 /// At most this much unread text goes into one turn's added context.
 pub(crate) const TURN_CONTEXT_BYTES: usize = 24 * 1024;
 
@@ -257,10 +294,24 @@ pub(crate) fn mark_read(tx: &Transaction, team: &str, member: &str, ids: &[Strin
 
 /// A member's unread summary for the team record (status, inbox, re-rings);
 /// the lead's notice is kept while the oldest unread message is the same.
-pub(crate) fn summary(db: &Connection, team: &str, member: &str, before: Option<&Unread>, now: f64) -> anyhow::Result<Option<Unread>> {
+/// Task 186: the schedule is every message's own (`next_ring`), with the
+/// team's `urgent_bound` (seconds).
+pub(crate) fn summary(db: &Connection, team: &str, member: &str, before: Option<&Unread>, urgent_bound: f64, now: f64) -> anyhow::Result<Option<Unread>> {
     let list = unread(db, team, member, now)?;
     let Some(oldest) = list.first() else { return Ok(None) };
     let lead_told = before.filter(|before| before.oldest == oldest.id).map(|before| before.lead_told).unwrap_or(false);
+    let last = last_ring(&list);
+    let ring_at = list.iter().filter_map(|message| next_ring(message, last, urgent_bound)).reduce(f64::min);
+    let stall_at = list
+        .iter()
+        .filter(|message| message.rings >= 2)
+        .map(|message| message.rung_at.unwrap_or(message.at) + bound_of(message, urgent_bound))
+        .reduce(f64::min);
+    let held_urgent_at = list
+        .iter()
+        .filter(|message| message.urgent() && message.rings == 0 && message.injected_at.is_none())
+        .map(|message| message.at)
+        .reduce(f64::min);
     Ok(Some(Unread {
         count: list.len() as u32,
         urgent: list.iter().filter(|message| message.urgent()).count() as u32,
@@ -269,14 +320,24 @@ pub(crate) fn summary(db: &Connection, team: &str, member: &str, before: Option<
         rings: oldest.rings,
         rung_at: oldest.rung_at,
         lead_told,
+        planned: true,
+        ring_at,
+        stall_at,
+        held_urgent_at,
     }))
 }
 
 /// Refreshes `member`'s summary in the team record.
 pub(crate) fn refresh(db: &Connection, team: &mut Team, member: &str, now: f64) -> anyhow::Result<()> {
     let team_id = team.id.clone();
+    let bound = urgent_bound(team);
     if let Some(found) = team.members.iter_mut().find(|found| found.id == member) {
-        found.unread = summary(db, &team_id, member, found.unread.as_ref(), now)?;
+        found.unread = summary(db, &team_id, member, found.unread.as_ref(), bound, now)?;
+        // Task 186: the tool-boundary hook looks for this mark before it
+        // opens the team store (one file check per tool call).
+        if let Some(session) = &found.session {
+            mark_urgent(session, found.unread.as_ref().is_some_and(|unread| unread.held_urgent_at.is_some()));
+        }
     }
     Ok(())
 }
@@ -304,14 +365,25 @@ pub(crate) fn cleanup(tx: &Transaction, team: &str, now: f64) -> anyhow::Result<
     Ok(events)
 }
 
-/// The doorbell: one line, never the text. `header` keeps the hand-out's own
-/// first-line fields (`from`, `task`, `attempt`) when there are some.
-pub(crate) fn doorbell(header: &str, count: usize, urgent: usize) -> String {
-    let what = if count == 1 { "1 new message".to_owned() } else { format!("{count} new messages") };
-    let urgency = if urgent > 0 { " \u{b7} URGENT" } else { "" };
-    let header = if header.is_empty() { "[Zerus team".to_owned() } else { header.trim_end_matches(']').to_owned() };
-    let line = format!("{header}{urgency}] {what} for you: hgs team inbox (or hgs team current)");
-    line.chars().take(300).collect()
+/// The doorbell (docs/lore.md 11.11, task 186): one line of at most 200
+/// characters, never the text: who, `normal` or `URGENT`, the newest message's
+/// id, the count when several wait, and where to read them. `header` keeps a
+/// hand-out's own first-line fields (`from`, `task`, `attempt`), shortened
+/// first when the line would be longer.
+pub(crate) fn doorbell(header: &str, list: &[Message]) -> String {
+    let newest = list.last();
+    let urgency = if list.iter().any(Message::urgent) { "URGENT" } else { "normal" };
+    let id = newest.map(|message| message.id.as_str()).unwrap_or_default();
+    let count = if list.len() > 1 { format!(" \u{b7} {} messages", list.len()) } else { String::new() };
+    let tail = format!(" \u{b7} {urgency} \u{b7} {id}{count}] read it with hgs team inbox");
+    let head = if header.is_empty() {
+        format!("[Zerus team \u{b7} message \u{b7} from {}", newest.map(|message| message.by.as_str()).unwrap_or("zerus"))
+    } else {
+        header.trim_end_matches(']').to_owned()
+    };
+    let room = DOORBELL_CHARS.saturating_sub(tail.chars().count());
+    let head: String = head.chars().take(room).collect();
+    format!("{head}{tail}")
 }
 
 /// The first line of a team message when it is a `[Zerus team · ...]` header.
@@ -373,12 +445,54 @@ pub(crate) fn session_member(store: &super::store::Store, session: &SessionRef) 
     Ok(Some((serde_json::from_str(&payload)?, member)))
 }
 
+/// Task 186: the mark that a session has an urgent team message waiting for
+/// a safe point; the tool-boundary hook reads only this file until one does.
+fn urgent_mark(name: &str, run_id: &str) -> std::path::PathBuf {
+    let key = digest(&format!("{name}\n{run_id}"));
+    super::store::path().with_file_name("urgent").join(&key[..24])
+}
+
+fn mark_urgent(session: &SessionRef, held: bool) {
+    if session.name.is_empty() || session.run_id.is_empty() {
+        return;
+    }
+    let path = urgent_mark(&session.name, &session.run_id);
+    if held {
+        if !path.exists() {
+            let _ = path.parent().map(std::fs::create_dir_all);
+            let _ = std::fs::write(&path, b"");
+        }
+    } else if path.exists() {
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// Task 186 (11.11): whether a tool boundary of this session has an urgent
+/// team message to take (the mark exists); costs one file check.
+pub(crate) fn urgent_waiting(name: &str, run_id: &str) -> bool {
+    !name.is_empty() && !run_id.is_empty() && urgent_mark(name, run_id).exists()
+}
+
 /// Task 134: what the turn-start hook adds to this session's turn: the
 /// unread team messages Zerus has not put into a turn yet, each once. Marks
 /// them injected (never read). None when the session is no team member's,
 /// nothing is new, or the team store cannot be written from here (a
 /// sandbox): the doorbell and `hgs team inbox` still carry the text.
 pub(crate) fn turn_context_for(name: &str, run_id: &str) -> Option<String> {
+    context_for(name, run_id, false)
+}
+
+/// Task 186 (11.11): what a tool boundary (Claude Code's `PostToolUse`
+/// hook) adds to the working turn: only the urgent unread messages, which
+/// may not wait for the turn end. Never typed into the composer.
+pub(crate) fn tool_context_for(name: &str, run_id: &str) -> Option<String> {
+    if !urgent_waiting(name, run_id) {
+        return None;
+    }
+    context_for(name, run_id, true)
+}
+
+fn context_for(name: &str, run_id: &str, only_urgent: bool) -> Option<String> {
     let path = super::store::path();
     if !path.exists() {
         return None;
@@ -389,7 +503,13 @@ pub(crate) fn turn_context_for(name: &str, run_id: &str) -> Option<String> {
     let (team, member) = session_member(&store, &session).ok()??;
     let now = super::super::now();
     let list = unread(store.connection(), &team.id, &member, now).ok()?;
-    let (text, ids) = turn_context(&list, false)?;
+    let Some((text, ids)) = turn_context(&list, only_urgent) else {
+        // A stale mark (the message was read or rung meanwhile) goes.
+        if only_urgent {
+            let _ = store.mutate_working(&team.id, |tx, team, _| refresh(tx, team, &member, now));
+        }
+        return None;
+    };
     store
         .mutate_working(&team.id, |tx, team, events| {
             injected(tx, &ids, "hook", now)?;

@@ -3801,9 +3801,16 @@ fn inbox_command(input: &Value) -> anyhow::Result<Value> {
         (team, Some(member))
     } else {
         let team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
-        let caller = match actor(&team, "inbox", input) {
-            Ok(Actor::Member(id)) => Some(id),
-            _ => None,
+        // Task 186 (11.6): only the owner peeks at the lead's messages. A
+        // caller that cannot be verified (a session outside the team, a
+        // stale marker) is refused, never read as the owner; a parent lead
+        // or an intake key reads no team's messages.
+        let caller = match actor(&team, "inbox", input)? {
+            Actor::Member(id) => Some(id),
+            Actor::Human => None,
+            Actor::ParentLead | Actor::Intake(_) => {
+                anyhow::bail!("The team inbox is its members' and the owner's: this caller reads no messages of team {}", team.id)
+            }
         };
         (team, caller)
     };

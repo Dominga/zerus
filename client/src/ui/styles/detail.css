@@ -83,7 +83,18 @@
   .act-col [id^="item-"] { scroll-margin-top: 10px; }
   .act-msg { border-radius: var(--z-radius-lg); padding: 9px 14px 11px; background: var(--z-color-tile); border-left: 3px solid var(--z-color-border); animation: rise var(--z-motion-slow) var(--ease) both; }
   .act-msg.k-user { background: var(--z-color-bubble); border-left-color: var(--z-color-accent-muted); white-space: pre-wrap; }
-  .act-msg.k-agent { border-left-color: var(--z-color-accent); }
+  /* Task 208, as Qt: the model's reply is plain text on the page, no card and no bar;
+     left bars belong to system notices (team, member, Zerus), never to replies. */
+  .act-msg.k-agent { background: transparent; border-left: 0; border-radius: 0; padding-left: 2px; padding-right: 2px; }
+  .act-msg.k-system { background: var(--z-color-tile); border-left: 3px solid var(--bar-dark, var(--z-color-border)); }
+  :root[data-appearance="light"] .act-msg.k-system { border-left-color: var(--bar-light, var(--z-color-border)); }
+  .act-msg.k-system header b { color: var(--z-color-text); }
+  .act-plaque header { flex-wrap: wrap; row-gap: 4px; }
+  .act-plaque-chip { padding: 0 7px; border-radius: 9px; background: var(--z-color-hover); color: var(--z-color-text-3); font-size: var(--fs-xs); white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+  .act-plaque-chip.task { color: var(--z-color-accent); }
+  .act-plaque-body { margin: 2px 0 0; color: var(--z-color-text); }
+  .act-plaque-foot { display: flex; align-items: center; gap: 8px; margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--z-color-divider); font-size: var(--fs-2xs); color: var(--z-color-muted); min-width: 0; }
+  .act-plaque-foot .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   /* A fork's history from the session it began from: read-only, muted. */
   .act-msg.inherited, .act-tools.inherited, .act-thinking.inherited, .act-notice.inherited { opacity: .72; }
   .act-msg.k-receipt { background: transparent; border-left-color: var(--z-color-violet); padding: 6px 12px; font-size: var(--fs-sm); color: var(--z-color-text-3); }

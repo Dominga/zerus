@@ -38,6 +38,7 @@ import { activityAll, activityFlow, activityRange, measureActivityRows, activity
 import { openExternal, openSessionFile } from "./sessionFiles";
 import { SessionFileDialog } from "./SessionFileDialog";
 import { captionText, statusOf } from "./SessionCard";
+import { foldedBody, noticeBar, type SystemNotice } from "./notices";
 import type { ActivityItem, ItemAttachment, LocalItem, MediaMessage, Session, TranscriptItem } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -628,9 +629,36 @@ function EchoBody(props: { item: ActivityItem; scope?: AttachmentScope }) {
   return <ItemBody {...props} item={shown()} />;
 }
 
+/** Qt's team plaque (ActivityView.cpp teamMessage): kind, sender and receiver,
+ * task and attempt, three lines of the body, then the header Zerus pasted. */
+function NoticeCard(props: { item: ActivityItem; notice: SystemNotice; open: boolean; toggle: () => void }) {
+  const n = () => props.notice;
+  const folded = createMemo(() => foldedBody(n()));
+  const bar = () => noticeBar(n().from);
+  return (
+    <article class="act-msg k-system act-plaque" id={`item-${props.item.id}`} classList={{ inherited: !!props.item.inherited }}
+      style={{ "--bar-dark": bar().dark, "--bar-light": bar().light }} data-notice={n().from}>
+      <header>
+        <b class="act-plaque-kind">{n().kind}</b>
+        <span class="act-plaque-chip">{n().to ? `${n().from} → ${n().to}` : n().from}</span>
+        <Show when={n().task}><span class="act-plaque-chip task">{n().title ? tr("Task: %1", n().title) : tr("Task #%1", n().task)}</span></Show>
+        <Show when={n().attempt}><span class="act-plaque-chip">{tr("Attempt %1", n().attempt)}</span></Show>
+        <span class="grow" />
+        <span class="act-time">{props.item.at}</span>
+      </header>
+      <p class="act-plaque-body wrap-pre">{props.open ? n().full : folded().text}</p>
+      <footer class="act-plaque-foot">
+        <span class="mono">{n().header}</span><span class="grow" />
+        <Show when={folded().clipped || props.open}><button class="link" onClick={props.toggle}>{props.open ? tr("Show less") : tr("Show more")}</button></Show>
+      </footer>
+    </article>
+  );
+}
+
 function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?: string; postersEnabled?: boolean; expanded?: boolean; onExpanded?: (open: boolean) => void }) {
   const [open, toggleOpen] = layoutDisclosure(() => props.expanded, props.onExpanded);
   const it = props.item;
+  if (it.kind === "system" && it.notice) return <NoticeCard item={it} notice={it.notice} open={open()} toggle={toggleOpen} />;
   if (it.kind === "media") return <MediaCard item={it} scope={rowScope(it, props.scope)} sourceId={props.sourceId} postersEnabled={props.postersEnabled} expanded={props.expanded} onExpanded={props.onExpanded} />;
   if (it.kind === "context") return <div class="act-label eyebrow" id={`item-${it.id}`}>{it.body}</div>;
   if (it.kind === "thinking") return <div class="act-thinking" id={`item-${it.id}`} classList={{ inherited: !!it.inherited }}><span class="eyebrow">{tr("Thinking")}</span><p>{it.body}</p></div>;
@@ -657,7 +685,8 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?:
         </Show>
       </div>
     }>
-      <article class={`act-msg k-${it.kind}`} id={`item-${it.id}`} classList={{ inherited: !!it.inherited }}>
+      <article class={`act-msg k-${it.kind}`} id={`item-${it.id}`} classList={{ inherited: !!it.inherited }}
+        style={it.kind === "system" ? { "--bar-dark": noticeBar(it.sender ?? "").dark, "--bar-light": noticeBar(it.sender ?? "").light } : undefined}>
         <header>
           <b>{it.label ?? (it.kind === "user" ? tr("You") : it.kind === "agent" ? tr("Agent") : it.sender ?? "Zerus")}</b>
           {/* A local row's stamp stands in for the time and the receipt (ActivityView.cpp:1053-1055). */}

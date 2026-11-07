@@ -305,3 +305,112 @@
 .team-edit-phase .dlg-body, .team-add-task .dlg-body, .team-plan-task .dlg-body { display: flex; flex-direction: column; gap: 6px; min-width: min(520px, 86vw); }
 .team-edit-phase-task { display: flex; align-items: center; gap: 8px; }
 .team-edit-phase-task .field { flex: 1; }
+
+/* Task 197: Qt parity. One graph per phase (P1): the header, then one body
+   that scrolls sideways on its own (P3), one SVG for all the phase's links
+   under its cards; Board (P7) and Layers (P8) inside each phase. */
+.pt-row { padding-bottom: 8px; }
+.pt-row > .pt-phase { height: 44px; }
+.pt-phase { border-bottom: 0; border-radius: 10px 10px 0 0; }
+.pt-phase.pt-phase-closed { border-bottom: 1px solid var(--z-color-card-border); border-radius: 10px; }
+.pt-inline { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--z-color-muted); font-size: var(--fs-2xs); }
+.pt-healthy { color: var(--z-color-accent); font-size: var(--fs-2xs); white-space: nowrap; }
+.pt-healthy.warn { color: var(--z-color-warn); }
+.pt-phase-body, .pm-board-phase {
+  overflow-x: auto; overflow-y: hidden;
+  border: 1px solid var(--z-color-card-border); border-top: 0;
+  border-radius: 0 0 10px 10px;
+  background: var(--z-color-card);
+  scrollbar-width: thin;
+}
+.pt-phase-sizer { position: relative; }
+.pt-phase-canvas { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+.pt-layer-band { position: absolute; top: 0; bottom: 0; background: color-mix(in srgb, var(--z-color-text) 3%, transparent); }
+.pt-layer-band.odd { background: color-mix(in srgb, var(--z-color-text) 1.5%, transparent); }
+.pt-layer-label {
+  position: absolute; top: 8px; height: 18px;
+  display: flex; align-items: center; gap: 6px; padding-left: 20px;
+  color: var(--z-color-dim); font-size: var(--fs-2xs); letter-spacing: .04em; text-transform: uppercase;
+}
+.pt-layer-label b { color: var(--z-color-text-3); font-weight: 600; }
+.pt-edges { z-index: 0; }
+.pt-edge { stroke-width: 1.4; opacity: .7; }
+.pt-edge.back { stroke-dasharray: 2 3; }
+.pt-edge-head { fill: var(--z-color-dim); stroke: none; }
+.pt-origin-edge { fill: none; stroke: var(--z-color-violet); stroke-width: 1.2; stroke-dasharray: 4 3; opacity: .8; }
+.pt-card { z-index: 1; justify-content: center; gap: 4px; background: color-mix(in srgb, var(--z-color-danger) calc(var(--heat, 0) * 22%), var(--z-color-surface)); }
+.pt-card-assigned { --pt-tone: var(--z-color-status-working); }
+.pt-card-warn { --pt-tone: var(--z-color-warn); }
+.pt-card-dim { --pt-tone: var(--z-color-dim); }
+.pt-card-off { opacity: .3; }
+.pt-card-problem { border-color: color-mix(in srgb, var(--pt-tone) 65%, var(--z-color-card-border)); background: color-mix(in srgb, var(--pt-tone) 9%, var(--z-color-surface)); }
+.pt-card-draft { border-style: dashed; }
+.pt-state { display: inline-flex; flex: none; color: var(--pt-tone, var(--z-color-muted)); }
+.pt-card-l2 { gap: 6px; }
+.pt-card-l2 .agent-badge { flex: none; }
+.pt-role.role-badge { max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
+.pt-time { display: inline-flex; gap: 5px; min-width: 0; overflow: hidden; white-space: nowrap; color: var(--z-color-muted); font-size: var(--fs-2xs); }
+.pt-activity { overflow: hidden; text-overflow: ellipsis; }
+.pt-worked { flex: none; font-variant-numeric: tabular-nums; }
+.pt-worked.over, .pm-layer-time.over { color: var(--z-color-warn); }
+.pt-problem { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-2xs); color: var(--z-color-warn); }
+.pt-problem-danger { color: var(--z-color-status-error); }
+.pt-problem-warn { color: var(--z-color-warn); }
+.pt-tone-pending { --pm-tone: var(--z-color-muted); --pt-tone: var(--z-color-muted); }
+.pt-tone-working { --pm-tone: var(--z-color-accent); --pt-tone: var(--z-color-accent); }
+.pt-tone-assigned { --pm-tone: var(--z-color-status-working); --pt-tone: var(--z-color-status-working); }
+.pt-tone-done { --pm-tone: var(--z-color-status-ready); --pt-tone: var(--z-color-status-ready); }
+.pt-tone-danger { --pm-tone: var(--z-color-status-error); --pt-tone: var(--z-color-status-error); }
+.pt-tone-warn { --pm-tone: var(--z-color-warn); --pt-tone: var(--z-color-warn); }
+.pt-tone-dim { --pm-tone: var(--z-color-dim); --pt-tone: var(--z-color-dim); }
+
+/* The toolbar (P6). */
+.pt-plan { flex: 1 1 auto; min-width: 0; }
+.pt-plan-bar { flex-wrap: wrap; }
+.pt-plan-bar .pm-check { white-space: nowrap; }
+.pm-segment { display: inline-flex; gap: 2px; padding: 2px; border-radius: var(--z-radius-md); background: var(--z-color-field); }
+.pm-segment button { padding: 2px 9px; border: 0; border-radius: var(--z-radius-sm); background: none; color: var(--z-color-muted); font: inherit; font-size: var(--fs-xs); cursor: pointer; }
+.pm-segment button.on { background: var(--z-color-segment-on); color: var(--z-color-accent); font-weight: 600; }
+.pm-focus { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border: 1px solid var(--z-color-accent); border-radius: 10px; background: none; color: var(--z-color-accent); font: inherit; font-size: var(--fs-xs); font-weight: 600; cursor: pointer; }
+.pm-heat-mode { font: inherit; font-size: var(--fs-xs); padding: 1px 4px; border: 1px solid var(--z-color-border); border-radius: var(--z-radius-sm); background: var(--z-color-field); color: var(--z-color-text); }
+.pm-zoom { display: inline-flex; align-items: center; gap: 2px; }
+.pm-zoom-value { min-width: 38px; text-align: center; color: var(--z-color-muted); font-size: var(--fs-2xs); font-variant-numeric: tabular-nums; }
+
+/* Board (P7): each phase's columns; the titles stay pinned. */
+.pm-board-scroll, .pm-layers-scroll { padding: 6px 12px 24px; }
+.pm-phase { margin-bottom: 10px; }
+.pm-phase > .pt-phase { height: 44px; position: sticky; top: 0; z-index: 3; }
+.pm-board-phase .pm-board { display: grid; gap: 6px; padding: 6px; overflow: visible; min-width: min-content; }
+.pm-board-phase .pm-column { min-height: 60px; flex: none; }
+.pm-column.empty { background: transparent; border-color: color-mix(in srgb, var(--z-color-card-border) 60%, transparent); }
+.pm-column.problems { border-color: color-mix(in srgb, var(--z-color-danger) 55%, var(--z-color-card-border)); }
+.pm-board-phase .pm-column-head { align-self: stretch; color: var(--z-color-text-3); font-size: var(--fs-2xs); border-radius: 10px 10px 0 0; }
+.pm-board-phase .pm-column-body { overflow: visible; }
+.pm-board-card { gap: 4px; }
+.pm-board-card.problem { border-color: color-mix(in srgb, var(--pm-tone) 70%, var(--z-color-card-border)); }
+.pm-board-card.draft { border-style: dashed; }
+.pm-board-card .pm-card-meta { align-items: center; overflow: hidden; }
+.pm-deps { flex: none; color: var(--z-color-folder, var(--z-color-muted)); font-size: var(--fs-2xs); white-space: nowrap; }
+.pm-empty-dash { align-self: center; color: var(--z-color-dim); font-size: var(--fs-2xs); }
+
+/* Layers (P8): compact rows by layer, inside each phase. */
+.pm-layers-phase { border: 1px solid var(--z-color-card-border); border-top: 0; border-radius: 0 0 10px 10px; background: var(--z-color-card); padding: 6px 8px 8px; }
+.pm-layer-group { display: flex; flex-direction: column; gap: 2px; }
+.pm-layer-group + .pm-layer-group { margin-top: 2px; }
+.pm-layer-label { flex: none; width: 20px; color: var(--z-color-dim); font-size: var(--fs-2xs); }
+.pm-layer-row {
+  --heat: 0;
+  display: flex; align-items: center; gap: 7px; width: 100%; min-height: 30px; padding: 3px 8px;
+  border: 1px solid transparent; border-left: 3px solid var(--pt-tone); border-radius: 7px;
+  background: color-mix(in srgb, var(--z-color-danger) calc(var(--heat) * 22%), var(--z-color-surface));
+  color: var(--z-color-text); font: inherit; font-size: var(--fs-xs); text-align: left; cursor: pointer;
+}
+.pm-layer-row:hover { border-color: var(--z-color-accent-muted); }
+.pm-layer-row.problem { background: color-mix(in srgb, var(--pt-tone) 9%, var(--z-color-surface)); }
+.pm-layer-title { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.pm-layer-activity { color: var(--z-color-muted); font-size: var(--fs-2xs); white-space: nowrap; }
+.pm-layer-time { flex: none; min-width: 84px; text-align: right; color: var(--z-color-muted); font-size: var(--fs-2xs); font-variant-numeric: tabular-nums; }
+.pm-layer-row .pt-role { flex: none; max-width: 110px; }
+.pm-layer-agent { flex: none; width: 18px; display: inline-flex; }
+.team-member.focused { box-shadow: 0 0 0 1px var(--z-color-accent) inset; }
+.team-member { cursor: pointer; }

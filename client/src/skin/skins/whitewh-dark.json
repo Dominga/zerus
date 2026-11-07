@@ -34,5 +34,8 @@
       "warn": "#e8a75a",
       "danger": "#ef7d6d"
     }
+  },
+  "layout": {
+    "side-panel": "sections"
   }
 }

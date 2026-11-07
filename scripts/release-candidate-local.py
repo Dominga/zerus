@@ -87,6 +87,13 @@ def main() -> int:
     results.mkdir(parents=True, exist_ok=True)
     client = ROOT / "client"
     target = ROOT / "target/windows-next"
+    # Task 192: the local candidate is an experimental fork build, as the
+    # whitewh-exp-* runner leg is: no build number and no feed, so it neither
+    # updates nor gets updated. The same two values go to the Tauri build
+    # (embedded) and to the zip's build-info.json, which check-windows-portable
+    # compares; a fixed build "1" with an empty feed matched neither.
+    fork_build = os.environ.get("ZERUS_FORK_BUILD", "")
+    fork_feed = os.environ.get("ZERUS_FORK_FEED_URL", "")
     run(["npm", "ci"], cwd=client, dry=args.dry_run)
     print(f"tauri fork channel: ZERUS_FORK_BUILD={fork_build or '(unset)'} ZERUS_FORK_FEED_URL={fork_feed or '(unset)'}", flush=True)
     run(

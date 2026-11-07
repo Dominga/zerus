@@ -119,7 +119,9 @@ fn git(cwd: &str, args: &[&str], deadline: Instant) -> Option<(bool, String)> {
     Some((status.success(), output))
 }
 
-fn inspect_git(cwd: &str, deadline: Instant) -> Value {
+/// The folder's Git metadata and its own Git directory (where `HEAD` is),
+/// when it is a repository.
+fn inspect_git_dir(cwd: &str, deadline: Instant) -> (Value, Option<PathBuf>) {
     let Some((ok, output)) = git(
         cwd,
         &[
@@ -130,14 +132,14 @@ fn inspect_git(cwd: &str, deadline: Instant) -> Value {
         ],
         deadline,
     ) else {
-        return empty("unavailable");
+        return (empty("unavailable"), None);
     };
     if !ok {
-        return empty("not_repo");
+        return (empty("not_repo"), None);
     }
     let lines: Vec<_> = output.lines().collect();
     if lines.len() != 3 {
-        return empty("unavailable");
+        return (empty("unavailable"), None);
     }
     let absolute = |path: &str| {
         let path = Path::new(path);
@@ -155,11 +157,52 @@ fn inspect_git(cwd: &str, deadline: Instant) -> Value {
         &["symbolic-ref", "--quiet", "--short", "HEAD"],
         deadline,
     ) else {
-        return empty("unavailable");
+        return (empty("unavailable"), None);
     };
-    json!({"git_root":root,"git_branch":if named {branch.trim()} else {""},
+    (json!({"git_root":root,"git_branch":if named {branch.trim()} else {""},
         "git_worktree":worktree,"git_worktree_name":if worktree {root.file_name().and_then(|s|s.to_str()).unwrap_or("")} else {""},
-        "git_detached":!named,"git_common_dir":absolute(lines[2]),"git_metadata_state":"ok"})
+        "git_detached":!named,"git_common_dir":absolute(lines[2]),"git_metadata_state":"ok"}), Some(absolute(lines[1])))
+}
+
+/// Task 234: `HEAD`'s modification time and size: a branch switch, a new
+/// detached commit or a removed worktree changes it. None when it is gone.
+fn head_stamp(git_dir: &Path) -> Option<Value> {
+    let meta = fs::metadata(git_dir.join("HEAD")).ok()?;
+    let modified = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs_f64();
+    Some(json!([modified, meta.len()]))
+}
+
+/// How long a cached folder's metadata is trusted without a check (the
+/// earlier rule for every entry).
+const METADATA_FRESH_SECONDS: f64 = 15.0;
+/// Task 234: a repository's metadata is reused while its `HEAD` is unchanged
+/// (a branch switch, a detached commit or a removed worktree changes it), up
+/// to this long; spawning git twice for each of a listing's folders spent its
+/// whole 750 ms budget on every listing, and a short bound made the entries
+/// written together expire together.
+const METADATA_HEAD_SECONDS: f64 = 86_400.0;
+/// A folder that is no repository is checked again after this long.
+const METADATA_NOT_REPO_SECONDS: f64 = 120.0;
+
+/// Whether a cache entry `{cwd, at, data, git_dir, head}` still holds for
+/// `cwd` at `now`.
+fn metadata_fresh(cache: &Value, cwd: &str, now: f64) -> bool {
+    let age = now - cache["at"].as_f64().unwrap_or(0.0);
+    if cache["cwd"] != cwd || !cache["data"].is_object() || age < 0.0 {
+        return false;
+    }
+    if age < METADATA_FRESH_SECONDS {
+        return true;
+    }
+    match string(&cache["data"], "git_metadata_state") {
+        "ok" => {
+            age < METADATA_HEAD_SECONDS
+                && !cache["head"].is_null()
+                && cache["git_dir"].as_str().and_then(|dir| head_stamp(Path::new(dir))).as_ref() == Some(&cache["head"])
+        }
+        "not_repo" => age < METADATA_NOT_REPO_SECONDS && Path::new(cwd).is_dir(),
+        _ => false,
+    }
 }
 
 /// Search publishes only the capped result window's folder scopes. Unlike
@@ -185,19 +228,30 @@ fn cached(cwd: &str, deadline: Instant) -> Value {
         .filter(|m| m.len() < 32768)
         .and_then(|_| fs::read_to_string(&path).ok())
         .and_then(|s| serde_json::from_str::<Value>(&s).ok());
-    if let Some(cache) = &cached {
-        let age = now() - cache["at"].as_f64().unwrap_or(0.0);
-        if cache["cwd"] == cwd && (0.0..15.0).contains(&age) && cache["data"].is_object() {
-            return cache["data"].clone();
+    if let Some(cache) = cached.as_ref().filter(|cache| metadata_fresh(cache, cwd, now())) {
+        return cache["data"].clone();
+    }
+    // Task 234: a read that ran out of the listing's budget (git is slow on a
+    // loaded machine) never replaces good metadata: the last good entry is
+    // shown, and kept, until a read succeeds. It used to be overwritten with
+    // "unavailable", which every next listing read again.
+    let known = cached
+        .as_ref()
+        .filter(|cache| cache["cwd"] == cwd && string(&cache["data"], "git_metadata_state") != "unavailable")
+        .map(|cache| cache["data"].clone());
+    if Instant::now() >= deadline {
+        return known.unwrap_or_else(|| empty("unavailable"));
+    }
+    let (data, git_dir) = inspect_git_dir(cwd, deadline);
+    if string(&data, "git_metadata_state") == "unavailable" {
+        if let Some(known) = known {
+            return known;
         }
     }
-    if Instant::now() >= deadline {
-        return empty("unavailable");
-    }
-    let data = inspect_git(cwd, deadline);
+    let head = git_dir.as_deref().and_then(head_stamp);
     let _ = atomic(
         &path,
-        &json!({"cwd":cwd,"at":now(),"data":data}).to_string(),
+        &json!({"cwd":cwd,"at":now(),"data":data,"git_dir":git_dir,"head":head}).to_string(),
     );
     data
 }
@@ -220,5 +274,45 @@ pub(super) fn enrich(rows: &mut [Value], live_cwds: &BTreeMap<String, String>) {
         if let (Some(target), Some(data)) = (row.as_object_mut(), value.as_object()) {
             target.extend(data.clone());
         }
+    }
+}
+
+/// Task 234: a folder's Git metadata is reused while its HEAD is unchanged,
+/// instead of spawning git twice per folder every 15 seconds.
+#[cfg(test)]
+mod metadata_cache_tests {
+    use super::*;
+
+    #[test]
+    fn a_repository_entry_holds_while_its_head_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let cwd = dir.path().to_string_lossy().into_owned();
+        let head = head_stamp(&git_dir).unwrap();
+        let entry = json!({"cwd":cwd,"at":1000.0,"data":{"git_metadata_state":"ok","git_branch":"main"},
+            "git_dir":git_dir.to_string_lossy(),"head":head});
+        assert!(metadata_fresh(&entry, &cwd, 1010.0), "young");
+        assert!(metadata_fresh(&entry, &cwd, 1000.0 + METADATA_HEAD_SECONDS - 1.0), "HEAD unchanged");
+        assert!(!metadata_fresh(&entry, &cwd, 1000.0 + METADATA_HEAD_SECONDS), "bounded");
+        assert!(!metadata_fresh(&entry, "elsewhere", 1010.0), "another folder");
+        // A branch switch rewrites HEAD.
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature-branch\n").unwrap();
+        assert!(!metadata_fresh(&entry, &cwd, 1100.0));
+        // An entry of the earlier format (no HEAD stamp) holds 15 seconds.
+        let old = json!({"cwd":cwd,"at":1000.0,"data":{"git_metadata_state":"ok"}});
+        assert!(metadata_fresh(&old, &cwd, 1014.0) && !metadata_fresh(&old, &cwd, 1016.0));
+    }
+
+    #[test]
+    fn a_folder_that_is_no_repository_is_checked_again_after_two_minutes() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_string_lossy().into_owned();
+        let entry = json!({"cwd":cwd,"at":1000.0,"data":{"git_metadata_state":"not_repo"}});
+        assert!(metadata_fresh(&entry, &cwd, 1000.0 + METADATA_NOT_REPO_SECONDS - 1.0));
+        assert!(!metadata_fresh(&entry, &cwd, 1000.0 + METADATA_NOT_REPO_SECONDS));
+        let unavailable = json!({"cwd":cwd,"at":1000.0,"data":{"git_metadata_state":"unavailable"}});
+        assert!(!metadata_fresh(&unavailable, &cwd, 1020.0), "a failed read is retried");
     }
 }

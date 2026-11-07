@@ -4,6 +4,7 @@ import type { ActivityItem, LocalItem, MediaMessage, TranscriptItem, VoiceState 
 import { imageSize } from "./attachment-image";
 import { messageTimeOf } from "../lib/dates";
 import { tr, trNoop } from "../../i18n";
+import { systemNotice } from "./notices";
 
 // A Symbol cannot arrive from a provider's JSON. Only our own local send
 // supplies these immutable-cache preview paths and oriented dimensions.
@@ -491,7 +492,11 @@ function transcriptItems(events: readonly ActivityEvent[], summary?: Record<stri
     if (role === "notice") {
       const report = typeof e.report === "string" ? e.report : "";
       if (e.origin === "subagent_report") items.push({ id, kind: "report", at, title: preview(e.detail) || tr("Subagent report"), body: report || e.detail, sender: e.sender || undefined });
-      else items.push({ id, kind: "system", at, sender: e.origin === "peer_message" ? tr("Message from %1", e.sender ?? tr("another session")) : tr("Background task"), body: report || e.detail });
+      else {
+        // A session's message may carry a team header (Qt reads it inside the envelope).
+        const notice = e.origin === "peer_message" ? systemNotice(report || e.detail || "") : undefined;
+        items.push({ id, kind: "system", at, sender: notice?.from ?? (e.origin === "peer_message" ? tr("Message from %1", e.sender ?? tr("another session")) : tr("Background task")), body: report || e.detail, notice });
+      }
       i++; continue;
     }
     if (role === "user" && e.source === "hgs_voice") {
@@ -503,6 +508,15 @@ function transcriptItems(events: readonly ActivityEvent[], summary?: Record<stri
       const row = e.local as LocalMessage;
       items.push({ id: `local-${row.id}`, kind: "user", at: "", body: row.text, attachments: attachments(e), local: localItem(row, summary) });
       i++; continue;
+    }
+    // Task 208: what Zerus pasted into the session (a team message, a doorbell)
+    // is a system notice with its sender, never "You" (ActivityView.cpp teamMessage).
+    if (role === "user" && e.type !== "QuestionAnswered" && !e.question_replies?.length) {
+      const notice = systemNotice(e.detail ?? "");
+      if (notice) {
+        items.push({ id, kind: "system", at, sender: notice.from, body: notice.full, notice, attachments: attachments(e) });
+        i++; continue;
+      }
     }
     if (role) {
       let receipt: string | undefined;

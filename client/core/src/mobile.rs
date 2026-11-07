@@ -95,21 +95,16 @@ pub fn config_path() -> PathBuf {
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
     };
-    if cfg!(windows) {
-        if let Some(root) = absolute("HGS_CONFIG_DIR") {
-            return root.join("mobile").join("connector.json");
-        }
-        let home = absolute("HOME").or_else(home_dir).unwrap_or_default();
-        return home
-            .join(".config")
-            .join("hgs")
-            .join("mobile")
-            .join("connector.json");
-    }
-    let root = absolute("XDG_CONFIG_HOME")
-        .or_else(|| home_dir().map(|home| home.join(".config")))
-        .unwrap_or_default();
-    root.join("hgs").join("mobile").join("connector.json")
+    zerus_watch_protocol::session_labels::configuration_path(
+        if cfg!(windows) {
+            absolute("HOME").or_else(home_dir)
+        } else {
+            home_dir()
+        },
+        absolute("XDG_CONFIG_HOME"),
+        absolute("HGS_CONFIG_DIR"),
+        cfg!(windows),
+    )
 }
 
 fn home_dir() -> Option<PathBuf> {

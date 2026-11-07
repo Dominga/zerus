@@ -441,13 +441,15 @@ describe("Edit choices… (1525-1528)", () => {
 });
 
 describe("the notices (1577-1586)", () => {
+  // A creation made after this window started (unix seconds); older failures stay quiet.
+  const LIVE = 4_000_000_000;
   it("show once per state and error, using the normal toast timer", async () => {
-    const t = setup([card("a", { state: "failed", caption: "Creation failed", error: "No folder." })]);
+    const t = setup([card("a", { state: "failed", caption: "Creation failed", error: "No folder.", created: LIVE })]);
     await t.started;
-    t.emit(card("a", { state: "failed", caption: "Creation failed", error: "No folder." }));
-    t.emit(card("a", { state: "failed", caption: "Creation failed", error: "Still no folder." }));
-    t.emit(card("a", { state: "queued" }));
-    t.emit(card("a", { state: "unknown", caption: "Creation result unknown", error: "Still no folder." }));
+    t.emit(card("a", { state: "failed", caption: "Creation failed", error: "No folder.", created: LIVE }));
+    t.emit(card("a", { state: "failed", caption: "Creation failed", error: "Still no folder.", created: LIVE }));
+    t.emit(card("a", { state: "queued", created: LIVE }));
+    t.emit(card("a", { state: "unknown", caption: "Creation result unknown", error: "Still no folder.", created: LIVE }));
     expect(t.notices).toEqual([
       { tone: "error", text: "Creation tag-a: Creation failed\nNo folder.", sticky: undefined },
       { tone: "error", text: "Creation tag-a: Creation failed\nStill no folder.", sticky: undefined },
@@ -459,7 +461,7 @@ describe("the notices (1577-1586)", () => {
   it("expires failed and unknown toasts while retaining card details and once-per-state delivery", async () => {
     vi.useFakeTimers();
     const bus = createNoticeBus();
-    const failed = card("a", { state: "failed", error: "Name already exists.", can_edit: true });
+    const failed = card("a", { state: "failed", error: "Name already exists.", can_edit: true, created: LIVE });
     const t = setup([failed], { bus });
     try {
       await t.started;
@@ -475,15 +477,39 @@ describe("the notices (1577-1586)", () => {
     } finally { t.dispose(); vi.useRealTimers(); }
   });
 
+  it("keep a failure that settled before the window started on its card, without a toast at every restart", async () => {
+    const old = 1_793_000_000;
+    const t = setup([
+      card("gone", { state: "failed", caption: "Creation failed", error: "This session already has an account.", created: old }),
+      card("busy", { state: "queued", created: old }),
+    ]);
+    await t.started;
+    // The settled failure is still on its card, but raises no toast.
+    expect(t.store.creations().find((c) => c.id === "gone")?.error).toBe("This session already has an account.");
+    t.emit(card("gone", { state: "failed", caption: "Creation failed", error: "This session already has an account.", created: old }));
+    expect(t.notices).toEqual([]);
+    // A creation seen in progress that fails while the window is open shows one.
+    t.emit(card("busy", { state: "failed", caption: "Creation failed", error: "No folder.", created: old }));
+    // So does a new failure of the settled card, and a creation first seen failing after the start.
+    t.emit(card("gone", { state: "unknown", caption: "Creation result unknown", error: "Lost.", created: old }));
+    t.emit(card("fresh", { state: "failed", caption: "Creation failed", error: "Name already exists.", created: LIVE }));
+    expect(t.notices.map((n) => n.text)).toEqual([
+      "Creation tag-busy: Creation failed\nNo folder.",
+      "Creation tag-gone: Creation result unknown\nLost.",
+      "Creation tag-fresh: Creation failed\nName already exists.",
+    ]);
+    t.dispose();
+  });
+
   it("remember 128 creations", async () => {
     const t = setup();
     await t.started;
-    for (let i = 0; i < 129; i++) t.emit(card(`n${i}`, { state: "storage_error", created: i }));
+    for (let i = 0; i < 129; i++) t.emit(card(`n${i}`, { state: "storage_error", created: LIVE + i }));
     expect(t.notices).toHaveLength(129);
     // The newest is remembered; the oldest was forgotten and shows again.
-    t.emit(card("n128", { state: "storage_error", created: 128 }));
+    t.emit(card("n128", { state: "storage_error", created: LIVE + 128 }));
     expect(t.notices).toHaveLength(129);
-    t.emit(card("n0", { state: "storage_error", created: 0 }));
+    t.emit(card("n0", { state: "storage_error", created: LIVE }));
     expect(t.notices).toHaveLength(130);
     t.dispose();
   });

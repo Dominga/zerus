@@ -140,6 +140,8 @@ pub const KEYS: &[Key] = &[
     key("workspace/compact", Kind::Flag(false)),
     key("workspace/expandSessionsOnHover", Kind::Flag(true)),
     key("workspace/hideEmptyProjects", Kind::Flag(true)),
+    // Session cards mark their account with its letter, or its emoji when set.
+    client("sessions/accountMarks", Kind::Choice(&["letter", "emoji"])),
     key("workspace/animateActivity", Kind::Flag(true)),
     key("workspace/showCompletedSubagents", Kind::Flag(false)),
     key("workspace/reduceMotion", Kind::Flag(false)),
@@ -299,6 +301,29 @@ pub fn find(name: &str) -> Option<Key> {
         .or_else(|| update_family(name))
         .or_else(|| machine_family(name))
         .or_else(|| project_family(name))
+        .or_else(|| account_family(name))
+}
+
+/// The desktop's own color and emoji mark for one account profile:
+/// `accounts/color/<token>` and `accounts/mark/<token>`, where the token is
+/// the URI-encoded profile key (computer and profile ID). Like machine colors
+/// these are this desktop's preferences, never the host's catalog.
+pub const ACCOUNT_COLORS: &str = "accounts/color/";
+pub const ACCOUNT_MARKS: &str = "accounts/mark/";
+fn account_family(name: &str) -> Option<Key> {
+    let token = name
+        .strip_prefix(ACCOUNT_COLORS)
+        .or_else(|| name.strip_prefix(ACCOUNT_MARKS))?;
+    (!token.is_empty()
+        && token.len() <= 512
+        && !token
+            .chars()
+            .any(|c| c.is_control() || c == '/' || c == '\\'))
+    .then_some(Key {
+        name: "accounts/",
+        kind: Kind::Text(""),
+        seeded: false,
+    })
 }
 
 // Project IDs are flat JSON keys, never filesystem paths or machine aliases.
@@ -920,6 +945,7 @@ impl Settings {
                 name.starts_with(SHORTCUTS)
                     || name.starts_with("updates/")
                     || name.starts_with("machines/")
+                    || name.starts_with("accounts/")
             }) {
                 all.insert(name.clone(), effective(key.kind, Some(value)));
             }
@@ -942,7 +968,11 @@ impl Settings {
         }
         let stored = match (&key.kind, &value) {
             (Kind::Chords, Value::Null) => None,
-            (Kind::Text(""), Value::Null) if name.starts_with("machines/colors/") => None,
+            (Kind::Text(""), Value::Null)
+                if name.starts_with("machines/colors/") || name.starts_with("accounts/") =>
+            {
+                None
+            }
             (Kind::AutoFlag, Value::String(s)) if s == "auto" => Some(Value::from("auto")),
             (Kind::AutoFlag | Kind::Flag(_), Value::Bool(_))
             | (Kind::Choice(_) | Kind::Text(_) | Kind::Bytes, Value::String(_))

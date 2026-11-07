@@ -4,7 +4,9 @@ import { Icon } from "../lib/icons";
 import { MachineTile } from "../components/MachineTile";
 import { MachineLabel } from "../components/MachineLabel";
 import { Actions, Spinner, Status } from "../components/Status";
-import { AgentBadge, ProviderGlyph } from "../sessions/SessionCard";
+import { AccountMarkCircle, AgentBadge, ProviderGlyph } from "../sessions/SessionCard";
+import { accountMark } from "../../store/accountMarks";
+import { settings } from "../../store/settings";
 import { ResizeHandle } from "../sessions/SessionList";
 import type { Account } from "../../types";
 import { agentKind, catalog } from "../../store/catalog";
@@ -28,6 +30,7 @@ import { trText } from "../../text";
 // setup and distribution share that writer and the existing terminal backend.
 
 const AccountDistributionDialog=lazy(()=>import("./AccountDistributionDialog"));
+const AccountMarkDialog=lazy(()=>import("./AccountMarkDialog"));
 const AccountSetupDialog = lazy(() => import("./AccountSetupDialog"));
 const managementBusy=()=>accountManagement.busy()||accountSetup.busy()||accountDistribution.busy();
 const closeManagement=()=>{accountManagement.close();accountSetup.close();accountDistribution.close();};
@@ -139,6 +142,7 @@ function Detail(props: { a: Account }) {
   const defaultable = () => props.a.provider !== "dsh" && !nativeConfig();
   const matches = () => props.a.members.filter((x) => x.machine.toLowerCase().includes(moreQuery().trim().toLowerCase()));
   const tags = createMemo(() => profileTags(props.a));
+  const [markEditor, setMarkEditor] = createSignal<{ origin: HTMLElement }>();
   // The selected machine, with its profile tag when another profile shares it.
   const where = () => (tags().has(m().key) ? `${m().machine} (${tags().get(m().key)})` : m().machine);
   const choose = (key: string) => { setSelectedProfile(key); closeManagement(); clearManagementNotice(); };
@@ -159,10 +163,13 @@ function Detail(props: { a: Account }) {
   return (
     <div class="acct-detail">
       <div class="acct-title">
+        <AccountMarkCircle mark={accountMark(props.a, settings)} size={22} />
         <h2 class="ell">{props.a.label}</h2>
         <span class="grow" />
+        <button class="btn" onClick={event=>setMarkEditor({ origin: event.currentTarget })}><Icon name="palette" size={13} />{tr("Color and mark…")}</button>
         <button class="btn" disabled={managementBusy()} onClick={event=>void openCatalog("rename",props.a.key,m().key,event.currentTarget)}><Icon name="pencil" size={13} />{tr("Rename…")}</button>
       </div>
+      <Show when={markEditor()}>{(editor) => <Suspense><AccountMarkDialog account={props.a} origin={editor().origin} close={() => setMarkEditor(undefined)} /></Suspense>}</Show>
       <div class="row acct-identity">
         <AgentBadge agent={agentKind(props.a.provider)} />
         <div class="col selectable">

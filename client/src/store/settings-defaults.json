@@ -16,6 +16,7 @@
   "processes/loadingSeconds": 0.5,
   "processes/unknownSeconds": 10.0,
   "recovery/sharedPolicy": "",
+  "sessions/accountMarks": "letter",
   "speech/host": "",
   "speech/machine_id": "",
   "speech/manage_host": "",

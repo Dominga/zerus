@@ -519,6 +519,34 @@ fn machine_appearance_editing_is_local_and_color_reset_preserves_style() {
 }
 
 #[test]
+fn account_marks_are_local_per_profile_and_removable() {
+    let scratch = Scratch::new("account-marks");
+    let path = scratch.0.join("settings.json");
+    let settings = Settings::open(path.clone(), None);
+    assert_eq!(settings.get("sessions/accountMarks"), "letter");
+    assert_eq!(
+        settings.set("sessions/accountMarks", json!("emoji")),
+        Ok(json!("emoji"))
+    );
+    let color = "accounts/color/studio%1Fclaude-a1";
+    let mark = "accounts/mark/studio%1Fclaude-a1";
+    assert_eq!(settings.set(color, json!("#2b97ff")), Ok(json!("#2b97ff")));
+    assert_eq!(settings.set(mark, json!("x")), Ok(json!("x")));
+    for invalid in ["accounts/color/", "accounts/color/a/b", "accounts/mark/a\\b"] {
+        assert!(settings.set(invalid, json!("#2b97ff")).is_err(), "{invalid}");
+    }
+    assert!(settings.all().contains_key(color));
+    assert_eq!(settings.set(mark, Value::Null), Ok(Value::Null));
+    assert!(!settings.all().contains_key(mark));
+    assert!(settings.flush_within(FLUSH));
+    drop(settings);
+    let reopened = Settings::open(path, None);
+    assert_eq!(reopened.get(color), "#2b97ff");
+    assert!(!reopened.all().contains_key(mark));
+    assert_eq!(reopened.get("sessions/accountMarks"), "emoji");
+}
+
+#[test]
 fn set_normalizes_persists_and_tells_listeners() {
     let scratch = Scratch::new("set");
     let path = scratch.0.join("data/settings.json");

@@ -234,7 +234,7 @@
     <message>
       <location filename="../src/AccountsPage.cpp" line="327" />
       <source>Model defaults saved for new sessions on %1.</source>
-      <translation type="unfinished" />
+      <translation>Модель по умолчанию сохранена для новых сессий на %1.</translation>
     </message>
     <message>
       <location filename="../src/AccountsPage.cpp" line="327" />
@@ -300,7 +300,7 @@
     <message>
       <location filename="../src/AccountsPage.cpp" line="446" />
       <source>%1, %2</source>
-      <translation type="unfinished" />
+      <translation>%1, %2</translation>
     </message>
     <message>
       <location filename="../src/AccountsPage.cpp" line="446" />

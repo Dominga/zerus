@@ -125,6 +125,9 @@ fn run_within(
         !alias.starts_with('-') && !alias.chars().any(char::is_whitespace),
         "invalid connection alias"
     );
+    let label_attempt = (words == ["swarm", "hello"])
+        .then(|| super::session_labels::begin_peer(config, alias, deadline))
+        .flatten();
     let bytes = serde_json::to_vec(&input.unwrap_or(&json!({})))?;
     ensure!(
         bytes.len() as u64 <= MAX_BYTES,
@@ -222,6 +225,7 @@ fn run_within(
         .context("remote HGS does not provide a valid swarm response; update HGS on that machine",
     )?;
     ensure!(!expired(), "connection to {alias} timed out");
+    super::session_labels::finish_peer(config, label_attempt, &answer);
     Ok(answer)
 }
 
@@ -266,6 +270,9 @@ pub fn hello(config: &Config, inventory: bool) -> Result<Value> {
     if inventory {
         return Ok(result);
     }
+    // Business/fence hello never waits for a connector. Configured slots
+    // require the separate bounded background capability observation.
+    result["session_labels"] = super::session_labels::observe_absent(config).unwrap_or(Value::Null);
     match replica::hello(config) {
         Ok(mut replica) => {
             replica["peers"] = json!(peers);
@@ -368,7 +375,11 @@ pub fn sync_peer(config: &Config, alias: &str) -> Result<()> {
         peer.last_sync = now();
         peer.error.clear();
     }
-    local.save()
+    local.save()?;
+    drop(local);
+    let _ =
+        super::session_labels::refresh_peer(config, alias, Instant::now() + Duration::from_secs(2));
+    Ok(())
 }
 
 /// The member's verified hello and the catalog exchange after it; a failure
@@ -567,6 +578,7 @@ pub fn sync(config: &Config) -> Result<Value> {
             }
         }
     }
+    let _ = super::session_labels::refresh_local(config, Instant::now() + Duration::from_secs(2));
     Ok(json!(result))
 }
 
@@ -830,6 +842,12 @@ pub fn worker() -> Result<()> {
                                 .insert(alias, (now() + (15 * (1 << failures)).min(300), failures));
                         }
                     }
+                }
+                if super::session_labels::due_local(&config) {
+                    let _ = super::session_labels::refresh_local(
+                        &config,
+                        Instant::now() + Duration::from_secs(2),
+                    );
                 }
                 last_digest = LockedStore::load(&config)?.data.catalog.digest() + &replica::fingerprint(&config).unwrap_or_default();
                 Ok(())

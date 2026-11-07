@@ -189,6 +189,9 @@ pub const KEYS: &[Key] = &[
     // key is the device's record of the child links it already handled.
     client("sessions/compactNewChildren", Kind::Flag(true)),
     client("sessions/childRowsSeen", Kind::Text("")),
+    // Parents whose child sessions are hidden, by machine UUID and session
+    // ID, so the choice survives a relaunch (zerus-sa9qn.15).
+    client("sessions/collapsedTeams", Kind::Text("")),
     key("workspace/animateActivity", Kind::Flag(true)),
     key("workspace/showCompletedSubagents", Kind::Flag(false)),
     key("workspace/reduceMotion", Kind::Flag(false)),
@@ -297,6 +300,7 @@ pub const KEYS: &[Key] = &[
         },
     ),
     client("client/overviewFullWidth", Kind::Flag(false)),
+    client("client/overviewSubSessions", Kind::Flag(false)),
     client("workspace/inspectorOpen", Kind::AutoFlag),
     client(
         "workspace/inspectorTab",

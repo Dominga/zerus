@@ -21,6 +21,7 @@ pub(super) struct Spec {
     topic: String,
     session: Option<Session>,
     project: Option<String>,
+    path: Option<String>,
     after: Option<i64>,
     tail: Option<u32>,
     interval_ms: Option<u64>,
@@ -37,6 +38,7 @@ impl Spec {
         let mut native = Subscription {
             topic: self.topic.clone(),
             project: self.project,
+            path: self.path,
             after: self.after,
             tail: self.tail,
             interval_ms: self.interval_ms,
@@ -59,7 +61,25 @@ impl Spec {
                 conversation_id: session.conversation_id,
             });
         }
+        ensure!(
+            native.topic == topic::GIT || native.path.is_none(),
+            "unexpected detail path"
+        );
         match native.topic.as_str() {
+            topic::GIT => ensure!(
+                native
+                    .path
+                    .as_deref()
+                    .is_some_and(zerus_client_core::git::valid_path)
+                    && native.session.is_none()
+                    && native.project.is_none()
+                    && native.after.is_none()
+                    && native.tail.is_none()
+                    && native.interval_ms.is_none()
+                    && native.window.is_none()
+                    && self.refresh.is_none(),
+                "invalid git demand"
+            ),
             topic::ACTIVITY => {
                 ensure!(
                     native.session.is_some()
@@ -127,13 +147,15 @@ impl Key {
                 .session
                 .as_ref()
                 .map(SessionRef::key)
-                .or_else(|| spec.project.clone()),
+                .or_else(|| spec.project.clone())
+                .or_else(|| spec.path.clone()),
         }
     }
     pub fn limit(&self) -> usize {
         match self.topic.as_str() {
             topic::ACTIVITY | topic::PROCESSES | topic::TASKS => 16,
             topic::ORGANIZATION => 1,
+            topic::GIT => 64,
             _ => 0,
         }
     }

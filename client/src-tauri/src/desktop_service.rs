@@ -316,9 +316,17 @@ impl CatalogDelivery {
             );
         }
         match self.value {
-            CatalogValue::Row(change) => {
+            CatalogValue::Row(mut change) => {
+                if let Change::Upsert { row, .. } = change.as_mut() {
+                    row.catalog_source = Some((
+                        self.epoch.clone(),
+                        self.source.incarnation,
+                        self.source.generation,
+                    ));
+                }
                 observe(&change);
                 pump.push(*change);
+                shared.details_changed.notify_one();
             }
             CatalogValue::Removal { key, listed } => {
                 // The serial drain's mirror holds exactly the rows delivered
@@ -334,6 +342,7 @@ impl CatalogDelivery {
                 };
                 observe(&change);
                 pump.push(change);
+                shared.details_changed.notify_one();
             }
             CatalogValue::Finish {
                 through,
@@ -378,6 +387,7 @@ impl CatalogDelivery {
                 observe(&change);
                 pump.push(change);
                 let _ = done.send(());
+                shared.details_changed.notify_one();
             }
         }
     }

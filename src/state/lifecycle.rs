@@ -402,6 +402,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             let current =
                 read_own_run(&name, &token)?.ok_or("session changed while launching agent")?;
             !string(&current, "conversation_id").is_empty() || current.get("pausing").is_some()
+                || terminating::pending(&current)
         };
         let fallback = nonempty_env("HGS_FALLBACK_SECS")
             .unwrap_or_else(|| "5".into())
@@ -421,6 +422,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             let _guard = lock(None)?;
             let mut current =
                 read_own_run(&name, &token)?.ok_or("session changed while launching agent")?;
+            terminating::check_mutation(&current)?;
             current["pid"] = json!(std::process::id());
             current["process_start"] = json!(process_start(std::process::id()));
             current["activity"] = json!("unknown");
@@ -453,6 +455,7 @@ fn spawn_agent(argv: &[String], name: &str, run_id: &str) -> Result<std::process
         Err(error) => {
             let _guard = lock(None)?;
             if let Some(mut record) = read_run(name, run_id)? {
+                terminating::check_mutation(&record)?;
                 record["error"] = json!(error);
                 write(&mut record)?;
                 archive::failed_restore(&mut record)?;
@@ -479,6 +482,7 @@ pub(super) fn pausable(record: &Value, resumed_idle: impl FnOnce() -> bool) -> b
 
 fn pause_check(name: &str, snapshot: &Snapshot) -> Result<Value> {
     let record = read(name)?;
+    terminating::check_mutation(&record)?;
     if !matches(&record, panes_of(snapshot, &record)) {
         return Err(format!(
             "{name}: live pane does not match its saved binding"
@@ -569,6 +573,7 @@ fn pause_one(record: &Value, scope: Option<&session_action::Scope>) -> Result<()
     {
         let _guard = lock(None)?;
         let current = read(name)?;
+        terminating::check_mutation(&current)?;
         if let Some(scope)=scope {scope.check(&current)?;}
         if current["run_id"] != record["run_id"]
             || !safe_to_pause(&current)
@@ -682,6 +687,7 @@ pub(super) fn pause_scoped(names: &[String], dry: bool, scope: Option<&session_a
         let _guard = lock(None)?;
         for record in &saved {
             let current = read(string(record, "name"))?;
+            terminating::check_mutation(&current)?;
             if let Some(scope)=scope {scope.check(&current)?;}
             if current["run_id"] != record["run_id"] || current["updated"] != record["updated"] {
                 return Err(format!(
@@ -1044,6 +1050,7 @@ pub(super) fn resume_scoped(names: &[String], dry: bool, scope: Option<&session_
             verify_requested(&read(&name)?, &snapshot, id)?;
         }
         let record = read(&name)?;
+        terminating::check_mutation(&record)?;
         if already_live(&record, &snapshot)? {
             if scope.is_some() {return Err("Session is already live; no resume was launched".into());}
             continue;
@@ -1257,10 +1264,11 @@ mod tests {
     }
 }
 
-/// Replacing a binding cannot drop an unfinished archive/Clear transaction.
+/// Replacing a binding cannot drop an unfinished archive/Clear or Terminate transaction.
 /// A resident old finalizer may have archived the successor with both anchors;
 /// current restore/resume/fresh must retain that record until exact settlement.
 fn refuse_unsettled_clear(record: &Value) -> Result<()> {
+    terminating::check_mutation(record)?;
     if clear_context::cleanup_pending(record) {
         return Err("Restored Clear archive cleanup is unfinished; retain the binding for review".into());
     }

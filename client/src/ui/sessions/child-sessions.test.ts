@@ -35,6 +35,24 @@ describe("child sessions in the list", () => {
     expect(cards(out)[3]).toMatchObject({ parentKey: lead.session.key, lastChild: true });
   });
 
+  it("counts subagents and child sessions in one counter, and one toggle hides both (zerus-sa9qn.16)", () => {
+    const subagents = [{ id: "a", name: "general-purpose", state: "working" as const, summary: "Reading", inactive: false },
+      { id: "b", name: "Explore", state: "ready" as const, summary: "", inactive: false }];
+    const lead = { ...session(1), subagents };
+    const list = [lead, session(2, 1, { status: "working" })];
+    const open = rows(list, {}, list);
+    expect(cards(open)[0]).toMatchObject({ expandable: false, expanded: true, team: { total: 3, working: 2, collapsed: false } });
+    expect(open.filter((r) => r.type === "child").map((r) => r.type === "child" && r.child.id)).toEqual(["a", "b"]);
+    // The old subagent toggle no longer decides: only the parent's one toggle.
+    const shut = rows(list, { expanded: () => true, teamCollapsed: (k) => k === "\nrun:1" }, list);
+    expect(shut.map((r) => r.type)).toEqual(["card"]);
+    expect(cards(shut)[0].team).toMatchObject({ total: 3, working: 2, collapsed: true });
+    // A parent with only subagents gets the same counter and toggle.
+    const alone = rows([lead]);
+    expect(cards(alone)[0].team).toEqual({ total: 2, working: 1, asking: 0, needsYou: 0, errors: 0, collapsed: false });
+    expect(rowHeight(alone.find((r) => r.type === "child")!)).toBe(ROW_HEIGHT.collapsedRow);
+  });
+
   it("counts working descendants and collapses a parent's children without promoting them", () => {
     const out = rows([session(1), session(2, 1, { status: "working" }), session(3, 2)], { teamCollapsed: (k) => k === "\nrun:1" });
     expect(shape(out)).toEqual(["s1"]);

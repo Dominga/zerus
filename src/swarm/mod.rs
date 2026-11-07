@@ -373,8 +373,12 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
             ensure!(args == ["session-labels-context", "--json"], "usage: hgs swarm session-labels-context --json");
             Ok(serde_json::to_value(session_labels::context(config)?)?)
         }
+        "session-labels-gate" => {
+            ensure!(args == ["session-labels-gate", "--json"], "usage: hgs swarm session-labels-gate --json");
+            Ok(json!({"schema":1,"ready":session_labels::cached(config)}))
+        }
         "session-labels" => {
-            ensure!(args == ["session-labels", "--json"], "usage: hgs swarm session-labels --json");
+            ensure!(args == ["session-labels", "--json"] || args == ["session-labels"], "usage: hgs swarm session-labels --json");
             session_labels::observe(config, std::time::Instant::now() + std::time::Duration::from_secs(2))
         }
         "session-project" | "assign-session" => {

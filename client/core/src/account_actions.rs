@@ -21,6 +21,9 @@ pub enum Kind {
     Remove,
     Permissions,
     Model,
+    /// Share the permission mode across the account's computers, or keep it
+    /// per computer (zerus-f0uz8): `mode` is `account` or `computer`.
+    Scope,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -29,6 +32,9 @@ pub struct Values {
     pub mode: String,
     pub model: String,
     pub effort: String,
+    /// For a shared permission change: the scope the member must still have
+    /// (`account`), checked by its hgs under the catalog lock (zerus-f0uz8).
+    pub expect_scope: String,
 }
 
 /// Native-only evidence captured when the action opens, never read from a
@@ -137,6 +143,7 @@ impl Binding {
             Kind::Remove => "rm",
             Kind::Permissions => "permissions",
             Kind::Model => "model-defaults",
+            Kind::Scope => "permission-scope",
         };
         if kind == Kind::Default && matches!(self.provider.as_str(), "dsh" | "opencode") {
             return Err("This account has no default selection.".into());
@@ -159,6 +166,18 @@ impl Binding {
                 return Err("Choose provider or bypass permission mode.".into());
             }
             call.args.extend(["--mode".into(), values.mode.clone()]);
+            if !values.expect_scope.is_empty() {
+                call.args
+                    .extend(["--expect-scope".into(), values.expect_scope.clone()]);
+            }
+        }
+        if kind == Kind::Scope {
+            if self.provider == "opencode"
+                || !["account", "computer"].contains(&values.mode.as_str())
+            {
+                return Err("Choose shared or per-computer permissions.".into());
+            }
+            call.args.extend(["--scope".into(), values.mode.clone()]);
         }
         if kind == Kind::Model {
             if !["codex", "claude", "kimi"].contains(&self.provider.as_str())
@@ -273,5 +292,34 @@ mod tests {
         assert!(binding().verify(&v).is_err());
         assert!(Binding::capture(ComputerId::local(), String::new(), &catalog(), "work").is_err());
         assert!(binding().edit(Kind::Rename, "\n").is_err());
+    }
+    #[test]
+    fn a_scope_edit_names_shared_or_per_computer_only() {
+        let scope = |mode: &str| {
+            binding().edit_values(
+                Kind::Scope,
+                &Values {
+                    mode: mode.into(),
+                    ..Default::default()
+                },
+            )
+        };
+        let args = scope("computer").unwrap().args;
+        assert_eq!(
+            &args[3..],
+            [
+                "account",
+                "permission-scope",
+                "work",
+                "--revision",
+                "r1",
+                "--scope",
+                "computer"
+            ]
+        );
+        assert!(scope("account").is_ok());
+        for bad in ["", "everywhere", "bypass"] {
+            assert!(scope(bad).is_err(), "{bad}");
+        }
     }
 }

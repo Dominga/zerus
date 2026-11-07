@@ -263,6 +263,9 @@ pub(super) fn restore(record: &Value) -> Result<()> {
 /// Archive success must never become a failed termination because cleanup was
 /// skipped or could not be confirmed. Emit a separate, machine-readable outcome.
 pub(super) fn after_archive(record: &Value, archive_id: &str) {
+    if terminating::pending(record) {
+        return;
+    }
     if !super::worktree_maintenance::policy().is_ok_and(|p| p.enabled && p.after_session) {
         return;
     }

@@ -91,7 +91,7 @@ export function createCreations(deps: CreationsDeps) {
   /** Ids an event named before the first read answered; that read never overwrites them. */
   const early = new Set<string>();
   let loaded = false;
-  /** When this window started reading creations (unix seconds, like `created`). */
+  /** When this window started reading creations (desktop-clock Unix seconds). */
   let startedAt = 0;
   /** The version each card's details were read for. */
   const read = new Map<string, number>();
@@ -127,10 +127,10 @@ export function createCreations(deps: CreationsDeps) {
     notices.set(c.id, n.key);
     if (notices.size > NOTICE_LIMIT) notices.delete(notices.keys().next().value!);
     // A failure that settled before this window started (first seen already
-    // failed, created earlier) stays on its card; only a failure that happens
+    // failed, last changed earlier) stays on its card; only a failure that happens
     // while the window is open raises a toast. Otherwise an old failed
     // creation came back at every restart (owner 2026-11-07).
-    if (!known && c.created < startedAt) return;
+    if (!known && (c.updated ?? c.created) < startedAt) return;
     deps.notify("error", n.text);
   }
 

@@ -126,6 +126,7 @@ pub struct CreationCard {
     caption: String,
     error: String,
     created: i64,
+    updated: i64,
     group: String,
     host: String,
     machine: String,
@@ -151,6 +152,10 @@ impl CreationCard {
             caption: creation::caption(text(operation, "state")).into(),
             error: text(operation, "error").into(),
             created: operation["created"].as_i64().unwrap_or_default(),
+            updated: operation["updated"]
+                .as_i64()
+                .filter(|time| *time > 0)
+                .unwrap_or_else(|| operation["created"].as_i64().unwrap_or_default()),
             group: text(operation, "group").into(),
             host: text(operation, "host").into(),
             machine: text(operation, "machine").into(),
@@ -1912,6 +1917,42 @@ mod tests {
             ..choices()
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn cards_carry_the_stage_clock_without_retiming_visibility_or_legacy_records() {
+        let clock = Arc::new(std::sync::atomic::AtomicI64::new(1_000));
+        let source = Arc::clone(&clock);
+        let mut queue = Creations::new(
+            move || source.load(Ordering::SeqCst),
+            || "00000000-0000-4000-8000-000000000123".into(),
+        );
+        queue.load(Journal::Missing);
+        let (id, effects) = queue.submit(plan());
+        let id = id.unwrap();
+        let write = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Write { write, .. } => Some(*write),
+                _ => None,
+            })
+            .unwrap();
+        clock.store(2_000, Ordering::SeqCst);
+        queue.written(write, false);
+        let value =
+            serde_json::to_value(CreationCard::of(&id, queue.operation(&id).unwrap(), false))
+                .unwrap();
+        assert_eq!(value["created"], 1_000);
+        assert_eq!(value["updated"], 2_000);
+        assert_eq!(value["state"], "storage_error");
+        clock.store(3_000, Ordering::SeqCst);
+        queue.hide(&id);
+        queue.show(&id);
+        let operation = queue.operation(&id).unwrap();
+        assert_eq!(CreationCard::of(&id, operation, false).updated, 2_000);
+        let mut legacy = operation.clone();
+        legacy.as_object_mut().unwrap().remove("updated");
+        assert_eq!(CreationCard::of(&id, &legacy, false).updated, 1_000);
     }
 
     impl Fake {

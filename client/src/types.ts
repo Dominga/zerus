@@ -712,6 +712,8 @@ export interface CreationCard {
   caption: string; error: string;
   /** Seconds since the Unix epoch. */
   created: number;
+  /** Last recorded state change in desktop-clock Unix seconds; absent on older hosts. */
+  updated?: number;
   /** The destination project's id. */
   group: string;
   /** "" for this computer, else the alias. */

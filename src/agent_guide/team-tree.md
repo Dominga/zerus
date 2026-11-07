@@ -29,4 +29,5 @@ in the whole tree (tree_sessions), checked at create, add-member, scale,
 swap-member and extend. Sub-teams are approved by their parent lead, or by the
 owner.
 Sub-lead: hgs team sub-lead {"member":"qalead","sub":true}; reports-to
-{member, parent} sets who it reviews.
+{member, parent} sets who it reviews. A sub-lead with reports and no session
+yet is started for them; it then hears its brief and inbox.

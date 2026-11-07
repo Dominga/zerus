@@ -107,6 +107,7 @@ private slots:
     void aPollUnderTheMemberMenuKeepsItsButtonAndTheSwapDialog();
     void memberBlocksShowTheirReasonAndReviewAction();
     void memberMenuScalesAndDrains();
+    void relaunchTooltipNamesItsReports();
     void sideListsAndMemberTasks();
 };
 
@@ -1856,6 +1857,31 @@ void TestTeamsUiMembers::sideListsAndMemberTasks()
     if (!qEnvironmentVariable("ZERUS_TEAM_SHOTS").isEmpty()) lightShot(&workspace, "ux-4-planning-light");
     darkPalette();
     Settings::remove("workspace/skin");
+}
+
+// Task #26: a member that is not failed starts on its own for its first task or
+// its reports; the Relaunch action says so.
+void TestTeamsUiMembers::relaunchTooltipNamesItsReports()
+{
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.refreshCatalog();
+    QTRY_VERIFY(controller.catalogReady());
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    panel.resize(420, 900); panel.show();
+    workspace.resize(1300, 820); workspace.show();
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QTRY_VERIFY(!workspace.findChildren<QFrame *>("teamWorkspaceMember").isEmpty());
+    inspectMemberMenu(&workspace, "backend", [](QMenu *menu) {
+        QAction *relaunch = nullptr;
+        for (auto *action : menu->actions()) if (action->text() == "Relaunch") relaunch = action;
+        QVERIFY(relaunch && !relaunch->isEnabled());
+        QVERIFY2(relaunch->toolTip().contains("its reports"), qPrintable(relaunch->toolTip()));
+    });
 }
 
 QTEST_MAIN(TestTeamsUiMembers)

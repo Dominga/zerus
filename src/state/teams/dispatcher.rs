@@ -446,6 +446,17 @@ fn session_of<'a>(member: &Member, seen: &'a [Seen]) -> Option<&'a Seen> {
     seen.iter().find(|s| s.host == session.host && s.name == session.name)
 }
 
+/// Task #26: whether Zerus may start this member although no task is handed out
+/// to it: no session, no start in flight, and neither removed, paused, draining
+/// nor failed (a failed start waits for its relaunch).
+fn may_start(member: &Member) -> bool {
+    member.session.is_none()
+        && !matches!(member.state, MemberState::Removed | MemberState::Paused)
+        && !member.draining
+        && member.launch_id.is_empty()
+        && member.error.is_empty()
+}
+
 /// N7: whether this tick may decide anything from the member's session being
 /// absent - only when its computer answered the listing. A member with no
 /// session yet, or a tick with no listing information, is not held back.
@@ -1106,6 +1117,18 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             steps.push(Step::Inbox);
         }
     }
+    // Task #26: a sub-lead with reports to read and no session is started, so
+    // its brief and inbox reach it; the message steps below follow once it can
+    // take one. Only a running or paused team starts its members: a planning or
+    // draft team starts its lead alone.
+    if active {
+        for sub in team.members.iter().filter(|member| member.sub && may_start(member)) {
+            let untold = inbox::items_for(team, &sub.id).iter().any(|item| !sub.inbox.told.contains(&item.key));
+            if untold && launching.insert(sub.id.clone()) {
+                steps.push(Step::Launch { member: sub.id.clone() });
+            }
+        }
+    }
     // N10: a member that just became a sub-lead hears what that means once.
     for sub in team.members.iter().filter(|member| member.sub && member.sub_brief && member.state != MemberState::Removed) {
         if session_of(sub, seen).is_some_and(can_take_a_message) {
@@ -1328,6 +1351,15 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             if let Some(member) = candidates.iter().filter_map(|id| team.member(id)).find(|member| available(member, &busy, Some(task))) {
                 busy.insert(member.id.as_str());
                 steps.push(Step::StageOut { task, member: member.id.clone() });
+                continue;
+            }
+            // Task #26: no candidate is available and the member this stage
+            // would go to has no session: start it, so the stage is not left
+            // waiting for a member that never starts.
+            if let Some(member) = candidates.iter().filter_map(|id| team.member(id)).find(|member| may_start(member)) {
+                if launching.insert(member.id.clone()) {
+                    steps.push(Step::Launch { member: member.id.clone() });
+                }
             }
         }
     }
@@ -7975,6 +8007,10 @@ mod dispatcher_drain;
 #[cfg(test)]
 #[path = "tests/dispatcher_context.rs"]
 mod dispatcher_context;
+
+#[cfg(test)]
+#[path = "tests/dispatcher_launch.rs"]
+mod dispatcher_launch;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_lead.rs"]

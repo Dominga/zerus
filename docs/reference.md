@@ -1915,6 +1915,17 @@ While the action runs the task's `waits` is `{"for":"zerus","on":["context"],
 the same request instead of running it again; it is not an inbox item until it
 fails.
 
+### When Zerus starts a member
+
+A member's session starts with its first task hand-out, after a swap, or for
+the lead of a planning or draft team with its brief. It also starts when the
+member has work that would otherwise never reach it: a sub-lead with untold
+items in its inbox (its sub-brief and inbox steps follow once the session takes
+a message), and the member a waiting stage would go to when no other candidate
+is available. A paused, draining or removed member is not started this way, and
+neither is one whose start is already in flight or whose last start failed: a
+failed start waits for `hgs team relaunch`.
+
 ### Stages Zerus runs itself: a command, a land, a branch per task
 
 The owner's catalog may give a preset a `command` stage — a command, its

@@ -19,6 +19,13 @@ Start a session (hgs guide launch)
   ended_launches with its launch_id, exit code and last screen lines.
 - A folder the agent has not trusted yet stops at its trust prompt, which
   only the owner may confirm. inspect then shows the session needing attention.
+- A session you launch here, or fork, becomes your child: Zerus lists it
+  under you. Adopt one you direct but did not launch, on this computer:
+    jq -n --arg run RUN --arg conv CONVERSATION \
+      '{expected_run_id:$run, expected_conversation_id:$conv, action:"adopt"}' |
+      hgs parent SESSION --json
+  RUN and CONVERSATION come from hgs inspect SESSION.
+  "read" shows the link and "clear" removes it.
 
 Continue existing work instead of starting over:
   hgs [@h] resume SESSION -d          restore a Saved conversation

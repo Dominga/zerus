@@ -46,9 +46,12 @@ describe("emoji marks", () => {
 });
 
 describe("account colors", () => {
-  it("picks dark ink on light colors and light ink on dark ones", () => {
+  it("picks the ink with the stronger contrast, including medium colors", () => {
     expect(inkFor("#ffcf33")).toBe("#10151b");
     expect(inkFor("#1f2a44")).toBe("#ffffff");
+    // Medium swatches: dark ink gives about 6:1 where white gives about 3:1 (zerus-gjwsi).
+    for (const medium of ["#2b97ff", "#00aa7f", "#f85c63", "#8796aa", "#6677ff"]) expect(inkFor(medium), medium).toBe("#10151b");
+    expect(inkFor("#5a2ca0")).toBe("#ffffff");
   });
   it("derives a stable palette slot from the label when no color is chosen", () => {
     const work = account([member()], "a", "Work");

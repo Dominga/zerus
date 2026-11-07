@@ -62,8 +62,8 @@ changes project membership.
 | Source | Recorded | Proof |
 | --- | --- | --- |
 | `hgs [@h] AGENT DIR … -d` (a launch) run from an agent's shell | at the new session's first record, `source: launch` | the launching `hgs` resolves its caller with the same native process-ancestry proof as `hgs self` |
-| `hgs [@h] adopt SESSION`, run by an agent | on SESSION's record, `source: adopt` | the caller is proven the same way; the target is selected by name plus its current `session_id` |
-| `hgs [@h] parent SESSION --clear`, or **Detach from parent** in the session menu | removes the link | an explicit person or agent action |
+| `hgs parent SESSION --json` with `adopt`, run by an agent | on SESSION's record, `source: adopt` | the caller is proven the same way; the target is selected by name plus its expected run and conversation |
+| `hgs [@h] parent SESSION --json` with `clear` (the desktop **Detach** entry is a follow-up) | removes the link | an explicit person or agent action |
 | `hgs wait` producer/waiter links | never | a wait is a declared dependency, not ownership: reviewers, peers and a waiter's own parent are producers too |
 | Native subagents (Claude Task, Codex subagents) | never | they are not independent sessions; they keep their existing compact child rows |
 | Message prose, session names, folders, accounts | never | no inference |
@@ -79,20 +79,22 @@ host's first `lifecycle` write records `parent` only for a new session
 moment. A fork run by an agent records both its fork lineage (`fork_parent_id`)
 and its parent; they are independent facts.
 
-**Remote launch.** `hgs @peer AGENT …` run inside an agent resolves the caller
-locally and forwards it as the hidden option `--parent-reference zerus://…`. The
-peer checks the reference syntax and records it. A cross-computer link is a claim
-by the SSH-authenticated caller; the child's host cannot verify the parent on
-another computer, so it never treats a remote parent as live for attention
-(1.5). Before forwarding, the local `hgs` checks the peer's help for the
-`parent-reference` marker; an older peer launches without a parent instead of
-failing.
+**Remote launch (follow-up).** The first version records links for launches
+and adoptions on the parent's own computer only: `hgs @peer AGENT …` runs on a
+peer whose process no agent there owns, so it records no parent. A later change
+forwards the proven caller as a hidden `--parent-reference zerus://…` option,
+behind a help marker so an older peer launches without a parent. A
+cross-computer link is a claim by the SSH-authenticated caller; the child's
+host cannot verify the parent on another computer, so it never treats a remote
+parent as live for attention (1.5).
 
 **Adopt.** Existing sessions such as `desktop-u` predate the feature. The
-coordinator runs `hgs adopt desktop-u` from its own shell. The command refuses
-self-adoption, archived targets, a target that is an ancestor of the caller on
-this computer (a cycle) and a target already parented by another live session
-unless `--replace` is given. `hgs parent SESSION --json` reads the link.
+coordinator runs `hgs parent desktop-u --json` with `{"action":"adopt"}` and
+the target's expected run and conversation on stdin, like other guarded
+session commands. It refuses an unproven caller, self-adoption, archived
+targets, a target that is an ancestor of the caller on this computer (a cycle)
+and a target with another parent unless `"replace": true`. `read` returns the
+link and `clear` removes it.
 
 ### 1.3 Durability
 
@@ -136,18 +138,20 @@ worktrees of the parent's repository already infer the same project.
 
 ### 1.5 Supervision on the host
 
-The host computes one more fact per listed row with a parent on the same
-computer: `parent.state`, one of `live` (the parent record is running and its
-process has not exited), `saved` (paused or stopped), `archived` or `missing`.
-A parent on another computer lists `remote`. This needs only the rows of the
-same listing, so it is computed in `finish_rows` with one map keyed by
-`session_id`.
+The host computes one more fact per listed row with a parent: `parent.state`,
+one of `live` (the parent record is running and its process has not exited),
+`saved` (paused or stopped), `archived` or `missing` (this listing has no such
+session: gone, or on another computer). Session IDs are UUIDs, so this needs
+only the rows of the same listing and no machine identity; it is computed in
+`finish_rows` with one map keyed by `session_id`. A listing never reads or
+waits on the shared catalog, and a launch reads its machine identity without
+the catalog lock, only after proving its caller.
 
 A row is **supervised** when `parent.state == "live"`. Every consumer, the
 desktop list, the desktop notification tracker in `client/core`, the desktop
 service (which projects each row through the same tracker) and later Android,
-reads the same fact from the row. When the parent is unknown, remote, saved,
-archived or missing, the child is not supervised and behaves like any session.
+reads the same fact from the row. When the parent is unknown, saved, archived or
+missing (including a parent on another computer), the child is not supervised and behaves like any session.
 This fails open: an unverifiable parent never silences a request.
 
 ### 1.6 Account label, color and mark
@@ -235,8 +239,8 @@ count, and it does not mark anything read.
   ordinary: a pending question notifies, an unread reply counts. Unmute-style
   replay protection applies: the transition raises the current request once and
   does not replay older ones the tracker already settled.
-* **Parent on another computer:** never supervised in this version; nested in the
-  list, ordinary attention. Follow-up: resolve remote parents in the desktop
+* **Parent on another computer:** never supervised in this version (its host
+  lists it as `missing`); nested in the list, ordinary attention. Follow-up: resolve remote parents in the desktop
   catalog.
 * **Parent live but stuck:** the parent's own state surfaces it (its question,
   approval, error or idle reply alerts the person normally). Children stay quiet
@@ -269,8 +273,8 @@ The card adopts two parts of the owner's prototype:
 
 * **Agent tile.** A 34 px rounded tile at the card's left with the provider glyph
   at 20 px in the agent's color (`--z-agent-<kind>`), replacing the provider
-  badge in the first line. The tile's corner carries the account mark. Compact
-  rows use a 22 px tile.
+  badge in the first line. The account mark stays in the footer with its
+  label. Compact rows use a 22 px tile before the mark and title.
 * **Card surface.** Cards always paint their surface and a 1 px border; hover
   and selection change the surface and border. Edge marks (attention, unread,
   draft, error) stay as the inset left bar.
@@ -307,8 +311,8 @@ Compact row (40 px): `[tile 22 + mark] title [status] [questions] [mute] [expand
   their level in the accessible description.
 * A parent card's footer shows a **Team** toggle: the people glyph, `3 of 5`
   (working of children) and a chevron. It collapses or expands the parent's
-  child sessions; the choice is device-local, bounded to 2000 parents, and
-  defaults to expanded. Native subagent rows keep their existing toggle.
+  child sessions; the choice is kept for this window only and defaults to
+  expanded. Native subagent rows keep their existing toggle.
 * Children sort by their rank in the project group, as top-level cards do.
   Dragging a child organizes it within its group exactly as before; nesting is
   derived, not a position.
@@ -325,14 +329,16 @@ amber badge and edge.
 
 ### 3.5 Session menu
 
-* **Detach from PARENT**: removes the link (asks for confirmation that names
-  the parent; reversible by the parent's `hgs adopt`).
-* **Open parent**.
+* **Detach from PARENT** (follow-up): removes the link (asks for confirmation
+  that names the parent; reversible by the parent's adopt). Until then
+  `hgs parent SESSION --json` with `clear` does it.
+* **Open parent**: the from-PARENT chip opens it; a menu entry is part of the desktop follow-up.
 * Mute and Unmute stay independent of supervision.
 
 ### 3.6 Keyboard and screen readers
 
-* The list stays a single listbox. A child row's accessible description adds
+* The list stays a single tree of `treeitem` rows; a child row gets `aria-level`
+  and its accessible description adds
   "child of PARENT, level N". The parent's adds "N child sessions, collapsed" or
   "expanded".
 * Left on an expanded parent collapses its children; Right expands; Left on a
@@ -370,4 +376,5 @@ team strip says `3 of 5`, the footer uses spacing, and tooltips use line breaks.
 * Resolve cross-computer parents for supervision in the desktop catalog.
 * Route a supervised child's blocking question to its parent session as a
   guarded message (needs owner direction: it sends text into an agent).
-* Drag to nest or **Set parent…** from the desktop.
+* Drag to nest, **Set parent…** and **Detach from PARENT** from the desktop.
+* Forward the proven caller on remote launches (`--parent-reference`).

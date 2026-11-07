@@ -188,6 +188,34 @@
   .qchip { flex: none; margin-left: 6px; height: 20px; display: inline-flex; align-items: center; gap: 3px; padding: 0 5px 0 4px; border-radius: 5px; background: color-mix(in srgb, var(--z-list-tone-attention) 16%, transparent); color: var(--z-list-tone-attention); font-size: 11px; font-weight: 600; }
   .qchip.muted { background: var(--z-list-chip); color: var(--z-list-badge-muted); }
 
+  /* Card surface (zerus-sa9qn.2): always painted, as in the owner's prototype; hover and selection still win. */
+  .scard { background: color-mix(in srgb, var(--z-color-row-hover) 55%, transparent); border-color: color-mix(in srgb, var(--z-list-tree-line) 60%, transparent); }
+  /* Agent tile: the large colored provider mark at the card's left; the lines start after it. */
+  .agent-tile { --tile: 34px; flex: none; display: inline-grid; place-items: center; width: var(--tile); height: var(--tile); border-radius: calc(var(--tile) * .26);
+    color: var(--agent); background: color-mix(in srgb, var(--agent) 14%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--agent) 34%, transparent); }
+  .scard.tiled .sc-tile { position: absolute; left: 10px; top: 9px; display: inline-flex; }
+  .scard.tiled .sc-l1, .scard.tiled .sc-l2, .scard.tiled .sc-l3, .scard.tiled .sc-foot { left: 54px; }
+  .cc-tile { flex: none; display: inline-flex; margin-right: 7px; }
+  /* Team toggle: a parent's child sessions, working of all, with a chevron. */
+  .sc-team { position: relative; flex: none; margin-left: 8px; height: 20px; display: inline-flex; align-items: center; padding: 0 20px 0 26px; border-radius: 4px; background: var(--z-list-counter); color: var(--z-list-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .sc-team:hover { background: var(--z-list-counter-hover); color: var(--z-list-text); }
+  .sc-team:focus-visible { outline: 1px solid var(--z-color-accent); }
+  .sc-team .team-glyph { position: absolute; left: 6px; top: 4px; }
+  .sc-team .chev { position: absolute; right: 5px; top: 7px; transition: rotate var(--z-motion-base) var(--ease); }
+  .sc-team.open .chev { rotate: 180deg; }
+  /* A child shown away from its parent names it. */
+  .sc-from { flex: 0 0 auto; margin-right: 6px; height: 16px; max-width: 40%; padding: 0 5px; border-radius: 3px; background: var(--z-list-chip); color: var(--z-list-muted); font-size: 10.5px; line-height: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  button.sc-from:hover { color: var(--z-list-text); text-decoration: underline; }
+  button.sc-from:focus-visible { outline: 1px solid var(--z-color-accent); }
+  /* Nested child sessions: 26 px per level, a connector from the parent above. */
+  .team-tree { position: absolute; left: calc(var(--indent) + 14px); top: -6px; bottom: 0; width: 12px; pointer-events: none; }
+  .team-tree::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 1px; background: var(--z-list-tree-line); }
+  .team-tree.last::before { bottom: auto; height: 36px; }
+  .team-tree::after { content: ""; position: absolute; left: 0; top: 28px; width: 12px; height: 8px; border-left: 1px solid var(--z-list-tree-line); border-bottom: 1px solid var(--z-list-tree-line); border-bottom-left-radius: 6px; }
+  .team-tree.compact.last::before { height: 25px; }
+  .team-tree.compact::after { top: 17px; }
+  :root[data-tree-lines="indent"] .team-tree { display: none; }
+
   /* Compact (collapsed) row: 40 px row, 30 px card; status, provider, mute and expand at the right. */
   .scard.compact { display: flex; align-items: center; padding: 2px 3px 0 11px; bottom: 6px; }
   .scard.compact .sc-title { flex: 1 1 auto; line-height: 22px; }

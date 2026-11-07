@@ -41,11 +41,12 @@ import {
   setCompactRows, compactRows, expandCompactRows, hasCompactRows, stateFilter, setStateFilter, search, setSearch, stripMode, setStripMode,
   setMenu, visibleMenu, machineFilter, setMachineFilter, projectFilter, setProjectFilter, accountFilterSet, setAccountFilter, folderFilter, setPage,
   multi, setMulti, peek, setPeek, setSubagentOpen, sessionsWidth, setSessionsWidth, commitSessionsWidth, menu, subagentOpen,
-  revealing, setRevealing, setDetailTab,
+  revealing, setRevealing, setDetailTab, collapsedTeams, setCollapsedTeams,
   type StateFilter, type MenuEntry,
 } from "../../store/ui";
 import type { Session } from "./types";
 import { filterAccounts, selectedFilterAccounts, chooseFilterAccounts, toggleFilterAccount, openFilterAccounts, cancelFilterAccountReads } from "../../store/accountFilters";
+import { loadMarkCatalogs } from "../../store/accounts";
 import { clearFolderScope } from "../../store/folderFilter";
 import { leaf, native } from "./paths";
 import { appendAccountChoices, bindingState, type AccountChoice } from "./scope-filters";
@@ -542,13 +543,13 @@ export function SessionList() {
   const refreshAccounts = () => { void openFilterAccounts().catch(() => {}); };
   onCleanup(cancelFilterAccountReads);
   // Account marks need each live computer's account catalog (bindings only, no
-  // profile inspects): read it once per computer as it comes online.
+  // profile inspects): read only a newly live computer's, once (zerus-j648h).
   const markCatalogs = new Set<string>();
   createEffect(() => {
     const fresh = Object.values(catalog.computers).filter((c) => c.status === "live" || c.status === "polled").map((c) => c.id).filter((id) => !markCatalogs.has(id));
     if (!fresh.length) return;
     fresh.forEach((id) => markCatalogs.add(id));
-    refreshAccounts();
+    void loadMarkCatalogs(fresh).catch(() => {});
   });
   const accountChoices = createMemo(() => filterAccounts().map((a) => ({ ...a, count: a.bindings.reduce((n, b) => n + (pickerCounts().account.get(b) ?? 0), 0) })));
   const list = useRows(false);
@@ -635,9 +636,14 @@ export function SessionList() {
       }
     } else if ((e.key === "ArrowRight" || e.key === "ArrowLeft") && i >= 0) {
       const r = nav[i];
-      if (r.type === "card" && r.compactRow && e.key === "ArrowRight") setRowCompact(r.session.key, false);
-      else if (r.type === "card" && r.expandable) setExpandedChildren(r.session.key, e.key === "ArrowRight");
-      else if (r.type === "child" && e.key === "ArrowLeft") setSelectedKey(r.parent.key);
+      const right = e.key === "ArrowRight";
+      if (r.type === "card" && r.compactRow && right) setRowCompact(r.session.key, false);
+      else if (r.type === "card" && r.expandable && (right ? !expandedChildren[r.session.key] : !!expandedChildren[r.session.key])) setExpandedChildren(r.session.key, right);
+      // Child sessions (zerus-sa9qn.2): Right expands, Left collapses, then moves to the parent.
+      else if (r.type === "card" && r.team && r.team.collapsed === right) setCollapsedTeams(r.session.key, !right);
+      else if (r.type === "card" && !right && r.parentKey) setSelectedKey(r.parentKey);
+      else if (r.type === "card" && r.expandable) setExpandedChildren(r.session.key, right);
+      else if (r.type === "child" && !right) setSelectedKey(r.parent.key);
     } else if (e.key === "Escape") {
       Object.keys(multi).forEach((k) => setMulti(k, false));
     }
@@ -812,13 +818,26 @@ function DropIndicator() {
 
 type RowSource = ReturnType<typeof useRows>;
 
+/** Child session indentation: 26 px per level, at most three levels (spec 3.3). */
+const indentOf = (depth = 0) => Math.min(Math.max(depth, 1), 3) * 26 - 26;
+const cardLevel = (row: Row | undefined) => row?.type === "card" && row.depth ? row.depth + 1 : undefined;
+function cardDescription(row: Row | undefined): string | undefined {
+  if (row?.type !== "card") return undefined;
+  const parts: string[] = [];
+  if (row.depth && row.parentKey) parts.push(tr("Child of %1, level %2", catalog.rows[row.parentKey]?.title ?? "", row.depth + 1));
+  if (row.team) parts.push(row.team.collapsed ? tr("%1 child sessions, collapsed", row.team.total) : tr("%1 child sessions, expanded", row.team.total));
+  return parts.length ? parts.join("\n") : undefined;
+}
+
 /** One virtual row, bound to its id: content updates in place while the row exists. */
 function ListRow(props: { id: string; list: RowSource }) {
   const row = () => props.list.byId().get(props.id);
   const top = () => props.list.startOf().get(props.id) ?? 0;
   return (
     <div class="vrow" data-type={row()?.type} data-key={props.id} style={{ transform: `translateY(${top()}px)`, height: `${props.list.heightOf(props.id)}px` }}
-      role="treeitem" aria-selected={props.id === selectedKey()}>
+      role="treeitem" aria-selected={props.id === selectedKey()} aria-level={cardLevel(row())}
+      aria-expanded={row()?.type === "card" && (row() as Extract<Row, { type: "card" }>).team ? !(row() as Extract<Row, { type: "card" }>).team!.collapsed : undefined}
+      aria-description={cardDescription(row())}>
       <Show when={row()?.type === "header" ? (row() as Extract<Row, { type: "header" }>) : undefined}>{(h) => <Header row={h()} list={props.list} />}</Show>
       <Show when={row()?.type === "child" ? (row() as Extract<Row, { type: "child" }>) : undefined}>
         {(c) => (
@@ -830,7 +849,12 @@ function ListRow(props: { id: string; list: RowSource }) {
       <Show when={row()?.type === "creation" ? (row() as Extract<Row, { type: "creation" }>) : undefined}>{(v) => <CreationCard card={v().creation} />}</Show>
       <Show when={row()?.type === "card" ? (row() as Extract<Row, { type: "card" }>) : undefined}>
         {(v) => (
-          <div onDragOver={(e) => taskDragOver(e, groupOf(v().session.key), v().session)} onDrop={(e) => taskDrop(e, groupOf(v().session.key), v().session)} class="rowhit" classList={{ "has-kids-open": v().expanded && !v().compactRow, multi: !!multi[v().session.key], dragged: dragItem()?.id === v().session.key, "context-target": visibleMenu()?.sessionKey === v().session.key }}
+          <>
+          <Show when={(v().depth ?? 0) > 0}>
+            <i class="team-tree" classList={{ last: !!v().lastChild, compact: !!v().compactRow }} aria-hidden="true" style={{ "--indent": `${indentOf(v().depth)}px` }} />
+          </Show>
+          <div onDragOver={(e) => taskDragOver(e, groupOf(v().session.key), v().session)} onDrop={(e) => taskDrop(e, groupOf(v().session.key), v().session)} class="rowhit" classList={{ "has-kids-open": v().expanded && !v().compactRow, multi: !!multi[v().session.key], dragged: dragItem()?.id === v().session.key, "context-target": visibleMenu()?.sessionKey === v().session.key, nested: (v().depth ?? 0) > 0 }}
+            style={(v().depth ?? 0) > 0 ? { left: `${indentOf(v().depth) + 26}px` } : undefined}
             draggable={POINTER_DRAG ? undefined : "true"} onDragStart={(e) => startDrag(e, { kind: "session", id: v().session.key })}
             onPointerDown={(e) => pointerOrganize(e, { kind: "session", id: v().session.key }, props.list)}
             onMouseDown={(e) => { if (e.shiftKey) e.preventDefault(); }} onClick={(e) => selectSession(v().session.key, e)}
@@ -838,9 +862,12 @@ function ListRow(props: { id: string; list: RowSource }) {
             onDblClick={(e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey) setRowCompact(v().session.key, !compactRows[v().session.key]); }}>
             <Show when={!v().compactRow} fallback={<CompactCard session={v().session} selected={selectedKey() === v().session.key || !!multi[v().session.key]} onExpand={() => setRowCompact(v().session.key, false)} />}>
               <SessionCard session={v().session} selected={(selectedKey() === v().session.key && !subagentOpen()) || !!multi[v().session.key]} expandable={v().expandable}
-                expanded={!!expandedChildren[v().session.key]} onToggleChildren={() => setExpandedChildren(v().session.key, !expandedChildren[v().session.key])} />
+                expanded={!!expandedChildren[v().session.key]} onToggleChildren={() => setExpandedChildren(v().session.key, !expandedChildren[v().session.key])}
+                team={v().team} onToggleTeam={() => setCollapsedTeams(v().session.key, !collapsedTeams[v().session.key])}
+                fromParent={v().fromParent} onOpenParent={(key) => { setSelectedKey(key); setRevealing(key); }} />
             </Show>
           </div>
+          </>
         )}
       </Show>
     </div>

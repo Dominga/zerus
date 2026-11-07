@@ -148,6 +148,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs @host download --path REMOTE_PATH --output LOCAL_FILE   download a file through configured SSH
        hgs [@host] answer <session> --json   answer an exact pending question from JSON stdin
        hgs [@host] answer <session> --observe --json   read a pending question's consent identity, changing nothing
+       hgs [@host] parent <session> --json   read, adopt (as the calling agent) or clear its parent session from JSON stdin
        hgs [@host] read <session> --json   mark the current reply/attention read (JSON stdin)
        hgs [@host] subagent retire <session> --json   retire an exact stale child record (JSON stdin)
        Subagent retirement ABI: subagent-retire-v1
@@ -989,7 +990,7 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
             state_command(command, &args)
         }
         "inspect" | "processes" | "worktrees" | "git-status" | "repository" | "dirs" | "send" | "send-now" | "session-action" | "session-action-status" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "read" | "notifications"
-        | "attachment" | "file-read" | "recovery" | "voice" | "schedules" | "graph" | "wait" => {
+        | "attachment" | "file-read" | "recovery" | "voice" | "schedules" | "graph" | "wait" | "parent" => {
             if command == "session-action-status" && dry { return Err(Error::new(1,"Lifecycle receipt reads do not support --dry-run")); }
             if command == "repository" && dry { return Err(Error::new(1,"Repository operations do not support --dry-run")); }
             if command == "wait" && dry { return Err(Error::new(1,"Wait operations do not support --dry-run")); }
@@ -1000,7 +1001,7 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
             if command == "worktrees" && args.first().is_some_and(|s| s == "create" || s == "cancel" || s == "remove" || s == "sweep" || s == "policy" && args.get(1).is_some_and(|s|s=="set")) && dry {
                 return Err(Error::new(1, "worktree creation, removal and policy changes do not support --dry-run"));
             }
-            if (matches!(command.as_str(), "processes" | "send" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "recovery" | "read" | "notifications" | "voice" | "schedules") || (command=="attachment" && has(args,"--stage"))) && dry {
+            if (matches!(command.as_str(), "processes" | "send" | "send-now" | "session-action" | "terminal" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "recovery" | "read" | "notifications" | "voice" | "schedules" | "parent") || (command=="attachment" && has(args,"--stage"))) && dry {
                 return Err(Error::new(1, "message input does not support --dry-run"));
             }
             state_command(command, args)
@@ -1344,7 +1345,7 @@ const SESSION_COMMANDS: &[&str] = &[
     "terminal", "session-action", "session-action-status", "compact-context", "clear-context",
     "interrupt", "attachment", "file-read", "answer", "read", "notifications", "fork", "effort",
     "settings", "schedules", "voice", "hooks", "a", "kill", "rename", "archive", "terminate",
-    "pause", "resume", "native-ui", "__dsh-ui-url",
+    "pause", "resume", "native-ui", "__dsh-ui-url", "parent",
 ];
 
 /// The position and value of `--session-id` for a session command, refused
@@ -1396,7 +1397,7 @@ fn resolves_label_first(command: &str, args: &[String], here: bool, local: bool)
 const REQUEST_GUARDED: &[&str] = &[
     "send", "send-now", "history", "history-projection", "terminal", "session-action",
     "compact-context", "clear-context", "interrupt", "attachment", "file-read", "answer", "read",
-    "notifications", "effort", "settings", "schedules", "voice",
+    "notifications", "effort", "settings", "schedules", "voice", "parent",
 ];
 /// Its guard is on its command line (`--expected-run-id`, `--run`, `--run-id`,
 /// `--expected-conversation-id`, `--conversation`).
@@ -1613,7 +1614,7 @@ fn remote_via(
         }
         "session-action-status" if machine.is_none() => return Err(Error::new(2,"A remote lifecycle receipt read requires --expect-machine ID before session-action-status")),
         "archives" | "session-action-status" | "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "repository" | "dirs" | "project" | "archive" | "rename"
-        | "send" | "send-now" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "guide" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "notifications" | "speech" | "analytics" | "voice" | "hooks" | "--help" => {
+        | "send" | "send-now" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "guide" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "notifications" | "speech" | "analytics" | "voice" | "hooks" | "parent" | "--help" => {
             flags = vec![
                 "-o".into(),
                 "BatchMode=yes".into(),
@@ -2959,6 +2960,9 @@ fn launch(
             ),
             format!("HGS_STATE_DIR={}", config.state.display()),
             format!("HGS_EXECUTABLE={executable}"),
+            // The live agent that runs this launch, proven by its process
+            // ancestry; empty otherwise (zerus-sa9qn.2).
+            format!("{}={}", state::parent_link::ENV, state::parent_link::launcher_value()),
             "HGS_RUN_ID=".into(),
             "HGS_SESSION_ID=".into(),
             "HGS_EXPECTED_ID=".into(),

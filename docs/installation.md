@@ -535,15 +535,14 @@ stops an idle session host without disabling anything.
 - Mobile connection runs the bundled Rust connector on this PC. Configure its
   HTTPS relay and computer credential, choose Start connector, then refresh
   Phones and pair by QR code. No other gateway is needed. After that first
-  start, Zerus starts the connector each time Zerus starts. Closing the GUI keeps
-  it and native agents running. Zerus can't stop a running encrypted workspace
-  connector on Windows yet, so Stop connector stays disabled and says why, and the
-  workspace can't be changed while it runs. See
-  [Windows gateway](mobile-deployment.md#windows-gateway).
+  start, Zerus starts the connector each time Zerus starts; Stop connector turns
+  that off until the next Start connector. Closing the GUI keeps it and native
+  agents running. See [Windows gateway](mobile-deployment.md#windows-gateway).
   The first Windows gateway controls existing local Codex/Claude/Kimi sessions;
   mobile creation, folder/worktree/Git/file operations, peer routing and
-  voice/speech are unavailable. A legacy API v1 connector's Stop drains the current
-  request and keeps the independent session host and native agents running.
+  voice/speech are unavailable. Stop drains the current request and keeps
+  the independent session host and native agents running. It's refused for a
+  connector Zerus can't prove it started.
 - Other machines cannot connect to the Windows computer as a peer: its local
   sessions appear only in Zerus on that computer, and its folders in Projects are
   not shared with other machines.

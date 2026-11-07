@@ -251,6 +251,7 @@ pub(crate) async fn prepare_switch(
 }
 /// Read-only Stop admission. A cooperative exit is still unsafe under a foreign
 /// supervisor; no caller may write the Stop marker before this succeeds.
+#[cfg(not(windows))]
 pub(crate) async fn stop_preflight(
     config: &Path,
     private: &Path,

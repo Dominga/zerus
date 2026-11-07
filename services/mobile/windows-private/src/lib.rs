@@ -2,7 +2,9 @@
 //! are refused; ACLs are applied at creation, never repaired after opening.
 #![cfg(windows)]
 mod connector_process;
+mod process_identity;
 pub use connector_process::{spawn_connector, ConnectorChild};
+pub use process_identity::{current_process_birth, identity_of, OriginalProcess, ProcessIdentity};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawHandle};

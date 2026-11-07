@@ -66,7 +66,7 @@ pub fn report(
     let mut report = Map::new();
     report.insert(
         "capabilities".into(),
-        if cfg!(target_os = "linux") {
+        if cfg!(any(target_os = "linux", windows)) {
             json!({"workspace_stop": crate::workspace_lifecycle::STOP_PREFLIGHT_ABI})
         } else {
             json!({})

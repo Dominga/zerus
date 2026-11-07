@@ -430,15 +430,53 @@ fn a_refused_stop_puts_back_exactly_what_it_found() {
     assert!(saved(&mut state).is_none());
 }
 
+// zerus-9ysdg.1: a refusal never mints permission to start automatically.
 #[test]
-fn a_refused_stop_with_no_earlier_choice_arms_what_is_running() {
-    // A verified running connector with no record is armed by the next read anyway.
+fn a_refused_stop_with_no_earlier_choice_stays_unarmed() {
+    for mut state in [
+        State::default(),
+        State::load(None),
+        State::load(Some(b"not a record")),
+    ] {
+        state.stop_chosen(NODE, Some(GENERATION));
+        let _ = saved(&mut state);
+        state.stop_refused(NODE, Some(GENERATION));
+        let record = saved(&mut state).unwrap();
+        assert_eq!(record["armed"], false);
+        assert!(record.get("stopped_generation").is_none(), "{record}");
+        assert!(state.target(&stopped()).is_none());
+        assert_eq!(state.line(&stopped()), Some(Line::NotArmed));
+        assert_eq!(state.line(&running()), Some(Line::RunningNotArmed));
+    }
+}
+
+#[test]
+fn a_refused_stop_with_no_earlier_choice_survives_a_restart_as_never_started() {
     let mut state = State::default();
     state.stop_chosen(NODE, Some(GENERATION));
     let _ = saved(&mut state);
     state.stop_refused(NODE, Some(GENERATION));
+    let bytes = state.take_unsaved().unwrap();
+    let loaded = State::load(Some(&bytes));
+    assert!(loaded.target(&stopped()).is_none());
+    assert_eq!(loaded.line(&stopped()), Some(Line::NotArmed));
+}
+
+#[test]
+fn only_a_later_running_read_arms_after_a_refusal_with_no_earlier_choice() {
+    let mut state = State::default();
+    state.stop_chosen(NODE, Some(GENERATION));
+    let _ = saved(&mut state);
+    state.stop_refused(NODE, Some(GENERATION));
+    let _ = saved(&mut state);
+    // A stopped reading proves nothing and arms nothing.
+    state.observe(&stopped());
+    assert!(saved(&mut state).is_none());
+    assert!(state.target(&stopped()).is_none());
+    // The connector is verified running: the same rule as with no record at all.
+    state.observe(&running());
     assert_eq!(saved(&mut state).unwrap()["armed"], true);
-    assert_eq!(state.line(&running()), Some(Line::Running));
+    assert!(state.target(&stopped()).is_some());
 }
 
 #[test]

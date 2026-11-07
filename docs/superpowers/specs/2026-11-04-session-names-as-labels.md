@@ -236,7 +236,13 @@ The Qt GUI (`tray/src`) is part of neither the gate nor P3f. It addresses sessio
 - **tmux terminal names**, per question 2.
 - **The ambiguity report.** `session_id::ambiguity` has no caller yet; every label resolution uses it.
 - **DeepSeek and OpenCode bindings** follow the ID layout for reused labels; their launch and rename refusals go behind the fleet gate.
-- **Catalog membership.** The name form stays written. Sessions that share a label share one name membership, and their ID twins tell them apart once `membership_by_id` is ready. The gateway connector resolves sessions and membership by ID, reading twins, before it advertises `session-labels-v1` (a P3d and P3f prerequisite; see the fleet gate).
+- **Catalog membership.** The name form and derived twins keep their existing schemas. The separate primary per-ID causal membership graph keeps sessions with the same label independent. Valid twins are promoted before a shared-name write; exact ID data (including null or a reviewable conflict) wins, with name fallback only when no ID record exists. Only peers advertising `session_id_memberships_v1` exchange that graph. Older name-only writers cannot edit ID grouping. The gateway connector resolves sessions and membership by ID before advertising `session-labels-v1` (see the fleet gate).
+
+### Primary ID project membership (coordinator, 2026-11-07)
+
+The name membership and its clock-bound ID twins remain byte-compatible; the derived twins do not silently become primary data. A separate, bounded primary membership record addresses `(machine UUID, session_id)` and is exchanged only under a new advertised catalog capability. Older builds keep their name/twin readers and writers and preserve this separate record, but cannot edit the new ID grouping. New readers prefer the exact ID record and fall back to the name membership only when no ID record exists; unavailable or malformed evidence is not absence.
+
+Project membership currently uses `src/swarm/catalog.rs`'s causal operation graph, not a document in `crates/replica`. Reuse that existing graph and membership resolution for the separate ID map. Preserve every raw causal head: one known live concrete project wins over concurrent Inbox/null defaults; distinct concurrent concrete projects remain reviewable; a later explicit Inbox or unassignment consumes all observed heads and wins. Do not introduce last-writer-wins per ID. Migrate valid existing twins under the catalog lock before any shared-name change, idempotently, without overwriting an existing ID record. Tests cover those four merge cases and two same-label IDs in different projects surviving both rename and peer exchange. This metadata grants no native authority and adds no general inventory.
 
 ### Rollback
 

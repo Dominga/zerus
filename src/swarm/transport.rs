@@ -43,6 +43,13 @@ pub struct Exchange {
     /// The twins the requester has; present when it takes them in return.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub known_twins: Option<BTreeSet<String>>,
+    /// Primary ID operations are never sent to a peer that has not advertised
+    /// this independent capability. Unlike twins, malformed primary data fails
+    /// the whole exchange; no partial projection can become primary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_memberships: Option<Vec<Operation>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_id_memberships: Option<BTreeSet<String>>,
 }
 
 pub fn remote(config: &Config, alias: &str, action: &str, input: Option<&Value>) -> Result<Value> {
@@ -210,7 +217,8 @@ fn run_within(
         "remote catalog is too large"
     );
     let answer = serde_json::from_slice(&output)
-        .context("remote HGS does not provide a valid swarm response; update HGS on that machine")?;
+        .context("remote HGS does not provide a valid swarm response; update HGS on that machine",
+    )?;
     ensure!(!expired(), "connection to {alias} timed out");
     Ok(answer)
 }
@@ -220,6 +228,17 @@ pub fn hello(config: &Config, inventory: bool) -> Result<Value> {
     store.save()?;
     let mut result = json!({"schema":1,"node_id":store.data.node_id,"swarm_id":store.data.catalog.swarm_id,"digest":store.data.catalog.digest(),"initialized":store.data.imported,"kinds":catalog::advertised(),
         "twins":store.data.twins.digest()});
+    if let Some(primary) = &store.data.id_memberships {
+        result["id_memberships"] = json!(primary.digest());
+        if inventory {
+            result["known_id_memberships"] = json!(primary.known());
+        }
+    } else {
+        result["kinds"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|k| k != super::session_memberships::CAPABILITY);
+    }
     if inventory {
         result["known"] = json!(store.data.catalog.operations.keys().collect::<Vec<_>>());
         result["known_twins"] = json!(store.data.twins.known());
@@ -273,6 +292,39 @@ pub fn exchange(config: &Config, request: Exchange) -> Result<Value> {
     if let Some(twins) = request.twins {
         store.data.twins.merge(&request.swarm_id, parsed(&twins))?;
     }
+    let primary_capable = request
+        .kinds
+        .as_ref()
+        .is_some_and(|kinds| kinds.contains(super::session_memberships::CAPABILITY));
+    ensure!(
+        primary_capable
+            || (request.id_memberships.is_none() && request.known_id_memberships.is_none()),
+        "ID membership capability was not negotiated"
+    );
+    if let Some(operations) = request.id_memberships {
+        store
+            .data
+            .id_memberships
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("ID memberships unavailable"))?
+            .merge(&store.data.catalog, &request.swarm_id, operations)?;
+    }
+    // Incoming compatible twins are promoted too, before any later label move.
+    if let Some(primary) = &mut store.data.id_memberships {
+        primary.migrate(&store.data.catalog, &store.data.twins)?;
+    }
+    let id_memberships = request
+        .known_id_memberships
+        .as_ref()
+        .map(|known| {
+            store
+                .data
+                .id_memberships
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("ID memberships unavailable"))
+                .map(|p| p.missing(known))
+        })
+        .transpose()?;
     let twins = request
         .known_twins
         .as_ref()
@@ -291,6 +343,9 @@ pub fn exchange(config: &Config, request: Exchange) -> Result<Value> {
     let mut response = json!({"schema":1,"node_id":store.data.node_id,"swarm_id":store.data.catalog.swarm_id,"operations":missing});
     if let Some(twins) = twins {
         response["twins"] = json!(twins);
+    }
+    if let Some(primary) = id_memberships {
+        response["id_memberships"] = json!(primary);
     }
     Ok(response)
 }
@@ -316,7 +371,8 @@ pub fn sync_peer(config: &Config, alias: &str) -> Result<()> {
 
 /// The member's verified hello and the catalog exchange after it; a failure
 /// says whether the member answered as another computer.
-fn catalog_sync(config: &Config, alias: &str) -> std::result::Result<Value, (Incomplete, anyhow::Error)> {
+fn catalog_sync(config: &Config, alias: &str,
+) -> std::result::Result<Value, (Incomplete, anyhow::Error)> {
     let unreachable = |error: anyhow::Error| (Incomplete::Unreachable, error);
     let identity = remote(config, alias, "hello", None).map_err(unreachable)?;
     let local = LockedStore::load(config).map_err(unreachable)?;
@@ -334,7 +390,8 @@ fn catalog_sync(config: &Config, alias: &str) -> std::result::Result<Value, (Inc
     catalog_exchange(config, alias, identity, local).map_err(unreachable)
 }
 
-fn catalog_exchange(config: &Config, alias: &str, identity: Value, mut local: LockedStore) -> Result<Value> {
+fn catalog_exchange(config: &Config, alias: &str, identity: Value, mut local: LockedStore,
+) -> Result<Value> {
     ensure!(
         identity["swarm_id"] == local.data.catalog.swarm_id,
         "{alias} belongs to a different swarm"
@@ -357,6 +414,10 @@ fn catalog_exchange(config: &Config, alias: &str, identity: Value, mut local: Lo
     }
     // Whether this member reads session memberships by ID (zerus-ucck
     // P2c-1); only such a member exchanges them.
+    let primary = local.data.id_memberships.is_some()
+        && peer_kinds
+            .as_ref()
+            .is_some_and(|kinds| kinds.contains(super::session_memberships::CAPABILITY));
     let twins = peer_kinds
         .as_ref()
         .is_some_and(|kinds| kinds.contains(catalog::SESSION_ID_KIND));
@@ -369,6 +430,12 @@ fn catalog_exchange(config: &Config, alias: &str, identity: Value, mut local: Lo
     local.save()?;
     if identity["digest"] != local.data.catalog.digest()
         || (twins && identity["twins"] != local.data.twins.digest())
+        || (primary
+            && local
+                .data
+                .id_memberships
+                .as_ref()
+                .is_some_and(|p| identity["id_memberships"] != p.digest()))
     {
         drop(local);
         let inventory = remote(config, alias, "inventory", None)?;
@@ -397,7 +464,13 @@ fn catalog_exchange(config: &Config, alias: &str, identity: Value, mut local: Lo
                 })
                 .cloned()
                 .collect(),
-            kinds: peer_kinds.as_ref().map(|_| catalog::kinds()),
+            kinds: peer_kinds.as_ref().map(|_| {
+                let mut kinds = catalog::kinds();
+                if primary {
+                    kinds.insert(super::session_memberships::CAPABILITY.into());
+                }
+                kinds
+            }),
             twins: twins.then(|| {
                 let known: BTreeSet<String> =
                     serde_json::from_value(inventory["known_twins"].clone()).unwrap_or_default();
@@ -410,6 +483,17 @@ fn catalog_exchange(config: &Config, alias: &str, identity: Value, mut local: Lo
                     .collect()
             }),
             known_twins: twins.then(|| local.data.twins.known()),
+            id_memberships: if primary {
+                // Unlike derived twins, an invalid primary inventory is not
+                // read as empty. It is a failed exchange.
+                let known: BTreeSet<String> =
+                    serde_json::from_value(inventory["known_id_memberships"].clone())?;
+                Some(local.data.id_memberships.as_ref().unwrap().missing(&known))
+            } else {
+                None
+            },
+            known_id_memberships: primary
+                .then(|| local.data.id_memberships.as_ref().unwrap().known()),
         };
         let node = peer.node.clone();
         drop(local);
@@ -432,9 +516,25 @@ fn catalog_exchange(config: &Config, alias: &str, identity: Value, mut local: Lo
         local
             .data
             .catalog
-            .merge(swarm, serde_json::from_value(response["operations"].clone())?)?;
+            .merge(swarm, serde_json::from_value(response["operations"].clone())?,
+        )?;
         if let Some(received) = response["twins"].as_array().filter(|_| twins) {
             local.data.twins.merge(swarm, parsed(received))?;
+        }
+        if primary {
+            local
+                .data
+                .id_memberships
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("ID memberships unavailable"))?
+                .merge(
+                    &local.data.catalog,
+                    swarm,
+                    serde_json::from_value(response["id_memberships"].clone())?,
+                )?;
+        }
+        if let Some(primary) = &mut local.data.id_memberships {
+            primary.migrate(&local.data.catalog, &local.data.twins)?;
         }
         local.save()?;
     } else {
@@ -557,6 +657,10 @@ pub fn join(config: &Config, alias: &str, request: Join) -> Result<Value> {
             );
         }
         local.backup("before-join")?;
+        ensure!(
+            local.data.id_memberships.is_some(),
+            "ID memberships unavailable; cannot change swarms"
+        );
         local.data.catalog = catalog;
         let mut existing = local.data.catalog.values();
         for (mut key, mut value) in old {
@@ -609,9 +713,13 @@ pub fn join(config: &Config, alias: &str, request: Join) -> Result<Value> {
             // local project. Distinct concrete choices retain the explicit
             // preview's keep-peer policy; without it they remain causal heads.
             if request.prefer_peer_memberships && matches!(key, Key::Session { .. })
-                && existing.get(&key).is_some_and(|peer| peer.as_str()
-                    .is_some_and(|id| (id != "ungrouped" || value == "ungrouped")
-                        && existing.get(&Key::project(id, "alive")) == Some(&json!(true))))
+                && existing.get(&key).is_some_and(|peer| {
+                    peer.as_str()
+                    .is_some_and(|id| {
+                        (id != "ungrouped" || value == "ungrouped")
+                        && existing.get(&Key::project(id, "alive")) == Some(&json!(true))
+                    })
+                })
             {
                 continue;
             }
@@ -626,6 +734,14 @@ pub fn join(config: &Config, alias: &str, request: Join) -> Result<Value> {
             &catalog.swarm_id,
             catalog.operations.into_values().collect(),
         )?;
+    }
+    if !same {
+        local
+            .data
+            .id_memberships
+            .as_mut()
+            .unwrap()
+            .rehome(&local.data.catalog, &request.project_map)?;
     }
     local.data.bind(alias, &request.node_id)?;
     local.data.peers.insert(

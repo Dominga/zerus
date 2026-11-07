@@ -5562,6 +5562,17 @@ Schema 2 adds the hgs-owned native-effect ledger. Schema 1 migrates
 transactionally after the configuration check. Its writer policy starts revoked
 and every process restart fences it again; manual revocation reasons survive.
 `effect_journal` reports policy, a reason code and four maintained attempt counts.
+Its `reason` describes writer revocation, not a native notification refusal.
+`recent_failures.refused` and `.unknown` show at most the latest attempt of each
+state by reservation sequence: `seq`, action `kind`, the closed receipt `code`
+and `recorded_at` (Unix milliseconds when the actor recorded the receipt).
+They expose no notification content or session identity. Schema 31 adds the
+optional recorded time; older and restart-recovered attempts retain a null time.
+Missing, corrupt or unrecognized receipt details have `details_available:false`
+and null fields; they do not reveal raw errors. A failed diagnostic read sets
+`recent_failures.available:false` without hiding the maintained counts.
+The two reads use the attempt-state index and bounded identity/receipt strings;
+status never scans history, retries an attempt or changes delivery permission.
 Recovery marks at most 256 prior-process reservations unknown at startup and per
 heartbeat. Neither reserved nor unknown work becomes a fresh delivery after a
 restart. Recovery failure reports a component error and pauses admissions while

@@ -874,9 +874,14 @@ pub(crate) fn waiting_for_owner(team: &Team) -> bool {
 /// draft's, not in a paused phase, not behind a phase awaiting the owner's
 /// acceptance and not held by a barrier. Only such work makes a member
 /// starve; a phase that cannot start is the owner's or the plan's wait.
+/// Task 169 (wave 2 merge): nor a parked task (task 160: Zerus watches its
+/// outside event) or one an open owner card holds back (task 159): the lead
+/// cannot act on either.
 pub(crate) fn startable(team: &Team, task: &Task) -> bool {
     !task.status.finished()
         && task.status != TaskStatus::Draft
+        && task.park.is_none()
+        && !super::owner_steps::waiting_on_cards(team).contains_key(&task.id)
         && phase_pause(team, task.phase).is_none()
         && acceptance_block(team, task.phase).is_none()
         && barrier_blockers(team, task).is_empty()

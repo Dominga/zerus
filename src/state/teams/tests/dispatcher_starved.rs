@@ -86,6 +86,26 @@ fn work_of_a_phase_that_cannot_start_does_not_starve_anyone() {
     assert!(steps(&team, &seen_all(), 10.0).contains(&Step::Starving { member: "dev".into() }));
 }
 
+/// Task 169 (wave 2): parked work (task 160) and work an open owner card holds
+/// back (task 159) start by themselves; neither makes anyone starve.
+#[test]
+fn parked_work_and_work_behind_an_owner_card_do_not_starve_anyone() {
+    let mut team = team();
+    let ids: Vec<u32> = team.tasks.iter().map(|task| task.id).collect();
+    for task in &mut team.tasks {
+        task.status = TaskStatus::Pending;
+        task.park = Some(Park { attempt: "A".into(), member: "dev".into(), state: "waiting".into(), ..Default::default() });
+    }
+    assert!(team.tasks.iter().all(|task| !super::super::super::plan::startable(&team, task)));
+    assert!(!steps(&team, &seen_all(), 10.0).iter().any(|step| matches!(step, Step::Starving { .. })));
+    for task in &mut team.tasks {
+        task.park = None;
+    }
+    team.proposals.push(json!({"id":"p1","kind":"question","state":"open","at":1.0,"for_tasks":ids}));
+    assert!(team.tasks.iter().all(|task| !super::super::super::plan::startable(&team, task)));
+    assert!(!steps(&team, &seen_all(), 10.0).iter().any(|step| matches!(step, Step::Starving { .. })));
+}
+
 #[test]
 fn one_team_digest_an_hour_names_every_member_due_and_concrete_actions() {
     let mut team = team();

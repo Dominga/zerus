@@ -339,6 +339,24 @@ pub async fn iron_rules(
     .map_err(|error| error.to_string())
 }
 
+/// Task 126: reads or writes one project's memory (RustCodeLore switch, store
+/// folder, verified move): the guarded `hgs project config` call client/core
+/// builds.
+#[tauri::command]
+pub async fn project_memory(
+    teams: State<'_, Teams>,
+    call: zerus_client_core::project_memory::MemoryCall,
+) -> Result<zerus_client_core::project_memory::MemoryOutcome, String> {
+    if teams.replay {
+        return Err("Project memory needs hgs; a replay has none.".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        zerus_client_core::project_memory::run(&default_hgs(), &call)
+    })
+    .await
+    .map_err(|error| error.to_string())
+}
+
 /// Task 11: reads one team once, as a Waiting for you answer does before it
 /// sends (Qt's TeamWaitingAnswer::read): the projected `team status`.
 #[tauri::command]

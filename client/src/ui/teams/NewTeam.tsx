@@ -1,14 +1,14 @@
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createResource, createSignal, onCleanup, onMount } from "solid-js";
 import type { JSX } from "solid-js";
 import { tr } from "../../i18n";
 import { Icon } from "../lib/icons";
-import { pickLocalFolder } from "../../bridge";
+import { pickLocalFolder, projectMemory } from "../../bridge";
 import { showTeam, teams } from "../../store/teams";
 import { followDraft } from "../../store/newTeamFollow";
 import { memberRowErrors, type ComputerChoice, type NewTeamStore } from "../../store/teamsNew";
 import {
   FOLDER_POLICIES, applyPolicy, branchHint, canAdd, createReason, effectivePolicy, folderPolicy, leadMember, maxMembers, memberOf,
-  memberRoles, pickTemplate, startReason, templateTasks, type FolderPolicy, type LeadChoice,
+  memberRoles, memoryMode, pickTemplate, startReason, templateTasks, withMemory, type FolderPolicy, type LeadChoice, type MemoryMode,
 } from "../../store/newTeamForm";
 import type { Catalog } from "./catalog";
 import type { DraftMember } from "./types";
@@ -89,6 +89,15 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
   });
 
   const policy = createMemo(() => effectivePolicy(folderPolicy(settings()), fields().folder, props.git));
+  // Task 126: a project with RustCodeLore on gives the team a shared
+  // workspace in its store; otherwise New team offers the memory mode,
+  // RustCodeLore by default (written into the settings, so the draft has it).
+  const [projectMemoryOn] = createResource(() => props.projectId || undefined, async (project) => {
+    try { const outcome = await projectMemory({ project, op: { op: "read" } }); return outcome.outcome === "done" && outcome.view.enabled; }
+    catch { return false; }
+  });
+  createEffect(() => { if (!draft() && !settings().memory) store.edit("settings", withMemory(settings(), "lore")); });
+  const chooseMemory = (mode: MemoryMode) => store.edit("settings", withMemory(settings(), mode));
   const members = () => fields().members;
   const unseen = (field: string) => store.unseen().includes(field);
   const mark = (field: string) => (
@@ -296,6 +305,15 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
                 <option value="auto">{tr("Later phases: auto")}</option>
               </select>
             </div>
+          </div>
+          <div class="nt-field">
+            <span>{tr("Memory")}</span>
+            <Show when={!projectMemoryOn()} fallback={<span class="nt-hint">{tr("RustCodeLore: a shared workspace in the project's store")}</span>}>
+              <div class="nt-inline" role="radiogroup" aria-label={tr("Memory")}>
+                <label class="nt-check"><input type="radio" name="nt-memory" checked={memoryMode(settings()) === "lore"} onChange={() => chooseMemory("lore")} />{tr("RustCodeLore")}</label>
+                <label class="nt-check"><input type="radio" name="nt-memory" checked={memoryMode(settings()) === "plain"} onChange={() => chooseMemory("plain")} />{tr("Plain memory")}</label>
+              </div>
+            </Show>
           </div>
           <label class="nt-field">
             <span>{tr("Max members")}</span>

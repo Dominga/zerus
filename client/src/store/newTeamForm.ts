@@ -178,5 +178,13 @@ export function createReason(input: {
 }
 
 /** The limit counts the members besides the lead. */
+/** Task 126: the team's memory mode as New team offers it: RustCodeLore ("lore") unless plain was chosen. */
+export type MemoryMode = "plain" | "lore";
+export const memoryMode = (settings: TeamSettings): MemoryMode => {
+  const memory = settings.memory as { mode?: unknown } | undefined;
+  return memory?.mode === "plain" ? "plain" : "lore";
+};
+/** The settings with the chosen memory mode; Zerus fills its store at Create team. */
+export const withMemory = (settings: TeamSettings, mode: MemoryMode): TeamSettings => ({ ...settings, memory: { mode } });
 export const maxMembers = (settings: TeamSettings) => (typeof settings.max_members === "number" && settings.max_members > 0 ? settings.max_members : 6);
 export const canAdd = (members: readonly DraftMember[], settings: TeamSettings) => members.length < maxMembers(settings);

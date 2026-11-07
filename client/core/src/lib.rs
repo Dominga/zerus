@@ -36,6 +36,7 @@ pub mod fsx;
 pub mod image;
 pub mod input_queue;
 pub mod iron_rules;
+pub mod project_memory;
 pub mod launch;
 pub mod legacy;
 pub mod linux_notify;

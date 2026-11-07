@@ -700,8 +700,11 @@ its computer's machine UUID and session ID, or by conversation for a parent an
 older `hgs` listed without one; names never match. A loop never hides a card.
 Cards show a large agent tile at the left: the agent's mark from the owner's
 design prototype (Claude, Codex, DeepSeek, Kimi and the shell; OpenCode keeps
-its glyph) on a neutral bordered tile, 34 px on cards and 22 px on compact
-rows. The artwork loads lazily, outside the entry bundle; until it arrives the
+its glyph) on a bordered tile, 34 px on cards and 22 px on compact rows. The
+tile uses the skin tokens `list.agent-tile` and `list.agent-tile-border`: the
+prototype's near-black tile with a thin outline in the dark skin, and a white
+tile with a firmer outline in the light skin, where it gives the colored marks
+their best contrast. The artwork loads lazily, outside the entry bundle; until it arrives the
 tile shows the provider glyph. A compact parent row takes a second line that
 sums up its child sessions: working of all, **Needs you**, **Asking** and
 **Errors** counts, with the same collapse toggle; childless compact rows stay

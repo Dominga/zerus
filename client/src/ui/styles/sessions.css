@@ -193,8 +193,9 @@
   .qchip.muted { background: var(--z-list-chip); color: var(--z-list-badge-muted); }
 
   /* Agent tile: the large colored provider mark at the card's left; the lines start after it. */
+  /* The prototype's darker tile and thin outline (owner 2026-11-07): skin tokens list.agent-tile(-border). */
   .agent-tile { --tile: 34px; box-sizing: border-box; flex: none; display: inline-grid; place-items: center; width: var(--tile); height: var(--tile);
-    border-radius: calc(var(--tile) * .26); color: var(--agent); background: var(--z-color-tile); border: 1px solid var(--z-color-card-border); }
+    border-radius: calc(var(--tile) * .26); color: var(--agent); background: var(--z-list-agent-tile); border: 1px solid var(--z-list-agent-tile-border); }
   .scard.tiled .sc-tile { position: absolute; left: 10px; top: 9px; display: inline-flex; }
   .scard.tiled .sc-l1, .scard.tiled .sc-l2, .scard.tiled .sc-l3, .scard.tiled .sc-foot { left: 54px; }
   .cc-tile { flex: none; display: inline-flex; margin-right: 7px; }

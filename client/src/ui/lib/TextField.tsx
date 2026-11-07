@@ -65,9 +65,12 @@ function field(props: InputProps | AreaProps, area: boolean) {
       if (composition() || composing || (value === lastIncoming && revision === lastRevision)) return;
       lastIncoming = value; lastRevision = revision;
       if (editor.value === value) return;
+      // insertText selects all before it can report refusal. Keep the original
+      // caret for the fresh-node fallback, rather than that temporary selection.
+      const selected = { focused: document.activeElement === editor, start: editor.selectionStart, end: editor.selectionEnd, direction: editor.selectionDirection };
       if (replaceText(editor, value, false)) { edited = true; suppressChange = true; return; }
       if (edited) {
-        restore = { focused: document.activeElement === editor, start: editor.selectionStart, end: editor.selectionEnd, direction: editor.selectionDirection };
+        restore = selected;
         bump((n) => n + 1);
       } else editor.value = value;
     });

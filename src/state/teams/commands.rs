@@ -236,6 +236,56 @@ fn dsh_member(team: &Team, conversation: &str) -> Option<String> {
         .map(|member| member.id.clone())
 }
 
+/// Task #220: the team session this process runs in - the team whose run
+/// raised a missing tool - with the member and the task it holds now. A
+/// process outside every team's session (a worker-started run, the owner's own
+/// shell) has none, and what it raises keeps the owner's path.
+pub(crate) fn calling_team() -> Option<(String, String, Option<u32>)> {
+    let record = caller_record();
+    let (dsh, env, run) = caller_identities();
+    if record.is_none() && dsh.is_none() && env.is_none() && run.is_none() {
+        return None;
+    }
+    let store = Store::open(false).ok()?;
+    for team in store.active_teams(ACTIVE_TEAMS).ok()? {
+        let member = record
+            .as_ref()
+            .and_then(|record| calling_member(&team, record))
+            .or_else(|| dsh_member(&team, dsh.as_deref().unwrap_or_default()))
+            .or_else(|| running_member(&team, env.as_deref().unwrap_or_default(), run.as_deref().unwrap_or_default()));
+        if let Some(member) = member {
+            let task = open_task(&team, &member);
+            return Some((team.id.clone(), member, task));
+        }
+    }
+    None
+}
+
+/// The member whose stored session this hgs session or run is: its run id
+/// first, which a rename never changes, then its session name (H7).
+fn running_member(team: &Team, session: &str, run: &str) -> Option<String> {
+    team.members
+        .iter()
+        .filter(|member| member.state != MemberState::Removed)
+        .find(|member| {
+            member.session.as_ref().is_some_and(|found| {
+                found.host.is_empty()
+                    && ((!run.is_empty() && found.run_id == run) || (!session.is_empty() && found.name == session))
+            })
+        })
+        .map(|member| member.id.clone())
+}
+
+/// The task a member holds now: its open attempt's task, the latest when a
+/// member holds several.
+pub(crate) fn open_task(team: &Team, member: &str) -> Option<u32> {
+    team.tasks
+        .iter()
+        .filter(|task| task.attempts.iter().any(|attempt| attempt.member == member && attempt.state.open()))
+        .map(|task| task.id)
+        .max()
+}
+
 /// Who asks. A team session is proven by ancestry; a dsh session by the
 /// conversation its harness exports; a report, question or `current` from
 /// elsewhere (a member on another computer) is authorized by its attempt id;
@@ -1561,6 +1611,63 @@ fn next_goal_as(store: &mut Store, request: &str, input: &Value, caller: &Actor)
     Ok(json!({"status":"planned","team":next_id,"previous":old.id}))
 }
 
+/// Task #220: the lead's answer to a missing tool its team's run raised. The
+/// lead denies it with a reason, for its own team only; it never allows an
+/// install - that is the owner's, on the lead's install-tool card.
+fn decide_tool_lead(input: &Value) -> anyhow::Result<Value> {
+    let request = text(input, "request_id").to_owned();
+    ensure!(canonical_uuid(&request), "A canonical request_id is required");
+    let mut store = Store::open(true)?;
+    let team = store.load(text(input, "team"))?.context("Unknown team")?;
+    let caller = actor(&team, "decide-tool", input)?;
+    ensure!(caller.is_lead(&team), "Only the team's lead denies a tool its own run asked for");
+    let id = text(input, "offer").to_owned();
+    ensure!(!id.is_empty(), "Name the offer: {{\"request_id\":\"UUID\",\"team\":\"...\",\"offer\":\"...\",\"allow\":false,\"reason\":\"...\"}}");
+    ensure!(input["allow"].as_bool() != Some(true), "The lead never installs a tool: ask the owner with hgs team propose --json, kind install-tool");
+    let reason: String = text(input, "reason").trim().chars().take(500).collect();
+    ensure!(!reason.is_empty(), "A Deny says why: add \"reason\"");
+    let before = crate::test_discipline::tools::offer(&id).map(|offer| offer.state);
+    let denied = crate::test_discipline::tools::lead_deny(&team.id, &id, &reason)?;
+    // The team's feed names the decision, so its member reads it there too.
+    store.mutate(Some((&request, input)), &team.id, None, |_, events| {
+        events.push(Event::new("tool_denied", json!({"offer":denied.id,"tool":denied.tool,"by":caller.label(&team),"reason":reason})));
+        Ok(Value::Null)
+    })?;
+    // Task #220: the member whose run asked for it hears the answer once.
+    if before.as_deref() != Some("denied") {
+        tell_tool_outcome(&mut store, &team.id, &denied.id, false, &reason)?;
+    }
+    Ok(json!({"status":"denied","offer":denied.id,"tool":denied.tool,"reason":reason}))
+}
+
+/// Task #220: the member whose run raised a tool offer hears what became of it:
+/// the lead's Deny, or the owner's Allow or Deny on the lead's card.
+fn tell_tool_outcome(store: &mut Store, team_id: &str, offer: &str, allowed: bool, reason: &str) -> anyhow::Result<()> {
+    let Some(found) = crate::test_discipline::tools::offer(offer) else { return Ok(()) };
+    let team = store.load(team_id)?.context("Unknown team")?;
+    let Some(member) = team.member(&found.member) else { return Ok(()) };
+    let Some(session) = member.session.clone() else { return Ok(()) };
+    let text = if allowed {
+        format!(
+            "Your run found `{}` missing and asked for it. The owner allowed the install: {} (in {}). Work without it until a run finds it, and never install it yourself.",
+            found.tool,
+            found.command.join(" "),
+            found.folder
+        )
+    } else {
+        format!(
+            "Your run found `{}` missing and asked for it. Installing it was denied: {reason}. Work without it, and never install it yourself.",
+            found.tool
+        )
+    };
+    let request = uuid::Uuid::new_v4().to_string();
+    let outcome = super::doorbell::post_and_ring(store, team_id, &member.id, &session, &request, "tool_outcome", "zerus", super::working::Urgency::Normal, &text);
+    if let super::dispatcher::Sent::Refused(why) = outcome {
+        eprintln!("hgs: the tool outcome did not reach {}: {why}", member.id);
+    }
+    Ok(())
+}
+
 /// F8: the owner decides a proposal. An accepted one runs as the owner: an
 /// accepted next goal creates the next team, an accepted swap calls the swap
 /// operation. A decided proposal is idempotent: a replay returns its state.
@@ -1730,6 +1837,8 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
     let reason = text(input, "reason").trim().to_owned();
     ensure!(reason.chars().count() <= 2000, "A reason has at most 2000 characters");
     let kind = team.proposals[at]["kind"].as_str().unwrap_or_default().to_owned();
+    // Task #220: an install card names the offer its answer reports to.
+    let card_offer = team.proposals[at]["change"]["offer"].as_str().unwrap_or_default().to_owned();
     // U57: the owner's Allow is bound to this id and the proposal's content
     // hash; a changed proposal never applies. An older proposal without a hash
     // stays decidable.
@@ -1758,8 +1867,23 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
                 // U59: a Deny's reason reaches the lead with the team's feed.
                 events.push(Event::new("plan_mode_denied", json!({"by":"You","proposal":id,"reason":reason})));
             }
+            if let Some(offer) = team
+                .proposals
+                .iter()
+                .find(|proposal| proposal["id"] == id && proposal["kind"] == "install-tool")
+                .and_then(|proposal| proposal["change"]["offer"].as_str())
+            {
+                // Task #220: the tool is not installed; the offer remembers why,
+                // so no card asks again.
+                crate::test_discipline::tools::deny_escalated(offer, &reason)?;
+                events.push(Event::new("install_tool_denied", json!({"by":"You","proposal":id,"offer":offer,"reason":reason})));
+            }
             Ok(Value::Null)
         })?;
+        // Task #220: the member whose run asked for the tool hears the Deny.
+        if kind == "install-tool" {
+            tell_tool_outcome(store, &team_id, &card_offer, false, &reason)?;
+        }
         return Ok(json!({"status":"rejected","proposal":id}));
     }
     if kind == "question" {
@@ -1919,6 +2043,12 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
             value["by"] = json!("human");
             super::super::iron_rules::run("set", &value)?
         }
+        // Task #220: the owner's Allow installs the tool the card names.
+        "install-tool" => {
+            let offer = change["offer"].as_str().context("The install-tool proposal names its offer")?;
+            let allowed = crate::test_discipline::tools::allow_escalated(offer)?;
+            json!({"tool":allowed.tool,"state":allowed.state,"command":allowed.command.join(" "),"folder":allowed.folder})
+        }
         other => bail!("Unknown proposal kind {other}"),
     };
     store.mutate(None, &team_id, None, |team, events| {
@@ -1941,6 +2071,10 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
         }
         Ok(Value::Null)
     })?;
+    // Task #220: the member whose run asked for the tool hears the Allow.
+    if kind == "install-tool" {
+        tell_tool_outcome(store, &team_id, &card_offer, true, "")?;
+    }
     Ok(json!({"status":"accepted","proposal":id,"kind":kind,"result":result}))
 }
 
@@ -4902,7 +5036,12 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         return decide_proposal(input);
     }
     // #742: the owner's Allow or Deny of a missing tool's install; not a team's.
+    // Task #220: a team's lead denies the offer its own run raised, and asks the
+    // owner with an install-tool card instead of installing it.
     if op == "decide-tool" {
+        if !text(input, "team").is_empty() {
+            return decide_tool_lead(input);
+        }
         return crate::test_discipline::tools::decide(input);
     }
     // Task 97: the owner's question queue spans teams and ordinary sessions.
@@ -5585,4 +5724,8 @@ mod commands_status;
 #[cfg(test)]
 #[path = "tests/commands_other.rs"]
 mod commands_other;
+
+#[cfg(test)]
+#[path = "tests/commands_tools.rs"]
+mod commands_tools;
 

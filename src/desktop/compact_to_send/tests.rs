@@ -1646,6 +1646,71 @@ mod actor {
         assert_eq!(ran.counts(), (1, 0), "no send child");
     }
 
+    /// zerus-qw7wp: one work slot, so an operation queued behind another's
+    /// wait gets its turn late. Its chain starts at that turn, not at its
+    /// admission: after the first waits close to its whole budget, the
+    /// second still compacts and sends instead of expiring NotStarted.
+    #[test]
+    fn a_second_operation_queued_behind_a_long_wait_still_runs() {
+        let first_id = Arc::new(std::sync::Mutex::new(String::new()));
+        let second_started = Arc::new(std::sync::Mutex::new(None::<Instant>));
+        let (ran_first, ran_second) = (Arc::new(Ran::default()), Arc::new(Ran::default()));
+        // The first's compaction never completes; the second's does.
+        let pending = executor(ran_first.clone(), true, "submitted", true);
+        let completes = executor(ran_second.clone(), true, "completed", true);
+        let (which, started) = (first_id.clone(), second_started.clone());
+        let mut f = Fixture::new(move |state, plan, args, input, lock, resources| {
+            if plan.compaction_request_id == *which.lock().unwrap() {
+                return pending(state, plan, args, input, lock, resources);
+            }
+            if args[0] == "compact-context" {
+                started.lock().unwrap().get_or_insert_with(Instant::now);
+            }
+            completes(state, plan, args, input, lock, resources)
+        });
+        // The real budgets' shape: a wait close to the whole chain (600 s
+        // of 690 s), and preparations that take a moment.
+        let (wait, chain) = (Duration::from_millis(300), Duration::from_millis(345));
+        f.runtime
+            .fixture_wait(wait, Duration::from_millis(5), chain);
+        f.runtime
+            .fixture_prepare_hook(Arc::new(|| std::thread::sleep(Duration::from_millis(30))));
+        let (first, second) = (f.original(), f.original());
+        *first_id.lock().unwrap() = first.plan.compaction_request_id.clone();
+        assert!(f.admit(&first).accepted);
+        assert!(f.admit(&second).accepted);
+        let admitted = Instant::now();
+        f.until("both settled", |f| {
+            f.row(&first).receipt.drained && f.row(&second).receipt.drained
+        });
+        // The first's wait expired: compacted, never sent.
+        let row = f.row(&first);
+        assert_eq!(
+            row.receipt.result(&first.plan),
+            Some(Settled::NotSent { compacted: true })
+        );
+        assert!(row.send.is_none());
+        assert_eq!(ran_first.counts(), (1, 0));
+        // The second got its turn only after a chain counted from its
+        // admission would have ended, and still ran both children once.
+        let turn = second_started
+            .lock()
+            .unwrap()
+            .expect("the second compacted");
+        assert!(
+            turn >= admitted + chain,
+            "the scenario queues the second past its admission chain"
+        );
+        let row = f.row(&second);
+        assert_eq!(row.receipt.compaction.step, Step::Recorded);
+        assert_eq!(row.receipt.send.step, Step::Recorded);
+        assert_eq!(
+            row.receipt.result(&second.plan),
+            Some(Settled::Sent(row.receipt.send.outcome.clone().unwrap()))
+        );
+        assert_eq!(ran_second.counts(), (1, 1), "each child once");
+    }
+
     /// An operation past its compaction that no live work holds lost its
     /// wait: it is retired, never resumed.
     #[test]

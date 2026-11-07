@@ -55,8 +55,10 @@ const PROBE_EVERY: Duration = Duration::from_millis(250);
 pub(super) const WAIT: Duration = Duration::from_secs(600);
 /// How often the waiting operation reads its slot again.
 const POLL_EVERY: Duration = Duration::from_millis(500);
-/// The whole operation from its admission: both children, both receipt
-/// reads, the wait and a margin. Nothing starts after it.
+/// The whole operation from its own first turn, when it gets the work slot:
+/// both children, both receipt reads, the wait and a margin. Nothing starts
+/// after it. Time queued behind another operation does not count
+/// (zerus-qw7wp).
 pub(super) const CHAIN: Duration = Duration::from_secs(690);
 #[cfg(test)]
 type Hook = Arc<dyn Fn() + Send + Sync>;
@@ -165,7 +167,7 @@ pub(in crate::desktop) struct Runtime {
     /// The receipt read's deadline after the drain ([`READ_WAIT`]).
     read_wait: Duration,
     /// The wait's budget ([`WAIT`]), its read interval ([`POLL_EVERY`]) and
-    /// the whole operation's deadline from admission ([`CHAIN`]).
+    /// the whole operation's bound from its first turn ([`CHAIN`]).
     wait: Duration,
     poll_every: Duration,
     chain: Duration,
@@ -337,7 +339,7 @@ impl Runtime {
                 self.exclusion.as_ref(),
             )?;
             let original = ledger::load(&tx, &id)?;
-            let consent = Consent::admitted(verified, lease.clone(), Instant::now() + self.chain)?;
+            let consent = Consent::admitted(verified, lease.clone(), self.chain)?;
             let row = ledger::admit(
                 &tx,
                 &consent.original,
@@ -639,6 +641,10 @@ impl Runtime {
             return Ok(());
         };
         self.check(&store.db, &consent, &row, None)?;
+        // The operation's first turn: its whole bound starts now, not at its
+        // admission, so a wait ahead of it in the one work slot cannot use
+        // it up (zerus-qw7wp).
+        consent.chain();
         self.prepare(&row, Child::Compaction, consent, None)
     }
     /// Starts `child`'s preparation off the actor: its exact custody and its
@@ -785,7 +791,7 @@ impl Runtime {
                     if child == Child::Compaction && !settled.drained {
                         // One budget from here, never renewed, within the
                         // operation's own deadline.
-                        let until = (Instant::now() + self.wait).min(consent.chain);
+                        let until = (Instant::now() + self.wait).min(consent.chain());
                         self.work = Some(Work::Waiting {
                             id: id.clone(),
                             consent: consent.clone(),
@@ -929,7 +935,7 @@ impl Runtime {
             return self.end_wait(store, &id, ledger::VETOED);
         }
         match slot {
-            Some(Slot::Completed) if Instant::now() < consent.chain => {
+            Some(Slot::Completed) if Instant::now() < consent.chain() => {
                 return self.prepare(&row, Child::Send, consent, Some((roots, token)));
             }
             Some(Slot::Completed) => return self.end_wait(store, &id, ledger::CHAIN_EXPIRED),
@@ -938,7 +944,7 @@ impl Runtime {
         }
         let now = Instant::now();
         if now >= until {
-            let code = if until >= consent.chain {
+            let code = if until >= consent.chain() {
                 ledger::CHAIN_EXPIRED
             } else {
                 ledger::WAIT_EXPIRED
@@ -1048,8 +1054,8 @@ impl Runtime {
     pub(super) fn fixture_prepare_hook(&mut self, hook: Hook) {
         self.prepare_hook = Some(hook);
     }
-    /// Sets the wait's budget, its read interval and the operation's
-    /// deadline from admission.
+    /// Sets the wait's budget, its read interval and the operation's bound
+    /// from its first turn.
     #[cfg(test)]
     pub(super) fn fixture_wait(&mut self, wait: Duration, every: Duration, chain: Duration) {
         self.wait = wait;
@@ -1114,7 +1120,7 @@ fn original(
         if !target::current(roots, plan)
             || (child == Child::Send && slot::read(roots, plan) != Slot::Completed)
             || consent.cancel.load(Ordering::Acquire)
-            || Instant::now() >= consent.chain
+            || Instant::now() >= consent.chain()
         {
             return Ended::NotStarted;
         }
@@ -1122,7 +1128,7 @@ fn original(
     }
     #[cfg(target_os = "linux")]
     if let Some(image) = image {
-        let deadline = (Instant::now() + DEADLINE).min(consent.chain);
+        let deadline = (Instant::now() + DEADLINE).min(consent.chain());
         return child::run(
             image.executable(),
             &args,

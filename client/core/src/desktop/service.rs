@@ -82,6 +82,10 @@ pub struct Snapshot {
     pub epoch: Option<String>,
     pub generation: Option<u64>,
     pub background: BTreeMap<String, Component>,
+    /// Bounded connection presentation, including configured ungreeted peers.
+    /// This contains no source generations or writer authority.
+    #[serde(default)]
+    pub fleet_computers: Option<Vec<FleetComputer>>,
     /// Shared host presentation only. Null and incomplete counts stay unknown.
     pub attention_counts: Option<Value>,
     pub automatic_approvals: Option<bool>,
@@ -92,6 +96,14 @@ pub struct Snapshot {
     pub details_available: bool,
     pub code: String,
 }
+/// Display only: an unconnected configured alias is not a catalog source.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct FleetComputer {
+    pub id: String,
+    pub status: String,
+    pub attempt: u32,
+}
+
 /// The service's held task message copies awaiting review.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -122,6 +134,7 @@ impl Default for Snapshot {
             epoch: None,
             generation: None,
             background: BTreeMap::new(),
+            fleet_computers: None,
             attention_counts: None,
             automatic_approvals: None,
             task_message_inputs: None,
@@ -260,6 +273,7 @@ impl State {
             epoch: Some(epoch.into()),
             generation: Some(generation),
             background,
+            fleet_computers: checked_connections(&value["background_runtime"], epoch),
             attention_counts: counts,
             automatic_approvals: value["automatic_approvals"].as_bool(),
             task_message_inputs: HeldInputs::parse(
@@ -347,6 +361,39 @@ impl State {
             _ => Ok(Update::Other),
         }
     }
+}
+
+fn checked_connections(value: &Value, epoch: &str) -> Option<Vec<FleetComputer>> {
+    if value["epoch"] != epoch
+        || value["display_only"] != true
+        || value["authority"] != false
+        || value["state"] != "running"
+    {
+        return None;
+    }
+    let rows = value["connections"]
+        .as_array()
+        .filter(|rows| rows.len() <= 64)?;
+    let mut seen = std::collections::BTreeSet::new();
+    rows.iter()
+        .map(|row| {
+            let id = row["id"].as_str().filter(|id| valid_computer(id))?;
+            if !seen.insert(id) {
+                return None;
+            }
+            let status = row["status"].as_str().filter(|status| {
+                matches!(
+                    *status,
+                    "live" | "polled" | "probing" | "unsupported" | "reconnecting" | "ended"
+                )
+            })?;
+            Some(FleetComputer {
+                id: id.into(),
+                status: status.into(),
+                attempt: u32::try_from(row["attempt"].as_u64()?).ok()?,
+            })
+        })
+        .collect()
 }
 
 fn checked_sources(value: &Value, epoch: &str) -> Option<Vec<CatalogSource>> {

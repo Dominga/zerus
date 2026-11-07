@@ -4765,6 +4765,12 @@ HGS_TAB=1                    # enable terminal title updates
 HGS_TAB_COLORS="macbook=#80ff80"
 ```
 
+An unavailable peer does not make healthy computers unavailable. The desktop
+machine counter includes configured peers that have not connected, with their
+connection state in its tooltip. A running background service captures
+`HGS_PEERS` at startup; restart the background service after changing it.
+Existing agent sessions keep running.
+
 The CLI config is `~/.config/hgs/config`; `HGS_CONFIG_DIR` and `HGS_STATE_DIR` permit
 isolated setups. `HGS_SSH` names the OpenSSH client for every peer connection
 (dry runs still print `ssh`); without it `hgs` runs `ssh` from `PATH`, and on

@@ -545,6 +545,7 @@
   "Response failed": "Ошибка ответа",
   "Response finished": "Ответ завершён",
   "Restart Windows, then open Zerus and review again. Use Restart, not Shut down: with Fast Startup, Shut down keeps the previous session.": "Перезагрузите Windows, затем откройте Zerus и повторите проверку. Выберите «Перезагрузка», а не «Завершение работы»: при быстром запуске завершение работы сохраняет предыдущий сеанс.",
+  "Restart the background service after changing HGS_PEERS. Existing sessions keep running.": "После изменения HGS_PEERS перезапустите фоновую службу. Текущие сессии продолжат работать.",
   "Restart your computer, then open Zerus and review again.": "Перезагрузите компьютер, затем откройте Zerus и повторите проверку.",
   "Restarting Zerus": "Перезапуск Zerus",
   "Restore": "Восстановить",

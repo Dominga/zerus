@@ -11,7 +11,7 @@ vi.mock("../../bridge", () => ({ fleetRefresh: calls.retry }));
 vi.mock("../../store/ui", () => ({ setPage: calls.page, toast: calls.toast }));
 vi.mock("../../i18n", () => ({ tr: (s: string, ...args: unknown[]) => s.replace(/%(\d+)/g, (_, n) => String(args[Number(n) - 1])) }));
 import { desktopService } from "../../store/desktopService";
-import { MachinesStatus } from "./MachinesStatus";
+import { MachinesStatus, PeerConfigurationNotice } from "./MachinesStatus";
 const healthy = (): DesktopService => ({ connected: true, epoch: "fixture", generation: 1, code: "", details_available: true,
   automatic_approvals: false, attention_counts: null, background: Object.fromEntries(["fleet", "presence", "reads", "attention", "approvals"].map((name) => [name, { ready: true, code: "ready" }])) });
 let dispose: (() => void) | undefined;
@@ -69,4 +69,39 @@ it("uses the same local machine name while checking and never offers a probing R
   expect(host.querySelector<HTMLButtonElement>(".machines-status")?.title).not.toContain("offline");
   expect(host.textContent).toBe("0/1"); expect(calls.retry).not.toHaveBeenCalled();
   expect(host.querySelectorAll("button")).toHaveLength(1);
+});
+
+it("counts a configured peer with no catalog row as offline, without blocking healthy computers", () => {
+  machines([["", "live"], ["healthy.example", "live"]]);
+  desktopService.apply({ ...healthy(), fleet_computers: [
+    { id: "", status: "live", attempt: 0 }, { id: "healthy.example", status: "live", attempt: 0 },
+    { id: "broken.example", status: "reconnecting", attempt: 4 },
+  ] });
+  const host = mount(), button = host.querySelector<HTMLButtonElement>(".machines-status")!;
+  expect(button.textContent).toBe("2/3");
+  expect(button.title).toContain("broken.example offline");
+  expect(button.title).toContain("broken.example: reconnecting (attempt 4)");
+  expect(button.classList.contains("warn")).toBe(true);
+  expect(calls.retry).not.toHaveBeenCalled();
+  button.click(); expect(calls.page).toHaveBeenCalledExactlyOnceWith("machines");
+});
+
+it("keeps configured initial probing calm and follows the current checked roster", () => {
+  machines([["", "live"]]);
+  desktopService.apply({ ...healthy(), fleet_computers: [
+    { id: "", status: "live", attempt: 0 }, { id: "warming.example", status: "probing", attempt: 0 },
+  ] });
+  const host = mount(), button = host.querySelector<HTMLButtonElement>(".machines-status")!;
+  expect(button.textContent).toBe("1/2");
+  expect(button.title).toContain("warming.example: checking");
+  expect(button.title).not.toContain("offline"); expect(button.classList.contains("warn")).toBe(false);
+  desktopService.apply({ ...healthy(), fleet_computers: [{ id: "", status: "live", attempt: 0 }] });
+  expect(button.textContent).toBe("1/1"); expect(button.title).not.toContain("warming.example");
+});
+
+it("explains that HGS_PEERS changes need a service restart, without restarting it", () => {
+  const host = document.createElement("div"); document.body.append(host);
+  dispose = render(() => createComponent(PeerConfigurationNotice, {}), host);
+  expect(host.textContent).toBe("Restart the background service after changing HGS_PEERS. Existing sessions keep running.");
+  expect(host.querySelector("button")).toBeNull(); expect(calls.retry).not.toHaveBeenCalled();
 });

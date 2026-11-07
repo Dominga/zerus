@@ -2991,6 +2991,63 @@ fn look(input: &Value) -> anyhow::Result<Value> {
     Ok(value)
 }
 
+/// Task 128: the team a lore read names, or the caller's own team.
+fn lore_team(input: &Value) -> anyhow::Result<Team> {
+    let store = Store::open(false)?;
+    let named = text(input, "team");
+    if !named.is_empty() {
+        return store.load(named)?.context("Unknown team");
+    }
+    let record = caller_record().context("Name the team: --team ID (or run it from a member's session)")?;
+    store
+        .active_teams(ACTIVE_TEAMS)?
+        .into_iter()
+        .find(|team| calling_member(team, &record).is_some())
+        .context("This session is in no running team; name it with --team ID")
+}
+
+/// Task 128: `hgs team lore find|plans|show`: lore's answer from the team's
+/// workspace (and the project's store in project and read-only modes).
+fn lore_read(op: &str, input: &Value) -> anyhow::Result<Value> {
+    let team = lore_team(input)?;
+    let (command, words): (&str, Vec<String>) = match op {
+        "lore-find" => {
+            let query = text(input, "query").trim().to_owned();
+            ensure!(!query.is_empty(), "Name what to find: hgs team lore find <words>");
+            let mut words = vec![query];
+            if let Some(n) = input["n"].as_u64() {
+                words.extend(["-n".into(), n.min(50).to_string()]);
+            }
+            ("find", words)
+        }
+        "lore-plans" => ("plans", Vec::new()),
+        _ => {
+            let id = text(input, "id").trim().to_owned();
+            ensure!(!id.is_empty(), "Name the record: hgs team lore show <id>");
+            ("show", vec![id])
+        }
+    };
+    // Plain memory has no store: its recall is the team digest.
+    if command == "plans" && super::lore_sync::workspace(&team).is_none() {
+        return Ok(json!({"team":team.id,"mode":"plain","digest":super::lore_sync::plain_digest(&team)}));
+    }
+    let mut value = super::lore_sync::read(&team, command, &words)?;
+    // Recall after compaction: the live plans' open items come with plans.
+    if command == "plans" {
+        let prefix = super::lore_sync::prefix(&team);
+        let mut open = Vec::new();
+        for phase in team.phases.iter().rev().take(3) {
+            let plan = super::lore_sync::plan_id(&team, phase.n);
+            if let Ok(items) = super::lore_sync::read(&team, "items", &["--plan".into(), plan.clone()]) {
+                open.push(json!({"plan":plan,"items":items["stores"]["workspace"].clone()}));
+            }
+        }
+        value["open_items"] = json!(open);
+        value["prefix"] = json!(prefix);
+    }
+    Ok(value)
+}
+
 /// Task 133: `hgs team note`: the member's own pulse for its open attempt,
 /// which stands for this turn instead of Zerus's summary.
 fn note(input: &Value) -> anyhow::Result<Value> {
@@ -4520,6 +4577,10 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         "status" => {
             let store = Store::open(false)?;
             let mut team = store.load(text(input, "team"))?.context("Unknown team")?;
+            // Task 128 (docs/lore.md 5): the plain memory digest, at most 6 KiB.
+            if input["digest"] == true {
+                return Ok(json!({"team":team.id,"digest":super::lore_sync::plain_digest(&team)}));
+            }
             // Task 111: a proposal that can no longer apply reads withdrawn at
             // once; the next change stores it so.
             ops::withdraw_inapplicable(&mut team, &mut Vec::new());
@@ -4606,6 +4667,15 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         "look" => look(input),
         // Task 133: a member's own pulse, and the team's pulses.
         "note" => note(input),
+        // Task 128: the team's lore workspace: search, recall and the export.
+        "lore-find" | "lore-plans" | "lore-show" => lore_read(op, input),
+        "lore-export" => {
+            let store = Store::open(false)?;
+            let team = store.load(text(input, "team"))?.context("Unknown team")?;
+            let caller = actor(&team, "settings", input)?;
+            ensure!(matches!(caller, Actor::Human), "Only you export a team's memory into the project");
+            super::lore_sync::export(&team)
+        }
         "pulses" => {
             let store = Store::open(false)?;
             let team = store.load(text(input, "team"))?.context("Unknown team")?;
@@ -4915,6 +4985,38 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
         None
     };
     // Task 139: `hgs team look MEMBER [--team ID]`, beside its JSON form.
+    // Task 128: `hgs team status --digest --team ID`, the plain memory digest.
+    if args.first().map(String::as_str) == Some("status") && args.iter().any(|arg| arg == "--digest") && file.is_none() && !args.iter().any(|arg| arg == "--json") {
+        let team = args.iter().position(|arg| arg == "--team").and_then(|index| args.get(index + 1)).cloned().unwrap_or_default();
+        let result = run("status", &json!({"team":team,"digest":true}), false).map_err(|e| e.to_string())?;
+        println!("{}", result["digest"].as_str().unwrap_or_default());
+        return Ok(0);
+    }
+    // Task 128: `hgs team lore find <words> | plans | show <id> | export [--team ID]`.
+    if args.first().map(String::as_str) == Some("lore") && file.is_none() && !args.iter().any(|arg| arg == "--json") {
+        let mut team = String::new();
+        let mut words: Vec<String> = Vec::new();
+        let mut index = 2;
+        while index < args.len() {
+            if args[index] == "--team" {
+                team = args.get(index + 1).cloned().unwrap_or_default();
+                index += 2;
+                continue;
+            }
+            words.push(args[index].clone());
+            index += 1;
+        }
+        let (op, input) = match args.get(1).map(String::as_str) {
+            Some("find") => ("lore-find", json!({"team":team,"query":words.join(" ")})),
+            Some("plans") => ("lore-plans", json!({"team":team})),
+            Some("show") => ("lore-show", json!({"team":team,"id":words.first().cloned().unwrap_or_default()})),
+            Some("export") => ("lore-export", json!({"team":team})),
+            _ => return Err("usage: hgs team lore find <words> | plans | show <id> | export [--team ID]".into()),
+        };
+        let result = run(op, &input, false).map_err(|e| e.to_string())?;
+        println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+        return Ok(0);
+    }
     if args.first().map(String::as_str) == Some("look") && args.get(1).is_some_and(|arg| !arg.starts_with("--")) && file.is_none() {
         let team = args.iter().position(|arg| arg == "--team").and_then(|index| args.get(index + 1)).cloned().unwrap_or_default();
         let result = run("look", &json!({"member":args[1],"team":team}), false).map_err(|e| e.to_string())?;

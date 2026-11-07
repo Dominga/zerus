@@ -1516,6 +1516,11 @@ pub(crate) struct Attempt {
     /// implementer keeps the task and is not counted as failed for it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pipeline_return: bool,
+    /// Task 128: the exact reason this attempt was sent back for rework (the
+    /// lead's or the owner's reject, or a failed check), at most 2000
+    /// characters; the team memory's fault keeps it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rework_reason: String,
     /// #684 N1: the folder's HEAD and branch when this attempt reported, so a
     /// later stage checks that commit and never the folder's HEAD at the
     /// stage's own start.
@@ -2181,6 +2186,44 @@ pub(crate) struct PhaseRejection {
 
 /// One phase appended to the plan after the approved one. Phase 1 is implicit
 /// and has no record.
+/// Task 128: the team's lore writer state (docs/lore.md 6.1).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct LoreState {
+    /// The hash of the records the last complete pass wrote: equal, nothing runs.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hash: String,
+    /// Records that wait on a field only the lead or you can give.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending: Vec<LorePending>,
+    /// Refused records by id, with the content hash they were refused at:
+    /// never retried until the record changes.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub refused: std::collections::BTreeMap<String, String>,
+    /// The journal said once that the lore binary is missing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unavailable_told: bool,
+    /// The last write, and the ids it wrote (newest first, at most 10).
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub written_at: f64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent: Vec<String>,
+}
+
+impl LoreState {
+    pub(crate) fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Task 128: a record Zerus cannot write until a field is known.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct LorePending {
+    pub id: String,
+    pub kind: String,
+    pub missing: Vec<String>,
+    pub text: String,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Phase {
     pub n: u32,
@@ -2349,6 +2392,10 @@ pub(crate) struct Team {
     pub memory_mode_offer: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub memory_mode_reason: String,
+    /// Task 128: what the background writer last put into the team's lore
+    /// workspace, and what waits on a field only a person can give.
+    #[serde(default, skip_serializing_if = "LoreState::is_empty")]
+    pub lore: LoreState,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub plan_mode_reason: String,
     /// U59: tasks accepted since the last build of the free phase, so the header

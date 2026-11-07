@@ -3937,6 +3937,7 @@ fn decide_check(team: &mut Team, id: u32, n: u32, events: &mut Vec<Event>) -> an
         if let Some(attempt) = task.attempts.iter_mut().rev().find(|attempt| attempt.state == AttemptState::Reported) {
             attempt.state = AttemptState::Rejected;
             attempt.interim = None;
+            attempt.rework_reason = format!("check failed: exit {exit}, expected {}", expected.expect_exit);
         }
         revoke(task, "check failed");
         task.status = TaskStatus::Pending;
@@ -5738,6 +5739,7 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
         if let Some(attempt) = task.attempts.iter_mut().rev().find(|a| a.state == AttemptState::Reported) {
             attempt.state = AttemptState::Rejected;
             attempt.interim = None;
+            attempt.rework_reason = reason.chars().take(2000).collect();
         }
         revoke(task, "rejected");
         task.status = if input["final"].as_bool() == Some(true) {

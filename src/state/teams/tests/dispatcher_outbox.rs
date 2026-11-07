@@ -482,7 +482,7 @@ fn the_worker_answers_a_sandboxed_members_read_and_starts_its_run_at_low_integri
         assert_eq!(*calls.borrow(), vec![vec!["ls".to_owned(), "--json".to_owned()]], "only the read reached hgs");
         let refused = super::super::outbox::result(&folder, send).unwrap();
         assert_eq!(refused["status"], "refused", "{refused}");
-        assert!(refused["error"].as_str().unwrap().contains("only for hgs ls and hgs inspect"), "{refused}");
+        assert!(refused["error"].as_str().unwrap().contains("only for hgs ls, inspect, task reads and team lore reads"), "{refused}");
         assert_eq!(super::super::outbox::result(&folder, run).unwrap()["status"], "running");
         let claim = crate::state::builds::record(run, now()).unwrap();
         assert_eq!((claim["integrity"].as_str(), claim["session"]["name"].as_str()), (Some("low"), Some("codex/x/dev")), "{claim}");

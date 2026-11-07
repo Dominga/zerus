@@ -38,6 +38,6 @@ Member: the message names your task and attempt. Do it, report once:
   Your task: {"attempt":"ATTEMPT"} | hgs team current --json
   A question goes through hgs team ask, never a report; a progress line
   is interim; captured, it holds new work.
-  Codex on Windows: git-commit template, powershell.exe (team-run).
+  Codex on Windows: hgs guide team-run. First: hgs team lore find.
 Say what changed and how you checked it; a taken task's report is
 refused. Sub-teams: hgs guide team-tree.

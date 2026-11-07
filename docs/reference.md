@@ -8407,3 +8407,24 @@ event. A finished team keeps its memory. The lead proposes the same as a card
 the team keeps `memory_mode_offer` and `memory_mode_reason` (both in
 `hgs team status`) until the owner allows it or denies it
 (`memory_mode_denied`, with the reason). Trying the card touches no store.
+
+Task 128 (docs/lore.md 6): a team in `team` or `project` mode writes its
+memory. The team worker's background writer (never the dispatcher tick) puts
+each approved phase's plan and its tasks' outcomes (done with commits,
+dropped with the reason and who), the owner's decisions on cards, faults for
+fixed review findings and for reworks (the reviewer's exact reason) and the
+newest passing test reading per template into the workspace, at most 50
+changes per pass, through the `lore` binary (`HGS_LORE`, beside hgs, then
+`PATH`; without it the team keeps plain memory and journals
+`lore_unavailable` once). A fault Zerus cannot complete waits as a
+`lore_missing` lead inbox item; refusals journal `lore_refused`. The team's
+`lore` field keeps the last pass's hash, the waiting records and the refused
+ids. The lead's inbox message ends with the workspace's open items and the
+newest decisions, at most 10 lines. Reads, from a member's session or with
+`--team ID`: `hgs team lore find WORDS`, `hgs team lore plans` (with the
+open items of the newest three phases) and `hgs team lore show ID`; JSON
+forms `lore-find {team, query, n}`, `lore-plans {team}`, `lore-show {team,
+id}`. A finished team's workspace gets `.closed` and stays searchable;
+`hgs team lore export --team ID` (the owner only) copies its faults,
+decisions, readings, topics and recipes into the project store's area
+`team-<team8>`, skipping ids already there.

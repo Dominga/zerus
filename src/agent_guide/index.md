@@ -12,14 +12,15 @@ Session names look like provider/project/tag. [@h] marks an optional @alias.
   hgs guide wait              wait for a result another session owes you
   hgs guide team              lead or work in an agent team
   hgs guide team-tests        affected tests, never a full suite
-  hgs guide team-lead         add a phase or finish a running team
+  hgs guide team-lead         phases and finishing
   hgs guide team-custom       models, stages, branches, scale, intake
   hgs guide team-draft        plan a draft with the owner
   hgs guide team-input        member shape and --json-file
   hgs guide team-tree         lead a sub-team and pass work up
-  hgs guide team-run          routine commands outside the sandbox
+  hgs guide team-run          routine commands
   hgs guide team-safe         allow a member's routine request
   hgs guide team-propose      propose a change on a card
+  hgs guide team-lore         team memory: find, plans, export
   hgs guide team-broker       builds in one shared folder
   hgs guide team-cpp          CMake and MSBuild runs
   hgs guide run               start a build or test as your work
@@ -37,4 +38,4 @@ Rules
 - Stopping, killing or archiving a session needs the owner's explicit
   permission unless you started it for this task. Prefer pause.
 - An older peer may lack a command: check hgs @alias -h.
-- Contracts: docs/reference.md and docs/agent-coordination.md (Zerus repository).
+- Contracts: docs/reference.md, docs/agent-coordination.md.

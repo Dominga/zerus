@@ -516,6 +516,18 @@ impl Store {
         rows.iter().map(|row| Ok(serde_json::from_str(row)?)).collect()
     }
 
+    /// Task 128: the teams whose memory the background writer looks at: the
+    /// running ones and the ones finished since `since` (their last pass
+    /// closes the plan), most recently changed first, at most `limit`.
+    pub(crate) fn memory_teams(&self, since: f64, limit: i64) -> anyhow::Result<Vec<Team>> {
+        let mut statement = self.db.prepare(
+            "SELECT payload FROM teams WHERE status IN ('planning','running','paused') OR (status IN ('done','stopped') AND updated >= ?1) ORDER BY updated DESC LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![since, limit], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+        drop(statement);
+        rows.iter().map(|row| Ok(serde_json::from_str(row)?)).collect()
+    }
+
     /// The teams that still run: Planning, Running or Paused, most recently
     /// changed first, at most `limit`. Uses the (status, updated) index, so a
     /// finished team's status never reads every team (C1).

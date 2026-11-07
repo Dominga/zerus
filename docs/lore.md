@@ -125,7 +125,7 @@ The facts the port must keep. References are to `D:/Tools/CodeLore`, HEAD
 
 ### 2.1 Shape
 
-- **Crate:** a new `crates/lore` library, so Zerus links it without a subprocess. It has the same modules as the Python package:
+- **Crate:** a new `crates/lore` library with the same modules as the Python package. hgs does not link it (see "hgs runs the binary" below):
 
   | Module | Role |
   |---|---|
@@ -152,6 +152,22 @@ The facts the port must keep. References are to `D:/Tools/CodeLore`, HEAD
   fallback until that move, and is retired after it (section 8). The name
   RustCodeLore is the crate's name during the port and disappears at 1.0,
   where the tool is CodeLore again.
+- **hgs runs the binary (task 128, lead's decision of 2026-11-07).** hgs
+  calls the `lore` binary as a subprocess instead of linking the crate, for
+  two reasons:
+  - The crate needs serde_json's `preserve_order` feature (records keep their
+    field order byte for byte). Cargo unifies features across one build, so
+    linking it would turn `preserve_order` on for all of hgs and change the
+    key order of every JSON value hgs writes and hashes: request receipts,
+    card hashes and stored team records.
+  - The built-in embedding model (candle) is heavy, and hgs would carry it
+    whether or not a project uses memory.
+
+  hgs finds the binary as `HGS_LORE`, else `lore` beside the hgs executable,
+  else on `PATH`. Without it a team keeps plain memory and its journal says
+  so once (`lore_unavailable`). hgs passes a store's reference roots
+  (section 2.4) in `LORE_ROOTS`, the platform's path list. Shipping `lore`
+  beside hgs in the Windows zip and the installers is a separate task.
 - **Binaries:**
   - `lore`, a standalone CLI with the Python CLI's commands, flags, exit codes and `--json` shapes, byte-identical for the same store. Section 8 holds it to that. It is the same binary in the CodeLore repository after the move, so the owner's scripts and agents see one tool, not two.
   - `hgs lore …`, the same commands addressed by project instead of folder: `--project ID` (or the session's project), and `--team ID` for a team workspace. It also takes `@alias` (section 3.4).
@@ -413,7 +429,7 @@ Teams writes only records that pass validation, and writes them as `agent:zerus`
 | A review finding fixed by a task, or a rework whose cause the reviewer named | a `fault`, written automatically when all four fields are known: symptom = the finding's scenario, cause = the reviewer's reason, fix = the fixing task's report summary, check = the test that now passes. A missing field goes to the lead's inbox as above, and the record is written as soon as the field arrives. |
 | A test suite's result, with a time measured on a commit | `reading`: what = suite duration or pass count, command = the suite's command, value, `measured_at` = commit. A new reading supersedes the previous current one of the same suite. |
 
-Writes are batched per dispatcher tick: one write per team per tick, one commit. They go through the writer lock, and through `@home` when the store is elsewhere. A write that is refused (for example a duplicate) is recorded in the journal as `lore_refused` with the reason and never retried blindly.
+Writes never run on the dispatcher tick (task 128). A background thread of the team worker looks at the active teams every 30 seconds. For a team whose records changed since its last complete pass it reads the workspace's JSONL (at most 4 MiB), computes the difference and writes at most 50 changes: one `lore add any --new` for the new records, one `lore update --batch` for the changed ones, and `lore plan close` or `lore item reopen` where a status move needs that command. Each is one commit. Record ids are fixed by the team (`t<team8>-phase-<n>`, `<plan>#<task>`, `t<team8>-<proposal>`, `t<team8>-finding-<id>`, `t<team8>-rework-<task>-<attempt>`, `t<team8>-reading-<template>`), so a pass repeated after a crash writes nothing twice. Faults, decisions and readings go in the team's area `team-<team8>`, added to the workspace's `lore.toml` when it is missing. A decided item stays as it was decided, and a closed plan stays closed. A write that is refused (for example a duplicate) is recorded in the journal as `lore_refused` with the reason and never retried until the record changes. When lore did not run at all, nothing is remembered and the next pass tries again.
 
 ### 6.2 What the lead and members read
 

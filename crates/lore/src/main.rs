@@ -17,7 +17,7 @@ fn main() {
         stdin,
         lore_by: std::env::var("LORE_BY").ok(),
         finder: Some(&BUILTIN),
-        roots: None,
+        roots: roots(),
         history: history_source(),
         history_scope: history_scope(),
         ..Env::default()
@@ -27,6 +27,19 @@ fn main() {
     print!("{}", output.stdout);
     eprint!("{}", output.stderr);
     std::process::exit(output.code);
+}
+
+/// docs/lore.md 2.4: a Zerus store's reference roots, the folders a cited
+/// commit or file may be in, as `LORE_ROOTS` (the platform's path list); Zerus
+/// sets it for the stores it writes. Unset: CodeLore's one repository.
+fn roots() -> Option<zerus_lore::refs::Roots> {
+    roots_from(std::env::var_os("LORE_ROOTS"))
+}
+
+fn roots_from(value: Option<std::ffi::OsString>) -> Option<zerus_lore::refs::Roots> {
+    let value = value.filter(|value| !value.is_empty())?;
+    let folders: Vec<std::path::PathBuf> = std::env::split_paths(&value).filter(|path| !path.as_os_str().is_empty()).collect();
+    (!folders.is_empty()).then(|| zerus_lore::refs::Roots::new(folders, "this computer"))
 }
 
 /// docs/lore.md 11.7: Zerus registers its content-search index by naming its
@@ -121,5 +134,25 @@ fn model(args: &[String]) -> i32 {
             }
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::roots_from;
+    use std::path::PathBuf;
+
+    /// Task 128: Zerus names a store's reference roots in `LORE_ROOTS`, the
+    /// platform's path list, the store first; unset or empty is CodeLore's
+    /// one repository.
+    #[test]
+    fn lore_roots_name_the_reference_folders_in_order() {
+        let folders = [PathBuf::from("store"), PathBuf::from("team"), PathBuf::from("member")];
+        let joined = std::env::join_paths(&folders).unwrap();
+        let roots = roots_from(Some(joined)).expect("roots");
+        assert_eq!(roots.folders, folders);
+        assert_eq!(roots.machine, "this computer");
+        assert_eq!(roots_from(None), None);
+        assert_eq!(roots_from(Some("".into())), None);
     }
 }

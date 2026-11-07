@@ -22,17 +22,17 @@ Each kind sends its exact change:
    "expected_revision":N} (or "scope":"session" with the member's session)
   {"kind":"switch-plan-mode","mode":"free","phase":N} switches phase N
     only (free or standard); without "phase", the team's mode
-  swap-member and next-goal as before
+  {"kind":"switch-memory-mode","mode":"team"}; swap-member, next-goal as before
 with "reason" and a request_id, piped to hgs team propose --json. An
 operation's fields may also go in "input":{...}.
 
 The receipt carries the proposal id and its content hash. The owner's Allow
 applies exactly that change once; a changed or stale card is refused and
 nothing is applied twice. A Deny's reason reaches you. A typed owner word
-stays a fallback only. A change Allow could not apply is refused at once.
+is a fallback. A change Allow cannot apply is refused at once.
 
-A question to the owner goes this way, never only in your reply: the owner
-picks an option or writes an answer on the card, and it reaches your inbox.
+A question to the owner goes this way, never only in your reply: the
+owner's option or answer on the card reaches your inbox.
 
 The owner's own answer from a plain shell (never from an agent session):
   {"team":"ID","proposal":"p1","accept":true,"expected_hash":"...",

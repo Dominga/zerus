@@ -1038,6 +1038,23 @@ fn all_items(team: &Team) -> Vec<Item> {
             detail: if limit.detail.is_empty() { String::new() } else { summary(&limit.detail) },
         });
     }
+    // Task 128 (docs/lore.md 6.1): a record Zerus cannot write until a field
+    // is known waits here, with the workspace to write it in.
+    if let Some((workspace, true)) = super::lore_sync::workspace(team) {
+        for pending in &team.lore.pending {
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "lore_missing",
+                key: format!("lore_missing:{}:{}", pending.id, pending.missing.join(",")),
+                task: None,
+                member: "Zerus".into(),
+                since: if team.lore.written_at > 0.0 { team.lore.written_at } else { team.updated },
+                summary: summary(&pending.text),
+                command: format!("lore -C \"{}\" add {} --stdin  # id {}; give {}", workspace.display(), pending.kind, pending.id, pending.missing.join(", ")),
+                detail: String::new(),
+            });
+        }
+    }
     items.sort_by(|a, b| a.since.total_cmp(&b.since).then_with(|| a.key.cmp(&b.key)));
     items.truncate(ITEM_LIMIT);
     items

@@ -31,6 +31,8 @@ pub(crate) const MARKER: &str = "project-memory-v1";
 /// is on, else `team`.
 pub(crate) const MODES: [&str; 5] = ["plain", "off", "team", "project", "read-only"];
 pub(crate) const LEGACY_LORE: &str = "lore";
+/// The kinds a team's export moves into the project store (docs/lore.md 4.5).
+pub(crate) const KNOWLEDGE_KINDS: [&str; 5] = ["fault", "reading", "decision", "topic", "recipe"];
 /// At most this many files are walked for a status or a move.
 const FILE_LIMIT: usize = 200_000;
 const CACHE: &str = ".cache";
@@ -296,6 +298,18 @@ fn make_private(dir: &Path, subject: &str) -> anyhow::Result<()> {
     fs::write(dir.join(".gitignore"), format!("{CACHE}/\n"))?;
     git(dir, &["add", "-A"])?;
     git(dir, &["commit", "-q", "-m", subject])?;
+    Ok(())
+}
+
+/// Task 128: commits a changed `lore.toml` where a private Zerus store owns
+/// the history; in a project's own working tree it is left for the person.
+pub(crate) fn commit_config(dir: &Path, subject: &str) -> anyhow::Result<()> {
+    let Some(top) = working_tree(dir) else { return Ok(()) };
+    if !is_private(&top) {
+        return Ok(());
+    }
+    git(dir, &["add", "--", "lore.toml"])?;
+    git(dir, &["commit", "-q", "-m", subject, "--", "lore.toml"])?;
     Ok(())
 }
 

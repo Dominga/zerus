@@ -431,6 +431,12 @@ fn parse_task(value: &Value) -> anyhow::Result<Task> {
     ensure!(task.deps.iter().all(|dep| dep.task != task.id), "{who}: field \"deps\": the task depends on itself");
     // Task #60: a follow-up names the task it came from, never itself.
     ensure!(task.origin.is_none_or(|origin| origin != task.id && origin > 0), "{who}: field \"origin\": a follow-up names another task as its origin");
+    // Task #229: a spawned follow-up is a Crit or a Minor; anything else is a
+    // misspelling Zerus refuses rather than reading as ordinary work.
+    ensure!(
+        task.severity.is_empty() || matches!(task.severity.as_str(), "crit" | "minor"),
+        "{who}: field \"severity\": \"crit\" or \"minor\""
+    );
     // U27: the lane the task is drawn in; its number and label are bounded and
     // it changes nothing about hand-out.
     if let Some(lane) = task.lane.as_mut() {
@@ -1480,6 +1486,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
     team.phases.push(Phase {
         n,
         order,
+        kind: PhaseKind::Plan,
         title: title.clone(),
         barrier,
         approval,
@@ -1874,6 +1881,203 @@ fn add_to_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
     Ok(json!({"status":"added","phase":n,"tasks":ids,"validation":validation,"renumbered":renumbered_json(&renumbered)}))
 }
 
+/// Task #229 (owner, 2026-11-07): the lead spawns a follow-up from a task or a
+/// review. A Crit joins the running phase of its origin at once and without a
+/// card; the owner sees it in Waiting and the digest, and may revert it. It
+/// depends on its origin and holds that phase's acceptance, its close and any
+/// release candidate. A Minor blocks nothing: it joins the next phase that has
+/// not started, or a new Minor phase the lead opens (which may run in free mode
+/// and may end with tail tasks depending on all its minors).
+fn spawn(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(actor.is_lead(team), "Only the lead spawns a follow-up task; you add one to a phase with add-to-phase");
+    ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "Only a running or paused team takes a spawned task");
+    let severity = text(input, "severity").trim().to_ascii_lowercase();
+    ensure!(matches!(severity.as_str(), "crit" | "minor"), "A spawned task's \"severity\" is \"crit\" or \"minor\"");
+    let origin = input["origin"]
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .context("A spawned task names its origin, the task or review it came from")?;
+    let origin_phase = team.task(origin).with_context(|| format!("Unknown origin task #{origin}"))?.phase;
+    let values = input["tasks"].as_array().filter(|tasks| !tasks.is_empty()).context("Name at least one task to spawn")?;
+    ensure!(values.len() <= ADDED_TASKS, "At most {ADDED_TASKS} tasks are spawned at once");
+    ensure!(team.tasks.len() + values.len() <= 500, "A team has at most 500 tasks (it has {})", team.tasks.len());
+    let by = actor.label(team);
+    let at = now();
+    let tail = input["tail"].as_bool() == Some(true);
+    let summary = plan::phase_summary(team);
+    let state_of = |n: u32| -> String {
+        summary
+            .iter()
+            .find(|phase| phase["n"].as_u64() == Some(u64::from(n)))
+            .and_then(|phase| phase["state"].as_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let origin_order = team.phases.iter().find(|phase| phase.n == origin_phase).map_or(origin_phase, Phase::order);
+    // The target phase: the origin's own running phase for a Crit; for a Minor,
+    // the named or next phase that has not started, else a new Minor phase.
+    let mut new_phase = false;
+    let n = if severity == "crit" {
+        ensure!(
+            state_of(origin_phase) == "running",
+            "The origin #{origin} is in phase {origin_phase}, which is not running ({}): a Crit joins a running phase; extend the plan for a later one",
+            state_of(origin_phase).replace('_', " ")
+        );
+        origin_phase
+    } else if let Some(named) = input["phase"].as_u64().and_then(|named| u32::try_from(named).ok()).filter(|named| *named > 0) {
+        let state = state_of(named);
+        ensure!(
+            matches!(state.as_str(), "draft" | "queued"),
+            "Phase {named} has started ({}): a Minor joins the next phase that has not started, or a new Minor phase",
+            state.replace('_', " ")
+        );
+        named
+    } else {
+        // A Minor first joins the Minor phase the lead already opened (its set
+        // of minors); then the next phase that has not started; then a new
+        // Minor phase. An explicit "phase" overrides the choice above.
+        let open_minor = team
+            .phases
+            .iter()
+            .filter(|phase| phase.kind == PhaseKind::Minor && phase.state != PhaseState::Discarded)
+            .filter(|phase| matches!(state_of(phase.n).as_str(), "running" | "queued"))
+            .map(|phase| (phase.order(), phase.n))
+            .min();
+        if let Some((_, n)) = open_minor {
+            n
+        } else {
+            let next = summary.iter().filter_map(|phase| {
+                let n = u32::try_from(phase["n"].as_u64()?).ok()?;
+                let order = team.phases.iter().find(|record| record.n == n).map_or(n, Phase::order);
+                let started = team.tasks.iter().any(|task| task.phase == n && task.attempts.iter().any(|attempt| attempt.sent_at > 0.0));
+                let state = phase["state"].as_str().unwrap_or_default();
+                (order > origin_order && !started && matches!(state, "draft" | "queued")).then_some((order, n))
+            });
+            match (input["new_phase"].as_bool(), next.min_by_key(|(order, n)| (*order, *n))) {
+                (Some(true), _) => {
+                    new_phase = true;
+                    0
+                }
+                (_, Some((_, n))) => n,
+                (_, None) => {
+                    new_phase = true;
+                    0
+                }
+            }
+        }
+    };
+    // A Minor phase is the lead's own: it opens after the origin's phase, in
+    // free mode, with no approval card; `spawn` records it as a lead change.
+    let n = if new_phase {
+        let next = team
+            .tasks
+            .iter()
+            .map(|task| task.phase)
+            .chain(team.phases.iter().map(|phase| phase.n))
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .context("Phase numbers are exhausted")?;
+        let order = origin_order.saturating_add(1);
+        for phase in &mut team.phases {
+            if phase.order() >= order {
+                phase.order = phase.order() + 1;
+            }
+        }
+        let title = clean_text(text(input, "title"), 120, "A Minor phase title")?;
+        let title = if title.trim().is_empty() { format!("Minor phase {next}") } else { title };
+        team.phases.push(Phase {
+            n: next,
+            order,
+            kind: PhaseKind::Minor,
+            title,
+            state: PhaseState::Approved,
+            approval: Approval::Auto,
+            tasks: Vec::new(),
+            added_by: by.clone(),
+            added_at: at,
+            ..Default::default()
+        });
+        team.phase_modes.insert(next, PlanMode::Free);
+        next
+    } else {
+        n
+    };
+    let kind = team.phases.iter().find(|phase| phase.n == n).map_or(PhaseKind::Plan, |phase| phase.kind);
+    ensure!(
+        !(tail && severity != "minor") && !(tail && kind.is_plan()),
+        "A tail task belongs to a Minor phase: spawn its minors first"
+    );
+    let mut tasks = values.iter().map(parse_task).collect::<anyhow::Result<Vec<Task>>>()?;
+    for task in &mut tasks {
+        task.severity = severity.clone();
+        task.origin = Some(origin);
+    }
+    // #754: the next free numbers, whatever the request named.
+    let renumbered = renumber_new_tasks(team, &mut tasks)?;
+    for task in &mut tasks {
+        task.phase = n;
+        if severity == "crit" {
+            // A Crit depends on what it came from: none of its phase's result
+            // is used before it is decided.
+            if !task.deps.iter().any(|dep| dep.task == origin) {
+                task.deps.push(Dependency { task: origin, kind: DependencyKind::Hard });
+            }
+            task.deps.sort_by_key(|dep| dep.task);
+            task.added_late = Some(AddedLate { by: by.clone(), at, request: String::new(), confirm: "critical follow-up".into() });
+        }
+        // Task status follows the phase it joins: a draft waits for its
+        // approval, a running or Minor phase is handed out at once.
+        task.status = if state_of(n) == "draft" { TaskStatus::Draft } else { TaskStatus::Pending };
+    }
+    if tail {
+        let minors: Vec<u32> = team
+            .tasks
+            .iter()
+            .filter(|task| task.phase == n && task.severity == "minor" && !task.status.finished())
+            .map(|task| task.id)
+            .collect();
+        ensure!(!minors.is_empty(), "A tail task waits for its Minor phase's minors: spawn them first");
+        for task in &mut tasks {
+            for id in &minors {
+                if !task.deps.iter().any(|dep| dep.task == *id) {
+                    task.deps.push(Dependency { task: *id, kind: DependencyKind::Hard });
+                }
+            }
+            task.deps.sort_by_key(|dep| dep.task);
+        }
+    }
+    // The tasks as they would join: numbered, validated in place, then kept.
+    let validation = {
+        let first_new = team.tasks.len();
+        let wanted: BTreeSet<u32> = tasks.iter().map(|task| task.id).collect();
+        team.tasks.extend(tasks.iter().cloned());
+        let validation = plan::validate(team, offline);
+        let errors = phase_errors(&validation, &wanted, true);
+        team.tasks.truncate(first_new);
+        ensure!(errors.is_empty(), "Fix {} task error(s) to spawn: {}", errors.len(), errors_text(&errors));
+        validation
+    };
+    let ids: Vec<u32> = tasks.iter().map(|task| task.id).collect();
+    team.tasks.extend(tasks);
+    if let Some(record) = team.phases.iter_mut().find(|phase| phase.n == n) {
+        record.tasks.extend(ids.iter().copied());
+        record.tasks.sort_unstable();
+    }
+    events.push(Event::new(
+        "task_spawned",
+        with_origins(
+            json!({"by":by,"severity":severity,"origin":origin,"phase":n,"phase_kind":kind.as_str(),
+                "tasks":ids,"tail":tail,"crit_gate":plan::crit_gate(team, n)}),
+            team,
+            &ids,
+        ),
+    ));
+    Ok(json!({"status":"spawned","severity":severity,"origin":origin,"phase":n,"phase_kind":kind.as_str(),
+        "tasks":ids,"tail":tail,"validation":validation,"renumbered":renumbered_json(&renumbered),
+        "crit_gate":plan::crit_gate(team, n)}))
+}
+
 /// Approves a draft phase once every phase before it ended (owner), or discards
 /// it with its tasks (the lead or the owner, F10).
 fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
@@ -2248,6 +2452,12 @@ fn accept_phase_as_owner(team: &mut Team, input: &Value, actor: &Actor, events: 
     let n = phase_number(input)?;
     let at = team.phases.iter().position(|phase| phase.n == n).with_context(|| format!("Unknown phase {n}"))?;
     ensure!(plan::awaits_acceptance(team, &team.phases[at]), "Phase {n} is not waiting for the owner's acceptance");
+    // Task #229: a Crit in the phase holds its acceptance.
+    ensure!(
+        plan::crit_gate(team, n).is_none(),
+        "Phase {n} cannot be accepted: {}",
+        plan::crit_gate(team, n).unwrap_or_default()
+    );
     ensure_owner_or_word(team, actor, input, n, "accepts a phase")?;
     let by = actor.label(team);
     let owner_word = verified_word(input)?;
@@ -3402,6 +3612,10 @@ fn finish(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     ensure!(matches!(team.status, TeamStatus::Running | TeamStatus::Paused), "The team is not running");
     let summary = clean(text(input, "summary").trim(), 4000, "A summary")?;
     ensure!(!summary.is_empty(), "A summary is required");
+    // Task #229: a Crit blocks using its phase's result to the end.
+    if let Some((phase, id)) = plan::open_crits_all(team).first() {
+        bail!("A critical task is open: #{id} in phase {phase}; decide or cancel it first");
+    }
     let open = team.tasks.iter().filter(|task| !task.status.finished()).count();
     ensure!(open == 0, "{open} task(s) are not decided: decide or cancel them first");
     // U63: a phase that waits for the owner's acceptance (or its rework) is
@@ -3411,7 +3625,7 @@ fn finish(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
     }
     // D2: a critical finding that is still open blocks a finish; the owner may
     // force it.
-    let critical = team.findings.iter().any(|finding| finding.severity == "critical" && finding.unresolved());
+    let critical = team.findings.iter().any(|finding| matches!(finding.severity.as_str(), "critical" | "crit") && finding.unresolved());
     // C16: only the owner forces a finish over an open critical finding.
     let force = input["force"].as_bool() == Some(true) && matches!(actor, Actor::Human);
     ensure!(
@@ -3675,7 +3889,7 @@ struct CheckedFinding {
 fn checked_finding(team: &Team, finding: &Value) -> anyhow::Result<CheckedFinding> {
     ensure!(finding.is_object(), "A finding is an object");
     let severity = finding["severity"].as_str().unwrap_or("normal").to_owned();
-    ensure!(["critical", "normal", "later"].contains(&severity.as_str()), "A finding is critical, normal or later");
+    ensure!(["critical", "normal", "later", "crit", "minor"].contains(&severity.as_str()), "A finding is critical (crit), normal (minor) or later");
     let title = clean(finding["title"].as_str().unwrap_or_default().trim(), 200, "A finding title")?;
     ensure!(!title.is_empty(), "A finding needs a title");
     let scenario = clean(finding["scenario"].as_str().unwrap_or_default().trim(), 2000, "A finding scenario")?;
@@ -6436,6 +6650,8 @@ fn apply_op(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &B
         "reports-to" | "sub-lead" => hierarchy(team, op, input, actor, events),
         "move-phase" => move_phase(team, input, actor, events),
         "add-to-phase" => add_to_phase(team, input, actor, offline, events),
+        // Task #229: a Crit or Minor spawned from a task or review.
+        "spawn" => spawn(team, input, actor, offline, events),
         "approve-phase" => decide_phase(team, input, actor, true, offline, events),
         "discard-phase" => decide_phase(team, input, actor, false, offline, events),
         "return-to-draft" => return_to_draft(team, input, actor, events),
@@ -6588,6 +6804,8 @@ fn apply_op(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &B
             if let Some(named) = input.get("phase").and_then(Value::as_u64) {
                 ensure!(named == u64::from(n), "Phase {named} is not the free phase; phase {n} is");
             }
+            // Task #229: a Crit in the phase holds its close.
+            ensure!(plan::crit_gate(team, n).is_none(), "Phase {n} cannot be closed: {}", plan::crit_gate(team, n).unwrap_or_default());
             // (b) a phase whose work still runs is not closed; the running ids
             // are named so the owner or the lead knows what waits.
             let running: Vec<u32> = team
@@ -6988,6 +7206,10 @@ mod ops_members;
 mod ops_lead_plan;
 
 #[cfg(test)]
+#[path = "tests/ops_spawn.rs"]
+mod ops_spawn;
+
+#[cfg(test)]
 #[path = "tests/ops_phases.rs"]
 mod ops_phases;
 
@@ -7014,3 +7236,4 @@ mod ops_settings;
 #[cfg(test)]
 #[path = "tests/ops_other.rs"]
 mod ops_other;
+

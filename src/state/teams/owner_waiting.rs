@@ -202,6 +202,22 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
         found["seen"] = json!(format!("{{\"team\":\"{}\",\"by\":\"human\"}} | hgs team seen-lead-changes --json", team.id));
         out.push(found);
     }
+    // Task #229: the lead's critical follow-ups, one item each, blocking nothing
+    // for the owner but naming the task, its phase and its origin; the desktop's
+    // notification for a Waiting item comes from here.
+    for task in team.tasks.iter().filter(|task| task.severity == "crit" && !task.status.finished()) {
+        let origin = task.origin.map(|origin| format!(" (from #{origin})")).unwrap_or_default();
+        let title = format!("The lead added critical task #{} to phase {}{origin}: {}", task.id, task.phase, task.title);
+        let at = task.added_late.as_ref().map_or(team.updated, |late| late.at);
+        let mut found = item(team, "crit_added", &task.id.to_string(), title, at, "open_task");
+        found["task"] = json!(task.id);
+        found["phase"] = json!(task.phase);
+        found["severity"] = json!("crit");
+        if let Some(origin) = task.origin {
+            found["origin"] = json!(origin);
+        }
+        out.push(found);
+    }
     // F8: the lead's open proposals wait for the owner's Accept or Reject.
     for proposal in team.proposals.iter().filter(|proposal| proposal["state"] == "open") {
         let key = proposal["id"].as_str().unwrap_or_default();

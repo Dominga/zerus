@@ -1995,6 +1995,15 @@ pub(crate) struct Task {
     /// carries the link. Absent on tasks without one and on older records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<u32>,
+    /// Task #229 (owner, 2026-11-07): what a spawned follow-up is. "crit"
+    /// blocks using the phase's result: it joins its origin's running phase,
+    /// depends on the origin, and holds the phase's acceptance, its close and
+    /// the release candidate. "minor" is a shortcoming or missing
+    /// functionality that blocks nothing: it joins the next phase that has not
+    /// started, or a Minor phase. Empty on every task not spawned so, and on
+    /// older records.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub severity: String,
     #[serde(default)]
     pub assignee: String,
     /// The lead or you chose this member: Zerus does not give the task to
@@ -2356,6 +2365,9 @@ pub(crate) struct LeadChange {
     /// The phases it changed as they were before it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub phases_before: Vec<Phase>,
+    /// Task #229: the phases it opened (a Minor phase), removed on a revert.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phases_added: Vec<u32>,
     /// The owner looked at it in the digest (it leaves Waiting).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub seen: bool,
@@ -2440,6 +2452,30 @@ impl Task {
     /// A check task is decided by the exit code of its command (C5).
     pub(crate) fn is_check(&self) -> bool {
         self.kind == TaskKind::Check
+    }
+}
+
+/// Task #229: what a phase is. A plan phase belongs to the goal; a Minor phase
+/// holds the Minor follow-ups the lead spawned, may run in free mode and may end
+/// with tail tasks that depend on all its minors.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PhaseKind {
+    #[default]
+    Plan,
+    Minor,
+}
+
+impl PhaseKind {
+    pub(crate) fn is_plan(&self) -> bool {
+        *self == Self::Plan
+    }
+
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Plan => "plan",
+            Self::Minor => "minor",
+        }
     }
 }
 
@@ -2572,6 +2608,10 @@ pub(crate) struct LorePending {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Phase {
     pub n: u32,
+    /// Task #229: a plan phase (the default) or a Minor phase the lead opened
+    /// for a set of Minor follow-ups; a Minor phase may run in free mode.
+    #[serde(default, skip_serializing_if = "PhaseKind::is_plan")]
+    pub kind: PhaseKind,
     /// The display and approval order (F10): drafts may be moved before each
     /// other. 0 on a team stored before the field means n order.
     #[serde(default)]

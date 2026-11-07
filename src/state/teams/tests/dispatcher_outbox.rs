@@ -401,9 +401,42 @@ fn the_runner_takes_only_the_workers_claim() {
     assert!(error.contains("not from an agent session"), "{error}");
 }
 
+/// Task #229: a Crit in the team holds the release: a queued release-candidate
+/// run is refused, naming the crit, until it is decided.
 #[test]
-fn a_queued_run_of_an_unknown_template_is_refused() {
-    // U21: the same argument validation guards the worker's queue.
+fn the_release_candidate_is_refused_while_a_crit_is_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+    let mut t = team();
+    t.status = TeamStatus::Running;
+    let mut crit = t.tasks.iter().find(|t| t.assignee == "dev").unwrap().clone();
+    crit.id = 9;
+    crit.title = "Fix the crash".into();
+    crit.severity = "crit".into();
+    crit.origin = Some(2);
+    crit.status = TaskStatus::Pending;
+    t.tasks.push(crit);
+    let task = t.tasks.iter_mut().find(|t| t.assignee == "dev").unwrap();
+    task.attempts.push(Attempt { n: 1, id: "A1".into(), member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+    task.status = TaskStatus::InProgress;
+    store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
+    let folder = dir.path().join("work");
+    let request = json!({"op":"run","request_id":"99999999-9999-4999-8999-999999999999",
+        "team":t.id,"member":"dev","attempt":"A1","template":"release-candidate","args":{"commit":"abc"},
+        "input":{"request_id":"99999999-9999-4999-8999-999999999999","team":t.id,"attempt":"A1","template":"release-candidate","args":{"commit":"abc"}}});
+    super::super::outbox::push(&folder, &request).unwrap();
+    let mut member = session("codex/x/dev", "r1", true);
+    member.cwd = folder.to_string_lossy().into_owned();
+    let current = store.load(&t.id).unwrap().unwrap();
+    take_outbox(&mut store, &current, &[member]).unwrap();
+    let result = super::super::outbox::result(&folder, "99999999-9999-4999-8999-999999999999").unwrap();
+    assert_eq!(result["status"], "refused", "{result}");
+    let error = result["error"].as_str().unwrap_or_default();
+    assert!(error.contains("critical task") && error.contains("#9 in phase 1") && error.contains("release candidate"), "{error}");
+}
+
+#[test]
+fn a_queued_run_of_an_unknown_template_is_refused() {    // U21: the same argument validation guards the worker's queue.
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
     let mut t = team();

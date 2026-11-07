@@ -5,8 +5,8 @@ import { agentKind, computerOffline } from "../../store/catalog";
 import { coordinatorActivity, activity } from "../../store/session";
 import { memberRow, showCatalog, showTeam, teams } from "../../store/teams";
 import { SHARE, SIDE, dragShare, dragSide, teamLayout, type TeamLayout } from "../../store/teamLayout";
-import { selected, setDetailTab, setSelectedKey } from "../../store/ui";
-import { teamTests, teamTimeline, teamsProfile } from "../../bridge";
+import { selected, setDetailTab, setSelectedKey, toast } from "../../store/ui";
+import { teamAction, teamTests, teamTimeline, teamsProfile } from "../../bridge";
 import { PlanView } from "./PlanView";
 import { TeamCatalogEditor } from "./TeamCatalogEditor";
 import { TeamSettingsDialog } from "./TeamSettingsDialog";
@@ -23,7 +23,13 @@ import { TeamReports } from "./TeamReports";
 import { WaitingBanner } from "./Waiting";
 import { Blockers, PhaseModeControl, TaskActions, TeamBarActions, TeamBarChips, TeamModeControl, TeamQuestions } from "./TeamActions";
 import { composer } from "../../store/composer";
+<<<<<<< HEAD
 import type { ComputerId, TeamMemberView, TeamPulseView, TeamView } from "../../types";
+||||||| 425388389
+import type { ComputerId, TeamMemberView, TeamView } from "../../types";
+=======
+import type { ComputerId, TeamCall, TeamMemberView, TeamView } from "../../types";
+>>>>>>> 0706a4dc4
 import type { Session } from "../sessions/types";
 
 // The Team tab (Qt's TeamWorkspace, design D3, HANDOFF §14): the team bar and
@@ -67,6 +73,23 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
   const [tests, setTests] = createSignal<TeamTestsView | null>(null);
   const graph = () => teams.graph(props.computer, props.team.id);
   const profile = () => teams.profile(props.computer, props.team.id);
+  // The plan's "Approve" on a draft phase (the owner, 2026-11-07: the button
+  // was never wired, so a phase could not be approved from the Teams tab).
+  // The same call Waiting for you sends; a confirmation the core asks for is
+  // shown and sent again only on the owner's yes.
+  const approvePhase = async (n: number) => {
+    const call = { computer: props.computer, team: props.team.id, team_name: props.team.name, action: { kind: "approve", phase: n } as TeamCall["action"] };
+    try {
+      let outcome = await teamAction(call);
+      if (outcome.outcome === "confirm") {
+        if (!window.confirm(outcome.confirmation.text)) return;
+        outcome = await teamAction({ ...call, confirmed: true });
+      }
+      if (outcome.outcome === "failed" || outcome.outcome === "uncertain") toast(tr("Approve phase"), outcome.detail, "error", true);
+    } catch (cause) {
+      toast(tr("Approve phase"), String(cause), "error", true);
+    }
+  };
   let body!: HTMLDivElement;
   createEffect(() => {
     const hide = showTeam(props.computer, props.team.id);
@@ -125,6 +148,7 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
                   return task ? <TaskActions computer={props.computer} team={props.team} task={task} /> : <></>;
                 }}
                 phaseActions={(n) => <PhaseModeControl computer={props.computer} team={props.team} phase={n} />}
+                onApprovePhase={(n) => void approvePhase(n)}
               />
             )}
           </Show>

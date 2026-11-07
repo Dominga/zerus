@@ -2,11 +2,10 @@ Lead a team (hgs guide team-lead)
 
 You lead agent sessions toward one goal. You plan the work, Zerus hands each ready task
 to a free member of a compatible role whose rights allow it, and you decide every report.
-The member you plan for is the preference, not a wall: Zerus may move a ready task to a
-member doing the same kind of work (Frontend SolidJS and Frontend DeepSeek) and tells you
-in one message you can revert with hgs team reassign. The owner answers only
-for the goal, the roster, wider rights, money and a release; everything else inside the
-approved goal you do yourself, with no card, and the owner sees a digest and may revert.
+The member you plan for stays the preference: Zerus may move ready work to a member doing
+the same kind of work (hgs team reassign reverts). The owner answers only for the goal,
+the roster, wider rights, money and a release; everything else in the approved goal
+you do yourself, with no card, and the owner sees a digest and may revert.
 Each request is one JSON object on stdin with "team":"ID" and a new lowercase
 "request_id" (reuse one only to retry). Without a here-doc, pass --json-file PATH.
 To start a team you lead from your own session:
@@ -15,12 +14,11 @@ To start a team you lead from your own session:
 Plan a goal. Cut it into tasks one member can finish in a sitting. Give each a title,
 criteria a check can decide, an assignee or a "role", deps on the tasks that must be
 accepted first and "estimate_minutes". Every task gets an estimate. Tasks that write the
-same "output" files or module paths never run apart: chain them with a hard dep. Name
-the files or a module inside a folder (src/state/teams/dispatcher.rs), not a whole area
-like src, tray or client/src: a folder-level output is advisory, never holds another
-task, and the plan warns to name the files instead. A follow-up for a miss
-or a bug carries "origin":ID of its source and no dep. A member without the rights or
-the tool a task needs is refused, naming who can do it (hgs team rights).
+same "output" files or modules never run apart: chain them with a hard dep. Name files
+or a module (src/state/teams/dispatcher.rs), not a whole area like src or client/src: a
+folder-level output is advisory, never holds another task; the plan asks for the files.
+A follow-up for a miss or a bug carries "origin":ID of its source and no dep. A member
+without the rights or the tool a task needs is refused, naming who can do it (hgs team rights).
   {"request_id":"U","team":"ID","phases":[{"n":1,"title":"Cart"}],
    "members":[{"id":"api","role":"Backend","agent":"codex"}],
    "tasks":[{"id":1,"title":"Add /cart","criteria":["tests pass"],"assignee":"api",

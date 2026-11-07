@@ -23,10 +23,12 @@ pub(crate) fn with_session_project_binding<T>(
             indexed_name == name,
             "Session ID no longer names the requested session; refresh and retry"
         );
-        let by_id = kind == session_index::Kind::IdRecord;
+        let by_id = matches!(kind, session_index::Kind::IdRecord | session_index::Kind::DeepSeekId | session_index::Kind::OpenCodeId);
         session_id::select_guarded_route(name, id, run, conversation, by_id);
         Some(match kind {
             session_index::Kind::IdRecord => storage::id_record_path(id).expect("canonical ID"),
+            session_index::Kind::DeepSeekId => provider_binding::Provider::DeepSeek.id_path(id).expect("canonical ID"),
+            session_index::Kind::OpenCodeId => provider_binding::Provider::OpenCode.id_path(id).expect("canonical ID"),
             session_index::Kind::Record => storage::label_record_path(name),
             session_index::Kind::DeepSeek => root()
                 .join("dsh/bindings")
@@ -107,22 +109,7 @@ fn binding_location(name: &str) -> (Option<&'static str>, PathBuf) {
     } else {
         None
     };
-    let path = provider.map_or_else(
-        || record_path(name),
-        |provider| {
-            root()
-                .join(provider)
-                .join("bindings")
-                .join(legacy_record_path(name).file_name().unwrap())
-        },
-    );
-    let path = if session_id::selected()
-        .is_some_and(|selection| selection.name == name && selection.id_layout)
-    {
-        record_path(name)
-    } else {
-        path
-    };
+    let path = provider_binding::Provider::named(name).map_or_else(|| record_path(name), |provider| provider.path(name));
     (provider, path)
 }
 fn binding_metadata(path: &Path, name: &str, provider: Option<&str>) -> anyhow::Result<Value> {
@@ -133,7 +120,8 @@ fn binding_metadata(path: &Path, name: &str, provider: Option<&str>) -> anyhow::
         record.is_object() && string(&record, "name") == name,
         "Stored session identity changed"
     );
-    let by_id = path.parent() == Some(root().join("sessions").as_path());
+    let by_id = path.parent() == Some(root().join("sessions").as_path())
+        || provider_binding::Provider::named(name).is_some_and(|p| path.parent() == Some(p.directory().as_path()));
     let id = path
         .file_stem()
         .and_then(|stem| stem.to_str())

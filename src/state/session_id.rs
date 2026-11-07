@@ -125,7 +125,7 @@ pub(super) fn select_guarded_route(name: &str, id: &str, run: &str, conversation
 
 /// Whether `id` is, right now, the session in the ID layout under `name`.
 fn in_id_layout_under(name: &str, id: &str) -> bool {
-    canonical(id) && storage::read_id(id).is_ok_and(|record| string(&record, "name") == name)
+    canonical(id) && labels::read_id_for_label(name, id).is_ok_and(|record| string(&record, "name") == name)
 }
 
 /// Records a session reference's selection for the rest of this command: its
@@ -230,12 +230,12 @@ pub(crate) fn names_of(id: &str) -> Result<Vec<String>> {
         .chain(
             dsh::binding_records()
                 .into_iter()
-                .map(|record| (record, Kind::DeepSeek)),
+                .map(|record| { let kind = provider_binding::Provider::DeepSeek.kind(&record); (record, kind) }),
         )
         .chain(
             opencode::binding_records()
                 .into_iter()
-                .map(|record| (record, Kind::OpenCode)),
+                .map(|record| { let kind = provider_binding::Provider::OpenCode.kind(&record); (record, kind) }),
         )
         .filter(|(record, _)| {
             string(record, "session_id") == id && string(record, "archive_id").is_empty()

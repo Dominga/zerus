@@ -63,6 +63,7 @@ pub(crate) use labels::prove as prove_label_index;
 #[cfg(unix)]
 pub(crate) use storage::is_id_layout_record;
 mod provider_messages;
+mod provider_binding;
 mod processes;
 mod prompt_suggestion;
 mod question_terminal;
@@ -969,7 +970,7 @@ fn select_among(
     let candidates = labels::candidates(name).map_err(|error| (error, report.1.clone()))?;
     let mut records = Vec::new();
     if candidates.first {
-        records.push(storage::read_label(name).map_err(|error| (error, report.1.clone()))?);
+        records.push(labels::read_first(name).map_err(|error| (error, report.1.clone()))?);
     }
     records.extend(candidates.by_id);
     let chosen: Vec<&Value> = records
@@ -1002,7 +1003,7 @@ fn ambiguity_report(name: &str, candidates: &labels::Candidates) -> (String, Val
     };
     let mut listed: Vec<Value> = Vec::new();
     if candidates.first {
-        if let Ok(record) = storage::read_label(name) {
+        if let Ok(record) = labels::read_first(name) {
             listed.push(json!({"session_id":record["session_id"],"run_id":record["run_id"],
                 "conversation_id":record["conversation_id"],"state":state(&record),
                 "cwd":record["cwd"],"created":record["created"]}));

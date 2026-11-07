@@ -23,6 +23,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE = ROOT / ".zerus-release"
+# Task 213: the fork identity the workflow takes from its tag and run number; a
+# local leg has no tag, so it takes the same two values explicitly.
+FORK_RELEASES = "https://github.com/WhiteWh/zerus/releases/"
 
 
 def run(command: list[str], env: dict[str, str] | None = None) -> None:
@@ -34,11 +37,27 @@ def run(command: list[str], env: dict[str, str] | None = None) -> None:
         raise SystemExit(f"release candidate step failed: {' '.join(command)}")
 
 
-def record(commit: str, leg: str, status: str, detail: str = "") -> None:
+def fork_identity(build: str, feed: str) -> tuple[str, str]:
+    """Task 213: both a build number and a feed, or neither (experimental)."""
+    build = build.strip()
+    feed = feed.strip()
+    if bool(build) != bool(feed):
+        raise SystemExit("A fork build has both a build number and a feed, or neither (experimental).")
+    if build and (not build.isdigit() or int(build) <= 0):
+        raise SystemExit(f"The fork build is a positive number or empty (got {build!r}).")
+    if feed and not feed.startswith(FORK_RELEASES):
+        raise SystemExit(f"The fork feed is a release asset of WhiteWh/zerus (got {feed!r}).")
+    return build, feed
+
+
+def record(commit: str, leg: str, status: str, detail: str = "", extra: dict | None = None) -> None:
     EVIDENCE.mkdir(exist_ok=True)
     path = EVIDENCE / f"{commit}.json"
     data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"commit": commit}
-    data[leg] = {"status": status, "detail": detail, "at": int(time.time())}
+    entry = {"status": status, "detail": detail, "at": int(time.time())}
+    if extra:
+        entry.update(extra)
+    data[leg] = entry
     path.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
 
 
@@ -49,7 +68,7 @@ def bash() -> str:
             return str(candidate)
     raise SystemExit("bash not found: install Git for Windows or put bash on PATH")
 
-def local_steps(commit: str) -> None:
+def local_steps(commit: str, fork_build: str, fork_feed: str) -> None:
     run([sys.executable, "scripts/check-machine-dependent-tests.py"])
     run(["cargo", "build", "--locked", "--release", "--bin", "hgs"])
     # The same order as fork-windows.yml after "Rust tests and release build".
@@ -61,7 +80,10 @@ def local_steps(commit: str) -> None:
         run(["cmake", "-S", "tray", "-B", ".ci-build/gui", "-DCMAKE_BUILD_TYPE=Release",
              "-DBUILD_TESTING=ON", f"-DCMAKE_PREFIX_PATH={qt_root}"])
         run(["cmake", "--build", ".ci-build/gui", "--config", "Release", "--parallel", "2"])
-        run(["ctest", "--test-dir", ".ci-build/gui", "-C", "Release", "--parallel", "4", "--output-on-failure"],
+        # Task 213: four Qt suites (sessionswindow_opencode, teamsui_workspace,
+        # sessionswindow_list3, machinespage) fail under --parallel 4 and pass
+        # alone on this worker; two workers keep their timing stable.
+        run(["ctest", "--test-dir", ".ci-build/gui", "-C", "Release", "--parallel", "2", "--output-on-failure"],
             {"ZERUS_QT_RETRY": "2", "ZERUS_TEST_HGS": str(ROOT / "target/release/hgs.exe"),
              "QT_QPA_PLATFORM": "offscreen", "QT_QUICK_BACKEND": "software",
              "ZERUS_GUI_THREAD_CHECKS": "fatal", "ZERUS_SETTINGS_SYNC": "1",
@@ -72,8 +94,11 @@ def local_steps(commit: str) -> None:
     run(["cargo", "test", "--locked", "--manifest-path", "client/core/Cargo.toml", "--lib", "fork_update"])
     run(["cargo", "test", "--locked", "--manifest-path", "client/core/Cargo.toml", "--test", "fork_handoff"])
     # Tauri build and the portable zip are run through their scripts so this
-    # file has no second copy of the flags.
-    run([sys.executable, "scripts/release-candidate-local.py", "--commit", commit])
+    # file has no second copy of the flags. Task 213: the fork identity goes to
+    # both, so hgs-tray embeds what build-info.json names and the portable
+    # self-test compares them.
+    run([sys.executable, "scripts/release-candidate-local.py", "--commit", commit,
+         "--fork-build", fork_build, "--fork-feed", fork_feed])
 
 
 def push_exp_tag(commit: str, tag: str) -> None:
@@ -163,14 +188,24 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--commit", default="HEAD")
     parser.add_argument("--exp-tag", default="")
+    # Task 213: the local leg takes the fork identity the workflow gets from its
+    # tag and run number; both values together, or neither (experimental).
+    parser.add_argument("--fork-build", default=os.environ.get("ZERUS_FORK_BUILD", ""),
+                        help="the fork build number the desktop embeds and build-info.json names "
+                             "[default: $ZERUS_FORK_BUILD; empty for an experimental build]")
+    parser.add_argument("--fork-feed", default=os.environ.get("ZERUS_FORK_FEED") or os.environ.get("ZERUS_FORK_FEED_URL", ""),
+                        help="the fork update feed [default: $ZERUS_FORK_FEED, else $ZERUS_FORK_FEED_URL; empty for an experimental build]")
     args = parser.parse_args()
     commit = subprocess.run(["git", "rev-parse", args.commit], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
+    fork_build, fork_feed = fork_identity(args.fork_build, args.fork_feed)
+    print(f"fork identity: build {fork_build or 'none (experimental)'}, feed {fork_feed or 'none (experimental)'}", flush=True)
+    extra = {"fork": {"build": int(fork_build) if fork_build else None, "feed": fork_feed}}
     try:
-        local_steps(commit)
+        local_steps(commit, fork_build, fork_feed)
     except BaseException as error:
-        record(commit, "local", "failed", str(error)[:1000])
+        record(commit, "local", "failed", str(error)[:1000], extra)
         raise
-    record(commit, "local", "green")
+    record(commit, "local", "green", "", extra)
     if args.exp_tag:
         try:
             push_exp_tag(commit, args.exp_tag)

@@ -626,7 +626,7 @@ fn owner_operation_cards_run_once_on_allow_and_never_on_reject() {
         assert_eq!(team.settings.max_members, before);
         assert_eq!(team.proposals.iter().find(|p| p["id"] == id.as_str()).unwrap()["state"], "rejected");
         // A card Allow could not apply is refused when the lead proposes it.
-        let error = propose(&mut store, json!({"kind":"relaunch","member":"dev","reason":"x"})).unwrap_err().to_string();
+        let error = propose(&mut store, json!({"kind":"relaunch","member":"nobody","reason":"x"})).unwrap_err().to_string();
         assert!(error.contains("Allow could not apply"), "{error}");
         let error = propose(&mut store, json!({"kind":"settings","reason":"x"})).unwrap_err().to_string();
         assert!(error.contains("settings proposal names"), "{error}");

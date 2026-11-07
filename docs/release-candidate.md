@@ -36,6 +36,29 @@ runner leg pushes a tag and stays the owner's step by hand:
 hgs team run --template release-candidate --args '{"commit":"<sha>"}'
 ```
 
+The local leg takes the fork identity too (task 213). The runner gets its fork
+build number (the CI run number) and feed URL from the tag that starts
+`fork-windows.yml`; a local leg has no tag, so pass both explicitly:
+
+```
+hgs team run --template release-candidate --args '{"commit":"<sha>","fork_build":"<next CI sequence>","fork_feed":"https://github.com/WhiteWh/zerus/releases/latest/download/zerus-fork-feed.json"}'
+```
+
+`fork_build` is the number the build publishes (the next CI sequence, the number
+the same experiment's workflow would carry); `fork_feed` is the fork's update
+feed. Both are embedded by the Tauri build (`ZERUS_FORK_BUILD` and
+`ZERUS_FORK_FEED_URL`), named by the packaged `build-info.json`, compared by
+`check-windows-portable.py --run --selftest`, and recorded under `fork` in
+`.zerus-release/<commit>.json`. Give both or neither: an experimental leg with
+neither builds without a fork identity, and the self-test then compares "no
+build, no feed". The scripts refuse one without the other, a build that is not a
+positive number and a feed outside `https://github.com/WhiteWh/zerus/releases/`.
+
+On the Windows worker the local leg configures and builds the Qt tests with the
+Visual Studio generator and runs `ctest --parallel 2`: four suites
+(`sessionswindow_opencode`, `teamsui_workspace`, `sessionswindow_list3`,
+`machinespage`) failed under four workers and pass alone.
+
 ## Publishing
 
 `scripts/publish_whitewh_main.py --commit <sha>` refuses unless

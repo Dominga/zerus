@@ -173,10 +173,16 @@ pub(crate) const BUILTIN: &[Template] = &[
     // runner leg stays the owner's step by hand (docs/release-candidate.md).
     Template {
         id: "release-candidate",
-        summary: "the fork release candidate's local leg on a Windows worker: Qt offscreen suites, fork handoff/update, Tauri build, portable zip self-test, recorded for the commit",
+        summary: "the fork release candidate's local leg on a Windows worker: Qt offscreen suites, fork handoff/update, the Tauri build and portable zip self-test with the fork build and feed, recorded for the commit",
         program: "python",
-        args: &["scripts/release-candidate.py", "--commit={commit}"],
-        params: &[optional("commit", Kind::Identifier)],
+        args: &["scripts/release-candidate.py", "--commit={commit}", "--fork-build={fork_build}", "--fork-feed={fork_feed}"],
+        params: &[
+            optional("commit", Kind::Identifier),
+            // Task 213: the local leg has no tag, so the fork identity the
+            // workflow takes from it is passed explicitly; both or neither.
+            optional("fork_build", Kind::Identifier),
+            optional("fork_feed", Kind::Text),
+        ],
         timeout_secs: 10800,
     },
     // Owner, 2026-10-28: a stale generated build folder (an AAPT intermediate)
@@ -2564,6 +2570,28 @@ mod tests {
         assert_eq!(plan("qt-build", &json!({"targets":["hgs-tray"]}), dir.path()).unwrap().argv, ["--build", ".ci-build/gui", "--target", "hgs-tray"]);
         // An absent filter adds no argument at all.
         assert_eq!(plan("cargo-build", &json!({}), dir.path()).unwrap().argv, ["build", "--locked"]);
+    }
+
+    /// Task 213: the release candidate takes the fork identity as two explicit
+    /// inputs (the workflow takes them from its tag and run number), so a local
+    /// leg embeds and packages the same build and feed.
+    #[test]
+    fn the_release_candidate_takes_the_fork_identity() {
+        let dir = temp();
+        let feed = "https://github.com/WhiteWh/zerus/releases/latest/download/zerus-fork-feed.json";
+        let full = plan("release-candidate", &json!({"commit":"abc1234","fork_build":"41","fork_feed":feed}), dir.path()).unwrap();
+        assert_eq!(
+            full.argv,
+            ["scripts/release-candidate.py", "--commit=abc1234", "--fork-build=41", "--fork-feed=https://github.com/WhiteWh/zerus/releases/latest/download/zerus-fork-feed.json"]
+        );
+        // Both are optional: an experimental leg (neither) passes no flag, and
+        // one alone is the script's own refusal (both or neither).
+        assert_eq!(plan("release-candidate", &json!({}), dir.path()).unwrap().argv, ["scripts/release-candidate.py"]);
+        assert_eq!(
+            plan("release-candidate", &json!({"fork_build":"41"}), dir.path()).unwrap().argv,
+            ["scripts/release-candidate.py", "--fork-build=41"]
+        );
+        assert!(plan("release-candidate", &json!({"fork_build":"41 42"}), dir.path()).is_err(), "a build number is one word");
     }
 
     #[test]

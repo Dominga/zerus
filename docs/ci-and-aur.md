@@ -607,16 +607,17 @@ with a fixed timeout and checks the registration again. It refuses owner and
 non-Windows environments and never removes the shared runtime. See Microsoft's
 [WebView2 distribution guidance](https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution).
 
-`scripts/package-windows.py` copies the exact tested `hgs.exe`, Tauri
+`scripts/package-windows.py` copies the exact tested `hgs.exe`, `lore.exe`, Tauri
 `hgs-tray.exe` and `zerus-mobile-connector.exe` into
 `zerus-windows-x86_64.zip`, preserving the top-level
 `zerus-windows-x86_64/hgs-tray.exe` path winget uses. It adds the app-local MSVC
-runtime from Visual Studio's default redistributable directory and the pinned
-ConPTY pair next to `hgs.exe`. No Qt runtime or plugins are deployed.
+runtime from Visual Studio's default redistributable directory, the pinned
+ConPTY pair next to `hgs.exe`, and `lore.exe` beside it for team and project
+memory. No Qt runtime or plugins are deployed.
 
 The zip carries the project, Codex and ConPTY notices, the host-target Rust
-notices for the CLI/connector and Tauri desktop (including its selected video
-feature), and the exact installed production frontend packages' license texts.
+notices for the CLI, lore, connector and Tauri desktop (including its selected
+video feature), and the exact installed production frontend packages' license texts.
 Frontend collection uses the shared `client/scripts/collect-notices.py` and npm
 lockfile, excludes development tools except Vite's emitted preload runtime, and
 refuses missing notices or mismatched installed versions. `build-info.json`

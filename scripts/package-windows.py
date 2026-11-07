@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Bundle tested hgs, the Tauri desktop and connector into the Windows zip.
+"""Bundle tested hgs, lore, the Tauri desktop and connector into the Windows zip.
 
 The app-local MSVC runtime and pinned ConPTY pair accompany the unchanged
-binaries. WebView2 uses the installed Evergreen runtime; Qt is never deployed.
+binaries. lore.exe sits beside hgs.exe, which finds it there for team and
+project memory. WebView2 uses the installed Evergreen runtime; Qt is never
+deployed.
 """
 import argparse
 import datetime
@@ -102,6 +104,10 @@ def main():
     parser.add_argument("--gui", type=Path, required=True, help="tested hgs-tray.exe")
     # WhiteWh fork: a relay for this computer alone (docs/fork-updates.md).
     parser.add_argument("--mobile-relay", type=Path, help="tested zerus-relay.exe")
+    # Task 260: team and project memory run crates/lore's binary, which hgs
+    # finds beside itself, so every Windows package ships it beside hgs.exe.
+    parser.add_argument("--lore", type=Path, required=True,
+                        help="tested lore.exe (crates/lore), shipped beside hgs.exe for team and project memory")
     parser.add_argument("--output", type=Path, required=True, help="zip to write")
     parser.add_argument("--crt-dir", type=Path, help="Microsoft.VC14*.CRT folder [default: found with vswhere]")
     parser.add_argument("--rust-licenses", type=Path,
@@ -154,6 +160,8 @@ def main():
         copy(args.cli, stage / "hgs.exe")
         copy(args.gui, stage / "hgs-tray.exe")
         copy(args.connector, stage / "zerus-mobile-connector.exe")
+        copy(args.lore, stage / "lore.exe")
+        manifest["lore_bundled"] = True
         if args.mobile_relay:
             copy(args.mobile_relay, stage / "zerus-relay.exe")
         for dll in sorted(crt.glob("*.dll")):
@@ -178,9 +186,10 @@ def main():
             shutil.copytree(args.rust_licenses, licenses / "rust")
         else:
             relay = ["--manifest-path", str(ROOT / "services/mobile/relay/Cargo.toml")] if args.mobile_relay else []
+            lore = ["--manifest-path", str(ROOT / "crates/lore/Cargo.toml")]
             subprocess.run([sys.executable, str(ROOT / "scripts/collect-licenses.py"), str(licenses / "rust"),
                             "--manifest-path", str(ROOT / "Cargo.toml"),
-                            "--manifest-path", str(ROOT / "services/mobile/connector/Cargo.toml"), *relay],
+                            "--manifest-path", str(ROOT / "services/mobile/connector/Cargo.toml"), *relay, *lore],
                            cwd=ROOT, check=True)
             subprocess.run([sys.executable, str(ROOT / "scripts/collect-licenses.py"), str(licenses / "rust/desktop"),
                             "--manifest-path", str(ROOT / "client/src-tauri/Cargo.toml"),

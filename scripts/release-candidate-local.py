@@ -48,6 +48,9 @@ def main() -> int:
     run(["cargo", "build", "--locked", "--release", "--bin", "hgs"], dry=args.dry_run)
     run(["cargo", "build", "--locked", "--release", "--manifest-path", "services/mobile/connector/Cargo.toml"], dry=args.dry_run)
     run(["cargo", "build", "--locked", "--release", "--manifest-path", "services/mobile/relay/Cargo.toml"], dry=args.dry_run)
+    # Task 260: team and project memory run crates/lore's binary beside hgs.exe.
+    run(["cargo", "build", "--locked", "--release", "--manifest-path", "crates/lore/Cargo.toml",
+         "--target-dir", "target"], dry=args.dry_run)
     conpty = Path(os.environ.get("RUNNER_TEMP", ROOT / ".zerus-team/tmp")) / "conpty"
     if not conpty.exists():
         run(["python", "scripts/fetch-conpty.py", "--output", str(conpty)], dry=args.dry_run)
@@ -71,6 +74,7 @@ def main() -> int:
          "--gui", "target/windows-next/release/hgs-tray.exe",
          "--connector", "services/mobile/connector/target/release/zerus-mobile-connector.exe",
          "--mobile-relay", "services/mobile/relay/target/release/zerus-relay.exe",
+         "--lore", "target/release/lore.exe",
          "--qt-fallback", qt_fallback(), "--qt-root", args.qt_root,
          "--frontend-licenses", "artifacts/windows-frontend-licenses",
          "--conpty", str(Path(os.environ.get("RUNNER_TEMP", ROOT / ".zerus-team/tmp")) / "conpty"),

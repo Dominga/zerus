@@ -42,7 +42,7 @@ REQUIRED = (
 # legacy inspection for immutable published Qt archives; new Tauri packages
 # cannot quietly carry an old Qt runtime alongside the replacement executable.
 NEXT_REQUIRED = (
-    "hgs.exe", "hgs-tray.exe", "zerus-mobile-connector.exe", "build-info.json", "README.txt", "LICENSE", "THIRD_PARTY_NOTICES.md",
+    "hgs.exe", "hgs-tray.exe", "zerus-mobile-connector.exe", "lore.exe", "build-info.json", "README.txt", "LICENSE", "THIRD_PARTY_NOTICES.md",
     "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "conpty.dll", "OpenConsole.exe",
     "licenses/conpty-LICENSE.txt", "licenses/conpty-NOTICE.md", "licenses/rust/inventory.json",
     "licenses/rust/desktop/inventory.json", "licenses/frontend/inventory.json",

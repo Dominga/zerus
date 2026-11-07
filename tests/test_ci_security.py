@@ -1003,7 +1003,8 @@ class WorkflowSecurityTests(unittest.TestCase):
                 # Each cache follows the lock of what it builds.
                 lock = "services/mobile/connector/Cargo.lock" if name == "connector" else "Cargo.lock"
                 if name in ("windows-desktop", "windows-host"):
-                    lock = "Cargo.lock', 'client/core/Cargo.lock', 'client/media/Cargo.lock', 'client/src-tauri/Cargo.lock"
+                    lock = ("Cargo.lock', 'crates/lore/Cargo.lock', 'client/core/Cargo.lock', "
+                            "'client/media/Cargo.lock', 'client/src-tauri/Cargo.lock")
                 if name in ('cli-macos-debug', 'cli-macos-core'):
                     profile, other = ('debug', 'complete') if name.endswith('debug') else ('complete', 'debug')
                     prefix = f"{family}{identity}${{{{ hashFiles('{lock}') }}}}"

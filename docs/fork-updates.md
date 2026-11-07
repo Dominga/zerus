@@ -46,10 +46,12 @@ release drops it: remove `--qt-fallback` and the Qt steps from
 `fork-windows.yml`.
 
 A local dry run uses the workflow's own commands from a clean checkout (the
-Tauri `--build-info` check refuses a dirty source): the release builds, `npm run
+Tauri `--build-info` check refuses a dirty source): the release builds
+(including `crates/lore`'s `lore.exe` for team and project memory), `npm run
 tauri -- build ...` with `ZERUS_FORK_BUILD` and `ZERUS_FORK_FEED_URL` set,
-`scripts/package-windows.py --fork ... --qt-fallback .ci-build/gui/hgs-tray.exe`
-and `scripts/check-windows-portable.py <zip> --run --selftest`. Never push
+`scripts/package-windows.py --fork ... --lore crates/lore/target/release/lore.exe
+--qt-fallback .ci-build/gui/hgs-tray.exe`, and
+`scripts/check-windows-portable.py <zip> --run --selftest`. Never push
 `whitewh/main` for it: a push publishes.
 
 A failing step publishes nothing. The run number is embedded in `hgs-tray.exe` as

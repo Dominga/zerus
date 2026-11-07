@@ -65,7 +65,7 @@ jobs:
             target
             services/mobile/connector/target
             services/mobile/relay/target
-          key: fork-windows-cli-${{ steps.rust.outputs.rustc }}-${{ hashFiles('Cargo.lock', 'services/mobile/connector/Cargo.lock', 'services/mobile/relay/Cargo.lock') }}
+          key: fork-windows-cli-${{ steps.rust.outputs.rustc }}-${{ hashFiles('Cargo.lock', 'crates/lore/Cargo.lock', 'services/mobile/connector/Cargo.lock', 'services/mobile/relay/Cargo.lock') }}
           restore-keys: fork-windows-cli-${{ steps.rust.outputs.rustc }}-
       # The runner gives every step a synchronous pipe as stdin; hgs must not inherit it.
       - name: Rust tests and release build
@@ -77,6 +77,9 @@ jobs:
           cargo test --locked --lib --manifest-path services/mobile/connector/Cargo.toml </dev/null 2>&1 | tee artifacts/test-results/connector.log
           cargo build --release --locked --manifest-path services/mobile/connector/Cargo.toml
           cargo build --release --locked --manifest-path services/mobile/relay/Cargo.toml
+          # Task 260: team and project memory run crates/lore's binary; hgs finds
+          # it beside itself, so the portable zip carries it.
+          cargo build --release --locked --manifest-path crates/lore/Cargo.toml
       - name: Save Rust cache
         if: steps.rust-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -189,6 +192,7 @@ jobs:
           python scripts/package-windows.py --fork --cli target/release/hgs.exe --gui target/windows-next/release/hgs-tray.exe \
             --connector services/mobile/connector/target/release/zerus-mobile-connector.exe \
             --mobile-relay services/mobile/relay/target/release/zerus-relay.exe \
+            --lore crates/lore/target/release/lore.exe \
             --qt-fallback .ci-build/gui/hgs-tray.exe --qt-root "$QT_ROOT_DIR" \
             --frontend-licenses artifacts/windows-frontend-licenses \
             --conpty "$RUNNER_TEMP/conpty" --output artifacts/zerus-windows-x86_64.zip </dev/null 2>&1 | tee artifacts/test-results/package.log

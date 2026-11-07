@@ -4,6 +4,7 @@ GUI for one release as qt/zerus-qt.exe, a fallback started by hand."""
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -61,7 +62,8 @@ class ForkPackageTests(unittest.TestCase):
 
     def fork(self, output, *extra):
         arguments = ["--connector", self.directory / "zerus-mobile-connector.exe", "--cli", self.directory / "hgs.exe",
-                     "--gui", self.directory / "hgs-tray.exe", "--output", output, "--crt-dir", self.crt,
+                     "--gui", self.directory / "hgs-tray.exe", "--lore", self.directory / "lore.exe",
+                     "--output", output, "--crt-dir", self.crt,
                      "--rust-licenses", self.rust, "--frontend-licenses", self.frontend, "--conpty", self.conpty, *extra]
         environment = {key: value for key, value in os.environ.items() if not key.startswith(("QT_", "HGS_", "ZERUS_FORK_"))}
         environment["SOURCE_DATE_EPOCH"] = "1760000000"
@@ -117,10 +119,15 @@ class ForkWorkflowTests(unittest.TestCase):
         package = self.step("name: Portable zip from the tested executables")
         for part in ["package-windows.py --fork", "--gui target/windows-next/release/hgs-tray.exe",
                      "--mobile-relay services/mobile/relay/target/release/zerus-relay.exe",
+                     "--lore crates/lore/target/release/lore.exe",
                      "--qt-fallback .ci-build/gui/hgs-tray.exe", '--qt-root "$QT_ROOT_DIR"',
                      "--frontend-licenses artifacts/windows-frontend-licenses",
                      "check-windows-portable.py artifacts/zerus-windows-x86_64.zip --run --selftest"]:
             self.assertIn(part, package)
+        # Task 260: the zip's lore.exe is built from crates/lore before packaging.
+        rust = self.step("name: Rust tests and release build")
+        self.assertIn("cargo build --release --locked --manifest-path crates/lore/Cargo.toml", rust)
+        self.assertLess(self.index("name: Rust tests and release build"), self.index("name: Portable zip from the tested executables"))
         self.assertNotIn("package-windows-qt.py", self.text)
         self.assertIn("ZERUS_FORK_BUILD: ${{ !startsWith(github.ref, 'refs/tags/whitewh-exp-') && github.run_number || '' }}", self.text)
         self.assertIn("ZERUS_FORK_FEED_URL:", self.text)
@@ -132,6 +139,18 @@ class ForkWorkflowTests(unittest.TestCase):
                       "name: Build the Tauri Windows desktop with the fork channel"]:
             self.assertLess(self.index(words), zip_step, words)
         self.assertLess(zip_step, self.index("name: Update feed"))
+
+
+class ReleaseCandidateLocalTests(unittest.TestCase):
+    def test_the_local_leg_builds_lore_and_packages_it(self):
+        # Task 260: the release-candidate local leg is the same package step as
+        # the fork workflow, so it builds crates/lore's binary and ships it.
+        result = subprocess.run([sys.executable, str(ROOT / "scripts/release-candidate-local.py"), "--dry-run"],
+                                capture_output=True, text=True, cwd=ROOT)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("cargo build --locked --release --manifest-path crates/lore/Cargo.toml --target-dir target",
+                      result.stdout)
+        self.assertIn("--lore target/release/lore.exe", result.stdout)
 
 
 if __name__ == "__main__":

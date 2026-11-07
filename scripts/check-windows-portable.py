@@ -5,10 +5,12 @@ Every platform reads only the zip directory, build-info.json and the ConPTY
 pair, whose SHA-256 must be the pinned one, as the release publishers do. On
 Windows, --run also extracts the bundle into a disposable folder and starts its
 executables with a minimal environment: no Qt, build, user or HGS_* paths, and
-PATH without the bundle. New packages use Tauri plus the separately installed
-WebView2 Evergreen runtime; legacy archives keep their old Qt checks. --selftest then also enables local sessions in that folder's
-temporary profile with `hgs.exe session-host install`, which must stage the
-pinned pair into the host image; no session host starts.
+PATH without the bundle; lore.exe starts there too for team and project memory.
+New packages use Tauri plus the separately installed WebView2 Evergreen runtime;
+legacy archives keep their old Qt checks. --selftest then also enables local
+sessions in that folder's temporary profile with `hgs.exe session-host install`,
+which must stage the pinned pair and lore.exe into the host image and beside the
+staged CLI; no session host starts.
 """
 import argparse
 import json
@@ -125,6 +127,13 @@ def main():
             for program, expected in ((hgs, f"hgs {cli_version}"), (tray, f"Zerus {version}")):
                 reported = run(program, ["--version"], environment, base)
                 require(reported == expected, f"{program.name} --version: {reported!r}, expected {expected!r}.")
+            if manifest.get("desktop") == "tauri":
+                # Task 260: hgs runs crates/lore's binary beside itself for team
+                # and project memory; a bundle whose copy does not start writes
+                # no records.
+                lore_version = run(bundle / "lore.exe", ["--version"], environment, base)
+                require(lore_version.startswith("lore "), f"Bundled lore does not start: {lore_version!r}")
+                print(f"lore.exe ({lore_version}) starts from the extracted bundle.")
             if manifest.get("mobile_connector_bundled"):
                 connector_version = run(bundle / "zerus-mobile-connector.exe", ["--version"], environment, base)
                 require(connector_version.startswith("zerus-mobile-connector "), "Bundled connector does not start.")
@@ -176,8 +185,16 @@ def main():
                 for name, pinned in conpty_pair.PIN["files"].items():
                     require((staged / name).is_file() and sha256(staged / name) == pinned["sha256"],
                             f"The host image lacks the pinned {name}: {staged}")
+                # Task 260: team and project memory run crates/lore's binary,
+                # which hgs finds beside itself; the staged CLI and the host
+                # image carry it and it starts.
+                stable_lore = Path(environment["USERPROFILE"]) / ".local/bin/lore.exe"
+                require((staged / "lore.exe").is_file(), f"The host image lacks lore.exe: {staged}")
+                require(stable_lore.is_file(), f"The staged CLI lacks lore.exe: {stable_lore}")
+                lore_version = run(stable_lore, ["--version"], environment, base)
+                require(lore_version.startswith("lore "), f"Staged lore does not start: {lore_version!r}")
                 print(f"session-host install staged hgs.exe with ConPTY {conpty_pair.PIN['version']} "
-                      f"into host image {image.get('name')}.")
+                      f"and lore.exe beside the CLI and in host image {image.get('name')}.")
     print(f"Windows portable bundle verified for commit {commit}.")
 
 

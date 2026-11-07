@@ -111,6 +111,8 @@ export interface ViewRow {
   /** The session that launched or adopted this one (core `ParentLink`). */
   parent?: ParentLinkOut | null;
   git_worktree?: boolean;
+  /** A supervised child: its requests draw no attention (core `quiet`). */
+  quiet?: boolean;
   terminal_supported?: boolean;
   terminal_reported?: boolean;
   terminal_attach_supported?: boolean;

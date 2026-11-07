@@ -525,7 +525,9 @@ impl Desk {
                 c.rows
                     .values()
                     .filter(|row| {
-                        !row.muted && (row.notify.review_later || (current && needs_attention(row)))
+                        !row.muted
+                            && (row.notify.review_later
+                                || (!row.quiet && current && needs_attention(row)))
                     })
                     .count()
             })

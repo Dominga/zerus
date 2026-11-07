@@ -699,7 +699,30 @@ level again. A child whose parent is not shown above it stays at top level with
 its computer's machine UUID and session ID, or by conversation for a parent an
 older `hgs` listed without one; names never match. A loop never hides a card.
 Cards show a large colored agent tile at the left. Rows stay transparent and
-paint a surface only on hover and selection. See
+paint a surface only on hover and selection.
+
+Supervised children draw no attention for requests their parent can handle.
+A child is supervised when its own computer lists its parent as `live`; rows
+with a parent then also carry `human_request`, true while the child holds a
+request only the person can answer: a tool or permission approval, its own or
+a native subagent's, a folder or Codex hooks trust prompt, or signing in (an
+authentication failure or **Sign in required**). A supervised child is quiet
+only when its host reports `human_request: false` and the row itself shows no
+such approval or sign-in; a host that does not report it keeps every request
+visible. A quiet child behaves like a muted session: no system notification, no rail, tray, menu bar or project header
+count, and gray badges and edge, while its status, Activity, unread reply,
+questions and approvals stay as they are and it remains in the Active and
+Needs attention filters. Nothing is marked read. Review later, the person's
+own mark, still counts. A person-only request notifies as for any session.
+When the parent is paused, stopped, exited, archived, not listed on the
+child's computer (including a parent on another computer) or gone, the child
+is ordinary again: a pending request that waited quietly is announced once,
+while replies seen meanwhile are not replayed. A supervised child shows a bell
+with an arrow before its title instead of the mute bell; the parent's **Team**
+toggle adds **Asking** (quiet requests waiting for it) and **Needs you**
+(person-only requests), which never raise the parent's own attention.
+`client/core/tests/fixtures/supervised-attention.json` lists the cases the
+desktop projects; Android and iOS follow (`zerus-sa9qn.4`, `.5`). See
 `docs/superpowers/specs/2026-11-07-account-labels-child-sessions-design.md`.
 
 ### Rename, Saved and Archive

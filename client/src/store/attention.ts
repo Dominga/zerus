@@ -5,6 +5,16 @@ import type { Session } from "../ui/sessions/types";
 
 /** What the attention rules read from a row. */
 export type AttentionFacts = Pick<Session, "state" | "status" | "unread" | "reviewLater" | "attentionNeeded" | "actionNeeded" | "childAttention">;
+type Quiet = Partial<Pick<Session, "muted" | "quiet" | "reviewLater" | "state">>;
+
+/**
+ * Attention that draws nobody: a muted session, or a supervised child whose
+ * requests are its parent's (zerus-sa9qn.3, the core's `quiet`). Its state,
+ * unread identity and questions are unchanged and it stays in the filters.
+ */
+export const quietAttention = (s: Pick<Session, "muted" | "quiet">) => !!s.muted || !!s.quiet;
+/** A quiet supervised child still counts the person's own Review later mark. */
+const quietCounts = (s: Quiet) => !s.muted && !!s.quiet && !!s.reviewLater && s.state !== "archived";
 
 /**
  * Qt's SessionInfo::needsAttention (HgsClient.h:107-108) with this device's
@@ -49,6 +59,13 @@ export const actionNeeded = (s: Pick<Session, "status" | "actionNeeded">) => s.a
  */
 export const headerAttention = (s: AttentionFacts, online: boolean) =>
   s.state !== "archived" && (!!s.reviewLater || (online && (actionNeeded(s) || !!s.childAttention)));
+
+/** Needs attention as the counters count it: never muted, and a quiet child only for Review later. */
+export const countedAttention = (s: AttentionFacts & Quiet, online: boolean) =>
+  quietAttention(s) ? quietCounts(s) : needsAttention(s, online);
+/** The project header's attention count, with the same quiet rule. */
+export const countedHeaderAttention = (s: AttentionFacts & Quiet, online: boolean) =>
+  quietAttention(s) ? quietCounts(s) : headerAttention(s, online);
 
 /**
  * Qt's SessionPresentation::working (SessionPresentation.h:268-271): native

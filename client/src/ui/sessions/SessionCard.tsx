@@ -2,7 +2,7 @@ import { For, Show } from "solid-js";
 import { tr, trNoop } from "../../i18n";
 import { AGENT_LABEL, Icon } from "../lib/icons";
 import { computerFresh, computerOffline } from "../../store/catalog";
-import { visibleUnreadReply } from "../../store/attention";
+import { quietAttention, visibleUnreadReply } from "../../store/attention";
 import { optionalQuestionCount, optionalQuestionCountText } from "./optional-questions";
 import { now } from "../../store/ui";
 import { settings } from "../../store/settings";
@@ -66,10 +66,12 @@ export type BadgeKind =
 
 export function badgeKind(s: Session): BadgeKind {
   const status = statusOf(s);
-  if (status === "attention") return s.muted ? "muted-attention" : "attention";
+  if (status === "attention") return quietAttention(s) ? "muted-attention" : "attention";
+  // A supervised child's error is its parent's to handle: gray, like its other requests (zerus-rxz9k).
+  if (status === "error" && s.quiet && !s.muted) return "muted-attention";
   if (status === "error" || status === "working" || status === "background") return status;
   if (s.draft && status !== "offline") return "draft";
-  if (visibleUnreadReply(s, computerFresh(s.computer))) return s.muted ? "muted-unread" : "unread";
+  if (visibleUnreadReply(s, computerFresh(s.computer))) return quietAttention(s) ? "muted-unread" : "unread";
   if (status === "scheduled" || status === "waiting" || status === "paused") return status;
   return "neutral";
 }
@@ -77,9 +79,9 @@ export function badgeKind(s: Session): BadgeKind {
 // Edge mark: attention/error > draft > unread; muted rows turn it grey.
 export function emphasis(s: Session): string | undefined {
   const status = statusOf(s);
-  if (s.muted && (status === "attention" || visibleUnreadReply(s, computerFresh(s.computer)))) return "muted";
+  if (quietAttention(s) && !(s.quiet && !s.muted && s.reviewLater) && (status === "attention" || visibleUnreadReply(s, computerFresh(s.computer)))) return "muted";
   if (status === "attention" || s.reviewLater) return "attention";
-  if (status === "error") return "error";
+  if (status === "error") return s.quiet && !s.muted ? "muted" : "error";
   if (s.draft) return "draft";
   if (visibleUnreadReply(s, computerFresh(s.computer))) return "unread";
   return undefined;
@@ -135,6 +137,19 @@ export function AgentBadge(props: { agent: AgentKind; narrow?: boolean; max?: nu
   );
 }
 
+/** A supervised child: its parent handles its requests (spec 3.4). */
+export function SupervisedMark(props: { session: Session }) {
+  const name = () => props.session.parent?.name.split("/").pop() || props.session.parent?.name || "";
+  return (
+    <span class="sc-supervised" role="img" aria-label={tr("Supervised by %1", name())}
+      title={tr("Supervised by %1\nOnly requests that need you notify you.", props.session.parent?.name ?? "")}>
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M3.5 9.5V6.5A3.5 3.5 0 0 1 10.5 6.5V9.5L11.5 10.5H2.5Z" /><path d="M6 12.2A1.2 1.2 0 0 0 8 12.2" /><path d="M7 1V3.4M5.6 2.2L7 3.4L8.4 2.2" />
+      </svg>
+    </span>
+  );
+}
+
 /** The large colored agent mark at the card's left (spec 3.1). */
 export function AgentTile(props: { agent: AgentKind; size?: number }) {
   const size = () => props.size ?? 34;
@@ -156,6 +171,8 @@ export function TeamToggle(props: { team: Team; onToggle?: () => void }) {
         <path d="M4 11A4 3 0 0 1 12 11M0 10.5A3 2.4 0 0 1 4.5 9M16 10.5A3 2.4 0 0 0 11.5 9" />
       </svg>
       <span>{tr("%1 of %2", props.team.working, props.team.total)}</span>
+      <Show when={props.team.asking}><span class="team-asking" title={tr("Child sessions waiting for their parent's answer")}>{tr("Asking: %1", props.team.asking ?? 0)}</span></Show>
+      <Show when={props.team.needsYou}><span class="team-needs" title={tr("Child sessions with a request only you can answer")}>{tr("Needs you: %1", props.team.needsYou ?? 0)}</span></Show>
       <svg class="chev" width="8" height="6" viewBox="0 0 8 6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 2L4 5L7 2" /></svg>
     </button>
   );
@@ -309,7 +326,7 @@ export function folderOf(s: Session) {
 function OptionalQuestionsChip(props: { session: Session }) {
   const optionalCount = () => optionalQuestionCount(props.session, computerFresh(props.session.computer));
   return <Show when={optionalCount()}>
-    <span class="qchip" classList={{ muted: !!props.session.muted }} title={tr(optionalCount() === 1 ? "%1 optional question waiting\nThe agent can continue without an answer. Answer or skip it in Activity.\nClick to open." : "%1 optional questions waiting\nThe agent can continue without an answer. Answer or skip it in Activity.\nClick to open.", optionalCount())}>
+    <span class="qchip" classList={{ muted: quietAttention(props.session) }} title={tr(optionalCount() === 1 ? "%1 optional question waiting\nThe agent can continue without an answer. Answer or skip it in Activity.\nClick to open." : "%1 optional questions waiting\nThe agent can continue without an answer. Answer or skip it in Activity.\nClick to open.", optionalCount())}>
       <Icon name="question" size={16} />{optionalQuestionCountText(optionalCount())}
     </span>
   </Show>;
@@ -333,10 +350,11 @@ export function SessionCard(props: {
       <span class="sc-tile"><AgentTile agent={s().agent} /></span>
       <div class="sc-l1">
         <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
+        <Show when={!s().muted && s().parent?.state === "live"}><SupervisedMark session={s()} /></Show>
         <span class="sc-title ell" style={titleReserve(s().title, 72)} title={s().name}>{s().title}</span>
         <StatusBadge kind={kind()} caption={statusCaption(s())} />
         <Show when={visibleUnreadReply(s(), computerFresh(s().computer)) && (s().status === "working" || s().status === "attention" || s().draft)}>
-          <span class="sc-extra"><StatusBadge kind={s().muted ? "muted-unread" : "unread"} caption="" iconOnly /></span>
+          <span class="sc-extra"><StatusBadge kind={quietAttention(s()) ? "muted-unread" : "unread"} caption="" iconOnly /></span>
         </Show>
         <OptionalQuestionsChip session={s()} />
         <span class="grow" />
@@ -414,6 +432,7 @@ export function CompactCard(props: { session: Session; selected: boolean; onExpa
       <StatusBadge kind={badgeKind(s())} caption={statusCaption(s())} />
       <OptionalQuestionsChip session={s()} />
       <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
+      <Show when={!s().muted && s().parent?.state === "live"}><SupervisedMark session={s()} /></Show>
       <button class="cc-expand" title={tr("Expand session row")} onClick={(e) => { e.stopPropagation(); props.onExpand(); }} onDblClick={(e) => e.stopPropagation()}>
         <Icon name="expand-row" size={16} />
       </button>

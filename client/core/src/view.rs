@@ -116,6 +116,13 @@ pub struct ViewRow {
     /// only; it never authorizes an action.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<ParentLink>,
+    /// A supervised child (zerus-sa9qn.3): its computer lists its parent as
+    /// running there, and it holds no request only the person can answer
+    /// (`human_request`: an approval, folder or hook trust, signing in). Its
+    /// replies, questions, errors and exits are the parent's to handle, so
+    /// they draw no attention, as for a muted session; its state is unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quiet: bool,
     /// The raw `state` (`running`, `paused`, `stopped`, `archived`, ...);
     /// `running` when the row lists none (a live session).
     pub state: String,
@@ -533,6 +540,27 @@ impl<'a> Session<'a> {
             && !self.conversation_id.is_empty()
             && !reply.is_empty()
             && self.read_mark("reply_id") != reply
+    }
+
+    /// A request only the person can answer that this row shows by itself: a
+    /// tool or permission approval of the session or of a native subagent
+    /// (zerus-dn4ia), a failed sign-in or a required one. The host adds folder
+    /// and hook trust, which only its pending questions show.
+    fn person_only_request(&self) -> bool {
+        let approval = |child: &Value| {
+            ["display_state", "state"]
+                .iter()
+                .any(|key| child.get(*key).and_then(Value::as_str) == Some("approval"))
+        };
+        self.phase == "approval"
+            || self.error_kind() == "authentication"
+            || text(self.row, "activity_summary") == "Sign in required"
+            || object(self.row, "subagents").is_some_and(|map| map.values().any(approval))
+            || self
+                .row
+                .get("subagent_previews")
+                .and_then(Value::as_array)
+                .is_some_and(|list| list.iter().any(approval))
     }
 
     fn child_needs_input(&self) -> bool {
@@ -1309,6 +1337,11 @@ pub fn row(value: &Value) -> ViewRow {
         session_id: some(text(value, "session_id"))
             .filter(|id| crate::creation::canonical_uuid(id)),
         parent: ParentLink::from_row(value),
+        // Only an explicit host classification quiets a row; an older or
+        // unknown host keeps the person's attention (zerus-b5oin).
+        quiet: ParentLink::from_row(value).is_some_and(|parent| parent.live())
+            && value.get("human_request") == Some(&Value::Bool(false))
+            && !session.person_only_request(),
         // A live row lists no state; Qt reads it as running (`HgsClient.cpp`).
         state: session.state.to_owned(),
         tracked: session.tracked,

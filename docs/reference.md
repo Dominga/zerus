@@ -1576,6 +1576,12 @@ sessions, even if the original attachment file is gone. Storage is a private
 directory next to the desktop's Qt settings file (`<settings-file>.drafts`),
 outside P2P configuration sync.
 
+Pasting an image in Terminal uses the same draft attachment path and opens
+Activity so you can review it and send your message. It never sends automatically
+or writes image data to the terminal. If the message field is not ready to accept
+attachments, Terminal shows an Open Activity action and asks you to paste again
+when it is ready. Text-only terminal pastes keep their normal behavior.
+
 Use **Reference an existing file** (the link button beside Attach, or its Files
 menu in a narrow column) when the file
 already exists on the agent's computer, including very large files. Locally,

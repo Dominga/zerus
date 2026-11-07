@@ -96,6 +96,9 @@ pub struct ViewRow {
     pub summary: String,
     /// The last hook event, seconds since the Unix epoch.
     pub updated_at: Option<f64>,
+    /// The host's Keep cache warm state (`keep_warm` of the listing), as reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_warm: Option<Value>,
     /// When an archived row was archived (epoch seconds).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<f64>,
@@ -505,8 +508,17 @@ impl<'a> Session<'a> {
             && !(self.conversation_state == "ended" && self.activity != "idle")
     }
 
+    /// A keep-warm ping is running: the agent works, but not on the person's turn.
+    fn keep_warm_turn(&self) -> bool {
+        object(self.row, "keep_warm")
+            .and_then(|warm| warm.get("turn_active"))
+            .and_then(Value::as_bool)
+            == Some(true)
+    }
+
     fn reply_in_progress(&self) -> bool {
-        self.current_activity()
+        !self.keep_warm_turn()
+            && self.current_activity()
             && (self.activity == "busy"
                 || self.background > 0
                 || self.subagents_active > 0
@@ -683,6 +695,9 @@ impl<'a> Session<'a> {
         }
         if !acknowledged && self.current_activity() && self.child_needs_input() {
             return caption("attention", "Needs input");
+        }
+        if self.keep_warm_turn() {
+            return caption("ready", "Warming cache");
         }
         match self.phase {
             "compacting" => return caption("working", "Compacting"),
@@ -1336,6 +1351,7 @@ pub fn row(value: &Value) -> ViewRow {
         effort: some(text(value, "effort")),
         summary: simplified(&session.summary()),
         updated_at: number(value, "last_event_at").filter(|at| *at > 0.0),
+        keep_warm: object(value, "keep_warm").map(|warm| Value::Object(warm.clone())),
         archived_at: number(value, "archived_at"),
         turn_started: session.turn_started(),
         launch_id: some(text(value, "launch_id")),
@@ -1993,6 +2009,27 @@ mod tests {
             status(json!({"tracked": true, "activity": "launching"})),
             s("starting", "Connecting")
         );
+    }
+
+    #[test]
+    fn a_keep_warm_ping_turn_reads_as_ready_not_work() {
+        let warm = json!({"enabled": true, "until": null, "revision": 2, "state": "warming",
+            "next_at": null, "reason": "", "turn_active": true});
+        let ping = row(&json!({"tracked": true, "state": "running", "process_state": "running",
+            "phase": "working", "activity": "busy", "conversation_id": "c", "run_id": "r",
+            "reply_id": "7:1.0", "keep_warm": warm}));
+        assert_eq!((ping.status.as_str(), ping.caption.as_str()), ("ready", "Warming cache"));
+        assert!(ping.unread_candidate, "the previous reply stays the candidate");
+        assert_eq!(ping.keep_warm.as_ref().unwrap()["revision"], 2);
+        assert_eq!(serde_json::to_value(&ping).unwrap()["keep_warm"]["turn_active"], true);
+        // The person's own turn, or a ping that also needs a decision, is not quiet.
+        let mut working = json!({"tracked": true, "phase": "working", "activity": "busy",
+            "keep_warm": {"enabled": true, "turn_active": false}});
+        assert_eq!(row(&working).status, "working");
+        working["keep_warm"]["turn_active"] = json!(true);
+        working["phase"] = json!("approval");
+        assert_eq!(row(&working).status, "attention");
+        assert_eq!(row(&json!({"tracked": true, "activity": "idle"})).keep_warm, None);
     }
 
     #[test]

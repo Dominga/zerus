@@ -8,7 +8,24 @@ $pipe=[Console]::IsInputRedirected;$i.CreateNoWindow=$pipe;$i.RedirectStandardIn
 $p=[Diagnostics.Process]::new();$p.StartInfo=$i;if(-not$p.Start()){throw 'start refused'}
 if($pipe){
 $o=$p.StandardOutput.BaseStream.CopyToAsync([Console]::OpenStandardOutput());$e=$p.StandardError.BaseStream.CopyToAsync([Console]::OpenStandardError())
-$s=[Console]::OpenStandardInput();$b=[byte[]]::new(65536);$n=4;$pos=0;$header=$true;$closed=$false;$w=$null;$clock=[Diagnostics.Stopwatch]::StartNew();$r=$s.ReadAsync($b,0,4)
+# Open the inherited SSH pipe with its actual async mode. ConsoleStream's
+# fallback ReadAsync can stall after its first read on OpenSSH's async handle.
+Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class HgsSshInput {
+[DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int n);
+[DllImport("ntdll.dll")] static extern int NtQueryInformationFile(IntPtr h, [Out] IntPtr[] status, out uint mode, uint size, int info);
+public static FileStream Open() {
+var h=GetStdHandle(-10); uint mode;
+if(NtQueryInformationFile(h,new IntPtr[2],out mode,4,16)!=0) throw new IOException("stdin mode unavailable");
+return new FileStream(new SafeFileHandle(h,false),FileAccess.Read,1,(mode&48)==0);
+}
+}
+'@
+$s=[HgsSshInput]::Open();$b=[byte[]]::new(65536);$n=4;$pos=0;$header=$true;$closed=$false;$w=$null;$clock=[Diagnostics.Stopwatch]::StartNew();$r=$s.ReadAsync($b,0,4)
 # Keep servicing the lease while output waits for a healthy slow consumer.
 while($true){
 $ended=$p.WaitForExit(20);if($ended -and $o.IsCompleted -and $e.IsCompleted){break};if($ended){[Threading.Thread]::Sleep(20)}

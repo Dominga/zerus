@@ -1094,6 +1094,21 @@ fn all_items(team: &Team) -> Vec<Item> {
             });
         }
     }
+    // Task 173: a member working with nothing handed to it, at once.
+    for member in team.members.iter().filter(|_| active) {
+        let Some(flag) = member.unassigned.as_ref() else { continue };
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "unassigned_work",
+            key: format!("unassigned_work:{}:{}", member.id, flag.since as i64),
+            task: None,
+            member: member.id.clone(),
+            since: flag.since,
+            summary: summary(&super::shadow::lead_line(team, member, flag)),
+            command: "{\"request_id\":\"UUID\",\"team\":\"ID\",\"task\":N} | hgs team retry --json (or reassign); hgs team look MEMBER shows what it runs".into(),
+            detail: String::new(),
+        });
+    }
     items.sort_by(|a, b| a.since.total_cmp(&b.since).then_with(|| a.key.cmp(&b.key)));
     items.truncate(ITEM_LIMIT);
     items

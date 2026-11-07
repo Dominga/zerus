@@ -97,3 +97,31 @@ fn a_message_is_stored_with_its_urgency_within_its_bounds() {
         assert!(error.contains("5 unread urgent messages") && error.contains("at most 5"), "{error}");
     });
 }
+
+/// Task 173: the lead's team message naming a task goes only to the member
+/// that holds it, bound to its attempt; anything else is refused with the
+/// hand-out, and a message naming no task goes through unbound.
+#[test]
+fn a_lead_message_naming_a_task_binds_to_its_attempt_or_is_refused() {
+    let (team, dev_attempt, _) = review_team();
+    with_review_team(&team, || {
+        as_lead(|| {
+            let sent = call("message", json!({"to":"dev","text":"On #1: keep the old field name"})).unwrap();
+            assert_eq!(sent["status"], "queued");
+            let error = call("message", json!({"to":"qa","text":"Lead, for 3: write the docs too"})).unwrap_err().to_string();
+            assert!(error.starts_with("Task #3 is not handed to qa"), "{error}");
+            assert!(error.contains("hgs team retry --json"), "{error}");
+            let error = call("message", json!({"to":"team","text":"Everyone help with #1"})).unwrap_err().to_string();
+            assert!(error.contains("Task #1 is not handed to qa"), "a broadcast naming a task is refused: {error}");
+            call("message", json!({"to":"qa","text":"Standup in 5"})).unwrap();
+        });
+        let saved = stored();
+        let attempt = saved.task(1).unwrap().attempts.iter().find(|attempt| attempt.id == dev_attempt).unwrap().clone();
+        assert_eq!(attempt.lead_messages.len(), 1);
+        assert_eq!(attempt.lead_messages[0]["text"], "On #1: keep the old field name");
+        assert_eq!(attempt.lead_messages[0]["via"], "team message");
+        assert!(saved.task(2).unwrap().attempts[0].lead_messages.is_empty());
+        // The owner's own message is never checked.
+        call("message", json!({"by":"human","to":"qa","text":"for 3: I changed my mind"})).unwrap();
+    });
+}

@@ -61,7 +61,7 @@ fn parent_lead_proven(team: &Team, parent: Option<&Team>, record: Option<&Value>
 /// The member whose session runs this CLI, proven by process ancestry. U54: a
 /// renamed session stays the member: the run id and the conversation id match
 /// as well as the stored name, so `hgs rename` never drops a member.
-fn calling_member(team: &Team, record: &Value) -> Option<String> {
+pub(crate) fn calling_member(team: &Team, record: &Value) -> Option<String> {
     let name = record["name"].as_str()?;
     let run = record["run_id"].as_str().unwrap_or_default();
     let conversation = record["conversation_id"].as_str().unwrap_or_default();
@@ -3287,6 +3287,15 @@ fn message_command(input: &Value) -> anyhow::Result<Value> {
         }
     };
     ensure!(!recipients.is_empty(), "Nobody else is in the team");
+    // Task 173: a lead message naming a task goes only to that task's holder
+    // and is bound to its attempt; otherwise it is refused with the hand-out.
+    let mut bindings = Vec::new();
+    if by == team.lead {
+        for recipient in recipients.iter().filter(|recipient| **recipient != team.lead) {
+            let member = team.member(recipient).context("unknown member")?;
+            bindings.extend(super::shadow::check_lead_message(&team, member, &body)?);
+        }
+    }
     let now = super::super::now();
     let mut store = Store::open(true)?;
     let posted = store.mutate_working(&team.id, |tx, team, events| {
@@ -3316,6 +3325,8 @@ fn message_command(input: &Value) -> anyhow::Result<Value> {
             super::working::refresh(tx, team, recipient, now)?;
             posted.push(json!({"id":message.id,"to":recipient}));
         }
+        let kept: String = body.chars().take(500).collect();
+        super::shadow::attach(team, &bindings, &kept, "team message", now, events);
         Ok(posted)
     })?;
     Ok(json!({"status":"queued","team":team.id,"request_id":request,"urgency":urgency,"messages":posted,
@@ -4437,7 +4448,11 @@ fn team_run_in(folder: &std::path::Path, input: &Value, wait: bool, wait_seconds
         .tasks
         .iter()
         .find(|task| task.open_attempt().is_some_and(|attempt| attempt.id == attempt_id && attempt.member == member_id));
-    let Some(task) = attempt else { bail!("attempt {attempt_id} does not run for this member") };
+    let Some(task) = attempt else {
+        // Task 173: no shadow work: the refusal says what is handed, if anything.
+        let error = super::shadow::job_of(&team, &member_id, &attempt_id).err().map(|error| error.to_string());
+        bail!("{}", error.unwrap_or_else(|| format!("attempt {attempt_id} does not run for this member")))
+    };
     // N4: an outcome already there answers at once; the same request never runs twice.
     if let Some(result) = super::outbox::result(folder, &request_id) {
         return Ok(result);

@@ -26,6 +26,7 @@ pub(crate) mod run_results;
 pub(crate) mod profile;
 pub(crate) mod lore_sync;
 pub(crate) mod pulses;
+pub(crate) mod shadow;
 pub(crate) mod rights;
 pub(crate) mod safe_actions;
 pub(crate) mod spans;

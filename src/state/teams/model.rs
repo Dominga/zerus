@@ -565,6 +565,11 @@ pub(crate) struct Member {
     /// The lead was told once about this starvation episode (C7).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub starved_told: bool,
+    /// Task 173: the member's session works with nothing handed to it
+    /// (unassigned work), since when and what it runs; cleared once it has a
+    /// hand-out or stops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unassigned: Option<Unassigned>,
     /// Task 134: the member's unread team messages (the working tier), as
     /// status shows them ("unread: N"); None when it has read everything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1540,6 +1545,13 @@ impl Question {
 
 /// A task kept back from the dispatcher until the lead releases it (A5): a
 /// rejection may return a task to a member who is not ready for it.
+/// Task 173: a member's work outside any hand-out.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Unassigned {
+    pub since: f64,
+    pub what: String,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Hold {
     /// The lead or you.
@@ -1649,6 +1661,10 @@ pub(crate) struct Attempt {
     /// as the report by itself (owner, 2026-11-07).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub last_reply: String,
+    /// Task 173: the lead's messages about this attempt ({at, via, text}),
+    /// newest last, at most 20: a lead message naming the task is bound here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lead_messages: Vec<serde_json::Value>,
     /// The member's turn ended long enough ago without a report.
     #[serde(default)]
     pub no_report: bool,

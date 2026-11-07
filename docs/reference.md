@@ -2323,6 +2323,31 @@ reassignment clears the rework reservation and its wait age. Returning an
 unstarted phase to a draft also clears rework reservations. Member-wait inbox
 items exclude held rework and members available to take it.
 
+Task 173 (owner, 2026-11-07): no shadow work. Every piece of a member's work
+belongs to the attempt (or stage run) handed to it.
+- A lead's message to a member that names a task (`#N`, `task N`, `for N:`
+  for one of the team's tasks) is bound to that task's attempt when the task is
+  handed to that member (the attempt's `lead_messages`, at most 20, with a
+  `lead_message` event); otherwise it is refused, naming the task's state and
+  the hand-out to use (`hgs team retry`, `hgs team reassign`). This holds for
+  `hgs send` from the lead's own session to a member's session and for the
+  lead's `hgs team message` (a broadcast naming a task is refused). A message
+  naming no task goes through; it carries no work. Answers and decisions keep
+  their own commands (`hgs team reply`, `accept`, `reject`, `hold`); the
+  owner's messages and Zerus's own sends are never checked.
+- A team member's `hgs run` needs its open attempt or stage run; it may name
+  it in `"attempt"`, and one naming another attempt is refused. Without one:
+  "No task is handed to you in team NAME: ask the lead". The run's claim
+  records `team`, `task` and `attempt`. A sandboxed member's run is checked by
+  the worker the same way, and `hgs team run`'s refusal says the same. The
+  lead's own runs are not checked.
+- A member session building with nothing handed to it, or working past two
+  minutes in a turn that began after its last attempt ended, is flagged at
+  once: the member's `unassigned` ({since, what}), an `unassigned_work` event
+  and lead inbox item with what it runs, `hgs team look` state
+  `unassigned_work` (never idle) and its next action. The flag clears
+  (`unassigned_work_ended`) when the member is free again or gets a hand-out.
+
 A reassign, a take-over or a cancel of a task whose attempt its member is still
 working on (sent or delivered, not reported) tells that member at once: one
 `[Zerus team · from: Zerus · task: #N · stop]` message names the task and why it

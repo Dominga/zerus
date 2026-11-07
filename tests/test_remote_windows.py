@@ -188,6 +188,36 @@ class WindowsTarget(unittest.TestCase):
                     if child.poll() is None: child.terminate();child.wait(timeout=5)
                     child.stdout.close();child.stderr.close()
 
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'requires kernel exit observation through procfs')
+    def test_cancel_settles_after_ssh_exits_with_inherited_output_still_open(self):
+        ssh = self.root/'ssh'
+        child_script = "import os,pathlib,time; r=pathlib.Path(os.environ['REMOTE_WINDOWS_FIXTURE']); (r/'holder-ready').touch(); deadline=time.monotonic()+12;\nwhile not (r/'holder-stop').exists() and time.monotonic()<deadline:time.sleep(.01)\n(r/'holder-ended').touch()\n"
+        ssh.write_text("#!/usr/bin/env python3\nimport os,pathlib,subprocess\np=subprocess.Popen(['python3','-c',"+repr(child_script)+"],stdin=subprocess.DEVNULL)\npathlib.Path(os.environ['REMOTE_WINDOWS_FIXTURE'],'ssh-ended').write_text(str(os.getpid()))\nos._exit(0)\n")
+        child = subprocess.Popen([str(HGS),'--ssh-bytes-client','peer','__hgs_ssh_bytes_v1__ fixed'],env=self.env,
+                                 stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        try:
+            deadline = time.monotonic()+5
+            while not ((self.root/'ssh-ended').exists() and (self.root/'holder-ready').exists()):
+                self.assertLess(time.monotonic(), deadline, 'fixture did not start')
+                time.sleep(.01)
+            original = int((self.root/'ssh-ended').read_text())
+            while Path('/proc', str(original)).exists():
+                self.assertLess(time.monotonic(), deadline, 'original SSH did not exit/reap')
+                time.sleep(.01)
+            # The original is physically gone, while its holder stays alive.
+            # Cancel this SAME Popen only; the holder has a natural control exit.
+            child.terminate()
+            try: child.wait(timeout=1)
+            except subprocess.TimeoutExpired: self.fail('cancellation did not settle the original helper after SSH exit')
+            self.assertEqual(child.returncode,255)
+        finally:
+            (self.root/'holder-stop').touch()
+            if child.poll() is None: child.kill(); child.wait(timeout=3)
+            child.stdout.close();child.stderr.close()
+            deadline=time.monotonic()+3
+            while not (self.root/'holder-ended').exists() and time.monotonic()<deadline:time.sleep(.01)
+            self.assertTrue((self.root/'holder-ended').exists(), 'fixture holder did not settle naturally')
+
     def test_unknown_probe_is_closed_before_an_operation(self):
         for mode in ('unknown','offline','oversize'):
             with self.subTest(mode=mode):

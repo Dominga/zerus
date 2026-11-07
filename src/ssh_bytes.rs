@@ -143,7 +143,27 @@ pub(crate) fn run(mut args: Vec<String>) -> io::Result<i32> {
                 }
             }
             if exit.is_none() {
-                exit = child.child.try_wait()?;
+                if let Some(status) = child.child.try_wait()? {
+                    // No signal handler may retain a reaped Unix PID while
+                    // a healthy downstream reader keeps output backpressured.
+                    platform::shutdown_child_exited();
+                    exit = Some(status);
+                }
+            }
+            if failed
+                || platform::shutdown_signal() != 0
+                || (exit.is_none()
+                    && input_error_at.is_some_and(|at| at.elapsed() >= Duration::from_millis(100)))
+            {
+                failed = true;
+                if exit.is_none() {
+                    // Only the same original SSH Child; never a retained
+                    // output descriptor's holder or a reaped/reused PID.
+                    let _ = child.child.kill();
+                    exit = Some(child.child.wait()?);
+                    platform::shutdown_child_exited();
+                }
+                break;
             }
             if exit.is_some() {
                 // A live downstream reader may apply backpressure indefinitely.
@@ -152,14 +172,6 @@ pub(crate) fn run(mut args: Vec<String>) -> io::Result<i32> {
                 if completed[1] && completed[2] {
                     break;
                 }
-            } else if failed
-                || platform::shutdown_signal() != 0
-                || input_error_at.is_some_and(|at| at.elapsed() >= Duration::from_millis(100))
-            {
-                failed = true;
-                // Only the same original SSH Child; no process lookup/adoption.
-                let _ = child.child.kill();
-                exit = Some(child.child.wait()?);
             }
             thread::sleep(Duration::from_millis(10));
         }

@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -207,6 +208,35 @@ class ParentLink(unittest.TestCase):
         self.choose(self.lead, self.worker)
         self.assertIn('cycle', self.choose(self.worker, self.lead, success=False))
         self.assertNotIn('parent', self.read(self.worker))
+
+    def test_a_remote_launch_forwards_the_proven_caller_behind_the_peer_marker(self):
+        # zerus-sa9qn.7: the launch on a peer carries the caller as --parent-link,
+        # and only a peer that lists launch-parent-v1 receives it.
+        env = dict(self.env, HGS_PEERS='peer', HGS_SESSION=self.lead['name'], HGS_RUN_ID=self.lead['run_id'])
+        run = lambda env: subprocess.run([str(HGS), '--dry-run', '@peer', 'claude', '/work/example', '--new', '-n', 'kid', '-d'],
+                                         env=env, capture_output=True, text=True, timeout=10)
+        proven = run(env)
+        self.assertEqual(proven.returncode, 0, proven.stderr)
+        self.assertIn('launch-parent-v1', proven.stdout)
+        hex_link = re.search(r"--parent-link\W+([0-9a-f]+)", proven.stdout).group(1)
+        link = json.loads(bytes.fromhex(hex_link))
+        self.assertEqual((link['session_id'], link['source'], link['name']), (LEAD_ID, 'launch', self.lead['name']))
+        plain = run(dict(self.env, HGS_PEERS='peer'))
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        self.assertNotIn('--parent-link', plain.stdout)
+
+    def test_a_forwarded_parent_stays_missing_even_when_its_ids_match_here(self):
+        # zerus-l4ehe: another computer's claim is never matched to a session here.
+        link = self.parent(self.worker, 'adopt', caller=self.lead)['parent']
+        self.assertEqual(self.listed()[self.worker['name']]['parent']['state'], 'saved')
+        self.write(dict(self.read(self.worker), parent=dict(link, source='forwarded')))
+        row = self.listed()[self.worker['name']]
+        self.assertEqual((row['parent']['source'], row['parent']['state']), ('forwarded', 'missing'))
+        # A malformed --parent-link is refused without a panic (zerus-so6hr).
+        refused = subprocess.run([str(HGS), '--dry-run', 'claude', str(self.root), '--new', '-n', 'kid', '-d',
+                                  '--parent-link', '\u20acx'], env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(refused.returncode, 1, refused.stderr)
+        self.assertIn('--parent-link needs a launch link', refused.stderr)
 
     def test_adoption_needs_a_proven_caller_and_the_exact_target(self):
         self.assertIn('no live Zerus session', self.parent(self.worker, 'adopt', success=False))

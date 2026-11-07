@@ -2895,7 +2895,9 @@ kind = "path"
         let configure = plan("cmake-configure", &json!({"build_dir":"vs","generator":generator}), dir.path()).unwrap();
         let configured = execute(&configure, dir.path(), timeout, &[]);
         assert_eq!(configured.exit, Some(0), "{}", configured.tail);
-        let build = plan("msbuild-build", &json!({"project":"vs/fixture.sln","config":"Debug","platform":"x64"}), dir.path()).unwrap();
+        // CMake writes fixture.slnx for Visual Studio 2026 and fixture.sln before it.
+        let solution = ["vs/fixture.slnx", "vs/fixture.sln"].into_iter().find(|name| dir.path().join(name).is_file()).expect("CMake wrote no solution");
+        let build = plan("msbuild-build", &json!({"project":solution,"config":"Debug","platform":"x64"}), dir.path()).unwrap();
         let built = execute(&build, dir.path(), timeout, &[]);
         assert_eq!(built.exit, Some(0), "{}", built.tail);
         assert!(dir.path().join("vs").join("Debug").join("fixture.exe").is_file());

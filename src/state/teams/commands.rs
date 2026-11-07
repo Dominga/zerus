@@ -3287,7 +3287,7 @@ fn look(input: &Value) -> anyhow::Result<Value> {
     };
     let at = now();
     let quiet = member.seen_event_at.map(|seen| (at - seen).max(0.0)).unwrap_or(0.0);
-    let hooks = super::look::Hooks {
+    let mut hooks = super::look::Hooks {
         live: member.seen.is_some_and(|seen| seen.live),
         activity: member.seen_activity.clone(),
         phase: member.seen_phase.clone(),
@@ -3295,10 +3295,17 @@ fn look(input: &Value) -> anyhow::Result<Value> {
         background: member.background_since.is_some(),
         building: false,
         tool: String::new(),
+        tool_since: None,
         last_event_at: member.seen_event_at,
         quiet,
         limit: super::ops::stuck_minutes(team) * 60.0,
     };
+    // Task 181: a DeepSeek member's open tool call is work, held to the tool bound.
+    if member.agent == "dsh" {
+        if let Some(session) = member.session.as_ref() {
+            super::dispatcher::fold_open_tool(session, &mut hooks, super::dispatcher::tool_stuck_minutes(team) * 60.0);
+        }
+    }
     let screen = member.session.as_ref().and_then(super::dispatcher::read_screen);
     let lines = screen.as_deref().map(|screen| super::dispatcher::last_lines(screen, 40)).unwrap_or_default();
     let shown = screen.as_ref().map(|_| super::look::classify(&member.agent, &lines));

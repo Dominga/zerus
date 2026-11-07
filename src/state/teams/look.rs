@@ -13,7 +13,10 @@
 //! - activity: the time of its last event against the stuck bound.
 //!
 //! Sources that disagree beyond `GRACE` make the member `uncertain`, with the
-//! disagreeing views named; it is never shown as a confident `working`. The
+//! disagreeing views named; it is never shown as a confident `working`. A tool
+//! call that is open (Claude's `active_tools`, a DeepSeek session's PreToolUse
+//! with no result after it) and a Zerus build the member waits for are work,
+//! held to the tool bound, never silence (task 181). The
 //! screen is read only for a suspect member, at most `MAX_CHECKS` at a time and
 //! off the dispatcher's tick. `hgs team look <member>` gives the same compact
 //! snapshot in one call, and an uncertain member is told to the lead once.
@@ -33,6 +36,10 @@ pub(crate) const RECHECK: f64 = 60.0;
 pub(crate) const MAX_CHECKS: usize = 2;
 /// The snapshot keeps the screen's last this many non-blank lines.
 pub(crate) const SCREEN_LINES: usize = 12;
+/// Task 181: a finished turn (an idle prompt on the screen, no agent rows) the
+/// hooks still call working is settled in the record once the session has been
+/// silent this long and two reads agree.
+pub(crate) const SETTLE_AFTER: f64 = 120.0;
 
 /// What the session record says (its native hooks and events).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -44,6 +51,9 @@ pub(crate) struct Hooks {
     pub background: bool,
     pub building: bool,
     pub tool: String,
+    /// Task 181: when the open tool call began (Claude's record, or a DeepSeek
+    /// session's PreToolUse with no result after it).
+    pub tool_since: Option<f64>,
     pub last_event_at: Option<f64>,
     /// Seconds since its last progress, and the stuck bound it is held to.
     pub quiet: f64,
@@ -114,6 +124,16 @@ fn working_row(row: &str) -> bool {
     glyph && (trimmed.contains('…') || trimmed.contains("...")) && trimmed.chars().count() <= 160
 }
 
+/// Claude's rows for work that outlives an empty prompt: the agent list under
+/// the prompt ("◯ general-purpose  Review the diff · 12.3k tokens") and the
+/// footer's "N shells still running". The prompt is empty; the member works.
+fn work_row(row: &str) -> bool {
+    let trimmed = row.trim().trim_start_matches('│').trim_start();
+    let lower = trimmed.to_lowercase();
+    let agent = trimmed.starts_with(['\u{25ef}', '\u{25cb}', '\u{25c9}', '\u{25ce}']) && lower.contains("token");
+    agent || lower.contains("shell still running") || lower.contains("shells still running")
+}
+
 /// The question row of a choice panel: the nearest row above that ends with '?'.
 fn question_above(rows: &[String], at: usize) -> String {
     rows[..=at]
@@ -166,6 +186,10 @@ pub(crate) fn classify(agent: &str, rows: &[String]) -> (Screen, String) {
     if let Some(row) = tail.iter().rev().find(|row| working_row(row)) {
         return (Screen::Working, row.trim().chars().take(160).collect());
     }
+    // Task 181: running subagents or shells make an empty prompt a working one.
+    if let Some(row) = tail.iter().rev().find(|row| work_row(row)) {
+        return (Screen::Working, row.trim().chars().take(160).collect());
+    }
     for row in tail.iter().rev().take(8) {
         if let Some(text) = prompt_row(agent, row) {
             if text.contains("[Pasted text") || text.starts_with("[Image") {
@@ -196,7 +220,7 @@ pub(crate) fn due(team: &Team, member: &Member, hooks: &Hooks, now: f64) -> Opti
     let quiet = hooks.quiet >= SUSPECT_AFTER;
     let unread = hooks.asks() && member.pending.is_none() && member.terminal_question.is_none();
     let open = member.check.as_ref().is_some_and(|check| check.state != "agree");
-    let suspect = (hooks.busy() && !hooks.asks() && quiet)
+    let suspect = (hooks.busy() && !hooks.asks() && quiet && !hooks.building)
         || (unread && quiet)
         || (!hooks.busy() && !hooks.asks() && !hooks.background && !hooks.building && unreported)
         || open;
@@ -241,7 +265,10 @@ pub(crate) fn compare(hooks: &Hooks, record: Option<&str>, screen: Option<(Scree
     let said = hooks.view();
     let mut disagree = Vec::new();
     let minutes = |seconds: f64| (seconds.max(0.0) / 60.0).round() as u64;
-    if said == "working" && hooks.limit > 0.0 && hooks.quiet >= hooks.limit {
+    // Task 181: a member inside one long tool call is held to the tool bound
+    // (`limit` is already that bound then), and one waiting on its own Zerus
+    // build is Building: neither is silence.
+    if said == "working" && !hooks.building && hooks.limit > 0.0 && hooks.quiet >= hooks.limit {
         disagree.push(format!(
             "activity: no session event for {} min while hooks say working (bound {} min)",
             minutes(hooks.quiet),
@@ -281,13 +308,71 @@ pub(crate) fn compare(hooks: &Hooks, record: Option<&str>, screen: Option<(Scree
     };
     let sources = json!({
         "hooks":{"view":said,"activity":hooks.activity,"phase":hooks.phase,"asking":hooks.asking,"tool":hooks.tool,
-            "last_event_at":hooks.last_event_at},
+            "tool_since":hooks.tool_since,"last_event_at":hooks.last_event_at},
         "record":{"view":if record.is_some() { "asking" } else { "none" },"request":record},
         "screen":screen.map(|(kind, detail)| json!({"view":kind.name(),"detail":detail})).unwrap_or(json!({"view":"unread"})),
         "process":{"view":if hooks.live { "running" } else { "stopped" },"background":hooks.background,"building":hooks.building},
         "activity":{"minutes_quiet":minutes(hooks.quiet),"stuck_after_minutes":minutes(hooks.limit)},
     });
     Compared { state, disagree, sources }
+}
+
+/// Task 181: a DeepSeek session's open tool call: the oldest PreToolUse of
+/// `record["events"]` that no PostToolUse (the same tool's, else the oldest
+/// open one) or turn boundary (a message, a prompt, a Stop) followed, as
+/// (tool, started). The listing does not show it: its `last_event_at` does not
+/// advance with the native tool events.
+pub(crate) fn open_tool(record: &Value) -> Option<(String, f64)> {
+    let mut events: Vec<&Value> = record["events"].as_array()?.iter().collect();
+    events.sort_by_key(|event| event["seq"].as_i64().unwrap_or(0));
+    let mut open: Vec<(String, f64)> = Vec::new();
+    for event in events {
+        let at = event["at"].as_f64().unwrap_or(0.0);
+        match event["type"].as_str().unwrap_or_default() {
+            "PreToolUse" if at > 0.0 => open.push((event["tool"].as_str().unwrap_or_default().to_owned(), at)),
+            "PostToolUse" => {
+                let tool = event["tool"].as_str().unwrap_or_default();
+                let at = open.iter().position(|(name, _)| name == tool).unwrap_or(0);
+                if at < open.len() {
+                    open.remove(at);
+                }
+            }
+            "AgentMessage" | "UserPromptSubmit" | "Stop" | "StopFailure" => open.clear(),
+            _ => {}
+        }
+    }
+    open.into_iter().next()
+}
+
+/// Folds an open tool call into the hooks' view: the call's start is progress
+/// (quiet counts from it) and its bound replaces the stuck bound.
+pub(crate) fn note_open_tool(hooks: &mut Hooks, open: Option<(String, f64)>, bound: f64, now: f64) {
+    let Some((tool, since)) = open else { return };
+    hooks.tool = tool;
+    hooks.tool_since = Some(since);
+    hooks.quiet = hooks.quiet.min((now - since).max(0.0));
+    hooks.limit = hooks.limit.max(bound);
+}
+
+/// Task 181: whether this read settles a finished turn the hooks still call
+/// working. A hook-driven agent (a DeepSeek session's state is its host's, not a
+/// record), the hooks say working with no request recorded, the screen shows
+/// an idle prompt (no spinner, no agent row, no shell, no draft; a wedged
+/// subagent counts as Background work, so that alone never blocks it), the session
+/// has been silent for `SETTLE_AFTER`, and an earlier read at least `GRACE` ago
+/// showed the same clash.
+pub(crate) fn settle_due(agent: &str, hooks: &Hooks, record: Option<&str>, screen: Option<(Screen, &str)>, previous: Option<&MemberCheck>, now: f64) -> bool {
+    if agent == "dsh" || record.is_some() || hooks.view() != "working" || hooks.building {
+        return false;
+    }
+    if !matches!(screen, Some((Screen::Prompt, _))) || hooks.quiet < SETTLE_AFTER {
+        return false;
+    }
+    previous.is_some_and(|check| {
+        check.state != "agree"
+            && check.since.is_some_and(|since| now - since >= GRACE)
+            && check.disagree.iter().any(|line| line.starts_with("hooks say working; the screen shows an idle prompt"))
+    })
 }
 
 /// The member's next check record from this comparison: a disagreement

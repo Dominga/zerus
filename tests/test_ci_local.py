@@ -88,6 +88,20 @@ class WorkflowBodies(unittest.TestCase):
         mixed = dict(uses='actions/setup-node@123', run='exit 19', with_={})
         self.assertEqual(CI.infrastructure(mixed, online=True)[0], 'not run')
 
+    def test_container_does_not_inherit_the_namespace_only_home_paths(self):
+        with tempfile.TemporaryDirectory(prefix='container-ci-') as temporary:
+            root = Path(temporary)
+            runner = SimpleNamespace(output=root)
+            container = CI.Container(runner, 'archlinux@sha256:fixture')
+            container.identity = 'original-private-container'
+            script = root / 'step.sh'; script.write_text('true\n')
+            argv = container.command(script, Path('.'), dict(XDG_STATE_HOME='/home/test/.local/state',
+                                     XDG_RUNTIME_DIR='/tmp/r', RUSTUP_HOME='/must-not-inherit'))
+            env = dict(arg.split('=', 1) for i, arg in enumerate(argv) if i and argv[i - 1] == '--env')
+            self.assertEqual(env['XDG_STATE_HOME'], '/home/user/.local/state')
+            self.assertEqual(env['XDG_RUNTIME_DIR'], '/home/user/.runtime')
+            self.assertNotIn('RUSTUP_HOME', env)
+
 
 @unittest.skipUnless(sys.platform == "linux" and shutil.which("bwrap") and shutil.which("dbus-run-session")
                      and hasattr(os, "sched_getaffinity"), "requires unprivileged Linux namespaces")

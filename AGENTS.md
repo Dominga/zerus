@@ -213,6 +213,8 @@ Shared candidate tests may run once in a same-SHA qualification job when final
 sealing requires its successful result. Do not start a second full matrix for a
 SHA already under full verification; check the resolved source and wait, or select
 missing platforms. A PR run does not replace the release's own required gate.
+Keep the iOS marketing version for ordinary Dev uploads; change it only when a new
+App Store/marketing version is actually needed, never just to publish another build.
 iOS TestFlight Dev uploads follow successful Nightly verification, using the exact
 source's main CI sequence. Manual checks remain available. Public
 standard GitHub runners are free; do not introduce paid larger runners or raise

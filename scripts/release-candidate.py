@@ -61,9 +61,11 @@ def local_steps(commit: str) -> None:
         run(["cmake", "-S", "tray", "-B", ".ci-build/gui", "-DCMAKE_BUILD_TYPE=Release",
              "-DBUILD_TESTING=ON", f"-DCMAKE_PREFIX_PATH={qt_root}"])
         run(["cmake", "--build", ".ci-build/gui", "--config", "Release", "--parallel", "2"])
-        run(["ctest", "--test-dir", ".ci-build/gui", "-C", "Release", "--output-on-failure"],
+        run(["ctest", "--test-dir", ".ci-build/gui", "-C", "Release", "--parallel", "4", "--output-on-failure"],
             {"ZERUS_QT_RETRY": "2", "ZERUS_TEST_HGS": str(ROOT / "target/release/hgs.exe"),
              "QT_QPA_PLATFORM": "offscreen", "QT_QUICK_BACKEND": "software",
+             "ZERUS_GUI_THREAD_CHECKS": "fatal", "ZERUS_SETTINGS_SYNC": "1",
+             "QTWEBENGINE_CHROMIUM_FLAGS": "--disable-gpu",
              "PATH": str(Path(qt_root) / "bin") + os.pathsep + os.environ.get("PATH", "")})
     else:
         run([bash(), "scripts/ci/gui.sh", "all"], {"ZERUS_QT_RETRY": "2", "ZERUS_TEST_HGS": str(ROOT / "target/release/hgs.exe"), "QT_ROOT_DIR": qt_root})
@@ -185,6 +187,8 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
 
 
 

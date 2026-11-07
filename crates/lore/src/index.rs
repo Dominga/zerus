@@ -461,6 +461,22 @@ impl Index {
         tx.commit().map_err(index_error)
     }
 
+    /// Puts `model`'s precomputed vectors (by record id) into the index and
+    /// sets its model/dimension meta. The bench harness uses it; the searcher's
+    /// own path is `ensure_vectors`.
+    pub fn load_vectors(&self, model: &str, dimension: usize, vectors: &[(String, Vec<f32>)]) -> Result<(), LoreError> {
+        let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate).map_err(index_error)?;
+        tx.execute("DELETE FROM vectors", []).map_err(index_error)?;
+        tx.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('model', ?1)", params![model]).map_err(index_error)?;
+        tx.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('dimension', ?1)", params![dimension.to_string()]).map_err(index_error)?;
+        for (id, vector) in vectors {
+            let hash: String = tx.query_row("SELECT ehash FROM records WHERE id=?1", params![id], |row| row.get(0)).map_err(index_error)?;
+            let blob: Vec<u8> = vector.iter().flat_map(|value| value.to_le_bytes()).collect();
+            tx.execute("INSERT OR REPLACE INTO vectors VALUES(?1,?2,?3)", params![model, hash, blob]).map_err(index_error)?;
+        }
+        tx.commit().map_err(index_error)
+    }
+
     /// The vector of every record that has one under `model`, by id.
     pub fn vectors(&self, model: &str) -> Result<Vec<(String, Vec<f32>)>, LoreError> {
         let mut statement = self

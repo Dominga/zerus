@@ -197,6 +197,12 @@ fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
         (50..=100).contains(&settings.context_compact_percent),
         "context_compact_percent is 50 to 100 (the share of the context window at which Zerus compacts a member)"
     );
+    // Task 254: a cold session at this share of its window is compacted
+    // before it works; 0 never compacts for a cold cache.
+    ensure!(
+        settings.cold_compact_percent <= 100,
+        "cold_compact_percent is 0 to 100 (the share of the context window at which a cold session is compacted before it works; 0 never)"
+    );
     ensure!(
         (30..=3600).contains(&settings.start_timeout_seconds),
         "The start warning waits 30 to 3600 seconds after delivery"
@@ -1232,7 +1238,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-pub(crate) const OWNER_SETTINGS: [&str; 26] = [
+pub(crate) const OWNER_SETTINGS: [&str; 27] = [
     "approval",
     // Task 126: the owner chooses the team's memory and its store.
     "memory",
@@ -1275,6 +1281,8 @@ pub(crate) const OWNER_SETTINGS: [&str; 26] = [
     // Task 209: only the owner sets what Zerus does to a member's context (the
     // share of the window at which it compacts, 95% by default).
     "context_compact_percent",
+    // Task 254: and when a cold session is compacted before it works.
+    "cold_compact_percent",
 ];
 
 /// Task 126: a lead's whole settings object that leaves out `memory` keeps
@@ -6208,6 +6216,67 @@ fn retry(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>)
     ensure!(actor.reviews(team, &assignee), "Only the lead or you retry tasks");
     let label = actor.label(team);
     let reachable = super::merge_queue::merge_still_reachable(team, id);
+    // Task #227 (owner, 2026-11-07): a retry while the member works on that very
+    // task never revokes the attempt it is working under - core lost its task
+    // that way. It becomes a "continue": the attempt stays, the member hears it
+    // at its turn's safe point, and only "fresh":true starts the task over.
+    let fresh = input["fresh"].as_bool() == Some(true);
+    let working = team.task(id).is_some_and(|task| {
+        // A waiting task is retried for its refused step, not continued.
+        task.waits.is_none()
+            && task.open_attempt().is_some_and(|attempt| {
+                (attempt.state == AttemptState::Delivered && attempt.turn_ended_at.is_none())
+                    || (attempt.state == AttemptState::Unconfirmed && attempt.error.contains("the session crashed"))
+            })
+    });
+    let stray = team.member(&assignee).and_then(|member| member.unassigned.as_ref()).is_some_and(|flag| flag.task == Some(id));
+    if !fresh && (working || stray) {
+        let attempt = {
+            let task = team.task_mut(id).context("Unknown task")?;
+            ensure!(!task.status.finished() && task.status != TaskStatus::Draft, "Task #{id} cannot be retried now");
+            match task.open_attempt() {
+                Some(attempt) => attempt.n,
+                None => {
+                    // The member works on the task with no attempt of its own:
+                    // the retry binds the work in progress instead of starting
+                    // it over, so its report has an attempt and its number.
+                    let n = task.attempts.len() as u32 + 1;
+                    let at = now();
+                    task.attempts.push(Attempt {
+                        n,
+                        id: uuid::Uuid::new_v4().to_string(),
+                        member: assignee.clone(),
+                        state: AttemptState::Delivered,
+                        sent_at: at,
+                        delivered_at: Some(at),
+                        started_at: Some(at),
+                        ..Default::default()
+                    });
+                    task.status = TaskStatus::InProgress;
+                    n
+                }
+            }
+        };
+        let at = now();
+        let notice = ContinueNotice {
+            id: uuid::Uuid::new_v4().to_string(),
+            task: id,
+            attempt,
+            member: assignee.clone(),
+            by: label.clone(),
+            at,
+            notice: Notice::Pending,
+            tries: 0,
+        };
+        team.continues.push(notice);
+        if team.continues.len() > 20 {
+            let excess = team.continues.len() - 20;
+            team.continues.drain(..excess);
+        }
+        events.push(Event::new("continue_requested", json!({"by":label,"task":id,"attempt":attempt,
+            "how":if stray { "work in progress" } else { "the attempt in progress" }})));
+        return Ok(json!({"status":"continue","task":id,"attempt":attempt}));
+    }
     let task = team.task_mut(id).context("Unknown task")?;
     ensure!(!task.status.finished() && task.status != TaskStatus::Draft, "Task #{id} cannot be retried now");
     if task.merge.as_ref().is_some_and(|entry| entry.state == "testing") {

@@ -119,3 +119,53 @@ export function taskHeat(profile: TeamProfileView | null | undefined, task: numb
   if (causes.length > 0) lines.push(tr("Causes: %1", causes.join("; ")));
   return { tint, label, muted, badge, badgeCompact, over, tip: lines.join("\n") };
 }
+
+/** Task 197: the plan's heat modes, as Qt's switch offers them (Off, Lateness,
+ * Tokens); Tokens used to fall back to lateness silently. */
+export type HeatMode = "off" | "time" | "tokens";
+
+/** "950", "1.2k", "34k", "1.5M" (Qt tokensText). */
+export function tokensText(tokens: number): string {
+  if (tokens < 1000) return String(Math.max(0, Math.round(tokens)));
+  if (tokens < 10_000) return `${(tokens / 1000).toFixed(1)}k`;
+  if (tokens < 1_000_000) return `${Math.round(tokens / 1000)}k`;
+  return `${(tokens / 1_000_000).toFixed(1)}M`;
+}
+
+/** The tokens each task lost to rework and long tests (the profile's losses). */
+export function tokensLost(profile: TeamProfileView | null | undefined): Map<number, number> {
+  const lost = new Map<number, number>();
+  for (const loss of profile?.losses ?? []) {
+    if (loss.task > 0 && loss.tokens != null && loss.tokens > 0) lost.set(loss.task, (lost.get(loss.task) ?? 0) + loss.tokens);
+  }
+  return lost;
+}
+
+/**
+ * Task 197: a task's Tokens heat (Qt Heat::share with the tokens metric):
+ * its lost tokens against the most any task lost; null without a loss.
+ */
+export function tokenHeat(profile: TeamProfileView | null | undefined, task: number): TaskHeat | null {
+  if (!profile) return null;
+  const lost = tokensLost(profile);
+  const own = lost.get(task) ?? 0;
+  if (own <= 0) return null;
+  const most = Math.max(...lost.values());
+  const causes = profile.losses
+    .filter((loss) => loss.task === task && (loss.tokens ?? 0) > 0)
+    .sort((a, b) => (b.tokens ?? 0) - (a.tokens ?? 0))
+    .slice(0, 3)
+    .map((loss) => tr("%1 %2 tokens", lossName(loss.kind), tokensText(loss.tokens ?? 0)));
+  const lines = [tr("Lost %1 tokens to rework and long tests", tokensText(own))];
+  if (causes.length > 0) lines.push(tr("Causes: %1", causes.join("; ")));
+  if (profile.tokens_partial) lines.push(tr("Some spans' tokens are unknown"));
+  return { tint: most > 0 ? Math.min(1, own / most) : 0, label: tr("lost %1 tokens", tokensText(own)), muted: false,
+    badge: "", badgeCompact: "", over: 0, tip: lines.join("\n") };
+}
+
+/** A task's heat in `mode`, or null (Off, or nothing to show). */
+export function heatOf(mode: HeatMode, profile: TeamProfileView | null | undefined, task: number): TaskHeat | null {
+  if (mode === "time") return taskHeat(profile, task);
+  if (mode === "tokens") return tokenHeat(profile, task);
+  return null;
+}

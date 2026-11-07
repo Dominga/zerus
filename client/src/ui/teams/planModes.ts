@@ -143,6 +143,21 @@ export function runTime(ms: number): string {
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60).toString().padStart(2, "0")}m`;
 }
 
+/** Task 197: the heat mode a team starts with: this browser's own stored
+ * choice ("time", "tokens", "off"; "1" from before task 197 is lateness),
+ * else Qt's imported mode (`teams/heatModes`), else Off. Tokens stays Tokens. */
+export function heatModeSeed(team: string, stored: string | null, modes: string): "off" | "time" | "tokens" {
+  if (stored === "1" || stored === "time") return "time";
+  if (stored === "tokens" || stored === "off") return stored;
+  if (stored !== null) return "off";
+  try {
+    const mode = (JSON.parse(modes) as Record<string, unknown>)[team];
+    return mode === "time" || mode === "tokens" ? mode : "off";
+  } catch {
+    return "off";
+  }
+}
+
 /** Task 103: what a team's Lateness switch starts with: this browser's own
  * stored choice first, else Qt's imported heat mode (`teams/heatModes`, a
  * bounded team -> "time" | "tokens" map from the settings store). */

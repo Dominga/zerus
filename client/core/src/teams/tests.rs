@@ -1107,6 +1107,33 @@ fn task_60_a_follow_up_carries_its_origin() {
     assert!(graph.edges.is_empty(), "an origin is not a dependency edge");
 }
 
+/// Task 197: a card's time line ("after #3 ~45 min", "attempt 2, idle 12 of
+/// ~30 min") needs the estimate's source and spent minutes, the running
+/// attempt's start and the worked seconds, what the task waits on and whether
+/// its attempt began; an older hgs names none of them, and none reaches the
+/// wire then.
+#[test]
+fn task_197_a_card_s_time_and_wait_reach_the_task_view() {
+    let status = json!({"id":"t1","name":"Checkout","status":"running","lead":"lead","members":[{"id":"lead"}],
+        "tasks":[
+            {"id":1,"title":"API","status":"in_progress","assignee":"lead","estimate_minutes":30,"estimate_source":"role",
+             "estimate_spent_minutes":12.5,"timing":{"worked_s":600,"running_since":1700000000.0},
+             "attempts":[{"n":1,"state":"delivered"},{"n":2,"state":"delivered","started_at":1700000000.0}]},
+            {"id":2,"title":"UI","status":"pending","assignee":"lead","estimate_minutes":45,"estimate_source":"lead",
+             "waits":{"for":"deps","on":[1,"#4"],"unblock":"finish #1"}},
+            {"id":3,"title":"Old","status":"pending","assignee":"lead"}]});
+    let view = view::team(&status);
+    let (api, ui, old) = (&view.tasks[0], &view.tasks[1], &view.tasks[2]);
+    assert_eq!((api.estimate_source.as_str(), api.estimate_spent, api.running_since, api.worked_s, api.attempt_begun),
+               ("role", Some(12.5), 1_700_000_000.0, 600.0, true));
+    assert_eq!((ui.wait_for.as_str(), ui.wait_on.clone(), ui.waits.as_str()), ("deps", vec!["1".to_owned(), "#4".to_owned()], "finish #1"));
+    assert!(!ui.attempt_begun);
+    let wire = serde_json::to_value(old).unwrap();
+    for key in ["estimate_source", "estimate_spent", "running_since", "worked_s", "wait_for", "wait_on", "attempt_begun"] {
+        assert!(wire.get(key).is_none(), "an older hgs adds no {key}");
+    }
+}
+
 /// Task 92: the Time view's lanes from this team's real replies, as Qt's
 /// `TeamProfile::Model::build` lays them out: a lane per profile member in
 /// its order (then the lead when it has time), each member's own spans in its

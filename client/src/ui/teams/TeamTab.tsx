@@ -8,6 +8,7 @@ import { SHARE, SIDE, dragShare, dragSide, teamLayout, type TeamLayout } from ".
 import { selected, setDetailTab, setSelectedKey, toast } from "../../store/ui";
 import { teamAction, teamTests, teamTimeline, teamsProfile } from "../../bridge";
 import { PlanView } from "./PlanView";
+import { problemTasks as planProblemTasks } from "./planTasks";
 import { TeamCatalogEditor } from "./TeamCatalogEditor";
 import { TeamSettingsDialog } from "./TeamSettingsDialog";
 import type { TeamTestsView } from "../../types";
@@ -23,7 +24,7 @@ import { TeamReports } from "./TeamReports";
 import { WaitingBanner } from "./Waiting";
 import { Blockers, PhaseModeControl, TaskActions, TeamBarActions, TeamBarChips, TeamModeControl, TeamQuestions } from "./TeamActions";
 import { composer } from "../../store/composer";
-import type { ComputerId, TeamCall, TeamMemberView, TeamPulseView, TeamView } from "../../types";
+import type { ComputerId, TeamCall, TeamMemberView, TeamPulseView, TeamTaskView, TeamView } from "../../types";
 import type { Session } from "../sessions/types";
 
 // The Team tab (Qt's TeamWorkspace, design D3, HANDOFF §14): the team bar and
@@ -62,6 +63,25 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
   const statuses = createMemo(() => new Map(props.team.members.map((member) => [member.id, memberStatus(props.team, member, live(member))])));
   const problems = createMemo(() => shownMembers(props.team).filter((member) => statuses().get(member.id)?.problem));
   const problemTasks = createMemo(() => new Set(problems().map((member) => statuses().get(member.id)!.task).filter((task) => task > 0)));
+  // Task 197 (P2): the plan tints each problem task with its reason (Qt
+  // problemTasks/problemTexts): the members' problems, then each task's own.
+  const planProblems = createMemo(() => planProblemTasks(props.team, statuses()));
+  // Task 197 (P8): a click on a member's card shows only its tasks.
+  const [focus, setFocus] = createSignal("");
+  const workingOn = (task: TeamTaskView) => {
+    const member = props.team.members.find((candidate) => candidate.id === task.assignee);
+    return !!member && (live(member).working || member.activity === "busy");
+  };
+  // Task 197 (P6): only the switch's own field; the server merges it.
+  const setAutoAccept = async (on: boolean) => {
+    try {
+      const outcome = await teamAction({ computer: props.computer, team: props.team.id, team_name: props.team.name,
+        action: { kind: "settings", settings: { auto_accept: on } } as TeamCall["action"] });
+      if (outcome.outcome === "failed" || outcome.outcome === "uncertain") toast(tr("Auto-accept drafts"), outcome.detail, "error", true);
+    } catch (cause) {
+      toast(tr("Auto-accept drafts"), String(cause), "error", true);
+    }
+  };
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [catalogOpen, setCatalogOpen] = createSignal(false);
   const [tests, setTests] = createSignal<TeamTestsView | null>(null);
@@ -143,6 +163,11 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
                 }}
                 phaseActions={(n) => <PhaseModeControl computer={props.computer} team={props.team} phase={n} />}
                 onApprovePhase={(n) => void approvePhase(n)}
+                problems={planProblems()}
+                working={workingOn}
+                member={focus()}
+                onMember={setFocus}
+                onAutoAccept={(on) => void setAutoAccept(on)}
               />
             )}
           </Show>
@@ -153,7 +178,7 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
           start={() => teamLayout.sideWidth()} onCommit={teamLayout.commitSide} onReset={teamLayout.resetSide}
           onStep={(direction) => teamLayout.stepSide(-direction)} />
         <aside class="team-side" style={{ width: `${teamLayout.sideWidth()}px` }} aria-label={tr("Members and coordinator")}>
-          <SideColumn computer={props.computer} team={props.team} statuses={statuses()} />
+          <SideColumn computer={props.computer} team={props.team} statuses={statuses()} focus={focus()} onFocus={(id) => setFocus(focus() === id ? "" : id)} />
         </aside>
       </div>
       <Show when={settingsOpen()}>
@@ -263,7 +288,7 @@ function TeamPhases(props: { computer: ComputerId; team: TeamView }) {
   );
 }
 
-function SideColumn(props: { computer: ComputerId; team: TeamView; statuses: Map<string, MemberStatus> }) {
+function SideColumn(props: { computer: ComputerId; team: TeamView; statuses: Map<string, MemberStatus>; focus?: string; onFocus?: (member: string) => void }) {
   const members = createMemo(() => shownMembers(props.team));
   const lead = createMemo(() => props.team.members.find((member) => member.lead));
   let column!: HTMLDivElement;
@@ -273,7 +298,8 @@ function SideColumn(props: { computer: ComputerId; team: TeamView; statuses: Map
       <section class="team-members" style={{ height: `${teamLayout.membersShare()}%` }} aria-label={tr("Members")}>
         <div class="team-section-head"><b>{tr("Members")}</b><span class="dim mono">{members().length}</span></div>
         <div class="team-members-list">
-          <For each={members()}>{(member) => <MemberRow computer={props.computer} team={props.team} member={member} status={props.statuses.get(member.id)!} />}</For>
+          <For each={members()}>{(member) => <MemberRow computer={props.computer} team={props.team} member={member} status={props.statuses.get(member.id)!}
+            focused={props.focus === member.id} onFocus={props.onFocus} />}</For>
         </div>
       </section>
       <Divider orientation="horizontal" label={tr("Members and coordinator")} layout={teamLayout}
@@ -306,13 +332,15 @@ function pulseText(pulse: TeamPulseView): string {
   return [...pulseLines(pulse), by].join("\n");
 }
 
-function MemberRow(props: { computer: ComputerId; team: TeamView; member: TeamMemberView; status: MemberStatus }) {
+function MemberRow(props: { computer: ComputerId; team: TeamView; member: TeamMemberView; status: MemberStatus; focused?: boolean; onFocus?: (member: string) => void }) {
   const row = () => memberRow(props.computer, props.member);
   const own = createMemo(() => memberProgress(props.team, props.member));
   const model = () => [props.member.model, props.member.effort].filter(Boolean).join(" ");
   return (
-    <div class="team-member" classList={{ problem: props.status.problem, [`tone-${props.status.tone}`]: true, lead: props.member.lead, planned: props.status.kind === "not_created" }}
-      data-kind={props.status.kind}>
+    <div class="team-member" classList={{ problem: props.status.problem, [`tone-${props.status.tone}`]: true, lead: props.member.lead, planned: props.status.kind === "not_created", focused: !!props.focused }}
+      data-kind={props.status.kind} data-member={props.member.id}
+      title={tr("Show only this member's tasks in the plan")}
+      onClick={(event) => { if (!(event.target as HTMLElement).closest("button")) props.onFocus?.(props.member.id); }}>
       <span class="team-tile" title={props.member.agent}><AgentGlyph agent={agentKind(props.member.agent)} size={14} /></span>
       <div class="team-member-main">
         <div class="team-member-line">

@@ -205,6 +205,7 @@ pub fn menu_event(app: &AppHandle, id: &str) {
                 eprintln!("zerus-client: could not restart into the installed bundle: {error}");
             }
         }
+        Some(MenuAction::Session { computer, key }) => crate::desk::menu_session(app, computer, key),
         Some(MenuAction::Quit) => crate::exit_flush::quit_with_flush(app, 0),
         Some(MenuAction::Refresh) => {}
         None => {}
@@ -484,3 +485,4 @@ mod tests {
         assert_eq!(pixel(18, 18)[3], 0, "the gap between the rows stays clear");
     }
 }
+

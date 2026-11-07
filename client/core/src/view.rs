@@ -114,6 +114,18 @@ pub struct ViewRow {
     /// The raw `state` (`running`, `paused`, `stopped`, `archived`, ...);
     /// `running` when the row lists none (a live session).
     pub state: String,
+    /// Task 175: the shared session state (working, build, user, deps, cooling,
+    /// cold, stopped).
+    #[serde(default)]
+    pub session_state: String,
+    /// Task 175: the team that owns this session, and whether it is its lead.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub team_id: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub team_lead: bool,
+    /// A child/forked session is never a row of its own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub subagent: bool,
     pub tracked: bool,
     pub resumable: bool,
     pub activity: String,
@@ -1256,6 +1268,10 @@ pub fn row(value: &Value) -> ViewRow {
             .filter(|id| crate::creation::canonical_uuid(id)),
         // A live row lists no state; Qt reads it as running (`HgsClient.cpp`).
         state: session.state.to_owned(),
+        session_state: text(value, "session_state").to_owned(),
+        team_id: text(value, "team_id").to_owned(),
+        team_lead: value["team_lead"].as_bool().unwrap_or(false),
+        subagent: !text(value, "fork_parent_id").is_empty(),
         tracked: session.tracked,
         resumable: value
             .get("resumable")

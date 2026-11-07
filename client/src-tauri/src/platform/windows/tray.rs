@@ -186,6 +186,7 @@ fn dispatch(app: &AppHandle, action: MenuAction) {
             let fleet = app.state::<crate::commands::AppState>();
             fleet.refresh();
         }
+        MenuAction::Session { computer, key } => crate::desk::menu_session(app, computer, key),
         MenuAction::Quit => crate::exit_flush::quit_with_flush(app, 0),
     }
 }

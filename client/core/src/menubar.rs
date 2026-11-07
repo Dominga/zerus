@@ -44,12 +44,29 @@ impl Computer {
         self.listed && matches!(self.status, ComputerStatus::Live | ComputerStatus::Polled)
     }
 
-    /// Sessions that are not archived (`visibleSessionCount`, `FleetState.cpp:17-21`).
+    /// Task 175: a row the menu bar lists and counts: an active session, no
+    /// subagent, and no team member other than the team lead.
+    fn listed(row: &ViewRow) -> bool {
+        !row.subagent
+            && (row.team_id.is_empty() || row.team_lead)
+            && (matches!(row.session_state.as_str(), "working" | "build" | "user" | "deps")
+                || (row.session_state.is_empty() && row.state == "running"))
+    }
+
+    /// Sessions the menu bar shows and counts.
     pub fn visible(&self) -> usize {
-        self.rows
-            .values()
-            .filter(|row| row.state != "archived")
-            .count()
+        self.rows.values().filter(|row| Self::listed(row)).count()
+    }
+
+    /// The active rows, attention first, then most recently updated.
+    pub fn listed_rows(&self) -> Vec<(&String, &ViewRow)> {
+        let mut rows: Vec<(&String, &ViewRow)> = self.rows.iter().filter(|(_, row)| Self::listed(row)).collect();
+        rows.sort_by(|(_, a), (_, b)| {
+            needs_attention(b).cmp(&needs_attention(a)).then_with(|| {
+                b.updated_at.unwrap_or(0.0).total_cmp(&a.updated_at.unwrap_or(0.0))
+            })
+        });
+        rows
     }
 }
 
@@ -375,6 +392,10 @@ pub enum Entry {
     Separator,
     /// A line that cannot be chosen: a computer's sessions count or its state.
     Label(Text),
+    /// Task 175: an active session under a computer; choosing it opens it.
+    Session { computer: String, key: String, title: Text },
+    /// "+N more": opens Zerus.
+    More(usize),
     Refresh,
     Quit,
 }
@@ -616,6 +637,9 @@ impl Desk {
                     None => crate::text!("%1: polling…", crate::text!("this box")),
                 },
             ));
+            if let Some(computer) = local.filter(|computer| computer.listed) {
+                push_sessions(&mut menu, "", computer);
+            }
         }
         let peers: Vec<(&str, &Computer)> = self.peers().collect();
         if !local_section && peers.is_empty() {
@@ -624,19 +648,39 @@ impl Desk {
         for (alias, computer) in peers {
             let alias = escape(alias);
             menu.push(Entry::Label(if !computer.listed {
-                crate::text!("%1: polling…", alias)
+                crate::text!("%1: polling…", alias.clone())
             } else if !computer.fresh() {
-                crate::text!("%1: unreachable", alias)
+                crate::text!("%1: unreachable", alias.clone())
             } else {
-                crate::text!("%1 on %2", computer.visible(), alias)
+                crate::text!("%1 on %2", computer.visible(), alias.clone())
             }));
+            if computer.listed {
+                push_sessions(&mut menu, alias.as_str(), computer);
+            }
         }
         menu.extend([Entry::Separator, Entry::Quit]);
         menu
     }
 }
 
-/// One change to the status item.
+
+/// Task 175: at most this many active sessions under one computer.
+const SESSION_ROWS: usize = 15;
+
+fn push_sessions(menu: &mut Vec<Entry>, computer: &str, state: &Computer) {
+    let rows = state.listed_rows();
+    for (key, row) in rows.iter().take(SESSION_ROWS) {
+        let title = if row.display_title.is_empty() { row.title.as_str() } else { row.display_title.as_str() };
+        menu.push(Entry::Session {
+            computer: computer.to_owned(),
+            key: (*key).clone(),
+            title: Text::verbatim(&escape(title)),
+        });
+    }
+    if rows.len() > SESSION_ROWS {
+        menu.push(Entry::More(rows.len() - SESSION_ROWS));
+    }
+}/// One change to the status item.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Apply {
     Face(Face),
@@ -1272,7 +1316,7 @@ mod tests {
         );
         assert_eq!(
             tip(&desk),
-            "1 needs attention, 3 sessions total\n2 here\n1 on mac\nstudio: not polled yet\nwin: unreachable"
+            "1 needs attention, 2 sessions total\n1 here\n1 on mac\nstudio: not polled yet\nwin: unreachable"
         );
         let mut empty = Desk::default();
         host(&mut empty, "", "arch", true);
@@ -1303,11 +1347,11 @@ mod tests {
             ComputerStatus::Reconnecting { attempt: 1 },
         );
         assert_eq!(
-            desk.menu(),
+            desk.menu().into_iter().filter(|entry| !matches!(entry, Entry::Session { .. } | Entry::More(_))).collect::<Vec<_>>(),
             vec![
                 Entry::Open,
                 Entry::Separator,
-                Entry::Label(crate::text!("%1 here", 2usize)),
+                Entry::Label(crate::text!("%1 here", 1usize)),
                 Entry::Label(crate::text!("%1 on %2", 0usize, "mac&&m")),
                 Entry::Label(crate::text!("%1: polling…", "studio")),
                 Entry::Label(crate::text!("%1: unreachable", "win")),
@@ -1574,4 +1618,47 @@ mod tests {
             "another run"
         );
     }
+
+    #[test]
+    fn only_active_sessions_not_team_members_not_subagents_are_counted_and_listed() {
+        let mut desk = Desk::default();
+        let active = |name: &str| {
+            let mut row = row(name, "running");
+            row.session_state = "working".into();
+            row
+        };
+        let idle = |name: &str, state: &str| {
+            let mut row = row(name, state);
+            row.session_state = state.into();
+            row
+        };
+        let mut member = active("member");
+        member.team_id = "team-1".into();
+        let mut lead = active("lead");
+        lead.team_id = "team-1".into();
+        lead.team_lead = true;
+        let mut child = active("child");
+        child.subagent = true;
+        listed(&mut desk, "", vec![
+            ("run:active", active("active")),
+            ("run:member", member),
+            ("run:lead", lead),
+            ("run:child", child),
+            ("run:stopped", idle("stopped", "stopped")),
+        ]);
+        listed(&mut desk, "peer", vec![("run:peer", active("peer"))]);
+        assert_eq!(desk.total(), 3, "active, the lead and the peer");
+        let menu = desk.menu();
+        let rows: Vec<(&str, &str)> = menu.iter().filter_map(|entry| match entry {
+            Entry::Session { computer, key, .. } => Some((computer.as_str(), key.as_str())),
+            _ => None,
+        }).collect();
+        assert_eq!(rows, [("", "run:active"), ("", "run:lead"), ("peer", "run:peer")]);
+    }
+
 }
+
+
+
+
+

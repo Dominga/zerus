@@ -53,3 +53,14 @@ export function rosterFor(row: Session, details?: Record<string, unknown>): Suba
   }
   return row.subagents ?? [];
 }
+
+/**
+ * Plan & agents (owner, 2026-11-08, T-ug5hxx, zerus-5ffek): the IDs kept in
+ * view, the working ones and those waiting for an answer while the session is
+ * current, with the one open in Activity, and the IDs folded as finished.
+ */
+export function splitSubagents(children: readonly Subagent[], current: boolean, open?: string) {
+  const active: string[] = [], finished: string[] = [];
+  for (const child of children) ((current && (child.state === "working" || child.state === "attention")) || child.id === open ? active : finished).push(child.id);
+  return { active, finished };
+}

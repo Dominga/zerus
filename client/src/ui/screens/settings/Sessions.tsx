@@ -41,7 +41,7 @@ export function SessionsSection() {
         <ToggleRow label={trNoop("Start new child sessions as compact rows")} checked={flag("sessions/compactNewChildren")} onChange={toggle("sessions/compactNewChildren")}
           hint={trNoop("A session that another session launches or adopts appears collapsed under its parent. Expanding a row keeps it expanded.")} />
         <ToggleRow label={trNoop("Show completed subagents")} checked={flag("workspace/showCompletedSubagents")} onChange={toggle("workspace/showCompletedSubagents")}
-          hint={trNoop("Include agents whose latest turn has finished in the session list and its counts. Plan & agents always shows all reported agents. Agents with unknown status remain visible.")} />
+          hint={trNoop("Include agents whose latest turn has finished in the session list and its counts. Agents with unknown status remain visible. Plan & agents keeps working agents in view and folds the others behind their count.")} />
         <ToggleRow label={trNoop("Notify about optional questions")} checked={notifications.checked()} onChange={(on)=>void notifications.change(on)}
           disabled={notifications.disabled()}
           hint={trNoop("Off by default. Shows a system notification once for each new optional question, which the agent keeps working without. It is withdrawn when the questions are answered or skipped, or the session is marked as read. Questions that need an answer always notify.")} />

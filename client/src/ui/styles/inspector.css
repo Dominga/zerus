@@ -36,6 +36,10 @@
   .irow-ico { flex: none; width: 16px; height: 16px; display: grid; place-items: center; color: var(--z-color-muted); }
   .irow-ico .state-dot { margin: 0; }
   .irow-val { flex: 1; min-width: 0; }
+  /* Subagents (zerus-5ffek): each row is laid out on its own; the finished fold. */
+  .isub > .irow { contain: content; }
+  .isub-more { display: flex; align-items: center; gap: 6px; min-height: 28px; color: var(--z-color-muted); text-align: left; }
+  .isub-more:hover { color: var(--z-color-text); }
   .irow-val.mono { font-size: .94em; }
   .irow-label { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--z-color-dim); }
   .irow .icon-btn.small { flex: none; margin-right: -4px; }

@@ -99,7 +99,16 @@ createRoot(() => {
   createEffect(() => {
     const row = page() === "sessions" ? selected() : undefined;
     const computer = row && row.state !== "archived" ? row.computer : undefined;
-    const needs: TeamsNeed[] = computer !== undefined ? [{ computer, list: true, team: selectedTeam()?.id ?? null }] : [];
+    // A lead's card needs its team strip wherever the team's lead row is
+    // listed, so the Sessions page reads every computer's team list; only the
+    // selected session's computer also follows its one team.
+    const needs: TeamsNeed[] = page() === "sessions"
+      ? (Object.keys(catalog.computers) as ComputerId[]).map((id) => ({
+          computer: id,
+          list: true,
+          team: id === computer ? selectedTeam()?.id ?? null : null,
+        }))
+      : [];
     const wanted = mergeFollows([...needs, ...shownNeeds()]);
     for (const gone of current) if (!wanted.has(gone)) teams.follow(gone, NOTHING);
     for (const [id, follow] of wanted) teams.follow(id, follow);

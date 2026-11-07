@@ -10,6 +10,8 @@ vi.hoisted(() => {
 });
 vi.mock("../../store/endActions", () => ({ endActions: { schedule: async (_captures: unknown[], run: (refs: unknown[], key: string) => Promise<unknown>) => run([{ id: "test-delay", index: 0 }], "test-end") } }));
 vi.mock("../../bridge", () => ({
+  // The Teams store subscribes when a session module imports it.
+  onTeamDecided: vi.fn(async () => () => {}), teamsFollow: vi.fn(async () => {}),
   // The session entry points also initialize the bounded creation-card store.
   onCreations: vi.fn(async () => () => {}), creationsView: vi.fn(async () => []),
   archivePage: vi.fn(),

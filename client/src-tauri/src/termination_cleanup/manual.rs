@@ -417,6 +417,7 @@ mod tests {
             manual_review: false,
             dismissed: false,
             program_review_pending: false,
+            program_retirement: None,
             source: None,
             archive: None,
             restore_supported: false,

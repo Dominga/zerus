@@ -1,10 +1,11 @@
 Propose a change to the owner (hgs guide team-propose)
 
-Every change only the owner may make is a card: propose it, then wait for the
-owner's Allow or Reject. Never ask the owner to type a phrase or a sentence.
+Owner gates (goal and plan approval, roster, wider rights, money, release,
+destructive actions) are cards: wait for Allow or Reject. Never ask the
+owner to type a phrase. Inside the approved goal you add, move, split and
+edit tasks yourself, no card (the owner sees a digest, may revert).
 Each kind sends its exact change:
-  {"kind":"add-member","members":[...]} (one or several)
-  {"kind":"add-to-phase","phase":N,"tasks":[...]}
+  {"kind":"add-member","members":[...]}
   {"kind":"cancel-tasks","tasks":[ids]}
   {"kind":"discard-phase","phase":N}
   {"kind":"question","question":"...","options":["A","B"],"recommended":"A"}
@@ -15,27 +16,26 @@ Each kind sends its exact change:
   {"kind":"scale","role":"Tester","agent":"claude","count":2}
   {"kind":"approve"}; {"kind":"approve-phase","phase":N}
   accept-phase, unpause-phase, return-to-draft: {"kind":K,"phase":N}
-  edit-draft, move-phase, phase-acceptance, extend: the operation's fields
-  {"kind":"settings","settings":{"max_members":8}} (any owner setting)
-  {"kind":"full-tests","release":"v1.2"} (one full test run)
+  edit-draft, move-phase, phase-acceptance, extend: fields (before approval)
+  {"kind":"settings","settings":{"max_members":8}}
+  {"kind":"full-tests","release":"v1.2"}
   {"kind":"iron-rules","scope":"project","project":"ID","rules":[...],
-   "expected_revision":N} (or "scope":"session" with the member's session)
-  {"kind":"switch-plan-mode","mode":"free","phase":N} switches phase N
-    only (free or standard); without "phase", the team's mode
+   "expected_revision":N} (or "scope":"session")
+  {"kind":"switch-plan-mode","mode":"free","phase":N} (no phase: the team)
   {"kind":"switch-memory-mode","mode":"team"}; swap-member, next-goal as before
+  {"kind":"scratch-rule","folder":"ABS","agents":["claude"]}: no approval
 with "reason" and a request_id, piped to hgs team propose --json. An
 operation's fields may also go in "input":{...}.
 
-The receipt carries the proposal id and its content hash. The owner's Allow
-applies exactly that change once; a changed or stale card is refused and
-nothing is applied twice. A Deny's reason reaches you. A typed owner word
-is a fallback. A change Allow cannot apply is refused at once.
+The receipt has the id and hash; Allow applies that change once. A
+Deny's reason reaches you; a typed owner word is not taken.
+"for_tasks":[N] keeps those tasks back until granted; cards reach a
+present owner as one batch.
 
 A question to the owner goes this way, never only in your reply: the
 owner's option or answer on the card reaches your inbox.
 
-The owner's own answer from a plain shell (never from an agent session):
-  {"team":"ID","proposal":"p1","accept":true,"expected_hash":"...",
-   "reason":"...","by":"human","request_id":"UUID"} |
-  hgs team decide-proposal --json
-"accept" is required; false rejects and its reason reaches you.
+The owner answers on the card (or decide-proposal in a plain shell). Each
+answer is a decision for the tasks it binds: add "spec", "files":["PATH"],
+"binds":[N], "forbids":["TERM"]. The owner's word in your chat: hgs team
+decide --json with "owner_word"; never message a decision.

@@ -195,10 +195,6 @@ pub(crate) struct Settings {
     /// waiting when the owner turns it on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub auto_accept: bool,
-    /// U31: let an idle member take an independent task of the next draft
-    /// phase; the result waits for that phase's approval.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub work_ahead: bool,
     /// U48: the owner allows a pipeline's land stage, which may push; without
     /// it a land stage holds the task for the lead.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -362,7 +358,6 @@ impl Default for Settings {
             tree_sessions: default_tree_sessions(),
             subteam_approval: SubteamApproval::default(),
             auto_accept: false,
-            work_ahead: false,
             land_allowed: false,
             branch_per_task: None,
             base_branch: String::new(),
@@ -565,6 +560,11 @@ pub(crate) struct Member {
     /// The lead was told once about this starvation episode (C7).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub starved_told: bool,
+    /// Task 173: the member's session works with nothing handed to it
+    /// (unassigned work), since when and what it runs; cleared once it has a
+    /// hand-out or stops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unassigned: Option<Unassigned>,
     /// Task 134: the member's unread team messages (the working tier), as
     /// status shows them ("unread: N"); None when it has read everything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1386,6 +1386,9 @@ pub(crate) enum AttemptState {
     Revoked,
     Reported,
     Rejected,
+    /// Task 160: parked on an outside event: not open (its member is free),
+    /// given back in the same attempt when the condition holds.
+    Parked,
 }
 
 impl AttemptState {
@@ -1540,6 +1543,112 @@ impl Question {
 
 /// A task kept back from the dispatcher until the lead releases it (A5): a
 /// rejection may return a task to a member who is not ready for it.
+/// Task 173: a member's work outside any hand-out.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Unassigned {
+    pub since: f64,
+    pub what: String,
+}
+
+/// Task 160: a task parked on a named outside condition, with an estimate.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Park {
+    /// The parked attempt and its member: the task goes back to them.
+    pub attempt: String,
+    pub member: String,
+    /// Who parked it (the member, the lead or you) and when.
+    pub by: String,
+    pub at: f64,
+    pub condition: ParkCondition,
+    /// When the parker expects the condition to hold (an estimate).
+    pub eta: f64,
+    /// The member's notes for its return.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+    /// waiting, met or failed.
+    #[serde(default)]
+    pub state: String,
+    /// What the check saw: why it held or failed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub checked_at: f64,
+}
+
+/// Task 160: what a park waits for. Zerus checks each itself, bounded.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum ParkCondition {
+    /// A GitHub Actions run of the fork finishing (`repo` is OWNER/REPO).
+    Ci { repo: String, run: u64 },
+    /// A build installed: at least `version`, at least Dev `build`, or exactly
+    /// `commit`; `program` is an installed desktop answering --build-info
+    /// (empty: the hgs the team worker runs).
+    Build {
+        #[serde(default)]
+        version: String,
+        #[serde(default)]
+        build: u64,
+        #[serde(default)]
+        commit: String,
+        #[serde(default)]
+        program: String,
+    },
+    /// Another task accepted.
+    Task { task: u32 },
+    /// The owner's answer on a card.
+    Card { proposal: String },
+    /// A time, in seconds since 1970.
+    Time { at: f64 },
+}
+
+impl Default for ParkCondition {
+    fn default() -> Self {
+        Self::Time { at: 0.0 }
+    }
+}
+
+/// Task 156: one owner decision: the question, the choice, why, who and when,
+/// with the refs it concerns; superseded by a later one on the same question.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Decision {
+    pub id: String,
+    pub question: String,
+    pub choice: String,
+    #[serde(default)]
+    pub why: String,
+    #[serde(default)]
+    pub by: String,
+    #[serde(default)]
+    pub at: f64,
+    /// The card it answered, if any.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub card: String,
+    /// The spec (and section) it amends, such as docs/lore.md#2.1.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub spec: String,
+    /// The output paths and tasks it concerns.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<u32>,
+    /// Terms a report must not add (a dependency, a tool), lowercase.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forbids: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub superseded_by: String,
+    /// The question's content words: a later decision with the same supersedes it.
+    #[serde(default)]
+    pub topic: String,
+}
+
+/// Task 156: lore's hits over decisions for one task, and what they were for.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct DecisionHits {
+    pub hash: String,
+    pub ids: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Hold {
     /// The lead or you.
@@ -1583,9 +1692,6 @@ pub(crate) struct Attempt {
     /// unconfirmed (spec 1).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prepare: Vec<PrepareStep>,
-    /// U31: this attempt worked a task of a draft phase before its approval.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub worked_ahead: bool,
     /// #728 L2: when the silent check last read a dsh session for this attempt;
     /// the stuck check reads it at most once a minute too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1649,6 +1755,23 @@ pub(crate) struct Attempt {
     /// as the report by itself (owner, 2026-11-07).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub last_reply: String,
+    /// Task 173: the lead's messages about this attempt ({at, via, text}),
+    /// newest last, at most 20: a lead message naming the task is bound here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lead_messages: Vec<serde_json::Value>,
+    /// Task 161: when Zerus last looked for a wait loop in this attempt's
+    /// work (its runs and repeated checks), at most every five minutes.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub wait_checked_at: f64,
+    /// Task 156: the decisions this attempt's member was told of while it worked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions_told: Vec<String>,
+    /// Task 156: the decisions its report contradicts ({decision, term,
+    /// choice}), found in its changes before accept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decision_flags: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub decisions_scanned: bool,
     /// The member's turn ended long enough ago without a report.
     #[serde(default)]
     pub no_report: bool,
@@ -1834,6 +1957,10 @@ pub(crate) struct Task {
     /// Held back from the dispatcher until the lead releases it (A5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold: Option<Hold>,
+    /// Task 160: parked on an outside event; Zerus watches the condition and
+    /// gives the task back to the same member in the same attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub park: Option<Park>,
     #[serde(default)]
     pub attempts: Vec<Attempt>,
     #[serde(default)]
@@ -2123,6 +2250,38 @@ pub(crate) struct AddedLate {
 
 /// U29: an addition to a running phase that waits for the owner's
 /// confirmation of the warning. One per phase; it expires after 30 minutes.
+/// Task 162: one change of the plan the lead made inside the approved goal.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct LeadChange {
+    /// "lcN", in order.
+    pub id: String,
+    pub op: String,
+    /// What changed, in words ("added #12 Fix the login crash to phase 3").
+    pub summary: String,
+    pub by: String,
+    pub at: f64,
+    /// The tasks it changed as they were before it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks_before: Vec<Task>,
+    /// The tasks it added.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub added: Vec<u32>,
+    /// The phases it changed as they were before it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phases_before: Vec<Phase>,
+    /// The owner looked at it in the digest (it leaves Waiting).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub seen: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverted_at: Option<f64>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reverted_by: String,
+}
+
+/// Task 162: at most this many lead changes are kept (the oldest seen or
+/// reverted ones leave first).
+pub(crate) const LEAD_CHANGES_KEPT: usize = 300;
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct PendingAddition {
     pub id: String,
@@ -2204,16 +2363,18 @@ pub(crate) enum PhaseState {
     /// Waits for the owner's approval.
     #[default]
     Draft,
-    /// The owner approved it, or its approval was `auto`.
+    /// The owner approved it, or its approval was `auto`. Task 158 (owner,
+    /// 2026-11-07): an approved phase runs alongside the phases before it;
+    /// its tasks wait only for their dependencies, for the outputs an open
+    /// task holds (task 155), for a barrier and for an owner-acceptance gate.
+    /// A record from before reads its old `queued` state as approved.
+    #[serde(alias = "queued")]
     Approved,
     /// The owner discarded it; its ids stay used.
     Discarded,
     /// U25: the owner sent the draft back with a comment; the lead reworks it
     /// into a draft again. Its tasks are not handed out.
     Rejected,
-    /// U25: accepted while an earlier phase still runs; it starts (becomes
-    /// approved) once every earlier phase is finished.
-    Queued,
     /// U63 (owner, 2026-10-31): a phase that requires the owner's acceptance
     /// has every task decided and waits for that acceptance; no later phase
     /// starts meanwhile.
@@ -2229,10 +2390,10 @@ impl PhaseState {
     pub(crate) fn is_draft(self) -> bool {
         matches!(self, Self::Draft | Self::Rejected)
     }
-    /// Accepted: running, finished or queued behind an earlier phase (U63:
-    /// or awaiting the owner's acceptance, or accepted by the owner).
+    /// Accepted: running or finished (U63: or awaiting the owner's
+    /// acceptance, or accepted by the owner).
     pub(crate) fn is_accepted(self) -> bool {
-        matches!(self, Self::Approved | Self::Queued | Self::AwaitingAcceptance | Self::Done)
+        matches!(self, Self::Approved | Self::AwaitingAcceptance | Self::Done)
     }
 }
 
@@ -2360,10 +2521,6 @@ pub(crate) struct Phase {
     /// and its tasks are handed out before other pending ones.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub urgent: bool,
-    /// U61: the lead lets idle members start this auto-accepted draft early;
-    /// its first hand-out accepts the phase.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub start_ahead: bool,
     /// Section 9.5: why a "Rework" draft was opened after the parent lead
     /// rejected the sub-team's report.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -2418,6 +2575,10 @@ pub(crate) struct Team {
     pub iron_rules_error: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iron_rules_error_at: Option<f64>,
+    /// Task 164 (owner, 2026-11-07): when the lead last got the team's starved
+    /// digest; at most one an hour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starved_digest_at: Option<f64>,
     #[serde(default)]
     pub folder: String,
     #[serde(default)]
@@ -2489,6 +2650,20 @@ pub(crate) struct Team {
     pub memory_mode_offer: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub memory_mode_reason: String,
+    /// Task 159: the owner's scratch rule this team was created under (its
+    /// id): no per-plan approval, its folder trusted for the rule's agents.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scratch_rule: String,
+    /// Task 156: the owner's decisions, oldest first (at most 500): kept in
+    /// Zerus state for every memory mode, mirrored into the team's lore.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<Decision>,
+    /// Task 156: lore's `find` hits over decisions per task (a workspace team).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub decision_hits: std::collections::BTreeMap<u32, DecisionHits>,
+    /// Task 156: the decisions the generated spec sections were last written for.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub decision_specs: String,
     /// Task 128: what the background writer last put into the team's lore
     /// workspace, and what waits on a field only a person can give.
     #[serde(default, skip_serializing_if = "LoreState::is_empty")]
@@ -2599,6 +2774,12 @@ pub(crate) struct Team {
     /// U29: additions to running phases waiting for the owner's confirmation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_additions: Vec<PendingAddition>,
+    /// Task 162: the lead's changes of the plan inside the approved goal
+    /// (tasks added, moved, split or edited in accepted phases), each with
+    /// what it replaced, so the owner sees them in a digest and can revert
+    /// any; newest last, at most `LEAD_CHANGES_KEPT`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lead_changes: Vec<LeadChange>,
     /// #511 N3: members to tell that their worked-ahead attempt was revoked
     /// with its phase, newest last, at most 20. Task 24: also a member whose
     /// attempt in progress was revoked by a reassign, a take-over or a cancel
@@ -2858,7 +3039,9 @@ impl Team {
 
     /// A returned task reserves its member even while held or awaiting review.
     pub(crate) fn reserved_for_rework(&self, member: &str, task: Option<u32>) -> bool {
-        self.tasks.iter().filter(|found| found.rework() && found.assignee == member)
+        // Task 160 (owner, 2026-11-07): a held reject or a parked rework at
+        // the head of a member's queue never blocks its later hand-outs.
+        self.tasks.iter().filter(|found| found.rework() && found.assignee == member && found.hold.is_none() && found.park.is_none())
             .min_by(|a, b| a.rework_since.unwrap().total_cmp(&b.rework_since.unwrap()).then(a.id.cmp(&b.id)))
             .is_some_and(|found| Some(found.id) != task)
     }

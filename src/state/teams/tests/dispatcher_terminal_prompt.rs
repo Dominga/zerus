@@ -105,8 +105,7 @@ fn the_raised_prompt_reaches_the_owner_the_phone_and_the_lead_with_its_screen() 
     let inbox = inbox::items(&after);
     let lead_item = inbox.iter().find(|item| item.kind == "terminal_question").unwrap();
     assert!(lead_item.detail.contains("Zerus raised it to the owner with the screen"), "{}", lead_item.detail);
-    let dev = after.member("dev").unwrap().clone();
-    let text = starved_text(&after, &dev, now());
+    let text = starved_text(&after, &["dev".into()], now()).unwrap();
     assert!(text.contains("Waiting in a Terminal:"), "{text}");
     assert!(text.contains("qa (Tester) waits 12 min in kimi/x/qa on a prompt only its Terminal takes: Bash: Run this command?"), "{text}");
     assert!(text.contains("Open Terminal"), "{text}");

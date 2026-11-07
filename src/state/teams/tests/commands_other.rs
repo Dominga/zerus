@@ -951,13 +951,14 @@ fn a_draft_behind_an_approved_running_phase_does_not_wait() {
 #[test]
 fn a_confirmed_alongside_approval_hands_the_phase_out_now() {
     // N6: "Can run alongside phase 1" was false - approving phase 2 put it
-    // in Queued and every task waited for phase 1. The owner's confirmed
-    // approval starts it; without the confirmation it still queues (U25).
+    // in Queued and every task waited for phase 1. Task 158 (owner,
+    // 2026-11-07): every approval now runs the phase alongside, confirmed
+    // "alongside" or not.
     let (team, _, _) = review_team();
     with_review_team(&team, || {
         let value = call("approve-phase", json!({"phase":2,"by":"human"})).unwrap();
-        assert_eq!(value["phase_state"], "queued", "{value}");
-        assert!(!crate::state::teams::plan::ready(&stored()).contains(&3), "a queued phase hands nothing out");
+        assert_eq!((value["phase_state"].as_str(), value["alongside"].as_bool()), (Some("running"), Some(false)), "{value}");
+        assert!(crate::state::teams::plan::ready(&stored()).contains(&3), "the phase runs alongside phase 1");
     });
     let (team, _, _) = review_team();
     with_review_team(&team, || {
@@ -1583,12 +1584,12 @@ fn a_draft_phase_can_run_alongside_a_running_phase() {
     assert_eq!(phase["waiting"]["alongside"], true);
     assert_eq!((phase["waiting"]["phase"].as_u64(), phase["waiting"]["open"].clone()), (Some(1), json!([1])));
     // The server's rule is unchanged: a draft opens when no earlier phase is
-    // a draft, so this one can be approved while phase 1 still runs (it is
-    // queued until the dispatcher hands it out).
+    // a draft, so this one can be approved while phase 1 still runs; task
+    // 158: it then runs alongside phase 1.
     let mut approved = team.clone();
     let mut events = Vec::new();
     ops::apply(&mut approved, "approve-phase", &json!({"phase":2}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
-    assert_eq!(approved.phases[0].state, PhaseState::Queued);
+    assert_eq!(approved.phases[0].state, PhaseState::Approved);
     // Once the previous phase is decided, the draft is simply a draft.
     team.task_mut(1).unwrap().status = TaskStatus::Accepted;
     let value = view_with(&team, &[], None);
@@ -1808,9 +1809,10 @@ Files: a"));
     });
 }
 
-/// U61 #709 N2: start-ahead is a CLI mutation for the lead and the owner.
+/// Task 158 (owner, 2026-11-07): start-ahead is gone; the CLI still routes it
+/// so an older lead or desktop hears why, and nothing changes.
 #[test]
-fn the_lead_or_the_owner_starts_an_auto_draft_ahead_through_the_cli() {
+fn start_ahead_is_refused_with_the_reason_through_the_cli() {
     use crate::state::teams::model::{Approval, Phase, PhaseState, Task, TaskStatus};
     let (mut team, _, _) = review_team();
     team.settings.auto_accept = true;
@@ -1825,16 +1827,12 @@ fn the_lead_or_the_owner_starts_an_auto_draft_ahead_through_the_cli() {
     });
     team.tasks.push(Task { id: 99, title: "Next".into(), phase: 9, status: TaskStatus::Draft, assignee: "dev".into(), ..Default::default() });
     with_review_team(&team, || {
-        // The lead, through the CLI's mutation list.
-        let started = as_lead(|| call("start-ahead", json!({"phase":9}))).unwrap();
-        assert_eq!(started["start_ahead"], json!(true));
-        assert!(stored().phases.iter().find(|phase| phase.n == 9).unwrap().start_ahead);
-        // The owner undoes it before any hand-out.
-        let undone = call("start-ahead", json!({"phase":9,"undo":true,"by":"human"})).unwrap();
-        assert_eq!(undone["status"], json!("undone"));
-        // The owner starts it too.
-        let again = call("start-ahead", json!({"phase":9,"by":"human"})).unwrap();
-        assert_eq!(again["status"], json!("started"));
+        for error in [as_lead(|| call("start-ahead", json!({"phase":9}))), call("start-ahead", json!({"phase":9,"by":"human"}))] {
+            let error = error.unwrap_err().to_string();
+            assert!(error.contains("Start ahead is gone"), "{error}");
+        }
+        assert_eq!(stored().phases.iter().find(|phase| phase.n == 9).unwrap().state, PhaseState::Draft);
+        assert!(!crate::state::teams::commands::USAGE.contains("start-ahead"));
     });
 }
 

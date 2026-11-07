@@ -1039,7 +1039,17 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if input.len() > MAX_JSON {
         return Err("message payload exceeds 29 MiB".into());
     }
+    // Task 161: the lead's message telling a member to wait is a park instead.
+    // Task 156: the lead's decision for a member is recorded with hgs team
+    // decide, never only messaged.
+    // Task 173: a team lead's message to its member naming a task is bound to
+    // that task's attempt, or refused with the hand-out to use instead.
+    let text = serde_json::from_slice::<Value>(&input).ok().and_then(|value| value["text"].as_str().map(str::to_owned)).unwrap_or_default();
+    super::teams::wait_loops::lead_send_check(&args[0], &text).map_err(|error| error.to_string())?;
+    super::teams::decisions::lead_send_check(&args[0], &text).map_err(|error| error.to_string())?;
+    let bindings = super::teams::shadow::lead_send(&args[0], &text).map_err(|error| error.to_string())?;
     let receipt = submit(&args[0], &input, None)?;
+    super::teams::shadow::record(&bindings, &text, "hgs send");
     println!("{receipt}");
     Ok(0)
 }

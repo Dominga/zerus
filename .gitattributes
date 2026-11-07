@@ -5,6 +5,9 @@
 
 # Reviewed official manifests are hash-pinned raw upstream bytes on every host.
 scripts/ci/kimi-native-manifests/*.json -text
+# A reviewed third-party license is hash-pinned too (collect-licenses.py):
+# a Windows checkout must not turn its line endings into CRLF (task 169).
+docs/licenses/canonicalpath-LICENSE.txt -text
 
 # Captured terminal screens intentionally preserve whitespace and blank lines.
 # They and the recorded screen data are embedded with include_str!, so checkouts

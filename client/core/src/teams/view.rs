@@ -351,6 +351,10 @@ pub struct TaskView {
     pub waits: String,
     /// Task 40: the owner holds it (`held`).
     pub held: bool,
+    /// Task 160: "parked until <condition>, ETA HH:MM (in N min)", as hgs
+    /// status words it; empty when the task is not parked.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub parked: String,
     /// Task 40: the pipeline chosen in the plan, and its run (stages and the
     /// open stage) when one started.
     pub pipeline: String,
@@ -680,6 +684,7 @@ fn task(value: &Value) -> TaskView {
             .map(|waits| text(waits, "unblock", LINE_CHARS))
             .unwrap_or_default(),
         held: flag(value, "held"),
+        parked: text(value, "parked", LINE_CHARS),
         pipeline: name(value, "pipeline"),
         pipeline_run: pipeline_run(value),
         subteam: value.get("subteam").is_some_and(Value::is_object),

@@ -166,6 +166,19 @@ pub(crate) const BUILTIN: &[Template] = &[
         params: &[],
         timeout_secs: 3600,
     },
+    // Task 157: the release candidate's local leg a Windows worker runs before
+    // the release branch moves: the fork-windows steps, recorded per commit.
+    // Task 169 review: a built-in template runs for any member without an
+    // approval, so it never takes --exp-tag (that pushes a tag to origin): the
+    // runner leg stays the owner's step by hand (docs/release-candidate.md).
+    Template {
+        id: "release-candidate",
+        summary: "the fork release candidate's local leg on a Windows worker: Qt offscreen suites, fork handoff/update, Tauri build, portable zip self-test, recorded for the commit",
+        program: "python",
+        args: &["scripts/release-candidate.py", "--commit={commit}"],
+        params: &[optional("commit", Kind::Identifier)],
+        timeout_secs: 10800,
+    },
     // Owner, 2026-10-28: a stale generated build folder (an AAPT intermediate)
     // needed a permission to remove; only a build output can go.
     Template {
@@ -323,7 +336,7 @@ pub(crate) fn settings_override(path: Option<PathBuf>) {
 /// The settings file: the global switch and the owner's additions. It lives in
 /// Zerus state, never in a member's folder, so a sandboxed member can neither
 /// read nor write it (U21, attempt 2).
-fn read_settings() -> Value {
+pub(crate) fn read_settings() -> Value {
     std::fs::read(settings_path())
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
@@ -331,7 +344,7 @@ fn read_settings() -> Value {
         .unwrap_or_else(|| json!({"enabled":true}))
 }
 
-fn write_settings(value: &Value) -> anyhow::Result<()> {
+pub(crate) fn write_settings(value: &Value) -> anyhow::Result<()> {
     let path = settings_path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -2093,8 +2106,8 @@ mod tests {
         // The set the owner asked for, by id.
         let ids: Vec<&str> = BUILTIN.iter().map(|template| template.id).collect();
         // Task 85: the CMake and MSBuild templates of any project after them; task 86: the Python and Cython ones; task 87: Unreal.
-        assert_eq!(ids, ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test", "py-test", "cython-build", "android-test", "clean-build",
-                         "git-merge-lead", "git-commit", "ue-build", "ue-test", "cmake-configure", "cmake-build", "ctest", "msbuild-build", "vstest"]);
+        assert_eq!(ids, ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test", "py-test", "cython-build", "android-test", "release-candidate",
+                         "clean-build", "git-merge-lead", "git-commit", "ue-build", "ue-test", "cmake-configure", "cmake-build", "ctest", "msbuild-build", "vstest"]);
     }
 
     // Run by hand on a Windows machine with Visual Studio (cargo test -- --ignored).
@@ -3241,4 +3254,3 @@ kind = "path"
         assert!(error.contains("HKCU") && error.contains("ZERUS_UE_ENGINE"), "{error}");
     }
 }
-

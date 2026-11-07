@@ -153,7 +153,7 @@ result.
 | **Command and land stages** | The catalog may add a command stage (its exit code is the verdict) and one land stage (exit codes map to accepted, returned or held; needs your `land_allowed`). |
 | **Add-to-phase and proposals** | The lead proposes adding, removing or swapping members, adding tasks to a running phase, cancelling tasks, discarding a phase or a setting change; you Allow exactly that change. |
 | **Plan modes** | Standard plans a release in phases; free keeps an open phase that takes tasks as they come. |
-| **Auto drafts and start-ahead** | With Auto-accept, a drafted phase stays a draft until its first hand-out; the lead can start it ahead when members are idle. |
+| **Phases run alongside** | An approved phase runs beside the phases before it: a task waits only for its dependencies, for files an open task writes, for a barrier phase and for a phase awaiting your acceptance. A draft runs nothing until it is approved; with Auto-accept, Auto approves a draft once its plan has no blocker. |
 | **Rebalancing** | A free member of the right role takes a ready task; a task for a role goes to a member whose models allow it. |
 | **Stuck and crashed members** | A member that stops without a report, or crashes, is noticed; a member waiting for your answer or for its Background work is not a stop. With `restart_crashed` it is restarted at most three times an hour, then held for the lead. |
 | **Stalled lead** | When the lead's reports, questions or permissions wait past `lead_stall_minutes` (20 by default) and the lead does not work on them, you are told on the team bar, in Waiting for you, on the desktop and on the phone, at most once an hour, until it moves. |
@@ -204,7 +204,7 @@ editor apart.
 ### A long stream in free plan mode
 
 Turn on: **Free** plan mode, the **intake key** for urgent work, and
-**start-ahead**.
+**Auto-accept drafts**.
 
 Why: a support queue never drains. A free team keeps one open phase and takes
 each task as it arrives; a build is added when you ask for one, and you close

@@ -21,6 +21,8 @@ const TOPICS: &[(&str, &str)] = &[
     ("team-propose", include_str!("agent_guide/team-propose.md")),
     // Task 128: a team's RustCodeLore memory.
     ("team-lore", include_str!("agent_guide/team-lore.md")),
+    // Task 160: park a task on an outside event, never poll.
+    ("team-park", include_str!("agent_guide/team-park.md")),
     ("team-broker", include_str!("agent_guide/team-broker.md")),
     ("team-cpp", include_str!("agent_guide/team-cpp.md")),
     ("run", include_str!("agent_guide/run.md")),
@@ -31,7 +33,7 @@ const TOPICS: &[(&str, &str)] = &[
     ("stop", include_str!("agent_guide/stop.md")),
     ("tasks", include_str!("agent_guide/tasks.md")),
 ];
-const USAGE: &str = "usage: hgs guide [send|wait|team|team-tests|team-lead|team-custom|team-draft|team-input|team-tree|team-run|team-safe|team-propose|team-lore|team-broker|team-cpp|run|tests|designer|launch|stop|tasks]";
+const USAGE: &str = "usage: hgs guide [send|wait|team|team-tests|team-lead|team-custom|team-draft|team-input|team-tree|team-run|team-safe|team-propose|team-lore|team-park|team-broker|team-cpp|run|tests|designer|launch|stop|tasks]";
 
 pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     let text = match args {
@@ -142,21 +144,22 @@ mod tests {
         assert!(lead.contains("unknown, never zero"), "{lead}");
     }
 
-    /// U61: the lead protocol says an auto-accepted draft stays editable until
-    /// its first hand-out, when to start it ahead, and keeps the review rule.
+    /// U61, task 158: the lead protocol says an approved phase runs alongside,
+    /// what a task still waits for, how Auto accepts a draft, and keeps the
+    /// review rule; start ahead and work ahead are gone.
     #[test]
-    fn the_lead_protocol_names_auto_drafts_and_start_ahead() {
+    fn the_lead_protocol_names_the_one_phase_start_model() {
         let lead = TOPICS.iter().find(|(name, _)| *name == "team-lead").unwrap().1;
         assert!(lead.contains("Auto drafts (U61)"), "{lead}");
-        assert!(lead.contains("stays a draft you edit"), "{lead}");
-        assert!(lead.contains("hgs team start-ahead --json"), "{lead}");
-        assert!(lead.contains("members are idle") && lead.contains("independent"), "{lead}");
+        assert!(lead.contains("an approved phase runs alongside earlier ones"), "{lead}");
+        assert!(lead.contains("files an open task writes"), "{lead}");
+        assert!(!lead.contains("start-ahead") && !lead.contains("Work ahead"), "{lead}");
         assert!(lead.contains("Review drafts") && lead.contains("need the owner"), "{lead}");
         // #740: a question to the owner is a proposal, never only prose.
         assert!(lead.contains("a question for the owner is a proposal, never only"), "{lead}");
         let propose = pages().into_iter().find(|(name, _)| *name == "team-propose").unwrap().1;
         assert!(propose.contains(r#"{"kind":"question","question""#) && propose.contains("never only in your reply"), "{propose}");
-        assert!(lead.contains("Work ahead is for review drafts"), "{lead}");
+        assert!(lead.contains("no draft runs before approval"), "{lead}");
     }
 
     /// #742: no agent installs a tool; the lead's and the tests' pages say a

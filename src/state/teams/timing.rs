@@ -175,7 +175,8 @@ pub(crate) fn timing(team: &Team, task: &Task, now: f64) -> Value {
     }
     // A pending task with no open attempt waits for a member, or for the lead
     // while it holds the task (A5).
-    if live && task.status == TaskStatus::Pending && task.open_attempt().is_none() {
+    // Task 160: a parked task waits for its condition, not for a hand-out.
+    if live && task.status == TaskStatus::Pending && task.open_attempt().is_none() && task.park.is_none() {
         if let Some(since) = since {
             match &task.hold {
                 Some(hold) => {

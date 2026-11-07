@@ -31,6 +31,9 @@ pub(crate) fn refusal_pause(count: u32) -> f64 {
 /// How long a member may sit idle without ready work before the lead hears
 /// once that the plan starves it (C7).
 const STARVED_AFTER: f64 = 20.0 * 60.0;
+/// Task 164 (owner, 2026-11-07): the lead gets one team-level starved digest
+/// at most once an hour.
+const STARVED_DIGEST_EVERY: f64 = 60.0 * 60.0;
 /// The worker's session listing is bounded, so a stop request is never far away.
 const LIST_TIMEOUT: Duration = Duration::from_secs(30);
 /// The worker's log keeps at most this much before it starts over.
@@ -255,6 +258,17 @@ pub(crate) enum Step {
     Adopt { member: String, session: SessionRef },
     Launch { member: String },
     HandOut { task: u32, member: String },
+    /// Task 160: a parked task whose condition held goes back to its member.
+    Resume { task: u32, member: String },
+    /// Task 161: look for a wait loop in a task's work (its runs, repeated
+    /// checks); one found becomes a park.
+    DetectWait { task: u32 },
+    /// Task 156: a new decision binds a task in flight: one message to its member.
+    TellDecision { task: u32, decision: String },
+    /// Task 156: a report's changes are checked against the decisions.
+    ScanReport { task: u32 },
+    /// Task 156: the specs' generated Decisions sections are out of date.
+    SpecDecisions,
     /// U45: switch the member's model and effort before it gets the task.
     SwitchModel { task: u32, member: String, from: String, model: String, effort: String },
     /// U45: the switch was not confirmed in time; the task waits for the lead.
@@ -264,8 +278,6 @@ pub(crate) enum Step {
     /// U46: a hand-out waits for its context action's confirmation: one look
     /// per tick, then the hand-out itself or the waiting reason.
     PrepareContext { task: u32, member: String },
-    /// U31: an idle member takes an independent task of the next draft phase.
-    WorkAhead { task: u32, member: String },
     /// U49: a draining member owes nothing: pause its session, then remove it.
     /// `pause` is false when there is no live session to keep (an agent with no
     /// separate process, or a session already stopped).
@@ -294,10 +306,13 @@ pub(crate) enum Step {
     CheckSilent { task: u32, last: f64 },
     /// The member is idle without a ready task while tasks are open (C7).
     Starving { member: String },
+    /// Task 173: the member's session works with nothing handed to it.
+    Unassigned { member: String, what: String },
+    UnassignedEnded { member: String },
     /// The member got work again or nothing is open: the episode ends (C7).
     StarvedEnded { member: String },
     /// Idle without work for too long: tell the free lead once (C7).
-    PlanStarved { member: String },
+    PlanStarved { members: Vec<String> },
     /// The member's Background work appeared; its default red time starts now
     /// (C12).
     BackgroundStart { member: String },
@@ -1320,7 +1335,11 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         steps.push(Step::AutoAcceptDraft { phase });
     }
     let ready_ids = plan::ready(team);
-    let staging_open = team.tasks.iter().any(|task| !task.status.finished());
+    // Task 164 (owner, 2026-11-07): only work of a phase that can start makes
+    // a member starve; a draft, a paused phase or one behind a barrier or the
+    // owner's acceptance is the owner's or the plan's wait, not the lead's.
+    let staging_open = team.tasks.iter().any(|task| plan::startable(team, task));
+    let mut starved_due = Vec::new();
     // U9: while every open task waits for the owner's phase approval, a
     // member with nothing ready is expected; no episode starts or continues.
     let owner_wait = plan::waiting_for_owner(team);
@@ -1332,8 +1351,11 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         let Some(found) = seen.iter().find(|seen| seen.host == session.host && seen.name == session.name) else { continue };
         let has_work = busy.contains(member.id.as_str()) || team.reserved_for_rework(&member.id, None)
             || ready_ids.iter().any(|id| team.task(*id).is_some_and(|task| task.assignee == member.id));
+        // Task 164: a review, QA, acceptance or merge role waits by design; it
+        // starves only while a ready task of its kind sits with someone else.
+        let waits_by_role = plan::waiting_role(&member.role) && plan::ready_for_role(team, member, &ready_ids).is_empty();
         // U49: a draining member is idle on purpose; its episode ends quietly.
-        if !staging_open || owner_wait || has_work || member.draining || !(found.free && found.live) {
+        if !staging_open || owner_wait || has_work || waits_by_role || member.draining || !(found.free && found.live) {
             if member.starved_since.is_some() {
                 steps.push(Step::StarvedEnded { member: member.id.clone() });
             }
@@ -1342,7 +1364,26 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         } else if !member.starved_told
             && now - member.starved_since.unwrap_or(now) >= STARVED_AFTER
         {
-            steps.push(Step::PlanStarved { member: member.id.clone() });
+            starved_due.push(member.id.clone());
+        }
+    }
+    // Task 164: one team-level digest for every member due, at most once an
+    // hour; a member that becomes due meanwhile waits for the next one.
+    if !starved_due.is_empty() && team.starved_digest_at.is_none_or(|at| now - at >= STARVED_DIGEST_EVERY) {
+        steps.push(Step::PlanStarved { members: starved_due });
+    }
+    // Task 173: a member building, or working past the grace, with nothing
+    // handed to it is unassigned work for the lead at once, never idle.
+    if team.status == TeamStatus::Running {
+        for member in team.members.iter().filter(|member| member.id != team.lead) {
+            let Some(found) = session_of(member, seen) else { continue };
+            match (super::shadow::unassigned(team, member, found, now), member.unassigned.is_some()) {
+                (Some(what), false) => steps.push(Step::Unassigned { member: member.id.clone(), what }),
+                (None, true) if !found.building && (found.free || !super::shadow::handed(team, &member.id).is_empty()) => {
+                    steps.push(Step::UnassignedEnded { member: member.id.clone() });
+                }
+                _ => {}
+            }
         }
     }
     // C12: Background work and the budgets declared for it. A job without a
@@ -1496,6 +1537,17 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         let delivered = run.delivered_at.unwrap_or(run.at);
         if found.free && !found.background && !found.building && found.reply_at.unwrap_or(0.0) > delivered {
             steps.push(Step::StageSilent { task: task.id, run: run.id.clone() });
+        }
+    }
+    // Task 160: a parked task whose condition held goes back to its member at
+    // its next free turn, before any new task.
+    if team.status == TeamStatus::Running {
+        for task in team.tasks.iter().filter(|task| task.park.as_ref().is_some_and(|park| park.state == super::park::MET)) {
+            let Some(member) = task.park.as_ref().and_then(|park| team.member(&park.member)) else { continue };
+            if available(member, &busy, Some(task.id)) {
+                busy.insert(member.id.as_str());
+                steps.push(Step::Resume { task: task.id, member: member.id.clone() });
+            }
         }
     }
     // C6: among a member's ready tasks the one with the most transitive
@@ -1664,36 +1716,50 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         busy.insert(member.id.as_str());
         steps.push(if member.needs_settings() { Step::Settings { member: member.id.clone() } } else { Step::HandOut { task: id, member: member.id.clone() } });
     }
-    // U31: work ahead. An idle member may take an independent task of the next
-    // draft phase (#511 N2: every dependency accepted). U61: the same path takes
-    // the tasks of an auto-accepted draft whose phases ahead are done, or that
-    // the lead started ahead; that hand-out accepts the phase by Auto.
-    let ahead: Vec<u32> = {
-        let mut ids = work_ahead_tasks(team);
-        for id in plan::auto_draft_tasks(team) {
-            if !ids.contains(&id) {
-                ids.push(id);
+    // Task 158 (owner, 2026-11-07): there is no work ahead or start ahead any
+    // more; a draft's tasks wait for its approval, and an approved phase's
+    // tasks are on the ready path above, alongside the phases before it.
+    // Task 161: a member's attempt that may have become a wait loop (its own
+    // waiting job, the same read-only check repeated) is looked at, at most
+    // every five minutes, ten minutes after its hand-out.
+    if team.status == TeamStatus::Running {
+        for task in team.tasks.iter().filter(|task| task.park.is_none()) {
+            let Some(attempt) = task.open_attempt() else { continue };
+            let Some(member) = team.member(&attempt.member).filter(|member| member.id != team.lead && member.session.is_some()) else { continue };
+            // Only a busy session (a turn or a run going on) can be looping.
+            let busy = member.session.as_ref().is_some_and(|session| seen.iter().any(|found| found.host == session.host && found.name == session.name && !found.free));
+            let start = attempt.delivered_at.unwrap_or(attempt.sent_at);
+            if attempt.state == AttemptState::Delivered
+                && attempt.report.is_none()
+                && attempt.open_question().is_none()
+                && now - start >= super::wait_loops::DETECT_AFTER
+                && now - attempt.wait_checked_at >= super::wait_loops::DETECT_EVERY
+                && busy
+            {
+                steps.push(Step::DetectWait { task: task.id });
             }
         }
-        ids
-    };
-    if !ahead.is_empty() {
-        for member in &team.members {
-            if !available(member, &busy, None) || busy.contains(member.id.as_str()) {
-                continue;
-            }
-            // Task 155: work ahead never runs beside a task writing the same files.
-            if let Some(task) = ahead.iter().filter_map(|id| team.task(*id)).find(|task| {
-                task.assignee == member.id
-                    && super::rights::missing(task, member).is_empty()
-                    && plan::output_holders(team, task).is_empty()
-                    && !claimed.iter().any(|other| other.output_overlaps(task))
-            }) {
-                claimed.push(task);
-                busy.insert(member.id.as_str());
-                steps.push(Step::WorkAhead { task: task.id, member: member.id.clone() });
+    }
+    // Task 156: decisions reach the work: a task in flight a new decision
+    // binds is told once; a report is checked against them before accept;
+    // the specs they amend get their generated section.
+    for task in &team.tasks {
+        let Some(attempt) = task.open_attempt().filter(|attempt| attempt.member != team.lead) else { continue };
+        if let Some(decision) = super::decisions::current(team).find(|decision| {
+            decision.at > attempt.sent_at && !attempt.decisions_told.contains(&decision.id) && super::decisions::binds(team, decision, task).is_some()
+        }) {
+            steps.push(Step::TellDecision { task: task.id, decision: decision.id.clone() });
+        }
+    }
+    if super::decisions::current(team).any(|decision| !decision.forbids.is_empty()) {
+        for task in &team.tasks {
+            if task.attempts.iter().rev().find(|attempt| attempt.state == AttemptState::Reported).is_some_and(|attempt| !attempt.decisions_scanned) {
+                steps.push(Step::ScanReport { task: task.id });
             }
         }
+    }
+    if team.status == TeamStatus::Running && !super::decisions::specs(team).is_empty() && super::decisions::specs_hash(team) != team.decision_specs {
+        steps.push(Step::SpecDecisions);
     }
     // Task 134: unread team messages ring at the member's next idle moment,
     // never into a busy composer, and once more past their bound; a member
@@ -1701,7 +1767,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     // delivery rings for everything unread).
     for member in team.members.iter().filter(|member| member.state != MemberState::Removed) {
         let given = steps.iter().any(|step| match step {
-            Step::HandOut { member: to, .. } | Step::StageOut { member: to, .. } | Step::WorkAhead { member: to, .. } => *to == member.id,
+            Step::HandOut { member: to, .. } | Step::StageOut { member: to, .. } | Step::Resume { member: to, .. } => *to == member.id,
             Step::Rebalance { to, .. } => *to == member.id,
             Step::Inbox => member.id == team.lead,
             _ => false,
@@ -2052,61 +2118,9 @@ fn test_queue_tick(store: &mut Store, team_id: &str, now: f64) -> anyhow::Result
     })
 }
 
-/// U31: the tasks of the next draft phase an idle member may work ahead on: a
-/// task (not a check) still waiting for its phase, whose dependencies are all
-/// accepted (#511 N2: a dependency inside a draft or queued phase counts too)
-/// and that names no file an open running task also names.
-pub(crate) fn work_ahead_tasks(team: &Team) -> Vec<u32> {
-    if !team.settings.work_ahead {
-        return Vec::new();
-    }
-    // U61: work ahead keeps its meaning for review drafts; an auto-accepted
-    // draft starts early only on the lead's start-ahead (or when the phases
-    // ahead are done, which the Auto path above handles).
-    let Some(draft) = team
-        .phases
-        .iter()
-        .filter(|phase| phase.state == PhaseState::Draft && phase.approval != Approval::Auto)
-        .map(|phase| phase.n)
-        .min()
-    else {
-        return Vec::new();
-    };
-    let running: Vec<&Task> = team
-        .tasks
-        .iter()
-        .filter(|task| {
-            !task.status.finished() && team.phases.iter().find(|phase| phase.n == task.phase).is_none_or(|phase| phase.state == PhaseState::Approved)
-        })
-        .collect();
-    let files = |text: &str| -> BTreeSet<String> {
-        text.split_whitespace()
-            .map(|word| word.trim_matches(|c: char| "`'\",;()[]{}".contains(c)))
-            .filter(|word| word.contains('/') || word.contains('\\') || word.rsplit_once('.').is_some_and(|(_, ext)| !ext.is_empty() && ext.len() <= 4))
-            .map(str::to_lowercase)
-            .collect()
-    };
-    let running_files: BTreeSet<String> = running.iter().flat_map(|task| files(&format!("{} {}", task.title, task.description))).collect();
-    team.tasks
-        .iter()
-        .filter(|task| {
-            task.phase == draft
-                && matches!(task.status, TaskStatus::Pending | TaskStatus::Draft)
-                && task.kind == TaskKind::Task
-                && task.hold.is_none()
-                && task.waits.is_none()
-                // U63: nothing works ahead behind a phase awaiting the owner's acceptance.
-                && plan::acceptance_block(team, task.phase).is_none()
-                && task.deps.iter().all(|dep| plan::satisfied(team, dep.task, DependencyKind::Hard))
-                && files(&format!("{} {}", task.title, task.description)).is_disjoint(&running_files)
-        })
-        .map(|task| task.id)
-        .collect()
-}
-
-/// Whether Zerus may hand `task_id` out now: a ready task of the running plan,
-/// or (U31) a task of the next draft phase an idle member works ahead on. A
-/// draft phase's tasks are Draft, which `plan::ready` never lists.
+/// Whether Zerus may hand `task_id` out now: a ready task of an approved phase
+/// (task 158: alongside the phases before it). A draft phase's tasks are
+/// Draft, which `plan::ready` never lists.
 fn can_hand_out(team: &Team, task_id: u32) -> bool {
     if team.status != TeamStatus::Running {
         return false;
@@ -2116,13 +2130,7 @@ fn can_hand_out(team: &Team, task_id: u32) -> bool {
     if team.task(task_id).is_some_and(|task| !plan::output_holders(team, task).is_empty()) {
         return false;
     }
-    if plan::ready(team).contains(&task_id) || work_ahead_tasks(team).contains(&task_id) {
-        return true;
-    }
-    // U61: an auto-accepted draft whose phases ahead are done, or that the lead
-    // started ahead, hands out its independent draft tasks; the first hand-out
-    // accepts the phase.
-    plan::auto_draft_tasks(team).contains(&task_id)
+    plan::ready(team).contains(&task_id)
 }
 
 /// At most one message reaches the free lead per tick; the others wait for the
@@ -2363,6 +2371,8 @@ fn hand_off_text_rules(
         text += &format!("Zerus {} into your branch before this hand-out; build on it.\n", step.reason);
     }
     text += &dependencies_text(team, task, report_host);
+    // Task 156: the owner's decisions that bind this task, by relevance.
+    text += &super::decisions::block(team, task);
     // Owner 2026-10-31: the hand-out says the task's time estimate.
     text += &super::estimates::prompt_line(team, task);
     if let Some(previous) = task.attempts.iter().rev().find(|a| a.n < attempt.n && a.state == AttemptState::Rejected) {
@@ -3389,6 +3399,249 @@ pub(crate) fn classify_answer(output: &anyhow::Result<Output>) -> Sent {
     }
 }
 
+/// Task 160: gives a parked task back to its member in the same attempt, with
+/// the notes it parked with. A refused message leaves it to the next tick; an
+/// uncertain one is unconfirmed, as a hand-out is.
+fn resume_parked(store: &mut Store, team: &Team, task_id: u32, member_id: &str) -> anyhow::Result<()> {
+    let task = team.task(task_id).context("unknown task")?;
+    let park = task.park.clone().filter(|park| park.state == super::park::MET).context("the task is no longer parked")?;
+    let member = team.member(member_id).context("unknown member")?;
+    let session = member.session.clone().context("the member has no session")?;
+    let text = super::park::resume_text(task_id, &task.title, &park);
+    let sent = send(&session, &uuid::Uuid::new_v4().to_string(), &text);
+    if let Sent::Refused(reason) = &sent {
+        anyhow::bail!("the resume of #{task_id} was refused: {reason}");
+    }
+    let unconfirmed = matches!(sent, Sent::Uncertain(_));
+    change(store, &team.id, |team, events| {
+        let task = team.task_mut(task_id).context("unknown task")?;
+        if task.park.as_ref().is_none_or(|found| found.attempt != park.attempt) {
+            return Ok(());
+        }
+        task.park = None;
+        task.status = TaskStatus::InProgress;
+        if let Some(attempt) = task.attempts.iter_mut().find(|attempt| attempt.id == park.attempt) {
+            attempt.state = if unconfirmed { AttemptState::Unconfirmed } else { AttemptState::Delivered };
+            attempt.sent_at = now();
+        }
+        events.push(Event::new("resumed", json!({"task":task_id,"member":park.member,"condition":super::park::label(&park.condition),
+            "detail":park.detail,"unconfirmed":unconfirmed})));
+        Ok(())
+    })?;
+    // Task 161: the lead gets every park's outcome; a failed or overdue one
+    // is in its inbox, a met one is told here.
+    tell_lead(store, team, "park", &format!(
+        "[Zerus team] Task #{task_id} ({}) is back with {}: its park ended, {} ({}).",
+        task.title,
+        team.name_of(&park.member),
+        super::park::label(&park.condition),
+        if park.detail.is_empty() { "condition met" } else { park.detail.as_str() }
+    ));
+    Ok(())
+}
+
+/// Task 161: one line for the lead, stored and rung; a refusal is left (the
+/// event journal has it).
+fn tell_lead(store: &mut Store, team: &Team, kind: &str, text: &str) {
+    let Some(lead) = team.member(&team.lead).and_then(|lead| lead.session.clone()) else { return };
+    let _ = super::doorbell::post_and_ring(store, &team.id, &team.lead, &lead, &uuid::Uuid::new_v4().to_string(), kind, "zerus", super::working::Urgency::Normal, text);
+}
+
+/// Task 161: a member's attempt that waits instead of working: a running job
+/// of its session whose purpose is waiting, or the same read-only check its
+/// turn repeated at intervals. Found, the task is parked on the condition
+/// Zerus guesses, the member is told to stop waiting, and the lead is told
+/// once with the guessed condition to correct.
+fn detect_wait(store: &mut Store, team: &Team, task_id: u32) -> anyhow::Result<()> {
+    let task = team.task(task_id).context("unknown task")?;
+    let attempt = task.open_attempt().context("no open attempt")?.clone();
+    let member = team.member(&attempt.member).context("unknown member")?.clone();
+    let session = member.session.clone().context("the member has no session")?;
+    let at = now();
+    let mut found: Option<(String, String)> = None;
+    if member.computer.is_empty() {
+        for claim in super::super::builds::running_for(&session.name) {
+            if claim["session"]["run_id"] != session.run_id.as_str() {
+                continue;
+            }
+            let label = claim["label"].as_str().unwrap_or_default();
+            let command = claim["command"].as_str().unwrap_or_default();
+            let cwd = std::path::PathBuf::from(claim["cwd"].as_str().unwrap_or("."));
+            let script = super::wait_loops::script_text(command, &cwd);
+            if let Some(why) = super::wait_loops::waiting_job(label, &format!("{command}\n{script}")) {
+                found = Some((format!("its run \"{label}\" ({why})"), format!("{label}\n{command}\n{script}")));
+                break;
+            }
+        }
+    }
+    if found.is_none() {
+        let events: Vec<Value> = hgs(&session.host, &["inspect", &session.name, "--after", "0"], None, Duration::from_secs(15))
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
+            .and_then(|value| value.get("events").and_then(Value::as_array).cloned())
+            .unwrap_or_default();
+        if let Some((command, times)) = super::wait_loops::repeated_check(&events, attempt.delivered_at.unwrap_or(attempt.sent_at)) {
+            found = Some((format!("it ran `{command}` {times} times at intervals"), command));
+        }
+    }
+    let Some((why, text)) = found else {
+        return change(store, &team.id, |team, _| {
+            if let Some(open) = team.task_mut(task_id).and_then(|task| task.attempts.iter_mut().find(|found| found.id == attempt.id)) {
+                open.wait_checked_at = at;
+            }
+            Ok(())
+        });
+    };
+    let (condition, what) = super::wait_loops::guess_condition(&text, at);
+    let mut parked = false;
+    change(store, &team.id, |team, events| {
+        if let Some(open) = team.task_mut(task_id).and_then(|task| task.attempts.iter_mut().find(|found| found.id == attempt.id)) {
+            open.wait_checked_at = at;
+        }
+        let request = json!({"task":task_id,"attempt":attempt.id,"condition":condition,"eta_minutes":super::wait_loops::GUESSED_ETA_MINUTES,
+            "note":format!("Parked by Zerus: the attempt was waiting ({why}).")});
+        let lead = ops::Actor::Member(team.lead.clone());
+        let mut inner = Vec::new();
+        if ops::apply(team, "park", &request, &lead, &BTreeSet::new(), &mut inner).is_ok() {
+            if let Some(park) = team.task_mut(task_id).and_then(|task| task.park.as_mut()) {
+                park.by = "Zerus (a wait loop)".into();
+            }
+            events.extend(inner);
+            events.push(Event::new("wait_parked", json!({"task":task_id,"member":member.id,"attempt":attempt.n,"why":why,"condition":what})));
+            parked = true;
+        }
+        Ok(())
+    })?;
+    if !parked {
+        return Ok(());
+    }
+    let _ = send(&session, &uuid::Uuid::new_v4().to_string(), &format!(
+        "[Zerus team] Your task #{task_id} was waiting ({why}), so Zerus parked it until {what}. Stop the wait now (end that job or loop) and end your turn: \
+Zerus watches the condition and gives the task back to you; take your next task meanwhile. A wait is always a park: hgs guide team-park."
+    ));
+    tell_lead(store, team, "park", &format!(
+        "[Zerus team] Task #{task_id} ({}) of {} was a wait loop ({why}); Zerus parked it until {what} (a guess, ETA {} min). \
+Set the real condition with hgs team unpark and hgs team park, or leave it.",
+        task.title,
+        team.name_of(&member.id),
+        super::wait_loops::GUESSED_ETA_MINUTES
+    ));
+    Ok(())
+}
+
+/// Task 156: one message to the member of a task in flight that a new
+/// decision binds; told once per attempt.
+fn tell_decision(store: &mut Store, team: &Team, task_id: u32, decision_id: &str) -> anyhow::Result<()> {
+    let task = team.task(task_id).context("unknown task")?;
+    let attempt = task.open_attempt().context("no open attempt")?.clone();
+    let decision = team.decisions.iter().find(|found| found.id == decision_id).context("unknown decision")?;
+    let member = team.member(&attempt.member).context("unknown member")?;
+    let session = member.session.clone().context("the member has no session")?;
+    let text = format!(
+        "[Zerus team] A decision of the owner binds your task #{task_id} ({}):\n{}\nFollow it in this attempt (attempt {}); hgs team ask if it conflicts with your work.",
+        task.title,
+        super::decisions::line(decision),
+        attempt.id
+    );
+    if let Sent::Refused(reason) = send(&session, &uuid::Uuid::new_v4().to_string(), &text) {
+        anyhow::bail!("the decision {decision_id} did not reach {}: {reason}", member.id);
+    }
+    change(store, &team.id, |team, events| {
+        if let Some(found) = team.task_mut(task_id).and_then(|task| task.attempts.iter_mut().find(|found| found.id == attempt.id)) {
+            if !found.decisions_told.iter().any(|id| id == decision_id) {
+                found.decisions_told.push(decision_id.to_owned());
+                events.push(Event::new("decision_told", json!({"task":task_id,"attempt":attempt.n,"decision":decision_id})));
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Task 156: what a report adds: its text and the lines its commits add
+/// against the lead branch (bounded), to check against the decisions.
+fn added_text(team: &Team, task: &Task, attempt: &Attempt) -> String {
+    let mut text = attempt.report.as_ref().map(|report| report.text.clone()).unwrap_or_default();
+    let Some(member) = team.member(&attempt.member) else { return text };
+    let Ok(folder) = member_folder_path(team, member) else { return text };
+    let Ok(branch) = lead_branch(team) else { return text };
+    let head = if attempt.folder_head.is_empty() { "HEAD".to_owned() } else { attempt.folder_head.clone() };
+    if folder.is_empty() || !member.computer.is_empty() {
+        return text;
+    }
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let range = format!("{branch}...{head}");
+    if let Ok(out) = super::super::worktrees::git(Path::new(&folder), &["diff", "--no-color", "--no-ext-diff", "-U0", &range], deadline) {
+        let diff = String::from_utf8_lossy(&out);
+        for line in diff.lines().filter(|line| line.starts_with('+') && !line.starts_with("+++")).take(20_000) {
+            text.push('\n');
+            text.push_str(&line[1..]);
+            if text.len() > 2 * 1024 * 1024 {
+                break;
+            }
+        }
+    }
+    let _ = task;
+    text
+}
+
+/// Task 156: a report's changes against the decisions that bind its task;
+/// a contradiction is flagged before accept (the inbox item, and accept asks
+/// for "against_decisions").
+fn scan_report(store: &mut Store, team: &Team, task_id: u32) -> anyhow::Result<()> {
+    let task = team.task(task_id).context("unknown task")?;
+    let attempt = task.attempts.iter().rev().find(|attempt| attempt.state == AttemptState::Reported).context("no report")?.clone();
+    let added = added_text(team, task, &attempt);
+    let flags = super::decisions::conflicts(team, task, &added);
+    change(store, &team.id, |team, events| {
+        if let Some(found) = team.task_mut(task_id).and_then(|task| task.attempts.iter_mut().find(|found| found.id == attempt.id)) {
+            found.decisions_scanned = true;
+            found.decision_flags = flags.clone();
+        }
+        if !flags.is_empty() {
+            events.push(Event::new("decision_conflict", json!({"task":task_id,"attempt":attempt.n,"flags":flags})));
+        }
+        Ok(())
+    })
+}
+
+/// Task 156: the Decisions section of each spec the decisions amend, written
+/// into the lead branch's checkout and committed there (only when it is
+/// clean); the spec is a view of the records.
+fn spec_decisions(store: &mut Store, team: &Team) -> anyhow::Result<()> {
+    let folder = team.integration_folder().to_owned();
+    anyhow::ensure!(!folder.is_empty(), "the team has no folder for its specs");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let status = super::super::worktrees::git(Path::new(&folder), &["status", "--porcelain", "--untracked-files=no"], deadline)
+        .map_err(|error| anyhow::anyhow!("the lead branch's status was not read: {}", error.detail))?;
+    if !String::from_utf8_lossy(&status).trim().is_empty() {
+        // The next tick tries again once the checkout is clean.
+        return Ok(());
+    }
+    let branch = lead_branch(team)?;
+    let mut written = Vec::new();
+    for spec in super::decisions::specs(team) {
+        let path = Path::new(&folder).join(&spec);
+        let Ok(current) = std::fs::read_to_string(&path) else { continue };
+        let updated = super::decisions::render_into(&current, &super::decisions::spec_section(team, &spec));
+        if updated != current {
+            std::fs::write(&path, &updated).with_context(|| format!("{}", path.display()))?;
+            written.push(spec);
+        }
+    }
+    if !written.is_empty() {
+        commit_in(&folder, &branch, &format!("Decisions: {} from the team's decision records", written.join(", ")), &written)?;
+    }
+    let hash = super::decisions::specs_hash(team);
+    change(store, &team.id, |team, events| {
+        team.decision_specs = hash.clone();
+        if !written.is_empty() {
+            events.push(Event::new("decision_specs_written", json!({"specs":written})));
+        }
+        Ok(())
+    })
+}
+
 pub(crate) fn send(session: &SessionRef, request_id: &str, text: &str) -> Sent {
     let input = json!({"request_id":request_id,"expected_run_id":session.run_id,
         "expected_conversation_id":session.conversation_id,"text":text});
@@ -4070,6 +4323,20 @@ fn launch(team: &Team, member: &Member) -> anyhow::Result<()> {
     // has no per-launch rule override, and editing the config a launch reads
     // would silently change every Kimi session on this computer.
     let folder = member_folder(team, member)?;
+    // Task 159: under the owner's scratch rule (still granted), the folder is
+    // trusted for the rule's agents before the launch reads its config.
+    if !team.scratch_rule.is_empty() && member.computer.is_empty() {
+        let rules = super::owner_steps::rules();
+        if let Some(rule) = rules.iter().find(|rule| rule.id == team.scratch_rule && super::owner_steps::inside(&folder, &rule.folder)) {
+            if super::owner_steps::trusted(rule).contains(member.agent.as_str()) {
+                if let Ok(config) = crate::config::Config::load() {
+                    if let Err(error) = crate::accounts::trust_folder_for(&config, &member.agent, &member.account, &folder) {
+                        eprintln!("hgs team worker: {}: trusting {folder} for {}: {error}", team.name, member.id);
+                    }
+                }
+            }
+        }
+    }
     let args = launch_args(team, member, &folder);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let output = hgs(&member.computer, &args, None, Duration::from_secs(120))?;
@@ -6861,49 +7128,115 @@ fn send_sub_brief(store: &mut Store, team: &Team, member: &str) -> anyhow::Resul
     })
 }
 
-/// The message that tells the lead a member starves on the plan (C7), with the
-/// blocking chain of the open tasks.
-pub(crate) fn starved_text(team: &Team, member: &Member, now: f64) -> String {
-    let minutes = (((now - member.starved_since.unwrap_or(now)).max(0.0)) / 60.0).round() as u64;
-    let role = team.name_of(&member.id);
-    let ready: BTreeSet<u32> = plan::ready(team).into_iter().collect();
-    let open: Vec<&Task> = team.tasks.iter().filter(|task| !task.status.finished()).collect();
-    let mut chain = String::new();
-    for task in open.iter().take(5) {
-        if let Some(wait) = inbox::waits(team, task, ready.contains(&task.id)) {
-            let on: Vec<String> = wait["on"].as_array().into_iter().flatten().map(|value| {
-                value.as_str().map(str::to_owned).or_else(|| value.as_u64().map(|id| format!("#{id}"))).unwrap_or_default()
-            }).collect();
-            chain += &format!("  #{} {}: {} {}\n", task.id, task.title, wait["for"].as_str().unwrap_or_default(), on.join(", "));
+/// Task 164 (owner, 2026-11-07): what the lead can do about members idle
+/// without ready work, one line per concrete action: a ready task of a
+/// member's role sitting with another member, a draft that would run
+/// alongside once approved, and what each startable open task waits for
+/// (never a member at work, never "give it work"). Empty when the lead can do
+/// nothing; then nobody is told.
+pub(crate) fn starved_actions(team: &Team, members: &[String]) -> Vec<String> {
+    let ready = plan::ready(team);
+    let mut lines = Vec::new();
+    for id in members {
+        let Some(member) = team.member(id) else { continue };
+        for task_id in plan::ready_for_role(team, member, &ready).into_iter().take(2) {
+            if let Some(task) = team.task(task_id) {
+                let holder = if task.assignee.is_empty() { "nobody".to_owned() } else { team.name_of(&task.assignee) };
+                lines.push(format!(
+                    "#{} {} is ready and sits with {holder}: reassign it to {} (hgs team reassign)",
+                    task.id, task.title, team.name_of(&member.id)
+                ));
+            }
         }
     }
-    format!(
-        "[Zerus team \u{b7} from: Zerus \u{b7} starved]\n{role} has had no ready task for {minutes} min while {} task(s) are open.\n\
-         Blocking:\n{chain}{}\
-         Give it work, release a held task or change the plan (hgs guide team-lead).",
-        open.len(),
-        // Task 113: a member held by a prompt only its Terminal takes.
-        super::terminal_prompt::lead_lines(team, now)
-    )
+    for phase in team.phases.iter().filter(|phase| phase.state.is_draft()) {
+        let open = team.tasks.iter().filter(|task| task.phase == phase.n && !task.status.finished()).count();
+        if open > 0 && phase.state == PhaseState::Draft {
+            lines.push(format!(
+                "Phase {} ({open} task(s)) can run alongside once it is approved: ask the owner with a card (hgs team propose)",
+                phase.n
+            ));
+        }
+    }
+    let ready_set: BTreeSet<u32> = ready.iter().copied().collect();
+    let mut waits = 0;
+    for task in team.tasks.iter().filter(|task| plan::startable(team, task) && task.status == TaskStatus::Pending && !ready_set.contains(&task.id)) {
+        let Some(wait) = inbox::waits(team, task, false) else { continue };
+        let kind = wait["for"].as_str().unwrap_or_default();
+        let unblock = wait["unblock"].as_str().unwrap_or_default();
+        if kind == "member" || unblock.is_empty() || unblock == "wait" {
+            continue;
+        }
+        let owner = if kind == "owner" { " (an owner card)" } else { "" };
+        lines.push(format!("#{} {} waits for {kind}: {unblock}{owner}", task.id, task.title));
+        waits += 1;
+        if waits == 5 {
+            break;
+        }
+    }
+    lines
 }
 
-/// Tells the free lead once that a member starves on the plan (C7).
-fn tell_lead_starved(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Result<()> {
-    let member = team.member(member_id).context("unknown member")?.clone();
-    let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
-    let outcome = super::doorbell::post_and_ring(store, &team.id, &team.lead, &lead, &uuid::Uuid::new_v4().to_string(), "starved", "zerus",
-        Urgency::Normal, &starved_text(team, &member, now()));
-    if matches!(outcome, Sent::Refused(_)) {
-        return Ok(());
+/// The team-level starved digest (task 164): who is idle and for how long,
+/// and the concrete actions; None when there is no action to name.
+pub(crate) fn starved_text(team: &Team, members: &[String], now: f64) -> Option<String> {
+    let actions = starved_actions(team, members);
+    let terminal = super::terminal_prompt::lead_lines(team, now);
+    if actions.is_empty() && terminal.is_empty() {
+        return None;
     }
-    let role = team.role_of(member_id);
-    change(store, &team.id, |team, events| {
-        let Some(found) = team.members.iter_mut().find(|found| found.id == member_id) else {
+    let idle: Vec<String> = members
+        .iter()
+        .filter_map(|id| team.member(id))
+        .map(|member| {
+            let minutes = (((now - member.starved_since.unwrap_or(now)).max(0.0)) / 60.0).round() as u64;
+            format!("{} {minutes} min", team.name_of(&member.id))
+        })
+        .collect();
+    let mut text = format!(
+        "[Zerus team \u{b7} from: Zerus \u{b7} starved]\nIdle with no ready task: {}.\n",
+        idle.join(", ")
+    );
+    if !actions.is_empty() {
+        text += "What you can do:\n";
+        for line in &actions {
+            text += &format!("- {line}\n");
+        }
+    }
+    // Task 113: a member held by a prompt only its Terminal takes.
+    text += &terminal;
+    text += "At most one starved digest an hour (hgs guide team-lead).";
+    Some(text)
+}
+
+/// Tells the lead once an hour at most which members starve on the plan and
+/// what it can do (C7, task 164). Nothing is sent when there is no action;
+/// the members are still marked told for this episode.
+fn tell_lead_starved(store: &mut Store, team: &Team, members: &[String]) -> anyhow::Result<()> {
+    let at = now();
+    let text = starved_text(team, members, at);
+    if let Some(text) = &text {
+        let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
+        let outcome = super::doorbell::post_and_ring(store, &team.id, &team.lead, &lead, &uuid::Uuid::new_v4().to_string(), "starved", "zerus",
+            Urgency::Normal, text);
+        if matches!(outcome, Sent::Refused(_)) {
             return Ok(());
-        };
-        found.starved_told = true;
-        let minutes = (((now() - found.starved_since.unwrap_or(now())).max(0.0)) / 60.0).round() as u64;
-        events.push(Event::new("plan_starved", json!({"member":role,"minutes":minutes})));
+        }
+    }
+    let actions = starved_actions(team, members).len();
+    change(store, &team.id, |team, events| {
+        let mut named = Vec::new();
+        for id in members {
+            if let Some(found) = team.members.iter_mut().find(|found| found.id == *id) {
+                found.starved_told = true;
+                named.push(json!({"member":id,"minutes":(((at - found.starved_since.unwrap_or(at)).max(0.0)) / 60.0).round() as u64}));
+            }
+        }
+        if text.is_some() {
+            team.starved_digest_at = Some(at);
+            let roles: Vec<String> = members.iter().map(|id| team.role_of(id)).collect();
+            events.push(Event::new("plan_starved", json!({"members":roles,"idle":named,"actions":actions})));
+        }
         Ok(())
     })
 }
@@ -7375,6 +7708,11 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         }
     }
     match step {
+        Step::Resume { task, member } => resume_parked(store, team, *task, member),
+        Step::DetectWait { task } => detect_wait(store, team, *task),
+        Step::TellDecision { task, decision } => tell_decision(store, team, *task, decision),
+        Step::ScanReport { task } => scan_report(store, team, *task),
+        Step::SpecDecisions => spec_decisions(store, team),
         Step::Brief => send_brief(store, &team.id),
         Step::AllDecided => send_all_decided(store, &team.id),
         Step::Permission { member } => sync_permission(store, team, member),
@@ -7402,6 +7740,22 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::RingMessages { member } => super::doorbell::ring(store, team, member).map(drop),
         Step::RemindReviewer { task, member } => remind_reviewer(store, team, *task, member),
         Step::RemindReport { task } => remind_report(store, team, *task),
+        Step::Unassigned { member, what } => change(store, &team.id, |team, events| {
+            let at = now();
+            let Some(found) = team.members.iter_mut().find(|found| found.id == *member) else { return Ok(()) };
+            if found.unassigned.is_none() {
+                found.unassigned = Some(Unassigned { since: at, what: what.clone() });
+                events.push(Event::new("unassigned_work", json!({"member":member,"what":what})));
+            }
+            Ok(())
+        }),
+        Step::UnassignedEnded { member } => change(store, &team.id, |team, events| {
+            let Some(found) = team.members.iter_mut().find(|found| found.id == *member) else { return Ok(()) };
+            if found.unassigned.take().is_some() {
+                events.push(Event::new("unassigned_work_ended", json!({"member":member})));
+            }
+            Ok(())
+        }),
         Step::Starving { member } => change(store, &team.id, |team, _| {
             if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
                 if found.starved_since.is_none() {
@@ -7418,7 +7772,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             }
             Ok(())
         }),
-        Step::PlanStarved { member } => tell_lead_starved(store, team, member),
+        Step::PlanStarved { members } => tell_lead_starved(store, team, members),
         Step::BackgroundStart { member } => change(store, &team.id, |team, _| {
             if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
                 if found.background_since.is_none() {
@@ -7667,14 +8021,6 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             super::ops::accept_auto_draft(team, *phase, &BTreeSet::new(), events);
             Ok(())
         }),
-        Step::WorkAhead { task, member } => {
-            hand_out(store, &team.id, *task, member, None, host)?;            change(store, &team.id, |team, _| {
-                if let Some(attempt) = team.task_mut(*task).and_then(|task| task.attempts.last_mut()) {
-                    attempt.worked_ahead = true;
-                }
-                Ok(())
-            })
-        }
         Step::Drain { member, pause } => drain_member(store, team, member, *pause),
         Step::Rebalance { task, from, to } => hand_out(store, &team.id, *task, to, Some(from), host),
         Step::StageOut { task, member } => stage_hand_out(store, &team.id, *task, member, host),
@@ -7945,9 +8291,38 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                     }
                 }
                 Ok(())
-            })
+            })?;
+            // Task 161: a turn that ended waiting or blocked on an outside
+            // event is offered the park, never kept as a wait.
+            let reply = team_reply(store, &team.id, *task);
+            if let (Some(attempt), Some(session)) = (attempt, session) {
+                if super::wait_loops::waiting_reply(&reply) {
+                    let (condition, what) = super::wait_loops::guess_condition(&reply, now());
+                    let request = json!({"team":team.id,"task":task,"attempt":attempt.id,"condition":condition,"eta_minutes":60,"note":"..."});
+                    let _ = send(&session, &uuid::Uuid::new_v4().to_string(), &format!(
+                        "[Zerus team] Your turn on task #{task} ended waiting. A wait is a park, never a turn or a loop: {request} | hgs team park --json \
+(a guess: until {what}; conditions ci, build, task, card, time; hgs guide team-park). Zerus watches it, gives the task back to you and tells the lead. \
+Otherwise finish with hgs team report."
+                    ));
+                    let _ = change(store, &team.id, |_, events| {
+                        events.push(Event::new("park_offered", json!({"task":task,"attempt":attempt.n,"until":what})));
+                        Ok(())
+                    });
+                }
+            }
+            Ok(())
         }
     }
+}
+
+/// Task 161: the last reply kept on a task's newest attempt.
+fn team_reply(store: &Store, team_id: &str, task_id: u32) -> String {
+    store
+        .load(team_id)
+        .ok()
+        .flatten()
+        .and_then(|team| team.task(task_id).and_then(|task| task.attempts.last()).map(|attempt| attempt.last_reply.clone()))
+        .unwrap_or_default()
 }
 
 /// After a restart nothing is re-sent: an attempt or report notice that was
@@ -8132,7 +8507,14 @@ fn take_outbox_with(
             }
             // Task #28: a sandboxed member's own `hgs run` and its host reads.
             if matches!(request["op"].as_str(), Some("session-run" | "read")) {
-                let outcome = sandbox_request(member, folder, &request);
+                // Task 173: a sandboxed member's run belongs to its handed work too.
+                let outcome = match (request["op"].as_str(), member.id != team.lead) {
+                    (Some("session-run"), true) => match super::shadow::job_of(team, &member.id, request["input"]["attempt"].as_str().unwrap_or_default()) {
+                        Ok(_) => sandbox_request(member, folder, &request),
+                        Err(error) => json!({"status":"refused","request_id":request["request_id"],"error":error.to_string()}),
+                    },
+                    _ => sandbox_request(member, folder, &request),
+                };
                 if let Err(error) = super::outbox::settle(folder, &request, &outcome) {
                     eprintln!("hgs team worker: {}: outbox {}: {error}", team.name, path.display());
                 }
@@ -8843,6 +9225,8 @@ pub(crate) fn worker() -> Result<i32> {
     let mut last_reason = String::new();
     // Task 128: the lore writer runs beside the ticks, never inside one.
     super::lore_sync::start_background(|line| eprintln!("hgs team worker: {line}"));
+    // Task 160: the park watcher, beside the ticks too.
+    super::park::start_background(|line| eprintln!("hgs team worker: {line}"));
     let exit = loop {
         if fs::metadata(&executable).and_then(|m| m.modified()).ok() != started {
             // An update replaced hgs: the new one carries on with the teams.
@@ -9024,6 +9408,18 @@ mod dispatcher_rights;
 #[cfg(test)]
 #[path = "tests/dispatcher_pulses.rs"]
 mod dispatcher_pulses;
+#[cfg(test)]
+#[path = "tests/dispatcher_shadow.rs"]
+mod dispatcher_shadow;
+#[cfg(test)]
+#[path = "tests/dispatcher_park.rs"]
+mod dispatcher_park;
+#[cfg(test)]
+#[path = "tests/dispatcher_wait_loops.rs"]
+mod dispatcher_wait_loops;
+#[cfg(test)]
+#[path = "tests/dispatcher_decisions.rs"]
+mod dispatcher_decisions;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_areas.rs"]

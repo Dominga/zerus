@@ -67,9 +67,8 @@ fn a_member_with_no_ready_work_starves_the_plan_and_the_lead_hears_once() {
     // Not before 20 minutes, then once.
     assert!(!steps(&team, &seen, 10.0 + 20.0 * 60.0 - 1.0).iter().any(|step| matches!(step, Step::PlanStarved { .. })));
     let late = steps(&team, &seen, 10.0 + 20.0 * 60.0);
-    assert!(late.contains(&Step::PlanStarved { member: "dev".into() }), "{late:?}");
-    let member = team.member("dev").unwrap().clone();
-    let text = starved_text(&team, &member, 10.0 + 20.0 * 60.0);
+    assert!(late.contains(&Step::PlanStarved { members: vec!["dev".into()] }), "{late:?}");
+    let text = starved_text(&team, &["dev".into()], 10.0 + 20.0 * 60.0).unwrap();
     assert!(text.contains("starved") && text.contains("Backend") && text.contains("20 min"), "{text}");
     assert!(text.contains("#1") && text.contains("hgs guide team-lead"), "{text}");
     // Told once per episode.
@@ -419,8 +418,13 @@ fn a_rework_keeps_its_member_and_reserves_it_until_decided() {
             &BTreeSet::new(), &mut Vec::new()).unwrap();
         assert!(steps(&draining, &seen, 3.0).iter().any(|step| matches!(step, Step::Drain { member, .. } if member == "dev")));
     }
-    // Even a held return reserves its member, independently of ready ordering.
+    // Task 160 (owner, 2026-11-07): a held return reserves nobody; the
+    // member takes other work meanwhile, and the release reserves it again.
     ops::apply(&mut team, "hold", &json!({"task":1}), &Actor::Member("lead".into()),
+        &BTreeSet::new(), &mut Vec::new()).unwrap();
+    let now = steps(&team, &seen, 2.0);
+    assert!(now.contains(&Step::Rebalance { task: 2, from: "dev2".into(), to: "dev".into() }), "{now:?}");
+    ops::apply(&mut team, "release", &json!({"task":1}), &Actor::Member("lead".into()),
         &BTreeSet::new(), &mut Vec::new()).unwrap();
     let now = steps(&team, &seen, 2.0);
     assert!(!now.iter().any(|step| matches!(step, Step::Rebalance { to, .. } if to == "dev")), "{now:?}");

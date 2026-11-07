@@ -784,9 +784,10 @@ fn all_items(team: &Team) -> Vec<Item> {
                         task: Some(task.id),
                         member: team.name_of(&attempt.member),
                         since: report.at,
-                        // U31: a report made ahead of its draft phase waits for
-                        // the owner's approval of that phase.
-                        summary: if attempt.worked_ahead {
+                        // U31: a report made ahead of its draft phase (an older
+                        // record's work ahead; task 158 runs no draft) waits
+                        // for the owner's approval of that phase.
+                        summary: if team.phases.iter().any(|phase| phase.n == task.phase && phase.state.is_draft()) {
                             format!("worked ahead of phase {}: {}", task.phase, summary(&report.text))
                         } else if !report.replaced.is_empty() {
                             format!("replaces the earlier report: {}", summary(&report.text))
@@ -830,7 +831,18 @@ fn all_items(team: &Team) -> Vec<Item> {
                         "{} | hgs team reply --json",
                         json!({"request_id":PLACEHOLDER,"team":team.id,"question":question.id,"text":"..."})
                     ),
-                    detail: String::new(),
+                    // Task 161: a member blocked on an outside event is
+                    // answered with a park until its condition, with an ETA.
+                    detail: if super::wait_loops::waiting_reply(&question.text) || super::wait_loops::lead_wait_instruction(&question.text) {
+                        let (condition, what) = super::wait_loops::guess_condition(&question.text, question.at);
+                        format!(
+                            "Blocked on an outside event? Answer with a park until {what}, ETA: {} | hgs team reply --json",
+                            json!({"request_id":PLACEHOLDER,"team":team.id,"question":question.id,"text":"",
+                                "park":{"condition":condition,"eta_minutes":60,"note":"..."}})
+                        )
+                    } else {
+                        String::new()
+                    },
                 });
             }
         }
@@ -1077,6 +1089,31 @@ fn all_items(team: &Team) -> Vec<Item> {
             detail: if limit.detail.is_empty() { String::new() } else { summary(&limit.detail) },
         });
     }
+    // Task 160: a parked task whose condition failed is the lead's to decide;
+    // one well past its estimate is named too.
+    let now = crate::state::now();
+    for task in team.tasks.iter().filter(|_| active) {
+        let Some(park) = task.park.as_ref() else { continue };
+        let overdue = park.state == super::park::WAITING && now > park.eta + (park.eta - park.at).max(1800.0);
+        if park.state != super::park::FAILED && !overdue {
+            continue;
+        }
+        let kind = if overdue { "park_overdue" } else { "park_failed" };
+        items.push(Item {
+            subagents: Value::Null,
+            kind,
+            key: format!("{kind}:{}:{}", task.id, park.at as i64),
+            task: Some(task.id),
+            member: park.member.clone(),
+            since: if overdue { park.eta } else if park.checked_at > 0.0 { park.checked_at } else { park.at },
+            summary: summary(&format!("#{} {}", task.id, super::park::summary(park, now))),
+            command: format!(
+                "{{\"team\":\"{}\",\"task\":{}}} | hgs team unpark --json (give it back now), or reassign or cancel it",
+                team.id, task.id
+            ),
+            detail: String::new(),
+        });
+    }
     // Task 128 (docs/lore.md 6.1): a record Zerus cannot write until a field
     // is known waits here, with the workspace to write it in.
     if let Some((workspace, true)) = super::lore_sync::workspace(team) {
@@ -1093,6 +1130,37 @@ fn all_items(team: &Team) -> Vec<Item> {
                 detail: String::new(),
             });
         }
+    }
+    // Task 173: a member working with nothing handed to it, at once.
+    for member in team.members.iter().filter(|_| active) {
+        let Some(flag) = member.unassigned.as_ref() else { continue };
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "unassigned_work",
+            key: format!("unassigned_work:{}:{}", member.id, flag.since as i64),
+            task: None,
+            member: member.id.clone(),
+            since: flag.since,
+            summary: summary(&super::shadow::lead_line(team, member, flag)),
+            command: "{\"request_id\":\"UUID\",\"team\":\"ID\",\"task\":N} | hgs team retry --json (or reassign); hgs team look MEMBER shows what it runs".into(),
+            detail: String::new(),
+        });
+    }
+    // Task 156: a report that contradicts a decision, before its accept.
+    for task in team.tasks.iter().filter(|_| active) {
+        let Some(attempt) = task.attempts.iter().rev().find(|attempt| attempt.state == AttemptState::Reported && !attempt.decision_flags.is_empty()) else { continue };
+        let named: Vec<String> = attempt.decision_flags.iter().map(|flag| format!("{} (adds \"{}\")", flag["decision"].as_str().unwrap_or_default(), flag["term"].as_str().unwrap_or_default())).collect();
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "decision_conflict",
+            key: format!("decision_conflict:{}:{}", task.id, attempt.n),
+            task: Some(task.id),
+            member: attempt.member.clone(),
+            since: attempt.report.as_ref().map_or(attempt.sent_at, |report| report.at),
+            summary: summary(&format!("#{} {}: the report contradicts decision {}", task.id, task.title, named.join(", "))),
+            command: format!("{{\"request_id\":\"UUID\",\"team\":\"{}\",\"task\":{},\"reason\":\"...\"}} | hgs team reject --json, or accept with \"against_decisions\":true", team.id, task.id),
+            detail: attempt.decision_flags.iter().map(|flag| format!("- {}: {}", flag["decision"].as_str().unwrap_or_default(), flag["choice"].as_str().unwrap_or_default())).collect::<Vec<_>>().join("\n"),
+        });
     }
     items.sort_by(|a, b| a.since.total_cmp(&b.since).then_with(|| a.key.cmp(&b.key)));
     items.truncate(ITEM_LIMIT);

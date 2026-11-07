@@ -523,6 +523,65 @@ sys.exit(0 if signed_in else 1)
         self.assertEqual(result['auth_status'],'signed_out')
         self.assertEqual(result['status'],'signed_out')
 
+    def test_claude_rate_limit_is_shared_by_refreshes_and_preserves_last_limits(self):
+        home,_=self.claude_login_fixture()
+        credentials=home/'.credentials.json'
+        credentials.write_text(json.dumps({'claudeAiOauth':{'accessToken':'SYNTHETIC-USAGE-TOKEN'}}))
+        before=credentials.read_bytes()
+        calls=self.root/'usage-calls'
+        curl=self.bin/'curl'
+        curl.write_text('''#!/usr/bin/env python3
+import json,sys,pathlib
+config=sys.stdin.read()
+assert 'https://api.anthropic.com/api/oauth/usage' in config
+assert 'SYNTHETIC-USAGE-TOKEN' in config
+assert 'SYNTHETIC-USAGE-TOKEN' not in sys.argv
+calls=pathlib.Path('''+repr(str(calls))+''')
+count=int(calls.read_text())+1 if calls.exists() else 1
+calls.write_text(str(count))
+headers=pathlib.Path(sys.argv[sys.argv.index('--dump-header')+1])
+if count==1:
+ headers.write_text('HTTP/1.1 200 OK\\r\\n\\r\\n')
+ print(json.dumps({'five_hour':{'utilization':42,'resets_at':'2030-01-01T00:00:00Z'}}))
+ print('200',end='')
+elif count==2:
+ headers.write_text('HTTP/1.1 429 Too Many Requests\\r\\nRetry-After: 100\\r\\n\\r\\n')
+ print('{}')
+ print('429',end='')
+else:
+ raise AssertionError('usage endpoint requested during cooldown')
+''');curl.chmod(0o755)
+        commands=[[HGS,'account','inspect','claude-work','--refresh'] for _ in range(4)]
+        children=[subprocess.Popen(cmd,env=self.env,cwd=self.root,stdout=subprocess.PIPE,stderr=subprocess.PIPE) for cmd in commands]
+        for child in children:
+            stdout,stderr=child.communicate(timeout=15)
+            self.assertEqual(child.returncode,0,stderr.decode())
+            self.assertEqual(json.loads(stdout)['windows'][0]['used_percent'],42)
+        self.assertEqual(calls.read_text(),'1')
+        # Age the synthetic sample/attempt instead of sleeping a real minute.
+        cache=self.config/'account-status/claude-usage.json'
+        saved=json.loads(cache.read_text())
+        for entry in saved.values():
+            entry['attempted_at']-=360
+            entry['checked_at']-=360
+        checked=next(iter(saved.values()))['checked_at']
+        cache.write_text(json.dumps(saved))
+        limited=json.loads(self.run_hgs('account','inspect','claude-work','--refresh').stdout)
+        self.assertEqual((limited['status'],limited['auth_status']),('rate_limited','signed_in'))
+        self.assertEqual(limited['checked_at'],checked)
+        self.assertEqual(limited['windows'][0]['used_percent'],42)
+        self.assertGreater(limited['retry_at'],time.time()+95)
+        for _ in range(2):
+            cached=json.loads(self.run_hgs('account','inspect','claude-work','--refresh').stdout)
+            self.assertEqual(cached['retry_at'],limited['retry_at'])
+            self.assertEqual(cached['checked_at'],checked)
+        self.assertEqual(calls.read_text(),'2')
+        row=next(p for p in self.ls()['profiles'] if p['id']=='claude-work')
+        self.assertEqual(row['account_status']['retry_at'],limited['retry_at'])
+        self.assertEqual(row['account_status']['status'],'rate_limited')
+        self.assertEqual(credentials.read_bytes(),before)
+        self.assertNotIn('SYNTHETIC-USAGE-TOKEN',json.dumps(saved)+json.dumps(limited)+cache.read_text())
+
     @unittest.skipUnless(os.uname().sysname=='Darwin', 'macOS Keychain diagnostic')
     def test_claude_inaccessible_saved_sign_in_preserves_profile_identity(self):
         import hashlib

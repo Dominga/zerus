@@ -2238,5 +2238,16 @@
   "Working tree is clean.": "Рабочее дерево чистое.",
   "files": "файлы",
   "phase %1 pending approval": "фаза %1 ждёт одобрения",
-  "Changes": "Изменения"
+  "Changes": "Изменения",
+  "All tasks decided": "Все задачи решены",
+  "Message from you": "Сообщение от вас",
+  "Planning brief": "Задание на планирование",
+  "Report to lead": "Отчёт лиду",
+  "Task from team": "Задача от команды",
+  "Zerus notice": "Уведомление Zerus",
+  "Zerus team": "Команда Zerus",
+  "Attempt %1": "Попытка %1",
+  "Show less": "Свернуть",
+  "Task #%1": "Задача #%1",
+  "Task: %1": "Задача: %1"
 }

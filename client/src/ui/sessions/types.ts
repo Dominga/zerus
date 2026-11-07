@@ -231,6 +231,8 @@ export interface ActivityItem {
   replies?: Reply[];
   /** History a fork began from, shown read-only and muted. */
   inherited?: boolean;
+  /** Task 208: a team message or Zerus notice pasted into the session (Qt's plaque), never the owner's. */
+  notice?: import("./notices").SystemNotice;
 }
 
 export type VoiceState =

@@ -429,7 +429,8 @@ export const childStatus = (c: Subagent, current = true): { kind: BadgeKind; cap
 /**
  * Native subagent row (40 px), indented under its parent: a compact session
  * row that never expands (owner, 2026-11-07, zerus-sa9qn.16): the agent's
- * tile, the name and the status; the summary is its tooltip.
+ * tile, the parent's account mark, the name and the status, then the expand
+ * button's empty slot; the summary is its tooltip.
  */
 export function ChildCard(props: { parent: Session; child: Subagent; last: boolean; first: boolean; selected: boolean }) {
   const status = () => childStatus(props.child, currentChildren(props.parent, !computerOffline(props.parent.computer)));
@@ -438,8 +439,12 @@ export function ChildCard(props: { parent: Session; child: Subagent; last: boole
       <i class="tree" aria-hidden="true" />
       <div class="scard compact child" classList={{ selected: props.selected }} title={props.child.summary || undefined}>
         <span class="cc-tile"><AgentTile agent={props.parent.agent} size={22} /></span>
+        {/* A subagent runs on its parent's account (owner, 2026-11-08). */}
+        <Show when={sessionMark(props.parent)}>{(m) => <span class="cc-mark" title={markTooltip(props.parent, m())}><AccountMarkCircle mark={m()} size={14} /></span>}</Show>
         <span class="sc-title ell" style={titleReserve(props.child.name, 60)}>{props.child.name}</span>
         <StatusBadge kind={status().kind} caption={status().caption} />
+        {/* The expand button's slot, empty, so the status lines up with other rows. */}
+        <span class="cc-expand cc-slot" aria-hidden="true" />
       </div>
     </div>
   );

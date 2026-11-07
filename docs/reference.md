@@ -734,7 +734,9 @@ child sessions and native subagents together, working of all (`2 of 5`); this
 one toggle shows or hides both (owner, 2026-11-07, zerus-sa9qn.16), and Left
 and Right do the same from the keyboard, Left then moving from a child to its
 parent. A native subagent row looks like a compact session row (the agent's
-tile, its name and status, the summary as its tooltip) and never expands. This
+tile, its parent's account mark, its name and status, the summary as its
+tooltip) and never expands; the expand button's place stays empty, so its
+status lines up with the rows around it (owner, 2026-11-08). This
 device remembers a collapsed parent across relaunches by its computer's machine
 UUID and session ID (`sessions/collapsedTeams`, at most 2048 parents, the oldest
 forgotten first), so a rename, resume or restart keeps the choice; a parent

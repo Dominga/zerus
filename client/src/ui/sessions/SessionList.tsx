@@ -9,7 +9,7 @@ import { Icon } from "../lib/icons";
 import { tr, trNoop } from "../../i18n";
 import { listRows, rowHeight, shownSummary, machineChoices, projectChoices, filterCounts as counts, pickerCounts, type Row } from "./model";
 import {
-  SessionCard, ChildCard, CompactCard, AgentBadge, StatusBadge, badgeKind, statusCaption, stripCaption,
+  SessionCard, ChildCard, CompactCard, teamSummary, AgentBadge, StatusBadge, badgeKind, statusCaption, stripCaption,
   emphasis, childStatus, gitTooltip, paletteIndex, folderOf, ProviderGlyph,
 } from "./SessionCard";
 import { agentKind, catalog, computerFresh, computerOffline } from "../../store/catalog";
@@ -825,7 +825,10 @@ function cardDescription(row: Row | undefined): string | undefined {
   if (row?.type !== "card") return undefined;
   const parts: string[] = [];
   if (row.depth && row.parentKey) parts.push(tr("Child of %1, level %2", catalog.rows[row.parentKey]?.title ?? "", row.depth + 1));
-  if (row.team) parts.push(row.team.collapsed ? tr("%1 child sessions, collapsed", row.team.total) : tr("%1 child sessions, expanded", row.team.total));
+  if (row.team) {
+    parts.push(row.team.collapsed ? tr("%1 child sessions, collapsed", row.team.total) : tr("%1 child sessions, expanded", row.team.total));
+    parts.push(...teamSummary(row.team));
+  }
   return parts.length ? parts.join("\n") : undefined;
 }
 
@@ -860,7 +863,8 @@ function ListRow(props: { id: string; list: RowSource }) {
             onMouseDown={(e) => { if (e.shiftKey) e.preventDefault(); }} onClick={(e) => selectSession(v().session.key, e)}
             onContextMenu={(e) => sessionContextMenu(e, v().session)}
             onDblClick={(e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey) setRowCompact(v().session.key, !compactRows[v().session.key]); }}>
-            <Show when={!v().compactRow} fallback={<CompactCard session={v().session} selected={selectedKey() === v().session.key || !!multi[v().session.key]} onExpand={() => setRowCompact(v().session.key, false)} />}>
+            <Show when={!v().compactRow} fallback={<CompactCard session={v().session} selected={selectedKey() === v().session.key || !!multi[v().session.key]} onExpand={() => setRowCompact(v().session.key, false)}
+              team={v().team} onToggleTeam={() => setCollapsedTeams(v().session.key, !collapsedTeams[v().session.key])} />}>
               <SessionCard session={v().session} selected={(selectedKey() === v().session.key && !subagentOpen()) || !!multi[v().session.key]} expandable={v().expandable}
                 expanded={!!expandedChildren[v().session.key]} onToggleChildren={() => setExpandedChildren(v().session.key, !expandedChildren[v().session.key])}
                 team={v().team} onToggleTeam={() => setCollapsedTeams(v().session.key, !collapsedTeams[v().session.key])}

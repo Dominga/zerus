@@ -275,9 +275,11 @@ This change keeps desktop, the desktop service, shared fixtures and docs aligned
 
 The card adopts the large agent tile of the owner's prototype:
 
-* **Agent tile.** A 34 px rounded tile at the card's left with the provider glyph
-  at 20 px in the agent's color (`--z-agent-<kind>`), replacing the provider
-  badge in the first line. The account mark stays in the footer with its
+* **Agent tile.** A 34 px rounded tile at the card's left, replacing the provider
+  badge in the first line. Since the owner's 2026-11-07 feedback it shows the
+  prototype's agent artwork (20 px; 14 px on the 22 px compact tile) on a neutral
+  tile with a 1 px border, loaded lazily outside the entry bundle; the provider
+  glyph in the agent's color is the fallback. The account mark stays in the footer with its
   label. Compact rows use a 22 px tile before the mark and title.
 * **Card surface.** Rows stay transparent; hover and selection paint the
   surface, as before. An always-painted surface shipped in #1644 and was
@@ -294,6 +296,9 @@ Expanded card (94 px), left to right:
 ```
 
 Compact row (40 px): `[tile 22 + mark] title [status] [questions] [mute] [expand]`.
+A compact parent (owner feedback 2026-11-07) takes a second line, 62 px in all:
+`[team] 3 of 8 working [Needs you: 1] [Asking: 2] [Errors: 1] [chevron]`, the
+same collapse toggle; the summary joins the row's accessible description.
 
 ### 3.2 Account mark
 

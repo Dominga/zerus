@@ -2425,10 +2425,11 @@ fn send_back(team: &mut Team, op: &str, input: &Value, actor: &Actor, events: &m
     }
 }
 
-/// U61: with auto_accept on, a draft stays a draft until its first task is
-/// handed out; that hand-out accepts it, in its own change
-/// (accept_phase_on_hand_out). A draft whose work already started is accepted
-/// here so an older record keeps today's state.
+/// U61: with auto_accept on, the dispatcher accepts an auto draft by Auto once
+/// its plan has no blocker (drafts_ready_to_auto_accept, then
+/// accept_auto_draft); task 158: it then runs alongside the phases before it.
+/// A draft whose work already started (an older record's start-ahead or work
+/// ahead) is accepted here so that record keeps its state.
 fn auto_accept(team: &mut Team, offline: &BTreeSet<String>, events: &mut Vec<Event>) {
     if !team.settings.auto_accept || !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
         return;
@@ -2455,9 +2456,10 @@ fn auto_accept(team: &mut Team, offline: &BTreeSet<String>, events: &mut Vec<Eve
     }
 }
 
-/// U61: the auto-accepted drafts whose phases ahead are done and whose plan has
-/// no blocker: the dispatcher accepts them by Auto, and the ordinary ready path
-/// then hands out (launch, rebalance, role routing).
+/// U61: the auto drafts whose plan has no blocker (and, for a barrier phase,
+/// whose phases ahead are done): the dispatcher accepts them by Auto, and the
+/// ordinary ready path then hands out (launch, rebalance, role routing),
+/// alongside the phases before them (task 158).
 pub(crate) fn drafts_ready_to_auto_accept(team: &Team, offline: &BTreeSet<String>) -> Vec<u32> {
     if !team.settings.auto_accept || !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
         return Vec::new();
@@ -2506,9 +2508,10 @@ pub(crate) fn accept_auto_draft(team: &mut Team, phase: u32, offline: &BTreeSet<
     true
 }
 
-/// U61: the first hand-out of a task in an auto-accepted draft fixes the phase
-/// by Auto, in the same change that hands the task out; a plan blocker keeps it
-/// a draft, as auto_accept does.
+/// U61: a hand-out of a task in an auto draft fixes the phase by Auto, in the
+/// same change that hands the task out; a plan blocker keeps it a draft, as
+/// auto_accept does. Task 158: a draft's tasks are no longer handed out, so
+/// this only settles a hand-out an older record started.
 pub(crate) fn accept_phase_on_hand_out(team: &mut Team, task_id: u32, events: &mut Vec<Event>) {
     if !team.settings.auto_accept {
         return;

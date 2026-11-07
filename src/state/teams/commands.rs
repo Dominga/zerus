@@ -1730,6 +1730,10 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
             }
             events.push(Event::new("proposal_decided", json!({"proposal":id,"accept":false,"reason":reason})));
             ops::hold_for_denied(team, &id, &reason, events);
+            // Task 156: the owner's answer is a decision at once.
+            if let Some(card) = team.proposals.iter().find(|proposal| proposal["id"] == id).cloned() {
+                super::decisions::record(team, super::decisions::from_card(&card, "rejected", "", &reason), super::super::now(), events);
+            }
             if team.proposals.iter().any(|proposal| proposal["id"] == id && proposal["kind"] == "switch-plan-mode") {
                 // U59: a Deny's reason reaches the lead with the team's feed.
                 events.push(Event::new("plan_mode_denied", json!({"by":"You","proposal":id,"reason":reason})));
@@ -1752,6 +1756,9 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
                 proposal["note"] = json!(answer);
             }
             events.push(Event::new("proposal_decided", json!({"proposal":id,"accept":true,"kind":"question","answer":answer})));
+            if let Some(card) = team.proposals.iter().find(|proposal| proposal["id"] == id).cloned() {
+                super::decisions::record(team, super::decisions::from_card(&card, "answered", &answer, &answer), super::super::now(), events);
+            }
             Ok(Value::Null)
         })?;
         return Ok(json!({"status":"answered","proposal":id,"answer":answer}));
@@ -1909,6 +1916,9 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
             detail["request"] = json!(operation_request);
         }
         events.push(Event::new("proposal_decided", detail));
+        if let Some(card) = team.proposals.iter().find(|proposal| proposal["id"] == id).cloned() {
+            super::decisions::record(team, super::decisions::from_card(&card, "accepted", "", &reason), super::super::now(), events);
+        }
         Ok(Value::Null)
     })?;
     Ok(json!({"status":"accepted","proposal":id,"kind":kind,"result":result}))
@@ -1961,6 +1971,56 @@ fn scratch_rules(input: &Value) -> anyhow::Result<Value> {
             Ok(json!({"status":"revoked","id":id,"rules":super::owner_steps::rules()}))
         }
         other => bail!("A scratch-rules action is list or revoke, not {other}"),
+    }
+}
+
+/// Task 156: `hgs team decide`: the owner's decision, by the owner or by the
+/// lead on the owner's verified word, recorded at once.
+fn decide_command(input: &Value) -> anyhow::Result<Value> {
+    let request = text(input, "request_id").to_owned();
+    ensure!(canonical_uuid(&request), "A canonical request_id is required");
+    let team_id = text(input, "team").to_owned();
+    let mut store = Store::open(true)?;
+    let team = store.load(&team_id)?.context("Unknown team")?;
+    let caller = actor(&team, "decide", input)?;
+    let by = match &caller {
+        Actor::Human => "owner".to_owned(),
+        _ if caller.is_lead(&team) => {
+            let rule = super::owner_word::WordRule { phrases: &[""], expect: "the owner's own words with the decision".into(), ..Default::default() };
+            let word = super::owner_word::verify_roster(&team, input.get("owner_word").context("The lead records a decision on the owner's word: add \"owner_word\":{\"text\":\"the owner's words\"}")?, &rule, super::super::now())?;
+            format!("the lead on the owner's word \"{}\"", word.text.chars().take(200).collect::<String>())
+        }
+        _ => bail!("Only you, or the lead on your word, record a decision"),
+    };
+    let mut new = super::decisions::from_input(&team, input)?;
+    new.by = by;
+    store.mutate(Some((&request, input)), &team_id, None, |team, events| {
+        let id = super::decisions::record(team, new.clone(), super::super::now(), events);
+        let decision = team.decisions.iter().find(|found| found.id == id).cloned().unwrap_or_default();
+        Ok(json!({"status":"recorded","decision":decision,
+            "note":"Zerus gives it to every task it binds: hand-outs, a message to work in flight, and the review of reports."}))
+    })
+}
+
+/// Task 156: `hgs team decisions`: the team's decisions (superseded ones
+/// marked), the tasks each binds now, or a spec's generated section.
+fn decisions_command(input: &Value) -> anyhow::Result<Value> {
+    let team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
+    match text(input, "action") {
+        "" | "list" => {
+            let open: Vec<&Task> = team.tasks.iter().filter(|task| !task.status.finished()).collect();
+            let list: Vec<Value> = team.decisions.iter().rev().take(200).map(|decision| {
+                let tasks: Vec<u32> = open.iter().filter(|task| decision.superseded_by.is_empty() && super::decisions::binds(&team, decision, task).is_some()).map(|task| task.id).collect();
+                json!({"decision":decision,"binds":tasks})
+            }).collect();
+            Ok(json!({"team":team.id,"decisions":list}))
+        }
+        "spec" => {
+            let spec = text(input, "spec");
+            ensure!(!spec.is_empty(), "Name the spec: {{\"action\":\"spec\",\"spec\":\"docs/lore.md\"}}");
+            Ok(json!({"team":team.id,"spec":spec,"section":super::decisions::spec_section(&team, spec)}))
+        }
+        other => bail!("A decisions action is list or spec, not {other}"),
     }
 }
 
@@ -3346,6 +3406,8 @@ fn message_command(input: &Value) -> anyhow::Result<Value> {
         }
     };
     ensure!(!recipients.is_empty(), "Nobody else is in the team");
+    // Task 156: the lead's decision is recorded, never only messaged.
+    ensure!(by != team.lead || !super::decisions::decision_like(&body), "{}", super::decisions::refusal(&team.id));
     // Task 161: the lead never tells a member to wait; waiting is a park.
     if by == team.lead && super::wait_loops::lead_wait_instruction(&body) {
         let open = recipients.iter().find_map(|member| team.tasks.iter().find_map(|task| task.open_attempt().filter(|attempt| attempt.member == *member).map(|attempt| (task.id, attempt.id.clone()))));
@@ -4827,6 +4889,9 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         // Task 159: the owner's scratch-team rule, and its list and revoke.
         "scratch-rule" => scratch_rule(input),
         "scratch-rules" => scratch_rules(input),
+        // Task 156: the owner's decisions: record one, list them, a spec's section.
+        "decide" => decide_command(input),
+        "decisions" => decisions_command(input),
         "answer" => answer(input),
         // U20: a sandbox that cannot write the store queues the whole commit, so
         // no commit exists without the attempt recording it.

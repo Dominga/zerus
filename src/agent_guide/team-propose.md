@@ -39,3 +39,7 @@ owner's option or answer on the card reaches your inbox.
 
 The owner answers on the card (or hgs team decide-proposal --json, from a
 plain shell, with "accept" and the card's "expected_hash").
+Every answer is a decision record that reaches the tasks it binds: add
+"spec":"docs/x.md#2", "files":["PATH"], "binds":[N], "forbids":["TERM"].
+The owner's word in your chat: {"question","choice","why","owner_word":
+{"text":"..."}} | hgs team decide --json; never message a decision.

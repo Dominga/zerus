@@ -45,5 +45,6 @@ Members:
 - Compacted: hgs team lore plans. Waiting is always a park, never an
   instruction: hgs guide team-park
 - A message naming a task its member lacks is refused: hand it out.
+- Owner decisions: hgs team decide, never a message.
 - Cancel empty tasks first; all decided: extend/finish; owner stop is final
 Sub-teams: hgs guide team-tree

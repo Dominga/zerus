@@ -1608,6 +1608,47 @@ impl Default for ParkCondition {
     }
 }
 
+/// Task 156: one owner decision: the question, the choice, why, who and when,
+/// with the refs it concerns; superseded by a later one on the same question.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Decision {
+    pub id: String,
+    pub question: String,
+    pub choice: String,
+    #[serde(default)]
+    pub why: String,
+    #[serde(default)]
+    pub by: String,
+    #[serde(default)]
+    pub at: f64,
+    /// The card it answered, if any.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub card: String,
+    /// The spec (and section) it amends, such as docs/lore.md#2.1.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub spec: String,
+    /// The output paths and tasks it concerns.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<u32>,
+    /// Terms a report must not add (a dependency, a tool), lowercase.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forbids: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub superseded_by: String,
+    /// The question's content words: a later decision with the same supersedes it.
+    #[serde(default)]
+    pub topic: String,
+}
+
+/// Task 156: lore's hits over decisions for one task, and what they were for.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct DecisionHits {
+    pub hash: String,
+    pub ids: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Hold {
     /// The lead or you.
@@ -1722,6 +1763,15 @@ pub(crate) struct Attempt {
     /// work (its runs and repeated checks), at most every five minutes.
     #[serde(default, skip_serializing_if = "is_zero_f64")]
     pub wait_checked_at: f64,
+    /// Task 156: the decisions this attempt's member was told of while it worked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions_told: Vec<String>,
+    /// Task 156: the decisions its report contradicts ({decision, term,
+    /// choice}), found in its changes before accept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decision_flags: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub decisions_scanned: bool,
     /// The member's turn ended long enough ago without a report.
     #[serde(default)]
     pub no_report: bool,
@@ -2572,6 +2622,16 @@ pub(crate) struct Team {
     /// id): no per-plan approval, its folder trusted for the rule's agents.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub scratch_rule: String,
+    /// Task 156: the owner's decisions, oldest first (at most 500): kept in
+    /// Zerus state for every memory mode, mirrored into the team's lore.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<Decision>,
+    /// Task 156: lore's `find` hits over decisions per task (a workspace team).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub decision_hits: std::collections::BTreeMap<u32, DecisionHits>,
+    /// Task 156: the decisions the generated spec sections were last written for.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub decision_specs: String,
     /// Task 128: what the background writer last put into the team's lore
     /// workspace, and what waits on a field only a person can give.
     #[serde(default, skip_serializing_if = "LoreState::is_empty")]

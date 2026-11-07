@@ -139,3 +139,34 @@ fn the_lead_never_messages_a_wait() {
         });
     });
 }
+
+/// Task 156: the owner's decide is recorded at once and binds the work; a
+/// second one on the same question supersedes it; the lead cannot hand a
+/// decision down as a message.
+#[test]
+fn a_decision_is_recorded_listed_and_never_messaged() {
+    let (team, _, _) = review_team();
+    with_review_team(&team, || {
+        let first = call("decide", json!({"by":"human","question":"Which HTTP client does the API use?","choice":"ureq only",
+            "why":"one blocking client","tasks":[1],"forbids":["reqwest"]})).unwrap();
+        assert_eq!(first["status"], "recorded");
+        assert_eq!(first["decision"]["id"], "d1");
+        let second = call("decide", json!({"by":"human","question":"Which HTTP client does the API use?","choice":"ureq or hyper",
+            "why":"hyper for the relay","tasks":[1]})).unwrap();
+        assert_eq!(second["decision"]["id"], "d2");
+        let saved = stored();
+        assert_eq!(saved.decisions[0].superseded_by, "d2");
+        let list = call("decisions", json!({})).unwrap();
+        assert_eq!(list["decisions"][0]["decision"]["id"], "d2");
+        assert_eq!(list["decisions"][0]["binds"], json!([1]));
+        assert_eq!(list["decisions"][1]["binds"], json!([]), "a superseded decision binds nothing");
+        assert!(call("decide", json!({"by":"human","question":"","choice":"x"})).is_err());
+        as_lead(|| {
+            let error = call("message", json!({"to":"dev","text":"The owner decided: no reqwest anywhere"})).unwrap_err().to_string();
+            assert!(error.contains("hgs team decide --json"), "{error}");
+            // Without the owner's word the lead records nothing.
+            let error = call("decide", json!({"question":"Q","choice":"C"})).unwrap_err().to_string();
+            assert!(error.contains("owner_word"), "{error}");
+        });
+    });
+}

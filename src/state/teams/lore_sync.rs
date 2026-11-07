@@ -265,10 +265,32 @@ pub(crate) fn desired(team: &Team) -> (Vec<Value>, Vec<LorePending>) {
         records.extend(items);
     }
     let area = area(team);
-    // The owner's decisions on cards.
+    // Task 156: the team's decision records, superseded ones marked.
+    for decision in &team.decisions {
+        let mut reason = decision.why.clone();
+        if !decision.files.is_empty() || !decision.tasks.is_empty() || !decision.spec.is_empty() || !decision.forbids.is_empty() {
+            let tasks: Vec<String> = decision.tasks.iter().map(|id| format!("#{id}")).collect();
+            reason = format!("{reason} [spec: {}; files: {}; tasks: {}; forbids: {}]", decision.spec, decision.files.join(", "), tasks.join(", "), decision.forbids.join(", "));
+        }
+        let mut record = json!({"kind": "decision", "id": format!("{}{}", prefix(team), decision.id), "area": area,
+            "title": first_line(&format!("{}: {}", decision.question, decision.choice), 120),
+            "question": cut(&decision.question, 300), "choice": cut(&decision.choice, 600),
+            "reason": cut(if reason.trim().is_empty() { "no reason given" } else { &reason }, 800),
+            "decided_by": cut(&decision.by, 120), "status": "active"});
+        if !decision.superseded_by.is_empty() {
+            record["status"] = json!("superseded");
+            record["superseded_by"] = json!(format!("{}{}", prefix(team), decision.superseded_by));
+        }
+        records.push(record);
+    }
+    // The owner's decisions on cards (a card the team's records already hold
+    // is written once, as its decision).
     for proposal in &team.proposals {
         let state = proposal["state"].as_str().unwrap_or_default();
         if !matches!(state, "accepted" | "rejected") {
+            continue;
+        }
+        if team.decisions.iter().any(|decision| proposal["id"] == decision.card.as_str()) {
             continue;
         }
         let id = proposal["id"].as_str().unwrap_or_default();
@@ -645,6 +667,18 @@ pub(crate) fn sync(store: &mut Store, team_id: &str, bin: Option<&Path>) -> anyh
             }
         }
     }
+    // Task 156: lore's meaning hits over the decisions for open tasks
+    // (bounded: ten tasks a pass, only when their text or the decisions changed).
+    let hits = decision_hits(&team, bin, &workspace, &roots);
+    if !hits.is_empty() {
+        store.mutate(None, team_id, None, |team, _| {
+            for (task, found) in &hits {
+                team.decision_hits.insert(*task, found.clone());
+            }
+            team.decision_hits.retain(|task, _| team.tasks.iter().any(|found| found.id == *task && !found.status.finished()));
+            Ok(Value::Null)
+        })?;
+    }
     // A finished team's workspace is kept read only (docs/lore.md 4.5).
     if matches!(team.status, TeamStatus::Done | TeamStatus::Stopped) && workspace.is_dir() && !workspace.join(".closed").exists() {
         let _ = std::fs::write(workspace.join(".closed"), format!("team {} ended; kept read only and searchable\n", team.id));
@@ -677,6 +711,35 @@ fn is_transient(error: &str) -> bool {
         || error.starts_with("lore failed")
         || error.contains("another writer holds the store")
         || error.contains("another process holds the file")
+}
+
+/// Task 156: `lore find` over the decision records for the open tasks whose
+/// text or decisions changed since their last hits.
+fn decision_hits(team: &Team, bin: &Path, workspace: &Path, roots: &[PathBuf]) -> Vec<(u32, super::model::DecisionHits)> {
+    if team.decisions.is_empty() {
+        return Vec::new();
+    }
+    let decisions: Vec<&str> = team.decisions.iter().map(|decision| decision.id.as_str()).collect();
+    let mut out = Vec::new();
+    for task in team.tasks.iter().filter(|task| !task.status.finished()) {
+        if out.len() >= 10 {
+            break;
+        }
+        let query = cut(&format!("{} {}", task.title, task.description), 400);
+        let hash = digest_of(&json!([query, decisions]));
+        if team.decision_hits.get(&task.id).is_some_and(|found| found.hash == hash) {
+            continue;
+        }
+        let Ok(value) = run_lore(bin, workspace, &["find", &query, "--kind", "decision", "-n", "5"], "", roots, None) else { continue };
+        let ids: Vec<String> = value["results"].as_array().into_iter().flatten()
+            .filter_map(|hit| hit["record"]["id"].as_str())
+            .filter_map(|id| id.strip_prefix(&prefix(team)))
+            .filter(|id| id.starts_with('d'))
+            .map(str::to_owned)
+            .collect();
+        out.push((task.id, super::model::DecisionHits { hash, ids }));
+    }
+    out
 }
 
 /// The background writer: every 30 s, each active team with a workspace.

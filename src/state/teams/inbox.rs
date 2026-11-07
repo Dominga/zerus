@@ -1146,6 +1146,22 @@ fn all_items(team: &Team) -> Vec<Item> {
             detail: String::new(),
         });
     }
+    // Task 156: a report that contradicts a decision, before its accept.
+    for task in team.tasks.iter().filter(|_| active) {
+        let Some(attempt) = task.attempts.iter().rev().find(|attempt| attempt.state == AttemptState::Reported && !attempt.decision_flags.is_empty()) else { continue };
+        let named: Vec<String> = attempt.decision_flags.iter().map(|flag| format!("{} (adds \"{}\")", flag["decision"].as_str().unwrap_or_default(), flag["term"].as_str().unwrap_or_default())).collect();
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "decision_conflict",
+            key: format!("decision_conflict:{}:{}", task.id, attempt.n),
+            task: Some(task.id),
+            member: attempt.member.clone(),
+            since: attempt.report.as_ref().map_or(attempt.sent_at, |report| report.at),
+            summary: summary(&format!("#{} {}: the report contradicts decision {}", task.id, task.title, named.join(", "))),
+            command: format!("{{\"request_id\":\"UUID\",\"team\":\"{}\",\"task\":{},\"reason\":\"...\"}} | hgs team reject --json, or accept with \"against_decisions\":true", team.id, task.id),
+            detail: attempt.decision_flags.iter().map(|flag| format!("- {}: {}", flag["decision"].as_str().unwrap_or_default(), flag["choice"].as_str().unwrap_or_default())).collect::<Vec<_>>().join("\n"),
+        });
+    }
     items.sort_by(|a, b| a.since.total_cmp(&b.since).then_with(|| a.key.cmp(&b.key)));
     items.truncate(ITEM_LIMIT);
     items

@@ -263,6 +263,12 @@ pub(crate) enum Step {
     /// Task 161: look for a wait loop in a task's work (its runs, repeated
     /// checks); one found becomes a park.
     DetectWait { task: u32 },
+    /// Task 156: a new decision binds a task in flight: one message to its member.
+    TellDecision { task: u32, decision: String },
+    /// Task 156: a report's changes are checked against the decisions.
+    ScanReport { task: u32 },
+    /// Task 156: the specs' generated Decisions sections are out of date.
+    SpecDecisions,
     /// U45: switch the member's model and effort before it gets the task.
     SwitchModel { task: u32, member: String, from: String, model: String, effort: String },
     /// U45: the switch was not confirmed in time; the task waits for the lead.
@@ -1734,6 +1740,27 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             }
         }
     }
+    // Task 156: decisions reach the work: a task in flight a new decision
+    // binds is told once; a report is checked against them before accept;
+    // the specs they amend get their generated section.
+    for task in &team.tasks {
+        let Some(attempt) = task.open_attempt().filter(|attempt| attempt.member != team.lead) else { continue };
+        if let Some(decision) = super::decisions::current(team).find(|decision| {
+            decision.at > attempt.sent_at && !attempt.decisions_told.contains(&decision.id) && super::decisions::binds(team, decision, task).is_some()
+        }) {
+            steps.push(Step::TellDecision { task: task.id, decision: decision.id.clone() });
+        }
+    }
+    if super::decisions::current(team).any(|decision| !decision.forbids.is_empty()) {
+        for task in &team.tasks {
+            if task.attempts.iter().rev().find(|attempt| attempt.state == AttemptState::Reported).is_some_and(|attempt| !attempt.decisions_scanned) {
+                steps.push(Step::ScanReport { task: task.id });
+            }
+        }
+    }
+    if team.status == TeamStatus::Running && !super::decisions::specs(team).is_empty() && super::decisions::specs_hash(team) != team.decision_specs {
+        steps.push(Step::SpecDecisions);
+    }
     // Task 134: unread team messages ring at the member's next idle moment,
     // never into a busy composer, and once more past their bound; a member
     // given a task, a stage or a message this tick is not rung again (that
@@ -2344,6 +2371,8 @@ fn hand_off_text_rules(
         text += &format!("Zerus {} into your branch before this hand-out; build on it.\n", step.reason);
     }
     text += &dependencies_text(team, task, report_host);
+    // Task 156: the owner's decisions that bind this task, by relevance.
+    text += &super::decisions::block(team, task);
     // Owner 2026-10-31: the hand-out says the task's time estimate.
     text += &super::estimates::prompt_line(team, task);
     if let Some(previous) = task.attempts.iter().rev().find(|a| a.n < attempt.n && a.state == AttemptState::Rejected) {
@@ -3499,6 +3528,118 @@ Set the real condition with hgs team unpark and hgs team park, or leave it.",
         super::wait_loops::GUESSED_ETA_MINUTES
     ));
     Ok(())
+}
+
+/// Task 156: one message to the member of a task in flight that a new
+/// decision binds; told once per attempt.
+fn tell_decision(store: &mut Store, team: &Team, task_id: u32, decision_id: &str) -> anyhow::Result<()> {
+    let task = team.task(task_id).context("unknown task")?;
+    let attempt = task.open_attempt().context("no open attempt")?.clone();
+    let decision = team.decisions.iter().find(|found| found.id == decision_id).context("unknown decision")?;
+    let member = team.member(&attempt.member).context("unknown member")?;
+    let session = member.session.clone().context("the member has no session")?;
+    let text = format!(
+        "[Zerus team] A decision of the owner binds your task #{task_id} ({}):\n{}\nFollow it in this attempt (attempt {}); hgs team ask if it conflicts with your work.",
+        task.title,
+        super::decisions::line(decision),
+        attempt.id
+    );
+    if let Sent::Refused(reason) = send(&session, &uuid::Uuid::new_v4().to_string(), &text) {
+        anyhow::bail!("the decision {decision_id} did not reach {}: {reason}", member.id);
+    }
+    change(store, &team.id, |team, events| {
+        if let Some(found) = team.task_mut(task_id).and_then(|task| task.attempts.iter_mut().find(|found| found.id == attempt.id)) {
+            if !found.decisions_told.iter().any(|id| id == decision_id) {
+                found.decisions_told.push(decision_id.to_owned());
+                events.push(Event::new("decision_told", json!({"task":task_id,"attempt":attempt.n,"decision":decision_id})));
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Task 156: what a report adds: its text and the lines its commits add
+/// against the lead branch (bounded), to check against the decisions.
+fn added_text(team: &Team, task: &Task, attempt: &Attempt) -> String {
+    let mut text = attempt.report.as_ref().map(|report| report.text.clone()).unwrap_or_default();
+    let Some(member) = team.member(&attempt.member) else { return text };
+    let Ok(folder) = member_folder_path(team, member) else { return text };
+    let Ok(branch) = lead_branch(team) else { return text };
+    let head = if attempt.folder_head.is_empty() { "HEAD".to_owned() } else { attempt.folder_head.clone() };
+    if folder.is_empty() || !member.computer.is_empty() {
+        return text;
+    }
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let range = format!("{branch}...{head}");
+    if let Ok(out) = super::super::worktrees::git(Path::new(&folder), &["diff", "--no-color", "--no-ext-diff", "-U0", &range], deadline) {
+        let diff = String::from_utf8_lossy(&out);
+        for line in diff.lines().filter(|line| line.starts_with('+') && !line.starts_with("+++")).take(20_000) {
+            text.push('\n');
+            text.push_str(&line[1..]);
+            if text.len() > 2 * 1024 * 1024 {
+                break;
+            }
+        }
+    }
+    let _ = task;
+    text
+}
+
+/// Task 156: a report's changes against the decisions that bind its task;
+/// a contradiction is flagged before accept (the inbox item, and accept asks
+/// for "against_decisions").
+fn scan_report(store: &mut Store, team: &Team, task_id: u32) -> anyhow::Result<()> {
+    let task = team.task(task_id).context("unknown task")?;
+    let attempt = task.attempts.iter().rev().find(|attempt| attempt.state == AttemptState::Reported).context("no report")?.clone();
+    let added = added_text(team, task, &attempt);
+    let flags = super::decisions::conflicts(team, task, &added);
+    change(store, &team.id, |team, events| {
+        if let Some(found) = team.task_mut(task_id).and_then(|task| task.attempts.iter_mut().find(|found| found.id == attempt.id)) {
+            found.decisions_scanned = true;
+            found.decision_flags = flags.clone();
+        }
+        if !flags.is_empty() {
+            events.push(Event::new("decision_conflict", json!({"task":task_id,"attempt":attempt.n,"flags":flags})));
+        }
+        Ok(())
+    })
+}
+
+/// Task 156: the Decisions section of each spec the decisions amend, written
+/// into the lead branch's checkout and committed there (only when it is
+/// clean); the spec is a view of the records.
+fn spec_decisions(store: &mut Store, team: &Team) -> anyhow::Result<()> {
+    let folder = team.integration_folder().to_owned();
+    anyhow::ensure!(!folder.is_empty(), "the team has no folder for its specs");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let status = super::super::worktrees::git(Path::new(&folder), &["status", "--porcelain", "--untracked-files=no"], deadline)
+        .map_err(|error| anyhow::anyhow!("the lead branch's status was not read: {}", error.detail))?;
+    if !String::from_utf8_lossy(&status).trim().is_empty() {
+        // The next tick tries again once the checkout is clean.
+        return Ok(());
+    }
+    let branch = lead_branch(team)?;
+    let mut written = Vec::new();
+    for spec in super::decisions::specs(team) {
+        let path = Path::new(&folder).join(&spec);
+        let Ok(current) = std::fs::read_to_string(&path) else { continue };
+        let updated = super::decisions::render_into(&current, &super::decisions::spec_section(team, &spec));
+        if updated != current {
+            std::fs::write(&path, &updated).with_context(|| format!("{}", path.display()))?;
+            written.push(spec);
+        }
+    }
+    if !written.is_empty() {
+        commit_in(&folder, &branch, &format!("Decisions: {} from the team's decision records", written.join(", ")), &written)?;
+    }
+    let hash = super::decisions::specs_hash(team);
+    change(store, &team.id, |team, events| {
+        team.decision_specs = hash.clone();
+        if !written.is_empty() {
+            events.push(Event::new("decision_specs_written", json!({"specs":written})));
+        }
+        Ok(())
+    })
 }
 
 pub(crate) fn send(session: &SessionRef, request_id: &str, text: &str) -> Sent {
@@ -7569,6 +7710,9 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
     match step {
         Step::Resume { task, member } => resume_parked(store, team, *task, member),
         Step::DetectWait { task } => detect_wait(store, team, *task),
+        Step::TellDecision { task, decision } => tell_decision(store, team, *task, decision),
+        Step::ScanReport { task } => scan_report(store, team, *task),
+        Step::SpecDecisions => spec_decisions(store, team),
         Step::Brief => send_brief(store, &team.id),
         Step::AllDecided => send_all_decided(store, &team.id),
         Step::Permission { member } => sync_permission(store, team, member),
@@ -9273,6 +9417,9 @@ mod dispatcher_park;
 #[cfg(test)]
 #[path = "tests/dispatcher_wait_loops.rs"]
 mod dispatcher_wait_loops;
+#[cfg(test)]
+#[path = "tests/dispatcher_decisions.rs"]
+mod dispatcher_decisions;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_areas.rs"]

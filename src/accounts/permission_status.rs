@@ -2,6 +2,7 @@
 //! session switches may still override these; never present them as live state.
 use super::*;
 use std::io::Read;
+mod opencode;
 
 fn text(path: &Path) -> Option<String> {
     let mut value = String::new();
@@ -14,6 +15,7 @@ fn text(path: &Path) -> Option<String> {
 }
 fn native(provider: &str, home: &Path, claude_native: &Path) -> Option<(&'static str, String)> {
     match provider {
+        "opencode" => opencode::native(home),
         "claude" => {
             let data = claude_settings::preview(claude_native, home).ok()?;
             let mode = data["permissions"]["defaultMode"].as_str().unwrap_or("default");

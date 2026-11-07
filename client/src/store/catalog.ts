@@ -33,6 +33,8 @@ export interface CatalogState {
   /** Arrival order. The list groups rows by the organization's projects and ranks, ties in this order (ui/sessions/model.ts). */
   order: string[];
   computers: Record<ComputerId, ComputerState>;
+  /** Task 235: computers whose rows are the last list on disk (when it was saved, epoch seconds) until their live listing replaces them. */
+  stale: Record<ComputerId, number>;
 }
 
 const KINDS = new Set<Status>(["attention", "working", "background", "scheduled", "ready", "error", "offline", "paused", "waiting", "starting", "ended"]);
@@ -201,7 +203,7 @@ const REPLACED_MS = 10_000;
 /** `marks` given: the catalog applies them and they refresh it. Without, rows get the app's overlay and nothing is attached. */
 export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void) {
   const marks = given ?? appMarks;
-  const [catalog, setCatalog] = createStore<CatalogState>({ rows: {}, order: [], computers: {} });
+  const [catalog, setCatalog] = createStore<CatalogState>({ rows: {}, order: [], computers: {}, stale: {} });
   // Bumped with every change to the rows, their order or the computers, once
   // per batch: whole-catalog aggregates track this instead of each field of
   // every row (zerus-5wmh.66.50).
@@ -293,6 +295,8 @@ export function createCatalog(given?: RowMarks, onMachines?: (b: Batch) => void)
   // The core's order: computers, replaces, removes, upserts (Activity goes to its own store).
   function applyBatch(b: Batch) {
     batch(() => {
+      // Task 235: a computer's cached rows are stale until its live listing replaces them.
+      for (const [computer, saved] of Object.entries(b.stale ?? {})) setCatalog("stale", computer, saved ?? undefined!);
       for (const c of b.computers) setCatalog("computers", c.computer, { id: c.computer, status: c.status, attempt: c.attempt ?? 0 });
       onMachines?.(b);
       const fresh: string[] = [];

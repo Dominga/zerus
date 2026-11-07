@@ -909,6 +909,8 @@ pub async fn start(
     composers: State<'_, crate::composer::Composers>,
     processes: State<'_, crate::processes::ProcessHub>,
 ) -> Result<String, String> {
+    // Task 235: when the webview asks for its data source.
+    crate::startup_log::phase("webview_start", None);
     let live = Arc::clone(&state.live);
     composers.resend();
     processes.resend();

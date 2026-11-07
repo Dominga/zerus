@@ -198,6 +198,27 @@ fn attachments_root(cache_dir: &std::path::Path, replay: bool) -> std::path::Pat
 /// `drafts-replay` in a replay, so a replay never touches the real drafts.
 /// Qt's store is only ever read (Saved drafts and its recovery).
 #[cfg(feature = "live")]
+/// Task 235: writes the live listings to the catalog cache when they changed,
+/// at most every [`CATALOG_CACHE_EVERY`], off every UI and stream thread.
+#[cfg(feature = "live")]
+fn catalog_cache_writer(pump: pump::Pump, dir: std::path::PathBuf) {
+    let _ = std::thread::Builder::new().name("zerus-catalog-cache".into()).spawn(move || loop {
+        std::thread::sleep(CATALOG_CACHE_EVERY);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |at| at.as_secs_f64());
+        if let Some(listings) = pump.cache_snapshot(now) {
+            if !listings.is_empty() {
+                if let Err(error) = zerus_client_core::catalog_cache::save(&dir, listings) {
+                    eprintln!("zerus-client: role=catalog_cache operation=save error={error}");
+                }
+            }
+        }
+    });
+}
+
+/// Task 235: how often the catalog cache is written at most.
+#[cfg(feature = "live")]
+const CATALOG_CACHE_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
 fn drafts_root(data_dir: &std::path::Path, replay: bool) -> std::path::PathBuf {
     data_dir.join(zerus_client_core::drafts::dir(replay))
 }
@@ -333,6 +354,7 @@ pub fn run() {
             std::process::exit(2);
         }
     };
+    startup_log::begin();
     startup_log::record("entered", "gui_entry", None);
     startup_log::install_panic_hook();
     let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
@@ -421,13 +443,17 @@ pub fn run() {
                 any(target_os = "linux", target_os = "macos", windows)
             )))]
             let reply = None;
-            match instance::claim(
+            // Task 235: the cold start's named phases.
+            let claim_started = std::time::Instant::now();
+            let claim = instance::claim(
                 &name,
                 identity.launchd_label(),
                 activation,
                 reply,
                 renderer::choose,
-            ) {
+            );
+            startup_log::phase("instance_claim", Some(claim_started.elapsed()));
+            match claim {
                 instance::Claim::Claimed(claimed) => {
                     #[cfg(all(feature = "live", any(target_os = "linux", target_os = "macos")))]
                     {
@@ -508,18 +534,23 @@ pub fn run() {
     #[cfg(all(windows, feature = "live"))]
     {
         let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
+        let select_started = std::time::Instant::now();
         let hgs = platform::windows::startup::select_hgs(
             options.hgs.as_deref(),
             identity.is_switch() && !replay,
         );
+        startup_log::phase("select_hgs", Some(select_started.elapsed()));
         std::env::set_var("ZERUS_CLIENT_HGS", hgs);
         platform::windows::startup::prepare(&args, &identity.bundle_id);
         if identity.is_switch() && !replay && !desktop_service::mode() {
             if let Some(responder) = &desktop_responder {
-                native_ownership = match desktop_ownership::native_takeover_recoverable(
+                let takeover_started = std::time::Instant::now();
+                let takeover = desktop_ownership::native_takeover_recoverable(
                     zerus_client_core::default_hgs(),
                     responder.clone(),
-                ) {
+                );
+                startup_log::phase("native_takeover", Some(takeover_started.elapsed()));
+                native_ownership = match takeover {
                     Ok(proof) => Some(proof),
                     Err(failure) => {
                         startup_log::record(
@@ -855,6 +886,18 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     None => actions::Attention::new(local_read_path),
                 });
                 let pump = app.state::<commands::AppState>().pump();
+                // Task 235: the last session list shows at once, marked
+                // stale, until each computer's live listing replaces it; the
+                // live listings are written back, bounded, at most every 30 s.
+                if !replay {
+                    let cache_started = std::time::Instant::now();
+                    let cached = zerus_client_core::catalog_cache::load(&dir);
+                    let rows: usize = cached.iter().map(|cached| cached.rows.len()).sum();
+                    let seeded = pump.seed_cached(cached);
+                    startup_log::phase("catalog_cache_loaded", Some(cache_started.elapsed()));
+                    eprintln!("zerus-client: role=startup catalog_cache computers={seeded} rows={rows}");
+                    catalog_cache_writer(pump.clone(), dir.clone());
+                }
                 app.manage(approvals::start(
                     pump.clone(),
                     app.state::<actions::Actions>().inner().clone(),

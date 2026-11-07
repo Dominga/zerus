@@ -108,6 +108,40 @@ fn append(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.write_all(bytes)
 }
 
+/// Task 235: when this process entered the GUI, so each phase names its time
+/// since then.
+static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// Marks the start of the cold start (the GUI entry); later calls keep it.
+pub(crate) fn begin() {
+    STARTED.get_or_init(std::time::Instant::now);
+}
+
+/// The milliseconds since [`begin`], or 0 before it.
+pub(crate) fn since_start_ms() -> u128 {
+    STARTED.get().map_or(0, |started| started.elapsed().as_millis())
+}
+
+/// Task 235: the detail of a cold-start phase: when it ended since the GUI
+/// entry and how long it took.
+pub(crate) fn phase_detail(at_ms: u128, took_ms: Option<u128>) -> String {
+    match took_ms {
+        Some(took) => format!("at_ms={at_ms} took_ms={took}"),
+        None => format!("at_ms={at_ms}"),
+    }
+}
+
+/// Task 235: one named cold-start phase in the startup log, e.g.
+/// `outcome=phase reason=select_hgs detail=at_ms=812 took_ms=640`.
+pub(crate) fn phase(name: &'static str, took: Option<std::time::Duration>) {
+    let detail = phase_detail(since_start_ms(), took.map(|took| took.as_millis()));
+    // Tests never write to the user's own startup log.
+    #[cfg(not(test))]
+    record("phase", name, Some(&detail));
+    #[cfg(test)]
+    let _ = (name, detail);
+}
+
 pub(crate) fn record(outcome: &'static str, reason: &'static str, detail: Option<&str>) {
     let bytes = line(outcome, reason, detail);
     let result = path()
@@ -163,6 +197,23 @@ pub(crate) fn install_panic_hook() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Task 235: a cold-start phase names when it ended since the GUI entry
+    /// and how long it took, in one bounded startup line.
+    #[test]
+    fn a_phase_line_names_its_time_and_duration() {
+        assert_eq!(phase_detail(812, Some(640)), "at_ms=812 took_ms=640");
+        assert_eq!(phase_detail(1950, None), "at_ms=1950");
+        let bytes = line("phase", "first_rows_out_cached", Some(&phase_detail(u128::MAX, Some(u128::MAX))));
+        assert!(bytes.len() <= LINE_BYTES);
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("outcome=phase reason=first_rows_out_cached detail=at_ms="), "{text}");
+        begin();
+        let first = since_start_ms();
+        begin();
+        assert!(since_start_ms() >= first, "a second begin keeps the first start");
+    }
+
     #[test]
     fn guard_records_are_one_bounded_private_line_even_with_hostile_details() {
         let root = std::env::temp_dir().join(format!("zerus-startup-log-{}", uuid::Uuid::new_v4()));

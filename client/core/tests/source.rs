@@ -173,7 +173,7 @@ fn older_raw_peer_is_explicitly_unsupported_without_legacy_or_agent_calls() {
         )
     });
     assert!(fake.runs("", &["watch", "--json"]).is_empty());
-    assert!(fake.runs("", &["ls", "--json"]).is_empty());
+    assert!(fake.runs("", &["ls", "--json", "--local", "--no-archives"]).is_empty());
     assert!(fake
         .log()
         .iter()

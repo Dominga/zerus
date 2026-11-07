@@ -50,6 +50,19 @@ struct Inner {
     terminations: terminations::Terminations,
     service: Option<zerus_client_core::desktop::service::Snapshot>,
     service_changed: bool,
+    /// Task 235: computers showing their cached rows, and the marks the next
+    /// batch carries (saved at, or None once live rows replaced them).
+    stale: BTreeMap<String, f64>,
+    stale_out: BTreeMap<String, Option<f64>>,
+    /// The cached rows of each stale computer, for a resend (a second
+    /// `start` or a reloaded webview) before its live listing arrives.
+    stale_rows: BTreeMap<String, Vec<(String, ViewRow)>>,
+    /// A live listing changed since the cache was last written.
+    cache_dirty: bool,
+    /// Task 235: the first live listing and the first rows out were logged.
+    first_live_logged: bool,
+    first_rows_out_logged: bool,
+    first_take_logged: bool,
 }
 
 /// Task 8: receives a computer's stream team heads (None: poll).
@@ -326,7 +339,9 @@ impl Inner {
     /// name only service-scoped rows in this mirror.
     fn publish(&mut self, mut change: Change) {
         match &mut change {
+            Change::Remove { .. } => self.cache_dirty = true,
             Change::Upsert { computer, row, .. } => {
+                self.cache_dirty = true;
                 if let Some(rows) = self.mirror.computers.get_mut(&computer.0) {
                     rows.keep_notifications(row);
                     rows.keep_questions(row);
@@ -336,6 +351,15 @@ impl Inner {
                 computer,
                 rows: incoming,
             } => {
+                // Task 235: the live listing replaces the cached rows.
+                self.cache_dirty = true;
+                if !std::mem::replace(&mut self.first_live_logged, true) {
+                    crate::startup_log::phase("first_live_catalog", None);
+                }
+                if self.stale.remove(&computer.0).is_some() {
+                    self.stale_rows.remove(&computer.0);
+                    self.stale_out.insert(computer.0.clone(), None);
+                }
                 if let Some(rows) = self.mirror.computers.get_mut(&computer.0) {
                     for (_, row) in incoming {
                         rows.keep_notifications(row);
@@ -377,6 +401,9 @@ impl Pump {
             .wait_timeout_while(inner, park, |inner| !inner.dirty)
             .unwrap_or_else(PoisonError::into_inner);
         inner.dirty = false;
+        if !std::mem::replace(&mut inner.first_take_logged, true) {
+            crate::startup_log::phase("first_batch_taken", None);
+        }
         let mut batch = inner.coalescer.take();
         // The organization stays in Rust; the webview gets each row's project
         // and the headers (zerus-5wmh.31), only when they changed.
@@ -387,7 +414,59 @@ impl Pump {
         if std::mem::take(&mut inner.service_changed) {
             batch.desktop_service = inner.service.clone();
         }
+        batch.stale = std::mem::take(&mut inner.stale_out);
+        // Task 235: the first rows the webview gets, cached or live.
+        if !inner.first_rows_out_logged && batch.replaces.iter().any(|replace| !replace.rows.is_empty()) {
+            inner.first_rows_out_logged = true;
+            let cached = batch.stale.values().any(Option::is_some);
+            crate::startup_log::phase(if cached { "first_rows_out_cached" } else { "first_rows_out_live" }, None);
+        }
         batch
+    }
+
+    /// Task 235: shows each cached computer's last rows at once, marked
+    /// stale, unless live rows of it are already here. They go to the
+    /// webview only: never the tap (no notification, question or attention
+    /// from an old list), the mirror or the cache; the live listing replaces
+    /// them. Returns the computers seeded.
+    pub fn seed_cached(&self, cached: Vec<zerus_client_core::catalog_cache::Cached>) -> usize {
+        let mut inner = self.lock();
+        let mut seeded = 0;
+        for cached in cached {
+            if inner.mirror.computers.contains_key(&cached.computer) || inner.stale.contains_key(&cached.computer) {
+                continue;
+            }
+            inner.stale_rows.insert(cached.computer.clone(), cached.rows.clone());
+            let change = Change::Replace { computer: ComputerId(cached.computer.clone()), rows: cached.rows };
+            inner.grouping.observe(&change);
+            inner.coalescer.push(change);
+            inner.stale.insert(cached.computer.clone(), cached.saved_at);
+            inner.stale_out.insert(cached.computer, Some(cached.saved_at));
+            seeded += 1;
+        }
+        if seeded > 0 {
+            self.wake(inner);
+        }
+        seeded
+    }
+
+    /// Task 235: the live listings to cache, when one changed since the last
+    /// call; computers still showing cached rows are left out.
+    pub fn cache_snapshot(&self, saved_at: f64) -> Option<Vec<zerus_client_core::catalog_cache::Cached>> {
+        let mut inner = self.lock();
+        if !std::mem::take(&mut inner.cache_dirty) {
+            return None;
+        }
+        let stale: BTreeSet<String> = inner.stale.keys().cloned().collect();
+        let mut out = Vec::new();
+        for change in inner.mirror.changes() {
+            if let Change::Replace { computer, rows } = change {
+                if !stale.contains(&computer.0) {
+                    out.push(zerus_client_core::catalog_cache::Cached { computer: computer.0, saved_at, rows });
+                }
+            }
+        }
+        Some(out)
     }
 
     /// Queues the full last-known catalog again (a reloaded webview starts empty).
@@ -398,6 +477,17 @@ impl Pump {
         let changes = inner.mirror.changes();
         for change in changes {
             inner.coalescer.push(change);
+        }
+        // Task 235: a computer still showing its cached rows keeps them: the
+        // mirror holds none of its live rows yet, only its status.
+        let stale: Vec<(String, f64, Vec<(String, ViewRow)>)> = inner
+            .stale
+            .iter()
+            .map(|(computer, saved)| (computer.clone(), *saved, inner.stale_rows.get(computer).cloned().unwrap_or_default()))
+            .collect();
+        for (computer, saved, rows) in stale {
+            inner.coalescer.push(Change::Replace { computer: ComputerId(computer.clone()), rows });
+            inner.stale_out.insert(computer, Some(saved));
         }
         self.wake(inner);
     }
@@ -438,6 +528,27 @@ impl Pump {
                 key,
                 reason: None,
             });
+        }
+        // Task 235: the service's pages name live rows one by one; once its
+        // listing is whole, the cached rows give way to exactly these. The
+        // tap saw each live row already, so this goes to the webview only.
+        let mut inner = self.lock();
+        if inner.stale.remove(&computer.0).is_some() {
+            inner.stale_rows.remove(&computer.0);
+            let rows = inner
+                .mirror
+                .computers
+                .get(&computer.0)
+                .map(|rows| {
+                    rows.order
+                        .iter()
+                        .filter_map(|key| rows.rows.get(key).map(|row| (key.clone(), row.clone())))
+                        .collect()
+                })
+                .unwrap_or_default();
+            inner.coalescer.push(Change::Replace { computer: computer.clone(), rows });
+            inner.stale_out.insert(computer.0.clone(), None);
+            self.wake(inner);
         }
     }
 
@@ -1261,6 +1372,96 @@ mod tests {
             name: name.into(),
             ..ViewRow::default()
         }
+    }
+
+    fn cached(computer: &str, keys: &[&str]) -> zerus_client_core::catalog_cache::Cached {
+        zerus_client_core::catalog_cache::Cached {
+            computer: computer.into(),
+            saved_at: 1_700_000_000.0,
+            rows: keys.iter().map(|key| ((*key).to_owned(), row(&format!("claude/p/{key}")))).collect(),
+        }
+    }
+
+    /// Task 235: the last list on disk reaches the webview at once, marked
+    /// stale, never the tap; the live listing replaces it and clears the
+    /// mark; only live rows are written back to the cache.
+    #[test]
+    fn cached_rows_show_marked_stale_until_the_live_listing_replaces_them() {
+        let pump = Pump::default();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        pump.tap(Box::new(move |change: &Change| {
+            let _ = sender.send(change.computer().clone());
+        }));
+        assert_eq!(pump.seed_cached(vec![cached("", &["a", "b"]), cached("studio", &["c"])]), 2);
+        assert!(receiver.try_recv().is_err(), "the tap never sees cached rows");
+        let batch = pump.take(Duration::ZERO);
+        assert_eq!(batch.replaces.len(), 2);
+        assert_eq!(batch.stale.get(""), Some(&Some(1_700_000_000.0)));
+        assert_eq!(batch.stale.get("studio"), Some(&Some(1_700_000_000.0)));
+        assert!(pump.cache_snapshot(1.0).is_none(), "nothing live to write yet");
+        // The live listing of this computer replaces its cached rows.
+        pump.push(Change::Replace { computer: ComputerId(String::new()), rows: vec![("a".into(), row("claude/p/a"))] });
+        let batch = pump.take(Duration::ZERO);
+        assert_eq!(batch.stale.get(""), Some(&None), "the mark is cleared");
+        assert!(!batch.stale.contains_key("studio"), "the other computer stays stale");
+        assert_eq!(batch.replaces[0].rows.len(), 1);
+        let written = pump.cache_snapshot(2.0).expect("a live listing changed");
+        assert_eq!(written.len(), 1, "a computer still showing cached rows is not written back");
+        assert_eq!((written[0].computer.as_str(), written[0].rows.len(), written[0].saved_at), ("", 1, 2.0));
+        assert!(pump.cache_snapshot(3.0).is_none(), "written only when something changed");
+        pump.push(upsert("b", "claude/p/b"));
+        assert_eq!(pump.cache_snapshot(4.0).unwrap()[0].rows.len(), 2);
+    }
+
+    /// Task 235: a second `start` (or a reloaded webview) replays the mirror,
+    /// which holds only the computer's status yet: its cached rows and mark
+    /// come back with it, never an empty list over them.
+    #[test]
+    fn a_resend_keeps_the_cached_rows_until_the_live_listing() {
+        let pump = Pump::default();
+        pump.seed_cached(vec![cached("", &["a", "b"])]);
+        pump.push(Change::Computer { computer: ComputerId(String::new()), status: ComputerStatus::Probing });
+        let _ = pump.take(Duration::ZERO);
+        pump.resend();
+        let batch = pump.take(Duration::ZERO);
+        let rows: Vec<usize> = batch.replaces.iter().filter(|replace| replace.computer.0.is_empty()).map(|replace| replace.rows.len()).collect();
+        assert_eq!(rows, [2], "the cached rows, not the mirror's empty list");
+        assert_eq!(batch.stale.get(""), Some(&Some(1_700_000_000.0)));
+        pump.push(Change::Replace { computer: ComputerId(String::new()), rows: vec![("a".into(), row("claude/p/a"))] });
+        let _ = pump.take(Duration::ZERO);
+        pump.resend();
+        let batch = pump.take(Duration::ZERO);
+        assert_eq!(batch.replaces.iter().find(|replace| replace.computer.0.is_empty()).map(|replace| replace.rows.len()), Some(1));
+        assert!(batch.stale.is_empty(), "no stale mark after the live listing");
+    }
+
+    /// Task 235: a computer whose live rows are here already is never
+    /// overwritten by its cached rows, and a seed happens once.
+    #[test]
+    fn cached_rows_never_cover_live_ones() {
+        let pump = Pump::default();
+        pump.push(upsert("live", "claude/p/live"));
+        assert_eq!(pump.seed_cached(vec![cached("", &["old"])]), 0);
+        assert_eq!(pump.seed_cached(vec![cached("mac", &["x"])]), 1);
+        assert_eq!(pump.seed_cached(vec![cached("mac", &["y"])]), 0, "seeded once");
+        let batch = pump.take(Duration::ZERO);
+        assert!(batch.replaces.iter().all(|replace| replace.computer.0 != ""), "the live computer keeps its rows");
+    }
+
+    /// Task 235: the desktop service names live rows page by page; once its
+    /// listing is whole, the cached rows give way to exactly those.
+    #[test]
+    fn a_whole_service_listing_replaces_the_cached_rows() {
+        let pump = Pump::default();
+        pump.seed_cached(vec![cached("", &["old", "kept"])]);
+        let _ = pump.take(Duration::ZERO);
+        pump.push(upsert("kept", "claude/p/kept"));
+        let seen: BTreeSet<String> = ["kept".to_owned()].into();
+        pump.service_catalog_finish(&ComputerId(String::new()), &seen);
+        let batch = pump.take(Duration::ZERO);
+        assert_eq!(batch.stale.get(""), Some(&None));
+        let keys: Vec<&str> = batch.replaces[0].rows.iter().map(|row| row.key.as_str()).collect();
+        assert_eq!(keys, ["kept"], "the old cached row is gone");
     }
 
     fn upsert(key: &str, name: &str) -> Change {

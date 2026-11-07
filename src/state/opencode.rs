@@ -1038,6 +1038,8 @@ pub(crate) fn own_state(name: &str) -> Result<Value> {
     Ok(value)
 }
 pub(crate) fn snapshots() -> Result<Vec<Value>> {
+    // Task 234: where the OpenCode rows of a listing spend their time.
+    let mut phases = super::slow_calls::Phases::start();
     let Ok(entries) = fs::read_dir(bindings()) else {
         return Ok(Vec::new());
     };
@@ -1051,12 +1053,16 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
     if records.is_empty() {
         return Ok(Vec::new());
     }
+    phases.mark("bindings");
     let mut inspector = Inspector::connect();
+    phases.mark("connect");
     let mut rows = Vec::new();
     let preferences = notifications::load();
     for record in &records {
         let mut row = inspector.row(record, Detail::Listing);
+        phases.mark("row");
         notifications::enrich(&mut row, preferences.as_ref(), journal::journal_name(record));
+        phases.mark("notifications");
         if let Some(map) = row.as_object_mut() {
             for key in [
                 "events",
@@ -1072,6 +1078,9 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
         rows.push(row);
     }
     inspector.finish();
+    phases.mark("finish");
+    phases.note("records", records.len() as u64);
+    phases.finish_at("ls-opencode", "", 100);
     Ok(rows)
 }
 fn checked_request(record: &Value) -> Result<Value> {

@@ -6336,6 +6336,30 @@ the read inside that and lets a failure pass by itself:
   `provider_messages`, `events_open`, `activity`, `waits`, `session_state`,
   `team_store` and others). A call of 1 s or more leaves one JSON line in
   `<state>/logs/slow-calls.log`, which rotates at 256 KiB to one older file.
+- `hgs ls` names its phases the same way (task 193, task 234):
+  - a listing of 1 s or more is an `ls` line: `reads`, `rows` (with `rows_live`,
+    `rows_saved` and their count), `dsh`, `opencode` and `finish_rows`;
+  - parts of 100 ms or more get their own lines: `ls-row` (one live row),
+    `ls-dsh` (`host_rows` is the DeepSeek host's answer), `ls-opencode` and
+    `ls-finish` (`workspace`, `session_state`).
+- Task 234: what made a listing take 6 to 8 s on 65 sessions:
+  - **DeepSeek host replays.** The host builds a stopped session's row by
+    replaying its stored history: about half a second each, 7 s for twelve.
+    The host's last answer for a stopped session is kept in
+    `dsh/hosts/<id>/listing-rows.json` and reused while all of these hold:
+    the host's generation is the same (checked by one `ping`), the binding's
+    run is the same (a launch or resume through Zerus asks again), and the
+    host does not name the session as loaded. A bridge that names its loaded
+    sessions (`loadedSessions` in `ping`) keeps such a row up to an hour, an
+    older one 15 minutes. One row past its bound is refreshed per listing,
+    oldest first.
+  - **Git metadata.** Every listing ran `git` twice for each session folder,
+    and with 27 folders it spent its whole 750 ms budget. A folder's metadata
+    in `metadata-cache/` is now reused while its `HEAD` is unchanged (a branch
+    switch, a detached commit or a removed worktree changes it), up to a day;
+    a folder that is not a repository is read again after 2 minutes. A read
+    that runs out of the budget keeps the last good metadata instead of
+    replacing it with `unavailable`.
 - The team reasons every listing and inspection reads wait at most 300 ms for a
   team writer. A store that stays busy answers with the last good reasons, kept
   in `teams/waiting-cache.json` for 2 minutes. Before, a rollback-journal store

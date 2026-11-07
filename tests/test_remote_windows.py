@@ -25,8 +25,12 @@ if command.startswith('echo "hgs-remote-v2|'):
     if mode=='offline':sys.exit(255)
     if mode=='oversize':print('x'*300000);sys.exit(0)
     print('not a platform receipt');sys.exit(0)
-assert command.startswith(("$LASTEXITCODE=127;$PSNativeCommandUseErrorActionPreference=$false;& 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' ", '\"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" ')),command
-script=base64.b64decode(command.rsplit(' -EncodedCommand ',1)[1].split(';',1)[0]).decode('utf-16-le')
+if command.startswith('& ([ScriptBlock]::Create('):
+    encoded=command.split("FromBase64String('",1)[1].split("'",1)[0]
+else:
+    assert command.startswith('"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" '),command
+    encoded=command.rsplit(' -EncodedCommand ',1)[1]
+script=base64.b64decode(encoded).decode('utf-16-le')
 data=script.split("FromBase64String('",1)[1].split("'",1)[0]
 words=json.loads(base64.b64decode(data))
 with (r/'words').open('a') as f:f.write(json.dumps(words)+'\n')

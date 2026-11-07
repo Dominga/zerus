@@ -174,31 +174,17 @@ fn encode<S: AsRef<str>>(shell: &Login, words: &[S]) -> Result<String> {
     let words: Vec<&str> = words.iter().map(AsRef::as_ref).collect();
     let data = STANDARD.encode(serde_json::to_vec(&words).unwrap());
     let script = format!(
-        r#"$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';try{{$a=@([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{data}'))|ConvertFrom-Json);function q([string]$s){{'"'+[regex]::Replace($s,'(\\*)("|$)',{{param($m)$b=$m.Groups[1].Value;if($m.Groups[2].Value -eq '"'){{$b+$b+'\"'}}else{{$b+$b}}}})+'"'}};$i=[Diagnostics.ProcessStartInfo]::new();$i.FileName=Join-Path $env:USERPROFILE '.local\bin\hgs.exe';$i.Arguments=($a|ForEach-Object{{q $_}})-join ' ';$i.UseShellExecute=$false;$i.CreateNoWindow=[Console]::IsInputRedirected;$p=[Diagnostics.Process]::new();$p.StartInfo=$i;if(-not$p.Start()){{throw 'hgs start refused'}};$p.WaitForExit();$c=$p.ExitCode;$p.Dispose();exit $c}}catch{{[Console]::Error.WriteLine('hgs: remote Windows invocation failed');exit 127}}"#
+        r#"$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';try{{$a=@([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{data}'))|ConvertFrom-Json);function q([string]$s){{'"'+[regex]::Replace($s,'(\\*)("|$)',{{param($m)$b=$m.Groups[1].Value;if($m.Groups[2].Value -eq '"'){{$b+$b+'\"'}}else{{$b+$b}}}})+'"'}};$i=[Diagnostics.ProcessStartInfo]::new();$i.FileName=Join-Path $env:USERPROFILE '.local\bin\hgs.exe';$i.Arguments=($a|ForEach-Object{{q $_}})-join ' ';$i.UseShellExecute=$false;$pipe=[Console]::IsInputRedirected;$i.CreateNoWindow=$pipe;$i.RedirectStandardInput=$pipe;$i.RedirectStandardOutput=$pipe;$i.RedirectStandardError=$pipe;$p=[Diagnostics.Process]::new();$p.StartInfo=$i;if(-not$p.Start()){{throw 'hgs start refused'}};if($pipe){{$t=[Console]::OpenStandardInput().CopyToAsync($p.StandardInput.BaseStream);$o=$p.StandardOutput.BaseStream.CopyToAsync([Console]::OpenStandardOutput());$e=$p.StandardError.BaseStream.CopyToAsync([Console]::OpenStandardError());$closed=$false;while(-not$p.WaitForExit(50)){{if(-not$closed -and $t.IsCompleted){{$p.StandardInput.BaseStream.Close();$closed=$true}}}};$o.GetAwaiter().GetResult();$e.GetAwaiter().GetResult()}}else{{$p.WaitForExit()}};exit $p.ExitCode}}catch{{[Console]::Error.WriteLine('hgs: remote Windows invocation failed');exit 127}}"#
     );
     let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
-    let program = match shell {
-        Login::PowerShell(path) => format!(
-            "$LASTEXITCODE=127;$PSNativeCommandUseErrorActionPreference=$false;& '{}'",
-            path
-        ),
-        Login::Cmd(path) => format!("\"{}\"", path),
-        Login::Posix => {
-            return Err(Error::new(
-                1,
-                "Windows transport requires a verified Windows shell",
-            ))
-        }
+    let encoded = STANDARD.encode(bytes);
+    let command = match shell {
+        // Execute in this disposable SSH login shell, without passing binary
+        // output through PowerShell's native-command text decoding pipeline.
+        Login::PowerShell(_) => format!("& ([ScriptBlock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{encoded}'))))"),
+        Login::Cmd(path) => format!("\"{path}\" -NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}"),
+        Login::Posix => return Err(Error::new(1, "Windows transport requires a verified Windows shell")),
     };
-    let mut command = format!(
-        "{program} -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
-        STANDARD.encode(bytes)
-    );
-    if matches!(shell, Login::PowerShell(_)) {
-        // A native command in PowerShell's -Command otherwise flattens nonzero
-        // exit codes to 1. Initialize refusal before dispatch, then pass it on.
-        command.push_str(";exit $LASTEXITCODE");
-    }
     // cmd's command-line limit is smaller than CreateProcess's. Refuse before
     // an operation when the exact transport cannot represent it.
     if command.len() > 8000 {
@@ -339,10 +325,10 @@ mod tests {
             parse_probe(b"hgs-remote-v2|%OS%|%SystemRoot%|Windows_NT|C:\\Windows\r\n").unwrap();
         let command = encode(&shell, &words).unwrap();
         let encoded = command
-            .rsplit(" -EncodedCommand ")
-            .next()
+            .split("FromBase64String('")
+            .nth(1)
             .unwrap()
-            .split(';')
+            .split('\'')
             .next()
             .unwrap();
         let bytes = STANDARD.decode(encoded).unwrap();
@@ -366,8 +352,9 @@ mod tests {
         );
         assert!(!command.contains("日本語"));
         assert!(script.contains("UseShellExecute=$false"));
-        assert!(script.contains("CreateNoWindow=[Console]::IsInputRedirected"));
-        assert!(!script.contains("RedirectStandard"));
+        assert!(script.contains("$pipe=[Console]::IsInputRedirected"));
+        assert!(script.contains("RedirectStandardInput=$pipe"));
+        assert!(script.contains("BaseStream.CopyToAsync"));
         assert!(encode(&shell, &["bad\0argument"]).is_err());
         assert!(encode(&shell, &["x".repeat(8000)]).is_err());
     }

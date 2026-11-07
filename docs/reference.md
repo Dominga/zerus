@@ -4991,8 +4991,8 @@ the alias to Zerus's computers. PowerShell 5.1 and cmd are supported as SSH logi
 shells. Discovery is read-only and cached per alias/connection settings within
 the calling CLI process; an unknown result refuses before sending an operation.
 The Windows route selects `%USERPROFILE%\.local\bin\hgs.exe`, uses fixed encoded
-PowerShell source and Windows-native argument quoting, and inherits SSH stdin,
-stdout and stderr. JSON requests and watch controls stay on stdin. Required help
+PowerShell source and Windows-native argument quoting, and relays SSH stdin,
+stdout and stderr as raw bytes. JSON requests and watch controls stay on stdin. Required help
 capabilities, machine identities and session selectors still gate their commands;
 an old peer is never tried as an unknown agent command. The cmd transport limit
 is checked before dispatch; large request bodies belong on stdin. POSIX peers

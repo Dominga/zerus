@@ -327,6 +327,10 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     const origins = rowOrigins(phase, row);
     const marker = `pt-origin-arrow-${phase.phase.n}-${row.layer}`;
     const litNow = lit();
+    // Node y values are phase-local; row.top is the whole plan's offset, which
+    // grows with every phase above and sent edges far outside their phase
+    // (owner's screenshot, 2026-11-07). The row's own phase-local top anchors them.
+    const localTop = row.nodes[0]?.y ?? 0;
     return (
       <div
         class={`pt-layer${row.end ? " pt-row-end" : ""}`}
@@ -341,7 +345,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           <For each={edges}>
             {(entry) => (
               <path
-                d={edgePath(entry.from, entry.to, row.top)}
+                d={edgePath(entry.from, entry.to, localTop)}
                 class={`pt-edge ${edgeState(entry.edge, litNow)}`}
               />
             )}
@@ -349,7 +353,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           <For each={origins}>
             {(entry) => (
               <path
-                d={edgePath(entry.from, entry.to, row.top)}
+                d={edgePath(entry.from, entry.to, localTop)}
                 class="pt-origin-edge"
                 marker-end={`url(#${marker})`}
                 data-origin={entry.origin}

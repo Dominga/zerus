@@ -1,5 +1,6 @@
 #include "Settings.h"
 #include "TeamTaskCard.h"
+#include "TeamController.h"
 #include <QApplication>
 #include "TeamStages.h"
 #include "TeamTests.h"
@@ -66,11 +67,40 @@ TeamTaskCard::TeamTaskCard(QWidget *parent) : QWidget(parent)
 
 void TeamTaskCard::setTask(const Team &team, int task, const LiveLookup &live, bool dark)
 {
-    if (task != m_task) { m_form.clear(); m_evidence.clear(); }
+    if (task != m_task || team.id != m_team.id) { m_form.clear(); m_evidence.clear(); }
     m_team = team; m_task = task; m_live = live; m_dark = dark;
     if (m_runs.task != task) m_runs = {task, 0, false, {}, {}, m_runs.generation + 1};
+    const auto *current = team.task(task);
+    if (m_historyTeam != team.id || m_historyTask != task
+        || (current && !current->archived && (m_historyReady || m_historyLoading))) {
+        ++m_historyGeneration;
+        m_historyTeam = team.id; m_historyTask = task;
+        m_history = {}; m_historyReady = false; m_historyLoading = false; m_historyError.clear();
+    }
+    readHistory();
     readRuns();
     rebuild();
+}
+
+void TeamTaskCard::readHistory()
+{
+    const auto *stub = m_team.task(m_task);
+    if (!m_controller || !m_task || (stub && !stub->archived) || m_historyReady || m_historyLoading || !m_historyError.isEmpty()) return;
+    m_historyLoading = true;
+    const quint64 generation = m_historyGeneration;
+    QPointer<TeamTaskCard> self(this);
+    m_controller->call("status", {{"team", m_team.id}, {"task", m_task}},
+        [self, generation](bool ok, const QJsonObject &result, const QString &error) {
+            if (!self || generation != self->m_historyGeneration) return;
+            self->m_historyLoading = false;
+            if (ok && result.value("id").toInt() == self->m_task) {
+                const auto team = Teams::parse({{"tasks", QJsonArray{result}}});
+                self->m_history = team.tasks.first();
+                if (const auto *stub = self->m_team.task(self->m_task)) self->m_history.timing = stub->timing;
+                self->m_historyReady = true;
+            } else self->m_historyError = error.isEmpty() ? tr("Invalid task response") : error;
+            self->rebuild();
+        }, false);
 }
 
 void TeamTaskCard::keyPressEvent(QKeyEvent *event)
@@ -104,7 +134,7 @@ void TeamTaskCard::rebuild()
     // the theme's light text and back button unreadable on it.
     m_scroll->setStyleSheet(QStringLiteral("QScrollArea#teamTaskCardScroll,QScrollArea#teamTaskCardScroll>QWidget#qt_scrollarea_viewport,"
                                            "QWidget#teamTaskCardContent{background:%1;border:0;}").arg(c.surface.name()));
-    const Task *task = m_team.task(m_task);
+    const Task *task = m_historyReady ? &m_history : m_team.task(m_task);
     auto *content = new QWidget;
     content->setObjectName("teamTaskCardContent");
     auto *v = new QVBoxLayout(content);
@@ -114,6 +144,21 @@ void TeamTaskCard::rebuild()
     delete m_footer->layout();
     // A footer button may be the one being clicked: it goes once its signal returns.
     for (auto *child : m_footer->findChildren<QWidget *>(Qt::FindDirectChildrenOnly)) retire(child);
+    if (m_historyLoading || !m_historyError.isEmpty()) {
+        auto *message = label(m_historyLoading ? tr("Reading archived task...") : tr("Task not read: %1").arg(m_historyError), c.muted, 12);
+        message->setObjectName("teamTaskHistoryState");
+        v->addWidget(message);
+        auto *close = button(tr("Back to the team"), "teamTaskHistoryBack");
+        QObject::connect(close, &QPushButton::clicked, this, [this] { if (back) back(); });
+        v->addWidget(close);
+        if (!m_historyLoading) {
+            auto *retry = button(tr("Retry"), "teamTaskHistoryRetry");
+            QObject::connect(retry, &QPushButton::clicked, this, [this] { m_historyError.clear(); readHistory(); rebuild(); });
+            v->addWidget(retry);
+        }
+        m_scroll->setWidget(content);
+        return;
+    }
     if (!task) {
         v->addWidget(label(tr("This task is no longer in the plan."), c.muted, 12));
         v->addStretch();

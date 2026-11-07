@@ -1560,6 +1560,46 @@ A refusal is never the owner's word: a sentence carrying a negation ("Don't
 remove backend2", "не надо добавлять второго тестера") authorizes no roster,
 scale, drain or phase change in either language.
 
+### Editing a member while the team runs
+
+`hgs team settings` with `members_update` changes one member per entry, and the
+operation takes only the fields it names: an unknown field is refused with its
+name, the fields it takes and an example, never dropped in silence. `agent`,
+`account` and `computer` stay with Swap member; `folder`, `directory` and `role`
+still need a member without a session.
+
+A member that runs takes its start `prompt`, `model`, `effort`, `permissions`,
+`permissions_profile`, `context_before_task`, `models` and `iron_rules` while the
+team runs. A model or effort change reaches its session before the member's next
+task (the same `hgs settings` switch U45 uses); an agent that cannot switch in
+place takes it at its next start, and a refused switch leaves the member on the
+model its session kept. A prompt change is sent once to the member as a message
+marked "replaces previous instructions", after the clear the owner asked for
+with `"clear_context_first": true` (off by default; the clear needs the agent's
+own clear action, so DeepSeek and OpenCode refuse it); an unanswered send is
+recorded uncertain and never replayed, and the next hand-out carries the new
+prompt as well. An edit made while a message is on its way stays for the next
+one. Permissions and the permissions profile are the mode the member's next
+start gets; its running session keeps its own. A swap to another session drops
+the changes still pending for the session it replaced.
+
+Only the owner changes a member while the team runs. The lead changes a member's
+`model` and `effort` directly; every other member field goes through the
+`{"kind":"settings","members_update":[...]}` card the owner allows. A permissions
+mode the member's agent does not have (Codex has no `auto`) is refused in `plan`,
+`add-member` and `members_update`, never accepted and left to fail when the
+member starts.
+
+In the Qt team workspace, a member's menu offers **Edit member** once its current
+settings have been read. The dialog starts with that member's prompt, model,
+effort, permissions/profile, per-task context action, allowed models and iron
+rules. Save sends only changed fields in one `members_update`; a refusal stays
+in the dialog and preserves the draft while the stored member stays unchanged.
+A changed prompt reveals **Clear context first**, unchecked by default (only a
+running member can clear). Permissions-profile widening requires the owner's
+explicit checkbox confirmation. Agent, account, computer and folder changes stay
+with **Swap member**.
+
 ### Tasks added to a running phase
 
 A task joins a running phase only on the owner's word twice. The first
@@ -1681,6 +1721,19 @@ Zerus names `teams.sqlite3` and its cap, refuses the change and preserves the
 original readable record. Archive retention or export is a separate policy. Explicit
 edits of archived work restore only that phase, subject to the live 500-task
 limit and an 8 MiB phase-history read cap, and retain the original history.
+
+The Qt workspace and Profile offer **Archived phases**. This reads phase headers
+and task summaries in replaceable pages of 50 through the archive status reads
+above, including phases outside the live window. Each summary shows the title,
+final outcome, recorded work time and closure time. Double-clicking a task reads
+its full report through the per-task status read. CLI I/O and JSON decoding run
+on the process worker, with a 15-second local deadline and an 8 MiB output cap.
+Loading, refusal and retry remain visible; navigating away discards stale replies.
+The drawer retains only its selected full task, and the archive browser retains
+one phase page and one task page. A phase link seeks directly to that phase; it
+does not scan earlier history. Archived Profile scopes show recorded metadata
+instead of reconstructing timelines from compact stubs. The live Profile cache
+keeps at most six scopes, 1,000 task rows and 1,000 timelines per scope.
 
 ### Reports and interim reports
 
@@ -1953,6 +2006,17 @@ While the action runs the task's `waits` is `{"for":"zerus","on":["context"],
 "state":"waiting",...}` with the action's request, so a restarted worker reads
 the same request instead of running it again; it is not an inbox item until it
 fails.
+
+### When Zerus starts a member
+
+A member's session starts with its first task hand-out, after a swap, or for
+the lead of a planning or draft team with its brief. It also starts when the
+member has work that would otherwise never reach it: a sub-lead with untold
+items in its inbox (its sub-brief and inbox steps follow once the session takes
+a message), and the member a waiting stage would go to when no other candidate
+is available. A paused, draining or removed member is not started this way, and
+neither is one whose start is already in flight or whose last start failed: a
+failed start waits for `hgs team relaunch`.
 
 ### Stages Zerus runs itself: a command, a land, a branch per task
 

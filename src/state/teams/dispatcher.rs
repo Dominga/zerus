@@ -376,6 +376,12 @@ pub(crate) enum Step {
     AllDecided,
     /// A DeepSeek member's model and effort, before its first message.
     Settings { member: String },
+    /// Task #6: a running member's model or effort changed: switch its session
+    /// before its next task.
+    ApplyModel { member: String },
+    /// Task #6: a running member's start prompt changed: send it as the message
+    /// that replaces its earlier instructions, after the clear it asked for.
+    ReplacePrompt { member: String },
     /// Gives a ready task to a free member with the assignee's role: the
     /// assignee is busy, or failed the task's last attempt.
     Rebalance { task: u32, from: String, to: String },
@@ -444,6 +450,17 @@ fn deliver(task: &Task, member: &Member) -> Step {
 fn session_of<'a>(member: &Member, seen: &'a [Seen]) -> Option<&'a Seen> {
     let session = member.session.as_ref()?;
     seen.iter().find(|s| s.host == session.host && s.name == session.name)
+}
+
+/// Task #26: whether Zerus may start this member although no task is handed out
+/// to it: no session, no start in flight, and neither removed, paused, draining
+/// nor failed (a failed start waits for its relaunch).
+fn may_start(member: &Member) -> bool {
+    member.session.is_none()
+        && !matches!(member.state, MemberState::Removed | MemberState::Paused)
+        && !member.draining
+        && member.launch_id.is_empty()
+        && member.error.is_empty()
 }
 
 /// N7: whether this tick may decide anything from the member's session being
@@ -1106,6 +1123,18 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             steps.push(Step::Inbox);
         }
     }
+    // Task #26: a sub-lead with reports to read and no session is started, so
+    // its brief and inbox reach it; the message steps below follow once it can
+    // take one. Only a running or paused team starts its members: a planning or
+    // draft team starts its lead alone.
+    if active {
+        for sub in team.members.iter().filter(|member| member.sub && may_start(member)) {
+            let untold = inbox::items_for(team, &sub.id).iter().any(|item| !sub.inbox.told.contains(&item.key));
+            if untold && launching.insert(sub.id.clone()) {
+                steps.push(Step::Launch { member: sub.id.clone() });
+            }
+        }
+    }
     // N10: a member that just became a sub-lead hears what that means once.
     for sub in team.members.iter().filter(|member| member.sub && member.sub_brief && member.state != MemberState::Removed) {
         if session_of(sub, seen).is_some_and(can_take_a_message) {
@@ -1191,6 +1220,35 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             steps.push(Step::PrepareContext { task: task.id, member: task.assignee.clone() });
         }
     }
+    // Task #6: the owner changed a member's model, effort or start prompt while
+    // it ran. The switch and the replacing message go out before the member's
+    // next task, so it takes no task in this tick; a member Zerus is already
+    // switching for a ready task (U45) keeps that claim, and a removed member is
+    // done. A model step left on a finished or waiting task claims nothing.
+    let ready_ids = plan::ready(team);
+    let claimed: BTreeSet<&str> = ready_ids
+        .iter()
+        .filter_map(|id| team.task(*id))
+        .filter(|task| task.waits.is_none() && super::models::applies(team, task))
+        .filter_map(super::models::pending)
+        .map(|step| step.member.as_str())
+        .collect();
+    for member in team.members.iter().filter(|member| member.model_switch.is_some() || member.prompt_change.is_some()) {
+        if member.state == MemberState::Removed
+            || claimed.contains(member.id.as_str())
+            || busy.contains(member.id.as_str())
+            || !session_of(member, seen).is_some_and(|found| found.live && found.free)
+        {
+            continue;
+        }
+        busy.insert(member.id.as_str());
+        if member.model_switch.is_some() {
+            steps.push(Step::ApplyModel { member: member.id.clone() });
+        }
+        if member.prompt_change.is_some() {
+            steps.push(Step::ReplacePrompt { member: member.id.clone() });
+        }
+    }
     // C7: a member idle without a ready task while tasks are open starves the
     // plan. The lead hears once after 20 minutes; the episode ends with work.
     // U56/#728: a restart the lead or the owner asked for runs on its own.
@@ -1205,7 +1263,6 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     for phase in super::ops::drafts_ready_to_auto_accept(team, &BTreeSet::new()) {
         steps.push(Step::AutoAcceptDraft { phase });
     }
-    let ready_ids = plan::ready(team);
     let staging_open = team.tasks.iter().any(|task| !task.status.finished());
     // U9: while every open task waits for the owner's phase approval, a
     // member with nothing ready is expected; no episode starts or continues.
@@ -1328,6 +1385,15 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             if let Some(member) = candidates.iter().filter_map(|id| team.member(id)).find(|member| available(member, &busy, Some(task))) {
                 busy.insert(member.id.as_str());
                 steps.push(Step::StageOut { task, member: member.id.clone() });
+                continue;
+            }
+            // Task #26: no candidate is available and the member this stage
+            // would go to has no session: start it, so the stage is not left
+            // waiting for a member that never starts.
+            if let Some(member) = candidates.iter().filter_map(|id| team.member(id)).find(|member| may_start(member)) {
+                if launching.insert(member.id.clone()) {
+                    steps.push(Step::Launch { member: member.id.clone() });
+                }
             }
         }
     }
@@ -3302,6 +3368,27 @@ fn apply_settings(member: &Member) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// U45/Task #6: the `hgs settings` call that switches a running session's model
+/// and effort, for a task's hand-out and for a member's own change. `Ok` when
+/// the agent took it; `Err((refused, reason))`, where `refused` is false for a
+/// call that may have reached it.
+fn set_session_model(session: &SessionRef, model: &str, effort: &str) -> std::result::Result<(), (bool, String)> {
+    let mut input = json!({"request_id":uuid::Uuid::new_v4().to_string(),"expected_run_id":session.run_id,
+        "expected_conversation_id":session.conversation_id,"model":model});
+    if !effort.is_empty() {
+        input["effort"] = json!(effort);
+    }
+    match hgs(&session.host, &["settings", &session.name, "--json"], Some(&input), Duration::from_secs(120)) {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let line = stderr.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("the settings change was refused");
+            Err((true, line.chars().take(300).collect::<String>()))
+        }
+        Err(error) => Err((false, error.to_string().chars().take(300).collect())),
+    }
+}
+
 /// U45: switches a member's model and effort before it gets `task_id`. The
 /// step is recorded before the call, so a crash leaves it pending and then
 /// uncertain, never sent twice; the hand-out waits until the member's session
@@ -3318,32 +3405,58 @@ fn switch_model(store: &mut Store, team: &Team, task_id: u32, member_id: &str, f
         events.push(Event::new("model_switch", json!({"task":task_id,"member":role,"from":from,"to":to})));
         Ok(())
     })?;
-    let mut input = json!({"request_id":uuid::Uuid::new_v4().to_string(),"expected_run_id":session.run_id,
-        "expected_conversation_id":session.conversation_id,"model":model});
-    if !effort.is_empty() {
-        input["effort"] = json!(effort);
-    }
-    let outcome = match hgs(&session.host, &["settings", &session.name, "--json"], Some(&input), Duration::from_secs(120)) {
-        Ok(output) if output.status.success() => return Ok(()),
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let line = stderr.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("the settings change was refused");
-            ("refused", line.chars().take(300).collect::<String>())
-        }
-        Err(error) => ("uncertain", error.to_string().chars().take(300).collect()),
+    let (state, reason) = match set_session_model(&session, model, effort) {
+        Ok(()) => return Ok(()),
+        Err((refused, reason)) => (if refused { "refused" } else { "uncertain" }, reason),
     };
     change(store, &team.id, |team, events| {
         let (role, name) = (team.role_of(member_id), team.name_of(member_id));
         let task = team.task_mut(task_id).context("unknown task")?;
         if let Some(step) = task.prepare.iter_mut().rev().find(|step| step.step == "model" && step.result == "pending" && step.member == member_id) {
-            step.result = outcome.0.into();
-            step.reason = outcome.1.clone();
+            step.result = state.into();
+            step.reason = reason.clone();
         }
-        super::models::wait(task, "model", &format!("{name} could not switch to {to}: {}", outcome.1), now());
+        super::models::wait(task, "model", &format!("{name} could not switch to {to}: {reason}"), now());
         events.push(Event::new(
-            if outcome.0 == "refused" { "model_switch_refused" } else { "model_switch_uncertain" },
-            json!({"task":task_id,"member":role,"to":to,"reason":outcome.1}),
+            if state == "refused" { "model_switch_refused" } else { "model_switch_uncertain" },
+            json!({"task":task_id,"member":role,"to":to,"reason":reason}),
         ));
+        Ok(())
+    })
+}
+
+/// Task #6: switches a running member's session to the model and effort its
+/// settings change named, before its next task. The change is taken once: a
+/// refusal puts the member's model back where its session is, and a newer
+/// change that arrived while the call ran stays for the next tick.
+fn apply_model(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Result<()> {
+    let Some(wanted) = team.member(member_id).and_then(|member| member.model_switch.clone()) else { return Ok(()) };
+    let to = super::models::label(&wanted.model, &wanted.effort);
+    let outcome = match team.member(member_id).and_then(|member| member.session.as_ref()) {
+        Some(session) => set_session_model(session, &wanted.model, &wanted.effort),
+        None => Err((true, "the member has no session".to_owned())),
+    };
+    change(store, &team.id, |team, events| {
+        let role = team.role_of(member_id);
+        let Some(found) = team.members.iter_mut().find(|member| member.id == member_id) else { return Ok(()) };
+        // The hgs call may have taken up to two minutes; a change the owner made
+        // meanwhile is newer than this one and stays for the next tick.
+        if found.model_switch.as_ref() != Some(&wanted) {
+            return Ok(());
+        }
+        found.model_switch = None;
+        match &outcome {
+            Ok(()) => events.push(Event::new("model_switched", json!({"member":role,"to":to}))),
+            // A definite refusal leaves the session on the model it ran, so the
+            // member's model follows it back. An uncertain call may have reached
+            // the session: the new value stays and the feed says so.
+            Err((true, reason)) => {
+                found.model = wanted.from_model.clone();
+                found.effort = wanted.from_effort.clone();
+                events.push(Event::new("model_switch_failed", json!({"member":role,"to":to,"reason":reason})));
+            }
+            Err((false, reason)) => events.push(Event::new("model_switch_uncertain", json!({"member":role,"to":to,"reason":reason}))),
+        }
         Ok(())
     })
 }
@@ -3664,7 +3777,7 @@ pub(crate) fn context_before_task(team: &Team, member: &Member) -> String {
 
 /// U46: whether this agent has the native context action. DeepSeek compacts but
 /// has no native clear; OpenCode has neither yet.
-fn native_context(agent: &str, action: &str) -> bool {
+pub(crate) fn native_context(agent: &str, action: &str) -> bool {
     match action {
         "compact" => matches!(agent, "claude" | "codex" | "kimi" | "dsh"),
         "clear" => matches!(agent, "claude" | "codex" | "kimi"),
@@ -3672,7 +3785,7 @@ fn native_context(agent: &str, action: &str) -> bool {
     }
 }
 
-fn agent_label(agent: &str) -> &str {
+pub(crate) fn agent_label(agent: &str) -> &str {
     match agent {
         "claude" => "Claude",
         "codex" => "Codex",
@@ -3858,6 +3971,186 @@ struct Preparation {
     steps: Vec<PrepareStep>,
     conversation: Option<(String, String)>,
     resume: bool,
+}
+
+/// Task #6: what the clear before a changed start prompt leaves to its send.
+enum ClearAhead {
+    Done,
+    Waiting,
+    Failed(String),
+}
+
+/// Task #6: runs, or reads, the clear a changed start prompt asked for. A new
+/// conversation the clear names is kept on `session`, so the message that
+/// follows keeps the member.
+fn clear_ahead(store: &mut Store, team: &Team, member: &Member, session: &mut SessionRef, wanted: &PromptChange) -> anyhow::Result<ClearAhead> {
+    if !wanted.clear_context {
+        return Ok(ClearAhead::Done);
+    }
+    let Some(clear) = wanted.clear.clone() else {
+        return Ok(match run_context(member, session, "clear") {
+            ContextStart::Started(request) => {
+                change(store, &team.id, |team, _| {
+                    if let Some(found) = team.members.iter_mut().find(|found| found.id == member.id) {
+                        if let Some(prompt_change) = found.prompt_change.as_mut() {
+                            prompt_change.clear = Some(PromptClear {
+                                request_id: request.request_id,
+                                run_id: request.run_id,
+                                conversation_id: request.conversation,
+                                started_at: request.started_at,
+                            });
+                        }
+                    }
+                    Ok(())
+                })?;
+                ClearAhead::Waiting
+            }
+            ContextStart::Done { conversation, .. } => {
+                if let Some(new) = conversation {
+                    session.conversation_id = new;
+                }
+                ClearAhead::Done
+            }
+            ContextStart::Failed { step } => ClearAhead::Failed(step.reason),
+        });
+    };
+    let request = ContextRequest {
+        action: "clear".into(),
+        request_id: clear.request_id,
+        run_id: clear.run_id,
+        conversation: clear.conversation_id,
+        started_at: clear.started_at,
+    };
+    match check_context(session, &request) {
+        ContextCheck::Waiting => Ok(ClearAhead::Waiting),
+        ContextCheck::Done { conversation } => {
+            if let Some(new) = conversation {
+                session.conversation_id = new;
+            }
+            Ok(ClearAhead::Done)
+        }
+        ContextCheck::Refused(reason) | ContextCheck::Uncertain(reason) => Ok(ClearAhead::Failed(reason)),
+    }
+}
+
+/// Task #6: what the send of a changed start prompt did.
+enum PromptDone {
+    Replaced,
+    Failed(String),
+    Uncertain(String),
+}
+
+/// Task #6: whether `member` still holds the prompt change `wanted` describes:
+/// the same prompt and the same clear. A newer edit makes this send its own.
+fn same_prompt_change(member: &Member, wanted: &PromptChange, prompt: &str) -> bool {
+    member.prompt.trim() == prompt.trim()
+        && member.prompt_change.as_ref().is_some_and(|stored| stored.clear == wanted.clear && stored.clear_context == wanted.clear_context)
+}
+
+/// Task #6: sends a member's changed start prompt as the message that replaces
+/// its earlier instructions, after the clear the change asked for.
+fn replace_prompt(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Result<()> {
+    let Some(member) = team.member(member_id) else { return Ok(()) };
+    let Some(wanted) = member.prompt_change.clone() else { return Ok(()) };
+    let prompt = member.prompt.clone();
+    let text = replace_prompt_text(team, member);
+    // A send attempted by an earlier tick (a crash during it) is never replayed
+    // under a new id: the message may have arrived (U45's rule).
+    if wanted.sent_at.is_some() {
+        return finish_prompt_change(store, team, member_id, None, &wanted, &prompt, PromptDone::Uncertain("the send was interrupted; it was not replayed".into()));
+    }
+    let Some(mut session) = member.session.clone() else {
+        return finish_prompt_change(store, team, member_id, None, &wanted, &prompt, PromptDone::Failed("the member has no session".into()));
+    };
+    match clear_ahead(store, team, member, &mut session, &wanted)? {
+        ClearAhead::Waiting => return Ok(()),
+        ClearAhead::Failed(reason) => return finish_prompt_change(store, team, member_id, None, &wanted, &prompt, PromptDone::Failed(reason)),
+        ClearAhead::Done => {}
+    }
+    // The send is recorded before the message leaves, so a crash during it
+    // leaves it uncertain instead of sending it again. A newer edit that
+    // replaced the change meanwhile makes this send stale: nothing goes out and
+    // the next tick sends the current prompt.
+    let ours = std::cell::Cell::new(false);
+    change(store, &team.id, |team, _| {
+        if let Some(found) = team.members.iter_mut().find(|member| member.id == member_id) {
+            let same = same_prompt_change(found, &wanted, &prompt);
+            ours.set(same);
+            if let Some(stored) = found.session.as_mut().filter(|stored| stored.run_id == session.run_id) {
+                stored.conversation_id = session.conversation_id.clone();
+            }
+            if same {
+                if let Some(prompt_change) = found.prompt_change.as_mut() {
+                    prompt_change.sent_at = Some(now());
+                }
+            }
+        }
+        Ok(())
+    })?;
+    if !ours.get() {
+        return Ok(());
+    }
+    let done = match send(&session, &uuid::Uuid::new_v4().to_string(), &text) {
+        Sent::Delivered => PromptDone::Replaced,
+        // A refusal or an uncertain send is not repeated; the next hand-out
+        // carries the new prompt anyway, and the feed records what happened.
+        Sent::Refused(reason) => PromptDone::Failed(reason),
+        Sent::Uncertain(reason) => PromptDone::Uncertain(reason),
+    };
+    finish_prompt_change(store, team, member_id, Some(&session), &wanted, &prompt, done)
+}
+
+/// Task #6: the changed start prompt is done: the clear's new conversation is
+/// kept, this change leaves the member and its outcome reaches the feed. A newer
+/// prompt or clear that arrived while the send ran is not this change and stays
+/// for a later tick.
+fn finish_prompt_change(
+    store: &mut Store,
+    team: &Team,
+    member_id: &str,
+    session: Option<&SessionRef>,
+    wanted: &PromptChange,
+    prompt: &str,
+    done: PromptDone,
+) -> anyhow::Result<()> {
+    change(store, &team.id, |team, events| {
+        let role = team.role_of(member_id);
+        let Some(found) = team.members.iter_mut().find(|member| member.id == member_id) else { return Ok(()) };
+        if same_prompt_change(found, wanted, prompt) {
+            if let Some(session) = session {
+                if let Some(stored) = found.session.as_mut().filter(|stored| stored.run_id == session.run_id) {
+                    stored.conversation_id = session.conversation_id.clone();
+                }
+            }
+            found.prompt_change = None;
+        }
+        match done {
+            PromptDone::Replaced => events.push(Event::new("prompt_replaced", json!({"member":role}))),
+            PromptDone::Failed(reason) => events.push(Event::new("prompt_change_failed", json!({"member":role,"reason":reason}))),
+            PromptDone::Uncertain(reason) => events.push(Event::new("prompt_change_uncertain", json!({"member":role,"reason":reason}))),
+        }
+        Ok(())
+    })
+}
+
+/// Task #6: the message that gives a running member its new start prompt. It
+/// says the words replace the earlier instructions, so the member does not keep
+/// both.
+pub(crate) fn replace_prompt_text(team: &Team, member: &Member) -> String {
+    let prompt = member.prompt.trim();
+    let instructions = if prompt.is_empty() {
+        "Your start prompt is now empty: the instructions you were given before no longer apply.".to_owned()
+    } else {
+        format!("Your start prompt changed. These instructions replace the ones you were given before:\n\n{prompt}")
+    };
+    format!(
+        "[Zerus team \u{b7} from: Zerus \u{b7} replaces previous instructions]\n\
+         Team: {}. Your role: {}.\n\
+         {instructions}\n\n\
+         They apply from your next task on; do not follow the earlier instructions, and go on with the work you have.",
+        team.name,
+        team.role_of(&member.id)
+    )
 }
 
 
@@ -6622,6 +6915,8 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                 Ok(())
             })
         }
+        Step::ApplyModel { member } => apply_model(store, team, member),
+        Step::ReplacePrompt { member } => replace_prompt(store, team, member),
         Step::Adopt { member, session } => {
             let mut filing = None;
             change(store, &team.id, |team, events| {
@@ -6631,6 +6926,11 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                 found.session = Some(session.clone());
                 found.state = MemberState::Active;
                 if started {
+                    // Task #6: a new session takes the prompt and model it
+                    // starts with; a change recorded for the session it
+                    // replaced is done.
+                    found.prompt_change = None;
+                    found.model_switch = None;
                     let role = team.role_of(member);
                     events.push(Event::new("member_started", json!({"member":role,"session":session.name})));
                     // F1.1: the adopted session is filed into the team's project,
@@ -7975,6 +8275,14 @@ mod dispatcher_drain;
 #[cfg(test)]
 #[path = "tests/dispatcher_context.rs"]
 mod dispatcher_context;
+
+#[cfg(test)]
+#[path = "tests/dispatcher_launch.rs"]
+mod dispatcher_launch;
+
+#[cfg(test)]
+#[path = "tests/dispatcher_live_edit.rs"]
+mod dispatcher_live_edit;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_lead.rs"]

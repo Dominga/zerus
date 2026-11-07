@@ -16,6 +16,8 @@ Each kind sends its exact change:
   accept-phase, unpause-phase, return-to-draft: {"kind":K,"phase":N}
   edit-draft, move-phase, phase-acceptance, extend: the operation's fields
   {"kind":"settings","settings":{"max_members":8}} (any owner setting)
+  {"kind":"settings","members_update":[{"id":"dev","prompt":"..."}]} (a
+    member field: prompt, permissions, model, effort, settings)
   {"kind":"full-tests","release":"v1.2"} (one full test run)
   {"kind":"iron-rules","scope":"project","project":"ID","rules":[...],
    "expected_revision":N} (or "scope":"session" with the member's session)

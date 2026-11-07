@@ -2600,6 +2600,33 @@ written for compatibility. `swarm export --kinds`
 takes the kinds its requester parses on stdin; without them it exports only
 the kinds hgs v0.47.0 parses.
 
+Primary project placement is stored separately in the bounded causal
+`swarm/session-id-memberships.json`, exchanged only with peers advertising
+`session_id_memberships_v1`. It preserves concurrent concrete placements for
+review; a concrete project beats concurrent default placement, and a later
+explicit Inbox/unassignment wins. Valid twins are migrated under the catalog
+lock without replacing an existing ID record. An exact primary null/conflict
+means unassigned; only an absent ID record allows name membership fallback.
+Unreadable primary data stays unavailable and is not repaired automatically.
+Older builds preserve this file but cannot edit its ID grouping.
+
+The `session-labels-v1` transition gate requires fresh positives from this
+computer, every configured peer and every catalog machine. An unaddressed,
+unknown or unreachable member keeps it closed. `hgs swarm session-labels-gate
+--json` reads the bounded ten-minute cache without starting a worker or making
+connections. Each hello retires the previous observation; ordinary hello never
+waits for a connector, and the existing sync worker performs that bounded query
+separately. The answering CLI must report both ID membership readiness and its
+complete ID routing capability; the earlier observation-only build cannot open
+the gate. Configuration, route, membership or connector changes invalidate the
+answer. The cache grants no native authority and never weakens exact selector,
+original receipt or no-replay checks.
+
+While the gate is open, `hgs reference`, `hgs self` and sender envelopes include
+the stored canonical session ID. Older parsers continue to receive the earlier
+reference form while it is closed. This capability leaf does not yet enable
+new duplicate-label writers.
+
 The session-label transition gate's supported connector inventory consists of
 the maintained installer's connector using the canonical mobile configuration
 (`core::mobile::config_path()`). On Linux its user unit is

@@ -89,6 +89,8 @@ pub struct Context {
     pub configuration: String,
     pub version: String,
     pub membership_by_id: bool,
+    /// A required build capability: an earlier context shape cannot claim it.
+    pub labels_by_id: bool,
 }
 impl Context {
     pub fn valid(&self) -> bool {
@@ -164,6 +166,7 @@ impl Reply {
             && self.context.as_ref().is_some_and(|context| {
                 context.valid()
                     && context.membership_by_id
+                    && context.labels_by_id
                     && context.machine == query.machine
                     && context.configuration == query.configuration
             })
@@ -245,6 +248,7 @@ mod tests {
                 configuration: query.configuration.clone(),
                 version: "fixture".into(),
                 membership_by_id: true,
+                labels_by_id: true,
             }),
             query,
         }
@@ -275,6 +279,7 @@ mod tests {
             "marker",
             "membership",
             "routing",
+            "native routing",
         ] {
             let mut r = reply();
             let c = r.context.as_mut().unwrap();
@@ -284,6 +289,7 @@ mod tests {
                 "configuration" => c.configuration = "c".repeat(64),
                 "marker" => c.marker = "session-labels-v10".into(),
                 "routing" => r.routing_by_id = false,
+                "native routing" => c.labels_by_id = false,
                 _ => c.membership_by_id = false,
             }
             assert!(!r.matches(&query, 1_000), "{field}");
@@ -312,5 +318,14 @@ mod tests {
         object.as_object_mut().unwrap().remove("operation");
         object["context"]["membership_by_id"] = serde_json::json!("true");
         assert!(Reply::parse(&serde_json::to_vec(&object).unwrap(), &query, 1_000).is_none());
+        object = serde_json::to_value(reply()).unwrap();
+        object["context"]
+            .as_object_mut()
+            .unwrap()
+            .remove("labels_by_id");
+        assert!(
+            Reply::parse(&serde_json::to_vec(&object).unwrap(), &query, 1_000).is_none(),
+            "the earlier observation-only CLI context cannot claim full ID routing"
+        );
     }
 }

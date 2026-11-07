@@ -21,46 +21,6 @@ fn the_leads_relaunch_needs_a_word_that_names_the_member() {
     assert!(!roster_word_rule(&team, "relaunch", &json!({"member":""})).needed());
 }
 
-/// #432 N9: the swap and the owner's word together, through the command
-/// entry: the lead swaps on the exact sentence naming the member by its
-/// role, and that sentence pays for one swap only.
-#[test]
-fn a_lead_swaps_a_member_on_the_owners_word() {
-    let dir = tempfile::tempdir().unwrap();
-    let now = crate::state::now();
-    let said = "замени бэкендера на кими";
-    owner_word_events(dir.path(), &[(now - 60.0, said)]);
-    crate::state::with_test_state_root(dir.path(), || {
-        set_test_caller_identities(Some((Some("c1".into()), None, None)));
-        let mut store = Store::open(true).unwrap();
-        let team = full_team();
-        let id = team.id.clone();
-        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
-        let swap = |request: &str, member: &str, agent: &str| {
-            run(
-                "swap-member",
-                &json!({"request_id":request,"team":id,"member":member,"agent":agent,"owner_word":{"text":said}}),
-                false,
-            )
-        };
-        // Without the owner's sentence the lead does not swap.
-        let error = run(
-            "swap-member",
-            &json!({"request_id":"22222222-2222-4222-8222-222222222222","team":id,"member":"m1","agent":"kimi"}),
-            false,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("your word"), "{error}");
-        let swapped = swap("33333333-3333-4333-8333-333333333333", "m1", "kimi").unwrap();
-        assert_eq!((swapped["status"].as_str(), swapped["agent"].as_str()), (Some("swapped"), Some("kimi")));
-        // The same sentence pays for one swap only.
-        let error = swap("44444444-4444-4444-8444-444444444444", "m2", "kimi").unwrap_err().to_string();
-        assert!(error.contains("already used"), "{error}");
-        assert!(Store::open(false).unwrap().load(&id).unwrap().unwrap().member("m2").unwrap().agent == "dsh");
-    });
-}
-
 #[test]
 fn every_roster_change_needs_the_owner_word_naming_it() {
     use rusqlite::Connection;
@@ -397,342 +357,6 @@ fn a_task_joins_a_running_phase_on_the_owners_word_twice() {
     });
 }
 
-/// U32: the owner's plain request adds a member by role or agent, raises a
-/// full cap by the count the sentence names, and one word covers one add.
-#[test]
-fn the_owners_word_adds_a_member_by_role_and_raises_a_full_cap() {
-    let dir = tempfile::tempdir().unwrap();
-    let now = crate::state::now();
-    let sentence = "может еще одного дипсик бэкендера добавим?";
-    let frontend = "может еще одного фронтендера добавим?";
-    // Task #21: a quote may be part of a fresh message, so the stale one has
-    // words of its own.
-    let stale = "давай добавим еще дипсик бэкендера";
-    let relayed = "[Zerus team · from: Zerus] should we add a backend?";
-    owner_word_events(dir.path(), &[
-        (now - 60.0, sentence),
-        (now - 60.0, frontend),
-        (now - super::super::owner_word::FRESH_SECONDS - 60.0, stale),
-        (now - 60.0, relayed),
-        (now - 60.0, "Please remove the backend from the roster"),
-        (now - 60.0, "Please remove the tester from the roster"),
-    ]);
-    crate::state::with_test_state_root(dir.path(), || {
-        set_test_caller_identities(Some((Some("c1".into()), None, None)));
-        let mut store = Store::open(true).unwrap();
-        let team = full_team();
-        let id = team.id.clone();
-        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
-        let add = |request: &str, member: &str, text: &str| {
-            run(
-                "add-member",
-                &json!({"request_id":request,"team":id,"member":{"id":member,"role":"Backend","agent":"dsh"},
-                    "owner_word":{"text":text}}),
-                false,
-            )
-        };
-        // A sentence naming another role does not add a backend.
-        let error = add("22222222-2222-4222-8222-222222222222", "backend4", frontend).unwrap_err();
-        let error = format!("{error:#}");
-        assert!(error.contains("does not name the member to add"), "{error}");
-        // A stale sentence and a relayed one are not the owner's word.
-        let error = add("33333333-3333-4333-8333-333333333333", "backend4", stale).unwrap_err().to_string();
-        assert!(error.contains("your word"), "{error}");
-        let error = add("44444444-4444-4444-8444-444444444444", "backend4", relayed).unwrap_err().to_string();
-        assert!(error.contains("your word"), "{error}");
-        // The owner's plain request adds a dsh Backend and raises the full cap by one.
-        let value = add("55555555-5555-4555-8555-555555555555", "backend4", sentence).unwrap();
-        assert_eq!(value["status"], "added");
-        assert_eq!(value["by"], "Lead on your word");
-        let saved = Store::open(false).unwrap().load(&id).unwrap().unwrap();
-        assert_eq!(saved.settings.max_members, 6);
-        let added = saved.member("backend4").unwrap().added.clone().unwrap();
-        assert_eq!(added["by"], "Lead on your word");
-        assert_eq!(added["owner_word"], sentence);
-        // Status shows how the member joined.
-        let status = run("status", &json!({"team":id}), false).unwrap();
-        assert_eq!(status["settings"]["max_members"], 6);
-        let member = status["members"].as_array().unwrap().iter().find(|member| member["id"] == "backend4").cloned().unwrap();
-        assert_eq!(member["added"]["by"], "Lead on your word");
-        assert_eq!(member["added"]["owner_word"], sentence);
-        // The feed names both caps and carries the quote.
-        let events = run("events", &json!({"team":id}), false).unwrap();
-        let items = events["items"].as_array().unwrap();
-        let raised = items.iter().find(|item| item["kind"] == "max_members_raised").unwrap();
-        assert_eq!((raised["detail"]["old"].as_u64(), raised["detail"]["new"].as_u64()), (Some(5), Some(6)));
-        let joined = items.iter().find(|item| item["kind"] == "member_added").unwrap();
-        assert_eq!(
-            (joined["detail"]["by"].as_str(), joined["detail"]["owner_word"].as_str()),
-            (Some("Lead on your word"), Some(sentence))
-        );
-        // One word covers one add: the same sentence adds no second member.
-        let error = add("66666666-6666-4666-8666-666666666666", "backend5", sentence).unwrap_err().to_string();
-        assert!(error.contains("already used"), "{error}");
-        assert!(Store::open(false).unwrap().load(&id).unwrap().unwrap().member("backend5").is_none());
-        // N15: a removal names the member by id or by its role: a sentence
-        // naming another role is refused, the role's own one is the word.
-        let error = run(
-            "remove-member",
-            &json!({"request_id":"77777777-7777-4777-8777-777777777777","team":id,"member":"backend4",
-                "owner_word":{"text":"Please remove the tester from the roster"}}),
-            false,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("your word"), "{error}");
-        let removed = run(
-            "remove-member",
-            &json!({"request_id":"88888888-8888-4888-8888-888888888888","team":id,"member":"backend4",
-                "owner_word":{"text":"Please remove the backend from the roster"}}),
-            false,
-        )
-        .unwrap();
-        assert_eq!((removed["status"].as_str(), removed["member"].as_str()), (Some("removed"), Some("backend4")));
-    });
-}
-
-/// U42 (#587): the lead discards an accepted phase, or returns one to a
-/// draft, on the owner's sentence naming the phase and the change; the CLI
-/// verifies it as it does for an approval.
-#[test]
-fn the_lead_discards_or_redrafts_an_accepted_phase_on_the_owners_word() {
-    use crate::state::teams::model::{Phase, PhaseState, Task, TaskStatus};
-    let dir = tempfile::tempdir().unwrap();
-    let now = crate::state::now();
-    owner_word_events(dir.path(), &[
-        (now - 60.0, "discard phase 3, it is stale"),
-        (now - 60.0, "верни фазу 2 в черновик"),
-        (now - 60.0, "phase 2 looks fine"),
-        (now - 60.0, "Don't discard phase 3, rework it"),
-        (now - 60.0, "не отменяй фазу 2"),
-        (now - 60.0, "phase 2 is not a draft any more"),
-    ]);
-    crate::state::with_test_state_root(dir.path(), || {
-        set_test_caller_identities(Some((Some("c1".into()), None, None)));
-        let mut store = Store::open(true).unwrap();
-        let mut team = full_team();
-        team.tasks = vec![
-            Task { id: 1, title: "A".into(), assignee: "m1".into(), status: TaskStatus::InProgress, ..Default::default() },
-            Task { id: 2, phase: 2, title: "B".into(), assignee: "m1".into(), status: TaskStatus::Pending, ..Default::default() },
-            Task { id: 3, phase: 3, title: "C".into(), assignee: "m1".into(), status: TaskStatus::Pending, ..Default::default() },
-        ];
-        team.phases = vec![
-            Phase { n: 2, order: 2, title: "Two".into(), state: PhaseState::Queued, tasks: vec![2], ..Default::default() },
-            Phase { n: 3, order: 3, title: "Three".into(), state: PhaseState::Queued, tasks: vec![3], ..Default::default() },
-        ];
-        let id = team.id.clone();
-        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
-        let call = |op: &str, request: &str, phase: u32, text: Option<&str>| {
-            let mut input = json!({"request_id":request,"team":id,"phase":phase});
-            if let Some(text) = text {
-                input["owner_word"] = json!({"text":text});
-            }
-            run(op, &input, false)
-        };
-        // Without a word, or on a sentence that does not name the change,
-        // the lead cannot.
-        let error = call("discard-phase", "22222222-2222-4222-8222-222222222222", 3, None).unwrap_err().to_string();
-        assert!(error.contains("Only you discard an accepted phase"), "{error}");
-        let error = call("discard-phase", "33333333-3333-4333-8333-333333333333", 2, Some("phase 2 looks fine")).unwrap_err().to_string();
-        assert!(error.contains("has not asked to discard phase 2"), "{error}");
-        // A discard sentence names its own phase only.
-        let error = call("discard-phase", "44444444-4444-4444-8444-444444444444", 2, Some("discard phase 3")).unwrap_err().to_string();
-        assert!(error.contains("has not asked to discard phase 2"), "{error}");
-        // #595 C1: a refusal never authorizes the change, in either language,
-        // and the quote is the owner's whole sentence, never a fragment.
-        let error = call("discard-phase", "4a444444-4444-4444-8444-444444444444", 3, Some("Don't discard phase 3")).unwrap_err().to_string();
-        assert!(error.contains("has not asked to discard phase 3"), "{error}");
-        let error = call("discard-phase", "4b444444-4444-4444-8444-444444444444", 2, Some("не отменяй фазу 2")).unwrap_err().to_string();
-        assert!(error.contains("has not asked to discard phase 2"), "{error}");
-        let error = call("return-to-draft", "4c444444-4444-4444-8444-444444444444", 2, Some("phase 2 is not a draft any more")).unwrap_err().to_string();
-        assert!(error.contains("has not asked to return phase 2 to a draft"), "{error}");
-        let error = call("discard-phase", "4d444444-4444-4444-8444-444444444444", 3, Some("discard phase 3")).unwrap_err().to_string();
-        assert!(error.contains("has not asked to discard phase 3"), "a fragment is not the sentence: {error}");
-        // The owner's discard of phase 3 is the lead's word for it: the whole
-        // sentence, as the owner wrote it.
-        let discarded = call("discard-phase", "55555555-5555-4555-8555-555555555555", 3, Some("discard phase 3, it is stale")).unwrap();
-        assert_eq!(discarded["status"], "phase_discarded");
-        // The Russian sentence returns phase 2 to a draft.
-        let returned = call("return-to-draft", "66666666-6666-4666-8666-666666666666", 2, Some("верни фазу 2 в черновик")).unwrap();
-        assert_eq!(returned["status"], "phase_returned_to_draft");
-        let saved = Store::open(false).unwrap().load(&id).unwrap().unwrap();
-        assert_eq!(saved.phases.iter().map(|phase| (phase.n, phase.state)).collect::<Vec<_>>(), vec![(2, PhaseState::Draft)]);
-        assert_eq!(saved.task(2).unwrap().status, TaskStatus::Draft);
-        let events = run("events", &json!({"team":id}), false).unwrap();
-        let item = events["items"].as_array().unwrap().iter().find(|item| item["kind"] == "phase_returned_to_draft").cloned().unwrap();
-        assert_eq!((item["detail"]["by"].as_str(), item["detail"]["owner_word"]["text"].as_str()), (Some("Lead"), Some("верни фазу 2 в черновик")));
-    });
-}
-
-/// N7: "add two backends" authorizes two adds, and the full cap grows by
-/// one for each of them; a third add on the same sentence is refused.
-#[test]
-fn a_count_word_authorizes_that_many_adds_and_the_cap_grows_by_one_each() {
-    let dir = tempfile::tempdir().unwrap();
-    let now = crate::state::now();
-    let sentence = "add two deepseek backends to the roster";
-    owner_word_events(dir.path(), &[(now - 60.0, sentence)]);
-    crate::state::with_test_state_root(dir.path(), || {
-        set_test_caller_identities(Some((Some("c1".into()), None, None)));
-        let mut store = Store::open(true).unwrap();
-        let team = full_team();
-        let id = team.id.clone();
-        let cap = team.settings.max_members;
-        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
-        let add = |request: &str, member: &str| {
-            run(
-                "add-member",
-                &json!({"request_id":request,"team":id,"member":{"id":member,"role":"Backend","agent":"dsh"},
-                    "owner_word":{"text":sentence}}),
-                false,
-            )
-        };
-        let members = || Store::open(false).unwrap().load(&id).unwrap().unwrap().settings.max_members;
-        assert_eq!(add("22222222-2222-4222-8222-222222222222", "backend4").unwrap()["status"], "added");
-        assert_eq!(members(), cap + 1);
-        assert_eq!(add("33333333-3333-4333-8333-333333333333", "backend5").unwrap()["status"], "added");
-        assert_eq!(members(), cap + 2);
-        let error = add("44444444-4444-4444-8444-444444444444", "backend6").unwrap_err().to_string();
-        assert!(error.contains("already used"), "{error}");
-    });
-}
-
-/// Owner (2026-11-01): the lead session's journal keeps the name it had when
-/// it began, so a renamed lead ("work-7c91e747" -> "Worker") has its events,
-/// including "plan approved", under the earlier name. The word belongs to the
-/// same conversation, so the approval is found.
-#[test]
-fn the_owners_word_is_found_under_an_earlier_name_of_the_lead_session() {
-    use sha2::{Digest, Sha256};
-    let dir = tempfile::tempdir().unwrap();
-    let now = crate::state::now();
-    let name = "dsh/zerus-src/Worker";
-    let earlier = "dsh/zerus-src/work-7c91e747";
-    let conversation = "session-conv-lead";
-    let db = rusqlite::Connection::open(dir.path().join("events.sqlite3")).unwrap();
-    db.execute_batch("CREATE TABLE events (seq INTEGER PRIMARY KEY, name TEXT, conversation TEXT, payload TEXT);").unwrap();
-    db.execute(
-        "INSERT INTO events(name, conversation, payload) VALUES (?1, ?2, ?3)",
-        rusqlite::params![
-            earlier,
-            conversation,
-            json!({"type":"UserPromptSubmit","at":now - 60.0,"agent_id":"","detail":"plan approved"}).to_string()
-        ],
-    )
-    .unwrap();
-    crate::state::with_test_state_root(dir.path(), || {
-        let _worker = hold_worker_lock();
-        // The dsh binding of the renamed lead: hgs ls shows "Worker", and its
-        // journal began as "work-7c91e747".
-        let binding = dir.path().join("dsh/bindings").join(format!("{:x}.json", Sha256::digest(name.as_bytes())));
-        std::fs::create_dir_all(binding.parent().unwrap()).unwrap();
-        std::fs::write(
-            &binding,
-            json!({"version":1,"name":name,"backend":"dsh","agent":"dsh",
-                "run_id":"r0","conversation_id":conversation,"journal_name":earlier}).to_string(),
-        )
-        .unwrap();
-        let mut store = Store::open(true).unwrap();
-        let (mut team, _) = ops::create(
-            "t",
-            &json!({"name":"Renamed","lead":{"id":"lead","agent":"dsh",
-                "session":{"name":name,"run_id":"r0","conversation_id":conversation}}}),
-        )
-        .unwrap();
-        let mut events = Vec::new();
-        ops::apply(
-            &mut team,
-            "plan",
-            &json!({"members":[{"id":"dev","role":"Backend","agent":"codex"}],
-                "tasks":[{"id":1,"title":"API","assignee":"dev"}]}),
-            &Actor::Human,
-            &BTreeSet::new(),
-            &mut events,
-        )
-        .unwrap();
-        let id = team.id.clone();
-        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
-        // The lead of the renamed session approves on the word under its old name.
-        set_test_caller_identities(Some((Some(conversation.into()), None, None)));
-        let approved = run(
-            "approve",
-            &json!({"request_id":"22222222-2222-4222-8222-222222222222","team":id,"owner_word":{"text":"plan approved"}}),
-            false,
-        )
-        .unwrap();
-        assert_eq!(approved["status"], "approved", "{approved}");
-        let saved = Store::open(false).unwrap().load(&id).unwrap().unwrap();
-        assert_eq!(saved.owner_word.as_ref().map(|word| word.text.as_str()), Some("plan approved"));
-        set_test_caller_identities(None);
-    });
-}
-
-/// Owner (2026-11-01): the same earlier-name journal applies to a Claude Code
-/// session record (not only a dsh binding): "claude/zerus-src/Worker" was
-/// "claude/zerus-src/work-7c91e747" when its journal began.
-#[test]
-fn the_owners_word_is_found_under_an_earlier_name_of_a_claude_session_record() {
-    use sha2::{Digest, Sha256};
-    let dir = tempfile::tempdir().unwrap();
-    let now = crate::state::now();
-    let name = "claude/zerus-src/Worker";
-    let earlier = "claude/zerus-src/work-7c91e747";
-    let conversation = "claude-conv-lead";
-    let db = rusqlite::Connection::open(dir.path().join("events.sqlite3")).unwrap();
-    db.execute_batch("CREATE TABLE events (seq INTEGER PRIMARY KEY, name TEXT, conversation TEXT, payload TEXT);").unwrap();
-    db.execute(
-        "INSERT INTO events(name, conversation, payload) VALUES (?1, ?2, ?3)",
-        rusqlite::params![
-            earlier,
-            conversation,
-            json!({"type":"UserPromptSubmit","at":now - 60.0,"agent_id":"","detail":"plan approved"}).to_string()
-        ],
-    )
-    .unwrap();
-    crate::state::with_test_state_root(dir.path(), || {
-        let _worker = hold_worker_lock();
-        // The Claude Code record keeps the journal's first name.
-        let record = dir.path().join(format!("{:x}.json", Sha256::digest(name.as_bytes())));
-        std::fs::write(
-            &record,
-            json!({"version":1,"name":name,"agent":"claude",
-                "conversation_id":conversation,"journal_name":earlier}).to_string(),
-        )
-        .unwrap();
-        let mut store = Store::open(true).unwrap();
-        let (mut team, _) = ops::create(
-            "t",
-            &json!({"name":"Renamed Claude","lead":{"id":"lead","agent":"claude",
-                "session":{"name":name,"conversation_id":conversation}}}),
-        )
-        .unwrap();
-        let mut events = Vec::new();
-        ops::apply(
-            &mut team,
-            "plan",
-            &json!({"members":[{"id":"dev","role":"Backend","agent":"codex"}],
-                "tasks":[{"id":1,"title":"API","assignee":"dev"}]}),
-            &Actor::Human,
-            &BTreeSet::new(),
-            &mut events,
-        )
-        .unwrap();
-        let id = team.id.clone();
-        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
-        set_test_caller_identities(Some((Some(conversation.into()), None, None)));
-        let approved = run(
-            "approve",
-            &json!({"request_id":"33333333-3333-4333-8333-333333333333","team":id,"owner_word":{"text":"plan approved"}}),
-            false,
-        )
-        .unwrap();
-        assert_eq!(approved["status"], "approved", "{approved}");
-        let saved = Store::open(false).unwrap().load(&id).unwrap().unwrap();
-        assert_eq!(saved.owner_word.as_ref().map(|word| word.text.as_str()), Some("plan approved"));
-        set_test_caller_identities(None);
-    });
-}
-
 /// #728: the lead relaunches a stuck member on the owner's setting without a
 /// word; the owner has the same route; without the setting the word is still
 /// asked.
@@ -757,7 +381,7 @@ fn the_lead_relaunches_a_stuck_member_with_lead_restarts_stuck() {
         Some(MemberStuck { at: 1.0, reason: "no_progress".into(), phase: "tool".into(), ..Default::default() });
     with_review_team(&strict, || {
         let error = as_lead(|| call("relaunch", json!({"member":"dev"}))).unwrap_err().to_string();
-        assert!(error.contains("owner_word"), "{error}");
+        assert!(error.contains("hgs team propose --json"), "{error}");
     });
 }
 
@@ -774,4 +398,26 @@ fn a_sentence_naming_them_all_relaunches_each_member() {
     }
     let rule = roster_word_rule(&team, "relaunch", &json!({"member":"m1"}));
     assert!(rule.names.iter().any(|name| name == "их"), "{:?}", rule.names);
+}
+
+/// Task 162 (owner, 2026-11-07): the owner's typed word is no longer taken
+/// where a card exists; the refusal names the card.
+#[test]
+fn a_typed_owner_word_is_no_longer_taken_where_a_card_exists() {
+    let (team, _, _) = review_team();
+    with_review_team(&team, || {
+        as_lead(|| {
+            for (op, input) in [
+                ("relaunch", json!({"member":"dev"})),
+                ("remove-member", json!({"member":"dev"})),
+                ("settings", json!({"settings":{"max_members":9}})),
+                ("approve", json!({})),
+            ] {
+                let mut input = input;
+                input["owner_word"] = json!({"text":"yes, do it"});
+                let error = call(op, input).unwrap_err().to_string();
+                assert!(error.contains(&format!("no longer taken for {op}")) && error.contains("hgs team propose --json"), "{op}: {error}");
+            }
+        });
+    });
 }

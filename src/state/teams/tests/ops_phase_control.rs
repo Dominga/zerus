@@ -96,14 +96,15 @@ fn the_lead_edits_an_accepted_phase_only_on_the_owners_word() {
     let none = BTreeSet::new();
     let before = phase_rows(&team);
     let edit = json!({"phase":3,"title":"B2","tasks_update":[{"id":4,"title":"B task","description":"More detail"}]});
-    let error = apply(&mut team, "edit-draft", &edit, &lead(), &none, &mut events).unwrap_err().to_string();
-    assert!(error.contains("The lead edits an accepted phase only on the owner's word"), "{error}");
-    let error = extend(&mut team, &json!({"phase":3,"tasks":[{"id":8,"title":"More","assignee":"dev"}]}), &lead(), &none, &mut events)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("The lead adds tasks to an accepted phase only on the owner's word"), "{error}");
-    let error = apply(&mut team, "move-phase", &json!({"phase":4,"to":3,"position":"before"}), &lead(), &none, &mut events).unwrap_err().to_string();
-    assert!(error.contains("The lead moves an accepted phase only on the owner's word"), "{error}");
+    // Task 162: inside the approved goal the lead edits, adds to and moves an
+    // accepted phase itself; each change is recorded for the owner's digest.
+    let mut own = team.clone();
+    let mut own_events = Vec::new();
+    apply(&mut own, "edit-draft", &edit, &lead(), &none, &mut own_events).unwrap();
+    apply(&mut own, "extend", &json!({"phase":3,"tasks":[{"id":8,"title":"More","assignee":"dev"}]}), &lead(), &none, &mut own_events).unwrap();
+    apply(&mut own, "move-phase", &json!({"phase":4,"to":3,"position":"before"}), &lead(), &none, &mut own_events).unwrap();
+    assert_eq!(own.lead_changes.len(), 3, "{:?}", own.lead_changes);
+    assert!(own_events.iter().filter(|event| event.kind == "lead_changed_plan").count() == 3);
     // A draft is the lead's own.
     apply(&mut team, "edit-draft", &json!({"phase":5,"title":"D2"}), &lead(), &none, &mut events).unwrap();
     assert!(team.phases[3].changes.last().is_none_or(|change| change.get("accepted").is_none()));
@@ -115,7 +116,8 @@ fn the_lead_edits_an_accepted_phase_only_on_the_owners_word() {
     assert_eq!(team.phases[1].title, "B2");
     assert_eq!((team.task(4).unwrap().title.as_str(), team.task(4).unwrap().status), ("B task", TaskStatus::Pending));
     assert!(!events.iter().any(|event| event.kind == "phase_renumbered"));
-    assert_eq!(events.last().unwrap().payload["owner_word"]["text"], "change phase 3: rename it B2");
+    let edited_event = events.iter().rev().find(|event| event.kind != "lead_changed_plan").unwrap();
+    assert_eq!(edited_event.payload["owner_word"]["text"], "change phase 3: rename it B2");
     // The owner sees the lead's changes of the accepted phase.
     assert!(team.phases[1].changes.iter().all(|change| change["accepted"] == true), "{:?}", team.phases[1].changes);
     // The owner edits it directly, and adds to it.

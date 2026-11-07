@@ -194,6 +194,14 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
             _ => {}
         }
     }
+    // Task 162: the lead's changes of the plan inside the approved goal, in
+    // one digest that blocks nothing; each can be reverted.
+    if let Some((title, at, changes)) = super::lead_plan::digest(team) {
+        let mut found = item(team, "lead_changes", "digest", title, at, "open_team");
+        found["changes"] = changes;
+        found["seen"] = json!(format!("{{\"team\":\"{}\",\"by\":\"human\"}} | hgs team seen-lead-changes --json", team.id));
+        out.push(found);
+    }
     // F8: the lead's open proposals wait for the owner's Accept or Reject.
     for proposal in team.proposals.iter().filter(|proposal| proposal["state"] == "open") {
         let key = proposal["id"].as_str().unwrap_or_default();

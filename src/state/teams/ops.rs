@@ -1331,7 +1331,7 @@ fn extend(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<Stri
                 Some(at) => at,
                 None => {
                     let at = editable_phase(team, n)?;
-                    if !team.phases[at].state.is_draft() {
+                    if !team.phases[at].state.is_draft() && !super::lead_plan::lead_plans(team, actor) {
                         ensure_owner_or_word(team, actor, input, n, "adds tasks to an accepted phase")?;
                     }
                     at
@@ -1759,7 +1759,10 @@ fn add_to_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
     );
     ensure!(state == "running", "Phase {n} is not running; add the task to a draft phase or extend the plan");
     let word = verified_word(input)?;
-    ensure!(!actor.is_lead(team) || word.is_some(), "The lead adds a task to a running phase only on your word: propose {{\"kind\":\"add-to-phase\"}} as a card (hgs guide team-propose); the owner allows it with a click");
+    // Task 162: inside the approved goal the lead adds tasks to a running
+    // phase itself, at once; the owner sees it in the digest and may revert it.
+    let lead_direct = word.is_none() && super::lead_plan::lead_plans(team, actor);
+    ensure!(!actor.is_lead(team) || word.is_some() || lead_direct, "The lead adds a task to a running phase only on your word: propose {{\"kind\":\"add-to-phase\"}} as a card (hgs guide team-propose); the owner allows it with a click");
     let at = now();
     team.pending_additions.retain(|pending| addition_fresh(pending, at));
     let by = actor.label(team);
@@ -1799,6 +1802,17 @@ fn add_to_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
         let titles: Vec<String> = tasks.iter().map(|task| task.title.clone()).collect();
         let id = uuid::Uuid::new_v4().to_string();
         team.pending_additions.push(PendingAddition { id: id.clone(), phase: n, tasks, by: by.clone(), request: quote.clone(), warned_at: at });
+        if lead_direct {
+            // No warning to confirm: the lead's addition joins now.
+            let mut confirm = input.clone();
+            confirm["confirm"] = json!(id);
+            if let Some(object) = confirm.as_object_mut() {
+                object.remove("tasks");
+            }
+            let mut joined = add_to_phase(team, &confirm, actor, offline, events)?;
+            joined["renumbered"] = renumbered_json(&renumbered);
+            return Ok(joined);
+        }
         events.push(Event::new("phase_addition_warned", json!({"by":by,"phase":n,"tasks":ids,"request":quote})));
         return Ok(json!({"status":"warning","phase":n,"pending":id,"tasks":ids,"warning":addition_warning(n, &titles),
             "expires_at":at + PENDING_ADDITION_SECONDS,"renumbered":renumbered_json(&renumbered)}));
@@ -1817,6 +1831,7 @@ fn add_to_phase(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSe
             ensure!(typed == "add" || typed == n.to_string(), "Type \"add\" or \"{n}\" to confirm the addition");
             typed
         }
+        (None, _) if lead_direct => "inside the approved goal".to_owned(),
         (None, _) => bail!("The lead adds a task to a running phase only on your word: propose {{\"kind\":\"add-to-phase\"}} as a card (hgs guide team-propose); the owner allows it with a click"),
     };
     let pending = team.pending_additions.remove(found);
@@ -2977,7 +2992,9 @@ fn edit_draft(team: &mut Team, input: &Value, actor: &Actor, offline: &BTreeSet<
     let mut proposed = team.clone();
     let at = editable_phase(&proposed, n)?;
     if !proposed.phases[at].state.is_draft() {
-        ensure_owner_or_word(team, actor, input, n, "edits an accepted phase")?;
+        if !super::lead_plan::lead_plans(team, actor) {
+            ensure_owner_or_word(team, actor, input, n, "edits an accepted phase")?;
+        }
     }
     let by = actor.label(team);
     let mut diff = json!({"updated":[],"removed":[]});
@@ -3249,7 +3266,9 @@ fn move_phase(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Ev
     let at = movable_phase(&proposed, n)?;
     let to_at = movable_phase(&proposed, to)?;
     if !proposed.phases[at].state.is_draft() || !proposed.phases[to_at].state.is_draft() {
-        ensure_owner_or_word(team, actor, input, n, "moves an accepted phase")?;
+        if !super::lead_plan::lead_plans(team, actor) {
+            ensure_owner_or_word(team, actor, input, n, "moves an accepted phase")?;
+        }
     }
     proposed.phases.sort_by_key(|phase| (phase.order(), phase.n));
     let at = proposed.phases.iter().position(|phase| phase.n == n).context("Unknown phase")?;
@@ -6064,6 +6083,19 @@ fn check(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>)
 /// Applies one human, lead or member request. The dispatcher records its own
 /// changes directly.
 pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    // Task 162: the lead's planning inside the approved goal is its own
+    // operation, recorded with what it replaced for the owner's digest.
+    let watched = super::lead_plan::LEAD_PLAN_OPS.contains(&op) && super::lead_plan::lead_plans(team, actor);
+    let before = watched.then(|| (team.tasks.clone(), team.phases.clone()));
+    let result = apply_op(team, op, input, actor, offline, events)?;
+    if let Some((tasks, phases)) = before {
+        let by = actor.label(team);
+        super::lead_plan::record(team, op, &tasks, &phases, &by, now(), events);
+    }
+    Ok(result)
+}
+
+fn apply_op(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &BTreeSet<String>, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     // N14: the word is checked again on the stored team inside the change. Two
     // requests sent at once both pass the CLI's pre-check on their own read;
     // the store serializes them, and only the second sees the first's record.
@@ -6186,6 +6218,9 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         "reassign" => reassign(team, input, actor, events),
         // U58: move a task that has not started to another phase, keeping its id.
         "move-task" => move_task(team, input, actor, events),
+        // Task 162: the owner reverts a lead change or marks the digest seen.
+        "revert-lead-change" => super::lead_plan::revert(team, input, actor, events),
+        "seen-lead-changes" => super::lead_plan::seen(team, input, actor, events),
         // U36: the lead's and the owner's pipeline overrides.
         "skip-stage" => super::pipeline::skip_stage(team, input, actor, events),
         "send-back" => super::pipeline::send_back(team, input, actor, events),
@@ -6673,6 +6708,10 @@ mod support;
 #[cfg(test)]
 #[path = "tests/ops_members.rs"]
 mod ops_members;
+
+#[cfg(test)]
+#[path = "tests/ops_lead_plan.rs"]
+mod ops_lead_plan;
 
 #[cfg(test)]
 #[path = "tests/ops_phases.rs"]

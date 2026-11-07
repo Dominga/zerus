@@ -10,7 +10,7 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|phase-mode|integrate-build|start-ahead|full-tests|test|run|templates|safe-action|reports-to|sub-lead|deferred|answer-deferred|defer-session|disk|test-config --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|phase-mode|lead-changes|revert-lead-change|seen-lead-changes|integrate-build|start-ahead|full-tests|test|run|templates|safe-action|reports-to|sub-lead|deferred|answer-deferred|defer-session|disk|test-config --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "move-task", "add-to-phase", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
@@ -26,6 +26,15 @@ const MUTATIONS: &[&str] = &[
     "rights",
     // Task 127: the team's memory mode (docs/lore.md 4.2).
     "switch-memory-mode",
+    // Task 162: the owner reverts the lead's plan change or marks the digest seen.
+    "revert-lead-change", "seen-lead-changes",
+];
+
+/// Task 162: the operations the lead once did on the owner's typed word and
+/// that have a card now: the typed word is no longer taken for them.
+const CARD_WORD_OPS: &[&str] = &[
+    "approve", "approve-phase", "discard-phase", "return-to-draft", "unpause-phase", "phase-acceptance", "accept-phase",
+    "add-member", "scale", "drain", "swap-member", "remove-member", "relaunch", "settings",
 ];
 
 fn text<'a>(input: &'a Value, key: &str) -> &'a str {
@@ -4014,7 +4023,7 @@ fn check_roster_word(
     // typed word is only a fallback, never asked for.
     let card = card_hint(op, filled);
     let word_input = input.get("owner_word").filter(|word| word.is_object()).with_context(|| {
-        format!("The lead changes the roster only on your word: propose it, {card} | hgs team propose --json, and you allow it with a click (a quoted \"owner_word\" stays a fallback)")
+        format!("The lead changes the roster only on your word: propose it, {card} | hgs team propose --json, and you allow it with a click (the typed word is no longer taken)")
     })?;
     // U56: the refusal names the card that would pass.
     let word = verify(team, word_input, &rule, super::super::now()).with_context(|| {
@@ -4868,6 +4877,11 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             Ok(value)
         }
         "inbox" => inbox_command(input),
+        // Task 162: the lead's recorded plan changes, newest first.
+        "lead-changes" => {
+            let team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
+            Ok(super::lead_plan::list(&team, input["limit"].as_u64().unwrap_or(50) as usize))
+        }
         "message" => message_command(input),
         "events" => {
             let before = match &input["before"] {
@@ -4940,6 +4954,19 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 object.remove("owner_word_change");
                 object.remove("roster_word");
             }
+            // Task 162 (owner, 2026-11-07): the owner's typed word is no longer
+            // a fallback where a card exists; the lead proposes the card, and
+            // planning inside the approved goal needs no word at all.
+            if input.get("owner_word").is_some_and(|word| !word.is_null()) {
+                if CARD_WORD_OPS.contains(&op) {
+                    bail!(
+                        "The owner's typed word is no longer taken for {op}: propose it as a card, {{\"kind\":\"{op}\",\"reason\":\"...\"}} | hgs team propose --json, and the owner allows it with a click"
+                    );
+                }
+                if let Some(object) = filled.as_object_mut() {
+                    object.remove("owner_word");
+                }
+            }
             // U54: one owner action moves every member whose session really
             // runs on from_account, of the requested agent, the lead included.
             // A same-provider move keeps the conversation through U53's switch;
@@ -4991,6 +5018,11 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 }
                 ensure!(!moved.is_empty() || !fresh.is_empty(), format!("No member of team {} could move to account {to}", team.name));
                 fill_bulk_swap(&mut filled, &moved, &fresh, notes, failed, &to);
+            }
+            // Task 162: planning inside the approved goal is no card.
+            if op == "propose" {
+                let team = store.load(team_id)?.context("Unknown team")?;
+                super::lead_plan::refuse_plan_card(&team, input)?;
             }
             if op == "use-last-reply" && text(input, "attempt").is_empty() {
                 // Without an attempt, the task's open one.

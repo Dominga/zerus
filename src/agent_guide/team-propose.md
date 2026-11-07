@@ -11,6 +11,7 @@ Each kind sends its exact change:
   {"kind":"switch-setting","setting":"build_broker","value":true}
     (also base_branch "main", full_tests "allowed", max_members 8)
   {"kind":"relaunch","member":"ID"}; drain and remove-member the same
+  {"kind":"rights","member":"ID","permissions_profile":"operate"}
   {"kind":"scale","role":"Tester","agent":"claude","count":2}
   {"kind":"approve"}; {"kind":"approve-phase","phase":N}
   accept-phase, unpause-phase, return-to-draft: {"kind":K,"phase":N}

@@ -135,7 +135,7 @@ pub(crate) const BUILTIN: &[Template] = &[
     // provider's job.
     Template {
         id: "py-test",
-        summary: "the project .venv interpreter runs pytest (typed -k expression, -m mark, node names and test file or folder paths; JUnit XML in .zerus-team/python)",
+        summary: "the project .venv interpreter runs pytest (typed -k expression, -m mark, node names and test file or folder paths; JUnit XML in .zerus-team/python); project: a Python project in a subfolder, run there",
         program: "python",
         args: &["-m", "pytest", "-q", "--junitxml=.zerus-team/python/junit.xml", "-k={filter}", "-m={mark}", "{tests}", "{paths}"],
         params: &[
@@ -144,15 +144,18 @@ pub(crate) const BUILTIN: &[Template] = &[
             optional("tests", Kind::Identifiers),
             // Task 137: the test files `hgs test affected` chose.
             optional("paths", Kind::Paths),
+            // Task 153: a Python project in a subfolder: its environment, and
+            // the folder pytest runs in.
+            optional("project", Kind::Path),
         ],
         timeout_secs: 1800,
     },
     Template {
         id: "cython-build",
-        summary: "the project .venv interpreter rebuilds the Cython extensions in place (setup.py build_ext --inplace)",
+        summary: "the project .venv interpreter rebuilds the Cython extensions in place (setup.py build_ext --inplace); project: a Python project in a subfolder, built there",
         program: "python",
         args: &["setup.py", "build_ext", "--inplace", "{sources}"],
-        params: &[optional("sources", Kind::Paths)],
+        params: &[optional("sources", Kind::Paths), optional("project", Kind::Path)],
         timeout_secs: 1800,
     },    // Owner, 2026-10-28: QA ran the Android tests by hand, a permission each.
     Template {
@@ -286,6 +289,10 @@ pub(crate) struct Plan {
     pub commit: Option<Value>,
     /// #741: further commands of the same run, in turn (several Qt suites).
     pub more: Vec<(String, Vec<String>)>,
+    /// Task 153: the folder the commands run in, relative to the member's
+    /// folder and inside it (a Python project in a subfolder); None is the
+    /// member's folder itself.
+    pub cwd: Option<String>,
 }
 
 /// The built-in template with `id`, if the set has one.
@@ -836,7 +843,7 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
             if let Some((key, _)) = args.as_object().into_iter().flatten().next() {
                 bail!("The project template {id} takes no placeholders (got \"{key}\")");
             }
-            return Ok(Plan { template: id.to_owned(), program, argv, commit: None, more: Vec::new() });
+            return Ok(Plan { template: id.to_owned(), program, argv, commit: None, more: Vec::new(), cwd: None });
         }
         // Task 85: a [[template]] of the folder's .zerus/tests.toml, typed like
         // a built-in, once the owner accepted its exact content.
@@ -893,11 +900,23 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
             check_path(path, "paths")?;
             ensure!(folder.join(path).lexists(), "The template's path {path} does not exist in your folder");
         }
-        return Ok(Plan { template: "git-commit".to_owned(), program: "hgs".into(), argv: vec!["team".into(), "commit".into(), "--json".into()], commit: Some(json!({"message":message,"paths":paths})), more: Vec::new() });
+        return Ok(Plan { template: "git-commit".to_owned(), program: "hgs".into(), argv: vec!["team".into(), "commit".into(), "--json".into()], commit: Some(json!({"message":message,"paths":paths})), more: Vec::new(), cwd: None });
     }
+    // Task 153: a Python project in a subfolder resolves its environment and
+    // setup.py there and runs there; every path it is given stays the
+    // member's, made absolute so the project's folder reads it the same.
+    let python_project = if matches!(template.id, "py-test" | "cython-build") { python_project(template, args, folder)? } else { None };
+    let cwd = python_project.clone();
     let (mut program, prefix) = if matches!(template.id, "py-test" | "cython-build") {
-        let (python, prefix) = interpreter(folder)?;
+        let project_dir = python_project.as_ref().map_or_else(|| folder.to_path_buf(), |project| folder.join(project));
+        let (python, prefix) = interpreter(&project_dir)?;
         if template.id == "py-test" { let _ = std::fs::create_dir_all(folder.join(".zerus-team").join("python")); }
+        // A relative venv interpreter is the project's own.
+        let python = if python_project.is_some() && (python.contains('/') || python.contains('\\')) && Path::new(&python).is_relative() {
+            project_dir.join(&python).display().to_string()
+        } else {
+            python
+        };
         (python, prefix)
     } else {
         (template.program.to_owned(), Vec::new())
@@ -1045,10 +1064,49 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
         let home = folder.join(".zerus-team").join("gradle");
         argv.extend(["-g".to_owned(), home.join("home").display().to_string(), "--project-cache-dir".to_owned(), home.join("cache").display().to_string()]);
     }
-    Ok(Plan { template: template.id.to_owned(), program, argv, commit: None, more })
+    if cwd.is_some() {
+        argv = argv.into_iter().map(|word| member_path_absolute(template, args, folder, word)).collect();
+    }
+    Ok(Plan { template: template.id.to_owned(), program, argv, commit: None, more, cwd })
 }
 
 /// One optional placeholder of a built-in as a single word.
+/// Task 153: the Python project folder of py-test or cython-build: a folder
+/// inside the member's folder (its real path too, so no link leads out), or
+/// None for the member's folder itself.
+fn python_project(template: &Template, args: &Value, folder: &Path) -> anyhow::Result<Option<String>> {
+    let Some(project) = one(template, args, "project", folder)? else { return Ok(None) };
+    let project = project.replace('\\', "/").trim_end_matches('/').to_owned();
+    if project == "." {
+        return Ok(None);
+    }
+    let dir = folder.join(&project);
+    ensure!(dir.is_dir(), "The template's project {project} is not a folder in your folder");
+    let real = std::fs::canonicalize(&dir).context("The project folder cannot be read")?;
+    let base = std::fs::canonicalize(folder).context("Your folder cannot be read")?;
+    ensure!(real.starts_with(&base), "The template's project {project} leads outside your folder");
+    Ok(Some(project))
+}
+
+/// Task 153: in a project subfolder, the member-relative paths a Python
+/// template was given (test files, sources, its JUnit report) as absolute
+/// paths, so they name the same files from the project's folder.
+fn member_path_absolute(template: &Template, args: &Value, folder: &Path, word: String) -> String {
+    if let Some(report) = word.strip_prefix("--junitxml=") {
+        return format!("--junitxml={}", folder.join(report).display());
+    }
+    let given = |name: &str| -> bool {
+        template.params.iter().any(|param| param.name == name && param.kind == Kind::Paths)
+            && args[name].as_array().is_some_and(|items| items.iter().any(|item| item.as_str() == Some(word.as_str())))
+            || args[name].as_str() == Some(word.as_str())
+    };
+    if given("paths") || given("sources") {
+        folder.join(&word).display().to_string()
+    } else {
+        word
+    }
+}
+
 fn one(template: &Template, args: &Value, name: &str, folder: &Path) -> anyhow::Result<Option<String>> {
     Ok(match value_of(template.params, args, name, folder)? {
         Some(Words::One(word)) => Some(word),
@@ -1089,7 +1147,7 @@ pub(crate) fn cmake_configure_argv(source: &str, build_dir: &str, generator: Opt
 }
 
 fn plain(template: &str, program: &str, argv: Vec<String>) -> Plan {
-    Plan { template: template.to_owned(), program: program.to_owned(), argv, commit: None, more: Vec::new() }
+    Plan { template: template.to_owned(), program: program.to_owned(), argv, commit: None, more: Vec::new(), cwd: None }
 }
 
 fn cmake_configure(template: &Template, args: &Value, folder: &Path) -> anyhow::Result<Plan> {
@@ -1517,7 +1575,8 @@ fn template_environment(plan: &Plan, folder: &Path) -> Vec<(String, String)> {
         let _ = std::fs::create_dir_all(python.join("pytest-cache"));
         env.push(("PIP_CACHE_DIR".into(), python.join("pip-cache").display().to_string()));
         env.push(("PYTHONPYCACHEPREFIX".into(), python.join("pycache").display().to_string()));
-        env.push(("PYTEST_ADDOPTS".into(), "-o cache_dir=.zerus-team/python/pytest-cache".into()));
+        // Absolute, so a project run in a subfolder (task 153) keeps it in the member's folder.
+        env.push(("PYTEST_ADDOPTS".into(), format!("-o cache_dir={}", python.join("pytest-cache").display())));
     }
     if plan.template == "android-test" {
         env.push(("GRADLE_USER_HOME".into(), folder.join(".zerus-team").join("gradle").join("home").display().to_string()));
@@ -1651,7 +1710,7 @@ pub(crate) fn execute_as(plan: &Plan, folder: &Path, timeout: Duration, env: &[(
         let mut command = Command::new(program);
         command
             .args(argv)
-            .current_dir(folder)
+            .current_dir(plan.cwd.as_ref().map_or_else(|| folder.to_path_buf(), |cwd| folder.join(cwd)))
             .env("TEMP", &temp)
             .env("TMP", &temp)
             .env("QT_QPA_PLATFORM", "offscreen")
@@ -2046,7 +2105,7 @@ mod tests {
         std::fs::write(dir.path().join(".ci-build").join("gui").join("CMakeCache.txt"),
                        format!("Qt6_DIR:PATH={}\n", qt.join("lib").join("cmake").join("Qt6").display())).unwrap();
         assert_eq!(qt_bin(dir.path()), Some(qt.join("bin")));
-        let test = Plan { template: "qt-test".into(), program: "t".into(), argv: vec![], commit: None, more: Vec::new() };
+        let test = Plan { template: "qt-test".into(), program: "t".into(), argv: vec![], commit: None, more: Vec::new(), cwd: None };
         let env = template_environment(&test, dir.path());
         let path = env.iter().find(|(key, _)| key == "PATH").map(|(_, value)| value.clone()).unwrap();
         assert!(path.starts_with(&qt.join("bin").display().to_string()), "{path}");
@@ -2232,7 +2291,7 @@ mod tests {
                 program: "cmd".into(),
                 argv: vec!["/c".into(), format!("start /b {}", script.display())],
                 commit: None,
-                more: Vec::new(),
+                more: Vec::new(), cwd: None,
             }
         };
         #[cfg(unix)]
@@ -2241,7 +2300,7 @@ mod tests {
             program: "sh".into(),
             argv: vec!["-c".into(), format!("(sleep 3; echo late > '{}') &", marker.display())],
             commit: None,
-            more: Vec::new(),
+            more: Vec::new(), cwd: None,
         };
         let started = Instant::now();
         let outcome = execute(&plan, dir.path(), Duration::from_secs(120), &[]);
@@ -2263,7 +2322,7 @@ mod tests {
 
     fn shell_plan(windows: &str, unix: &str) -> Plan {
         let (program, flag, command) = if cfg!(windows) { ("cmd", "/c", windows) } else { ("sh", "-c", unix) };
-        Plan { template: "test".into(), program: program.into(), argv: vec![flag.into(), command.into()], commit: None, more: Vec::new() }
+        Plan { template: "test".into(), program: program.into(), argv: vec![flag.into(), command.into()], commit: None, more: Vec::new(), cwd: None }
     }
 
     /// Task #35: team 33fbafeb's qt-build in a DeepSeek member's clone stopped
@@ -2963,6 +3022,67 @@ kind = "path"
         assert_eq!(&uv.argv[..2], ["run", "python"]);
         let empty = temp();
         assert!(plan("py-test", &json!({}), empty.path()).is_err());
+    }
+
+    /// Task 153: a Python project in a subfolder (a monorepo, a provider's
+    /// root): both templates take its environment and setup.py, run there,
+    /// and keep every path the member's.
+    #[test]
+    fn a_nested_python_project_runs_through_both_templates_inside_the_folder() {
+        let dir = temp();
+        let project = dir.path().join("services").join("app");
+        std::fs::create_dir_all(project.join(".venv/Scripts")).unwrap();
+        std::fs::write(project.join(".venv/Scripts/python.exe"), "").unwrap();
+        std::fs::create_dir_all(project.join("tests")).unwrap();
+        std::fs::write(project.join("tests/test_app.py"), "").unwrap();
+        std::fs::write(project.join("setup.py"), "").unwrap();
+        std::fs::write(project.join("ext.pyx"), "").unwrap();
+        // Without the project the member's root has no environment.
+        let refused = plan("py-test", &json!({"paths":["services/app/tests/test_app.py"]}), dir.path()).unwrap_err().to_string();
+        assert!(refused.contains("No project Python environment"), "{refused}");
+        let py = plan("py-test", &json!({"project":"services/app","paths":["services/app/tests/test_app.py"],"tests":["test_app.py::test_one"]}), dir.path()).unwrap();
+        assert_eq!(py.cwd.as_deref(), Some("services/app"));
+        assert!(Path::new(&py.program).is_absolute() && Path::new(&py.program).starts_with(&project), "{}", py.program);
+        let junit = format!("--junitxml={}", dir.path().join(".zerus-team/python/junit.xml").display());
+        assert!(py.argv.contains(&junit), "{:?}", py.argv);
+        assert!(py.argv.contains(&dir.path().join("services/app/tests/test_app.py").display().to_string()), "{:?}", py.argv);
+        // A node id names the test from the project's folder, as pytest reads it there.
+        assert!(py.argv.contains(&"test_app.py::test_one".to_owned()));
+        let cy = plan("cython-build", &json!({"project":"services/app","sources":["services/app/ext.pyx"]}), dir.path()).unwrap();
+        assert_eq!(cy.cwd.as_deref(), Some("services/app"));
+        assert!(Path::new(&cy.program).starts_with(&project));
+        assert_eq!(&cy.argv[..3], ["setup.py", "build_ext", "--inplace"]);
+        assert_eq!(cy.argv[3], dir.path().join("services/app/ext.pyx").display().to_string());
+        // The member's root and "." are the folder itself, as before.
+        std::fs::create_dir_all(dir.path().join(".venv/Scripts")).unwrap();
+        std::fs::write(dir.path().join(".venv/Scripts/python.exe"), "").unwrap();
+        let root = plan("py-test", &json!({"project":"."}), dir.path()).unwrap();
+        assert_eq!((root.cwd, root.program.as_str()), (None, ".venv/Scripts/python.exe"));
+        assert!(root.argv.contains(&"--junitxml=.zerus-team/python/junit.xml".to_owned()));
+        // Confined to the member's folder.
+        for outside in ["../app", "/tmp/app", "C:/app", "services/missing", "services/app/setup.py"] {
+            assert!(plan("cython-build", &json!({"project": outside}), dir.path()).is_err(), "{outside}");
+        }
+        #[cfg(unix)]
+        {
+            let elsewhere = temp();
+            std::os::unix::fs::symlink(elsewhere.path(), dir.path().join("linked")).unwrap();
+            let error = plan("cython-build", &json!({"project":"linked"}), dir.path()).unwrap_err().to_string();
+            assert!(error.contains("leads outside your folder"), "{error}");
+        }
+    }
+
+    /// Task 153: a plan's folder is where its commands run.
+    #[test]
+    fn a_plan_runs_in_its_project_folder() {
+        let dir = temp();
+        std::fs::create_dir_all(dir.path().join("services").join("app")).unwrap();
+        let mut plan = shell_plan("cd", "pwd");
+        plan.cwd = Some("services/app".into());
+        let outcome = execute(&plan, dir.path(), Duration::from_secs(60), &[]);
+        assert_eq!(outcome.exit, Some(0), "{}", outcome.tail);
+        let tail = outcome.tail.replace('\\', "/");
+        assert!(tail.trim_end().ends_with("services/app"), "{tail}");
     }
 
     #[test]

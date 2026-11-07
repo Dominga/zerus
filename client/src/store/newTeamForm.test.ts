@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createRoot } from "solid-js";
 import {
   applyPolicy, branchHint, canAdd, createReason, effectivePolicy, folderPolicy, leadMember, memberId, memberOf, memberRoles, membersWithIds,
-  pickTemplate, startReason, templateTasks, type LeadChoice,
+  memoryMode, pickTemplate, startReason, templateTasks, withMemory, type LeadChoice,
 } from "./newTeamForm";
 import { createNewTeam, type NewTeamPort } from "./teamsNew";
 import { followDraft } from "./newTeamFollow";
@@ -209,5 +209,14 @@ describe("New team creation rules", () => {
     expect(store.fields().goal).toBe("The lead's goal");
     expect(store.dirty().size).toBe(0);
     dispose();
+  });
+});
+
+describe("task 126: the team's memory mode", () => {
+  it("is RustCodeLore unless plain was chosen, and keeps the other settings", () => {
+    expect(memoryMode({})).toBe("lore");
+    expect(memoryMode({ memory: { mode: "lore" } })).toBe("lore");
+    expect(memoryMode({ memory: { mode: "plain" } })).toBe("plain");
+    expect(withMemory({ max_members: 4, memory: { mode: "lore", store: "/old" } }, "plain")).toEqual({ max_members: 4, memory: { mode: "plain" } });
   });
 });

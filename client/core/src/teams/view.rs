@@ -282,6 +282,10 @@ pub struct MemberView {
     pub input_refusals: u64,
     pub input_reason: String,
     pub input_raised: bool,
+    /// Task 134: the member's unread team messages (status's
+    /// `members[].unread`), and how many of them are urgent.
+    pub unread: u64,
+    pub unread_urgent: u64,
     /// Task 11: the member's pending question or permission request as hgs
     /// sends it (`members[].question`, at most [`DETAIL_BYTES`]): its id,
     /// hash, tool, command, reason and the card's own allow and deny ids.
@@ -595,6 +599,8 @@ fn member(value: &Value, lead: &str) -> MemberView {
         input_refusals: value.get("input_block").map_or(0, |block| count(block, "count")),
         input_reason: value.get("input_block").map_or_else(String::new, |block| text(block, "reason", LINE_CHARS)),
         input_raised: value.get("input_block").is_some_and(|block| flag(block, "raised")),
+        unread: value.get("unread").map_or(0, |unread| count(unread, "count")),
+        unread_urgent: value.get("unread").map_or(0, |unread| count(unread, "urgent")),
         permission: bounded(
             value
                 .get("question")

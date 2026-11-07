@@ -1769,6 +1769,96 @@ mod process {
     pub fn verify_private_directory(file: &fs::File) -> io::Result<bool> {
         private_entry(file, Private::Directory)
     }
+    /// WhiteWh fork: an existing directory this user owns that nobody else can
+    /// change: every ACE granting another principal access grants only reading
+    /// (no write, append, delete, child delete, attribute, ACL or owner change).
+    /// Codex grants its sandbox group read access on `~/.local`; that folder
+    /// stays usable as an ancestor of a private record, which itself must
+    /// still pass `verify_private_directory`/`verify_private_file`.
+    pub fn verify_guarded_directory(file: &fs::File) -> io::Result<bool> {
+        let info = file_information(file)?;
+        let attributes = info.dwFileAttributes;
+        if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 || attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+            return Ok(false);
+        }
+        guarded_security(file.as_raw_handle() as HANDLE)
+    }
+    /// Any access that lets a principal change an entry or the names below it.
+    const CHANGING_ACCESS: u32 = 0x0000_0002 // FILE_WRITE_DATA / FILE_ADD_FILE
+        | 0x0000_0004 // FILE_APPEND_DATA / FILE_ADD_SUBDIRECTORY
+        | 0x0000_0010 // FILE_WRITE_EA
+        | 0x0000_0040 // FILE_DELETE_CHILD
+        | 0x0000_0100 // FILE_WRITE_ATTRIBUTES
+        | 0x0001_0000 // DELETE
+        | 0x0004_0000 // WRITE_DAC
+        | 0x0008_0000 // WRITE_OWNER
+        | 0x0200_0000 // MAXIMUM_ALLOWED
+        | 0x1000_0000 // GENERIC_ALL
+        | 0x4000_0000; // GENERIC_WRITE
+    fn guarded_security(handle: HANDLE) -> io::Result<bool> {
+        let user = current_user()
+            .ok_or_else(|| io::Error::other("this user's identity is unavailable"))?;
+        let mut owner: PSID = std::ptr::null_mut();
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let code = unsafe {
+            GetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut owner,
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        if code != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(code as i32));
+        }
+        struct Descriptor(PSECURITY_DESCRIPTOR);
+        impl Drop for Descriptor {
+            fn drop(&mut self) {
+                unsafe {
+                    LocalFree(self.0);
+                }
+            }
+        }
+        let _descriptor = Descriptor(descriptor);
+        if owner.is_null() || unsafe { sid_bytes(owner) } != user {
+            return Ok(false);
+        }
+        if dacl.is_null() {
+            return Ok(false);
+        }
+        for index in 0..u32::from(unsafe { (*dacl).AceCount }) {
+            let mut ace = std::ptr::null_mut();
+            if unsafe { GetAce(dacl, index, &mut ace) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let header = unsafe { &*(ace as *const ACE_HEADER) };
+            if u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0
+                || header.AceType == ACCESS_DENIED_ACE_TYPE
+            {
+                continue;
+            }
+            if header.AceType != ACCESS_ALLOWED_ACE_TYPE {
+                return Ok(false);
+            }
+            let allowed = ace as *const ACCESS_ALLOWED_ACE;
+            let sid = unsafe { std::ptr::addr_of!((*allowed).SidStart) } as PSID;
+            let trusted = unsafe {
+                sid_bytes(sid) == user
+                    || IsWellKnownSid(sid, WinLocalSystemSid) != 0
+                    || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
+                    || IsWellKnownSid(sid, WinCreatorOwnerRightsSid) != 0
+            };
+            if !trusted && unsafe { (*allowed).Mask } & CHANGING_ACCESS != 0 {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
     fn private_entry(file: &fs::File, kind: Private) -> io::Result<bool> {
         let info = file_information(file)?;
         let attributes = info.dwFileAttributes;
@@ -1929,6 +2019,115 @@ mod process {
             return Ok(PrivateRepair::Refused("it is still open after the repair".into()));
         }
         Ok(PrivateRepair::Repaired(open_aces))
+    }
+    /// WhiteWh fork, task 176: why the entry at `path` is not private, in
+    /// words a person can act on: the folder's owner, or each access entry
+    /// that opens it, with its rights and whether it was inherited (Codex's
+    /// sandbox group gets read access on `~/.local`, which every folder below
+    /// inherits). None when it is private. Reads only; changes nothing.
+    pub fn describe_private(path: &Path, kind: Private) -> io::Result<Option<String>> {
+        let entry = fs::OpenOptions::new()
+            .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)?;
+        let info = file_information(&entry)?;
+        let attributes = info.dwFileAttributes;
+        if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Ok(Some("it is a link or reparse point".into()));
+        }
+        let directory = attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+        match kind {
+            Private::Directory if !directory => return Ok(Some("it is not a folder".into())),
+            Private::File if directory => return Ok(Some("it is a folder, not a file".into())),
+            Private::File if info.nNumberOfLinks != 1 => return Ok(Some(format!("the file has {} links", info.nNumberOfLinks))),
+            _ => {}
+        }
+        let user = current_user().ok_or_else(|| io::Error::other("this user's identity is unavailable"))?;
+        let handle = entry.as_raw_handle() as HANDLE;
+        let mut owner: PSID = std::ptr::null_mut();
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let code = unsafe {
+            GetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut owner,
+                std::ptr::null_mut(),
+                &mut dacl,
+                std::ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        if code != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(code as i32));
+        }
+        let _descriptor = Descriptor(descriptor);
+        if owner.is_null() {
+            return Ok(Some("it has no owner".into()));
+        }
+        let owner = unsafe { sid_bytes(owner) };
+        if owner != user {
+            return Ok(Some(format!("it is owned by {}", account_label(owner))));
+        }
+        if dacl.is_null() {
+            return Ok(Some("it has no access list, so everyone has full control".into()));
+        }
+        let mut open = Vec::new();
+        for index in 0..u32::from(unsafe { (*dacl).AceCount }) {
+            let mut ace = std::ptr::null_mut();
+            if unsafe { GetAce(dacl, index, &mut ace) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let header = unsafe { &*(ace as *const ACE_HEADER) };
+            if u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0 || header.AceType == ACCESS_DENIED_ACE_TYPE {
+                continue;
+            }
+            if header.AceType != ACCESS_ALLOWED_ACE_TYPE {
+                open.push(format!("it has an access entry of type {}", header.AceType));
+                continue;
+            }
+            let allowed = ace as *const ACCESS_ALLOWED_ACE;
+            let sid = unsafe { std::ptr::addr_of!((*allowed).SidStart) } as PSID;
+            let trusted = unsafe {
+                sid_bytes(sid) == user
+                    || IsWellKnownSid(sid, WinLocalSystemSid) != 0
+                    || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
+                    || IsWellKnownSid(sid, WinCreatorOwnerRightsSid) != 0
+            };
+            if trusted {
+                continue;
+            }
+            // INHERITED_ACE: the entry came from a parent folder.
+            let inherited = u32::from(header.AceFlags) & 0x10 != 0;
+            open.push(format!(
+                "it grants {} {}{}",
+                account_label(unsafe { sid_bytes(sid) }),
+                rights_words(unsafe { (*allowed).Mask }),
+                if inherited { ", inherited from its parent folder" } else { "" }
+            ));
+        }
+        Ok((!open.is_empty()).then(|| open.join("; ")))
+    }
+    /// An access mask as icacls names it, with the mask itself.
+    fn rights_words(mask: u32) -> String {
+        const FULL: u32 = 0x001F_01FF;
+        const MODIFY: u32 = 0x0013_01BF;
+        const READ_EXECUTE: u32 = 0x0012_00A9;
+        const CHANGING: u32 = 0x0000_0002 | 0x0000_0004 | 0x0000_0010 | 0x0000_0040 | 0x0000_0100 | 0x0001_0000 | 0x0004_0000 | 0x0008_0000;
+        let words = if mask & 0x1000_0000 != 0 || mask & FULL == FULL {
+            "full control (F)"
+        } else if mask & MODIFY == MODIFY {
+            "modify (M)"
+        } else if mask & 0x4000_0000 != 0 || mask & CHANGING != 0 {
+            "write access (W)"
+        } else if mask & READ_EXECUTE == READ_EXECUTE || mask & 0x2000_0000 != 0 {
+            "read and execute (RX)"
+        } else {
+            "read access (R)"
+        };
+        format!("{words}, mask 0x{mask:08X}")
     }
     /// The owner of the entry behind `handle` and the accesses its DACL grants
     /// anyone but this user, SYSTEM, Administrators and OWNER RIGHTS.

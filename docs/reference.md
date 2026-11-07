@@ -2337,6 +2337,82 @@ member's folder from the base or checks it out; a returned or reopened task
 gets its existing branch. Branches are never deleted. Without `branch_per_task`
 a member keeps one branch, as before.
 
+Tasks that write the same files never run apart (owner, 2026-11-07). Two open
+tasks whose `output` paths overlap (one path contains the other, by
+components) must be chained: unless one waits for the other's acceptance
+through hard dependencies (or `all_hard`), plan validation reports an
+`outputs` error naming both tasks and the shared paths, so the plan does not
+run and an `extend` or `add-to-phase` with such a task is refused. The
+dispatcher enforces the same rule team-wide, whatever the plan says: a task
+waits while an open task with an overlapping output has reached a member and is
+not decided (assigned, in progress, reported, in a stage, or sent back), and of
+two ready ones only the first in dispatch order starts; it never goes to
+another member to run beside it. Two returned tasks never wait on each other:
+the lower number goes first. A task without `output` is not held by this rule.
+
+Before a hand-out, after its task branch, Zerus merges the accepted work of the
+task's dependencies (direct or through another dependency) into the member's
+branch: for each accepted task, the commit its accepted report named
+(`folder_head`), fetched from its author's folder when the member's folder
+lacks it, oldest task first, skipped when the branch holds it already. The
+attempt records a `dependencies` prepare step and the hand-out says what was
+merged. A folder with uncommitted changes, a commit that cannot be fetched or a
+conflicting merge is never left to the member: a conflict is aborted, the
+folder put back, and the task waits for the lead with the conflicting files and
+`hgs team retry`. The lead's own task and a member working in the team's own
+folder are left alone; a member on another computer gets a `skipped` step.
+
+Team messages are pulled, not pasted (task 134; owner, 2026-11-07). The text
+of a hand-out, a stage hand-out, the lead's (or a sub-lead's) inbox message
+and the starved notice is stored first in the working tier: the
+`working_messages` table of `teams.sqlite3` (docs/lore.md 11.5, the Zerus-state
+form), with `queued`, `rung` and `read`, a read message expiring 7 days after
+its read and an unread one 30 days after it was written (a
+`working_unread_expired` event), cleaned at most 500 rows a pass. The terminal
+then receives only a one-line doorbell under the message's own request id
+(the hand-out's attempt id, the stage run id), so receipts and request
+identities are as before: `[Zerus team · from: Lead · task: #N · attempt: K]
+1 new message for you: hgs team inbox (or hgs team current)`, with `URGENT` in
+it for an urgent one. A doorbell that never submits loses nothing: the text is
+stored, and a refused doorbell withdraws its message, so the retry's message is
+the only copy. A message that cannot be stored is a refused send.
+
+`hgs team inbox --json` (the team may be left out in a member's session or with
+`attempt`) answers the lead's or sub-lead's items as before and the caller's
+own unread `messages` with their text, and marks them read; `hgs team current
+--json` answers the attempt with the same `messages`. These two are the only
+read receipts: `read` names the ids, the request id and `via`, the message keeps
+`read_at`, `read_via` and `read_request`, and the journal gets `message_read`.
+`"peek":true` marks nothing, and anyone but the recipient (you on the desktop)
+only peeks. In a sandbox the receipt waits in the member's folder for the
+worker (`messages-read`), as a report does. Nothing else marks a message read.
+
+Delivery does not depend on the agent's discipline. A Claude or Codex member's
+turn-start hook (`UserPromptSubmit`) gets the unread text Zerus has not put into
+a turn yet as `additionalContext`, each message once (`injected_at`, at most
+24 KiB a turn), without marking it read; the doorbell's own turn is the first
+such turn. An agent without that hook (Kimi, DeepSeek, OpenCode) gets the text
+after the doorbell line in the same paste. A doorbell rings only at an idle
+moment, never into a busy composer; a message posted while the member works
+rings at its next idle moment. An unread message rings once more after 20
+minutes (an urgent one after 10), and after two rings and the same time again
+the lead gets an `unread_messages` inbox item with the member's state and
+session; an urgent message a member's turn kept from ringing for 10 minutes is
+an item at once, and the lead may stop the member natively so it rings at the
+turn end. Status shows each member's `unread` (`count`, `urgent`, the oldest
+message and its rings); Zerus Next's member row shows `unread: N`.
+
+The lead's inbox message is urgent when it names a question, a permission, a
+Terminal question, a crash, a blocked input or a stuck member. `hgs team message
+--json` with `{"request_id","to","text","urgent"}` (`to`: a member id, `lead`
+or `team`, one message per other member) stores a note from the lead, a member
+or you (`by`: the member id, or `owner`) of at most 2,000 characters, and Zerus
+rings it at the recipient's next idle moment. A recipient with 50 unread normal
+or 5 unread urgent messages takes no more of that kind; the sender is refused
+with the count. Zerus's own messages are at most 32 KiB each. A RustCodeLore
+team keeps its team messages here too: hgs does not link the lore crate, and a
+message must not wait for a store on another computer.
+
 ### Scaling and draining the roster
 
 `hgs team scale --json {"request_id":"<uuid>","team":"<id>","role":"Backend",
@@ -8023,6 +8099,11 @@ and nothing is enforced: a team without a configuration keeps today's flow.
   - pytest: `py-test` with the chosen test files as `paths`;
   - cython: `cython-build` when an extension source (`.pyx`, `.pxd`, `.pxi`,
     C or C++, `setup.py`) changed or for the whole set, then `py-test`;
+  - a Python provider with a `root` (task 153) passes it as both templates'
+    `project`: the environment (`.venv`, `venv`, uv, Poetry) and `setup.py`
+    are that folder's and the commands run there; it must be a folder inside
+    the member's folder, its real path too. Paths stay member-relative and
+    the JUnit report and pytest cache stay in the member's `.zerus-team`;
   - msbuild: `msbuild-build` of the chosen test project (its configuration
     and platform), or of `manifest` for the whole set, then `vstest` with its
     assemblies; without a test project the build is the run;
@@ -8334,3 +8415,55 @@ Iron-rules compatibility and failure handling:
 - An older hgs that rewrites a team record does not preserve unknown
   `iron_rules`/`project_id` fields. Keep team writers on a rules-aware hgs;
   additive deserialization alone cannot protect these fields from old writers.
+
+### Project memory
+
+Project memory (task 126, owner 2026-11-07) turns RustCodeLore on for a whole
+project, a project of the organization catalog with all its folders. It is off
+until the owner turns it on in the project's settings (Projects in Zerus Next
+and in the Qt GUI). The store is a lore root (`lore.toml`, records in
+`lore/*.jsonl` and `lore/plans/*.jsonl`, team workspaces under
+`teams/<team8>/`, each its own lore root, and the search index under
+`.cache/index.sqlite`, ignored by git). Its default folder is
+`HGS_STATE_DIR/lore/projects/<project id>`; Browse chooses another while the
+store holds no records. As docs/lore.md section 2.5 has it (the owner's answer
+2), a store outside any git working tree, the default among them, is its own
+private git repository, made as crates/lore `private.rs` makes it: `git init`
+on branch `main`, the local identity `Zerus <lore@zerus.invalid>`, the marker
+`zerus-lore-store` in its git folder, `commit.mode = "plain"`, no remote, and a
+first commit "lore: a new store"; RustCodeLore commits every write. Only an
+empty or new folder is initialized. A folder inside another git working tree
+(a project's) is never initialized and gets `commit.mode = "shared-tree"`. A
+team workspace in a Zerus store is `plain` and is committed into the store's
+repository ("lore: a new team workspace"). A store with records is moved, never repointed: after
+the owner confirms, hgs copies every file to an empty or new folder, compares
+each file's size and SHA-256 with the source, checks that the source did not
+change meanwhile, and only then switches. A failed check removes only the copy
+it made and switches nothing. The old store is kept and listed in `moved_from`;
+Zerus never deletes it. A move to a folder outside any working tree takes
+the store's repository and history along (a store without one gets its own,
+"lore: the store moved here"); a move into another working tree leaves the
+repository behind and switches the store to `shared-tree`. Turning memory off keeps the store as it is. The
+status shows the records (nonempty lines of the record files), the files and
+their size, and the index state: `none`, `built`, or `stale` when a record
+file changed after the index.
+
+`hgs project config get|set|move --json` (`project-memory-v1` in help) reads one
+JSON object on stdin naming `project` (the stable identity). Get returns
+`enabled`, `store`, `default_store`, `default`, `revision`, `moved_from` and
+`status` (`exists`, `records`, `files`, `bytes`, `index`). Set takes `enabled`
+and/or `store` (a full path, "" for the default); move takes `to`. Writes are
+the owner's (`by: "human"`; an agent session is refused) and carry a canonical
+`request_id` and `expected_revision` from get; the same request replays its
+receipt, and a stale revision is refused. Settings and receipts live in
+`HGS_STATE_DIR/project-memory.json`, per computer, like project iron rules.
+
+A team's memory is the owner's setting `settings.memory`: `mode` `plain` (as
+before) or `lore`. When a team is created (Create team for a draft, or at once
+for a team created without a draft) and its `project_id` has memory on, it
+gets `{"mode":"lore","source":"project"}` with the project's `store` and a
+shared `workspace` in it, whatever mode was chosen. Otherwise New team offers
+the mode, RustCodeLore by default: `lore` gives the team its own store under
+`HGS_STATE_DIR/lore/teams/<team8>` (`source` `team`). A team without
+`memory` keeps plain memory. A lead's settings that leave `memory` out keep the
+owner's choice; only the owner changes it.

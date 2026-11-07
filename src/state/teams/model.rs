@@ -94,10 +94,28 @@ pub(crate) struct FullTestsGrant {
     pub by: String,
 }
 
+/// Task 126 (owner, 2026-11-07): a team's memory. `plain` is memory as
+/// before; `lore` is RustCodeLore: a shared workspace in the project's store
+/// (`source` "project") or the team's own store under the state folder
+/// (`source` "team"). New team names only the mode; Zerus fills the rest.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct TeamMemory {
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub store: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub workspace: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Settings {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub iron_rules: Vec<String>,
+    /// Task 126: the team's memory; None is plain memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<TeamMemory>,
     /// Every dependency is hard, whatever the lead chose.
     #[serde(default)]
     pub all_hard: bool,
@@ -315,6 +333,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             iron_rules: Vec::new(),
+            memory: None,
             all_hard: false,
             folder_policy: FolderPolicy::default(),
             approval: Approval::default(),
@@ -410,6 +429,26 @@ pub(crate) struct PromptSnapshot {
     /// catalog edit changes no running team.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub context_before_task: String,
+}
+
+/// Task 134: a member's unread team messages, kept in the team record so
+/// status, the lead's inbox and the dispatcher's second ring read it without
+/// the working tier. `oldest` is the id of the oldest unread message.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Unread {
+    pub count: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub urgent: u32,
+    pub oldest: String,
+    pub oldest_at: f64,
+    /// How often the doorbell rang for the oldest one.
+    #[serde(default)]
+    pub rings: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rung_at: Option<f64>,
+    /// The lead was told about the oldest one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lead_told: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -519,6 +558,10 @@ pub(crate) struct Member {
     /// The lead was told once about this starvation episode (C7).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub starved_told: bool,
+    /// Task 134: the member's unread team messages (the working tier), as
+    /// status shows them ("unread: N"); None when it has read everything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread: Option<Unread>,
     /// Task 98: the member's Terminal refuses hand-outs because its composer
     /// holds a draft, a dialog or a prompt Zerus does not know; cleared by the
     /// next delivery.
@@ -587,6 +630,10 @@ pub(crate) struct Member {
     /// member; the dispatcher runs the session commands and clears this.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub restart_pending: bool,
+    /// Task 154: its rights changed while its session runs; the dispatcher
+    /// pauses the session and resumes it in its conversation with them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rights_relaunch: bool,
     /// The permission request the lead last heard about (B1): the exact
     /// command, where it came from and the agent's reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1645,6 +1692,11 @@ pub(crate) struct Task {
     pub check: Option<Check>,
     #[serde(default)]
     pub criteria: Vec<String>,
+    /// Task 154: what the task needs of its member's session (rights.rs
+    /// CAPABILITIES); absent, Zerus reads the needs from the task's words, and
+    /// an empty list says it needs nothing beyond editing and building.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs: Option<Vec<String>>,
     #[serde(default)]
     pub deps: Vec<Dependency>,
     /// Task #60 (owner, 2026-11-06): the task this one was added for (a missed
@@ -2040,11 +2092,13 @@ impl Task {
     /// Paths are normalized at task creation/editing; directory containment
     /// compares components so `src/api` never contains `src/apis`.
     pub(crate) fn output_overlaps(&self, other: &Task) -> bool {
-        self.output.iter().any(|a| other.output.iter().any(|b| {
-            let a: Vec<_> = a.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
-            let b: Vec<_> = b.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
-            a.starts_with(&b) || b.starts_with(&a)
-        }))
+        self.output.iter().any(|a| other.output.iter().any(|b| Self::paths_overlap(a, b)))
+    }
+    /// One output path contains the other, compared by components.
+    pub(crate) fn paths_overlap(a: &str, b: &str) -> bool {
+        let a: Vec<_> = a.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
+        let b: Vec<_> = b.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
+        a.starts_with(&b) || b.starts_with(&a)
     }
 
     pub(crate) fn rework(&self) -> bool {

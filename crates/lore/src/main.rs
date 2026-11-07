@@ -18,12 +18,33 @@ fn main() {
         lore_by: std::env::var("LORE_BY").ok(),
         finder: Some(&BUILTIN),
         roots: None,
+        history: history_source(),
+        history_scope: history_scope(),
+        ..Env::default()
     };
     let references: Vec<&str> = args.iter().map(String::as_str).collect();
     let output = cli::run(&references, &env);
     print!("{}", output.stdout);
     eprint!("{}", output.stderr);
     std::process::exit(output.code);
+}
+
+/// docs/lore.md 11.7: Zerus registers its content-search index by naming its
+/// hgs in `LORE_HISTORY_HGS`; standalone lore has no history source.
+fn history_source() -> Option<std::sync::Arc<dyn zerus_lore::history::HistorySource>> {
+    let hgs = std::env::var_os("LORE_HISTORY_HGS").filter(|value| !value.is_empty())?;
+    Some(std::sync::Arc::new(zerus_lore::history::HgsSource { hgs: hgs.into() }))
+}
+
+/// Whose sessions the history channel returns: `LORE_HISTORY_SESSIONS` (a
+/// member's own, the lead's team's; unset: the owner's, any) and
+/// `LORE_HISTORY_EXCLUDE` (sessions whose memory_history is off).
+fn history_scope() -> zerus_lore::history::Scope {
+    let list = |name: &str| -> Option<Vec<String>> {
+        let value = std::env::var(name).ok()?;
+        Some(value.split(',').map(str::trim).filter(|item| !item.is_empty()).map(str::to_owned).collect())
+    };
+    zerus_lore::history::Scope { sessions: list("LORE_HISTORY_SESSIONS"), excluded: list("LORE_HISTORY_EXCLUDE").unwrap_or_default() }
 }
 
 /// `lore model fetch [--local <dir>] [--json]` and `lore model status [--json]`.

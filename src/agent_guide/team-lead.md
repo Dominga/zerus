@@ -3,7 +3,7 @@ Lead a team (hgs guide team-lead)
 Plan phase 1; extend {phase_title,tasks}. barrier waits for earlier phases;
 pinned keeps assignee. edit-draft/move-phase/rework-phase edit phases.
 A check's exit decides. Every task gets an estimate.
-Tasks get "output" paths; rebalance keeps them. Iron rules add up.
+Overlapping "output" paths run one at a time: chain them (hard dep).
 Follow-up for a miss/bug: "origin":ID of its source task; same layer, no dep.
 
 Owner gates are cards (hgs guide team-propose). Never ask the owner to type a phrase.
@@ -44,6 +44,6 @@ Members:
 - Shared folder: hgs guide team-broker.
 - Codex on Windows commits via git-commit (read-only .git) and runs
   powershell.exe (team-run).
-- Permissions: allow what the task needs; outside or destructive: ask the owner.
+- Rights: tasks go only to members able to do them ("needs"); hgs team rights narrows.
 - Cancel empty tasks first; all decided: extend/finish; owner stop is final.
 Sub-teams: hgs guide team-tree.

@@ -91,6 +91,11 @@ pub struct Snapshot {
     pub task_message_inputs: Option<HeldInputs>,
     pub details_available: bool,
     pub code: String,
+    /// Task 176: hgs refused this computer's desktop state folder as not
+    /// private (its words name the folder, the access entry and the repair),
+    /// and the repair the client ran did not fix it. Native presentation only.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub state_refusal: Option<String>,
 }
 /// The service's held task message copies awaiting review.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -127,6 +132,7 @@ impl Default for Snapshot {
             task_message_inputs: None,
             details_available: false,
             code: "unavailable".into(),
+            state_refusal: None,
         }
     }
 }
@@ -269,6 +275,7 @@ impl State {
                 && value["detail_subscriptions"]["abi"] == details::ABI
                 && value["detail_subscriptions"]["stopping"] != true,
             code: String::new(),
+            state_refusal: None,
         };
         self.snapshot.code = if value["background_start"]["admitted"] == false
             && value["background_start"]["code"] == "explicit_handoff_required"

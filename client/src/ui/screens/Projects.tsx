@@ -13,6 +13,7 @@ import { setMenu, type MenuEntry } from "../../store/ui";
 import { PROJECT_EDITING } from "./reasons";
 import { machineCards } from "../../store/machines";
 import { IronRulesPanel } from "../sessions/IronRulesPanel";
+import { ProjectMemoryPanel } from "./ProjectMemoryPanel";
 import { folderButton, folderExists, folderLaunch, folderMenuEntry, newSessionInFolder } from "../sessions/newsession-view";
 import { copy } from "../../store/actions";
 import { nextSort, showAskedProject, shownProjects, sortFolders, type Sort, type SortColumn } from "./projects-ui";
@@ -305,6 +306,10 @@ export function ProjectsScreen() {
               <div class="form-row proj-rules">
                 <label>{tr("Iron rules")}</label>
                 <IronRulesPanel context={{ computer: "", project: p().id }} />
+              </div>
+              <div class="form-row proj-memory-row">
+                <label>{tr("Project memory")}</label>
+                <ProjectMemoryPanel project={p().id} enabled={p().accessible} />
               </div>
 
               <div class="proj-folders" style={{height: `${split()}px`}}>

@@ -16,7 +16,7 @@ import { Composer } from "../sessions/Composer";
 import { QuestionCard } from "../sessions/QuestionCard";
 import { QueuePanel } from "../sessions/QueuePanel";
 import { sendBackMessage } from "./actions";
-import { duration, memberProgress, memberStatus, progress, shownMembers, stateLabel, stateTone, teamState, type MemberLive, type MemberStatus } from "./team-model";
+import { duration, memberProgress, memberStatus, progress, shownMembers, stateLabel, stateTone, teamState, unreadBadge, type MemberLive, type MemberStatus } from "./team-model";
 import { roleStyle } from "./roles";
 import { TeamProposals } from "./ProposalCards";
 import { TeamReports } from "./TeamReports";
@@ -286,6 +286,9 @@ function MemberRow(props: { computer: ComputerId; team: TeamView; member: TeamMe
         <div class="team-member-line">
           <span class="role-badge ell" style={roleStyle(props.member.role, props.member.lead)}>{props.member.role || props.member.id}</span>
           <Show when={props.member.question}><span class="team-q" title={tr("Needs your answer")}>?1</span></Show>
+          <Show when={unreadBadge(props.member)}>{(badge) => (
+            <span class="team-unread mono" classList={{ urgent: badge().urgent }} title={badge().tip}>{badge().text}</span>
+          )}</Show>
           <Show when={model()}><span class="dim ell team-model">{model()}</span></Show>
           <span class="grow" />
           <span class={`team-status tone-${props.status.tone}`} title={props.status.text}><Icon name={props.status.icon} size={12} />{props.status.short}</span>

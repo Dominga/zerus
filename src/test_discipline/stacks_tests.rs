@@ -104,6 +104,35 @@ fn a_python_change_runs_py_test_on_the_test_files_it_reaches() {
     assert!(plan.argv.contains(&"tests/test_demo.py".to_owned()), "{:?}", plan.argv);
 }
 
+/// Task 153: qa's Cython project in a subfolder of a monorepo: both requests
+/// name the project, which holds the environment and setup.py.
+#[test]
+fn a_nested_cython_project_names_its_folder_in_both_requests() {
+    let files: &[(&str, &str)] = &[
+        ("pkg/pyproject.toml", include_str!("../../tests/fixtures/stacks/cython/pyproject.toml")),
+        ("pkg/setup.py", include_str!("../../tests/fixtures/stacks/cython/setup.py")),
+        ("pkg/src/demo.pyx", include_str!("../../tests/fixtures/stacks/cython/src/demo.pyx")),
+        ("pkg/tests/test_demo.py", include_str!("../../tests/fixtures/stacks/cython/tests/test_demo.py")),
+    ];
+    let dir = place(files);
+    let config = detect::detect(dir.path());
+    let provider = &config.providers[0];
+    assert_eq!((provider.name.as_str(), provider.kind, provider.root.as_str()), ("pkg-cython", Kind::Cython, "pkg"));
+    let tracked: Vec<String> = files.iter().map(|(path, _)| (*path).to_owned()).collect();
+    let map = map::generate(dir.path(), &config, &tracked, None).unwrap();
+    let run = &select(dir.path(), &config, &map, &["pkg/src/demo.pyx"], false).runs[0];
+    assert_eq!(run.team_build, Some(json!({"template":"cython-build","args":{"project":"pkg"}})));
+    assert_eq!(run.team_run, Some(json!({"template":"py-test","args":{"project":"pkg","paths":["pkg/tests/test_demo.py"]}})));
+    // The environment is the project's, not the member folder's.
+    venv(&dir.path().join("pkg"));
+    let build = plans(dir.path(), run.team_build.as_ref().unwrap());
+    assert_eq!(build.cwd.as_deref(), Some("pkg"));
+    let tests = plans(dir.path(), run.team_run.as_ref().unwrap());
+    assert_eq!(tests.cwd.as_deref(), Some("pkg"));
+    // The whole set runs from the project's folder.
+    assert_eq!(select(dir.path(), &config, &map, &[], true).runs[0].team_run, Some(json!({"template":"py-test","args":{"project":"pkg"}})));
+}
+
 #[test]
 fn cython_is_proposed_and_a_pyx_change_rebuilds_then_runs_only_its_tests() {
     let files: &[(&str, &str)] = &[

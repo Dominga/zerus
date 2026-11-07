@@ -1579,6 +1579,14 @@ fn track(name: String, token: String, mut event: Value, output: &mut impl std::i
             record["iron_rules_start_conversation"] = record["conversation_id"].clone();
         }
     }
+    // Task 134: a team member's unread messages go into this turn as the
+    // turn-start hook's added context (the agent reads it; nothing is typed).
+    // They stay unread until the member reads them with hgs team inbox.
+    if kind == "UserPromptSubmit" && string(&event, "agent_id").is_empty() && teams::doorbell::turn_hook(&agent) {
+        if let Some(context) = teams::working::turn_context_for(string(&record, "name"), string(&record, "run_id")) {
+            agent_hint::output_event(output, &context, "UserPromptSubmit")?;
+        }
+    }
     // The ready conversation and its proof become visible in the same atomic
     // record update; hook() performs no later proof-only binding write.
     write(&mut record)?;

@@ -195,7 +195,7 @@ fn a_stage_hand_out_names_the_folder_and_a_refusal_puts_it_back() {
     set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| {
         assert_eq!(args.first().copied(), Some("send"));
         let input = input.cloned().unwrap_or_default();
-        record.borrow_mut().push((args.get(1).copied().unwrap_or_default().to_owned(), input["text"].as_str().unwrap_or_default().to_owned()));
+        record.borrow_mut().push((args.get(1).copied().unwrap_or_default().to_owned(), crate::state::teams::doorbell::posted_text(&input)));
         Ok(if refusing.get() { fake_output(1, "", "hgs: the session is busy") } else { fake_output(0, r#"{"status":"submitted"}"#, "") })
     })));
     let refused = stage_hand_out(&mut store, &t.id, 1, "rev", "");

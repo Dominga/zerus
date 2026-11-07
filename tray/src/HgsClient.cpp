@@ -605,6 +605,25 @@ IronRules::Transport HgsClient::rulesTransport()
     };
 }
 
+IronRules::Transport HgsClient::memoryTransport()
+{
+    return [guard = QPointer<HgsClient>(this)](const QString &, const QString &op, const QJsonObject &input, IronRules::Reply done) {
+        if (!guard) { done({}, QObject::tr("The connection closed.")); return; }
+        auto payload = input;
+        if (op != "get") payload.insert("by", "human");
+        const QStringList args{"project", "config", op, "--json"};
+        // A move copies the whole store and checks it: give it time.
+        const int timeout = op == "move" ? 600000 : 30000;
+        runHgsDirect(guard->m_hgs, {"--help"}, 15000, guard, [guard, args, payload, timeout, done](const QByteArray &help) {
+            if (!guard) return;
+            if (!help.contains("project-memory-v1")) { done({{"unsupported", true}}, {}); return; }
+            runHgsParsedDirect(guard->m_hgs, args, timeout, guard, parseObject,
+                [done](const ObjectReply &reply) { done(reply.object, reply.ok() ? QString() : QObject::tr("Invalid project memory response.")); },
+                [done](const QString &, const QString &error) { done({}, error); }, QJsonDocument(payload).toJson(QJsonDocument::Compact), true);
+        }, [done](const QString &, const QString &error) { done({}, error); }, {}, true);
+    };
+}
+
 quint64 HgsClient::requestModelServer(const QStringList &args, const QByteArray &input, int timeoutMs)
 {
     const quint64 request = ++m_modelServerRequest;

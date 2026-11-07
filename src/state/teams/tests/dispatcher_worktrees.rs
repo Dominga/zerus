@@ -101,7 +101,9 @@ fn a_commit_records_its_sha_and_refuses_another_branch() {
     assert_eq!(profile_mode("claude", "build"), Some("acceptEdits"));
     assert_eq!(profile_mode("claude", "read"), Some("plan"));
     assert_eq!(profile_mode("codex", "read"), None);
-    assert_eq!(profile_mode("claude", "network"), None);
+    // Task 154: every profile maps; network and operate run without plan mode.
+    assert_eq!(profile_mode("claude", "network"), Some("acceptEdits"));
+    assert_eq!(profile_mode("claude", "operate"), Some("acceptEdits"));
 }
 
 #[test]

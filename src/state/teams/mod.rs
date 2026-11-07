@@ -23,6 +23,7 @@ pub(crate) mod pipeline;
 pub(crate) mod plan;
 pub(crate) mod run_results;
 pub(crate) mod profile;
+pub(crate) mod rights;
 pub(crate) mod safe_actions;
 pub(crate) mod spans;
 pub(crate) mod strict;
@@ -36,6 +37,8 @@ pub(crate) mod merge_queue;
 pub(crate) mod timing;
 pub(crate) mod usage_sampler;
 pub(crate) mod waiting;
+pub(crate) mod working;
+pub(crate) mod doorbell;
 
 use std::collections::BTreeSet;
 

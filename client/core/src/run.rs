@@ -21,6 +21,9 @@ use std::time::{Duration, Instant};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod custody;
+// Inactive physical-I/O support for the future Unix Terminate controller.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod writer_custody;
 
 /// A noisy child keeps no more than this much of its standard error.
 const STDERR_CAP: usize = 64 * 1024;

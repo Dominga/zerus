@@ -2604,6 +2604,20 @@ carries one `idle_with_ready_work` item naming the member, the task and the
 reassign command. Every move records a `rebalanced` event with its `cross_role`
 flag, and the lead gets one message that `hgs team reassign` reverts.
 
+Task 263 (owner, 2026-11-08): a ready task waiting for its busy member never
+holds back other members' ready work. The dispatcher claims a task's files for
+a tick only when that tick hands it out or starts its member for it; a task
+that merely waits for a busy member no longer blocks a later ready task writing
+the same files (once it can start, that later task's work holds it back
+instead, so the two still never run apart). A real hold - a task that runs, or
+a returned task waiting for its member - is named rather than silent:
+`waits` on the held task is `{"for":"outputs","on":[198],"unblock":"#198 waits
+for ui2 (Frontend): hold or reassign #198"}`, and `hgs team look` says which
+task holds the member's ready work and what frees it. When a member is idle
+only because such a hold keeps its ready work, the lead's inbox carries one
+`idle_with_ready_work` item with that reason (the hold command for a waiting
+holder, `hgs team look` for a running one).
+
 A stage member may ask the lead with `hgs team ask` (its question belongs to the
 stage run and the lead answers it with `hgs team reply`), and the stage hand-off
 names that route, `hgs team current` and the rule that a reply in its turn is

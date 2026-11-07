@@ -2184,8 +2184,6 @@
   "Earlier stores, kept:": "Прежние хранилища (сохранены):",
   "Teams of this project get a shared workspace in this store. Turning memory off keeps the store.": "Команды этого проекта получают общее рабочее пространство в этом хранилище. При выключении памяти хранилище сохраняется.",
   "Project memory": "Память проекта",
-  "RustCodeLore: a shared workspace in the project's store": "RustCodeLore: общее рабочее пространство в хранилище проекта",
-  "RustCodeLore": "RustCodeLore",
   "Plain memory": "Обычная память",
   "unread: %1": "не прочитано: %1",
   "%1 unread team messages, %2 urgent; the member reads them with hgs team inbox": "Непрочитанных сообщений команды: %1, срочных: %2; участник читает их командой hgs team inbox",

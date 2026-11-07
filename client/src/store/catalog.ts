@@ -36,7 +36,7 @@ export interface CatalogState {
 }
 
 const KINDS = new Set<Status>(["attention", "working", "background", "scheduled", "ready", "error", "offline", "paused", "waiting", "starting", "ended"]);
-const AGENTS = new Set<AgentKind>(["claude", "codex", "kimi", "deepseek", "opencode", "sh"]);
+const AGENTS = new Set<AgentKind>(["claude", "codex", "kimi", "deepseek", "opencode", "ollama", "sh"]);
 
 /** The presentation kind of a view row; Qt gives `sh` its own Shell badge. */
 export function agentKind(agent: string | undefined): AgentKind {

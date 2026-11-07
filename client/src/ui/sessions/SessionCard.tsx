@@ -1,6 +1,6 @@
 import { For, Show } from "solid-js";
 import { tr, trNoop } from "../../i18n";
-import { AGENT_LABEL, Icon } from "../lib/icons";
+import { AGENT_LABEL, AgentLogo, Icon } from "../lib/icons";
 import { computerFresh, computerOffline } from "../../store/catalog";
 import { visibleUnreadReply } from "../../store/attention";
 import { optionalQuestionCount, optionalQuestionCountText } from "./optional-questions";
@@ -148,20 +148,26 @@ const PROVIDER_GLYPH: Record<AgentKind, string> = {
   opencode: `<path d="M4 3L1 6L4 9M8 3L11 6L8 9"/>`,
   codex: `<path d="M2 3L5 6L2 9M7 9H10"/>`,
   deepseek: `<path d="M2 3L5 6L2 9M7 9H10"/>`,
+  ollama: `<path d="M4 2V5M8 2V5M2.5 6A3.5 3.5 0 0 1 9.5 6V8A3.5 3.5 0 0 1 2.5 8Z"/>`,
   sh: `<path d="M2 3L5 6L2 9M7 9H10"/>`,
 };
 
-/** The provider glyph alone (IdentityBadges::paint), for menus and filter chips. */
-export function ProviderGlyph(props: { agent: AgentKind; size?: number }) {
+/** The stroke glyph, for an agent without a logo. */
+function StrokeGlyph(props: { agent: AgentKind; size?: number }) {
   return (
     <svg width={props.size ?? 12} height={props.size ?? 12} viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" innerHTML={PROVIDER_GLYPH[props.agent]} />
   );
 }
 
+/** The provider's logo alone (as Qt's agentLogoIcon), for badges, menus and filter chips; the stroke glyph without one. */
+export function ProviderGlyph(props: { agent: AgentKind; size?: number }) {
+  return <AgentLogo agent={props.agent} size={props.size} fallback={<StrokeGlyph agent={props.agent} size={props.size} />} />;
+}
+
 export function AgentBadge(props: { agent: AgentKind; narrow?: boolean; max?: number }) {
   return (
     <span class="agent-badge" classList={{ narrow: props.narrow }} style={{ "--agent": `var(--z-agent-${props.agent})`, "max-width": `${props.max ?? 95}px` }} title={AGENT_LABEL[props.agent]}>
-      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" innerHTML={PROVIDER_GLYPH[props.agent]} />
+      <ProviderGlyph agent={props.agent} />
       <Show when={!props.narrow}><span class="ab-label">{AGENT_LABEL[props.agent]}</span></Show>
     </span>
   );

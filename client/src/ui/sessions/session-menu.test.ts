@@ -11,6 +11,8 @@ vi.hoisted(() => {
   vi.stubGlobal("window", { document: { addEventListener: () => {} }, addEventListener: () => {} });
 });
 vi.mock("../../bridge", () => ({
+  // The Teams store subscribes when a session module imports it.
+  onTeamDecided: vi.fn(async () => () => {}), teamsFollow: vi.fn(async () => {}),
   // The task store reads further board pages through this bridge call.
   readTaskPage: vi.fn(async () => ({ tasks: [], page: { next: null } })),
   // The native workspace store, loaded by the session entry points.

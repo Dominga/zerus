@@ -213,6 +213,9 @@ fn the_list_projects_each_team_with_its_members_and_counts() {
         (team.id.as_str(), team.name.as_str(), team.status.as_str()),
         (TEAM, "Zerus Next for the fork", "running")
     );
+    // The lead's strip: phase 1 has two accepted of four tasks, one phase total.
+    assert_eq!((team.phase, team.phase_done, team.phase_total), (1, 2, 4));
+    assert_eq!((team.phases_done, team.phases_total), (0, 1));
     assert_eq!(
         (
             team.members.len(),

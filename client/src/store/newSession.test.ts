@@ -255,6 +255,23 @@ describe("accounts (NewSessionDialog.cpp 865-1023)", () => {
 });
 
 describe("repository source (NewSessionDialog.cpp 590-639)", () => {
+  it("publishes the URL focus request with the source change, before any later edit or form answer", async () => {
+    const t = setup();
+    await t.open();
+    const original = t.state().focusUrl;
+    t.act.setSource(true);
+    expect(t.state().repository).toBe(true);
+    expect(t.state().focusUrl).toBe(original + 1);
+    t.act.setName("typed-name");
+    t.act.setSource(true);
+    await settle();
+    expect(t.state().focusUrl).toBe(original + 1);
+    t.act.setSource(false);
+    t.act.setSource(true);
+    expect(t.state().focusUrl).toBe(original + 2);
+    expect(t.world.creating()).toEqual([]);
+  });
+
   for (const host of ["", "mac"]) {
     for (const override of ["", "existing", "ungrouped"]) {
       it(`repositorySourceKeepsNewProjectIntent (${host || "local"}, ${override || "keep new"})`, async () => {

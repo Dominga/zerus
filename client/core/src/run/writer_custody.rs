@@ -28,7 +28,7 @@ static UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 static RETIRED: Mutex<Vec<Original>> = Mutex::new(Vec::new());
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Refusal {
+pub enum Failure {
     Invalid,
     Capacity,
     Unavailable,
@@ -56,19 +56,19 @@ pub struct Admission {
     until: Instant,
 }
 impl Admission {
-    pub fn reserve(source: Arc<dyn Send + Sync>, until: Instant) -> Result<Self, Refusal> {
+    pub fn reserve(source: Arc<dyn Send + Sync>, until: Instant) -> Result<Self, Failure> {
         reap();
         let now = Instant::now();
         if until <= now || until.duration_since(now) > Duration::from_secs(30) {
-            return Err(Refusal::Invalid);
+            return Err(Failure::Invalid);
         }
         if UNAVAILABLE.load(Ordering::Acquire) {
-            return Err(Refusal::Unavailable);
+            return Err(Failure::Unavailable);
         }
         LIVE.try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
             (count < LIMIT).then_some(count + 1)
         })
-        .map_err(|_| Refusal::Capacity)?;
+        .map_err(|_| Failure::Capacity)?;
         Ok(Self {
             charge: Charge { _source: source },
             until,
@@ -77,7 +77,7 @@ impl Admission {
 
     /// Consume the SAME original Child returned by the host's guarded spawn.
     /// All three streams must be this child's original pipes. Input stays held
-    /// until send's fresh native/source check; missing pipes retain a refusal.
+    /// until send's fresh native/source check; missing pipes retain a failure.
     /// The host must not detach/replace the Child inside its check callback.
     pub fn attach(self, mut child: Child) -> Exchange {
         let missing = child.stdin.is_none() || child.stdout.is_none() || child.stderr.is_none();
@@ -92,14 +92,14 @@ impl Admission {
             exit: None,
             offered: false,
             stopped: false,
-            refusal: None,
+            failure: None,
             until: self.until,
             _charge: self.charge,
         };
         if missing {
-            original.stop(Refusal::Worker);
+            original.stop(Failure::Worker);
         } else if Instant::now() >= original.until {
-            original.stop(Refusal::Expired);
+            original.stop(Failure::Expired);
         }
         Exchange(Some(original))
     }
@@ -107,14 +107,15 @@ impl Admission {
 
 /// Physical helper exchange data, NOT a delivery or operation-success receipt.
 /// Even exit zero never proves source freshness, native tree exit or cleanup
-/// authority. A refusal remains sticky after a later physical drain.
+/// authority. A failure remains sticky after a later physical drain.
 #[derive(Debug)]
 pub struct Report {
     pub exit: ExitStatus,
+    /// True only for a complete write/flush. False may include partial delivery.
     pub input_written: bool,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
-    pub refusal: Option<Refusal>,
+    pub failure: Option<Failure>,
 }
 
 pub struct Exchange(Option<Original>);
@@ -122,42 +123,44 @@ impl Exchange {
     /// Exactly one input handoff, after the host rechecks THIS original Child.
     /// The host must bound its check by the supplied unchanged deadline. Failed
     /// check, oversized input, expiry or a second handoff never starts a writer.
+    /// Ok only means handed to that writer, never acknowledged delivery. An
+    /// admitted write may require retirement after cancellation or expiry.
     pub fn send(
         &mut self,
         input: Vec<u8>,
         check: impl FnOnce(&mut Child, Instant) -> bool,
-    ) -> Result<(), Refusal> {
-        let original = self.0.as_mut().ok_or(Refusal::Invalid)?;
-        if original.offered || original.refusal.is_some() {
-            return Err(original.refusal.unwrap_or(Refusal::Input));
+    ) -> Result<(), Failure> {
+        let original = self.0.as_mut().ok_or(Failure::Invalid)?;
+        if original.offered || original.failure.is_some() {
+            return Err(original.failure.unwrap_or(Failure::Input));
         }
         original.offered = true;
         original.wait();
-        let failure = if original.refusal.is_some() {
-            original.refusal
+        let failure = if original.failure.is_some() {
+            original.failure
         } else if input.len() > INPUT_BYTES {
-            Some(Refusal::Input)
+            Some(Failure::Input)
         } else if original.exit.is_some() {
-            Some(Refusal::SourceChanged)
+            Some(Failure::SourceChanged)
         } else if Instant::now() >= original.until {
-            Some(Refusal::Expired)
+            Some(Failure::Expired)
         } else if !check(&mut original.child, original.until) {
-            Some(Refusal::SourceChanged)
+            Some(Failure::SourceChanged)
         } else if Instant::now() >= original.until {
-            Some(Refusal::Expired)
+            Some(Failure::Expired)
         } else {
             original.wait();
             original
-                .refusal
-                .or_else(|| original.exit.is_some().then_some(Refusal::SourceChanged))
+                .failure
+                .or_else(|| original.exit.is_some().then_some(Failure::SourceChanged))
         };
         if let Some(reason) = failure {
             original.stop(reason);
             return Err(reason);
         }
         if !original.input.send(input, original.until) {
-            original.stop(Refusal::Worker);
-            return Err(Refusal::Worker);
+            original.stop(Failure::Worker);
+            return Err(Failure::Worker);
         }
         Ok(())
     }
@@ -165,14 +168,14 @@ impl Exchange {
     /// Stop ONLY this owned helper; cancellation does not settle any resource.
     pub fn cancel(&mut self) {
         if let Some(original) = self.0.as_mut() {
-            original.stop(Refusal::Cancelled);
+            original.stop(Failure::Cancelled);
         }
     }
 
-    /// Reporting only. A refusal can be visible while its original resources
+    /// Reporting only. A failure can be visible while its original resources
     /// are still draining; it supplies neither settlement nor retry authority.
-    pub fn refusal(&self) -> Option<Refusal> {
-        self.0.as_ref().and_then(|original| original.refusal)
+    pub fn failure(&self) -> Option<Failure> {
+        self.0.as_ref().and_then(|original| original.failure)
     }
 
     /// Nonblocking observation. Report only after original wait, stdin closure
@@ -190,7 +193,7 @@ impl Exchange {
             input_written: original.input.written,
             stdout: std::mem::take(&mut original.output.bytes),
             stderr: std::mem::take(&mut original.error.bytes),
-            refusal: original.refusal,
+            failure: original.failure,
         })
     }
 }
@@ -199,7 +202,7 @@ impl Drop for Exchange {
         let Some(mut original) = self.0.take() else {
             return;
         };
-        original.stop(Refusal::Cancelled);
+        original.stop(Failure::Cancelled);
         original.tick();
         if !original.settled() {
             match RETIRED.lock() {
@@ -223,7 +226,7 @@ struct Original {
     exit: Option<ExitStatus>,
     offered: bool,
     stopped: bool,
-    refusal: Option<Refusal>,
+    failure: Option<Failure>,
     until: Instant,
     _charge: Charge,
 }
@@ -233,13 +236,13 @@ impl Original {
             match self.child.try_wait() {
                 Ok(exit) => self.exit = exit,
                 Err(_) => {
-                    self.refusal.get_or_insert(Refusal::Unavailable);
+                    self.failure.get_or_insert(Failure::Unavailable);
                 }
             }
         }
     }
-    fn stop(&mut self, reason: Refusal) {
-        self.refusal.get_or_insert(reason);
+    fn stop(&mut self, reason: Failure) {
+        self.failure.get_or_insert(reason);
         self.input.close_unoffered();
         self.wait();
         if !self.stopped && self.exit.is_none() {
@@ -251,20 +254,20 @@ impl Original {
     }
     fn tick(&mut self) {
         if Instant::now() >= self.until {
-            self.stop(Refusal::Expired);
+            self.stop(Failure::Expired);
         }
         self.wait();
         self.input.poll();
         self.output.poll();
         self.error.poll();
         if self.offered && self.input.joined && self.input.closed && !self.input.written {
-            self.stop(Refusal::Input);
+            self.stop(Failure::Input);
         }
         if self.output.overflow() || self.error.overflow() {
-            self.stop(Refusal::OutputLimit);
+            self.stop(Failure::OutputLimit);
         }
         if self.input.failed || self.output.failed || self.error.failed {
-            self.stop(Refusal::Worker);
+            self.stop(Failure::Worker);
         }
     }
     fn settled(&self) -> bool {

@@ -57,7 +57,7 @@ fn original_echo_releases_source_only_after_wait_eof_and_all_joins() {
     let report = finish(&mut original);
     assert!(report.exit.success() && report.input_written);
     assert_eq!(report.stdout, b"original input");
-    assert!(report.stderr.is_empty() && report.refusal.is_none());
+    assert!(report.stderr.is_empty() && report.failure.is_none());
     assert!(weak.upgrade().is_none());
     assert!(original.poll().is_none());
 }
@@ -71,22 +71,22 @@ fn source_refusal_and_second_handoff_never_start_another_writer() {
         admission(Arc::new(()), Duration::from_secs(5)).attach(child("exec /bin/cat"));
     assert_eq!(
         original.send(b"withheld".to_vec(), |_, _| false),
-        Err(Refusal::SourceChanged)
+        Err(Failure::SourceChanged)
     );
     assert_eq!(
         original.send(b"replay".to_vec(), |_, _| panic!("source refusal retried")),
-        Err(Refusal::SourceChanged)
+        Err(Failure::SourceChanged)
     );
     let report = finish(&mut original);
     assert!(!report.input_written && report.stdout.is_empty());
-    assert_eq!(report.refusal, Some(Refusal::SourceChanged));
+    assert_eq!(report.failure, Some(Failure::SourceChanged));
 
     let mut original =
         admission(Arc::new(()), Duration::from_secs(5)).attach(child("exec /bin/cat"));
     original.send(b"once".to_vec(), |_, _| true).unwrap();
     assert_eq!(
         original.send(b"twice".to_vec(), |_, _| panic!("duplicate checked")),
-        Err(Refusal::Input)
+        Err(Failure::Input)
     );
     assert_eq!(finish(&mut original).stdout, b"once");
 }
@@ -108,12 +108,13 @@ fn exit_without_output_eof_retains_the_original_source() {
         .stdin(Stdio::piped())
         .stdout(Stdio::from(held_write.try_clone().unwrap()))
         .stderr(Stdio::piped());
+    let source = Arc::new(());
+    let weak = Arc::downgrade(&source);
+    let reserved = admission(source, Duration::from_secs(5));
     let mut owned = command.spawn().unwrap();
     owned.stdout = Some(OwnedFd::from(read).into());
     drop(command);
-    let source = Arc::new(());
-    let weak = Arc::downgrade(&source);
-    let mut original = admission(source, Duration::from_secs(5)).attach(owned);
+    let mut original = reserved.attach(owned);
     original.send(b"exit\n".to_vec(), |_, _| true).unwrap();
     until(|| {
         assert!(original.poll().is_none());
@@ -142,12 +143,13 @@ fn cancelled_child_exit_does_not_join_a_still_blocked_original_writer() {
         .stdin(Stdio::from(held_read.try_clone().unwrap()))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let source = Arc::new(());
+    let weak = Arc::downgrade(&source);
+    let reserved = admission(source, Duration::from_secs(5));
     let mut owned = command.spawn().unwrap();
     owned.stdin = Some(OwnedFd::from(write).into());
     drop(command);
-    let source = Arc::new(());
-    let weak = Arc::downgrade(&source);
-    let mut original = admission(source, Duration::from_secs(5)).attach(owned);
+    let mut original = reserved.attach(owned);
     original.send(vec![b'x'; INPUT_BYTES], |_, _| true).unwrap();
     original.cancel();
     until(|| {
@@ -161,7 +163,7 @@ fn cancelled_child_exit_does_not_join_a_still_blocked_original_writer() {
     drop(held_read);
     let report = finish(&mut original);
     assert!(!report.input_written);
-    assert_eq!(report.refusal, Some(Refusal::Cancelled));
+    assert_eq!(report.failure, Some(Failure::Cancelled));
     assert!(weak.upgrade().is_none());
 }
 
@@ -178,12 +180,13 @@ fn expiry_and_drop_retire_original_pipes_and_discard_the_old_result() {
         .stdin(Stdio::piped())
         .stdout(Stdio::from(held_write.try_clone().unwrap()))
         .stderr(Stdio::piped());
+    let source = Arc::new(());
+    let weak = Arc::downgrade(&source);
+    let reserved = admission(source, Duration::from_secs(1));
     let mut owned = command.spawn().unwrap();
     owned.stdout = Some(OwnedFd::from(read).into());
     drop(command);
-    let source = Arc::new(());
-    let weak = Arc::downgrade(&source);
-    let mut original = admission(source, Duration::from_secs(1)).attach(owned);
+    let mut original = reserved.attach(owned);
     original.send(b"old\n".to_vec(), |_, _| true).unwrap();
     let deadline = original.0.as_ref().unwrap().until;
     until(|| {
@@ -192,7 +195,7 @@ fn expiry_and_drop_retire_original_pipes_and_discard_the_old_result() {
     });
     until(|| Instant::now() >= deadline);
     assert!(original.poll().is_none());
-    assert_eq!(original.refusal(), Some(Refusal::Expired));
+    assert_eq!(original.failure(), Some(Failure::Expired));
     drop(original);
     assert!(weak.upgrade().is_some());
     drop(held_write);
@@ -212,7 +215,7 @@ fn an_expired_native_check_and_oversized_input_release_zero_bytes() {
         admission(Arc::new(()), Duration::from_secs(5)).attach(child("exec /bin/cat"));
     assert_eq!(
         original.send(vec![0; INPUT_BYTES + 1], |_, _| panic!("oversized checked")),
-        Err(Refusal::Input)
+        Err(Failure::Input)
     );
     assert!(finish(&mut original).stdout.is_empty());
     let mut original =
@@ -222,7 +225,7 @@ fn an_expired_native_check_and_oversized_input_release_zero_bytes() {
             until(|| Instant::now() >= deadline);
             true
         }),
-        Err(Refusal::Expired)
+        Err(Failure::Expired)
     );
     assert!(finish(&mut original).stdout.is_empty());
 }
@@ -242,15 +245,15 @@ fn all_original_admissions_count_before_any_child_or_writer_exists() {
     }
     assert!(matches!(
         Admission::reserve(Arc::new(()), Instant::now() + Duration::from_secs(5)),
-        Err(Refusal::Capacity)
+        Err(Failure::Capacity)
     ));
     assert!(matches!(
         Admission::reserve(Arc::new(()), Instant::now()),
-        Err(Refusal::Invalid)
+        Err(Failure::Invalid)
     ));
     assert!(matches!(
         Admission::reserve(Arc::new(()), Instant::now() + Duration::from_secs(31)),
-        Err(Refusal::Invalid)
+        Err(Failure::Invalid)
     ));
     drop(held);
     assert_eq!(LIVE.load(Ordering::Acquire), 0);
@@ -376,7 +379,7 @@ fn a_panicked_reader_never_supplies_an_eof_witness() {
 }
 
 #[test]
-fn oversized_original_output_drains_physically_but_keeps_its_refusal() {
+fn oversized_original_output_drains_physically_but_keeps_its_failure() {
     let _serial = TESTS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -387,7 +390,7 @@ fn oversized_original_output_drains_physically_but_keeps_its_refusal() {
     original.send(b"begin\n".to_vec(), |_, _| true).unwrap();
     let report = finish(&mut original);
     assert_eq!(report.stdout.len(), STDOUT_BYTES);
-    assert_eq!(report.refusal, Some(Refusal::OutputLimit));
+    assert_eq!(report.failure, Some(Failure::OutputLimit));
     assert!(weak.upgrade().is_none());
 }
 
@@ -405,11 +408,11 @@ fn an_original_that_exits_during_its_native_check_receives_no_input() {
             owned.wait().unwrap();
             true
         }),
-        Err(Refusal::SourceChanged)
+        Err(Failure::SourceChanged)
     );
     let report = finish(&mut original);
     assert!(!report.input_written && report.stdout.is_empty());
-    assert_eq!(report.refusal, Some(Refusal::SourceChanged));
+    assert_eq!(report.failure, Some(Failure::SourceChanged));
 }
 
 #[test]

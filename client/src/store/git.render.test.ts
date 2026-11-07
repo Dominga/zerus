@@ -106,4 +106,35 @@ describe("visible Git watch projection", () => {
     expect(isEmptyBatch(b)).toBe(false);
     expect(b.git).toEqual([update()]);
   });
+
+  it.each([
+    ["empty", ""], ["missing", undefined], ["blank", " \t"],
+    ["null", null], ["number", 42], ["object", { name: "published/integration" }],
+  ])("keeps a reported verified remote unknown when its upstream is %s", (_label, upstream) => {
+    const c = createCatalog();
+    c.applyBatch(batch({ upserts: [row("run:a")], computers: [{ computer: "", status: "live", attempt: 0 }] }));
+    c.gitInterests(["\nrun:a"]);
+    const host = document.createElement("div"); document.body.append(host);
+    dispose = render(() => createComponent(SessionCard, {
+      get session() { return c.catalog.rows["\nrun:a"]; }, selected: false, expandable: false, expanded: false, onToggleChildren() {},
+    }), host);
+    const clean = { changed_files: 0, conflicts: 0, ahead: 0, behind: 0, remote_state: "verified", remote_age_seconds: 0 };
+    c.applyBatch(batch({ git: [update("", undefined, { ...clean, upstream })] }));
+    // Advance the card clock with each newly observed batch.
+    setNow((c.catalog.rows["\nrun:a"].git!.receivedAt! + 1) / 1000);
+    expect(host.querySelector(".gmark.t-synced"), "no verified clean mark without a reported upstream").toBeNull();
+    expect(host.querySelector(".gmarks .gmark.t-muted")).not.toBeNull();
+    expect(host.querySelector(".gmarks")?.getAttribute("title")).toContain("Remote publication has not been verified recently.");
+    expect(c.catalog.rows["\nrun:a"].git?.remoteVerified).toBe(false);
+
+    c.applyBatch(batch({ git: [update("", undefined, { ...clean, upstream, changed_files: 2 })] }));
+    setNow((c.catalog.rows["\nrun:a"].git!.receivedAt! + 1) / 1000);
+    expect(host.querySelector(".gmark.t-attention")?.textContent).toBe("2");
+    expect(host.querySelector(".gmark.t-synced")).toBeNull();
+
+    c.applyBatch(batch({ git: [update("", undefined, { ...clean, upstream: "published/integration" })] }));
+    setNow((c.catalog.rows["\nrun:a"].git!.receivedAt! + 1) / 1000);
+    expect(host.querySelector(".gmark.t-synced")).not.toBeNull();
+    expect(c.catalog.rows["\nrun:a"].git?.remoteVerified).toBe(true);
+  });
 });

@@ -25,14 +25,15 @@ export function createGitProjection(port: {
     const scope = (!s.gitRoot || v.root === s.gitRoot) && (!s.branch || v.branch === s.branch || (s.gitDetached && v.detached === true));
     const local = v.state === "ok" && changed !== undefined && scope;
     const age = typeof v.remote_age_seconds === "number" && v.remote_age_seconds >= 0 ? v.remote_age_seconds : undefined;
-    const remote = local && v.remote_state === "verified" && age !== undefined && age < 60;
+    const upstream = typeof v.upstream === "string" ? v.upstream : "";
+    const remote = local && !!upstream.trim() && v.remote_state === "verified" && age !== undefined && age < 60;
     return { changed: changed ?? 0, ahead: ahead ?? 0, behind: behind ?? 0, conflicts: number("conflicts"),
       state: remote ? changed ? "diff" : ahead ? "push" : behind ? "pull" : "synced" : "unknown",
       streamed: true, localFresh: local, remoteVerified: remote, receivedAt: fact.at, remoteAge: age,
       changedKnown: changed !== undefined, aheadKnown: ahead !== undefined, behindKnown: behind !== undefined,
       countsKnown: changed !== undefined && ahead !== undefined && behind !== undefined,
       root: typeof v.root === "string" ? v.root : gitPath(s),
-      upstream: typeof v.upstream === "string" ? v.upstream : "",
+      upstream,
       detached: v.detached === true, unborn: v.unborn === true,
     };
   };

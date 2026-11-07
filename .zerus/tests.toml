@@ -175,6 +175,15 @@ kind = "cargo"
 root = "crates/watch-protocol"
 sources = ["crates/watch-protocol/**"]
 
+# RustCodeLore: the CodeLore implementation of docs/lore.md, with its own lock
+# and its own target folder like the other storage crates.
+[[provider]]
+name = "lore"
+kind = "cargo"
+root = "crates/lore"
+sources = ["crates/lore/**"]
+command = "cargo test --locked --target-dir ../../target/lore {targets}"
+
 # The Qt desktop: CMake's link lists and the include graph name the files each
 # test binary uses. The build folder is this checkout's; the owner may move it.
 [[provider]]

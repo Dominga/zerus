@@ -6,6 +6,7 @@ mod claude;
 mod claude_settings;
 mod mcp_servers;
 mod permission_status;
+mod permission_scope;
 mod install;
 mod deepseek;
 use crate::{
@@ -336,6 +337,7 @@ fn list(config: &Config) -> Result<Value> {
         permission_status::describe(config, row, mode);
         model_defaults::describe(row, &catalog);
     }
+    permission_scope::describe(config, &mut rows);
     // The connector forwards at most 128 KiB of accounts; this row keeps within 32 KiB.
     #[cfg(unix)]
     for row in rows.iter_mut().filter(|r| r["id"] == "native-opencode" && r["model_options"].is_array()) {
@@ -347,7 +349,7 @@ fn list(config: &Config) -> Result<Value> {
             .contains(r["id"].as_str().unwrap_or(""))
     });
     Ok(
-        json!({"host":config.host(),"profiles":visible,"removed_profiles":removed,"defaults":catalog.defaults,"revision":revision(&bytes),"setup_revision":true,"copy_revision":true}),
+        json!({"host":config.host(),"profiles":visible,"removed_profiles":removed,"defaults":catalog.defaults,"revision":revision(&bytes),"setup_revision":true,"copy_revision":true,"permission_scope_supported":true}),
     )
 }
 pub const AUTH_ENV: &[&str] = &[
@@ -590,6 +592,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             if mode=="provider" {catalog.permission_modes.remove(id);} else {catalog.permission_modes.insert(id.into(),mode.into());}
             if !dry {save(config,&catalog)?;}println!("{}",list(config)?);
         },
+        "permission-scope"=>{println!("{}",permission_scope::set(config,args,dry)?);},
         "rename"=>{
             let label=arg(args,"--label").ok_or_else(||Error::new(1,"Account name is required."))?.trim();validate_label(label)?;
             let _lock=locked(config)?;let bytes=read(config)?;check_revision(&bytes,args)?;let mut catalog=decode(&bytes)?;
@@ -680,7 +683,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             }
             return Ok(code);
         },
-        _=>return Err(Error::new(1,"usage: hgs account ls | add ID --provider codex|claude|kimi --label NAME | rm ID | login ID | favorite native-opencode --model PROVIDER/MODEL --favorite on|off --request-id UUID | models native-opencode [--location DIR]")),
+        _=>return Err(Error::new(1,"usage: hgs account ls | add ID --provider codex|claude|kimi --label NAME | rm ID | login ID | permission-scope ID --scope account|computer | favorite native-opencode --model PROVIDER/MODEL --favorite on|off --request-id UUID | models native-opencode [--location DIR]")),
     }
     Ok(0)
 }

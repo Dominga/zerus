@@ -1,7 +1,7 @@
 use super::*;
 use std::cell::Cell;
 use std::time::Instant;
-use zerus_replica::{NewTask, SessionKey, Target, TaskAttachment};
+use zerus_replica::{Inventory, NewTask, SessionKey, Target, TaskAttachment};
 
 /// What `f` decoded and stamped.
 fn counted<T>(f: impl FnOnce() -> T) -> (T, usize, usize) {
@@ -1246,4 +1246,83 @@ fn an_older_hgs_index_is_never_touched() {
     assert_eq!(fs::read(&old).unwrap(), b"an older hgs's index");
     assert!(store.dir().join(FILE).exists());
     assert_ne!(FILE, "task-index-v1.sqlite3");
+}
+
+/// What the index holds for the phone's inventory (zerus-cg5h.21): the
+/// project document's version, and each loaded task's version by whether it
+/// is Done.
+fn held(index: &Index) -> (Option<zerus_replica::Version>, Inventory, Inventory) {
+    let project = index.meta("project_version").unwrap().map(|v| serde_json::from_str(&v).unwrap());
+    let (mut live, mut done) = (Inventory::default(), Inventory::default());
+    let mut query = index.db.prepare("SELECT uuid, version, done FROM tasks WHERE version IS NOT NULL").unwrap();
+    let rows = query
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?)))
+        .unwrap();
+    for row in rows {
+        let (uuid, version, is_done) = row.unwrap();
+        let into = if is_done { &mut done } else { &mut live };
+        into.tasks.insert(uuid, serde_json::from_str(&version).unwrap());
+    }
+    (project, live, done)
+}
+
+/// The index's inventory against the store's own: the live view, and every
+/// loaded task (Done ones included).
+fn assert_holds_the_inventory(store: &ProjectStore, index: &Index) {
+    let (project, live, done) = held(index);
+    let (expected_live, _) = store.live_inventory().unwrap();
+    let (everything, _) = store.inventory().unwrap();
+    assert_eq!(project.as_ref(), Some(&expected_live.project));
+    assert_eq!(live.tasks, expected_live.tasks);
+    let mut all = live.tasks.clone();
+    all.extend(done.tasks);
+    assert_eq!(all, everything.tasks);
+}
+
+#[test]
+fn the_index_holds_the_inventory_of_every_loaded_task_and_the_project() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = project(temp.path());
+    let index = Index::open(&store).unwrap();
+    // Before the project document was ever saved its version is empty.
+    assert_eq!(held(&index).0, Some(Default::default()));
+    assert_holds_the_inventory(&store, &index);
+    // The damaged task file holds no version.
+    let damaged: i64 = index
+        .db
+        .query_row("SELECT count(*) FROM tasks WHERE error IS NOT NULL AND version IS NULL", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(damaged, 1);
+    drop(index);
+    // Saves through the store: a note, a task completed, the project's settings.
+    let uuids: Vec<String> = store.uuids().unwrap();
+    let mut noted = store.load(&uuids[0]).unwrap();
+    noted.comment("More detail", &Actor::Person, 5).unwrap();
+    store.save(&mut noted).unwrap();
+    let mut finished = uuids
+        .iter()
+        .map(|uuid| store.load(uuid))
+        .filter_map(std::result::Result::ok)
+        .find(|task| task.stage().unwrap() == Stage::Review)
+        .unwrap();
+    finished.set_stage(Stage::Done, &Actor::Person, now()).unwrap();
+    store.save(&mut finished).unwrap();
+    let mut doc = store.project().unwrap();
+    doc.set_settings(&zerus_replica::Settings { agent_limit: 3, ..doc.settings() }).unwrap();
+    store.save_project(&doc).unwrap();
+    let index = Index::open(&store).unwrap();
+    assert!(!held(&index).0.unwrap().is_empty());
+    assert_holds_the_inventory(&store, &index);
+    let revision = index.revision().unwrap();
+    drop(index);
+    // A project write without the journal is found by the full check; it
+    // leaves the task rows, and with them the revision, alone.
+    doc.set_settings(&zerus_replica::Settings { agent_limit: 4, ..doc.settings() }).unwrap();
+    fs::write(store.dir().join("project.loro"), doc.snapshot().unwrap()).unwrap();
+    let index = Index::open(&store).unwrap();
+    index.db.execute("UPDATE meta SET value='0' WHERE key='checked'", []).unwrap();
+    drop(index);
+    let index = Index::open(&store).unwrap();
+    assert_holds_the_inventory(&store, &index);
+    assert_eq!(index.revision().unwrap(), revision);
 }

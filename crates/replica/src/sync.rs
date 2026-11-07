@@ -176,6 +176,24 @@ fn settled(files: &[Option<Stamp>]) -> bool {
         .all(|Stamp(_, secs, nanos, _)| Duration::new(*secs, *nanos) + SETTLE <= now)
 }
 
+impl TaskDoc {
+    /// This task's version as an inventory holds it.
+    pub fn inventory_version(&self) -> Version {
+        version(&self.current_vv())
+    }
+}
+
+impl ProjectStore {
+    /// The project document's version as an inventory holds it; empty while
+    /// it was never saved.
+    pub fn project_version(&self) -> Result<Version> {
+        if !self.dir().join("project.loro").exists() {
+            return Ok(Version::new());
+        }
+        Ok(version(&VersionVector::decode(&self.project()?.version())?))
+    }
+}
+
 pub(crate) fn version(vv: &VersionVector) -> Version {
     vv.iter()
         .map(|(peer, count)| (peer.to_string(), *count))

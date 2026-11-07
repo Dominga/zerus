@@ -32,7 +32,9 @@ const FILE: &str = "task-index-v2.sqlite3";
 /// history headers carry the task's execution (zerus-cg5h.4), so rows cached
 /// without it are built again rather than mixed with rows that have it.
 /// 4: history entries naming an attempt carry its origin and phase (A4).
-/// 5: rows carry their owner session and whether they are unassigned.
+/// 5: rows carry their owner session and whether they are unassigned, and
+/// each loaded task's inventory version and whether it is Done; the meta
+/// holds the project document's version (zerus-cg5h.26, zerus-cg5h.21).
 const ROWS: i64 = 5;
 /// The index's version: its rows' shape and the replica's mark format, since
 /// a row remembers whether its task loaded, which the mark decides. An index
@@ -230,21 +232,42 @@ enum Derived {
         id: String,
         row: String,
         sends: Vec<i64>,
+        held: Option<Held>,
     },
-    Damaged(String),
+    /// A task that does not load, or whose header cannot be read; one that
+    /// loads still holds its inventory version.
+    Damaged(String, Option<Held>),
+}
+
+/// What the phone's inventory holds of a loaded task (zerus-cg5h.21): its
+/// version (canonical JSON) and whether it is Done. None when its stage
+/// cannot be read, so it is in no inventory read from the index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Held {
+    version: String,
+    done: bool,
+}
+
+fn held(task: &TaskDoc) -> Option<Held> {
+    let stage = task.stage().ok()?;
+    Some(Held {
+        version: serde_json::to_string(&task.inventory_version()).ok()?,
+        done: stage == Stage::Done,
+    })
 }
 
 fn derive(store: &ProjectStore, uuid: &str) -> Derived {
     #[cfg(test)]
     DECODED.with(|n| n.set(n.get() + 1));
-    let damaged = |error: String| Derived::Damaged(cut(&error, ERROR_BYTES).to_owned());
+    let damaged = |error: String, held| Derived::Damaged(cut(&error, ERROR_BYTES).to_owned(), held);
     let task = match store.load(uuid) {
         Ok(task) => task,
-        Err(error) => return damaged(error.to_string()),
+        Err(error) => return damaged(error.to_string(), None),
     };
+    let held = held(&task);
     let view = match task.view() {
         Ok(view) => view,
-        Err(error) => return damaged(error.to_string()),
+        Err(error) => return damaged(error.to_string(), held),
     };
     let (stage, rank, id) = (view.stage.as_str(), view.rank.clone(), view.id.clone());
     // What `ProjectStore::agent_starts_since` counts.
@@ -261,8 +284,9 @@ fn derive(store: &ProjectStore, uuid: &str) -> Derived {
             id,
             row: capped(row).to_string(),
             sends,
+            held,
         },
-        Err(error) => damaged(error.message),
+        Err(error) => damaged(error.message, held),
     }
 }
 
@@ -458,11 +482,11 @@ fn connect(dir: &Path) -> Outcome<Connection> {
         "SELECT count(*) FROM sqlite_schema WHERE name IN
             ('meta', 'tasks', 'sends', 'tasks_order', 'tasks_short', 'tasks_checked', 'tasks_untrusted',
              'sends_at', 'sends_uuid', 'histories', 'entries', 'entries_place', 'entries_id',
-             'tasks_owner', 'tasks_unassigned')",
+             'tasks_owner', 'tasks_unassigned', 'tasks_held')",
         [],
         |r| r.get(0),
     )?;
-    if version != SCHEMA || objects != 15 {
+    if version != SCHEMA || objects != 16 {
         // The one-task history cache before this index; nothing has it open
         // while the project lock is held.
         for suffix in ["", "-journal", "-wal", "-shm"] {
@@ -476,10 +500,11 @@ fn connect(dir: &Path) -> Outcome<Connection> {
             CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE tasks(uuid TEXT NOT NULL UNIQUE, files TEXT NOT NULL, stage TEXT, rank TEXT,
                 short_id TEXT, row TEXT, error TEXT, checked INTEGER NOT NULL, trusted INTEGER NOT NULL,
-                owner TEXT, unassigned INTEGER NOT NULL DEFAULT 0);
+                owner TEXT, unassigned INTEGER NOT NULL DEFAULT 0, version TEXT, done INTEGER);
             CREATE INDEX tasks_order ON tasks(stage, rank, uuid);
             CREATE INDEX tasks_owner ON tasks(owner, stage, rank, uuid);
             CREATE INDEX tasks_unassigned ON tasks(stage, rank, uuid) WHERE unassigned = 1;
+            CREATE INDEX tasks_held ON tasks(done, uuid) WHERE version IS NOT NULL;
             CREATE INDEX tasks_short ON tasks(short_id);
             CREATE INDEX tasks_checked ON tasks(checked);
             CREATE INDEX tasks_untrusted ON tasks(checked) WHERE trusted = 0;
@@ -612,6 +637,15 @@ impl<'a> Index<'a> {
             let list: Vec<String> = suspect.iter().cloned().collect();
             self.refresh(&list, None, Some(&suspect))?;
         }
+        // The project document's version, as the phone's inventory holds it:
+        // read again when the journal names it, and at a full check when its
+        // file changed; kept apart from the rows and their revision.
+        let noted = changes.documents.as_ref().is_some_and(|d| d.contains("project"));
+        let project = if full || noted || self.meta("project_version")?.is_none() {
+            self.project_version(now, noted)?
+        } else {
+            None
+        };
         let tx = self.db.transaction()?;
         {
             let mut set = tx.prepare("INSERT OR REPLACE INTO meta VALUES(?1, ?2)")?;
@@ -621,10 +655,35 @@ impl<'a> Index<'a> {
             if full {
                 set.execute(params!["checked", now.to_string()])?;
             }
+            match project {
+                Some((files, Some(version))) => {
+                    set.execute(params!["project_files", files])?;
+                    set.execute(params!["project_version", version])?;
+                }
+                // Unreadable now: read again at the next sync.
+                Some((_, None)) => {
+                    tx.execute("DELETE FROM meta WHERE key IN ('project_files', 'project_version')", [])?;
+                }
+                None => (),
+            }
             tx.execute("INSERT OR IGNORE INTO meta VALUES('revision', ?1)", [ids::new_uuid()])?;
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// The project document's stamp and version (canonical JSON; None when
+    /// it cannot be read) to keep, or None when the kept ones still hold:
+    /// its file's stamp is unchanged and the journal (`noted`) names no save.
+    /// An unsettled file's stamp is not kept, so it is read again next time.
+    fn project_version(&self, now: i64, noted: bool) -> Outcome<Option<(String, Option<String>)>> {
+        let (files, settled) = stamp_at(&self.store.dir().join("project.loro"), now);
+        let kept = self.meta("project_version")?.is_some() && self.meta("project_files")?.as_deref() == Some(files.as_str());
+        if kept && !noted {
+            return Ok(None);
+        }
+        let version = self.store.project_version().ok().and_then(|v| serde_json::to_string(&v).ok());
+        Ok(Some((if settled { files } else { String::new() }, version)))
     }
 
     /// Rows checked before this are suspect: read before the journal last
@@ -655,10 +714,15 @@ impl<'a> Index<'a> {
                 // When it was read orders the background queue; whether its
                 // files were settled decides if a page may trust it.
                 let (checked, trusted) = (read_at, settled);
-                let stored: Option<(String, Option<String>, Option<String>)> = self
+                #[allow(clippy::type_complexity)]
+                let stored: Option<(String, Option<String>, Option<String>, Option<Held>)> = self
                     .db
-                    .query_row("SELECT files, row, error FROM tasks WHERE uuid=?1", [uuid], |r| {
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                    .query_row("SELECT files, row, error, version, done FROM tasks WHERE uuid=?1", [uuid], |r| {
+                        let held = match (r.get::<_, Option<String>>(3)?, r.get::<_, Option<bool>>(4)?) {
+                            (Some(version), Some(done)) => Some(Held { version, done }),
+                            _ => None,
+                        };
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, held))
                     })
                     .optional()?;
                 let stamps = match known {
@@ -672,8 +736,8 @@ impl<'a> Index<'a> {
                 let derived = (!gone(&now)).then(|| derive(self.store, uuid));
                 // Read again to the same row: only its stamps and time change.
                 let same = match (&derived, &stored) {
-                    (Some(Derived::Row { row, .. }), Some((_, Some(old), None))) => row == old,
-                    (Some(Derived::Damaged(error)), Some((_, None, Some(old)))) => error == old,
+                    (Some(Derived::Row { row, held, .. }), Some((_, Some(old), None, was))) => row == old && held == was,
+                    (Some(Derived::Damaged(error, held)), Some((_, None, Some(old), was))) => error == old && held == was,
                     _ => false,
                 };
                 work.push((uuid, now, derived, same, checked, trusted));
@@ -699,18 +763,22 @@ impl<'a> Index<'a> {
                 tx.execute("DELETE FROM entries WHERE uuid=?1", [uuid])?;
                 match derived {
                     None => (),
-                    Some(Derived::Damaged(error)) => {
+                    Some(Derived::Damaged(error, held)) => {
+                        let (version, done) = held.map(|h| (h.version, h.done)).unzip();
                         tx.execute(
-                            "INSERT INTO tasks(uuid, files, error, checked, trusted) VALUES(?1, ?2, ?3, ?4, ?5)",
-                            params![uuid, files, error, checked, trusted],
+                            "INSERT INTO tasks(uuid, files, error, checked, trusted, version, done)
+                             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            params![uuid, files, error, checked, trusted, version, done],
                         )?;
                     }
-                    Some(Derived::Row { stage, rank, id, row, sends }) => {
+                    Some(Derived::Row { stage, rank, id, row, sends, held }) => {
                         let (owner, unassigned) = owner_of(&row);
+                        let (version, done) = held.map(|h| (h.version, h.done)).unzip();
                         tx.execute(
-                            "INSERT INTO tasks(uuid, files, stage, rank, short_id, row, checked, trusted, owner, unassigned)
-                             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                            params![uuid, files, stage, rank, id, row, checked, trusted, owner, unassigned],
+                            "INSERT INTO tasks(uuid, files, stage, rank, short_id, row, checked, trusted, owner, unassigned,
+                                version, done)
+                             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                            params![uuid, files, stage, rank, id, row, checked, trusted, owner, unassigned, version, done],
                         )?;
                         for at in sends {
                             tx.execute("INSERT INTO sends VALUES(?1, ?2)", params![uuid, at])?;

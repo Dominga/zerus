@@ -12,7 +12,7 @@
 //! view shown again gets exactly that before the live output, so no byte
 //! arrives twice or goes missing.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
@@ -210,11 +210,11 @@ struct Inner {
     connecting: Mutex<()>,
     next: AtomicU64,
     /// One transfer per actual attached session, independent of other sessions.
-    dropping: Mutex<HashSet<(String, String)>>,
+    dropping: Mutex<HashMap<u64, TerminalTarget>>,
 }
 
 /// Release the transfer on every exit, including cancellation and unwinding.
-struct Dropping<'a>(&'a Mutex<HashSet<(String, String)>>, (String, String));
+struct Dropping<'a>(&'a Mutex<HashMap<u64, TerminalTarget>>, u64);
 
 impl Drop for Dropping<'_> {
     fn drop(&mut self) {
@@ -240,7 +240,7 @@ impl Terminals {
             targets: Mutex::new(HashMap::new()),
             connecting: Mutex::new(()),
             next: AtomicU64::new(0),
-            dropping: Mutex::new(HashSet::new()),
+            dropping: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -277,9 +277,18 @@ impl Terminals {
         if changed {
             self.disconnect(view);
         } else if let Some(open) = lock(&self.0.views).get_mut(view) {
-            open.target = kept;
+            self.keep_target(open, kept);
         }
         changed
+    }
+
+    /// Called under the views lock, as transfer admission is. A retained
+    /// attach keeps its transfer exclusion through rename and run enrichment.
+    fn keep_target(&self, open: &mut Open, target: TerminalTarget) {
+        if let Some(transfer) = lock(&self.0.dropping).get_mut(&open.generation) {
+            *transfer = target.clone();
+        }
+        open.target = target;
     }
 
     /// Connects the view, or rebinds its running attach to `sink` when the
@@ -354,7 +363,7 @@ impl Terminals {
     ) -> Option<Connected> {
         let mut views = lock(&self.0.views);
         let open = views.get_mut(view)?;
-        open.target = target.clone();
+        self.keep_target(open, target.clone());
         open.set_size(size.0, size.1);
         let mut delivery = lock(&open.pipe.delivery);
         let replay: Vec<u8> = delivery.delivered.iter().copied().collect();
@@ -457,16 +466,25 @@ impl Terminals {
     {
         // The retained attach determines exclusion, not caller-supplied drop
         // fields. Reconnection still invalidates the eventual paste.
-        let key = match lock(&self.0.views).get(view) {
-            Some(open) if open.generation == generation => {
-                (open.target.computer.clone(), open.target.name.clone())
+        {
+            let views = lock(&self.0.views);
+            let open = match views.get(view) {
+                Some(open) if open.generation == generation => open,
+                _ => return Ok(None),
+            };
+            let mut dropping = lock(&self.0.dropping);
+            if dropping.contains_key(&generation)
+                || dropping.values().any(|held| {
+                    held.computer == open.target.computer
+                        && (held.name == open.target.name
+                            || (!held.run_id.is_empty() && held.run_id == open.target.run_id))
+                })
+            {
+                return Ok(Some("Wait for the current file transfer to finish.".into()));
             }
-            _ => return Ok(None),
-        };
-        if !lock(&self.0.dropping).insert(key.clone()) {
-            return Ok(Some("Wait for the current file transfer to finish.".into()));
+            dropping.insert(generation, open.target.clone());
         }
-        let _dropping = Dropping(&self.0.dropping, key);
+        let _dropping = Dropping(&self.0.dropping, generation);
         if target.computer.is_empty() {
             self.paste(
                 view,
@@ -1326,6 +1344,98 @@ mod tests {
             t.disconnect("other");
         }
         t.disconnect("main");
+    }
+
+    #[test]
+    fn review_a_retained_attach_rename_does_not_admit_a_second_transfer() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        let t = terminals();
+        let sink = Arc::new(Collect::default());
+        let c = t
+            .connect("main", target("run-1"), 80, 24, sink.clone())
+            .unwrap();
+        hello(&t, c.generation, &sink);
+        let mut kept = false;
+        let mut second = None;
+        let first = drop_with(&t, c.generation, drop_target(), |_, _| {
+            let mut renamed = target("run-1");
+            renamed.name = "claude/sample-project/renamed".into();
+            kept = !t.retarget("main", &renamed) && t.generation("main") == Some(c.generation);
+            let mut destination = drop_target();
+            destination.name = renamed.name;
+            second = Some(drop_with(&t, c.generation, destination, |_, _| {
+                Err("second transfer reached dispatch while the original transfer was held".into())
+            }));
+            Ok(stage_done())
+        });
+        // Always settle the private original attach before asserting the result.
+        t.disconnect("main");
+        assert!(kept, "a rename keeps the original attach and generation");
+        assert_eq!(first, Ok(None));
+        assert_eq!(
+            second,
+            Some(Ok(Some(
+                "Wait for the current file transfer to finish.".into()
+            )))
+        );
+    }
+
+    #[test]
+    fn a_transfer_keeps_its_run_across_enrichment_rename_omission_and_rebind() {
+        let _tree = crate::PROCESS_TREE.read().unwrap();
+        for initial_run in ["run-1", ""] {
+            let t = terminals();
+            let c = t
+                .connect(
+                    "main",
+                    target(initial_run),
+                    80,
+                    24,
+                    Arc::new(Collect::default()),
+                )
+                .unwrap();
+            let mut kept = Vec::new();
+            let mut refused = Vec::new();
+            let first = drop_with(&t, c.generation, drop_target(), |_, _| {
+                kept.push(!t.retarget("main", &target("run-1")));
+                let mut renamed = target("run-1");
+                renamed.name = "claude/sample-project/renamed".into();
+                kept.push(!t.retarget("main", &renamed));
+                let mut omitted = renamed.clone();
+                omitted.run_id.clear();
+                kept.push(!t.retarget("main", &omitted));
+                let rebound = t
+                    .connect("main", omitted, 80, 24, Arc::new(Collect::default()))
+                    .unwrap();
+                kept.push(rebound.reused && rebound.generation == c.generation);
+                let other = t
+                    .connect(
+                        "other",
+                        renamed.clone(),
+                        80,
+                        24,
+                        Arc::new(Collect::default()),
+                    )
+                    .unwrap();
+                for (view, generation) in [("main", c.generation), ("other", other.generation)] {
+                    let mut destination = drop_target();
+                    destination.name = renamed.name.clone();
+                    refused.push(drop_view_with(&t, view, generation, destination, |_, _| {
+                        Err("second transfer reached dispatch".into())
+                    }));
+                }
+                t.disconnect("other");
+                Err("first transfer reached dispatch".into())
+            });
+            t.disconnect("main");
+            assert!(kept.into_iter().all(|kept| kept));
+            assert_eq!(first, Err("first transfer reached dispatch".into()));
+            assert_eq!(
+                refused,
+                vec![Ok(Some("Wait for the current file transfer to finish.".into())); 2]
+            );
+            assert!(lock(&t.0.dropping).is_empty());
+        }
     }
 
     #[test]

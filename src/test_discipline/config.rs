@@ -56,6 +56,10 @@ pub struct TestsConfig {
     /// linter); Zerus offers a missing one to the owner.
     #[serde(default, rename = "tool", skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ToolNeed>,
+    /// Task 190: where a tool lives on this project, for a template that must
+    /// find it itself: `[tools]` names a tool (`qt`) and its path.
+    #[serde(default, rename = "tools", skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub tool_paths: std::collections::BTreeMap<String, String>,
     /// Task 85: the project's own `hgs team run` templates, typed like the
     /// built-ins; each runs only once the owner accepted its exact content.
     #[serde(default, rename = "template", skip_serializing_if = "Vec::is_empty")]
@@ -195,6 +199,7 @@ impl Default for TestsConfig {
             resources: std::collections::BTreeMap::new(),
             providers: Vec::new(),
             tools: Vec::new(),
+            tool_paths: std::collections::BTreeMap::new(),
             templates: Vec::new(),
             build_broker: None,
         }
@@ -669,6 +674,10 @@ fn validate(config: &TestsConfig) -> anyhow::Result<()> {
     for tool in &config.tools {
         anyhow::ensure!(!tool.name.trim().is_empty(), "Every [[tool]] has a name");
     }
+    for (tool, path) in &config.tool_paths {
+        anyhow::ensure!(!tool.trim().is_empty(), "Every [tools] entry names a tool");
+        anyhow::ensure!(!path.trim().is_empty(), "Every [tools] entry names a path: {tool}");
+    }
     let mut names = std::collections::BTreeSet::new();
     for provider in &config.providers {
         anyhow::ensure!(!provider.name.trim().is_empty(), "Every test provider has a name");
@@ -870,8 +879,18 @@ targets = ["ctest:gui:views"]
         let command = project(&[(FILE, "[[provider]]\nname = \"a\"\nkind = \"command\"\n")]);
         assert!(load(command.path(), None).unwrap_err().to_string().contains("names its command"));
     }
+
+
+
+    /// Task 190: a project names where a tool lives in `[tools]`, beside its
+    /// `[[tool]]` needs; the file still parses and validates.
+    #[test]
+    fn a_project_names_a_tools_path_in_its_own_table() {
+        let dir = project(&[(FILE, "version = 1\n[tools]\nqt = 'D:/Tools/zerus-deps/Qt/6.10.3/msvc2022_64'\n")]);
+        let loaded = load(dir.path(), None).unwrap();
+        assert_eq!(loaded.config.tool_paths.get("qt").map(String::as_str), Some("D:/Tools/zerus-deps/Qt/6.10.3/msvc2022_64"));
+        // An empty path is refused rather than searched for.
+        let dir = project(&[(FILE, "version = 1\n[tools]\nqt = ' '\n")]);
+        assert!(load(dir.path(), None).unwrap_err().to_string().contains("[tools] entry names a path"));
+    }
 }
-
-
-
-

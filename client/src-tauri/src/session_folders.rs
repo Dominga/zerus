@@ -118,10 +118,17 @@ fn terminal_arguments(
     target: &Target,
     online: bool,
 ) -> Result<Vec<String>, String> {
-    if !current_target(row, target) {
+    // Startup may precede the first native conversation binding. External
+    // attach needs the original live run, unlike inspected folder actions.
+    let Some(row) = row.filter(|row| {
+        !target.run_id.is_empty()
+            && row.name == target.name
+            && row.run_id.as_deref() == Some(&target.run_id)
+            && (target.conversation_id.is_empty()
+                || row.conversation_id.as_deref() == Some(&target.conversation_id))
+    }) else {
         return Err(CHANGED.into());
-    }
-    let row = row.unwrap();
+    };
     let facts = zerus_client_core::terminal::TerminalFacts {
         cmd: row.agent.clone(),
         terminal_supported: row.terminal_supported,
@@ -341,6 +348,67 @@ mod tests {
             terminal_arguments(Some(&row), &target, true).unwrap(),
             ["a", &row.name, "--existing", "--run-id", "run-1"]
         );
+    }
+
+    #[test]
+    fn external_startup_connection_needs_only_its_original_run() {
+        let mut target = folder().target;
+        target.conversation_id.clear();
+        for conversation_id in [None, Some(String::new()), Some("first-binding".into())] {
+            let row = ViewRow {
+                conversation_id,
+                ..terminal_row()
+            };
+            assert_eq!(
+                terminal_arguments(Some(&row), &target, true).unwrap(),
+                ["@peer", "a", &row.name, "--existing", "--run-id", "run-1"]
+            );
+            // Folder inspection still requires both IDs, even for this run.
+            assert!(!current_target(Some(&row), &target));
+        }
+    }
+
+    #[test]
+    fn external_startup_connection_keeps_source_and_no_resume_guards() {
+        let mut target = folder().target;
+        target.conversation_id.clear();
+        let row = ViewRow {
+            conversation_id: None,
+            ..terminal_row()
+        };
+        assert!(terminal_arguments(None, &target, true).is_err());
+        assert!(terminal_arguments(Some(&row), &target, false).is_err());
+        for changed in [
+            ViewRow {
+                run_id: None,
+                ..row.clone()
+            },
+            ViewRow {
+                run_id: Some("replacement".into()),
+                ..row.clone()
+            },
+            ViewRow {
+                name: "codex/sample-project/renamed".into(),
+                ..row.clone()
+            },
+            ViewRow {
+                state: "paused".into(),
+                ..row.clone()
+            },
+            ViewRow {
+                state: "stopped".into(),
+                ..row.clone()
+            },
+            ViewRow {
+                terminal_supported: false,
+                terminal_reported: true,
+                ..row.clone()
+            },
+        ] {
+            assert!(terminal_arguments(Some(&changed), &target, true).is_err());
+        }
+        target.run_id.clear();
+        assert!(terminal_arguments(Some(&row), &target, true).is_err());
     }
 
     #[test]

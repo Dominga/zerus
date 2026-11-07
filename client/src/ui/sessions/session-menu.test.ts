@@ -253,6 +253,29 @@ describe("session context targeting", () => {
 
 
 describe("external terminal availability", () => {
+  it.each([undefined, ""])("opens the original startup run before conversation binding (%j)", (conversation) => {
+    const raw: ViewRow = { name: "codex/context/startup", agent: "codex", state: "running", status: "starting", run_id: "startup-run", conversation_id: conversation, terminal_supported: true };
+    applyBatch({ ...emptyBatch(), computers: [{ computer: "peer", status: "live", attempt: 0 }], upserts: [{ computer: "peer", key: "run:startup-run", row: raw }] });
+    const target = toSession("peer", "run:startup-run", raw);
+    const item = menuItem("Open terminal", sessionMenu(target));
+    expect(item.disabled).toBe(false);
+    expect(sessionTerminalOpen).not.toHaveBeenCalled();
+    item.action?.();
+    expect(sessionTerminalOpen).toHaveBeenCalledExactlyOnceWith({ computer: "peer", name: raw.name, run_id: "startup-run", conversation_id: "" });
+  });
+  it.each(["run", "name", "created", "conversation", "removed"])("retains the startup row's click-time source guard (%s)", (change) => {
+    const raw: ViewRow = { name: "codex/context/startup", agent: "codex", state: "running", status: "starting", run_id: "startup-run", created: 100 };
+    applyBatch({ ...emptyBatch(), computers: [{ computer: "peer", status: "live", attempt: 0 }], upserts: [{ computer: "peer", key: "run:startup-run", row: raw }] });
+    const item = menuItem("Open terminal", sessionMenu(toSession("peer", "run:startup-run", raw)));
+    expect(item.disabled).toBe(false);
+    if (change === "removed") {
+      applyBatch({ ...emptyBatch(), removes: [{ computer: "peer", key: "run:startup-run" }] });
+    } else {
+      const row = { ...raw, ...({ run: { run_id: "replacement" }, name: { name: "codex/context/renamed" }, created: { created: 101 }, conversation: { conversation_id: "new-binding" } }[change]) };
+      applyBatch({ ...emptyBatch(), upserts: [{ computer: "peer", key: "run:startup-run", row }] });
+    }
+    item.action?.(); expect(sessionTerminalOpen).not.toHaveBeenCalled();
+  });
   it.each([
     [{ agent: "deepseek", terminal_supported: false }, "This native adapter does not provide Terminal."],
     [{ state: "paused" }, "Resume this session before opening its terminal."],

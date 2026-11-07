@@ -166,7 +166,17 @@ pub(crate) const BUILTIN: &[Template] = &[
         params: &[],
         timeout_secs: 3600,
     },
-    // Owner, 2026-10-28: a stale generated build folder (an AAPT intermediate)
+    // Task 157: the release candidate a Windows worker runs before the release
+    // branch moves. The script runs the fork-windows steps; --exp-tag also
+    // dispatches the whitewh-exp-* workflow and waits for it.
+    Template {
+        id: "release-candidate",
+        summary: "the whole fork release candidate on a Windows worker: Qt offscreen suites, fork handoff/update, Tauri build, portable zip self-test; --exp-tag dispatches and waits for the experimental runner",
+        program: "python",
+        args: &["scripts/release-candidate.py", "--commit={commit}", "--exp-tag={exp_tag}"],
+        params: &[optional("commit", Kind::Identifier), optional("exp_tag", Kind::Identifier)],
+        timeout_secs: 10800,
+    },    // Owner, 2026-10-28: a stale generated build folder (an AAPT intermediate)
     // needed a permission to remove; only a build output can go.
     Template {
         id: "clean-build",
@@ -2093,8 +2103,8 @@ mod tests {
         // The set the owner asked for, by id.
         let ids: Vec<&str> = BUILTIN.iter().map(|template| template.id).collect();
         // Task 85: the CMake and MSBuild templates of any project after them; task 86: the Python and Cython ones; task 87: Unreal.
-        assert_eq!(ids, ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test", "py-test", "cython-build", "android-test", "clean-build",
-                         "git-merge-lead", "git-commit", "ue-build", "ue-test", "cmake-configure", "cmake-build", "ctest", "msbuild-build", "vstest"]);
+        assert_eq!(ids, ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test", "py-test", "cython-build", "android-test", "release-candidate",
+                         "clean-build", "git-merge-lead", "git-commit", "ue-build", "ue-test", "cmake-configure", "cmake-build", "ctest", "msbuild-build", "vstest"]);
     }
 
     // Run by hand on a Windows machine with Visual Studio (cargo test -- --ignored).
@@ -3241,4 +3251,7 @@ kind = "path"
         assert!(error.contains("HKCU") && error.contains("ZERUS_UE_ENGINE"), "{error}");
     }
 }
+
+
+
 

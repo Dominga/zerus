@@ -1170,19 +1170,74 @@ fn all_items(team: &Team) -> Vec<Item> {
         }
     }
     // Task 173: a member working with nothing handed to it, at once.
+    // Task #227: when its folder's branch names the task it works on, the item
+    // names it and one command binds the work in progress to that task.
     for member in team.members.iter().filter(|_| active) {
         let Some(flag) = member.unassigned.as_ref() else { continue };
+        let named = flag.task.and_then(|id| team.task(id).map(|task| (id, task.title.clone())));
+        let (summary, command, detail) = match &named {
+            Some((task, title)) => (
+                summary(&format!("{} {} on #{} {} with no attempt (unassigned work)", team.name_of(&member.id), flag.what, task, title)),
+                format!(
+                    "{} | hgs team retry --json (binds the work in progress to #{}), or reassign",
+                    json!({"request_id":"UUID","team":team.id,"task":task}),
+                    task
+                ),
+                format!("Its branch shows #{}; the retry keeps the work and tells the member to report under it, never to start over.", task),
+            ),
+            None => (
+                summary(&super::shadow::lead_line(team, member, flag)),
+                "{\"request_id\":\"UUID\",\"team\":\"ID\",\"task\":N} | hgs team retry --json (or reassign); hgs team look MEMBER shows what it runs".into(),
+                String::new(),
+            ),
+        };
         items.push(Item {
             subagents: Value::Null,
             kind: "unassigned_work",
             key: format!("unassigned_work:{}:{}", member.id, flag.since as i64),
-            task: None,
+            task: flag.task,
             member: member.id.clone(),
             since: flag.since,
-            summary: summary(&super::shadow::lead_line(team, member, flag)),
-            command: "{\"request_id\":\"UUID\",\"team\":\"ID\",\"task\":N} | hgs team retry --json (or reassign); hgs team look MEMBER shows what it runs".into(),
-            detail: String::new(),
+            summary,
+            command,
+            detail,
         });
+    }
+    // Task #227: the attempts a restart gave back by itself, as one item: what
+    // Zerus re-sent or bound, with no action for the lead.
+    if active {
+        let cutoff = crate::state::now() - 30.0 * 60.0;
+        let recovered: Vec<&Value> = team
+            .crash_recovered
+            .iter()
+            .filter(|entry| entry["at"].as_f64().unwrap_or(0.0) >= cutoff)
+            .collect();
+        if !recovered.is_empty() {
+            let since = recovered.iter().filter_map(|entry| entry["at"].as_f64()).fold(f64::INFINITY, f64::min);
+            let named: Vec<String> = recovered
+                .iter()
+                .filter_map(|entry| {
+                    let task = entry["task"].as_u64()?;
+                    let attempt = entry["attempt"].as_u64().unwrap_or_default();
+                    Some(match entry["how"].as_str().unwrap_or("") {
+                        "resent" => format!("#{task} attempt {attempt} sent again"),
+                        "continued" => format!("#{task} attempt {attempt} continued on its own"),
+                        _ => format!("#{task} attempt {attempt}"),
+                    })
+                })
+                .collect();
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "attempt_recovered",
+                key: format!("attempt_recovered:{:.0}", since),
+                task: None,
+                member: "Zerus".into(),
+                since,
+                summary: summary(&format!("The restart gave {} attempt(s) back by itself: {}", named.len(), named.join(", "))),
+                command: "no action: Zerus kept each attempt's number; hgs team status --json shows them".into(),
+                detail: String::new(),
+            });
+        }
     }
     // Task 156: a report that contradicts a decision, before its accept.
     for task in team.tasks.iter().filter(|_| active) {

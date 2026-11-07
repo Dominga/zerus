@@ -307,8 +307,14 @@ pub(crate) enum Step {
     /// The member is idle without a ready task while tasks are open (C7).
     Starving { member: String },
     /// Task 173: the member's session works with nothing handed to it.
-    Unassigned { member: String, what: String },
+    Unassigned { member: String, what: String, task: Option<u32> },
     UnassignedEnded { member: String },
+    /// Task #227: an attempt a restart left unconfirmed goes back to the
+    /// restarted session by itself; `busy` says the new run already works on
+    /// it, so the attempt is bound instead of sent again.
+    RecoverCrash { task: u32, member: String, busy: bool },
+    /// Task #227: the queued "continue" notices of a retry reach their members.
+    Continues,
     /// The member got work again or nothing is open: the episode ends (C7).
     StarvedEnded { member: String },
     /// Idle without work for too long: tell the free lead once (C7).
@@ -1096,6 +1102,37 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             }
         }
     }
+    // Task #227 (owner, 2026-11-07): an attempt a restart left unconfirmed goes
+    // back to its restarted session by itself, never to the lead: sent again
+    // when the new run idles, bound to it when the run already works on the
+    // task (a resumed conversation continues on its own).
+    for task in &team.tasks {
+        let Some(attempt) = task
+            .attempts
+            .iter()
+            .rev()
+            .find(|attempt| attempt.state == AttemptState::Unconfirmed && attempt.error.contains("the session crashed"))
+        else {
+            continue;
+        };
+        let Some(member) = team.member(&attempt.member) else { continue };
+        let Some(found) = session_of(member, seen) else { continue };
+        if !found.live {
+            continue;
+        }
+        let busy = !found.free;
+        // Only a run that works on this very task keeps it: its branch or screen
+        // names it, or it holds no other attempt. A run busy elsewhere is left
+        // alone rather than told to start this one over.
+        if busy && !crash_same_task(team, member, task.id) {
+            continue;
+        }
+        steps.push(Step::RecoverCrash { task: task.id, member: attempt.member.clone(), busy });
+    }
+    // Task #227: the "continue" a retry queued reaches its member at a safe point.
+    if team.continues.iter().any(|notice| notice.notice == Notice::Pending) {
+        steps.push(Step::Continues);
+    }
     // A hand-out that never started: the lead hears once, when free (A1).
     if team.member(&team.lead).and_then(|m| session_of(m, seen)).is_some_and(|s| s.free) {
         for task in &team.tasks {
@@ -1430,7 +1467,11 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         for member in team.members.iter().filter(|member| member.id != team.lead) {
             let Some(found) = session_of(member, seen) else { continue };
             match (super::shadow::unassigned(team, member, found, now), member.unassigned.is_some()) {
-                (Some(what), false) => steps.push(Step::Unassigned { member: member.id.clone(), what }),
+                (Some(what), false) => steps.push(Step::Unassigned {
+                    member: member.id.clone(),
+                    what,
+                    task: task_evidence(team, member),
+                }),
                 (None, true) if !found.building && (found.free || !super::shadow::handed(team, &member.id).is_empty()) => {
                     steps.push(Step::UnassignedEnded { member: member.id.clone() });
                 }
@@ -7789,6 +7830,253 @@ fn restart_crashed(store: &mut Store, team: &Team, member_id: &str) -> anyhow::R
     })
 }
 
+/// Task #227: the task a member's folder branch names: a per-task branch, or
+/// the fork's task branch ending in `-<id>`. None when the folder shows none.
+fn task_evidence(team: &Team, member: &Member) -> Option<u32> {
+    let folder = member_folder_path(team, member).ok().filter(|folder| !folder.is_empty())?;
+    let branch = git_bounded(&folder, &["rev-parse", "--abbrev-ref", "HEAD"]).ok()?;
+    team.tasks
+        .iter()
+        .filter(|task| task.assignee == member.id && !task.status.finished())
+        .find(|task| {
+            task_branch(team, task.id, &member.id).is_some_and(|expected| expected == branch)
+                || branch.ends_with(&format!("-{}", task.id))
+        })
+        .map(|task| task.id)
+}
+
+/// Task #227: whether a busy member's run works on `task`: its branch names it,
+/// or it holds no attempt for another task.
+fn crash_same_task(team: &Team, member: &Member, task: u32) -> bool {
+    match task_evidence(team, member) {
+        Some(shown) => shown == task,
+        None => !team
+            .tasks
+            .iter()
+            .filter(|found| found.id != task)
+            .any(|found| found.attempts.iter().any(|attempt| attempt.member == member.id && attempt.state.open())),
+    }
+}
+
+/// Task #227: what a restarted session reads before its old hand-out: the fixed
+/// preamble the owner asked for, then the task as it was handed out.
+fn crash_preamble(team: &Team, task: &Task, attempt: &Attempt) -> String {
+    format!(
+        "[Zerus team \u{b7} from: Zerus \u{b7} task: #{} \u{b7} attempt: {} \u{b7} restarted]\n\
+         Your session crashed at {} and was restarted. Continue this same task from your folder and branch: run git status and git log first, \
+         then go on where you stopped. Do not start over, and keep attempt {} (team {}).\n\n",
+        task.id,
+        attempt.n,
+        super::inbox::local_time(attempt.sent_at),
+        attempt.n,
+        team.name
+    )
+}
+
+/// Task #227: an attempt a restart left unconfirmed goes back to the member by
+/// itself. `busy`: the new run already works on the task, so the attempt is
+/// bound to it instead of sent again. Returns what it did, for the sweep.
+fn recover_crash(store: &mut Store, team: &Team, task_id: u32, member_id: &str, busy: bool) -> anyhow::Result<Option<Value>> {
+    let snapshot = store.load(&team.id)?.context("Unknown team")?;
+    let Some(member) = snapshot.member(member_id).cloned() else { return Ok(None) };
+    let Some(task) = snapshot.task(task_id) else { return Ok(None) };
+    let Some(attempt) = task
+        .attempts
+        .iter()
+        .rev()
+        .find(|attempt| attempt.member == member_id && attempt.state == AttemptState::Unconfirmed && attempt.error.contains("the session crashed"))
+    else {
+        return Ok(None);
+    };
+    let (n, attempt_id) = (attempt.n, attempt.id.clone());
+    if busy {
+        // The resumed conversation is already on it: no second hand-out, the
+        // attempt runs under the new run and keeps its number.
+        let mut done = false;
+        change(store, &team.id, |team, events| {
+            let at = now();
+            let role = team.role_of(member_id);
+            {
+                let task = team.task_mut(task_id).context("unknown task")?;
+                if let Some(attempt) = task.attempts.iter_mut().find(|attempt| attempt.id == attempt_id) {
+                    attempt.state = AttemptState::Delivered;
+                    attempt.delivered_at = Some(at);
+                    attempt.started_at = Some(at);
+                    attempt.error = "the session crashed and was restarted; its new run continued on its own".into();
+                    task.status = TaskStatus::InProgress;
+                    done = true;
+                }
+            }
+            if done {
+                events.push(Event::new("attempt_continued", json!({"task":task_id,"attempt":n,"member":role})));
+                team.crash_recovered.push(json!({"task":task_id,"attempt":n,"member":role,"at":at,"how":"continued"}));
+                if team.crash_recovered.len() > 20 {
+                    let excess = team.crash_recovered.len() - 20;
+                    team.crash_recovered.drain(..excess);
+                }
+            }
+            Ok(())
+        })?;
+        return Ok(done.then(|| json!({"task":task_id,"attempt":n,"how":"continued"})));
+    }
+    let Some(session) = member.session.clone() else { return Ok(None) };
+    let rules = super::super::iron_rules::for_team(&snapshot, &member)?;
+    let extra = continuation_extra(task);
+    let text = format!("{}{}", crash_preamble(&snapshot, task, attempt), hand_off_text_rules(&snapshot, task, attempt, "", &member.computer, &extra, &rules));
+    let request = uuid::Uuid::new_v4().to_string();
+    let outcome = super::doorbell::post_and_ring(store, &team.id, member_id, &session, &request, "hand_out", "zerus", Urgency::Normal, &text);
+    let mut how = "";
+    change(store, &team.id, |team, events| {
+        let at = now();
+        let role = team.role_of(member_id);
+        {
+            let task = team.task_mut(task_id).context("unknown task")?;
+            let Some(attempt) = task.attempts.iter_mut().find(|attempt| attempt.id == attempt_id) else { return Ok(()) };
+            match &outcome {
+                Sent::Delivered => {
+                    attempt.state = AttemptState::Delivered;
+                    attempt.delivered_at = Some(at);
+                    attempt.error.clear();
+                    task.status = TaskStatus::InProgress;
+                    how = "resent";
+                }
+                Sent::Uncertain(error) => {
+                    attempt.error = format!("the session crashed and was restarted; the task may have been sent again ({error})");
+                    how = "uncertain";
+                }
+                Sent::Refused(error) => {
+                    attempt.error = format!("the session crashed and was restarted, but the task was not sent again: {error}");
+                    how = "refused";
+                }
+            }
+        }
+        match how {
+            "resent" => events.push(Event::new("attempt_resent", json!({"task":task_id,"attempt":n,"member":role}))),
+            "refused" => events.push(Event::new("attempt_resend_refused", json!({"task":task_id,"attempt":n,"member":role}))),
+            _ => events.push(Event::new("attempt_resend_uncertain", json!({"task":task_id,"attempt":n,"member":role}))),
+        }
+        if how == "resent" {
+            team.crash_recovered.push(json!({"task":task_id,"attempt":n,"member":role,"at":at,"how":"resent"}));
+            if team.crash_recovered.len() > 20 {
+                let excess = team.crash_recovered.len() - 20;
+                team.crash_recovered.drain(..excess);
+            }
+        }
+        Ok(())
+    })?;
+    Ok(match how {
+        "resent" => Some(json!({"task":task_id,"attempt":n,"how":"resent"})),
+        _ => None,
+    })
+}
+
+/// Task #227: one sweep over the running teams after an update (the sessions
+/// were restarted) or at a worker's start: every attempt a crash left
+/// unconfirmed goes back to its member. The lead reads the batch as one item.
+pub(crate) fn recover_crashed(store: &mut Store, seen: &[Seen], _now: f64) -> anyhow::Result<Vec<Value>> {
+    let mut done = Vec::new();
+    for team in store.active_teams(1000)? {
+        if team.status != TeamStatus::Running {
+            continue;
+        }
+        for task in team.tasks.clone() {
+            let Some(attempt) = task
+                .attempts
+                .iter()
+                .rev()
+                .find(|attempt| attempt.state == AttemptState::Unconfirmed && attempt.error.contains("the session crashed"))
+            else {
+                continue;
+            };
+            let Some(found) = team.member(&attempt.member).and_then(|member| session_of(member, seen)) else { continue };
+            if !found.live {
+                continue;
+            }
+            if let Some(result) = recover_crash(store, &team, task.id, &attempt.member, !found.free)? {
+                done.push(result);
+            }
+        }
+    }
+    Ok(done)
+}
+
+/// Task #227: the sweep a GUI install or update runs: the update restarted the
+/// sessions, so their attempts are given back now instead of waiting for the
+/// lead's retry.
+pub(crate) fn recover_after_update() -> anyhow::Result<Value> {
+    if !super::store::path().exists() {
+        return Ok(json!({"recovered":[]}));
+    }
+    let mut store = Store::open(true)?;
+    Ok(json!({"recovered": sweep_crashed(&mut store)?}))
+}
+
+/// Task #227: one sweep with a fresh session listing. Only a team with an
+/// attempt a crash left unconfirmed pays for the listing.
+fn sweep_crashed(store: &mut Store) -> anyhow::Result<Vec<Value>> {
+    let crashed = store.active_teams(1000)?.iter().any(|team| {
+        team.status == TeamStatus::Running
+            && team
+                .tasks
+                .iter()
+                .flat_map(|task| &task.attempts)
+                .any(|attempt| attempt.state == AttemptState::Unconfirmed && attempt.error.contains("the session crashed"))
+    });
+    if !crashed {
+        return Ok(Vec::new());
+    }
+    let output = hgs("", &["ls", "--json", "--no-archives"], None, LIST_TIMEOUT)?;
+    anyhow::ensure!(output.status.success(), "hgs ls failed: {}", String::from_utf8_lossy(&output.stderr).trim());
+    let listing: Value = serde_json::from_slice(&output.stdout).context("invalid hgs ls output")?;
+    let sessions = seen(&listing);
+    recover_crashed(store, &sessions, now())
+}
+
+/// Task #227: the words of a retry that continues the work: nothing was
+/// revoked, so the member goes on and reports under the attempt it has.
+fn continue_text(team: &Team, notice: &ContinueNotice) -> String {
+    let by = if notice.by.is_empty() { "Lead".to_owned() } else { notice.by.clone() };
+    format!(
+        "[Zerus team \u{b7} from: {by} \u{b7} task: #{} \u{b7} continue]\n\
+         Continue task #{} (attempt {}) from where you are: nothing was revoked and you do not have to start over. \
+         Finish it as usual, then hgs team report with attempt {} (team {}).",
+        notice.task, notice.task, notice.attempt, notice.attempt, team.name
+    )
+}
+
+/// Task #227: a retry's "continue" reaches its member at a safe point; a refused
+/// send is tried on later ticks, ten times at most.
+fn tell_continues(store: &mut Store, team: &Team) -> anyhow::Result<()> {
+    for notice in team.continues.iter().filter(|notice| notice.notice == Notice::Pending) {
+        let Some(member) = team.member(&notice.member) else { continue };
+        let Some(session) = member.session.clone() else { continue };
+        let text = continue_text(team, notice);
+        let outcome = super::doorbell::post_and_ring(store, &team.id, &notice.member, &session, &notice.id, "continue", "lead", Urgency::Normal, &text);
+        change(store, &team.id, |team, events| {
+            let Some(found) = team.continues.iter_mut().find(|found| found.id == notice.id) else { return Ok(()) };
+            match &outcome {
+                Sent::Delivered => {
+                    found.notice = Notice::Sent;
+                    events.push(Event::new("continue_sent", json!({"task":found.task,"attempt":found.attempt})));
+                }
+                Sent::Refused(_) => {
+                    found.tries += 1;
+                    if found.tries >= 10 {
+                        found.notice = Notice::Unconfirmed;
+                        events.push(Event::new("continue_undelivered", json!({"task":found.task,"attempt":found.attempt})));
+                    }
+                }
+                Sent::Uncertain(_) => {
+                    found.notice = Notice::Unconfirmed;
+                    events.push(Event::new("continue_undelivered", json!({"task":found.task,"attempt":found.attempt})));
+                }
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
 /// Whether a refused native answer can only be given in the session's
 /// Terminal: Kimi's adapters say so whenever Zerus cannot prove which
 /// request its panel shows.
@@ -8248,12 +8536,12 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::RingMessages { member } => super::doorbell::ring(store, team, member).map(drop),
         Step::RemindReviewer { task, member } => remind_reviewer(store, team, *task, member),
         Step::RemindReport { task } => remind_report(store, team, *task),
-        Step::Unassigned { member, what } => change(store, &team.id, |team, events| {
+        Step::Unassigned { member, what, task } => change(store, &team.id, |team, events| {
             let at = now();
             let Some(found) = team.members.iter_mut().find(|found| found.id == *member) else { return Ok(()) };
             if found.unassigned.is_none() {
-                found.unassigned = Some(Unassigned { since: at, what: what.clone() });
-                events.push(Event::new("unassigned_work", json!({"member":member,"what":what})));
+                found.unassigned = Some(Unassigned { since: at, what: what.clone(), task: *task });
+                events.push(Event::new("unassigned_work", json!({"member":member,"what":what,"task":task})));
             }
             Ok(())
         }),
@@ -8264,6 +8552,10 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             }
             Ok(())
         }),
+        Step::RecoverCrash { task, member, busy } => {
+            recover_crash(store, team, *task, member, *busy).map(drop)
+        }
+        Step::Continues => tell_continues(store, team),
         Step::Starving { member } => change(store, &team.id, |team, _| {
             if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
                 if found.starved_since.is_none() {
@@ -9762,6 +10054,11 @@ pub(crate) fn worker() -> Result<i32> {
     if let Err(error) = recover(&mut store) {
         files.log(&format!("recover failed: {error}"));
     }
+    // Task #227: at a worker's start (an update restarted the sessions), one
+    // sweep gives the attempts a crash left unconfirmed back to their members.
+    if let Err(error) = sweep_crashed(&mut store) {
+        files.log(&format!("recovery sweep failed: {error}"));
+    }
     let mut last_work = Instant::now();
     let mut last_reason = String::new();
     // Task 128: the lore writer runs beside the ticks, never inside one.
@@ -9880,6 +10177,10 @@ mod dispatcher_stages;
 #[cfg(test)]
 #[path = "tests/dispatcher_restart.rs"]
 mod dispatcher_restart;
+
+#[cfg(test)]
+#[path = "tests/dispatcher_crash.rs"]
+mod dispatcher_crash;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_host_start.rs"]

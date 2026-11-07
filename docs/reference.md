@@ -1712,6 +1712,19 @@ original readable record. Archive retention or export is a separate policy. Expl
 edits of archived work restore only that phase, subject to the live 500-task
 limit and an 8 MiB phase-history read cap, and retain the original history.
 
+The Qt workspace and Profile offer **Archived phases**. This reads phase headers
+and task summaries in replaceable pages of 50 through the archive status reads
+above, including phases outside the live window. Each summary shows the title,
+final outcome, recorded work time and closure time. Double-clicking a task reads
+its full report through the per-task status read. CLI I/O and JSON decoding run
+on the process worker, with a 15-second local deadline and an 8 MiB output cap.
+Loading, refusal and retry remain visible; navigating away discards stale replies.
+The drawer retains only its selected full task, and the archive browser retains
+one phase page and one task page. A phase link seeks directly to that phase; it
+does not scan earlier history. Archived Profile scopes show recorded metadata
+instead of reconstructing timelines from compact stubs. The live Profile cache
+keeps at most six scopes, 1,000 task rows and 1,000 timelines per scope.
+
 ### Reports and interim reports
 
 A member reports with `hgs team report --json` (`task`, `attempt`, `text`): the

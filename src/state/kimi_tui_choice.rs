@@ -76,6 +76,7 @@ pub(super) fn capture(record: &Value) -> Result<String> {
 pub(super) fn identity(original: &Value) -> Result<Value> {
     let record = read_run(string(original, "name"), string(original, "run_id"))?
         .ok_or("Session run disappeared")?;
+    terminating::check_mutation(&record)?;
     if [
         "pane",
         "pid",

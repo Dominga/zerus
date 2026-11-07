@@ -37,7 +37,7 @@ pub(super) struct Store {
 pub(crate) struct Claim {
     store: Store,
     input: Input,
-    _group: File,
+    _group: crate::platform::FileLock,
     consumed: std::sync::atomic::AtomicBool,
 }
 pub(super) enum Reservation {
@@ -212,7 +212,7 @@ impl Store {
         }
         Ok(Some((input, report)))
     }
-    pub(super) fn group(&self, input: &Input) -> Result<File> {
+    pub(super) fn group(&self, input: &Input) -> Result<crate::platform::FileLock> {
         let scope = (
             &input.manifest.configuration,
             &input.manifest.capture.machine,
@@ -248,8 +248,11 @@ impl Store {
         }
         file.try_lock_exclusive()
             .map_err(|_| "The original program-stop helper is still running")?;
+        // Unlock explicitly when this acquisition ends, including early
+        // returns. An unrelated fork can retain this open file until exec.
+        let group = crate::platform::FileLock::held(file);
         self.current()?;
-        Ok(file)
+        Ok(group)
     }
     pub(super) fn reserve(self, input: Input, now: u64) -> Result<Reservation> {
         if !input.valid() {
@@ -426,6 +429,78 @@ pub(super) mod tests {
         worktree_programs::{DirectoryId, Manifest, Program},
         Target,
     };
+
+    /// Keep the exact fork inheritance window open without exec or Rust work
+    /// in the child. This guard is its only reaper; its PID stays reserved.
+    pub(in crate::state::worktree_programs) struct ForkedDescriptors(libc::pid_t);
+    impl ForkedDescriptors {
+        pub(in crate::state::worktree_programs) fn stopped() -> Self {
+            let pid = unsafe { libc::fork() };
+            assert!(pid >= 0, "{}", std::io::Error::last_os_error());
+            if pid == 0 {
+                // Only async-signal-safe calls after forking a parallel test
+                // binary. SIGSTOP cannot be caught or blocked.
+                unsafe {
+                    libc::kill(libc::getpid(), libc::SIGSTOP);
+                    libc::_exit(0);
+                }
+            }
+            let mut child = Self(pid);
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let mut status = 0;
+                let found =
+                    unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG | libc::WUNTRACED) };
+                if found == pid {
+                    if libc::WIFSTOPPED(status) {
+                        assert_eq!(libc::WSTOPSIG(status), libc::SIGSTOP);
+                        return child;
+                    }
+                    child.0 = 0; // Already reaped: never signal this PID again.
+                    panic!("inherited-descriptor child exited before the barrier");
+                }
+                if found < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    child.0 = 0; // Lost custody: do not signal a possibly reused PID.
+                    panic!("cannot observe inherited-descriptor child: {error}");
+                }
+                assert!(
+                    std::time::Instant::now() < until,
+                    "fork barrier did not settle"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        pub(in crate::state::worktree_programs) fn still_stopped(&mut self) {
+            let mut status = 0;
+            let found = unsafe { libc::waitpid(self.0, &mut status, libc::WNOHANG) };
+            if found != 0 {
+                self.0 = 0;
+                panic!("inherited-descriptor child did not remain live: {found}");
+            }
+        }
+    }
+    impl Drop for ForkedDescriptors {
+        fn drop(&mut self) {
+            if self.0 == 0 {
+                return;
+            }
+            unsafe {
+                libc::kill(self.0, libc::SIGKILL);
+            }
+            loop {
+                let found = unsafe { libc::waitpid(self.0, std::ptr::null_mut(), 0) };
+                if found >= 0
+                    || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+                {
+                    break;
+                }
+            }
+        }
+    }
     pub(in crate::state::worktree_programs) fn input() -> Input {
         let id = "11111111-1111-4111-8111-111111111111";
         let capture = Capture {
@@ -539,6 +614,25 @@ pub(super) mod tests {
         let mut rebound = input.clone();
         rebound.archive_id = "77777777-7777-4777-8777-777777777777".into();
         assert!(store(state.path()).reserve(rebound, 1100).is_err());
+    }
+    #[test]
+    fn a_forked_descriptor_does_not_keep_a_dropped_claim_locked_or_allow_replay() {
+        let state = private();
+        let input = input();
+        let claim = fresh(store(state.path()), input.clone());
+        let mut child = ForkedDescriptors::stopped();
+        assert!(store(state.path()).reserve(input.clone(), 1100).is_err());
+        drop(claim);
+        let Reservation::Existing(report) =
+            store(state.path()).reserve(input.clone(), 1100).unwrap()
+        else {
+            panic!("a dropped original must not reconstruct a claim");
+        };
+        assert_eq!(report.state, State::Unknown);
+        child.still_stopped();
+        let mut other = input;
+        other.request_id = "66666666-6666-4666-8666-666666666666".into();
+        assert!(store(state.path()).reserve(other, 1100).is_err());
     }
     #[test]
     fn exact_terminal_result_is_immutable_and_the_full_original_payload_is_checked() {

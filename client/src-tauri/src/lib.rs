@@ -155,6 +155,8 @@ mod wsl_mapping;
 // Task 102: Qt's presets and raised notices, read once at the first start.
 mod qt_first_start;
 mod model_servers;
+// G1: the Windows session host that stays for other computers.
+mod resident_host;
 #[cfg(any(windows, test))]
 mod windows_shell;
 #[cfg(feature = "live")]
@@ -1686,6 +1688,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         desk::desk_take_pending,
         window_layer::window_layer_state,
         settings::hgs_version,
+        settings::hgs_setting,
         settings::open_repository,
         speech_settings::speech_input,
         files::files_usage,
@@ -1896,6 +1899,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         screens::machines_view,
         screens::machine_resolve,
         screens::machine_check,
+        screens::machine_test_host,
         screens::machine_change,
         screens::machine_ssh,
         screens::machine_setup::machine_setup,

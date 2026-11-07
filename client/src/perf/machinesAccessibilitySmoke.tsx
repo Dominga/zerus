@@ -15,7 +15,7 @@ const check = (value: unknown, message: string) => { if (!value) failures.push(m
 const frame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 const report = (value: unknown) => (window as unknown as { webkit: { messageHandlers: { result: { postMessage(text: string): void } } } }).webkit.messageHandlers.result.postMessage(JSON.stringify(value));
 const view: MachinesView = { ...emptyMachines(), loaded: true, local: "fixture-local", connection_revision: "synthetic-revision", machines: [
-  { alias: "fixture-peer", enabled: true, source: "local", inherited: false, hostname: "peer.example.invalid", user: "fixture", port: null, identity_file: "", origin: "Synthetic machine" },
+  { alias: "fixture-peer", enabled: true, source: "local", inherited: false, transport: "ssh", wsl: null, test_runner: "", hostname: "peer.example.invalid", user: "fixture", port: null, identity_file: "", origin: "Synthetic machine" },
 ] };
 Object.assign(window, { __TAURI_INTERNALS__: { invoke: async (command: string, args: { alias?: string } = {}) => {
   calls.push(command);

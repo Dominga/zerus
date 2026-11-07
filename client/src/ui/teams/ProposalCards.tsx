@@ -1,9 +1,11 @@
-import { For, Show, createEffect, createSignal, onCleanup } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js";
 import { tr } from "../../i18n";
 import { teamAction, teamRead } from "../../bridge";
 import { teamConfirm } from "../../store/teamConfirm";
-import { teams } from "../../store/teams";
+import { showTeam, teams } from "../../store/teams";
+import { selected, subagentOpen } from "../../store/ui";
 import { ProposalCards, proposalKindLabel, type CardState, type DecisionPort } from "./decisions";
+import { ledTeamOf, leadsTeam } from "./leadTeam";
 import type { ComputerId, TeamView } from "../../types";
 
 // The lead's proposals as cards (Qt TeamProposalCards, task 11): the kind in
@@ -118,7 +120,48 @@ export function ProposalCardList(props: { cards: ProposalCards; tick: () => numb
 export function TeamProposals(props: { computer: ComputerId; team: TeamView }) {
   const { model, tick } = useModel((changed) => new ProposalCards(windowPort, { computer: props.computer, teamName: () => props.team.name },
     () => teams.team(props.computer, props.team.id) ?? props.team, changed));
+  // The first team paints with the render (SSR and the first client frame); the
+  // effect takes every later read.
+  model.setTeam(props.team);
   createEffect(() => model.setTeam(props.team));
   onCleanup(() => model.setTeam(undefined));
   return <ProposalCardList cards={model} tick={tick} />;
+}
+
+/**
+ * The selected session's own proposals in its Activity (Qt U57
+ * mainProposalCards, SessionsWindow.cpp:7616-7626): the open cards of the team
+ * it leads, above the question card and the composer. A member's session shows
+ * none; a sub-lead shows its sub-team, which is not the team it belongs to.
+ */
+export function LeadProposals() {
+  const row = () => selected();
+  const led = createMemo(() => {
+    const now = row();
+    return now && now.state !== "archived" ? ledTeamOf(teams.list(now.computer), now) : undefined;
+  });
+  const team = createMemo(() => {
+    const now = row(), summary = led();
+    if (!now || !summary || subagentOpen()) return undefined;
+    const view = teams.team(now.computer, summary.id);
+    // The live read has the last word on who leads: a roster change keeps no cards.
+    return view && leadsTeam(view, now) ? view : undefined;
+  });
+  // A sub-team's lead session is also a member of the parent team, which the
+  // sessions page may already follow: follow the sub-team's read while its
+  // cards show. Only a different team re-subscribes, not every list poll.
+  createEffect(on(() => {
+    const now = row(), summary = led();
+    return now && summary && !subagentOpen() ? `${now.computer}\n${summary.id}` : "";
+  }, (key) => {
+    if (!key) return;
+    const at = key.indexOf("\n");
+    const hide = showTeam(key.slice(0, at), key.slice(at + 1));
+    onCleanup(hide);
+  }));
+  return (
+    <Show when={team()}>{(view) => (
+      <div class="cmp-col"><TeamProposals computer={row()!.computer} team={view()} /></div>
+    )}</Show>
+  );
 }

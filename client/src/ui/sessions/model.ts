@@ -12,23 +12,30 @@ import { withCreations } from "../../store/creations";
 import { isWorking, needsAttention } from "../../store/attention";
 import { followedFor } from "../../store/actions";
 import { flag } from "../../store/settings";
+import { compactSessionRows, hideEmptyProjects } from "./session-prefs";
 import { rosterFor } from "./subagents";
 import type { Session } from "./types";
 
 // Flattened list model. Heights match tray/src/SessionCardDelegate.h
-// sizeHint at the compact density, the only one in the web client: group
-// header 40, card 94, native child 64, collapsed row 40. Fixed heights per row
-// type let the virtualizer place rows without measuring the DOM.
+// sizeHint: group header 40, card 104 (Qt's normal density) or 94 with
+// "Compact session rows" (SettingsPage.h:232), native child 64, collapsed row
+// 40. Fixed heights per row type let the virtualizer place rows without
+// measuring the DOM.
 
-export const ROW_HEIGHT = { header: 40, card: 94, child: 64, collapsedRow: 40 } as const;
+export const NORMAL_CARD_HEIGHT = 104;
+export const COMPACT_CARD_HEIGHT = 94;
+export const ROW_HEIGHT = { header: 40, card: NORMAL_CARD_HEIGHT, child: 64, collapsedRow: 40 } as const;
+
+/** Qt's "Compact session rows": 94 px cards, else 104 (SessionCardDelegate.h:85). */
+export const cardHeight = () => (compactSessionRows() ? COMPACT_CARD_HEIGHT : NORMAL_CARD_HEIGHT);
 
 /** In the strip every row keeps its height except compact rows, which show as tiles. */
 export function rowHeight(row: Row, strip = false): number {
   if (row.type === "header") return ROW_HEIGHT.header;
   if (row.type === "child") return ROW_HEIGHT.child;
-  if (row.type === "creation") return ROW_HEIGHT.card;
+  if (row.type === "creation") return cardHeight();
   if (row.compactRow && !strip) return ROW_HEIGHT.collapsedRow;
-  return ROW_HEIGHT.card;
+  return cardHeight();
 }
 
 export function sessionMatchesSearch(s: Session, q: string): boolean {
@@ -91,6 +98,11 @@ export const listRows = createMemo<Row[]>(() => {
     grouping: grouping(), members: membersByGroup(), visible, online, projects: projectFilter(),
     expanded: (k: string) => !!expandedChildren[k], compact: (k: string) => !!compactRows[k], filter: f, hosts, query: q,
     accounts: accountFilter(), folder: folderFilter(),
+    // Qt hides empty projects always while filtering, and otherwise per the
+    // owner's "Hide projects without active sessions" (SessionsWindowRows.cpp:559).
+    filtering: f !== "all" || hosts.length > 0 || q !== "" || projectFilter().length > 0
+      || accountFilter().length > 0 || folderFilter() !== undefined,
+    hideEmpty: hideEmptyProjects(),
     includeCompleted: flag("workspace/showCompletedSubagents"),
     selected: { key: selectedKey(), subagent: subagentOpen(), conversation: selected()?.conversationId },
     roster: (s: Session) => rosterFor(s, s.key === selectedKey() ? followedFor(s.key).value : undefined),

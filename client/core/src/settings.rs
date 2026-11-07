@@ -144,6 +144,9 @@ pub const KEYS: &[Key] = &[
     key("workspace/showCompletedSubagents", Kind::Flag(false)),
     key("workspace/reduceMotion", Kind::Flag(false)),
     key("notifications/optionalQuestions", Kind::Flag(false)),
+    // Machines (SettingsPage.h:251-258): keep a Windows session host running
+    // for other computers. Off by default.
+    key("machines/residentHost", Kind::Flag(false)),
     // A remembered Terminate checkbox, never maintenance/removal consent.
     Key {
         name: "workspace/removeWorktreeAfterTermination",
@@ -358,6 +361,14 @@ pub const KEYS: &[Key] = &[
     },
     Key {
         name: "teams/planModes",
+        kind: Kind::Text("{}"),
+        seeded: false,
+    },
+    // W2 (Qt's `teams/attentionNotified`): the team-waiting notices already
+    // shown, as a JSON object of item id -> notice token, so a restart or a
+    // reopened window does not raise them again.
+    Key {
+        name: "teams/attentionNotified",
         kind: Kind::Text("{}"),
         seeded: false,
     },

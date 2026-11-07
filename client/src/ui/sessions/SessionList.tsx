@@ -18,6 +18,7 @@ import { optionalQuestionCount } from "./optional-questions";
 import { currentChildren } from "./subagents";
 import { runningCommandsEntry } from "../../store/processes";
 import { flag } from "../../store/settings";
+import { compactSessionRows, expandSessionsOnHover } from "./session-prefs";
 import { archiveCount, archiveTip } from "../../store/archive";
 import { ArchiveBar, datePanelOpen } from "./ArchiveBar";
 import { detailsFor, followedFor, notify, updating } from "../../store/actions";
@@ -600,14 +601,15 @@ export function SessionList() {
     else slide(panel, sessionsWidth(), false, () => { if (!peek() && stripMode()) setPanelVisible(false); });
   }, { defer: true }));
 
-  // Hover expand: opens after 150 ms of rest on the strip; closes once the
-  // pointer has been outside for 350 ms. Menus and an active search keep it open.
+  // Hover expand (Settings > Sessions, "Expand the collapsed session list on
+  // hover"): opens after 150 ms of rest on the strip; closes once the pointer
+  // has been outside for 350 ms. Menus and an active search keep it open.
   let enterTimer: number | undefined, leaveTimer: number | undefined;
   let hoverOpened = false;
   const keepOpen = () => !!menu() || searchFocused() || search().length > 0 || datePanelOpen();
   const onStripEnter = () => {
     clearTimeout(leaveTimer);
-    if (!stripMode() || peek()) return;
+    if (!stripMode() || peek() || !expandSessionsOnHover()) return;
     enterTimer = setTimeout(() => { if (stripMode() && !peek()) { hoverOpened = true; setPeek(true); } }, 150);
   };
   const onSectionEnter = () => clearTimeout(leaveTimer);
@@ -626,6 +628,9 @@ export function SessionList() {
   addEventListener("keydown", onKeyEsc);
   const outside = (e: PointerEvent) => { if (peek() && section && !section.contains(e.target as Node) && !(e.target as Element).closest?.(".menu")) { hoverOpened = false; setPeek(false); } };
   addEventListener("pointerdown", outside);
+  // Turning hover expansion off closes a peek it opened, keeping one the
+  // owner opened by hand.
+  createEffect(() => { if (!expandSessionsOnHover() && hoverOpened && peek()) { hoverOpened = false; setPeek(false); } });
   onCleanup(() => { removeEventListener("keydown", onKeyEsc); removeEventListener("pointerdown", outside); clearTimeout(enterTimer); clearTimeout(leaveTimer); });
 
   const onKey = (e: KeyboardEvent) => {
@@ -697,7 +702,7 @@ export function SessionList() {
         <Show when={stateFilter() === "archived"}><ArchiveBar contentSearch={!!search().trim()} /></Show>
         <Show when={search().trim()} fallback={<>
           <Show when={catalog.order.length > 0 || creationCount() > 0 || stateFilter() === "archived"} fallback={<ListPlaceholder />}>
-            <div class="sp-scroll" classList={{ organizing: !!dragItem() }} ref={list.ref} tabindex="0" onKeyDown={onKey} role="tree"
+            <div class="sp-scroll" data-density={compactSessionRows() ? "compact" : "normal"} classList={{ organizing: !!dragItem() }} ref={list.ref} tabindex="0" onKeyDown={onKey} role="tree"
               onDragOver={(e) => organizeOver(e, list)} onDrop={(e) => organizeDrop(e)} onDragLeave={(e) => { if (!(e.currentTarget as Element).contains(e.relatedTarget as Node)) setDrop(undefined); }}
               aria-label={tr("Agent sessions; Ctrl-click to select several; drag to organize, left/right to collapse or expand a group")}>
               <Show when={list.rows().length} fallback={<NoMatches />}>

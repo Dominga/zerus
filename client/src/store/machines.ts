@@ -1,7 +1,7 @@
 import { createSignal } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
-import { machineCheck, machineResolve, machinesView } from "../bridge";
-import { emptyMachines, type Batch, type ComputerId, type MachineMeta, type MachinesView } from "../types";
+import { machineCheck, machineResolve, machineTestHost, machinesView } from "../bridge";
+import { emptyMachines, type Batch, type ComputerId, type HostTest, type MachineMeta, type MachinesView } from "../types";
 import { latest } from "./latest";
 
 // Machine cards: each computer's latest catalog.meta projection
@@ -30,3 +30,15 @@ const pull = latest(setMachinesPage);
 export const loadMachines = (force = false) => pull(() => machinesView(force));
 export const resolveMachine = (alias: string) => pull(() => machineResolve(alias));
 export const testConnection = (alias: string) => pull(() => machineCheck(alias));
+
+/** "Test session host" (MachinesPage.cpp:215-219, 413-423): the answer, or why there is none. */
+export const [hostTest, setHostTest] = createSignal<{ busy: boolean; test?: HostTest; error?: string }>();
+export async function testHost(): Promise<void> {
+  if (hostTest()?.busy) return;
+  setHostTest({ busy: true });
+  try {
+    setHostTest({ busy: false, test: await machineTestHost() });
+  } catch (reason) {
+    setHostTest({ busy: false, error: String(reason instanceof Error ? reason.message : reason) });
+  }
+}

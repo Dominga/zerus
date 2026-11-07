@@ -2,7 +2,7 @@ import { withdrawnRefusal } from "./teamRefusals";
 import { desktopService } from "./store/desktopService";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type ActivityEvent, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalEvent, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type AttachmentRef, type Fetched, type TaskFileSource, type ConflictsPage, type DraftSource, type SavedDraftDetail, type SavedDraftsPage, type QuestionEdit, type QuestionReply, type ClearControl, emptyUsage, type TerminalFinished, type SessionUsageRef, type Usage } from "./types";
+import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type ActivityEvent, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalEvent, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type AttachmentRef, type Fetched, type TaskFileSource, type ConflictsPage, type DraftSource, type SavedDraftDetail, type SavedDraftsPage, type QuestionEdit, type QuestionReply, type ClearControl, emptyUsage, type TerminalFinished, type SessionUsageRef, type Usage, type HgsSettingName, type HgsSettingOutcome } from "./types";
 import type { CreatedWorktree, CreationAction, CreationAdmission, CreationCard, CreationEvent, FolderOut, LaunchAccounts, LaunchChoices, LaunchPlan, LaunchStart, MachineMeta, NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
@@ -130,7 +130,9 @@ export const teamWaitingNotify = (raised: { token: string; title: string; body: 
   inTauri() ? invoke<void>("team_waiting_notify", { raised, cleared }) : Promise.resolve();
 /** Task 41/32: asks the core to read the watched team's profile. */
 export const teamsProfile = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_profile", { computer }) : Promise.resolve(false);
-/** Task 41: the Tests mode's queue and one bounded result page through the core. */
+/** The hgs-owned settings Settings > Sessions shows (SettingsPage.h:242-250): a read or the person's write. */
+export const hgsSetting = (call: { setting: HgsSettingName; value?: boolean; request_id?: string | null }) =>
+  inTauri() ? invoke<HgsSettingOutcome>("hgs_setting", { call }) : Promise.reject(new Error("hgs settings need the desktop app."));/** Task 41: the Tests mode's queue and one bounded result page through the core. */
 export const teamTests = (computer: ComputerId, team: string, before: number | null) =>
   inTauri() ? invoke<import("./types").TeamTestsView>("team_tests", { computer, team, before }) : Promise.reject(new Error("Teams need the desktop app."));
 /** Task 92: the profile's Time view of one scope (a phase, or the plan with null), read on request through the core. */
@@ -765,6 +767,12 @@ export async function machineCheck(alias: string): Promise<MachinesView> {
   return invoke<MachinesView>("machine_check", { alias });
 }
 
+/** "Test session host" (MachinesPage.cpp:215-219): one `hgs session-host status --json` on this computer. */
+export async function machineTestHost(): Promise<import("./types").HostTest> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke<import("./types").HostTest>("machine_test_host");
+}
+
 export async function projectsView(): Promise<ProjectsView> {
   if (!inTauri()) return emptyProjects(DESKTOP_ONLY);
   return invoke<ProjectsView>("projects_view");
@@ -955,8 +963,8 @@ export const windowVisibility: PageVisibility = {
 };
 
 /** A session the menu bar or a notification opens: its computer and catalog key. */
-/** `attention`: a clicked notification's session, shown on its Activity tab (Qt's `showAttentionSession`). */
-export type OpenSession = { computer: ComputerId; key: string; attention?: boolean; preserveFilters?: boolean; expected?: { run: string; conversation: string } };
+/** `attention`: a clicked notification's session, shown on its Activity tab (Qt's `showAttentionSession`); `terminal`: a tray-menu row, attached in Terminal. */
+export type OpenSession = { computer: ComputerId; key: string; attention?: boolean; terminal?: boolean; preserveFilters?: boolean; expected?: { run: string; conversation: string } };
 /** A notice for the window. */
 export type DeskNotice = { title: string; text: string };
 export type DeskPending = { open: OpenSession | null; notices: DeskNotice[]; updates?: boolean };

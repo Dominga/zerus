@@ -105,6 +105,13 @@
   .sc-l2 { top: 24px; height: 18px; font-size: 11px; color: var(--z-list-muted); }
   .sc-l3 { top: 44px; height: 18px; font-size: 12px; }
   .sc-foot { top: 62px; height: 20px; font-size: 10px; color: var(--z-list-muted); }
+  /* Qt's normal density ("Compact session rows" off): 104 px rows, a 94 px
+     card, its line boxes two pixels lower than the compact card's
+     (SessionCardDelegate.h:85, 641-686). */
+  .sp-scroll[data-density="normal"] .sc-l1 { top: 4px; height: 22px; }
+  .sp-scroll[data-density="normal"] .sc-l2 { top: 26px; }
+  .sp-scroll[data-density="normal"] .sc-l3 { top: 48px; }
+  .sp-scroll[data-density="normal"] .sc-foot { top: 66px; }
   .sc-title { flex: 0 1 auto; font-size: 14px; font-weight: 600; line-height: 21px; }
   .sc-mute { flex: none; margin-right: 4px; color: var(--z-list-badge-muted); }
   .sc-l1 > .sbadge { margin-left: 8px; flex-shrink: .001; }

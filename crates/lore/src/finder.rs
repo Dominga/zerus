@@ -28,6 +28,8 @@ pub struct Hit {
     pub score: f64,
     /// The lists that found it: signal, phrase, words, terms, meaning.
     pub via: Vec<String>,
+    /// Task 133: its cosine with the query when the meaning list found it.
+    pub meaning: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -252,6 +254,7 @@ pub fn find(
     let visible_ids: HashSet<&str> = visible.iter().map(|(id, _)| id.as_str()).collect();
     let take = |ids: Vec<String>| -> Vec<String> { ids.into_iter().filter(|id| visible_ids.contains(id.as_str())).take(DEPTH).collect() };
     let mut lists: Vec<(&str, Vec<String>)> = Vec::new();
+    let mut cosines: HashMap<String, f64> = HashMap::new();
     lists.push(("words", take(fts(index, "words", &word_query(query), true))));
     lists.push(("terms", take(fts(index, "terms", &term_query(query), false))));
     if let Some(semantic) = semantic {
@@ -269,7 +272,9 @@ pub fn find(
                             .collect();
                         // Python sorts (score, id) pairs in reverse.
                         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then_with(|| b.1.cmp(&a.1)));
-                        lists.push(("meaning", scored.into_iter().take(DEPTH).map(|(_, id)| id).collect()));
+                        let kept: Vec<(f64, String)> = scored.into_iter().take(DEPTH).collect();
+                        cosines.extend(kept.iter().map(|(cosine, id)| (id.clone(), *cosine)));
+                        lists.push(("meaning", kept.into_iter().map(|(_, id)| id).collect()));
                     }
                     Ok(_) => notes.push("semantic search unavailable: the provider returned no vector; text only".into()),
                     Err(error) => notes.push(format!("semantic search unavailable: {error}; text only")),
@@ -298,7 +303,8 @@ pub fn find(
         .into_iter()
         .map(|(id, score, via)| {
             let title = by_id.get(id.as_str()).and_then(|record| text(record, "title")).unwrap_or_default().to_owned();
-            Hit { id, title, score: (score * 1e5).round() / 1e5, via }
+            let meaning = cosines.get(&id).map(|cosine| (cosine * 1e4).round() / 1e4);
+            Hit { id, title, score: (score * 1e5).round() / 1e5, via, meaning }
         })
         .collect();
     Ok((hits, notes))

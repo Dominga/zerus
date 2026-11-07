@@ -116,7 +116,35 @@ pub fn shape_write(outcome: &Outcome, push_line: Option<&str>) -> Value {
 }
 
 pub fn shape_find(query: &str, notes: &[String], results: &[search::Found]) -> Value {
-    json!({"query": query, "notes": notes, "results": results.iter().map(|hit| json!({"score": hit.score, "via": hit.via, "record": hit.record})).collect::<Vec<_>>()})
+    shape_find_at(query, notes, results, chrono::Utc::now().timestamp())
+}
+
+/// Task 133: every result says its tier and a confidence (additive keys).
+pub fn shape_find_at(query: &str, notes: &[String], results: &[search::Found], now: i64) -> Value {
+    json!({"query": query, "notes": notes, "results": results.iter().map(|hit| durable_result(hit, now)).collect::<Vec<_>>()})
+}
+
+pub fn durable_result(hit: &search::Found, now: i64) -> Value {
+    let confidence = search::confidence("durable", &hit.via, hit.meaning, search::record_age(&hit.record, now), search::retired(&hit.record));
+    json!({"score": hit.score, "via": hit.via, "record": hit.record, "tier": "durable", "confidence": confidence})
+}
+
+/// The text line a result's confidence reads as.
+pub fn confidence_line(confidence: &Value) -> String {
+    let mut parts = vec![format!("{} confidence", confidence["level"].as_str().unwrap_or("low")), confidence["tier"].as_str().unwrap_or_default().to_owned()];
+    if confidence["exact"] == true {
+        parts.push("exact match".into());
+    }
+    if let Some(cosine) = confidence["semantic"].as_f64() {
+        parts.push(format!("semantic {}", crate::py::float_str(cosine)));
+    }
+    if let Some(days) = confidence["age_days"].as_i64() {
+        parts.push(format!("{days} d old"));
+    }
+    if confidence["superseded"] == true {
+        parts.push("superseded".into());
+    }
+    format!("  ({})", parts.join(", "))
 }
 
 pub fn shape_check(records: usize, files: usize, errors: &[String], warnings: &[String]) -> Value {
@@ -866,8 +894,9 @@ fn cmd_find(ctx: &mut Ctx, io: &mut Io) -> Result<i32> {
         }
         return Ok(0);
     }
+    let at = ctx.env.now.unwrap_or_else(|| chrono::Utc::now().timestamp());
     if ctx.args.json {
-        io.json(&shape_find(&query, &notes, &hits));
+        io.json(&shape_find_at(&query, &notes, &hits, at));
         return Ok(0);
     }
     for note in &notes {
@@ -877,7 +906,7 @@ fn cmd_find(ctx: &mut Ctx, io: &mut Io) -> Result<i32> {
         io.say("nothing found");
         return Ok(0);
     }
-    io.say(&hits.iter().map(|hit| fmt_record(&hit.record, Some(hit.score), &hit.via)).collect::<Vec<_>>().join("\n\n"));
+    io.say(&hits.iter().map(|hit| format!("{}\n{}", fmt_record(&hit.record, Some(hit.score), &hit.via), confidence_line(&durable_result(hit, at)["confidence"]))).collect::<Vec<_>>().join("\n\n"));
     Ok(0)
 }
 

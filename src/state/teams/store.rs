@@ -290,7 +290,12 @@ impl Store {
                     kind TEXT NOT NULL,payload TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS events_team ON events(team,seq);
                 CREATE INDEX IF NOT EXISTS events_team_kind_at ON events(team,kind,at);
-                CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY,digest TEXT NOT NULL,receipt TEXT NOT NULL,at REAL NOT NULL);",
+                CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY,digest TEXT NOT NULL,receipt TEXT NOT NULL,at REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS working_pulses(id TEXT PRIMARY KEY,team TEXT NOT NULL,member TEXT NOT NULL,
+                    task INTEGER NOT NULL,done TEXT NOT NULL,next TEXT NOT NULL,blocked TEXT NOT NULL,at REAL NOT NULL,
+                    source TEXT NOT NULL,expires REAL);
+                CREATE INDEX IF NOT EXISTS working_pulses_member ON working_pulses(team,member,task,at);
+                CREATE INDEX IF NOT EXISTS working_pulses_team_at ON working_pulses(team,at);",
             )?;
         }
         if write {
@@ -324,6 +329,112 @@ impl Store {
             if migration { db.execute_batch("COMMIT")?; }
         }
         Ok(Self { db })
+    }
+
+    /// Task 133: writes a member's pulse (docs/lore.md 11.2, 11.5). One by the
+    /// same member and task within 5 minutes replaces it in place; the team
+    /// keeps at most 2,000, the oldest that are not a member's latest go.
+    pub(crate) fn put_pulse(&self, pulse: &super::pulses::Pulse) -> anyhow::Result<super::pulses::Pulse> {
+        use super::pulses::{PER_TEAM, REPLACE_WITHIN};
+        let mut pulse = pulse.clone();
+        let previous: Option<String> = self
+            .db
+            .query_row(
+                "SELECT id FROM working_pulses WHERE team=?1 AND member=?2 AND task=?3 AND at>=?4 ORDER BY at DESC LIMIT 1",
+                params![pulse.team, pulse.member, pulse.task, pulse.at - REPLACE_WITHIN],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match previous {
+            Some(id) => {
+                pulse.id = id;
+                self.db.execute(
+                    "UPDATE working_pulses SET done=?1,next=?2,blocked=?3,at=?4,source=?5 WHERE id=?6",
+                    params![pulse.done, pulse.next, pulse.blocked, pulse.at, pulse.source, pulse.id],
+                )?;
+            }
+            None => {
+                if pulse.id.is_empty() {
+                    pulse.id = format!("w-pulse-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+                }
+                self.db.execute(
+                    "INSERT INTO working_pulses(id,team,member,task,done,next,blocked,at,source,expires) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,NULL)",
+                    params![pulse.id, pulse.team, pulse.member, pulse.task, pulse.done, pulse.next, pulse.blocked, pulse.at, pulse.source],
+                )?;
+            }
+        }
+        // The bound: the oldest rows beyond 2,000 that are no member's latest.
+        self.db.execute(
+            "DELETE FROM working_pulses WHERE id IN (SELECT id FROM working_pulses AS p WHERE team=?1
+                AND at < (SELECT MAX(at) FROM working_pulses AS q WHERE q.team=p.team AND q.member=p.member AND q.task=p.task)
+                ORDER BY at LIMIT MAX(0, (SELECT COUNT(*) FROM working_pulses WHERE team=?1) - ?2))",
+            params![pulse.team, PER_TEAM],
+        )?;
+        Ok(pulse)
+    }
+
+    /// Task 133: the closed tasks' pulses expire 14 days after the close and
+    /// a finished team's after its finish (11.3); at most 500 rows a call.
+    pub(crate) fn prune_pulses(&self, team: &Team, now: f64) -> anyhow::Result<usize> {
+        use super::pulses::{closed_at, KEEP_SECONDS, PRUNE_ROWS};
+        let finished = matches!(team.status, super::model::TeamStatus::Done | super::model::TeamStatus::Stopped);
+        let mut changed = 0;
+        for task in &team.tasks {
+            let closed = if finished { Some(closed_at(task).unwrap_or(team.updated)) } else { closed_at(task) };
+            let Some(closed) = closed else { continue };
+            changed += self.db.execute(
+                "UPDATE working_pulses SET expires=?1 WHERE team=?2 AND task=?3 AND (expires IS NULL OR expires<>?1)",
+                params![closed + KEEP_SECONDS, team.id, task.id],
+            )?;
+        }
+        let removed = self.db.execute(
+            "DELETE FROM working_pulses WHERE id IN (SELECT id FROM working_pulses WHERE team=?1 AND expires IS NOT NULL AND expires<=?2 LIMIT ?3)",
+            params![team.id, now, PRUNE_ROWS],
+        )?;
+        let _ = changed; // expiries set; only removals count
+        Ok(removed)
+    }
+
+    fn pulse_rows(&self, sql: &str, args: &[&dyn rusqlite::ToSql]) -> Vec<super::pulses::Pulse> {
+        let run = || -> rusqlite::Result<Vec<super::pulses::Pulse>> {
+            let mut statement = self.db.prepare(sql)?;
+            let rows = statement.query_map(args, |row| {
+                Ok(super::pulses::Pulse {
+                    id: row.get(0)?,
+                    team: row.get(1)?,
+                    member: row.get(2)?,
+                    task: row.get(3)?,
+                    done: row.get(4)?,
+                    next: row.get(5)?,
+                    blocked: row.get(6)?,
+                    at: row.get(7)?,
+                    source: row.get(8)?,
+                })
+            })?;
+            rows.collect()
+        };
+        // A store written before task 133 has no table: no pulses yet.
+        run().unwrap_or_default()
+    }
+
+    /// Task 133: the latest pulse of each member, newest first, unexpired.
+    pub(crate) fn latest_pulses(&self, team: &str, now: f64) -> Vec<super::pulses::Pulse> {
+        self.pulse_rows(
+            "SELECT id,team,member,task,done,next,blocked,at,source FROM working_pulses AS p WHERE team=?1
+                AND (expires IS NULL OR expires>?2)
+                AND at=(SELECT MAX(at) FROM working_pulses AS q WHERE q.team=p.team AND q.member=p.member AND (q.expires IS NULL OR q.expires>?2))
+                ORDER BY at DESC LIMIT 200",
+            &[&team, &now],
+        )
+    }
+
+    /// Task 133: a team's pulses, newest first, of one member or all.
+    pub(crate) fn pulses(&self, team: &str, member: Option<&str>, now: f64, limit: i64) -> Vec<super::pulses::Pulse> {
+        self.pulse_rows(
+            "SELECT id,team,member,task,done,next,blocked,at,source FROM working_pulses WHERE team=?1
+                AND (?2='' OR member=?2) AND (expires IS NULL OR expires>?3) ORDER BY at DESC LIMIT ?4",
+            &[&team, &member.unwrap_or_default(), &now, &limit.clamp(1, 500)],
+        )
     }
 
     pub(crate) fn load(&self, id: &str) -> anyhow::Result<Option<Team>> {

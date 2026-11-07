@@ -1800,6 +1800,58 @@ fn finish_rights(store: &mut Store, team_id: &str, member_id: &str, role: &str, 
     })
 }
 
+/// Task 133: at a member's turn end, its pulse: the member's own note when it
+/// gave one during the turn, else a summary of the turn's tool events (the
+/// task, the files changed, the last tool or error line). No chat text is
+/// read; a turn with nothing concrete writes nothing.
+fn turn_pulse(store: &mut Store, team_id: &str, task_id: u32, ended: f64) {
+    let Ok(Some(team)) = store.load(team_id) else { return };
+    let Some(task) = team.task(task_id) else { return };
+    let Some(attempt) = task.attempts.last() else { return };
+    let Some(member) = team.member(&attempt.member).cloned() else { return };
+    let start = attempt.delivered_at.unwrap_or(attempt.sent_at);
+    let since = attempt.pulse_at.unwrap_or(start).max(start);
+    let at = now();
+    let noted = store
+        .pulses(team_id, Some(&member.id), at, 5)
+        .iter()
+        .any(|pulse| pulse.source == "note" && pulse.task == task_id && pulse.at > since);
+    if !noted {
+        if let Some(session) = &member.session {
+            let events: Vec<Value> = hgs(&session.host, &["inspect", &session.name, "--after", "0"], None, Duration::from_secs(15))
+                .ok()
+                .filter(|output| output.status.success())
+                .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
+                .and_then(|value| value.get("events").and_then(Value::as_array).cloned())
+                .unwrap_or_default();
+            let folder = member_folder_path(&team, &member).unwrap_or_default();
+            if let Some((done, next, blocked)) = super::pulses::auto(task, &events, since, &folder) {
+                let pulse = super::pulses::Pulse {
+                    team: team_id.to_owned(),
+                    member: member.id.clone(),
+                    task: task_id,
+                    done,
+                    next,
+                    blocked,
+                    at,
+                    source: "auto".into(),
+                    ..Default::default()
+                };
+                let _ = store.put_pulse(&pulse);
+            }
+        }
+    }
+    let _ = change(store, team_id, |team, _| {
+        if let Some(attempt) = team.task_mut(task_id).and_then(|task| task.attempts.last_mut()) {
+            attempt.pulse_at = Some(ended.max(since));
+        }
+        Ok(())
+    });
+    if let Ok(Some(team)) = store.load(team_id) {
+        let _ = store.prune_pulses(&team, at);
+    }
+}
+
 fn clear_restarted(store: &mut Store, team_id: &str, member_id: &str, role: &str) -> anyhow::Result<()> {
     change(store, team_id, |team, events| {
         let Some(found) = team.members.iter_mut().find(|found| found.id == member_id) else { return Ok(()) };
@@ -6154,7 +6206,15 @@ fn tell_lead_inbox(store: &mut Store, team: &Team) -> anyhow::Result<()> {
     if new.is_empty() && again.is_empty() {
         return Ok(());
     }
-    let outcome = send(&lead, &uuid::Uuid::new_v4().to_string(), &inbox::text_with(team, &new, &again, now()));
+    // Task 133: the digest ends with what each member is doing (its latest
+    // pulse of the last day), so the lead need not read the chats.
+    let mut text = inbox::text_with(team, &new, &again, now());
+    let recent: Vec<super::pulses::Pulse> = store.latest_pulses(&team.id, now()).into_iter().filter(|pulse| now() - pulse.at <= 86_400.0).collect();
+    let block = super::pulses::digest(team, &recent, now());
+    if !block.is_empty() {
+        text = format!("{text}\n\n{block}");
+    }
+    let outcome = send(&lead, &uuid::Uuid::new_v4().to_string(), &text);
     if matches!(outcome, Sent::Refused(_)) {
         return Ok(());
     }
@@ -7380,18 +7440,24 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::TellStop { stop } => tell_stop(store, team, stop),
         Step::InterruptStop { stop } => interrupt_stop(store, team, stop),
         Step::Rebalanced { tasks } => tell_lead_rebalanced(store, team, tasks),
-        Step::TurnEnded { task, at, reply } => change(store, &team.id, |team, _| {
-            if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
-                if attempt.state == AttemptState::Delivered && attempt.turn_ended_at.is_none() {
-                    attempt.turn_ended_at = Some(*at);
-                    attempt.turn_reply = reply.clone();
-                    // The gate is open at this tick: the timeout starts here (C2).
-                    attempt.report_ready_at = Some(now());
-                    attempt.blocked_since = None;
+        Step::TurnEnded { task, at, reply } => {
+            change(store, &team.id, |team, _| {
+                if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
+                    if attempt.state == AttemptState::Delivered && attempt.turn_ended_at.is_none() {
+                        attempt.turn_ended_at = Some(*at);
+                        attempt.turn_reply = reply.clone();
+                        // The gate is open at this tick: the timeout starts here (C2).
+                        attempt.report_ready_at = Some(now());
+                        attempt.blocked_since = None;
+                    }
                 }
-            }
+                Ok(())
+            })?;
+            // Task 133: the member's pulse for this turn; a failure to read
+            // the session's events only means no automatic pulse.
+            turn_pulse(store, &team.id, *task, *at);
             Ok(())
-        }),
+        }
         Step::RunAwaited { task, run, label } => change(store, &team.id, |team, _| {
             if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
                 if attempt.state == AttemptState::Delivered {
@@ -8698,6 +8764,9 @@ mod dispatcher_look;
 #[cfg(test)]
 #[path = "tests/dispatcher_rights.rs"]
 mod dispatcher_rights;
+#[cfg(test)]
+#[path = "tests/dispatcher_pulses.rs"]
+mod dispatcher_pulses;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_areas.rs"]

@@ -23,6 +23,7 @@ pub(crate) mod pipeline;
 pub(crate) mod plan;
 pub(crate) mod run_results;
 pub(crate) mod profile;
+pub(crate) mod pulses;
 pub(crate) mod rights;
 pub(crate) mod safe_actions;
 pub(crate) mod spans;

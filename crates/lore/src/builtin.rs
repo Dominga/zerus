@@ -72,7 +72,7 @@ impl Finder for Builtin {
         let found = hits
             .into_iter()
             .filter_map(|hit| {
-                visible.get(&hit.id).map(|record| Found { record: record.clone(), score: hit.score, via: hit.via })
+                visible.get(&hit.id).map(|record| Found { record: record.clone(), score: hit.score, via: hit.via, meaning: hit.meaning })
             })
             .collect();
         Ok((found, notes))

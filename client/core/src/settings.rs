@@ -256,6 +256,7 @@ pub const KEYS: &[Key] = &[
         },
     ),
     client("client/overviewFullWidth", Kind::Flag(false)),
+    client("client/overviewSubSessions", Kind::Flag(false)),
     client("workspace/inspectorOpen", Kind::AutoFlag),
     client(
         "workspace/inspectorTab",

@@ -4850,6 +4850,26 @@ The official web host uses a separate `hgs` profile through `--patch`; sign-in a
 secrets stay in `DSH_HOME`. The web endpoint is loopback-only; remote access uses
 SSH. `~/.npm-global/bin` is discoverable from service and SSH launches.
 
+If the adapter endpoint disappears while the recorded original host is still
+alive, Zerus refuses another launch and leaves the original running. New
+launches record the kernel boot identity along with the native PID and birth,
+so an older boot cannot identify a reused PID and birth ticks as its live host.
+A dead original or a verified reused PID permits normal startup. Fresh legacy
+PID-file evidence still protects a live or unverifiable process.
+
+Before spawning, Zerus records the exact launching process and a preparation
+boundary. An ended launcher is recoverable on the same boot only before the
+possible-spawn boundary and with unchanged PID-file evidence. Once a host might
+have started, its missing PID file or ended launcher cannot authorize another
+start. The error directs you to the existing native UI; save any running work
+before restarting the computer if a possible start remains unconfirmed. A later
+boot retires that old attempt while retaining checks for newer legacy evidence.
+Known spawn refusal restores the previous identity proof; uncertain starts do
+not roll it back. Incomplete or older starting records without a boot/launcher
+identity remain unverifiable, rather than being assigned a synthetic identity.
+A healthy resident adapter reconnects without a restart or record rewrite.
+These checks never stop a host or reload its bridge.
+
 Reviewed adoption of `0.2.1-rc.5` (2026-10-29, `zerus-r7d4`): the rc.2-only
 startup gate rejected rc.5 before starting the host. Comparison of the official
 npm packages found the launcher's code, boot/profile handling, web listener,

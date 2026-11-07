@@ -43,6 +43,9 @@ pub(crate) struct Hooks {
     pub asking: bool,
     pub background: bool,
     pub building: bool,
+    /// Task 36: the label of the build Zerus runs for the session, empty when
+    /// it is not building (or has none).
+    pub build_label: String,
     pub tool: String,
     pub last_event_at: Option<f64>,
     /// Seconds since its last progress, and the stuck bound it is held to.
@@ -196,7 +199,10 @@ pub(crate) fn due(team: &Team, member: &Member, hooks: &Hooks, now: f64) -> Opti
     let quiet = hooks.quiet >= SUSPECT_AFTER;
     let unread = hooks.asks() && member.pending.is_none() && member.terminal_question.is_none();
     let open = member.check.as_ref().is_some_and(|check| check.state != "agree");
-    let suspect = (hooks.busy() && !hooks.asks() && quiet)
+    // Task #269: a member waiting on its own Zerus build, Background work or a
+    // tool call is quiet for a reason; it is not suspect.
+    let explained = waiting(hooks).is_some();
+    let suspect = (hooks.busy() && !hooks.asks() && quiet && !explained)
         || (unread && quiet)
         || (!hooks.busy() && !hooks.asks() && !hooks.background && !hooks.building && unreported)
         || open;
@@ -205,6 +211,30 @@ pub(crate) fn due(team: &Team, member: &Member, hooks: &Hooks, now: f64) -> Opti
     }
     let every = if open { RECHECK } else { CHECK_EVERY };
     Some(member.check.as_ref().is_none_or(|check| now - check.at >= every))
+}
+
+/// Task #269: what a quiet member is waiting on, when its own work explains
+/// the quiet: a Zerus build (`hgs team run`, `hgs run`), Background work (a
+/// job, subagents, a declared budget), or a tool call in flight. The
+/// dispatcher's stuck rule already exempts the first two; the look must not
+/// call them uncertain either, and names the wait instead.
+pub(crate) fn waiting(hooks: &Hooks) -> Option<String> {
+    if hooks.building {
+        let label = hooks.build_label.trim();
+        return Some(if label.is_empty() {
+            "its own Zerus build".into()
+        } else {
+            format!("its own Zerus build ({label})")
+        });
+    }
+    if hooks.background {
+        return Some("Background work in flight (a job, subagents or a declared budget)".into());
+    }
+    let tool = hooks.tool.trim();
+    if !tool.is_empty() {
+        return Some(format!("a tool call ({tool})"));
+    }
+    None
 }
 
 /// The idle lead's message (task 95's stall, told to the lead itself): what
@@ -233,6 +263,9 @@ pub(crate) struct Compared {
     pub state: String,
     pub disagree: Vec<String>,
     pub sources: Value,
+    /// Task #269: what the member waits on (its own build, Background work or a
+    /// tool call), when that explains a quiet hook.
+    pub waiting: Option<String>,
 }
 
 /// Compares the views. `record` names a request Zerus read from the session;
@@ -241,7 +274,13 @@ pub(crate) fn compare(hooks: &Hooks, record: Option<&str>, screen: Option<(Scree
     let said = hooks.view();
     let mut disagree = Vec::new();
     let minutes = |seconds: f64| (seconds.max(0.0) / 60.0).round() as u64;
-    if said == "working" && hooks.limit > 0.0 && hooks.quiet >= hooks.limit {
+    // Task #269: the member is waiting on its own build, Background work or a
+    // tool call; a quiet hook is expected and is named, never uncertain. The
+    // build and Background work are exempt like the dispatcher's stuck rule;
+    // a tool call gets the dispatcher's longer tool bound (`limit`).
+    let hard = hooks.building || hooks.background;
+    let waiting = waiting(hooks);
+    if said == "working" && hooks.limit > 0.0 && hooks.quiet >= hooks.limit && !hard {
         disagree.push(format!(
             "activity: no session event for {} min while hooks say working (bound {} min)",
             minutes(hooks.quiet),
@@ -258,7 +297,10 @@ pub(crate) fn compare(hooks: &Hooks, record: Option<&str>, screen: Option<(Scree
         };
         let clash = match (said, kind) {
             (_, Screen::Unknown) => false,
-            ("working", Screen::Asking | Screen::Prompt | Screen::Draft) => true,
+            // While a build, job or tool runs, the agent is normally back at its
+            // prompt; the wait is not a disagreement. An asking panel stays one.
+            ("working", Screen::Prompt | Screen::Draft) => waiting.is_none(),
+            ("working", Screen::Asking) => true,
             ("asking", Screen::Prompt | Screen::Working | Screen::Draft) => true,
             ("idle", Screen::Working | Screen::Draft) => true,
             ("idle", Screen::Asking) => record.is_none(),
@@ -281,13 +323,14 @@ pub(crate) fn compare(hooks: &Hooks, record: Option<&str>, screen: Option<(Scree
     };
     let sources = json!({
         "hooks":{"view":said,"activity":hooks.activity,"phase":hooks.phase,"asking":hooks.asking,"tool":hooks.tool,
-            "last_event_at":hooks.last_event_at},
+            "building":hooks.building,"build_label":hooks.build_label,"last_event_at":hooks.last_event_at},
         "record":{"view":if record.is_some() { "asking" } else { "none" },"request":record},
         "screen":screen.map(|(kind, detail)| json!({"view":kind.name(),"detail":detail})).unwrap_or(json!({"view":"unread"})),
         "process":{"view":if hooks.live { "running" } else { "stopped" },"background":hooks.background,"building":hooks.building},
+        "waiting":waiting,
         "activity":{"minutes_quiet":minutes(hooks.quiet),"stuck_after_minutes":minutes(hooks.limit)},
     });
-    Compared { state, disagree, sources }
+    Compared { state, disagree, sources, waiting }
 }
 
 /// The member's next check record from this comparison: a disagreement
@@ -364,6 +407,7 @@ pub(crate) fn snapshot(team: &Team, member: &Member, check: &MemberCheck, now: f
         "uncertain":check.state == "uncertain","settling":check.state == "pending",
         "disagree":check.disagree,"uncertain_since":check.since,"checked_at":check.at,
         "sources":check.sources,"screen":check.screen,"task":task,
+        "waiting":check.sources.get("waiting").cloned().unwrap_or(Value::Null),
         // Task 173: never shown as idle while it works with no task handed.
         "unassigned":member.unassigned.as_ref().map(|flag| json!({"what":flag.what,"since":flag.since})),
         "pulse":{"minutes_since_event":minutes(member.seen_event_at),"stuck":member.stuck,

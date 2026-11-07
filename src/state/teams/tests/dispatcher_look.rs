@@ -135,6 +135,56 @@ fn a_disagreement_is_uncertain_only_past_the_grace_and_agreement_ends_it() {
     assert_eq!((again.state.as_str(), again.since, again.told), ("pending", Some(1300.0), false));
 }
 
+#[test]
+fn a_quiet_member_inside_its_own_build_or_tool_is_working_not_uncertain() {
+    let at = 10_000.0;
+    let t = working_qa(at - 900.0);
+    let qa = t.member("qa").unwrap();
+    // Its own Zerus build: quiet past the bound, the screen back at the prompt.
+    let building = Hooks { quiet: 1500.0, limit: 600.0, building: true, build_label: "release-candidate".into(), ..hooks("busy", "working") };
+    let compared = look::compare(&building, None, Some((Screen::Prompt, "")));
+    assert_eq!((compared.state.as_str(), compared.disagree.len()), ("working", 0), "{:?}", compared.disagree);
+    assert_eq!(compared.waiting.as_deref(), Some("its own Zerus build (release-candidate)"));
+    assert!(compared.sources["waiting"].as_str().unwrap().contains("release-candidate"));
+    assert_eq!(look::due(&t, qa, &building, at), None, "not suspect");
+    // A tool call in flight: the long bound, the prompt expected too.
+    let tool = Hooks { quiet: 3000.0, limit: 3600.0, tool: "Bash".into(), ..hooks("busy", "tool") };
+    let compared = look::compare(&tool, None, Some((Screen::Prompt, "")));
+    assert_eq!((compared.state.as_str(), compared.disagree.len()), ("working", 0), "{:?}", compared.disagree);
+    assert_eq!(compared.waiting.as_deref(), Some("a tool call (Bash)"));
+    assert_eq!(look::due(&t, qa, &tool, at), None);
+    // Background work: a job, subagents or a declared budget.
+    let background = Hooks { quiet: 3000.0, limit: 600.0, background: true, ..hooks("busy", "working") };
+    let compared = look::compare(&background, None, Some((Screen::Working, "")));
+    assert_eq!((compared.state.as_str(), compared.disagree.len()), ("working", 0));
+    assert!(compared.waiting.as_deref().unwrap().contains("Background work"));
+    // A quiet member with no such work is still uncertain.
+    let silent = Hooks { quiet: 1500.0, ..hooks("busy", "working") };
+    let compared = look::compare(&silent, None, Some((Screen::Working, "")));
+    assert_eq!((compared.state.as_str(), compared.waiting.as_deref()), ("uncertain", None));
+    assert!(compared.disagree[0].starts_with("activity: no session event"));
+}
+
+#[test]
+fn a_building_member_is_never_told_uncertain() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
+    let at = now();
+    let t = working_qa(at - 900.0);
+    stored(&mut store, &t);
+    let sent = fake(CLAUDE_WORKING);
+    let building = Hooks { quiet: 1500.0, limit: 600.0, building: true, build_label: "cargo-build".into(), ..hooks("busy", "working") };
+    for when in [at - 120.0, at] {
+        apply_check(&mut store, &t.id, "qa", &building, read_screen(t.member("qa").unwrap().session.as_ref().unwrap()).as_deref(), when).unwrap();
+    }
+    set_fake_hgs(None);
+    let after = store.load(&t.id).unwrap().unwrap();
+    let check = after.member("qa").unwrap().check.clone().unwrap();
+    assert_eq!((check.state.as_str(), check.disagree.len()), ("agree", 0), "{:?}", check.disagree);
+    assert!(sent.borrow().is_empty(), "the lead is not told: {:?}", sent.borrow());
+    assert!(!event_kinds(&store, &t.id).contains(&"member_uncertain".to_owned()));
+}
+
 /// The team with qa (Kimi) busy on #3, a hand-out delivered at `delivered`.
 fn working_qa(delivered: f64) -> Team {
     let mut t = team();

@@ -38,7 +38,6 @@ const STUBS: Record<string, string> = {
   "src/store/notices": `export const toast = () => {};`,
   "src/store/folderFilter": `export const filterFolder = () => {}; export const clearFolderFilter = () => {};`,
   "src/ui/sessions/SessionCard": `export const captionText = (c) => String(c ?? ""); export const childStatus = () => ({ caption: "" }); export const AgentBadge = (p) => "[" + p.agent + "]";`,
-  "src/ui/sessions/subagents": `export const currentChildren = () => []; export const workingChildren = () => 0;`,
   "src/store/accounts": `export const accountsPage = () => ({ hosts: [], accounts: [], overview: [] });`,
   "src/store/accountFilters": `export const openFilterAccounts = async () => {};`,
   "src/store/composer": `export const composer = { view: () => ({ context: { text: "36%" }, clear: { enabled: true } }), openClear() {} };`,
@@ -145,6 +144,32 @@ describe("the side panel (task 206)", () => {
   it("shows the Team section only for a team's session", () => {
     state({ skin: sections, team: undefined });
     expect(shown(render())).toEqual(["sec-environment", "sec-context", "sec-tasks", "sec-rules", "sec-worktrees", "sec-changes", "sec-projecttasks"]);
+  });
+
+  it("folds finished subagents into a count in both variants, open per session (task 262)", () => {
+    const children = [
+      { id: "a", name: "Reader", state: "ready", summary: "" },
+      { id: "b", name: "Writer", state: "working", summary: "" },
+      { id: "c", name: "Checker", state: "ended", summary: "" },
+    ];
+    const running = { ...session, state: "running", activity: "busy", processState: "running", subagents: children };
+    for (const skin of [sections, tabs]) {
+      state({ skin, session: running });
+      const text = plain(render());
+      expect(text).toContain("Writer");
+      expect(text).not.toContain("Reader");
+      expect(text).toContain("2 finished");
+      expect(text).toContain("show");
+      // Opened for this session: every child, running first, and the way back.
+      state({ skin, session: running, closed: [`+finished:${session.key}`] });
+      const open = plain(render());
+      expect(open.indexOf("Writer")).toBeLessThan(open.indexOf("Reader"));
+      expect(open).toContain("Checker");
+      expect(open).toContain("hide finished");
+      // Another session's fold does not open this one.
+      state({ skin, session: running, closed: ["+finished:\nrun:other"] });
+      expect(plain(render())).not.toContain("Reader");
+    }
   });
 
   it("keeps the four tabs in every other skin", () => {

@@ -2265,5 +2265,9 @@
   "This video cannot be played.": "Это видео не удаётся воспроизвести.",
   "Video message": "Видеосообщение",
   "Loading %1 from %2…": "Загрузка %1 с %2…",
-  "Media": "Медиа"
+  "Media": "Медиа",
+  "1 finished": "1 завершён",
+  "%1 finished": "Завершено: %1",
+  "show": "показать",
+  "hide finished": "скрыть завершённые"
 }

@@ -1017,6 +1017,11 @@ fn new_from_args(ctx: &Ctx, kind: &str) -> Result<Vec<Value>> {
 fn cmd_add(ctx: &mut Ctx, io: &mut Io) -> Result<i32> {
     let kind = ctx.args.positional[0].clone();
     let mut records = new_from_args(ctx, &kind)?;
+    // Task 150: a fault whose signals are only exact strings gets a warning,
+    // never a refusal.
+    for record in &records {
+        for warning in schema::warnings(record) { io.progress(&format!("warn: {warning}")); }
+    }
     if ctx.args.flag("occurrence") {
         return working_cli::add_resolved(ctx, io, records);
     }

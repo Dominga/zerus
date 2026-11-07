@@ -970,6 +970,7 @@ fn dispatch(app: &AppHandle, action: MenuAction, token: Option<String>) {
             crate::updates::open_page(&target);
         }
         MenuAction::Restart => crate::updates::open_page(&target),
+        MenuAction::Session { computer, key } => crate::desk::menu_session(&target, computer, key),
         MenuAction::Quit => crate::exit_flush::quit_with_flush(&target, 0),
         MenuAction::Refresh => {
             let state = target.state::<crate::commands::AppState>();
@@ -1579,3 +1580,4 @@ mod tests {
         );
     }
 }
+

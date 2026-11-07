@@ -12,9 +12,12 @@ python3 scripts/ci/local-linux.py --sha COMMIT \
 ```
 
 The host needs Python with PyYAML, bubblewrap with unprivileged user namespaces,
-D-Bus, tmux 3.7 or later, the Rust 1.99.1 toolchain including rustfmt/clippy, and
+D-Bus, Fish, the Rust 1.99.1 toolchain including rustfmt/clippy, and
 the native build dependencies documented in installation.md. Online mode also
-needs slirp4netns (a private executable can be selected with `--slirp`).
+needs slirp4netns (a private executable can be selected with `--slirp`). The
+CLI job builds its workflow's exact tmux in its private home. Additional private
+fixture executables, including Fish, can be supplied with `--tool-bin`; a missing
+Fish leaves the CLI job not run rather than silently skipping shell coverage.
 PostgreSQL checks use Docker, the workflow's pinned official image, a unique
 private network and an original labelled container, without published host ports.
 They never connect to a pre-existing database. Package installation on the host

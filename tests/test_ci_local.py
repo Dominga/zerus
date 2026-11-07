@@ -65,6 +65,11 @@ class WorkflowBodies(unittest.TestCase):
         self.assertNotIn("body", rows[1])
         self.assertNotIn("body", rows[2])
 
+    def test_online_runs_the_pinned_tmux_body_instead_of_the_host_version(self):
+        step = {"run": 'bash scripts/ci/install-tmux.sh "$RUNNER_TEMP/tmux"\n'}
+        self.assertIsNone(CI.infrastructure(step, online=True))
+        self.assertEqual(CI.infrastructure(step, online=False)[0], "not run")
+
 
 @unittest.skipUnless(sys.platform == "linux" and shutil.which("bwrap") and shutil.which("dbus-run-session")
                      and hasattr(os, "sched_getaffinity"), "requires unprivileged Linux namespaces")
@@ -79,7 +84,7 @@ class RealIsolation(unittest.TestCase):
         self.report = {"jobs": [], "completed": False}
         self.runner = CI.Runner(self.args, self.report)
         for folder in (self.runner.output, self.runner.cache / "cargo", self.runner.workspace,
-                       self.runner.target, self.runner.home, self.runner.tools):
+                       self.runner.target, self.runner.home, self.runner.tools, self.runner.output / "harness"):
             folder.mkdir(parents=True, exist_ok=True)
         self.runner.rustup = self.base / "rustup"
         self.runner.rustup.mkdir()

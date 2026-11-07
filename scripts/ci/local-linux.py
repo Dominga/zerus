@@ -98,7 +98,7 @@ def infrastructure(step, online=False):
     if body.startswith("rustup toolchain install") and len(body.splitlines()) == 1:
         return "local", "preinstalled pinned toolchain; no host toolchain mutation"
     if body.startswith("bash scripts/ci/install-tmux.sh"):
-        return "local", "preinstalled tmux; version retained in environment report"
+        return None if online else ("not run", "pinned CI tmux build requires online provisioning")
     if body.startswith("sudo apt-get") and len(body.splitlines()) == 1:
         return "local", "Arch tools supplied locally; no host package installation"
     if ("sudo " in body or "docker " in body or "${{" in body):
@@ -300,6 +300,11 @@ class Runner:
         self.objects = [Path(line) for line in
                         (self.pristine / ".git/objects/info/alternates").read_text().splitlines()]
         self.report["environment"] = {}
+        fixture_path = os.pathsep.join([str(path.resolve()) for path in self.args.tool_bin] + [os.environ.get("PATH", "")])
+        if not shutil.which("fish", path=fixture_path):
+            for job in self.report["jobs"]:
+                if job["id"] == "cli" and job["steps"]:
+                    job["prerequisite_error"] = "Fish is missing; provide its private bin directory with --tool-bin"
         for tool, command in {"tmux": ["tmux", "-V"], "node": ["node", "--version"],
                               "rust": [rustup, "run", RUST, "rustc", "-Vv"]}.items():
             result = subprocess.run(command, capture_output=True, text=True, timeout=15)
@@ -326,7 +331,7 @@ class Runner:
                    "--bind", str(self.target), "/mnt/build", "--bind", str(self.cache / "cargo"), str(self.cargo_home),
                    "--bind" if self.android_enabled else "--ro-bind", str(self.rustup_source), str(self.rustup),
                    "--ro-bind", str(self.tools), "/mnt/tools",
-                   "--ro-bind", str(Path(__file__).parent), "/mnt/runner",
+                   "--ro-bind", str(self.output / "harness"), "/mnt/runner",
                    "--ro-bind", str(script), "/mnt/step.sh"]
         for name in ("/bin", "/sbin", "/lib", "/lib64"):
             path = Path(name)
@@ -399,16 +404,22 @@ class Runner:
             step.update(status="not run", reason="working directory escapes checkout")
             return
         variables = dict(step["env"])
+        for key, value in variables.items():
+            if isinstance(value, str):
+                variables[key] = value.replace("${{ runner.temp }}", "/home/test/runner-temp").replace(
+                    "${{ github.workspace }}", "/mnt/workspace")
         if self.container:
             replacements = {
                 "${{ inputs.save_caches }}": "false",
                 "${{ inputs.arch_check_in_source && needs.source.outputs.commit || '' }}": "",
+                "${{ inputs.arch_check_in_source && github.sha || '' }}": "",
+                "${{ inputs.save_caches && steps.build.outcome == 'success' }}": "false",
                 "${{ github.repository == 'ufna/zerus' && github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.DEV_UPDATES_ENABLED == 'true' && github.run_number || '' }}": "",
             }
             for key, value in variables.items():
                 if str(value) in replacements:
                     variables[key] = replacements[value]
-                if value == "${{ steps.ccache.outputs.started }}":
+                if value in ("${{ steps.ccache.outputs.started }}", "${{ steps.ccache-start.outputs.started }}"):
                     lines = (self.container.metadata / "output").read_text().splitlines()
                     variables[key] = next(line.split("=", 1)[1] for line in reversed(lines) if line.startswith("started="))
         if self.postgres and variables.get("ZERUS_RELAY_TEST_DATABASE_URL") == (
@@ -514,6 +525,13 @@ def run_job(runner, args, report, job):
     for step in job["steps"]:
         if "body" not in step:
             continue
+        if job.get("prerequisite_error"):
+            step.update(status="not run", reason=job["prerequisite_error"])
+            continue
+        if job["id"] == "arch-package" and step["name"] == "Verify installed system bundle in disposable home":
+            if not any(row["name"] == "Build and check package" and row["status"] == "pass" for row in job["steps"]):
+                step.update(status="not run", reason="package build did not pass; no installed-package claim")
+                continue
         if step.get("condition") == "failure()" and not any(row["status"] == "fail" for row in job["steps"]):
             step.update(status="local", reason="failure-only collection is not applicable")
             continue

@@ -26,10 +26,11 @@ impl Builtin {
             notes.push("semantic search is off (embed.provider = \"none\"); text only".to_owned());
             return (None, notes);
         }
-        match embed::builtin_shared() {
-            Some(shared) => (Some(shared), notes),
-            None => {
-                let status = embed::status();
+        let selected = config.embedding_model();
+        match embed::Embedder::open_model(selected, embed::ModelSource::Cache).map(|embedder| std::sync::Arc::new(embedder) as embed::Shared) {
+            Ok(shared) => (Some(shared), notes),
+            Err(_error) => {
+                let status = embed::status_for(selected, &embed::model_dir(selected));
                 notes.push(format!(
                     "semantic search unavailable: {}; text only",
                     if status.reason.is_empty() { "the model is not installed".to_owned() } else { status.reason }
@@ -60,11 +61,12 @@ impl Finder for Builtin {
             all: filters.all,
             sources: filters.sources,
         };
+        let selected = config.embedding_model();
         let semantic = shared.as_ref().map(|shared| finder::Semantic {
             embedder: shared.as_ref(),
-            model: embed::MODEL,
-            doc_prefix: embed::DOCUMENT_PREFIX,
-            query_prefix: embed::QUERY_PREFIX,
+            model: selected.id(),
+            doc_prefix: selected.document_prefix(),
+            query_prefix: selected.query_prefix(),
         });
         let (hits, mut more) = finder::find(&index, query, &wanted, limit, semantic.as_ref())?;
         notes.append(&mut more);
@@ -96,10 +98,11 @@ impl Finder for Builtin {
         let mut vectors = 0;
         let mut semantic = false;
         if let Some(shared) = &shared {
-            match index.ensure_vectors(shared.as_ref(), embed::MODEL, embed::DOCUMENT_PREFIX) {
+            let selected = config.embedding_model();
+            match index.ensure_vectors(shared.as_ref(), selected.id(), selected.document_prefix()) {
                 Ok(()) => {
                     semantic = true;
-                    vectors = index.vectors(embed::MODEL).map(|vectors| vectors.len()).unwrap_or(0);
+                    vectors = index.vectors(selected.id()).map(|vectors| vectors.len()).unwrap_or(0);
                 }
                 Err(error) => notes.push(format!("semantic search unavailable: {error}; text only")),
             }

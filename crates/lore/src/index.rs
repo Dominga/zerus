@@ -245,6 +245,7 @@ fn create(db: &Connection) -> Result<(), LoreError> {
         CREATE VIRTUAL TABLE terms USING fts5(id UNINDEXED, toks,
             tokenize = "unicode61 remove_diacritics 0 tokenchars '_./:-'");
         CREATE TABLE vectors(model TEXT, hash TEXT, vec BLOB, PRIMARY KEY(model, hash));
+        CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
         PRAGMA user_version = {INDEX_VERSION};"#
     ))
     .map_err(index_error)
@@ -413,6 +414,17 @@ impl Index {
     /// Embeds every record that has no vector under `model`. The error is the
     /// provider's, for the caller to turn into a note.
     pub fn ensure_vectors(&self, embedder: &dyn Embeddings, model: &str, doc_prefix: &str) -> Result<(), LoreError> {
+        // The index records which model and dimension its vectors came from;
+        // a change (lore.toml's embed.model, or the model's dimension) makes
+        // every stored vector useless, so they are dropped and rebuilt.
+        let dimension = embedder.dimensions().to_string();
+        let stored_model: Option<String> = self.db.query_row("SELECT value FROM meta WHERE key='model'", [], |row| row.get(0)).optional().map_err(index_error)?;
+        let stored_dim: Option<String> = self.db.query_row("SELECT value FROM meta WHERE key='dimension'", [], |row| row.get(0)).optional().map_err(index_error)?;
+        if stored_model.as_deref() != Some(model) || stored_dim.as_deref() != Some(dimension.as_str()) {
+            self.db.execute("DELETE FROM vectors", []).map_err(index_error)?;
+            self.db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('model', ?1)", params![model]).map_err(index_error)?;
+            self.db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('dimension', ?1)", params![dimension]).map_err(index_error)?;
+        }
         let mut have: HashSet<String> = HashSet::new();
         {
             let mut statement = self.db.prepare("SELECT hash FROM vectors WHERE model=?1").map_err(index_error)?;

@@ -351,3 +351,23 @@ fn open_index_puts_the_index_in_the_user_cache_keyed_by_the_repository() {
     assert_eq!(index.path().parent().unwrap().file_name().unwrap().to_string_lossy(), zerus_lore::index::repo_key(repo.root()));
     assert_eq!(index.count().unwrap(), 3);
 }
+
+/// Task 177: the index records the model and dimension; a change drops every
+/// stored vector and rebuilds, so a new `embed.model` cannot read old vectors.
+#[test]
+fn a_model_or_dimension_change_rebuilds_the_vectors() {
+    use zerus_lore::embed::Fixed;
+    let repo = Repo::new();
+    let index = repo.index();
+    index.ensure_vectors(&Fixed(vec![vec![1.0; 768]; 3]), "bge-m3", "").unwrap();
+    assert_eq!(index.vectors("bge-m3").unwrap().len(), 3);
+    // The same model with a new dimension is a rebuild too.
+    index.ensure_vectors(&Fixed(vec![vec![1.0; 1024]; 3]), "bge-m3", "").unwrap();
+    let vectors = index.vectors("bge-m3").unwrap();
+    assert_eq!(vectors.len(), 3);
+    assert_eq!(vectors[0].1.len(), 1024);
+    // A different model drops the old model's vectors.
+    index.ensure_vectors(&Fixed(vec![vec![2.0; 768]; 3]), "multilingual-e5-base", "passage: ").unwrap();
+    assert!(index.vectors("bge-m3").unwrap().is_empty());
+    assert_eq!(index.vectors("multilingual-e5-base").unwrap().len(), 3);
+}

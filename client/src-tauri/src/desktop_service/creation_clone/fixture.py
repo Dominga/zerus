@@ -18,6 +18,20 @@ elif sys.argv[1:3] in [['desktop', 'frontend-request'], ['desktop', 'request']]:
     import json
     value = json.loads(line)
     request = value.get('request', value)
+    if request.get('op') == 'creation_launch_result':
+        from pathlib import Path
+        root = Path(__file__).parent
+        with (root / 'launch-lookup-calls').open('a') as log:
+            log.write(json.dumps({'args': sys.argv[1:], 'request': request}) + '\n')
+        raw = (root / 'launch-lookup.json').read_text()
+        try:
+            reply = json.loads(raw)
+            reply['request_id'] = request['query']['request_id']
+        except (ValueError, TypeError):
+            sys.stdout.write(raw)
+        else:
+            print(json.dumps(reply))
+        sys.exit(0)
     if request.get('op') == 'creation_worktree':
         # Only a sent worktree intent whose reply is lost is modelled.
         import os

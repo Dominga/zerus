@@ -1258,3 +1258,74 @@ fn task_creation_keeps_its_reserved_launch_id_and_refuses_duplicate_admission() 
     assert!(result.is_err() && effects.is_empty());
     assert_eq!(driver.writes.len(), before);
 }
+
+#[test]
+fn a_known_failed_launch_keeps_its_identity_but_allows_a_separate_edit() {
+    let mut driver = Driver::loaded();
+    let id = driver.submit(plan(&choices()));
+    driver.flush();
+    let (flight, _) = driver.call();
+    driver.answer(flight, identity("/srv/repo"));
+    driver.flush();
+    assert_eq!(driver.launches.len(), 1);
+    let original = driver.op(&id)["launch_id"].clone();
+    let effects = driver.creations.launch_failed(
+        original.as_str().unwrap(),
+        "This session already has an account.",
+    );
+    driver.take(effects);
+    driver.flush();
+    assert_eq!(driver.state(&id), "failed");
+    assert!(driver.creations.can_edit(&id));
+    assert!(!can_resume(&driver.op(&id)));
+    assert_eq!(driver.op(&id)["launch_id"], original);
+    assert_eq!(driver.op(&id)["launch_dispatched"], true);
+    let effects = driver.creations.resume(&id);
+    driver.take(effects);
+    driver.flush();
+    assert_eq!(
+        driver.launches.len(),
+        1,
+        "never dispatch the failed original twice"
+    );
+    let mut restarted = Driver::new();
+    let effects = restarted
+        .creations
+        .load(Journal::Bytes(driver.journal.clone()));
+    restarted.take(effects);
+    restarted.flush();
+    assert!(restarted.creations.can_edit(&id));
+    assert!(!can_resume(&restarted.op(&id)));
+    assert!(restarted.launches.is_empty());
+    // The restarted fixture's synthetic ID generator starts again at one;
+    // the live fixture models production's fresh UUID generator.
+    let replacement = driver.submit(plan(&choices()));
+    assert_ne!(replacement, id, "an edit creates a separate identity");
+}
+
+#[test]
+fn an_unknown_or_foreign_launch_result_cannot_enable_edit_or_replay() {
+    let mut driver = Driver::loaded();
+    let id = driver.submit(plan(&choices()));
+    driver.flush();
+    let (flight, _) = driver.call();
+    driver.answer(flight, identity("/srv/repo"));
+    driver.flush();
+    let effects = driver
+        .creations
+        .launch_finished(&id, Err("Unknown original".into()));
+    driver.take(effects);
+    driver.flush();
+    let effects = driver
+        .creations
+        .launch_failed(&self::id(900), "another original");
+    driver.take(effects);
+    driver.flush();
+    assert_eq!(driver.state(&id), "unknown");
+    assert!(!driver.creations.can_edit(&id));
+    assert!(!can_resume(&driver.op(&id)));
+    let effects = driver.creations.resume(&id);
+    driver.take(effects);
+    driver.flush();
+    assert_eq!(driver.launches.len(), 1);
+}

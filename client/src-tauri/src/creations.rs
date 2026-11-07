@@ -44,6 +44,16 @@ type ServiceLaunch = Arc<
         + Send
         + Sync,
 >;
+/// Read-only result of one original; no consent or dispatch path.
+type ServiceLaunchLookup = Arc<
+    dyn Fn(
+            &str,
+            &Value,
+            &AtomicBool,
+        ) -> Option<crate::desktop_service::creation_launch::LaunchAnswer>
+        + Send
+        + Sync,
+>;
 type JournalWriter = Arc<dyn Fn(&Path, &[u8]) -> bool + Send + Sync>;
 type LaunchSession = Arc<dyn Fn(&Value) -> Result<(), String> + Send + Sync>;
 type ReadBinding = Arc<dyn Fn(&ComputerId) -> Result<BindingListing, String> + Send + Sync>;
@@ -172,6 +182,7 @@ struct Services {
     /// Local detached launches of the closed agent set, in desktop-service
     /// mode only; every other launch keeps `launch`.
     service_launch: Option<ServiceLaunch>,
+    service_launch_lookup: Option<ServiceLaunchLookup>,
     launch: LaunchSession,
     binding: ReadBinding,
     watch: WatchBinding,
@@ -205,6 +216,11 @@ enum Done {
     Launched(String, String, bool, Result<(), String>),
     /// A fresh launch the selected service definitively does not offer.
     LaunchUnsent(String, String),
+    LaunchFailed(String, String),
+    LaunchLookup(
+        String,
+        Option<crate::desktop_service::creation_launch::LaunchAnswer>,
+    ),
     Binding(String, Result<BindingListing, String>),
 }
 
@@ -310,6 +326,7 @@ impl CreationHost {
                     fresh_creations: BTreeSet::new(),
                     fresh_worktrees: BTreeSet::new(),
                     fresh_launches: BTreeSet::new(),
+                    launch_lookup_running: false,
                     chains: BTreeMap::new(),
                     #[cfg(all(test, unix))]
                     barrier: None,
@@ -562,6 +579,8 @@ struct Worker {
     /// Submits (direct or task Start) whose first launch may be a fresh
     /// service intent, consumed once.
     fresh_launches: BTreeSet<String>,
+    /// At most one explicit original-result read, independent of dispatch.
+    launch_lookup_running: bool,
     /// One explicit Continue setup's chain per creation
     /// (zerus-5wmh.66.4.3.9); see [`Chain`].
     chains: BTreeMap<String, Chain>,
@@ -807,6 +826,9 @@ impl Worker {
                     CreationAction::Show => self.queue.show(&id),
                 };
                 self.effects(effects);
+                if matches!(action, CreationAction::Check) {
+                    self.check_launch(&id);
+                }
                 let _ = answer.send(Ok(()));
             }
             #[cfg(all(test, unix))]
@@ -839,6 +861,35 @@ impl Worker {
                 cache.cards.insert(id.clone(), card);
             }
         }
+    }
+
+    fn check_launch(&mut self, id: &str) {
+        if self.launch_lookup_running || self.shutdown.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(lookup) = self.services.service_launch_lookup.clone() else {
+            return;
+        };
+        let Some(operation) = self.queue.operation(id).cloned().filter(|o| {
+            flag(o, "launch_dispatched") && matches!(text(o, "state"), "unknown" | "recover")
+        }) else {
+            return;
+        };
+        self.launch_lookup_running = true;
+        let id = id.to_owned();
+        let shutdown = self.shutdown.clone();
+        let done = self.done.clone();
+        (self.services.spawn)(Box::new(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                lookup(&id, &operation, &shutdown)
+            }))
+            .ok()
+            .flatten();
+            let _ = done.send(Done::LaunchLookup(
+                text(&operation, "launch_id").into(),
+                result,
+            ));
+        }));
     }
 
     fn effects(&mut self, effects: Vec<Effect>) {
@@ -1073,6 +1124,7 @@ impl Worker {
                                     }),
                                 ),
                                 LaunchAnswer::Unsent(error) => Done::LaunchUnsent(launch, error),
+                                LaunchAnswer::Failed(error) => Done::LaunchFailed(launch, error),
                                 LaunchAnswer::Launched => Done::Launched(
                                     text(&operation, "host").into(),
                                     launch,
@@ -1123,6 +1175,16 @@ impl Worker {
                 }
             }
             Done::LaunchUnsent(launch, error) => self.queue.launch_unsent(&launch, &error),
+            Done::LaunchFailed(launch, error) => self.queue.launch_failed(&launch, &error),
+            Done::LaunchLookup(launch, result) => {
+                self.launch_lookup_running = false;
+                use crate::desktop_service::creation_launch::LaunchAnswer;
+                match result {
+                    Some(LaunchAnswer::Failed(error)) => self.queue.launch_failed(&launch, &error),
+                    Some(LaunchAnswer::Launched) => self.queue.launch_finished(&launch, Ok(())),
+                    _ => Vec::new(),
+                }
+            }
             Done::Binding(host, result) => {
                 if let Some(poll) = self.polls.get_mut(&host) {
                     poll.running = false;
@@ -1594,6 +1656,19 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
             },
         ) as ServiceLaunch
     });
+    let lookup_app = app.clone();
+    let service_launch_lookup = (cfg!(unix) && crate::desktop_service::mode()).then(|| {
+        Arc::new(move |id: &str, operation: &Value, shutdown: &AtomicBool| {
+            crate::desktop_service::creation_launch::lookup(
+                lookup_app
+                    .state::<crate::commands::AppState>()
+                    .desktop_service(),
+                id,
+                operation,
+                shutdown,
+            )
+        }) as ServiceLaunchLookup
+    });
     let service_clone = crate::desktop_service::mode().then(|| {
         Arc::new(
             move |id: &str, operation: &Value, fresh: bool, wait: bool, shutdown: &AtomicBool| {
@@ -1651,6 +1726,7 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
             service_clone,
             service_worktree,
             service_launch,
+            service_launch_lookup,
             binding: Arc::new(move |computer| {
                 creation::binding_listing(
                     zerus_client_core::run_limited(
@@ -1905,6 +1981,7 @@ mod tests {
                 service_clone: None,
                 service_worktree: None,
                 service_launch: None,
+                service_launch_lookup: None,
                 launch: Arc::new(move |operation| detached(&launch, &launch_invocation(operation))),
                 binding: Arc::new(move |_| {
                     binding.reads.fetch_add(1, Ordering::SeqCst);
@@ -2608,6 +2685,74 @@ mod tests {
         );
         fake.stop(host);
     }
+    #[test]
+    fn a_known_service_launch_failure_can_edit_but_never_dispatches_its_original_again() {
+        use crate::desktop_service::creation_launch::LaunchAnswer;
+        let fake = Fake::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let mut services = fake.services();
+        services.service_launch = Some(Arc::new(move |_, _, _, _| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            LaunchAnswer::Failed("This session already has an account.".into())
+        }));
+        let host = CreationHost::new(fake.dir.join("creations.json"), services);
+        let id = admitted(&host, plan());
+        state(&host, &id, "failed");
+        let original = operation(&host, &id)["launch_id"].clone();
+        assert!(host.plan(&id).is_some());
+        assert!(host.view()[0].can_edit && !host.view()[0].can_resume);
+        host.action(id.clone(), CreationAction::Resume).unwrap();
+        assert!(host.arrange_for_test(|| {}));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(operation(&host, &id)["launch_id"], original);
+        assert!(flag(&operation(&host, &id), "launch_dispatched"));
+        assert!(!launched_directly(&fake));
+        fake.stop(host);
+    }
+
+    #[test]
+    fn explicit_check_reads_only_the_original_failure_and_missing_evidence_stays_unknown() {
+        use crate::desktop_service::creation_launch::LaunchAnswer;
+        for found in [false, true] {
+            let fake = Fake::new();
+            let sends = Arc::new(AtomicUsize::new(0));
+            let sent = sends.clone();
+            let reads = Arc::new(AtomicUsize::new(0));
+            let read = reads.clone();
+            let mut services = fake.services();
+            services.service_launch = Some(Arc::new(move |_, _, _, _| {
+                sent.fetch_add(1, Ordering::SeqCst);
+                LaunchAnswer::Unconfirmed("lost reply".into())
+            }));
+            services.service_launch_lookup = Some(Arc::new(move |_, _, _| {
+                read.fetch_add(1, Ordering::SeqCst);
+                found.then(|| LaunchAnswer::Failed("The existing name was refused.".into()))
+            }));
+            let host = CreationHost::new(fake.dir.join("creations.json"), services);
+            let id = admitted(&host, plan());
+            state(&host, &id, "unknown");
+            let original = operation(&host, &id)["launch_id"].clone();
+            host.action(id.clone(), CreationAction::Check).unwrap();
+            wait("original lookup", || reads.load(Ordering::SeqCst) == 1);
+            if found {
+                state(&host, &id, "failed");
+                assert!(host.plan(&id).is_some());
+            } else {
+                assert!(host.arrange_for_test(|| {}));
+                assert_eq!(text(&operation(&host, &id), "state"), "unknown");
+                assert!(host.plan(&id).is_none());
+            }
+            host.action(id.clone(), CreationAction::Resume).unwrap();
+            assert!(host.arrange_for_test(|| {}));
+            assert_eq!(sends.load(Ordering::SeqCst), 1);
+            assert_eq!(operation(&host, &id)["launch_id"], original);
+            assert!(flag(&operation(&host, &id), "launch_dispatched"));
+            assert!(!launched_directly(&fake));
+            fake.stop(host);
+        }
+    }
+
     #[test]
     fn continue_after_a_definitely_unsent_submit_has_fresh_consent_for_the_reserved_launch() {
         use crate::desktop_service::creation_launch::{self, LaunchAnswer};

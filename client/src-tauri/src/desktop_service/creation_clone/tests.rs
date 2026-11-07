@@ -411,3 +411,107 @@ fn original_connection_and_helper_are_rechecked_before_each_clone_read() {
         assert!(!read.current());
     });
 }
+
+#[test]
+fn original_launch_lookup_accepts_only_a_matching_known_result_and_never_dispatches() {
+    if !private_case("desktop_service::creation_clone::tests::original_launch_lookup_accepts_only_a_matching_known_result_and_never_dispatches") { return }
+    tauri::async_runtime::block_on(async {
+        use crate::desktop_service::creation_launch::{lookup, LaunchAnswer};
+        use zerus_client_core::desktop::creation_launch as launch;
+        let f = fixture(json!({}));
+        let (service, _cache) = connected(&f).await;
+        let scope = Read::new(Some(service.clone())).unwrap().scope.clone();
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut operation = json!({"id":id,"creation_schema":1,"created":1,"revision":7,
+            "cmd":"codex","tag":"example","host":"","target":"/srv/repo",
+            "state":"launching","launch_dispatched":true,"launch_id":id,
+            "expected_machine":"22222222-2222-4222-8222-222222222222"});
+        let original = launch::Intent {
+            scope: scope.clone(),
+            creation_id: id.clone(),
+            launch_id: id.clone(),
+            revision: 7,
+            original: operation.to_string(),
+        }
+        .verify()
+        .unwrap();
+        let receipt = launch::Receipt {
+            binding: original.binding,
+            admission_epoch: scope.service_epoch.clone(),
+            revision: 3,
+            phase: launch::Phase::Failed,
+            drained: true,
+            code: String::new(),
+            launch: launch::Exited::new(&original.plan, 1, "This session already has an account."),
+        };
+        let query = launch::Query::for_plan(scope.clone(), id.clone(), &original.plan).unwrap();
+        let good = launch::Lookup {
+            abi: launch::ABI.into(),
+            request_id: query.request_id.clone(),
+            scope,
+            read_only: true,
+            found: true,
+            receipt: Some(receipt),
+            observation: None,
+        };
+        assert!(good.matches(&query));
+        operation["state"] = json!("unknown");
+        let read = |reply: Vec<u8>| {
+            std::fs::write(f.0.join("launch-lookup.json"), reply).unwrap();
+            let selected = service.clone();
+            let id = id.clone();
+            let operation = operation.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                lookup(Some(selected), &id, &operation, &AtomicBool::new(false))
+            })
+        };
+        let answer = read(serde_json::to_vec(&good).unwrap()).await.unwrap();
+        assert!(
+            matches!(answer,Some(LaunchAnswer::Failed(ref error)) if error.contains("already has an account"))
+        );
+        let mut unknown = good.clone();
+        let receipt = unknown.receipt.as_mut().unwrap();
+        receipt.phase = launch::Phase::Unknown;
+        receipt.launch = None;
+        assert!(read(serde_json::to_vec(&unknown).unwrap())
+            .await
+            .unwrap()
+            .is_none());
+        let mut missing = good.clone();
+        missing.receipt = None;
+        missing.found = false;
+        assert!(read(serde_json::to_vec(&missing).unwrap())
+            .await
+            .unwrap()
+            .is_none());
+        let mut wrong_plan = good.clone();
+        wrong_plan.receipt.as_mut().unwrap().binding.plan_sha256 = "b".repeat(64);
+        assert!(read(serde_json::to_vec(&wrong_plan).unwrap())
+            .await
+            .unwrap()
+            .is_none());
+        let mut undrained = good.clone();
+        undrained.receipt.as_mut().unwrap().drained = false;
+        assert!(read(serde_json::to_vec(&undrained).unwrap())
+            .await
+            .unwrap()
+            .is_none());
+        let mut changed = good;
+        changed.scope.service_epoch = uuid::Uuid::new_v4().to_string();
+        assert!(read(serde_json::to_vec(&changed).unwrap())
+            .await
+            .unwrap()
+            .is_none());
+        assert!(read(b"{".to_vec()).await.unwrap().is_none());
+        let calls = std::fs::read_to_string(f.0.join("launch-lookup-calls")).unwrap();
+        assert_eq!(calls.lines().count(), 7);
+        for call in calls
+            .lines()
+            .map(|s| serde_json::from_str::<Value>(s).unwrap())
+        {
+            assert_eq!(call["args"], json!(["desktop", "request", "--json"]));
+            assert_eq!(call["request"]["op"], "creation_launch_result");
+        }
+        service.join().await.unwrap();
+    });
+}

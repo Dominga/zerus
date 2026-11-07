@@ -2681,12 +2681,21 @@ worktree helpers offer **Stop after preparation**. Files and branches are always
 kept. Once launch dispatch is reserved, check its result; use normal confirmed
 session termination after an actual session appears.
 
-**Check result** observes the original clone/worktree request or refreshes session
-evidence. An unknown outcome never permits another creation command. After a
+**Check result** observes the original clone/worktree request, reads the original
+service launch receipt, or refreshes session evidence. An unknown outcome never
+permits another creation command. After a
 restart, unfinished cards require explicit **Continue setup**; recovered
 preparation is revalidated before startup. A definitely ended startup can retry
 only startup with a new launch identity. **Edit choices** opens a reviewed new
 request while preserving the original attempt and resources.
+
+A matching service receipt with a fully drained, unsuccessful launch-command
+exit shows **Creation failed** and its reason. Its dispatched launch identity
+is kept: **Continue setup** never repeats it. **Edit choices** opens a separate,
+reviewed creation with a new identity. Missing, unreadable, mismatched or Unknown
+receipts stay **Creation result unknown**, with **Check result** and **Hide status**.
+Failure and unknown-result notices close on the normal toast timer; their full
+details remain on the creation card.
 
 Only the exact native launch identity, computer, name and agent replace a card
 with a real session. Command success alone remains **Confirming session…**; a

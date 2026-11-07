@@ -180,6 +180,8 @@ export interface Session {
   /** The notification preferences pass Qt's validation, and their revision. */
   sharedNotifications: boolean;
   notificationRevision?: number;
+  /** The host's Keep cache warm state, when it reports one. */
+  keepWarm?: import("../../types").KeepWarmState;
 }
 
 /** A file of a message, as Qt's attachment card shows it (ActivityView.cpp:759-782). */
@@ -219,7 +221,7 @@ export interface LocalItem {
 
 export interface ActivityItem {
   id: string;
-  kind: "user" | "agent" | "tool" | "tools" | "question" | "approval" | "system" | "receipt" | "thinking" | "report" | "voice" | "cleared" | "context";
+  kind: "user" | "agent" | "tool" | "tools" | "question" | "approval" | "system" | "receipt" | "thinking" | "report" | "voice" | "cleared" | "context" | "warm";
   at: string;
   title?: string;
   body?: string;

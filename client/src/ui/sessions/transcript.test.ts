@@ -351,3 +351,30 @@ describe("inherited fork history", () => {
     expect(items.map((i) => [i.kind, !!i.inherited])).toEqual([["context", false], ["user", true], ["agent", true]]);
   });
 });
+
+describe("keep-warm ping turns", () => {
+  const PING = "[Zerus keep-warm] Reply with exactly OK and do nothing else.";
+  const row = (seq: number, type: string, detail: string, extra: Partial<ActivityEvent> = {}): ActivityEvent => ({ seq, type, at: 1_793_000_000 + seq, detail, agent_id: "", ...extra });
+
+  it("folds the ping, its reply and its Stop into one dim row", () => {
+    const items = buildTranscript([
+      row(1, "UserPromptSubmit", "Fix the tests"), row(2, "Stop", "Done."),
+      row(3, "UserPromptSubmit", PING, { origin: "keep_warm", turn_origin: "keep_warm" }),
+      // The provider's own copy of the reply carries no mark.
+      { seq: 0, type: "AgentMessage", at: 1_793_000_003.5, detail: "OK", source: "provider" },
+      row(4, "Stop", "OK", { turn_origin: "keep_warm" }),
+      row(5, "UserPromptSubmit", "Next task"), row(6, "Stop", "Done again."),
+    ]) as ActivityItem[];
+    expect(items.map((i) => [i.kind, i.title ?? i.body])).toEqual([
+      ["user", "Fix the tests"], ["agent", "Done."], ["warm", "Cache kept warm"], ["user", "Next task"], ["agent", "Done again."],
+    ]);
+    expect(items[2].lines).toEqual([PING, "OK"]);
+  });
+
+  it("a running ping and a stray tagged row stay out of the person's messages", () => {
+    const running = buildTranscript([row(1, "Stop", "Done."), row(2, "UserPromptSubmit", PING, { origin: "keep_warm", turn_origin: "keep_warm" })]) as ActivityItem[];
+    expect(running.map((i) => i.kind)).toEqual(["agent", "warm"]);
+    const stray = buildTranscript([row(1, "Stop", "OK", { turn_origin: "keep_warm" }), row(2, "UserPromptSubmit", "Hello")]) as ActivityItem[];
+    expect(stray.map((i) => i.kind)).toEqual(["user"]);
+  });
+});

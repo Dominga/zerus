@@ -33,6 +33,7 @@ pub mod fsx;
 pub mod git;
 pub mod image;
 pub mod input_queue;
+pub mod keep_warm;
 pub mod launch;
 pub mod legacy;
 pub mod linux_notify;

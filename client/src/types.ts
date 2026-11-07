@@ -12,6 +12,30 @@ export type ComputerId = string;
  * not live), `caption` the Qt status text without clock parts. Unknown values
  * are null; times are seconds since the Unix epoch.
  */
+/**
+ * A session's Keep cache warm state as its computer reports it. The listing
+ * carries the first seven fields; the Details read and a confirmed change add
+ * the rest (docs/reference.md, Keep cache warm).
+ */
+export interface KeepWarmState {
+  enabled: boolean;
+  /** Seconds since the epoch on the agent's computer; null is Always. */
+  until: number | null;
+  revision: number;
+  /** off, waiting, warming, cold, uncertain, stopped, paused or unsupported. */
+  state: string;
+  next_at: number | null;
+  reason: string;
+  /** A keep-warm ping is running now. */
+  turn_active: boolean;
+  supported?: boolean;
+  reason_code?: string;
+  ttl_seconds?: number | null;
+  ttl_source?: string;
+  interval_seconds?: number | null;
+  cache_expires_at?: number | null;
+}
+
 export interface ViewRow {
   conversation_state?: string;
   /** This device's retained pre-cutover queue, not host acknowledgement. */
@@ -38,6 +62,8 @@ export interface ViewRow {
   /** The row's notification preferences pass Qt's validation, and their revision. */
   shared_notifications?: boolean;
   notification_revision?: number | null;
+  /** The host's Keep cache warm state (`hgs keep-warm`), when it reports one. */
+  keep_warm?: KeepWarmState | null;
   /** `created`, in whole seconds (it keys a conversation-less attention mark). */
   created?: number;
   /** Exact/fallback Qt row-density hashes with this computer's configured identity. */
@@ -350,6 +376,8 @@ export interface ActivityEvent {
   tool?: string;
   agent_id?: string;
   origin?: string;
+  /** `keep_warm` for every event of a keep-warm ping turn. */
+  turn_origin?: string;
   report?: string;
   sender?: string;
   activity_key?: string;

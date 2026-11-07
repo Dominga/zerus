@@ -12,6 +12,7 @@ use zerus_client_core::{
 use zerus_desktop_ledger as ledger;
 use zerus_watch_protocol::{Body, CatalogItem, Delta, Frame, Hello, Snapshot};
 mod retention_tests;
+mod startup_tests;
 fn id() -> String {
     uuid::Uuid::new_v4().to_string()
 }

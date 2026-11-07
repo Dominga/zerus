@@ -1402,6 +1402,7 @@ mod tests {
             computer: "c".repeat(255),
             run: "r".repeat(1024),
             conversation: "v".repeat(1024),
+            startup_question: None,
         };
         let navigation = Activation::Navigation(target);
         assert!(navigation.line().len() > LINE);

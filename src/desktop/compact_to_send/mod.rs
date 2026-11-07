@@ -42,6 +42,8 @@ pub(super) const SCHEMA: i64 = 30;
 /// tables drops their triggers and indexes.
 #[cfg(test)]
 pub(super) fn remove_fixture(db: &rusqlite::Connection) {
+    db.execute_batch("DROP INDEX desktop_attention_catalog_run;")
+        .unwrap();
     db.execute_batch(
         "DROP TABLE desktop_compact_to_sends; DROP TABLE desktop_compact_to_send_budget;",
     )

@@ -538,7 +538,13 @@ fn resolve_service(
         state.rows.iter().find(|(_, row)| {
             row.state != "archived"
                 && row.run_id.as_deref() == Some(&target.run)
-                && row.conversation_id.as_deref() == Some(&target.conversation)
+                && row.conversation_id.as_deref().unwrap_or("") == target.conversation
+                && target.startup_question.as_deref().is_none_or(|question| {
+                    row.state == "running"
+                        && row.process_state != "exited"
+                        && row.notify.needs_action
+                        && row.notify.attention_id == question
+                })
         })
     }) {
         return Resolution::Open {
@@ -2039,6 +2045,7 @@ mod tests {
             computer: "peer".into(),
             run: "original-run".into(),
             conversation: "original-conversation".into(),
+            startup_question: None,
         };
         let initial = thread.round(
             0.0,
@@ -2080,6 +2087,7 @@ mod tests {
             computer: "peer".into(),
             run: "original-run".into(),
             conversation: "original-conversation".into(),
+            startup_question: None,
         };
         assert_eq!(resolve_service(&target, &desk, false), Resolution::Waiting);
         let mut original = asking("codex/renamed/current");
@@ -2115,6 +2123,45 @@ mod tests {
             resolve_service(&target, &desk, false),
             Resolution::Gone(_)
         ));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn startup_click_requires_the_same_live_run_and_question_before_session_start() {
+        let mut desk = Desk::default();
+        let target = zerus_client_core::desktop::activation::Target {
+            computer: "peer".into(),
+            run: "original-run".into(),
+            conversation: String::new(),
+            startup_question: Some("codex-trust:one".into()),
+        };
+        let mut row = asking("codex/renamed/startup");
+        row.run_id = Some(target.run.clone());
+        row.conversation_id = None;
+        row.notify.needs_action = true;
+        row.notify.attention_id = target.startup_question.clone().unwrap();
+        listed(&mut desk, "peer", vec![row.clone()]);
+        assert!(matches!(
+            resolve_service(&target, &desk, false),
+            Resolution::Open { .. }
+        ));
+        for (run, conversation, question, needs) in [
+            ("replacement", None, "codex-trust:one", true),
+            ("original-run", Some("bound"), "codex-trust:one", true),
+            ("original-run", None, "codex-trust:two", true),
+            ("original-run", None, "codex-trust:one", false),
+        ] {
+            let mut changed = row.clone();
+            changed.run_id = Some(run.into());
+            changed.conversation_id = conversation.map(String::from);
+            changed.notify.attention_id = question.into();
+            changed.notify.needs_action = needs;
+            listed(&mut desk, "peer", vec![changed]);
+            assert!(matches!(
+                resolve_service(&target, &desk, false),
+                Resolution::Gone(_)
+            ));
+        }
     }
 
     #[test]

@@ -2443,8 +2443,12 @@ operation a twin mirrors is still the selected label membership, so any later
 move by label, from any hgs or desktop, hides it. `swarm get` also reports
 `membership_by_id {ready, missing}`. It is ready when every machine of the
 catalog is this computer or a peer whose last sync listed the kind; any other
-machine fails closed. A desktop reads the ID form only when it is ready. The
-label form is still written and read everywhere else. `swarm export --kinds`
+machine fails closed. Desktops and the Rust mobile connector read the ID form
+only when it is ready. The connector keeps sessions with the same label separate
+by ID; a missing or invalid session ID never falls back to that label's project.
+With a legacy catalog, only unique labels receive label-based membership; twins
+stay unassigned rather than sharing a guessed project. The label form is still
+written for compatibility. `swarm export --kinds`
 takes the kinds its requester parses on stdin; without them it exports only
 the kinds hgs v0.47.0 parses.
 

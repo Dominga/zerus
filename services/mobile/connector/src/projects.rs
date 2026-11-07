@@ -50,7 +50,14 @@ pub fn normalize(catalog: &Value, snapshot: &Value, fallback_id: &str) -> PyResu
     let (Some(node_id), Some(swarm_id)) = (text("node_id"), text("swarm_id")) else {
         return Err(invalid("invalid native project identity"));
     };
+    // The name form remains the compatibility view until the native catalog
+    // proves that every member exchanges ID twins. Never mix the two views.
+    let by_id = catalog
+        .get("membership_by_id")
+        .and_then(|value| value.get("ready"))
+        == Some(&Value::Bool(true));
     let mut aliases: HashSet<String> = HashSet::new();
+    aliases.insert(node_id.clone());
     if let Some(host) = snapshot.get("host").and_then(Value::as_str) {
         aliases.insert(host.into());
     }
@@ -65,6 +72,7 @@ pub fn normalize(catalog: &Value, snapshot: &Value, fallback_id: &str) -> PyResu
     }
     let mut projects = Vec::new();
     let mut ids: HashSet<String> = HashSet::new();
+    let mut member_ids = HashSet::new();
     for group in groups {
         let group = match group.as_object() {
             Some(group) => group,
@@ -110,12 +118,37 @@ pub fn normalize(catalog: &Value, snapshot: &Value, fallback_id: &str) -> PyResu
                 sessions.push(json!(session));
             }
         }
-        projects.push(json!({
+        let mut projected = json!({
             "id": id, "name": name,
             "color": group.get("color").cloned().unwrap_or(json!("#64b5f6")),
             "accessible": group.get("accessible").cloned().unwrap_or(json!(true)),
             "folders": folders, "sessions": sessions, "archives": archives,
-        }));
+        });
+        if by_id {
+            let mut members = Vec::new();
+            let entries = match group.get("session_ids") {
+                Some(Value::Array(entries)) => entries.as_slice(),
+                None => &[],
+                _ => return Err(invalid("invalid native session ID memberships")),
+            };
+            for entry in entries {
+                let (machine, session_id) = entry
+                    .as_str()
+                    .and_then(|s| s.split_once('\n'))
+                    .ok_or_else(|| invalid("invalid native session ID membership"))?;
+                if !aliases.contains(machine) {
+                    continue;
+                }
+                if !crate::session_selector::canonical(session_id)
+                    || !member_ids.insert(session_id.to_owned())
+                {
+                    return Err(invalid("invalid or duplicate native session ID membership"));
+                }
+                members.push(json!(session_id));
+            }
+            projected["session_ids"] = json!(members);
+        }
+        projects.push(projected);
     }
     // `default if default in ids else None`; a list or dict is unhashable.
     let default = match organization.get("default_project") {
@@ -125,11 +158,13 @@ pub fn normalize(catalog: &Value, snapshot: &Value, fallback_id: &str) -> PyResu
         },
         None => Value::Null,
     };
-    Ok(
-        json!({"schema": 1, "source": "swarm", "available": true, "stale": false,
+    let mut result = json!({"schema": 1, "source": "swarm", "available": true, "stale": false,
               "swarm_id": swarm_id, "node_id": node_id,
-              "default_project": default, "projects": projects}),
-    )
+              "default_project": default, "projects": projects});
+    if by_id {
+        result["membership_by_id"] = json!({"ready":true});
+    }
+    Ok(result)
 }
 
 /// Each project's tasks digest from `hgs task digests --json`
@@ -176,8 +211,28 @@ pub fn apply_memberships(sessions: &mut [Value], catalog: &Value) {
         return;
     }
     let mut by_session: HashMap<String, Value> = HashMap::new();
+    let mut by_session_id: HashMap<String, Value> = HashMap::new();
     let mut by_archive: HashMap<String, Value> = HashMap::new();
+    let by_id = catalog["membership_by_id"]["ready"] == true;
+    let mut names = HashMap::<String, usize>::new();
+    for row in sessions
+        .iter()
+        .filter_map(Value::as_object)
+        .filter(|row| !is_archived(row))
+    {
+        if let Some(name) = row.get("name").and_then(Value::as_str) {
+            *names.entry(name.to_owned()).or_default() += 1;
+        }
+    }
     for project in catalog["projects"].as_array().into_iter().flatten() {
+        for id in project["session_ids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            by_session_id.insert(id.into(), project["id"].clone());
+        }
         for session in project["sessions"].as_array().into_iter().flatten() {
             if let Some(session) = session.as_str() {
                 by_session
@@ -201,11 +256,30 @@ pub fn apply_memberships(sessions: &mut [Value], catalog: &Value) {
         let Some(row) = session.as_object_mut() else {
             continue;
         };
+        row.remove("mobile_project_id");
         let group = if is_archived(row) {
             row.get("archive_id")
                 .and_then(Value::as_str)
                 .and_then(|id| by_archive.get(id))
+        } else if by_id {
+            let Some(id) = row
+                .get("session_id")
+                .and_then(Value::as_str)
+                .filter(|id| crate::session_selector::canonical(id))
+            else {
+                continue;
+            };
+            by_session_id.get(id)
         } else {
+            // A legacy catalog cannot distinguish twins, even when its name
+            // assignment happens to match one of them. Leave those unassigned.
+            if row
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| names.get(name).copied().unwrap_or_default() > 1)
+            {
+                continue;
+            }
             row.get("name")
                 .and_then(Value::as_str)
                 .and_then(|name| by_session.get(name))

@@ -993,6 +993,9 @@ export const terminationProgramForceCancel = (id: string, confirmation: string) 
 export const terminationCleanupView = () => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_view", {});
 export const terminationCleanupCheck = (id: string) => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_check", { id });
 export const terminationCleanupRemove = (revision: number, consents: import("./store/terminationCleanup").Consents) => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_remove", { revision, consents });
+export const terminationCleanupManualOffer = (id: string) => desktop<import("./store/terminationCleanup").ManualCleanupView>("termination_cleanup_manual_offer", { id });
+export const terminationCleanupManualCancel = (confirmation: string) => desktop<void>("termination_cleanup_manual_cancel", { confirmation });
+export const terminationCleanupManualConfirm = (id: string, confirmation: string, consents: import("./store/terminationCleanup").Consents) => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_manual_confirm", { id, confirmation, consents });
 export const terminationCleanupDismiss = (id: string, revision: number) => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_dismiss", { id, revision });
 export const terminationCleanupKeep = (revision: number) => desktop<import("./store/terminationCleanup").CleanupView>("termination_cleanup_keep", { revision });
 export const terminationCleanupRestore = (source: import("./store/terminationCleanup").RestoreSource) => desktop<Outcome>("termination_cleanup_restore", { source });

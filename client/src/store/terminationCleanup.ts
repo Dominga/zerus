@@ -7,7 +7,7 @@ export interface Consents { local_files: boolean; discard_changes: boolean; unch
 export interface RestoreSource { target: Target; machine: string; archive_id: string; status: "kept" | "unconfirmed"; overflow: boolean }
 export interface RetainedCapture { id: string | null; restore: RestoreSource | null; notice: string }
 export type ProgramRetirement = "expired" | "source_unavailable" | "holder_unavailable" | "offer_unavailable" | "stop_unconfirmed" | "cleanup_settled" | "cleanup_unconfirmed";
-export interface CleanupRow { id: string; folder_key?: string; can_dismiss?: boolean; sessions?: string[]; processes?: { pid: number; label: string }[]; label: string; path: string; machine: string; computer: string; branch: string; size: string; status: "removed" | "kept" | "review" | "unknown" | "ready" | "checking" | "removing" | "stopping"; reason: string; details: string; can_check: boolean; can_force?: boolean; force_revision?: number | null; program_retirement?: ProgramRetirement | null; ready: boolean; busy?: boolean; activity?: string | null; source?: Target | null; notice?: string | null; restore?: RestoreSource | null }
+export interface CleanupRow { id: string; folder_key?: string; can_dismiss?: boolean; can_remove_anyway?: boolean; sessions?: string[]; processes?: { pid: number; label: string }[]; label: string; path: string; machine: string; computer: string; branch: string; size: string; status: "removed" | "kept" | "review" | "unknown" | "ready" | "checking" | "removing" | "stopping"; reason: string; details: string; can_check: boolean; can_force?: boolean; force_revision?: number | null; program_retirement?: ProgramRetirement | null; ready: boolean; busy?: boolean; activity?: string | null; source?: Target | null; notice?: string | null; restore?: RestoreSource | null }
 export interface CleanupView { revision: number; rows: CleanupRow[]; busy: boolean; cleaning?: boolean; can_clear?: boolean; removed: number; kept: number; unknown: number; required: Consents; text: string; title: string }
 export interface Inspection {
   path: string; common_dir: string; files?: { path: string; status: string }[]; files_partial?: boolean;
@@ -61,3 +61,5 @@ export function groupCleanupRows(rows: CleanupRow[]): CleanupFolder[] {
   }));
 }
 export const dismissCleanup = (id: string) => update(bridge.terminationCleanupDismiss(id, cleanup().revision));
+
+export interface ManualCleanupView { confirmation: string; path: string; computer: string; branch: string; size: string; changes: number; untracked: number; ignored: string[]; ignored_count: number; ignored_size: string; required: Consents; ready: boolean; reason: string; sessions: string[]; processes: {pid: number; label: string}[] }

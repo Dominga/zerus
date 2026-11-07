@@ -22,6 +22,7 @@ mod program_pipeline;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::desktop_service::termination_outcome::programs::pipeline as programs;
 
+pub mod manual;
 mod presentation;
 
 const LIMIT: usize = review::CLEANUP_TARGETS;
@@ -38,6 +39,7 @@ struct Inner {
 #[derive(Default)]
 struct Model {
     offers: VecDeque<Offer>,
+    manual: Option<manual::Offer>,
     jobs: VecDeque<Job>,
     reserved: usize,
     revision: u64,
@@ -86,6 +88,12 @@ struct Job {
     programs: Option<program_pipeline::ProgramJob>,
 }
 impl Job {
+    fn has_launch_owner(&self) -> bool {
+        self.cleanup
+            .entries
+            .iter()
+            .all(|entry| entry.exit_cleanup && !entry.expected_owner_id.is_empty())
+    }
     fn clearable(&self) -> bool {
         !self.busy
             && !self.unfinished_programs()
@@ -313,6 +321,7 @@ pub struct Row {
     id: String,
     folder_key: String,
     can_dismiss: bool,
+    can_remove_anyway: bool,
     sessions: Vec<String>,
     processes: Vec<ProgramView>,
     label: String,
@@ -538,7 +547,7 @@ impl Model {
                 } else {
                     review::summary_line(&entry.row)
                 };
-                let r = if job.manual_review {
+                let r = if job.manual_review && job.has_launch_owner() {
                     job.cleanup.required()
                 } else {
                     Consents::default()
@@ -557,6 +566,7 @@ impl Model {
                     id: job.id.clone(),
                     folder_key: presentation::folder_key(entry),
                     can_dismiss: self.can_dismiss(job),
+                    can_remove_anyway: self.manual_entry(&job.id).is_ok(),
                     sessions: entry.row["sessions"]
                         .as_array()
                         .into_iter()
@@ -644,6 +654,7 @@ impl Model {
                         && !job.busy
                         && !job.has_programs()
                         && job.manual_review
+                        && job.has_launch_owner()
                         && ready(entry)
                         && zerus_client_core::creation::canonical_uuid(&entry.machine),
                     busy: job.busy,
@@ -1351,6 +1362,7 @@ pub fn termination_cleanup_remove(
         if j.dismissed
             || unknown_folders.contains(&presentation::job_key(j))
             || !j.manual_review
+            || !j.has_launch_owner()
             || j.has_programs()
         {
             continue;

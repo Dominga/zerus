@@ -46,6 +46,7 @@ def main() -> int:
     parser.add_argument("--qt-root", default=os.environ.get("QT_ROOT_DIR", r"D:/Tools/zerus-deps/Qt/6.10.3/msvc2022_64"))
     args = parser.parse_args()
     run(["cargo", "build", "--locked", "--release", "--bin", "hgs"], dry=args.dry_run)
+    run(["cargo", "build", "--locked", "--release", "--manifest-path", "crates/lore/Cargo.toml", "--target-dir", "target/lore"], dry=args.dry_run)
     run(["cargo", "build", "--locked", "--release", "--manifest-path", "services/mobile/connector/Cargo.toml"], dry=args.dry_run)
     run(["cargo", "build", "--locked", "--release", "--manifest-path", "services/mobile/relay/Cargo.toml"], dry=args.dry_run)
     conpty = Path(os.environ.get("RUNNER_TEMP", ROOT / ".zerus-team/tmp")) / "conpty"
@@ -67,7 +68,7 @@ def main() -> int:
     )
     run(["python", "client/scripts/collect-notices.py", "artifacts/windows-frontend-licenses"], dry=args.dry_run)
     run(["python", "scripts/package-windows.py", "--fork",
-         "--cli", "target/release/hgs.exe",
+         "--cli", "target/release/hgs.exe", "--lore", "target/lore/release/lore.exe",
          "--gui", "target/windows-next/release/hgs-tray.exe",
          "--connector", "services/mobile/connector/target/release/zerus-mobile-connector.exe",
          "--mobile-relay", "services/mobile/relay/target/release/zerus-relay.exe",
@@ -82,5 +83,6 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bundle tested hgs, the Tauri desktop and connector into the Windows zip.
+"""Bundle tested hgs, lore, the Tauri desktop and connector into the Windows zip.
 
 The app-local MSVC runtime and pinned ConPTY pair accompany the unchanged
 binaries. WebView2 uses the installed Evergreen runtime; Qt is never deployed.
@@ -98,6 +98,7 @@ def write_zip(stage, output, date_time):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--cli", type=Path, required=True, help="tested hgs.exe")
+    parser.add_argument("--lore", type=Path, required=True, help="tested lore.exe (task 128 subprocess)")
     parser.add_argument("--connector", type=Path, required=True, help="tested zerus-mobile-connector.exe")
     parser.add_argument("--gui", type=Path, required=True, help="tested hgs-tray.exe")
     # WhiteWh fork: a relay for this computer alone (docs/fork-updates.md).
@@ -131,6 +132,7 @@ def main():
     cli_version = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
     manifest = {"product": "Zerus", "version": version, "cli_version": cli_version, "platform": "Windows",
                 "architecture": "x86_64", "desktop": "tauri", "webview2_runtime": "evergreen", "native_agents_bundled": False, "mobile_connector_bundled": True,
+                "lore_version": re.search(r'pub const VERSION: &str = "([^"]+)"', (ROOT / "crates/lore/src/lib.rs").read_text(encoding="utf-8")).group(1),
                 "source_commit": source_commit()}
     if args.fork:
         build = args.fork_build.strip()
@@ -152,6 +154,7 @@ def main():
         else:
             pair = conpty_pair.fetch(Path(temporary) / "conpty")
         copy(args.cli, stage / "hgs.exe")
+        copy(args.lore, stage / "lore.exe")
         copy(args.gui, stage / "hgs-tray.exe")
         copy(args.connector, stage / "zerus-mobile-connector.exe")
         if args.mobile_relay:
@@ -232,3 +235,4 @@ if __name__ == "__main__":
         main()
     except ValueError as error:
         raise SystemExit(f"package-windows: {error}") from None
+

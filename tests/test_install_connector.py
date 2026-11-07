@@ -24,6 +24,7 @@ target="${target:-$CARGO_TARGET_DIR}"
 mkdir -p "$target/release"
 case "$manifest" in
     */services/mobile/connector/Cargo.toml) name=zerus-mobile-connector ;;
+    */crates/lore/Cargo.toml) name=lore ;;
     *) name=hgs ;;
 esac
 printf '#!/bin/sh\\necho "%s %s"\\n' "$name" "$(cat "$FIXTURE/revision")" > "$target/release/$name"
@@ -145,3 +146,4 @@ class InstallConnector(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -166,8 +166,9 @@ The facts the port must keep. References are to `D:/Tools/CodeLore`, HEAD
   hgs finds the binary as `HGS_LORE`, else `lore` beside the hgs executable,
   else on `PATH`. Without it a team keeps plain memory and its journal says
   so once (`lore_unavailable`). hgs passes a store's reference roots
-  (section 2.4) in `LORE_ROOTS`, the platform's path list. Shipping `lore`
-  beside hgs in the Windows zip and the installers is a separate task.
+  (section 2.4) in `LORE_ROOTS`, the platform's path list. Release packages ship
+  `lore` beside hgs in the Windows zip, the macOS app and the Linux installers;
+  model weights are fetched at runtime and are never packaged.
 - **Binaries:**
   - `lore`, a standalone CLI with the Python CLI's commands, flags, exit codes and `--json` shapes, byte-identical for the same store. Section 8 holds it to that. It is the same binary in the CodeLore repository after the move, so the owner's scripts and agents see one tool, not two.
   - `hgs lore …`, the same commands addressed by project instead of folder: `--project ID` (or the session's project), and `--team ID` for a team workspace. It also takes `@alias` (section 3.4).
@@ -743,3 +744,4 @@ The owner's points and the two reviews fix the shape; these numbers and choices 
 - Semantic (embedding) search of working entries and of history.
 - A working tier shared across projects, or a working tier on a computer that holds no store.
 - Any delivery to a working composer, by any mechanism (hard rule 3).
+

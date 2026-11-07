@@ -26,7 +26,7 @@ def main():
     parser.add_argument("--package-name", default="zerus-git")
     args = parser.parse_args()
     root = args.root.resolve()
-    required = ["usr/bin/hgs", "usr/bin/hgs-tray", "usr/bin/hgs_state.py", "usr/bin/zerus-setup",
+    required = ["usr/bin/hgs", "usr/bin/lore", "usr/bin/hgs-tray", "usr/bin/hgs_state.py", "usr/bin/zerus-setup",
                 "usr/share/applications/hgs-tray.desktop", "usr/lib/systemd/user/hgs-tray.service",
                 "usr/lib/systemd/user/hgs-swarm.service", "usr/lib/systemd/user/hgs-recovery.service",
                 f"usr/share/licenses/{args.package_name}/LICENSE",
@@ -67,7 +67,8 @@ def main():
         desktop = manifest.get("desktop_build", {})
         if desktop.get("ZerusGUI") != "tauri":
             raise SystemExit("The package build identity must identify Zerus Next")
-        expected = {"hgs": "hgs " + manifest["cli_version"], "hgs-tray": "Zerus " + desktop.get("versionName", manifest["version"]),
+        expected = {"hgs": "hgs " + manifest["cli_version"], "lore": "lore " + manifest["lore_version"],
+                    "hgs-tray": "Zerus " + desktop.get("versionName", manifest["version"]),
                     "zerus-mobile-connector": "zerus-mobile-connector " + manifest["mobile_connector_version"]}
         for name, version in expected.items():
             result = subprocess.run([str(root / "usr/bin" / name), "--version"], env=env,

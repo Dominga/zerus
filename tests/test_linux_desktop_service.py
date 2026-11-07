@@ -955,7 +955,7 @@ class CliRefreshHook(unittest.TestCase):
         fake.mkdir()
         for name, body in {
                 "cargo": 'mkdir -p "$CARGO_TARGET_DIR/release"\n'
-                         'case "$*" in *services/mobile/connector/Cargo.toml*) name=zerus-mobile-connector ;; *) name=hgs ;; esac\n'
+                         'case "$*" in *services/mobile/connector/Cargo.toml*) name=zerus-mobile-connector ;; *crates/lore/Cargo.toml*) name=lore ;; *) name=hgs ;; esac\n'
                          'printf \'#!/bin/sh\\necho %s-fixture\\n\' "$name" > "$CARGO_TARGET_DIR/release/$name"\n',
                 "systemctl": 'exit 1\n',
                 "uname": 'echo Linux\n', "id": 'echo "${FIXTURE_UID:-1000}"\n'}.items():
@@ -1001,3 +1001,4 @@ class CliRefreshHook(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

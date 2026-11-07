@@ -14,6 +14,7 @@ cask "zerus@dev" do
 
   app "Zerus.app"
   binary "#{appdir}/Zerus.app/Contents/MacOS/hgs"
+  binary "#{appdir}/Zerus.app/Contents/MacOS/lore"
   binary "#{appdir}/Zerus.app/Contents/Resources/bin/zerus-setup"
 
   caveats <<~EOS

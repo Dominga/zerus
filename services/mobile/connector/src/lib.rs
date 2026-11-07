@@ -5,7 +5,6 @@
 //! Rust connector deliberately differs from the Python one.
 
 pub mod accounts;
-#[cfg(any(windows, test))]
 mod admission;
 pub mod archives;
 pub mod capabilities;

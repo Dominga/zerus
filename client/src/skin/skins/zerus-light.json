@@ -107,6 +107,8 @@
       "frame-muted": "#637080",
       "tile-surface": "#ffffff",
       "tile-border": "#dfe5eb",
+      "agent-tile": "#ffffff",
+      "agent-tile-border": "#d3dae1",
       "tone-working": "#12834e",
       "tone-background": "#466b99",
       "tone-error": "#a32238",

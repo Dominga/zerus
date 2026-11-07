@@ -2343,6 +2343,12 @@ pub(crate) struct Team {
     /// one-line reason; the owner's approval chooses one of the two.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_mode_offer: Option<PlanMode>,
+    /// Task 127 (docs/lore.md 4.2): the memory mode the lead asked for on a
+    /// `switch-memory-mode` card, and why; cleared when the owner decides.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub memory_mode_offer: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub memory_mode_reason: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub plan_mode_reason: String,
     /// U59: tasks accepted since the last build of the free phase, so the header

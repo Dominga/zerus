@@ -8377,12 +8377,33 @@ the owner's (`by: "human"`; an agent session is refused) and carry a canonical
 receipt, and a stale revision is refused. Settings and receipts live in
 `HGS_STATE_DIR/project-memory.json`, per computer, like project iron rules.
 
-A team's memory is the owner's setting `settings.memory`: `mode` `plain` (as
-before) or `lore`. When a team is created (Create team for a draft, or at once
-for a team created without a draft) and its `project_id` has memory on, it
-gets `{"mode":"lore","source":"project"}` with the project's `store` and a
-shared `workspace` in it, whatever mode was chosen. Otherwise New team offers
-the mode, RustCodeLore by default: `lore` gives the team its own store under
-`HGS_STATE_DIR/lore/teams/<team8>` (`source` `team`). A team without
-`memory` keeps plain memory. A lead's settings that leave `memory` out keep the
-owner's choice; only the owner changes it.
+A team's memory is the owner's setting `settings.memory` (task 127,
+docs/lore.md 4.1): `mode` is one of `plain`, `off`, `team`, `project` and
+`read-only` (task 126's `lore` still reads as the default RustCodeLore mode).
+New team, in Zerus Next and the Qt GUI, offers what the project allows: with
+the project's memory on all five, `project` preselected; with it off `team`,
+`plain` and `off`, `team` preselected. `project` and `read-only` without the
+project's memory are refused by name. Nothing is created when New team opens
+or a draft is saved; Create team (or a team created without a draft) makes the
+store:
+- `project`, and `team` while the project's memory is on: a shared
+  `workspace` `<store>/teams/<team8>` in the project's store, committed into
+  its repository (`source` `project`);
+- `team` without it: the team's own private store under
+  `HGS_STATE_DIR/lore/teams/<team8>` (`source` `team`);
+- `read-only`: the project's `store`, and the workspace when one exists;
+- `plain` and `off`: no store.
+A team created without `memory` keeps task 126's rule: a workspace when the
+project's memory is on, else plain memory. A lead's settings that leave
+`memory` out keep the owner's choice; only the owner changes it.
+
+`hgs team switch-memory-mode --json` (`{team, mode, reason, request_id}`) is
+the owner's switch of a team's mode (docs/lore.md 4.2). It applies in one
+team update: a switch to `team` or `project` creates or attaches the
+workspace; a switch away from them keeps the workspace on disk and named, so
+switching back attaches the same records. It writes one `memory_mode_changed`
+event. A finished team keeps its memory. The lead proposes the same as a card
+(`{"kind":"switch-memory-mode","mode":"...","reason":"..."} | hgs team propose --json`):
+the team keeps `memory_mode_offer` and `memory_mode_reason` (both in
+`hgs team status`) until the owner allows it or denies it
+(`memory_mode_denied`, with the reason). Trying the card touches no store.

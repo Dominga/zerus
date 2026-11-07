@@ -177,8 +177,10 @@ fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
     super::super::iron_rules::validate(&json!(settings.iron_rules))?;
     if let Some(memory) = &settings.memory {
         ensure!(
-            super::super::project_memory::MODES.contains(&memory.mode.as_str()),
-            "The team's memory mode is plain or lore"
+            super::super::project_memory::MODES.contains(&memory.mode.as_str()) || memory.mode == super::super::project_memory::LEGACY_LORE,
+            "The team's memory mode is one of {}, not \"{}\"",
+            super::super::project_memory::MODES.join(", "),
+            memory.mode
         );
         for path in [&memory.store, &memory.workspace] {
             ensure!(path.len() <= 4096 && !path.chars().any(char::is_control), "Invalid memory store folder");
@@ -990,6 +992,65 @@ fn rights(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>
         }
     }
     Ok(json!({"status":"changed","member":id,"rights":view,"relaunch":relaunch}))
+}
+
+/// Task 127: what a memory mode switch does, in the words the card shows
+/// (docs/lore.md 4.2): which writes stop or start, and the workspace's fate.
+fn memory_effect(from: &str, to: &str) -> String {
+    let writes = |mode: &str| matches!(mode, "team" | "project");
+    match (writes(from), writes(to)) {
+        (false, true) => format!("Zerus starts writing the team's memory to its workspace ({to}); the workspace is created or attached."),
+        (true, false) => format!("Writes to the workspace stop ({to}); the workspace is kept on disk, read only and searchable."),
+        _ => format!("The workspace stays as it is; {to} decides what the team reads."),
+    }
+}
+
+/// Task 127: the checks of a memory mode switch, with no side effect, so a
+/// card is tried and re-checked without touching any store.
+pub(crate) fn check_memory_switch(team: &Team, mode: &str) -> anyhow::Result<()> {
+    use super::super::project_memory::{project_enabled, LEGACY_LORE, MODES};
+    ensure!(
+        MODES.contains(&mode) || mode == LEGACY_LORE,
+        "The memory mode is one of {}, not \"{mode}\"",
+        MODES.join(", ")
+    );
+    ensure!(!matches!(team.status, TeamStatus::Done | TeamStatus::Stopped), "A finished team keeps its memory; its workspace stays read only");
+    ensure!(
+        project_enabled(&team.project_id) || !matches!(mode, "project" | "read-only"),
+        "The project's memory is off, so the {mode} memory mode is not available; choose team, plain or off"
+    );
+    Ok(())
+}
+
+/// Task 127 (docs/lore.md 4.2): the owner switches the team's memory mode;
+/// the lead asks for it with a `switch-memory-mode` card. It applies in this
+/// one update: a switch to team or project creates or attaches the workspace;
+/// one away from them keeps the workspace on disk. One journal event names the
+/// old and new mode and the reason.
+fn switch_memory_mode(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    let mode = text(input, "mode").trim().to_owned();
+    let reason = clean(text(input, "reason").trim(), 500, "A memory mode reason")?;
+    if !matches!(actor, Actor::Human) {
+        bail!(
+            "Only you switch the team's memory mode; the lead proposes it: {} | hgs team propose --json",
+            json!({"kind":"switch-memory-mode","mode":mode,"reason":"..."})
+        );
+    }
+    check_memory_switch(team, &mode)?;
+    let old = team.settings.memory.clone();
+    let from = old.as_ref().map(|memory| memory.mode.clone()).unwrap_or_else(|| "plain".into());
+    let chosen = super::model::TeamMemory { mode: mode.clone(), ..old.clone().unwrap_or_default() };
+    let memory = super::super::project_memory::team_memory(&team.project_id, &team.id, Some(&chosen))?;
+    let to = memory.as_ref().map(|memory| memory.mode.clone()).unwrap_or_else(|| "plain".into());
+    team.memory_mode_offer.clear();
+    team.memory_mode_reason.clear();
+    if memory == old {
+        return Ok(json!({"status":"unchanged","mode":to}));
+    }
+    team.settings.memory = memory.clone();
+    events.push(Event::new("memory_mode_changed", json!({"by":"You","from":from,"to":to,"reason":reason,
+        "workspace":memory.as_ref().map(|memory| memory.workspace.clone()).unwrap_or_default()})));
+    Ok(json!({"status":"switched","from":from,"to":to,"memory":memory}))
 }
 
 /// F1.5: the lead or owner changes a team's settings and its members in place.
@@ -5076,6 +5137,12 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
         "mode":mode,"hash":hash,"change":change});
     team.proposals.push(proposal);
     events.push(Event::new("proposed", json!({"id":id,"kind":kind,"hash":hash})));
+    // Task 127 (docs/lore.md 4.2): the team stores the lead's memory mode
+    // offer and its reason until the owner decides.
+    if kind == "switch-memory-mode" {
+        team.memory_mode_offer = change["input"]["mode"].as_str().unwrap_or_default().to_owned();
+        team.memory_mode_reason = reason.clone();
+    }
     Ok(json!({"status":"proposed","proposal":id,"hash":hash,"mode":mode,"change":change}))
 }
 
@@ -5107,6 +5174,12 @@ fn decide_proposal(team: &mut Team, input: &Value, actor: &Actor, offline: &BTre
         if kind == "switch-plan-mode" {
             // U59: the reason reaches the lead with the team's feed.
             events.push(Event::new("plan_mode_denied", json!({"by":"You","proposal":id,"reason":reason})));
+        }
+        if kind == "switch-memory-mode" {
+            // Task 127: a denial is recorded with its reason.
+            team.memory_mode_offer.clear();
+            team.memory_mode_reason.clear();
+            events.push(Event::new("memory_mode_denied", json!({"by":"You","proposal":id,"reason":reason})));
         }
         return Ok(json!({"status":"rejected","proposal":id}));
     }
@@ -5147,6 +5220,10 @@ fn trial(team: &Team, kind: &str, member: &Value, change: &Value, mode: &str) ->
     if matches!(kind, "add-member" | "remove-member" | "add-to-phase" | "cancel-tasks" | "discard-phase" | "switch-plan-mode" | "switch-setting") {
         let mut copy = team.clone();
         run_proposal(&mut copy, kind, member, change, mode, "", "", &BTreeSet::new(), &mut Vec::new())?;
+    }
+    if kind == "switch-memory-mode" {
+        // Task 127: tried by its checks alone; Allow creates the workspace.
+        return check_memory_switch(team, change["input"]["mode"].as_str().unwrap_or_default());
     }
     if OWNER_OPS.contains(&kind) {
         let mut copy = team.clone();
@@ -5366,7 +5443,7 @@ pub(crate) const SWITCHES: [&str; 1] = ["build_broker"];
 /// owner's Allow runs it as the owner's own `hgs team <op>`, once, under the
 /// proposal's request id; Reject changes nothing. A typed word stays accepted
 /// as a fallback, but no flow needs one.
-pub(crate) const OWNER_OPS: [&str; 15] = [
+pub(crate) const OWNER_OPS: [&str; 16] = [
     "relaunch",
     "scale",
     "drain",
@@ -5384,6 +5461,8 @@ pub(crate) const OWNER_OPS: [&str; 15] = [
     "full-tests",
     // Task 154: wider rights for a member, relaunched in its conversation.
     "rights",
+    // Task 127: the team's memory mode, switched by the owner (docs/lore.md 4.2).
+    "switch-memory-mode",
 ];
 
 /// Task #21: owner settings a switch card sets through the settings operation
@@ -5440,6 +5519,12 @@ fn describe_owner_op(team: &Team, op: &str, input: &Value) -> (String, Vec<Strin
     let mut lines = Vec::new();
     let title = match op {
         "relaunch" => format!("Relaunch {}", member("member")),
+        "switch-memory-mode" => {
+            let from = team.settings.memory.as_ref().map(|memory| memory.mode.clone()).unwrap_or_else(|| "plain".into());
+            let to = text(input, "mode");
+            lines.push(memory_effect(&from, to));
+            format!("Switch the team's memory from {from} to {to}")
+        }
         "rights" => {
             let profile = text(input, "permissions_profile");
             let selection = text(input, "permissions");
@@ -6001,6 +6086,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         "reject-phase" | "undo-reject-phase" | "rework-phase" => send_back(team, op, input, actor, events),
         "settings" => settings(team, input, actor, events),
         "rights" => rights(team, input, actor, events),
+        "switch-memory-mode" => switch_memory_mode(team, input, actor, events),
         "finding" => finding(team, input, actor, offline, events),
         "draft" => draft(team, input, actor, offline, events),
         "propose" => propose(team, input, actor, events),

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createRoot } from "solid-js";
 import {
   applyPolicy, branchHint, canAdd, createReason, effectivePolicy, folderPolicy, leadMember, memberId, memberOf, memberRoles, membersWithIds,
-  memoryMode, pickTemplate, startReason, templateTasks, withMemory, type LeadChoice,
+  MEMORY_LABELS, defaultMemory, memoryMode, memoryModes, pickTemplate, startReason, templateTasks, withMemory, type LeadChoice,
 } from "./newTeamForm";
 import { createNewTeam, type NewTeamPort } from "./teamsNew";
 import { followDraft } from "./newTeamFollow";
@@ -214,9 +214,18 @@ describe("New team creation rules", () => {
 
 describe("task 126: the team's memory mode", () => {
   it("is RustCodeLore unless plain was chosen, and keeps the other settings", () => {
-    expect(memoryMode({})).toBe("lore");
-    expect(memoryMode({ memory: { mode: "lore" } })).toBe("lore");
+    // Task 127: five modes; the defaults follow the project's memory.
+    expect(memoryModes(true)).toEqual(["project", "team", "read-only", "plain", "off"]);
+    expect(memoryModes(false)).toEqual(["team", "plain", "off"]);
+    expect([defaultMemory(true), defaultMemory(false)]).toEqual(["project", "team"]);
+    expect(memoryMode({})).toBe("team");
+    expect(memoryMode({}, true)).toBe("project");
+    expect(memoryMode({ memory: { mode: "lore" } })).toBe("team");
     expect(memoryMode({ memory: { mode: "plain" } })).toBe("plain");
+    expect(memoryMode({ memory: { mode: "off" } }, true)).toBe("off");
+    // A mode the project does not offer falls back to the default.
+    expect(memoryMode({ memory: { mode: "project" } }, false)).toBe("team");
+    expect(Object.keys(MEMORY_LABELS).sort()).toEqual(["off", "plain", "project", "read-only", "team"]);
     expect(withMemory({ max_members: 4, memory: { mode: "lore", store: "/old" } }, "plain")).toEqual({ max_members: 4, memory: { mode: "plain" } });
   });
 });

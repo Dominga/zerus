@@ -24,6 +24,8 @@ const MUTATIONS: &[&str] = &[
     "phase-mode",
     // Task 154: a member's launch rights.
     "rights",
+    // Task 127: the team's memory mode (docs/lore.md 4.2).
+    "switch-memory-mode",
 ];
 
 fn text<'a>(input: &'a Value, key: &str) -> &'a str {
@@ -625,6 +627,10 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
     // approval chooses one of the two.
     value["plan_mode_offer"] = json!(team.plan_mode_offer);
     value["plan_mode_reason"] = json!(team.plan_mode_reason);
+    // Task 127: the team's memory mode, its workspace and the lead's offer.
+    value["memory"] = json!(team.settings.memory);
+    value["memory_mode_offer"] = json!(team.memory_mode_offer);
+    value["memory_mode_reason"] = json!(team.memory_mode_reason);
     if let Some(n) = ops::free_phase(team) {
         let tasks: Vec<&super::model::Task> = team.tasks.iter().filter(|task| task.phase == n).collect();
         let running: Vec<u32> = tasks.iter().filter(|task| !task.status.finished()).map(|task| task.id).collect();

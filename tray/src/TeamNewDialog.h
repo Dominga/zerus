@@ -35,6 +35,12 @@ public:
     // F6: the template the list shows as chosen, applied as a click would.
     void selectTemplate(const QString &id);
     QString templateId() const { return m_templateId; }
+    // Task 127: the project's RustCodeLore is on (project and read-only are
+    // offered, project preselected) or off (team preselected).
+    void setProjectMemoryOn(bool on);
+    QString memoryMode() const;
+    QStringList memoryModesShown() const;
+    bool event(QEvent *event) override;
     // F7: take a session a finished team left running into a new team. The
     // dialog's only existing-session slot is the lead, so it is preselected
     // there; a session on another computer cannot lead from here.
@@ -90,6 +96,12 @@ private:
     // resuming typing returns it to auto.
     bool m_forcedShared = false;
     QComboBox *m_planning = nullptr;
+    // Task 127 (docs/lore.md 4.1): the team's memory mode.
+    QComboBox *m_memory = nullptr;
+    bool m_memoryChosen = false;
+    bool m_projectMemoryOn = false;
+    void showMemoryModes();
+    void readProjectMemory();
     QSpinBox *m_maxMembers = nullptr;
     QPlainTextEdit *m_goal = nullptr;
     QLabel *m_gitNote = nullptr, *m_summary = nullptr;

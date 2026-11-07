@@ -323,7 +323,7 @@ pub(crate) fn settings_override(path: Option<PathBuf>) {
 /// The settings file: the global switch and the owner's additions. It lives in
 /// Zerus state, never in a member's folder, so a sandboxed member can neither
 /// read nor write it (U21, attempt 2).
-fn read_settings() -> Value {
+pub(crate) fn read_settings() -> Value {
     std::fs::read(settings_path())
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
@@ -331,7 +331,7 @@ fn read_settings() -> Value {
         .unwrap_or_else(|| json!({"enabled":true}))
 }
 
-fn write_settings(value: &Value) -> anyhow::Result<()> {
+pub(crate) fn write_settings(value: &Value) -> anyhow::Result<()> {
     let path = settings_path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;

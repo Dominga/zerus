@@ -4114,6 +4114,20 @@ fn launch(team: &Team, member: &Member) -> anyhow::Result<()> {
     // has no per-launch rule override, and editing the config a launch reads
     // would silently change every Kimi session on this computer.
     let folder = member_folder(team, member)?;
+    // Task 159: under the owner's scratch rule (still granted), the folder is
+    // trusted for the rule's agents before the launch reads its config.
+    if !team.scratch_rule.is_empty() && member.computer.is_empty() {
+        let rules = super::owner_steps::rules();
+        if let Some(rule) = rules.iter().find(|rule| rule.id == team.scratch_rule && super::owner_steps::inside(&folder, &rule.folder)) {
+            if super::owner_steps::trusted(rule).contains(member.agent.as_str()) {
+                if let Ok(config) = crate::config::Config::load() {
+                    if let Err(error) = crate::accounts::trust_folder_for(&config, &member.agent, &member.account, &folder) {
+                        eprintln!("hgs team worker: {}: trusting {folder} for {}: {error}", team.name, member.id);
+                    }
+                }
+            }
+        }
+    }
     let args = launch_args(team, member, &folder);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let output = hgs(&member.computer, &args, None, Duration::from_secs(120))?;

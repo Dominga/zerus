@@ -23,19 +23,19 @@ Each kind sends its exact change:
   {"kind":"switch-plan-mode","mode":"free","phase":N} switches phase N
     only (free or standard); without "phase", the team's mode
   {"kind":"switch-memory-mode","mode":"team"}; swap-member, next-goal as before
+  {"kind":"scratch-rule","folder":"ABS","agents":["claude"]}: scratch teams
+    you create there start without plan approval, the folder trusted
 with "reason" and a request_id, piped to hgs team propose --json. An
 operation's fields may also go in "input":{...}.
 
-The receipt carries the proposal id and its content hash. The owner's Allow
-applies exactly that change once; a changed or stale card is refused and
-nothing is applied twice. A Deny's reason reaches you. A typed owner word
-is a fallback. A change Allow cannot apply is refused at once.
+The receipt has the proposal id and content hash; Allow applies exactly
+that change once, a changed card is refused. A Deny's reason reaches you.
+Plan owner steps early, together: "for_tasks":[N] on a card keeps those
+tasks back until it is granted; cards reach the owner as one batch when
+present.
 
 A question to the owner goes this way, never only in your reply: the
 owner's option or answer on the card reaches your inbox.
 
-The owner's own answer from a plain shell (never from an agent session):
-  {"team":"ID","proposal":"p1","accept":true,"expected_hash":"...",
-   "reason":"...","by":"human","request_id":"UUID"} |
-  hgs team decide-proposal --json
-"accept" is required; false rejects and its reason reaches you.
+The owner answers on the card (or hgs team decide-proposal --json, from a
+plain shell, with "accept" and the card's "expected_hash").

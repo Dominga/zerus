@@ -5247,12 +5247,20 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
     let operation_request = uuid::Uuid::new_v4().to_string();
     // U57: the owner's Allow is bound to this id and this content hash; a
     // changed proposal never applies.
-    let content = json!({"kind":kind,"reason":reason,"change":change,"member":member,
+    // Task 159: the tasks that need the owner's step wait for it.
+    let for_tasks = super::owner_steps::for_tasks(team, input)?;
+    let mut content = json!({"kind":kind,"reason":reason,"change":change,"member":member,
         "goal":input["goal"].clone(),"mode":mode});
+    if !for_tasks.is_empty() {
+        content["for_tasks"] = json!(for_tasks);
+    }
     let hash = format!("{:x}", Sha256::digest(content.to_string().as_bytes()));
-    let proposal = json!({"id":id,"kind":kind,"by":actor.label(team),"at":now(),"state":"open","reason":reason,
+    let mut proposal = json!({"id":id,"kind":kind,"by":actor.label(team),"at":now(),"state":"open","reason":reason,
         "member":member,"goal":input["goal"].clone(),"operation_request":operation_request,
         "mode":mode,"hash":hash,"change":change});
+    if !for_tasks.is_empty() {
+        proposal["for_tasks"] = json!(for_tasks);
+    }
     team.proposals.push(proposal);
     events.push(Event::new("proposed", json!({"id":id,"kind":kind,"hash":hash})));
     // Task 127 (docs/lore.md 4.2): the team stores the lead's memory mode
@@ -5262,6 +5270,22 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
         team.memory_mode_reason = reason.clone();
     }
     Ok(json!({"status":"proposed","proposal":id,"hash":hash,"mode":mode,"change":change}))
+}
+
+/// Task 159: the tasks a denied card held back are held for the lead with
+/// the owner's reason; nothing hands them out as if the step were granted.
+pub(crate) fn hold_for_denied(team: &mut Team, card: &str, reason: &str, events: &mut Vec<Event>) {
+    let tasks: Vec<u32> = team.proposals.iter().find(|proposal| proposal["id"] == card)
+        .map(|proposal| proposal["for_tasks"].as_array().into_iter().flatten().filter_map(Value::as_u64).map(|id| id as u32).collect())
+        .unwrap_or_default();
+    let why = if reason.trim().is_empty() { format!("you denied card {card}") } else { format!("you denied card {card}: {}", reason.trim()) };
+    for id in tasks {
+        let Some(task) = team.task_mut(id) else { continue };
+        if task.status == TaskStatus::Pending && task.hold.is_none() {
+            task.hold = Some(Hold { by: "You".into(), at: now(), reason: why.clone() });
+            events.push(Event::new("held", json!({"by":"You","task":id,"reason":why})));
+        }
+    }
 }
 
 /// F8: only the owner decides a proposal; accepting runs the change as the
@@ -5289,6 +5313,7 @@ fn decide_proposal(team: &mut Team, input: &Value, actor: &Actor, offline: &BTre
         team.proposals[at]["decided_at"] = json!(super::super::now());
         team.proposals[at]["note"] = json!(reason);
         events.push(Event::new("proposal_decided", json!({"id":id,"accept":false,"reason":reason})));
+        hold_for_denied(team, &id, &reason, events);
         if kind == "switch-plan-mode" {
             // U59: the reason reaches the lead with the team's feed.
             events.push(Event::new("plan_mode_denied", json!({"by":"You","proposal":id,"reason":reason})));
@@ -5561,7 +5586,7 @@ pub(crate) const SWITCHES: [&str; 1] = ["build_broker"];
 /// owner's Allow runs it as the owner's own `hgs team <op>`, once, under the
 /// proposal's request id; Reject changes nothing. A typed word stays accepted
 /// as a fallback, but no flow needs one.
-pub(crate) const OWNER_OPS: [&str; 16] = [
+pub(crate) const OWNER_OPS: [&str; 17] = [
     "relaunch",
     "scale",
     "drain",
@@ -5581,6 +5606,8 @@ pub(crate) const OWNER_OPS: [&str; 16] = [
     "rights",
     // Task 127: the team's memory mode, switched by the owner (docs/lore.md 4.2).
     "switch-memory-mode",
+    // Task 159: one rule for the lead's scratch teams in a named folder.
+    "scratch-rule",
 ];
 
 /// Task #21: owner settings a switch card sets through the settings operation
@@ -5589,9 +5616,11 @@ pub(crate) const OWNER_VALUE_SETTINGS: [&str; 3] = ["base_branch", "full_tests",
 
 /// The request fields a card never carries: who asks, its identity and any
 /// owner word, which the owner's Allow replaces.
-const CARD_RESERVED: [&str; 13] = [
+const CARD_RESERVED: [&str; 14] = [
     "kind", "reason", "team", "request_id", "by", "attempt", "input", "owner_word", "owner_word_checked", "owner_word_event",
     "owner_word_change", "owner_word_count", "roster_word",
+    // Task 159: the tasks that wait on the card, not the operation's input.
+    "for_tasks",
 ];
 
 /// Task #21: the change of an owner-operation card: the operation, its input
@@ -5637,6 +5666,15 @@ fn describe_owner_op(team: &Team, op: &str, input: &Value) -> (String, Vec<Strin
     let mut lines = Vec::new();
     let title = match op {
         "relaunch" => format!("Relaunch {}", member("member")),
+        "scratch-rule" => {
+            let agents: Vec<&str> = input["agents"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+            let trusted: Vec<&str> = agents.iter().copied().filter(|agent| super::owner_steps::TRUSTED_AGENTS.contains(agent)).collect();
+            lines.push("Scratch teams a lead creates there start without your per-plan approval; you can revoke the rule in Settings > Teams (hgs team scratch-rules).".into());
+            if trusted.len() < agents.len() {
+                lines.push(format!("Zerus records the folder's start-up trust for {}; the others still ask at start-up.", if trusted.is_empty() { "none of them".into() } else { trusted.join(", ") }));
+            }
+            format!("Let the lead's scratch teams in {} start at once, the folder trusted for {}", text(input, "folder"), agents.join(", "))
+        }
         "switch-memory-mode" => {
             let from = team.settings.memory.as_ref().map(|memory| memory.mode.clone()).unwrap_or_else(|| "plain".into());
             let to = text(input, "mode");
@@ -6206,6 +6244,13 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         "settings" => settings(team, input, actor, events),
         "rights" => rights(team, input, actor, events),
         "switch-memory-mode" => switch_memory_mode(team, input, actor, events),
+        // Task 159: checked and journaled here; `hgs team scratch-rule` keeps it.
+        "scratch-rule" => {
+            ensure!(matches!(actor, Actor::Human), "Only you grant the scratch-team rule: the lead proposes it, {{\"kind\":\"scratch-rule\",\"folder\":\"D:/scratch\",\"agents\":[\"claude\"],\"reason\":\"...\"}} | hgs team propose --json");
+            let rule = super::owner_steps::rule_from(input)?;
+            events.push(Event::new("scratch_rule_granted", json!({"folder":rule.folder,"agents":rule.agents})));
+            Ok(json!({"status":"granted","folder":rule.folder,"agents":rule.agents}))
+        }
         "finding" => finding(team, input, actor, offline, events),
         "draft" => draft(team, input, actor, offline, events),
         "propose" => propose(team, input, actor, events),

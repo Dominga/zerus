@@ -2554,6 +2554,10 @@ pub(crate) struct Team {
     pub memory_mode_offer: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub memory_mode_reason: String,
+    /// Task 159: the owner's scratch rule this team was created under (its
+    /// id): no per-plan approval, its folder trusted for the rule's agents.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scratch_rule: String,
     /// Task 128: what the background writer last put into the team's lore
     /// workspace, and what waits on a field only a person can give.
     #[serde(default, skip_serializing_if = "LoreState::is_empty")]

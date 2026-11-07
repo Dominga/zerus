@@ -63,7 +63,7 @@ fn parent_lead_proven(team: &Team, parent: Option<&Team>, record: Option<&Value>
 /// The member whose session runs this CLI, proven by process ancestry. U54: a
 /// renamed session stays the member: the run id and the conversation id match
 /// as well as the stored name, so `hgs rename` never drops a member.
-fn calling_member(team: &Team, record: &Value) -> Option<String> {
+pub(crate) fn calling_member(team: &Team, record: &Value) -> Option<String> {
     let name = record["name"].as_str()?;
     let run = record["run_id"].as_str().unwrap_or_default();
     let conversation = record["conversation_id"].as_str().unwrap_or_default();
@@ -1731,6 +1731,7 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
                 proposal["note"] = json!(reason);
             }
             events.push(Event::new("proposal_decided", json!({"proposal":id,"accept":false,"reason":reason})));
+            ops::hold_for_denied(team, &id, &reason, events);
             if team.proposals.iter().any(|proposal| proposal["id"] == id && proposal["kind"] == "switch-plan-mode") {
                 // U59: a Deny's reason reaches the lead with the team's feed.
                 events.push(Event::new("plan_mode_denied", json!({"by":"You","proposal":id,"reason":reason})));
@@ -1925,6 +1926,44 @@ fn owner_card(team_id: &str, op: &str, change: &Value, request: &str) -> anyhow:
     value["request_id"] = json!(request);
     value["by"] = json!("human");
     run(op, &value, false)
+}
+
+/// Task 159: the owner grants the scratch-team rule (directly, or by Allow on
+/// the lead's card, which runs this): journaled on the team, kept in the
+/// teams settings file.
+fn scratch_rule(input: &Value) -> anyhow::Result<Value> {
+    let request = text(input, "request_id").to_owned();
+    ensure!(canonical_uuid(&request), "A canonical request_id is required");
+    let mut store = Store::open(true)?;
+    let team_id = text(input, "team").to_owned();
+    let team = store.load(&team_id)?.context("Unknown team")?;
+    let caller = actor(&team, "scratch-rule", input)?;
+    let result = store.mutate(Some((&request, input)), &team_id, None, |team, events| ops::apply(team, "scratch-rule", input, &caller, &BTreeSet::new(), events))?;
+    let mut rule = super::owner_steps::rule_from(input)?;
+    rule.team = team_id;
+    rule.request = request;
+    let rule = super::owner_steps::add(rule)?;
+    let mut answer = result;
+    answer["rule"] = json!(rule);
+    Ok(answer)
+}
+
+/// Task 159: Settings > Teams: the owner's scratch rules, and a revoke.
+fn scratch_rules(input: &Value) -> anyhow::Result<Value> {
+    match text(input, "action") {
+        "" | "list" => Ok(json!({"rules":super::owner_steps::rules()})),
+        "revoke" => {
+            let (dsh, session, run) = caller_identities();
+            owner_caller(input, false, dsh.is_some(), session.is_some(), run.is_some())
+                .context("Only you revoke a scratch rule: add \"by\":\"human\" from your own shell or the desktop")?;
+            let id = text(input, "id");
+            ensure!(!id.is_empty(), "Name the rule to revoke: {{\"action\":\"revoke\",\"id\":\"sXXXXXXXX\",\"by\":\"human\"}}");
+            let revoked = super::owner_steps::revoke(id)?;
+            ensure!(revoked, "No scratch rule {id}");
+            Ok(json!({"status":"revoked","id":id,"rules":super::owner_steps::rules()}))
+        }
+        other => bail!("A scratch-rules action is list or revoke, not {other}"),
+    }
 }
 
 /// N8: a sub-team's create input cannot set an owner-only setting.
@@ -2234,6 +2273,22 @@ fn create(input: &Value) -> anyhow::Result<Value> {
             }
         }
     }
+    // Task 159: a team the lead's own session creates in the folder of your
+    // scratch rule needs no per-plan approval; its folder is trusted at launch.
+    let mut scratch_events: Vec<Event> = Vec::new();
+    if parent_link.is_none() && team.status != TeamStatus::Draft {
+        if let Some(record) = caller_record() {
+            let rules = super::owner_steps::rules();
+            if let Some(rule) = super::owner_steps::covering(&rules, &team.folder) {
+                let leads = store::path().exists().then(|| Store::open(false).and_then(|store| store.active_teams(ACTIVE_TEAMS)).unwrap_or_default()).unwrap_or_default();
+                if super::owner_steps::lead_creating(&record, &leads) {
+                    team.settings.approval = super::model::Approval::Auto;
+                    team.scratch_rule = rule.id.clone();
+                    scratch_events.push(Event::new("scratch_rule_applied", json!({"rule":rule.id,"folder":rule.folder,"agents":rule.agents})));
+                }
+            }
+        }
+    }
     let rules_authorization = (|| -> anyhow::Result<()> {
         if !team.settings.iron_rules.is_empty() || team.members.iter().any(|member| !member.iron_rules.is_empty()) {
             let caller = actor(&team, "settings", input)?;
@@ -2266,6 +2321,8 @@ fn create(input: &Value) -> anyhow::Result<Value> {
     }
     let start = team.brief == Notice::Pending;
     // The request's identity is what the caller sent, so a replay matches.
+    let mut events = events;
+    events.extend(scratch_events);
     let receipt = match Store::open(true)?.create(request, input, team.clone(), events) {
         Ok(receipt) => receipt,
         Err(error) => {
@@ -4749,6 +4806,9 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
     }
     match op {
         "create" => create(input),
+        // Task 159: the owner's scratch-team rule, and its list and revoke.
+        "scratch-rule" => scratch_rule(input),
+        "scratch-rules" => scratch_rules(input),
         "answer" => answer(input),
         // U20: a sandbox that cannot write the store queues the whole commit, so
         // no commit exists without the attempt recording it.
@@ -4790,6 +4850,8 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 fill_pause(&store, team);
             }
             let mut items = super::owner_waiting::items(&teams, super::super::now());
+            // Task 159: cards wait for the owner's presence and come as one batch.
+            super::owner_steps::mark_cards(&mut items, &teams, super::owner_steps::owner_present());
             items.extend(tools);
             let items = super::owner_waiting::sorted(items);
             let before = Some(&input["before"]).filter(|cursor| !cursor.is_null());

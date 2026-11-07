@@ -2363,6 +2363,35 @@ Status shows `parked` on the task ("parked until <condition>, ETA HH:MM (in N
 min)") and on its member; an idle member's session waits for it ("Waiting for
 #N: parked until ...", reason kind `team_parked`), never Building.
 
+Task 159 (owner, 2026-11-07): owner-only steps are planned for when the owner
+is there, in one click.
+- A lead's card may name the tasks that need it: `"for_tasks":[N]` (open
+  tasks, at most 50; part of the card's hash). While the card is open those
+  tasks are never ready, so no member is handed a task it would wait on; an
+  idle member's session says "Waiting for the owner's card pN for #M" (reason
+  kind `team_owner_card`). Allowed or answered, they are ready; denied, they are
+  held for the lead with "you denied card pN: REASON".
+- `hgs team waiting` marks the owner's cards (`owner_word_asked`) by presence:
+  while the desktop reports the owner away (locked, or idle 10 minutes) each
+  is `"notify":false, "held_for_presence":true`; otherwise `"notify":true` and
+  every card listed together shares one `"batch"` (with `"batch_size"`). Each
+  card names what waits on it (`waiting_tasks`, and "(#N wait for it)" in its
+  title). Without a desktop's presence nothing is held. The desktop posts a
+  batch as one notice and withdraws it with its last card.
+- One owner rule for scratch teams, granted once by card
+  (`{"kind":"scratch-rule","folder":"ABS","agents":["claude","codex"],"reason":"..."}`
+  | `hgs team propose --json`, or the owner's own `hgs team scratch-rule
+  --json`): a team that a running team's lead creates from its own session
+  with its folder inside that folder starts with approval `auto` (no per-plan
+  approval; `scratch_rule` names the rule, `scratch_rule_applied` in its feed).
+  Before each local member launches, its folder is trusted for the rule's
+  Claude and Codex agents in the account config that launch reads
+  (`.claude.json`, Codex's `config.toml` `[projects."FOLDER"]`); Kimi,
+  DeepSeek and OpenCode still ask at start-up. The rules live in the teams
+  settings file (Settings > Teams): `hgs team scratch-rules --json` lists
+  them, and `{"action":"revoke","id":"sXXXXXXXX","by":"human"}` revokes one;
+  teams created under it keep what they were given.
+
 A reassign, a take-over or a cancel of a task whose attempt its member is still
 working on (sent or delivered, not reported) tells that member at once: one
 `[Zerus team · from: Zerus · task: #N · stop]` message names the task and why it

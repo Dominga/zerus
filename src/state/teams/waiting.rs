@@ -223,6 +223,11 @@ fn member_reason(team: &Team, member: &Member) -> Option<Value> {
         .filter(mine)
         .filter(|task| matches!(task.status, TaskStatus::Pending | TaskStatus::Draft))
         .min_by_key(|task| (!ready.contains(&task.id), task.status == TaskStatus::Draft, task.id))?;
+    // Task 159: a task an open card of the owner holds back waits for it.
+    if let Some(cards) = super::owner_steps::waiting_on_cards(team).get(&next.id) {
+        return reason(team, "team_owner_card", format!("Waiting for the owner's card {} for #{}", cards.join(", "), next.id),
+            json!({"task":next.id,"cards":cards}));
+    }
     let phase_of = |n: u32| team.phases.iter().find(|phase| phase.n == n);
     if next.status == TaskStatus::Draft || phase_of(next.phase).is_some_and(|phase| phase.state.is_draft()) {
         return reason(team, "team_draft_phase",

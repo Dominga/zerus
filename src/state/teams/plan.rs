@@ -281,6 +281,7 @@ fn barrier_holds(team: &Team, task: &Task) -> bool {
 /// Pending tasks whose dependencies and phase barrier are satisfied, in id order.
 pub(crate) fn ready(team: &Team) -> Vec<u32> {
     let cycles = cycle_tasks(&team.tasks);
+    let owner_wait = super::owner_steps::waiting_on_cards(team);
     let mut out: Vec<u32> = team
         .tasks
         .iter()
@@ -289,6 +290,8 @@ pub(crate) fn ready(team: &Team) -> Vec<u32> {
         .filter(|task| task.hold.is_none())
         // Task 160: nor a parked one: Zerus gives it back to its member.
         .filter(|task| task.park.is_none())
+        // Task 159: nor one an open card of the owner holds back.
+        .filter(|task| !owner_wait.contains_key(&task.id))
         // Spec 0: a task Zerus could not prepare (U45 model, U46 context, U48
         // branch), or whose context action still runs, waits for a retry or a
         // reassignment, never for the next tick.

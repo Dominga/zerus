@@ -1,3 +1,4 @@
+import { TextInput } from "../../lib/TextField";
 import {Show,createSignal,createEffect,onMount,onCleanup,lazy,Suspense} from "solid-js";
 import {invoke} from "@tauri-apps/api/core";
 import {Icon} from "../../lib/icons";
@@ -43,8 +44,8 @@ export default function WorkspacePanel(props:{view?:View;refresh:(afterAction?:b
   </Actions>
   <Show when={actions.open()&&!read()?.pending}>
    <form class="ws-enroll" onSubmit={e=>{e.preventDefault();void actions.submit(submit);}}><Row label={trNoop("Connection")} for="ws-mode"><Select id="ws-mode" value={actions.fields().mode} disabled={actions.busy()} onChange={mode=>actions.setFields(f=>({...f,mode:mode as WorkspaceMode}))} options={[{value:"create",label:tr("Create workspace")},{value:"join",label:tr("Join by code")}]}/></Row>
-    <Row label={trNoop("Relay (HTTPS)")} for="ws-relay" hint={relayError(actions.fields())?<span class="danger">{relayError(actions.fields())}</span>:undefined}><input id="ws-relay" class="field mono set-wide-field" value={actions.fields().relay} readOnly={actions.busy()} onInput={e=>actions.setFields(f=>({...f,relay:e.currentTarget.value}))} aria-invalid={!!relayError(actions.fields())}/></Row>
-    <Show when={actions.fields().mode==="join"}><Row label={trNoop("Computer invitation code")} for="ws-code" hint={actions.fields().code&&codeError(actions.fields())?<span class="danger">{codeError(actions.fields())}</span>:undefined}><input id="ws-code" class="field mono set-wide-field" type="password" autocomplete="off" autocapitalize="none" spellcheck={false} maxLength={4096} placeholder="ze1.…" value={actions.fields().code} readOnly={actions.busy()} onInput={e=>actions.setFields(f=>({...f,code:e.currentTarget.value}))}/></Row></Show>
+    <Row label={trNoop("Relay (HTTPS)")} for="ws-relay" hint={relayError(actions.fields())?<span class="danger">{relayError(actions.fields())}</span>:undefined}><TextInput id="ws-relay" class="field mono set-wide-field" value={actions.fields().relay} readOnly={actions.busy()} onInput={e=>actions.setFields(f=>({...f,relay:e.currentTarget.value}))} aria-invalid={!!relayError(actions.fields())}/></Row>
+    <Show when={actions.fields().mode==="join"}><Row label={trNoop("Computer invitation code")} for="ws-code" hint={actions.fields().code&&codeError(actions.fields())?<span class="danger">{codeError(actions.fields())}</span>:undefined}><TextInput id="ws-code" class="field mono set-wide-field" type="password" autocomplete="off" autocapitalize="none" spellcheck={false} maxLength={4096} placeholder="ze1.…" value={actions.fields().code} readOnly={actions.busy()} onInput={e=>actions.setFields(f=>({...f,code:e.currentTarget.value}))}/></Row></Show>
     <Actions><button ref={submit} type="submit" class="btn primary" disabled={!writable()||!!relayError(actions.fields())||!!codeError(actions.fields())}>{enrollmentLabel(actions.fields().mode,changing())}</button><Show when={changing()}><button type="button" class="btn ghost" disabled={actions.busy()} onClick={()=>actions.cancel()}>{tr("Cancel")}</button></Show></Actions>
    </form>
   </Show>

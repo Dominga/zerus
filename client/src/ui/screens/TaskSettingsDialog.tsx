@@ -1,3 +1,4 @@
+import { TextArea, TextInput } from "../lib/TextField";
 import { Show, createSignal, onCleanup, onMount } from "solid-js";
 import { taskSettings } from "../../store/taskSettings";
 import { Icon } from "../lib/icons";
@@ -18,13 +19,13 @@ export default function TaskSettingsDialog() {
     <div class="dlg-body"><div class="td-form">
       <h3 class="td-heading">{tr("Service prompts")}</h3>
       <label class="td-label" for="ts-task">{tr("Task (Send now)")}</label>
-      <textarea ref={first} id="ts-task" class="field mono td-template" rows={8} value={task()} onInput={(e) => setTask(e.currentTarget.value)} spellcheck={false} />
+      <TextArea ref={first} id="ts-task" class="field mono td-template" rows={8} value={task()} onInput={(e) => setTask(e.currentTarget.value)} spellcheck={false} />
       <label class="td-label" for="ts-cancel">{tr("Cancel message")}</label>
-      <textarea id="ts-cancel" class="field mono td-template" rows={4} value={cancel()} onInput={(e) => setCancel(e.currentTarget.value)} spellcheck={false} />
+      <TextArea id="ts-cancel" class="field mono td-template" rows={4} value={cancel()} onInput={(e) => setCancel(e.currentTarget.value)} spellcheck={false} />
       <div class="hint">{tr("Placeholders:")} <code>{"{ref}"}</code>, <code>{"{author}"}</code>, <code>{"{prompt}"}</code>, <code>{"{tools}"}</code>, <code>{"{history}"}</code></div>
       <h3 class="td-heading">{tr("Agents")}</h3>
       <label class="check"><input type="checkbox" checked={others()} onChange={(e) => setOthers(e.currentTarget.checked)} />{tr("Agents may start and cancel tasks in other sessions")}</label>
-      <div class="row td-limit"><label for="ts-limit">{tr("Limit tasks started by agents")}</label><input id="ts-limit" class="field tabular" type="number" min={0} max={1000} step={1} value={limit()} onInput={(e) => setLimit(e.currentTarget.valueAsNumber)} /><span class="muted">{tr("per hour")}</span><Show when={limit() === 0}><span class="chip">{tr("no limit")}</span></Show></div>
+      <div class="row td-limit"><label for="ts-limit">{tr("Limit tasks started by agents")}</label><TextInput id="ts-limit" class="field tabular" type="number" min={0} max={1000} step={1} value={limit()} onInput={(e) => setLimit(e.currentTarget.valueAsNumber)} /><span class="muted">{tr("per hour")}</span><Show when={limit() === 0}><span class="chip">{tr("no limit")}</span></Show></div>
       <Show when={taskSettings.error()}><div class="tv-note-error" role="alert">{taskSettings.error()}</div></Show>
     </div></div>
     <div class="dlg-foot"><span class="spacer" /><button class="btn" onClick={close}>{tr("Cancel")}</button><button class="btn primary" disabled={taskSettings.busy()} onClick={save}>{tr("Save")}</button></div>

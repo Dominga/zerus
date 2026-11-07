@@ -1,3 +1,4 @@
+import { TextInput } from "../lib/TextField";
 import { Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { taskCancellation, setTaskCancellation, confirmTaskCancellation } from "../../store/taskCancel";
 import { orderedRows, computerOffline } from "../../store/catalog";
@@ -27,7 +28,7 @@ export default function TaskCancelDialog() {
         <Show when={running() && working()}> {worker()} {tr("is working; it reads the message when its turn ends.")}</Show>
       </p>
       <label class="td-label" for="td-reason">{tr("Reason (optional) — saved as a comment on the task, not sent to the agent")}</label>
-      <input id="td-reason" class="field" placeholder={tr("Why it is cancelled")} value={reason()} onInput={(e) => setReason(e.currentTarget.value)} />
+      <TextInput id="td-reason" class="field" placeholder={tr("Why it is cancelled")} value={reason()} onInput={(e) => setReason(e.currentTarget.value)} />
     </div>
     <div class="dlg-foot"><span class="spacer" /><button type="button" class="btn solid-danger" onClick={() => void confirmTaskCancellation(reason())}><Icon name="x" size={13} />{tr("Cancel task")}</button><button ref={keep} type="button" class="btn primary" autofocus onClick={close}>{tr("Keep running")}</button></div>
   </dialog>;

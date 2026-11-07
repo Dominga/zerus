@@ -1,3 +1,4 @@
+import { TextInput } from "../lib/TextField";
 import { For, Index, Show, Switch, Match, createEffect, createMemo, createSignal, lazy, Suspense, onCleanup } from "solid-js";
 import { Icon } from "../lib/icons";
 import { MachineTile } from "../components/MachineTile";
@@ -204,7 +205,7 @@ function Detail(props: { a: Account }) {
               <Show when={moreOpen()}>
                 <div class="acct-more" role="dialog" aria-label={tr("Machines with %1", props.a.label)}
                   onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeMore(); } }}>
-                  <input class="field" ref={moreInput} type="search" placeholder={tr("Search %1 machines", props.a.members.length)} value={moreQuery()}
+                  <TextInput class="field" ref={moreInput} type="search" placeholder={tr("Search %1 machines", props.a.members.length)} value={moreQuery()}
                     onInput={(e) => setMoreQuery(e.currentTarget.value)} aria-label={tr("Search machines")} />
                   <div class="acct-more-list">
                     <For each={matches()} fallback={<div class="dim acct-more-empty">{tr("No machine matches.")}</div>}>

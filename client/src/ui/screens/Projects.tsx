@@ -1,3 +1,4 @@
+import { TextInput } from "../lib/TextField";
 import { ProjectLabel } from "../components/ProjectLabel";
 import ProjectColorDialog from "./ProjectColorDialog";
 import ProjectCatalogDialog from "./ProjectCatalogDialog";
@@ -56,7 +57,7 @@ function ProjectName(props: { project: Project; enabled: boolean; describedBy?: 
     setValue(name);
     void props.rename(started.id, name)?.then((result) => { if (!result || result.outcome === "refused") setValue(props.project.name); });
   };
-  return <input id="proj-name" class="field proj-name" maxLength={80} value={value()} readOnly={!props.enabled} aria-describedby={props.describedBy}
+  return <TextInput id="proj-name" class="field proj-name" maxLength={80} value={value()} readOnly={!props.enabled} aria-describedby={props.describedBy}
     onFocus={() => { editing = { id: props.project.id, name: props.project.name }; }}
     onInput={(event) => setValue(event.currentTarget.value)} onBlur={commit}
     onKeyDown={(event) => {

@@ -1,3 +1,4 @@
+import { TextInput } from "../lib/TextField";
 import { For, Show, createEffect, createMemo, createSignal, lazy, onCleanup, onMount, untrack } from "solid-js";
 import { Icon } from "../lib/icons";
 import { catalog, computerOffline } from "../../store/catalog";
@@ -186,7 +187,7 @@ function RenameDialog(props: { row: ActionRow; close: () => void }) {
       <div class="dlg-body">
         <div class="dlg-detail dlg-context">{props.row.machine} / {prefix.slice(0, -1)}</div>
         <label class="dlg-label" for="rename-tag">{tr("Session name")}</label>
-        <input id="rename-tag" data-initial class="dlg-input" placeholder={tr("e.g. release planning")} value={value()} onInput={(e) => setValue(e.currentTarget.value)} />
+        <TextInput id="rename-tag" data-initial class="dlg-input" placeholder={tr("e.g. release planning")} value={value()} onInput={(e) => setValue(e.currentTarget.value)} />
         <div class="dlg-detail ell" title={prefix + value()}>{prefix + value()}</div>
         <Show when={problem()}><div class="dlg-error">{problem()}</div></Show>
       </div>

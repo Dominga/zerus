@@ -422,23 +422,24 @@ class WindowsNativeTransport(unittest.TestCase):
             fallback = False
             try:
                 child.stdin.write(struct.pack('<I', 0xffffffff)); child.stdin.flush()
-                deadline = time.monotonic()+8
+                # The fake renders before writing ready; keep renewing while
+                # its twenty-second output crosses OpenSSH's original lease.
+                started = time.monotonic()
+                deadline = started+(25 if sustained else 8)
+                next_ping = started+2
                 while not slow and not ready.exists():
+                    if sustained and time.monotonic() >= next_ping:
+                        child.stdin.write(struct.pack('<I', 0xffffffff)); child.stdin.flush()
+                        next_ping = time.monotonic()+2
                     self.assertIsNone(child.poll(), (root/'stderr').read_bytes())
                     self.assertLess(time.monotonic(), deadline, 'original fake did not become ready')
                     time.sleep(.02)
                 if not slow: self.assertEqual(json.loads(ready.read_text(encoding='utf-8'))['argv'], words)
+                if sustained: self.assertGreaterEqual(time.monotonic()-started, 19)
                 started = time.monotonic()
                 if slow:
                     child.stdin.write(struct.pack('<I', 0)); child.stdin.flush()
                 elif not lease:
-                    if sustained:
-                        # Renew over several reads and beyond the original 15 s
-                        # guard, while keeping the actual inherited async pipe open.
-                        for _ in range(11):
-                            time.sleep(2)
-                            self.assertIsNone(child.poll(), (root/'stderr').read_bytes())
-                            child.stdin.write(struct.pack('<I', 0xffffffff)); child.stdin.flush()
                     frame = struct.pack('<I', len(body))+body
                     child.stdin.write(frame[:2]); child.stdin.flush()
                     child.stdin.write(frame[2:]+struct.pack('<I', 0)); child.stdin.flush()

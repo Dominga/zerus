@@ -326,8 +326,10 @@ same collapse toggle; the summary joins the row's accessible description.
   (working of children) and a chevron. It collapses or expands the parent's
   child sessions; the choice defaults to expanded and this device keeps a
   collapsed parent across relaunches by machine UUID and session ID
-  (owner, 2026-11-07, zerus-sa9qn.15). Native subagent rows keep their
-  existing toggle.
+  (owner, 2026-11-07, zerus-sa9qn.15). Since zerus-sa9qn.16 the counter and the
+  toggle also cover native subagents (one count, one toggle), and a subagent
+  row is a compact session row that never expands; their separate toggle is
+  gone.
 * Children sort by their rank in the project group, as top-level cards do.
   Dragging a child organizes it within its group exactly as before; nesting is
   derived, not a position.
@@ -342,9 +344,10 @@ same collapse toggle; the summary joins the row's accessible description.
 
 ### 3.4 Supervised indicator
 
-A supervised child shows the crossed bell of Mute, 13 px, before its title in
-`--z-color-dim`, as in the owner's prototype (owner feedback 2026-11-07: a
-plain bell read as "notifications coming"). Tooltip: "Supervised by PARENT. Only requests that need you notify
+A supervised child shows `corner-down-right`, 13 px, before its title in
+`--z-color-dim`: handled by the parent above (owner, 2026-11-07,
+zerus-sa9qn.16; a plain bell read as "notifications coming", the crossed bell
+as muted). Tooltip: "Supervised by PARENT. Only requests that need you notify
 you." Its quiet badges are gray as for muted rows; a human signal keeps the
 amber badge and edge.
 

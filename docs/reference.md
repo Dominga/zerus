@@ -712,8 +712,11 @@ the catalog lock, and a launch without a readable identity records no parent.
 The desktop session list nests a child under its parent when both are shown in
 the same project group, 26 px per level up to three levels, with a connector
 from the parent above. The parent's footer shows **Team** with working and all
-child sessions (`2 of 5`); it collapses or expands them, and Left and Right do
-the same from the keyboard, Left then moving from a child to its parent. This
+child sessions and native subagents together, working of all (`2 of 5`); this
+one toggle shows or hides both (owner, 2026-11-07, zerus-sa9qn.16), and Left
+and Right do the same from the keyboard, Left then moving from a child to its
+parent. A native subagent row looks like a compact session row (the agent's
+tile, its name and status, the summary as its tooltip) and never expands. This
 device remembers a collapsed parent across relaunches by its computer's machine
 UUID and session ID (`sessions/collapsedTeams`, at most 2048 parents, the oldest
 forgotten first), so a rename, resume or restart keeps the choice; a parent
@@ -757,9 +760,10 @@ own mark, still counts. A person-only request notifies as for any session.
 When the parent is paused, stopped, exited, archived, not listed on the
 child's computer (including a parent on another computer) or gone, the child
 is ordinary again: a pending request that waited quietly is announced once,
-while replies seen meanwhile are not replayed. A supervised child shows the
-crossed bell of Mute, dim, before its title (its tooltip and accessible name
-say which session supervises it); the parent's **Team**
+while replies seen meanwhile are not replayed. A supervised child shows a dim
+arrow turning down and right before its title, meaning its parent above
+handles it (its tooltip and accessible name say which session supervises it;
+owner, 2026-11-07, zerus-sa9qn.16, replacing the crossed bell); the parent's **Team**
 toggle adds **Asking** (quiet requests waiting for it) and **Needs you**
 (person-only requests), which never raise the parent's own attention.
 `client/core/tests/fixtures/supervised-attention.json` lists the cases the

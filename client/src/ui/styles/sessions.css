@@ -266,13 +266,12 @@
 
   /* Native child rows: 64 px, card indented 24 px, the prototype's tree lines. */
   .child-row { position: absolute; inset: 0; }
+  /* A native subagent is a compact row that never expands (zerus-sa9qn.16). */
   .child-row .scard.child { left: 26px; top: 4px; bottom: 6px; }
-  .child-row .scard.child .sc-l1 { top: 4px; }
-  .sc-child-detail { position: absolute; left: 11px; right: 10px; top: 29px; height: 18px; font-size: 11px; color: var(--z-list-muted); line-height: 18px; }
   .child-row .tree { position: absolute; left: 14px; top: 0; bottom: 0; width: 10px; pointer-events: none; }
   .child-row .tree::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 1px; background: var(--z-list-tree-line); }
-  .child-row.last .tree::before { bottom: auto; height: 25px; }
-  .child-row .tree::after { content: ""; position: absolute; left: 0; top: 23px; width: 9px; height: 8px; border-left: 1px solid var(--z-list-tree-line); border-bottom: 1px solid var(--z-list-tree-line); border-bottom-left-radius: 6px; }
+  .child-row.last .tree::before { bottom: auto; height: 13px; }
+  .child-row .tree::after { content: ""; position: absolute; left: 0; top: 11px; width: 9px; height: 8px; border-left: 1px solid var(--z-list-tree-line); border-bottom: 1px solid var(--z-list-tree-line); border-bottom-left-radius: 6px; }
   .rowhit.has-kids-open::after { content: ""; position: absolute; left: 14px; bottom: 0; height: 6px; width: 1px; background: var(--z-list-tree-line); }
   :root[data-tree-lines="indent"] .child-row .tree, :root[data-tree-lines="indent"] .rowhit.has-kids-open::after { display: none; }
 

@@ -18,10 +18,10 @@ import type { Session } from "./types";
 
 // Flattened list model. Heights match tray/src/SessionCardDelegate.h
 // sizeHint at the compact density, the only one in the web client: group
-// header 40, card 94, native child 64, collapsed row 40. Fixed heights per row
+// header 40, card 94, native child 40 (a compact row), collapsed row 40. Fixed heights per row
 // type let the virtualizer place rows without measuring the DOM.
 
-export const ROW_HEIGHT = { header: 40, card: 94, child: 64, collapsedRow: 40, collapsedTeam: 62 } as const;
+export const ROW_HEIGHT = { header: 40, card: 94, child: 40, collapsedRow: 40, collapsedTeam: 62 } as const;
 
 /** In the strip every row keeps its height except compact rows, which show as tiles. */
 export function rowHeight(row: Row, strip = false): number {

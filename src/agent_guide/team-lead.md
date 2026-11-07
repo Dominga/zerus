@@ -76,3 +76,8 @@ names the top three losses and tokens per accepted task; unknown, never zero.
 hgs team look MEMBER shows one member. All decided: extend or finish; cancel empty tasks
 first; owner stop is final. A member's repeating routine request: hgs guide team-safe.
 Models, stages, scale: team-custom. Sub-teams: hgs guide team-tree.
+
+
+
+Scratch teams: a QA member (operate) creates and leads them at the team's scratch
+root; deciding their task stops them.

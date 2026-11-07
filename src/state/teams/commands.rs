@@ -1245,6 +1245,72 @@ fn stop_lead_session(session: &SessionRef) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Task #228: a scratch team left running when its creating task is decided is
+/// stopped and its sessions terminated. The creating member's own session is
+/// the parent team's work and stays; a session that cannot be stopped is listed
+/// for the owner instead of being reported stopped.
+pub(crate) fn close_scratch_teams(store: &mut Store, parent_id: &str, task: u32) -> anyhow::Result<()> {
+    let Some(parent) = store.load(parent_id)? else { return Ok(()) };
+    if !parent.task(task).is_some_and(|task| task.status.finished()) {
+        return Ok(());
+    }
+    let open: Vec<super::model::ScratchChild> = parent
+        .scratch_teams
+        .iter()
+        .filter(|record| record.task == task && record.state != "stopped" && record.state != "listed")
+        .cloned()
+        .collect();
+    if open.is_empty() {
+        return Ok(());
+    }
+    let creator = open.first().map(|record| record.member.clone()).unwrap_or_default();
+    let creator_session = parent.member(&creator).and_then(|member| member.session.clone());
+    let mut stopped = Vec::new();
+    let mut listed = Vec::new();
+    for record in &open {
+        let Some(child) = store.load(&record.id)? else {
+            listed.push(record.id.clone());
+            continue;
+        };
+        let mut failed = false;
+        for member in &child.members {
+            let Some(session) = member.session.as_ref() else { continue };
+            if creator_session.as_ref() == Some(session) {
+                continue;
+            }
+            if stop_lead_session(session).is_err() {
+                failed = true;
+            }
+        }
+        if !failed {
+            store.mutate(None, &record.id, None, |team, events| {
+                team.status = TeamStatus::Stopped;
+                events.push(Event::new("scratch_stopped", json!({"by":"Zerus","task":task})));
+                Ok(Value::Null)
+            })?;
+        }
+        if failed {
+            listed.push(record.id.clone());
+        } else {
+            stopped.push(record.id.clone());
+        }
+    }
+    store.mutate(None, parent_id, None, |team, events| {
+        for record in &mut team.scratch_teams {
+            if record.task == task && record.state != "stopped" {
+                record.state = if listed.contains(&record.id) { "listed".into() } else { "stopped".into() };
+                record.stopped_at = Some(crate::state::now());
+            }
+        }
+        events.push(Event::new(
+            "scratch_teams_stopped",
+            json!({"task":task,"stopped":stopped,"listed":listed}),
+        ));
+        Ok(Value::Null)
+    })?;
+    Ok(())
+}
+
 #[cfg(test)]
 thread_local! {
     /// Tests record the lead stop instead of terminating a real session.
@@ -2100,6 +2166,39 @@ fn scratch_rule(input: &Value) -> anyhow::Result<Value> {
     let team_id = text(input, "team").to_owned();
     let team = store.load(&team_id)?.context("Unknown team")?;
     let caller = actor(&team, "scratch-rule", input)?;
+    // Task #228: the owner's one standing rule for this team, at its scratch
+    // root and for the agents of its roster. Settings > Teams grants it here,
+    // and so does a scratch-rule card whose folder is that root.
+    let root = super::scratch::root(&team);
+    let at_root = !root.is_empty() && super::owner_steps::inside(text(input, "folder"), &root);
+    if input["standing"].as_bool() == Some(true) || at_root {
+        ensure!(!root.is_empty(), "The team has no folder, so it has no scratch root: the owner sets scratch_root in Settings > Teams");
+        let roster = super::scratch::roster_agents(&team);
+        ensure!(!roster.is_empty(), "The team's roster has no agents; the standing rule covers its agents");
+        let mut agents: Vec<String> = input["agents"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+        agents.sort();
+        agents.dedup();
+        if agents.is_empty() {
+            agents = roster.clone();
+        }
+        for agent in &agents {
+            ensure!(roster.contains(agent), "{agent} is not in the team's roster ({}); a standing rule trusts the team's own agents", roster.join(", "));
+        }
+        let effective = json!({"folder":root,"agents":agents,"reason":text(input, "reason"),"standing":true});
+        let result = store.mutate(Some((&request, input)), &team_id, None, |team, events| {
+            ops::apply(team, "scratch-rule", &effective, &caller, &BTreeSet::new(), events)
+        })?;
+        let mut rule = super::owner_steps::rule_from(&effective)?;
+        rule.team = team_id;
+        rule.request = request;
+        let rule = super::owner_steps::add_standing(rule)?;
+        let mut answer = result;
+        answer["rule"] = json!(rule);
+        answer["standing"] = json!(true);
+        answer["folder"] = json!(rule.folder);
+        answer["agents"] = json!(rule.agents);
+        return Ok(answer);
+    }
     let result = store.mutate(Some((&request, input)), &team_id, None, |team, events| ops::apply(team, "scratch-rule", input, &caller, &BTreeSet::new(), events))?;
     let mut rule = super::owner_steps::rule_from(input)?;
     rule.team = team_id;
@@ -2407,6 +2506,36 @@ fn release_reservation(parent_link: &Option<(String, u32)>, child_id: &str) {
     });
 }
 
+/// Task #228: the team and member a session belongs to, when the member is not
+/// its lead: a member's create is a scratch team of that team. A lead, the
+/// owner and a session outside any team keep the other create paths.
+fn scratch_creator() -> anyhow::Result<Option<(Team, Member)>> {
+    let record = caller_record();
+    let (dsh, session, run) = caller_identities();
+    if record.is_none() && dsh.is_none() && session.is_none() && run.is_none() {
+        return Ok(None);
+    }
+    if !store::path().exists() {
+        return Ok(None);
+    }
+    for team in Store::open(false)?.teams(false, 200)? {
+        if !matches!(team.status, TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused) {
+            continue;
+        }
+        let id = record
+            .as_ref()
+            .and_then(|record| calling_member(&team, record))
+            .or_else(|| dsh_member(&team, dsh.as_deref().unwrap_or_default()));
+        let Some(id) = id else { continue };
+        if id == team.lead {
+            continue;
+        }
+        let Some(member) = team.member(&id).cloned() else { continue };
+        return Ok(Some((team, member)));
+    }
+    Ok(None)
+}
+
 fn create(input: &Value) -> anyhow::Result<Value> {
     let request = text(input, "request_id");
     ensure!(canonical_uuid(request), "A canonical request_id is required");
@@ -2421,8 +2550,16 @@ fn create(input: &Value) -> anyhow::Result<Value> {
         return Ok(receipt);
     }
     let mut filled = input.clone();
-    let parent_link = parent_create(input, &mut filled)?;
-    if parent_link.is_none() {
+    // Task #228: a member's own create is a scratch team of its team, led by
+    // its session, inside the team's scratch root; every other create keeps
+    // the sub-team or the lead/owner path below. A sub-team create (a parent
+    // object) is never a scratch team.
+    let scratch = if input["parent"].is_object() { None } else { scratch_creator()? };
+    let parent_link = if scratch.is_none() { parent_create(input, &mut filled)? } else { None };
+    if let Some((parent, member)) = &scratch {
+        filled = super::scratch::prepare(parent, member, input)?;
+    }
+    if parent_link.is_none() && scratch.is_none() {
         if let Some(record) = caller_record() {
             // A lead creates its own team: its session is the lead's.
             let lead = &mut filled["lead"];
@@ -2553,6 +2690,21 @@ fn create(input: &Value) -> anyhow::Result<Value> {
                 parent_task.subteam = Some(child.clone());
             }
             events.push(Event::new("subteam_created", json!({"team":child,"task":task})));
+            Ok(Value::Null)
+        })?;
+    }
+    // Task #228: the parent lead sees the scratch team in its feed and inbox;
+    // its creating task's decision stops it (cleanup after the decision).
+    if let Some((parent, member)) = &scratch {
+        let task = team.scratch_parent.as_ref().map(|link| link.task).unwrap_or(0);
+        let mut store = Store::open(true)?;
+        let child = team.clone();
+        store.mutate(None, &parent.id, None, |known, events| {
+            let record = super::scratch::record_created(known, &child, &member.id, task, crate::state::now());
+            events.push(Event::new(
+                "scratch_team_created",
+                json!({"team":record.id,"name":record.name,"task":task,"member":member.id}),
+            ));
             Ok(Value::Null)
         })?;
     }
@@ -5537,6 +5689,15 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             if receipt["status"] == "stale" {
                 bail!("This attempt is no longer current for task #{}; the report was not accepted", receipt["task"]);
             }
+            // Task #228: a scratch team left running when its creating task is
+            // decided stops; the answer names any session it could not stop.
+            if matches!(op, "accept" | "reject" | "cancel") {
+                if let Some(task) = filled["task"].as_u64().and_then(|id| u32::try_from(id).ok()) {
+                    if let Err(error) = close_scratch_teams(&mut store, team_id, task) {
+                        receipt["scratch_error"] = json!(format!("{error:#}"));
+                    }
+                }
+            }
             // Sections 9.5 and 9.7: the tree reacts to a finished, rejected,
             // paused, resumed or stopped team, and to a parent answer. N28: the
             // change above is already stored, so a tree hook that fails says so
@@ -5735,4 +5896,8 @@ mod commands_other;
 #[cfg(test)]
 #[path = "tests/commands_tools.rs"]
 mod commands_tools;
+
+#[cfg(test)]
+#[path = "tests/commands_scratch.rs"]
+mod commands_scratch;
 

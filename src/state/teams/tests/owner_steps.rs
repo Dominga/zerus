@@ -114,6 +114,32 @@ fn a_card_holds_its_tasks_back_and_names_only_open_ones() {
 }
 
 #[test]
+fn a_team_keeps_one_standing_scratch_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    super::super::templates::settings_override(Some(dir.path().join("templates.json")));
+    let mut first = rule_from(&json!({"folder":folder("teams"),"agents":["kimi"]})).unwrap();
+    first.team = "t".into();
+    let first = add_standing(first).unwrap();
+    // The same grant is kept once; a different grant replaces the team's rule.
+    let mut again = rule_from(&json!({"folder":folder("teams"),"agents":["kimi"]})).unwrap();
+    again.team = "t".into();
+    assert_eq!(add_standing(again).unwrap().id, first.id);
+    let mut moved = rule_from(&json!({"folder":folder("teams-2"),"agents":["kimi"]})).unwrap();
+    moved.team = "t".into();
+    let moved = add_standing(moved).unwrap();
+    assert_ne!(moved.id, first.id);
+    assert_eq!(rules().len(), 1, "one standing rule per team");
+    assert_eq!(standing("t", &folder("teams-2")).map(|rule| rule.id), Some(moved.id));
+    assert!(standing("t", &folder("teams")).is_none(), "the old root kept no rule");
+    // Another team keeps its own rule.
+    let mut other = rule_from(&json!({"folder":folder("teams"),"agents":["kimi"]})).unwrap();
+    other.team = "u".into();
+    add_standing(other).unwrap();
+    assert_eq!(rules().len(), 2);
+    super::super::templates::settings_override(None);
+}
+
+#[test]
 fn codex_trust_is_added_once_and_keeps_the_config() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");

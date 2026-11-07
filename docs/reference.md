@@ -1623,6 +1623,13 @@ draft, focus and selection; informational notices leave editing available. When
 the composer is hidden, the same diagnostic uses the existing workspace footer.
 Other operation notices retain their priority there.
 
+An uncertain draft holding a deferred-input identity shows a quiet **This text
+may already have been delivered** hint when its exact text appears in the loaded
+history of that run and conversation. The hint is derived from the existing
+bounded history window and disappears when it no longer matches, including on
+edit or Allow retry. It changes no draft, checkpoint or uncertainty state: text
+equality is never request-ID receipt evidence and never clears or retries input.
+
 Reads from the selected remote machine show a yellow loading circle beside the
 session name only after two seconds. It remains visible while an actual read is
 pending and clears when that read completes or fails. Switching sessions shows

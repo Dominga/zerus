@@ -1031,6 +1031,7 @@
   "This session is not tracked by Zerus and its terminal could not be verified. Open its terminal and close it with exit after its jobs finish.": "Эта сессия не отслеживается Zerus, и её терминал не удалось проверить. Откройте терминал и закройте его командой exit после завершения задач.",
   "This session left the list; its Activity stopped here.": "Эта сессия покинула список; её активность остановилась здесь.",
   "This task could not be read.": "Не удалось прочитать задачу.",
+  "This text may already have been delivered": "Возможно, этот текст уже был доставлен",
   "This turn is no longer working": "Этот ход больше не выполняется",
   "Tokens changed": "Изменено токенов",
   "Too many read actions are pending. Wait for the background service and try again.": "Слишком много ожидающих отметок о прочтении. Дождитесь фоновой службы и повторите попытку.",

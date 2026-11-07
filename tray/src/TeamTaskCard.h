@@ -7,6 +7,7 @@
 #include <functional>
 #include "TeamModel.h"
 
+class TeamController;
 class QVBoxLayout;
 class QScrollArea;
 class QKeyEvent;
@@ -22,6 +23,7 @@ public:
     explicit TeamTaskCard(QWidget *parent = nullptr);
     void setTask(const Teams::Team &team, int task, const Teams::LiveLookup &live, bool dark);
     int task() const { return m_task; }
+    void setController(TeamController *controller) { m_controller = controller; }
     std::function<void()> back;
     std::function<void(const QString &operation, const QJsonObject &input)> act;
     // Task 55: an action whose answer the card shows (a member's question):
@@ -46,6 +48,13 @@ protected:
     // Esc closes the card, as its back button does.
     void keyPressEvent(QKeyEvent *event) override;
 private:
+    void readHistory();
+    TeamController *m_controller = nullptr;
+    QString m_historyTeam, m_historyError;
+    int m_historyTask = 0;
+    quint64 m_historyGeneration = 0;
+    bool m_historyLoading = false, m_historyReady = false;
+    Teams::Task m_history;  // only the selected task, released on navigation
     void readRuns();
     struct TestRuns { int task = 0; qint64 at = 0; bool loading = false; QJsonArray runs; QString error; quint64 generation = 0; };
     TestRuns m_runs;

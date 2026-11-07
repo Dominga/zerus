@@ -559,6 +559,7 @@ Team parse(const QJsonObject &v)
     for (const auto &value : v.value("tasks").toArray()) {
         const auto t = value.toObject();
         Task task;
+        task.archived = t.value("archived").isObject();
         task.id = t.value("id").toInt(); task.phase = qMax(1, t.value("phase").toInt(1)); task.pinned = t.value("pinned").toBool();
         task.title = str(t, "title"); task.description = str(t, "description");
         task.status = str(t, "status"); task.assignee = str(t, "assignee");
@@ -591,9 +592,10 @@ Team parse(const QJsonObject &v)
             task.estimateMinutes = t.value("estimate_minutes").isDouble() ? t.value("estimate_minutes").toDouble() : -1;
             task.estimateSpent = t.value("estimate_spent_minutes").isDouble() ? t.value("estimate_spent_minutes").toDouble() : -1;
         }
-        if (t.value("timing").isObject()) {
+        const auto frozen = t.value("archived").toObject().value("timing");
+        if (t.value("timing").isObject() || frozen.isObject()) {
             // U37: the working time and the waits, computed by hgs.
-            const auto o = t.value("timing").toObject();
+            const auto o = (frozen.isObject() ? frozen : t.value("timing")).toObject();
             const auto w = o.value("waits").toObject();
             auto &timing = task.timing;
             timing.known = true;
@@ -792,6 +794,13 @@ Team parse(const QJsonObject &v)
     for (const auto &value : v.value("phases").toArray()) {
         const auto p = value.toObject();
         Phase phase;
+        const auto archived = p.value("archived").toObject();
+        phase.archived = p.value("archived").isObject();
+        phase.archivedTasks = archived.value("tasks").toInt();
+        phase.archivedAccepted = archived.value("accepted").toInt();
+        phase.archivedRejected = archived.value("rejected").toInt();
+        phase.archivedCancelled = archived.value("cancelled").toInt();
+        phase.closedAt = archived.value("closed_at").toDouble();
         phase.n = p.value("n").toInt(); phase.title = str(p, "title"); phase.barrier = p.value("barrier").toBool();
         phase.approval = str(p, "approval"); phase.state = str(p, "state");
         phase.addedBy = str(p, "added_by"); phase.decidedBy = str(p, "decided_by");
@@ -1586,6 +1595,12 @@ QList<PhaseGroup> phaseGroups(const Team &team)
         group.tasks.append(task.id);
         group.done += task.finished();
     }
+    for (const auto &phase : team.phases) if (phase.archived) {
+        auto &group = byPhase[phase.n];
+        group.n = phase.n;
+        group.archivedTotal = phase.archivedTasks;
+        group.done = phase.archivedTasks;
+    }
     for (auto it = byPhase.cbegin(); it != byPhase.cend(); ++it) {
         PhaseGroup group = it.value();
         if (const auto *record = team.phase(it.key())) {
@@ -1600,6 +1615,8 @@ QList<PhaseGroup> phaseGroups(const Team &team)
 
 bool phaseCancelled(const Team &team, int phase)
 {
+    if (const auto *record = team.phase(phase); record && record->archived)
+        return record->archivedTasks > 0 && record->archivedCancelled == record->archivedTasks;
     if (const auto *record = team.phase(phase); record && record->state == QLatin1String("discarded")) return false;
     bool any = false;
     for (const auto &task : team.tasks) {
@@ -1612,7 +1629,9 @@ bool phaseCancelled(const Team &team, int phase)
 
 int cancelledTasks(const Team &team)
 {
-    return int(std::count_if(team.tasks.cbegin(), team.tasks.cend(), [](const Task &task) { return task.status == QLatin1String("cancelled"); }));
+    int count = int(std::count_if(team.tasks.cbegin(), team.tasks.cend(), [](const Task &task) { return !task.archived && task.status == QLatin1String("cancelled"); }));
+    for (const auto &phase : team.phases) if (phase.archived) count += phase.archivedCancelled;
+    return count;
 }
 
 Team withoutCancelled(const Team &team)
@@ -1621,6 +1640,7 @@ Team withoutCancelled(const Team &team)
     Team shown = team;
     shown.cancelledHidden = true;
     QSet<int> gone, phases;
+    for (const auto &phase : team.phases) if (phase.archived && phaseCancelled(team, phase.n)) phases.insert(phase.n);
     for (const auto &task : team.tasks) if (task.status == QLatin1String("cancelled")) gone.insert(task.id);
     for (const auto &task : team.tasks) if (phaseCancelled(team, task.phase)) phases.insert(task.phase);
     shown.tasks.erase(std::remove_if(shown.tasks.begin(), shown.tasks.end(), [&gone](const Task &task) { return gone.contains(task.id); }), shown.tasks.end());
@@ -1634,6 +1654,7 @@ Team withoutCancelled(const Team &team)
 
 bool phaseFinished(const Team &team, int phase)
 {
+    if (const auto *record = team.phase(phase); record && record->archived) return !phaseCancelled(team, phase);
     if (const auto *record = team.phase(phase); record && record->state == QLatin1String("discarded")) return false;
     if (team.freeMode() && team.freePhase.known && team.freePhase.phase == phase) return false;
     bool any = false, cancelledOnly = true;
@@ -1649,6 +1670,7 @@ bool phaseFinished(const Team &team, int phase)
 int finishedPhases(const Team &team)
 {
     QSet<int> phases;
+    for (const auto &phase : team.phases) if (phase.archived && phaseFinished(team, phase.n)) phases.insert(phase.n);
     for (const auto &task : team.tasks) if (!phases.contains(task.phase) && phaseFinished(team, task.phase)) phases.insert(task.phase);
     return int(phases.size());
 }
@@ -1656,6 +1678,7 @@ int finishedPhases(const Team &team)
 Team withoutFinished(const Team &team)
 {
     QSet<int> phases;
+    for (const auto &phase : team.phases) if (phase.archived && phaseFinished(team, phase.n)) phases.insert(phase.n);
     for (const auto &task : team.tasks) if (phaseFinished(team, task.phase)) phases.insert(task.phase);
     if (phases.isEmpty()) return team;
     Team shown = team;
@@ -1814,7 +1837,7 @@ QString phaseHeading(const PhaseGroup &group)
 {
     const QString phase = group.title.isEmpty() ? tr("Phase %1").arg(group.n)
                                                 : tr("Phase %1 · %2").arg(group.n).arg(group.title);
-    return tr("%1 · %2/%3").arg(phase).arg(group.done).arg(group.tasks.size());
+    return tr("%1 · %2/%3").arg(phase).arg(group.done).arg(group.archivedTotal ? group.archivedTotal : group.tasks.size());
 }
 
 bool leftMember(const Team &team, const QString &member)

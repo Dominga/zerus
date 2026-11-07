@@ -1532,6 +1532,51 @@ fn qt_bin(folder: &Path) -> Option<PathBuf> {
     bin.is_dir().then_some(bin)
 }
 
+/// A Qt test's environment: its output on the pipe, Qt's DLLs first on PATH
+/// and the fonts.
+fn qt_test_environment(env: &mut Vec<(String, String)>, folder: &Path) {
+    // Task 53: QtTest's plain logger writes to OutputDebugString instead of
+    // stdout when stderr has no console (Qt's shouldLogToStderr), and the
+    // worker has none: the suite's lines (FAIL!, Totals) never reached the
+    // pipe and the tail was empty. Qt's own switch sends them to the
+    // stream on every platform.
+    env.push(("QT_FORCE_STDERR_LOGGING".into(), "1".into()));
+    if let Some(bin) = qt_bin(folder) {
+        let path = env.iter().find(|(key, _)| key.eq_ignore_ascii_case("PATH")).map(|(_, value)| value.clone())
+            .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
+        let separator = if cfg!(windows) { ';' } else { ':' };
+        env.retain(|(key, _)| !key.eq_ignore_ascii_case("PATH"));
+        env.push(("PATH".into(), format!("{}{separator}{path}", bin.display())));
+    }
+    #[cfg(windows)]
+    if std::env::var_os("QT_QPA_FONTDIR").is_none() {
+        env.push(("QT_QPA_FONTDIR".into(), "C:/Windows/Fonts".into()));
+    }
+}
+
+/// Task 174: the environment the test queue gives a queued suite: the build
+/// cache for cargo; for a CMake or CTest command also what the qt templates
+/// give (the Visual Studio tools on Windows, the C++ cache, Qt's DLLs, the
+/// offscreen platform), so a merged commit's Qt suites build and run as the
+/// members' do.
+pub(crate) fn queue_environment(project: &Path, command: &str) -> Vec<(String, String)> {
+    let mut env = cache_use("cargo-test", project).env;
+    let cmake = command
+        .split(|ch: char| ch.is_whitespace() || matches!(ch, '&' | ';' | '|' | '(' | ')' | '"'))
+        .any(|word| matches!(word.to_ascii_lowercase().as_str(), "ctest" | "cmake" | "ctest.exe" | "cmake.exe"));
+    if !cmake {
+        return env;
+    }
+    #[cfg(windows)]
+    if let Some(msvc) = msvc_environment() {
+        env.extend(msvc);
+    }
+    env.extend(cache_use("qt-build", project).env);
+    qt_test_environment(&mut env, project);
+    env.push(("QT_QPA_PLATFORM".into(), "offscreen".into()));
+    env
+}
+
 /// The environment a template needs beyond the worker's own (owner,
 /// 2026-10-28): the Visual Studio tools for the Qt configure and build on
 /// Windows, Qt's DLLs and the fonts for a Qt test, Gradle's home in the folder.
@@ -1544,23 +1589,7 @@ fn template_environment(plan: &Plan, folder: &Path) -> Vec<(String, String)> {
         }
     }
     if plan.template == "qt-test" {
-        // Task 53: QtTest's plain logger writes to OutputDebugString instead of
-        // stdout when stderr has no console (Qt's shouldLogToStderr), and the
-        // worker has none: the suite's lines (FAIL!, Totals) never reached the
-        // pipe and the tail was empty. Qt's own switch sends them to the
-        // stream on every platform.
-        env.push(("QT_FORCE_STDERR_LOGGING".into(), "1".into()));
-        if let Some(bin) = qt_bin(folder) {
-            let path = env.iter().find(|(key, _)| key.eq_ignore_ascii_case("PATH")).map(|(_, value)| value.clone())
-                .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
-            let separator = if cfg!(windows) { ';' } else { ':' };
-            env.retain(|(key, _)| !key.eq_ignore_ascii_case("PATH"));
-            env.push(("PATH".into(), format!("{}{separator}{path}", bin.display())));
-        }
-        #[cfg(windows)]
-        if std::env::var_os("QT_QPA_FONTDIR").is_none() {
-            env.push(("QT_QPA_FONTDIR".into(), "C:/Windows/Fonts".into()));
-        }
+        qt_test_environment(&mut env, folder);
     }
     if plan.template == "ue-test" {
         let ue = folder.join(".zerus-team").join("ue");
@@ -2535,6 +2564,24 @@ mod tests {
     // U62 (#721): the build cache is the project's choice. Without
     // `[build_cache]` (or with it off) builds run as before: no wrapper, no
     // launcher, the Qt configure unchanged.
+    /// Task 174: a queued CMake or CTest suite runs as the qt templates do
+    /// (offscreen, its output on the pipe); a cargo suite only gets the cache.
+    #[test]
+    fn a_queued_qt_suite_gets_the_qt_test_environment() {
+        let dir = temp();
+        settings_override(Some(dir.path().join("templates.json")));
+        let folder = dir.path().join("integration");
+        std::fs::create_dir_all(&folder).unwrap();
+        let qt = queue_environment(&folder, "cmake --build .ci-build/gui && ctest --test-dir .ci-build/gui -R \"^(test_a)$\"");
+        let value = |env: &[(String, String)], key: &str| env.iter().rev().find(|(name, _)| name == key).map(|(_, value)| value.clone());
+        assert_eq!(value(&qt, "QT_QPA_PLATFORM").as_deref(), Some("offscreen"));
+        assert_eq!(value(&qt, "QT_FORCE_STDERR_LOGGING").as_deref(), Some("1"));
+        let cargo = queue_environment(&folder, "cargo test --locked state::");
+        assert_eq!(value(&cargo, "QT_QPA_PLATFORM"), None);
+        assert!(queue_environment(&folder, "python -m unittest test_cmake_notes").is_empty(), "a word containing cmake is not cmake");
+        settings_override(None);
+    }
+
     #[test]
     fn a_project_without_a_build_cache_builds_as_before() {
         let dir = temp();

@@ -1953,13 +1953,57 @@ fn merge_queue_tick(store: &mut Store, team_id: &str, now: f64) -> anyhow::Resul
     })
 }
 
+/// Task 174: the teams whose test queue runs on its thread now.
+static TEST_QUEUES: std::sync::Mutex<BTreeSet<String>> = std::sync::Mutex::new(BTreeSet::new());
+
+/// Task 174: runs the team's test queue beside the tick: a thread of its own
+/// per team (never two), with its own store; an empty queue starts nothing.
+/// Tests drive the queue in the tick itself, with their own state folder.
+fn start_test_queue(store: &mut Store, team_id: &str, name: &str) {
+    if cfg!(test) {
+        if let Err(error) = test_queue_tick(store, team_id, now()) {
+            eprintln!("hgs team worker: {name}: test queue: {error}");
+        }
+        return;
+    }
+    let queued = super::test_queue::TestStore::open(true).and_then(|database| database.queued(team_id)).map(|list| !list.is_empty());
+    if !queued.unwrap_or(false) {
+        return;
+    }
+    {
+        let Ok(mut running) = TEST_QUEUES.lock() else { return };
+        if !running.insert(team_id.to_owned()) {
+            return;
+        }
+    }
+    let (team_id, name) = (team_id.to_owned(), name.to_owned());
+    let started = std::thread::Builder::new().name("hgs-test-queue".into()).spawn({
+        let team_id = team_id.clone();
+        move || {
+            let result = Store::open(true).and_then(|mut store| test_queue_tick(&mut store, &team_id, now()));
+            if let Err(error) = result {
+                eprintln!("hgs team worker: {name}: test queue: {error}");
+            }
+            if let Ok(mut running) = TEST_QUEUES.lock() {
+                running.remove(&team_id);
+            }
+        }
+    });
+    if started.is_err() {
+        if let Ok(mut running) = TEST_QUEUES.lock() {
+            running.remove(&team_id);
+        }
+    }
+}
+
 fn test_queue_tick(store: &mut Store, team_id: &str, now: f64) -> anyhow::Result<()> {
     use chrono::Timelike;
     let team = store.load(team_id)?.with_context(|| format!("Unknown team {team_id}"))?;
     if team.status != TeamStatus::Running {
         return Ok(());
     }
-    let project = std::path::Path::new(&team.folder);
+    // Task 174: queued suites run where the lead branch is checked out.
+    let project = std::path::Path::new(team.integration_folder());
     let loaded = crate::test_discipline::load(project, Some(&team.id)).map_err(|error| anyhow::anyhow!("{error}"))?;
     let classes = loaded.config.resources.clone();
     let night = loaded.config.schedule.clone();
@@ -8075,9 +8119,9 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
         if let Err(error) = merge_queue_tick(store, &team.id, now()) {
             eprintln!("hgs team worker: {}: merge queue: {error}", team.name);
         }
-        if let Err(error) = test_queue_tick(store, &team.id, now()) {
-            eprintln!("hgs team worker: {}: test queue: {error}", team.name);
-        }
+        // Task 174: queued suites run minutes (a merge's Qt suites tens of
+        // minutes): never in the tick. One thread per team runs them.
+        start_test_queue(store, &team.id, &team.name);
     }
     // Task 108: the build folder cleanup, at most every ten minutes, on a
     // thread of its own so removing gigabytes never holds up a tick.
@@ -8260,9 +8304,11 @@ fn sandbox_request(member: &Member, folder: &Path, request: &Value) -> Value {
 /// from the team's folder, never built into Zerus, so another project gets its
 /// own branch.
 fn lead_branch(team: &Team) -> anyhow::Result<String> {
-    anyhow::ensure!(!team.folder.is_empty(), "The team has no folder to merge from");
+    // Task 174: the lead branch is the integration folder's branch.
+    let folder = team.integration_folder();
+    anyhow::ensure!(!folder.is_empty(), "The team has no folder to merge from");
     let deadline = Instant::now() + Duration::from_secs(20);
-    let out = super::super::worktrees::git(Path::new(&team.folder), &["rev-parse", "--abbrev-ref", "HEAD"], deadline)
+    let out = super::super::worktrees::git(Path::new(folder), &["rev-parse", "--abbrev-ref", "HEAD"], deadline)
         .map_err(|error| anyhow::anyhow!("the lead's branch was not read: {}", error.detail))?;
     let branch = String::from_utf8_lossy(&out).trim().to_owned();
     super::templates::check_branch(&branch)?;
@@ -8332,7 +8378,7 @@ fn run_outcome(team: &Team, member: &Member, folder: &Path, request: &Value) -> 
             "This team works in one shared folder; Zerus does not merge the lead's branch into it"
         );
         let branch = lead_branch(team)?;
-        return Ok(merge_lead(&mine, &team.folder, &branch, timeout));
+        return Ok(merge_lead(&mine, team.integration_folder(), &branch, timeout));
     }
     if let Some(payload) = &plan.commit {
         // B4/U21: the commit template is Zerus' own code, not a subprocess: the

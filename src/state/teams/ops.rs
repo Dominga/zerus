@@ -212,6 +212,14 @@ fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
         super::templates::check_branch(&sample).context("The task branch template does not give a valid branch name")?;
     }
     ensure!(settings.base_branch.is_empty() || super::templates::check_branch(&settings.base_branch).is_ok(), "The base branch is not a valid branch name");
+    // Task 174: an absolute folder; the queue checks at use that it is a
+    // checkout of the team's repository and waits with a note when not.
+    let integration = settings.integration_folder.trim();
+    ensure!(
+        integration.is_empty()
+            || (integration.chars().count() <= 1000 && !integration.chars().any(char::is_control) && std::path::Path::new(integration).is_absolute()),
+        "The integration folder is an absolute path of at most 1000 characters"
+    );
     // N19: a short list of folder paths; Zerus does not read them.
     ensure!(settings.evidence_folders.len() <= 20, "A team lists at most 20 evidence folders");
     for folder in &settings.evidence_folders {
@@ -1212,7 +1220,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-pub(crate) const OWNER_SETTINGS: [&str; 25] = [
+pub(crate) const OWNER_SETTINGS: [&str; 26] = [
     "approval",
     // Task 126: the owner chooses the team's memory and its store.
     "memory",
@@ -1235,6 +1243,8 @@ pub(crate) const OWNER_SETTINGS: [&str; 25] = [
     "land_allowed",
     "branch_per_task",
     "base_branch",
+    // Task 174: where the merge queue merges and tests.
+    "integration_folder",
     // U52: only the owner lets Zerus launch a crashed member again.
     "restart_crashed",
     // U56: only the owner lets the lead restart a stuck member.

@@ -210,6 +210,12 @@ pub(crate) struct Settings {
     /// U48: the branch a task's branch starts from; empty is the lead's branch.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub base_branch: String,
+    /// Task 174 (owner, 2026-11-07): the checkout of the team's repository
+    /// whose branch integrates the team's work: the merge queue merges into
+    /// it and tests there, and members merge from it (git-merge-lead). Empty
+    /// is the team's folder. Only the owner sets it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub integration_folder: String,
     /// U52: a member session that exits on its own is launched again into its
     /// conversation, at most three times an hour. On by default (owner,
     /// 2026-11-05), also for a team stored before, and always written so the
@@ -360,6 +366,7 @@ impl Default for Settings {
             land_allowed: false,
             branch_per_task: None,
             base_branch: String::new(),
+            integration_folder: String::new(),
             restart_crashed: true,
             stuck_minutes: 0,
             lead_restarts_stuck: false,
@@ -2707,6 +2714,16 @@ pub(crate) struct StopNotice {
 }
 
 impl Team {
+    /// Task 174: the folder whose branch integrates the team's work (the lead
+    /// branch): the owner's `integration_folder`, else the team's folder.
+    pub(crate) fn integration_folder(&self) -> &str {
+        if self.settings.integration_folder.trim().is_empty() {
+            &self.folder
+        } else {
+            self.settings.integration_folder.trim()
+        }
+    }
+
     /// Task #58: the mode phase `n` plans in: its own, else the team's.
     pub(crate) fn phase_mode(&self, n: u32) -> PlanMode {
         self.phase_modes.get(&n).copied().unwrap_or(self.plan_mode)

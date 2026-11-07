@@ -124,6 +124,28 @@ The startup canary is created with exclusive, no-follow creation inside an atomi
 The system binary and keychains stay untouched. Native original-child/signature
 controls continue to select their own original executables.
 
+The private Bash launcher preserves real login startup and the original command
+and positional arguments. After startup, it restores only the private `ps`
+directory ahead of system tools: macOS `path_helper` otherwise moves the
+unusable setuid `/bin/ps` ahead of it. Explicit shell choices remain explicit.
+The `mktemp` shim preserves explicit template paths and `-p` parents; only an
+implicit parent is redirected to the private job directory. Neither routing
+change adds Seatbelt permissions.
+
+For a reviewed runner fix against frozen product source, select the separately
+reviewed runner with `--runner-sha FULL_RUNNER_COMMIT`, while `--sha` remains the
+product commit. Supply the unchanged `local*.py` helpers from that runner commit.
+Preparation verifies their bytes against the immutable runner tree before any
+helper executes, then compiles those captured bytes directly. Cached bytecode
+and caller package paths cannot supply helper code. The command selects the
+same interpreter in isolated mode before its other imports. The workflow and
+job checkouts still come from the product tree. The
+report records both `runner_commit` and `source_commit`, plus helper hashes.
+This does not establish trust in an unreviewed runner: review is a prerequisite.
+Compare affected target results with the original run rather than replacing its
+failures. For CLI targets, include `cli-macos-debug` as their required exact-source
+binary producer.
+
 Independent exact-source CLI and fake-agent builds precede integration and
 real-agent tests. Their executable hashes bind that local handoff; a failed
 unit suite still fails its job and cannot conceal those independent suites;

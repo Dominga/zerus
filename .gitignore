@@ -13,6 +13,8 @@ compile_commands.json
 __pycache__/
 /target/
 /artifacts/
+# The release candidate's per-commit evidence (scripts/release-candidate.py).
+/.zerus-release/
 /.ci-build/
 /dist/
 

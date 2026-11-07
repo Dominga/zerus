@@ -45,18 +45,25 @@ def main() -> int:
     results.mkdir(parents=True, exist_ok=True)
     client = ROOT / "client"
     target = ROOT / "target/windows-next"
+    # Task 192: the local candidate is an experimental fork build, as the
+    # whitewh-exp-* runner leg is: no build number and no feed, so it neither
+    # updates nor gets updated. The same two values go to the Tauri build
+    # (embedded) and to the zip's build-info.json, which check-windows-portable
+    # compares; a fixed build "1" with an empty feed matched neither.
+    fork_build = os.environ.get("ZERUS_FORK_BUILD", "")
+    fork_feed = os.environ.get("ZERUS_FORK_FEED_URL", "")
     run(["npm", "ci"], cwd=client, dry=args.dry_run)
     run(
         ["npm", "run", "tauri", "--", "build", "--ci", "--no-bundle",
          "--config", "src-tauri/tauri.windows.conf.json", "--features", "video"],
         cwd=client,
         env={"CARGO_TARGET_DIR": str(target), "CARGO_BUILD_JOBS": "4",
-             "ZERUS_FORK_BUILD": "1",
-             "ZERUS_FORK_FEED_URL": os.environ.get("ZERUS_FORK_FEED_URL", "")},
+             "ZERUS_FORK_BUILD": fork_build, "ZERUS_FORK_FEED_URL": fork_feed},
         dry=args.dry_run,
     )
     run(["python", "client/scripts/collect-notices.py", "artifacts/windows-frontend-licenses"], dry=args.dry_run)
     run(["python", "scripts/package-windows.py", "--fork",
+         f"--fork-build={fork_build}", f"--fork-feed={fork_feed}",
          "--cli", "target/release/hgs.exe",
          "--gui", "target/windows-next/release/hgs-tray.exe",
          "--connector", "services/mobile/connector/target/release/zerus-mobile-connector.exe",

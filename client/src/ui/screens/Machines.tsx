@@ -1,3 +1,4 @@
+import { Dropdown } from "../lib/Dropdown";
 import { TextInput } from "../lib/TextField";
 import { Index, Show, createEffect, createMemo, createSignal, lazy, on, type JSX } from "solid-js";
 import { Icon } from "../lib/icons";
@@ -100,10 +101,8 @@ function Editor(props: { local: LocalState; peers: { row: MachineRow; state: Pee
           <button class="btn" disabled={!appearanceAvailable()} onClick={(event) => setColorEditor({ alias: name(), origin: event.currentTarget })}>
             <span class="mach-swatch" style={{ "--entity": appearance().color }} />{tr("Label color…")}
           </button>
-          <select class="field" aria-label={tr("Label style")} disabled={!appearanceAvailable()} value={appearance().vivid ? "bright" : "soft"}
-            onChange={(event) => void setSetting(`machines/vivid/${name()}`, event.currentTarget.value === "bright")}>
-            <option value="soft">{tr("Soft")}</option><option value="bright">{tr("Bright")}</option>
-          </select>
+          <Dropdown class="field" aria-label={tr("Label style")} disabled={!appearanceAvailable()} value={appearance().vivid ? "bright" : "soft"}
+            onChange={(value) => void setSetting(`machines/vivid/${name()}`, value === "bright")} options={[{ value: "soft", label: tr("Soft") }, { value: "bright", label: tr("Bright") }]} />
           <button class="btn ghost" disabled={!appearanceAvailable()} title={tr("Use the default color for this machine")} onClick={() => void setSetting(`machines/colors/${name()}`, null)}>{tr("Automatic")}</button>
         </div>
         <div class="row mach-preview">

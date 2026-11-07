@@ -317,6 +317,11 @@ pub(crate) trait TerminalBackend: Sync {
     fn attached_counts(&self) -> Result<Option<Vec<(String, String)>>> {
         Ok(None)
     }
+    /// When a client attached to terminal `name` last had input, in seconds
+    /// since the epoch: `Some(None)` with no client attached, None unknown.
+    fn last_client_input(&self, _name: &str) -> Option<Option<f64>> {
+        None
+    }
     fn panes(&self) -> Result<Vec<PaneRow>> {
         Err(UNSUPPORTED.into())
     }

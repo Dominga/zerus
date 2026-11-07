@@ -526,6 +526,222 @@ pub(super) fn check_submission(record: &Value, id: &str) -> Result<()> {
     }
 }
 
+/// The worker's view of one enabled session.
+pub(super) struct Observed<'a> {
+    pub record: &'a Value,
+    /// The exact verified agent process runs in its pane.
+    pub live: bool,
+    /// Native usage (Claude's observed cache lifetime).
+    pub usage: Value,
+}
+
+/// What one round does for one enabled session.
+#[derive(Debug, PartialEq)]
+enum Step {
+    /// Turn the setting off: it expired or its session is gone.
+    Off(&'static str, &'static str),
+    /// Send nothing; record this state.
+    Hold { state: &'static str, reason: String, next_at: Option<f64>, since: Option<f64> },
+    /// Send one ping now.
+    Send,
+}
+
+/// Never ping this close to the estimated expiry: the cache may be gone.
+const COLD_MARGIN: f64 = 30.0;
+/// Terminal input this recent means someone may be typing.
+const TYPING_SECONDS: f64 = 120.0;
+const RESUMES: &str = "Keeping it warm resumes after your next message.";
+
+fn hold(state: &'static str, reason: impl Into<String>, next_at: Option<f64>, since: Option<f64>) -> Step {
+    Step::Hold { state, reason: reason.into(), next_at, since }
+}
+
+/// One round's decision. `facts` and `input` are asked only for a due ping.
+fn decide(entry: &Entry, runtime: &Value, observed: Option<&Observed>, facts: impl FnOnce() -> Facts,
+    input: impl FnOnce() -> Option<Option<f64>>, now: f64) -> Step {
+    if entry.until.is_some_and(|until| until <= now) {
+        return Step::Off("expired", "Keep cache warm ended at the chosen time.");
+    }
+    let Some(observed) = observed else {
+        return Step::Off("gone", "The session is no longer available.");
+    };
+    let record = observed.record;
+    let since = runtime["since"].as_f64();
+    // Missed windows and unknown deliveries wait for the person's next turn.
+    let resumed = since.is_some_and(|since| record["keep_warm_real_stop_at"].as_f64().unwrap_or(0.0) > since);
+    let reason = string(runtime, "reason").to_owned();
+    match string(runtime, "state") {
+        "cold" if !resumed => return hold("cold", reason, None, since),
+        "uncertain" if !resumed => return hold("uncertain", reason, None, since),
+        "stopped" if !resumed => return hold("stopped", reason, None, since),
+        // Each round runs alone, so a dispatching state is a round that died
+        // while sending: the ping may have been typed. Never send it again.
+        "dispatching" => return hold("uncertain",
+            format!("A keep-warm ping may have been typed when its worker stopped. {RESUMES}"), None, Some(now)),
+        "warming" => {
+            let sent = runtime["sent_at"].as_f64().unwrap_or(0.0);
+            let answered = last_turn_at(record).is_some_and(|at| at > sent) && !record["keep_warm_turn"].is_object();
+            if !answered && now - sent > TURN_SECONDS {
+                return hold("uncertain", format!("No reply to the last keep-warm ping was seen. {RESUMES}"), None, Some(now));
+            }
+            if !answered {
+                return hold("warming", "", None, since);
+            }
+        }
+        _ => {}
+    }
+    if !observed.live || record["paused"] == true {
+        return hold("paused", "The agent is not running.", None, None);
+    }
+    if record["phase"] == "error" && record["recovery_user_text"] == TEXT {
+        return hold("stopped", format!("The last keep-warm ping failed. {RESUMES}"), None, Some(now));
+    }
+    let rule = eligibility(record, &observed.usage, last_turn_at(record));
+    if !rule.supported {
+        return hold("unsupported", rule.reason, None, None);
+    }
+    if !telemetry::settled(record) || record["keep_warm_turn"].is_object() {
+        return hold("waiting", "The agent is working.", None, None);
+    }
+    let (Some(due), Some(expires)) = (rule.due_at(), rule.expires_at) else {
+        return hold("waiting", rule.reason, None, None);
+    };
+    if expires - now < COLD_MARGIN {
+        return hold("cold", format!("The cache went cold. {RESUMES}"), None, Some(now));
+    }
+    if now < due {
+        return hold("waiting", "", Some(due), None);
+    }
+    let facts = facts();
+    if facts.background != Some(0) {
+        return hold("waiting", "Background work is running.", None, None);
+    }
+    if facts.schedules > 0 {
+        return hold("waiting", "The agent has scheduled jobs.", None, None);
+    }
+    if facts.recovery_active {
+        return hold("waiting", "Automatic recovery is active.", None, None);
+    }
+    if let Some(Some(at)) = input() {
+        if now - at < TYPING_SECONDS {
+            return hold("waiting", "Someone is typing in Terminal.", None, None);
+        }
+    }
+    Step::Send
+}
+
+/// The enabled session's current record: by its session ID, so a rename
+/// keeps it, else by its saved label with the same owner key.
+fn bound_record(owner: &str, entry: &Entry) -> Option<Value> {
+    let record = if session_id::canonical(owner) { storage::read_id(owner).ok()? } else { read(&entry.name).ok()? };
+    let archived = !string(&record, "archive_id").is_empty() || record["state"] == "archived";
+    (storage::owner_key(&record) == owner && !archived).then_some(record)
+}
+
+fn save_runtime(owner: &str, value: &Value) -> Result<()> {
+    atomic(&runtime_path(owner), &value.to_string())
+}
+
+/// Turn an expired or orphaned setting off, unless it changed meanwhile.
+fn turn_off(owner: &str, entry: &Entry) -> Result<()> {
+    let _guard = lock(Some(&lock_path()))?;
+    let mut store = read_store(&path())?;
+    if let Some(current) = store.sessions.get_mut(owner).filter(|current| *current == entry) {
+        current.enabled = false;
+        current.revision += 1;
+        current.set_at = now();
+        persist(&path(), &store)?;
+    }
+    Ok(())
+}
+
+/// Send one ping. The guarded submit re-checks everything under the input
+/// lock; only a refusal before any input lets a later round try again.
+fn send(owner: &str, record: &Value, mut runtime: Value, now: f64) -> Result<()> {
+    let request_id = uuid::Uuid::new_v4().to_string();
+    for (key, value) in [("state", json!("dispatching")), ("request_id", json!(request_id)), ("since", json!(now)),
+        ("reason", json!("")), ("next_at", Value::Null)] {
+        runtime[key] = value;
+    }
+    save_runtime(owner, &runtime)?;
+    let payload = json!({"request_id":request_id,"text":TEXT,"expected_run_id":record["run_id"],
+        "expected_conversation_id":record["conversation_id"]});
+    let result = input::submit_keep_warm(string(record, "name"), payload.to_string().as_bytes(), &request_id);
+    match result {
+        input::Submission::Receipt(_) => {
+            runtime["state"] = json!("warming");
+            runtime["sent_at"] = json!(now);
+            runtime["last_ping_at"] = json!(now);
+            runtime["pings"] = json!(runtime["pings"].as_u64().unwrap_or(0) + 1);
+        }
+        input::Submission::NotOffered(witness) => {
+            runtime["state"] = json!("waiting");
+            runtime["reason"] = json!(witness.reason);
+            runtime["since"] = Value::Null;
+        }
+        input::Submission::Unknown(error) => {
+            runtime["state"] = json!("uncertain");
+            runtime["reason"] = json!(format!("The last keep-warm delivery is unknown: {}. {RESUMES}", journal::clipped(&json!(error), 300)));
+        }
+    }
+    save_runtime(owner, &runtime)
+}
+
+fn round(owner: &str, entry: &Entry, panes: &Snapshot, now: f64) -> Result<()> {
+    let runtime = read_runtime(owner);
+    let record = bound_record(owner, entry);
+    let observed = record.as_ref().map(|record| Observed {
+        record,
+        live: matches(record, panes_of(panes, record)) && process_alive(record),
+        usage: if string(record, "agent") == "claude" { usage::read(record) } else { Value::Null },
+    });
+    let step = decide(entry, &runtime, observed.as_ref(),
+        || record.as_ref().map_or(Facts { background: None, schedules: 0, recovery_active: false }, Facts::observe),
+        || record.as_ref().and_then(|record| backend::current().last_client_input(terminal_name(record))), now);
+    match step {
+        Step::Off(state, reason) => {
+            turn_off(owner, entry)?;
+            save_runtime(owner, &json!({"state":state,"reason":reason,"since":now,"pings":runtime["pings"]}))
+        }
+        Step::Hold { state, reason, next_at, since } => {
+            let mut next = runtime.clone();
+            if !next.is_object() {
+                next = json!({});
+            }
+            for (key, value) in [("state", json!(state)), ("reason", json!(reason)), ("next_at", json!(next_at)), ("since", json!(since))] {
+                next[key] = value;
+            }
+            if next != runtime { save_runtime(owner, &next) } else { Ok(()) }
+        }
+        Step::Send => send(owner, record.as_ref().unwrap(), if runtime.is_object() { runtime } else { json!({}) }, now),
+    }
+}
+
+/// One keep-warm round over the enabled sessions of this computer. Rounds
+/// never overlap: a second one (the CLI `recovery tick` beside the worker)
+/// skips, so one window never gets two pings.
+pub(super) fn tick() -> Result<()> {
+    let Some(store) = load() else { return Ok(()) };
+    let enabled: Vec<(String, Entry)> = store.sessions.into_iter().filter(|(_, entry)| entry.enabled).collect();
+    if enabled.is_empty() {
+        return Ok(());
+    }
+    private_dir(&root().join("recovery/keep-warm"))?;
+    let file = crate::platform::private_open(fs::OpenOptions::new().create(true).truncate(false).write(true))
+        .open(root().join("recovery/keep-warm.lock")).map_err(|e| e.to_string())?;
+    if fs2::FileExt::try_lock_exclusive(&file).is_err() {
+        return Ok(());
+    }
+    let _round = crate::platform::FileLock::held(file);
+    let panes = live()?;
+    for (owner, entry) in enabled {
+        if let Err(error) = round(&owner, &entry, &panes, now()) {
+            eprintln!("hgs keep-warm: {error}");
+        }
+    }
+    Ok(())
+}
+
 /// When the last main-agent turn or ping ended, the start of the current
 /// cache lifetime for agents whose TTL is not observed per request.
 pub(super) fn last_turn_at(record: &Value) -> Option<f64> {
@@ -943,6 +1159,95 @@ mod tests {
             assert_eq!(failed["keep_warm"], "turn", "{kind}");
             assert!(record.get("keep_warm_turn").is_none(), "{kind}");
         }
+    }
+
+    fn enabled() -> Entry {
+        Entry { name: "codex/project/warm".into(), enabled: true, until: Some(NOW + 3600.0), revision: 1, set_at: NOW - 60.0 }
+    }
+
+    /// An idle Codex session whose last turn ended `ago` seconds before NOW.
+    fn ended(ago: f64) -> Value {
+        let mut record = idle();
+        record["agent"] = json!("codex");
+        record["model"] = json!("gpt-6.1-sol");
+        record["cache_touched_at"] = json!(NOW - ago);
+        record
+    }
+
+    fn step(entry: &Entry, runtime: Value, record: Option<&Value>, facts: Facts, input: Option<Option<f64>>) -> Step {
+        let observed = record.map(|record| Observed { record, live: true, usage: Value::Null });
+        decide(entry, &runtime, observed.as_ref(), || facts, || input, NOW)
+    }
+
+    fn held(state: &str) -> impl Fn(&Step) -> bool + '_ {
+        move |step| matches!(step, Step::Hold { state: held, .. } if *held == state)
+    }
+
+    #[test]
+    fn the_round_pings_only_a_due_warm_idle_session() {
+        let due = ended(1500.0);
+        assert_eq!(step(&enabled(), Value::Null, Some(&due), quiet(), Some(None)), Step::Send);
+        // Typing in an attached terminal two minutes ago no longer blocks it.
+        assert_eq!(step(&enabled(), Value::Null, Some(&due), quiet(), Some(Some(NOW - 121.0))), Step::Send);
+        assert!(held("waiting")(&step(&enabled(), Value::Null, Some(&due), quiet(), Some(Some(NOW - 30.0)))));
+        // Not due yet: it says when.
+        let early = step(&enabled(), Value::Null, Some(&ended(600.0)), quiet(), Some(None));
+        assert_eq!(early, Step::Hold { state: "waiting", reason: String::new(), next_at: Some(NOW + 840.0), since: None });
+        // Past or within 30 s of the estimated expiry: cold, nothing sent.
+        assert!(held("cold")(&step(&enabled(), Value::Null, Some(&ended(1775.0)), quiet(), Some(None))));
+        assert!(held("cold")(&step(&enabled(), Value::Null, Some(&ended(4000.0)), quiet(), Some(None))));
+        for facts in [Facts { background: Some(1), ..quiet() }, Facts { background: None, ..quiet() },
+            Facts { schedules: 2, ..quiet() }, Facts { recovery_active: true, ..quiet() }] {
+            assert!(held("waiting")(&step(&enabled(), Value::Null, Some(&due), facts, Some(None))));
+        }
+        let mut busy = due.clone();
+        busy["activity"] = json!("busy");
+        assert!(held("waiting")(&step(&enabled(), Value::Null, Some(&busy), quiet(), Some(None))));
+        let mut old = due.clone();
+        old["model"] = json!("gpt-5.5");
+        assert!(held("unsupported")(&step(&enabled(), Value::Null, Some(&old), quiet(), Some(None))));
+    }
+
+    #[test]
+    fn expiry_and_a_vanished_session_turn_the_setting_off() {
+        let late = Entry { until: Some(NOW - 1.0), ..enabled() };
+        assert!(matches!(step(&late, Value::Null, Some(&ended(1500.0)), quiet(), Some(None)), Step::Off("expired", _)));
+        assert!(matches!(step(&enabled(), Value::Null, None, quiet(), Some(None)), Step::Off("gone", _)));
+        let always = Entry { until: None, ..enabled() };
+        assert_eq!(step(&always, Value::Null, Some(&ended(1500.0)), quiet(), Some(None)), Step::Send);
+    }
+
+    #[test]
+    fn missed_windows_and_unknown_deliveries_wait_for_the_next_real_turn() {
+        for state in ["cold", "uncertain", "stopped"] {
+            let runtime = json!({"state":state,"reason":"kept","since":NOW - 100.0});
+            let mut record = ended(1500.0);
+            assert!(held(state)(&step(&enabled(), runtime.clone(), Some(&record), quiet(), Some(None))), "{state}");
+            record["keep_warm_real_stop_at"] = json!(NOW - 50.0);
+            assert_eq!(step(&enabled(), runtime, Some(&record), quiet(), Some(None)), Step::Send, "{state}");
+        }
+        // A round that died while sending never sends again on its own.
+        let dispatching = json!({"state":"dispatching","request_id":"ping-1","since":NOW - 5.0});
+        assert!(held("uncertain")(&step(&enabled(), dispatching, Some(&ended(1500.0)), quiet(), Some(None))));
+        // A sent ping waits for its turn; without one it becomes uncertain.
+        let warming = json!({"state":"warming","request_id":"ping-1","sent_at":NOW - 20.0,"since":NOW - 20.0});
+        assert!(held("warming")(&step(&enabled(), warming, Some(&ended(1500.0)), quiet(), Some(None))));
+        let silent = json!({"state":"warming","request_id":"ping-1","sent_at":NOW - TURN_SECONDS - 1.0,"since":NOW - 700.0});
+        assert!(held("uncertain")(&step(&enabled(), silent, Some(&ended(1500.0)), quiet(), Some(None))));
+        let answered = json!({"state":"warming","request_id":"ping-1","sent_at":NOW - 20.0,"since":NOW - 20.0});
+        assert!(held("waiting")(&step(&enabled(), answered, Some(&ended(10.0)), quiet(), Some(None))));
+        // A failed ping stops keep-warm until the person's next turn.
+        let mut failed = ended(1500.0);
+        failed["phase"] = json!("error");
+        failed["recovery_user_text"] = json!(TEXT);
+        assert!(held("stopped")(&step(&enabled(), Value::Null, Some(&failed), quiet(), Some(None))));
+    }
+
+    #[test]
+    fn a_paused_or_stopped_agent_gets_nothing() {
+        let record = ended(1500.0);
+        let observed = Observed { record: &record, live: false, usage: Value::Null };
+        assert!(held("paused")(&decide(&enabled(), &Value::Null, Some(&observed), quiet, || Some(None), NOW)));
     }
 
     #[test]

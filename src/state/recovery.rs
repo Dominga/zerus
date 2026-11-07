@@ -917,12 +917,20 @@ fn worker() -> Result<i32> {
     };
     recover_interrupted_jobs()?;
     super::worktree_maintenance::worker();
+    // Keep-warm rounds run beside recovery, whatever its policy says.
+    let mut keep_warm_at: Option<std::time::Instant> = None;
     loop {
         if replaced() || owner.yields() {
             return Ok(0);
         }
         if let Err(e) = tick() {
             eprintln!("hgs recovery: {e}");
+        }
+        if keep_warm_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(15)) {
+            keep_warm_at = Some(std::time::Instant::now());
+            if let Err(e) = keep_warm::tick() {
+                eprintln!("hgs keep-warm: {e}");
+            }
         }
         std::thread::sleep(Duration::from_secs(2));
     }
@@ -967,6 +975,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         Some("worker") if args.len() == 1 => return worker(),
         Some("tick") if args.len() == 1 => {
             tick()?;
+            keep_warm::tick()?;
             return Ok(0);
         }
         Some("get") if args.len() == 1 => {

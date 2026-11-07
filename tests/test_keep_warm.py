@@ -148,6 +148,63 @@ class KeepWarm(unittest.TestCase):
         self.assertIsNone(self.inspect().get("recovery"))
         self.assertEqual(self.received(), b"")
 
+    def due(self, ago=1500):
+        """An idle Codex session on a 30-minute cache whose last turn ended `ago` seconds back."""
+        self.record.update(model="gpt-6.1-sol", cache_touched_at=time.time() - ago, last_event_at=time.time() - ago)
+        self.write_record()
+
+    def tick(self):
+        self.command("recovery", "tick")
+
+    def test_a_due_session_gets_exactly_one_ping_then_waits_for_its_turn(self):
+        self.due()
+        self.change(hours=1)
+        self.tick()
+        self.wait_for(lambda: self.received().endswith(b"\r"))
+        raw = self.received()
+        self.assertIn(TEXT.encode(), raw)
+        self.assertEqual(raw.count(b"\r"), 1)
+        warm = self.inspect()["keep_warm"]
+        self.assertEqual(warm["state"], "warming")
+        receipts = [json.loads(path.read_text()) for path in (self.state / "input_receipts").glob("*.json")]
+        self.assertEqual([(r["origin"], r["status"], r["text"]) for r in receipts], [("keep_warm", "submitted", TEXT)])
+        # Another round in the same window sends nothing more.
+        self.tick()
+        time.sleep(0.3)
+        self.assertEqual(self.received(), raw)
+        # The ping's turn ends; the next ping waits for the next window.
+        self.hook("UserPromptSubmit", prompt=TEXT)
+        self.hook("Stop", last_assistant_message="OK")
+        self.tick()
+        warm = self.inspect()["keep_warm"]
+        self.assertEqual(warm["state"], "waiting")
+        self.assertGreater(warm["next_at"], time.time() + 1400)
+        self.assertEqual(self.received(), raw)
+
+    def test_cold_busy_and_expired_sessions_get_no_ping(self):
+        self.due(ago=1790)
+        self.change(hours=1)
+        self.tick()
+        self.assertEqual(self.inspect()["keep_warm"]["state"], "cold")
+        self.due()
+        self.tick()
+        self.assertEqual(self.inspect()["keep_warm"]["state"], "cold", "a missed window waits for a real turn")
+        self.record.update(cache_touched_at=time.time() - 1500, keep_warm_real_stop_at=time.time(), activity="busy", phase="working")
+        self.write_record()
+        self.tick()
+        self.assertEqual(self.inspect()["keep_warm"]["reason"], "The agent is working.")
+        store = json.loads((self.state / "keep-warm.json").read_text())
+        for entry in store["sessions"].values():
+            entry["until"] = time.time() - 1
+        (self.state / "keep-warm.json").write_text(json.dumps(store))
+        self.record.update(activity="idle", phase="idle")
+        self.write_record()
+        self.tick()
+        listed = self.listed()["keep_warm"]
+        self.assertEqual((listed["enabled"], listed["state"]), (False, "off"))
+        time.sleep(0.3)
+        self.assertEqual(self.received(), b"")
+
     def test_a_stale_conversation_is_refused(self):
         stale = self.command("keep-warm", self.name, "--json", ok=False, payload=dict(
             expected_run_id=self.run_id, expected_conversation_id="other", expected_revision=0,

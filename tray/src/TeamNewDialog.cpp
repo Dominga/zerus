@@ -202,6 +202,12 @@ TeamNewDialog::TeamNewDialog(TeamController *teams, HgsClient *client, const QLi
     options->addRow(tr("Planning"), m_planning);
     m_review = new QCheckBox(tr("Review plan before running")); m_review->setObjectName("teamNewReview"); m_review->setChecked(true);
     options->addRow(tr("Approval"), m_review);
+    // Task 127: RustCodeLore by default; a project with memory on overrides it
+    // with a shared workspace at Create team.
+    m_memory = combo("teamNewMemory");
+    m_memory->addItem(tr("RustCodeLore"), QStringLiteral("lore"));
+    m_memory->addItem(tr("Plain memory"), QStringLiteral("plain"));
+    options->addRow(tr("Memory"), m_memory);
     outer->addLayout(options);
     // Footer.
     auto *footer = new QHBoxLayout;
@@ -595,7 +601,8 @@ void TeamNewDialog::create()
     const bool worktrees = m_worktrees->isChecked();
     const QString folderPolicy = m_folderPolicy ? m_folderPolicy->currentData().toString() : (worktrees ? QStringLiteral("worktree") : QStringLiteral("shared"));
     QJsonObject settings{{"folder_policy", folderPolicy}, {"approval", m_review->isChecked() ? "review" : "auto"},
-                         {"max_members", m_maxMembers->value()}};
+                         {"max_members", m_maxMembers->value()},
+                         {"memory", QJsonObject{{"mode", m_memory ? m_memory->currentData().toString() : QStringLiteral("lore")}}}};
     if (t && !t->phaseApproval.isEmpty()) settings.insert("phase_approval", t->phaseApproval);
     QJsonObject input{{"name", m_name->text().trimmed()}, {"goal", m_goal->toPlainText().trimmed()}, {"folder", m_folder->text().trimmed()},
                       {"project", m_project}, {"project_id", property("ironRulesProjectId").toString()}, {"template", t ? t->id : QString()}, {"lead", lead}, {"members", members}, {"tasks", tasks},
@@ -609,3 +616,4 @@ void TeamNewDialog::create()
         accept();
     });
 }
+

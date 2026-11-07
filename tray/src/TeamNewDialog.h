@@ -89,7 +89,7 @@ private:
     // N10: the current shared choice came from the non-Git folder rule, so
     // resuming typing returns it to auto.
     bool m_forcedShared = false;
-    QComboBox *m_planning = nullptr;
+    QComboBox *m_planning = nullptr, *m_memory = nullptr;
     QSpinBox *m_maxMembers = nullptr;
     QPlainTextEdit *m_goal = nullptr;
     QLabel *m_gitNote = nullptr, *m_summary = nullptr;
@@ -99,3 +99,4 @@ private:
     QString m_project, m_created;
     bool m_dark = false;   // #737: the theme of the window it opened over
 };
+

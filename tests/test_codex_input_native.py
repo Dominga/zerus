@@ -10,6 +10,7 @@ import time
 import tomllib
 import uuid
 import unittest
+from unittest import mock
 
 import test_clear_context_native as native
 import test_codex_async_questions_native as questions
@@ -144,6 +145,36 @@ class NativeCodexStartup(test_pause.Harness):
             time.sleep(.1)
         self.fail(label + '\n' + self.screen())
 
+    def pause_settled_original(self):
+        # SessionStart can publish idle before this turn's UserPromptSubmit.
+        # Only these preflight refusals prove that pause sent no signal.
+        name = self.name
+        original = self.binding(name)
+        fields = ('run_id', 'conversation_id', 'pid', 'process_start')
+        identity = tuple(original.get(key) for key in fields)
+        self.assertTrue(all(identity), 'The fixture must retain its original native binding')
+        refusals = {
+            f'hgs: {name}: activity changed while checking; retry pause',
+            f'hgs: {name}: agent is busy or unconfirmed; wait for its answer before pausing',
+        }
+        deadline = time.monotonic() + 20  # Existing fixture command budget, not per retry.
+        last = ''
+        while True:
+            current = self.binding(name)
+            self.assertEqual(tuple(current.get(key) for key in fields), identity,
+                             'The original changed while waiting to pause; never adopt another run')
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self.fail('The original did not settle for pause within 20 s: ' + last)
+            result = subprocess.run([str(test_pause.HGS), 'pause', name], env=self.env,
+                                    capture_output=True, text=True, timeout=remaining)
+            if result.returncode == 0:
+                return result.stdout
+            last = result.stdout + result.stderr
+            if result.returncode != 1 or result.stdout or result.stderr.strip() not in refusals:
+                self.fail(last)  # A possible signal, timeout or another refusal is never retried.
+            time.sleep(min(.1, max(0, deadline - time.monotonic())))
+
     def launch(self, trust=False):
         self.name = 'codex/p/startup'
         args = [] if trust else ['--dangerously-bypass-hook-trust']
@@ -233,7 +264,7 @@ class NativeCodexStartup(test_pause.Harness):
         original = hooks.read_bytes()
         stamp = hooks.stat().st_mtime_ns
         previous = self.binding(self.name)['run_id']
-        self.hgs('pause', self.name)
+        self.pause_settled_original()
         self.hgs('resume', self.name, '-d')
         self.until('The unchanged resume must reach its native composer', lambda:
                    self.binding(self.name).get('run_id') != previous and '›' in self.screen()
@@ -249,7 +280,7 @@ class NativeCodexStartup(test_pause.Harness):
         for mode in ('resume', 'restore'):
             with self.subTest(mode=mode):
                 previous = self.binding(self.name)['run_id']
-                self.hgs('pause', self.name)
+                self.pause_settled_original()
                 # Change one of our fixture's existing definitions, not its
                 # executable or trust state. Codex must request new consent.
                 document = json.loads(hooks.read_text())
@@ -284,6 +315,34 @@ class NativeCodexStartup(test_pause.Harness):
                            and not self.binding(self.name).get('expected_id'))
                 self.assertEqual(self.binding(self.name)['conversation_id'], conversation)
                 self.assertEqual(sum(row['texts'][-1:] == [text] for row in self.server.requests), 1)
+
+    def test_hook_review_pause_rechecks_each_original_after_preflight_refusals(self):
+        real_run = subprocess.run
+        refused, paused = {}, []
+        errors = ('agent is busy or unconfirmed; wait for its answer before pausing',
+                  'activity changed while checking; retry pause')
+
+        def run(argv, *args, **kwargs):
+            if argv == [str(test_pause.HGS), 'pause', getattr(self, 'name', None)]:
+                run_id = self.binding(self.name)['run_id']
+                count = refused.get(run_id, 0)
+                if count < len(errors):
+                    refused[run_id] = count + 1
+                    # A fixture preflight refusal: no native pause call occurred.
+                    return subprocess.CompletedProcess(argv, 1, '', f'hgs: {self.name}: {errors[count]}\n')
+                result = real_run(argv, *args, **kwargs)
+                if result.returncode == 0:
+                    paused.append(run_id)
+                return result
+            return real_run(argv, *args, **kwargs)
+
+        with mock.patch.object(subprocess, 'run', side_effect=run):
+            # Delegate every trust, send, resume, archive and scope assertion to
+            # the original native contract. A missing retry at either call site fails.
+            self.test_resumed_and_restored_hook_review_blocks_input_until_the_person_answers()
+        self.assertEqual(len(refused), 3)
+        self.assertEqual(list(refused.values()), [2, 2, 2])
+        self.assertEqual(paused, list(refused))
 
     def untrusted(self, git=False):
         self.server.collaboration = False

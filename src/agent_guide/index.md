@@ -12,7 +12,7 @@ Session names look like provider/project/tag. [@h] marks an optional @alias.
   hgs guide wait              wait for a result another session owes you
   hgs guide team              lead or work in an agent team
   hgs guide team-tests        affected tests, never a full suite
-  hgs guide team-lead         phases and finishing
+  hgs guide team-lead         plan, decide, ship
   hgs guide team-custom       models, stages, branches, scale
   hgs guide team-draft        plan a draft with the owner
   hgs guide team-input        member shape, --json-file

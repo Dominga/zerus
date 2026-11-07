@@ -33,6 +33,10 @@ const TOPICS: &[(&str, &str)] = &[
     ("stop", include_str!("agent_guide/stop.md")),
     ("tasks", include_str!("agent_guide/tasks.md")),
 ];
+/// Task 166: the lead's page is one readable page of plain prose with worked
+/// examples, 4 to 6 KB (also in a CRLF checkout); every other page keeps 2400.
+const LEAD_LIMIT: usize = 6000;
+const LEAD_MIN: usize = 4000;
 const USAGE: &str = "usage: hgs guide [send|wait|team|team-tests|team-lead|team-custom|team-draft|team-input|team-tree|team-run|team-safe|team-propose|team-lore|team-park|team-broker|team-cpp|run|tests|designer|launch|stop|tasks]";
 
 pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
@@ -57,16 +61,32 @@ mod tests {
         std::iter::once(("index", INDEX)).chain(TOPICS.iter().copied())
     }
 
+    /// Task 166: every page is at most 2400 bytes (about 600 tokens), except the
+    /// lead's one readable page.
+    fn limit(name: &str) -> usize {
+        if name == "team-lead" { LEAD_LIMIT } else { 2400 }
+    }
+
+    /// Lower-cased with every run of white space one space, so a phrase holds
+    /// across a line break and a capital.
+    fn flat(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    }
+
+    fn has(page: &str, phrase: &str) -> bool {
+        flat(page).contains(&flat(phrase))
+    }
+
     #[test]
     fn pages_stay_small_plain_and_free_of_local_details() {
         for (name, text) in pages() {
             // About four bytes a token: a page costs an agent at most ~600.
-            assert!(text.len() <= 2400, "{name} has {} bytes", text.len());
+            assert!(text.len() <= limit(name), "{name} has {} bytes", text.len());
             // A CRLF checkout adds one byte for each LF that has none: the
             // page must still fit (N8).
             let bare = text.matches('\n').count() - text.matches("\r\n").count();
             let crlf = text.len() + bare;
-            assert!(crlf <= 2400, "{name} has {crlf} bytes in a CRLF checkout");
+            assert!(crlf <= limit(name), "{name} has {crlf} bytes in a CRLF checkout");
             assert!(text.is_ascii(), "{name} is not ASCII");
             assert!(text.ends_with('\n') && !text.contains('\t'), "{name}");
             assert!(text.lines().all(|line| line.len() <= 100), "{name} has a long line");
@@ -138,10 +158,10 @@ mod tests {
     #[test]
     fn the_lead_protocol_names_the_profile_and_its_top_three_losses() {
         let lead = TOPICS.iter().find(|(name, _)| *name == "team-lead").unwrap().1;
-        assert!(lead.contains("hgs team profile --json"), "{lead}");
-        assert!(lead.contains("top three losses"), "{lead}");
-        assert!(lead.contains("tokens per accepted task"), "{lead}");
-        assert!(lead.contains("unknown, never zero"), "{lead}");
+        assert!(has(lead, "hgs team profile --json"), "{lead}");
+        assert!(has(lead, "top three losses"), "{lead}");
+        assert!(has(lead, "tokens per accepted task"), "{lead}");
+        assert!(has(lead, "unknown, never zero"), "{lead}");
     }
 
     /// U61, task 158: the lead protocol says an approved phase runs alongside,
@@ -150,16 +170,16 @@ mod tests {
     #[test]
     fn the_lead_protocol_names_the_one_phase_start_model() {
         let lead = TOPICS.iter().find(|(name, _)| *name == "team-lead").unwrap().1;
-        assert!(lead.contains("Auto drafts (U61)"), "{lead}");
-        assert!(lead.contains("an approved phase runs alongside earlier ones"), "{lead}");
-        assert!(lead.contains("files an open task writes"), "{lead}");
-        assert!(!lead.contains("start-ahead") && !lead.contains("Work ahead"), "{lead}");
-        assert!(lead.contains("Review drafts") && lead.contains("need the owner"), "{lead}");
+        assert!(has(lead, "Auto drafts (U61)"), "{lead}");
+        assert!(has(lead, "an approved phase runs alongside earlier ones"), "{lead}");
+        assert!(has(lead, "files an open task writes"), "{lead}");
+        assert!(!has(lead, "start-ahead") && !has(lead, "Work ahead"), "{lead}");
+        assert!(has(lead, "Review drafts") && has(lead, "need the owner"), "{lead}");
         // #740: a question to the owner is a proposal, never only prose.
-        assert!(lead.contains("a question for the owner is a proposal, never only"), "{lead}");
+        assert!(has(lead, "a question for the owner is a proposal, never only"), "{lead}");
         let propose = pages().into_iter().find(|(name, _)| *name == "team-propose").unwrap().1;
         assert!(propose.contains(r#"{"kind":"question","question""#) && propose.contains("never only in your reply"), "{propose}");
-        assert!(lead.contains("no draft runs before approval"), "{lead}");
+        assert!(has(lead, "no draft runs before approval"), "{lead}");
     }
 
     /// #742: no agent installs a tool; the lead's and the tests' pages say a
@@ -179,9 +199,9 @@ mod tests {
     #[test]
     fn the_lead_protocol_says_every_task_gets_an_estimate() {
         let lead = TOPICS.iter().find(|(name, _)| *name == "team-lead").unwrap().1;
-        assert!(lead.contains("Every task gets an estimate"), "{lead}");
+        assert!(has(lead, "Every task gets an estimate"), "{lead}");
         // Task #60: follow-ups name their origin.
-        assert!(lead.contains("\"origin\":ID") && lead.contains("no dep"), "{lead}");
+        assert!(has(lead, "\"origin\":ID") && has(lead, "no dep"), "{lead}");
     }
 
     /// U63 (owner, 2026-10-31): the lead protocol says an accepted phase that
@@ -190,10 +210,10 @@ mod tests {
     #[test]
     fn the_lead_protocol_names_phase_control() {
         let lead = TOPICS.iter().find(|(name, _)| *name == "team-lead").unwrap().1;
-        assert!(lead.contains("Accepted phase not started"), "{lead}");
-        assert!(lead.contains("return-to-draft re-approves"), "{lead}");
-        assert!(lead.contains("pause-phase {phase, reason}"), "{lead}");
-        assert!(lead.contains("accept-phase (a card)"), "{lead}");
+        assert!(has(lead, "Accepted phase not started"), "{lead}");
+        assert!(has(lead, "return-to-draft re-approves"), "{lead}");
+        assert!(has(lead, "pause-phase {phase, reason}"), "{lead}");
+        assert!(has(lead, "accept-phase (a card)"), "{lead}");
         let tree = TOPICS.iter().find(|(name, _)| *name == "team-tree").unwrap().1;
         assert!(tree.contains("hgs team sub-lead"), "{tree}");
     }
@@ -203,18 +223,55 @@ mod tests {
     #[test]
     fn the_lead_proposes_owner_gates_and_never_asks_for_a_phrase() {
         let lead = TOPICS.iter().find(|(name, _)| *name == "team-lead").unwrap().1;
-        assert!(lead.contains("Owner gates are cards") && lead.contains("Never ask the owner to type a phrase"), "{lead}");
+        assert!(has(lead, "Owner gates are cards") && has(lead, "Never ask the owner to type a phrase"), "{lead}");
         // Task 97: a deferred prompt never stops the lead.
-        assert!(lead.contains("denied and queued for the owner; do everything else"), "{lead}");
-        assert!(!lead.contains("owner_word") && !lead.contains("owner's sentence"), "{lead}");
+        assert!(has(lead, "denied and queued for the owner; do everything else"), "{lead}");
+        // `hgs team decide` takes the owner's own words (task 156); a typed phrase is never asked.
+        assert!(!has(lead, "owner's sentence"), "{lead}");
         let propose = TOPICS.iter().find(|(name, _)| *name == "team-propose").unwrap().1;
-        assert!(propose.contains("Never ask the owner to type a phrase"), "{propose}");
+        assert!(has(propose, "Never ask the owner to type a phrase"), "{propose}");
         for kind in crate::state::teams::ops::OWNER_OPS {
             assert!(propose.contains(kind), "team-propose omits {kind}");
         }
         for kind in ["\"relaunch\"", "\"iron-rules\"", "base_branch", "full_tests", "max_members"] {
             assert!(propose.contains(kind), "team-propose omits {kind}");
         }
+    }
+
+    /// Task 166 (owner, 2026-11-07): the lead's guide is one page of plain prose
+    /// with a worked example for each thing a lead does, and it does not send the
+    /// lead to a dozen other pages.
+    #[test]
+    fn the_lead_page_is_one_readable_page_with_worked_examples() {
+        let lead = TOPICS.iter().find(|(name, _)| *name == "team-lead").unwrap().1;
+        let crlf = lead.len() + lead.matches('\n').count();
+        assert!((LEAD_MIN..=LEAD_LIMIT).contains(&lead.len()) && crlf <= LEAD_LIMIT, "{} bytes", lead.len());
+        for example in ["Plan a goal.", "Run phases alongside.", "Decide reports.", "Park a blocked task.", "Record a decision.", "Publish through the release gate."] {
+            assert!(lead.contains(example), "no example: {example}");
+        }
+        // Each example shows its command.
+        for command in ["hgs team plan --json", "hgs team extend --json", "hgs team accept --json", "hgs team reply --json", "hgs team decide --json", "release-candidate"] {
+            assert!(lead.contains(command), "{command}");
+        }
+        // Prose, not telegraphic fragments: most lines are nearly full width.
+        let lines: Vec<&str> = lead.lines().filter(|line| !line.trim().is_empty()).collect();
+        let long = lines.iter().filter(|line| line.len() >= 80).count();
+        assert!(long * 2 >= lines.len(), "{long} long lines of {}", lines.len());
+        // At most a handful of other pages, each an optional reference.
+        let mut topics: Vec<&str> = lead
+            .split("hgs guide ")
+            .skip(1)
+            .map(|rest| rest.split(|c: char| !c.is_ascii_alphanumeric() && c != '-').next().unwrap_or_default())
+            .collect();
+        topics.sort_unstable();
+        topics.dedup();
+        assert!(topics.len() <= 6, "{topics:?}");
+        for topic in &topics {
+            assert!(TOPICS.iter().any(|(name, _)| name == topic), "unknown topic {topic}");
+        }
+        // The lead's text left the member's page, which is the member's now.
+        let member = TOPICS.iter().find(|(name, _)| *name == "team").unwrap().1;
+        assert!(has(member, "hgs team report") && has(member, "hgs guide team-lead") && !has(member, "hgs team plan"), "{member}");
     }
 
     #[test]

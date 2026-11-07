@@ -121,7 +121,7 @@ pub(crate) fn call(
         stage.set("intent_revision");
         let revision = operation["revision"].as_u64().ok_or(())?;
         stage.set("intent_encoding");
-        let original = serde_json::to_string(operation).map_err(drop)?;
+        let original = creation::effect_checkpoint(operation).map_err(drop)?;
         let intent = wire::Intent {
             scope: read.scope.clone(),
             creation_id: id.into(),

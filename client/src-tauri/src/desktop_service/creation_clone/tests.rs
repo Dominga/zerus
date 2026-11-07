@@ -153,7 +153,20 @@ fn original_clone_child_is_bound_and_lost_reply_only_allows_a_scoped_read() {
     tauri::async_runtime::block_on(async {
         let f = fixture(json!({"clone_lost":true}));
         let (service, _cache) = connected(&f).await;
-        let (id, value) = operation();
+        let (id, mut value) = operation();
+        // A real selected-service exchange must not carry unrelated catalog
+        // rows into its bounded authenticated request. Its lost reply still
+        // permits only the original read, never another clone.
+        let rows: Vec<_> = (0..219)
+            .map(|n| {
+                json!({
+                    "path":format!("/srv/repos/{}/work-{n}", "x".repeat(160)),
+                    "branch":format!("work-{n}"),"available":true,
+                })
+            })
+            .collect();
+        value["catalog"] = json!({"common_dir":"/srv/repo/.git","worktrees":rows});
+        assert!(serde_json::to_vec(&value).unwrap().len() > wire::SOURCE_BYTES);
         assert!(
             !answer(service.clone(), id.clone(), value.clone(), true)
                 .await

@@ -162,9 +162,14 @@ def profile(root, public, temporary, system_temp=None):
         '(allow file-read* ' + ' '.join('(subpath ' + quoted(p) + ')' for p in reads + public) + ')',
         '(allow file-read* ' + ' '.join('(literal ' + quoted(p) + ')' for p in parents) + ')',
         '(allow file-read* file-write* (subpath ' + quoted(root) + ') (subpath ' + quoted(temporary) + ') (subpath "/dev"))',
+        '(allow file-ioctl (subpath "/dev"))',
+        '(allow file-read* file-write* (regex #"^/private/tmp/(zguard|zgui)-[0-9a-f]{32}(/|$)"))',
+        '(allow file-read* file-write* (regex #"^/private/tmp/hgs-svc-[0-9a-f]{16}(/|$)"))',
         '(allow network-outbound (remote ip))',
         '(allow network-inbound network-bind (local ip))',
         '(allow network* (subpath ' + quoted(temporary) + ') (subpath ' + quoted(root) + '))',
+        '(allow network* (regex #"^/private/tmp/(zguard|zgui)-[0-9a-f]{32}(/|$)"))',
+        '(allow network* (regex #"^/private/tmp/hgs-svc-[0-9a-f]{16}(/|$)"))',
         '(allow network-outbound (literal "/private/var/run/mDNSResponder"))',
     ]
     if system_temp is not None:
@@ -305,6 +310,7 @@ class Runner:
         run_temp = home / 'runner-temp'
         run_temp.mkdir(exist_ok=True)
         base_env = dict(HOME=str(home), USER='test', LOGNAME='test', LANG='en_US.UTF-8', SHELL='/bin/bash',
+                   CFFIXED_USER_HOME=str(home),
                    PATH=str(self.tools) + ':' + str(self.node) + ':/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
                    TMPDIR=str(private_tmp), TMUX_TMPDIR=str(private_tmp),
                    XDG_CONFIG_HOME=str(home / '.config'), XDG_STATE_HOME=str(home / '.local/state'),

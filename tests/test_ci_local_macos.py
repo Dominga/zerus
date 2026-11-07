@@ -61,6 +61,8 @@ class MacPlan(unittest.TestCase):
         self.assertNotIn('(subpath "/Users/example")', profile)
         self.assertIn('(literal "/private/tmp")', profile)
         self.assertNotIn('(subpath "/private/tmp")', profile)
+        self.assertNotIn('com.hgdev.hgs-tray', profile)
+        self.assertIn('(allow file-ioctl (subpath "/dev"))', profile)
 
     def test_xcode_cache_exception_is_only_the_public_cache_leaf(self):
         profile = MAC.profile('/Users/example/private-ci', [], '/private/tmp/owned-ci',

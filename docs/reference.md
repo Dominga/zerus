@@ -8704,7 +8704,7 @@ and in the Qt GUI). The store is a lore root (`lore.toml`, records in
 `HGS_STATE_DIR/lore/projects/<project id>`; Browse chooses another while the
 store holds no records. As docs/lore.md section 2.5 has it (the owner's answer
 2), a store outside any git working tree, the default among them, is its own
-private git repository, made as crates/lore `private.rs` makes it: `git init`
+private git repository, made as CodeLore's `private.rs` makes it: `git init`
 on branch `main`, the local identity `Zerus <lore@zerus.invalid>`, the marker
 `zerus-lore-store` in its git folder, `commit.mode = "plain"`, no remote, and a
 first commit "lore: a new store"; RustCodeLore commits every write. Only an

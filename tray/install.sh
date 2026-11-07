@@ -78,9 +78,9 @@ LOCAL_CLI_BUILD="${HGS_MAC_CLI_BUILD:-${CARGO_TARGET_DIR:-${SCRIPT_DIR}/../targe
 PATH="${HOME}/.cargo/bin:${PATH}"; export PATH
 LORE_BUILD="${HGS_MAC_LORE_BUILD:-${SCRIPT_DIR}/../target/lore/release/lore}"
 lore_args=()
-if [ -f "${SCRIPT_DIR}/../crates/lore/Cargo.toml" ]; then
+if [ -f "${SCRIPT_DIR}/../crates/lore-bin/Cargo.toml" ]; then
     if [ ! -x "${LORE_BUILD}" ]; then
-        cargo build --locked --release --manifest-path "${SCRIPT_DIR}/../crates/lore/Cargo.toml" \
+        cargo build --locked --release --manifest-path "${SCRIPT_DIR}/../crates/lore-bin/Cargo.toml" \
             --target-dir "${SCRIPT_DIR}/../target/lore"
     fi
     lore_args=(--lore "${LORE_BUILD}")

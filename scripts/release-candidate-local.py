@@ -46,7 +46,7 @@ def main() -> int:
     parser.add_argument("--qt-root", default=os.environ.get("QT_ROOT_DIR", r"D:/Tools/zerus-deps/Qt/6.10.3/msvc2022_64"))
     args = parser.parse_args()
     run(["cargo", "build", "--locked", "--release", "--bin", "hgs"], dry=args.dry_run)
-    run(["cargo", "build", "--locked", "--release", "--manifest-path", "crates/lore/Cargo.toml", "--target-dir", "target/lore"], dry=args.dry_run)
+    run(["cargo", "build", "--locked", "--release", "--manifest-path", "crates/lore-bin/Cargo.toml", "--target-dir", "target/lore"], dry=args.dry_run)
     run(["cargo", "build", "--locked", "--release", "--manifest-path", "services/mobile/connector/Cargo.toml"], dry=args.dry_run)
     run(["cargo", "build", "--locked", "--release", "--manifest-path", "services/mobile/relay/Cargo.toml"], dry=args.dry_run)
     conpty = Path(os.environ.get("RUNNER_TEMP", ROOT / ".zerus-team/tmp")) / "conpty"

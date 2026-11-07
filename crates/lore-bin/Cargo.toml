@@ -1,0 +1,24 @@
+[package]
+name = "zerus-lore-bin"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.99"
+license = "MIT"
+description = "The lore binary, built from the pinned github.com/WhiteWh/CodeLore dependency: the one source of lore"
+publish = false
+
+[[bin]]
+name = "lore"
+path = "src/main.rs"
+
+[features]
+# Build with candle's CUDA backend (CodeLore's feature of the same name).
+cuda = ["zerus-lore/cuda"]
+
+[dependencies]
+# The one source of lore is CodeLore. To change lore: commit there, then move this
+# rev (and this package's Cargo.lock) to the new commit; see docs/lore.md.
+zerus-lore = { package = "codelore", git = "https://github.com/WhiteWh/CodeLore", rev = "b2271717df0e0430829745b3da67c0458c4e05e6" }
+
+[dev-dependencies]
+sha2 = "0.10"

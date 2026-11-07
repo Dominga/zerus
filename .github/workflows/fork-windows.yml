@@ -65,7 +65,7 @@ jobs:
             target
             services/mobile/connector/target
             services/mobile/relay/target
-          key: fork-windows-cli-${{ steps.rust.outputs.rustc }}-${{ hashFiles('Cargo.lock', 'crates/lore/Cargo.lock', 'services/mobile/connector/Cargo.lock', 'services/mobile/relay/Cargo.lock') }}
+          key: fork-windows-cli-${{ steps.rust.outputs.rustc }}-${{ hashFiles('Cargo.lock', 'crates/lore-bin/Cargo.lock', 'services/mobile/connector/Cargo.lock', 'services/mobile/relay/Cargo.lock') }}
           restore-keys: fork-windows-cli-${{ steps.rust.outputs.rustc }}-
       # The runner gives every step a synchronous pipe as stdin; hgs must not inherit it.
       - name: Rust tests and release build
@@ -74,7 +74,7 @@ jobs:
           cargo test --locked --features socraticode </dev/null 2>&1 | tee artifacts/test-results/rust.log
           cargo build --release --locked --features socraticode
           # Task 182: lore runs as hgs's subprocess; its own Cargo.lock stays.
-          cargo build --release --locked --manifest-path crates/lore/Cargo.toml --target-dir target/lore
+          cargo build --release --locked --manifest-path crates/lore-bin/Cargo.toml --target-dir target/lore
           # WhiteWh fork: the mobile gateway's connector and relay (docs/fork-updates.md).
           cargo test --locked --lib --manifest-path services/mobile/connector/Cargo.toml </dev/null 2>&1 | tee artifacts/test-results/connector.log
           cargo build --release --locked --manifest-path services/mobile/connector/Cargo.toml

@@ -282,7 +282,9 @@ jobs:
         if: ${{ !cancelled() }}
         run: python3 scripts/ci/ubuntu-disk.py report after-notification-tests
       - name: Rust license notices
-        run: python3 scripts/collect-licenses.py "$RUNNER_TEMP/rust-licenses"
+        run: |
+          cargo fetch --locked --manifest-path crates/lore-bin/Cargo.toml
+          python3 scripts/collect-licenses.py "$RUNNER_TEMP/rust-licenses" --manifest-path Cargo.toml --manifest-path crates/lore-bin/Cargo.toml
       - name: Save Rust 1.99 cache
         if: inputs.save_caches && steps.rust-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1405,7 +1407,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: windows-cli-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock', 'crates/lore/Cargo.lock', 'client/core/Cargo.lock', 'client/media/Cargo.lock', 'client/src-tauri/Cargo.lock') }}
+          key: windows-cli-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock', 'crates/lore-bin/Cargo.lock', 'client/core/Cargo.lock', 'client/media/Cargo.lock', 'client/src-tauri/Cargo.lock') }}
           restore-keys: windows-cli-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
       - name: Root unit tests and pinned lints
         run: |
@@ -1474,7 +1476,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: windows-cli-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock', 'crates/lore/Cargo.lock', 'client/core/Cargo.lock', 'client/media/Cargo.lock', 'client/src-tauri/Cargo.lock') }}
+          key: windows-cli-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock', 'crates/lore-bin/Cargo.lock', 'client/core/Cargo.lock', 'client/media/Cargo.lock', 'client/src-tauri/Cargo.lock') }}
           restore-keys: windows-cli-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
       # The runner gives every step a synchronous pipe as stdin. Windows OpenSSH
       # (and the fake client, which refuses it) must never inherit it, so steps
@@ -1484,7 +1486,7 @@ jobs:
           mkdir -p artifacts/test-results
           cargo build --release --locked
           # Task 182: lore runs as hgs's subprocess; it is built from its own lock.
-          cargo build --release --locked --manifest-path crates/lore/Cargo.toml --target-dir target/lore
+          cargo build --release --locked --manifest-path crates/lore-bin/Cargo.toml --target-dir target/lore
           cargo build --locked --example fake_ssh
           cargo build --locked --example fake_agent
           cargo +1.99.1 build --locked --release --manifest-path services/mobile/connector/Cargo.toml --target-dir target
@@ -1667,7 +1669,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: windows-cli-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock', 'crates/lore/Cargo.lock', 'client/core/Cargo.lock', 'client/media/Cargo.lock', 'client/src-tauri/Cargo.lock') }}
+          key: windows-cli-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock', 'crates/lore-bin/Cargo.lock', 'client/core/Cargo.lock', 'client/media/Cargo.lock', 'client/src-tauri/Cargo.lock') }}
           restore-keys: windows-cli-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
       - run: cargo build --release --locked
       - name: Pinned ConPTY pair

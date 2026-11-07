@@ -7,8 +7,12 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tomllib
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import lore_dependency  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -81,7 +85,7 @@ def main():
     shutil.copytree(args.licenses, licenses / "rust", dirs_exist_ok=True)
     cli_version = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
     connector_version = tomllib.loads((ROOT / "services/mobile/connector/Cargo.toml").read_text())["package"]["version"]
-    lore_version = re.search(r'pub const VERSION: &str = "([^"]+)"', (ROOT / "crates/lore/src/lib.rs").read_text(encoding="utf-8")).group(1)
+    lore_version = lore_dependency.lore_version(ROOT)
     manifest = {"product": "Zerus", "version": (ROOT / "VERSION").read_text().strip(),
                 "cli_version": cli_version, "mobile_connector_version": connector_version,
                 "lore_version": lore_version,

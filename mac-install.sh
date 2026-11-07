@@ -59,7 +59,7 @@ sources=(Cargo.toml Cargo.lock build.rs .cargo src scripts install.sh hgs hgs_st
   services/mobile/connector/src services/mobile/relay/Cargo.toml services/mobile/relay/src
   services/mobile/crypto/Cargo.toml services/mobile/crypto/src
   crates/replica/Cargo.toml crates/replica/Cargo.lock crates/replica/.cargo crates/replica/src
-  crates/lore/Cargo.toml crates/lore/Cargo.lock crates/lore/src
+  crates/lore-bin/Cargo.toml crates/lore-bin/Cargo.lock crates/lore-bin/src
   crates/watch-protocol/Cargo.toml crates/watch-protocol/Cargo.lock crates/watch-protocol/.cargo crates/watch-protocol/src
   client/core/Cargo.toml client/core/src
   crates/content-search/Cargo.toml crates/content-search/src

@@ -33,7 +33,7 @@ connector_stage=""
 lore_stage="$(mktemp "$prefix/bin/.lore.XXXXXXXX")"
 trap 'rm -f "$binary_stage" "$shim_stage" "$lore_stage" ${connector_stage:+"$connector_stage"}' EXIT
 # Task 182: hgs runs lore as a subprocess from beside itself.
-"$cargo_bin" build --manifest-path "$here/crates/lore/Cargo.toml" --locked --release --target-dir "$build_dir"
+"$cargo_bin" build --manifest-path "$here/crates/lore-bin/Cargo.toml" --locked --release --target-dir "$build_dir"
 install -m 0755 "$build_dir/release/lore" "$lore_stage"
 install -m 0755 "$build_dir/release/hgs" "$binary_stage"
 install -m 0644 "$here/hgs_state.py" "$shim_stage"

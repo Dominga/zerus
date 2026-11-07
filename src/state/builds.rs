@@ -1263,32 +1263,23 @@ pub(crate) mod tests {
         with_test_state_root(root.path(), || {
             private_dir(&dir()).unwrap();
             let flag = root.path().join("first-run-done");
-            #[cfg(windows)]
-            let (script, argv) = {
-                let script = root.path().join("fake-build.cmd");
-                std::fs::write(&script, format!(
-                    "@echo off
-if exist \"{flag}\" exit /b 0
-type nul > \"{flag}\"
-echo error: error writing dependencies to `D:\work\target\debug\deps\x-1.d`: Access is denied. (os error 5)
-exit /b 101
-",
-                    flag = flag.display())).unwrap();
-                (script.clone(), vec!["cmd.exe".to_owned(), "/D".to_owned(), "/C".to_owned(), script.display().to_string()])
+            // A fake build: a script for the platform's shell.
+            let fake_build = |name: &str, windows: &str, unix: &str| -> Vec<String> {
+                let script = root.path().join(name);
+                if cfg!(windows) {
+                    std::fs::write(&script, windows.replace('\n', "\r\n")).unwrap();
+                    vec!["cmd.exe".to_owned(), "/D".to_owned(), "/C".to_owned(), script.display().to_string()]
+                } else {
+                    std::fs::write(&script, unix).unwrap();
+                    vec!["sh".to_owned(), script.display().to_string()]
+                }
             };
-            #[cfg(not(windows))]
-            let (script, argv) = {
-                let script = root.path().join("fake-build.sh");
-                std::fs::write(&script, format!(
-                    "[ -e '{flag}' ] && exit 0
-: > '{flag}'
-echo 'error: error writing dependencies to `/work/target/debug/deps/x-1.d`: Access is denied. (os error 5)'
-exit 101
-",
-                    flag = flag.display())).unwrap();
-                (script.clone(), vec!["sh".to_owned(), script.display().to_string()])
-            };
-            let _ = script;
+            // The first run fails with the broken-server signature, the second passes.
+            let argv = fake_build(
+                "fake-build.cmd",
+                &format!("@echo off\nif exist \"{flag}\" exit /b 0\ntype nul > \"{flag}\"\necho error: error writing dependencies to `D:\\work\\target\\debug\\deps\\x-1.d`: Access is denied. (os error 5)\nexit /b 101\n", flag = flag.display()),
+                &format!("[ -e '{flag}' ] && exit 0\n: > '{flag}'\necho 'error: error writing dependencies to `/work/target/debug/deps/x-1.d`: Access is denied. (os error 5)'\nexit 101\n", flag = flag.display()),
+            );
             let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
             super::super::build_cache_server::fake(Some(super::super::build_cache_server::Fake {
                 program: Some(PathBuf::from("C:/Users/example/.cargo/bin/sccache.exe")), running: true, start_exit: 0, calls: calls.clone() }));
@@ -1306,22 +1297,11 @@ exit 101
             // rerun, never a loop.
             std::fs::remove_file(&flag).unwrap();
             calls.borrow_mut().clear();
-            let always = root.path().join("always.cmd");
-            #[cfg(windows)]
-            let argv = {
-                std::fs::write(&always, "@echo off
-echo error: error writing dependencies to `D:\w\deps\y.d`: Access is denied. (os error 5)
-exit /b 101
-").unwrap();
-                vec!["cmd.exe".to_owned(), "/D".to_owned(), "/C".to_owned(), always.display().to_string()]
-            };
-            #[cfg(not(windows))]
-            let argv = {
-                std::fs::write(&always, "echo 'error writing dependencies to `/w/deps/y.d`: Access is denied. (os error 5)'
-exit 101
-").unwrap();
-                vec!["sh".to_owned(), always.display().to_string()]
-            };
+            let argv = fake_build(
+                "always.cmd",
+                "@echo off\necho error: error writing dependencies to `D:\\w\\deps\\y.d`: Access is denied. (os error 5)\nexit /b 101\n",
+                "echo 'error writing dependencies to `/w/deps/y.d`: Access is denied. (os error 5)'\nexit 101\n",
+            );
             let id = "88888888-8888-4888-8888-888888888888";
             start_argv_for(id, "cargo build", &argv, root.path(), session.clone(), 1, &[]).unwrap();
             let done = read(&result_path(id)).unwrap();

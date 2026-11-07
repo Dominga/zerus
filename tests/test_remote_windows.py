@@ -303,7 +303,7 @@ class WindowsNativeTransport(unittest.TestCase):
             version = 'x'*8191
             if slow:
                 words = ['--version']
-                env['FAKE_AGENT_VERSION'] = version
+                env['FAKE_AGENT_PROBE_TEXT'] = version
             data = base64.b64encode(json.dumps(words, ensure_ascii=False, separators=(',', ':')).encode()).decode()
             script = '\n'.join(line.strip() for line in (ROOT/'src/remote_shell/windows.ps1').read_text().splitlines()
                                if line.strip() and not line.strip().startswith('#')).replace('__HGS_ARGUMENTS__', data)

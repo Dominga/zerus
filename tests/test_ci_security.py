@@ -322,7 +322,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         # Line endings are fixed before checking out the exact tested commit.
         self.assertLess(windows.index("core.autocrlf false"), windows.index("actions/checkout@"))
         self.assertIn("ref: ${{ needs.source.outputs.commit }}\n          persist-credentials: false", windows)
-        self.assertIn("uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0", windows)
+        self.assertIn("uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0", windows)
         self.assertNotIn("install-qt", windows)
         self.assertNotIn("windeployqt", windows)
         self.assertNotIn("gui.sh", windows)

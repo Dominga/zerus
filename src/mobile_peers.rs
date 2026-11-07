@@ -288,6 +288,55 @@ fn read_mark(payload: &Option<Value>) -> Result<()> {
     Ok(())
 }
 
+/// New-label auxiliary calls carry one fixed selector immediately after the
+/// session. Validate the original CLOSED command shape using a temporary argv;
+/// dispatch retains the original selector. This does not admit a new operation
+/// or reinterpret a status/recovery/actor plan.
+fn selected_auxiliary(request: &LocalRequest) -> Result<Option<LocalRequest>> {
+    const AUXILIARY: &[&str] = &[
+        "inspect",
+        "processes",
+        "history",
+        "history-projection",
+        "terminal",
+        "hooks",
+        "read",
+        "notifications",
+        "file-read",
+        "attachment",
+        "voice",
+    ];
+    let [command, name, flag, id, tail @ ..] = request.argv.as_slice() else {
+        return Ok(None);
+    };
+    if !AUXILIARY.contains(&command.as_str()) || flag != "--session-id" {
+        return Ok(None);
+    }
+    ensure!(
+        session(name) && crate::state::session_id::canonical(id),
+        "invalid native session ID"
+    );
+    ensure!(
+        !tail
+            .iter()
+            .any(|word| matches!(word.as_str(), "--archive" | "--session-id")),
+        "ambiguous or archived session ID selection"
+    );
+    ensure!(
+        request
+            .payload
+            .as_ref()
+            .is_none_or(|p| p.get("archive_id").is_none()),
+        "archived session ID selection"
+    );
+    Ok(Some(LocalRequest {
+        schema: request.schema,
+        target_machine_id: request.target_machine_id.clone(),
+        argv: [vec![command.clone(), name.clone()], tail.to_vec()].concat(),
+        payload: request.payload.clone(),
+    }))
+}
+
 /// Validate complete argv shapes before calling the CLI's permissive legacy dispatcher.
 /// Session operations retain their native scoped-payload validation and receipts.
 fn validate(request: &LocalRequest) -> Result<()> {
@@ -305,6 +354,9 @@ fn validate(request: &LocalRequest) -> Result<()> {
         request.payload.as_ref().is_none_or(Value::is_object),
         "native payload must be an object"
     );
+    if let Some(original_shape) = selected_auxiliary(request)? {
+        return validate(&original_shape);
+    }
     let op = args[0].as_str();
     let rest = &args[1..];
     let no_payload = || -> Result<()> {
@@ -1413,6 +1465,70 @@ mod tests {
         json!({"request_id":ID,"expected_run_id":"run","expected_conversation_id":"conversation"})
     }
 
+    #[test]
+    fn auxiliary_ids_validate_only_the_original_closed_shape_and_never_strip_at_dispatch() {
+        let sid = "11111111-1111-4111-8111-111111111111";
+        for argv in [
+            vec!["inspect", "codex/project"],
+            vec![
+                "inspect",
+                "codex/project",
+                "--skip-processes",
+                "--after",
+                "12",
+            ],
+        ] {
+            let mut selected = argv[..2].to_vec();
+            selected.extend(["--session-id", sid]);
+            selected.extend_from_slice(&argv[2..]);
+            let input = request(&selected, None);
+            let unchanged = input.argv.clone();
+            validate(&input).unwrap();
+            assert_eq!(input.argv, unchanged);
+            assert!(
+                validate(&request(&argv, Some(scope()))).is_err(),
+                "inspect still has no payload"
+            );
+            assert!(validate(&request(&selected, Some(scope()))).is_err());
+        }
+        for argv in [
+            vec![
+                "inspect",
+                "codex/project",
+                "--session-id",
+                sid,
+                "--archive",
+                ID,
+            ],
+            vec![
+                "inspect",
+                "codex/project",
+                "--session-id",
+                sid,
+                "--session-id",
+                sid,
+            ],
+            vec![
+                "inspect",
+                "codex/project",
+                "--skip-processes",
+                "--session-id",
+                sid,
+            ],
+            vec!["inspect", "codex/project", "--session-id", "not-uuid"],
+            vec![
+                "session-action-status",
+                "codex/project",
+                "--session-id",
+                sid,
+                "--json",
+            ],
+            vec!["recovery", "action", "--session-id", sid, "--scoped-json"],
+        ] {
+            assert!(validate(&request(&argv, None)).is_err(), "{argv:?}");
+        }
+    }
+
     /// zerus-ucck P1c-2b: a listed scoped command may select its live session
     /// by a canonical ID in exactly one position; nothing else changes.
     #[test]
@@ -1476,19 +1592,20 @@ mod tests {
             );
         }
         assert!(validate(&request(&selected("session-action"), Some(scope()))).is_err());
-        // Reads, Terminal and the other scoped commands keep the name form.
+        // New label-aware auxiliary reads retain the exact original scoped
+        // payload rules. Unlisted operation kinds still refuse the selector.
         for op in [
             "history",
             "history-projection",
             "terminal",
-            "effort",
             "file-read",
         ] {
             assert!(
-                validate(&request(&selected(op), Some(scope()))).is_err(),
+                validate(&request(&selected(op), Some(scope()))).is_ok(),
                 "{op}"
             );
         }
+        assert!(validate(&request(&selected("effort"), Some(scope()))).is_err());
         // Only a canonical ID, once, right after the session.
         for argv in [
             vec![

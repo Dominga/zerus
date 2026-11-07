@@ -12,9 +12,9 @@ use std::{
 };
 use zerus_watch_protocol::session_labels as wire;
 
-// Observation foundation only: the later ID-routing leaf enables this. An old
-// running connector must stay closed even after its selected hgs is upgraded.
-const ROUTING_BY_ID: bool = false;
+// This build routes current-session reads and project membership by ID. The
+// original nonce still needs the selected CLI's fresh complete-label context.
+const ROUTING_BY_ID: bool = true;
 
 pub(crate) struct Selection {
     path: PathBuf,
@@ -165,7 +165,11 @@ pub(crate) async fn serve<N: Native + 'static>(
                         .and_then(|output| {
                             serde_json::from_value::<wire::Context>(output.json()).ok()
                         })
-                        .filter(wire::Context::valid);
+                        .filter(wire::Context::valid)
+                        .filter(|_| {
+                            let flags = connector.flags.get();
+                            flags.session_labels && flags.session_selector && flags.peer_session_id
+                        });
                     if !connector.stopping.is_set() {
                         if let Some(now) = now() {
                             selection.publish(&query, context, now);
@@ -176,7 +180,7 @@ pub(crate) async fn serve<N: Native + 'static>(
         }
         if crate::runtime::until_stopped(
             &connector.stopping,
-            tokio::time::sleep(Duration::from_millis(50)),
+            tokio::time::sleep(Duration::from_millis(200)),
         )
         .await
         .is_none()
@@ -221,6 +225,7 @@ mod tests {
             configuration: query.configuration.clone(),
             version: "fixture".into(),
             membership_by_id: true,
+            labels_by_id: true,
         };
         (temp, selection, query, context)
     }
@@ -262,8 +267,19 @@ mod tests {
         let bytes = reply(&selection).unwrap();
         let answer: wire::Reply = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(answer.query, next);
-        assert!(!answer.routing_by_id);
-        assert!(wire::Reply::parse(&bytes, &next, now().unwrap()).is_none());
+        assert!(answer.routing_by_id);
+        assert!(wire::Reply::parse(&bytes, &next, now().unwrap()).is_some());
+        // A still-running foundation connector remains negative after only
+        // its selected CLI is upgraded; the connector's own flag is required.
+        let mut old = answer.clone();
+        old.routing_by_id = false;
+        assert!(
+            wire::Reply::parse(&serde_json::to_vec(&old).unwrap(), &next, now().unwrap()).is_none()
+        );
+        let mut partial = answer.clone();
+        partial.context.as_mut().unwrap().labels_by_id = false;
+        assert!(wire::Reply::parse(
+            &serde_json::to_vec(&partial).unwrap(), &next, now().unwrap()).is_none());
         // Replacement of the selected configuration closes even a valid nonce.
         put(
             &selection,
@@ -328,7 +344,7 @@ mod tests {
             Ok(Output::Json(serde_json::to_value(&self.context).unwrap()))
         }
     }
-    async fn run(replace: bool) {
+    async fn run(replace: bool, ready: bool) {
         let (temp, selection, query, context) = fixture();
         let journal = Journal::open(&temp.path().join("journal"), "fixture", 1_000.0).unwrap();
         let connector = Rc::new(Connector::new(
@@ -347,6 +363,9 @@ mod tests {
             },
             Box::new(|| 1_000.0),
         ));
+        if ready {
+            connector.flags.set(crate::capabilities::Flags::from_help("session-labels-v1\nsession-id-selector-v1\nmobile-peer-session-id-v1"));
+        }
         put(&selection, wire::QUERY_FILE, &query);
         let observe = async {
             tokio::time::timeout(Duration::from_secs(1), async {
@@ -367,9 +386,9 @@ mod tests {
                 let bytes = reply(&selection).unwrap();
                 let answer: wire::Reply = serde_json::from_slice(&bytes).unwrap();
                 assert_eq!(answer.query, query);
-                assert_eq!(answer.context.as_ref(), Some(&connector.native.context));
-                assert!(!answer.routing_by_id);
-                assert!(wire::Reply::parse(&bytes, &query, now().unwrap()).is_none());
+                assert_eq!(answer.context.as_ref(), ready.then_some(&connector.native.context));
+                assert!(answer.routing_by_id);
+                assert_eq!(wire::Reply::parse(&bytes, &query, now().unwrap()).is_some(), ready);
             }
             let calls = connector.native.calls.borrow();
             assert_eq!(calls[0].argv, ["swarm", "session-labels-context", "--json"]);
@@ -381,10 +400,14 @@ mod tests {
     }
     #[tokio::test]
     async fn a_live_journal_owner_answers_once_with_only_a_bounded_context_read() {
-        run(false).await;
+        run(false, true).await;
+    }
+    #[tokio::test]
+    async fn a_missing_runtime_routing_marker_never_gives_a_positive() {
+        run(false, false).await;
     }
     #[tokio::test]
     async fn a_configuration_changed_during_the_native_read_cannot_answer() {
-        run(true).await;
+        run(true, true).await;
     }
 }

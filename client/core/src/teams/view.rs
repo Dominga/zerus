@@ -290,6 +290,34 @@ pub struct MemberView {
     /// sends it (`members[].question`, at most [`DETAIL_BYTES`]): its id,
     /// hash, tool, command, reason and the card's own allow and deny ids.
     pub permission: Value,
+    /// Task 133: the member's latest pulse (`members[].pulse`): what it did,
+    /// does next and is blocked on, in at most three short lines; None
+    /// without one.
+    pub pulse: Option<PulseView>,
+}
+
+/// A member's pulse as the Team tab shows it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct PulseView {
+    pub task: Option<u64>,
+    pub done: String,
+    pub next: String,
+    pub blocked: String,
+    pub at: f64,
+    /// `note` (the member's own) or `auto` (Zerus's summary of the turn).
+    pub source: String,
+}
+
+fn pulse(value: &Value) -> Option<PulseView> {
+    let pulse = value.get("pulse").filter(|pulse| pulse.is_object())?;
+    Some(PulseView {
+        task: pulse.get("task").and_then(Value::as_u64),
+        done: text(pulse, "done", LINE_CHARS),
+        next: text(pulse, "next", LINE_CHARS),
+        blocked: text(pulse, "blocked", LINE_CHARS),
+        at: pulse.get("at").and_then(Value::as_f64).unwrap_or_default(),
+        source: name(pulse, "source"),
+    })
 }
 
 /// One dependency: the task it waits for, hard or soft.
@@ -606,6 +634,7 @@ fn member(value: &Value, lead: &str) -> MemberView {
                 .get("question")
                 .filter(|question| question.is_object()),
         ),
+        pulse: pulse(value),
     }
 }
 

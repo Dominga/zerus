@@ -1034,6 +1034,13 @@ export interface TeamMemberView {
   iron_rules?: string[];
   /** Task 11: the pending question or permission request as hgs sends it (`members[].question`), null without one. */
   permission?: TeamMemberQuestion | null;
+  /** Task 133: the member's latest pulse: what it did, does next and is blocked on; null without one. */
+  pulse?: TeamPulseView | null;
+}
+
+/** Task 133: a member's pulse (`members[].pulse`), its own note or Zerus's summary of its last turn. */
+export interface TeamPulseView {
+  task: number | null; done: string; next: string; blocked: string; at: number; source: string;
 }
 
 /** A member's pending question (`members[].question`): its id and hash, what it asks and the card's allow and deny ids. */

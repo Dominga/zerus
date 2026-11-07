@@ -2985,6 +2985,42 @@ fn look(input: &Value) -> anyhow::Result<Value> {
     Ok(value)
 }
 
+/// Task 133: `hgs team note`: the member's own pulse for its open attempt,
+/// which stands for this turn instead of Zerus's summary.
+fn note(input: &Value) -> anyhow::Result<Value> {
+    let attempt = text(input, "attempt");
+    ensure!(
+        !attempt.is_empty(),
+        "A note names the attempt its hand-out gave: {{\"attempt\":\"...\",\"done\":\"...\",\"next\":\"...\",\"blocked\":\"...\"}} | hgs team note --json"
+    );
+    let (done, next, blocked) = (text(input, "done").trim(), text(input, "next").trim(), text(input, "blocked").trim());
+    super::pulses::check_note(done, next, blocked)?;
+    let store = Store::open(true)?;
+    let teams = store.active_teams(ACTIVE_TEAMS)?;
+    let (team, task, member) = teams
+        .iter()
+        .filter(|team| text(input, "team").is_empty() || team.id == text(input, "team"))
+        .find_map(|team| {
+            team.tasks.iter().find_map(|task| {
+                task.attempts.iter().find(|found| found.id == attempt && found.state.open()).map(|found| (team.id.clone(), task.id, found.member.clone()))
+            })
+        })
+        .with_context(|| format!("No open attempt {attempt} runs in a team"))?;
+    let pulse = super::pulses::Pulse {
+        team,
+        member,
+        task,
+        done: done.to_owned(),
+        next: next.to_owned(),
+        blocked: blocked.to_owned(),
+        at: now(),
+        source: "note".into(),
+        ..Default::default()
+    };
+    let pulse = store.put_pulse(&pulse)?;
+    Ok(json!({"status":"noted","pulse":pulse.json()}))
+}
+
 /// Task 134: `hgs team current` gives the member's open attempt and its
 /// unread team messages (the hand-out's text among them), and marks those
 /// read: one of the two read receipts.
@@ -3213,6 +3249,10 @@ fn inbox_command(input: &Value) -> anyhow::Result<Value> {
     view["messages"] = json!(messages);
     view["read"] = receipt;
     view["for"] = json!(recipient);
+    if reviews {
+        // Task 133: what each member is doing, beside the items.
+        view["pulses"] = json!(Store::open(false)?.latest_pulses(&team.id, now()).iter().map(super::pulses::Pulse::json).collect::<Vec<_>>());
+    }
     Ok(view)
 }
 
@@ -4698,6 +4738,14 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 ask["team"] = json!(team.id);
                 value["profile"] = profile_view(&ask)?;
             }
+            // Task 133: each member's latest pulse, for the Team tab.
+            let pulses = store.latest_pulses(&team.id, now());
+            if let Some(members) = value["members"].as_array_mut() {
+                for entry in members {
+                    let id = entry["id"].as_str().unwrap_or_default().to_owned();
+                    entry["pulse"] = pulses.iter().find(|pulse| pulse.member == id).map_or(Value::Null, super::pulses::Pulse::json);
+                }
+            }
             // #756: with the build broker on, each member's build state for
             // task nodes and member cards; the Builds tab reads the rest.
             if team.settings.build_broker {
@@ -4723,6 +4771,20 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         }
         "current" => current(input),
         "look" => look(input),
+        // Task 133: a member's own pulse, and the team's pulses.
+        "note" => note(input),
+        "pulses" => {
+            let store = Store::open(false)?;
+            let team = store.load(text(input, "team"))?.context("Unknown team")?;
+            let member = text(input, "member");
+            let at = now();
+            let list = if input["all"].as_bool() == Some(true) || !member.is_empty() {
+                store.pulses(&team.id, (!member.is_empty()).then_some(member), at, input["limit"].as_i64().unwrap_or(50))
+            } else {
+                store.latest_pulses(&team.id, at)
+            };
+            Ok(json!({"team":team.id,"pulses":list.iter().map(super::pulses::Pulse::json).collect::<Vec<_>>()}))
+        }
         "escalate" => escalate(input),
         op if MUTATIONS.contains(&op) => {
             let request = text(input, "request_id");

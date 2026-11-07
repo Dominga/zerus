@@ -1561,6 +1561,10 @@ pub(crate) struct Attempt {
     /// When the member's turn after the hand-off ended, for No report.
     #[serde(default)]
     pub turn_ended_at: Option<f64>,
+    /// Task 133: the end of the last turn Zerus wrote (or skipped) a pulse
+    /// for; the next pulse summarizes only what came after it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pulse_at: Option<f64>,
     /// The first tick that saw the capture gate open: the report timeout counts
     /// from here, not from the reply (C2).
     #[serde(default, skip_serializing_if = "Option::is_none")]

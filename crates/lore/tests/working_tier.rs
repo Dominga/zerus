@@ -214,7 +214,12 @@ fn find_ranks_and_marks_the_tiers() {
     repo.json(&["add", "fault", "--stdin"], &fault("black-frame", "Black frame after swapchain resize", "the swapchain is not recreated", "recreate the swapchain on resize").to_string());
     // No working entry, no history source: CodeLore's own answer.
     let plain = repo.json(&["find", "swapchain resize"], "");
-    assert!(plain["results"].as_array().unwrap().iter().all(|hit| hit.get("tier").is_none()));
+    assert!(plain["results"].as_array().unwrap().iter().all(|hit| hit["tier"] == "durable" && hit["record"].is_object()));
+    // Task 133: every result says its tier and how far to trust it.
+    let confidence = &plain["results"][0]["confidence"];
+    assert_eq!((confidence["tier"].as_str(), confidence["exact"].as_bool(), confidence["superseded"].as_bool()), (Some("durable"), Some(true), Some(false)), "{confidence}");
+    assert_eq!(confidence["level"], "high", "a phrase match of a current record");
+    assert!(confidence["age_days"].as_i64().is_some() && confidence.get("semantic").is_some());
     for n in 0..4 {
         repo.json(&["pulse", "add", "--done", &format!("swapchain resize investigation {n}"), "--team", "t", "--by", &format!("m{n}")], "");
     }
@@ -234,13 +239,16 @@ fn find_ranks_and_marks_the_tiers() {
     let only = repo.json(&["find", "swapchain resize", "--working"], "");
     assert!(only["results"].as_array().unwrap().iter().all(|hit| hit["tier"] == "working"));
     let none = repo.json(&["find", "swapchain resize", "--no-working", "--no-history"], "");
-    assert!(none["results"].as_array().unwrap().iter().all(|hit| hit.get("tier").is_none()));
+    assert!(none["results"].as_array().unwrap().iter().all(|hit| hit["tier"] == "durable"));
+    let levels: Vec<(&str, &str)> = results.iter().map(|hit| (hit["confidence"]["tier"].as_str().unwrap(), hit["confidence"]["level"].as_str().unwrap())).collect();
+    assert!(levels.contains(&("working", "medium")) && levels.contains(&("history", "low")), "{levels:?}");
     let history = repo.json(&["find", "swapchain resize", "--history"], "");
     assert_eq!(history["results"].as_array().unwrap().len(), 3, "the 3 best history hits");
     assert!(history["results"][0]["hit"]["excerpt"].as_str().unwrap().contains("swapchain"));
     // Text output marks the tier.
     let text = repo.run_at(T0, &["find", "swapchain resize", "-n", "6"], "").stdout;
     assert!(text.contains("[working pulse]") && text.contains("[history]"), "{text}");
+    assert!(text.contains("(high confidence, durable, exact match") && text.contains("(low confidence, history"), "{text}");
 }
 
 #[test]

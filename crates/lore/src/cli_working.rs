@@ -167,16 +167,21 @@ pub(super) fn tiers(ctx: &mut Ctx, query: &str, durable: &[search::Found], notes
     for (score, _, _, item) in rows {
         match item {
             Item::Durable(found) => {
-                results.push(json!({"score": found.score, "via": found.via, "record": found.record}));
-                text.push(fmt_record(&found.record, Some(found.score), &found.via));
+                let result = durable_result(found, at);
+                text.push(format!("{}\n{}", fmt_record(&found.record, Some(found.score), &found.via), confidence_line(&result["confidence"])));
+                results.push(result);
             }
             Item::Working(entry, via) => {
-                results.push(json!({"score": score, "via": via, "tier": "working", "entry": entry.json()}));
-                text.push(fmt_entry(&entry, at, Some(score)));
+                let age = Some(((at - entry.at) / 86_400).max(0));
+                let confidence = search::confidence("working", &via, None, age, !entry.promoted.is_empty());
+                text.push(format!("{}\n{}", fmt_entry(&entry, at, Some(score)), confidence_line(&confidence)));
+                results.push(json!({"score": score, "via": via, "tier": "working", "entry": entry.json(), "confidence": confidence}));
             }
             Item::History(hit) => {
-                results.push(json!({"score": score, "via": ["history"], "tier": "history", "hit": hit.json()}));
-                text.push(fmt_hit(&hit, score));
+                let age = Some(((at - hit.at as i64) / 86_400).max(0));
+                let confidence = search::confidence("history", &["history".to_owned()], None, age, false);
+                text.push(format!("{}\n{}", fmt_hit(&hit, score), confidence_line(&confidence)));
+                results.push(json!({"score": score, "via": ["history"], "tier": "history", "hit": hit.json(), "confidence": confidence}));
             }
         }
     }

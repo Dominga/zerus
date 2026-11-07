@@ -40,6 +40,41 @@ pub struct Found {
     pub record: Value,
     pub score: f64,
     pub via: Vec<String>,
+    /// Task 133: the cosine of the meaning list, when it found the record.
+    pub meaning: Option<f64>,
+}
+
+/// Task 133 (owner, 2026-11-07): how far a find result may be trusted - its
+/// tier, whether it matched exactly (a signal or the whole phrase), its
+/// semantic score, its age in days and whether it is superseded - and a
+/// level that sums them: `high`, `medium` or `low`.
+pub fn confidence(tier: &str, via: &[String], semantic: Option<f64>, age_days: Option<i64>, superseded: bool) -> Value {
+    let exact = via.iter().any(|list| list == "signal" || list == "phrase");
+    let level = if superseded || tier == "history" {
+        "low"
+    } else if tier == "working" {
+        if age_days.is_some_and(|days| days <= 1) { "medium" } else { "low" }
+    } else if exact || semantic.is_some_and(|cosine| cosine >= 0.8) {
+        if age_days.is_some_and(|days| days > 365) { "medium" } else { "high" }
+    } else if semantic.is_some_and(|cosine| cosine >= 0.6) || via.len() >= 2 {
+        "medium"
+    } else {
+        "low"
+    };
+    serde_json::json!({"tier": tier, "exact": exact, "semantic": semantic, "age_days": age_days, "superseded": superseded, "level": level})
+}
+
+/// A record's age in days from its `updated` date (UTC), at `now`.
+pub fn record_age(record: &Value, now: i64) -> Option<i64> {
+    let day = record.get("updated").and_then(Value::as_str)?;
+    let date = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?;
+    let at = date.and_hms_opt(0, 0, 0)?.and_utc().timestamp();
+    Some(((now - at) / 86_400).max(0))
+}
+
+/// Whether a record no longer holds: superseded, obsolete or reversed.
+pub fn retired(record: &Value) -> bool {
+    matches!(record.get("status").and_then(Value::as_str), Some("superseded" | "obsolete" | "reversed"))
 }
 
 /// What `lore index` reports: `{"records", "vectors", "index", "semantic", "note"}`.

@@ -75,6 +75,9 @@
   .team-member-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
   .team-member-line.sub { font-size: 11px; color: var(--z-color-text-3); }
   .team-member-text { min-width: 0; }
+  /* Task 133: the latest pulse, at most three short lines. */
+  .team-member-pulse { display: flex; flex-direction: column; min-width: 0; font-size: 11px; color: var(--z-color-muted); }
+  .team-member-pulse.blocked span:last-child { color: var(--z-color-danger, inherit); }
   .team-model { font-size: 11px; min-width: 0; }
   .team-tile { flex: none; display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: var(--z-color-tile, var(--z-color-field)); color: var(--z-color-text-2); }
   .team-section-head .team-tile { width: 22px; height: 22px; }

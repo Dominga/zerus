@@ -64,6 +64,11 @@ pub(super) fn finish(name: &str, run_id: &str, child_id: u32, status: ExitStatus
         "unconfirmed_exit"
     });
     write(&mut record)?;
+    // Exit evidence may commit while Terminate owns finalization. Neither a
+    // clean SessionEnd nor failed Restore may archive or discard this record.
+    if terminating::pending(&record) {
+        return Ok(());
+    }
     if archive::failed_restore(&mut record)? {
         return Ok(());
     }

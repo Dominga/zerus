@@ -936,19 +936,24 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
     if value["request_id"] != request.id() {
         return None;
     }
+    // A category change carrying a switch value the service no longer has
+    // is refused before its policy write (zerus-sz42x.2).
+    let approval_refusal = matches!(request, Request::AutomaticApprovals { .. })
+        && value["code"] == "approval_policy_changed";
     if !lookup
         && value["accepted"] == false
         && value["durable"] == false
-        && matches!(
-            value["code"].as_str(),
-            Some(
-                "frontend_authentication_refused"
-                    | "frontend_identity_expired"
-                    | "desktop_background_unavailable"
-                    | "invalid_request_id"
-                    | "delivery_stopping"
-            )
-        )
+        && (approval_refusal
+            || matches!(
+                value["code"].as_str(),
+                Some(
+                    "frontend_authentication_refused"
+                        | "frontend_identity_expired"
+                        | "desktop_background_unavailable"
+                        | "invalid_request_id"
+                        | "delivery_stopping"
+                )
+            ))
     {
         // These refusals precede the mutation boundary. Store/configuration
         // failures may straddle a commit and remain unknown until lookup.

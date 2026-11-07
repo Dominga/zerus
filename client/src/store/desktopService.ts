@@ -344,6 +344,7 @@ export function createServiceApprovalIntent(
       && result.accepted === false && result.durable === false && result.pending !== true) {
       setUncertain(undefined);
       if (result.code === "frontend_request_not_applied") throw Error(tr("The previous change was not applied."));
+      if (result.code === "approval_policy_changed") throw Error(tr("Automatic approvals were turned on or off elsewhere. Check the switch, then change the categories again."));
       throw Error("Automatic approval settings are unavailable with this background service connection.");
     }
     if (result?.request_id !== request.id || result.op !== "automatic_approvals" || result.accepted !== true

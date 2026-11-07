@@ -91,6 +91,8 @@ export function createCreations(deps: CreationsDeps) {
   /** Ids an event named before the first read answered; that read never overwrites them. */
   const early = new Set<string>();
   let loaded = false;
+  /** When this window started reading creations (unix seconds, like `created`). */
+  let startedAt = 0;
   /** The version each card's details were read for. */
   const read = new Map<string, number>();
 
@@ -118,12 +120,17 @@ export function createCreations(deps: CreationsDeps) {
   });
   const pendingCards = createMemo(() => creations().filter((c) => !confirmed().has(c.id)));
 
-  function notice(c: CreationCard) {
+  function notice(c: CreationCard, known: boolean) {
     const n = noticeOf(c);
     if (!n || notices.get(c.id) === n.key) return;
     notices.delete(c.id);
     notices.set(c.id, n.key);
     if (notices.size > NOTICE_LIMIT) notices.delete(notices.keys().next().value!);
+    // A failure that settled before this window started (first seen already
+    // failed, created earlier) stays on its card; only a failure that happens
+    // while the window is open raises a toast. Otherwise an old failed
+    // creation came back at every restart (owner 2026-11-07).
+    if (!known && c.created < startedAt) return;
     deps.notify("error", n.text);
   }
 
@@ -148,6 +155,7 @@ export function createCreations(deps: CreationsDeps) {
 
   /** The changed handler (1571-1586): a hidden card loses its reveal and selection; failures show once. */
   function changed(c: CreationCard) {
+    const known = !!cards[c.id];
     batch(() => {
       setCards(c.id, cards[c.id] ? reconcile(c) : c);
       setVersions(c.id, (v) => (v ?? 0) + 1);
@@ -158,7 +166,7 @@ export function createCreations(deps: CreationsDeps) {
         if (selectedCreation() === c.id) deps.setSelectedKey(undefined);
       }
     });
-    notice(c);
+    notice(c, known);
   }
 
   /** Bound: its card goes; a selected one hands the selection to its exact session (3036-3039, 3253-3255). */
@@ -200,6 +208,7 @@ export function createCreations(deps: CreationsDeps) {
 
   /** Listens, then reads every card; events that came first win over the read. */
   async function start(): Promise<() => void> {
+    startedAt = Math.floor(Date.now() / 1000);
     const stop = await deps.bridge.onCreations(apply);
     let view: CreationCard[] = [];
     try { view = await deps.bridge.creationsView(); } catch { /* the browser build has no host */ }

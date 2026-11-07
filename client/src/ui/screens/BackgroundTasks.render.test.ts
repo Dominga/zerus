@@ -44,7 +44,7 @@ it("shows the count while work runs and no cleanup chip beside it", () => {
   expect(html).toContain("Background tasks 2");
   expect(html).not.toContain("Cleaning working folders…");
 });
-it("shows nothing when nothing is held", () => { expect(render({ rows: [] })).not.toContain("<button"); });
+it("always offers worktree review even when nothing is held", () => { expect(render({ rows: [] })).toContain('aria-label="Review working folders"'); });
 it("keeps a kept result on its warning chip beside running work", () => {
   const html = render({ rows: [running, row({ id: "kept", status: "kept" })], busy: true, cleaning: true, kept: 1, text: "Folder kept: work.", title: "Folder kept: work." });
   expect(html).toContain("Background tasks 1");

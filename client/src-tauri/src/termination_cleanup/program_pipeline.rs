@@ -106,6 +106,7 @@ pub(super) async fn confirm(
                 busy: true,
                 phase: "stopping",
                 manual_review: false,
+                program_review_pending: true,
                 source: Some(capture.target.clone()),
                 restore_supported: true,
                 archive: Some(ArchiveIdentity {

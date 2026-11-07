@@ -83,20 +83,54 @@ fn observed_machine(config: &crate::config::Config) -> Option<String> {
     crate::swarm::existing_node_id(&bytes).ok()
 }
 
+/// The proven local caller's link, for a session this process launches.
+fn proven_link() -> Option<String> {
+    let record = session_graph::caller_record()?;
+    let config = crate::config::Config::load().ok()?;
+    let machine = observed_machine(&config)?;
+    link_of(&record, &machine, config.host(), "launch").map(|link| link.to_string())
+}
+
+/// A link another computer's hgs forwarded with this launch (zerus-sa9qn.7).
+static FORWARDED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 /// `HGS_PARENT`'s value for a session this process launches: the proven
-/// caller's link, or empty, which keeps an inherited value from the record.
-/// The caller is proven first; only a proven caller reads the identity.
+/// local caller's link; else a link forwarded by the computer that ran the
+/// launch; else empty, which keeps an inherited value from the record. The
+/// caller is proven first; only a proven caller reads the identity.
 pub(crate) fn launcher_value() -> String {
-    let Some(record) = session_graph::caller_record() else {
-        return String::new();
-    };
-    let Ok(config) = crate::config::Config::load() else {
-        return String::new();
-    };
-    observed_machine(&config)
-        .and_then(|machine| link_of(&record, &machine, config.host(), "launch"))
-        .map(|link| link.to_string())
-        .unwrap_or_default()
+    proven_link().or_else(|| FORWARDED.get().cloned()).unwrap_or_default()
+}
+
+/// `--parent-link HEX` for a launch on a peer: the proven caller's link, hex
+/// encoded so no shell or SSH quoting can change it. None without a caller.
+pub(crate) fn forwarded_argument() -> Option<String> {
+    proven_link().map(|link| link.bytes().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Accepts a link the launching computer forwarded (`--parent-link HEX`): a
+/// well-formed `launch` link naming another computer. It is a claim by the
+/// SSH-authenticated caller that this computer cannot verify, so the listing
+/// never shows such a parent as live and it never quiets the child.
+pub(crate) fn accept_forwarded(hex: &str) -> std::result::Result<(), String> {
+    let refuse = || "--parent-link needs a launch link from another computer".to_owned();
+    if hex.is_empty() || hex.len() > 8192 || !hex.len().is_multiple_of(2) {
+        return Err(refuse());
+    }
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&hex[at..at + 2], 16))
+        .collect::<std::result::Result<Vec<u8>, _>>()
+        .map_err(|_| refuse())?;
+    let link: Value = serde_json::from_slice(&bytes).map_err(|_| refuse())?;
+    if !valid(&link) || string(&link, "source") != "launch" {
+        return Err(refuse());
+    }
+    let local = crate::config::Config::load().ok().and_then(|config| observed_machine(&config));
+    if local.as_deref() == Some(string(&link, "machine")) {
+        return Err("A link for a parent on this computer comes from this computer's own proof".into());
+    }
+    FORWARDED.set(link.to_string()).map_err(|_| "--parent-link may be given once".to_owned())
 }
 
 /// The link the launching hgs passed, for a new session's first record.
@@ -440,6 +474,17 @@ mod tests {
         assert!(human_request(&child("approval"), None), "a native subagent's approval");
         assert!(!human_request(&child("input"), None));
         assert!(human_request(&json!({"phase":"tool","subagent_previews":[{"state":"approval"}]}), None));
+    }
+
+    #[test]
+    fn a_forwarded_link_must_be_a_well_formed_launch_link() {
+        let hex = |value: &Value| value.to_string().bytes().map(|b| format!("{b:02x}")).collect::<String>();
+        for bad in ["", "zz", "abc", &hex(&json!({"schema": 2}))] {
+            assert!(accept_forwarded(bad).is_err(), "{bad}");
+        }
+        let mut adopted = link();
+        adopted["source"] = json!("adopt");
+        assert!(accept_forwarded(&hex(&adopted)).is_err(), "only a launch is forwarded");
     }
 
     #[test]

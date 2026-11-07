@@ -664,7 +664,13 @@ durable `session_id`, its name, conversation and run as hints, `source`
 Clear, fresh starts, rename, pause, archive and restore keep the link, as they
 keep `session_id`; an older `hgs` that rebuilds the record drops it. Claude,
 Codex and Kimi sessions carry links; DeepSeek and OpenCode sessions do not yet.
-A launch on another computer (`hgs @peer …`) records no parent yet.
+A launch or fork on another computer (`hgs @peer claude …`, `hgs @peer fork …`)
+run by a proven agent passes that agent's link to the peer as
+`--parent-link`, hex-encoded JSON, only when the peer's `hgs --help` lists
+`launch-parent-v1`; an older peer launches without it. The peer accepts only a
+well-formed launch link naming another computer and uses it only when no
+local agent owns the launch. It cannot verify a parent on another computer, so
+its listing shows that parent as `missing` and the child is never supervised.
 
 `hgs [@host] parent SESSION --json` reads JSON stdin with
 `expected_run_id`, `expected_conversation_id` and `action`: `read`, `adopt`,

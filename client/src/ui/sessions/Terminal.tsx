@@ -1,8 +1,9 @@
-import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
+import { Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import type { Terminal as XTerm } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
 import { Icon } from "../lib/icons";
-import { contentScale } from "../../store/ui";
+import { contentScale, setDetailTab } from "../../store/ui";
+import { composer } from "../../store/composer";
 import { skin } from "../../skin/runtime";
 import { screenShowsLatest, terminal, type Screen } from "../../store/terminal";
 import { tr } from "../../i18n";
@@ -24,6 +25,7 @@ function theme() {
 export function TerminalTab() {
   let host!: HTMLDivElement;
   const [live, setLive] = createSignal<{ term: XTerm; measure: () => void } | undefined>();
+  const [imagePasteUnavailable, setImagePasteUnavailable] = createSignal(false);
   let gone = false;
   let teardown: (() => void) | undefined;
   // Registered synchronously: the owner is gone once the imports below resolve.
@@ -48,7 +50,21 @@ export function TerminalTab() {
   const onPaste = (event: ClipboardEvent) => {
     event.preventDefault();
     event.stopPropagation();
-    terminal.paste(event.clipboardData?.getData("text/plain") ?? "");
+    const data = event.clipboardData;
+    const items = [...(data?.items ?? [])];
+    const imageItems = items.filter((item) => item.kind === "file" && item.type.startsWith("image/"));
+    const image = imageItems[0]?.getAsFile()
+      ?? [...(data?.files ?? [])].find((file) => file.type.startsWith("image/"));
+    if (image || imageItems.length || [...(data?.types ?? [])].some((type) => type.startsWith("image/"))) {
+      if (image && composer.canAttach()) {
+        // The existing composer captures its original handle before any await.
+        // Stage in the draft, never write image data or Enter to the terminal.
+        void composer.pasteImage(image);
+        setDetailTab("activity");
+      } else setImagePasteUnavailable(true);
+      return;
+    }
+    terminal.paste(data?.getData("text/plain") ?? "");
   };
 
   onMount(async () => {
@@ -106,6 +122,13 @@ export function TerminalTab() {
           <Icon name={connected() ? "unplug" : "plug"} size={15} />
         </button>
       </div>
+      <Show when={imagePasteUnavailable()}>
+        <div class="term-image-paste" role="status">
+          <span>{tr("Images go through Activity. Open Activity and paste again when the message field is ready.")}</span>
+          <button class="btn small" onClick={() => setDetailTab("activity")}>{tr("Open Activity")}</button>
+          <button class="icon-btn small" aria-label={tr("Dismiss")} onClick={() => setImagePasteUnavailable(false)}><Icon name="x" size={14} /></button>
+        </div>
+      </Show>
       <div class="term-host" data-shortcut-context="terminal" ref={host} />
     </div>
   );

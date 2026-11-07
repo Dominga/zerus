@@ -269,15 +269,16 @@ This change keeps desktop, the desktop service, shared fixtures and docs aligned
 
 ### 3.1 Cards
 
-The card adopts two parts of the owner's prototype:
+The card adopts the large agent tile of the owner's prototype:
 
 * **Agent tile.** A 34 px rounded tile at the card's left with the provider glyph
   at 20 px in the agent's color (`--z-agent-<kind>`), replacing the provider
   badge in the first line. The account mark stays in the footer with its
   label. Compact rows use a 22 px tile before the mark and title.
-* **Card surface.** Cards always paint their surface and a 1 px border; hover
-  and selection change the surface and border. Edge marks (attention, unread,
-  draft, error) stay as the inset left bar.
+* **Card surface.** Rows stay transparent; hover and selection paint the
+  surface, as before. An always-painted surface shipped in #1644 and was
+  removed at the owner's request on 2026-11-07 as too heavy. Edge marks
+  (attention, unread, draft, error) stay as the inset left bar.
 
 Expanded card (94 px), left to right:
 
@@ -363,7 +364,7 @@ team strip says `3 of 5`, the footer uses spacing, and tooltips use line breaks.
 2. **Parent link and nesting.** CLI: record at launch, `adopt`, `parent`,
    carry on all paths, listing field, remote forwarding with the help marker.
    Client core: view row fields. Client: tree rows, connector, Team toggle,
-   card tile and surface, from-PARENT chip, Detach.
+   card tile, from-PARENT chip, Detach.
 3. **Attention policy.** Host `parent.state`; core `quiet` predicate shared by the
    list and tracker; service projection; fixture; docs.
 

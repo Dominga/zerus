@@ -698,8 +698,8 @@ level again. A child whose parent is not shown above it stays at top level with
 **from PARENT**, which opens the parent when it is listed. A parent is matched by
 its computer's machine UUID and session ID, or by conversation for a parent an
 older `hgs` listed without one; names never match. A loop never hides a card.
-Cards show a large colored agent tile at the left and always paint their
-surface. See
+Cards show a large colored agent tile at the left. Rows stay transparent and
+paint a surface only on hover and selection. See
 `docs/superpowers/specs/2026-11-07-account-labels-child-sessions-design.md`.
 
 ### Rename, Saved and Archive

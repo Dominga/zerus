@@ -140,6 +140,11 @@ export function phasePlans(team: TeamView, graph: PlanGraph): PlanPhase[] {
           x: 0,
           y: 0,
         }));
+      const graphed = new Set(nodes.map((placed) => placed.node.id));
+      for (const task of tasks.filter((task) => task.archived && !graphed.has(task.id))) {
+        nodes.push({ node: { id: task.id, title: task.title, status: task.status, assignee: task.assignee,
+          role: "", phase: n, layer: 0, ready: false, in_cycle: false }, task, x: 0, y: 0 });
+      }
       const layers = new Map<number, PlacedNode[]>();
       for (const placed of nodes) {
         const layer = layers.get(placed.node.layer) ?? [];
@@ -157,7 +162,7 @@ export function phasePlans(team: TeamView, graph: PlanGraph): PlanPhase[] {
       const placed = ordered.flatMap((layer) => layer.nodes);
       const columns = Math.max(0, ...ordered.map((layer) => layer.nodes.length));
       return {
-        phase: { ...phaseRecord(team, n), done: phaseRecord(team, n).done || tasks.filter((task) => task.status === "accepted" || task.status === "done").length, total: tasks.length },
+        phase: { ...phaseRecord(team, n), done: phaseRecord(team, n).done || tasks.filter((task) => task.status === "accepted" || task.status === "done").length, total: Math.max(phaseRecord(team, n).total, tasks.length) },
         tasks,
         nodes: placed,
         layers: ordered,

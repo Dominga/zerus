@@ -1712,6 +1712,14 @@ The `(team, phase)` primary key and `(team, phase, task)` index bound each page.
 shift an older page. GUI clients can use these pages and per-task reads off
 the UI thread.
 
+The Tauri Teams plan, reports and Profile show archived task stubs and frozen
+working time from the status window. They retain its limit of 1,000 task stubs
+and 200 phase headers; older omitted phases are named with their count. Opening
+an archived report reads just that task on a blocking worker. The report panel
+shows loading, failure and retry states, discards late replies after selection
+changes, and retains only the selected report (up to 64 Ki characters, with an
+explicit truncation notice). It does not load archive history on refresh.
+
 Existing records migrate on their next successful mutation. To migrate one
 without changing its plan, the owner or lead sends `hgs team archive-phases
 --json` with `team` and a canonical `request_id`; retries are idempotent.

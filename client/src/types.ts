@@ -955,6 +955,7 @@ export interface TeamMemberQuestion {
 }
 
 export interface TeamTaskView {
+  archived?: boolean; worked_s?: number | null;
   id: number; title: string; status: string; assignee: string; phase: number; deps: { task: number; hard: boolean }[];
   estimate_minutes: number; attempts: number;
   /** The newest attempt's state (`delivering`, `delivered`, `unconfirmed`, `reported`...), empty without one. */
@@ -967,6 +968,11 @@ export interface TeamTaskView {
   subteam_team?: string;
   /** Task 55: the newest attempt's open questions to the lead; the owner answers them too. */
   questions?: { id: string; text: string; at: number }[];
+}
+
+/** One task read on demand; only the newest available report crosses IPC. */
+export interface TeamTaskDetailView {
+  task: TeamTaskView; report: string; report_truncated: boolean;
 }
 
 /** A task's pipeline run (core PipelineRunView). */
@@ -1006,6 +1012,7 @@ export interface TeamTestsView {
 }
 
 export interface TeamPhaseView {
+  archived?: boolean;
   n: number; title: string; state: string; status: string; done: number; total: number; barrier: boolean; auto: boolean;
   acceptance: string; paused: boolean; health: string;
 }
@@ -1013,6 +1020,7 @@ export interface TeamPhaseView {
 export interface TeamFinding { kind: string; text: string; task: number | null; member: string }
 
 export interface TeamView {
+  archived_phases_not_shown?: number;
   id: string; name: string; status: string; project: string; folder: string; goal: string; plan_mode: string; lead: string;
   revision: number; created: number; updated: number; waiting_for_lead: boolean; pending_phase: number | null;
   settings: Record<string, unknown>; members: TeamMemberView[]; tasks: TeamTaskView[]; phases: TeamPhaseView[];

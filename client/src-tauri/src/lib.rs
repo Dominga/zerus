@@ -1450,6 +1450,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         teams::team_tests,
         teams::team_action,
         teams::team_read,
+        teams::team_task_read,
         teams::team_role_models,
         teams::catalog_editor_schema,
         teams::catalog_editor_load,
@@ -1811,8 +1812,7 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         builder = builder.data_directory(webview_data);
     }
     let window = builder.build().map_err(|error| {
-        tauri::Error::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        tauri::Error::Io(std::io::Error::other(
             format!("WebView2 window creation: {error}"),
         ))
     })?;

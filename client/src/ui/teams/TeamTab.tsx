@@ -19,7 +19,7 @@ import { sendBackMessage } from "./actions";
 import { duration, memberProgress, memberStatus, progress, shownMembers, stateLabel, stateTone, teamState, type MemberLive, type MemberStatus } from "./team-model";
 import { roleStyle } from "./roles";
 import { TeamProposals } from "./ProposalCards";
-import { TeamReports } from "./TeamReports";
+import { ArchivedTaskReport, TeamReports } from "./TeamReports";
 import { WaitingBanner } from "./Waiting";
 import { Blockers, TaskActions, TeamBarActions, TeamBarChips, TeamQuestions } from "./TeamActions";
 import { composer } from "../../store/composer";
@@ -65,6 +65,9 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [catalogOpen, setCatalogOpen] = createSignal(false);
   const [tests, setTests] = createSignal<TeamTestsView | null>(null);
+  const [reportTask, setReportTask] = createSignal<number | null>(null);
+  const reportTeam = createMemo(() => props.team.id);
+  createEffect(() => { props.computer; reportTeam(); setReportTask(null); });
   const graph = () => teams.graph(props.computer, props.team.id);
   const profile = () => teams.profile(props.computer, props.team.id);
   let body!: HTMLDivElement;
@@ -91,7 +94,8 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
         onSettings={() => setSettingsOpen(true)}
         onCatalog={() => setCatalogOpen(true)} />
       <WaitingBanner />
-      <TeamReports computer={props.computer} team={props.team} />
+      <TeamReports computer={props.computer} team={props.team} onOpenReport={setReportTask} />
+      <Show when={reportTask()}>{(task) => <ArchivedTaskReport computer={props.computer} team={reportTeam()} task={task()} onClose={() => setReportTask(null)} />}</Show>
       <Show when={props.failure}><div class="team-strip danger" role="status"><Icon name="circle-alert" size={14} /><span class="ell">{props.failure}</span></div></Show>
       <Show when={state() === "stuck"}>
         <div class="team-strip warn" role="status">
@@ -119,9 +123,10 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
                 tests={tests()}
                 onLoadProfile={() => { void teamsProfile(props.computer); }}
                 onLoadTests={loadTests}
+                onOpenReport={setReportTask}
                 taskActions={(id) => {
                   const task = props.team.tasks.find((candidate) => candidate.id === id);
-                  return task ? <TaskActions computer={props.computer} team={props.team} task={task} /> : <></>;
+                  return task && !task.archived ? <TaskActions computer={props.computer} team={props.team} task={task} /> : <></>;
                 }}
               />
             )}

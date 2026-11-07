@@ -753,15 +753,11 @@ impl<N: Native + 'static> Connector<N> {
                     .ok()
                     .flatten();
                 let mut call =
-                    crate::session_projects::call(
-                        &validated.operation,
-                        payload,
-                        session);
+                    crate::session_projects::call(&validated.operation, payload, session);
                 if let Some(selected) = &selected {
                     call.payload.as_mut().unwrap()["session_id"] = json!(selected.id);
                 }
-                let result = self.call(call)
-                    .await?;
+                let result = self.call(call).await?;
                 let mut native_result = result.clone();
                 if let Some(selected) = &selected {
                     if result["session_id"] != selected.id {
@@ -782,7 +778,8 @@ impl<N: Native + 'static> Connector<N> {
                         "native project assignment acknowledgement did not match",
                     ));
                 }
-                if validated.operation == "project_assign" && native_result["status"] == "assigned" {
+                if validated.operation == "project_assign" && native_result["status"] == "assigned"
+                {
                     self.state.borrow_mut().project_next_poll = 0.0;
                 }
                 Ok(native_result)

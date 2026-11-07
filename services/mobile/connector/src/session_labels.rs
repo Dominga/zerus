@@ -279,7 +279,11 @@ mod tests {
         let mut partial = answer.clone();
         partial.context.as_mut().unwrap().labels_by_id = false;
         assert!(wire::Reply::parse(
-            &serde_json::to_vec(&partial).unwrap(), &next, now().unwrap()).is_none());
+            &serde_json::to_vec(&partial).unwrap(),
+            &next,
+            now().unwrap()
+        )
+        .is_none());
         // Replacement of the selected configuration closes even a valid nonce.
         put(
             &selection,
@@ -364,7 +368,9 @@ mod tests {
             Box::new(|| 1_000.0),
         ));
         if ready {
-            connector.flags.set(crate::capabilities::Flags::from_help("session-labels-v1\nsession-id-selector-v1\nmobile-peer-session-id-v1"));
+            connector.flags.set(crate::capabilities::Flags::from_help(
+                "session-labels-v1\nsession-id-selector-v1\nmobile-peer-session-id-v1",
+            ));
         }
         put(&selection, wire::QUERY_FILE, &query);
         let observe = async {
@@ -386,9 +392,15 @@ mod tests {
                 let bytes = reply(&selection).unwrap();
                 let answer: wire::Reply = serde_json::from_slice(&bytes).unwrap();
                 assert_eq!(answer.query, query);
-                assert_eq!(answer.context.as_ref(), ready.then_some(&connector.native.context));
+                assert_eq!(
+                    answer.context.as_ref(),
+                    ready.then_some(&connector.native.context)
+                );
                 assert!(answer.routing_by_id);
-                assert_eq!(wire::Reply::parse(&bytes, &query, now().unwrap()).is_some(), ready);
+                assert_eq!(
+                    wire::Reply::parse(&bytes, &query, now().unwrap()).is_some(),
+                    ready
+                );
             }
             let calls = connector.native.calls.borrow();
             assert_eq!(calls[0].argv, ["swarm", "session-labels-context", "--json"]);

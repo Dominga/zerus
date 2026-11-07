@@ -535,7 +535,9 @@ async fn attention_reads_route_same_label_rows_through_their_own_native_ids() {
         &[SELECTOR_MARKER, PEER_MARKER, LABELS_MARKER],
         None,
     );
-    h.connector.flags.set(Flags::from_help(&[SELECTOR_MARKER,PEER_MARKER,LABELS_MARKER].join("\n")));
+    h.connector.flags.set(Flags::from_help(
+        &[SELECTOR_MARKER, PEER_MARKER, LABELS_MARKER].join("\n"),
+    ));
     h.connector.state.borrow_mut().capabilities_next_poll = 1_000_000.0;
     let other = "22222222-2222-4222-8222-222222222222";
     let rows:Vec<_>=[(RUN,CONVERSATION,ID),("second-run","second-conversation",other)].into_iter().map(|(run,conversation,id)|

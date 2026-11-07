@@ -186,6 +186,10 @@ fn primary_grouping_separates_twins_and_ignores_other_computers() {
     raw["session_id_memberships"]["records"] =
         json!([{ "machine":NODE,"session_id":ONE,"project":"one","conflict":true}]);
     assert!(PrimaryMemberships::read(&raw).is_err());
-    raw["session_id_memberships"]["records"] = json!([{ "machine":NODE,"session_id":ONE,"conflict":false}]);
-    assert!(PrimaryMemberships::read(&raw).is_err(), "missing is not an explicit null");
+    raw["session_id_memberships"]["records"] =
+        json!([{ "machine":NODE,"session_id":ONE,"conflict":false}]);
+    assert!(
+        PrimaryMemberships::read(&raw).is_err(),
+        "missing is not an explicit null"
+    );
 }

@@ -701,8 +701,7 @@ impl<N: Native + 'static> Connector<N> {
             let detail = SESSION_LABEL_SELECTION
                 .scope(
                     selection,
-                    self
-                .native(Call::new(["inspect", key.0.as_str()]).timeout(timeout)),
+                    self.native(Call::new(["inspect", key.0.as_str()]).timeout(timeout)),
                 )
                 .await;
             (key, detail)
@@ -754,7 +753,9 @@ impl<N: Native + 'static> Connector<N> {
                 .ok()
                 .and_then(|native| {
                     let raw = native.json();
-                    if self.flags.get().session_labels && raw.get("session_id_memberships").is_none() {
+                    if self.flags.get().session_labels
+                        && raw.get("session_id_memberships").is_none()
+                    {
                         return None;
                     }
                     let primary = projects::PrimaryMemberships::read(&raw).ok()?;
@@ -1441,7 +1442,11 @@ mod encrypted_machine_tests {
         let f = Fixture::new();
         let name = "codex/example/labels";
         let id = "11111111-1111-4111-8111-111111111111";
-        f.connector.state.borrow_mut().session_ids.insert("run".into(), id.into());
+        f.connector
+            .state
+            .borrow_mut()
+            .session_ids
+            .insert("run".into(), id.into());
         let payload = json!({"expected_run_id":"run"});
         let flags = |markers: &[&str]| crate::capabilities::Flags::from_help(&markers.join("\n"));
         let all = [LABELS_MARKER, SELECTOR_MARKER, PEER_MARKER];
@@ -1449,23 +1454,63 @@ mod encrypted_machine_tests {
             f.connector.flags.set(flags(markers));
             let selection = Connector::<NativeFixture>::guarded(MACHINE.into(), async {
                 f.connector.labels_selection(name, Some(&payload))
-            }).await;
+            })
+            .await;
             assert_eq!(selection.is_some(), expected, "{markers:?}");
         }
         f.connector.flags.set(flags(&all[..2]));
-        assert_eq!(f.connector.labels_selection(name, Some(&payload)).unwrap().id, id);
-        assert!(f.connector.labels_selection(name, Some(&json!({"expected_run_id":"run","run_id":"other"}))).is_none());
-        assert!(f.connector.labels_selection(name, Some(&json!({"expected_run_id":"run","archive_id":"old"}))).is_none());
-        assert!(f.connector.labels_selection(name, Some(&json!({"expected_run_id":"unlisted"}))).is_none());
+        assert_eq!(
+            f.connector
+                .labels_selection(name, Some(&payload))
+                .unwrap()
+                .id,
+            id
+        );
+        assert!(f
+            .connector
+            .labels_selection(
+                name,
+                Some(&json!({"expected_run_id":"run","run_id":"other"}))
+            )
+            .is_none());
+        assert!(f
+            .connector
+            .labels_selection(
+                name,
+                Some(&json!({"expected_run_id":"run","archive_id":"old"}))
+            )
+            .is_none());
+        assert!(f
+            .connector
+            .labels_selection(name, Some(&json!({"expected_run_id":"unlisted"})))
+            .is_none());
         let fleet = f.connector.fleet.as_ref().unwrap();
-        let peer = f.connector.peer_context(MACHINE, crate::fleet::PeerNative {
-            gateway: fleet.gateway.clone(), routes: fleet.routes.clone(), slots: fleet.slots.clone(),
-            identity: "peer".into(), machine: MACHINE.into(), default_timeout: 1.0,
-        });
-        peer.state.borrow_mut().session_ids.insert("run".into(), id.into());
-        for (gateway, own, expected) in [(&all[..], &all[..], true), (&all[1..], &all[..], false), (&all[..], &all[..2], false)] {
-            f.connector.flags.set(flags(gateway)); peer.flags.set(flags(own));
-            assert_eq!(peer.labels_selection(name, Some(&payload)).is_some(), expected);
+        let peer = f.connector.peer_context(
+            MACHINE,
+            crate::fleet::PeerNative {
+                gateway: fleet.gateway.clone(),
+                routes: fleet.routes.clone(),
+                slots: fleet.slots.clone(),
+                identity: "peer".into(),
+                machine: MACHINE.into(),
+                default_timeout: 1.0,
+            },
+        );
+        peer.state
+            .borrow_mut()
+            .session_ids
+            .insert("run".into(), id.into());
+        for (gateway, own, expected) in [
+            (&all[..], &all[..], true),
+            (&all[1..], &all[..], false),
+            (&all[..], &all[..2], false),
+        ] {
+            f.connector.flags.set(flags(gateway));
+            peer.flags.set(flags(own));
+            assert_eq!(
+                peer.labels_selection(name, Some(&payload)).is_some(),
+                expected
+            );
         }
     }
 

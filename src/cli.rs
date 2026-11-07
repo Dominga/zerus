@@ -177,6 +177,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] account default [ID]   show or select the default account for new sessions
        hgs [@host] account model-settings ID   inspect this account's native model catalog and launch defaults
        hgs [@host] account model-defaults ID --model MODEL [--effort LEVEL] [--revision REV]   defaults for new sessions
+       hgs [@host] account permission-scope ID --scope account|computer [--revision REV]   share the permission mode across the account's computers, or keep it per computer
        hgs [@host] account set-key native-dsh --json   save API key from private JSON stdin
        hgs [@host] account start native-opencode   start the shared OpenCode service if none runs; inspection never starts it
        hgs [@host] account favorite native-opencode --model PROVIDER/MODEL --favorite on|off --request-id UUID   star an OpenCode model on that computer
@@ -1532,9 +1533,6 @@ fn remote(
     remote_via(config, target, command, args, global_dry, None)
 }
 
-/// `remote`, optionally as the one verified hop of a session reference: the
-/// peer runs the command guarded by `--expect-machine MACHINE`, with the same
-/// SSH options the command has without it (zerus-ucck P1c).
 /// The port Codex's browser sign-in waits on, on the signing computer.
 const CALLBACK_PORT: u16 = 1455;
 /// SSH options for a remote sign-in: this computer's loopback port 1455
@@ -1558,6 +1556,9 @@ fn account_sign_in(command: &str, args: &[String]) -> bool {
     rest.first().is_some_and(|operation| operation == "login")
 }
 
+/// `remote`, optionally as the one verified hop of a session reference: the
+/// peer runs the command guarded by `--expect-machine MACHINE`, with the same
+/// SSH options the command has without it (zerus-ucck P1c).
 fn remote_via(
     config: &Config,
     target: &str,

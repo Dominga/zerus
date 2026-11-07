@@ -8,6 +8,7 @@ import {osOf} from "../../store/overview";
 import {accountDistribution,signInDistributedProfile,type DistributionPrompt} from "../../store/accountDistribution";
 import type {AccountDistributionValues,AccountDistributionState} from "../../bridge";
 import { tr } from "../../i18n";
+import { trText } from "../../text";
 const slug=(s:string)=>s.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,48)||"account";
 const RANK:Record<AccountDistributionState,number>={failed:0,unknown:1,"needs-signin":2,working:3,pending:4,added:5};
 /** Approved AddToMachine.tsx layout, driven by a bounded native snapshot. */
@@ -55,7 +56,7 @@ export default function AccountDistributionDialog(props:{prompt:DistributionProm
    </Show>
    <Show when={step()===3}>
     <p class="atm-summary"><Show when={finished()} fallback={<>{state.progress().length===1?tr("Adding %1 to 1 machine…",view.label):tr("Adding %1 to %2 machines…",view.label,state.progress().length)}</>}>{[tr("%1 added",count("added")),count("needs-signin")?tr("%1 need sign-in",count("needs-signin")):"",count("failed")?tr("%1 failed",count("failed")):"",count("unknown")?tr("%1 unknown",count("unknown")):""].filter(Boolean).join(", ")}.</Show></p>
-    <div class="atm-results"><For each={ordered()}>{p=><div class={`atm-result r-${p.state}`}><span class="atm-ricon" aria-hidden="true"><Show when={p.state==="working"} fallback={<Icon name={p.state==="added"?"check":p.state==="needs-signin"?"key-round":p.state==="failed"?"x":p.state==="unknown"?"circle-alert":"clock"} size={14}/>}><i class="atm-spin"/></Show></span><MachineLabel alias={p.machine}/><span class="atm-rtext">{p.text}</span><Show when={p.state==="failed"}><button class="btn small" disabled={state.busy()} onClick={()=>void state.retry(p.host,values())}>{tr("Retry")}</button></Show><Show when={p.state==="needs-signin"&&p.profile}><button class="btn small" disabled={state.busy()} onClick={e=>void signInDistributedProfile(p.profile!,e.currentTarget)}>{tr("Sign in…")}</button></Show></div>}</For></div>
+    <div class="atm-results"><For each={ordered()}>{p=><div class={`atm-result r-${p.state}`}><span class="atm-ricon" aria-hidden="true"><Show when={p.state==="working"} fallback={<Icon name={p.state==="added"?"check":p.state==="needs-signin"?"key-round":p.state==="failed"?"x":p.state==="unknown"?"circle-alert":"clock"} size={14}/>}><i class="atm-spin"/></Show></span><MachineLabel alias={p.machine}/><span class="atm-rtext">{p.text}<Show when={p.note}>{note=><> {trText(note())}</>}</Show></span><Show when={p.state==="failed"}><button class="btn small" disabled={state.busy()} onClick={()=>void state.retry(p.host,values())}>{tr("Retry")}</button></Show><Show when={p.state==="needs-signin"&&p.profile}><button class="btn small" disabled={state.busy()} onClick={e=>void signInDistributedProfile(p.profile!,e.currentTarget)}>{tr("Sign in…")}</button></Show></div>}</For></div>
     <Show when={count("unknown")}><p class="hint">{tr("An unknown result is never retried automatically: the copy may have finished. Open the machine in Accounts to check it.")}</p></Show>
    </Show>
   </div>

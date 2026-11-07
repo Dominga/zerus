@@ -1575,10 +1575,12 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         // apart on separate branches. One waits while an open task with an
         // overlapping output runs, or while an earlier one in this order waits
         // for its member; it never goes to another member to run beside it.
-        if !plan::output_holders(team, task).is_empty() || claimed.iter().any(|other| other.output_overlaps(task)) {
+        // Task 259: only files and module paths hold; a folder-level output is
+        // advisory and never holds a whole area.
+        if !plan::output_holders(team, task).is_empty() || claimed.iter().any(|other| other.narrow_output_overlaps(task)) {
             continue;
         }
-        if !task.output.is_empty() {
+        if task.narrow_outputs().next().is_some() {
             claimed.push(task);
         }
         // U45: a task with models or for a role goes to a member that can run
@@ -1682,18 +1684,33 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         // Members with one role do the same work: a ready task goes to a free
         // one when its assignee is busy. Only an explicit fresh rejection
         // prefers a member that did not fail it; rework keeps its member.
+        // Task 259 (owner, 2026-11-08): no idle member while a ready task
+        // waits. A task with free outputs goes to an idle member of a
+        // compatible role when its assignee cannot take it: the same role, or
+        // one that does the same kind of work (Frontend SolidJS and Frontend
+        // DeepSeek share "Frontend"). Rights decide; the exact role and the
+        // plan's assignee only order the choice. A member Zerus has not
+        // started yet keeps its task - the plan's assignee is launched for it;
+        // only one that has a session and still cannot work now (busy, held by
+        // a stage, failed, or already given another task) is replaced.
         // U36: a test holding the assignee's folder keeps its next task back;
-        // a free member with the same role may take it.
+        // a free member of a compatible role may take it.
         let held = super::stages::held(team, &member.id).is_some();
         if !team.requires_assignee(task) && (task.requests_fresh_retry() || !outputs.blocks(task)) {
-            let failed = |m: &Member| task.failed_by(&m.id);
-            let assignee_fits = available(member, &busy, Some(id)) && !failed(member) && !held;
+            let assignee_fits = available(member, &busy, Some(id)) && !task.failed_by(&member.id) && !held;
             if !assignee_fits {
-                let role = team.role_of(&member.id);
-                if let Some(peer) = team.members.iter().find(|m| {
-                    m.id != member.id && m.id != team.lead && team.role_of(&m.id) == role && available(m, &busy, Some(id)) && !failed(m)
-                        && super::stages::held(team, &m.id).is_none()
-                }) {
+                // Task 259: the idle member of a compatible role, with the
+                // rights, whose own work in progress does not write the same
+                // files; the plan's assignee is only replaced once started.
+                let peer = super::dispatcher_rebalance::peer(
+                    team,
+                    task,
+                    member,
+                    member.session.is_some(),
+                    &|other| available(other, &busy, Some(id)),
+                    &outputs,
+                );
+                if let Some(peer) = peer {
                     busy.insert(peer.id.as_str());
                     steps.push(Step::Rebalance { task: id, from: member.id.clone(), to: peer.id.clone() });
                     continue;
@@ -5266,6 +5283,9 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
     anyhow::ensure!(!team.reserved_for_rework(member_id, Some(task_id)), "member reserved for rework");
     if let Some(task) = team.task(task_id).filter(|task| task.assignee != member_id && !task.assignee.is_empty()) {
         anyhow::ensure!(!team.rebalance_blocked(task), "task must stay with its member");
+        // Task 259: a task given across roles never lands beside work in
+        // progress in the same files in the new member's folder.
+        anyhow::ensure!(!InProgressOutputs::new(&team).blocks_for(member_id, task), "the member has work in progress in the same files");
     }
     // U48 (spec 1, step 2): the task's branch, confirmed before the hand-out;
     // a refused or unconfirmed one leaves the task waiting. A confirmed one
@@ -5436,7 +5456,8 @@ fn hand_out_now(
         }
         task.attempts.last_mut().unwrap().prepare = prepared;
         if let (false, Some((from_role, to_role))) = (rebalanced.is_empty(), roles) {
-            events.push(Event::new("rebalanced", json!({"task":task_id,"from":from_role,"to":to_role,"from_member":rebalanced,"to_member":member_id})));
+            let cross_role = from_role != to_role;
+            events.push(Event::new("rebalanced", json!({"task":task_id,"from":from_role,"to":to_role,"from_member":rebalanced,"to_member":member_id,"cross_role":cross_role})));
         }
         task.status = TaskStatus::Assigned;
         let task = team.task(task_id).unwrap();
@@ -6071,7 +6092,8 @@ fn record_context_start(
             ..TaskWait::zerus("context", "waiting", "", now())
         });
         if let (false, Some((from_role, to_role))) = (rebalanced.is_empty(), roles) {
-            events.push(Event::new("rebalanced", json!({"task":task_id,"from":from_role,"to":to_role,"from_member":rebalanced,"to_member":member_id})));
+            let cross_role = from_role != to_role;
+            events.push(Event::new("rebalanced", json!({"task":task_id,"from":from_role,"to":to_role,"from_member":rebalanced,"to_member":member_id,"cross_role":cross_role})));
         }
         Ok(())
     })
@@ -6119,7 +6141,8 @@ fn record_waits(
             ..TaskWait::zerus("context", if step.result == "uncertain" { "uncertain" } else { "refused" }, &step.reason, step.at)
         });
         if let (false, Some((from_role, to_role))) = (rebalanced.is_empty(), roles) {
-            events.push(Event::new("rebalanced", json!({"task":task_id,"from":from_role,"to":to_role,"from_member":rebalanced,"to_member":member_id})));
+            let cross_role = from_role != to_role;
+            events.push(Event::new("rebalanced", json!({"task":task_id,"from":from_role,"to":to_role,"from_member":rebalanced,"to_member":member_id,"cross_role":cross_role})));
         }
         events.push(Event::new(
             "prepare_failed",
@@ -6266,14 +6289,14 @@ fn tell_lead_blocked(store: &mut Store, team: &Team, task_id: u32) -> anyhow::Re
     })
 }
 
-/// One message for the lead: the open tasks Zerus gave to another member
-/// with the same role, and to whom.
+/// One message for the lead: the open tasks Zerus gave to another member,
+/// with the same role or (task 259) across roles, and to whom.
 pub(crate) fn rebalanced_text(team: &Team, tasks: &[u32]) -> String {
     let mut text = String::from("[Zerus team \u{b7} from: Zerus \u{b7} tasks moved]\n");
     for task in tasks.iter().filter_map(|id| team.task(*id)) {
         if let Some(attempt) = task.open_attempt() {
             text += &format!(
-                "#{} {}: given to {} instead of {}, which was busy or failed its last attempt.\n",
+                "#{} {}: given to {} instead of {}, which could not take it now.\n",
                 task.id,
                 task.title,
                 team.name_of(&attempt.member),
@@ -6281,7 +6304,9 @@ pub(crate) fn rebalanced_text(team: &Team, tasks: &[u32]) -> String {
             );
         }
     }
-    text + "Members with one role share their work; nothing to do unless you want another member (hgs team reassign keeps your choice)."
+    text + "Zerus hands a ready task with free outputs to an idle member of a compatible role; the plan's member \
+            and the exact role stay the preference. Nothing to do unless you want another member \
+            (hgs team reassign keeps your choice)."
 }
 
 fn tell_lead_rebalanced(store: &mut Store, team: &Team, tasks: &[u32]) -> anyhow::Result<()> {

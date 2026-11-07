@@ -138,6 +138,9 @@ pub const KEYS: &[Key] = &[
     key("workspace/alwaysOnTop", Kind::Flag(false)),
     // Sessions (SettingsPage.h:97-107, QuestionNotificationSettings.h).
     key("workspace/compact", Kind::Flag(false)),
+    // Qt's workspace/collapsedTeams: the team ids whose members are folded
+    // under the lead (SessionsWindowRows.cpp).
+    key("workspace/collapsedTeams", Kind::Chords),
     key("workspace/expandSessionsOnHover", Kind::Flag(true)),
     key("workspace/hideEmptyProjects", Kind::Flag(true)),
     key("workspace/animateActivity", Kind::Flag(true)),

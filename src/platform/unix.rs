@@ -1644,7 +1644,8 @@ pub fn paste(config: &Config, session: &str, pane: &str, client: &str) -> Result
                     .reopen()
                     .ok()
                     .and_then(|file| {
-                        super::ssh()
+                        let remote = crate::remote_shell::hgs(config, who, &["clip"]).ok()?;
+                        crate::ssh_bytes::command(&remote).ok()?
                             .args(crate::machines::ssh_options(config, who))
                             .args([
                                 "-o",
@@ -1652,7 +1653,7 @@ pub fn paste(config: &Config, session: &str, pane: &str, client: &str) -> Result
                                 "-o",
                                 "ConnectTimeout=3",
                                 who,
-                                "~/.local/bin/hgs clip",
+                                &remote,
                             ])
                             .stdout(file)
                             .stderr(Stdio::null())

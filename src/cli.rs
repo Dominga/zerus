@@ -1211,8 +1211,9 @@ fn peer_session(command: &str, args: &[String]) -> String {
     )
 }
 fn peer_json_archives(config: &Config, peer: &str, archives: bool) -> Value {
-    let output = platform::ssh_output(
-        platform::ssh()
+    let words = if archives { vec!["ls", "--local", "--json"] } else { vec!["ls", "--local", "--json", "--no-archives"] };
+    let output = crate::remote_shell::hgs(config, peer, &words).map_err(|e| std::io::Error::other(e.message)).and_then(|remote| platform::ssh_output(
+        crate::ssh_bytes::command(&remote)?
             .args(crate::machines::ssh_options(config, peer))
             .args([
                 "-o",
@@ -1220,10 +1221,10 @@ fn peer_json_archives(config: &Config, peer: &str, archives: bool) -> Value {
                 "-o",
                 "ConnectTimeout=3",
                 peer,
-                if archives { "~/.local/bin/hgs ls --local --json" } else { "~/.local/bin/hgs ls --local --json --no-archives" },
+                &remote,
             ])
             .stderr(Stdio::piped()),
-    );
+    ));
     let (error, detail) = match output {
         Ok(out) if out.status.success() && !out.stdout.is_empty() => {
             match serde_json::from_slice::<Value>(&out.stdout) {
@@ -1687,6 +1688,36 @@ fn remote_via(
     } else if command == "guide" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] guide'; then exec ~/.local/bin/hgs {}; else echo 'hgs: the selected computer has no agent guide; check hgs @host -h' >&2; exit 1; fi",platform::join(&remote_args)))
     } else { format!("~/.local/bin/hgs {}", platform::remote_join(&remote_args)) };
+    if !global_dry && !has(&args, "--dry-run") && command == "ls" && has(&args, "--json") {
+        println!("{}", peer_json_archives(config, target, !has(&args,"--no-archives")));
+        return Ok(0);
+    }
+    let remote = if global_dry || has(&args, "--dry-run") { remote } else {
+        let mut markers: Vec<(&str, bool)> = match command {
+            "--expect-machine" if args.get(1).is_some_and(|v| v == "session-action-status") => vec![("guarded-create-v1", false), ("lifecycle-receipt-status-v1", true)],
+            "--expect-machine" => vec![("guarded-create-v1", false)],
+            "subagent" => vec![("Subagent retirement ABI: subagent-retire-v1", false)],
+            "repository" => vec![("repository-clone-v1", false)],
+            "wait" => vec![("hgs [@host] wait", false)],
+            "notifications" => vec![("session-notifications-v1", true)],
+            "hooks" => vec![("hooks-health-v1", false)],
+            "analytics" => vec![("hgs [@host] analytics --json", false)],
+            "watch" => vec![(zerus_watch_protocol::HELP_MARKER, false)],
+            "guide" => vec![("hgs [@host] guide", false)],
+            _ => vec![],
+        };
+        if let Some(selected) = selector_markers(command, &args)? {
+            markers = selected.iter().map(|marker| match marker {
+                Marker::Line(value) => (*value, true), Marker::Text(value) => (*value, false),
+            }).collect();
+        }
+        if machine.is_some() { markers.push(("guarded-create-v1", false)); }
+        let mut words = remote_args.clone();
+        if command == "analytics" { words.push("--read-only".into()); }
+        crate::remote_shell::adapt(config, target, &words, &remote, &markers,
+            "Update the selected computer before using this command; the required capability is missing")
+            .map_err(|e| if e.code == 3 { Error::new(3, format!("{target} unreachable: {}", e.message)) } else { e })?
+    };
     if global_dry || has(&args, "--dry-run") {
         if let Some(title) = tab {
             if config.tab {
@@ -1706,6 +1737,13 @@ fn remote_via(
     let _tab = tab
         .as_ref()
         .map(|title| TabGuard::begin(config, title, &platform::tab_color(config, target)));
+    if remote.starts_with(crate::ssh_bytes::PREFIX) {
+        let mut framed = crate::ssh_bytes::command(&remote)?;
+        for (key, value) in ssh.get_envs() {
+            match value { Some(value) => { framed.env(key, value); }, None => { framed.env_remove(key); } }
+        }
+        ssh = framed;
+    }
     flags.push(target.into());
     flags.push(remote);
     let rc = platform::wait_interactive(ssh.args(flags))?;
@@ -1827,6 +1865,10 @@ fn list(config: &Config, args: &[String], global_dry: bool) -> Result<i32> {
     local_list(config)?;
     for peer in &config.peers {
         println!("{peer}:");
+        let Ok(remote) = crate::remote_shell::hgs(config, peer, &["ls", "--local"]) else {
+            println!("  offline");
+            continue;
+        };
         let mut flags = crate::machines::ssh_options(config, peer);
         flags.extend(
             [
@@ -1835,7 +1877,7 @@ fn list(config: &Config, args: &[String], global_dry: bool) -> Result<i32> {
                 "-o",
                 "ConnectTimeout=3",
                 peer,
-                "~/.local/bin/hgs ls --local",
+                &remote,
             ]
             .into_iter()
             .map(str::to_owned),

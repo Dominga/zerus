@@ -305,7 +305,8 @@ pub(crate) fn call(
                 revision: operation["revision"]
                     .as_u64()
                     .ok_or(creation::READ_FAILED)?,
-                original: serde_json::to_string(operation).map_err(|_| creation::READ_FAILED)?,
+                original: creation::effect_checkpoint(operation)
+                    .map_err(|_| creation::READ_FAILED)?,
             };
             intent.clone().verify().map_err(|_| creation::READ_FAILED)?;
             sent.set(true);

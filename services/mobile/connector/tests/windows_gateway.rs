@@ -478,7 +478,12 @@ fn cleanup_ends_a_detached_connector_through_its_own_stop_marker() {
     .unwrap();
     original.verify().unwrap();
     drop(encrypted);
-    assert!(original.verify().is_err(), "the connector is still running");
+    // The journal lock frees before the process has finished ending, so wait for the
+    // exit itself. An error here is missing evidence, not an exit.
+    assert!(
+        original.wait_for_exit(Duration::from_secs(30)).unwrap(),
+        "the connector is still running"
+    );
 }
 
 #[test]

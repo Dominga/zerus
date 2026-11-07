@@ -54,9 +54,14 @@ The facts the port must keep. References are to `D:/Tools/CodeLore`, HEAD
 - **No writer lock:** concurrency is the SQLite busy timeout (120 s, WAL), the shared-tree compare-and-swap, and an atomic replace with retries.
 - **Index:** disposable SQLite under the user cache. That is `$LORE_CACHE`, else `%LOCALAPPDATA%\codelore` (Windows), `~/Library/Caches/codelore` (macOS) or `$XDG_CACHE_HOME`/`~/.cache` + `/codelore`, then `/<sha1(root)[..16]>/index.sqlite`.
   - It is refreshed on open by size, mtime and content hash.
-  - It holds FTS5 `words` (porter) and `terms` (code tokens), plus optional vectors.
+  - It holds FTS5 `words` (porter) and `terms` (code tokens), plus optional vectors (one per record text, by the text's hash and the model's name).
+  - It has CodeLore's schema (`user_version` 3), so the Rust and the Python versions read each other's file.
+  - A file is read again only when its size or mtime moved and its hash differs; a file that is gone is dropped, and another version rebuilds it.
+  - When the cache cannot be written, the index goes to the repository's git directory (`.git/codelore`) and the command says so.
 - **Search:** hybrid, fused by RRF (k = 60, depth 50).
-  - The lists are BM25 words, BM25 terms and vectors (Ollama `nomic-embed-text` at `127.0.0.1:11434`, optional).
+  - The lists are BM25 words, BM25 terms and vectors. The vectors come from the built-in model (`nomic-embed-text` v1.5, run in the process on the CPU with candle; no Ollama and no ONNX runtime). They are optional: without the model, or with `embed.provider = "none"` or `--text-only`, the search runs on the first two lists and says so.
+  - The weights (about 550 MB) are not in the binary and never fetched by a search: `lore model fetch` downloads them from Hugging Face at a pinned revision into the user cache (or an offline install gives `LORE_MODEL_DIR`), each file checked by size and SHA-256.
+  - Records are embedded with the model's `search_document: ` prefix and queries with `search_query: `.
   - Phrase and signal bonuses apply.
   - Retired records are hidden by default.
 - **CLI:**
@@ -113,7 +118,7 @@ The facts the port must keep. References are to `D:/Tools/CodeLore`, HEAD
   | `ops` | the one write path, references, relations, ids, commit subjects |
   | `dedupe` | duplicates |
   | `index` | SQLite FTS5 and vectors |
-  | `embed` | `ollama` or `none` |
+  | `embed` | the built-in nomic-embed-text model (candle), `builtin` or `none` |
   | `search` | `find`, `for` |
   | `plans` | counts, layers, readiness, stale |
   | `cover` | sources |
@@ -187,7 +192,7 @@ A store whose git is unusable (no git on that computer, a broken repository) is 
 
 - `cover` (sources and their coverage). The commands are ported but not used by Teams in the first version.
 - Push from Zerus-held stores.
-- Any embedding provider other than Ollama, and any network model service.
+- Any embedding provider other than the built-in model (Ollama was dropped by the owner's decision), and any network model service. A lore.toml that still says `provider = "ollama"` reads as `builtin`, and its `url`, `model`, `timeout` and prefix keys are ignored.
 - A web or desktop editor for records. The desktop lists and opens them read-only at first.
 - Sharing a store between projects.
 

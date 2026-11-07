@@ -184,7 +184,7 @@ fn peer(config: &Config, peer: &str) -> Value {
             let words = if crate::remote_shell::supports(config, peer, &[("hgs [@host] status", false)])? {
                 vec!["status", "--local", "--json"]
             } else { vec!["ls", "--local", "--json"] };
-            crate::remote_shell::windows_command(&words)
+            crate::remote_shell::windows_command(config, peer, &words)
         } else { Ok(platform::remote_sh(PEER_COMMAND)) }
     })();
     let output = match command.and_then(|command| ssh(config, peer, &command)) {

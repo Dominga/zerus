@@ -15,12 +15,65 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub const WINDOWS_PROBE: &str = "cmd.exe /d /c echo hgs-remote-windows-v1";
+pub const WINDOWS_PROBE: &str = r#"echo "hgs-remote-v2|%OS%|%SystemRoot%|$env:OS|$env:SystemRoot""#;
 
-/// A process-local discovery cache: an alias/config change in a later CLI
-/// invocation is always rediscovered. No credentials or remote state is stored.
-pub fn windows(config: &Config, peer: &str) -> Result<bool> {
-    static CACHE: OnceLock<Mutex<BTreeMap<Vec<String>, bool>>> = OnceLock::new();
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Shell {
+    Posix,
+    PowerShell(String),
+    Cmd(String),
+}
+
+fn parse_probe(bytes: &[u8]) -> Option<Shell> {
+    let text = std::str::from_utf8(bytes).ok()?.trim();
+    let text = text
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(text);
+    let fields: Vec<_> = text.split('|').collect();
+    if fields.len() != 5 || fields[0] != "hgs-remote-v2" {
+        return None;
+    }
+    let (root, cmd) =
+        if fields[1] == "Windows_NT" && fields[3] == "$env:OS" && fields[4] == "$env:SystemRoot" {
+            (fields[2], true)
+        } else if fields[1] == "%OS%" && fields[2] == "%SystemRoot%" && fields[3] == "Windows_NT" {
+            (fields[4], false)
+        } else if fields[1] == "%OS%"
+            && fields[2] == "%SystemRoot%"
+            && fields[3].strip_suffix(":OS")? == fields[4].strip_suffix(":SystemRoot")?
+        {
+            return Some(Shell::Posix);
+        } else {
+            return None;
+        };
+    let bytes = root.as_bytes();
+    if bytes.len() < 3
+        || bytes.len() > 240
+        || !bytes[0].is_ascii_alphabetic()
+        || bytes[1] != b':'
+        || !matches!(bytes[2], b'\\' | b'/')
+        || !root
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || ":\\/_-. ()".contains(c))
+    {
+        return None;
+    }
+    let path = format!(
+        "{}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+        root.trim_end_matches(['\\', '/'])
+    );
+    Some(if cmd {
+        Shell::Cmd(path)
+    } else {
+        Shell::PowerShell(path)
+    })
+}
+
+/// Process-local discovery cache, bound to alias, SSH program and connection
+/// overrides. Later CLI calls rediscover; no metadata/credentials are persisted.
+fn discover(config: &Config, peer: &str) -> Result<Shell> {
+    static CACHE: OnceLock<Mutex<BTreeMap<Vec<String>, Shell>>> = OnceLock::new();
     let mut key = vec![
         platform::ssh_program().to_string_lossy().into_owned(),
         peer.into(),
@@ -28,17 +81,17 @@ pub fn windows(config: &Config, peer: &str) -> Result<bool> {
     key.extend(crate::machines::ssh_options(config, peer));
     let cache = CACHE.get_or_init(Default::default);
     if let Some(value) = cache.lock().unwrap().get(&key) {
-        return Ok(*value);
+        return Ok(value.clone());
     }
+    // `echo` is a builtin in each supported login shell. No new executable is
+    // searched for on remote PATH merely to discover the platform.
     let output = read(config, peer, WINDOWS_PROBE)?;
-    let value = if output.status.success() && output.stdout == b"hgs-remote-windows-v1\r\n"
-        || output.status.success() && output.stdout == b"hgs-remote-windows-v1\n"
-    {
-        true
-    } else if output.status.code() == Some(127) {
-        // The fixed Windows executable is absent from this POSIX login shell.
-        false
+    let value = if output.status.success() {
+        parse_probe(&output.stdout)
     } else {
+        None
+    };
+    let Some(value) = value else {
         let detail: String = String::from_utf8_lossy(&output.stderr)
             .chars()
             .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
@@ -55,8 +108,12 @@ pub fn windows(config: &Config, peer: &str) -> Result<bool> {
     if cache.len() >= 256 {
         cache.clear();
     }
-    cache.insert(key, value);
+    cache.insert(key, value.clone());
     Ok(value)
+}
+
+pub fn windows(config: &Config, peer: &str) -> Result<bool> {
+    Ok(!matches!(discover(config, peer)?, Shell::Posix))
 }
 
 pub fn hgs<S: AsRef<str>>(config: &Config, peer: &str, words: &[S]) -> Result<String> {
@@ -86,11 +143,11 @@ pub fn adapt<S: AsRef<str>>(
     if !markers.is_empty() && !supports(config, peer, markers)? {
         return Err(Error::new(1, missing));
     }
-    windows_command(words)
+    windows_command(config, peer, words)
 }
 
 pub fn supports(config: &Config, peer: &str, markers: &[(&str, bool)]) -> Result<bool> {
-    let output = read(config, peer, &windows_command(&["--help"])?)?;
+    let output = read(config, peer, &windows_command(config, peer, &["--help"])?)?;
     let help = String::from_utf8_lossy(&output.stdout);
     Ok(output.status.success()
         && markers.iter().all(|(marker, exact)| {
@@ -106,7 +163,11 @@ pub fn supports(config: &Config, peer: &str, markers: &[(&str, bool)]) -> Result
 /// ProcessStartInfo inherits the original SSH standard handles; PowerShell does
 /// not read, format or buffer the hgs stream. Native argv uses Windows quoting,
 /// rather than PowerShell 5.1's lossy native argument forwarding.
-pub fn windows_command<S: AsRef<str>>(words: &[S]) -> Result<String> {
+pub fn windows_command<S: AsRef<str>>(config: &Config, peer: &str, words: &[S]) -> Result<String> {
+    encode(&discover(config, peer)?, words)
+}
+
+fn encode<S: AsRef<str>>(shell: &Shell, words: &[S]) -> Result<String> {
     if words.iter().any(|word| word.as_ref().contains('\0')) {
         return Err(Error::new(1, "A remote argument contains NUL"));
     }
@@ -116,8 +177,18 @@ pub fn windows_command<S: AsRef<str>>(words: &[S]) -> Result<String> {
         r#"$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';try{{$a=@([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{data}'))|ConvertFrom-Json);function q([string]$s){{'"'+[regex]::Replace($s,'(\\*)("|$)',{{param($m)$b=$m.Groups[1].Value;if($m.Groups[2].Value -eq '"'){{$b+$b+'\"'}}else{{$b+$b}}}})+'"'}};$i=[Diagnostics.ProcessStartInfo]::new();$i.FileName=Join-Path $env:USERPROFILE '.local\bin\hgs.exe';$i.Arguments=($a|ForEach-Object{{q $_}})-join ' ';$i.UseShellExecute=$false;$i.CreateNoWindow=[Console]::IsInputRedirected;$p=[Diagnostics.Process]::new();$p.StartInfo=$i;if(-not$p.Start()){{throw 'hgs start refused'}};$p.WaitForExit();$c=$p.ExitCode;$p.Dispose();exit $c}}catch{{[Console]::Error.WriteLine('hgs: remote Windows invocation failed');exit 127}}"#
     );
     let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let program = match shell {
+        Shell::PowerShell(path) => format!("& '{}'", path),
+        Shell::Cmd(path) => format!("\"{}\"", path),
+        Shell::Posix => {
+            return Err(Error::new(
+                1,
+                "Windows transport requires a verified Windows shell",
+            ))
+        }
+    };
     let command = format!(
-        "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
+        "{program} -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
         STANDARD.encode(bytes)
     );
     // cmd's command-line limit is smaller than CreateProcess's. Refuse before
@@ -217,6 +288,36 @@ fn read(config: &Config, peer: &str, command: &str) -> Result<std::process::Outp
 mod tests {
     use super::*;
     #[test]
+    fn discovery_requires_a_complete_receipt_and_a_literal_absolute_interpreter() {
+        assert_eq!(
+            parse_probe(b"hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot\n"),
+            Some(Shell::Posix)
+        );
+        let ps =
+            parse_probe(b"hgs-remote-v2|%OS%|%SystemRoot%|Windows_NT|D:\\Windows\r\n").unwrap();
+        assert!(matches!(ps, Shell::PowerShell(_)));
+        let cmd = parse_probe(br#""hgs-remote-v2|Windows_NT|D:\Windows|$env:OS|$env:SystemRoot""#)
+            .unwrap();
+        assert!(matches!(cmd, Shell::Cmd(_)));
+        for root in [
+            "relative",
+            "C:\\Win%PATH%",
+            "C:\\Win&echo",
+            "C:\\Win'quote",
+            "C:\\Win`code",
+            "C:\\Win\ncode",
+        ] {
+            assert!(parse_probe(
+                format!("hgs-remote-v2|%OS%|%SystemRoot%|Windows_NT|{root}").as_bytes()
+            )
+            .is_none());
+        }
+        assert!(parse_probe(b"hgs-remote-v2|%OS%|%SystemRoot%|unknown|unknown").is_none());
+        assert!(parse_probe(b"hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot\nhidden").is_none());
+        assert!(encode(&Shell::Posix, &["send"]).is_err());
+    }
+
+    #[test]
     fn windows_envelope_is_only_fixed_syntax_and_literal_encoded_data() {
         let words = [
             "send",
@@ -226,7 +327,9 @@ mod tests {
             "日本語",
             "$(no);& no",
         ];
-        let command = windows_command(&words).unwrap();
+        let shell =
+            parse_probe(b"hgs-remote-v2|%OS%|%SystemRoot%|Windows_NT|C:\\Windows\r\n").unwrap();
+        let command = encode(&shell, &words).unwrap();
         let encoded = command.split_whitespace().last().unwrap();
         let bytes = STANDARD.decode(encoded).unwrap();
         let utf16: Vec<_> = bytes
@@ -251,7 +354,7 @@ mod tests {
         assert!(script.contains("UseShellExecute=$false"));
         assert!(script.contains("CreateNoWindow=[Console]::IsInputRedirected"));
         assert!(!script.contains("RedirectStandard"));
-        assert!(windows_command(&["bad\0argument"]).is_err());
-        assert!(windows_command(&["x".repeat(8000)]).is_err());
+        assert!(encode(&shell, &["bad\0argument"]).is_err());
+        assert!(encode(&shell, &["x".repeat(8000)]).is_err());
     }
 }

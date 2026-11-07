@@ -17,7 +17,7 @@ REPO = Path(__file__).resolve().parents[1]
 HGS = Path(os.environ.get('HGS_TEST_BIN', REPO / 'target/debug/hgs')).resolve()
 SSH = '''#!/usr/bin/env python3
 import json, os, pathlib, shlex, subprocess, sys
-if sys.argv[-1]=='cmd.exe /d /c echo hgs-remote-windows-v1': sys.exit(127)
+if sys.argv[-1].startswith('echo "hgs-remote-v2|'): print('hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot'); sys.exit(0)
 root = pathlib.Path(os.environ['SWARM_TEST_ROOT'])
 alias = sys.argv[-2]
 if (root / ('offline-' + alias)).exists():

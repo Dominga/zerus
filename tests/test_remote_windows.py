@@ -12,19 +12,20 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 HGS = Path(os.environ.get('HGS_TEST_BIN', ROOT / 'target/debug/hgs'))
-PROBE = 'cmd.exe /d /c echo hgs-remote-windows-v1'
+PROBE = 'echo "hgs-remote-v2|%OS%|%SystemRoot%|$env:OS|$env:SystemRoot"'
 SSH = r'''#!/usr/bin/env python3
 import base64,json,os,pathlib,sys
 r=pathlib.Path(os.environ['REMOTE_WINDOWS_FIXTURE'])
 command=sys.argv[-1]
 with (r/'calls').open('a') as f:f.write(json.dumps(sys.argv[1:])+'\n')
-if command=='cmd.exe /d /c echo hgs-remote-windows-v1':
+if command.startswith('echo "hgs-remote-v2|'):
     mode=(r/'mode').read_text()
-    if mode=='windows':print('hgs-remote-windows-v1');sys.exit(0)
+    if mode=='windows':print('hgs-remote-v2|%OS%|%SystemRoot%|Windows_NT|C:\\Windows');sys.exit(0)
+    if mode=='cmd':print('"hgs-remote-v2|Windows_NT|C:\\Windows|$env:OS|$env:SystemRoot"');sys.exit(0)
     if mode=='offline':sys.exit(255)
     if mode=='oversize':print('x'*300000);sys.exit(0)
     print('not a platform receipt');sys.exit(0)
-assert command.startswith('powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand '),command
+assert command.startswith(("& 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' ", '\"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" ')),command
 script=base64.b64decode(command.split()[-1]).decode('utf-16-le')
 data=script.split("FromBase64String('",1)[1].split("'",1)[0]
 words=json.loads(base64.b64decode(data))
@@ -167,3 +168,9 @@ class WindowsTarget(unittest.TestCase):
         self.assertEqual(out.returncode,2,out.stderr)
         self.assertIn('Windows Zerus package',out.stderr)
         self.assertEqual(self.operations(),[])
+
+    def test_cmd_uses_the_same_closed_transport(self):
+        (self.root/'mode').write_text('cmd')
+        out=self.hgs('send','codex/project/tag','--json',body='{"text":"synthetic"}')
+        self.assertEqual(out.returncode,0,out.stderr)
+        self.assertEqual(self.operations(),[{'argv':['send','codex/project/tag','--json'],'stdin':'{"text":"synthetic"}'}])

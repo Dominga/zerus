@@ -24,6 +24,7 @@ pub mod py;
 pub mod refs;
 pub mod schema;
 pub mod search;
+pub mod stats;
 pub mod store;
 pub mod writer;
 

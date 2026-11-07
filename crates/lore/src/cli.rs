@@ -117,6 +117,35 @@ pub fn shape_index(info: &search::IndexInfo) -> Value {
     json!({"records": info.records, "vectors": info.vectors, "index": info.index, "semantic": info.semantic, "note": info.note})
 }
 
+/// How agents search (task 149): counts only, never a query or a record's text.
+pub fn shape_stats(report: &crate::stats::Report) -> Value {
+    fn metric(metric: &crate::stats::Metric) -> Value {
+        json!({"finds": metric.finds, "opened": metric.opened, "hit1": metric.hit1, "hit5": metric.hit5,
+               "hit1_rate": metric.hit1_rate(), "hit5_rate": metric.hit5_rate()})
+    }
+    let mut by_class = serde_json::Map::new();
+    for (name, value) in &report.by_class {
+        by_class.insert(name.clone(), metric(value));
+    }
+    let mut by_caller = serde_json::Map::new();
+    for (name, value) in &report.by_caller {
+        by_caller.insert(name.clone(), metric(value));
+    }
+    json!({
+        "window_days": report.window_days,
+        "finds": report.finds,
+        "opened": report.opened,
+        "hit1": report.hit1,
+        "hit5": report.hit5,
+        "by_class": by_class,
+        "by_caller": by_caller,
+        "tiers": report.tiers,
+        "latency_ms_mean": report.latency_ms,
+        "misses": report.misses,
+        "retention": {"days": crate::stats::RETENTION_DAYS, "max_finds": crate::stats::RETENTION_FINDS, "finds": report.retained},
+    })
+}
+
 pub fn shape_error(error: &LoreError) -> Value {
     let first = error.to_string().lines().next().unwrap_or_default().to_owned();
     json!({"error": first, "details": error.details})
@@ -165,6 +194,7 @@ fn options_of(command: &str) -> Option<Vec<(&'static str, &'static [&'static str
         "guide" | "areas" | "fmt" | "show" | "exists" | "plan show" => vec![],
         "check" => vec![("evidence", &[], false)],
         "index" => vec![("rebuild", &[], false)],
+        "stats" => vec![("days", &[], true)],
         "find" => {
             let mut list = filters.to_vec();
             list.push(("n", &["-n"], true));
@@ -191,7 +221,7 @@ fn options_of(command: &str) -> Option<Vec<(&'static str, &'static [&'static str
 
 /// The commands, as `lore guide` may name them.
 pub const COMMANDS: &[&str] = &[
-    "init", "guide", "areas", "check", "fmt", "index", "find", "for", "show", "exists", "cover", "add", "update", "plans", "items", "stale", "plan", "item",
+    "init", "guide", "areas", "check", "fmt", "index", "find", "for", "show", "exists", "cover", "add", "update", "plans", "items", "stale", "stats", "plan", "item",
 ];
 pub const PLAN_COMMANDS: &[&str] = &["new", "show", "set", "close"];
 pub const ITEM_COMMANDS: &[&str] = &["add", "done", "drop", "supersede", "defer", "reopen"];
@@ -305,7 +335,7 @@ fn check_shape(args: &Args) -> std::result::Result<(), Usage> {
     match command.as_str() {
         "" => Err(Usage("a command is needed".into())),
         "plan" | "item" => Err(Usage(format!("a {command} command is needed"))),
-        "init" | "guide" | "areas" | "check" | "fmt" | "index" | "plans" | "items" | "stale" => positional(0, Some(0), ""),
+        "init" | "guide" | "areas" | "check" | "fmt" | "index" | "plans" | "items" | "stale" | "stats" => positional(0, Some(0), ""),
         "find" => positional(1, None, "query"),
         "for" => positional(1, Some(1), "target"),
         "show" | "plan show" => positional(1, Some(1), "id"),
@@ -600,6 +630,9 @@ impl<'a> Ctx<'a> {
             identity: private::identity(&self.config.root, &by),
         };
         let mut outcome = ops::apply(&self.config, build, &options)?;
+        // Task 149: a fault written after a find is a miss; the records it
+        // cited are the find's hit position. Ids and kinds only.
+        crate::stats::record_write(&self.config, &outcome.records);
         let mut all = notes;
         all.extend(outcome.notes.drain(..));
         outcome.notes = all;
@@ -692,6 +725,7 @@ fn dispatch(args: Args, env: &Env, io: &mut Io) -> Result<i32> {
         "update" => cmd_update(&mut ctx, io),
         "cover" => cmd_cover(&mut ctx, io),
         "index" => cmd_index(&mut ctx, io),
+        "stats" => cmd_stats(&mut ctx, io),
         "plans" => cmd_plans(&mut ctx, io),
         "items" => cmd_items(&mut ctx, io),
         "stale" => cmd_stale(&mut ctx, io),
@@ -804,7 +838,10 @@ fn cmd_find(ctx: &mut Ctx, io: &mut Io) -> Result<i32> {
         io.progress(&format!("note: {note}"));
     }
     let records = ctx.records()?;
+    let started = std::time::Instant::now();
     let (hits, notes) = finder.find(&ctx.config, &records, &query, &filters(&ctx.args), limit, ctx.args.text_only)?;
+    // Task 149: counts only. Never the query or a record's text.
+    crate::stats::record_find(&ctx.config, &query, &hits, started.elapsed(), &crate::stats::tiers(&hits));
     if ctx.args.json {
         io.json(&shape_find(&query, &notes, &hits));
         return Ok(0);
@@ -838,6 +875,7 @@ fn cmd_show(ctx: &mut Ctx, io: &mut Io) -> Result<i32> {
     let id = ctx.args.positional[0].clone();
     let (record, rev) = ctx.record(&id)?;
     let record = record.ok_or_else(|| LoreError::new(format!("{} does not exist", repr_str(&id))))?;
+    crate::stats::record_open(&ctx.config, &id);
     if ctx.args.json {
         io.json(&record);
         return Ok(0);
@@ -1416,8 +1454,53 @@ fn cmd_index(ctx: &mut Ctx, io: &mut Io) -> Result<i32> {
     Ok(0)
 }
 
-fn cmd_plans(ctx: &mut Ctx, io: &mut Io) -> Result<i32> {
-    let rows = plans::summary(&ctx.records()?, ctx.args.flag("all"));
+/// How agents search (task 149): the mix, hit@1/hit@5 by class and caller,
+/// misses and the counters' bounds. Counts only - no query or record text.
+fn cmd_stats(ctx: &mut Ctx, io: &mut Io) -> Result<i32> {
+    let days: i64 = match ctx.args.one("days") {
+        Some(value) => value
+            .parse()
+            .map_err(|_| LoreError::new(format!("argument --days: invalid int value: {}", repr_str(&value))))?,
+        None => 30,
+    };
+    let report = crate::stats::report(&ctx.config, days);
+    if ctx.args.json {
+        io.json(&shape_stats(&report));
+        return Ok(0);
+    }
+    let percent = |rate: f64| format!("{:.0}%", rate * 100.0);
+    io.say(&format!(
+        "{} find(s) in the last {} day(s): {} opened ({} at rank 1, {} at rank 5 or better); {} miss(es); mean {:.1} ms",
+        report.finds, report.window_days, report.opened, report.hit1, report.hit5, report.misses, report.latency_ms
+    ));
+    for (class, metric) in &report.by_class {
+        io.say(&format!(
+            "  {class}: {} find(s), hit@1 {}, hit@5 {}",
+            metric.finds,
+            percent(metric.hit1_rate()),
+            percent(metric.hit5_rate())
+        ));
+    }
+    for (caller, metric) in &report.by_caller {
+        io.say(&format!(
+            "  {caller}: {} find(s), hit@1 {}, hit@5 {}",
+            metric.finds,
+            percent(metric.hit1_rate()),
+            percent(metric.hit5_rate())
+        ));
+    }
+    let tiers: Vec<String> = report.tiers.iter().map(|(tier, count)| format!("{tier} {count}")).collect();
+    io.say(&format!("  tiers: {}", if tiers.is_empty() { "none".to_owned() } else { tiers.join(", ") }));
+    io.say(&format!(
+        "  keeping {} find(s); older than {} day(s) or beyond {} find(s) are pruned",
+        report.retained,
+        crate::stats::RETENTION_DAYS,
+        crate::stats::RETENTION_FINDS
+    ));
+    Ok(0)
+}
+
+fn cmd_plans(ctx: &mut Ctx, io: &mut Io) -> Result<i32> {    let rows = plans::summary(&ctx.records()?, ctx.args.flag("all"));
     if ctx.args.json {
         io.json(&Value::Array(rows));
         return Ok(0);

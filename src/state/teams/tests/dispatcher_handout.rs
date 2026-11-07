@@ -67,9 +67,8 @@ fn a_member_with_no_ready_work_starves_the_plan_and_the_lead_hears_once() {
     // Not before 20 minutes, then once.
     assert!(!steps(&team, &seen, 10.0 + 20.0 * 60.0 - 1.0).iter().any(|step| matches!(step, Step::PlanStarved { .. })));
     let late = steps(&team, &seen, 10.0 + 20.0 * 60.0);
-    assert!(late.contains(&Step::PlanStarved { member: "dev".into() }), "{late:?}");
-    let member = team.member("dev").unwrap().clone();
-    let text = starved_text(&team, &member, 10.0 + 20.0 * 60.0);
+    assert!(late.contains(&Step::PlanStarved { members: vec!["dev".into()] }), "{late:?}");
+    let text = starved_text(&team, &["dev".into()], 10.0 + 20.0 * 60.0).unwrap();
     assert!(text.contains("starved") && text.contains("Backend") && text.contains("20 min"), "{text}");
     assert!(text.contains("#1") && text.contains("hgs guide team-lead"), "{text}");
     // Told once per episode.

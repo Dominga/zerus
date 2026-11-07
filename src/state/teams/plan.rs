@@ -1,7 +1,7 @@
 //! WhiteWh fork: pure rules of a team's task graph, as the prototype
 //! (design/agent-teams/index.html: cycleNodes, layersOf, chainOf, readyTasks,
 //! planErrors) defines them. Edges run from a dependency to its dependent.
-use super::model::{AttemptState, DependencyKind, MemberState, Phase, PhaseAcceptance, PhasePause, PhaseState, Task, TaskStatus, Team};
+use super::model::{AttemptState, DependencyKind, Member, MemberState, Phase, PhaseAcceptance, PhasePause, PhaseState, Task, TaskStatus, Team};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -865,10 +865,51 @@ pub(crate) fn waiting_for_owner(team: &Team) -> bool {
     })
 }
 
+/// Task 164 (owner, 2026-11-07): an open task whose phase can start: not a
+/// draft's, not in a paused phase, not behind a phase awaiting the owner's
+/// acceptance and not held by a barrier. Only such work makes a member
+/// starve; a phase that cannot start is the owner's or the plan's wait.
+pub(crate) fn startable(team: &Team, task: &Task) -> bool {
+    !task.status.finished()
+        && task.status != TaskStatus::Draft
+        && phase_pause(team, task.phase).is_none()
+        && acceptance_block(team, task.phase).is_none()
+        && barrier_blockers(team, task).is_empty()
+}
+
+/// Task 164: a role whose work is to wait for others' work - review, QA,
+/// acceptance and merging. Idle is its normal state.
+pub(crate) fn waiting_role(role: &str) -> bool {
+    review_kind(role, "").is_some() || role.to_lowercase().contains("merg")
+}
+
+/// Task 164: the ready tasks of a member's role or kind that sit with another
+/// member: a task routed to its role, one assigned to a member of the same
+/// role, or (a waiting role) of the same kind. The lead can hand one over;
+/// only these make a waiting role starve.
+pub(crate) fn ready_for_role(team: &Team, member: &Member, ready: &[u32]) -> Vec<u32> {
+    let kind = |role: &str| review_kind(role, "").or_else(|| role.to_lowercase().contains("merg").then_some("merge"));
+    let own = kind(&member.role);
+    ready
+        .iter()
+        .copied()
+        .filter(|id| {
+            team.task(*id).is_some_and(|task| {
+                task.assignee != member.id
+                    && ((!task.role.is_empty() && task.role.eq_ignore_ascii_case(&member.role))
+                        || team.member(&task.assignee).is_some_and(|other| {
+                            other.role.eq_ignore_ascii_case(&member.role) || (own.is_some() && kind(&other.role) == own)
+                        }))
+            })
+        })
+        .collect()
+}
+
 /// Members idle without a ready task while tasks are open (C7), for status.
-/// U9: no episode exists while every open task waits for the owner.
+/// U9: no episode exists while every open task waits for the owner. Task
+/// 164: only tasks of phases that can start count as open.
 pub(crate) fn starved(team: &Team, now: f64) -> Vec<Starved> {
-    let open: Vec<u32> = team.tasks.iter().filter(|task| !task.status.finished()).map(|task| task.id).collect();
+    let open: Vec<u32> = team.tasks.iter().filter(|task| startable(team, task)).map(|task| task.id).collect();
     if open.is_empty()
         || waiting_for_owner(team)
         || !matches!(team.status, super::model::TeamStatus::Running | super::model::TeamStatus::Paused)

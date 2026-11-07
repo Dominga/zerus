@@ -31,6 +31,9 @@ pub(crate) fn refusal_pause(count: u32) -> f64 {
 /// How long a member may sit idle without ready work before the lead hears
 /// once that the plan starves it (C7).
 const STARVED_AFTER: f64 = 20.0 * 60.0;
+/// Task 164 (owner, 2026-11-07): the lead gets one team-level starved digest
+/// at most once an hour.
+const STARVED_DIGEST_EVERY: f64 = 60.0 * 60.0;
 /// The worker's session listing is bounded, so a stop request is never far away.
 const LIST_TIMEOUT: Duration = Duration::from_secs(30);
 /// The worker's log keeps at most this much before it starts over.
@@ -295,7 +298,7 @@ pub(crate) enum Step {
     /// The member got work again or nothing is open: the episode ends (C7).
     StarvedEnded { member: String },
     /// Idle without work for too long: tell the free lead once (C7).
-    PlanStarved { member: String },
+    PlanStarved { members: Vec<String> },
     /// The member's Background work appeared; its default red time starts now
     /// (C12).
     BackgroundStart { member: String },
@@ -1318,7 +1321,11 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         steps.push(Step::AutoAcceptDraft { phase });
     }
     let ready_ids = plan::ready(team);
-    let staging_open = team.tasks.iter().any(|task| !task.status.finished());
+    // Task 164 (owner, 2026-11-07): only work of a phase that can start makes
+    // a member starve; a draft, a paused phase or one behind a barrier or the
+    // owner's acceptance is the owner's or the plan's wait, not the lead's.
+    let staging_open = team.tasks.iter().any(|task| plan::startable(team, task));
+    let mut starved_due = Vec::new();
     // U9: while every open task waits for the owner's phase approval, a
     // member with nothing ready is expected; no episode starts or continues.
     let owner_wait = plan::waiting_for_owner(team);
@@ -1330,8 +1337,11 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         let Some(found) = seen.iter().find(|seen| seen.host == session.host && seen.name == session.name) else { continue };
         let has_work = busy.contains(member.id.as_str()) || team.reserved_for_rework(&member.id, None)
             || ready_ids.iter().any(|id| team.task(*id).is_some_and(|task| task.assignee == member.id));
+        // Task 164: a review, QA, acceptance or merge role waits by design; it
+        // starves only while a ready task of its kind sits with someone else.
+        let waits_by_role = plan::waiting_role(&member.role) && plan::ready_for_role(team, member, &ready_ids).is_empty();
         // U49: a draining member is idle on purpose; its episode ends quietly.
-        if !staging_open || owner_wait || has_work || member.draining || !(found.free && found.live) {
+        if !staging_open || owner_wait || has_work || waits_by_role || member.draining || !(found.free && found.live) {
             if member.starved_since.is_some() {
                 steps.push(Step::StarvedEnded { member: member.id.clone() });
             }
@@ -1340,8 +1350,13 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         } else if !member.starved_told
             && now - member.starved_since.unwrap_or(now) >= STARVED_AFTER
         {
-            steps.push(Step::PlanStarved { member: member.id.clone() });
+            starved_due.push(member.id.clone());
         }
+    }
+    // Task 164: one team-level digest for every member due, at most once an
+    // hour; a member that becomes due meanwhile waits for the next one.
+    if !starved_due.is_empty() && team.starved_digest_at.is_none_or(|at| now - at >= STARVED_DIGEST_EVERY) {
+        steps.push(Step::PlanStarved { members: starved_due });
     }
     // C12: Background work and the budgets declared for it. A job without a
     // budget gets the default red time; a budget ends with its job and never
@@ -6773,49 +6788,115 @@ fn send_sub_brief(store: &mut Store, team: &Team, member: &str) -> anyhow::Resul
     })
 }
 
-/// The message that tells the lead a member starves on the plan (C7), with the
-/// blocking chain of the open tasks.
-pub(crate) fn starved_text(team: &Team, member: &Member, now: f64) -> String {
-    let minutes = (((now - member.starved_since.unwrap_or(now)).max(0.0)) / 60.0).round() as u64;
-    let role = team.name_of(&member.id);
-    let ready: BTreeSet<u32> = plan::ready(team).into_iter().collect();
-    let open: Vec<&Task> = team.tasks.iter().filter(|task| !task.status.finished()).collect();
-    let mut chain = String::new();
-    for task in open.iter().take(5) {
-        if let Some(wait) = inbox::waits(team, task, ready.contains(&task.id)) {
-            let on: Vec<String> = wait["on"].as_array().into_iter().flatten().map(|value| {
-                value.as_str().map(str::to_owned).or_else(|| value.as_u64().map(|id| format!("#{id}"))).unwrap_or_default()
-            }).collect();
-            chain += &format!("  #{} {}: {} {}\n", task.id, task.title, wait["for"].as_str().unwrap_or_default(), on.join(", "));
+/// Task 164 (owner, 2026-11-07): what the lead can do about members idle
+/// without ready work, one line per concrete action: a ready task of a
+/// member's role sitting with another member, a draft that would run
+/// alongside once approved, and what each startable open task waits for
+/// (never a member at work, never "give it work"). Empty when the lead can do
+/// nothing; then nobody is told.
+pub(crate) fn starved_actions(team: &Team, members: &[String]) -> Vec<String> {
+    let ready = plan::ready(team);
+    let mut lines = Vec::new();
+    for id in members {
+        let Some(member) = team.member(id) else { continue };
+        for task_id in plan::ready_for_role(team, member, &ready).into_iter().take(2) {
+            if let Some(task) = team.task(task_id) {
+                let holder = if task.assignee.is_empty() { "nobody".to_owned() } else { team.name_of(&task.assignee) };
+                lines.push(format!(
+                    "#{} {} is ready and sits with {holder}: reassign it to {} (hgs team reassign)",
+                    task.id, task.title, team.name_of(&member.id)
+                ));
+            }
         }
     }
-    format!(
-        "[Zerus team \u{b7} from: Zerus \u{b7} starved]\n{role} has had no ready task for {minutes} min while {} task(s) are open.\n\
-         Blocking:\n{chain}{}\
-         Give it work, release a held task or change the plan (hgs guide team-lead).",
-        open.len(),
-        // Task 113: a member held by a prompt only its Terminal takes.
-        super::terminal_prompt::lead_lines(team, now)
-    )
+    for phase in team.phases.iter().filter(|phase| phase.state.is_draft()) {
+        let open = team.tasks.iter().filter(|task| task.phase == phase.n && !task.status.finished()).count();
+        if open > 0 && phase.state == PhaseState::Draft {
+            lines.push(format!(
+                "Phase {} ({open} task(s)) can run alongside once it is approved: ask the owner with a card (hgs team propose)",
+                phase.n
+            ));
+        }
+    }
+    let ready_set: BTreeSet<u32> = ready.iter().copied().collect();
+    let mut waits = 0;
+    for task in team.tasks.iter().filter(|task| plan::startable(team, task) && task.status == TaskStatus::Pending && !ready_set.contains(&task.id)) {
+        let Some(wait) = inbox::waits(team, task, false) else { continue };
+        let kind = wait["for"].as_str().unwrap_or_default();
+        let unblock = wait["unblock"].as_str().unwrap_or_default();
+        if kind == "member" || unblock.is_empty() || unblock == "wait" {
+            continue;
+        }
+        let owner = if kind == "owner" { " (an owner card)" } else { "" };
+        lines.push(format!("#{} {} waits for {kind}: {unblock}{owner}", task.id, task.title));
+        waits += 1;
+        if waits == 5 {
+            break;
+        }
+    }
+    lines
 }
 
-/// Tells the free lead once that a member starves on the plan (C7).
-fn tell_lead_starved(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Result<()> {
-    let member = team.member(member_id).context("unknown member")?.clone();
-    let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
-    let outcome = super::doorbell::post_and_ring(store, &team.id, &team.lead, &lead, &uuid::Uuid::new_v4().to_string(), "starved", "zerus",
-        Urgency::Normal, &starved_text(team, &member, now()));
-    if matches!(outcome, Sent::Refused(_)) {
-        return Ok(());
+/// The team-level starved digest (task 164): who is idle and for how long,
+/// and the concrete actions; None when there is no action to name.
+pub(crate) fn starved_text(team: &Team, members: &[String], now: f64) -> Option<String> {
+    let actions = starved_actions(team, members);
+    let terminal = super::terminal_prompt::lead_lines(team, now);
+    if actions.is_empty() && terminal.is_empty() {
+        return None;
     }
-    let role = team.role_of(member_id);
-    change(store, &team.id, |team, events| {
-        let Some(found) = team.members.iter_mut().find(|found| found.id == member_id) else {
+    let idle: Vec<String> = members
+        .iter()
+        .filter_map(|id| team.member(id))
+        .map(|member| {
+            let minutes = (((now - member.starved_since.unwrap_or(now)).max(0.0)) / 60.0).round() as u64;
+            format!("{} {minutes} min", team.name_of(&member.id))
+        })
+        .collect();
+    let mut text = format!(
+        "[Zerus team \u{b7} from: Zerus \u{b7} starved]\nIdle with no ready task: {}.\n",
+        idle.join(", ")
+    );
+    if !actions.is_empty() {
+        text += "What you can do:\n";
+        for line in &actions {
+            text += &format!("- {line}\n");
+        }
+    }
+    // Task 113: a member held by a prompt only its Terminal takes.
+    text += &terminal;
+    text += "At most one starved digest an hour (hgs guide team-lead).";
+    Some(text)
+}
+
+/// Tells the lead once an hour at most which members starve on the plan and
+/// what it can do (C7, task 164). Nothing is sent when there is no action;
+/// the members are still marked told for this episode.
+fn tell_lead_starved(store: &mut Store, team: &Team, members: &[String]) -> anyhow::Result<()> {
+    let at = now();
+    let text = starved_text(team, members, at);
+    if let Some(text) = &text {
+        let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
+        let outcome = super::doorbell::post_and_ring(store, &team.id, &team.lead, &lead, &uuid::Uuid::new_v4().to_string(), "starved", "zerus",
+            Urgency::Normal, text);
+        if matches!(outcome, Sent::Refused(_)) {
             return Ok(());
-        };
-        found.starved_told = true;
-        let minutes = (((now() - found.starved_since.unwrap_or(now())).max(0.0)) / 60.0).round() as u64;
-        events.push(Event::new("plan_starved", json!({"member":role,"minutes":minutes})));
+        }
+    }
+    let actions = starved_actions(team, members).len();
+    change(store, &team.id, |team, events| {
+        let mut named = Vec::new();
+        for id in members {
+            if let Some(found) = team.members.iter_mut().find(|found| found.id == *id) {
+                found.starved_told = true;
+                named.push(json!({"member":id,"minutes":(((at - found.starved_since.unwrap_or(at)).max(0.0)) / 60.0).round() as u64}));
+            }
+        }
+        if text.is_some() {
+            team.starved_digest_at = Some(at);
+            let roles: Vec<String> = members.iter().map(|id| team.role_of(id)).collect();
+            events.push(Event::new("plan_starved", json!({"members":roles,"idle":named,"actions":actions})));
+        }
         Ok(())
     })
 }
@@ -7330,7 +7411,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             }
             Ok(())
         }),
-        Step::PlanStarved { member } => tell_lead_starved(store, team, member),
+        Step::PlanStarved { members } => tell_lead_starved(store, team, members),
         Step::BackgroundStart { member } => change(store, &team.id, |team, _| {
             if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
                 if found.background_since.is_none() {

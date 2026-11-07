@@ -2408,6 +2408,10 @@ pub(crate) struct Team {
     pub iron_rules_error: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iron_rules_error_at: Option<f64>,
+    /// Task 164 (owner, 2026-11-07): when the lead last got the team's starved
+    /// digest; at most one an hour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starved_digest_at: Option<f64>,
     #[serde(default)]
     pub folder: String,
     #[serde(default)]

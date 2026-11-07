@@ -2161,6 +2161,26 @@ older record made ahead of a draft (`worked ahead of phase N`) still waits for
 that phase's approval, and sending the draft back still tells its member to
 stop.
 
+### Starved members
+
+A member starves when it is idle with a live session, has no ready task and
+work of the team could start; the lead hears of it only when it can act (task
+164; owner, 2026-11-07):
+
+- only open tasks of a phase that can start count: a draft's, a paused
+  phase's, and one behind a barrier or a phase awaiting the owner's
+  acceptance do not;
+- a review, QA, acceptance or merge role waits by design and starves only
+  while a ready task of its role or kind sits with another member;
+- after 20 minutes the lead gets one team-level digest (`plan_starved`, with
+  `members`, `idle` and `actions`), at most once an hour (`starved_digest_at`).
+  It names who is idle and the concrete actions: a ready task to reassign, a
+  draft that can run alongside once approved (an owner card), and what each
+  startable task waits for (accept, start, release, retry, answer). It never
+  says "give it work"; with no action to name, nothing is sent and the
+  episode is marked told. A member that becomes due within the hour waits for
+  the next digest.
+
 ### Changing, pausing and accepting a phase
 
 An approved phase whose work has not started (no task has a

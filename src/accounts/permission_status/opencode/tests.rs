@@ -121,6 +121,7 @@ fn malformed_unreadable_oversize_and_unexpanded_policy_stay_unverified() {
         r#"{"permissions":[{"effect":"ask"}]}"#,
         r#"{"policies":[{"action":"tool.use","resource":"*","effect":"deny"}]}"#,
         r#"{"agents":{"build":{"permissions":[]}}}"#,
+        r#"{"mode":{"build":{"permission":{"*":"deny"}}}}"#,
         r#"{"default_agent":"custom-agent"}"#,
         r#"{"default_agent":null}"#,
     ] {

@@ -203,7 +203,7 @@ fn apply(policy: &mut Policy, value: &Value) -> Option<()> {
             return None;
         }
     }
-    for key in ["agents", "agent"] {
+    for key in ["agents", "agent", "mode"] {
         if let Some(agents) = value.get(key) {
             for agent in agents.as_object()?.values() {
                 let agent = agent.as_object()?;

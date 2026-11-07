@@ -2518,7 +2518,9 @@ mod tests {
         temporary.write_all(b"blocked").unwrap();
         let started = std::time::Instant::now();
         assert!(super::super::persist(temporary, &target).is_err());
-        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        // The retry budget is 1 s. This cap only has to catch a retry loop that
+        // never gives up, so it leaves room for a loaded runner.
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
         assert_eq!(fs::read(&target).unwrap(), b"new");
     }
 

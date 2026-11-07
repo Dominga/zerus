@@ -165,7 +165,13 @@ pub(super) fn owner(event: &Value, sid: &str, panes: &Snapshot) -> Result<Option
             record
         }
     };
-    if string(&record, "conversation_id") != sid && continued_in(&record).as_deref() == Some(sid) {
+    // Owner routing precedes hook admission. A pending Terminate still needs
+    // completion observations for its original conversation, never adoption of
+    // a continued conversation before that admission gate can inspect it.
+    if !terminating::pending(&record)
+        && string(&record, "conversation_id") != sid
+        && continued_in(&record).as_deref() == Some(sid)
+    {
         record["conversation_id"] = json!(sid);
         if !string(event, "transcript_path").is_empty() {
             record["transcript"] = event["transcript_path"].clone();

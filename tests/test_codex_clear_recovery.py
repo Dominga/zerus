@@ -99,13 +99,13 @@ int main(int argc, char **argv) {
         # Preserve the same inode the original process has open.
         self.transcript.write_text(json.dumps(self.header) + '\n')
 
-    def emit(self, event=None):
+    def emit(self, event=None, expected=0):
         (self.root / 'hook-result').unlink(missing_ok=True)
         (self.root / 'recovery-event.json').write_text(json.dumps(event or self.event))
         self.tmux('send-keys', '-t', self.pane, '-l', 'fixture-hook')
         self.tmux('send-keys', '-t', self.pane, 'Enter')
         self.wait_for(lambda: (self.root / 'hook-result').exists())
-        self.assertEqual((self.root / 'hook-result').read_text(), '0')
+        self.assertEqual((self.root / 'hook-result').read_text(), str(expected))
         return json.loads(self.record_path.read_text())
 
     def terminal_end(self, outside=False):
@@ -266,6 +266,43 @@ int main(int argc, char **argv) {
         current = self.emit(dict(self.event, hook_event_name='Stop', last_assistant_message='Fixture finished'))
         self.assertEqual((current['activity'], current['phase']), ('idle', 'idle'))
         self.assertEqual(sum(e['type'] == 'SessionCleared' for e in self.inspect()['events']), 1)
+
+    @unittest.skipUnless(sys.platform in ('linux', 'darwin'), 'Unix Terminate fence')
+    def test_pending_terminate_blocks_successor_recovery_but_keeps_original_completion(self):
+        self.poisoned()
+        self.assert_supervised_holds_successor()
+        original = copy.deepcopy(self.record)
+        for marker in (None, False, 'damaged', dict(request_id=str(uuid.uuid4()))):
+            with self.subTest(marker=marker):
+                self.record = dict(copy.deepcopy(original), terminating=marker)
+                self.write_record()
+                before = self.record_path.read_bytes()
+                # These are emitted by the genuine original C fixture caller
+                # holding the successor rollout, not by the Python controller.
+                for kind in ('Stop', 'PostToolUse', 'SessionStart', 'PreToolUse'):
+                    self.emit(dict(self.event, hook_event_name=kind, source='clear'),
+                              expected=2 if kind in ('SessionStart', 'PreToolUse') else 0)
+                    self.assertEqual(self.record_path.read_bytes(), before, kind)
+                for kind in ('PostToolUse', 'Stop', 'SessionEnd'):
+                    current = self.emit(dict(self.event, hook_event_name=kind,
+                                            session_id=self.conversation_id,
+                                            transcript_path=original['transcript'], reason='other'))
+                    for key in ('terminating', 'name', 'run_id', 'conversation_id', 'transcript',
+                                'pid', 'process_start', 'supervisor', 'pane', 'expected_id',
+                                'clear_context_request', 'error'):
+                        self.assertEqual(current.get(key), self.record.get(key), key)
+                self.assertEqual(current['session_end']['reason'], 'other')
+                self.assertEqual(current['session_end']['conversation_id'], self.conversation_id)
+                self.assertFalse(current.get('session_clear'))
+
+    @unittest.skipUnless(sys.platform in ('linux', 'darwin'), 'Unix Terminate fence')
+    def test_pending_terminate_refuses_terminal_clear_start_without_changing_the_binding(self):
+        self.terminal_end()
+        self.record['terminating'] = None
+        self.write_record()
+        before = self.record_path.read_bytes()
+        self.emit(expected=2)
+        self.assertEqual(self.record_path.read_bytes(), before)
 
     def test_changed_or_unowned_proofs_keep_the_original_refusal(self):
         self.poisoned()

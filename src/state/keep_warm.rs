@@ -352,6 +352,72 @@ pub(super) fn eligibility(record: &Value, usage: &Value, last_turn_at: Option<f6
     }
 }
 
+/// Work around the agent that its record alone does not show.
+#[derive(Debug)]
+pub(super) struct Facts {
+    /// Live owned shell or native jobs (desktop Background); None is unknown.
+    pub background: Option<u64>,
+    /// Jobs the agent scheduled for itself.
+    pub schedules: u64,
+    /// An automatic recovery episode owns this session's next input.
+    pub recovery_active: bool,
+}
+
+impl Facts {
+    pub fn observe(record: &Value) -> Self {
+        let live = process_alive(record);
+        let background = processes::WorkSample::default().summary(record, live)["count"].as_u64();
+        let schedules = if string(record, "agent") == "kimi" {
+            // Unknown schedules count as present: never ping into a job's turn.
+            goals::summary(record)["schedules"]["count"].as_u64().unwrap_or(1)
+        } else {
+            0
+        };
+        Self { background, schedules, recovery_active: recovery::job_active(record) }
+    }
+}
+
+/// Why ping `id` must not be typed now, if it must not. The guarded submit
+/// asks this under the input lock, once before staging and again immediately
+/// before the first input byte.
+fn submission_refusal(record: &Value, entry: Option<&Entry>, runtime: &Value, facts: &Facts, id: &str, now: f64) -> Option<&'static str> {
+    let Some(entry) = entry.filter(|entry| entry.enabled) else {
+        return Some("Keep cache warm was turned off; nothing was submitted");
+    };
+    if entry.until.is_some_and(|until| until <= now) {
+        return Some("Keep cache warm has expired; nothing was submitted");
+    }
+    if runtime["state"] != "dispatching" || runtime["request_id"] != id {
+        return Some("This keep-warm ping is no longer current; nothing was submitted");
+    }
+    if !telemetry::settled(record) || record["keep_warm_turn"].is_object() || record["paused"] == true
+        || ["pending", "attempted"].contains(&string(&record["launch_prompt"], "status"))
+    {
+        return Some("The agent is not idle; nothing was submitted");
+    }
+    if facts.background != Some(0) {
+        return Some("Background work is running or unknown; nothing was submitted");
+    }
+    if facts.schedules > 0 {
+        return Some("The agent has scheduled jobs; nothing was submitted");
+    }
+    if facts.recovery_active {
+        return Some("Automatic recovery owns the next message; nothing was submitted");
+    }
+    None
+}
+
+/// The guarded submit's check for ping `id` (`input::submit_keep_warm`).
+pub(super) fn check_submission(record: &Value, id: &str) -> Result<()> {
+    let owner = storage::owner_key(record);
+    let store = load().ok_or("Keep cache warm settings are unreadable; nothing was submitted")?;
+    let facts = Facts::observe(record);
+    match submission_refusal(record, store.sessions.get(&owner), &read_runtime(&owner), &facts, id, now()) {
+        Some(reason) => Err(reason.into()),
+        None => Ok(()),
+    }
+}
+
 /// When the last main-agent turn or ping ended, the start of the current
 /// cache lifetime for agents whose TTL is not observed per request.
 pub(super) fn last_turn_at(record: &Value) -> Option<f64> {
@@ -634,6 +700,46 @@ mod tests {
             let rule = eligibility(&json!({"agent":agent}), &json!({}), Some(NOW));
             assert_eq!((rule.supported, rule.reason_code), (false, if agent == "dsh" { "deepseek" } else { "agent" }));
             assert!(!rule.reason.is_empty());
+        }
+    }
+
+    fn idle() -> Value {
+        json!({"name":"claude/project/warm","agent":"claude","run_id":"run-1","conversation_id":"conversation-1",
+            "activity":"idle","phase":"idle","active_tools":{},"subagents":{}})
+    }
+
+    fn quiet() -> Facts {
+        Facts { background: Some(0), schedules: 0, recovery_active: false }
+    }
+
+    #[test]
+    fn a_ping_goes_only_to_a_settled_agent_with_nothing_else_pending() {
+        let mut store = Store::default();
+        update(&mut store, "owner", &record(), &request(json!({})), NOW, ok);
+        let entry = store.sessions.get("owner");
+        let runtime = json!({"state":"dispatching","request_id":"ping-1"});
+        let refusal = |record: &Value, entry: Option<&Entry>, runtime: &Value, facts: &Facts, now: f64| {
+            submission_refusal(record, entry, runtime, facts, "ping-1", now)
+        };
+        assert_eq!(refusal(&idle(), entry, &runtime, &quiet(), NOW), None);
+        // The setting changed or expired, or another ping is current.
+        let off = Entry { enabled: false, ..entry.unwrap().clone() };
+        assert!(refusal(&idle(), Some(&off), &runtime, &quiet(), NOW).is_some());
+        assert!(refusal(&idle(), None, &runtime, &quiet(), NOW).is_some());
+        assert!(refusal(&idle(), entry, &runtime, &quiet(), NOW + 3.0 * 3600.0).is_some());
+        assert!(refusal(&idle(), entry, &json!({"state":"dispatching","request_id":"ping-0"}), &quiet(), NOW).is_some());
+        assert!(refusal(&idle(), entry, &json!({"state":"waiting","request_id":"ping-1"}), &quiet(), NOW).is_some());
+        // The agent works, or work or input waits.
+        for (key, value) in [("activity", json!("busy")), ("phase", json!("tool")),
+            ("active_tools", json!({"t":{"name":"Bash"}})), ("keep_warm_turn", json!({"request_id":"ping-0"})),
+            ("launch_prompt", json!({"status":"pending"})), ("paused", json!(true))] {
+            let mut busy = idle();
+            busy[key] = value;
+            assert!(refusal(&busy, entry, &runtime, &quiet(), NOW).is_some(), "{key}");
+        }
+        for facts in [Facts { background: Some(1), ..quiet() }, Facts { background: None, ..quiet() },
+            Facts { schedules: 1, ..quiet() }, Facts { recovery_active: true, ..quiet() }] {
+            assert!(refusal(&idle(), entry, &runtime, &facts, NOW).is_some(), "{facts:?}");
         }
     }
 

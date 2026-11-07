@@ -958,7 +958,27 @@ pub(super) fn task_reply_receipt_bound(
 }
 
 pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Result<Value> {
-    submit_with(name, input, recovery_id, false)
+    submit_with(name, input, recovery_id.map_or(Origin::Person, Origin::Recovery))
+}
+
+/// Who a submission comes from. Only the person's own input cancels automatic
+/// recovery; question answers and keep-warm pings never type pending settings.
+#[derive(Clone, Copy)]
+enum Origin<'a> {
+    Person,
+    Answer,
+    Recovery(&'a str),
+    KeepWarm(&'a str),
+}
+
+/// A keep-warm ping (`keep_warm::TEXT`) for ping `id`. Like a task reply it
+/// tells a refusal before any input from a possibly delivered ping.
+pub(super) fn submit_keep_warm(name: &str, input: &[u8], id: &str) -> Submission {
+    match submit_core(name, input, Origin::KeepWarm(id)) {
+        Ok(receipt) => Submission::Receipt(receipt),
+        Err(Failure::NotOffered(witness)) => Submission::NotOffered(*witness),
+        Err(Failure::Unknown(error)) => Submission::Unknown(error),
+    }
 }
 
 /// `submit` for a question's answer: it refuses, before any key, when pending
@@ -966,11 +986,11 @@ pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Res
 /// answer's own paste may reach the pane, so a refusal proves nothing was
 /// sent.
 pub(super) fn submit_answer(name: &str, input: &[u8]) -> Result<Value> {
-    submit_with(name, input, None, true)
+    submit_with(name, input, Origin::Answer)
 }
 
-fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, answer: bool) -> Result<Value> {
-    submit_core(name, input, recovery_id, answer).map_err(|failure| match failure {
+fn submit_with(name: &str, input: &[u8], origin: Origin) -> Result<Value> {
+    submit_core(name, input, origin).map_err(|failure| match failure {
         Failure::NotOffered(witness) => witness.reason.clone(),
         Failure::Unknown(error) => error,
     })
@@ -1029,7 +1049,7 @@ pub(crate) enum Submission {
 /// `submit` for a task reply that must tell a refusal before any input from
 /// one that may have delivered it.
 pub(super) fn submit_witnessed(name: &str, input: &[u8]) -> Submission {
-    match submit_core(name, input, None, false) {
+    match submit_core(name, input, Origin::Person) {
         Ok(receipt) => Submission::Receipt(receipt),
         Err(Failure::NotOffered(witness)) => Submission::NotOffered(*witness),
         Err(Failure::Unknown(error)) => Submission::Unknown(error),
@@ -1095,8 +1115,7 @@ fn before_input(typed: bool, witness: NotOffered) -> Failure {
 fn submit_core(
     name: &str,
     input: &[u8],
-    recovery_id: Option<&str>,
-    answer: bool,
+    origin: Origin,
 ) -> std::result::Result<Value, Failure> {
     let unknown = Failure::Unknown;
     let request: Request =
@@ -1135,18 +1154,23 @@ fn submit_core(
         )
     };
     let record = checked_record(name, &request).map_err(|e| refused(typed, e))?;
-    if answer && effort::pending_applies(&record) {
+    if matches!(origin, Origin::Answer) && effort::pending_applies(&record) {
         return Err(refused(
             typed,
             "model or effort settings would be typed first; answer this question in Terminal"
                 .into(),
         ));
     }
+    if matches!(origin, Origin::KeepWarm(_)) && effort::pending_applies(&record) {
+        return Err(refused(typed, "model or effort settings are pending; no keep-warm ping was typed".into()));
+    }
     // Pending settings may be typed here, whatever this returns.
     typed = effort::pending_applies(&record);
     let mut record = effort::apply_pending(name, record).map_err(unknown)?;
-    if let Some(id) = recovery_id {
-        recovery::check_submission(&record, id).map_err(|e| refused(typed, e))?;
+    match origin {
+        Origin::Recovery(id) => recovery::check_submission(&record, id).map_err(|e| refused(typed, e))?,
+        Origin::KeepWarm(id) => keep_warm::check_submission(&record, id).map_err(|e| refused(typed, e))?,
+        Origin::Person | Origin::Answer => {}
     }
     checked_send_terminal(&record).map_err(|e| refused(typed, e))?;
     let attachments_root = root.join("attachments");
@@ -1208,15 +1232,17 @@ fn submit_core(
         cleanup();
         return Err(refused(typed, error));
     }
-    if let Some(id) = recovery_id {
-        let checked = read(name).and_then(|record| recovery::check_submission(&record, id));
-        if let Err(error) = checked {
-            cleanup();
-            return Err(refused(typed, error));
-        }
+    let checked = match origin {
+        Origin::Recovery(id) => read(name).and_then(|record| recovery::check_submission(&record, id)),
+        Origin::KeepWarm(id) => read(name).and_then(|record| keep_warm::check_submission(&record, id)),
+        Origin::Person | Origin::Answer => Ok(()),
+    };
+    if let Err(error) = checked {
+        cleanup();
+        return Err(refused(typed, error));
     }
     let submitted_at = now();
-    if recovery_id.is_none() {
+    if matches!(origin, Origin::Person | Origin::Answer) {
         recovery::cancel_for_input(&record).map_err(unknown)?;
     }
     let mut receipt = json!({"request_id":request_id,"name":name,"run_id":request.expected_run_id,
@@ -1224,6 +1250,10 @@ fn submit_core(
         "submitted_at":submitted_at,"submitted_text":text,"text":request.text.trim(),"attachments":paths,"transport":"terminal"});
     if let Some(target) = session_graph::target_receipt(&record) {
         receipt["graph_target"] = target;
+    }
+    if let Origin::KeepWarm(id) = origin {
+        receipt["origin"] = json!("keep_warm");
+        record["keep_warm_pending"] = json!({"request_id":request_id,"ping":id,"submitted_at":submitted_at});
     }
     // The marker may be published even when its write reports an error.
     if let Err(error) = atomic(&receipt_path, &receipt.to_string()) {

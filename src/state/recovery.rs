@@ -379,6 +379,10 @@ pub(super) fn cancel_for_input(record: &Value) -> Result<()> {
 fn active(job: &Value) -> bool {
     ["waiting", "dispatching", "retrying"].contains(&string(job, "state"))
 }
+/// Whether an automatic recovery episode owns this session's next input.
+pub(super) fn job_active(record: &Value) -> bool {
+    active(&load_job(&owner(record)))
+}
 /// The agent works again after a provider failure while the continuation it
 /// accepted is still its latest input: that turn went on rather than stopped.
 fn working_on_continuation(job: &Value, s: &Value) -> bool {

@@ -56,23 +56,26 @@ class MacPlan(unittest.TestCase):
         row = MAC.plan(self.workflow([step]), '')[0]['steps'][0]
         self.assertEqual(row['status'], 'not run')
 
-    def test_xcode_substitution_binds_the_complete_selector_script(self):
-        MAC.require_xcode('Xcode 26.2\nBuild version example')
-        for output in ('Xcode 25.4', 'Command Line Tools', ''):
-            with self.assertRaises(RuntimeError):
-                MAC.require_xcode(output)
+    def test_ios_and_selection_calls_stay_not_run_in_every_context(self):
         body = 'bash mobile/ios/scripts/select-xcode.sh'
-        workflow = {'jobs': {'ios': {'runs-on': 'macos-15', 'steps': [{'run': body}]}}}
-        original = (ROOT / 'mobile/ios/scripts/select-xcode.sh').read_bytes()
-        row = MAC.plan(workflow, '', xcode_selector=original)[0]['steps'][0]
-        self.assertEqual(row['status'], 'local')
-        for script in (None, original + b'\nexit 19\n'):
-            row = MAC.plan(workflow, '', xcode_selector=script)[0]['steps'][0]
-            self.assertEqual(row['status'], 'not run')
-            self.assertNotIn('body', row)
-        workflow['jobs']['ios']['steps'][0]['run'] += '\nexit 19'
-        row = MAC.plan(workflow, '', xcode_selector=original)[0]['steps'][0]
-        self.assertEqual(row['body'], body + '\nexit 19')
+        contexts = ({}, {'working-directory': 'alternate'}, {'shell': 'pwsh'},
+                    {'if': 'new_condition'}, {'env': {'BASH_ENV': 'alternate/startup.sh'}})
+        for context in contexts:
+            with self.subTest(context=context):
+                job = {'runs-on': 'macos-15', 'steps': [dict(run=body, **context)]}
+                row = MAC.plan({'jobs': {'ios': job}}, '')[0]
+                self.assertEqual(row['status'], 'not run')
+                self.assertEqual(row['steps'], [])
+                self.assertIn('GitHub only', row['reason'])
+                # A selection helper moved into another supported job is also
+                # refused, including mixed bodies; it is never a local pass.
+                job['steps'][0]['run'] += '\nexit 19'
+                rows = MAC.plan(self.workflow(job['steps']), '')[0]['steps']
+                self.assertEqual(rows[0]['status'], 'not run')
+                self.assertNotIn('body', rows[0])
+        job = {'runs-on': 'macos-15', 'defaults': {'run': {'working-directory': 'alternate'}},
+               'steps': [{'run': body}]}
+        self.assertEqual(MAC.plan({'jobs': {'ios': job}}, '')[0]['steps'], [])
 
     def test_signal_and_file_scope_cannot_expand_to_the_owner_home(self):
         profile = MAC.profile('/Users/example/zerus-dev/private-ci', ['/public-git/objects'], '/private/tmp/owned-ci')

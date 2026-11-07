@@ -189,7 +189,8 @@ installed Arch bundle check resets XDG roots along with HOME, so its fake manage
 and the tested setup command inspect the same private drop-ins. No owner or
 container-builder profile is used as fixture state.
 
-The local Mac prerequisite verifies the private Xcode version is 26 or later.
-It replaces only the exact, reviewed selection-only helper, including its script
-hash; a changed helper stays not run. It never runs global `xcode-select` or
-accepts an Xcode licence. The original build/test bodies remain unchanged.
+iOS remains **not run locally, GitHub only**: its global Xcode selection and
+device-service environment are not isolated by this preflight. Selection-helper
+calls, including mixed bodies, are refused rather than substituted or executed.
+The other Mac jobs use the supplied SDK through a private DEVELOPER_DIR, without
+changing global tool selection or accepting a licence.

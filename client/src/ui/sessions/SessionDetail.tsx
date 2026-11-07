@@ -35,7 +35,6 @@ import { onCommand } from "../../store/shortcuts";
 import { composer } from "../../store/composer";
 import { createSubagentIdentity } from "../../store/subagentIdentity";
 import { selectedTask } from "../../store/taskNavigation";
-import { Inspector } from "./Inspector";
 import { followProjectTasks } from "../../store/taskContext";
 import { inspectorOpen, inspectorTab, setInspectorOpen, openInspector, inspectorHint } from "../../store/inspector";
 import { sessionGoal } from "./inspector-data";
@@ -45,6 +44,7 @@ import { expandedEntries } from "./session-extra-entries";
 import { folderEntries, folderRequest } from "../../store/sessionFolders";
 import { watchDetailRemoval } from "./detail-removal";
 
+const Inspector = lazy(() => import("./Inspector").then((m) => ({ default: m.Inspector })));
 const TaskView = lazy(() => import("../screens/TaskView"));
 let reportedRemovedDetail = false;
 
@@ -316,7 +316,7 @@ export function SessionDetail() {
                 </Switch>
               </div>
             </div>
-          <Inspector available={available()} />
+          <Suspense><Inspector available={available()} /></Suspense>
           </div>
         </div>
       </Show>

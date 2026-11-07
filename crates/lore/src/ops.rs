@@ -421,6 +421,10 @@ pub fn apply(config: &Config, build: &Builder, options: &Options) -> Result<Outc
                 }
             }
             errs.extend(validate(&record, &config.areas, Some(&config.limits)));
+            // docs/lore.md 11.9: every durable write passes the secret scan;
+            // the refusal names the field and never repeats the match.
+            let rid = text(&record, "id").unwrap_or_default().to_owned();
+            errs.extend(crate::secrets::check_record(&record, &config.secrets_allow).iter().map(|found| format!("{rid}: {}", found.line())));
             errs.extend(transition_errors(&record, old, change.reopen_reason.as_deref()));
             if let Some(old) = old {
                 if text(old, "kind") != text(&record, "kind") {

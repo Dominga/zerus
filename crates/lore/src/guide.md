@@ -114,6 +114,29 @@ left. `lore for <doc.md>` shows it. `lore check --evidence` also asks of every
 cited commit that it touches a file the record cites, or is written in the
 document the record came from.
 
+## Working memory
+
+Beside the records, a short-lived memory that expires by itself and is never
+committed: pulses (what you do), messages and task briefs. It lives in
+`.lore-private/working.sqlite`, which git never sees.
+
+    lore pulse add --task <ref> --done "<what>" --next "<what>" --blocked "<on what>"
+    lore pulses [--task <ref>] [--all]          # the current pulse per member and task
+    lore message send --to <member|lead|team|owner> [--urgent] "<text>"
+    lore messages --unread [--peek]             # reading marks read; --peek does not
+    lore brief set --task <ref> < brief.md      # also committed as briefs/t<ref>.md
+    lore brief show --task <ref>
+    lore promote <id> --kind <kind> --field <name>=<value> [--dry-run]
+    lore supersede <old-id> <new-id>
+    lore working status
+
+`find` searches the working tier too: its entries rank below the records and
+are marked `[working ...]`; `--no-working` leaves them out. Promote is the only
+way working text becomes a record, and it is checked as `lore add` checks.
+Secrets: a record, a promote or a brief that holds what looks like a key or a
+token is refused; working text is stored redacted. The scan is best-effort,
+and so is the redaction of terminal output and logs.
+
 ## Rules
 
 - Search before you diagnose; record before you finish.

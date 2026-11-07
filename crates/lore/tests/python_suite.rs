@@ -64,7 +64,7 @@ impl Case {
         let root = self.root.to_string_lossy().into_owned();
         let mut full = vec!["-C", root.as_str()];
         full.extend(argv);
-        let env = Env { cwd: self.root.clone(), stdin: stdin.as_bytes().to_vec(), lore_by: None, finder: finder(), roots: None };
+        let env = Env { cwd: self.root.clone(), stdin: stdin.as_bytes().to_vec(), lore_by: None, finder: finder(), roots: None, ..Env::default() };
         cli::run(&full, &env)
     }
 

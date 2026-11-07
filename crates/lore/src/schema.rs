@@ -494,8 +494,28 @@ pub fn validate(record: &Value, areas: &[String], limits: Option<&BTreeMap<Strin
             }
         }
     }
+    // docs/lore.md 11.10: `seen`, the occurrences of a knowledge record, is an
+    // optional list of at most 20 strings of at most 160 characters.
+    if let Some(seen) = map.get("seen") {
+        match seen.as_array() {
+            Some(items) if KNOWLEDGE.contains(&kind_name) => {
+                if items.len() > SEEN_MAX {
+                    errs.push(format!("{who}: `seen` holds at most {SEEN_MAX} occurrences"));
+                }
+                if items.iter().any(|item| item.as_str().is_none_or(|text| text.chars().count() > SEEN_TEXT)) {
+                    errs.push(format!("{who}: each `seen` occurrence is a string of at most {SEEN_TEXT} characters"));
+                }
+            }
+            Some(_) => errs.push(format!("{who}: only a knowledge record has `seen`")),
+            None => errs.push(format!("{who}: `seen` must be a list")),
+        }
+    }
     errs
 }
+
+/// At most this many occurrences a record's `seen` keeps (11.10).
+pub const SEEN_MAX: usize = 20;
+pub const SEEN_TEXT: usize = 160;
 
 /// A status as an f-string writes it: the text, or `None`.
 fn status_text(value: Option<&Value>) -> String {

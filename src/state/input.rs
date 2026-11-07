@@ -575,7 +575,7 @@ fn codex_shortcuts_footer(plain: &str) -> bool {
     tail.is_empty() || (tail.starts_with(' ') && codex_warning_footer(tail))
 }
 
-fn codex_footer_model(record: &Value) -> Option<&str> {
+pub(super) fn codex_footer_model(record: &Value) -> Option<&str> {
     if let Some(model) = record["model"].as_str().filter(|model| !model.is_empty()) {
         return Some(model);
     }

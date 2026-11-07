@@ -1131,6 +1131,8 @@ pub(super) fn inspection(name: &str, after: i64, archive_id: Option<&str>, inclu
     notifications::enrich(&mut output, notifications::load().as_ref(), journal_name);
     if archive_id.is_none() {
         keep_warm::enrich(&mut output, keep_warm::load().as_ref(), &record);
+        let usage = output["session_usage"].clone();
+        keep_warm::describe(&mut output, &record, &usage);
     }
     Ok(output)
 }

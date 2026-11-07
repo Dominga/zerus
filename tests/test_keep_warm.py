@@ -69,6 +69,21 @@ class KeepWarm(unittest.TestCase):
         self.assertFalse(off["keep_warm"]["enabled"])
         self.assertEqual(self.listed()["keep_warm"]["state"], "off")
 
+    def test_details_explain_the_lifetime_or_why_the_agent_is_not_eligible(self):
+        self.record.update(model="gpt-6.1-sol", recovery_success_at=time.time() - 60)
+        self.write_record()
+        details = self.inspect()["keep_warm"]
+        self.assertEqual((details["supported"], details["ttl_seconds"], details["interval_seconds"],
+                          details["ttl_source"]), (True, 1800, 1440, "provider_default"))
+        self.record["model"] = "gpt-5.5"
+        self.write_record()
+        details = self.inspect()["keep_warm"]
+        self.assertEqual((details["supported"], details["reason_code"]), (False, "codex_model"))
+        refused = self.change(hours=1, ok=False)
+        self.assertEqual(refused["error"], "unsupported")
+        self.assertIn("GPT-5.6", refused["reason"])
+        self.assertFalse((self.state / "keep-warm.json").exists())
+
     def test_a_stale_conversation_is_refused(self):
         stale = self.command("keep-warm", self.name, "--json", ok=False, payload=dict(
             expected_run_id=self.run_id, expected_conversation_id="other", expected_revision=0,

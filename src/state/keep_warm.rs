@@ -226,12 +226,160 @@ fn update(
     (0, json!({"ok":true,"applied":true,"run_id":run,"conversation_id":conversation,"keep_warm":next}), true)
 }
 
+/// Caches shorter than this are not kept warm: pings every few minutes cost
+/// about as much as rebuilding the cache and fill the conversation.
+const MIN_TTL: u64 = 15 * 60;
+/// Pings land at 80% of the lifetime, ahead of Claude Code's idle compaction
+/// at 90% and of worker scheduling delay.
+const INTERVAL_PERCENT: u64 = 80;
+/// Kimi Code's own `estimated_cache_duration` values, fetched 2026-11-07.
+const KIMI_TABLE: &[(&str, u64)] = &[
+    ("kimi-for-coding", 3600), ("kimi-for-coding-highspeed", 3600), ("k3", 1800),
+    ("k3-256k", 1800), ("k3.1-pro", 1800), ("k3.1-pro-highspeed", 1800),
+];
+
+/// Whether and how this session's cache can be kept warm, from what the agent
+/// reported. `expires_at` is the estimated end of the current cache lifetime.
+#[derive(Debug, PartialEq)]
+pub(super) struct Eligibility {
+    pub supported: bool,
+    pub reason_code: &'static str,
+    pub reason: &'static str,
+    pub ttl: Option<u64>,
+    pub source: &'static str,
+    pub expires_at: Option<f64>,
+}
+
+impl Eligibility {
+    fn refused(reason_code: &'static str, reason: &'static str) -> Self {
+        Self { supported: false, reason_code, reason, ttl: None, source: "", expires_at: None }
+    }
+
+    fn waiting(reason: &'static str) -> Self {
+        Self { supported: true, reason_code: "no_cache_report", reason, ttl: None, source: "", expires_at: None }
+    }
+
+    fn known(ttl: u64, source: &'static str, expires_at: Option<f64>) -> Self {
+        Self { supported: true, reason_code: "", reason: "", ttl: Some(ttl), source, expires_at }
+    }
+
+    pub fn interval(&self) -> Option<u64> {
+        self.ttl.map(|ttl| ttl * INTERVAL_PERCENT / 100)
+    }
+
+    /// When the next ping is due: the start of the current lifetime plus the interval.
+    pub fn due_at(&self) -> Option<f64> {
+        let (ttl, interval) = (self.ttl? as f64, self.interval()? as f64);
+        self.expires_at.map(|expires| expires - ttl + interval)
+    }
+}
+
+/// A Codex model with OpenAI's documented 30-minute default: GPT-5.6 and later.
+fn codex_thirty_minutes(model: &str) -> bool {
+    let Some(version) = model.strip_prefix("gpt-") else { return false };
+    let version: String = version.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    let mut parts = version.split('.').map(|part| part.parse::<u32>().ok());
+    match (parts.next().flatten(), parts.next().flatten()) {
+        (Some(major), _) if major > 5 => true,
+        (Some(5), Some(minor)) => minor >= 6,
+        _ => false,
+    }
+}
+
+/// Kimi Code's newest fetched `estimated_cache_duration` for `model`, read
+/// from the session's Kimi home: bounded, read only, never required.
+fn kimi_config(home: &Path, model: &str) -> Option<u64> {
+    let directory = home.join("cache/client-configs");
+    let mut newest: Option<(f64, Option<u64>)> = None;
+    for entry in fs::read_dir(directory).ok()?.flatten().take(64) {
+        let name = entry.file_name();
+        if !name.to_string_lossy().ends_with("estimated_cache_duration.json") {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        let Ok(file) = fs::File::open(entry.path()) else { continue };
+        if file.take(64 * 1024 + 1).read_to_end(&mut bytes).is_err() || bytes.len() > 64 * 1024 {
+            continue;
+        }
+        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else { continue };
+        let fetched = value["fetchedAt"].as_f64().unwrap_or(0.0);
+        let rules = &value["config"]["config"];
+        if !rules.is_object() || newest.is_some_and(|(at, _)| at >= fetched) {
+            continue;
+        }
+        newest = Some((fetched, rules[model]["cache_duration"].as_u64().filter(|ttl| (1..=86_400).contains(ttl))));
+    }
+    newest.and_then(|(_, ttl)| ttl)
+}
+
+/// `last_turn_at` is when the last main-agent turn (or ping) ended, the start
+/// of the current cache lifetime for agents whose TTL is not observed.
+pub(super) fn eligibility(record: &Value, usage: &Value, last_turn_at: Option<f64>) -> Eligibility {
+    let from_turn = |ttl: u64, source| Eligibility::known(ttl, source, last_turn_at.map(|at| at + ttl as f64));
+    match string(record, "agent") {
+        "claude" => {
+            let cache = &usage["prompt_cache"];
+            match cache["ttl_seconds"].as_u64() {
+                None => Eligibility::waiting("Waiting for Claude to report its cache lifetime with its next reply."),
+                Some(ttl) if ttl < MIN_TTL => Eligibility::refused("claude_short_ttl",
+                    "Claude uses a 5-minute cache on this account. Keeping it warm would cost about as much as rebuilding it."),
+                Some(ttl) => Eligibility::known(ttl, "native_usage", cache["expires_at"].as_f64()),
+            }
+        }
+        "codex" => match input::codex_footer_model(record) {
+            None => Eligibility::waiting("Waiting for Codex to report its model."),
+            Some(model) if codex_thirty_minutes(&model.to_ascii_lowercase()) => from_turn(1800, "provider_default"),
+            Some(_) => Eligibility::refused("codex_model",
+                "OpenAI keeps a 30-minute cache only for GPT-5.6 and later. This model's cache lasts about 5 to 10 minutes."),
+        },
+        "kimi" => {
+            let model = string(record, "model");
+            let model = model.rsplit('/').next().unwrap_or(model).to_ascii_lowercase();
+            if model.is_empty() {
+                return Eligibility::waiting("Waiting for Kimi to report its model.");
+            }
+            let configured = (!string(record, "agent_home").is_empty())
+                .then(|| kimi_config(Path::new(string(record, "agent_home")), &model)).flatten()
+                .or_else(|| kimi_config(&home().join(".kimi-code"), &model).filter(|_| string(record, "agent_home").is_empty()));
+            match (configured, KIMI_TABLE.iter().find(|(name, _)| *name == model)) {
+                (Some(ttl), _) if ttl >= MIN_TTL => from_turn(ttl, "kimi_config"),
+                (None, Some((_, ttl))) => from_turn(*ttl, "kimi_table"),
+                _ => Eligibility::refused("kimi_model", "Kimi reports no cache lifetime of at least 15 minutes for this model."),
+            }
+        }
+        "dsh" => Eligibility::refused("deepseek", "DeepSeek keeps its context cache for hours without pings."),
+        _ => Eligibility::refused("agent", "This agent reports no prompt cache that pings can keep warm."),
+    }
+}
+
+/// When the last main-agent turn or ping ended, the start of the current
+/// cache lifetime for agents whose TTL is not observed per request.
+pub(super) fn last_turn_at(record: &Value) -> Option<f64> {
+    ["cache_touched_at", "recovery_success_at"].iter()
+        .find_map(|key| record[*key].as_f64().filter(|at| at.is_finite() && *at > 0.0))
+}
+
+/// Add the derived fields of the Details read to `output["keep_warm"]`.
+pub(super) fn describe(output: &mut Value, record: &Value, usage: &Value) {
+    if !output["keep_warm"].is_object() {
+        return;
+    }
+    let rule = eligibility(record, usage, last_turn_at(record));
+    let warm = &mut output["keep_warm"];
+    warm["supported"] = json!(rule.supported);
+    warm["reason_code"] = json!(rule.reason_code);
+    warm["reason"] = json!(if rule.reason.is_empty() { string(warm, "reason") } else { rule.reason });
+    warm["ttl_seconds"] = json!(rule.ttl);
+    warm["ttl_source"] = json!(rule.source);
+    warm["interval_seconds"] = json!(rule.interval());
+    warm["cache_expires_at"] = json!(rule.expires_at);
+}
+
 /// Why this session cannot keep its cache warm now, if it cannot.
 fn eligible(record: &Value) -> std::result::Result<(), String> {
-    match string(record, "agent") {
-        "claude" | "codex" | "kimi" => Ok(()),
-        _ => Err("This agent does not report a prompt cache that pings can keep warm.".into()),
-    }
+    let usage = if string(record, "agent") == "claude" { usage::read(record) } else { Value::Null };
+    let rule = eligibility(record, &usage, None);
+    if rule.supported { Ok(()) } else { Err(rule.reason.into()) }
 }
 
 pub(super) fn dispatch(args: &[String]) -> Result<i32> {
@@ -269,6 +417,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     }
     if code == 0 {
         output["keep_warm"] = view(entry.as_ref(), &read_runtime(&owner), &record);
+        let usage = if string(&record, "agent") == "claude" { usage::read(&record) } else { Value::Null };
+        describe(&mut output, &record, &usage);
     }
     println!("{output}");
     Ok(code)
@@ -408,6 +558,83 @@ mod tests {
         update(&mut store, "owner", &record(), &request(json!({})), NOW, ok);
         persist(&path, &store).unwrap();
         assert_eq!(read_store(&path).unwrap().sessions, store.sessions);
+    }
+
+    fn claude(ttl: Value, expires: Value) -> (Value, Value) {
+        (json!({"agent":"claude","model":"claude-opus-5-5"}),
+         json!({"prompt_cache":{"status":"warm","ttl_seconds":ttl,"expires_at":expires}}))
+    }
+
+    #[test]
+    fn claude_uses_the_ttl_its_last_request_wrote() {
+        let (record, usage) = claude(json!(3600), json!(NOW + 3000.0));
+        let rule = eligibility(&record, &usage, None);
+        assert_eq!((rule.supported, rule.ttl, rule.source), (true, Some(3600), "native_usage"));
+        assert_eq!(rule.interval(), Some(2880));
+        // The last request was at NOW - 600; the ping is due 48 minutes after it.
+        assert_eq!(rule.due_at(), Some(NOW - 600.0 + 2880.0));
+        let (record, usage) = claude(json!(300), json!(NOW + 200.0));
+        let short = eligibility(&record, &usage, None);
+        assert_eq!((short.supported, short.reason_code), (false, "claude_short_ttl"));
+        assert!(short.reason.contains("5-minute"), "{}", short.reason);
+        // Before the first reply reports a cache, keep-warm can be on but waits.
+        let waiting = eligibility(&json!({"agent":"claude"}), &json!({}), None);
+        assert_eq!((waiting.supported, waiting.reason_code, waiting.due_at()), (true, "no_cache_report", None));
+    }
+
+    #[test]
+    fn codex_keeps_thirty_minutes_only_on_models_with_that_documented_cache() {
+        for model in ["gpt-5.6", "gpt-5.6-codex", "gpt-6.1-sol", "gpt-7"] {
+            let rule = eligibility(&json!({"agent":"codex","model":model}), &json!({}), Some(NOW));
+            assert_eq!((rule.supported, rule.ttl, rule.source), (true, Some(1800), "provider_default"), "{model}");
+            assert_eq!(rule.due_at(), Some(NOW + 1440.0));
+        }
+        for model in ["gpt-5.5", "gpt-5", "o3", "codex-mini-latest", "gpt-4.1"] {
+            let rule = eligibility(&json!({"agent":"codex","model":model}), &json!({}), Some(NOW));
+            assert_eq!((rule.supported, rule.reason_code), (false, "codex_model"), "{model}");
+        }
+        // The launch argument names the model before Codex reports it.
+        let launched = json!({"agent":"codex","base":["codex","-m","gpt-6.1-sol"]});
+        assert!(eligibility(&launched, &json!({}), Some(NOW)).supported);
+        let unknown = eligibility(&json!({"agent":"codex"}), &json!({}), Some(NOW));
+        assert_eq!((unknown.supported, unknown.reason_code), (true, "no_cache_report"));
+        // No finished turn yet: nothing to keep warm.
+        assert_eq!(eligibility(&json!({"agent":"codex","model":"gpt-6.1-sol"}), &json!({}), None).due_at(), None);
+    }
+
+    #[test]
+    fn kimi_follows_its_own_cache_duration_estimates() {
+        // An empty Kimi home: the built-in table decides.
+        let empty = tempfile::tempdir().unwrap();
+        let bare = empty.path().to_str().unwrap().to_owned();
+        let rule = |model: &str| eligibility(&json!({"agent":"kimi","model":model,"agent_home":bare}), &json!({}), Some(NOW));
+        assert_eq!(rule("kimi-for-coding").ttl, Some(3600));
+        assert_eq!(rule("kimi-for-coding-highspeed").ttl, Some(3600));
+        assert_eq!(rule("k3").ttl, Some(1800));
+        assert_eq!(rule("k3.1-pro").ttl, Some(1800));
+        assert_eq!(rule("k3").source, "kimi_table");
+        assert_eq!((rule("moonshot-v1").supported, rule("moonshot-v1").reason_code), (false, "kimi_model"));
+        let dir = tempfile::tempdir().unwrap();
+        let configs = dir.path().join("cache/client-configs");
+        std::fs::create_dir_all(&configs).unwrap();
+        std::fs::write(configs.join("estimated_cache_duration.json"), json!({"version":1,"fetchedAt":1,
+            "config":{"version":1,"config":{"k3":{"min_tokens_to_hint":1,"cache_duration":1200}}}}).to_string()).unwrap();
+        std::fs::write(configs.join("mainland-cn%3A%2Fclient_configs%3Aestimated_cache_duration.json"), json!({"version":1,"fetchedAt":2,
+            "config":{"version":1,"config":{"k3":{"min_tokens_to_hint":1,"cache_duration":2400},"k4":{"min_tokens_to_hint":1,"cache_duration":3600}}}}).to_string()).unwrap();
+        let home = dir.path().to_str().unwrap();
+        let configured = |model: &str| eligibility(&json!({"agent":"kimi","model":model,"agent_home":home}), &json!({}), Some(NOW));
+        // The newest fetched configuration decides; it can add models.
+        assert_eq!((configured("k3").ttl, configured("k3").source), (Some(2400), "kimi_config"));
+        assert_eq!(configured("k4").ttl, Some(3600));
+    }
+
+    #[test]
+    fn deepseek_opencode_and_unknown_agents_are_not_offered() {
+        for agent in ["dsh", "opencode", "sh"] {
+            let rule = eligibility(&json!({"agent":agent}), &json!({}), Some(NOW));
+            assert_eq!((rule.supported, rule.reason_code), (false, if agent == "dsh" { "deepseek" } else { "agent" }));
+            assert!(!rule.reason.is_empty());
+        }
     }
 
     #[test]

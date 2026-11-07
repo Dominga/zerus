@@ -147,12 +147,32 @@ class WorkflowBodies(unittest.TestCase):
             runner = WINDOWS.Runner(args, {})
             runner.sdk = {'VCTOOLSINSTALLDIR': 'C:/VS'}
             with patch.dict(os.environ, {'COMPUTERNAME': 'FIXTURE', 'HGS_STATE_DIR': '/owner',
-                                         'ZERUS_CLIENT_DESKTOP_SERVICE': '1', 'TOKEN': 'not-a-credential'}):
+                                         'ZERUS_CLIENT_DESKTOP_SERVICE': '1', 'TOKEN': 'not-a-credential',
+                                         'PYTHONUTF8': '0'}):
                 env = runner.environment(root/'home')
             self.assertEqual(env['COMPUTERNAME'], 'FIXTURE')
             self.assertNotIn('HGS_STATE_DIR', env)
             self.assertNotIn('ZERUS_CLIENT_DESKTOP_SERVICE', env)
             self.assertNotIn('TOKEN', env)
+            self.assertEqual(env['PYTHONUTF8'], '1')
+
+    @unittest.skipUnless(os.name == 'nt', 'native Windows Python pipe decoding')
+    def test_private_python_decodes_utf8_cli_error_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = SimpleNamespace(root=root, output=root/'output', repo=root/'repo',
+                                   node_directory='node', until='2030-01-01T00:00:00Z')
+            runner = WINDOWS.Runner(args, {})
+            runner.sdk = {'VCTOOLSINSTALLDIR': 'C:/VS'}
+            env = runner.environment(root/'home')
+            expected = 'missing parent: \u201csynthetic\u201d\n'
+            writer = 'import os; os.write(2, bytes.fromhex(' + repr(expected.encode().hex()) + '))'
+            probe = ('import subprocess,sys; p=subprocess.run([sys.executable,"-c",' + repr(writer)
+                     + '],capture_output=True,text=True); assert p.returncode==0; assert p.stderr.endswith('
+                     + repr(expected) + ')')
+            result = subprocess.run([sys.executable, '-c', probe], env=env,
+                                    capture_output=True, text=True, errors='replace', timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_conditions_and_tool_versions_never_guess(self):
         self.assertNotIn('body', rows([{'run': 'true', 'if': 'new_condition'}])[0])

@@ -218,7 +218,7 @@ class Runner:
                    RUSTUP_TOOLCHAIN='1.99.1', CARGO_TARGET_DIR=str(self.target), CARGO_BUILD_JOBS='4',
                    CARGO_INCREMENTAL='0', CARGO_PROFILE_DEV_DEBUG='0', CARGO_PROFILE_TEST_DEBUG='0',
                    RUST_TEST_THREADS='4', RAYON_NUM_THREADS='4', ZERUS_PYTHON_JOBS='4', ZERUS_TEST_JOBS='4',
-                   PYTHONNOUSERSITE='1', PYTHONDONTWRITEBYTECODE='1',
+                   PYTHONNOUSERSITE='1', PYTHONDONTWRITEBYTECODE='1', PYTHONUTF8='1',
                    GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=str(home / '.gitconfig'),
                    GIT_TERMINAL_PROMPT='0', GCM_INTERACTIVE='never', VSCMD_SKIP_SENDTELEMETRY='1',
                    NPM_CONFIG_USERCONFIG=str(home / '.npmrc'), NPM_CONFIG_CACHE=str(home / '.npm-cache'),

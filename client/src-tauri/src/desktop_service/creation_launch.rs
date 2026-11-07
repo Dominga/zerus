@@ -27,6 +27,9 @@ pub(crate) enum LaunchAnswer {
     /// The original failed or its result is unknown, with the detail the
     /// reducer records; it is never sent again.
     Unconfirmed(String),
+    /// The exact original command failed after its physical drain. Its ID
+    /// remains dispatched: this does not prove that no launch effects occurred.
+    Failed(String),
     /// This launch never left the client: it had no fresh consent, or it
     /// stopped before its admission request was written.
     Unsent(String),
@@ -51,8 +54,40 @@ pub(crate) fn settled(receipt: &wire::Receipt, plan: &wire::Plan) -> Option<Laun
     }
     Some(match receipt.result(plan)? {
         Ok(()) => LaunchAnswer::Launched,
-        Err(error) => LaunchAnswer::Unconfirmed(error),
+        Err(error) => LaunchAnswer::Failed(error),
     })
+}
+
+/// One read of the exact original's receipt. Missing, Unknown, unreadable or
+/// mismatched evidence proves nothing and never permits dispatch or fallback.
+pub(crate) fn lookup(
+    service: Option<Arc<Service>>,
+    id: &str,
+    operation: &Value,
+    shutdown: &AtomicBool,
+) -> Option<LaunchAnswer> {
+    if shutdown.load(Ordering::Acquire) || operation["launch_dispatched"] != true {
+        return None;
+    }
+    let plan = wire::Plan::from_operation(id, operation)?;
+    let read = Read::new(service).ok()?;
+    let query = wire::Query::for_plan(read.scope.clone(), id.into(), &plan)?;
+    let bytes = read
+        .exchange(
+            None,
+            json!({"op":"creation_launch_result","query":query}),
+            false,
+            None,
+        )
+        .ok()?;
+    let result: wire::Lookup = serde_json::from_slice(&bytes).ok()?;
+    if shutdown.load(Ordering::Acquire) || !result.matches(&query) {
+        return None;
+    }
+    match settled(&result.receipt?, &plan)? {
+        answer @ (LaunchAnswer::Launched | LaunchAnswer::Failed(_)) => Some(answer),
+        _ => None,
+    }
 }
 
 /// Called only by the native creation host for its exact durable launch
@@ -265,7 +300,7 @@ mod tests {
         receipt.launch = Some(wire::Exited::new(&verified.plan, 1, "hgs: refused").unwrap());
         assert!(matches!(
             settled(&receipt, &verified.plan),
-            Some(LaunchAnswer::Unconfirmed(_))
+            Some(LaunchAnswer::Failed(_))
         ));
     }
 }

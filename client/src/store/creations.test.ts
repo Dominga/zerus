@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createRoot, createSignal } from "solid-js";
 import { createStore } from "solid-js/store";
 import { createCreations, type CreationsDeps } from "./creations";
+import { createNoticeBus, NOTICE_MS, type NoticeBus } from "./notices";
 import { toSession } from "./catalog";
 import { RESOLVED, creationRowId, type CardScope, type ListScope } from "../ui/sessions/creations-ui";
 import type { CreationCard, CreationEvent, GroupingOut, ViewRow } from "../types";
@@ -31,7 +32,7 @@ const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve()
 /** The commands a card may send; anything else (a composer, a draft) fails the test. */
 const CREATION_COMMANDS = ["onCreations", "creationsView", "creationDetails", "creationAction", "creationPlan"];
 
-function setup(view: CreationCard[] = [], options: { grouping?: GroupingOut; plans?: Record<string, Record<string, unknown> | null>; details?: Record<string, string>; refuse?: string } = {}) {
+function setup(view: CreationCard[] = [], options: { bus?: NoticeBus; grouping?: GroupingOut; plans?: Record<string, Record<string, unknown> | null>; details?: Record<string, string>; refuse?: string } = {}) {
   return createRoot((dispose) => {
     const calls: { name: string; args: unknown[] }[] = [];
     let listener: ((e: CreationEvent) => void) | undefined;
@@ -64,7 +65,7 @@ function setup(view: CreationCard[] = [], options: { grouping?: GroupingOut; pla
     let page = "dashboard";
     const store = createCreations({
       bridge,
-      notify: (tone, text, sticky) => notices.push({ tone, text, sticky }),
+      notify: (tone, text, sticky) => { notices.push({ tone, text, sticky }); options.bus?.notify(tone, text, sticky); },
       openNewSession: async (o) => { opened.push(o); },
       selectedKey, setSelectedKey,
       closeSubagent: () => setSubagent(undefined),
@@ -440,7 +441,7 @@ describe("Edit choices… (1525-1528)", () => {
 });
 
 describe("the notices (1577-1586)", () => {
-  it("show once per state and error, sticky", async () => {
+  it("show once per state and error, using the normal toast timer", async () => {
     const t = setup([card("a", { state: "failed", caption: "Creation failed", error: "No folder." })]);
     await t.started;
     t.emit(card("a", { state: "failed", caption: "Creation failed", error: "No folder." }));
@@ -448,11 +449,30 @@ describe("the notices (1577-1586)", () => {
     t.emit(card("a", { state: "queued" }));
     t.emit(card("a", { state: "unknown", caption: "Creation result unknown", error: "Still no folder." }));
     expect(t.notices).toEqual([
-      { tone: "error", text: "Creation tag-a: Creation failed\nNo folder.", sticky: true },
-      { tone: "error", text: "Creation tag-a: Creation failed\nStill no folder.", sticky: true },
-      { tone: "error", text: "Creation tag-a: Creation result unknown\nStill no folder.", sticky: true },
+      { tone: "error", text: "Creation tag-a: Creation failed\nNo folder.", sticky: undefined },
+      { tone: "error", text: "Creation tag-a: Creation failed\nStill no folder.", sticky: undefined },
+      { tone: "error", text: "Creation tag-a: Creation result unknown\nStill no folder.", sticky: undefined },
     ]);
     t.dispose();
+  });
+
+  it("expires failed and unknown toasts while retaining card details and once-per-state delivery", async () => {
+    vi.useFakeTimers();
+    const bus = createNoticeBus();
+    const failed = card("a", { state: "failed", error: "Name already exists.", can_edit: true });
+    const t = setup([failed], { bus });
+    try {
+      await t.started;
+      expect(bus.notices()).toHaveLength(1); expect(bus.notices()[0].sticky).toBe(false);
+      vi.advanceTimersByTime(NOTICE_MS); expect(bus.notices()).toHaveLength(0);
+      expect(t.store.creations()[0].error).toBe("Name already exists.");
+      t.emit(failed); expect(bus.notices()).toHaveLength(0);
+      const unknown = { ...failed, state: "unknown", can_edit: false };
+      t.emit(unknown); expect(bus.notices()).toHaveLength(1);
+      vi.advanceTimersByTime(NOTICE_MS); expect(bus.notices()).toHaveLength(0);
+      t.emit(unknown); expect(bus.notices()).toHaveLength(0);
+      expect(t.store.creations()[0].state).toBe("unknown");
+    } finally { t.dispose(); vi.useRealTimers(); }
   });
 
   it("remember 128 creations", async () => {

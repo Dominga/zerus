@@ -124,7 +124,7 @@ export function createCreations(deps: CreationsDeps) {
     notices.delete(c.id);
     notices.set(c.id, n.key);
     if (notices.size > NOTICE_LIMIT) notices.delete(notices.keys().next().value!);
-    deps.notify("error", n.text, true);
+    deps.notify("error", n.text);
   }
 
   /** Selects a card: the session selection and an open subagent end (3717-3728). */

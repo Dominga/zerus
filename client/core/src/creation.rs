@@ -2082,7 +2082,10 @@ impl Creations {
     pub fn can_edit(&self, id: &str) -> bool {
         self.operations.get(id).is_some_and(|value| {
             !self.in_flight(id)
-                && !flag(value, "launch_dispatched")
+                && (!flag(value, "launch_dispatched")
+                    || (text(value, "state") == "failed"
+                        && !text(value, "launch_id").is_empty()
+                        && text(value, "failed_launch") == text(value, "launch_id")))
                 && (matches!(text(value, "state"), "failed" | "stopped") || can_resume(value))
         })
     }
@@ -2243,6 +2246,27 @@ impl Creations {
             }
             Err(error) => self.failed(&id, &error, true),
         }
+        self.finish()
+    }
+
+    /// A typed, exact-original service receipt confirms that the launch
+    /// command exited unsuccessfully and physically drained. This is not a
+    /// no-start proof: keep the dispatched identity and forbid Continue.
+    /// Editing supplies choices for a separately confirmed new creation.
+    pub fn launch_failed(&mut self, launch: &str, error: &str) -> Vec<Effect> {
+        let Some(id) = self.for_launch(launch) else {
+            return Vec::new();
+        };
+        let mut value = self.get(&id);
+        if text(&value, "launch_id") != launch
+            || text(&value, "state") == "bound"
+            || !flag(&value, "launch_dispatched")
+        {
+            return Vec::new();
+        }
+        value["failed_launch"] = Value::from(launch);
+        self.put(&id, value);
+        self.failed(&id, error, false);
         self.finish()
     }
 

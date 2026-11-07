@@ -116,6 +116,22 @@
   .sc-review { flex: none; margin-right: 4px; color: var(--z-list-tone-attention); }
   .muted .sc-review { color: var(--z-list-badge-muted); }
   .sc-model { flex: 0 1 auto; }
+  /* Account marks (zerus-sa9qn.1): a filled circle with the label's letter, or its emoji in a tinted ring. */
+  .acct-mark {
+    --mark-size: 16px;
+    flex: none; display: inline-grid; place-items: center; width: var(--mark-size); height: var(--mark-size); border-radius: 50%;
+    background: var(--mark); color: var(--mark-ink, #000); font-size: calc(var(--mark-size) * .62); font-weight: 650; line-height: 1;
+    font-variant-numeric: tabular-nums; overflow: hidden; user-select: none;
+  }
+  .acct-mark.emoji { background: color-mix(in srgb, var(--mark) 22%, transparent); box-shadow: inset 0 0 0 1px var(--mark); font-size: calc(var(--mark-size) * .7); font-weight: 400; }
+  .acct-chip { flex: 0 1 auto; min-width: 0; max-width: 140px; display: inline-flex; align-items: center; gap: 5px; margin-left: 8px; color: var(--z-list-muted); }
+  .acct-chip-label { min-width: 0; }
+  .cc-mark { flex: none; display: inline-flex; margin-right: 6px; }
+  .acct-title .acct-mark { margin-right: 8px; }
+  .am-preview { display: flex; align-items: center; gap: 10px; }
+  .am-label { font-weight: 600; }
+  .am-hint { margin: 2px 0 8px; font-size: var(--fs-xs, 11px); }
+  .am-emoji { font-size: 16px; }
   .sc-effort { flex: none; margin-left: 7px; height: 16px; padding: 0 5px; border-radius: 3px; background: var(--z-list-chip); line-height: 16px; }
 
   /* Children counter: text + 46 wide, glyph at x+10, chevron at right-9. */

@@ -541,6 +541,15 @@ function slideOpenLater(el: () => HTMLElement | undefined, width: () => number) 
 export function SessionList() {
   const refreshAccounts = () => { void openFilterAccounts().catch(() => {}); };
   onCleanup(cancelFilterAccountReads);
+  // Account marks need each live computer's account catalog (bindings only, no
+  // profile inspects): read it once per computer as it comes online.
+  const markCatalogs = new Set<string>();
+  createEffect(() => {
+    const fresh = Object.values(catalog.computers).filter((c) => c.status === "live" || c.status === "polled").map((c) => c.id).filter((id) => !markCatalogs.has(id));
+    if (!fresh.length) return;
+    fresh.forEach((id) => markCatalogs.add(id));
+    refreshAccounts();
+  });
   const accountChoices = createMemo(() => filterAccounts().map((a) => ({ ...a, count: a.bindings.reduce((n, b) => n + (pickerCounts().account.get(b) ?? 0), 0) })));
   const list = useRows(false);
   // A row the menu bar or a notification opened (Qt's revealRow): scrolled to

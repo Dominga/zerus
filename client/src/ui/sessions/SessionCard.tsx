@@ -7,6 +7,7 @@ import { optionalQuestionCount, optionalQuestionCountText } from "./optional-que
 import { now } from "../../store/ui";
 import { settings } from "../../store/settings";
 import { machineAppearance } from "../../store/machineAppearance";
+import { sessionMark, type AccountMark } from "../../store/accountMarks";
 import type { AgentKind, Session, Status, Subagent } from "./types";
 import { currentChildren, workingChildren } from "./subagents";
 
@@ -150,6 +151,32 @@ export function MachineBadge(props: { alias: string; computer: string; vivid?: b
   );
 }
 
+/** The account's colored circle: its letter, or its emoji with emoji account marks (spec 3.2). */
+export function AccountMarkCircle(props: { mark: AccountMark; size?: number }) {
+  return (
+    <span class="acct-mark" classList={{ emoji: props.mark.isEmoji }} role="img" aria-label={tr("Account: %1", props.mark.label)}
+      style={{ "--mark": props.mark.color, "--mark-ink": props.mark.ink, "--mark-size": `${props.size ?? 16}px` }}>
+      <span aria-hidden="true">{props.mark.glyph}</span>
+    </span>
+  );
+}
+
+const markTooltip = (s: Session, mark: AccountMark) =>
+  [tr("Account: %1", mark.label), mark.machine ? tr("%1 on %2", AGENT_LABEL[s.agent], mark.machine) : AGENT_LABEL[s.agent]].join("\n");
+
+/** The expanded card's account: the circle and the label. */
+export function AccountChip(props: { session: Session }) {
+  const mark = () => sessionMark(props.session);
+  return (
+    <Show when={mark()}>{(m) => (
+      <span class="acct-chip" title={markTooltip(props.session, m())}>
+        <AccountMarkCircle mark={m()} />
+        <span class="acct-chip-label ell" aria-hidden="true">{m().label}</span>
+      </span>
+    )}</Show>
+  );
+}
+
 type Git = NonNullable<Session["git"]>;
 interface GitMark { icon: string; count?: string; tone: "muted" | "attention" | "incoming" | "synced" | "conflict" }
 
@@ -286,6 +313,7 @@ export function SessionCard(props: {
       <div class="sc-foot">
         <span class="sc-model ell">{s().model}</span>
         <Show when={s().effort}><span class="sc-effort">{s().effort}</span></Show>
+        <AccountChip session={s()} />
         <span class="grow" />
         <Show when={(s().subagents ?? []).length}>
           <AgentsCounter label={agentsLabel(s())} expandable={props.expandable} expanded={props.expanded} onToggle={props.onToggleChildren} />
@@ -336,6 +364,7 @@ export function CompactCard(props: { session: Session; selected: boolean; onExpa
   return (
     <div class="scard compact" classList={{ selected: props.selected }} data-emphasis={emphasis(s())}
       aria-description={tr("Collapsed session row. Press Right to expand.")}>
+      <Show when={sessionMark(s())}>{(m) => <span class="cc-mark" title={markTooltip(s(), m())}><AccountMarkCircle mark={m()} size={14} /></span>}</Show>
       <span class="sc-title ell" style={titleReserve(s().title, 60)} title={s().name}>{s().title}</span>
       <StatusBadge kind={badgeKind(s())} caption={statusCaption(s())} />
       <OptionalQuestionsChip session={s()} />

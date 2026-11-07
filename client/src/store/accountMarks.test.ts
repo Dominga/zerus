@@ -65,7 +65,7 @@ describe("account colors", () => {
       [`accounts/mark/${profileToken("", "claude-a1")}`]: "not an emoji",
       [`accounts/mark/${profileToken("studio", "claude-a1")}`]: "🦊",
     };
-    expect(accountAppearance(values, [one, two])).toEqual({ color: "#2b97ff", emoji: "🦊" });
+    expect(accountAppearance(values, [one, two])).toEqual({ color: "#2b97ff", emoji: "🦊", hidden: false });
   });
   it("shows the emoji only with emoji account marks", () => {
     const work = account([member()], "a", "Work");
@@ -95,5 +95,24 @@ describe("row marks", () => {
     expect(rowMark(row({ accountId: "claude-gone" }), index, {})).toBeUndefined();
     expect(rowMark(row({ computer: "elsewhere" }), index, {})).toBeUndefined();
     expect(rowMark(row({ cmd: "codex" }), index, {})).toBeUndefined();
+  });
+});
+
+describe("account label visibility (zerus-sa9qn.13)", () => {
+  const local = member();
+  const work = account([local, member({ key: `studio${US}claude-a1`, host: "studio", machine: "studio" })], "claude-work", "Work");
+  const index = markIndex({ ...emptyAccounts(), accounts: [work] });
+
+  it("shows marks by default and hides them all when the option is off", () => {
+    expect(rowMark(row(), index, {})).toBeDefined();
+    expect(rowMark(row(), index, { "sessions/showAccountMarks": true })).toBeDefined();
+    expect(rowMark(row(), index, { "sessions/showAccountMarks": false })).toBeUndefined();
+  });
+
+  it("hides one account's mark when any of its profiles carries the choice, keeping its appearance", () => {
+    const values = { [`accounts/hide/${profileToken("studio", "claude-a1")}`]: true, [`accounts/color/${profileToken("", "claude-a1")}`]: "#2b97ff" };
+    expect(accountAppearance(values, work.members)).toEqual({ color: "#2b97ff", emoji: "", hidden: true });
+    expect(rowMark(row(), index, values)).toBeUndefined();
+    expect(rowMark(row(), index, { [`accounts/hide/${profileToken("", "claude-a1")}`]: false })).toBeDefined();
   });
 });

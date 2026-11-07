@@ -18,6 +18,7 @@ export default function AccountMarkDialog(props: { account: Account; origin?: HT
   const initial = accountAppearance(settings, props.account.members);
   const [hex, setHex] = createSignal(initial.color);
   const [emoji, setEmoji] = createSignal(initial.emoji);
+  const [hidden, setHidden] = createSignal(initial.hidden);
   const [busy, setBusy] = createSignal(false);
   const colorValid = () => hex() === "" || /^#[\da-f]{6}$/iu.test(hex());
   const emojiValid = () => emoji().trim() === "" || validEmoji(emoji());
@@ -46,15 +47,15 @@ export default function AccountMarkDialog(props: { account: Account; origin?: HT
     if (next === undefined) return;
     event.preventDefault(); rows[next].click(); rows[next].focus();
   };
-  const save = async (color: string | null, mark: string | null) => {
+  const save = async (color: string | null, mark: string | null, hide: boolean) => {
     if (busy()) return;
     setBusy(true);
     try {
-      if (await saveAccountAppearance(props.account, color, mark)) props.close();
+      if (await saveAccountAppearance(props.account, color, mark, hide)) props.close();
       else toast(tr("Color and mark"), tr("The account appearance could not be saved. Try again."), "warn", true);
     } finally { setBusy(false); }
   };
-  const apply = () => valid() && void save(hex() ? hex().toLowerCase() : null, emoji().trim() ? emoji().trim() : null);
+  const apply = () => valid() && void save(hex() ? hex().toLowerCase() : null, emoji().trim() ? emoji().trim() : null, hidden());
   onMount(() => { dialog.showModal(); queueMicrotask(() => dialog.querySelector<HTMLButtonElement>(".cd-swatch[tabindex='0']")?.focus()); });
   onCleanup(() => { dialog.close(); queueMicrotask(() => { if (origin instanceof HTMLElement && origin.isConnected) origin.focus(); }); });
   return <dialog class="dlg" ref={dialog} aria-labelledby="account-mark-title" style={{ width: "400px" }} onCancel={(event) => { if (busy()) event.preventDefault(); else props.close(); }} onClose={props.close}>
@@ -71,8 +72,12 @@ export default function AccountMarkDialog(props: { account: Account; origin?: HT
           {settings[MARK_STYLE] === "emoji" ? tr("Session cards show the emoji instead of the letter.") : tr("Session cards show the emoji when Settings > Sessions uses emoji account marks.")}
         </Show>
       </p>
+      <label class="check am-hide">
+        <input type="checkbox" checked={hidden()} disabled={busy()} onChange={(event) => setHidden(event.currentTarget.checked)} />
+        <span>{tr("Do not show this account's label on session cards")}</span>
+      </label>
       <label class="btn ghost cd-more">{tr("More colors…")}<input type="color" value={/^#[\da-f]{6}$/iu.test(hex()) ? hex() : "#2b97ff"} disabled={busy()} onInput={(event) => setHex(event.currentTarget.value)} /></label>
     </div>
-    <div class="dlg-foot"><button class="btn ghost" disabled={busy()} onClick={() => void save(null, null)}>{tr("Reset to default")}</button><span class="spacer" /><button class="btn" disabled={busy()} onClick={props.close}>{tr("Cancel")}</button><button class="btn primary" disabled={busy() || !valid()} onClick={apply}>{tr("Apply")}</button></div>
+    <div class="dlg-foot"><button class="btn ghost" disabled={busy()} onClick={() => void save(null, null, false)}>{tr("Reset to default")}</button><span class="spacer" /><button class="btn" disabled={busy()} onClick={props.close}>{tr("Cancel")}</button><button class="btn primary" disabled={busy() || !valid()} onClick={apply}>{tr("Apply")}</button></div>
   </dialog>;
 }

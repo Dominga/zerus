@@ -4313,7 +4313,13 @@ a color and an optional emoji. They are this desktop's preferences, stored for
 each member profile of the account (`accounts/color/` and `accounts/mark/`), like
 machine label colors; without a choice the color is a stable palette slot derived
 from the label, so every desktop shows the same default. Settings > Sessions >
-**Account marks** shows emoji instead of letters for accounts that have one. A
+**Account marks** shows emoji instead of letters for accounts that have one.
+**Show account labels on session cards** (on by default) turns the marks off on
+every card, and an account's **Color and mark…** dialog can keep its own mark
+off session cards (**Do not show this account's label on session cards**,
+stored per member profile as `accounts/hide/`; the account's details then say
+**Hidden on session cards**). Hiding is presentation only: labels, colors and
+account bindings stay as they are. A
 session without a recorded account binding, or whose profile is not in the loaded
 catalog, shows no mark. The session list reads each live computer's account
 catalog once, without profile inspects, to resolve labels.

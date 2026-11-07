@@ -386,8 +386,14 @@
   .irow-label { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--z-color-dim); }
   .irow .icon-btn.small { flex: none; margin-right: -4px; }
   /* The copy button shows on hover or keyboard focus, so values stay uncluttered (owner 2026-11-07). */
-  .irow .irow-copy { opacity: 0; transition: opacity .12s; }
-  .irow:hover .irow-copy, .irow:focus-within .irow-copy { opacity: 1; }
+  /* A copyable row: the row highlights on hover and its copy mark shows at the right end. */
+  .copy-mark { flex: none; display: inline-grid; place-items: center; width: 13px; margin-left: 6px; vertical-align: -2px; color: var(--z-color-muted); opacity: 0; transition: opacity .12s; }
+  .copyable { cursor: pointer; }
+  .copyable:hover .copy-mark, .copyable:focus-visible .copy-mark { opacity: 1; }
+  .usage tr.copyable td { transition: background var(--z-motion-fast); }
+  .usage tr.copyable:hover td, .usage tr.copyable:focus-visible td { background: var(--z-color-hover); }
+  .usage tr.copyable:focus-visible { outline: none; }
+  .usage tr.copyable:focus-visible td { box-shadow: inset 0 1px 0 var(--z-color-accent), inset 0 -1px 0 var(--z-color-accent); }
   .irow.done .irow-ico { color: var(--z-color-accent); }
   .irow.doing .irow-ico { color: var(--z-color-warn); }
   .irow.agent.working .irow-label { color: var(--z-color-status-working); }

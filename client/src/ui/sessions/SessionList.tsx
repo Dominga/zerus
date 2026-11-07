@@ -827,7 +827,8 @@ function ListRow(props: { id: string; list: RowSource }) {
             onDblClick={(e) => { if (!e.ctrlKey && !e.metaKey && !e.shiftKey) setRowCompact(v().session.key, !compactRows[v().session.key]); }}>
             <Show when={!v().compactRow} fallback={<CompactCard session={v().session} selected={selectedKey() === v().session.key || !!multi[v().session.key]} onExpand={() => setRowCompact(v().session.key, false)} />}>
               <SessionCard session={v().session} selected={(selectedKey() === v().session.key && !subagentOpen()) || !!multi[v().session.key]} expandable={v().expandable}
-                expanded={!!expandedChildren[v().session.key]} onToggleChildren={() => setExpandedChildren(v().session.key, !expandedChildren[v().session.key])} />
+                expanded={!!expandedChildren[v().session.key]} onToggleChildren={() => setExpandedChildren(v().session.key, !expandedChildren[v().session.key])}
+                team={v().team} depth={v().depth} teamFirst={v().teamFirst} teamLast={v().teamLast} />
             </Show>
           </div>
         )}
@@ -991,3 +992,4 @@ function StripTile(props: { row: Extract<Row, { type: "card" }> }) {
     </button>
   );
 }
+

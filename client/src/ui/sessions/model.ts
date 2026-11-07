@@ -6,6 +6,7 @@ import { catalog, computerFresh, hasDraftKey, orderedRows } from "../../store/ca
 import { machineCards } from "../../store/machines";
 import { archiveMachineChoices, archiveProjectChoices } from "./archive-filters";
 import { defaultProject, grouping, groups } from "../../store/organization";
+import { teams } from "../../store/teams";
 import { stateFilter, matchesFilter, listedByFilter, search,machineFilter, projectFilter, accountFilter, folderFilter, expandedChildren, compactRows, selected, selectedKey, subagentOpen } from "../../store/ui";
 import { compileScopes, scopeCounts } from "./scope-filters";
 import { withCreations } from "../../store/creations";
@@ -28,7 +29,8 @@ export function rowHeight(row: Row, strip = false): number {
   if (row.type === "child") return ROW_HEIGHT.child;
   if (row.type === "creation") return ROW_HEIGHT.card;
   if (row.compactRow && !strip) return ROW_HEIGHT.collapsedRow;
-  return ROW_HEIGHT.card;
+  // The lead's card carries Qt's 26 px team strip below its footer.
+  return ROW_HEIGHT.card + (row.team ? 26 : 0);
 }
 
 export function sessionMatchesSearch(s: Session, q: string): boolean {
@@ -95,6 +97,7 @@ export const listRows = createMemo<Row[]>(() => {
     selected: { key: selectedKey(), subagent: subagentOpen(), conversation: selected()?.conversationId },
     roster: (s: Session) => rosterFor(s, s.key === selectedKey() ? followedFor(s.key).value : undefined),
     childDraft: (s: Session, child: { id: string }) => hasDraftKey(`${s.computer}\n${s.name}\n${s.conversationId ?? ""}\n${child.id}`),
+    teamOf: (s: Session) => teams.teamOf(s),
   };
   const out = groupRows(scope);
   return withCreations(out, scope);
@@ -141,3 +144,4 @@ export const projectChoices = createMemo(() => {
   const g = grouping();
   return archiveProjectChoices(g, pickerCounts().project, projectFilter());
 });
+

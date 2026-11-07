@@ -323,3 +323,26 @@
 .acct-switch-notice { margin: 4px; padding: 6px 8px; color: var(--z-color-text-2); font-size: var(--fs-xs); }
 .tchip.locked { opacity: .6; cursor: not-allowed; }
 .acct-switch-row:disabled { cursor: default; }
+
+  /* The lead's team strip (Qt SessionCardDelegate::paintTeamStrip) */
+  .team-strip { position: absolute; left: 7px; right: 7px; top: 82px; height: 21px; display: flex; align-items: center;
+    gap: 7px; padding: 0 7px; border: 1px solid var(--z-color-card-border); border-radius: 7px; background: var(--z-color-card);
+    font-size: 10px; color: var(--z-list-muted); }
+  .team-strip .grow { flex: 1; }
+  .team-toggle { display: inline-flex; align-items: center; padding: 0; border: 0; background: transparent; color: var(--z-list-muted); cursor: pointer; }
+  .team-toggle[aria-expanded="true"] svg { transform: rotate(90deg); }
+  .tbar { display: inline-flex; align-items: center; gap: 4px; }
+  .tbar-label { font-variant-numeric: tabular-nums; }
+  .tbar-track { width: 26px; height: 3px; border-radius: 2px; background: var(--z-color-border); overflow: hidden; }
+  .tbar-fill { display: block; height: 100%; border-radius: 2px; background: var(--z-color-accent); }
+  .tbar.muted .tbar-fill { background: var(--z-color-accent-muted); }
+  .team-status { padding: 1px 7px; border-radius: 9px; color: var(--z-color-text-3); white-space: nowrap; }
+  .team-status.stuck { color: var(--z-color-warn); background: color-mix(in srgb, var(--z-color-warn) 11%, transparent); }
+  .team-answers { font-weight: 600; color: var(--z-color-text-3); }
+  .team-members { color: var(--z-list-dim); }
+  /* A member under its lead: indented 22 px with Qt's connector line. */
+  .scard.team-member { left: 24px; }
+  .scard.team-member::after { content: ""; position: absolute; left: -11px; top: -6px; width: 10px; height: 32px;
+    border-left: 1px solid var(--z-list-tree-line); border-bottom: 1px solid var(--z-list-tree-line); border-bottom-left-radius: 6px; }
+  .scard.team-member.team-last::after { height: 32px; }
+  .scard.team-member.team-first::after { top: -6px; }

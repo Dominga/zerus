@@ -1009,6 +1009,8 @@ export interface TeamSummary {
   parent?: string;
   /** Task #58: the phases that plan in free mode. */
   free_phases?: number[];
+  /** The phase in work and its two mini bars (Qt `Teams::phaseProgress`). */
+  phase: number; phase_done: number; phase_total: number; phases_done: number; phases_total: number;
 }
 
 export interface TeamList { teams: TeamSummary[]; truncated: boolean }
@@ -1292,3 +1294,4 @@ export type TeamOutcome =
   | { outcome: "failed"; detail: string; request_id: string }
   | { outcome: "uncertain"; detail: string; request_id: string }
   | { outcome: "confirm"; confirmation: TeamConfirmation };
+

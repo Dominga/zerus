@@ -11,6 +11,7 @@ use zerus_client_core::actions::{Exit, Invocation};
 /// the background is not confirmed. A Startup-folder shortcut is not seen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub enum Registration {
     On,
     Off,
@@ -20,8 +21,10 @@ pub enum Registration {
 
 /// The Run value could not be read as text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub struct Unreadable;
 
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn registration(read: Result<Option<&str>, Unreadable>, executable: &Path) -> Registration {
     let command = match read {
         Err(Unreadable) => return Registration::Unknown,

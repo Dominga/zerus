@@ -8339,17 +8339,29 @@ Iron-rules compatibility and failure handling:
 Project memory (task 126, owner 2026-11-07) turns RustCodeLore on for a whole
 project, a project of the organization catalog with all its folders. It is off
 until the owner turns it on in the project's settings (Projects in Zerus Next
-and in the Qt GUI). The store is a lore root (`lore.toml` with commits off,
-records in `lore/*.jsonl` and `lore/plans/*.jsonl`, team workspaces under
+and in the Qt GUI). The store is a lore root (`lore.toml`, records in
+`lore/*.jsonl` and `lore/plans/*.jsonl`, team workspaces under
 `teams/<team8>/`, each its own lore root, and the search index under
-`.cache/index.sqlite`). Its default folder is
+`.cache/index.sqlite`, ignored by git). Its default folder is
 `HGS_STATE_DIR/lore/projects/<project id>`; Browse chooses another while the
-store holds no records. A store with records is moved, never repointed: after
+store holds no records. As docs/lore.md section 2.5 has it (the owner's answer
+2), a store outside any git working tree, the default among them, is its own
+private git repository, made as crates/lore `private.rs` makes it: `git init`
+on branch `main`, the local identity `Zerus <lore@zerus.invalid>`, the marker
+`zerus-lore-store` in its git folder, `commit.mode = "plain"`, no remote, and a
+first commit "lore: a new store"; RustCodeLore commits every write. Only an
+empty or new folder is initialized. A folder inside another git working tree
+(a project's) is never initialized and gets `commit.mode = "shared-tree"`. A
+team workspace in a Zerus store is `plain` and is committed into the store's
+repository ("lore: a new team workspace"). A store with records is moved, never repointed: after
 the owner confirms, hgs copies every file to an empty or new folder, compares
 each file's size and SHA-256 with the source, checks that the source did not
 change meanwhile, and only then switches. A failed check removes only the copy
 it made and switches nothing. The old store is kept and listed in `moved_from`;
-Zerus never deletes it. Turning memory off keeps the store as it is. The
+Zerus never deletes it. A move to a folder outside any working tree takes
+the store's repository and history along (a store without one gets its own,
+"lore: the store moved here"); a move into another working tree leaves the
+repository behind and switches the store to `shared-tree`. Turning memory off keeps the store as it is. The
 status shows the records (nonempty lines of the record files), the files and
 their size, and the index state: `none`, `built`, or `stale` when a record
 file changed after the index.

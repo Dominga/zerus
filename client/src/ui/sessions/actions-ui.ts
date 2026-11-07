@@ -15,7 +15,7 @@ export type ActionRow = Pick<Session,
   | "archiveId" | "attention" | "unread" | "sharedRead" | "allowed" | "archiveReason" | "terminateReason" | "forgetReason" | "phase"
   | "runId" | "conversationId" | "replyId" | "attentionSignature" | "created" | "fingerprint" | "sessionId"
   | "cwdPath" | "terminalSupported" | "terminalReported" | "terminalAttachSupported" | "terminalAttachReported"
-  | "muted" | "sharedNotifications" | "notificationRevision" | "notificationConflict">;
+  | "muted" | "sharedNotifications" | "notificationRevision" | "notificationConflict" | "gitWorktree">;
 
 /** A plain copy of the action fields, as they were when a menu or dialog opened. */
 export function snapshotOf(s: ActionRow): ActionRow {
@@ -29,6 +29,7 @@ export function snapshotOf(s: ActionRow): ActionRow {
     terminalAttachSupported: s.terminalAttachSupported, terminalAttachReported: s.terminalAttachReported,
     muted: s.muted, sharedNotifications: s.sharedNotifications, notificationRevision: s.notificationRevision,
     notificationConflict: s.notificationConflict,
+    gitWorktree: s.gitWorktree,
   };
 }
 
@@ -134,8 +135,12 @@ export function menuState(s: ActionRow, online: boolean, updating: boolean, deta
   const archived = s.state === "archived";
   const running = s.state === "running";
   const idle = s.activity === "idle" || !!details?.auth_required;
-  const canPause = running && s.resumable && idle && s.processState !== "exited"
-    && (!details || details.expected_id === "" || details.resume_message_can_send);
+  // An unconfirmed fresh run has no resumable history yet. Only an explicit
+  // native Pause capability may offer its existing exact-process stop path.
+  const firstTurnPause = !s.conversationId && !details?.conversation_id
+    && (details?.allowed_actions != null ? details.allowed_actions.includes("pause") : s.allowed?.split(" ").includes("pause") === true);
+  const canPause = running && s.processState !== "exited" && (firstTurnPause
+    || (s.resumable && idle && (!details || details.expected_id === "" || details.resume_message_can_send)));
   // Restore (Qt canChange 5302-5304). The client's right-click selects the row
   // first, so its context menu is Qt's selected-row case, which reuses the
   // header's m_changeAction (5360): neither reads allowed(restore) (3897-3898).

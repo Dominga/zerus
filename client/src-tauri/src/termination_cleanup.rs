@@ -1017,6 +1017,21 @@ impl Inner {
 pub fn termination_cleanup_view(state: State<'_, TerminationCleanup>) -> View {
     lock(&state.0.model).view()
 }
+
+fn offer_candidate(row: &zerus_client_core::ViewRow, target: &Target) -> Result<bool, String> {
+    if row.name != target.name
+        || row.state != "running"
+        || target.run_id.is_empty()
+        || row.run_id.as_deref() != Some(&target.run_id)
+        || row.conversation_id.as_deref().unwrap_or("") != target.conversation_id
+        || row.machine.is_empty()
+    {
+        return Err(STATE_CHANGED.into());
+    }
+    // The optional cleanup protocol requires a confirmed native conversation.
+    // Its absence never blocks the ordinary run-bound Terminate action.
+    Ok(!target.conversation_id.is_empty() && row.git_worktree != Some(false))
+}
 #[tauri::command]
 pub async fn termination_cleanup_offer(
     handle: AppHandle,
@@ -1033,12 +1048,8 @@ pub async fn termination_cleanup_offer(
         .pump()
         .row_named(&target.computer, &target.name)
         .ok_or(STATE_CHANGED)?;
-    if row.state != "running"
-        || row.run_id.as_deref() != Some(&target.run_id)
-        || row.conversation_id.as_deref() != Some(&target.conversation_id)
-        || row.machine.is_empty()
-    {
-        return Err(STATE_CHANGED.into());
+    if !offer_candidate(&row, &target)? {
+        return Ok(None);
     }
     let read = Arc::new(state.0.read()?);
     let machine = app
@@ -1459,6 +1470,38 @@ pub async fn termination_cleanup_inspect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn known_ordinary_folder_never_needs_the_offer_pipeline_before_a_first_turn() {
+        let mut target = source();
+        target.conversation_id.clear();
+        let mut row = zerus_client_core::ViewRow {
+            name: target.name.clone(),
+            state: "running".into(),
+            run_id: Some(target.run_id.clone()),
+            conversation_id: None,
+            machine: "fixture-machine".into(),
+            git_worktree: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(offer_candidate(&row, &target), Ok(false));
+        row.git_worktree = None;
+        assert_eq!(offer_candidate(&row, &target), Ok(false));
+        target.conversation_id = "first-conversation".into();
+        row.conversation_id = Some(target.conversation_id.clone());
+        assert_eq!(
+            offer_candidate(&row, &target),
+            Ok(true),
+            "unreported metadata still gets inspected"
+        );
+        row.git_worktree = Some(true);
+        assert_eq!(offer_candidate(&row, &target), Ok(true));
+        row.git_worktree = Some(false);
+        row.conversation_id = Some("replacement-conversation".into());
+        assert!(offer_candidate(&row, &target).is_err());
+        row.conversation_id = Some(target.conversation_id.clone());
+        row.run_id = Some("replacement".into());
+        assert!(offer_candidate(&row, &target).is_err());
+    }
     use zerus_client_core::termination_cleanup::Entry;
     #[test]
     fn a_native_read_resource_can_settle_while_the_cleanup_model_is_locked() {

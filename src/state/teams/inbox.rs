@@ -214,6 +214,44 @@ fn all_items(team: &Team) -> Vec<Item> {
                 team.name_of(&task.assignee), task.waits.as_ref().map(|wait| wait.reason.as_str()).unwrap_or_default()).trim_end().to_owned(),
         });
     }
+    // Task #220: a tool a team's run found missing waits for its lead, not the
+    // owner: the lead denies it with a reason, or asks the owner on a card.
+    if active {
+        // A card the lead already asked for answers it; the offer is not the
+        // lead's again until the owner's answer says so.
+        let asked: Vec<String> = team
+            .proposals
+            .iter()
+            .filter(|proposal| proposal["state"] == "open" && proposal["kind"] == "install-tool")
+            .filter_map(|proposal| proposal["change"]["offer"].as_str().map(str::to_owned))
+            .collect();
+        for offer in crate::test_discipline::tools::offers_of(&team.id).into_iter().filter(|offer| !asked.contains(&offer.id)) {
+            let who = if offer.member.is_empty() { team.name.clone() } else { team.name_of(&offer.member) };
+            let needs = format!("{who}'s run needs {}", offer.tool);
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "tool_missing",
+                key: format!("tool_missing:{}", offer.id),
+                task: offer.task,
+                member: who.clone(),
+                since: offer.since,
+                summary: summary(&format!("{needs} in {}: {}", offer.project_name, offer.why)),
+                command: format!(
+                    "{} | hgs team decide-tool --json",
+                    json!({"request_id":PLACEHOLDER,"team":team.id,"offer":offer.id,"allow":false,
+                        "reason":format!("We work without {} for now", offer.tool)})
+                ),
+                detail: format!(
+                    "Project: {} ({}).\nThe install command: {}\nAsk the owner to install it: {} | hgs team propose --json",
+                    offer.project_name,
+                    offer.folder,
+                    offer.command.join(" "),
+                    json!({"request_id":PLACEHOLDER,"team":team.id,"kind":"install-tool","offer":offer.id,
+                        "reason":format!("{needs}: {}", offer.why)})
+                ),
+            });
+        }
+    }
     // #752: two or more members in one folder build each other's half-done
     // edits; the lead proposes the build broker once (a switch card), and a
     // card the owner denied is not proposed again.
@@ -347,10 +385,10 @@ fn all_items(team: &Team) -> Vec<Item> {
                     format!("{} Reassigning it to {peer} frees it now.", wait.reason),
                 ),
                 (None, MemberState::Paused) => (resume, format!("{} Resume the member to free it.", wait.reason)),
-                (None, _) if !live => (relaunch, format!("{} Relaunch its session to free it.", wait.reason)),
+                (None, _) if !live => (relaunch, format!("{} Relaunch its session in a fresh conversation with a handoff brief to free it.", wait.reason)),
                 (None, _) if team.settings.lead_restarts_stuck && member_stuck => (
                     relaunch,
-                    format!("{} Restart it: relaunch interrupts its stuck turn, or relaunches it in its conversation.", wait.reason),
+                    format!("{} Relaunch it: a fresh conversation with a handoff brief continues the task.", wait.reason),
                 ),
                 (None, _) => (
                     owner,
@@ -449,7 +487,7 @@ fn all_items(team: &Team) -> Vec<Item> {
                     json!({"request_id":PLACEHOLDER,"team":team.id,"member":member.id})
                 ),
                 format!(
-                    "You may restart it: hgs team relaunch {} interrupts its stuck turn and continues it, or relaunches the session in its own conversation.",
+                    "You may relaunch it: hgs team relaunch {} gives it a fresh conversation with a handoff brief that continues the task.",
                     member.id
                 ),
             )

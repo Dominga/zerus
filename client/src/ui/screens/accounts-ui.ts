@@ -69,9 +69,49 @@ export function profileTags(a: Account): Map<string, string> {
   return tags;
 }
 
-/** The accounts with a member on `machine` ("*" is every machine). */
-export const visibleAccounts = (view: AccountsView, machine: string): Account[] =>
-  machine === "*" ? view.accounts : view.accounts.filter((a) => a.members.some((m) => m.host === machine));
+/** All / Signed in / Signed out, counted on the machine filter (AccountsPage.cpp:276-290). */
+export type SignFilter = "all" | "in" | "out";
+
+/**
+ * A profile's sign-in on its machine (AccountsPage.cpp:166-174): "expired",
+ * "out" (signed out) or "in" (signed in, configured, or still being checked).
+ */
+export function signState(p: Profile): "in" | "out" | "expired" {
+  if (p.state === "expired" || p.usage.status === "expired") return "expired";
+  if (p.state === "signed-out" || p.usage.status === "signed_out" || p.usage.auth_status === "signed_out") return "out";
+  return "in";
+}
+
+/** An account's sign-in over the machines the filter shows: expired, out (any shown machine signed out), else in (AccountsPage.cpp:679-689). */
+export function accountSignState(a: Account, machine: string): "in" | "out" | "expired" {
+  let state: "in" | "out" | "expired" = "in";
+  for (const m of a.members) {
+    if (machine !== "*" && m.host !== machine) continue;
+    const one = signState(m);
+    if (one === "expired") state = one;
+    else if (one === "out" && state === "in") state = one;
+  }
+  return state;
+}
+
+/** The "Signed in N" and "Signed out N" counts of the machine-filtered accounts (AccountsPage.cpp:689, 717). */
+export function signedCounts(view: AccountsView, machine: string): { in: number; out: number } {
+  let signedIn = 0, signedOut = 0;
+  for (const a of visibleAccounts(view, machine)) {
+    if (accountSignState(a, machine) === "in") signedIn++;
+    else signedOut++;
+  }
+  return { in: signedIn, out: signedOut };
+}
+
+/** The accounts with a member on `machine` ("*" is every machine), filtered by sign-in state (AccountsPage.cpp:672-690). */
+export function visibleAccounts(view: AccountsView, machine: string, filter: SignFilter = "all"): Account[] {
+  return view.accounts.filter((a) => (machine === "*" || a.members.some((m) => m.host === machine))
+    && (filter === "all" || (filter === "in" ? accountSignState(a, machine) === "in" : accountSignState(a, machine) !== "in")));
+}
+
+/** The "No accounts match" line with Clear filters (AccountsPage.cpp:719-720, 310-318). */
+export const noAccountsMatch = (view: AccountsView): boolean => view.accounts.length > 0;
 
 /** updateRefreshState (AccountsPage.cpp:440-447) once the first snapshot is in and hosts exist; `visible` counts the listed accounts. */
 export function summaryLine(view: AccountsView, visible: number): string {

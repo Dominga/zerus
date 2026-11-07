@@ -106,6 +106,9 @@ pub struct OpenSession {
     /// (`SessionsWindow::showAttentionSession`, `SessionsWindow.cpp:2837-2842`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub attention: bool,
+    /// A tray-menu session row: attach its Terminal (Qt's `sessionActivated`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub terminal: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected: Option<ExactSession>,
 }
@@ -973,6 +976,7 @@ fn apply(app: &AppHandle, outcome: Outcome) {
                 computer: computer.0,
                 key,
                 attention: true,
+                terminal: false,
                 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                 expected: outcome.expected,
                 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
@@ -1131,7 +1135,7 @@ pub fn open_updates(app: &AppHandle) {
 pub fn menu_session(app: &AppHandle, computer: String, key: String) {
     open_if(
         app,
-        OpenSession { computer, key, attention: false, expected: None },
+        OpenSession { computer, key, attention: false, terminal: true, expected: None },
         || true,
     );
 }fn open_if(app: &AppHandle, target: OpenSession, current: impl Fn() -> bool + Send + 'static) {
@@ -1218,6 +1222,8 @@ pub enum MenuAction {
     Updates,
     Restart,
     Refresh,
+    /// "Open log": this client's own log in the system's text viewer.
+    OpenLog,
     /// Task 175: open an active session chosen in the tray menu.
     Session { computer: String, key: String },
     Quit,
@@ -1346,6 +1352,7 @@ impl Bar {
                     text: render(text),
                 },
                 Entry::Refresh => chosen_by(&text!("Refresh"), MenuAction::Refresh),
+                Entry::OpenLog => chosen_by(&text!("Open log"), MenuAction::OpenLog),
                 Entry::Session { computer, key, title } => chosen_by(
                     title,
                     MenuAction::Session { computer: computer.clone(), key: key.clone() },
@@ -2326,6 +2333,7 @@ mod tests {
             computer: "studio".into(),
             key: "run:a".into(),
             attention: false,
+            terminal: false,
             expected: None,
         };
         assert_eq!(
@@ -2345,6 +2353,7 @@ mod tests {
             computer: "peer".into(),
             key: "run:original".into(),
             attention: true,
+            terminal: false,
             expected: Some(ExactSession {
                 run: "original".into(),
                 conversation: "conversation".into(),
@@ -2476,6 +2485,7 @@ mod tests {
             computer: "studio".into(),
             key: key.into(),
             attention: false,
+            terminal: false,
             expected: None,
         }
     }

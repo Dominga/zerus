@@ -172,6 +172,10 @@ describe("desk wiring", () => {
     // The click expands the row's organization group as a menu row does.
     expect(projects.setProjectCollapsed).toHaveBeenCalledWith("folded-project", false);
     expect(shown.setSelectedKey).toHaveBeenLastCalledWith("mac\nrun:folded");
+    vi.clearAllMocks();
+    open({ computer: "mac", key: "run:folded", terminal: true });
+    expect(shown.setDetailTab).toHaveBeenCalledWith("terminal");
+    expect(shown.setSelectedKey).toHaveBeenLastCalledWith("mac\nrun:folded");
   });
 
   it("clears every filter first, as Qt's showSession does", async () => {

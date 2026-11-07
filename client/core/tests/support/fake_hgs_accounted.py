@@ -73,7 +73,7 @@ elif args == ["watch", "--json"]:
             if phase == "worker" and json.loads(line).get("topic") == "organization":
                 for index, frame in enumerate(CONFIG["organization_frames"], len(CONFIG["frames"]) + 1):
                     print(json.dumps(dict(frame, v=1, seq=index)), flush=True)
-elif args == ["ls", "--json"]:
+elif args in (["ls", "--json"], ["ls", "--json", "--local", "--no-archives"]):
     if phase == "legacy":
         holder()
         (ROOT / "ready").touch()

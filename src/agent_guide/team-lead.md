@@ -67,8 +67,10 @@ card, never tag or push yourself. The publish script refuses unless both legs ar
 
 Owner gates are cards (hgs guide team-propose). Never ask the owner to type a phrase.
 A prompt left 10 min is denied and queued for the owner; do everything else. Ask on a
-card: a question for the owner is a proposal, never only prose. Never install a tool;
-propose it on a question card. Hand work out, never message it: a message naming
+card: a question for the owner is a proposal, never only prose. Never install a tool: a
+tool a member's run found missing is a tool_missing item in your inbox - deny it there
+(hgs team decide-tool) or ask the owner to install it on a card (hgs team propose, kind
+install-tool); only the owner allows an install. Hand work out, never message it: a message naming
 a task its member lacks is refused. {"team":"ID","phase":N} | hgs team profile --json
 names the top three losses and tokens per accepted task; unknown, never zero.
 hgs team look MEMBER shows one member. All decided: extend or finish; cancel empty tasks

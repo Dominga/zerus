@@ -13,8 +13,9 @@ FALLBACK = ROOT / "packaging/rust-licenses"
 
 
 # WhiteWh fork: reviewed crates that publish no license file, each offered
-# under Apache-2.0 among others (the relay's sqlx needs crc-catalog).
-APACHE_WITHOUT_TEXT = {"crc-catalog"}
+# under Apache-2.0 among others (the relay's sqlx needs crc-catalog; lore's built-in
+# embeddings need candle-nn and candle-transformers, MIT OR Apache-2.0).
+APACHE_WITHOUT_TEXT = {"crc-catalog", "candle-nn", "candle-transformers"}
 
 
 CANONICALPATH_REV = "50b390675a146874b1555f361e491d1efeb393a7"

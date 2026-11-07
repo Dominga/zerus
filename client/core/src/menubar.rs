@@ -396,6 +396,8 @@ pub enum Entry {
     Session { computer: String, key: String, title: Text },
     /// "+N more": opens Zerus.
     More(usize),
+    /// "Open log": this client's own log in the system's viewer.
+    OpenLog,
     Refresh,
     Quit,
 }
@@ -658,7 +660,7 @@ impl Desk {
                 push_sessions(&mut menu, alias.as_str(), computer);
             }
         }
-        menu.extend([Entry::Separator, Entry::Quit]);
+        menu.extend([Entry::Separator, Entry::OpenLog, Entry::Refresh, Entry::Quit]);
         menu
     }
 }
@@ -1356,6 +1358,8 @@ mod tests {
                 Entry::Label(crate::text!("%1: polling…", "studio")),
                 Entry::Label(crate::text!("%1: unreachable", "win")),
                 Entry::Separator,
+                Entry::OpenLog,
+                Entry::Refresh,
                 Entry::Quit,
             ]
         );
@@ -1402,6 +1406,8 @@ mod tests {
                 Entry::Separator,
                 Entry::Label(crate::text!("%1: polling…", crate::text!("this box"))),
                 Entry::Separator,
+                Entry::OpenLog,
+                Entry::Refresh,
                 Entry::Quit,
             ]
         );
@@ -1419,6 +1425,8 @@ mod tests {
                 Entry::Separator,
                 Entry::Label(crate::text!("No remote machines")),
                 Entry::Separator,
+                Entry::OpenLog,
+                Entry::Refresh,
                 Entry::Quit,
             ]
         );

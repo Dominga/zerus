@@ -191,6 +191,12 @@ fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
         "The tests override is an object shaped like .zerus/tests.toml"
     );
     ensure!((1..=32).contains(&settings.max_members), "A team has 1 to 32 members");
+    // Task 209: the threshold a member's context is compacted at; a fraction of
+    // the window high enough that a compact helps, 95 by default.
+    ensure!(
+        (50..=100).contains(&settings.context_compact_percent),
+        "context_compact_percent is 50 to 100 (the share of the context window at which Zerus compacts a member)"
+    );
     ensure!(
         (30..=3600).contains(&settings.start_timeout_seconds),
         "The start warning waits 30 to 3600 seconds after delivery"
@@ -1226,7 +1232,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-pub(crate) const OWNER_SETTINGS: [&str; 25] = [
+pub(crate) const OWNER_SETTINGS: [&str; 26] = [
     "approval",
     // Task 126: the owner chooses the team's memory and its store.
     "memory",
@@ -1266,6 +1272,9 @@ pub(crate) const OWNER_SETTINGS: [&str; 25] = [
     // phase pause, and sets who accepts new phases.
     "lead_removes_own_pause",
     "phase_acceptance",
+    // Task 209: only the owner sets what Zerus does to a member's context (the
+    // share of the window at which it compacts, 95% by default).
+    "context_compact_percent",
 ];
 
 /// Task 126: a lead's whole settings object that leaves out `memory` keeps
@@ -4213,6 +4222,43 @@ fn swap_one(team: &mut Team, input: &Value, id: &str, keep_session: bool, actor:
     Ok(json!({"status":"swapped","member":id,"from":from,"to":to,"agent":agent,"tasks":handed,"lead":lead,"by":by}))
 }
 
+/// Task 209: gives a member a fresh conversation, keeping the seat and its open
+/// attempt. The old session is remembered (`replaced`), so the dispatcher's
+/// Launch step pauses and renames it before the new one takes the member's name;
+/// `handoff` makes the handoff brief the new session's first message. `why` is
+/// `relaunch` (the owner or the lead) or `context` (the auto rule).
+pub(crate) fn fresh_session(team: &mut Team, id: &str, why: &str, events: &mut Vec<Event>) -> anyhow::Result<()> {
+    let role = team.role_of(id);
+    let member = team.members.iter_mut().find(|member| member.id == id).context("Unknown member")?;
+    ensure!(member.state != MemberState::Removed, "This member was removed");
+    let from = member.session.take();
+    let from_name = from.as_ref().map(|session| session.name.clone()).unwrap_or_default();
+    if let Some(old) = from {
+        member.replaced = Some(old);
+    }
+    member.context = None;
+    member.context_compact = None;
+    member.context_retry_at = None;
+    member.restart_pending = false;
+    member.handoff = Some(super::model::HandoffNeed {
+        why: why.to_owned(),
+        at: now(),
+        from: from_name.clone(),
+        changes: Vec::new(),
+    });
+    // A fresh session starts even before its next task (H6): the member keeps
+    // its open attempt, so there may be no hand-out to carry the brief.
+    member.launch_after_swap = true;
+    member.launch_id.clear();
+    member.error.clear();
+    member.host_waits = 0;
+    member.seen = None;
+    member.settings_applied = false;
+    member.state = MemberState::NotCreated;
+    events.push(Event::new("fresh_session", json!({"member":role,"why":why,"from":from_name})));
+    Ok(())
+}
+
 /// Section 9.2: the root of a team's tree, by parent links among the loaded
 /// teams (a missing parent stops the walk at the team itself).
 pub(crate) fn root_of(team: &Team, all: &[Team]) -> Team {
@@ -5136,15 +5182,41 @@ fn serves_another_team(session: &SessionRef, others: &[Team]) -> bool {
     })
 }
 
+/// Task #220: the lead asks the owner to install a tool its team's run found
+/// missing. The card shows the tool, why it is needed and the command Allow
+/// runs; the offer belongs to this team, is still waiting, and has one card.
+fn install_tool_change(team: &Team, input: &Value) -> anyhow::Result<Value> {
+    let id = text(input, "offer");
+    ensure!(
+        !id.is_empty(),
+        "An install-tool proposal names its offer: {{\"kind\":\"install-tool\",\"offer\":\"...\",\"reason\":\"...\"}}"
+    );
+    let found = crate::test_discipline::tools::offer(id).context("Unknown tool offer")?;
+    ensure!(found.team == team.id, "That offer is not this team's");
+    ensure!(matches!(found.state.as_str(), "offered" | "failed"), "The offer of {} is {}; there is nothing to ask", found.tool, found.state);
+    ensure!(!found.command.is_empty(), "No package manager on this computer installs {}; install it yourself", found.tool);
+    ensure!(
+        !team.proposals
+            .iter()
+            .any(|proposal| proposal["state"] == "open" && proposal["kind"] == "install-tool" && proposal["change"]["offer"] == found.id),
+        "The owner already has the card for {}",
+        found.tool
+    );
+    Ok(json!({"offer":found.id,"tool":found.tool,"why":found.why,"saves":found.saves,"command":found.command,
+        "folder":found.folder,"project":found.project_name,
+        "lines":[format!("Install {}: {}", found.tool, found.command.join(" ")),
+            format!("Why: {} (saves {})", found.why, found.saves)]}))
+}
+
 /// F8: the lead proposes a membership change; the owner decides.
 fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(actor.is_lead(team), "Only the lead proposes a change to your team");
     let kind = text(input, "kind").to_owned();
     ensure!(
         ["add-member", "remove-member", "swap-member", "next-goal", "switch-plan-mode",
-         "add-to-phase", "cancel-tasks", "discard-phase", "question", "switch-setting", "iron-rules"].contains(&kind.as_str())
+         "add-to-phase", "cancel-tasks", "discard-phase", "question", "switch-setting", "iron-rules", "install-tool"].contains(&kind.as_str())
             || OWNER_OPS.contains(&kind.as_str()),
-        "A proposal is one of: add-member, remove-member, swap-member, next-goal, switch-plan-mode, add-to-phase, cancel-tasks, discard-phase, question, switch-setting, iron-rules, {}",
+        "A proposal is one of: add-member, remove-member, swap-member, next-goal, switch-plan-mode, add-to-phase, cancel-tasks, discard-phase, question, switch-setting, iron-rules, install-tool, {}",
         OWNER_OPS.join(", ")
     );
     let reason = clean(text(input, "reason").trim(), 2000, "A proposal reason")?;
@@ -5202,6 +5274,9 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
             Some(n) => json!({"phase":n}),
             None => Value::Null,
         },
+        // Task #220: a tool the team's run found missing; the owner installs it
+        // or denies the card, and the offer carries the outcome.
+        "install-tool" => install_tool_change(team, input)?,
         "question" => question_change(input)?,
         "swap-member" => swap_change(team, input)?,
         // Task #21: an owner-gated operation the owner allows with a click.
@@ -5342,6 +5417,15 @@ fn decide_proposal(team: &mut Team, input: &Value, actor: &Actor, offline: &BTre
             team.memory_mode_reason.clear();
             events.push(Event::new("memory_mode_denied", json!({"by":"You","proposal":id,"reason":reason})));
         }
+        if kind == "install-tool" {
+            // Task #220: the tool is not installed; the offer remembers why, so
+            // no card asks again.
+            let offer = card["change"]["offer"].as_str().unwrap_or_default();
+            if let Err(error) = crate::test_discipline::tools::deny_escalated(offer, &reason) {
+                eprintln!("hgs: the tool offer was not recorded as denied: {error:#}");
+            }
+            events.push(Event::new("install_tool_denied", json!({"by":"You","proposal":id,"offer":offer,"reason":reason})));
+        }
         return Ok(json!({"status":"rejected","proposal":id}));
     }
     let member = team.proposals[at]["member"].clone();
@@ -5421,6 +5505,17 @@ pub(crate) fn inapplicable(team: &Team, proposal: &Value) -> Option<String> {
         return Some("the team has finished".into());
     }
     let mode = proposal["mode"].as_str().unwrap_or_default();
+    // Task #220: an install card whose offer was decided or is gone withdraws.
+    if kind == "install-tool" {
+        let offer = proposal["change"]["offer"].as_str().unwrap_or_default();
+        let Some(found) = crate::test_discipline::tools::offer(offer) else {
+            return Some("the tool offer is gone".into());
+        };
+        if !matches!(found.state.as_str(), "offered" | "failed") {
+            return Some(format!("the offer of {} is {}", found.tool, found.state));
+        }
+        return None;
+    }
     trial(team, kind, &proposal["member"], &proposal["change"], mode).err().map(|error| format!("{error:#}"))
 }
 
@@ -5586,6 +5681,12 @@ fn run_proposal(team: &mut Team, kind: &str, member: &Value, change: &Value, mod
             apply(team, "settings", &value, &Actor::Human, offline, events)?
         }
         "switch-setting" => switch_setting(team, change, id, reason, events)?,
+        // Task #220: the owner's Allow installs the tool the card names.
+        "install-tool" => {
+            let offer = change["offer"].as_str().context("The install-tool proposal names its offer")?;
+            let allowed = crate::test_discipline::tools::allow_escalated(offer)?;
+            json!({"tool":allowed.tool,"state":allowed.state,"command":allowed.command.join(" "),"folder":allowed.folder})
+        }
         op if OWNER_OPS.contains(&op) => {
             let mut value = change["input"].clone();
             value["team"] = json!(team.id);
@@ -6457,7 +6558,10 @@ fn apply_op(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &B
         "relaunch" => {
             // U54: the owner relaunches directly; the lead on its verified word.
             // U56: on the owner's setting, the lead also relaunches a member
-            // Zerus marks stuck.
+            // Zerus marks stuck. Task 209 (owner, 2026-11-07): a relaunch is a
+            // fresh conversation with a handoff brief, never the same one; the
+            // lead proposes it for a stuck member too, not only for one that
+            // failed to start.
             let member_id = text(input, "member").to_owned();
             let stuck = team.member(&member_id).is_some_and(|member| member.stuck.is_some());
             ensure!(
@@ -6468,25 +6572,20 @@ fn apply_op(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &B
             );
             let id = member_id;
             let by = actor.label(team);
-            let member = team.members.iter_mut().find(|m| m.id == id).context("Unknown member")?;
-            if member.stuck.is_some() {
-                // U56/#728: the real route for a stuck member: the dispatcher
-                // interrupts its session and resumes it in its conversation;
-                // the lead needs no word when the owner set lead_restarts_stuck,
-                // and the owner has the same route.
-                member.restart_pending = true;
-                member.error.clear();
-                member.host_waits = 0;
-                member.launch_id.clear();
-                events.push(Event::new("member_restart_requested", json!({"by":by,"member":id})));
-                return Ok(json!({"status":"relaunching","member":id}));
-            }
-            ensure!(member.session.is_none() && !member.error.is_empty(), "This member's session did not fail to start");
-            member.error.clear();
-            member.host_waits = 0;
-            member.launch_id.clear();
-            events.push(Event::new("relaunch", json!({"by":"You","member":id})));
-            Ok(json!({"status":"relaunch","member":id}))
+            // Task 209: a member that failed to start, is stuck, or simply runs
+            // in a conversation the owner wants replaced gets a new one. The old
+            // session is set aside by the Launch step (paused and renamed), so
+            // the new one takes the member's name, and the handoff brief goes as
+            // its first message.
+            let (state, from) = team
+                .member(&id)
+                .map(|member| (member.state, member.session.as_ref().map(|session| session.name.clone()).unwrap_or_default()))
+                .context("Unknown member")?;
+            ensure!(state != MemberState::Removed, "This member was removed");
+            ensure!(id != team.lead, "Relaunch the lead by swapping it (hgs team swap-member)");
+            fresh_session(team, &id, "relaunch", events)?;
+            events.push(Event::new("relaunch", json!({"by":by,"member":id,"fresh":true,"from":from})));
+            Ok(json!({"status":"relaunch","member":id,"fresh":true,"from":from}))
         }
         "pause-member" | "resume-member" => {
             ensure!(human_or_lead, "Only the lead or you pause a member");

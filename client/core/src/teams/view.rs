@@ -294,6 +294,36 @@ pub struct MemberView {
     /// does next and is blocked on, in at most three short lines; None
     /// without one.
     pub pulse: Option<PulseView>,
+    /// Task 209: the member's native context reading (`members[].context`):
+    /// tokens used, the window and their percentage, so the card shows it
+    /// without an inspect of its own. None when its agent keeps no meter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<ContextView>,
+    /// Task 209: the member's context is being compacted (status reads its
+    /// state `compacting`); the card shows Compacting instead of Working.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub compacting: bool,
+}
+
+/// Task 209: a member's native context reading as the member card shows it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct ContextView {
+    pub used: u64,
+    pub limit: u64,
+    /// Whole percent of the window, rounded down by hgs.
+    pub percent: u64,
+    /// When hgs read it.
+    pub at: f64,
+}
+
+fn context(value: &Value) -> Option<ContextView> {
+    let context = value.get("context").filter(|context| context.is_object())?;
+    Some(ContextView {
+        used: count(context, "used"),
+        limit: count(context, "limit"),
+        percent: count(context, "percent").min(100),
+        at: number(context, "at"),
+    })
 }
 
 /// A member's pulse as the Team tab shows it.
@@ -639,6 +669,9 @@ fn member(value: &Value, lead: &str) -> MemberView {
                 .filter(|question| question.is_object()),
         ),
         pulse: pulse(value),
+        context: context(value),
+        compacting: value.get("state").and_then(Value::as_str) == Some("compacting")
+            || value.get("compacting").is_some_and(Value::is_object),
     }
 }
 

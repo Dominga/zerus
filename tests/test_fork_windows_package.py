@@ -135,6 +135,51 @@ class ForkWorkflowTests(unittest.TestCase):
         self.assertLess(zip_step, self.index("name: Update feed"))
 
 
+class LocalLegForkIdentityTests(unittest.TestCase):
+    """Task 213: the local leg takes the fork identity explicitly, so the Tauri
+    app embeds what build-info.json names and the portable self-test passes.
+
+    The dry run prints the steps and the identity; nothing builds or packages.
+    """
+
+    def dry(self, *extra):
+        return subprocess.run([sys.executable, "scripts/release-candidate-local.py", "--dry-run", *extra],
+                              cwd=ROOT, capture_output=True, text=True, timeout=60)
+
+    def test_the_local_leg_embeds_and_packages_the_fork_identity(self):
+        result = self.dry("--fork-build", "41", "--fork-feed", FEED)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"fork identity: build 41, feed {FEED}", result.stdout)
+        self.assertIn(f"tauri fork channel: ZERUS_FORK_BUILD=41 ZERUS_FORK_FEED_URL={FEED}", result.stdout)
+        self.assertIn(f"--fork-build 41 --fork-feed {FEED}", result.stdout)
+        # An experimental leg (neither) embeds and packages no identity.
+        experimental = self.dry()
+        self.assertEqual(experimental.returncode, 0, experimental.stderr)
+        self.assertIn("fork identity: build none (experimental), feed none (experimental)", experimental.stdout)
+        self.assertIn("ZERUS_FORK_BUILD=(unset) ZERUS_FORK_FEED_URL=(unset)", experimental.stdout)
+        self.assertIn("--fork-build  --fork-feed ", experimental.stdout)
+
+    def test_one_fork_value_without_the_other_or_a_foreign_feed_is_refused(self):
+        for extra, words in [
+            (["--fork-build", "41"], "both a build number and a feed"),
+            (["--fork-feed", FEED], "both a build number and a feed"),
+            (["--fork-build", "41", "--fork-feed", "https://example.com/feed.json"], "release asset"),
+            (["--fork-build", "-3", "--fork-feed", FEED], "positive number"),
+        ]:
+            with self.subTest(extra=extra):
+                result = self.dry(*extra)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(words, result.stderr)
+
+    def test_the_ctest_leg_uses_two_workers(self):
+        # Task 213: four suites fail under four workers and pass alone.
+        text = (ROOT / "scripts/release-candidate.py").read_text(encoding="utf-8")
+        self.assertIn('"--parallel", "2"', text)
+        self.assertNotIn('"--parallel", "4"', text)
+        self.assertIn("--fork-build", text)
+        self.assertIn("--fork-feed", text)
+
+
 if __name__ == "__main__":
     unittest.main()
 

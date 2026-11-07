@@ -64,6 +64,23 @@ class CollectNotices(unittest.TestCase):
         self.lock()
         self.assertEqual(len(collector.collect(self.client, self.output)), 2)
 
+    def test_bundled_logo_notice_ships_with_the_inventory_and_is_required(self):
+        assets = (("lobe-icons", "agent-logos", "MIT", "src/assets/agent-icons/LICENSE"),)
+        with self.assertRaisesRegex(ValueError, "No license text found for bundled lobe-icons"):
+            collector.collect(self.client, self.output, assets)
+        notice = self.client / assets[0][3]
+        notice.parent.mkdir(parents=True)
+        notice.write_text("MIT License\n\nCopyright (c) 2023 LobeHub\n")
+        rows = collector.collect(self.client, self.output, assets)
+        self.assertEqual(rows[-1], {"name": "lobe-icons", "version": "agent-logos", "license": "MIT", "notices": ["LICENSE"]})
+        self.assertIn("LobeHub", (self.output / "lobe-icons-agent-logos/LICENSE").read_text())
+        # The macOS bundle check looks for <name>-<version> beside the inventory.
+        self.assertEqual(json.loads((self.output / "inventory.json").read_text())["packages"][-1]["version"], "agent-logos")
+
+    def test_the_shipped_collector_includes_the_provider_logo_notice(self):
+        self.assertEqual([row[0] for row in collector.BUNDLED_ASSETS], ["lobe-icons"])
+        self.assertTrue((collector.ROOT / collector.BUNDLED_ASSETS[0][3]).is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

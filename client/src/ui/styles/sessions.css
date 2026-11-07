@@ -74,6 +74,9 @@
 
   /* Project header: 40 px row, band (2,5,-2,-3) radius 6, contents inset 9. */
   .group-band { position: absolute; left: 2px; right: 2px; top: 5px; height: 32px; display: flex; align-items: center; gap: 6px; padding: 0 9px; border-radius: 6px; text-align: left; }
+  .group-band { padding-right: 36px; }
+  .gb-add { position: absolute; right: 8px; top: 10px; width: 22px; height: 22px; display: inline-grid; place-items: center; border-radius: 5px; color: var(--z-list-muted); }
+  .gb-add:hover { color: var(--z-color-text); background: var(--z-color-hover); }
   .group-band .gb-chev { flex: none; margin-left: -2px; }
   .group-band .gb-icon { flex: none; margin-left: 1px; }
   .gb-name { margin-left: 2px; flex: 1; min-width: 0; font-size: 12px; font-weight: 600; }
@@ -102,6 +105,13 @@
   .sc-l2 { top: 24px; height: 18px; font-size: 11px; color: var(--z-list-muted); }
   .sc-l3 { top: 44px; height: 18px; font-size: 12px; }
   .sc-foot { top: 62px; height: 20px; font-size: 10px; color: var(--z-list-muted); }
+  /* Qt's normal density ("Compact session rows" off): 104 px rows, a 94 px
+     card, its line boxes two pixels lower than the compact card's
+     (SessionCardDelegate.h:85, 641-686). */
+  .sp-scroll[data-density="normal"] .sc-l1 { top: 4px; height: 22px; }
+  .sp-scroll[data-density="normal"] .sc-l2 { top: 26px; }
+  .sp-scroll[data-density="normal"] .sc-l3 { top: 48px; }
+  .sp-scroll[data-density="normal"] .sc-foot { top: 66px; }
   .sc-title { flex: 0 1 auto; font-size: 14px; font-weight: 600; line-height: 21px; }
   .sc-mute { flex: none; margin-right: 4px; color: var(--z-list-badge-muted); }
   .sc-l1 > .sbadge { margin-left: 8px; flex-shrink: .001; }
@@ -146,6 +156,27 @@
   .sbadge.k-scheduled { background: var(--z-list-badge-scheduled-bg); color: var(--z-list-badge-scheduled-fg); }
   .sbadge.k-waiting { background: var(--z-list-badge-waiting-bg); color: var(--z-list-badge-waiting-fg); }
   .sbadge.k-muted-attention, .sbadge.k-muted-unread { color: var(--z-list-badge-muted); }
+  /* The session states (SessionStatusBadge, U30 section 6): a frame in the state's tone, about half strong; a light fill for deps and cold; cooling carries its heat bar. */
+  .sbadge.k-deps, .sbadge.k-build, .sbadge.k-cooling, .sbadge.k-cold, .sbadge.k-stopped { background: transparent; color: var(--tone); border-radius: 10px; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tone) 50%, transparent); }
+  .sbadge.k-deps { --tone: var(--z-list-state-deps); background: color-mix(in srgb, var(--tone) 11%, transparent); }
+  .sbadge.k-build { --tone: var(--z-list-state-build); }
+  .sbadge.k-cooling { --tone: var(--z-list-state-cooling); padding-right: 29px; }
+  .sbadge.k-cold { --tone: var(--z-list-state-cold); background: color-mix(in srgb, var(--tone) 11%, transparent); }
+  .sbadge.k-stopped { --tone: var(--z-list-state-stopped); }
+  .sbadge .sb-heat { position: absolute; right: 7px; top: 50%; width: 16px; height: 3px; margin-top: -1.5px; border-radius: 1.5px; background: color-mix(in srgb, currentColor 25%, transparent); }
+  .sbadge .sb-heat::after { content: ""; position: absolute; inset: 0 auto 0 0; width: calc(var(--heat) * 100%); border-radius: inherit; background: currentColor; }
+  /* Line 3 of a state card: the state's glyph, its reason, and a cold card's + New and Resume. */
+  .sc-state-ico { flex: none; margin-right: 6px; color: var(--tone, currentColor); }
+  .sc-l3.s-deps { color: var(--z-list-state-deps); }
+  .sc-state-ico.k-deps { --tone: var(--z-list-state-deps); }
+  .sc-state-ico.k-build { --tone: var(--z-list-state-build); }
+  .sc-state-ico.k-cooling { --tone: var(--z-list-state-cooling); }
+  .sc-state-ico.k-cold { --tone: var(--z-list-state-cold); }
+  .sc-state-ico.k-stopped { --tone: var(--z-list-state-stopped); }
+  .sc-cold { flex: none; display: inline-flex; gap: 6px; margin-left: 8px; }
+  .sc-cold button { height: 20px; padding: 0 9px; border-radius: 6px; font-size: 12px; color: var(--z-list-muted); border: 1px solid color-mix(in srgb, var(--z-list-muted) 55%, transparent); background: transparent; }
+  .sc-cold button:hover { color: var(--z-color-text); background: var(--z-color-hover); }
+  .sc-cold button.new { color: var(--z-color-text); }
 
   /* Provider badge: 18 px, radius 4, glyph centred at x+10, label from 22. */
   .agent-badge { position: relative; flex: none; display: inline-flex; align-items: center; height: 18px; padding: 0 6px 0 22px; border-radius: 4px; background: var(--z-list-provider-bg); color: var(--agent); font-size: 11px; font-weight: 500; overflow: hidden; white-space: nowrap; }
@@ -160,6 +191,10 @@
   .gmarks { flex: none; display: inline-flex; gap: 4px; margin-right: 8px; }
   .gmark { --ink: var(--z-list-git-muted); position: relative; display: inline-flex; align-items: center; height: 18px; min-width: 24px; padding: 0 4px 0 23px; border-radius: 4px; color: var(--ink); background: color-mix(in srgb, var(--ink) 9.5%, transparent); font-size: 11px; font-weight: 500; font-variant-numeric: tabular-nums; }
   .gmark:not(.counted) { padding: 0; width: 24px; }
+  button.gmark { border: 0; cursor: pointer; font-family: inherit; }
+  button.gmark:hover { background: var(--z-color-hover); }
+  .gmark.t-muted { --ink: var(--z-list-git-muted); }
+  .gmark.t-bg { --ink: var(--z-list-badge-background-fg); }
   .gmark svg { position: absolute; left: 4px; top: 1px; }
   .gmark.t-attention { --ink: var(--z-list-git-attention); }
   .gmark.t-incoming { --ink: var(--z-list-git-incoming); }
@@ -326,3 +361,10 @@
 .acct-switch-notice { margin: 4px; padding: 6px 8px; color: var(--z-color-text-2); font-size: var(--fs-xs); }
 .tchip.locked { opacity: .6; cursor: not-allowed; }
 .acct-switch-row:disabled { cursor: default; }
+
+/* Task 235: rows from the last session list on disk, until the live listing
+   replaces them, and the status bar's note about them. */
+@layer components {
+  .rowhit.stale { opacity: .62; }
+  .statusbar .stale-note { color: var(--z-color-warn); overflow: hidden; text-overflow: ellipsis; }
+}

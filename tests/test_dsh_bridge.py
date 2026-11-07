@@ -13,7 +13,7 @@ class ModelSelection(unittest.TestCase):
         script = """
 import assert from 'node:assert/strict';
 const { modelSelectionAdapter: adapt, completedForkCut, matchesForkCut,
-        scheduleSession, manageSchedule } = await import(process.argv[2]);
+        scheduleSession, manageSchedule, compactAvailable, compactCommand } = await import(process.argv[2]);
 const route = { provider: 'fixture', model: 'selected', reasoningEffort: 'off' };
 const control = () => ({
   composeAgent: async () => ({ setup() {}, agentPreset: 'standard' }),
@@ -194,6 +194,24 @@ assert.deepEqual(calls, [
   ['history', { sessionId: 'original', id: 'task', limit: 10 }],
 ]);
 await assert.rejects(manageSchedule({ update() {}, view() {}, edit() {} }, { ...p, action: 'delete' }), /incompatible official/);
+""")
+
+    def test_compaction_is_the_native_seam_and_not_only_the_slash_command(self):
+        self.run_js("""
+const compact = { definitionId: '@deepseek-ai/dsh-command-compact', name: 'compact' };
+const other = { definitionId: '@deepseek-ai/dsh-command-goal', name: 'goal' };
+const seam = { async compactNow() {} };
+// The slash command registers in an interactive composition; the seam is the
+// native engine both run. A headless host may have only the seam.
+assert.equal(compactCommand(compact), compact);
+assert.equal(compactCommand(other), undefined);
+assert.equal(compactCommand(undefined), undefined);
+assert.equal(compactAvailable(compact, undefined), true);
+assert.equal(compactAvailable(undefined, seam), true);
+assert.equal(compactAvailable(other, seam), true);
+assert.equal(compactAvailable(undefined, undefined), false);
+assert.equal(compactAvailable(other, {}), false);
+assert.equal(compactAvailable(undefined, { compactNow: 'not a method' }), false);
 """)
 
 

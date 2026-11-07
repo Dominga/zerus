@@ -1606,6 +1606,49 @@ tool permissions qualify. Ordinary questions, startup trust, incomplete panels a
 persistent permission changes remain manual. Existing native identity and
 delivery guards still apply.
 
+Below the switch, **Categories** choose which of those requests are approved
+automatically; a request in a category that is off waits for the person. The
+categories apply only while the switch is on and are stored per computer as
+`automaticApprovals/category/<id>`, beside the switch. Every category except
+Paid usage is on by default, and an enabled switch from before categories
+keeps that default. A request's category comes only from the tool name in its
+verified native question: Claude's permission hook `tool_name` (the card's
+header), OpenCode 2's permission `action` (the card's `permission_action`) and
+the DeepSeek tool in Zerus's own `Allow <tool>?` approval. Matching is exact;
+commands, paths and other text are never parsed to choose a category.
+
+| Category (ID) | Claude | OpenCode 2 | DeepSeek |
+|---|---|---|---|
+| Read files and search (`read`) | Read, Glob, Grep, LS, LSP, NotebookRead | read, glob, grep, list, lsp | read, read_image, glob, grep, terminal_list, terminal_read, job_list, job_output |
+| Edit files (`edit`) | Edit, Write, MultiEdit, NotebookEdit, EnterWorktree | edit | edit, write, apply_patch, str_replace_editor |
+| Shell commands (`shell`) | Bash, PowerShell, Monitor | shell, execute | bash, pwsh, terminal_open, terminal_send, terminal_signal, terminal_close, job_kill |
+| Web pages (`web`) | WebFetch | webfetch | web_fetch |
+| MCP tools (`mcp`) | `mcp__<server>__<tool>`, ListMcpResourcesTool, ReadMcpResourceTool | none | `mcp__<server>__<tool>` |
+| Subagents and skills (`agents`) | Agent, Task, Skill, Workflow | subagent, skill | skill, subagent, workflow, spawn_teammate, send_message, interrupt_agent, wait_agent |
+| Other tools (`other`) | any other tool | any other action | any other tool |
+| Paid usage (`paid`) | WebSearch | websearch | web_search |
+
+Shell commands are one category: Zerus does not tell safe commands from
+destructive ones. OpenCode names MCP tools `<server>_<tool>` without a prefix,
+so any underscored OpenCode action (such as `external_directory`) is Other, as
+is a card from an older CLI without `permission_action`. Other tools also
+covers a tool name that cannot be read; it may include paid tools. Paid usage
+always wins: a paid tool, OpenCode's image generation
+(`experimental_image_generate`, Other by name) and any request while the
+prompt cache is cold, which the agent reports or whose estimated lifetime has
+ended, also need Paid usage, whatever else they match. Answering after the
+cache expired processes the whole conversation again; an unknown cache state
+is not treated as cold. Usage-limit, extra-usage and credit prompts are not
+one-time tool permissions and are never answered automatically. The worker
+checks the categories when it selects a request, again just before the
+journal reservation, which records them, and again before delivery. Each check
+uses the current time with the cache state of the selecting inspection, so a
+warm cache that expires meanwhile needs Paid usage too. A category turned off
+or a cache expired before delivery finishes the reserved attempt as cancelled
+without sending anything. With `ZERUS_CLIENT_DESKTOP_SERVICE=1` the background service
+approves the default categories until its own policy stores the person's
+choices; the page then shows them read-only.
+
 Zerus Next uses its live event-stream catalog for the same bounded discovery;
 it does not add a peer poller. Its opt-in is device-local and is never seeded
 from Qt or imported by migration. Confirm it separately in Next. Cached,
@@ -1614,7 +1657,8 @@ freshly inspected, and its exact identities are checked again before the
 existing native Answer lane runs under the journal's original request UUID.
 
 The same Settings page contains this computer's private approval journal, naming
-the computer, session, time, question, selected answer and confirmed outcome.
+the computer, session, time, question, approval categories, selected answer and
+confirmed outcome.
 Each attempt is durably reserved before native input. Failed, cancelled and
 unconfirmed attempts remain visible; an unconfirmed delivery is never retried
 automatically, including after a restart. If the journal cannot be saved,

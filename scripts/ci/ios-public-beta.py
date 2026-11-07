@@ -27,6 +27,8 @@ EXTERNAL_STATES = {'PROCESSING', 'PROCESSING_EXCEPTION', 'MISSING_EXPORT_COMPLIA
                    'IN_BETA_TESTING', 'EXPIRED', 'READY_FOR_BETA_SUBMISSION', 'IN_EXPORT_COMPLIANCE_REVIEW',
                    'WAITING_FOR_BETA_REVIEW', 'IN_BETA_REVIEW', 'BETA_REJECTED', 'BETA_APPROVED', 'NOT_APPLICABLE'}
 APPROVED = {'READY_FOR_BETA_TESTING', 'IN_BETA_TESTING', 'BETA_APPROVED'}
+PENDING_REVIEW = {'WAITING_FOR_BETA_REVIEW', 'IN_BETA_REVIEW'}
+USABLE_EXTERNAL = APPROVED | PENDING_REVIEW | {'READY_FOR_BETA_SUBMISSION'}
 
 
 class Refusal(ValueError):
@@ -196,7 +198,16 @@ class Monitor:
         if self.review in ('WAITING_FOR_REVIEW', 'IN_REVIEW'):
             require(age_hours(self.submitted, datetime.datetime.now(datetime.timezone.utc)) <= 48,
                     'Beta review has been stuck for more than 48 hours')
+        self.check_states()
         return self
+
+    def check_states(self):
+        # These are independent API reads; inconsistent observations grant no new write.
+        require(self.external in USABLE_EXTERNAL, 'External build is not usable for beta testing')
+        require(not (self.external in PENDING_REVIEW and self.review == 'NOT_SUBMITTED'),
+                'External review is pending but its exact submission is missing; no new submission')
+        require(self.review != 'APPROVED' or self.external in APPROVED,
+                'Approved review disagrees with the external build state')
 
     def done(self, action):
         if action == 'notes':
@@ -204,6 +215,7 @@ class Monitor:
         return self.member if action == 'group' else self.review != 'NOT_SUBMITTED' or self.external in APPROVED
 
     def health(self):
+        self.check_states()
         require(self.notes, 'Latest iOS Dev build has no English What to Test notes')
         require(self.member, 'Public beta is lagging behind the latest iOS Dev build')
         require(self.done('review'), 'Latest Public beta build has not been submitted for review')
@@ -221,6 +233,8 @@ class Monitor:
             return 'POST', f'/v1/betaGroups/{self.group}/relationships/builds', {'data': [{'type': 'builds', 'id': self.build}]}
         require(self.member, 'Review requires the exact build in Public beta first')
         require(self.notes, 'Review requires What to Test notes first')
+        require(self.review == 'NOT_SUBMITTED' and self.external == 'READY_FOR_BETA_SUBMISSION',
+                'New review requires an exact native submit-ready state')
         return 'POST', '/v1/betaAppReviewSubmissions', {'data': {'type': 'betaAppReviewSubmissions',
             'relationships': {'build': {'data': {'type': 'builds', 'id': self.build}}}}}
 

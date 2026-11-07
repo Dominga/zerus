@@ -34,7 +34,8 @@ class FakeASC:
     def __init__(self, member=False, review=None, notes=True):
         self.member, self.review, self.notes = member, review, notes
         self.localization = notes
-        self.external = 'READY_FOR_BETA_SUBMISSION'
+        self.external = {'WAITING_FOR_REVIEW': 'WAITING_FOR_BETA_REVIEW', 'IN_REVIEW': 'IN_BETA_REVIEW',
+                         'APPROVED': 'BETA_APPROVED'}.get(review, 'READY_FOR_BETA_SUBMISSION')
         self.version, self.number, self.processing = '0.4.1', '2123', 'VALID'
         self.submitted = datetime.datetime.now(datetime.timezone.utc).isoformat()
         self.writes = []; self.accepted_error = False; self.lost = False
@@ -67,6 +68,7 @@ class FakeASC:
             else:
                 assert path == '/v1/betaAppReviewSubmissions'
                 self.review = 'WAITING_FOR_REVIEW'
+                self.external = 'WAITING_FOR_BETA_REVIEW'
         if self.accepted_error or self.lost: raise beta.Refusal('ASC mutation outcome unavailable')
         return {}
 
@@ -170,6 +172,41 @@ class Promotion(unittest.TestCase):
                 with patch.object(beta, 'github_artifacts') as lookup:
                     self.assertFalse(beta.plan(m, 'review', self.root/'unused')); lookup.assert_not_called()
                 self.assertEqual(m.client.writes, [])
+
+    def test_pending_external_review_with_missing_submission_refuses_without_writes(self):
+        for state in beta.PENDING_REVIEW:
+            with self.subTest(external=state):
+                m = self.monitor(member=True); m.client.external = state
+                with patch.object(beta, 'github_artifacts') as history, self.assertRaisesRegex(beta.Refusal, 'exact submission is missing'):
+                    beta.plan(m, 'review', self.root/'must-not-create')
+                history.assert_not_called(); self.assertFalse((self.root/'must-not-create').exists())
+                self.assertEqual(m.client.writes, [])
+
+    def test_approved_review_cannot_hide_unusable_or_contradictory_external_state(self):
+        for state in beta.EXTERNAL_STATES - beta.APPROVED:
+            with self.subTest(external=state):
+                m = self.monitor(member=True, review='APPROVED'); m.client.external = state
+                with self.assertRaises(beta.Refusal): m.snapshot()
+                with self.assertRaises(beta.Refusal): m.health()
+                with self.assertRaises(beta.Refusal): beta.plan(m, 'review', self.root/'must-not-create')
+                self.assertEqual(m.client.writes, [])
+
+    def test_unusable_external_state_refuses_with_any_review_state(self):
+        for state in beta.EXTERNAL_STATES - beta.USABLE_EXTERNAL:
+            for review in (None, 'WAITING_FOR_REVIEW', 'IN_REVIEW', 'APPROVED'):
+                with self.subTest(external=state, review=review):
+                    m = self.monitor(member=True, review=review); m.client.external = state
+                    with self.assertRaises(beta.Refusal): m.snapshot()
+                    with self.assertRaises(beta.Refusal): m.health()
+                    self.assertEqual(m.client.writes, [])
+
+    def test_review_payload_itself_requires_original_submit_ready_state(self):
+        m = self.monitor(member=True); m.snapshot()
+        for state in beta.EXTERNAL_STATES - {'READY_FOR_BETA_SUBMISSION'}:
+            with self.subTest(external=state):
+                m.external = state
+                with self.assertRaisesRegex(beta.Refusal, 'submit-ready'): m.payload('review')
+        self.assertEqual(m.client.writes, [])
 
     def test_native_approved_state_needs_no_new_submission(self):
         for state in beta.APPROVED:

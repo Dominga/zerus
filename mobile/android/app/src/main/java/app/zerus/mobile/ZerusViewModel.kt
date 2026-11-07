@@ -221,9 +221,9 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     fun teamCollapsed(session: Session) = teamCollapse.collapsed(session, machineUuid(session.target))
     fun toggleTeam(session: Session) {
         val collapsed = !teamCollapsed(session)
-        val stored = ChildSessions.teamId(machineUuid(session.target), session)?.let { id ->
-            teamWriter?.edit { ChildSessions.withTeam(it, id, collapsed) } } ?: teamCollapse.stored
-        teamCollapse = TeamCollapse(stored, teamCollapse.overrides + (session.target.key to collapsed))
+        val saved = ChildSessions.teamId(machineUuid(session.target), session)?.let { id ->
+            teamWriter?.edit { ChildSessions.withTeam(it, id, collapsed) } }
+        teamCollapse = teamCollapse.choose(session.target.key, collapsed, saved)
     }
     /** Grouped accounts, which label the cards' account marks. */
     val groupedAccounts by derivedStateOf { AccountGrouping.group(displayedAccounts) }

@@ -143,6 +143,16 @@ class ChildSessionsTest {
         assertEquals(listOf(durable, "$other\n${id(2)}"), ChildSessions.parseTeams(stored))
         assertEquals(listOf("$other\n${id(2)}", durable), ChildSessions.withTeam(listOf(durable, "$other\n${id(2)}"), durable, true))
         assertEquals(listOf("$other\n${id(2)}"), ChildSessions.withTeam(listOf(durable, "$other\n${id(2)}"), durable, false))
+        // A saved choice needs no override; a row without durable IDs keeps its own, bounded (zerus-mepi6).
+        val chosen = TeamCollapse(overrides = mapOf(parent.target.key to true))
+        assertEquals(TeamCollapse(listOf(durable)), chosen.choose(parent.target.key, true, listOf(durable)))
+        var transient = TeamCollapse()
+        repeat(TeamCollapse.MAX_OVERRIDES + 5) { transient = transient.choose("row-$it", it % 2 == 0, null) }
+        assertEquals(TeamCollapse.MAX_OVERRIDES, transient.overrides.size)
+        assertEquals("row-5", transient.overrides.keys.first())
+        transient = transient.choose("row-5", false, null)
+        assertEquals("row-5", transient.overrides.keys.last()); assertEquals(false, transient.overrides["row-5"])
+        assertEquals(TeamCollapse.MAX_OVERRIDES, transient.overrides.size)
         val full = (0 until ChildSessions.MAX_COLLAPSED_TEAMS).map { "$machine\n${id(it)}" }
         assertEquals(ChildSessions.MAX_COLLAPSED_TEAMS, ChildSessions.withTeam(full, "$other\n${id(1)}", true).size)
         assertEquals("$other\n${id(1)}", ChildSessions.withTeam(full, "$other\n${id(1)}", true).last())
@@ -157,6 +167,9 @@ class ChildSessionsTest {
         assertEquals("2", ChildSessions.markLetter("-- 2nd", "claude", Locale.ROOT))
         assertEquals("C", ChildSessions.markLetter("", "claude", Locale.ROOT))
         assertEquals("?", ChildSessions.markLetter("--", "", Locale.ROOT))
+        // Any Unicode number, as the desktop's [\p{L}\p{N}] (zerus-1g5vt).
+        mapOf("① Work" to "①", "½ cup" to "½", "Ⅻ team" to "Ⅻ", "٣ arabic" to "٣", "ⅻ small" to "Ⅻ")
+            .forEach { (label, letter) -> assertEquals(label, letter, ChildSessions.markLetter(label, "claude", Locale.ROOT)) }
         assertEquals(0xFF10151B, ChildSessions.inkFor(0xFFFFCF33)); assertEquals(0xFFFFFFFF, ChildSessions.inkFor(0xFF1F2A44))
         assertEquals(0xFFFFFFFF, ChildSessions.inkFor(0xFF5A2CA0)); assertEquals(0xFF10151B, ChildSessions.inkFor(0xFF2B97FF))
     }

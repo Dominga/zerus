@@ -44,13 +44,29 @@ data class SessionCardEntry(val session: Session, val depth: Int = 0, val parent
  * Parents whose subagents and child sessions are hidden: one toggle for both
  * (zerus-sa9qn.16), kept across relaunches by machine UUID and session ID
  * (zerus-sa9qn.15), never by name or run. Expanded is the default. A choice
- * made here wins over the stored one by row key; a row without durable IDs
- * keeps its choice while the app runs.
+ * made here wins over the stored one by row key; a row without durable IDs,
+ * or one chosen before the stored list loads, keeps its choice while the app
+ * runs. Those choices are bounded too, newest last (zerus-mepi6): a row key
+ * names a run and conversation, so resumes would otherwise add entries forever.
  */
 data class TeamCollapse(val stored: List<String> = emptyList(), val overrides: Map<String, Boolean> = emptyMap()) {
     private val ids = stored.toHashSet()
     fun collapsed(session: Session, machine: String?): Boolean =
         overrides[session.target.key] ?: ChildSessions.teamId(machine, session)?.let { it in ids } ?: false
+
+    /**
+     * After one choice for row `key`: a choice saved in `saved` (the stored
+     * list it produced) needs no override; otherwise the row keeps it here.
+     */
+    fun choose(key: String, collapsed: Boolean, saved: List<String>?): TeamCollapse =
+        if (saved != null) TeamCollapse(saved, overrides - key)
+        else TeamCollapse(stored, (overrides - key).entries.map { it.key to it.value }.plus(key to collapsed)
+            .takeLast(MAX_OVERRIDES).toMap())
+
+    companion object {
+        /** Choices this app keeps by row key while it runs. */
+        const val MAX_OVERRIDES = 256
+    }
 }
 
 /** An account mark: the catalog label, its letter and the label's default palette color (spec 1.6; colors and emoji stay desktop choices). */
@@ -228,7 +244,11 @@ object ChildSessions {
         return kotlin.math.abs(hash % 8)
     }
 
-    /** The first letter or digit of the label, uppercased; the provider's initial when there is none. */
+    private val numbers = setOf(Character.DECIMAL_DIGIT_NUMBER, Character.LETTER_NUMBER, Character.OTHER_NUMBER).map { it.toInt() }
+    /** A Unicode letter or number (`\p{L}` or `\p{N}`), as the desktop's mark regex: circled digits, fractions and Roman numerals too. */
+    private fun letterOrNumber(codePoint: Int) = Character.isLetter(codePoint) || Character.getType(codePoint) in numbers
+
+    /** The first grapheme of the label holding a letter or number, uppercased; the provider's initial when there is none. */
     fun markLetter(label: String, provider: String = "", locale: Locale = Locale.getDefault()): String {
         val text = label.trim()
         val graphemes = BreakIterator.getCharacterInstance(locale).apply { setText(text) }
@@ -236,7 +256,7 @@ object ChildSessions {
         var end = graphemes.next()
         while (end != BreakIterator.DONE) {
             val grapheme = text.substring(start, end)
-            if (Character.isLetterOrDigit(grapheme.codePointAt(0))) return grapheme.uppercase(locale)
+            if (grapheme.codePoints().anyMatch(::letterOrNumber)) return grapheme.uppercase(locale)
             start = end; end = graphemes.next()
         }
         return provider.take(1).uppercase(locale).ifEmpty { "?" }

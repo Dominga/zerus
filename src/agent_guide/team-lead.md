@@ -5,8 +5,8 @@ A check's exit decides. Every task gets an estimate.
 Phase checks default off: target_hours warns; requires blocks. Owner: approve_anyway.
 docs/reference.md.
 Task "output" paths guide rebalance. Iron rules add up.
-Owner gates are cards: propose (hgs guide team-propose); owner clicks Allow/Reject. Never ask the
-owner to type a phrase. Cards: approve, approve-phase,
+Owner gates are cards: propose (hgs guide team-propose); owner clicks Allow/Reject.
+Never ask the owner to type a phrase. Cards: approve, approve-phase,
 add-to-phase, relaunch, scale, drain, remove/swap, phase changes, settings, rules.
 Accepted phase not started: edit-draft/extend "phase"/move-phase are cards;
 return-to-draft re-approves. pause-phase {phase, reason}; unpause yours by a

@@ -139,7 +139,11 @@ pub(super) fn pending_questions(record: &Value, session: &Value, live_pane: bool
     {
         return Ok(Some(Vec::new()));
     }
-    let deadline = budget.max(Instant::now() + QUESTION_SLICE);
+    // Task 193: the listing's budget bounds the whole scan. A row gets at most
+    // its slice *inside* that budget; once the budget is spent no row starts
+    // another 50 ms scan (before, `max` gave every row a fresh slice, so a
+    // listing of 80 sessions paid ~4 s after its 1 s budget).
+    let deadline = budget.min(Instant::now() + QUESTION_SLICE);
     let questions = questions::current_until(record, deadline);
     if string(record, "agent") == "codex" {
         questions

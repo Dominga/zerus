@@ -91,6 +91,21 @@ fn sql<T>(r: rusqlite::Result<T>) -> Result<T> {
     r.map_err(|e| format!("archive metadata index: {e}"))
 }
 
+/// Task 193: a fresh catalog connection opened read-only, for a listing that
+/// must not write (owner decision, 2026-11-07). None when the index is missing
+/// or stale: the reader then lists the record instead of rebuilding the index.
+pub(super) fn existing() -> Result<Option<Connection>> {
+    let directory = root().join("archives");
+    let path = root().join("archive-catalog-v1.sqlite3");
+    if !directory.exists() || !path.exists() {
+        return Ok(None);
+    }
+    let db = sql(Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY))?;
+    let current = stamp(&directory)?;
+    let prior: String = sql(db.query_row("SELECT COALESCE((SELECT value FROM catalog_meta WHERE key='stamp'),'')", [], |r| r.get(0)))?;
+    Ok((current == prior).then_some(db))
+}
+
 pub(super) fn catalog() -> Result<Connection> {
     private_dir(&root())?;
     let mut db = sql(Connection::open(root().join("archive-catalog-v1.sqlite3")))?;

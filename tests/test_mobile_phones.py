@@ -57,7 +57,12 @@ if action == 'status':
     print(json.dumps({'state': 'active', 'encrypted': True, 'server_url': 'https://relay.example.test',
                       'workspace_id': 'fixture', 'workspace_name': 'Fixture', 'config_revision': 'a' * 64}))
 elif action == 'list-devices':
-    print(json.dumps({'devices': []}))
+    print(json.dumps({'devices': [{'device_id': os.environ.get('PHONE_FIXTURE_DEVICE', ''), 'role': 'phone'}]
+                      if os.environ.get('PHONE_FIXTURE_DEVICE') else []}))
+elif action == 'invite-phone':
+    print(json.dumps({'code': 'ze1.synthetic-invitation'}))
+elif action == 'revoke-device':
+    print(json.dumps({}))
 else:
     raise AssertionError(action)
 '''
@@ -176,6 +181,67 @@ class MobilePhones(unittest.TestCase):
             refused = run()
             self.assertNotEqual(refused.returncode, 0)
             self.assertEqual(calls.read_text(), '', 'invalid explicit selection must never fall back')
+
+    @unittest.skipIf(os.name == 'nt', 'Unix executable fixtures; Windows runs the exact packaged UI trial')
+    def test_the_selected_connector_serves_every_local_phone_action_of_the_real_staged_cli(self):
+        # zerus-ihrzs: the desktop passes the connector its status probe used.
+        # The real staged CLI must run exactly that program for phones, invite
+        # and revoke-phone, whatever sits beside it or first on PATH.
+        package, on_path = self.root / 'package', self.root / 'on-path'
+        competing, lone = self.root / 'competing', self.root / 'lone'
+        for directory in (package, on_path, competing, lone):
+            directory.mkdir()
+            if directory in (competing, lone):
+                try:
+                    os.link(HGS, directory / 'hgs')
+                except OSError:
+                    shutil.copy2(HGS, directory / 'hgs')
+        for directory, mode in [(package, 'selected'), (on_path, 'stale'), (competing, 'stale')]:
+            program = directory / 'zerus-mobile-connector'
+            program.write_text('#!/usr/bin/env python3\nMODE=' + repr(mode) + '\n' + FAKE_PROTECTED_CONNECTOR)
+            program.chmod(0o755)
+        selected = package / 'zerus-mobile-connector'
+        folder = self.config / 'mobile'
+        folder.mkdir()
+        (folder / 'connector.json').write_text(json.dumps(
+            {'server_url': 'https://relay.example.test', 'encrypted_workspace': {}}))
+        actions = {
+            'phones': (['mobile', 'phones', '--json'], ['status', 'list-devices']),
+            'invite': (['mobile', 'invite', '--json'], ['status', 'invite-phone']),
+            'revoke-phone': (['mobile', 'revoke-phone', DEVICE, '--json'], ['status', 'list-devices', 'revoke-device']),
+        }
+        calls = self.root / 'protected-calls'
+
+        def run(stage, args, selection):
+            environment = dict(self.env, PHONE_FIXTURE_DEVICE=DEVICE,
+                               PATH=str(on_path) + os.pathsep + self.env['PATH'])
+            environment.pop('ZERUS_CLIENT_MOBILE_CONNECTOR_PATH', None)
+            if selection is not None:
+                environment['ZERUS_CLIENT_MOBILE_CONNECTOR_PATH'] = selection
+            calls.write_text('')
+            result = subprocess.run([str(stage / 'hgs'), *args], env=environment,
+                                    capture_output=True, text=True, timeout=15)
+            return result, calls.read_text().splitlines()
+
+        for stage, name in [(competing, 'competing refusing sibling'), (lone, 'missing sibling, stale PATH')]:
+            for action, (args, sequence) in actions.items():
+                with self.subTest(stage=name, action=action, selection='none'):
+                    # Without a selection the CLI keeps its order: the sibling,
+                    # else PATH. Both reach the refusing connector here.
+                    result, seen = run(stage, args, None)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn('stale sibling fixture', result.stderr)
+                    self.assertEqual(seen, ['stale:status'])
+                with self.subTest(stage=name, action=action, selection='exact'):
+                    result, seen = run(stage, args, str(selected))
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertTrue(json.loads(result.stdout)['encrypted'])
+                    self.assertEqual(seen, ['selected:' + step for step in sequence])
+                for bad in ['', 'relative-connector', str(package / 'missing-connector'), str(package)]:
+                    with self.subTest(stage=name, action=action, selection=bad or 'empty'):
+                        result, seen = run(stage, args, bad)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertEqual(seen, [], 'an invalid selection must fail closed, never fall back')
 
     def test_phones_come_from_the_relay_with_the_token_kept_off_the_command_line(self):
         self.connect()

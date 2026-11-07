@@ -38,7 +38,11 @@ TRANSPORT = {
 }
 
 
-def plan(workflow, cli, selected=None):
+# Reviewed selection-only helper; any changed script is refused, not skipped.
+XCODE_SELECTOR_SHA256 = '6244692e9457b7f3117f96d26a28ae55eb5149cfa6e65f97ab2496678634bdce'
+
+
+def plan(workflow, cli, selected=None, xcode_selector=None):
     result = []
     for key, job in workflow['jobs'].items():
         row = dict(id=key, name=job.get('name', key), status='not run', steps=[])
@@ -70,6 +74,12 @@ def plan(workflow, cli, selected=None):
                 continue
             if action:
                 item['reason'] = 'unsupported action'
+                continue
+            if body.rstrip('\n') == 'bash mobile/ios/scripts/select-xcode.sh':
+                if xcode_selector is not None and CI.digest(xcode_selector) == XCODE_SELECTOR_SHA256:
+                    item.update(status='local', reason='verified private Xcode26+; global xcode-select excluded')
+                else:
+                    item['reason'] = 'Xcode selection helper changed or absent; no global mutation or skipped checks'
                 continue
             if body.rstrip('\n') == 'brew install tmux python' or body.startswith('rustup toolchain install'):
                 if key == 'ios' and '--target' in body:
@@ -115,6 +125,12 @@ def plan(workflow, cli, selected=None):
                     row['steps'].append(current)
     return result
 
+
+
+def require_xcode(output):
+    matched = re.search(r'^Xcode ([0-9]+)(?:\.|$)', output)
+    if not matched or int(matched.group(1)) < 26:
+        raise RuntimeError('private Xcode26 or later is required')
 
 def quoted(path):
     return json.dumps(str(path))
@@ -335,7 +351,8 @@ class Runner:
         if not (cargo / 'registry').exists():
             subprocess.run(['cp', '-cR', str(Path.home() / '.cargo/registry'), str(cargo)], check=True)
         self.host_environment = {'PATH': '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
-                                 'HOME': str(self.root), 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null'}
+                                 'HOME': str(self.root), 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null',
+                                 'DEVELOPER_DIR': '/Applications/Xcode.app/Contents/Developer'}
         subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', 'clone', '--shared', '--no-checkout',
                         str(self.args.repo), str(self.snapshot)], env=self.host_environment, check=True, timeout=180)
         subprocess.run(['git', '-C', str(self.snapshot), '-c', 'credential.helper=', 'fetch', '--no-tags',
@@ -354,12 +371,14 @@ class Runner:
         self.report['tools'] = {}
         for name, command in {'rust': [str(self.tools / 'rustc'), '+1.99.1', '-Vv'],
                               'tmux': ['/opt/homebrew/bin/tmux', '-V'],
-                              'node': [str(self.node / 'node'), '--version']}.items():
+                              'node': [str(self.node / 'node'), '--version'],
+                              'xcode': [str(self.tools / 'xcodebuild'), '-version']}.items():
             p = subprocess.run(command, capture_output=True, text=True, timeout=30,
                                env={**self.host_environment, 'RUSTUP_HOME': str(rustup)})
             self.report['tools'][name] = dict(exit_code=p.returncode, version=p.stdout.strip())
             if p.returncode:
                 raise RuntimeError('required tool failed: ' + name)
+        require_xcode(self.report['tools']['xcode']['version'])
         # Node must match the workflow, not the owner's current Node.
         self.node_major = self.report['tools']['node']['version'].lstrip('v').split('.')[0]
 
@@ -394,6 +413,7 @@ class Runner:
                    CFFIXED_USER_HOME=str(home),
                    PATH=str(self.tools) + ':' + str(self.node) + ':/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin',
                    TMPDIR=str(private_tmp), TMUX_TMPDIR=str(private_tmp),
+                   ZERUS_TEST_SHORT_TMPDIR=str(private_tmp),
                    XDG_CONFIG_HOME=str(home / '.config'), XDG_STATE_HOME=str(home / '.local/state'),
                    XDG_DATA_HOME=str(home / '.local/share'), XDG_CACHE_HOME=str(home / '.cache'),
                    CARGO_HOME=str(self.cache / 'cargo'), RUSTUP_HOME=str(self.cache / 'rustup'),
@@ -474,7 +494,9 @@ def main():
         workflow = CI.load_workflow(workflow_bytes)
         selected = set(args.jobs.split(',')) if args.jobs else None
         report.update(workflow_sha256=CI.digest(workflow_bytes), runner_sha256=CI.file_digest(Path(__file__)),
-                      jobs=plan(workflow, (runner.snapshot / 'scripts/ci/cli.sh').read_text(), selected))
+                      xcode_selector_sha256=CI.file_digest(runner.snapshot / 'mobile/ios/scripts/select-xcode.sh'),
+                      jobs=plan(workflow, (runner.snapshot / 'scripts/ci/cli.sh').read_text(), selected,
+                                xcode_selector=(runner.snapshot / 'mobile/ios/scripts/select-xcode.sh').read_bytes()))
         # Real unrelated fixtures, never the owner's files or processes. Refuse
         # all checks unless reads/signals outside this sandbox are denied.
         canary = Canary('/private/tmp')

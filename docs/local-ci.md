@@ -179,3 +179,17 @@ build cannot hand an older cached executable to its later integration suite.
 The report retains all workflow jobs, unchanged bodies/hashes, tool versions,
 logs and the exact helper source. Remove private build trees when returning the
 slot and retain cited reports/logs separately.
+
+
+Mac fixture runs receive `ZERUS_TEST_SHORT_TMPDIR` pointing at the job's owned,
+short private temporary directory. The test fixtures otherwise keep their
+existing `/tmp` defaults; the native worker's 104-byte socket check is unchanged.
+OpenCode's private fixture explicitly supplies its own TMPDIR as well. The
+installed Arch bundle check resets XDG roots along with HOME, so its fake manager
+and the tested setup command inspect the same private drop-ins. No owner or
+container-builder profile is used as fixture state.
+
+The local Mac prerequisite verifies the private Xcode version is 26 or later.
+It replaces only the exact, reviewed selection-only helper, including its script
+hash; a changed helper stays not run. It never runs global `xcode-select` or
+accepts an Xcode licence. The original build/test bodies remain unchanged.

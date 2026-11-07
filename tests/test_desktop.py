@@ -811,7 +811,7 @@ finally:
     def setUp(self):
         # macOS's per-user TMPDIR (/var/folders/...) leaves too little of the
         # 104-byte socket path for the desktop service under nested state dirs.
-        temp = tempfile.TemporaryDirectory(prefix='hgs-desk-', dir='/tmp' if sys.platform == 'darwin' else None)
+        temp = tempfile.TemporaryDirectory(prefix='hgs-desk-', dir=os.environ.get('ZERUS_TEST_SHORT_TMPDIR', '/tmp') if sys.platform == 'darwin' else None)
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name).resolve()
         self.state = self.root / 'state'

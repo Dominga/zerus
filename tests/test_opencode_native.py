@@ -221,12 +221,14 @@ class OpenCodeNative(unittest.TestCase):
         # hgs lists tmux sessions too; an existing private TMUX_TMPDIR keeps it off the
         # user's default server, where a missing directory would fall back to it.
         (root / 'tmux').mkdir(mode=0o700)
+        (root / 'tmp').mkdir(mode=0o700)
         cls.model = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Model)
         cls.model.holding, cls.model.release, cls.model.requests = threading.Event(), threading.Event(), []
         threading.Thread(target=cls.model.serve_forever, daemon=True).start()
         native = Path(NATIVE).absolute()
         cls.env = {'PATH': os.pathsep.join([str(native.parent), os.environ.get('PATH', '')]), 'LANG': 'C.UTF-8',
-                   'HOME': str(root / 'home'), 'XDG_CONFIG_HOME': str(root / 'xdg-config'),
+                   'HOME': str(root / 'home'), 'TMPDIR': str(root / 'tmp'),
+                   'XDG_CONFIG_HOME': str(root / 'xdg-config'),
                    'XDG_DATA_HOME': str(root / 'xdg-data'), 'XDG_CACHE_HOME': str(root / 'xdg-cache'),
                    'XDG_STATE_HOME': str(root / 'xdg-state'), 'OPENCODE_DISABLE_MODELS_FETCH': 'true',
                    'OPENCODE_DISABLE_AUTOUPDATE': 'true', 'OPENCODE_DISABLE_LSP': 'true',

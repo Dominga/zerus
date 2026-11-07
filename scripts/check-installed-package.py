@@ -66,6 +66,20 @@ def connector_actions(home, env):
         (home / "systemctl.calls").unlink()
 
 
+
+def isolated_environment(home, sockets, inherited):
+    env = {key: value for key, value in inherited.items()
+           if not key.startswith("HGS_") and key not in {"TMUX", "TMUX_PANE", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "KIMI_CODE_HOME", "ZERUS_CLIENT_DESKTOP_SERVICE"}}
+    directories = {"XDG_CONFIG_HOME": home / ".config", "XDG_DATA_HOME": home / ".local/share",
+                   "XDG_STATE_HOME": home / ".local/state", "XDG_CACHE_HOME": home / ".cache",
+                   "XDG_RUNTIME_DIR": home / "runtime", "TMPDIR": home / "tmp"}
+    for path in directories.values():
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    env.update({key: str(value) for key, value in directories.items()})
+    env.update(HOME=str(home), TMUX_TMPDIR=str(sockets), HGS_STATE_DIR=str(home / "state"),
+               HGS_CONFIG_DIR=str(home / "config"), HGS_SELF="fixture", HGS_PEERS="", HGS_TAB="0")
+    return env
+
 def main():
     if os.geteuid() == 0:
         raise SystemExit("Run the installed-package check as an unprivileged user.")
@@ -74,10 +88,7 @@ def main():
         sockets, project = home / "tmux", home / "project"
         sockets.mkdir(mode=0o700)
         project.mkdir()
-        env = {key: value for key, value in os.environ.items()
-               if not key.startswith("HGS_") and key not in {"TMUX", "TMUX_PANE", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "KIMI_CODE_HOME"}}
-        env.update(HOME=str(home), TMUX_TMPDIR=str(sockets), HGS_STATE_DIR=str(home / "state"),
-                   HGS_CONFIG_DIR=str(home / "config"), HGS_SELF="fixture", HGS_PEERS="", HGS_TAB="0")
+        env = isolated_environment(home, sockets, os.environ)
 
         def run(*args):
             return subprocess.check_output(args, env=env, text=True, timeout=20)

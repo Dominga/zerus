@@ -2329,8 +2329,10 @@ hand-out with its reason, not the returned stage it followed.
 
 A non-final `hgs team reject` defaults to rework: the task keeps its assignee
 and the next attempt goes to that member as soon as it can take it. The member
-is reserved while the returned task is open, including a hold or an undecided
-report; no other task or stage is handed or rebalanced to it. A member with an
+is reserved while the returned task is open, including an undecided report;
+no other task or stage is handed or rebalanced to it. Task 160 (owner,
+2026-11-07): a held or parked rework reserves nobody, so it never blocks its
+member's later hand-outs; released, it reserves the member again. A member with an
 open approval, a usage limit or a stopped session keeps the rework without a
 time limit. The lead's inbox shows `#N waits for its member, N min`; an explicit
 `hgs team reassign` moves it. With `"fresh":true`, reject uses the previous
@@ -2369,6 +2371,73 @@ belongs to the attempt (or stage run) handed to it.
   and lead inbox item with what it runs, `hgs team look` state
   `unassigned_work` (never idle) and its next action. The flag clears
   (`unassigned_work_ended`) when the member is free again or gets a hand-out.
+
+Task 160 (owner, 2026-11-07): a task blocked on an outside event parks instead
+of keeping its member in a waiting loop. `hgs team park --json` (`{team, task,
+attempt, condition, eta_minutes, note}`) by the task's member, its reviewer or
+you parks an open attempt with no report or open question. The condition is
+one of:
+- `{"kind":"ci","repo":"OWNER/REPO","run":N}`: a GitHub Actions run finishing;
+- `{"kind":"build","version":"1.58.0","build":N,"commit":"SHA","program":"PATH"}`:
+  that build installed (at least the version, at least the Dev number, that
+  commit; `program` is an installed desktop answering `--build-info`, else the
+  hgs the team worker runs);
+- `{"kind":"task","task":N}`: another task accepted;
+- `{"kind":"card","proposal":"pN"}`: the owner's answer on a card;
+- `{"kind":"time","at":UNIX_SECONDS}`.
+
+The estimate is 1 to 10080 minutes. The task becomes Pending with a `park`
+(`attempt`, `member`, `by`, `at`, `condition`, `eta`, `note`, `state`
+waiting/met/failed, `detail`) and its attempt `parked`, which is not open: the
+member is free at once and takes its next ready task, and a
+parked task is never ready, never rebalanced and reserves nobody.
+
+Zerus checks the condition on a thread of the team worker, never the tick:
+task and card states and the clock on every 30-second pass, the installed
+build at most once a minute (a 15-second bounded `--version` or
+`--build-info`), a CI run through `api.github.com` at most every two minutes
+(`GITHUB_TOKEN` or `GH_TOKEN` for a private fork). Only an outcome writes the
+team (`park_met` or `park_failed`). A met park goes back to the same member at
+its next free turn, before any new task, in the same attempt (`resumed`), with
+a message naming the condition, what held and the member's note. A failed one
+(the run failed, the card was denied or withdrawn, the task was cancelled or
+rejected) is a `park_failed` lead inbox item with the reason, and one well past
+its estimate a `park_overdue` item. `hgs team unpark --json` (`{team, task,
+reason}`) gives it back early; a report on the parked attempt gives it back and
+reports; a cancel, reassign or take-over ends the park and its attempt.
+
+Status shows `parked` on the task ("parked until <condition>, ETA HH:MM (in N
+min)") and on its member; an idle member's session waits for it ("Waiting for
+#N: parked until ...", reason kind `team_parked`), never Building.
+
+Task 159 (owner, 2026-11-07): owner-only steps are planned for when the owner
+is there, in one click.
+- A lead's card may name the tasks that need it: `"for_tasks":[N]` (open
+  tasks, at most 50; part of the card's hash). While the card is open those
+  tasks are never ready, so no member is handed a task it would wait on; an
+  idle member's session says "Waiting for the owner's card pN for #M" (reason
+  kind `team_owner_card`). Allowed or answered, they are ready; denied, they are
+  held for the lead with "you denied card pN: REASON".
+- `hgs team waiting` marks the owner's cards (`owner_word_asked`) by presence:
+  while the desktop reports the owner away (locked, or idle 10 minutes) each
+  is `"notify":false, "held_for_presence":true`; otherwise `"notify":true` and
+  every card listed together shares one `"batch"` (with `"batch_size"`). Each
+  card names what waits on it (`waiting_tasks`, and "(#N wait for it)" in its
+  title). Without a desktop's presence nothing is held. The desktop posts a
+  batch as one notice and withdraws it with its last card.
+- One owner rule for scratch teams, granted once by card
+  (`{"kind":"scratch-rule","folder":"ABS","agents":["claude","codex"],"reason":"..."}`
+  | `hgs team propose --json`, or the owner's own `hgs team scratch-rule
+  --json`): a team that a running team's lead creates from its own session
+  with its folder inside that folder starts with approval `auto` (no per-plan
+  approval; `scratch_rule` names the rule, `scratch_rule_applied` in its feed).
+  Before each local member launches, its folder is trusted for the rule's
+  Claude and Codex agents in the account config that launch reads
+  (`.claude.json`, Codex's `config.toml` `[projects."FOLDER"]`); Kimi,
+  DeepSeek and OpenCode still ask at start-up. The rules live in the teams
+  settings file (Settings > Teams): `hgs team scratch-rules --json` lists
+  them, and `{"action":"revoke","id":"sXXXXXXXX","by":"human"}` revokes one;
+  teams created under it keep what they were given.
 
 A reassign, a take-over or a cancel of a task whose attempt its member is still
 working on (sent or delivered, not reported) tells that member at once: one

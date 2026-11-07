@@ -1,28 +1,28 @@
 Work in an agent team (hgs guide team)
 
-A team: a lead and members on any agent or computer. The lead plans;
-Zerus hands ready tasks to free members.
+A lead and members on any agents and computers; Zerus hands ready
+tasks to free members.
 Requests use lowercase UUIDs; reuse one to retry.
 
 Lead, in-session:
   {"request_id":"UUID","name":"Checkout","goal":"...","folder":"DIR"} |
-    hgs team create --json    prints the id; you lead
+    hgs team create --json   (you lead)
   plan while Planning (whole plan):
     {"request_id":"UUID","team":"ID","members":[{"id":"api","role":"Backend",
      "agent":"codex"}],"tasks":[{"id":1,"title":"...","criteria":["..."],
      "assignee":"api","deps":[{"task":2}]}]} | hgs team plan --json
   hard waits for Accepted, soft for In progress; the owner approves first.
   {"team":"ID"} | hgs team status --json   tasks, attempts
-  {"team":"ID"} | hgs team inbox --json    items, unread messages
+  {"team":"ID"} | hgs team inbox --json    items, unread
   Reports arrive as [Zerus team messages; decide:
     {"request_id":"UUID","team":"ID","task":N} | hgs team accept --json
     reject needs "reason"; rework keeps its member; "fresh":true: a peer.
     "hold":true keeps it back:
     {"request_id":"UUID","team":"ID","task":N} | hgs team release --json
     gives it out; hgs team hold --json holds a pending one.
-  reassign, retry, cancel take the same fields; a free peer of the same
-  role may get it; reassign pins it. Answer a question with hgs team
-  reply; native questions and permissions: hgs team answer.
+  reassign, retry, cancel: same fields; a free peer of the role may get
+  it; reassign pins it. Answer a question: hgs team reply;
+  native questions and permissions: hgs team answer.
   Allow only what the task needs; else ask the owner.
   Stopped member: message, retry, reassign, ask the owner.
   Phases, extend, finish: hgs guide team-lead
@@ -37,7 +37,8 @@ Member: a doorbell means unread: {} | hgs team inbox --json. Report once:
   {"request_id":"UUID","to":"lead","text":"...","urgent":true} | hgs team message --json
   A question goes through hgs team ask, never a report; a progress line
   is interim; only hgs team report reports.
-  Codex on Windows: hgs guide team-run. First: hgs team lore find.
+  First: hgs team lore find. Codex on Windows: hgs guide team-run.
   Work only on what hgs team current shows, else ask the lead.
+  Never poll CI, installs or cards: hgs guide team-park.
 Say what changed and how you checked it; a taken task's report is
 refused. Sub-teams: hgs guide team-tree.

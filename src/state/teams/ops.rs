@@ -3316,6 +3316,13 @@ fn revoke(task: &mut Task, why: &str) -> Option<u32> {
     close_questions(task);
     // U36: so does the stage that was reading its report.
     super::pipeline::revoke_runs(task, why);
+    // Task 160: a decision on a parked task ends its park and its attempt.
+    if task.park.take().is_some() {
+        if let Some(parked) = task.attempts.iter_mut().rev().find(|attempt| attempt.state == AttemptState::Parked) {
+            parked.state = AttemptState::Revoked;
+            parked.error = why.to_owned();
+        }
+    }
     let attempt = task.open_attempt_mut()?;
     attempt.state = AttemptState::Revoked;
     attempt.interim = None;
@@ -3542,6 +3549,8 @@ pub(crate) fn attempt_phase(task: &Task, session_stopped: bool) -> Option<&'stat
         // Nothing reached the agent, or another attempt replaced this one:
         // the task itself is Pending, so it has no phase of its own.
         AttemptState::Refused | AttemptState::Revoked => return None,
+        // Task 160: the task is Pending with its park; it has no phase here.
+        AttemptState::Parked => return None,
         AttemptState::Delivered | AttemptState::Reported => {
             if attempt.open_question().is_some() {
                 // A question is not a report, and the attempt stays open (A3).
@@ -3664,6 +3673,17 @@ fn report_with(team: &mut Team, input: &Value, actor: &Actor, captured: bool, ev
         return Ok(result);
     }
     let attempt_id = text(input, "attempt");
+    // Task 160: a member that finished its parked attempt anyway reports on it.
+    if let Some(task) = team.task_mut(id) {
+        if task.park.as_ref().is_some_and(|park| park.attempt == attempt_id || attempt_id.is_empty()) {
+            let park = task.park.take().expect("checked");
+            if let Some(parked) = task.attempts.iter_mut().find(|attempt| attempt.id == park.attempt && attempt.state == AttemptState::Parked) {
+                parked.state = AttemptState::Delivered;
+            }
+            task.status = TaskStatus::InProgress;
+            events.push(Event::new("unparked", json!({"by":park.member,"task":id,"member":park.member,"reason":"reported"})));
+        }
+    }
     let mut body = clean(text(input, "text").trim(), 64 * 1024, "A report")?;
     // C5: a check task reports its exit code and output tail; its text is
     // optional (Zerus writes the summary) and its decision is the exit code.
@@ -4527,6 +4547,67 @@ fn hold(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) 
     Ok(json!({"status":"held","task":id}))
 }
 
+/// Task 160: parks a task on an outside condition with an estimate. Its
+/// member (on its own open attempt) or its reviewer parks it; the attempt is
+/// kept, the member is free at once, and Zerus gives it back when the
+/// condition holds.
+fn park(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(team.status == TeamStatus::Running || team.status == TeamStatus::Paused, "Only a running or paused team parks tasks");
+    let id = task_id(input)?;
+    let task = team.task(id).context("Unknown task")?;
+    let attempt = task.open_attempt().with_context(|| format!("Task #{id} has no open attempt to park; a pending task is held instead (hold)"))?.clone();
+    ensure!(task.park.is_none(), "Task #{id} is already parked");
+    let named = text(input, "attempt");
+    ensure!(named.is_empty() || named == attempt.id, "Task #{id}'s open attempt is {}, not {named}", attempt.id);
+    let own = matches!(actor, Actor::Member(member) if *member == attempt.member);
+    ensure!(own || actor.reviews(team, &attempt.member), "Only the task's member, its reviewer or you park a task");
+    ensure!(attempt.report.is_none() && attempt.open_question().is_none(), "An attempt with a report or an open question is not parked: answer or decide it first");
+    let condition = super::park::condition_of(team, id, &input["condition"])?;
+    let minutes = input["eta_minutes"].as_u64().context("A park names its estimate: \"eta_minutes\":N (1 to 10080)")?;
+    ensure!((1..=super::park::ETA_MAX_MINUTES).contains(&minutes), "A park's estimate is 1 to {} minutes", super::park::ETA_MAX_MINUTES);
+    let note = clean(text(input, "note").trim(), 2000, "A park note")?;
+    let label = actor.label(team);
+    let at = now();
+    let park = Park {
+        attempt: attempt.id.clone(),
+        member: attempt.member.clone(),
+        by: label.clone(),
+        at,
+        condition,
+        eta: at + minutes as f64 * 60.0,
+        note,
+        state: super::park::WAITING.into(),
+        detail: String::new(),
+        checked_at: 0.0,
+    };
+    let summary = super::park::summary(&park, at);
+    let task = team.task_mut(id).context("Unknown task")?;
+    if let Some(open) = task.attempts.iter_mut().find(|found| found.id == park.attempt) {
+        open.state = AttemptState::Parked;
+    }
+    task.status = TaskStatus::Pending;
+    let (member, until) = (park.member.clone(), super::park::label(&park.condition));
+    task.park = Some(park);
+    events.push(Event::new("parked", json!({"by":label,"task":id,"member":member,"until":until,"eta_minutes":minutes})));
+    Ok(json!({"status":"parked","task":id,"parked":summary,
+        "note":"End your turn now: Zerus watches the condition and gives this task back to you; take your next task meanwhile."}))
+}
+
+/// Task 160: gives a parked task back now, as if its condition held.
+fn unpark(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    let id = task_id(input)?;
+    let member = team.task(id).and_then(|task| task.park.as_ref()).map(|park| park.member.clone()).with_context(|| format!("Task #{id} is not parked"))?;
+    let own = matches!(actor, Actor::Member(found) if *found == member);
+    ensure!(own || actor.reviews(team, &member), "Only the task's member, its reviewer or you give a parked task back");
+    let reason = clean(text(input, "reason").trim(), 1000, "A reason")?;
+    let label = actor.label(team);
+    let park = team.task_mut(id).and_then(|task| task.park.as_mut()).context("Unknown task")?;
+    park.state = super::park::MET.into();
+    park.detail = if reason.is_empty() { format!("{label} gave it back") } else { format!("{label} gave it back: {reason}") };
+    events.push(Event::new("unparked", json!({"by":label,"task":id,"member":member})));
+    Ok(json!({"status":"unparked","task":id,"note":"It goes back to its member at its next free turn."}))
+}
+
 /// A5: clears a hold; the task is handed out again when it is ready.
 fn release(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     let assignee = team.task(task_id(input)?).map(|task| task.assignee.clone()).unwrap_or_default();
@@ -5134,12 +5215,20 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
     let operation_request = uuid::Uuid::new_v4().to_string();
     // U57: the owner's Allow is bound to this id and this content hash; a
     // changed proposal never applies.
-    let content = json!({"kind":kind,"reason":reason,"change":change,"member":member,
+    // Task 159: the tasks that need the owner's step wait for it.
+    let for_tasks = super::owner_steps::for_tasks(team, input)?;
+    let mut content = json!({"kind":kind,"reason":reason,"change":change,"member":member,
         "goal":input["goal"].clone(),"mode":mode});
+    if !for_tasks.is_empty() {
+        content["for_tasks"] = json!(for_tasks);
+    }
     let hash = format!("{:x}", Sha256::digest(content.to_string().as_bytes()));
-    let proposal = json!({"id":id,"kind":kind,"by":actor.label(team),"at":now(),"state":"open","reason":reason,
+    let mut proposal = json!({"id":id,"kind":kind,"by":actor.label(team),"at":now(),"state":"open","reason":reason,
         "member":member,"goal":input["goal"].clone(),"operation_request":operation_request,
         "mode":mode,"hash":hash,"change":change});
+    if !for_tasks.is_empty() {
+        proposal["for_tasks"] = json!(for_tasks);
+    }
     team.proposals.push(proposal);
     events.push(Event::new("proposed", json!({"id":id,"kind":kind,"hash":hash})));
     // Task 127 (docs/lore.md 4.2): the team stores the lead's memory mode
@@ -5149,6 +5238,22 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
         team.memory_mode_reason = reason.clone();
     }
     Ok(json!({"status":"proposed","proposal":id,"hash":hash,"mode":mode,"change":change}))
+}
+
+/// Task 159: the tasks a denied card held back are held for the lead with
+/// the owner's reason; nothing hands them out as if the step were granted.
+pub(crate) fn hold_for_denied(team: &mut Team, card: &str, reason: &str, events: &mut Vec<Event>) {
+    let tasks: Vec<u32> = team.proposals.iter().find(|proposal| proposal["id"] == card)
+        .map(|proposal| proposal["for_tasks"].as_array().into_iter().flatten().filter_map(Value::as_u64).map(|id| id as u32).collect())
+        .unwrap_or_default();
+    let why = if reason.trim().is_empty() { format!("you denied card {card}") } else { format!("you denied card {card}: {}", reason.trim()) };
+    for id in tasks {
+        let Some(task) = team.task_mut(id) else { continue };
+        if task.status == TaskStatus::Pending && task.hold.is_none() {
+            task.hold = Some(Hold { by: "You".into(), at: now(), reason: why.clone() });
+            events.push(Event::new("held", json!({"by":"You","task":id,"reason":why})));
+        }
+    }
 }
 
 /// F8: only the owner decides a proposal; accepting runs the change as the
@@ -5176,6 +5281,7 @@ fn decide_proposal(team: &mut Team, input: &Value, actor: &Actor, offline: &BTre
         team.proposals[at]["decided_at"] = json!(super::super::now());
         team.proposals[at]["note"] = json!(reason);
         events.push(Event::new("proposal_decided", json!({"id":id,"accept":false,"reason":reason})));
+        hold_for_denied(team, &id, &reason, events);
         if kind == "switch-plan-mode" {
             // U59: the reason reaches the lead with the team's feed.
             events.push(Event::new("plan_mode_denied", json!({"by":"You","proposal":id,"reason":reason})));
@@ -5448,7 +5554,7 @@ pub(crate) const SWITCHES: [&str; 1] = ["build_broker"];
 /// owner's Allow runs it as the owner's own `hgs team <op>`, once, under the
 /// proposal's request id; Reject changes nothing. A typed word stays accepted
 /// as a fallback, but no flow needs one.
-pub(crate) const OWNER_OPS: [&str; 16] = [
+pub(crate) const OWNER_OPS: [&str; 17] = [
     "relaunch",
     "scale",
     "drain",
@@ -5468,6 +5574,8 @@ pub(crate) const OWNER_OPS: [&str; 16] = [
     "rights",
     // Task 127: the team's memory mode, switched by the owner (docs/lore.md 4.2).
     "switch-memory-mode",
+    // Task 159: one rule for the lead's scratch teams in a named folder.
+    "scratch-rule",
 ];
 
 /// Task #21: owner settings a switch card sets through the settings operation
@@ -5476,9 +5584,11 @@ pub(crate) const OWNER_VALUE_SETTINGS: [&str; 3] = ["base_branch", "full_tests",
 
 /// The request fields a card never carries: who asks, its identity and any
 /// owner word, which the owner's Allow replaces.
-const CARD_RESERVED: [&str; 13] = [
+const CARD_RESERVED: [&str; 14] = [
     "kind", "reason", "team", "request_id", "by", "attempt", "input", "owner_word", "owner_word_checked", "owner_word_event",
     "owner_word_change", "owner_word_count", "roster_word",
+    // Task 159: the tasks that wait on the card, not the operation's input.
+    "for_tasks",
 ];
 
 /// Task #21: the change of an owner-operation card: the operation, its input
@@ -5524,6 +5634,15 @@ fn describe_owner_op(team: &Team, op: &str, input: &Value) -> (String, Vec<Strin
     let mut lines = Vec::new();
     let title = match op {
         "relaunch" => format!("Relaunch {}", member("member")),
+        "scratch-rule" => {
+            let agents: Vec<&str> = input["agents"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+            let trusted: Vec<&str> = agents.iter().copied().filter(|agent| super::owner_steps::TRUSTED_AGENTS.contains(agent)).collect();
+            lines.push("Scratch teams a lead creates there start without your per-plan approval; you can revoke the rule in Settings > Teams (hgs team scratch-rules).".into());
+            if trusted.len() < agents.len() {
+                lines.push(format!("Zerus records the folder's start-up trust for {}; the others still ask at start-up.", if trusted.is_empty() { "none of them".into() } else { trusted.join(", ") }));
+            }
+            format!("Let the lead's scratch teams in {} start at once, the folder trusted for {}", text(input, "folder"), agents.join(", "))
+        }
         "switch-memory-mode" => {
             let from = team.settings.memory.as_ref().map(|memory| memory.mode.clone()).unwrap_or_else(|| "plain".into());
             let to = text(input, "mode");
@@ -6094,6 +6213,13 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         "settings" => settings(team, input, actor, events),
         "rights" => rights(team, input, actor, events),
         "switch-memory-mode" => switch_memory_mode(team, input, actor, events),
+        // Task 159: checked and journaled here; `hgs team scratch-rule` keeps it.
+        "scratch-rule" => {
+            ensure!(matches!(actor, Actor::Human), "Only you grant the scratch-team rule: the lead proposes it, {{\"kind\":\"scratch-rule\",\"folder\":\"D:/scratch\",\"agents\":[\"claude\"],\"reason\":\"...\"}} | hgs team propose --json");
+            let rule = super::owner_steps::rule_from(input)?;
+            events.push(Event::new("scratch_rule_granted", json!({"folder":rule.folder,"agents":rule.agents})));
+            Ok(json!({"status":"granted","folder":rule.folder,"agents":rule.agents}))
+        }
         "finding" => finding(team, input, actor, offline, events),
         "draft" => draft(team, input, actor, offline, events),
         "propose" => propose(team, input, actor, events),
@@ -6149,6 +6275,9 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
         "ask" => ask(team, input, actor, events),
         "reply" => reply(team, input, actor, events),
         "hold" => hold(team, input, actor, events),
+        // Task 160: park on an outside event, and give it back at once.
+        "park" => park(team, input, actor, events),
+        "unpark" => unpark(team, input, actor, events),
         "release" => release(team, input, actor, events),
         "accept" => decide(team, input, actor, true, events),
         "reject" => decide(team, input, actor, false, events),

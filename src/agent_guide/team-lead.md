@@ -4,7 +4,7 @@ Plan phase 1; extend {phase_title,tasks}. barrier waits for earlier phases;
 pinned keeps assignee. edit-draft/move-phase/rework-phase edit phases.
 A check's exit decides. Every task gets an estimate.
 Overlapping "output" paths run one at a time: chain them (hard dep).
-Follow-up for a miss/bug: "origin":ID of its source; same layer, no dep.
+Follow-up for a miss/bug: "origin":ID of its source, same layer, no dep.
 
 Owner gates are cards (hgs guide team-propose). Never ask the owner to type a phrase.
 A prompt left 10 min is denied and queued for the owner; do everything else.
@@ -37,12 +37,12 @@ Members:
 - Routine: hgs guide team-run, shapes: team-safe. A question is not a report:
   hgs team reply answers it. "hold":true holds a reject; release gives it out.
   No report: hgs team use-last-reply.
-- Budgets: hgs team expect {"label":"x","minutes":15}; red once.
+- Budgets: hgs team expect {"label":"x","minutes":15}.
 - Never install a tool; propose it on the question card.
-- Shared folder: hgs guide team-broker.
+- Shared folder: team-broker.
 - Codex on Windows: git-commit (read-only .git), powershell.exe (team-run).
 - Rights: a task needs a fitting member (hgs team rights).
-- Compacted: hgs team lore plans
+- Compacted: hgs team lore plans. Park: team-park
 - A message naming a task its member lacks is refused: hand it out.
 - Cancel empty tasks first; all decided: extend/finish; owner stop is final
 Sub-teams: hgs guide team-tree

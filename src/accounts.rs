@@ -285,6 +285,57 @@ pub(crate) fn trust_claude_folder(config: &Path, folder: &str) -> Result<bool> {
     claude::trust_folder(config, folder)
 }
 
+/// Task 159: the owner's scratch rule trusts `folder` for `provider` in the
+/// account config a launch with `account` (empty: the default) reads. Claude
+/// keeps it in `.claude.json`, Codex in `config.toml`; other agents have no
+/// trust entry Zerus writes (they still ask at start-up). True when added.
+pub(crate) fn trust_folder_for(config: &Config, provider: &str, account: &str, folder: &str) -> Result<bool> {
+    let account = if account.is_empty() { default_account(config, provider)? } else { Some(account.to_owned()) };
+    let profile = match &account {
+        Some(id) if !native_id(id) => Some(lookup(config, id)?.1),
+        _ => None,
+    };
+    match provider {
+        "claude" => {
+            let path = match profile {
+                Some(home) => home.join(".claude.json"),
+                None => claude::account_config()?,
+            };
+            claude::trust_folder(&path, folder)
+        }
+        "codex" => {
+            let home = profile.unwrap_or_else(|| native_home(config, "codex"));
+            trust_codex_folder(&home.join("config.toml"), folder)
+        }
+        _ => Ok(false),
+    }
+}
+
+/// Task 159: `[projects."FOLDER"] trust_level = "trusted"` in a Codex
+/// config.toml, every other key kept. True when added.
+pub(crate) fn trust_codex_folder(path: &Path, folder: &str) -> Result<bool> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(Error::new(1, format!("{}: {error}", path.display()))),
+    };
+    let mut document: toml_edit::DocumentMut = text.parse().map_err(|error| Error::new(1, format!("{} is not valid TOML: {error}", path.display())))?;
+    if document.get("projects").and_then(|projects| projects.get(folder)).and_then(|project| project.get("trust_level")).and_then(|level| level.as_str()) == Some("trusted") {
+        return Ok(false);
+    }
+    let projects = document.entry("projects").or_insert(toml_edit::table());
+    let projects = projects.as_table_mut().ok_or_else(|| Error::new(1, format!("{}: projects is not a table", path.display())))?;
+    projects.set_implicit(true);
+    let project = projects.entry(folder).or_insert(toml_edit::table());
+    let project = project.as_table_mut().ok_or_else(|| Error::new(1, format!("{}: the folder's entry is not a table", path.display())))?;
+    project.insert("trust_level", toml_edit::value("trusted"));
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    fs::write(path, document.to_string())?;
+    Ok(true)
+}
+
 fn default_label(provider: &str) -> &'static str {
     if provider=="opencode" {return "Native OpenCode configuration";}
     if provider == "dsh" {

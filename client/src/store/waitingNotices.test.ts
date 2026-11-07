@@ -17,7 +17,29 @@ function port(): WaitingNotificationPort & { posted: WaitingNotice[]; withdrawn:
   };
 }
 
+function card(id: string, detail: Record<string, unknown>): TeamWaitingItem {
+  return { ...item(id, `card ${id}`), kind: "owner_word_asked", detail: { id, ...detail } } as TeamWaitingItem;
+}
+
 describe("waiting notices", () => {
+  it("holds the owner's cards while away and posts them as one batch when back (task 159)", () => {
+    const out = port();
+    const notices = new WaitingNotices(out);
+    expect(notices.observe([card("p1", { notify: false }), card("p2", { notify: false })], true)).toEqual([]);
+    expect(out.posted).toHaveLength(0);
+    const back = notices.observe([card("p1", { notify: true, batch: "cards-1" }), card("p2", { notify: true, batch: "cards-1" }), item("r")], true);
+    expect(back.map((notice) => notice.token)).toEqual(["team-waiting:batch:cards-1", "team-waiting:r"]);
+    expect(out.posted[0].body).toBe("card p1\ncard p2");
+    // The batch's notice stays while one card still waits, and goes with the last.
+    notices.observe([card("p2", { notify: true, batch: "cards-1" }), item("r")], true);
+    expect(out.withdrawn).toEqual([]);
+    notices.withdraw("p2");
+    expect(out.withdrawn).toEqual(["team-waiting:batch:cards-1"]);
+    // A lone card of its own batch is an ordinary notice.
+    const single = notices.observe([card("p3", { notify: true, batch: "cards-2" })], false);
+    expect(single.map((notice) => notice.token)).toEqual(["team-waiting:p3"]);
+  });
+
   it("posts once per new item and keeps the page order", () => {
     const out = port();
     const notices = new WaitingNotices(out);

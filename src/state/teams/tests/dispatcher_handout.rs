@@ -418,8 +418,13 @@ fn a_rework_keeps_its_member_and_reserves_it_until_decided() {
             &BTreeSet::new(), &mut Vec::new()).unwrap();
         assert!(steps(&draining, &seen, 3.0).iter().any(|step| matches!(step, Step::Drain { member, .. } if member == "dev")));
     }
-    // Even a held return reserves its member, independently of ready ordering.
+    // Task 160 (owner, 2026-11-07): a held return reserves nobody; the
+    // member takes other work meanwhile, and the release reserves it again.
     ops::apply(&mut team, "hold", &json!({"task":1}), &Actor::Member("lead".into()),
+        &BTreeSet::new(), &mut Vec::new()).unwrap();
+    let now = steps(&team, &seen, 2.0);
+    assert!(now.contains(&Step::Rebalance { task: 2, from: "dev2".into(), to: "dev".into() }), "{now:?}");
+    ops::apply(&mut team, "release", &json!({"task":1}), &Actor::Member("lead".into()),
         &BTreeSet::new(), &mut Vec::new()).unwrap();
     let now = steps(&team, &seen, 2.0);
     assert!(!now.iter().any(|step| matches!(step, Step::Rebalance { to, .. } if to == "dev")), "{now:?}");

@@ -1386,6 +1386,9 @@ pub(crate) enum AttemptState {
     Revoked,
     Reported,
     Rejected,
+    /// Task 160: parked on an outside event: not open (its member is free),
+    /// given back in the same attempt when the condition holds.
+    Parked,
 }
 
 impl AttemptState {
@@ -1545,6 +1548,64 @@ impl Question {
 pub(crate) struct Unassigned {
     pub since: f64,
     pub what: String,
+}
+
+/// Task 160: a task parked on a named outside condition, with an estimate.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Park {
+    /// The parked attempt and its member: the task goes back to them.
+    pub attempt: String,
+    pub member: String,
+    /// Who parked it (the member, the lead or you) and when.
+    pub by: String,
+    pub at: f64,
+    pub condition: ParkCondition,
+    /// When the parker expects the condition to hold (an estimate).
+    pub eta: f64,
+    /// The member's notes for its return.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+    /// waiting, met or failed.
+    #[serde(default)]
+    pub state: String,
+    /// What the check saw: why it held or failed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub checked_at: f64,
+}
+
+/// Task 160: what a park waits for. Zerus checks each itself, bounded.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum ParkCondition {
+    /// A GitHub Actions run of the fork finishing (`repo` is OWNER/REPO).
+    Ci { repo: String, run: u64 },
+    /// A build installed: at least `version`, at least Dev `build`, or exactly
+    /// `commit`; `program` is an installed desktop answering --build-info
+    /// (empty: the hgs the team worker runs).
+    Build {
+        #[serde(default)]
+        version: String,
+        #[serde(default)]
+        build: u64,
+        #[serde(default)]
+        commit: String,
+        #[serde(default)]
+        program: String,
+    },
+    /// Another task accepted.
+    Task { task: u32 },
+    /// The owner's answer on a card.
+    Card { proposal: String },
+    /// A time, in seconds since 1970.
+    Time { at: f64 },
+}
+
+impl Default for ParkCondition {
+    fn default() -> Self {
+        Self::Time { at: 0.0 }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -1842,6 +1903,10 @@ pub(crate) struct Task {
     /// Held back from the dispatcher until the lead releases it (A5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold: Option<Hold>,
+    /// Task 160: parked on an outside event; Zerus watches the condition and
+    /// gives the task back to the same member in the same attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub park: Option<Park>,
     #[serde(default)]
     pub attempts: Vec<Attempt>,
     #[serde(default)]
@@ -2499,6 +2564,10 @@ pub(crate) struct Team {
     pub memory_mode_offer: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub memory_mode_reason: String,
+    /// Task 159: the owner's scratch rule this team was created under (its
+    /// id): no per-plan approval, its folder trusted for the rule's agents.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scratch_rule: String,
     /// Task 128: what the background writer last put into the team's lore
     /// workspace, and what waits on a field only a person can give.
     #[serde(default, skip_serializing_if = "LoreState::is_empty")]
@@ -2868,7 +2937,9 @@ impl Team {
 
     /// A returned task reserves its member even while held or awaiting review.
     pub(crate) fn reserved_for_rework(&self, member: &str, task: Option<u32>) -> bool {
-        self.tasks.iter().filter(|found| found.rework() && found.assignee == member)
+        // Task 160 (owner, 2026-11-07): a held reject or a parked rework at
+        // the head of a member's queue never blocks its later hand-outs.
+        self.tasks.iter().filter(|found| found.rework() && found.assignee == member && found.hold.is_none() && found.park.is_none())
             .min_by(|a, b| a.rework_since.unwrap().total_cmp(&b.rework_since.unwrap()).then(a.id.cmp(&b.id)))
             .is_some_and(|found| Some(found.id) != task)
     }

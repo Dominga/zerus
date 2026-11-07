@@ -22,7 +22,7 @@ const team = (lead: string, member: string): TeamSummary => ({
   phase: 1, phase_done: 2, phase_total: 4, phases_done: 0, phases_total: 1,
 });
 
-const input = (expanded: boolean, teamOf: ListInput["teamOf"]): ListInput => {
+const input = (expanded: boolean, teamOf: ListInput["teamOf"], collapsed = false): ListInput => {
   const lead = row("run:lead", "claude/p/lead");
   const member = row("run:core", "claude/p/core");
   return {
@@ -34,6 +34,7 @@ const input = (expanded: boolean, teamOf: ListInput["teamOf"]): ListInput => {
     expanded: () => expanded,
     compact: () => false,
     teamOf,
+    teamCollapsed: () => collapsed,
   } as unknown as ListInput;
 };
 
@@ -54,7 +55,7 @@ describe("a team's rows", () => {
     const lead = row("run:lead", "claude/p/lead");
     const member = row("run:core", "claude/p/core");
     const summary = team(lead.name, member.name);
-    const rows = groupRows(input(false, () => summary));
+    const rows = groupRows(input(false, () => summary, true));
     expect(rows.filter((r) => r.type === "card").map((r) => r.session.name)).toEqual([lead.name]);
   });
 });

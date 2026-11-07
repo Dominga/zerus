@@ -34,6 +34,8 @@ export interface ListInput {
   childDraft?: (parent: Session, child: Subagent) => boolean;
   /** The team a row belongs to, when its computer's team list is loaded. */
   teamOf?: (s: Session) => TeamSummary | undefined;
+  /** Whether this team's members are folded (workspace/collapsedTeams). */
+  teamCollapsed?: (team: string) => boolean;
 }
 
 /** Qt's grouped rows (SessionsWindowRows.cpp:289-338, header counts 393-411). */
@@ -81,7 +83,7 @@ export function groupRows(input: ListInput): Row[] {
       const shown = changed ? { ...s, subagents: kids } : s;
       const team = teamFor.get(s.key);
       const teamMembers = team ? membersOf.get(team.id) ?? [] : [];
-      const teamExpanded = teamMembers.length > 0 && input.expanded(s.key);
+      const teamExpanded = teamMembers.length > 0 && !(input.teamCollapsed?.(team!.id) ?? false);
       const isLead = !!team && leadOf.get(team.id)?.key === s.key;
       out.push({ type: "card", id: s.key, session: shown, expandable: kids.length > 0 || (isLead && teamMembers.length > 0),
                  expanded: expanded || teamExpanded, compactRow: input.compact(s.key), depth,

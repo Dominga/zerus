@@ -7,7 +7,7 @@ import { machineCards } from "../../store/machines";
 import { archiveMachineChoices, archiveProjectChoices } from "./archive-filters";
 import { defaultProject, grouping, groups } from "../../store/organization";
 import { teams } from "../../store/teams";
-import { stateFilter, matchesFilter, listedByFilter, search,machineFilter, projectFilter, accountFilter, folderFilter, expandedChildren, compactRows, selected, selectedKey, subagentOpen } from "../../store/ui";
+import { stateFilter, matchesFilter, listedByFilter, search,machineFilter, projectFilter, accountFilter, folderFilter, expandedChildren, compactRows, selected, selectedKey, subagentOpen, teamsCollapsed } from "../../store/ui";
 import { compileScopes, scopeCounts } from "./scope-filters";
 import { withCreations } from "../../store/creations";
 import { isWorking, needsAttention } from "../../store/attention";
@@ -98,6 +98,7 @@ export const listRows = createMemo<Row[]>(() => {
     roster: (s: Session) => rosterFor(s, s.key === selectedKey() ? followedFor(s.key).value : undefined),
     childDraft: (s: Session, child: { id: string }) => hasDraftKey(`${s.computer}\n${s.name}\n${s.conversationId ?? ""}\n${child.id}`),
     teamOf: (s: Session) => teams.teamOf(s),
+    teamCollapsed: (id: string) => teamsCollapsed(id),
   };
   const out = groupRows(scope);
   return withCreations(out, scope);
@@ -144,4 +145,5 @@ export const projectChoices = createMemo(() => {
   const g = grouping();
   return archiveProjectChoices(g, pickerCounts().project, projectFilter());
 });
+
 

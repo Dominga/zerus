@@ -2,10 +2,7 @@
 //! Complete stop never constructs Remove consent or an executing continuation.
 use super::journal::{exists, read, write};
 use super::*;
-use std::{
-    fs::File,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 use zerus_client_core::{
     desktop::termination_outcome::hash,
     worktree_programs::{
@@ -40,7 +37,7 @@ pub(super) enum Reservation {
 pub(crate) struct Claim {
     store: Store,
     input: Input,
-    _group: File,
+    _group: crate::platform::FileLock,
     consumed: AtomicBool,
 }
 fn leaf(id: &str, part: &str) -> Result<String> {
@@ -340,6 +337,7 @@ mod tests {
             claim.current().unwrap();
             claim.spend().unwrap();
             assert!(claim.spend().is_err());
+            let mut inherited = journal::tests::ForkedDescriptors::stopped();
             let mut different = input.clone();
             different.request_id = uuid::Uuid::new_v4().to_string();
             assert!(
@@ -360,6 +358,7 @@ mod tests {
             } else {
                 drop(claim);
             }
+            inherited.still_stopped();
             // Drop above/at end of the branch is actual journal ownership,
             // not a claim that a helper/pipe or deletion has physically ended.
             let Reservation::Existing(saved) =
@@ -373,6 +372,43 @@ mod tests {
                 "even a NEW UUID cannot replay the original removal"
             );
         }
+    }
+    #[test]
+    fn a_finished_stop_releases_its_group_before_cleanup_despite_a_forked_copy() {
+        let state = private();
+        let input = input();
+        let stop = *input.stop.clone();
+        let journal::Reservation::Fresh(claim) = journal::Store::open(state.path(), true)
+            .unwrap()
+            .unwrap()
+            .reserve(stop.clone(), 1000)
+            .unwrap()
+        else {
+            panic!("fresh stop data");
+        };
+        let mut child = journal::tests::ForkedDescriptors::stopped();
+        assert!(store(state.path()).reserve(input.clone(), 1001).is_err());
+        claim
+            .finish(stop::Report {
+                request_id: stop.request_id.clone(),
+                binding: stop.binding(),
+                state: stop::State::Complete,
+                members: stop
+                    .manifest
+                    .programs
+                    .iter()
+                    .map(|program| stop::Member {
+                        program: program.clone(),
+                        observation: stop::Observation::Exited,
+                    })
+                    .collect(),
+            })
+            .unwrap();
+        let Reservation::Fresh(claim) = store(state.path()).reserve(input, 1001).unwrap() else {
+            panic!("complete stop data permits the separate fresh cleanup reservation");
+        };
+        child.still_stopped();
+        drop(claim);
     }
     #[test]
     fn a_changed_stop_result_after_reservation_cannot_admit_the_first_delete() {

@@ -364,6 +364,8 @@ pub(crate) fn snapshot(team: &Team, member: &Member, check: &MemberCheck, now: f
         "uncertain":check.state == "uncertain","settling":check.state == "pending",
         "disagree":check.disagree,"uncertain_since":check.since,"checked_at":check.at,
         "sources":check.sources,"screen":check.screen,"task":task,
+        // Task #232: the request it waits on, named ("Bash: Run this command?").
+        "request":recorded_request(member),
         // Task 173: never shown as idle while it works with no task handed.
         "unassigned":member.unassigned.as_ref().map(|flag| json!({"what":flag.what,"since":flag.since})),
         "pulse":{"minutes_since_event":minutes(member.seen_event_at),"stuck":member.stuck,

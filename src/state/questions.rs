@@ -339,6 +339,7 @@ fn collect(record: &Value, deadline: Option<std::time::Instant>) -> Result<Optio
         cards.push(trust);
     }
     if let Some(trust) = codex_trust::current(record) {cards.push(trust);}
+    if let Some(approval) = codex_approval::current(record) {cards.push(approval);}
     if let Some(trust) = codex_hooks_trust::current(record) {cards.push(trust);}
     if let Some(update) = codex_update::current(record) {cards.push(update);}
     if let Some(goal) = codex_goal_resume::current(record) {cards.push(goal);}
@@ -530,8 +531,20 @@ pub(super) fn inspection(record: &Value, live_pane: bool) -> Result<Value> {
                         Err(error)=>card["answer_unavailable_reason"]=json!(error),
                     }
                 }
-                if string(record,"agent")=="claude" && string(card,"source")=="hook" {
-                    match answer_channel::route(record, card) {
+                if string(card, "source") == codex_approval::SOURCE {
+                    // Task #232: a Codex exec or apply-patch approval, answered
+                    // by its own dialog's choices; the command and folder are
+                    // in the card.
+                    match codex_approval::available(record, card) {
+                        Ok(()) => {
+                            card["can_answer"] = json!(true);
+                            card["answer_transport"] = json!("codex_tui");
+                            card["answer_unavailable_reason"] = json!("");
+                        }
+                        Err(error) => card["answer_unavailable_reason"] = json!(error),
+                    }
+                }
+                if string(record,"agent")=="claude" && string(card,"source")=="hook" {                    match answer_channel::route(record, card) {
                         // Claude's own hook waits beside the panel; the screen is not needed.
                         Ok(answer_channel::Route::Channel(_)) => { card["can_answer"]=json!(true); card["answer_transport"]=json!("claude_hook"); card["answer_unavailable_reason"]=json!(""); }
                         // An answer already belongs to the channel: never offer a second one.
@@ -860,7 +873,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         if string(&question, "question_hash") != request.expected_question_hash {
             return Err("question changed; refresh before answering".into());
         }
-        if !(["codex_hooks_trust", "codex_update", "codex_goal_resume", "codex_rate_limit", "codex_folder_trust", "codex_async", "kimi_wire", kimi_plan::SOURCE, kimi_approval::SOURCE, "kimi_cache_hint", "kimi_folder_trust", "claude_folder_trust", "claude_permission_mode", "claude_resume", "claude_usage_limit", "claude_tool_approval"]
+        if !(["codex_hooks_trust", "codex_update", "codex_goal_resume", "codex_rate_limit", "codex_folder_trust", "codex_async", codex_approval::SOURCE, "kimi_wire", kimi_plan::SOURCE, kimi_approval::SOURCE, "kimi_cache_hint", "kimi_folder_trust", "claude_folder_trust", "claude_permission_mode", "claude_resume", "claude_usage_limit", "claude_tool_approval"]
             .contains(&string(&question, "source"))
             || string(&record,"agent")=="claude" && string(&question,"source")=="hook")
         {
@@ -898,6 +911,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             codex_goal_resume::available(&record, &question)?;
         } else if string(&question, "source") == "codex_folder_trust" {
             codex_trust::available(&record, &question)?;
+        } else if string(&question, "source") == codex_approval::SOURCE {
+            codex_approval::available(&record, &question)?;
         } else if string(&question, "source") == "kimi_folder_trust" {
             kimi_trust::available(&record, &question)?;
         } else if string(&question, "source") == "kimi_cache_hint" {
@@ -917,7 +932,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         (record, question, answers, receipt)
     };
     let tui_choice =
-        ["codex_hooks_trust", "codex_update", "codex_goal_resume", "codex_rate_limit", "codex_folder_trust", "kimi_cache_hint", "kimi_folder_trust", "claude_folder_trust", "claude_permission_mode", "claude_resume", "claude_usage_limit", "claude_tool_approval"].contains(&string(&question, "source"));
+        ["codex_hooks_trust", "codex_update", "codex_goal_resume", "codex_rate_limit", "codex_folder_trust", codex_approval::SOURCE, "kimi_cache_hint", "kimi_folder_trust", "claude_folder_trust", "claude_permission_mode", "claude_resume", "claude_usage_limit", "claude_tool_approval"].contains(&string(&question, "source"));
     if string(&question,"source")=="codex_async" {
         let status = match codex_questions::answer(&record,&question,&answers,&request_id) {
             Ok(status) => status,
@@ -970,6 +985,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         codex_goal_resume::answer(&record, &question, &answers)
     } else if string(&question, "source") == "codex_folder_trust" {
         codex_trust::answer(&record, &question, &answers)
+    } else if string(&question, "source") == codex_approval::SOURCE {
+        codex_approval::answer(&record, &question, &answers)
     } else if string(&question, "source") == "kimi_folder_trust" {
         kimi_trust::answer(&record, &question, &answers)
     } else if string(&question, "source") == "kimi_cache_hint" {

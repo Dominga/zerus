@@ -1006,6 +1006,14 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
         let updated: Settings = serde_json::from_value(merged).context("Invalid settings")?;
         super::super::iron_rules::validate(&json!(updated.iron_rules))?;
         validate_settings(&updated)?;
+        // Task 88: a changed tests override is checked as hgs test reads it,
+        // over the team's project file, before it is saved.
+        if updated.tests != team.settings.tests {
+            if let Some(tests) = updated.tests.as_ref().filter(|tests| tests.as_object().is_some_and(|fields| !fields.is_empty())) {
+                crate::test_discipline::config::load(std::path::Path::new(&team.folder), Some(tests))
+                    .map_err(|error| anyhow::anyhow!("The tests override does not load: {error:#}"))?;
+            }
+        }
         ensure_lead_settings(&team.settings, &updated, actor, input["roster_word"].as_bool() == Some(true))?;
         // N13: only a sub-lead (and its parent lead) is refused auto; the owner
         // may choose it, and a sub-team already carrying auto can still change

@@ -1,0 +1,86 @@
+name: Release archive assembly
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: ''
+      macos:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+cache-mode: none
+
+jobs:
+  assemble:
+    runs-on: ubuntu-24.04
+    # The source recipe has already passed in parallel. Only the binary recipe
+    # and metadata are assembled here, alongside the independent cask install.
+    timeout-minutes: 20
+    container:
+      image: archlinux@sha256:996c3a1d6b0d87b01242f6fcd8cfa3ad3eece1a67ab5c8f108e20af1d7b97bdd
+    steps:
+      - name: Bootstrap Git before checkout
+        run: pacman -Syu --noconfirm --needed git
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-source-${{ github.sha }}
+          path: artifacts/release-source
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: arch-x86_64-${{ github.sha }}
+          path: artifacts/arch
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: windows-x86_64-${{ github.sha }}
+          path: artifacts/windows
+      - if: inputs.macos
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: macos-signed-${{ github.sha }}
+          path: artifacts/macos-signed
+      - name: Arch release dependencies
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git python webkit2gtk-4.1 gtk3 alsa-lib gstreamer gst-plugins-base-libs libappindicator dbus gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav tmux openssh namcap desktop-file-utils
+          useradd -m user
+          chown -R user:user "$GITHUB_WORKSPACE"
+      - name: Assemble exact verified candidate
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          MACOS_CASK: ${{ inputs.macos }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$RELEASE_VERSION" ]; then RELEASE_VERSION="$(cat VERSION)"; fi
+          packages=(artifacts/arch/*.pkg.tar.zst)
+          portables=(artifacts/windows/*.zip)
+          test "${#packages[@]}" = 1
+          test "${#portables[@]}" = 1
+          macos=()
+          if [ "$MACOS_CASK" = true ]; then macos=(--macos artifacts/macos-signed); fi
+          runuser -u user -- python3 scripts/prepare-release.py --version "$RELEASE_VERSION" --package "${packages[0]}" \
+            --windows-zip "${portables[0]}" \
+            --windows-installer artifacts/windows/installer/zerus-windows-x86_64-setup.exe \
+            --windows-installer-info artifacts/windows/installer/windows-installer-info.json --source-check artifacts/release-source --output dist "${macos[@]}"
+          runuser -u user -- bash scripts/check-release-packages.sh dist --binary-only --defer-seal
+      - name: Retain release packaging logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-packaging-${{ github.sha }}
+          path: artifacts/test-results/*
+          retention-days: 7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-assembled-${{ github.sha }}
+          path: dist
+          retention-days: 14
+          include-hidden-files: true # .SRCINFO is required AUR metadata.

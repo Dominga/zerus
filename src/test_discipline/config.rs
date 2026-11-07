@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub const FILE: &str = ".zerus/tests.toml";
@@ -55,6 +56,65 @@ pub struct TestsConfig {
     /// linter); Zerus offers a missing one to the owner.
     #[serde(default, rename = "tool", skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ToolNeed>,
+    /// Task 85: the project's own `hgs team run` templates, typed like the
+    /// built-ins; each runs only once the owner accepted its exact content.
+    #[serde(default, rename = "template", skip_serializing_if = "Vec::is_empty")]
+    pub templates: Vec<ProjectTemplate>,
+    /// The build broker's table (`src/state/teams/broker.rs` reads it from the
+    /// same file). Task 84 found it refused here, which made a file with it
+    /// unreadable for `hgs test` and the merge queue; it is declared, not read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_broker: Option<Value>,
+}
+
+/// Task 85: a `[[template]]` entry: a fixed program and argv with typed
+/// placeholders, as the built-in templates are.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectTemplate {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub summary: String,
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub params: Vec<TemplateParam>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    /// The test report the run leaves, read into one result per test.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results: Option<TemplateResults>,
+}
+
+impl ProjectTemplate {
+    /// The hash the owner's acceptance is bound to: any change waits again.
+    pub fn content_hash(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let text = serde_json::to_string(self).unwrap_or_default();
+        format!("{:x}", Sha256::digest(text.as_bytes()))
+    }
+}
+
+/// One typed placeholder of a project template.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TemplateParam {
+    pub name: String,
+    /// identifier, identifiers, text, path or paths.
+    pub kind: String,
+    #[serde(default)]
+    pub required: bool,
+}
+
+/// Where a project template's run writes its test report, and its format.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TemplateResults {
+    /// junit or trx.
+    pub format: String,
+    /// A path relative to the folder.
+    pub path: String,
 }
 
 /// A `[[tool]]` entry: a tool, why the project needs it and what it saves;
@@ -135,6 +195,8 @@ impl Default for TestsConfig {
             resources: std::collections::BTreeMap::new(),
             providers: Vec::new(),
             tools: Vec::new(),
+            templates: Vec::new(),
+            build_broker: None,
         }
     }
 }
@@ -360,6 +422,13 @@ pub enum Kind {
     Gradle,
     Npm,
     Command,
+    /// Task 137: pytest over Cython extensions, rebuilt in place first.
+    Cython,
+    /// Task 137: Visual Studio C++ projects (.sln, .vcxproj), vstest for
+    /// their test projects.
+    Msbuild,
+    /// Task 137: an Unreal project's automation tests (ue-build, ue-test).
+    Unreal,
 }
 
 impl Kind {
@@ -372,6 +441,9 @@ impl Kind {
             Kind::Gradle => "gradle",
             Kind::Npm => "npm",
             Kind::Command => "command",
+            Kind::Cython => "cython",
+            Kind::Msbuild => "msbuild",
+            Kind::Unreal => "unreal",
         }
     }
 }
@@ -431,7 +503,8 @@ pub struct Provider {
     /// whole set without it for a full run. Empty is the kind's own.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub command: String,
-    /// cargo: the manifest, relative to `root`.
+    /// The manifest, relative to `root`: cargo's Cargo.toml, msbuild's .sln or
+    /// project file, unreal's .uproject.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub manifest: String,
     /// cargo: how far a change in a shared module reaches.
@@ -440,6 +513,9 @@ pub struct Provider {
     /// ctest: the configured build folder holding CMake's file API reply.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub build_dir: String,
+    /// Unreal: a module folder to its automation test prefix (default the module name).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub prefixes: BTreeMap<String, String>,
     /// A resource class from `[resources]`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub resources: String,
@@ -458,6 +534,10 @@ pub struct Provider {
     /// Turned off, here or by the owner's override.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub disabled: bool,
+    /// Task 88: the report a suite's run leaves (junit, trx or unreal), read
+    /// into one result per test.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results: Option<TemplateResults>,
 }
 
 fn rule_build() -> Rule {
@@ -580,6 +660,12 @@ fn merge_providers(base: &mut Value, over: &Value) {
 
 fn validate(config: &TestsConfig) -> anyhow::Result<()> {
     anyhow::ensure!(config.version == 1, "The test configuration's version is 1, not {}", config.version);
+    anyhow::ensure!(config.templates.len() <= 50, "A project declares at most 50 templates");
+    let mut ids = std::collections::BTreeSet::new();
+    for template in &config.templates {
+        anyhow::ensure!(ids.insert(template.id.as_str()), "Two templates are named {}", template.id);
+        crate::state::teams::templates::check_project_template(template)?;
+    }
     for tool in &config.tools {
         anyhow::ensure!(!tool.name.trim().is_empty(), "Every [[tool]] has a name");
     }
@@ -593,6 +679,13 @@ fn validate(config: &TestsConfig) -> anyhow::Result<()> {
             provider.name
         );
         anyhow::ensure!(
+            !matches!(provider.kind, Kind::Msbuild | Kind::Unreal) || !provider.manifest.is_empty(),
+            "The {} provider {} names its manifest ({})",
+            provider.kind.name(),
+            provider.name,
+            if provider.kind == Kind::Msbuild { "the .sln or project file" } else { "the .uproject" }
+        );
+        anyhow::ensure!(
             provider.kind != Kind::Ctest || !provider.build_dir.is_empty() || provider.affected != Rule::Build,
             "The ctest provider {} names its build_dir to read the map from the build",
             provider.name
@@ -603,6 +696,21 @@ fn validate(config: &TestsConfig) -> anyhow::Result<()> {
             provider.name,
             provider.resources
         );
+        if let Some(results) = &provider.results {
+            anyhow::ensure!(
+                crate::state::teams::run_results::Format::parse(&results.format).is_some(),
+                "The provider {}'s results format is junit, trx or unreal (got {})",
+                provider.name,
+                results.format
+            );
+            let path = std::path::Path::new(&results.path);
+            anyhow::ensure!(
+                !results.path.trim().is_empty() && path.is_relative() && !results.path.contains(':') && !path.components().any(|part| part == std::path::Component::ParentDir),
+                "The provider {}'s results path is a path inside the project (got {})",
+                provider.name,
+                results.path
+            );
+        }
         for rule in &provider.paths {
             anyhow::ensure!(!rule.files.is_empty(), "A path rule of {} names its files", provider.name);
             anyhow::ensure!(
@@ -763,3 +871,7 @@ targets = ["ctest:gui:views"]
         assert!(load(command.path(), None).unwrap_err().to_string().contains("names its command"));
     }
 }
+
+
+
+

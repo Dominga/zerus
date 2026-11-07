@@ -1335,6 +1335,61 @@ output names the folder and asks for its build outputs (`.ci-build`, `target`)
 to be excluded from scanning. No other failure is retried, and a commit or
 merge never is.
 
+Builds and tests of any CMake or MSBuild project (task 85, the provider model
+of `docs/test-providers.md`) have their own templates beside the Qt ones:
+
+| Template | Arguments | Runs |
+|---|---|---|
+| `cmake-configure` | `source` (default `.`), `build_dir` (default `build`), `generator`, `config`, `preset` | `cmake -S source -B build_dir [-G generator] [-DCMAKE_BUILD_TYPE=config] [--preset preset]`, plus the build cache's launcher |
+| `cmake-build` | `build_dir`, `config`, `targets` | `cmake --build build_dir [--config config] [--target targets...]` |
+| `ctest` | `build_dir`, `config`, `tests` or `regex` | `ctest --test-dir build_dir --output-on-failure --output-junit <report> [-C config] [-R ^(tests)$ or regex]` |
+| `msbuild-build` | `project` (a `.sln` or project file), `config`, `platform`, `targets` | Visual Studio's MSBuild (vswhere), `/m /nologo /v:minimal [/p:Configuration] [/p:Platform] [/t:targets]` |
+| `vstest` | `tests` (assemblies), `filter` | `vstest.console tests /Logger:trx [/TestCaseFilter:filter]` |
+
+Every value is typed: a `source` or `build_dir` is a path inside the member's
+folder (it may not exist yet), a target or test name a plain word, a regex,
+generator, platform or filter one line of text. On Windows these templates load
+the Visual Studio environment as the Qt ones do, and the build cache and the
+scanning retry apply to them. `qt-configure` and `qt-build` are `cmake-configure`
+and `cmake-build` with this repository's fixed values; their argv is unchanged.
+
+`ctest` and `vstest` read their report (CTest's JUnit XML, VSTest's TRX, under
+`.zerus-team/results` in the member's folder, removed before each run) into one
+result per test: name, suite, `passed`/`failed`/`skipped`/`error`, duration and
+the first message, at most 5000 per run with failures first. The run's answer
+carries them as `report` (`results`, `passed`, `failed`, `skipped`, `errors`,
+`note`), and the failing names fill `failures` when the output named none. The
+exit code stays the verdict; a missing report is only a `note`.
+
+A project declares its own templates in `.zerus/tests.toml`, typed like the
+built-ins:
+
+```toml
+[[template]]
+id = "make-target"
+program = "make"
+args = ["-C", "src", "{targets}", "JOBS={jobs}"]
+timeout_secs = 900
+results = { format = "junit", path = "out/report.xml" }   # optional
+
+[[template.params]]
+name = "targets"
+kind = "identifiers"        # identifier, identifiers, text, path or paths
+required = true
+
+[[template.params]]
+name = "jobs"
+kind = "identifier"
+```
+
+The program is fixed; every placeholder is declared, a list is a whole
+argument, an absent optional value drops its argument, and an id never shadows
+a built-in. A project template runs outside the member's sandbox, so it runs
+only once the owner accepted its exact content: `hgs team templates --json`
+with `{"action":"project","folder":...}` lists a folder's templates with their
+content `hash` and `accepted`, and `{"action":"accept","hashes":[...],"by":"human"}`
+(the owner only) accepts them. A changed template waits again.
+
 Start builds and long tests through Zerus so they show as work:
 `hgs team run` for a team member's templates (`hgs guide team-run`), and
 `hgs run --json [--wait]` with `{request_id, label, command, cwd?,
@@ -2441,6 +2496,59 @@ defer-session --json` (0 turns it off; at most 100 sessions). The team worker
 then reads such a session while it asks, at most every 20 seconds, and keeps
 running for it. A session of a team follows its team's setting.
 
+#### A request only the Terminal takes is raised to the owner
+
+A member's request that Zerus cannot answer (`can_answer` false: a Kimi
+approval whose panel Zerus cannot verify, Kimi's Edit and Write approvals, a
+request behind another one) is never a quiet wait. The owner sees it at once
+(Waiting for you, kind `permission_escalated`, action `open_terminal`) and the
+lead's inbox names it. Once it has waited `defer_minutes` (10 when the queue is
+off), the dispatcher raises it once (task 113): it reads the member's Terminal
+(`hgs terminal NAME --json`, action `snapshot`) and keeps the last 12 non-blank
+lines in the member's `terminal_escalation`, bound to that request's id. The
+owner's item then adds `escalated`, `raised_at`, `minutes`, `session`, `host`,
+`tool`, `reason` and `screen`; the lead's `hgs ls --json` row carries one
+`mobile_attention` alert `{"question_id":"team-terminal-prompt:<team>:<member>:<question>",
+"question_hash","kind":"team_terminal_prompt","team","team_name","member",
+"member_id","session","host","tool","screen","action":"open_terminal",
+"action_label":"Open Terminal","since"}` with the screen's last six lines (at
+most 120 characters each); the mobile connector keeps it beside its question
+cards. The lead's starved-member message lists every member that waits in a
+Terminal, with its session, minutes and request. The escalation goes with its
+request (feed `terminal_prompt_raised`, `terminal_prompt_cleared`); Zerus never
+answers it.
+
+### A member's status is cross-checked from every source
+
+Task 139: `hgs team status` named members' states wrong (working while an
+approval waited, a prompt Zerus did not read, a delivery left in the composer).
+The dispatcher compares a member's sources: its session record (native hooks
+and events), a request Zerus read (`pending`, `terminal_question`), its
+Terminal's recognised panel (a question or approval, an unsent paste in the
+composer, an idle prompt, a working spinner), its process and jobs, and the time
+of its last event against the stuck bound. The screen is read only for a
+suspect member (busy without an event for 3 min, asking without a request Zerus
+read, idle with a hand-out unreported for 3 min, or a disagreement still open),
+at most every 3 min (1 min while it disagrees), two members at a time and on its
+own thread, never on the tick.
+
+Sources that disagree for 60 s make the member `uncertain`: status shows its
+`phase` and `activity` as `uncertain` and `check` with `state`, `since` and the
+disagreements in words; it never shows a confident `working`. The lead is told
+once per episode, with the disagreements, the screen's last lines and how to
+look again (feed `member_uncertain`, `member_uncertain_told`); agreement or a
+member no longer suspect ends it (`member_check_settled`). An idle lead with
+decisions waiting (task 95's stall, reason `idle`) is told itself once a round
+(`lead_idle_told`).
+
+`hgs team look MEMBER [--team ID]`, or `{"member":"dev","team":ID} | hgs team look
+--json`, reads the member's screen now and answers one compact snapshot: the
+reconciled `state` (`uncertain`, `settling` within the grace), `disagree`,
+`sources` (hooks, record, screen, process, activity), the last 12 `screen`
+lines, its open `task`, its `pulse` and `next`, what Zerus does next. It
+changes nothing. A member is named by id, role or session; with several teams
+the caller's own team is taken first.
+
 ### The profile of the work: losses, spans and unknown
 
 `hgs team profile` reads a scope after the work: where its time and tokens
@@ -2478,7 +2586,16 @@ apply, `member`, `attempt`, `stage`, `round`, `stage_kind`, `state`, `by`,
   started (A1); `lead`: waiting for the lead's decision; `hold`: a hold
   (`by`).
 - `question` and `permission`: blocked on a native question or permission
-  request (`by` is who answered).
+  request (`by` is who answered); what the lead answers.
+- `person` (task 118): waiting for a person's answer, with its `reason`:
+  `acceptance` (a phase before waiting for the owner's acceptance, with
+  `phase`), `permission` and `question` (a native request or a task question
+  the owner answered, or a request that went to the owner after the team's
+  `remind_owner_permission_minutes`, or only the Terminal takes), `deferred`
+  (a request the owner queue answered safely for the owner, task 97) and
+  `report` (the lead's decision on a report the owner decided, or that went
+  to the owner after `remind_owner_minutes`). It is a wait, not the member's
+  work; the lead's own waits stay `lead`, `question` and `permission`.
 - `stage_wait`: waiting for a stage member; `stage`: a U36 stage of a round
   (`stage_kind`, `round`).
 - `background`: Background work (U30); `no_report`: a task without a report;
@@ -2497,7 +2614,9 @@ The output is one JSON object:
   `s`, and `tokens`/`cost_usd` when its part's session is known. The kinds are
   `rework` (per rejected or returned attempt, with `cause`, `share` of the
   task's tokens and `tokens_unknown`), `lead_wait` (`lead_s`, `question_s`),
-  `permission_wait` (`answered_by`), `blocked_chain` (a folder another task's
+  `person_wait` (task 118: the seconds of the task's `person` spans, with
+  `reasons` per reason), `permission_wait` (`answered_by`),
+  `blocked_chain` (a folder another task's
   stage held: `folder_held_s`, `held_by`, with `deps_s` and `on` for context;
   waiting for dependencies is no loss by itself, see lateness below),
   `member_wait`, `idle_member` (`open_s`,
@@ -2641,10 +2760,12 @@ On, a build template of a member runs in that member's snapshot,
   (`[build_cache]`) serves it as usual.
 - Builds of one build folder run one at a time: the folder's lock is the
   queue. The key is the tree, the template, its arguments and the toolchain's
-  version lines (`rustc -vV` and `cargo -V`, or `cmake --version`). A build
+  version lines (`rustc -vV` and `cargo -V`; `cmake --version` for the Qt,
+  CMake and ctest templates; `msbuild -version` for `msbuild-build` and
+  `vstest`). A build
   of the same key still running is waited for through a marker taken
   atomically. A finished result serves a check template (`cargo-test`,
-  `cargo-clippy`, `qt-test`) as its verdict for any member; a build
+  `cargo-clippy`, `qt-test`, `ctest`, `vstest`) as its verdict for any member; a build
   template's result serves only the member whose tree holds its outputs. The
   newest 64 results are kept in `.zerus-team/runs/broker-results.json`.
 - A failure in a file another member is changing is reported to both as an
@@ -2685,7 +2806,8 @@ build in its own build folder.
 enabled = true                 # false: the project vetoes the broker
 mode = "auto"                  # "shared", "snapshot"; auto: shared for Unreal
 ready_wait_s = 300             # shared mode: the wait for others' edits
-templates = ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test"]
+templates = ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test",
+             "cmake-configure", "cmake-build", "ctest", "msbuild-build", "vstest"]
 assets = ["Content"]           # folders linked whole, never copied
 link = ["ThirdParty"]          # untracked folders the build needs, linked
 copy_limit_mb = 4              # copies above this size are named in the note
@@ -3266,6 +3388,16 @@ record Kimi is still writing, a line that is not a JSON object with one string
 type, an interaction record without its ID or of a kind Kimi does not write,
 or a repeated request ID keeps the approval read-only. Types and IDs are
 compared as decoded JSON.
+Kimi Code 2.5 (task 113) writes the same wire records and draws the same
+rows; in fullscreen mode (`tui_mode = "fullscreen"`) it docks the panel: its
+body is one column narrower (the scrollbar's) and shows at most six rows, and a
+longer body adds ` · shift+↑/↓ scroll` to the key hint. Zerus reads both
+layouts row by row; a scrolled body, a panel without the keyboard (`esc back
+to approval`) or a narrow one stays read-only and says why. A request of the
+running turn whose tool call Kimi's PreToolUse hook has not reported to Zerus
+still shows its exact command, read-only with **Open Terminal**, and becomes
+answerable once the hook reports it; one older than the turn, or after it
+ended, shows nothing.
 Experimental and off by default: an empty file
 `~/.config/hgs/kimi-unverified-edit-approvals` (in `HGS_CONFIG_DIR` when set)
 also lets Zerus answer Kimi's **Edit** and **Write** approvals, from Activity
@@ -3305,6 +3437,9 @@ descriptions only for reviewed text. In a Git subdirectory or worktree, Codex
 folder access names the repository root that Codex will trust. Claude wraps a
 long workspace path across rows; the joined rows must still equal the launch
 folder exactly.
+Codex 0.167 can offer **Back to Agent Command Center** instead of **Quit**.
+Back cancels opening the folder without saving trust and keeps Codex running;
+Quit exits the original Codex process. Both require an explicit user choice.
 Trust persistence belongs to the native agent.
 Already-running Claude and Kimi sessions can retain the exact Bitwarden launcher
 notices above the complete workspace-trust panel; Claude also accepts its
@@ -3368,6 +3503,11 @@ for your message. A dialog too narrow to read, or for another goal, stays in
 Terminal.
 
 Optional Codex questions preserve the regular composer and support **Skip**.
+Codex closes unanswered optional questions when their native turn completes,
+is interrupted, or accepts an ordinary follow-up. Zerus removes those cards
+and their question badge without recording a user answer. Continued tool work
+alone does not close a question. Questions belonging to a native child remain
+with that child's parent; they are not requests for the person.
 When Codex's own question panel is open, Zerus answers or skips there. Codex's
 animated working status above the panel does not block an answer; any change
 to the panel itself does. An open panel taller than its pane keeps its title
@@ -3386,7 +3526,10 @@ If an optional answer enters Codex's native queue, the question stays visible as
 **Submitted / Awaiting agent** with the original answer locked. Submission means
 the verified terminal received the answer; it does not mean Codex has recorded
 it yet. This state survives polling and GUI restarts. The card disappears after
-the exact native question reply appears in the conversation. Zerus never resends
+the exact native question reply appears in the conversation. If Codex closes
+the question first, this exact submitted answer stays as a read-only delivery
+receipt until acknowledgement; it is not an outstanding request for input.
+Zerus never resends
 the answer or promotes the queue automatically; **Send now** remains an explicit
 native queue action. Delivery without confirmed submission still requires
 checking Terminal before retrying.
@@ -6025,6 +6168,32 @@ another command. Codex completion beyond the normal 8 MiB transcript window can
 be read incrementally up to 16 MiB per poll and cached privately. Completion needs
 the exact call ID in the verified conversation; absence of an event is not success.
 
+## Activity never sticks on a timed-out refresh
+
+The desktops give a local `hgs inspect` 5 s (a peer's 15 s). Task 117 keeps
+the read inside that and lets a failure pass by itself:
+
+- `hgs inspect` answers its phase timings in `timings_ms` (`total` and each step:
+  `state_lock`, `record`, `live_sessions`, `questions`, `processes`,
+  `provider_messages`, `events_open`, `activity`, `waits`, `session_state`,
+  `team_store` and others). A call of 1 s or more leaves one JSON line in
+  `<state>/logs/slow-calls.log`, which rotates at 256 KiB to one older file.
+- The team reasons every listing and inspection reads wait at most 300 ms for a
+  team writer. A store that stays busy answers with the last good reasons, kept
+  in `teams/waiting-cache.json` for 2 minutes. Before, a rollback-journal store
+  (hgs before task 105's WAL) made this read wait up to 10 s behind a team
+  write: past the desktop's limit.
+- An inspection waits at most 3 s for the state lock, then answers "The session
+  state is busy" with its timings instead of being killed.
+- Qt and Zerus Next keep the last good Activity after a failed refresh. The
+  status says "Activity not refreshed since HH:mm:ss, retrying: <why>" (before
+  any good read, "Could not refresh activity: <why>"). The session is read
+  again by itself after 2 s (Activity's interval in Zerus Next, 2.5 s, or the
+  background interval behind Terminal), doubled for each failure in a row up to
+  a minute, also while a live event stream follows it, which before left the
+  notice standing. A read that succeeds, or a stream state, clears it; a
+  timed-out request never holds the next one.
+
 ## Build folder cleanup
 
 Zerus removes the build folders it creates, automatically and only its own
@@ -6917,8 +7086,8 @@ holds the `question_id` of the newest 32, oldest first, and `latest_at` is when
 the newest was asked (seconds since the epoch, or `null` when not recorded).
 Without any it is `{"count": 0}`, as for saved, archived and non-Codex sessions.
 A question stops counting once its answer appears in the conversation, it is
-skipped, or its answer was submitted (**Submitted / Awaiting agent**); one asked
-in an earlier run of the same conversation counts until then. Only the main
+skipped, closed by native turn completion/interruption or ordinary follow-up,
+or its answer was submitted (**Submitted / Awaiting agent**). Only the main
 conversation is indexed: async questions of Codex native subagents are not
 counted. The value is `null` while the question index is incomplete or held by
 another process (as above) or cannot be read: unknown, never a count of 0, so a
@@ -7806,15 +7975,22 @@ A project names its test suites in `.zerus/tests.toml`; Zerus reads it, and the
 owner may override any field in the team settings (`settings.tests`, an object
 shaped like the file and merged over it, providers by name; only the owner sets
 it). Without the file `hgs test config` shows a proposal from the stacks it
-finds (Cargo, CMake/CTest, pytest or unittest, Gradle, npm) and nothing is
-enforced: a team without a configuration keeps today's flow.
+finds (Cargo, CMake/CTest, pytest or unittest, Cython with `setup.py`,
+MSBuild with a `.sln` or `.vcxproj`, Unreal with a `.uproject`, Gradle, npm)
+and nothing is enforced: a team without a configuration keeps today's flow.
 
 - `hgs test map --write` writes the committed map (`.zerus/test-map.json`) from
   the build: a Cargo package's module graph (each module's tests, widened to
   the modules that use it, `include_str!` files included); CMake's file API
   reply, the CTest files and the include graph for each test binary (its
   functions too); and for Python, Gradle and npm the files a test names or
-  imports. `[[provider.paths]]` adds path rules, with targets or with the tests
+  imports (Cython's `.pyx`, `.pxd` and `.pxi` too). For MSBuild (task 137) a
+  file belongs to the projects whose item lists name it (`ClCompile`,
+  `ClInclude` and the others; macros and wildcards are skipped); a test
+  project (a native unit test or Google Test project, or one the provider's
+  `tests` name) answers for itself and every project it references, and a
+  project no test project reaches is its own target, checked by its build.
+  `[[provider.paths]]` adds path rules, with targets or with the tests
   that mention a text (such as the CLI binary).
 - `hgs test map --check` fails on a tracked file outside every provider's area
   and `map.ignore` and on a tracked test file no provider maps; the CLI job runs
@@ -7837,7 +8013,22 @@ enforced: a team without a configuration keeps today's flow.
   `functions` as `suite:function` (a plain name, or `function:datatag`, with
   one suite). A Qt test runs with `QT_FORCE_STDERR_LOGGING=1`: without a
   console QtTest would log to the debugger, and the run's tail keeps each
-  suite's own lines (`FAIL!`, `Totals`).
+  suite's own lines (`FAIL!`, `Totals`). `qt-test` is only for the Qt GUI's
+  build (`build_dir = ".ci-build/gui"`). Every other kind names its own
+  templates (task 137), with the build its tests need as `team_build`, sent
+  first:
+  - ctest: `cmake-build` (`build_dir`, the configuration a multi-config
+    build's binary folder names, the chosen `targets`), then `ctest` with the
+    chosen tests (`tests`, or an anchored `regex` for other names);
+  - pytest: `py-test` with the chosen test files as `paths`;
+  - cython: `cython-build` when an extension source (`.pyx`, `.pxd`, `.pxi`,
+    C or C++, `setup.py`) changed or for the whole set, then `py-test`;
+  - msbuild: `msbuild-build` of the chosen test project (its configuration
+    and platform), or of `manifest` for the whole set, then `vstest` with its
+    assemblies; without a test project the build is the run;
+  - unreal: `ue-build` of `<project>Editor` (Win64, Development), then
+    `ue-test` with the chosen automation tests, or the module prefixes for
+    the whole set.
 - `hgs test durations --record LOG --provider NAME` keeps the slowest measured
   time per target from CTest, QtTest, Cargo (and libtest JSON), unittest or
   pytest output, or a JSON object of test ids to seconds.
@@ -8024,11 +8215,13 @@ a module compiles in); `[full]` `where` (`here`, `ci`, `runner`), `policy`
 `suite_lines`; `[reuse]` `full_after`, `max_age_days`; `[isolation]`
 `enabled` and the keys under "Test isolation"; `[build_cache]`; `[merge_queue]`
 `enabled`; `[resources.NAME]` `cpu`, `ram_mb`, `gpu`, `exclusive`; and each
-`[[provider]]`: `name`, `kind` (`cargo`, `ctest`, `pytest`, `unittest`,
-`gradle`, `npm`, `command`), `root`, `sources`, `tests`, `manual`, `elsewhere`,
+`[[provider]]`: `name`, `kind` (`cargo`, `ctest`, `pytest`, `cython`,
+`unittest`, `gradle`, `npm`, `msbuild`, `unreal`, `command`), `root`, `sources`, `tests`, `manual`, `elsewhere`,
 `affected` (`build`, `paths`, `all`), `[[provider.paths]]` (`files` with
 `targets` or `mentions`), `command` (`{targets}`, `{manifest}`, `{build_dir}`),
-`manifest`, `widen` (`none`, `dependants`, `transitive`), `build_dir`,
+`manifest` (cargo's `Cargo.toml`, required for msbuild's `.sln` or project
+file and unreal's `.uproject`), `widen` (`none`, `dependants`, `transitive`),
+`build_dir`,
 `resources`, `platforms`, `budget_minutes`, `budget_lines`, `reuse` (`auto`,
 `inputs`, `binary`, `never`), `disabled`.
 

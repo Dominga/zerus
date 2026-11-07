@@ -76,7 +76,10 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             enabled: true,
-            templates: ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test"].map(str::to_owned).to_vec(),
+            // Task 85: the CMake and MSBuild templates of any project too.
+            templates: ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test", "cmake-configure", "cmake-build", "ctest", "msbuild-build", "vstest"]
+                .map(str::to_owned)
+                .to_vec(),
             assets: Vec::new(),
             link: Vec::new(),
             copy_limit: 4 * 1024 * 1024,
@@ -541,7 +544,7 @@ pub(crate) fn request_key(hash: &str, template: &str, args: &Value, toolchain: &
 /// result for the same key serves it. A build template's result is its
 /// outputs in one member's tree, so it serves only that member.
 fn verdict(template: &str) -> bool {
-    matches!(template, "cargo-test" | "cargo-clippy" | "qt-test")
+    matches!(template, "cargo-test" | "cargo-clippy" | "qt-test" | "ctest" | "vstest")
 }
 
 /// The tools a template builds with, as their version lines; an unknown tool
@@ -560,8 +563,13 @@ fn toolchain(template: &str, tree: &Path) -> String {
     };
     if template.starts_with("cargo-") {
         format!("{}\n{}", version("rustc", &["-vV"]), version("cargo", &["-V"]))
-    } else if template.starts_with("qt-") {
+    } else if template.starts_with("qt-") || template.starts_with("cmake-") || template == "ctest" {
+        // Task 85: CMake's version line; ctest is CMake's.
         version("cmake", &["--version"])
+    } else if template == "msbuild-build" || template == "vstest" {
+        // Task 85: the MSBuild that builds, as Visual Studio names it.
+        let msbuild = super::templates::msbuild_path();
+        version(&msbuild, &["-version", "-nologo"])
     } else {
         format!("template:{template}")
     }
@@ -801,7 +809,7 @@ fn run_shared(
 
 fn outcome_value(outcome: &super::templates::Outcome) -> Value {
     json!({"exit":outcome.exit,"tail":outcome.tail,"ms":outcome.ms,"timed_out":outcome.timed_out,"error":outcome.error,
-        "failures":outcome.failures,"excerpt":outcome.excerpt})
+        "failures":outcome.failures,"excerpt":outcome.excerpt,"report":outcome.report})
 }
 
 fn outcome_of(value: &Value) -> super::templates::Outcome {
@@ -813,6 +821,7 @@ fn outcome_of(value: &Value) -> super::templates::Outcome {
         error: value["error"].as_str().unwrap_or_default().to_owned(),
         failures: value["failures"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect(),
         excerpt: value["excerpt"].as_str().unwrap_or_default().to_owned(),
+        report: serde_json::from_value(value["report"].clone()).ok().flatten(),
     }
 }
 

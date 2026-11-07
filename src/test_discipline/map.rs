@@ -65,6 +65,12 @@ pub struct Target {
     /// ctest: the test binary, relative to the project, to run single functions.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub binary: String,
+    /// msbuild: the configuration and platform its project builds first
+    /// (`Debug|x64`), so its assembly's folder is known.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub config: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub platform: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -128,9 +134,13 @@ pub fn generate_only(root: &Path, config: &TestsConfig, files: &[String], previo
                     ProviderMap { note, ..kept.unwrap_or_else(|| ProviderMap { rule: Rule::Build, ..whole(provider) }) }
                 }
             },
+            (Rule::Build, Kind::Msbuild) => super::msbuild::section(root, provider, &area),
             (Rule::Build, _) => references(root, provider, &area),
         };
         section.rules = resolve_rules(root, provider, &area, &section);
+        if !provider.prefixes.is_empty() {
+            unreal_prefixes(&mut section, &provider.prefixes, &area);
+        }
         // A file three quarters of a larger set uses runs all of it: a few
         // more tests, and a map that stays small.
         let count = section.targets.len();
@@ -148,7 +158,28 @@ pub fn generate_only(root: &Path, config: &TestsConfig, files: &[String], previo
     Ok(map)
 }
 
-/// A provider whose every test runs as one: `all`, and `paths` before its
+
+/// Task 87: a Source/<Module>/ file selects the automation tests whose name
+/// starts with the module's prefix (default the module name); Content/ selects
+/// the whole provider.
+fn unreal_prefixes(section: &mut ProviderMap, prefixes: &BTreeMap<String, String>, area: &[String]) {
+    for file in area {
+        let Some(rest) = file.strip_prefix("Source/") else {
+            if file.starts_with("Content/") {
+                section.files.insert(file.clone(), vec![ALL.to_owned()]);
+            }
+            continue;
+        };
+        let module = rest.split('/').next().unwrap_or_default();
+        let prefix = prefixes.get(module).map(String::as_str).unwrap_or(module);
+        let chosen: Vec<String> = section.targets.keys()
+            .filter(|name| *name == prefix || name.starts_with(&format!("{prefix}.")))
+            .cloned().collect();
+        if !chosen.is_empty() {
+            section.files.insert(file.clone(), chosen);
+        }
+    }
+}/// A provider whose every test runs as one: `all`, and `paths` before its
 /// rules name targets.
 fn whole(provider: &Provider) -> ProviderMap {
     let mut targets = BTreeMap::new();
@@ -257,6 +288,7 @@ fn ctest(root: &Path, provider: &Provider) -> anyhow::Result<Option<ProviderMap>
                 tests: count,
                 functions,
                 binary: build.targets.values().find(|target| target.name == name).and_then(|target| target.artifacts.first()).map(|path| super::cargo_graph::relative(root, Path::new(path))).unwrap_or_default(),
+                ..Target::default()
             },
         );
         for file in files {
@@ -351,7 +383,7 @@ fn references(root: &Path, provider: &Provider, area: &[String]) -> ProviderMap 
 fn language(file: &str) -> Option<&'static str> {
     let ext = Path::new(file).extension()?.to_str()?;
     Some(match ext {
-        "py" => "python",
+        "py" | "pyx" | "pxd" | "pxi" => "python",
         "kt" | "kts" | "java" => "jvm",
         "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => "js",
         "rs" => "rust",
@@ -368,7 +400,7 @@ fn word_set(text: &str) -> BTreeSet<&str> {
 
 fn count_tests(kind: Kind, text: &str) -> usize {
     match kind {
-        Kind::Pytest | Kind::Unittest => text.lines().filter(|line| line.trim_start().starts_with("def test")).count(),
+        Kind::Pytest | Kind::Unittest | Kind::Cython => text.lines().filter(|line| line.trim_start().starts_with("def test")).count(),
         Kind::Gradle => text.matches("@Test").count(),
         Kind::Npm => text.matches("it(").count() + text.matches("test(").count(),
         _ => 1,
@@ -672,4 +704,25 @@ mentions = "target/debug/demo"
         lacking.providers.get_mut("py").unwrap().test_files.remove("tests/test_new.py");
         assert_eq!(check(&config, &files, &committed, &lacking).missing_tests, vec!["py: tests/test_new.py"]);
     }
+
+    #[test]
+    fn cython_sources_share_the_python_import_language() {
+        assert_eq!(language("src/ext.pyx"), Some("python"));
+        assert_eq!(language("src/ext.pxd"), Some("python"));
+        assert_eq!(language("src/ext.pxi"), Some("python"));
+        assert_eq!(language("src/ext.py"), Some("python"));
+    }
+
+    #[test]
+    fn unreal_source_modules_select_their_automation_prefixes() {
+        let mut section = ProviderMap { kind: Kind::Command, rule: Rule::Build, note: String::new(),
+            targets: [("Game.Core.Math".to_owned(), Target::default()), ("Game.UI.Hud".to_owned(), Target::default())].into(),
+            files: BTreeMap::new(), test_files: BTreeMap::new(), rules: Vec::new(), groups: BTreeMap::new(), seconds: 0.0, platforms: Vec::new() };
+        let prefixes = [("Game".to_owned(), "Game.Core".to_owned()), ("UI".to_owned(), "Game.UI".to_owned())].into();
+        unreal_prefixes(&mut section, &prefixes, &["Source/Game/Math.cpp".to_owned(), "Source/UI/Hud.cpp".to_owned(), "Content/Map.uasset".to_owned()]);
+        assert_eq!(section.files["Source/Game/Math.cpp"], ["Game.Core.Math"]);
+        assert_eq!(section.files["Source/UI/Hud.cpp"], ["Game.UI.Hud"]);
+        assert_eq!(section.files["Content/Map.uasset"], [ALL]);
+    }
 }
+

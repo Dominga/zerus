@@ -128,6 +128,11 @@ banner in the lower right corner of the screen with each step and its progress
 The banner leaves once the new build's window is up. A failure stays on it for
 ten seconds and goes to the log.
 
+Only tests pass the helper `-Quiet`; neither updater ever does. A quiet helper
+shows no banner and starts every build with a hidden window, so
+`client/core/tests/fork_handoff.rs` runs the real helpers without anything
+appearing on the desktop, and checks that no window of theirs appeared.
+
 If the new build exits within 15 seconds, the helper restores the previous build,
 keeps the failed one as `<installation>.failed` and starts the previous build. If a
 program still runs from the folder after two minutes, the update waits for the

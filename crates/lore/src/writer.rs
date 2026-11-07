@@ -27,7 +27,7 @@ impl Writer {
     pub fn acquire(root: &Path, who: &str) -> Result<Self> {
         std::fs::create_dir_all(root).map_err(|error| LoreError::new(format!("{}: {error}", root.display())))?;
         let path = root.join(".lore.lock");
-        let mut file = OpenOptions::new().read(true).write(true).create(true).open(&path)
+        let mut file = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path)
             .map_err(|error| LoreError::new(format!("{}: {error}", path.display())))?;
         let started = Instant::now();
         loop {

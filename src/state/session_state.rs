@@ -60,7 +60,7 @@ pub(super) fn decorate(sessions: &mut [Value]) {
         let key = format!("{}\n{}", text(session, "agent"), text(session, "account_home"));
         let ttl = accounts.entry(key).or_insert_with(|| cache_ttl(session, &observed)).clone();
         apply(session, ttl, team, at);
-        if let Some(alert) = team.and_then(|team| team.alert.as_ref()) {
+        for alert in team.map(|team| team.alerts.as_slice()).unwrap_or_default() {
             add_alert(session, alert);
         }
         let name = text(session, "name").to_owned();
@@ -111,9 +111,51 @@ fn build_of(session: &Value, builds: &[Value]) -> Option<Value> {
             "command":claim["command"],"since":claim["started"]}))
 }
 
+/// Task 117: the team store's read on every listing and inspection waits at
+/// most this long for a writer. The installed rollback-journal store made
+/// readers wait up to 10 s behind a team write, past the desktop's 5 s
+/// inspect limit ("Could not refresh activity: timed out").
+const TEAM_READ_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
+/// A busy store answers with the last good reasons, at most this old.
+const TEAM_CACHE_SECONDS: f64 = 120.0;
+/// The last team read's milliseconds, for the inspection's phase timings.
+pub(crate) static TEAM_READ_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn team_cache_path() -> std::path::PathBuf {
+    teams::store::path().with_file_name("waiting-cache.json")
+}
+
 fn team_reasons(at: f64) -> Vec<teams::waiting::Waiting> {
-    let Ok(store) = teams::store::Store::open(false) else { return Vec::new() };
-    store.active_teams(TEAMS_READ).map(|found| teams::waiting::reasons(&found, at)).unwrap_or_default()
+    let started = std::time::Instant::now();
+    let reasons = team_reasons_at(&teams::store::path(), &team_cache_path(), TEAM_READ_WAIT, at);
+    TEAM_READ_MS.store(started.elapsed().as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+    reasons
+}
+
+/// The reasons from the store at `store`, or, when it stays busy past `wait`,
+/// the last good ones saved at `cache` within `TEAM_CACHE_SECONDS`.
+pub(crate) fn team_reasons_at(store: &Path, cache: &Path, wait: std::time::Duration, at: f64) -> Vec<teams::waiting::Waiting> {
+    if !store.exists() {
+        return Vec::new();
+    }
+    let read = teams::store::Store::open_at(store, false)
+        .and_then(|found| {
+            found.busy_timeout(wait)?;
+            found.active_teams(TEAMS_READ)
+        });
+    match read {
+        Ok(found) => {
+            let reasons = teams::waiting::reasons(&found, at);
+            let _ = super::storage::atomic_private(cache, &json!({"at":at,"reasons":reasons}).to_string());
+            reasons
+        }
+        Err(_) => std::fs::read(cache)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .filter(|saved| at - saved["at"].as_f64().unwrap_or(0.0) <= TEAM_CACHE_SECONDS)
+            .and_then(|saved| serde_json::from_value(saved["reasons"].clone()).ok())
+            .unwrap_or_default(),
+    }
 }
 
 /// The last native event: the cache's last use, a keepalive turn included.

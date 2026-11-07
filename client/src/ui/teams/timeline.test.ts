@@ -89,7 +89,7 @@ describe("the profile's Time view (task 92)", () => {
   });
 
   it("names every kind Qt draws and gives each its palette entry", () => {
-    const kinds = [...BUSY_KINDS, "build", "delivery", "start_delay", "member", "deps", "lead", "folder_held", "hold", "stage_wait", "no_report", "stop"];
+    const kinds = [...BUSY_KINDS, "build", "delivery", "start_delay", "member", "deps", "lead", "person", "folder_held", "hold", "stage_wait", "no_report", "stop"];
     for (const kind of kinds) {
       expect(kindName(kind, "review")).not.toBe("Not recorded");
       expect(KIND_STYLES.some((style) => style.key === kindKey(kind, "review"))).toBe(true);

@@ -27,6 +27,8 @@ function hatch(ctx: CanvasRenderingContext2D, color: string, pattern: Pattern): 
   t.strokeStyle = color; t.fillStyle = color; t.lineWidth = 1;
   const line = (x1: number, y1: number, x2: number, y2: number) => { t.beginPath(); t.moveTo(x1, y1); t.lineTo(x2, y2); t.stroke(); };
   if (pattern === "dots") { t.fillRect(1, 1, 1.5, 1.5); t.fillRect(4, 4, 1.5, 1.5); }
+  // Task 118: waiting for a person's answer, one round dot in the tile (Qt: a texture of the same dot).
+  if (pattern === "sparse") { t.beginPath(); t.arc(3, 3, 1.3, 0, Math.PI * 2); t.fill(); }
   if (pattern === "bdiag" || pattern === "diagcross") { line(0, 6, 6, 0); line(-1, 1, 1, -1); line(5, 7, 7, 5); }
   if (pattern === "fdiag" || pattern === "diagcross") { line(0, 0, 6, 6); line(-1, 5, 1, 7); line(5, -1, 7, 1); }
   if (pattern === "hor" || pattern === "cross") line(0, 3, 6, 3);

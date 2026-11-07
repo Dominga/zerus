@@ -7,9 +7,11 @@ import { tr } from "../../i18n";
 // 3:1 against every shipped lane background, and every wait its own hatch, so
 // a wait is told by its pattern too, not only by hue. Task 93 (owner: "the
 // green is too toxic"): calm colours, CIE LCh chroma at most CHROMA_CAP, in
-// the skin's own lightness bands, with work the skin's mint.
+// the skin's own lightness bands, with work the skin's mint. Task 118: "person",
+// waiting for a person's answer, is a calm lime (dark) or sage (light) with the
+// sparse-dot hatch, which Qt draws as a texture.
 
-export type Pattern = "solid" | "dots" | "bdiag" | "fdiag" | "diagcross" | "hor" | "ver" | "cross";
+export type Pattern = "solid" | "dots" | "sparse" | "bdiag" | "fdiag" | "diagcross" | "hor" | "ver" | "cross";
 export interface KindStyle { key: string; dark: string; light: string; pattern: Pattern }
 
 /** Task 93: the most saturated a kind may be (CIE LCh chroma), per theme. */
@@ -28,6 +30,7 @@ export const KIND_STYLES: readonly KindStyle[] = [
   { key: "member", dark: "#b96f97", light: "#792758", pattern: "bdiag" },
   { key: "deps", dark: "#899d5d", light: "#354e03", pattern: "fdiag" },
   { key: "lead", dark: "#fdc5ff", light: "#925fa0", pattern: "diagcross" },
+  { key: "person", dark: "#d8eea5", light: "#8a9269", pattern: "sparse" },
   { key: "folder_held", dark: "#fcd6b2", light: "#58432d", pattern: "hor" },
   { key: "hold", dark: "#c1c1c1", light: "#314d38", pattern: "ver" },
   { key: "stage_wait", dark: "#59d6f5", light: "#174d5a", pattern: "cross" },
@@ -44,7 +47,7 @@ export function kindKey(kind: string, stageKind = ""): string {
 /** A profile loss's palette key (the loss kinds hgs reports); none for a loss no span draws. */
 export function lossKey(kind: string): string | undefined {
   const key = { rework: "rework", member: "member", member_wait: "member", deps: "deps", blocked_chain: "deps", lead: "lead",
-    folder_held: "folder_held", hold: "hold", stage_wait: "stage_wait" }[kind];
+    folder_held: "folder_held", hold: "hold", stage_wait: "stage_wait", person_wait: "person" }[kind];
   return key && KIND_STYLES.some((style) => style.key === key) ? key : undefined;
 }
 
@@ -66,6 +69,7 @@ export function keyName(key: string): string {
     case "member": return tr("Waited for a free member");
     case "deps": return tr("Waited for dependencies");
     case "lead": return tr("Waited for the lead");
+    case "person": return tr("Waiting for a person's answer");
     case "folder_held": return tr("Folder held by another task");
     case "hold": return tr("Held");
     case "stage_wait": return tr("Waited for a stage");
@@ -80,6 +84,7 @@ export function swatchBackground(style: KindStyle, dark: boolean): string {
   switch (style.pattern) {
     case "solid": return c;
     case "dots": return `radial-gradient(${c} 1px, transparent 1.2px) 0 0 / 3px 3px`;
+    case "sparse": return `radial-gradient(${c} 1.3px, transparent 1.7px) 0 0 / 6px 6px`;
     case "bdiag": return line(45);
     case "fdiag": return line(-45);
     case "diagcross": return `${line(45)}, ${line(-45)}`;

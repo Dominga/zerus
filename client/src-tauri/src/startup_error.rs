@@ -68,8 +68,8 @@ pub(crate) fn show(context: tauri::Context<tauri::Wry>) {
 
 /// The activation pipe belongs to a process that is not this user's Zerus
 /// window at this integrity level and session; nothing was sent to it.
-#[cfg(windows)]
-pub(crate) fn show_untrusted_pipe(context: tauri::Context<tauri::Wry>) {
+/// Task 110 shows it only when no Zerus process runs (second_start).
+pub(crate) fn show_untrusted(context: tauri::Context<tauri::Wry>) {
     show_message(
         context,
         crate::native_text::render(&zerus_client_core::text!(
@@ -80,6 +80,21 @@ pub(crate) fn show_untrusted_pipe(context: tauri::Context<tauri::Wry>) {
 
 fn show_message(context: tauri::Context<tauri::Wry>, message: String) {
     let title = crate::native_text::render(&zerus_client_core::text!("Zerus could not start"));
+    show_notice(context, title, message, true);
+}
+
+/// One native message box, then exit; no window, source or writer exists.
+pub(crate) fn show_notice(
+    context: tauri::Context<tauri::Wry>,
+    title: String,
+    message: String,
+    error: bool,
+) {
+    let kind = if error {
+        MessageDialogKind::Error
+    } else {
+        MessageDialogKind::Info
+    };
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
@@ -87,7 +102,7 @@ fn show_message(context: tauri::Context<tauri::Wry>, message: String) {
             app.dialog()
                 .message(message)
                 .title(title)
-                .kind(MessageDialogKind::Error)
+                .kind(kind)
                 .show(move |_| quit.exit(0));
             Ok(())
         })

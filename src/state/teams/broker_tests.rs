@@ -436,3 +436,22 @@ fn only_a_folder_that_builds_is_offered_the_broker() {
     std::fs::write(cargo.path().join("Cargo.toml"), "[package]").unwrap();
     assert!(super::builds(cargo.path()));
 }
+
+/// Task 85: the CMake and MSBuild templates have toolchain keys from their
+/// version lines, never the bare template name, and the test ones are verdicts.
+#[test]
+fn cmake_and_msbuild_templates_key_on_their_version_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let cmake = toolchain("cmake-build", dir.path());
+    assert!(!cmake.starts_with("template:"), "{cmake}");
+    assert_eq!(toolchain("ctest", dir.path()), cmake, "ctest is CMake's");
+    assert_eq!(toolchain("cmake-configure", dir.path()), toolchain("qt-build", dir.path()));
+    let msbuild = toolchain("msbuild-build", dir.path());
+    assert!(!msbuild.starts_with("template:"), "{msbuild}");
+    assert_eq!(toolchain("vstest", dir.path()), msbuild);
+    assert!(verdict("ctest") && verdict("vstest") && !verdict("cmake-build") && !verdict("msbuild-build"));
+    let defaults = Config::default();
+    for template in ["cmake-configure", "cmake-build", "ctest", "msbuild-build", "vstest"] {
+        assert!(defaults.templates.iter().any(|known| known == template), "{template}");
+    }
+}

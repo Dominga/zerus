@@ -634,7 +634,7 @@ impl<'a> Ctx<'a> {
         // cited are the find's hit position. Ids and kinds only.
         crate::stats::record_write(&self.config, &outcome.records);
         let mut all = notes;
-        all.extend(outcome.notes.drain(..));
+        all.append(&mut outcome.notes);
         outcome.notes = all;
         let place = format!("{}/{}", self.config.remote, self.config.branch);
         let line = outcome.commit.as_ref().map(|commit| {

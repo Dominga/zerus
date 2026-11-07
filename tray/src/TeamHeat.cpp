@@ -1,4 +1,5 @@
 #include "TeamHeat.h"
+#include "TeamProfile.h"
 #include "Settings.h"
 #include "WorkspaceIcons.h"
 #include <QHBoxLayout>
@@ -213,6 +214,10 @@ QString heatLossName(const HeatLoss &loss)
         if (questions > 0 && d.value("lead_s").toInteger() > 0)
             return QObject::tr("Waited for the lead (decision %1, questions %2)").arg(workedText(d.value("lead_s").toInteger()), workedText(questions));
         return questions > 0 ? QObject::tr("Waited for the lead's answers") : QObject::tr("Waited for the lead's decision");
+    }
+    if (loss.kind == "person_wait") {
+        const QString reasons = TeamProfile::personReasons(d.value("reasons").toObject());
+        return reasons.isEmpty() ? QObject::tr("Waiting for a person's answer") : QObject::tr("Waiting for a person's answer (%1)").arg(reasons);
     }
     if (loss.kind == "permission_wait") {
         QStringList by; for (const auto &name : d.value("answered_by").toArray()) by << name.toString();

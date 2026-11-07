@@ -224,7 +224,10 @@ pub fn needs(root: &Path, config: &TestsConfig, os: &str, has_manager: &dyn Fn(M
             Kind::Npm => Some("npm"),
             // The wrapper fetches Gradle itself; it needs a JDK.
             Kind::Gradle => Some("java"),
-            Kind::Command => None,
+            Kind::Cython => Some("pytest"),
+            // Visual Studio's MSBuild is found through vswhere, and an
+            // engine is per machine: nothing to offer by name.
+            Kind::Command | Kind::Msbuild | Kind::Unreal => None,
         };
         if let Some(runner) = runner {
             add(runner, &provider.name, "", "");

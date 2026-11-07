@@ -121,3 +121,15 @@ fn plan_items_move_through_their_lifecycle() {
     writer.item_status(&store, "pl", "pl#1", "done", json!({"commits":["abcd1234"]}).as_object().unwrap(), &areas).unwrap();
     assert!(Writer::close_plan(&store, "pl", "finished", &areas).is_ok());
 }
+
+#[test]
+fn the_embed_provider_is_builtin_none_or_the_old_name_of_builtin() {
+    use zerus_lore::config::parse;
+    for text in ["builtin", "ollama", "none"] {
+        let data: toml::Value = toml::from_str(&format!("version = 1\n[embed]\nprovider = \"{text}\"")).unwrap();
+        assert_eq!(parse(&data, std::path::Path::new("."), "lore.toml").unwrap().embed_provider, text);
+    }
+    let data: toml::Value = toml::from_str("version = 1\n[embed]\nprovider = \"openai\"").unwrap();
+    let error = parse(&data, std::path::Path::new("."), "lore.toml").unwrap_err().to_string();
+    assert!(error.contains("builtin, ollama, none"), "{error}");
+}

@@ -102,6 +102,7 @@ export function kindName(kind: string, stageKind = ""): string {
     case "member": return tr("Waited for a free member");
     case "deps": return tr("Waited for dependencies");
     case "lead": return tr("Waited for the lead");
+    case "person": return tr("Waiting for a person's answer");
     case "folder_held": return tr("Folder held by another task");
     case "hold": return tr("Held");
     case "stage_wait": return tr("Waited for a stage");

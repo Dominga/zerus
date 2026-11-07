@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 
 pub const CONFIG_NAME: &str = "lore.toml";
 pub const MODES: &[&str] = &["none", "plain", "shared-tree"];
-pub const PROVIDERS: &[&str] = &["ollama", "none"];
+/// `builtin` is the nomic-embed-text model in this process and `none` is text only. `ollama` is the
+/// name Python's `lore init` and every lore.toml written before the owner dropped Ollama use: it
+/// means the built-in model too, and the `url`, `model` and `timeout` keys beside it are ignored.
+pub const PROVIDERS: &[&str] = &["builtin", "ollama", "none"];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {

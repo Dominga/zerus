@@ -1,10 +1,12 @@
 // U62 (#712): Activity and the composer: drafts, delivery, recovery and cold caches, from test_sessionswindow.
 #include "SessionsWindowFixture.h"
+#include <QSignalSpy>
 
 class TestSessionsWindow : public SessionsWindowFixture {
     Q_OBJECT
 private slots:
     void refreshErrorsStayInComposerAndFooterWithoutMovingViews();
+    void aTimedOutRefreshKeepsActivityAndRecoversByItself();
     void sessionLimitRecoveryShowsResetAndKeepsDraft();
     void heldMessagesShowTheTerminalDraftThatHoldsThem();
     void aHeldMessageThatFailsComesBackToTheComposer();
@@ -45,7 +47,9 @@ void TestSessionsWindow::refreshErrorsStayInComposerAndFooterWithoutMovingViews(
     client->inspectionFailed({}, "codex/hgs/dashboard", "timed out"); QTest::qWait(20);
     QVERIFY(window.findChild<QLabel *>("hint")->isHidden());
     auto *status = composer->findChild<QLabel *>("messageStatus");
-    QVERIFY(status->text().contains("Could not refresh activity: timed out")); QVERIFY(status->isVisible());
+    // Task 117: after a good read the failure names its time and retries.
+    QVERIFY(status->text().contains("Activity not refreshed since ")); QVERIFY(status->text().contains(", retrying: timed out"));
+    QVERIFY(status->isVisible());
     QCOMPARE(tabs->mapTo(&window, QPoint()), tabPosition); QCOMPARE(tabs->size(), tabSize);
     QCOMPARE(composer->editor()->geometry(), editorRect); QVERIFY(composer->editor()->isReadOnly());
     QCOMPARE(composer->editor()->toPlainText(), QString("Keep my exact draft"));
@@ -60,6 +64,46 @@ void TestSessionsWindow::refreshErrorsStayInComposerAndFooterWithoutMovingViews(
     client->inspectionReady({}, "codex/hgs/dashboard", details); QTest::qWait(20);
     QVERIFY(footer->isHidden()); QVERIFY(!composer->editor()->isReadOnly());
     QCOMPARE(composer->editor()->toPlainText(), QString("Keep my exact draft"));
+}
+
+// Task 117 (owner, 2026-11-06): Activity stuck on "Could not refresh activity:
+// timed out". A fake hgs answers the first inspect, fails the second as a timed
+// out read does (a real sleep past the 5 s limit left its killed stand-in
+// running into later tests) and answers again after that. With the details poll held off (as
+// a live event stream holds it), the window keeps the first read's Activity,
+// says since when it was not refreshed, reads again by itself and clears it.
+void TestSessionsWindow::aTimedOutRefreshKeepsActivityAndRecoversByItself()
+{
+    QFile original(script()); QVERIFY(original.open(QIODevice::ReadOnly));
+    const QJsonObject details{{"tracked",true},{"run_id","fixture-run"},{"conversation_id","fixture-conversation"},
+        {"runtime_state","live"},{"process_state","running"},{"phase","idle"},{"activity","idle"},{"cursor",1},
+        {"events",QJsonArray{QJsonObject{{"seq",1},{"type","Stop"},{"detail","the first read"}}}}};
+    const QByteArray answer = "elif c=='inspect':\n"
+        " import pathlib\n"
+        " n=pathlib.Path(__file__+'.inspects');k=int(n.read_text())+1 if n.exists() else 1;n.write_text(str(k))\n"
+        " if k==2:sys.stderr.write('timed out');sys.exit(1)\n"
+        " print(" + FakeCli::pythonString(QString::fromUtf8(QJsonDocument(details).toJson(QJsonDocument::Compact))) + ")\n";
+    const QString fixture = m_dir->filePath("slow-once");
+    QVERIFY(FakeCli::install(fixture, original.readAll().replace("if False:pass\n", "if False:pass\n" + answer)));
+    SessionsWindow window(FakeCli::program(fixture)); window.setFleet(fleet()); keepDetailsPollsOut(window);
+    window.show(); window.showSession({}, "codex/hgs/dashboard");
+    auto *composer = window.findChild<MessageComposer *>("messageComposer");
+    auto *status = composer->findChild<QLabel *>("messageStatus");
+    auto *activity = window.findChild<ActivityView *>("mainActivity")->browser();
+    QTRY_VERIFY_WITH_TIMEOUT(activity->toPlainText().contains("the first read"), 10000);
+    QFile count(fixture + ".inspects");
+    const auto reads = [&count] { count.open(QIODevice::ReadOnly); const int n = count.readAll().toInt(); count.close(); return n; };
+    // The second read (the window's own follow-up or this Refresh) fails: the
+    // last good Activity stays.
+    emit composer->sessionRefreshRequested(composer->sessionKey());
+    // The fixture's hgs echoes its arguments to stderr before the reason.
+    QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(", retrying: ") && status->text().contains("timed out"), 12000);
+    QVERIFY(status->text().contains("Activity not refreshed since "));
+    QVERIFY(activity->toPlainText().contains("the first read"));
+    // Nothing asks again, yet it reads by itself and clears the notice.
+    QTRY_VERIFY_WITH_TIMEOUT(!status->text().contains("retrying"), 10000);
+    QVERIFY(reads() >= 3);
+    QVERIFY(activity->toPlainText().contains("the first read"));
 }
 
 void TestSessionsWindow::sessionLimitRecoveryShowsResetAndKeepsDraft()
@@ -174,10 +218,21 @@ else:print('{}')
     const auto body = QJsonDocument::fromJson(log.readAll().split('\n').first()).object(); log.close();
     QVERIFY(body["queue_when_unconfirmed"].toBool());
     QTRY_VERIFY_WITH_TIMEOUT(composer->editor()->toPlainText().isEmpty(), 15000);
+    auto *client = window.findChild<HgsClient *>(); QVERIFY(client);
     QVERIFY(FakeCli::replace(temp.filePath("held.json"), "[]"));
     QVERIFY(FakeCli::replace(temp.filePath("settled.json"), QJsonDocument(QJsonArray{QJsonObject{{"request_id", body["request_id"]},
         {"text", body["text"]}, {"status", "failed"}, {"error", "session identity changed; nothing was sent"}}}).toJson()));
-    QTRY_COMPARE_WITH_TIMEOUT(composer->editor()->toPlainText(), QStringLiteral("Also run the tests"), 15000);
+    // Task 120: the send's own read may still be in flight here, holding the
+    // files as they were before the settlement (the run after midnight showed
+    // exactly that: its reply still listed the message as held), and the details
+    // poll is kept out (24 h), so nothing else reads again. The test asks for one
+    // read that starts after the files changed and waits for that reply: the
+    // client runs one inspection per session, so the reply after a successful
+    // request is the new one.
+    QSignalSpy replies(client, &HgsClient::inspectionReady); qsizetype issued = -1;
+    QTRY_VERIFY(issued >= 0 || (client->requestInspection({}, "codex/hgs/dashboard") && (issued = replies.size(), true)));
+    QTRY_VERIFY(replies.size() > issued);
+    QCOMPARE(composer->editor()->toPlainText(), QStringLiteral("Also run the tests"));
     QTRY_VERIFY(window.findChild<QLabel *>("notice")->text().contains(QStringLiteral("Not delivered: session identity changed")));
     QVERIFY(window.findChild<QLabel *>("notice")->property("error").toBool());
     // Only once: a new draft stays as it is on the next reads.

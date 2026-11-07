@@ -29,6 +29,21 @@ Run Run::parse(const QJsonObject &record)
     run.askedBy = record.value("asked_by").toString();
     run.commit = record.value("commit").toString();
     run.excerpt = record.value("excerpt").toString();
+    // Task 88: the per-test report, when the provider names one.
+    if (record.value("report").isObject()) {
+        const auto report = record.value("report").toObject();
+        run.hasReport = true;
+        run.passed = report.value("passed").toInt();
+        run.failed = report.value("failed").toInt();
+        run.skipped = report.value("skipped").toInt();
+        run.errors = report.value("errors").toInt();
+        run.reportNote = report.value("note").toString();
+        for (const auto &value : report.value("results").toArray()) {
+            const auto item = value.toObject();
+            run.tests.append({item.value("suite").toString(), item.value("name").toString(), item.value("status").toString(),
+                              item.value("message").toString(), qint64(item.value("ms").toDouble())});
+        }
+    }
     run.task = record.value("task").toInt();
     run.at = record.value("at").toDouble();
     run.durationMs = qint64(record.value("duration_ms").toDouble());
@@ -75,6 +90,16 @@ QString Run::flakyTip() const
 {
     if (flakyRuns > 0) return QObject::tr("%1 of the last %2 runs failed").arg(flakyFailed).arg(flakyRuns);
     return QObject::tr("Failed, then passed on its automatic retry");
+}
+
+QString Run::countsText() const
+{
+    QStringList parts;
+    if (passed) parts << QObject::tr("%1 passed").arg(passed);
+    if (failed) parts << QObject::tr("%1 failed").arg(failed);
+    if (errors) parts << QObject::tr("%1 errors").arg(errors);
+    if (skipped) parts << QObject::tr("%1 skipped").arg(skipped);
+    return parts.isEmpty() ? QObject::tr("no tests reported") : parts.join(QStringLiteral(", "));
 }
 
 QString runnerName(const QString &runner)
@@ -578,6 +603,9 @@ QWidget *TeamTestsView::historyRow(const Run &run)
     machine->setToolTip(run.runner.isEmpty() ? tr("Ran on this computer") : tr("Ran on the test runner %1 over SSH").arg(run.runner));
     h->addWidget(machine);
     if (!run.askedBy.isEmpty()) h->addWidget(inert(label(tr("asked by %1").arg(run.askedBy), c.muted, 11)));
+    // Task 88: how its tests went, from the provider's report.
+    if (run.hasReport)
+        h->addWidget(inert(label(run.countsText(), run.failed + run.errors ? c.danger : c.text2, 11, false, "teamTestsCounts")));
     connect(top, &QPushButton::clicked, this, [this, id = run.id] { m_open = m_open == id ? QString() : id; render(); });
     auto *head = row(8); head->addWidget(top, 1);
     if (run.task) head->addWidget(taskLink(run.task));
@@ -598,6 +626,38 @@ QWidget *TeamTestsView::historyRow(const Run &run)
                                    .arg(c.bg.name(), c.fg.name(), c.border.name()));
         const int lines = std::clamp(int(run.excerpt.count(QLatin1Char('\n'))) + 2, 3, 16);
         excerpt->setFixedHeight(excerpt->fontMetrics().lineSpacing() * lines + 14);
+        // Task 88: each test of the report, failures first (the record keeps
+        // them in that order), at most 200 rows here.
+        if (run.hasReport) {
+            v->addWidget(label(tr("Tests: %1").arg(run.countsText()), c.text2, 12, true, "teamTestsCasesTitle"));
+            if (!run.reportNote.isEmpty()) v->addWidget(label(run.reportNote, c.muted, 11, false, "teamTestsReportNote"));
+            const int shown = std::min<int>(int(run.tests.size()), 200);
+            for (int index = 0; index < shown; ++index) {
+                const auto &test = run.tests[index];
+                const bool bad = test.status == QLatin1String("failed") || test.status == QLatin1String("error");
+                auto *line = new QWidget; line->setObjectName("teamTestsCase");
+                line->setProperty("status", test.status); line->setProperty("name", test.name);
+                auto *lh = new QHBoxLayout(line); lh->setContentsMargins(4, 0, 0, 0); lh->setSpacing(8);
+                lh->addWidget(glyphLabel(bad ? QStringLiteral("failed") : test.status == QLatin1String("skipped") ? QStringLiteral("reused") : QStringLiteral("passed"), c));
+                const QString name = test.suite.isEmpty() || test.name.startsWith(test.suite) ? test.name : test.suite + QStringLiteral("::") + test.name;
+                auto *named = label(name, bad ? c.fg : c.text2, 11, bad, "teamTestsCaseName");
+                named->setTextInteractionFlags(Qt::TextSelectableByMouse);
+                lh->addWidget(named, 1);
+                lh->addWidget(label(runTime(test.ms), c.muted, 11, false, "teamTestsCaseTime"));
+                v->addWidget(line);
+                if (!test.message.isEmpty()) {
+                    auto *message = label(test.message, bad ? c.danger : c.muted, 11, false, "teamTestsCaseMessage");
+                    message->setWordWrap(true); message->setTextInteractionFlags(Qt::TextSelectableByMouse);
+                    message->setContentsMargins(28, 0, 0, 0);
+                    v->addWidget(message);
+                }
+            }
+            // The report counts every test; the record keeps at most 5000 and
+            // this list 200.
+            const int total = run.passed + run.failed + run.skipped + run.errors;
+            if (total > shown)
+                v->addWidget(label(tr("%1 more tests in the record").arg(total - shown), c.muted, 11, false, "teamTestsCasesMore"));
+        }
         v->addWidget(excerpt);
     }
     return frame;

@@ -11,7 +11,9 @@ vi.hoisted(() => {
   vi.stubGlobal("window", { document, addEventListener: () => {}, removeEventListener: () => {} });
   vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }));
 });
-vi.mock("../../bridge", () => ({
+vi.mock("../../bridge", async (importOriginal) => ({
+  // Every bridge call the screens import exists; the entries below replace the ones this test drives.
+  ...(await importOriginal<typeof import("../../bridge")>()),
   // The task store reads further board pages through this bridge call.
   readTaskPage: vi.fn(async () => ({ tasks: [], page: { next: null } })),
   // The session entry points also initialize the bounded creation-card store.

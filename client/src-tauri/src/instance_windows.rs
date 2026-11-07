@@ -415,6 +415,16 @@ fn send_reply(pipe: &OwnedHandle, stop: &AtomicBool, end: Instant, bytes: &[u8])
     }
 }
 
+/// FILE_FLAG_FIRST_PIPE_INSTANCE refuses with ERROR_ACCESS_DENIED (or the
+/// pipe is busy) when another server already holds the name: the Qt GUI or
+/// another Zerus that this start could neither reach nor verify. That is a
+/// running Zerus, not a broken start (task 110); other errors stay failures.
+fn refused_pipe(error: io::Error) -> Claim {
+    match error.raw_os_error().map(|code| code as u32) {
+        Some(ERROR_ACCESS_DENIED | ERROR_PIPE_BUSY) => Claim::Duplicate("activation_pipe_held"),
+        _ => Claim::Failed(error.to_string()),
+    }
+}
 fn create_pipe(name: &str, security: &Security) -> io::Result<OwnedHandle> {
     let attrs = security.attributes();
     let pipe_name = wide(&format!(r"\\.\pipe\{name}"));
@@ -584,7 +594,7 @@ fn claim_guarded(
     };
     let pipe = match create_pipe(name, &security) {
         Ok(pipe) => pipe,
-        Err(error) => return Claim::Failed(error.to_string()),
+        Err(error) => return refused_pipe(error),
     };
     let canonical_pipe = match canonical
         .as_ref()
@@ -592,7 +602,7 @@ fn claim_guarded(
         .transpose()
     {
         Ok(pipe) => pipe,
-        Err(error) => return Claim::Failed(error.to_string()),
+        Err(error) => return refused_pipe(error),
     };
     let (tx, rx) = mpsc::sync_channel(32);
     admitted();
@@ -1502,6 +1512,47 @@ mod tests {
             panic!("released claim")
         };
         drop(next);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Task 110: a server that holds the name but answers nobody (its only
+    /// instance is taken, as when the Qt GUI or a hung Zerus keeps it) makes
+    /// this start a duplicate, never a silent failure.
+    #[test]
+    fn a_held_pipe_that_never_answers_is_a_running_zerus_not_a_failure() {
+        let root = std::env::temp_dir().join(format!("zerus-held-test-{}", uuid::Uuid::new_v4()));
+        let name = format!("zerus-test-{}", uuid::Uuid::new_v4());
+        let security = Security::user_only().unwrap();
+        let held = create_pipe(&name, &security).unwrap();
+        let pipe = wide(&format!(r"\\.\pipe\{name}"));
+        let occupant = owned(unsafe {
+            CreateFileW(
+                pipe.as_ptr(),
+                FILE_WRITE_DATA,
+                0,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                std::ptr::null_mut(),
+            )
+        })
+        .expect("the only pipe instance is taken");
+        let claim = claim_at(&name, &root, Activation::Sessions);
+        assert!(
+            matches!(claim, Claim::Duplicate("activation_pipe_held")),
+            "{}",
+            match &claim {
+                Claim::Failed(error) => error.clone(),
+                _ => "another outcome".into(),
+            }
+        );
+        drop(claim);
+        drop(occupant);
+        drop(held);
+        let Claim::Claimed(owner) = claim_at(&name, &root, Activation::Show) else {
+            panic!("the released name is claimed again")
+        };
+        drop(owner);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

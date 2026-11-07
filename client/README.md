@@ -315,6 +315,15 @@ npm run tauri -- build --no-bundle --config src-tauri/target/fork-dev-identity.j
 .\src-tauri\target\release\zerus-client.exe --build-info
 ```
 
+A second start of the installed identity while another Zerus runs (the Qt GUI,
+or a Zerus Next that does not answer its pipe) never exits silently
+(`src-tauri/src/second_start.rs`). It looks for this user's other
+`hgs-tray.exe` in the same Windows session, brings an already visible window of
+it to the front with its own foreground right, and otherwise shows a native
+message naming the client (Qt when `Qt6Core.dll` is loaded) and its process and
+how to switch. It writes nothing to a pipe it could not verify. A
+`--background` start stays quiet; the update restart is unchanged.
+
 `--build-info` starts nothing; it must print `"CFBundleIdentifier":
 "dev.zerus.next"` and `"ZerusGUI": "tauri"`. If it names `com.hgdev.hgs-tray`,
 the override did not apply and the build must not run beside Qt.

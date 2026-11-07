@@ -423,6 +423,10 @@ pub(crate) fn template_folders(template: &str, args: &Value, folder: &Path) -> V
             .collect()
     } else if template.starts_with("qt-") {
         vec![(folder.join(".ci-build").join("gui"), "cmake_build")]
+    } else if matches!(template, "cmake-configure" | "cmake-build" | "ctest") {
+        // Task 85: the build folder a CMake template names (default build).
+        let named = args["build_dir"].as_str().filter(|dir| !dir.is_empty()).unwrap_or(crate::state::teams::templates::CMAKE_BUILD_DIR);
+        vec![(folder.join(named), "cmake_build")]
     } else {
         Vec::new()
     }

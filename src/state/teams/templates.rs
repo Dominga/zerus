@@ -28,6 +28,9 @@ pub(crate) enum Kind {
     Text,
     /// A list of paths inside the member's folder.
     Paths,
+    /// Task 85: one path inside the member's folder that may not exist yet
+    /// (a build folder the configure creates).
+    Path,
 }
 
 /// One typed placeholder.
@@ -127,7 +130,31 @@ pub(crate) const BUILTIN: &[Template] = &[
         ],
         timeout_secs: 1800,
     },
-    // Owner, 2026-10-28: QA ran the Android tests by hand, a permission each.
+    // Task 86: the project's own interpreter runs pytest; typed -k/-m and node
+    // names, never a shell string. JUnit XML and per-test rows stay the
+    // provider's job.
+    Template {
+        id: "py-test",
+        summary: "the project .venv interpreter runs pytest (typed -k expression, -m mark, node names and test file or folder paths; JUnit XML in .zerus-team/python)",
+        program: "python",
+        args: &["-m", "pytest", "-q", "--junitxml=.zerus-team/python/junit.xml", "-k={filter}", "-m={mark}", "{tests}", "{paths}"],
+        params: &[
+            optional("filter", Kind::Text),
+            optional("mark", Kind::Identifier),
+            optional("tests", Kind::Identifiers),
+            // Task 137: the test files `hgs test affected` chose.
+            optional("paths", Kind::Paths),
+        ],
+        timeout_secs: 1800,
+    },
+    Template {
+        id: "cython-build",
+        summary: "the project .venv interpreter rebuilds the Cython extensions in place (setup.py build_ext --inplace)",
+        program: "python",
+        args: &["setup.py", "build_ext", "--inplace", "{sources}"],
+        params: &[optional("sources", Kind::Paths)],
+        timeout_secs: 1800,
+    },    // Owner, 2026-10-28: QA ran the Android tests by hand, a permission each.
     Template {
         id: "android-test",
         summary: "the Android unit tests (gradlew :app:testDebugUnitTest) with Gradle's home and cache in your folder",
@@ -162,7 +189,92 @@ pub(crate) const BUILTIN: &[Template] = &[
         params: &[param("message", Kind::Text), optional("paths", Kind::Paths)],
         timeout_secs: 300,
     },
+    // Task 87: the engine is a per-machine path; the project must exist.
+    Template {
+        id: "ue-build",
+        summary: "Unreal Build Tool builds a target (engine path, project, target, platform, configuration; -Project=*.uproject)",
+        program: "{engine}/Engine/Build/BatchFiles/Build.bat",
+        args: &["{project}", "{target}", "{platform}", "{config}", "-Project={project}"],
+        params: &[
+            optional("engine", Kind::Text), param("project", Kind::Path),
+            param("target", Kind::Identifier), optional("platform", Kind::Identifier), optional("config", Kind::Identifier),
+            optional("files", Kind::Paths),
+        ],
+        timeout_secs: 3600,
+    },
+    Template {
+        id: "ue-test",
+        summary: "UnrealEditor-Cmd runs automation tests headless and exports a report (-nullrhi -unattended -ExecCmds)",
+        program: "{engine}/Engine/Binaries/Win64/UnrealEditor-Cmd.exe",
+        args: &["{project}", "-nullrhi", "-unattended", "-saveddir=.zerus-team/ue/Saved", "-abslog=.zerus-team/ue/Unreal.log", "-ExecCmds=Automation RunTests {filters};Quit", "-ReportExportPath=.zerus-team/results/unreal"],
+        params: &[optional("engine", Kind::Text), param("project", Kind::Path), optional("filters", Kind::Text), optional("files", Kind::Paths)],
+        timeout_secs: 3600,
+    },    // Task 85 (owner, 2026-11-06: builds and tests of any stack): any CMake
+    // project, not only tray/; qt-configure and qt-build are these with their
+    // fixed values.
+    Template {
+        id: "cmake-configure",
+        summary: "cmake configure of any CMake project: source (default .), build_dir (default build), optional generator, config, preset",
+        program: "cmake",
+        args: &["-S", "{source}", "-B", "{build_dir}", "-G", "{generator}", "-DCMAKE_BUILD_TYPE={config}", "--preset", "{preset}"],
+        params: &[
+            optional("source", Kind::Path),
+            optional("build_dir", Kind::Path),
+            optional("generator", Kind::Text),
+            optional("config", Kind::Identifier),
+            optional("preset", Kind::Identifier),
+            optional("files", Kind::Paths),
+        ],
+        timeout_secs: 1200,
+    },
+    Template {
+        id: "cmake-build",
+        summary: "cmake --build of a configured build folder (default build): optional config and targets",
+        program: "cmake",
+        args: &["--build", "{build_dir}", "--config", "{config}", "--target", "{targets}"],
+        params: &[optional("build_dir", Kind::Path), optional("config", Kind::Identifier), optional("targets", Kind::Identifiers), optional("files", Kind::Paths)],
+        timeout_secs: 3600,
+    },
+    Template {
+        id: "ctest",
+        summary: "ctest in a build folder (default build): the tests by name or a -R regex, optional config; one result per test from its JUnit report",
+        program: "ctest",
+        args: &["--test-dir", "{build_dir}", "-C", "{config}", "-R", "{regex}", "{tests}"],
+        params: &[
+            optional("build_dir", Kind::Path),
+            optional("config", Kind::Identifier),
+            optional("tests", Kind::Identifiers),
+            optional("regex", Kind::Text),
+            optional("files", Kind::Paths),
+        ],
+        timeout_secs: 1800,
+    },
+    Template {
+        id: "msbuild-build",
+        summary: "MSBuild of a .sln or project file in your folder (Windows, Visual Studio's MSBuild): optional config, platform and targets",
+        program: "msbuild",
+        args: &["{project}", "/p:Configuration={config}", "/p:Platform={platform}", "/t:{targets}"],
+        params: &[
+            param("project", Kind::Paths),
+            optional("config", Kind::Identifier),
+            optional("platform", Kind::Text),
+            optional("targets", Kind::Identifiers),
+            optional("files", Kind::Paths),
+        ],
+        timeout_secs: 3600,
+    },
+    Template {
+        id: "vstest",
+        summary: "vstest.console on test assemblies in your folder (Windows), optional test case filter; one result per test from its TRX report",
+        program: "vstest.console",
+        args: &["{tests}", "/TestCaseFilter:{filter}"],
+        params: &[param("tests", Kind::Paths), optional("filter", Kind::Text), optional("files", Kind::Paths)],
+        timeout_secs: 1800,
+    },
 ];
+
+/// Task 85: the build folder a CMake template uses when none is named.
+pub(crate) const CMAKE_BUILD_DIR: &str = "build";
 
 /// A validated run: the program, argv and the JSON payload of `git-commit`.
 #[derive(Clone, Debug, PartialEq)]
@@ -339,7 +451,8 @@ pub(crate) struct CacheUse {
 pub(crate) fn cache_use(template: &str, folder: &Path) -> CacheUse {
     let mut used = CacheUse::default();
     let cargo = matches!(template, "cargo-build" | "cargo-test" | "cargo-clippy");
-    let qt = matches!(template, "qt-configure" | "qt-build");
+    // Task 85: the CMake templates of any project use the C and C++ cache too.
+    let qt = matches!(template, "qt-configure" | "qt-build" | "cmake-configure" | "cmake-build");
     if !cargo && !qt {
         return used;
     }
@@ -451,6 +564,18 @@ pub(crate) fn timeout_for(id: &str) -> u64 {
         .unwrap_or(1800)
 }
 
+/// Task 85: a project template's own timeout, read from the folder it runs in.
+pub(crate) fn timeout_in(id: &str, folder: &Path) -> u64 {
+    if builtin(id).is_none() && addition(id).is_none() {
+        if let Ok(loaded) = crate::test_discipline::config::load(folder, None) {
+            if let Some(seconds) = loaded.config.templates.iter().find(|template| template.id == id).and_then(|template| template.timeout_secs) {
+                return seconds.clamp(1, 86_400);
+            }
+        }
+    }
+    timeout_for(id)
+}
+
 /// Every template a member may name: the built-ins (when the switch is on) and
 /// the owner's additions, marked so the owner sees only the additions.
 pub(crate) fn listed() -> Value {
@@ -546,10 +671,26 @@ enum Words {
 
 fn value_of(params: &[Param], args: &Value, name: &str, folder: &Path) -> anyhow::Result<Option<Words>> {
     let Some(param) = params.iter().find(|param| param.name == name) else { return Ok(None) };
+    typed_value(param.kind, param.required, args, name, folder)
+}
+
+/// Task 85: one placeholder's checked value, for a built-in's parameter or a
+/// project template's declared one alike.
+fn typed_value(kind: Kind, required: bool, args: &Value, name: &str, folder: &Path) -> anyhow::Result<Option<Words>> {
+    let param = Param { name: "", kind, required };
     let value = &args[name];
     // A value of the wrong type is refused, not read as empty.
     ensure!(value.is_null() || value.is_string() || matches!(value, Value::Array(_)), "The template's \"{name}\" has the wrong type");
     match param.kind {
+        Kind::Path => {
+            let text = value.as_str().unwrap_or_default();
+            if text.is_empty() {
+                ensure!(!param.required, "The template needs \"{name}\"");
+                return Ok(None);
+            }
+            check_path(text, name)?;
+            Ok(Some(Words::One(text.trim_end_matches(['/', '\\']).to_owned())))
+        }
         Kind::Identifier | Kind::Text => {
             let text = value.as_str().unwrap_or_default();
             if text.is_empty() {
@@ -592,6 +733,96 @@ fn value_of(params: &[Param], args: &Value, name: &str, folder: &Path) -> anyhow
     }
 }
 
+/// Task 86: the project's own interpreter, never created or synced. uv,
+/// poetry and plain venvs all live in `.venv` or `venv`; a project without one
+/// is refused with the reason.
+fn interpreter(folder: &Path) -> anyhow::Result<(String, Vec<String>)> {
+    for candidate in [".venv/Scripts/python.exe", ".venv/bin/python", "venv/Scripts/python.exe", "venv/bin/python"] {
+        if folder.join(candidate).is_file() {
+            return Ok((candidate.to_owned(), Vec::new()));
+        }
+    }
+    // uv and poetry own their environment: use their runner, never create one.
+    if folder.join("uv.lock").is_file() {
+        return Ok(("uv".into(), vec!["run".into(), "python".into()]));
+    }
+    if folder.join("poetry.lock").is_file() {
+        let output = Command::new("poetry").args(["env", "info", "-p"]).current_dir(folder).output();
+        if let Ok(output) = output {
+            if output.status.success() {
+                let root = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+                let python = if cfg!(windows) { format!("{root}/Scripts/python.exe") } else { format!("{root}/bin/python") };
+                if Path::new(&python).is_file() {
+                    return Ok((python, Vec::new()));
+                }
+            }
+        }
+        bail!("poetry.lock has no Poetry environment; run `poetry env use` yourself; Zerus never creates or syncs one");
+    }
+    bail!("No project Python environment: create .venv with uv, poetry or venv first; Zerus never creates or syncs one")
+}
+/// Task 87: one registry string; the system reader queries reg.exe.
+trait EngineRegistry {
+    fn value(&self, root: &str, key: &str, name: &str) -> Option<String>;
+}
+struct SystemRegistry;
+impl EngineRegistry for SystemRegistry {
+    fn value(&self, root: &str, key: &str, name: &str) -> Option<String> {
+        // reg.exe from System32, never one found on the PATH.
+        let system = std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from("C:\\Windows"), PathBuf::from);
+        let output = Command::new(system.join("System32").join("reg.exe")).args(["query", &format!("{root}\\{key}"), "/v", name]).output().ok()?;
+        if !output.status.success() { return None; }
+        parse_reg_value(&String::from_utf8_lossy(&output.stdout), name)
+    }
+}
+
+/// The data of the value `name` in what `reg query KEY /v NAME` prints:
+/// `    InstalledDirectory    REG_SZ    D:\EGS\UE_5.3`. The type token is not
+/// part of it and the data is kept verbatim (a path with spaces stays whole).
+fn parse_reg_value(text: &str, name: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let rest = line.trim_start().strip_prefix(name)?;
+        // The whole name, not a longer one that starts with it.
+        if !rest.starts_with(char::is_whitespace) {
+            return None;
+        }
+        let rest = rest.trim_start();
+        let (kind, data) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        let data = data.trim();
+        (matches!(kind, "REG_SZ" | "REG_EXPAND_SZ") && !data.is_empty()).then(|| data.to_owned())
+    })
+}
+
+/// The engine from the project's EngineAssociation: a launcher version reads
+/// HKLM InstalledDirectory, a source-build GUID reads HKCU Builds. The
+/// per-machine override wins; a missing engine names every place tried.
+fn unreal_engine(project: &Path, override_path: Option<&str>, registry: &dyn EngineRegistry) -> anyhow::Result<String> {
+    if let Some(path) = override_path.filter(|path| !path.trim().is_empty()) {
+        return Ok(path.to_owned());
+    }
+    if let Some(path) = std::env::var("ZERUS_UE_ENGINE").ok().filter(|path| !path.trim().is_empty()) {
+        return Ok(path);
+    }
+    let text = std::fs::read_to_string(project).unwrap_or_default();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+    let association = value.get("EngineAssociation").and_then(serde_json::Value::as_str).unwrap_or_default();
+    if association.is_empty() {
+        bail!("{} names no EngineAssociation", project.display());
+    }
+    // A launcher engine ("5.3", "4.27"): HKLM\SOFTWARE\EpicGames\Unreal Engine\<version>,
+    // value InstalledDirectory. A source build (a GUID): HKCU\Software\Epic Games\
+    // Unreal Engine\Builds, a value named like the GUID. Both as reg.exe prints them.
+    let version = association.chars().all(|c| c.is_ascii_digit() || c == '.');
+    let (root, key, name) = if version {
+        ("HKLM", format!("SOFTWARE\\EpicGames\\Unreal Engine\\{association}"), "InstalledDirectory")
+    } else {
+        ("HKCU", "Software\\Epic Games\\Unreal Engine\\Builds".to_owned(), association)
+    };
+    if let Some(path) = registry.value(root, &key, name) {
+        return Ok(path);
+    }
+    bail!("No Unreal engine for EngineAssociation {association}: looked in {root}\\{key} (value {name}), ZERUS_UE_ENGINE, and the engine override")
+}
 /// Validates a run request and builds the exact program and argv (U21). Nothing
 /// here reads a shell: every value is one argv element, or spliced as whole
 /// elements for the list placeholders.
@@ -607,11 +838,47 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
             }
             return Ok(Plan { template: id.to_owned(), program, argv, commit: None, more: Vec::new() });
         }
+        // Task 85: a [[template]] of the folder's .zerus/tests.toml, typed like
+        // a built-in, once the owner accepted its exact content.
+        if let Some(found) = project_template(folder, id)? {
+            ensure!(enabled(), "The built-in command templates are turned off in Settings > Teams");
+            return project_plan(&found, args, folder);
+        }
     }
     let Some(template) = builtin(id) else { bail!("Unknown template {id}") };
     ensure!(enabled(), "The built-in command templates are turned off in Settings > Teams");
+    let mut args = args.clone();
+    let mut editor: Option<String> = None;
+    if matches!(template.id, "ue-build" | "ue-test") {
+        let project = args["project"].as_str().unwrap_or_default();
+        if project.is_empty() { bail!("The template {id} needs a project"); }
+        let engine = unreal_engine(&folder.join(project), args["engine"].as_str(), &SystemRegistry)?;
+        if template.id == "ue-test" {
+            // Task 90: -ExecCmds takes `;`-separated console commands, so the filter
+            // is one filter: no `;` and no line break. The engine, wherever it is
+            // named from, must hold the editor Zerus runs (4.x names it UE4Editor-Cmd).
+            let filters = args["filters"].as_str().unwrap_or_default();
+            ensure!(!filters.contains(';') && !filters.contains(['\n', '\r']), "The template's \"filters\" is one automation filter: no ';' and no line break");
+            let bin = Path::new(&engine).join("Engine").join("Binaries").join("Win64");
+            let name = ["UnrealEditor-Cmd.exe", "UE4Editor-Cmd.exe"].into_iter().find(|name| bin.join(name).is_file());
+            let Some(name) = name else { bail!("The Unreal engine {engine} holds no Engine/Binaries/Win64/UnrealEditor-Cmd.exe (or UE4Editor-Cmd.exe)") };
+            editor = Some(format!("{}/Engine/Binaries/Win64/{name}", engine.trim_end_matches(['/', '\\'])));
+        }
+        args["engine"] = json!(engine);
+    }
+    let args = &args;
     for (key, _) in args.as_object().into_iter().flatten() {
         ensure!(template.params.iter().any(|param| param.name == key), "The template {id} has no \"{key}\"");
+    }
+    // Task 85: the CMake and MSBuild templates build their argv themselves;
+    // qt-configure and qt-build are the CMake ones with their fixed values.
+    match template.id {
+        "cmake-configure" | "qt-configure" => return cmake_configure(template, args, folder),
+        "cmake-build" | "qt-build" => return cmake_build(template, args, folder),
+        "ctest" => return ctest(template, args, folder),
+        "msbuild-build" => return msbuild_build(template, args, folder),
+        "vstest" => return vstest(template, args, folder),
+        _ => {}
     }
     if template.id == "git-commit" {
         let message = args["message"].as_str().unwrap_or_default().to_owned();
@@ -628,7 +895,13 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
         }
         return Ok(Plan { template: "git-commit".to_owned(), program: "hgs".into(), argv: vec!["team".into(), "commit".into(), "--json".into()], commit: Some(json!({"message":message,"paths":paths})), more: Vec::new() });
     }
-    let mut program = template.program.to_owned();
+    let (mut program, prefix) = if matches!(template.id, "py-test" | "cython-build") {
+        let (python, prefix) = interpreter(folder)?;
+        if template.id == "py-test" { let _ = std::fs::create_dir_all(folder.join(".zerus-team").join("python")); }
+        (python, prefix)
+    } else {
+        (template.program.to_owned(), Vec::new())
+    };
     let mut argv = Vec::new();
     for raw in template.args {
         if let Some(name) = whole_placeholder(raw) {
@@ -656,6 +929,7 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
         if keep {
             argv.push(element);
         }    }
+    argv.splice(0..0, prefix);
     // qt-test names its binaries itself (below).
     for placeholder in placeholders(&program).into_iter().filter(|_| template.id != "qt-test") {
         let Some(Words::One(word)) = value_of(template.params, args, &placeholder, folder)? else {
@@ -663,20 +937,8 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
         };
         program = program.replace(&format!("{{{placeholder}}}"), &word);
     }
-    if template.id == "qt-configure" {
-        // U62 (#721): the compiler launcher of the build cache, or none.
-        if let Some(launcher) = cache_use(template.id, folder).launcher {
-            argv.push(format!("-DCMAKE_C_COMPILER_LAUNCHER={launcher}"));
-            argv.push(format!("-DCMAKE_CXX_COMPILER_LAUNCHER={launcher}"));
-        }
-    }
-    if template.id == "qt-build" {
-        // U21: cmake takes each target after one `--target`; Zerus adds the
-        // flag itself, so a target is never read as another option.
-        if let Some(Words::Many(targets)) = value_of(template.params, args, "targets", folder)? {
-            argv.push("--target".into());
-            argv.extend(targets);
-        }
+    if let Some(editor) = editor {
+        program = editor;
     }
     let mut more = Vec::new();
     if template.id == "cargo-test" {
@@ -786,6 +1048,369 @@ pub(crate) fn plan(id: &str, args: &Value, folder: &Path) -> anyhow::Result<Plan
     Ok(Plan { template: template.id.to_owned(), program, argv, commit: None, more })
 }
 
+/// One optional placeholder of a built-in as a single word.
+fn one(template: &Template, args: &Value, name: &str, folder: &Path) -> anyhow::Result<Option<String>> {
+    Ok(match value_of(template.params, args, name, folder)? {
+        Some(Words::One(word)) => Some(word),
+        Some(Words::Many(mut words)) if words.len() == 1 => words.pop(),
+        Some(Words::Many(_)) => bail!("The template's \"{name}\" is one value"),
+        None => None,
+    })
+}
+
+/// One optional list placeholder of a built-in.
+fn many(template: &Template, args: &Value, name: &str, folder: &Path) -> anyhow::Result<Vec<String>> {
+    Ok(match value_of(template.params, args, name, folder)? {
+        Some(Words::Many(words)) => words,
+        Some(Words::One(word)) => vec![word],
+        None => Vec::new(),
+    })
+}
+
+/// Task 85: the configure argv of a CMake project. qt-configure is this with
+/// tray, .ci-build/gui, Ninja and Release, so its argv is what it always was.
+pub(crate) fn cmake_configure_argv(source: &str, build_dir: &str, generator: Option<&str>, config: Option<&str>, preset: Option<&str>, launcher: Option<&str>) -> Vec<String> {
+    let mut argv: Vec<String> = vec!["-S".into(), source.into(), "-B".into(), build_dir.into()];
+    if let Some(generator) = generator {
+        argv.extend(["-G".into(), generator.into()]);
+    }
+    if let Some(config) = config {
+        argv.push(format!("-DCMAKE_BUILD_TYPE={config}"));
+    }
+    if let Some(preset) = preset {
+        argv.extend(["--preset".into(), preset.into()]);
+    }
+    // U62 (#721): the compiler launcher of the build cache, or none.
+    if let Some(launcher) = launcher {
+        argv.push(format!("-DCMAKE_C_COMPILER_LAUNCHER={launcher}"));
+        argv.push(format!("-DCMAKE_CXX_COMPILER_LAUNCHER={launcher}"));
+    }
+    argv
+}
+
+fn plain(template: &str, program: &str, argv: Vec<String>) -> Plan {
+    Plan { template: template.to_owned(), program: program.to_owned(), argv, commit: None, more: Vec::new() }
+}
+
+fn cmake_configure(template: &Template, args: &Value, folder: &Path) -> anyhow::Result<Plan> {
+    let launcher = cache_use(template.id, folder).launcher;
+    if template.id == "qt-configure" {
+        return Ok(plain(template.id, "cmake", cmake_configure_argv("tray", ".ci-build/gui", Some("Ninja"), Some("Release"), None, launcher.as_deref())));
+    }
+    let source = one(template, args, "source", folder)?.unwrap_or_else(|| ".".into());
+    ensure!(folder.join(&source).join("CMakeLists.txt").is_file(), "There is no CMakeLists.txt in {source} of your folder");
+    let build_dir = one(template, args, "build_dir", folder)?.unwrap_or_else(|| CMAKE_BUILD_DIR.into());
+    ensure!(build_dir != "." && build_dir != source, "The build folder is its own folder, not the sources");
+    let generator = one(template, args, "generator", folder)?;
+    if let Some(generator) = &generator {
+        ensure!(generator.chars().count() <= 100 && !generator.contains('\n'), "A CMake generator is one line of at most 100 characters");
+    }
+    let config = one(template, args, "config", folder)?;
+    let preset = one(template, args, "preset", folder)?;
+    let argv = cmake_configure_argv(&source, &build_dir, generator.as_deref(), config.as_deref(), preset.as_deref(), launcher.as_deref());
+    Ok(plain(template.id, "cmake", argv))
+}
+
+fn cmake_build(template: &Template, args: &Value, folder: &Path) -> anyhow::Result<Plan> {
+    let build_dir = if template.id == "qt-build" { ".ci-build/gui".to_owned() } else { one(template, args, "build_dir", folder)?.unwrap_or_else(|| CMAKE_BUILD_DIR.into()) };
+    let mut argv: Vec<String> = vec!["--build".into(), build_dir];
+    if template.id == "cmake-build" {
+        if let Some(config) = one(template, args, "config", folder)? {
+            argv.extend(["--config".into(), config]);
+        }
+    }
+    // U21: cmake takes each target after one `--target`; Zerus adds the flag
+    // itself, so a target is never read as another option.
+    let targets = many(template, args, "targets", folder)?;
+    if !targets.is_empty() {
+        argv.push("--target".into());
+        argv.extend(targets);
+    }
+    Ok(plain(template.id, "cmake", argv))
+}
+
+/// Task 85: where a run's test report goes: one file per template under the
+/// folder's `.zerus-team/results`, removed before each run.
+pub(crate) fn report_path(folder: &Path, template: &str) -> Option<(PathBuf, super::run_results::Format)> {
+    use super::run_results::Format;
+    let results = folder.join(".zerus-team").join("results");
+    match template {
+        "ctest" => Some((results.join("ctest.xml"), Format::Junit)),
+        "vstest" => Some((results.join("vstest.trx"), Format::Trx)),
+        _ => project_report(folder, template),
+    }
+}
+
+/// `a.b` as an anchored, escaped alternation for ctest -R.
+fn anchored(names: &[String]) -> String {
+    let escaped: Vec<String> = names
+        .iter()
+        .map(|name| name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == ':' || c == '@' { c.to_string() } else { format!("\\{c}") }).collect())
+        .collect();
+    format!("^({})$", escaped.join("|"))
+}
+
+fn ctest(template: &Template, args: &Value, folder: &Path) -> anyhow::Result<Plan> {
+    let build_dir = one(template, args, "build_dir", folder)?.unwrap_or_else(|| CMAKE_BUILD_DIR.into());
+    ensure!(folder.join(&build_dir).is_dir(), "The build folder {build_dir} is not in your folder: configure and build first");
+    let tests = many(template, args, "tests", folder)?;
+    let regex = one(template, args, "regex", folder)?;
+    ensure!(tests.is_empty() || regex.is_none(), "Name the tests or a regex, not both");
+    let (report, _) = report_path(folder, "ctest").context("the ctest report")?;
+    let mut argv: Vec<String> = vec!["--test-dir".into(), build_dir, "--output-on-failure".into(), "--output-junit".into(), report.display().to_string()];
+    if let Some(config) = one(template, args, "config", folder)? {
+        argv.extend(["-C".into(), config]);
+    }
+    if !tests.is_empty() {
+        argv.extend(["-R".into(), anchored(&tests)]);
+    } else if let Some(regex) = regex {
+        ensure!(regex.chars().count() <= 2000 && !regex.contains('\n'), "A ctest regex is one line of at most 2000 characters");
+        argv.extend(["-R".into(), regex]);
+    }
+    Ok(plain(template.id, "ctest", argv))
+}
+
+fn msbuild_build(template: &Template, args: &Value, folder: &Path) -> anyhow::Result<Plan> {
+    let project = many(template, args, "project", folder)?;
+    ensure!(project.len() == 1, "The template's \"project\" is one .sln or project file in your folder");
+    let project = project[0].clone();
+    let extension = Path::new(&project).extension().and_then(|extension| extension.to_str()).unwrap_or_default().to_ascii_lowercase();
+    ensure!(matches!(extension.as_str(), "sln" | "slnx" | "vcxproj" | "csproj" | "vbproj" | "fsproj" | "proj"), "MSBuild builds a .sln or a project file, not {project}");
+    let mut argv: Vec<String> = vec![project, "/m".into(), "/nologo".into(), "/v:minimal".into()];
+    if let Some(config) = one(template, args, "config", folder)? {
+        argv.push(format!("/p:Configuration={config}"));
+    }
+    if let Some(platform) = one(template, args, "platform", folder)? {
+        ensure!(platform.chars().count() <= 40 && platform.chars().all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '_' || c == '-'), "An MSBuild platform is letters, digits, spaces, _ and - (got \"{platform}\")");
+        argv.push(format!("/p:Platform={platform}"));
+    }
+    let targets = many(template, args, "targets", folder)?;
+    if !targets.is_empty() {
+        argv.push(format!("/t:{}", targets.join(";")));
+    }
+    Ok(plain(template.id, &msbuild_program(), argv))
+}
+
+fn vstest(template: &Template, args: &Value, folder: &Path) -> anyhow::Result<Plan> {
+    let tests = many(template, args, "tests", folder)?;
+    ensure!(!tests.is_empty(), "The template needs \"tests\": the test assemblies to run");
+    for test in &tests {
+        let extension = Path::new(test).extension().and_then(|extension| extension.to_str()).unwrap_or_default().to_ascii_lowercase();
+        ensure!(matches!(extension.as_str(), "dll" | "exe"), "vstest runs test assemblies (.dll, .exe), not {test}");
+    }
+    let (report, _) = report_path(folder, "vstest").context("the vstest report")?;
+    let mut argv = tests;
+    argv.push(format!("/Logger:trx;LogFileName={}", report.display()));
+    if let Some(filter) = one(template, args, "filter", folder)? {
+        ensure!(filter.chars().count() <= 2000 && !filter.contains('\n'), "A test case filter is one line of at most 2000 characters");
+        argv.push(format!("/TestCaseFilter:{filter}"));
+    }
+    Ok(plain(template.id, &vstest_program(), argv))
+}
+
+/// Task 85: the MSBuild the templates run, for the broker's version line.
+pub(crate) fn msbuild_path() -> String {
+    msbuild_program()
+}
+
+/// Visual Studio's MSBuild, as vswhere names it; `msbuild` on PATH otherwise.
+fn msbuild_program() -> String {
+    visual_studio_find(r"MSBuild\**\Bin\MSBuild.exe", "Microsoft.Component.MSBuild").unwrap_or_else(|| "msbuild".into())
+}
+
+/// Visual Studio's vstest.console; `vstest.console` on PATH otherwise.
+fn vstest_program() -> String {
+    visual_studio_find(r"**\vstest.console.exe", "Microsoft.VisualStudio.PackageGroup.TestTools.Core").unwrap_or_else(|| "vstest.console".into())
+}
+
+#[cfg(windows)]
+fn visual_studio_find(pattern: &str, component: &str) -> Option<String> {
+    let program_files = std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| r"C:\Program Files (x86)".into());
+    let vswhere = Path::new(&program_files).join(r"Microsoft Visual Studio\Installer\vswhere.exe");
+    let query = |requires: Option<&str>| -> Option<String> {
+        let mut command = Command::new(&vswhere);
+        command.args(["-latest", "-products", "*"]);
+        if let Some(component) = requires {
+            command.args(["-requires", component]);
+        }
+        let output = command.args(["-find", pattern]).output().ok()?;
+        let found = String::from_utf8_lossy(&output.stdout).lines().map(str::trim).find(|line| !line.is_empty())?.to_owned();
+        Path::new(&found).is_file().then_some(found)
+    };
+    query(Some(component)).or_else(|| query(None))
+}
+
+#[cfg(not(windows))]
+fn visual_studio_find(_pattern: &str, _component: &str) -> Option<String> {
+    None
+}
+
+/// Task 85: a `[[template]]` of the folder's tests file, or None when the
+/// file names none with this id. One whose exact content the owner has not
+/// accepted is refused: it would run outside the member's sandbox.
+fn project_template(folder: &Path, id: &str) -> anyhow::Result<Option<crate::test_discipline::config::ProjectTemplate>> {
+    let path = folder.join(crate::test_discipline::config::FILE);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let loaded = crate::test_discipline::config::load(folder, None)?;
+    let Some(found) = loaded.config.templates.into_iter().find(|template| template.id == id) else { return Ok(None) };
+    let hash = found.content_hash();
+    ensure!(
+        accepted_project().contains(&hash),
+        "The project template {id} of .zerus/tests.toml waits for the owner's acceptance: it runs outside your sandbox, so the owner accepts its exact content \
+         (hgs team templates accept, content {hash}); a changed template waits again"
+    );
+    Ok(Some(found))
+}
+
+/// The content hashes of the project templates the owner accepted.
+fn accepted_project() -> Vec<String> {
+    read_settings()["accepted_project"].as_array().into_iter().flatten().filter_map(|hash| hash.as_str().map(str::to_owned)).collect()
+}
+
+/// Task 85: the owner accepts project templates by their content hash (at
+/// most 200 kept, the newest last).
+pub(crate) fn accept_project(hashes: &[String]) -> anyhow::Result<Vec<String>> {
+    let mut accepted = accepted_project();
+    for hash in hashes {
+        ensure!(hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()), "A project template's content hash is 64 hex digits");
+        if !accepted.contains(hash) {
+            accepted.push(hash.clone());
+        }
+    }
+    let excess = accepted.len().saturating_sub(200);
+    accepted.drain(..excess);
+    let mut settings = read_settings();
+    settings["accepted_project"] = json!(accepted);
+    write_settings(&settings)?;
+    Ok(accepted)
+}
+
+/// Task 85: the project templates of a folder with their hashes and whether
+/// the owner accepted each, for `hgs team templates`.
+pub(crate) fn project_listed(folder: &Path) -> anyhow::Result<Vec<Value>> {
+    if !folder.join(crate::test_discipline::config::FILE).is_file() {
+        return Ok(Vec::new());
+    }
+    let loaded = crate::test_discipline::config::load(folder, None)?;
+    let accepted = accepted_project();
+    Ok(loaded
+        .config
+        .templates
+        .iter()
+        .map(|template| {
+            let hash = template.content_hash();
+            let mut item = serde_json::to_value(template).unwrap_or_default();
+            item["hash"] = json!(hash);
+            item["accepted"] = json!(accepted.contains(&hash));
+            item["source"] = json!("project");
+            item
+        })
+        .collect())
+}
+
+fn kind_of(name: &str) -> Option<Kind> {
+    match name {
+        "identifier" => Some(Kind::Identifier),
+        "identifiers" => Some(Kind::Identifiers),
+        "text" => Some(Kind::Text),
+        "paths" => Some(Kind::Paths),
+        "path" => Some(Kind::Path),
+        _ => None,
+    }
+}
+
+/// Task 85: a project template's own checks, the same as a built-in's: an id
+/// that is no built-in, a fixed program, every placeholder declared with a
+/// known type, bounded arguments and timeout.
+pub(crate) fn check_project_template(template: &crate::test_discipline::config::ProjectTemplate) -> anyhow::Result<()> {
+    check_identifier(&template.id, "id")?;
+    ensure!(builtin(&template.id).is_none(), "Template {} is built in", template.id);
+    ensure!(!template.program.trim().is_empty() && template.program.chars().count() <= 200, "The project template {} names its program", template.id);
+    ensure!(!template.program.contains('{') && !template.program.contains('}'), "The project template {}'s program has no placeholders", template.id);
+    ensure!(template.args.len() <= 64, "The project template {} has at most 64 arguments", template.id);
+    ensure!(template.params.len() <= 32, "The project template {} has at most 32 parameters", template.id);
+    let mut names = std::collections::BTreeSet::new();
+    for param in &template.params {
+        check_identifier(&param.name, "parameter")?;
+        ensure!(kind_of(&param.kind).is_some(), "The parameter {} of {} is identifier, identifiers, text, path or paths (got {})", param.name, template.id, param.kind);
+        ensure!(names.insert(param.name.as_str()), "The project template {} declares {} twice", template.id, param.name);
+    }
+    for arg in &template.args {
+        ensure!(arg.chars().count() <= 400 && !arg.contains('\0'), "An argument of {} is too long", template.id);
+        for placeholder in placeholders(arg) {
+            let declared = template.params.iter().find(|param| param.name == placeholder);
+            ensure!(declared.is_some(), "The project template {} uses {{{placeholder}}} without declaring it", template.id);
+            let list = declared.is_some_and(|param| matches!(param.kind.as_str(), "identifiers" | "paths"));
+            ensure!(!list || whole_placeholder(arg).is_some(), "The list {{{placeholder}}} of {} is a whole argument", template.id);
+        }
+    }
+    if let Some(seconds) = template.timeout_secs {
+        ensure!((1..=86_400).contains(&seconds), "The project template {}'s timeout_secs is 1-86400", template.id);
+    }
+    if let Some(results) = &template.results {
+        ensure!(super::run_results::Format::parse(&results.format).is_some(), "The project template {}'s results format is junit or trx", template.id);
+        check_path(&results.path, "results path")?;
+    }
+    Ok(())
+}
+
+/// Task 85: the argv of an accepted project template, every value checked by
+/// its declared type; an absent optional value drops its whole argument, as a
+/// built-in's does.
+fn project_plan(template: &crate::test_discipline::config::ProjectTemplate, args: &Value, folder: &Path) -> anyhow::Result<Plan> {
+    check_project_template(template)?;
+    for (key, _) in args.as_object().into_iter().flatten() {
+        ensure!(template.params.iter().any(|param| param.name == *key), "The template {} has no \"{key}\"", template.id);
+    }
+    let declared = |name: &str| template.params.iter().find(|param| param.name == name).and_then(|param| kind_of(&param.kind).map(|kind| (kind, param.required)));
+    let mut argv = Vec::new();
+    for raw in &template.args {
+        if let Some(name) = whole_placeholder(raw) {
+            let (kind, required) = declared(name).context("an undeclared placeholder")?;
+            match typed_value(kind, required, args, name, folder)? {
+                Some(Words::One(word)) => argv.push(word),
+                Some(Words::Many(words)) => argv.extend(words),
+                None => {}
+            }
+            continue;
+        }
+        let mut element = raw.clone();
+        let mut keep = true;
+        for placeholder in placeholders(raw) {
+            let (kind, required) = declared(&placeholder).context("an undeclared placeholder")?;
+            match typed_value(kind, required, args, &placeholder, folder)? {
+                Some(Words::One(word)) => element = element.replace(&format!("{{{placeholder}}}"), &word),
+                None => {
+                    keep = false;
+                    break;
+                }
+                Some(Words::Many(_)) => bail!("The template {} uses \"{{{placeholder}}}\" inside an argument, which needs one value", template.id),
+            }
+        }
+        if keep {
+            argv.push(element);
+        }
+    }
+    // A required parameter no argument uses is still required.
+    for param in template.params.iter().filter(|param| param.required) {
+        ensure!(!args[param.name.as_str()].is_null(), "The template needs \"{}\"", param.name);
+    }
+    Ok(plain(&template.id, &template.program, argv))
+}
+
+/// Task 85: the report a project template declares, if any.
+fn project_report(folder: &Path, id: &str) -> Option<(PathBuf, super::run_results::Format)> {
+    if builtin(id).is_some() || !folder.join(crate::test_discipline::config::FILE).is_file() {
+        return None;
+    }
+    let loaded = crate::test_discipline::config::load(folder, None).ok()?;
+    let template = loaded.config.templates.into_iter().find(|template| template.id == id)?;
+    let results = template.results?;
+    Some((folder.join(&results.path), super::run_results::Format::parse(&results.format)?))
+}
+
 /// Owner, 2026-10-28 (QA #512): on Windows a Qt build needs the Visual Studio
 /// environment; without it cl.exe finds no standard header (C1083) and the
 /// members built through their own vcvars batch files, a permission each.
@@ -855,7 +1480,7 @@ fn qt_bin(folder: &Path) -> Option<PathBuf> {
 fn template_environment(plan: &Plan, folder: &Path) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = Vec::new();
     #[cfg(windows)]
-    if matches!(plan.template.as_str(), "qt-configure" | "qt-build" | "qt-test") {
+    if matches!(plan.template.as_str(), "qt-configure" | "qt-build" | "qt-test" | "cmake-configure" | "cmake-build" | "ctest" | "msbuild-build" | "vstest") {
         if let Some(msvc) = msvc_environment() {
             env.extend(msvc);
         }
@@ -878,6 +1503,21 @@ fn template_environment(plan: &Plan, folder: &Path) -> Vec<(String, String)> {
         if std::env::var_os("QT_QPA_FONTDIR").is_none() {
             env.push(("QT_QPA_FONTDIR".into(), "C:/Windows/Fonts".into()));
         }
+    }
+    if plan.template == "ue-test" {
+        let ue = folder.join(".zerus-team").join("ue");
+        let _ = std::fs::create_dir_all(ue.join("Saved"));
+        let _ = std::fs::create_dir_all(ue.join("DDC"));
+        env.push(("UE-LocalDataCachePath".into(), ue.join("DDC").display().to_string()));
+    }
+    if matches!(plan.template.as_str(), "py-test" | "cython-build") {
+        let python = folder.join(".zerus-team").join("python");
+        let _ = std::fs::create_dir_all(python.join("pip-cache"));
+        let _ = std::fs::create_dir_all(python.join("pycache"));
+        let _ = std::fs::create_dir_all(python.join("pytest-cache"));
+        env.push(("PIP_CACHE_DIR".into(), python.join("pip-cache").display().to_string()));
+        env.push(("PYTHONPYCACHEPREFIX".into(), python.join("pycache").display().to_string()));
+        env.push(("PYTEST_ADDOPTS".into(), "-o cache_dir=.zerus-team/python/pytest-cache".into()));
     }
     if plan.template == "android-test" {
         env.push(("GRADLE_USER_HOME".into(), folder.join(".zerus-team").join("gradle").join("home").display().to_string()));
@@ -915,6 +1555,9 @@ pub(crate) struct Outcome {
     pub ms: u64,
     pub timed_out: bool,
     pub error: String,
+    /// Task 85: one result per test from the run's report (CTest's JUnit,
+    /// VSTest's TRX, a project template's declared report); None without one.
+    pub report: Option<super::run_results::Report>,
 }
 
 /// #717: the failing test names an output names, and a bounded excerpt around
@@ -1053,6 +1696,14 @@ pub(crate) fn execute_as(plan: &Plan, folder: &Path, timeout: Duration, env: &[(
             }
         }
     }
+    // Task 85: a report from an earlier run is never read as this run's.
+    let report = report_path(folder, &plan.template);
+    if let Some((path, _)) = &report {
+        let _ = std::fs::remove_file(path);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
     let stdin = plan.commit.as_ref().map(|payload| serde_json::to_vec(payload).unwrap_or_default());
     let before = isolated.as_ref().map(super::isolation::Run::fingerprint);
     let attempt = |command: &mut Command| {
@@ -1088,12 +1739,20 @@ pub(crate) fn execute_as(plan: &Plan, folder: &Path, timeout: Duration, env: &[(
     if let (Some(run), Some(before)) = (&isolated, before) {
         checked(&mut outcome, run, &before, folder);
     }
+    if let Some((path, format)) = report {
+        let read = super::run_results::read(&path, format);
+        // The report names the failing tests when the text did not.
+        if outcome.failures.is_empty() {
+            outcome.failures = read.failing(20);
+        }
+        outcome.report = Some(read);
+    }
     outcome
 }
 
 /// Task #35: the builds Zerus runs again once after a scanning failure. Never
 /// a commit, a merge or anything else whose second run would change more.
-const RETRIED_ON_SCANNING: &[&str] = &["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test"];
+const RETRIED_ON_SCANNING: &[&str] = &["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test", "cmake-configure", "cmake-build", "ctest", "msbuild-build"];
 
 /// Task #35: the two compiler failures real-time scanning gives a build in a
 /// folder it scans (team 33fbafeb, a DeepSeek member's clone without the
@@ -1250,6 +1909,7 @@ pub(crate) fn run_tree(command: &mut Command, timeout: Duration, stdin: Option<V
         ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         timed_out,
         error: if timed_out { format!("the command did not finish in {} s and was stopped", timeout.as_secs()) } else { String::new() },
+        report: None,
     }
 }
 
@@ -1344,7 +2004,9 @@ mod tests {
         }
         // The set the owner asked for, by id.
         let ids: Vec<&str> = BUILTIN.iter().map(|template| template.id).collect();
-        assert_eq!(ids, ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test", "android-test", "clean-build", "git-merge-lead", "git-commit"]);
+        // Task 85: the CMake and MSBuild templates of any project after them; task 86: the Python and Cython ones; task 87: Unreal.
+        assert_eq!(ids, ["cargo-build", "cargo-test", "cargo-clippy", "qt-configure", "qt-build", "qt-test", "py-test", "cython-build", "android-test", "clean-build",
+                         "git-merge-lead", "git-commit", "ue-build", "ue-test", "cmake-configure", "cmake-build", "ctest", "msbuild-build", "vstest"]);
     }
 
     // Run by hand on a Windows machine with Visual Studio (cargo test -- --ignored).
@@ -1980,4 +2642,436 @@ mod tests {
         std::fs::write(gui.join("CMakeCache.txt"), "CMAKE_CXX_COMPILER_LAUNCHER:STRING=C:/tools/ccache.exe\n").unwrap();
         assert_eq!(configured_launcher(dir.path()).as_deref(), Some("C:/tools/ccache.exe"));
     }
+
+    /// Task 85: qt-configure and qt-build are the CMake templates with their
+    /// fixed values; their argv is exactly what it was for this repository.
+    #[test]
+    fn qt_templates_keep_their_argv_as_aliases_of_the_cmake_ones() {
+        let dir = temp();
+        let configure = plan("qt-configure", &json!({}), dir.path()).unwrap();
+        assert_eq!((configure.program.as_str(), configure.argv.clone()),
+                   ("cmake", ["-S", "tray", "-B", ".ci-build/gui", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release"].map(str::to_owned).to_vec()));
+        assert_eq!(cmake_configure_argv("tray", ".ci-build/gui", Some("Ninja"), Some("Release"), None, Some("ccache")).last().unwrap().as_str(),
+                   "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache");
+        let build = plan("qt-build", &json!({"targets":["hgs-tray","test_teams"]}), dir.path()).unwrap();
+        assert_eq!(build.argv, ["--build", ".ci-build/gui", "--target", "hgs-tray", "test_teams"]);
+        assert_eq!(plan("qt-build", &json!({}), dir.path()).unwrap().argv, ["--build", ".ci-build/gui"]);
+        // qt-build takes no build folder or config of its own.
+        assert!(plan("qt-build", &json!({"build_dir":"elsewhere"}), dir.path()).is_err());
+    }
+
+    /// Task 85: any CMake project configures, builds and tests through the
+    /// generic templates; every value is checked by its type.
+    #[test]
+    fn cmake_templates_build_any_project_with_checked_values() {
+        let dir = temp();
+        std::fs::create_dir_all(dir.path().join("engine")).unwrap();
+        std::fs::write(dir.path().join("engine").join("CMakeLists.txt"), "project(x)\n").unwrap();
+        let configure = plan("cmake-configure", &json!({"source":"engine","build_dir":"out/engine","generator":"Visual Studio 17 2022","config":"Debug"}), dir.path()).unwrap();
+        assert_eq!(configure.argv, ["-S", "engine", "-B", "out/engine", "-G", "Visual Studio 17 2022", "-DCMAKE_BUILD_TYPE=Debug"]);
+        let preset = plan("cmake-configure", &json!({"source":"engine","preset":"ci"}), dir.path()).unwrap();
+        assert_eq!(preset.argv, ["-S", "engine", "-B", "build", "--preset", "ci"]);
+        // No CMakeLists, a folder outside, the sources as the build folder, an unknown key.
+        assert!(plan("cmake-configure", &json!({}), dir.path()).unwrap_err().to_string().contains("no CMakeLists.txt"));
+        for args in [json!({"source":"engine","build_dir":"../out"}), json!({"source":"engine","build_dir":"C:/out"}), json!({"source":"engine","build_dir":"/tmp/out"}),
+                     json!({"source":"engine","build_dir":"engine"}), json!({"source":"engine","defines":"X=1"}), json!({"source":"engine","config":"Debug; rm"})] {
+            assert!(plan("cmake-configure", &args, dir.path()).is_err(), "{args}");
+        }
+        let build = plan("cmake-build", &json!({"build_dir":"out/engine","config":"Debug","targets":["core","tests"]}), dir.path()).unwrap();
+        assert_eq!(build.argv, ["--build", "out/engine", "--config", "Debug", "--target", "core", "tests"]);
+        assert_eq!(plan("cmake-build", &json!({}), dir.path()).unwrap().argv, ["--build", "build"]);
+        // ctest: the tests by name as an anchored, escaped -R; a regex as given; not both.
+        std::fs::create_dir_all(dir.path().join("out").join("engine")).unwrap();
+        let tests = plan("ctest", &json!({"build_dir":"out/engine","config":"Debug","tests":["adds","math.divides"]}), dir.path()).unwrap();
+        let report = dir.path().join(".zerus-team").join("results").join("ctest.xml").display().to_string();
+        assert_eq!(tests.argv, ["--test-dir", "out/engine", "--output-on-failure", "--output-junit", report.as_str(), "-C", "Debug", "-R", "^(adds|math\\.divides)$"]);
+        let regex = plan("ctest", &json!({"build_dir":"out/engine","regex":"^unit_"}), dir.path()).unwrap();
+        assert_eq!(regex.argv[regex.argv.len() - 2..], ["-R", "^unit_"]);
+        assert!(plan("ctest", &json!({"build_dir":"out/engine","tests":["a"],"regex":"b"}), dir.path()).unwrap_err().to_string().contains("not both"));
+        assert!(plan("ctest", &json!({}), dir.path()).unwrap_err().to_string().contains("configure and build first"));
+        assert_eq!(report_path(dir.path(), "ctest").unwrap().1, super::super::run_results::Format::Junit);
+    }
+
+    /// Task 85: MSBuild builds a solution or project of the folder; VSTest
+    /// runs test assemblies into a TRX report.
+    #[test]
+    fn msbuild_and_vstest_take_only_their_files_and_checked_values() {
+        let dir = temp();
+        std::fs::write(dir.path().join("Fixture.sln"), "").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "").unwrap();
+        let build = plan("msbuild-build", &json!({"project":"Fixture.sln","config":"Release","platform":"Any CPU","targets":["Core","Tests:Rebuild"]}), dir.path()).unwrap();
+        assert_eq!(build.argv, ["Fixture.sln", "/m", "/nologo", "/v:minimal", "/p:Configuration=Release", "/p:Platform=Any CPU", "/t:Core;Tests:Rebuild"]);
+        assert!(build.program.to_lowercase().contains("msbuild"), "{}", build.program);
+        assert!(plan("msbuild-build", &json!({"project":"notes.txt"}), dir.path()).unwrap_err().to_string().contains(".sln or a project"));
+        assert!(plan("msbuild-build", &json!({"project":"Missing.sln"}), dir.path()).is_err());
+        assert!(plan("msbuild-build", &json!({"project":"Fixture.sln","platform":"x64;/t:Clean"}), dir.path()).is_err());
+        assert!(plan("msbuild-build", &json!({}), dir.path()).is_err());
+        std::fs::create_dir_all(dir.path().join("bin")).unwrap();
+        std::fs::write(dir.path().join("bin").join("Tests.dll"), "").unwrap();
+        let tests = plan("vstest", &json!({"tests":["bin/Tests.dll"],"filter":"TestCategory=Unit"}), dir.path()).unwrap();
+        assert_eq!(tests.argv[0], "bin/Tests.dll");
+        assert!(tests.argv[1].starts_with("/Logger:trx;LogFileName=") && tests.argv[1].ends_with("vstest.trx"), "{:?}", tests.argv);
+        assert_eq!(tests.argv[2], "/TestCaseFilter:TestCategory=Unit");
+        assert!(plan("vstest", &json!({"tests":["notes.txt"]}), dir.path()).is_err());
+    }
+
+    fn project_file(dir: &Path, templates: &str) {
+        std::fs::create_dir_all(dir.join(".zerus")).unwrap();
+        std::fs::write(dir.join(".zerus").join("tests.toml"), format!("version = 1\n{templates}")).unwrap();
+    }
+
+    const PROJECT_TEMPLATE: &str = r#"
+[[template]]
+id = "make-target"
+summary = "make one target"
+program = "make"
+args = ["-C", "src", "{targets}", "JOBS={jobs}", "--file={makefile}"]
+timeout_secs = 900
+results = { format = "junit", path = "out/report.xml" }
+
+[[template.params]]
+name = "targets"
+kind = "identifiers"
+required = true
+
+[[template.params]]
+name = "jobs"
+kind = "identifier"
+
+[[template.params]]
+name = "makefile"
+kind = "path"
+"#;
+
+    /// Task 85: a project's [[template]] is typed like a built-in, refused
+    /// until the owner accepts its exact content, and waits again when it
+    /// changes.
+    #[test]
+    fn a_project_template_is_typed_and_runs_only_once_the_owner_accepted_it() {
+        let dir = temp();
+        let state = temp();
+        settings_override(Some(state.path().join("templates.json")));
+        let _restore = scopeguard(|| settings_override(None));
+        project_file(dir.path(), PROJECT_TEMPLATE);
+        std::fs::write(dir.path().join("Makefile"), "").unwrap();
+        let error = plan("make-target", &json!({"targets":["all"]}), dir.path()).unwrap_err().to_string();
+        assert!(error.contains("waits for the owner's acceptance"), "{error}");
+        let listed = project_listed(dir.path()).unwrap();
+        assert_eq!((listed.len(), listed[0]["accepted"].clone()), (1, json!(false)));
+        let hash = listed[0]["hash"].as_str().unwrap().to_owned();
+        accept_project(std::slice::from_ref(&hash)).unwrap();
+        // Typed like a built-in: a list spliced whole, an absent optional value
+        // drops its whole argument, a wrong value or key is refused.
+        let planned = plan("make-target", &json!({"targets":["core","tests"],"jobs":"8"}), dir.path()).unwrap();
+        assert_eq!((planned.program.as_str(), planned.argv.clone()), ("make", ["-C", "src", "core", "tests", "JOBS=8"].map(str::to_owned).to_vec()));
+        let with_file = plan("make-target", &json!({"targets":["core"],"makefile":"Makefile"}), dir.path()).unwrap();
+        assert_eq!(with_file.argv.last().unwrap(), "--file=Makefile");
+        assert!(plan("make-target", &json!({}), dir.path()).unwrap_err().to_string().contains("targets"));
+        assert!(plan("make-target", &json!({"targets":["a; rm -rf /"]}), dir.path()).is_err());
+        assert!(plan("make-target", &json!({"targets":["a"],"other":"x"}), dir.path()).unwrap_err().to_string().contains("has no \"other\""));
+        assert_eq!(timeout_in("make-target", dir.path()), 900);
+        assert_eq!(report_path(dir.path(), "make-target"), Some((dir.path().join("out/report.xml"), super::super::run_results::Format::Junit)));
+        // A changed template waits again.
+        project_file(dir.path(), &PROJECT_TEMPLATE.replace("program = \"make\"", "program = \"gmake\""));
+        assert!(plan("make-target", &json!({"targets":["core"]}), dir.path()).unwrap_err().to_string().contains("waits for the owner's acceptance"));
+        // A built-in id is never a project's.
+        assert!(plan("cmake-build", &json!({}), dir.path()).is_ok());
+    }
+
+    /// Task 85: a project template is checked as a built-in is, before it can
+    /// ever be accepted.
+    #[test]
+    fn a_project_template_is_validated_like_a_builtin() {
+        let base = crate::test_discipline::config::ProjectTemplate {
+            id: "lint".into(),
+            program: "eslint".into(),
+            args: vec!["{paths}".into()],
+            params: vec![crate::test_discipline::config::TemplateParam { name: "paths".into(), kind: "paths".into(), required: false }],
+            ..Default::default()
+        };
+        check_project_template(&base).unwrap();
+        let bad = |change: &dyn Fn(&mut crate::test_discipline::config::ProjectTemplate)| {
+            let mut template = base.clone();
+            change(&mut template);
+            check_project_template(&template).unwrap_err().to_string()
+        };
+        assert!(bad(&|t| t.id = "cargo-test".into()).contains("built in"));
+        assert!(bad(&|t| t.program = "{tool}".into()).contains("no placeholders"));
+        assert!(bad(&|t| t.args = vec!["{missing}".into()]).contains("without declaring"));
+        assert!(bad(&|t| t.args = vec!["--files={paths}".into()]).contains("whole argument"));
+        assert!(bad(&|t| t.params[0].kind = "shell".into()).contains("identifier, identifiers, text, path or paths"));
+        assert!(bad(&|t| t.timeout_secs = Some(0)).contains("1-86400"));
+        assert!(bad(&|t| t.id = "a b".into()).contains("letters, digits"));
+        // In a tests file, an invalid one makes the file refuse to load, so it
+        // is never listed for acceptance.
+        let dir = temp();
+        project_file(dir.path(), "[[template]]\nid = \"x\"\nprogram = \"make\"\nargs = [\"{nope}\"]\n");
+        assert!(crate::test_discipline::config::load(dir.path(), None).unwrap_err().to_string().contains("without declaring"));
+        // [build_broker] no longer makes the file unreadable (task 84).
+        project_file(dir.path(), "[build_broker]\nenabled = true\nmode = \"snapshot\"\n");
+        assert!(crate::test_discipline::config::load(dir.path(), None).is_ok());
+    }
+
+    struct Guard<F: FnMut()>(F);
+    impl<F: FnMut()> Drop for Guard<F> {
+        fn drop(&mut self) {
+            (self.0)();
+        }
+    }
+    fn scopeguard<F: FnMut()>(f: F) -> Guard<F> {
+        Guard(f)
+    }
+
+    /// The C compiler this machine has for the fixture build, or None.
+    fn c_toolchain() -> bool {
+        let cmake = Command::new("cmake").arg("--version").output().is_ok_and(|output| output.status.success());
+        if !cmake {
+            return false;
+        }
+        #[cfg(windows)]
+        {
+            msvc_environment().is_some()
+        }
+        #[cfg(not(windows))]
+        {
+            Command::new("cc").arg("--version").output().is_ok_and(|output| output.status.success())
+        }
+    }
+
+    /// Task 85 (acceptance): a CMake project that is not Zerus configures,
+    /// builds and tests through the templates, and its CTest report gives one
+    /// result per test. Without CMake and a C compiler here it says so and
+    /// checks nothing else.
+    #[test]
+    fn a_plain_cmake_project_builds_and_tests_through_the_templates() {
+        if !c_toolchain() {
+            eprintln!("skipped: no cmake or no C compiler on this machine");
+            return;
+        }
+        let dir = temp();
+        std::fs::write(dir.path().join("CMakeLists.txt"),
+            "cmake_minimum_required(VERSION 3.21)\nproject(fixture C)\nenable_testing()\nadd_executable(fixture main.c)\n\
+             add_test(NAME passes COMMAND fixture 0)\nadd_test(NAME fails COMMAND fixture 1)\n").unwrap();
+        std::fs::write(dir.path().join("main.c"), "#include <stdlib.h>\nint main(int argc, char **argv) { return argc > 1 ? atoi(argv[1]) : 0; }\n").unwrap();
+        let timeout = Duration::from_secs(600);
+        let run = |id: &str, args: Value| {
+            let planned = plan(id, &args, dir.path()).unwrap();
+            execute(&planned, dir.path(), timeout, &[])
+        };
+        let configured = run("cmake-configure", json!({"config":"Debug"}));
+        assert_eq!(configured.exit, Some(0), "{}", configured.tail);
+        let built = run("cmake-build", json!({"config":"Debug"}));
+        assert_eq!(built.exit, Some(0), "{}", built.tail);
+        let tested = run("ctest", json!({"config":"Debug"}));
+        assert_ne!(tested.exit, Some(0), "one test fails: {}", tested.tail);
+        let report = tested.report.expect("the CTest report");
+        assert_eq!((report.passed, report.failed), (1, 1), "{report:?}");
+        assert_eq!(tested.failures, ["fails"]);
+        let only = run("ctest", json!({"config":"Debug","tests":["passes"]}));
+        assert_eq!(only.exit, Some(0), "{}", only.tail);
+        assert_eq!(only.report.unwrap().total(), 1);
+    }
+
+    /// Task 85 (acceptance, Windows): an MSBuild solution builds through
+    /// msbuild-build. The fixture's solution is CMake's Visual Studio
+    /// generator output, so no project file is written by hand.
+    #[cfg(windows)]
+    #[test]
+    fn an_msbuild_solution_builds_on_windows() {
+        if !c_toolchain() || visual_studio_find(r"MSBuild\**\Bin\MSBuild.exe", "Microsoft.Component.MSBuild").is_none() {
+            eprintln!("skipped: no cmake, Visual Studio or MSBuild on this machine");
+            return;
+        }
+        // The generator names the installed Visual Studio: a runner image may
+        // carry VS 2026 (18) and no 2022 (17).
+        let Some(generator) = visual_studio_generator() else {
+            eprintln!("skipped: vswhere names no Visual Studio version");
+            return;
+        };
+        let dir = temp();
+        std::fs::write(dir.path().join("CMakeLists.txt"), "cmake_minimum_required(VERSION 3.21)\nproject(fixture C)\nadd_executable(fixture main.c)\n").unwrap();
+        std::fs::write(dir.path().join("main.c"), "int main(void) { return 0; }\n").unwrap();
+        let timeout = Duration::from_secs(600);
+        let configure = plan("cmake-configure", &json!({"build_dir":"vs","generator":generator}), dir.path()).unwrap();
+        let configured = execute(&configure, dir.path(), timeout, &[]);
+        assert_eq!(configured.exit, Some(0), "{}", configured.tail);
+        // CMake writes fixture.slnx for Visual Studio 2026 and fixture.sln before it.
+        let solution = ["vs/fixture.slnx", "vs/fixture.sln"].into_iter().find(|name| dir.path().join(name).is_file()).expect("CMake wrote no solution");
+        let build = plan("msbuild-build", &json!({"project":solution,"config":"Debug","platform":"x64"}), dir.path()).unwrap();
+        let built = execute(&build, dir.path(), timeout, &[]);
+        assert_eq!(built.exit, Some(0), "{}", built.tail);
+        assert!(dir.path().join("vs").join("Debug").join("fixture.exe").is_file());
+    }
+
+    /// CMake's generator for the newest installed Visual Studio that this
+    /// CMake knows: vswhere's major versions, named as CMake names them
+    /// ("Visual Studio 17 2022", "Visual Studio 18 2026"), and kept only when
+    /// `cmake --help` lists that generator.
+    #[cfg(windows)]
+    fn visual_studio_generator() -> Option<String> {
+        let program_files = std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| r"C:\Program Files (x86)".into());
+        let vswhere = Path::new(&program_files).join(r"Microsoft Visual Studio\Installer\vswhere.exe");
+        let output = Command::new(&vswhere).args(["-products", "*", "-property", "installationVersion"]).output().ok()?;
+        let mut majors: Vec<u32> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.trim().split('.').next()?.parse().ok())
+            .collect();
+        majors.sort_unstable_by(|a, b| b.cmp(a));
+        let help = Command::new("cmake").arg("--help").output().ok()?;
+        let known = String::from_utf8_lossy(&help.stdout).into_owned();
+        majors.into_iter().find_map(|major| {
+            let year = match major {
+                16 => 2019,
+                17 => 2022,
+                18 => 2026,
+                _ => return None,
+            };
+            let name = format!("Visual Studio {major} {year}");
+            known.contains(&name).then_some(name)
+        })
+    }
+
+    #[cfg(not(windows))]
+    fn visual_studio_generator() -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn python_and_cython_templates_take_typed_arguments() {
+        let dir = temp();
+        std::fs::create_dir_all(dir.path().join(".venv/Scripts")).unwrap();
+        std::fs::write(dir.path().join(".venv/Scripts/python.exe"), "").unwrap();
+        std::fs::write(dir.path().join("a.pyx"), "cimport helper\n").unwrap();
+        let py = plan("py-test", &json!({"filter":"slow and not x","tests":["test_a.py::test_x"]}), dir.path()).unwrap();
+        assert!(py.program.contains(".venv"));
+        assert!(py.argv.contains(&"-k=slow and not x".to_owned()));
+        assert!(py.argv.contains(&"test_a.py::test_x".to_owned()));
+        assert!(py.argv.contains(&"--junitxml=.zerus-team/python/junit.xml".to_owned()));
+        assert!(!py.argv.iter().any(|arg| arg.starts_with("-m=")));
+        // Task 137: the test files an affected set chose, as paths.
+        std::fs::create_dir_all(dir.path().join("tests")).unwrap();
+        std::fs::write(dir.path().join("tests/test_demo.py"), "").unwrap();
+        let files = plan("py-test", &json!({"paths":["tests/test_demo.py"]}), dir.path()).unwrap();
+        assert!(files.argv.contains(&"tests/test_demo.py".to_owned()), "{:?}", files.argv);
+        assert!(plan("py-test", &json!({"paths":["tests/missing.py"]}), dir.path()).is_err());
+        let cy = plan("cython-build", &json!({"sources":["a.pyx"]}), dir.path()).unwrap();
+        assert_eq!(cy.argv, ["setup.py", "build_ext", "--inplace", "a.pyx"]);
+        let uvdir = temp();
+        std::fs::write(uvdir.path().join("uv.lock"), "").unwrap();
+        let uv = plan("py-test", &json!({}), uvdir.path()).unwrap();
+        assert_eq!(uv.program, "uv");
+        assert_eq!(&uv.argv[..2], ["run", "python"]);
+        let empty = temp();
+        assert!(plan("py-test", &json!({}), empty.path()).is_err());
+    }
+
+    #[test]
+    fn unreal_templates_are_typed_argv() {
+        let dir = temp();
+        std::fs::write(dir.path().join("Game.uproject"), "{}").unwrap();
+        let build = plan("ue-build", &json!({"engine":"UE_5.5","project":"Game.uproject","target":"Game","platform":"Win64","config":"Development"}), dir.path()).unwrap();
+        assert!(build.program.ends_with("Engine/Build/BatchFiles/Build.bat"));
+        assert!(build.argv.contains(&"-Project=Game.uproject".to_owned()));
+        assert_eq!(&build.argv[..4], ["Game.uproject", "Game", "Win64", "Development"]);
+        let engine = fake_engine("UnrealEditor-Cmd.exe");
+        let root = engine.path().to_string_lossy().into_owned();
+        let test = plan("ue-test", &json!({"engine":root,"project":"Game.uproject","filters":"Project.Game"}), dir.path()).unwrap();
+        assert!(test.program.ends_with("Engine/Binaries/Win64/UnrealEditor-Cmd.exe"), "{}", test.program);
+        assert!(test.argv.contains(&"-ExecCmds=Automation RunTests Project.Game;Quit".to_owned()));
+        assert!(test.argv.contains(&"-nullrhi".to_owned()) && test.argv.contains(&"-unattended".to_owned()));
+        assert!(test.argv.contains(&"-saveddir=.zerus-team/ue/Saved".to_owned()));
+        assert!(test.argv.contains(&"-abslog=.zerus-team/ue/Unreal.log".to_owned()));
+        assert!(plan("ue-build", &json!({"engine":"UE_5.5","project":"Game.uproject","target":"Game"}), dir.path()).is_ok());
+    }
+
+    /// An engine folder holding the named editor.
+    fn fake_engine(editor: &str) -> tempfile::TempDir {
+        let engine = tempfile::tempdir().unwrap();
+        let bin = engine.path().join("Engine").join("Binaries").join("Win64");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join(editor), "").unwrap();
+        engine
+    }
+
+    /// Task 90: -ExecCmds takes one automation filter, and the engine holds the
+    /// editor (UE4Editor-Cmd.exe for a 4.x engine).
+    #[test]
+    fn ue_test_refuses_a_filter_that_adds_commands_and_an_engine_without_its_editor() {
+        let dir = temp();
+        std::fs::write(dir.path().join("Game.uproject"), "{}").unwrap();
+        let engine = fake_engine("UnrealEditor-Cmd.exe");
+        let root = engine.path().to_string_lossy().into_owned();
+        for filters in ["Project.Game;Quit", "Project.Game\nquit", "A\rB"] {
+            let error = plan("ue-test", &json!({"engine":root,"project":"Game.uproject","filters":filters}), dir.path()).unwrap_err().to_string();
+            assert!(error.contains("one automation filter"), "{filters:?}: {error}");
+        }
+        assert!(plan("ue-test", &json!({"engine":root,"project":"Game.uproject","filters":"Project.Game"}), dir.path()).is_ok());
+        let empty = tempfile::tempdir().unwrap();
+        let error = plan("ue-test", &json!({"engine":empty.path().to_string_lossy(),"project":"Game.uproject"}), dir.path()).unwrap_err().to_string();
+        assert!(error.contains("UnrealEditor-Cmd.exe") && error.contains("UE4Editor-Cmd.exe"), "{error}");
+        let four = fake_engine("UE4Editor-Cmd.exe");
+        let plan = plan("ue-test", &json!({"engine":four.path().to_string_lossy(),"project":"Game.uproject"}), dir.path()).unwrap();
+        assert!(plan.program.ends_with("Engine/Binaries/Win64/UE4Editor-Cmd.exe"), "{}", plan.program);
+    }
+
+    /// reg.exe's own output, as printed on a machine with Unreal 5.3 installed
+    /// by the launcher and a source build registered by its GUID.
+    #[test]
+    fn reg_exe_output_is_read_without_its_type_token_and_with_the_path_whole() {
+        let launcher = "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\EpicGames\\Unreal Engine\\5.3\r\n    InstalledDirectory    REG_SZ    D:\\EGS\\UE_5.3\r\n\r\n";
+        assert_eq!(parse_reg_value(launcher, "InstalledDirectory").as_deref(), Some("D:\\EGS\\UE_5.3"));
+        let spaced = "HKEY_LOCAL_MACHINE\\SOFTWARE\\EpicGames\\Unreal Engine\\5.3\r\n    InstalledDirectory    REG_SZ    C:\\Program Files\\Epic Games\\UE_5.3\r\n";
+        assert_eq!(parse_reg_value(spaced, "InstalledDirectory").as_deref(), Some("C:\\Program Files\\Epic Games\\UE_5.3"));
+        let source = "HKEY_CURRENT_USER\\Software\\Epic Games\\Unreal Engine\\Builds\r\n    {A1B2-C3}    REG_SZ    D:\\Source\\UE\r\n    {OTHER}    REG_SZ    E:\\Other\r\n";
+        assert_eq!(parse_reg_value(source, "{A1B2-C3}").as_deref(), Some("D:\\Source\\UE"));
+        assert_eq!(parse_reg_value("    InstalledDirectoryX    REG_SZ    D:\\X\r\n", "InstalledDirectory"), None);
+        assert_eq!(parse_reg_value("    InstalledDirectory    REG_DWORD    0x1\r\n", "InstalledDirectory"), None);
+        assert_eq!(parse_reg_value("ERROR: The system was unable to find the specified registry key or value.\r\n", "InstalledDirectory"), None);
+    }
+
+    /// Against the real registry with reg.exe: every launcher engine this computer
+    /// lists gives its directory as plain data (no type token), and the ones still
+    /// installed give a folder that exists (a version may stay registered after its
+    /// folder is gone). Nothing to check where none is registered.
+    #[cfg(windows)]
+    #[test]
+    fn the_registry_of_this_computer_gives_its_launcher_engines() {
+        let system = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_owned());
+        let output = Command::new(Path::new(&system).join("System32").join("reg.exe")).args(["query", "HKLM\\SOFTWARE\\EpicGames\\Unreal Engine"]).output().unwrap();
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        let versions: Vec<&str> = text.lines().filter_map(|line| line.trim().rsplit('\\').next()).filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.')).collect();
+        let (mut found, mut present) = (0, 0);
+        for version in versions {
+            let key = format!("SOFTWARE\\EpicGames\\Unreal Engine\\{version}");
+            if let Some(dir) = SystemRegistry.value("HKLM", &key, "InstalledDirectory") {
+                assert!(!dir.starts_with("REG_") && !dir.starts_with(char::is_whitespace), "{version}: {dir}");
+                found += 1;
+                present += usize::from(Path::new(&dir).is_dir());
+            }
+        }
+        assert!(found == 0 || present > 0, "no registered engine folder exists ({found} registered)");
+    }
+
+    struct FakeRegistry(std::collections::BTreeMap<(String,String,String),String>);
+    impl EngineRegistry for FakeRegistry {
+        fn value(&self, root: &str, key: &str, name: &str) -> Option<String> {
+            self.0.get(&(root.to_owned(), key.to_owned(), name.to_owned())).cloned()
+        }
+    }
+
+    #[test]
+    fn unreal_engine_comes_from_the_association_or_the_override() {
+        let dir = temp();
+        let project = dir.path().join("Game.uproject");
+        std::fs::write(&project, r#"{"EngineAssociation":"5.5"}"#).unwrap();
+        let launcher = FakeRegistry([(("HKLM".into(), "SOFTWARE\\EpicGames\\Unreal Engine\\5.5".into(), "InstalledDirectory".into()), "C:/Epic/UE_5.5".into())].into());
+        assert_eq!(unreal_engine(&project, None, &launcher).unwrap(), "C:/Epic/UE_5.5");
+        assert_eq!(unreal_engine(&project, Some("D:/UE"), &launcher).unwrap(), "D:/UE");
+        std::fs::write(&project, r#"{"EngineAssociation":"{abc}"}"#).unwrap();
+        let source = FakeRegistry([(("HKCU".into(), "Software\\Epic Games\\Unreal Engine\\Builds".into(), "{abc}".into()), "D:/Source/UE".into())].into());
+        assert_eq!(unreal_engine(&project, None, &source).unwrap(), "D:/Source/UE");
+        let error = unreal_engine(&project, None, &launcher).unwrap_err().to_string();
+        assert!(error.contains("HKCU") && error.contains("ZERUS_UE_ENGINE"), "{error}");
+    }
 }
+

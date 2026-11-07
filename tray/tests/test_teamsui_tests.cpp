@@ -87,6 +87,8 @@ private slots:
     void theBuildsTabShowsTheBuildTheQueueTheTimelineAndWhoChangesWhat();
     void aTaskNodeAndAMemberCardShowTheirBuildState();
     void theBuildBrokerSwitchAndTheLeadsProposalCard();
+    void eachTestOfACppPythonOrUnrealRunShowsWhenItsRowOpens();
+    void theTestsSettingsCheckWithHgsAndSaveOnlyOnSave();
 };
 
 // #719: Tests beside Graph, Board, Layers and Profile: what runs now, the queue,
@@ -329,6 +331,142 @@ void TestTeamsUiTests::eachRunNamesItsMachineAndAWaitingRunnerSaysWhy()
 }
 
 QTEST_MAIN(TestTeamsUiTests)
+// Task 88 (owner, 2026-11-06: builds and tests of any stack): a run whose
+// provider names its report (CTest's JUnit for C++, pytest's for Python and
+// Cython, Unreal's automation JSON) says how its tests went on its row, and
+// lists each test, failures first with their message, when the row opens.
+void TestTeamsUiTests::eachTestOfACppPythonOrUnrealRunShowsWhenItsRowOpens()
+{
+    setTeam(phasedTeam());
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    const auto run = [now](const QString &id, const QString &suite, const QString &status, int ago, const QJsonObject &report) {
+        return QJsonObject{{"id", id}, {"team", "team-1"}, {"suite", suite}, {"commit", "abc1234"}, {"input_hash", "h"}, {"status", status},
+                           {"duration_ms", 42000}, {"excerpt", "output"}, {"asked_by", "dev"}, {"at", now - ago}, {"affected", QJsonArray{}},
+                           {"task", 3}, {"reused_from", ""}, {"flags", QJsonArray{}}, {"due", false}, {"recorded_ms", 0}, {"runner", ""}, {"report", report}};
+    };
+    const auto test = [](const QString &suite, const QString &name, const QString &status, int ms, const QString &message = {}) {
+        return QJsonObject{{"suite", suite}, {"name", name}, {"status", status}, {"ms", ms}, {"message", message}};
+    };
+    const QJsonArray results{
+        run("cpp", "engine", "failed", 60, QJsonObject{{"passed", 41}, {"failed", 1}, {"skipped", 1}, {"errors", 0},
+            {"results", QJsonArray{test("math", "divides", "failed", 500, "expected 2, got 3"), test("math", "adds", "passed", 12), test("later", "later", "skipped", 0)}}}),
+        run("py", "python", "passed", 120, QJsonObject{{"passed", 2}, {"failed", 0}, {"skipped", 0}, {"errors", 0},
+            {"results", QJsonArray{test("tests.test_ext", "test_cython_sum", "passed", 3), test("tests.test_io", "test_reads", "passed", 4)}}}),
+        run("ue", "unreal", "failed", 180, QJsonObject{{"passed", 1}, {"failed", 1}, {"skipped", 0}, {"errors", 0},
+            {"results", QJsonArray{test("", "Project.World.Spawns", "failed", 1500, "Expected 2 actors, got 0"), test("", "Project.Math.Adds", "passed", 250)}}}),
+    };
+    writeArray(script() + ".testqueue", QJsonArray{});
+    writeArray(script() + ".testresults", results);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    workspace.resize(1500, 980); workspace.show();
+    controller.refresh();
+    panel.showTeam("team-1");
+    workspace.showTeam("team-1");
+    QPushButton *tests = nullptr;
+    QTRY_VERIFY((tests = withProperty<QPushButton>(&workspace, QString(), "segment", "tests")));
+    tests->click();
+    TeamTestsView *view = nullptr;
+    QTRY_VERIFY((view = testsViewOf(&workspace)) && view->isVisible());
+    QTRY_COMPARE(view->runs().size(), 3);
+    // Parsed per run, with the counts of every test.
+    const auto &parsed = view->runs();
+    const auto byId = [&](const QString &id) { return *std::find_if(parsed.cbegin(), parsed.cend(), [&](const TeamTests::Run &r) { return r.id == id; }); };
+    QCOMPARE(byId("cpp").countsText(), QStringLiteral("41 passed, 1 failed, 1 skipped"));
+    QCOMPARE(byId("py").countsText(), QStringLiteral("2 passed"));
+    QCOMPARE(byId("ue").tests.first().name, QStringLiteral("Project.World.Spawns"));
+    // Each row says it; a failing count is the danger tone.
+    const auto rowOf = [&](const QString &id) -> QFrame * {
+        for (auto *frame : workspace.findChildren<QFrame *>("teamTestsRun")) if (frame->property("record").toString() == id) return frame;
+        return nullptr;
+    };
+    QTRY_VERIFY(rowOf("cpp") && rowOf("py") && rowOf("ue"));
+    QCOMPARE(rowOf("cpp")->findChild<QLabel *>("teamTestsCounts")->text(), QStringLiteral("41 passed, 1 failed, 1 skipped"));
+    QVERIFY(!rowOf("cpp")->findChild<QWidget *>("teamTestsCase"));
+    // Opened: each test, failures first, with its message.
+    for (const QString id : {"cpp", "py", "ue"}) {
+        auto *toggle = rowOf(id)->findChild<QPushButton *>("teamTestsRunToggle");
+        toggle->click();
+        QTRY_VERIFY(rowOf(id) && rowOf(id)->findChild<QWidget *>("teamTestsCase"));
+        QStringList names, statuses;
+        for (auto *line : rowOf(id)->findChildren<QWidget *>("teamTestsCase")) { names << line->property("name").toString(); statuses << line->property("status").toString(); }
+        if (id == "cpp") {
+            QCOMPARE(names, (QStringList{"divides", "adds", "later"}));
+            QCOMPARE(statuses.first(), QStringLiteral("failed"));
+            QCOMPARE(rowOf(id)->findChild<QLabel *>("teamTestsCaseMessage")->text(), QStringLiteral("expected 2, got 3"));
+            QCOMPARE(rowOf(id)->findChild<QLabel *>("teamTestsCasesMore")->text(), QStringLiteral("40 more tests in the record"));
+            QCOMPARE(rowOf(id)->findChild<QLabel *>("teamTestsCaseName")->text(), QStringLiteral("math::divides"));
+        } else if (id == "py") {
+            QCOMPARE(names, (QStringList{"test_cython_sum", "test_reads"}));
+            QVERIFY(!rowOf(id)->findChild<QLabel *>("teamTestsCaseMessage"));
+        } else {
+            QCOMPARE(names, (QStringList{"Project.World.Spawns", "Project.Math.Adds"}));
+            QCOMPARE(rowOf(id)->findChild<QLabel *>("teamTestsCaseMessage")->text(), QStringLiteral("Expected 2 actors, got 0"));
+        }
+    }
+    // A run without a report shows no counts.
+    QVERIFY(TeamTests::Run::parse(QJsonObject{{"id", "plain"}, {"status", "passed"}}).hasReport == false);
+}
+
+// Task 88: the team settings show the project's providers of any stack and
+// its templates (with whether the owner accepted each) as hgs reads them; the
+// owner's override is checked by hgs without writing, and only Save sends
+// it, as settings.tests.
+void TestTeamsUiTests::theTestsSettingsCheckWithHgsAndSaveOnlyOnSave()
+{
+    setTeam(phasedTeam());
+    QFile::remove(script() + ".testconfig");
+    {
+        QFile file(script() + ".testconfig"); QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write(QJsonDocument(QJsonObject{{"ok", true}, {"source", "file"}, {"overridden", false}, {"proposal", "version = 1\n[[provider]]\nname = \"ctest\"\n"},
+            {"providers", QJsonArray{QJsonObject{{"name", "engine"}, {"kind", "ctest"}, {"results", QJsonObject{{"format", "junit"}, {"path", "build/ctest.xml"}}}},
+                                     QJsonObject{{"name", "game"}, {"kind", "command"}, {"results", QJsonObject{{"format", "unreal"}, {"path", "Saved/Report/index.json"}}}}}},
+            {"templates", QJsonArray{QJsonObject{{"id", "make-all"}, {"program", "make"}, {"accepted", false}, {"hash", "0123456789abcdef0123"}}}}}).toJson());
+    }
+    const auto restore = qScopeGuard([this] { QFile::remove(script() + ".testconfig"); });
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    controller.refresh();
+    QTRY_VERIFY(controller.team("team-1"));
+    TeamSettingsDialog dialog(&controller, *controller.team("team-1"), true);
+    dialog.show();
+    QTRY_COMPARE(dialog.findChild<QLabel *>("teamSettingsTestsSource")->text(), QStringLiteral("From the project's .zerus/tests.toml"));
+    QStringList items;
+    QTRY_VERIFY(([&] { items.clear(); for (auto *item : dialog.findChildren<QLabel *>("teamSettingsTestsItem")) items << item->text(); return items.size() == 3; }()));
+    QCOMPARE(items, (QStringList{"Provider engine (ctest), results junit from build/ctest.xml", "Provider game (command), results unreal from Saved/Report/index.json",
+                                 "Template make-all: make, waits for your acceptance (hgs team templates accept 0123456789ab)"}));
+    QVERIFY(dialog.findChild<QPlainTextEdit *>("teamSettingsTestsProposal")->toPlainText().contains("[[provider]]"));
+    auto *save = dialog.findChild<QPushButton *>("teamSettingsSave");
+    auto *field = dialog.findChild<QPlainTextEdit *>("teamSettingsTestsOverride");
+    QVERIFY(!save->isEnabled());
+    // Not JSON: Save is refused with why.
+    field->setPlainText("{nope");
+    QVERIFY(!save->isEnabled());
+    QVERIFY(dialog.problem().contains("not valid JSON"));
+    // A refused override: Check says why, nothing is written.
+    field->setPlainText(R"({"provider":[{"name":"python","kind":"pytest","results":{"format":"html","path":"r.html"}}]})");
+    dialog.findChild<QPushButton *>("teamSettingsTestsCheck")->click();
+    auto *result = dialog.findChild<QLabel *>("teamSettingsTestsCheckResult");
+    QTRY_VERIFY(result->text().startsWith("hgs refuses it: The provider python's results format is junit, trx or unreal"));
+    // A good one: Check lists it, still nothing written.
+    field->setPlainText(R"({"provider":[{"name":"python","kind":"pytest","results":{"format":"junit","path":"out/pytest.xml"}}]})");
+    dialog.findChild<QPushButton *>("teamSettingsTestsCheck")->click();
+    QTRY_VERIFY(result->text().startsWith("hgs loads it: 3 providers"));
+    QVERIFY(calls(script(), "settings").isEmpty());
+    const auto checks = calls(script(), "test-config");
+    QVERIFY(std::any_of(checks.cbegin(), checks.cend(), [](const QJsonObject &call) { return call["action"] == "check" && call["tests"].isObject(); }));
+    for (const auto &call : checks) QVERIFY(!call.contains("request_id"));
+    // Save sends it as settings.tests, once.
+    QVERIFY(save->isEnabled());
+    QCOMPARE(dialog.changes().value("tests").toObject().value("provider").toArray().first().toObject().value("name").toString(), QStringLiteral("python"));
+    save->click();
+    QTRY_COMPARE(calls(script(), "settings").size(), 1);
+    QCOMPARE(calls(script(), "settings").first()["settings"].toObject()["tests"].toObject()["provider"].toArray().size(), 1);
+}
+
 #include "test_teamsui_tests.moc"
 
 namespace {

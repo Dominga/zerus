@@ -10,7 +10,7 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|phase-mode|integrate-build|start-ahead|full-tests|test|run|templates|safe-action|reports-to|sub-lead|deferred|answer-deferred|defer-session|disk --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|phase-mode|integrate-build|start-ahead|full-tests|test|run|templates|safe-action|reports-to|sub-lead|deferred|answer-deferred|defer-session|disk|test-config --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "move-task", "add-to-phase", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
@@ -934,6 +934,15 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
             entry["minutes_without_progress"] =
                 json!(member.seen_event_at.map(|at| ((crate::state::now() - at) / 60.0).max(0.0).round() as u64));
             entry["stuck"] = serde_json::to_value(&member.stuck).unwrap_or(Value::Null);
+            // Task 139: the last cross-check of its sources; an uncertain
+            // member never shows a confident phase or activity.
+            if let Some(check) = &member.check {
+                entry["check"] = json!({"state":check.state,"at":check.at,"since":check.since,"disagree":check.disagree});
+                if check.state == "uncertain" {
+                    entry["phase"] = json!("uncertain");
+                    entry["activity"] = json!("uncertain");
+                }
+            }
             let folder = super::dispatcher::member_folder_path(team, member).unwrap_or_default();
             // C11: a member on another computer works in a folder there; this
             // computer cannot read it, so its facts stay empty rather than
@@ -2898,6 +2907,65 @@ fn test_command(input: &Value) -> anyhow::Result<Value> {
 
 /// The member's live attempt from its own session; `team` is optional when the
 /// session belongs to one team (spec section 5). Read only.
+/// Task 139: `hgs team look`: one member's compact verified snapshot - its
+/// screen read now, every source's view, the reconciled state, its task and
+/// pulse and what Zerus does next. Reads only; changes nothing.
+fn look(input: &Value) -> anyhow::Result<Value> {
+    let wanted = text(input, "member").trim();
+    ensure!(!wanted.is_empty(), "hgs team look needs a member: its id or role");
+    let named = text(input, "team");
+    let teams = Store::open(false)?.active_teams(ACTIVE_TEAMS)?;
+    let matches = |team: &Team| {
+        team.members.iter().find(|member| {
+            member.state != MemberState::Removed
+                && (member.id.eq_ignore_ascii_case(wanted)
+                    || member.role.eq_ignore_ascii_case(wanted)
+                    || member.session.as_ref().is_some_and(|session| session.name == wanted))
+        }).cloned()
+    };
+    let found: Vec<(&Team, Member)> = teams
+        .iter()
+        .filter(|team| named.is_empty() || team.id == named)
+        .filter_map(|team| matches(team).map(|member| (team, member)))
+        .collect();
+    let (team, member) = match found.len() {
+        0 => bail!("No running team has a member {wanted}"),
+        1 => found.into_iter().next().unwrap(),
+        _ => {
+            // The caller's own team first.
+            let record = caller_record();
+            let ids: Vec<String> = found.iter().map(|(team, _)| team.id.clone()).collect();
+            let own = record.as_ref().and_then(|record| found.iter().position(|(team, _)| calling_member(team, record).is_some()));
+            let index = own.with_context(|| format!("Several teams have a member {wanted}; name one with \"team\": {}", ids.join(", ")))?;
+            found.into_iter().nth(index).unwrap()
+        }
+    };
+    let at = now();
+    let quiet = member.seen_event_at.map(|seen| (at - seen).max(0.0)).unwrap_or(0.0);
+    let hooks = super::look::Hooks {
+        live: member.seen.is_some_and(|seen| seen.live),
+        activity: member.seen_activity.clone(),
+        phase: member.seen_phase.clone(),
+        asking: member.pending.is_some() || member.terminal_question.is_some(),
+        background: member.background_since.is_some(),
+        building: false,
+        tool: String::new(),
+        last_event_at: member.seen_event_at,
+        quiet,
+        limit: super::ops::stuck_minutes(team) * 60.0,
+    };
+    let screen = member.session.as_ref().and_then(super::dispatcher::read_screen);
+    let lines = screen.as_deref().map(|screen| super::dispatcher::last_lines(screen, 40)).unwrap_or_default();
+    let shown = screen.as_ref().map(|_| super::look::classify(&member.agent, &lines));
+    let record = super::look::recorded_request(&member);
+    let compared = super::look::compare(&hooks, record.as_deref(), shown.as_ref().map(|(kind, detail)| (*kind, detail.as_str())));
+    let kept = lines[lines.len().saturating_sub(super::look::SCREEN_LINES)..].to_vec();
+    let check = super::look::next_check(member.check.as_ref(), &compared, kept, at);
+    let mut value = super::look::snapshot(team, &member, &check, at);
+    value["screen_read"] = json!(screen.is_some());
+    Ok(value)
+}
+
 fn current(input: &Value) -> anyhow::Result<Value> {
     let named = text(input, "team");
     // A member on another computer has no local identity: its attempt id names
@@ -3366,6 +3434,66 @@ pub(crate) fn fill_pause(store: &Store, team: &mut Team) {
         },
         None => super::model::TeamPause { at: team.updated, ..Default::default() },
     });
+}
+
+/// Task 88: the project's test configuration as the team uses it: the file
+/// (or the detected proposal) with the owner's override, every provider and
+/// its kind, the project templates with whether the owner accepted each, and
+/// the proposal `hgs test config --propose` would write. With `"action":
+/// "check"` and `"tests"`, a candidate override is checked as the owner's
+/// Save would apply it; nothing is written either way.
+fn test_config(input: &Value) -> anyhow::Result<Value> {
+    let team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
+    let folder = std::path::Path::new(&team.folder);
+    let (override_value, checking) = match text(input, "action") {
+        "" | "get" => (team.settings.tests.clone(), false),
+        "check" => {
+            let candidate = input["tests"].clone();
+            ensure!(candidate.is_null() || candidate.is_object(), "The tests override is an object shaped like .zerus/tests.toml");
+            ((!candidate.is_null()).then_some(candidate), true)
+        }
+        other => bail!("test-config action is get or check (got {other})"),
+    };
+    let detected = crate::test_discipline::detect::detect(folder);
+    let proposal = crate::test_discipline::detect::proposal(&detected);
+    let file = folder.join(crate::test_discipline::config::FILE);
+    let loaded = match crate::test_discipline::config::load(folder, override_value.as_ref()) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            return Ok(json!({"ok":false,"error":format!("{error:#}"),"checked":checking,"override":override_value,
+                "file":file.is_file(),"proposal":proposal}));
+        }
+    };
+    let source = match loaded.source {
+        crate::test_discipline::config::Source::File => "file",
+        crate::test_discipline::config::Source::Detected => "detected",
+        crate::test_discipline::config::Source::None => "none",
+    };
+    let providers: Vec<Value> = loaded
+        .config
+        .providers
+        .iter()
+        .map(|provider| {
+            let mut item = serde_json::to_value(provider).unwrap_or_default();
+            item["kind"] = json!(provider.kind.name());
+            item
+        })
+        .collect();
+    let accepted = super::templates::project_listed(folder).unwrap_or_default();
+    let templates: Vec<Value> = loaded
+        .config
+        .templates
+        .iter()
+        .map(|template| {
+            let hash = template.content_hash();
+            let mut item = serde_json::to_value(template).unwrap_or_default();
+            item["hash"] = json!(hash);
+            item["accepted"] = json!(accepted.iter().any(|known| known["hash"] == hash.as_str() && known["accepted"] == true));
+            item
+        })
+        .collect();
+    Ok(json!({"ok":true,"checked":checking,"source":source,"active":loaded.active(),"overridden":loaded.overridden,
+        "file":file.is_file(),"override":override_value,"providers":providers,"templates":templates,"proposal":proposal}))
 }
 
 /// 9.7: pause, resume or stop of a team reaches its sub-teams, level by level.
@@ -4094,7 +4222,23 @@ fn templates_command(input: &Value) -> anyhow::Result<Value> {
             }
             Ok(super::templates::listed())
         }
-        other => bail!("templates action is get or set (got {other})"),
+        // Task 85: the project templates of a folder's .zerus/tests.toml, each
+        // with its content hash and whether the owner accepted it.
+        "project" => {
+            let folder = text(input, "folder");
+            ensure!(!folder.is_empty(), "Name the folder whose project templates to list");
+            Ok(json!({"items":super::templates::project_listed(std::path::Path::new(folder))?}))
+        }
+        // Task 85: the owner accepts project templates by their content hash;
+        // they run outside a member's sandbox, so an agent never accepts one.
+        "accept" => {
+            let (dsh, session, run) = caller_identities();
+            owner_caller(input, caller_record().is_some(), dsh.is_some(), session.is_some(), run.is_some())?;
+            let hashes: Vec<String> = input["hashes"].as_array().into_iter().flatten().filter_map(|hash| hash.as_str().map(str::to_owned)).collect();
+            ensure!(!hashes.is_empty(), "Name the content hashes to accept (hgs team templates --json '{{\"action\":\"project\",\"folder\":...}}' lists them)");
+            Ok(json!({"accepted":super::templates::accept_project(&hashes)?}))
+        }
+        other => bail!("templates action is get, set, project or accept (got {other})"),
     }
 }
 
@@ -4240,6 +4384,11 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
     if op == "disk" {
         return crate::state::build_dirs::command(input);
     }
+    // Task 88: the team's test configuration for its Tests settings; it reads
+    // and checks, never writes (the owner's Save is `settings`).
+    if op == "test-config" {
+        return test_config(input);
+    }
     match op {
         "create" => create(input),
         "answer" => answer(input),
@@ -4382,6 +4531,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             Ok(super::broker::builds_view(&team, super::super::now()))
         }
         "current" => current(input),
+        "look" => look(input),
         "escalate" => escalate(input),
         op if MUTATIONS.contains(&op) => {
             let request = text(input, "request_id");
@@ -4684,6 +4834,13 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     } else {
         None
     };
+    // Task 139: `hgs team look MEMBER [--team ID]`, beside its JSON form.
+    if args.first().map(String::as_str) == Some("look") && args.get(1).is_some_and(|arg| !arg.starts_with("--")) && file.is_none() {
+        let team = args.iter().position(|arg| arg == "--team").and_then(|index| args.get(index + 1)).cloned().unwrap_or_default();
+        let result = run("look", &json!({"member":args[1],"team":team}), false).map_err(|e| e.to_string())?;
+        println!("{result}");
+        return Ok(0);
+    }
     let catalog = args.first().map(String::as_str) == Some("catalog");
     if catalog {
         args.remove(0);

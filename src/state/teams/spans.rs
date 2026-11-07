@@ -5,14 +5,23 @@
 //! covers the lead's wait. Builds lie on top of the work in `overlay`. A gap
 //! nothing recorded stays `unknown`, never guessed; a past phase gets its
 //! spans the same way from what its attempts kept.
-use super::model::{AttemptState, Task, TaskStatus, Team};
+//!
+//! Task 118 (owner, 2026-11-06): time that waits for a person's answer is its
+//! own kind, `person`, with the `reason` it waited on: `acceptance` (a phase
+//! waiting for the owner's acceptance), `permission` and `question` (a native
+//! request or a task question the owner answered, or that went to the owner),
+//! `deferred` (a request the owner queue answered safely for the owner, task
+//! 97) and `report` (the lead's decision on a report that the owner made or
+//! that was escalated to the owner). What the lead answers stays `question`,
+//! `permission` and `lead`.
+use super::model::{AttemptState, Decider, Question, Task, TaskStatus, Team};
 use super::timing::{opened, ready, Moment};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The journal entries a timeline reads; the rest is in the team file.
 pub(crate) const EVENT_KINDS: &[&str] = &[
-    "question_forwarded", "permission_answered", "stop_told", "held", "released",
+    "question_forwarded", "permission_answered", "request_deferred", "stop_told", "held", "released",
     // U63 (owner, 2026-10-31): a phase's pause, and the owner's acceptance a
     // later phase waits for.
     "phase_paused", "phase_unpaused", "phase_returned_to_draft",
@@ -67,6 +76,10 @@ impl Candidate {
     fn new(kind: &'static str, from: f64, to: f64, rank: u8, running: bool) -> Self {
         Candidate { kind, from, to, rank, running, extra: Map::new() }
     }
+    /// Task 118: time that waits for a person's answer, and what it waited on.
+    fn person(from: f64, to: f64, rank: u8, running: bool, reason: &str) -> Self {
+        Candidate::new("person", from, to, rank, running).with("reason", json!(reason))
+    }
     fn with(mut self, key: &str, value: Value) -> Self {
         if !value.is_null() && value != json!("") {
             self.extra.insert(key.to_owned(), value);
@@ -119,34 +132,115 @@ pub(crate) fn window(team: &Team, tasks: &[&Task], now: f64) -> Option<(f64, f64
 fn native_blocks(team: &Team, member: &str, journal: &[Journal], from: f64, to: f64, now: f64) -> Option<Vec<Candidate>> {
     let label = team.role_of(member);
     let mine = |entry: &Journal| entry.detail["member"].as_str() == Some(label.as_str());
+    // Task 118: a request only the member's Terminal takes waits for a person
+    // from the start; the team keeps no end for it, so only an open one shows.
+    let terminal: Vec<Candidate> = team
+        .member(member)
+        .and_then(|found| found.terminal_question.as_ref())
+        .map(|asked| asked.at.max(from))
+        .filter(|at| to >= now && *at < to)
+        .map(|at| Candidate::person(at, to, BLOCK, true, "permission"))
+        .into_iter()
+        .collect();
     if !journal.iter().any(|entry| entry.kind == "question_forwarded" && mine(entry) && entry.at >= from && entry.at <= to) {
-        return Some(Vec::new());
+        return Some(terminal);
     }
     if team.members.iter().filter(|other| team.role_of(&other.id) == label).count() > 1 {
         return None;
     }
-    let mut blocks = Vec::new();
-    let mut asked: Option<(f64, bool)> = None;
+    let kind_of = |approval: bool| if approval { "permission" } else { "question" };
+    let mut blocks = terminal;
+    // Asked at, an approval, and whether the owner queue took it (task 97).
+    let mut asked: Option<(f64, bool, bool)> = None;
     for entry in journal.iter().filter(|entry| mine(entry)) {
         match entry.kind.as_str() {
-            "question_forwarded" => asked = Some((entry.at, entry.detail["approval"] == true)),
+            "question_forwarded" => asked = Some((entry.at, entry.detail["approval"] == true, false)),
+            // Task 97: the owner queue answered it safely for the owner and the
+            // member went on; a request left on the screen stays asked.
+            "request_deferred" => {
+                if let Some((at, approval, _)) = asked {
+                    if entry.detail["delivery"] == "answered" {
+                        blocks.push(Candidate::person(at, entry.at, BLOCK, false, "deferred").with("by", json!("owner queue")));
+                        asked = None;
+                    } else {
+                        asked = Some((at, approval, true));
+                    }
+                }
+            }
             "permission_answered" => {
-                if let Some((at, approval)) = asked.take() {
-                    blocks.push(
-                        Candidate::new(if approval { "permission" } else { "question" }, at, entry.at, BLOCK, false)
-                            .with("by", entry.detail["by"].clone())
-                            .with("decision", entry.detail["decision"].clone()),
-                    );
+                if let Some((at, approval, deferred)) = asked.take() {
+                    let by = entry.detail["by"].clone();
+                    // Whoever answered it: the owner, or the lead (and Zerus's
+                    // safe actions and an answer nobody recorded stay blocked).
+                    let block = if deferred {
+                        Candidate::person(at, entry.at, BLOCK, false, "deferred")
+                    } else if by == "owner" {
+                        Candidate::person(at, entry.at, BLOCK, false, kind_of(approval))
+                    } else {
+                        Candidate::new(kind_of(approval), at, entry.at, BLOCK, false)
+                    };
+                    blocks.push(block.with("by", by).with("decision", entry.detail["decision"].clone()));
                 }
             }
             _ => {}
         }
     }
-    if let Some((at, approval)) = asked {
-        blocks.push(Candidate::new(if approval { "permission" } else { "question" }, at, to, BLOCK, to >= now));
+    if let Some((at, approval, deferred)) = asked {
+        let running = to >= now;
+        let went = if deferred { Some(at) } else { escalated_at(team, member, at) };
+        match went {
+            // Waiting for the lead until the request went to the owner, then for a person.
+            Some(went) if went < to => {
+                if went > at {
+                    blocks.push(Candidate::new(kind_of(approval), at, went, BLOCK, false));
+                }
+                blocks.push(Candidate::person(went.max(at), to, BLOCK, running, if deferred { "deferred" } else { kind_of(approval) }));
+            }
+            _ => blocks.push(Candidate::new(kind_of(approval), at, to, BLOCK, running)),
+        }
     }
     blocks.retain(|block| block.to > from && block.from < to);
     Some(blocks)
+}
+
+/// When the member's open request asked at `at` went to the owner (the owner's
+/// list, `inbox::attention`): at once for the lead's own, else after the
+/// team's `remind_owner_permission_minutes` of the lead's silence; None while
+/// it is still the lead's.
+fn escalated_at(team: &Team, member: &str, at: f64) -> Option<f64> {
+    let found = team.member(member)?;
+    found.pending.as_ref().filter(|pending| (pending.at - at).abs() < 5.0)?;
+    if found.id == team.lead {
+        return Some(at);
+    }
+    let minutes = team.settings.remind_owner_permission_minutes;
+    (minutes > 0).then_some(at + minutes as f64 * 60.0)
+}
+
+/// One task question as a span: waiting for the owner when the owner answered
+/// it, else for the lead.
+fn question_span(question: &Question, to: f64, running: bool) -> Candidate {
+    let candidate = if question.answered_at.is_some() && question.by == "You" {
+        Candidate::person(question.at, to, BLOCK, running, "question")
+    } else {
+        Candidate::new("question", question.at, to, BLOCK, running)
+    };
+    candidate.with("by", json!(question.by)).with("question", json!(question.id))
+}
+
+/// The lead's decision on a report from `at` to `to`: the lead's wait; the
+/// owner's when the owner decided it, and from the moment it went to the owner
+/// (`minutes` of the lead's silence, the team's `remind_owner_minutes`) while
+/// it is still open.
+fn lead_decision(at: f64, to: f64, running: bool, by_owner: bool, minutes: u64) -> Vec<Candidate> {
+    let went = (minutes > 0).then_some(at + minutes as f64 * 60.0);
+    match went {
+        _ if by_owner && went.is_none_or(|went| to <= went) => vec![Candidate::person(at, to, LEAD, running, "report")],
+        Some(went) if (by_owner || running) && went < to => {
+            vec![Candidate::new("lead", at, went, LEAD, false), Candidate::person(went, to, LEAD, running, "report")]
+        }
+        _ => vec![Candidate::new("lead", at, to, LEAD, running)],
+    }
 }
 
 /// The task's lead holds (A5) from the journal; a hold the journal lost but
@@ -180,7 +274,8 @@ fn holds(task: &Task, journal: &[Journal], live: bool, now: f64) -> Vec<Candidat
 
 /// U63 (owner, 2026-10-31): the task's waits that are the owner's or the
 /// lead's call on a phase: its own phase paused ("phase_pause"), or a phase
-/// before it waiting for the owner's acceptance ("owner_acceptance").
+/// before it waiting for the owner's acceptance (task 118: a "person" wait,
+/// reason "acceptance").
 fn phase_waits(team: &Team, task: &Task, journal: &[Journal], live: bool, now: f64) -> Vec<Candidate> {
     let mut list = Vec::new();
     let order_of = |n: u32| team.phases.iter().find(|phase| phase.n == n).map_or(n, |phase| phase.order());
@@ -203,7 +298,7 @@ fn phase_waits(team: &Team, task: &Task, journal: &[Journal], live: bool, now: f
             }
             "phase_owner_accepted" | "phase_acceptance_sent_back" | "phase_acceptance_changed" if before => {
                 if let Some(at) = awaiting.remove(&phase) {
-                    list.push(Candidate::new("owner_acceptance", at, entry.at, HOLD, false).with("phase", json!(phase)));
+                    list.push(Candidate::person(at, entry.at, HOLD, false, "acceptance").with("phase", json!(phase)));
                 }
             }
             _ => {}
@@ -215,7 +310,7 @@ fn phase_waits(team: &Team, task: &Task, journal: &[Journal], live: bool, now: f
         }
         if let Some(held) = super::plan::acceptance_block(team, task.phase) {
             if let Some(at) = awaiting.get(&u64::from(held)) {
-                list.push(Candidate::new("owner_acceptance", *at, now, HOLD, true).with("phase", json!(held)));
+                list.push(Candidate::person(*at, now, HOLD, true, "acceptance").with("phase", json!(held)));
             }
         }
     }
@@ -353,9 +448,7 @@ pub(crate) fn spans(team: &Team, task: &Task, journal: &[Journal], holders: &[Ho
         }
         for question in &attempt.questions {
             let to = question.answered_at.or(reach).unwrap_or(now);
-            lane.push(tag(Candidate::new("question", question.at, to, BLOCK, question.open() && open)
-                .with("by", json!(question.by))
-                .with("question", json!(question.id))));
+            lane.push(tag(question_span(question, to, question.open() && open)));
         }
         if let (Some(from), Some(to)) = (begin, reach) {
             match native_blocks(team, &attempt.member, journal, from, to, now) {
@@ -395,9 +488,7 @@ pub(crate) fn spans(team: &Team, task: &Task, journal: &[Journal], holders: &[Ho
             }
             for question in &run.questions {
                 let to = question.answered_at.or(close).unwrap_or(now);
-                lane.push(stage(Candidate::new("question", question.at, to, BLOCK, question.open() && going)
-                    .with("by", json!(question.by))
-                    .with("question", json!(question.id))));
+                lane.push(stage(question_span(question, to, question.open() && going)));
             }
             for record in &run.runs {
                 overlay.push(json!({"kind":"build","from":record.at - record.ms as f64 / 1000.0,"to":record.at,"s":seconds(record.ms as f64 / 1000.0),
@@ -411,9 +502,13 @@ pub(crate) fn spans(team: &Team, task: &Task, journal: &[Journal], holders: &[Ho
         // The lead's decision on the report; a stage covers its part of it.
         if let Some(report) = &attempt.report {
             let undecided = attempt.state == AttemptState::Reported && task.status.reported() && next.is_none();
+            // The task keeps who made its last decision: the owner's, when it
+            // is this attempt's.
+            let by_owner = task.decided_by == Some(Decider::Human) && next.is_none();
+            let minutes = team.settings.remind_owner_minutes;
             match attempt.decided_at {
-                Some(decided) => lane.push(tag(Candidate::new("lead", report.at, decided, LEAD, false))),
-                None if undecided && live => lane.push(tag(Candidate::new("lead", report.at, now, LEAD, true))),
+                Some(decided) => lane.extend(lead_decision(report.at, decided, false, by_owner, minutes).into_iter().map(&tag)),
+                None if undecided && live => lane.extend(lead_decision(report.at, now, true, false, minutes).into_iter().map(&tag)),
                 None => {}
             }
         }

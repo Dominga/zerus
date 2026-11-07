@@ -1183,7 +1183,7 @@ fn json_shapes_of_every_command() {
     assert_eq!(plans[0]["plan"]["id"], "pl");
     assert_eq!(case.json(&["items"]), json!([]));
     assert_eq!(case.json(&["stale"]), json!([]));
-    assert_eq!(ids(&case.json(&["for", "src/chain.py"])), [rid.clone()]);
+    assert_eq!(ids(&case.json(&["for", "src/chain.py"])), std::slice::from_ref(&rid));
     assert_eq!(case.json(&["show", &rid])["id"], json!(rid));
     let check = case.json(&["check"]);
     assert_eq!(check.as_object().unwrap().keys().collect::<Vec<_>>(), ["records", "files", "errors", "warnings"]);

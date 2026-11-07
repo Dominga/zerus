@@ -11,25 +11,30 @@ use anyhow::{anyhow, ensure, Result};
 use std::path::{Path, PathBuf};
 
 /// The read-only hgs commands a team member may run without an approval: the
-/// team it belongs to, its own hand-out, the guide and an inspection of a
-/// session. Nothing here changes a team, a task, a file or a session.
+/// team it belongs to, its own hand-out and the guide. Nothing here changes a
+/// team, a task, a file or a session. Task 90: `hgs inspect` is not here: it
+/// takes a session name, which only a `*` pattern can allow, and a `*` pattern
+/// also lets `hgs inspect x; other` through a matcher that does not split
+/// compound commands (Kimi's 2.5.2 matcher could not be checked here).
 pub(crate) const READ_ONLY: [&str; 6] = [
     "hgs team status",
     "hgs team current",
     "hgs team inbox",
     "hgs team profile",
     "hgs guide",
-    "hgs inspect",
+    "hgs guide team",
 ];
 
 /// The largest Kimi config this writer accepts (the file holds a provider
 /// table and models, never anything near this).
 const MAX_CONFIG: u64 = 1024 * 1024;
 
-/// Kimi's rule pattern for one command: its Bash matcher is a glob over the
-/// whole command, so `hgs team status*` takes the bare and the `--json` forms.
+/// Kimi's rule patterns for one command: exactly the bare command and its
+/// `--json` form, never a `*` glob, so no command with anything appended (a
+/// `;`, `&&` or `|` and another command) can match, whether or not Kimi's
+/// matcher splits compound commands.
 fn patterns(command: &str) -> [String; 2] {
-    [format!("Bash({command})"), format!("Bash({command} *)")]
+    [format!("Bash({command})"), format!("Bash({command} --json)")]
 }
 
 /// Every pattern the opt-in may add; the confirmation names exactly these.
@@ -335,18 +340,19 @@ pattern = \"Bash(rm -rf*)\"\n";
         expected.sort();
         seen.sort();
         assert_eq!(seen, expected);
-        // Every allow names a read-only command and a *-glob, never a bare *.
+        // Every allow names one read-only command, bare or with --json, and no
+        // glob at all.
         for rule in rules
             .iter()
             .filter(|rule| rule["decision"].as_str() == Some("allow"))
         {
             let pattern = rule["pattern"].as_str().unwrap();
-            assert_ne!(pattern, "Bash(*)");
+            assert!(!pattern.contains('*'), "{pattern}");
             let command = pattern
                 .strip_prefix("Bash(")
                 .and_then(|p| p.strip_suffix(')'))
                 .unwrap();
-            let command = command.strip_suffix(" *").unwrap_or(command);
+            let command = command.strip_suffix(" --json").unwrap_or(command);
             assert!(READ_ONLY.contains(&command), "{pattern}");
         }
         // Confirmed again: nothing more to write.

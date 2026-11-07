@@ -29,7 +29,7 @@ namespace TeamProfile {
 
 namespace {
 const QStringList Busy{"work", "rework", "stage", "question", "permission", "background"};
-const QStringList Waits{"deps", "member", "lead", "delivery", "start_delay", "folder_held", "hold", "stage_wait"};
+const QStringList Waits{"deps", "member", "lead", "person", "delivery", "start_delay", "folder_held", "hold", "stage_wait"};
 
 QList<std::pair<double, double>> unite(QList<std::pair<double, double>> list)
 {
@@ -87,7 +87,9 @@ const QList<KindStyle> &kindStyles()
     // solid kinds also stay apart under deuteranopia and protanopia. Task 93
     // (owner: "the green is too toxic"): calm colours, LCh chroma at most 45
     // in dark and 55 in light (ChromaCapDark/Light), in the skin's own
-    // lightness bands, with work the skin's mint.
+    // lightness bands, with work the skin's mint. Task 118: "person", waiting
+    // for a person's answer, is a calm lime in dark and sage in light, with its
+    // own hatch (a sparse dot, which Qt's patterns lack: TexturePattern).
     static const QList<KindStyle> styles{
         {"work", "work", "", QColor("#7dd3b0"), QColor("#3f9f7b"), Qt::SolidPattern},
         {"rework", "rework", "", QColor("#df9c77"), QColor("#83441d"), Qt::SolidPattern},
@@ -101,6 +103,7 @@ const QList<KindStyle> &kindStyles()
         {"member", "member", "", QColor("#b96f97"), QColor("#792758"), Qt::BDiagPattern},
         {"deps", "deps", "", QColor("#899d5d"), QColor("#354e03"), Qt::FDiagPattern},
         {"lead", "lead", "", QColor("#fdc5ff"), QColor("#925fa0"), Qt::DiagCrossPattern},
+        {"person", "person", "", QColor("#d8eea5"), QColor("#8a9269"), Qt::TexturePattern},
         {"folder_held", "folder_held", "", QColor("#fcd6b2"), QColor("#58432d"), Qt::HorPattern},
         {"hold", "hold", "", QColor("#c1c1c1"), QColor("#314d38"), Qt::VerPattern},
         {"stage_wait", "stage_wait", "", QColor("#59d6f5"), QColor("#174d5a"), Qt::CrossPattern}};
@@ -135,6 +138,25 @@ Qt::BrushStyle kindPattern(const QString &kind, const QString &stageKind)
     return style ? style->pattern : Qt::SolidPattern;
 }
 
+QBrush kindBrush(const QColor &tone, Qt::BrushStyle pattern)
+{
+    if (pattern != Qt::TexturePattern) return QBrush(tone, pattern);
+    // Task 118: the hatch of a wait for a person: one dot in each 6 by 6 cell,
+    // sparser than the delivery's fine dots and apart from every line hatch.
+    static QHash<QRgb, QPixmap> cache;
+    QPixmap &texture = cache[tone.rgba()];
+    if (texture.isNull()) {
+        texture = QPixmap(6, 6);
+        texture.fill(Qt::transparent);
+        QPainter p(&texture);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setPen(Qt::NoPen);
+        p.setBrush(tone);
+        p.drawEllipse(QPointF(3, 3), 1.3, 1.3);
+    }
+    return QBrush(texture);
+}
+
 QString keyName(const QString &key)
 {
     if (key == "blocked") return QObject::tr("Blocked (question, permission or stop)");
@@ -160,6 +182,23 @@ QColor labelOn(const QColor &fill)
     return contrast(fill, dark) >= contrast(fill, light) ? dark : light;
 }
 
+QString personReason(const QString &reason)
+{
+    if (reason == "acceptance") return QObject::tr("phase acceptance");
+    if (reason == "permission") return QObject::tr("a permission");
+    if (reason == "question") return QObject::tr("a question");
+    if (reason == "deferred") return QObject::tr("a deferred request");
+    if (reason == "report") return QObject::tr("a report decision");
+    return reason;
+}
+
+QString personReasons(const QJsonObject &reasons)
+{
+    QStringList parts;
+    for (auto it = reasons.begin(); it != reasons.end(); ++it) parts << QStringLiteral("%1 %2").arg(personReason(it.key()), duration(qint64(it.value().toDouble())));
+    return parts.join(QStringLiteral(", "));
+}
+
 QString kindName(const QString &kind, const QString &stageKind)
 {
     if (kind == "work") return QObject::tr("Work");
@@ -174,6 +213,7 @@ QString kindName(const QString &kind, const QString &stageKind)
     if (kind == "member") return QObject::tr("Waited for a free member");
     if (kind == "deps") return QObject::tr("Waited for dependencies");
     if (kind == "lead") return QObject::tr("Waited for the lead");
+    if (kind == "person") return QObject::tr("Waiting for a person's answer");
     if (kind == "folder_held") return QObject::tr("Folder held by another task");
     if (kind == "hold") return QObject::tr("Held");
     if (kind == "stage_wait") return QObject::tr("Waited for a stage");
@@ -603,7 +643,7 @@ protected:
                 if (!shown(span.from, span.to)) continue;
                 const QRectF r(x(span.from), y + LaneBands::WaitTop, std::max(2.0, x(span.to) - x(span.from)), LaneBands::WaitHeight);
                 const QColor tone = kindColor(span.kind, span.stageKind, m_dark);
-                p.setPen(QPen(alpha(tone, .9), 1)); p.setBrush(QBrush(tone, kindPattern(span.kind, span.stageKind))); p.drawRoundedRect(r, 2, 2);
+                p.setPen(QPen(alpha(tone, .9), 1)); p.setBrush(kindBrush(tone, kindPattern(span.kind, span.stageKind))); p.drawRoundedRect(r, 2, 2);
                 if (span.task == m_selected) { p.setPen(QPen(c.fg, 1.5)); p.setBrush(Qt::NoBrush); p.drawRoundedRect(r.adjusted(-1, -1, 1, 1), 2, 2); }
             }
             p.setPen(alpha(c.border, .5)); p.drawLine(12, y + Row - 1, width() - 12, y + Row - 1);
@@ -788,6 +828,7 @@ QString lossTitle(const QJsonObject &loss, const Model &model)
     const QString name = task ? QStringLiteral("#%1 %2").arg(task).arg(model.titles.value(task)) : QString();
     if (kind == "rework") return QObject::tr("Rework: #%1 attempt %2 %3").arg(task).arg(loss.value("attempt").toInt()).arg(loss.value("cause").toString());
     if (kind == "lead_wait") return QObject::tr("Waited for the lead: %1").arg(name);
+    if (kind == "person_wait") return QObject::tr("Waiting for a person's answer: %1").arg(name);
     if (kind == "permission_wait") return QObject::tr("Permission wait: %1").arg(name);
     if (kind == "blocked_chain") return QObject::tr("Blocked chain: %1").arg(name);
     if (kind == "member_wait") return QObject::tr("Waited for a free member: %1").arg(name);
@@ -807,6 +848,7 @@ QString lossDetail(const QJsonObject &loss)
         return text;
     }
     if (kind == "lead_wait") return QObject::tr("decisions %1, questions %2").arg(duration(qint64(loss.value("lead_s").toDouble())), duration(qint64(loss.value("question_s").toDouble())));
+    if (kind == "person_wait") return personReasons(loss.value("reasons").toObject());
     if (kind == "permission_wait") {
         QStringList by; for (const auto &who : loss.value("answered_by").toArray()) by << who.toString();
         return by.isEmpty() ? QString() : QObject::tr("answered by %1").arg(by.join(QStringLiteral(", ")));
@@ -1092,7 +1134,7 @@ QWidget *TeamProfileView::timePage()
         QPainter p(&pixmap); p.setRenderHint(QPainter::Antialiasing);
         const QColor tone = m_dark ? style.dark : style.light;
         p.setPen(style.pattern == Qt::SolidPattern ? Qt::NoPen : QPen(tone, 1));
-        p.setBrush(QBrush(tone, style.pattern));
+        p.setBrush(kindBrush(tone, style.pattern));
         if (style.key == "build") p.drawRoundedRect(QRectF(.5, 5.5, 15, 4), 1.5, 1.5);   // the bottom strip, as drawn
         else p.drawRoundedRect(QRectF(.5, .5, 15, 9), 2, 2);
         p.end();

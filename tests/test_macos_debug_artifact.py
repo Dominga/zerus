@@ -372,22 +372,29 @@ class WorkflowContracts(unittest.TestCase):
     def test_selected_and_full_suite_gate_requires_new_native_even_if_aggregate_is_faked_success(self):
         body=security.job(self.checks,'gate');code=compile(security.inline_python(body),'suite-results','exec')
         mac=('cli-macos-debug','cli-macos-core','cli-macos-native','cli-macos','connector-macos')
+        windows=('windows-tests','windows-desktop','windows-host','client-native-windows')
         always=('source','quick','client-frontend','relay','connector','android')
-        for linux,macos in itertools.product((False,True),repeat=2):
+        for linux,macos,win in itertools.product((False,True),repeat=3):
             results={name:{'result':'success'} for name in always}
             results.update({name:{'result':'success' if macos else 'skipped'} for name in mac})
-            results.update({name:{'result':'skipped'} for name in ('arch-package','ios','windows-host','windows-desktop')})
+            results.update({name:{'result':'skipped'} for name in ('arch-package','ios')})
+            results.update({name:{'result':'success' if win else 'skipped'} for name in windows})
             results['cli']={'result':'success' if linux else 'skipped'}
             results['client-native-linux']={'result':'success' if linux else 'skipped'}
             results['client-native-macos-core']={'result':'success' if macos else 'skipped'}
             results['client-native-macos-tauri']={'result':'success' if macos else 'skipped'}
-            results['client-native-windows']={'result':'skipped'}
-            env=dict(RESULTS=json.dumps(results),RUN_LINUX=json.dumps(linux),RUN_MACOS=json.dumps(macos),RUN_ARCH='false',RUN_WINDOWS='false',RUN_IOS='false')
+            env=dict(RESULTS=json.dumps(results),RUN_LINUX=json.dumps(linux),RUN_MACOS=json.dumps(macos),RUN_ARCH='false',RUN_WINDOWS=json.dumps(win),RUN_IOS='false')
             with patch.dict(os.environ,env):exec(code,{})
             for name in mac[:4]:
                 for result in ('failure','cancelled','skipped' if macos else 'success'):
                     changed=copy.deepcopy(results);changed[name]={'result':result}
                     with self.subTest(linux=linux,macos=macos,name=name,result=result),patch.dict(os.environ,{**env,'RESULTS':json.dumps(changed)}),self.assertRaises(SystemExit):exec(code,{})
+                changed=copy.deepcopy(results);del changed[name]
+                with patch.dict(os.environ,{**env,'RESULTS':json.dumps(changed)}),self.assertRaises(KeyError):exec(code,{})
+            for name in windows:
+                for result in ('failure','cancelled','skipped' if win else 'success'):
+                    changed=copy.deepcopy(results);changed[name]={'result':result}
+                    with self.subTest(linux=linux,macos=macos,windows=win,name=name,result=result),patch.dict(os.environ,{**env,'RESULTS':json.dumps(changed)}),self.assertRaises(SystemExit):exec(code,{})
                 changed=copy.deepcopy(results);del changed[name]
                 with patch.dict(os.environ,{**env,'RESULTS':json.dumps(changed)}),self.assertRaises(KeyError):exec(code,{})
 

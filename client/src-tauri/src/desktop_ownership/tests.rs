@@ -149,6 +149,48 @@ mod native {
     }
 
     #[test]
+    fn native_startup_prepares_legacy_modes_before_status_but_never_on_lookup_or_service() {
+        if crate::test_context::non_agent() {
+            return;
+        }
+        let _process = crate::PROCESS_TREE.read().unwrap();
+        let f = Fixture::new(
+            Mode::Native,
+            json!({"prepare_state":true,"never_service":true}),
+        );
+        assert_eq!(
+            f.run(Some(Action::NativeTakeover)).status.unwrap().state,
+            wire::State::Native
+        );
+        let calls: Vec<Value> = fs::read_to_string(f.root.join("calls"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let prepare = calls
+            .iter()
+            .position(|v| v["args"][1] == "prepare-state")
+            .unwrap();
+        let status = calls
+            .iter()
+            .position(|v| v["args"][1] == "ownership-status")
+            .unwrap();
+        assert!(prepare < status);
+        f.run(None);
+        assert_eq!(f.calls("prepare-state").len(), 1);
+        let refused = Fixture::new(
+            Mode::Native,
+            json!({"prepare_state":true,"prepare_refused":true}),
+        );
+        refused.run(Some(Action::NativeTakeover));
+        assert!(refused.calls("ownership-status").is_empty());
+        assert!(refused.calls("frontend-request").is_empty());
+        let service = Fixture::new(Mode::Service, json!({"prepare_state":true}));
+        service.run(Some(Action::Grant));
+        assert!(service.calls("prepare-state").is_empty());
+    }
+
+    #[test]
     fn a_keep_epoch_refresh_requires_a_fresh_read_of_our_own_native_receipt() {
         #[cfg(unix)]
         if crate::test_context::non_agent() {

@@ -524,6 +524,16 @@ pub(crate) struct Member {
     /// next delivery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_block: Option<InputBlock>,
+    /// Task 113: the request only its Terminal takes (`terminal_question`)
+    /// waited past the owner queue's `defer_minutes`: the owner's item and the
+    /// phone alert carry the screen's last lines. It belongs to that request
+    /// only and goes with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_escalation: Option<TerminalEscalation>,
+    /// Task 139: the last cross-check of its sources (look.rs); `uncertain`
+    /// when they disagreed past the grace. Cleared when it is no longer suspect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<MemberCheck>,
     /// Task 97: the questions (`id:hash`) Zerus answered with the safe choice
     /// and queued for the owner, newest last, at most 50. A question here is
     /// never answered by Zerus again, whatever its delivery was.
@@ -755,6 +765,45 @@ pub(crate) struct InputBlock {
     /// unknown: never sent again.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub own_paste: String,
+}
+
+/// Task 139: a member's sources compared (see `look.rs`).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct MemberCheck {
+    /// When the sources were last compared (the screen's read).
+    pub at: f64,
+    /// `agree`, `pending` (they disagree, within the grace) or `uncertain`.
+    pub state: String,
+    /// When they first disagreed in this episode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<f64>,
+    /// Every source's view: hooks, record, screen, process, activity.
+    #[serde(default)]
+    pub sources: Value,
+    /// The disagreements, in words.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disagree: Vec<String>,
+    /// The screen's last lines at that read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub screen: Vec<String>,
+    /// The lead was told of this episode.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub told: bool,
+}
+
+/// Task 113: a Terminal-only request raised to the owner after the defer time.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct TerminalEscalation {
+    pub question_id: String,
+    /// When Zerus raised it to the owner.
+    pub at: f64,
+    /// The Terminal's last lines then, at most `SCREEN_LINES`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub screen: Vec<String>,
+}
+
+impl TerminalEscalation {
+    pub(crate) const SCREEN_LINES: usize = 12;
 }
 
 impl InputBlock {
@@ -2430,6 +2479,9 @@ pub(crate) struct LeadStall {
     pub round: u32,
     /// When the owner was last notified (the round started).
     pub notified_at: f64,
+    /// Task 139: the idle lead itself was told this round.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lead_told: bool,
 }
 
 impl LeadStall {

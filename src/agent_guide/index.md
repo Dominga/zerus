@@ -17,23 +17,24 @@ Session names look like provider/project/tag. [@h] marks an optional @alias.
   hgs guide team-draft        plan a draft with the owner
   hgs guide team-input        member shape and --json-file
   hgs guide team-tree         lead a sub-team and pass work up
-  hgs guide team-run          run a routine command outside the sandbox
+  hgs guide team-run          routine commands outside the sandbox
   hgs guide team-safe         allow a member's routine request
   hgs guide team-propose      propose a change on a card
   hgs guide team-broker       builds in one shared folder
+  hgs guide team-cpp          CMake and MSBuild runs
   hgs guide run               start a build or test as your work
   hgs guide tests             run only the tests your change touches
   hgs guide designer          propose team roles and templates
   hgs guide launch            start a session, here or on a peer
-  hgs guide stop              interrupt, pause, kill or archive
-  hgs guide tasks             the project's task list: file, report, send
+  hgs guide stop              interrupt, pause, kill, archive
+  hgs guide tasks             the project's task list
 
 Rules
-- inspect prints over 100 KB of JSON: always select fields, never print it all.
+- inspect prints over 100 KB of JSON: always select fields.
 - A message arrives as ordinary user input. Begin it with who you are and
   your hgs self reference so the recipient can reply.
-- After an uncertain send, inspect the session; never resend automatically.
+- After an uncertain send, inspect the session; never resend.
 - Stopping, killing or archiving a session needs the owner's explicit
   permission unless you started it for this task. Prefer pause.
-- An older peer may lack a command: check hgs @alias -h first.
+- An older peer may lack a command: check hgs @alias -h.
 - Contracts: docs/reference.md and docs/agent-coordination.md (Zerus repository).

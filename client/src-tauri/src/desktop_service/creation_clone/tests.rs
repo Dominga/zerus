@@ -103,8 +103,14 @@ async fn answer(service: Arc<Service>, id: String, value: Value, fresh: bool) ->
 fn a_launch_help_failure_is_unsent_and_never_falls_back_or_dispatches() {
     if !private_case("desktop_service::creation_clone::tests::a_launch_help_failure_is_unsent_and_never_falls_back_or_dispatches") { return }
     tauri::async_runtime::block_on(async {
-        let f = fixture(json!({"clone_help_fail": true}));
+        let f = fixture(json!({}));
         let (service, _cache) = connected(&f).await;
+        // The service connects before only its launch capability probe fails.
+        std::fs::write(
+            f.0.join("fixture.json"),
+            json!({"clone_help_fail": true}).to_string(),
+        )
+        .unwrap();
         let id = uuid::Uuid::new_v4().to_string();
         let value = json!({"id":id,"creation_schema":1,"created":1,"revision":7,
             "cmd":"codex","tag":"example","host":"","target":"/srv/repo",

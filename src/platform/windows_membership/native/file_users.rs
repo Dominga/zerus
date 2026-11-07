@@ -118,6 +118,34 @@ pub(super) enum Observation {
     Positive(PositiveUsers),
     Incomplete,
 }
+/// Test-only phase counters; no additional query or authority is introduced.
+#[cfg(test)]
+#[derive(Clone, Copy, Default, serde::Serialize)]
+pub(super) struct Timing {
+    pub(super) identity_ns: u128,
+    pub(super) reset_ns: u128,
+    pub(super) native_query_ns: u128,
+    pub(super) native_calls: u64,
+    pub(super) native_pending: u64,
+    pub(super) completion_check_ns: u128,
+    pub(super) pending_returns: u64,
+    pub(super) decode_ns: u128,
+    pub(super) close_ns: u128,
+}
+#[cfg(test)]
+impl Timing {
+    pub(super) fn add(&mut self, other: Self) {
+        self.identity_ns += other.identity_ns;
+        self.reset_ns += other.reset_ns;
+        self.native_query_ns += other.native_query_ns;
+        self.native_calls += other.native_calls;
+        self.native_pending += other.native_pending;
+        self.completion_check_ns += other.completion_check_ns;
+        self.pending_returns += other.pending_returns;
+        self.decode_ns += other.decode_ns;
+        self.close_ns += other.close_ns;
+    }
+}
 /// One per-helper reader and ONE absolute inspection deadline across all files
 /// and growth attempts. Its reusable buffers are not a stale result cache.
 pub(super) struct Reader {
@@ -128,6 +156,8 @@ pub(super) struct Reader {
     spare: Option<Buffers>,
     original: Option<Original>,
     failed: bool,
+    #[cfg(test)]
+    timing: Timing,
 }
 impl Reader {
     pub(super) fn new(request: uuid::Uuid, until: Instant) -> Result<Self> {
@@ -160,6 +190,8 @@ impl Reader {
             spare: Some(Buffers::new(1 << 20)),
             original: None,
             failed: false,
+            #[cfg(test)]
+            timing: Timing::default(),
         })
     }
     /// The caller supplies an OWNED already verified disk object and its
@@ -174,7 +206,14 @@ impl Reader {
             self.failed = true;
             return Observation::Incomplete;
         }
-        if identity(&file, self.until) != Ok(expected) {
+        #[cfg(test)]
+        let started = Instant::now();
+        let matches = identity(&file, self.until) == Ok(expected);
+        #[cfg(test)]
+        {
+            self.timing.identity_ns += started.elapsed().as_nanos();
+        }
+        if !matches {
             self.failed = true;
             return Observation::Incomplete;
         }
@@ -203,9 +242,17 @@ impl Reader {
             return;
         }
         original.attempts += 1;
+        #[cfg(test)]
+        let reset_started = Instant::now();
         original.buffers.reset();
+        #[cfg(test)]
+        {
+            self.timing.reset_ns += reset_started.elapsed().as_nanos();
+        }
         // SAFETY: the OWN original disk handle and stable, aligned allocations
         // remain held even on STATUS_PENDING, deadline, failure or Reader drop.
+        #[cfg(test)]
+        let query_started = Instant::now();
         let status = unsafe {
             (self.api)(
                 original.file.as_raw_handle(),
@@ -215,6 +262,12 @@ impl Reader {
                 FileProcessIdsUsingFileInformation,
             )
         };
+        #[cfg(test)]
+        {
+            self.timing.native_query_ns += query_started.elapsed().as_nanos();
+            self.timing.native_calls += 1;
+            self.timing.native_pending += u64::from(status == PENDING);
+        }
         original.returned = status;
         original.pending = status == PENDING;
         if live(self.until).is_err() {
@@ -230,7 +283,18 @@ impl Reader {
                 return Observation::Incomplete;
             };
             if original.pending {
-                if !original.completed() {
+                #[cfg(test)]
+                let check_started = Instant::now();
+                let completed = original.completed();
+                #[cfg(test)]
+                {
+                    self.timing.completion_check_ns += check_started.elapsed().as_nanos();
+                }
+                if !completed {
+                    #[cfg(test)]
+                    {
+                        self.timing.pending_returns += 1;
+                    }
                     return Observation::Pending {
                         retiring: self.failed,
                     };
@@ -280,9 +344,23 @@ impl Reader {
             let bytes = unsafe {
                 std::slice::from_raw_parts(original.buffers.bytes.as_ptr().cast::<u8>(), used)
             };
-            let users = decode(bytes, self.until)
-                .ok()
-                .filter(|_| identity(&original.file, self.until) == Ok(original.object));
+            #[cfg(test)]
+            let decode_started = Instant::now();
+            let decoded = decode(bytes, self.until).ok();
+            #[cfg(test)]
+            {
+                self.timing.decode_ns += decode_started.elapsed().as_nanos();
+            }
+            let users = decoded.filter(|_| {
+                #[cfg(test)]
+                let identity_started = Instant::now();
+                let matches = identity(&original.file, self.until) == Ok(original.object);
+                #[cfg(test)]
+                {
+                    self.timing.identity_ns += identity_started.elapsed().as_nanos();
+                }
+                matches
+            });
             return self.finish(users);
         }
     }
@@ -295,7 +373,13 @@ impl Reader {
         self.spare = Some(original.buffers);
         // Temporary query file closes here, with delete-compatible sharing
         // chosen by its caller. The separate original-root guard remains held.
+        #[cfg(test)]
+        let close_started = Instant::now();
         drop(original.file);
+        #[cfg(test)]
+        {
+            self.timing.close_ns += close_started.elapsed().as_nanos();
+        }
         if let Some(pids) = users.filter(|_| live(self.until).is_ok()) {
             Observation::Positive(PositiveUsers {
                 request: self.request,
@@ -306,6 +390,10 @@ impl Reader {
             self.failed = true;
             Observation::Incomplete
         }
+    }
+    #[cfg(test)]
+    pub(super) fn private_timing(&self) -> Timing {
+        self.timing
     }
 }
 impl Drop for Reader {
@@ -879,6 +967,10 @@ mod tests {
             reader.start(file, object),
             Observation::Pending { retiring: false }
         ));
+        let timing = reader.private_timing();
+        assert_eq!(timing.native_calls, 1);
+        assert_eq!(timing.native_pending, 1);
+        assert_eq!(timing.pending_returns, 1);
         let original = reader.original.as_ref().unwrap();
         let status = original.buffers.status.get();
         let output = original.buffers.bytes.as_ptr();

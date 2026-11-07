@@ -1,6 +1,6 @@
 //! Ignored private fixture only. This is not a product entry, a coverage proof,
 //! a selected product budget, or permission to remove anything.
-use super::file_users::{private_identity, Observation, Reader};
+use super::file_users::{private_identity, Observation, Reader, Timing};
 use super::*;
 use crate::host::{protocol::Integrity, token::Token};
 use serde::{Deserialize, Serialize};
@@ -168,11 +168,93 @@ struct Data {
     process_ms: u128,
     query_ms: u128,
     elapsed_ms: u128,
+    metadata_open_ns: u128,
+    object_identity_ns: u128,
+    pending_sleep_ns: u128,
+    pending_sleep_calls: u64,
+    reader: Timing,
+}
+
+#[derive(Clone, Copy)]
+enum Mode {
+    Console,
+    HostedCost,
+}
+impl Mode {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Console => "console-user",
+            Self::HostedCost => "hosted-cost-only",
+        }
+    }
+    fn admits(self, context: &Context) -> bool {
+        match self {
+            Self::Console => {
+                !context.system
+                    && !context.elevated
+                    && context.medium_integrity
+                    && !context.debug_enabled
+                    && !context.impersonating
+                    && context.session == 1
+            }
+            // This separate ignored entry supplies timing DATA only. Its actual
+            // token is reported and never qualifies the console-user row.
+            Self::HostedCost => !context.impersonating,
+        }
+    }
 }
 
 #[test]
 #[ignore = "only the coordinator-booked private console-user fixture invokes this exact case"]
 fn private_measurement() {
+    measure(Mode::Console);
+}
+
+#[test]
+#[ignore = "only the opt-in hosted read-only timing comparison invokes this exact case"]
+fn hosted_measurement() {
+    assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
+    assert_eq!(
+        std::env::var("RUNNER_ENVIRONMENT").as_deref(),
+        Ok("github-hosted")
+    );
+    measure(Mode::HostedCost);
+}
+
+#[test]
+fn hosted_diagnostic_admission_does_not_relax_the_console_case() {
+    let mut context = Context {
+        system: false,
+        elevated: false,
+        elevation_type: 3,
+        medium_integrity: true,
+        debug_enabled: false,
+        enabled_privileges: vec![],
+        session: 1,
+        impersonating: false,
+    };
+    assert!(Mode::Console.admits(&context));
+    context.elevated = true;
+    assert!(!Mode::Console.admits(&context));
+    assert!(Mode::HostedCost.admits(&context));
+    context.elevated = false;
+    context.system = true;
+    assert!(!Mode::Console.admits(&context));
+    context.system = false;
+    context.medium_integrity = false;
+    assert!(!Mode::Console.admits(&context));
+    context.medium_integrity = true;
+    context.debug_enabled = true;
+    assert!(!Mode::Console.admits(&context));
+    context.debug_enabled = false;
+    context.session = 0;
+    assert!(!Mode::Console.admits(&context));
+    assert!(Mode::HostedCost.admits(&context));
+    context.impersonating = true;
+    assert!(!Mode::HostedCost.admits(&context));
+}
+
+fn measure(mode: Mode) {
     assert_eq!(
         std::env::var("ZERUS_MEMBERSHIP_QUALIFICATION").as_deref(),
         Ok("readonly-v1")
@@ -191,13 +273,8 @@ fn private_measurement() {
     let until = invocation + Duration::from_millis(remaining);
     let before = context().unwrap();
     assert!(
-        !before.system
-            && !before.elevated
-            && before.medium_integrity
-            && !before.debug_enabled
-            && !before.impersonating
-            && before.session == 1,
-        "qualification requires the real unelevated console-user token: {before:?}"
+        mode.admits(&before),
+        "measurement token or execution scope refused: {before:?}"
     );
     let count: usize = std::env::var("ZERUS_MEMBERSHIP_OBJECTS")
         .unwrap()
@@ -251,7 +328,7 @@ fn private_measurement() {
     if prepare {
         assert_eq!(before, context().unwrap());
         let record = serde_json::json!({"kind":"private-fixture-prepared-v1", "files":count,
-            "context":before, "elapsed_ms":invocation.elapsed().as_millis()});
+            "scope":mode.name(), "context":before, "elapsed_ms":invocation.elapsed().as_millis()});
         let frame = super::super::file_users::private_report_frame(
             &serde_json::to_string(&record).unwrap(),
         );
@@ -287,6 +364,7 @@ fn private_measurement() {
     let api = Api::new().unwrap();
     let mut rows_before = None;
     let mut query_started = None;
+    let mut reader_slot = None;
     let result: Result<()> = (|| {
         let before = api.census(until)?;
         data.processes = before.len();
@@ -358,18 +436,24 @@ fn private_measurement() {
         data.walk_ms = walk_started.elapsed().as_millis();
         query_started = Some(Instant::now());
         let request = uuid::Uuid::new_v4();
-        let mut reader = Reader::new(request, until)?;
+        reader_slot = Some(Reader::new(request, until)?);
         for path in paths {
             live(until)?;
-            let file = match metadata(&path) {
+            let open_started = Instant::now();
+            let opened = metadata(&path);
+            data.metadata_open_ns += open_started.elapsed().as_nanos();
+            let file = match opened {
                 Ok(file) => file,
                 Err(_) => {
                     data.root_query_refusals += 1;
                     continue;
                 }
             };
-            let object = private_identity(&file, until)?;
-            let mut outcome = reader.start(file, object);
+            let identity_started = Instant::now();
+            let identified = private_identity(&file, until);
+            data.object_identity_ns += identity_started.elapsed().as_nanos();
+            let object = identified?;
+            let mut outcome = reader_slot.as_mut().unwrap().start(file, object);
             loop {
                 match outcome {
                     Observation::Positive(users) => {
@@ -384,16 +468,21 @@ fn private_measurement() {
                         // its refusal and inspect the NEXT object, never retry
                         // this one or hide readable use elsewhere. Same root
                         // request and original deadline, no budget renewal.
+                        let reader = reader_slot.take().unwrap();
+                        data.reader.add(reader.private_timing());
                         drop(reader);
-                        reader = Reader::new(request, until)?;
+                        reader_slot = Some(Reader::new(request, until)?);
                         break;
                     }
                     Observation::Pending { .. } => {
                         // Keep the ORIGINAL native file/buffers through real
                         // completion even after the logical bound. The outer
                         // retained worker/job is the hard failure backstop.
+                        let sleep_started = Instant::now();
                         thread::sleep(Duration::from_millis(1));
-                        outcome = reader.poll();
+                        data.pending_sleep_ns += sleep_started.elapsed().as_nanos();
+                        data.pending_sleep_calls += 1;
+                        outcome = reader_slot.as_mut().unwrap().poll();
                     }
                 }
             }
@@ -408,6 +497,10 @@ fn private_measurement() {
         }
         live(until)
     })();
+    if let Some(reader) = reader_slot.take() {
+        data.reader.add(reader.private_timing());
+        drop(reader);
+    }
     if let Some(started) = query_started {
         data.query_ms = started.elapsed().as_millis();
     }
@@ -419,7 +512,7 @@ fn private_measurement() {
     );
     // No raw SID/PID, path, environment or frame values leave this record.
     let within = Instant::now() < until && unsafe { GetTickCount64() } < tick_end;
-    let report = serde_json::json!({"kind":"usage-timing-data-only-v1", "context":before,
+    let report = serde_json::json!({"kind":"usage-timing-data-only-v1", "scope":mode.name(), "context":before,
         "pass":pass, "files":count,
         "within_original_deadline": within,
         "invocation_ms":invocation.elapsed().as_millis(),

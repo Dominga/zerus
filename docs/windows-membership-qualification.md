@@ -70,3 +70,24 @@ deadline and remained incomplete. Those measurements are debug observations,
 not production timing or a selected product budget. Preserve them separately
 from the optimized fixture, including their changed process censuses and the
 absence of cold-cache evidence.
+
+The opt-in hosted job also invokes the separate ignored `hosted_measurement`
+case against 128 and 4096 files, using the same measurement body, readers and
+original deadlines. It reports its actual token context under the closed scope
+`hosted-cost-only`; it does not require or qualify the console user's medium,
+unelevated context. The strict `private_measurement` case remains unchanged in
+that requirement. Hosted admission additionally requires the GitHub-hosted
+environment and the explicit ignored test name. Its source-bound timing summary
+is retained separately as `membership-hosted-timing-windows-<source SHA>` for
+one day; no publisher consumes it.
+Failed comparisons may retain bounded diagnostics with `completed: false`;
+they are never qualification evidence.
+
+Test-only counters separate metadata open, file identity, output-buffer reset,
+the original native query, completion polling, actual pending sleep, decoding
+and physical file close. They add no native query, retry, timing-policy change
+or permission. Compare these phases before selecting a background budget.
+Differences in token, OS, filesystem, storage and filter drivers remain part of
+the comparison; a hosted-versus-PC difference alone does not identify a driver
+as the cause. No security setting or timer-resolution change is part of this
+diagnostic.

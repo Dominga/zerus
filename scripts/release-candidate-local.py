@@ -29,6 +29,16 @@ def run(command: list[str], cwd: Path = ROOT, env: dict[str, str] | None = None,
         raise SystemExit(f"release candidate step failed: {' '.join(command)}")
 
 
+def qt_fallback() -> str:
+    """The Qt desktop the package carries as its fallback: gui.sh's Ninja
+    build writes .ci-build/gui/hgs-tray.exe; the Visual Studio generator the
+    Windows-native leg uses writes it under its configuration folder."""
+    for candidate in (".ci-build/gui/hgs-tray.exe", ".ci-build/gui/Release/hgs-tray.exe"):
+        if (ROOT / candidate).exists():
+            return candidate
+    return ".ci-build/gui/hgs-tray.exe"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--commit", default="HEAD")
@@ -61,7 +71,7 @@ def main() -> int:
          "--gui", "target/windows-next/release/hgs-tray.exe",
          "--connector", "services/mobile/connector/target/release/zerus-mobile-connector.exe",
          "--mobile-relay", "services/mobile/relay/target/release/zerus-relay.exe",
-         "--qt-fallback", ".ci-build/gui/hgs-tray.exe", "--qt-root", args.qt_root,
+         "--qt-fallback", qt_fallback(), "--qt-root", args.qt_root,
          "--frontend-licenses", "artifacts/windows-frontend-licenses",
          "--conpty", str(Path(os.environ.get("RUNNER_TEMP", ROOT / ".zerus-team/tmp")) / "conpty"),
          "--output", "artifacts/zerus-windows-x86_64.zip"], dry=args.dry_run)

@@ -133,7 +133,8 @@ describe("the plan's Graph, Board and Layers (task 197)", () => {
     expect(html).toContain('data-scroll="graph/t1/2"');
     // Layers as columns with their labels.
     expect(html).toContain('data-layer="1"');
-    expect(html).toContain("L2");
+    // Qt numbers a phase's layers from 1 inside it.
+    expect(html).toContain("Layer 3");
   });
 
   it("tints a problem task with its reason and says what each task does and how long", () => {
@@ -199,8 +200,9 @@ describe("the plan's Graph, Board and Layers (task 197)", () => {
     const html = render({ team, graph, problems, now, initialMode: "layers" });
     const order = [...html.matchAll(/class="pm-layer-row[^"]*"[^>]*data-task="(\d+)"/g)].map((match) => Number(match[1]));
     expect(order).toEqual([1, 2, 3, 5, 4, 6]);
-    expect(html).toContain("L1");
-    expect(html).toContain("L3");
+    // Each row names its layer inside the phase: phase 1's L1 to L3, phase 2's L1.
+    expect(html.match(/class="pm-layer-label">L1</g)?.length).toBe(2);
+    expect(html).toContain('class="pm-layer-label">L3<');
     const qa = render({ team, graph, problems, now, initialMode: "layers", member: "qa" });
     expect([...qa.matchAll(/class="pm-layer-row[^"]*"[^>]*data-task="(\d+)"/g)].map((match) => Number(match[1]))).toEqual([3]);
   });

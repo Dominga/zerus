@@ -68,7 +68,9 @@ function toneClass(tone: string): string {
   if (tone === "done") return "done";
   if (tone === "danger") return "danger";
   if (tone === "warn") return "warn";
-  if (tone === "dim") return "dim";
+  // A dim task (a draft, a cancelled one) is muted: "pt-card-dim" is the
+  // hover chain's dimming.
+  if (tone === "dim") return "muted";
   return "pending";
 }
 
@@ -361,7 +363,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           </Show>
         </span>
         <span class="pt-card-l2">
-          <span class="pt-role" style={roleStyle(assigneeRole(props.team, task))}>{assigneeRole(props.team, task)}</span>
+          <span class="pt-role role-badge" style={roleStyle(assigneeRole(props.team, task))}>{assigneeRole(props.team, task)}</span>
           <Show when={assigneeAgent(props.team, task)}><AgentBadge agent={agentKind(assigneeAgent(props.team, task))} narrow /></Show>
           <Show when={taskHeatNow} fallback={timeBits(task)}>
             <HeatLine heat={taskHeatNow} compact />
@@ -390,11 +392,15 @@ export function PlanView(props: PlanViewProps): JSX.Element {
       <PhaseScroll key={`graph/${props.team.id}/${phase.phase.n}`} class="pt-phase-body" style={{ height: `${Math.ceil(layout.height * zoom()) + SCROLLBAR}px` }}>
         <div class="pt-phase-sizer" style={{ width: `${Math.ceil(layout.width * zoom())}px`, height: `${Math.ceil(layout.height * zoom())}px` }}>
           <div class="pt-phase-canvas" style={{ width: `${layout.width}px`, height: `${layout.height}px`, transform: `scale(${zoom()})` }}>
+            {/* Qt's band layers: each layer's columns shaded, numbered inside the phase. */}
             <For each={layout.labels}>
-              {(label) => (
-                <span class="pt-layer-label" style={{ left: `${label.x}px`, width: `${label.w}px` }} data-layer={label.layer}>
-                  <b>{tr("L%1", label.layer + 1)}</b><span>{label.count}</span>
-                </span>
+              {(label, index) => (
+                <>
+                  <span class="pt-layer-band" classList={{ odd: index() % 2 === 1 }} style={{ left: `${label.x}px`, width: `${label.w}px` }} />
+                  <span class="pt-layer-label" style={{ left: `${label.x}px`, width: `${label.w}px` }} data-layer={label.layer}>
+                    <b>{tr("Layer %1", index() + 1)}</b><span>{label.count}</span>
+                  </span>
+                </>
               )}
             </For>
             <svg class="pt-edges" width={layout.width} height={layout.height} aria-hidden="true" data-edges={phase.phase.n}>
@@ -438,7 +444,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           <b class="pm-title">{task.title}</b>
         </span>
         <span class="pm-card-meta">
-          <span class="pt-role" style={roleStyle(assigneeRole(props.team, task))}>{assigneeRole(props.team, task)}</span>
+          <span class="pt-role role-badge" style={roleStyle(assigneeRole(props.team, task))}>{assigneeRole(props.team, task)}</span>
           <Show when={assigneeAgent(props.team, task)}><AgentBadge agent={agentKind(assigneeAgent(props.team, task))} narrow /></Show>
           {timeBits(task)}
         </span>
@@ -482,7 +488,11 @@ export function PlanView(props: PlanViewProps): JSX.Element {
 
   /** Task 197 (P8): one phase's tasks as compact rows by layer then id. */
   const layersPhase = (phase: PlanPhase) => {
-    const nodes = phase.nodes.filter((placed) => visibleTask(placed.task) && matchesTask(placed.task));
+    // Qt's layer rows: the phase's own layers numbered from L1 (phaseLayers),
+    // each row labelled, in layer then id order.
+    const all = phase.nodes.filter((placed) => visibleTask(placed.task));
+    const own = new Map([...new Set(all.map((placed) => placed.node.layer))].sort((a, b) => a - b).map((layer, index) => [layer, index] as const));
+    const nodes = all.filter((placed) => matchesTask(placed.task));
     const layers = [...new Set(nodes.map((placed) => placed.node.layer))].sort((a, b) => a - b);
     return (
       <div class="pm-layers-phase">
@@ -491,7 +501,6 @@ export function PlanView(props: PlanViewProps): JSX.Element {
             const rows = nodes.filter((placed) => placed.node.layer === layer).sort((a, b) => a.node.id - b.node.id);
             return (
               <div class="pm-layer-group" data-layer={layer}>
-                <div class="pm-layer-label"><b>{tr("L%1", layer + 1)}</b><span>{rows.length}</span></div>
                 <For each={rows}>
                   {(placed) => {
                     const task = placed.task!;
@@ -503,6 +512,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
                       <button type="button" class={`pm-layer-row pt-tone-${tone(task)}`} classList={{ problem: !!problem }} data-task={task.id}
                         style={taskHeatNow ? { "--heat": String(taskHeatNow.tint) } : undefined}
                         title={[problem?.text ?? taskState(task).text, taskHeatNow?.tip ?? ""].filter(Boolean).join("\n")} onClick={() => open(task.id)}>
+                        <span class="pm-layer-label">{tr("L%1", (own.get(layer) ?? 0) + 1)}</span>
                         <span class="pt-state"><Icon name={statusIcon(task, !!problem)} size={12} /></span>
                         <span class="pm-id">#{task.id}</span>
                         <Show when={task.deps.length > 0}><span class="pm-deps">←{task.deps.map((dep) => `#${dep.task}`).join(" ")}</span></Show>
@@ -513,7 +523,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
                         <span class="grow" />
                         <Show when={taskHeatNow}><HeatLine heat={taskHeatNow} compact /></Show>
                         <span class="pm-layer-time" classList={{ over: time.over }}>{time.text}</span>
-                        <span class="pt-role" style={roleStyle(assigneeRole(props.team, task))}>{assigneeRole(props.team, task)}</span>
+                        <span class="pt-role role-badge" style={roleStyle(assigneeRole(props.team, task))}>{assigneeRole(props.team, task)}</span>
                         <span class="pm-layer-agent"><Show when={assigneeAgent(props.team, task)}><AgentBadge agent={agentKind(assigneeAgent(props.team, task))} narrow /></Show></span>
                       </button>
                     );

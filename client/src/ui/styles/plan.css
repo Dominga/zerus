@@ -290,11 +290,12 @@
 }
 .pt-phase-sizer { position: relative; }
 .pt-phase-canvas { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+.pt-layer-band { position: absolute; top: 0; bottom: 0; background: color-mix(in srgb, var(--z-color-text) 3%, transparent); }
+.pt-layer-band.odd { background: color-mix(in srgb, var(--z-color-text) 1.5%, transparent); }
 .pt-layer-label {
-  position: absolute; top: 6px; height: 18px;
-  display: flex; align-items: center; gap: 5px; padding-left: 20px;
-  border-top: 2px solid color-mix(in srgb, var(--z-color-accent) 18%, transparent);
-  color: var(--z-color-dim); font-size: var(--fs-2xs);
+  position: absolute; top: 8px; height: 18px;
+  display: flex; align-items: center; gap: 6px; padding-left: 20px;
+  color: var(--z-color-dim); font-size: var(--fs-2xs); letter-spacing: .04em; text-transform: uppercase;
 }
 .pt-layer-label b { color: var(--z-color-text-3); font-weight: 600; }
 .pt-edges { z-index: 0; }
@@ -312,7 +313,7 @@
 .pt-state { display: inline-flex; flex: none; color: var(--pt-tone, var(--z-color-muted)); }
 .pt-card-l2 { gap: 6px; }
 .pt-card-l2 .agent-badge { flex: none; }
-.pt-role { padding: 0 6px; border-radius: 8px; font-size: var(--fs-2xs); line-height: 16px; }
+.pt-role.role-badge { max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
 .pt-time { display: inline-flex; gap: 5px; min-width: 0; overflow: hidden; white-space: nowrap; color: var(--z-color-muted); font-size: var(--fs-2xs); }
 .pt-activity { overflow: hidden; text-overflow: ellipsis; }
 .pt-worked { flex: none; font-variant-numeric: tabular-nums; }
@@ -329,6 +330,9 @@
 .pt-tone-dim { --pm-tone: var(--z-color-dim); --pt-tone: var(--z-color-dim); }
 
 /* The toolbar (P6). */
+.pt-plan { flex: 1 1 auto; min-width: 0; }
+.pt-plan-bar { flex-wrap: wrap; }
+.pt-plan-bar .pm-check { white-space: nowrap; }
 .pm-segment { display: inline-flex; gap: 2px; padding: 2px; border-radius: var(--z-radius-md); background: var(--z-color-field); }
 .pm-segment button { padding: 2px 9px; border: 0; border-radius: var(--z-radius-sm); background: none; color: var(--z-color-muted); font: inherit; font-size: var(--fs-xs); cursor: pointer; }
 .pm-segment button.on { background: var(--z-color-segment-on); color: var(--z-color-accent); font-weight: 600; }
@@ -345,7 +349,7 @@
 .pm-board-phase .pm-column { min-height: 60px; flex: none; }
 .pm-column.empty { background: transparent; border-color: color-mix(in srgb, var(--z-color-card-border) 60%, transparent); }
 .pm-column.problems { border-color: color-mix(in srgb, var(--z-color-danger) 55%, var(--z-color-card-border)); }
-.pm-board-phase .pm-column-head { position: sticky; top: 44px; z-index: 2; background: inherit; color: var(--z-color-text-3); font-size: var(--fs-2xs); border-radius: 10px 10px 0 0; }
+.pm-board-phase .pm-column-head { align-self: stretch; color: var(--z-color-text-3); font-size: var(--fs-2xs); border-radius: 10px 10px 0 0; }
 .pm-board-phase .pm-column-body { overflow: visible; }
 .pm-board-card { gap: 4px; }
 .pm-board-card.problem { border-color: color-mix(in srgb, var(--pm-tone) 70%, var(--z-color-card-border)); }
@@ -355,10 +359,10 @@
 .pm-empty-dash { align-self: center; color: var(--z-color-dim); font-size: var(--fs-2xs); }
 
 /* Layers (P8): compact rows by layer, inside each phase. */
-.pm-layers-phase { border: 1px solid var(--z-color-card-border); border-top: 0; border-radius: 0 0 10px 10px; background: var(--z-color-card); padding: 4px 8px 8px; }
+.pm-layers-phase { border: 1px solid var(--z-color-card-border); border-top: 0; border-radius: 0 0 10px 10px; background: var(--z-color-card); padding: 6px 8px 8px; }
 .pm-layer-group { display: flex; flex-direction: column; gap: 2px; }
-.pm-layer-label { display: flex; gap: 6px; padding: 6px 2px 2px; color: var(--z-color-dim); font-size: var(--fs-2xs); }
-.pm-layer-label b { color: var(--z-color-text-3); }
+.pm-layer-group + .pm-layer-group { margin-top: 2px; }
+.pm-layer-label { flex: none; width: 20px; color: var(--z-color-dim); font-size: var(--fs-2xs); }
 .pm-layer-row {
   --heat: 0;
   display: flex; align-items: center; gap: 7px; width: 100%; min-height: 30px; padding: 3px 8px;

@@ -707,6 +707,22 @@ class NativeWindowsClaude(NativeAgent, host.HostCase):
         return sum(row.get("type") == "user" and row.get("message", {}).get("content") in forms
                    for row in self.transcript_rows(conversation_id))
 
+    def test_project_powershell_wrapper_keeps_existing_tracking_and_exact_messages(self):
+        # Initialize this private profile through the native CLI once. A project
+        # script is deliberately not run as a version probe for fresh hooks.
+        prime = self.launch("prime-hooks")
+        self.until("the native conversation", lambda: self.row(prime).get("conversation_id"))
+        self.hgs("terminate", prime)
+        self.until("the prime archive", lambda: self.row(prime).get("state") == "archived")
+        settings = (self.agent_home / "settings.json").read_bytes()
+        program = str(self.bin / "claude.exe").replace("'", "''")
+        (self.project / "run_claude.ps1").write_text(f"& '{program}' @args; exit $LASTEXITCODE\n", encoding="utf-8-sig")
+        name = self.launch("wrapper")
+        self.until("the wrapper's native conversation", lambda: self.row(name).get("conversation_id"))
+        self.assertTrue(self.inspect(name)["tracked"])
+        self.assertEqual((self.agent_home / "settings.json").read_bytes(), settings)
+        self.check_messages(name)
+
     def test_a_tracked_launch_reports_its_hooks_and_send_delivers_exact_messages(self):
         name = self.launch("messages")
         # Claude's SessionStart hook confirms the conversation before any message.
@@ -1065,6 +1081,14 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
         except sqlite3.OperationalError:
             return None  # Not created yet or momentarily busy; the original end still applies.
         return super().turn_ended(name, since) if stopped else None
+
+    def test_project_powershell_wrapper_reports_native_hooks_and_exact_messages(self):
+        program = str(self.bin / "codex.exe").replace("'", "''")
+        (self.project / "run_codex.ps1").write_text(f"& '{program}' @args; exit $LASTEXITCODE\n", encoding="utf-8-sig")
+        name = self.launch("wrapper", self.NO_HOOK_REVIEW)
+        self.check_messages(name)
+        self.assertTrue(self.inspect(name)["tracked"])
+        self.check_hook_form()
 
     def test_a_tracked_launch_reports_its_hooks_and_send_delivers_exact_messages(self):
         name = self.launch("messages", self.NO_HOOK_REVIEW)

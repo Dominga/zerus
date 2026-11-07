@@ -439,6 +439,57 @@ class Launch(LifecycleCase):
         self.assertIn("already exists", again.stderr)
         self.assertEqual(len(self.events("start")), 1)
 
+    def test_project_powershell_wrapper_prepares_environment_and_bare_bypasses_it(self):
+        wrapper = self.project / "run_fake_agent.ps1"
+        entry = self.root / "wrapper-entry.json"
+        cabinet = self.project / "cabinet space"
+        cabinet.mkdir()
+        literal = lambda path: "'" + str(path).replace("'", "''") + "'"
+        wrapper.write_text(
+            "$value=@{args=@($args);cleared=($null -eq $env:HGS_PROJECT_LAUNCH_DATA)}|ConvertTo-Json -Depth 5 -Compress; "
+            f"[IO.File]::WriteAllText({literal(entry)},$value,[Text.UTF8Encoding]::new($false)); "
+            f"Set-Location -LiteralPath {literal(cabinet)}; "
+            f"& {literal(self.bin / 'fake_agent.exe')} @args; exit $LASTEXITCODE", encoding="utf-8-sig")
+        name, ready = self.launch("wrapped", "--", "two words", "native-safe")
+        self.assertTrue(os.path.samefile(ready["cwd"], cabinet), ready)
+        self.assertEqual(ready["argv"], ["two words", "native-safe"])
+        recorded = read_json(entry)
+        self.assertEqual(recorded, {"args": ["--record", str(self.record), "--ready", str(self.ready),
+                                           "--control", str(self.control), "--prompt", "fake> ", "--", "two words", "native-safe"],
+                                    "cleared": True})
+        original = entry.read_bytes()
+        self.control.write_text("exit 0\n", encoding="utf-8")
+        self.wait_for("the wrapped native agent to exit", lambda: name not in self.sessions())
+
+        # A second launch explicitly bypasses the same wrapper.
+        ready2, control2 = self.root / "bare-ready.json", self.root / "bare-control"
+        result = self.hgs("fake_agent", str(self.project), "--new", "-n", "bare", "-d", "--bare", "--",
+                          "--ready", str(ready2), "--control", str(control2))
+        self.assertEqual(result.stdout, "hgs: started fake_agent/project/bare\n")
+        native = self.wait_for("the bare agent", lambda: read_json(ready2))
+        self.assertTrue(os.path.samefile(native["cwd"], self.project), native)
+        self.assertEqual(entry.read_bytes(), original)
+        control2.write_text("exit 0\n", encoding="utf-8")
+        self.wait_for("the bare agent to exit", lambda: "fake_agent/project/bare" not in self.sessions())
+
+    def test_project_powershell_wrapper_receives_literal_argument_array(self):
+        wrapper, entry = self.project / "run_fake_agent.ps1", self.root / "entry.json"
+        literal = "'" + str(entry).replace("'", "''") + "'"
+        wrapper.write_text(
+            "$value=@{args=@($args);cleared=($null -eq $env:HGS_PROJECT_LAUNCH_DATA)}|ConvertTo-Json -Depth 5 -Compress; "
+            f"[IO.File]::WriteAllText({literal},$value,[Text.UTF8Encoding]::new($false)); "
+            "[Console]::WriteLine('wrapper-ready'); $line=[Console]::ReadLine(); if($line -eq 'end-fixture'){exit 0}else{exit 2}",
+            encoding="utf-8-sig")
+        arguments = ["", 'a"b', "-name:value", "Пример", "日本語", "back\\", "$(literal);&only-data"]
+        result = self.hgs("fake_agent", str(self.project), "--new", "-n", "literal", "-d", "--", *arguments)
+        self.assertEqual(result.stdout, "hgs: started fake_agent/project/literal\n")
+        self.wait_for("the exact script entry", lambda: read_json(entry))
+        self.assertEqual(read_json(entry), {"args": arguments, "cleared": True})
+        pane = self.pane("fake_agent/project/literal")
+        self.wait_for("the wrapper prompt", lambda: "wrapper-ready" in self.backend({"op": "capture", "pane": pane["pane"]})["text"])
+        self.backend({"op": "send", "pane": pane["pane"], "keys": [{"literal": "end-fixture"}, {"named": "Enter"}]})
+        self.wait_for("the original wrapper to exit", lambda: "fake_agent/project/literal" not in self.sessions())
+
     def test_a_program_that_cannot_start_fails_its_launch(self):
         # The GUI's launch: detached, with a launch ID. The supervisor cannot start
         # the program, says why on the pane and ends at once, before any record

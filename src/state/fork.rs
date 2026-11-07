@@ -56,7 +56,7 @@ fn fork_argv(record: &Value, new_id: Option<&str>) -> Result<Vec<String>> {
         new_id.unwrap_or_else(|| string(record, "conversation_id")),
     )?;
     match agent {
-        "codex" => argv[1] = "fork".into(),
+        "codex" => { let program = crate::project_launcher::program_words(&argv); argv[program] = "fork".into(); },
         "claude" => argv.push("--fork-session".into()),
         "kimi" => {}
         _ => return Err("this provider does not support session forks".into()),
@@ -331,6 +331,15 @@ pub(super) fn start_scoped(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn powershell_codex_fork_replaces_the_agent_selector_only() {
+        let prefix = [r"C:\PowerShell\pwsh.exe", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", r"C:\p\run_codex.ps1"].map(str::to_owned).to_vec();
+        let base = [prefix.clone(), vec!["resume".into(), "old".into(), "--model".into(), "model-name".into(), "original prompt".into()]].concat();
+        let record = json!({"agent":"codex","base":base,"conversation_id":"parent"});
+        let fork = fork_argv(&record, None).unwrap();
+        assert_eq!(&fork[..7], prefix.as_slice());
+        assert_eq!(&fork[7..], ["fork", "parent", "--model", "model-name"]);
+    }
     #[test]
     fn live_forks_wait_for_the_ready_state_the_listing_reports() {
         let mut stale = telemetry::stale_hook_child();

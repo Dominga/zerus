@@ -1821,6 +1821,17 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
                 // U59: a Deny's reason reaches the lead with the team's feed.
                 events.push(Event::new("plan_mode_denied", json!({"by":"You","proposal":id,"reason":reason})));
             }
+            if let Some(offer) = team
+                .proposals
+                .iter()
+                .find(|proposal| proposal["id"] == id && proposal["kind"] == "install-tool")
+                .and_then(|proposal| proposal["change"]["offer"].as_str())
+            {
+                // Task #220: the tool is not installed; the offer remembers why,
+                // so no card asks again.
+                crate::test_discipline::tools::deny_escalated(offer, &reason)?;
+                events.push(Event::new("install_tool_denied", json!({"by":"You","proposal":id,"offer":offer,"reason":reason})));
+            }
             Ok(Value::Null)
         })?;
         return Ok(json!({"status":"rejected","proposal":id}));
@@ -1981,6 +1992,12 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
             value["request_id"] = json!(operation_request);
             value["by"] = json!("human");
             super::super::iron_rules::run("set", &value)?
+        }
+        // Task #220: the owner's Allow installs the tool the card names.
+        "install-tool" => {
+            let offer = change["offer"].as_str().context("The install-tool proposal names its offer")?;
+            let allowed = crate::test_discipline::tools::allow_escalated(offer)?;
+            json!({"tool":allowed.tool,"state":allowed.state,"command":allowed.command.join(" "),"folder":allowed.folder})
         }
         other => bail!("Unknown proposal kind {other}"),
     };

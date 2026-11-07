@@ -5136,15 +5136,41 @@ fn serves_another_team(session: &SessionRef, others: &[Team]) -> bool {
     })
 }
 
+/// Task #220: the lead asks the owner to install a tool its team's run found
+/// missing. The card shows the tool, why it is needed and the command Allow
+/// runs; the offer belongs to this team, is still waiting, and has one card.
+fn install_tool_change(team: &Team, input: &Value) -> anyhow::Result<Value> {
+    let id = text(input, "offer");
+    ensure!(
+        !id.is_empty(),
+        "An install-tool proposal names its offer: {{\"kind\":\"install-tool\",\"offer\":\"...\",\"reason\":\"...\"}}"
+    );
+    let found = crate::test_discipline::tools::offer(id).context("Unknown tool offer")?;
+    ensure!(found.team == team.id, "That offer is not this team's");
+    ensure!(matches!(found.state.as_str(), "offered" | "failed"), "The offer of {} is {}; there is nothing to ask", found.tool, found.state);
+    ensure!(!found.command.is_empty(), "No package manager on this computer installs {}; install it yourself", found.tool);
+    ensure!(
+        !team.proposals
+            .iter()
+            .any(|proposal| proposal["state"] == "open" && proposal["kind"] == "install-tool" && proposal["change"]["offer"] == found.id),
+        "The owner already has the card for {}",
+        found.tool
+    );
+    Ok(json!({"offer":found.id,"tool":found.tool,"why":found.why,"saves":found.saves,"command":found.command,
+        "folder":found.folder,"project":found.project_name,
+        "lines":[format!("Install {}: {}", found.tool, found.command.join(" ")),
+            format!("Why: {} (saves {})", found.why, found.saves)]}))
+}
+
 /// F8: the lead proposes a membership change; the owner decides.
 fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(actor.is_lead(team), "Only the lead proposes a change to your team");
     let kind = text(input, "kind").to_owned();
     ensure!(
         ["add-member", "remove-member", "swap-member", "next-goal", "switch-plan-mode",
-         "add-to-phase", "cancel-tasks", "discard-phase", "question", "switch-setting", "iron-rules"].contains(&kind.as_str())
+         "add-to-phase", "cancel-tasks", "discard-phase", "question", "switch-setting", "iron-rules", "install-tool"].contains(&kind.as_str())
             || OWNER_OPS.contains(&kind.as_str()),
-        "A proposal is one of: add-member, remove-member, swap-member, next-goal, switch-plan-mode, add-to-phase, cancel-tasks, discard-phase, question, switch-setting, iron-rules, {}",
+        "A proposal is one of: add-member, remove-member, swap-member, next-goal, switch-plan-mode, add-to-phase, cancel-tasks, discard-phase, question, switch-setting, iron-rules, install-tool, {}",
         OWNER_OPS.join(", ")
     );
     let reason = clean(text(input, "reason").trim(), 2000, "A proposal reason")?;
@@ -5202,6 +5228,9 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
             Some(n) => json!({"phase":n}),
             None => Value::Null,
         },
+        // Task #220: a tool the team's run found missing; the owner installs it
+        // or denies the card, and the offer carries the outcome.
+        "install-tool" => install_tool_change(team, input)?,
         "question" => question_change(input)?,
         "swap-member" => swap_change(team, input)?,
         // Task #21: an owner-gated operation the owner allows with a click.
@@ -5342,6 +5371,15 @@ fn decide_proposal(team: &mut Team, input: &Value, actor: &Actor, offline: &BTre
             team.memory_mode_reason.clear();
             events.push(Event::new("memory_mode_denied", json!({"by":"You","proposal":id,"reason":reason})));
         }
+        if kind == "install-tool" {
+            // Task #220: the tool is not installed; the offer remembers why, so
+            // no card asks again.
+            let offer = card["change"]["offer"].as_str().unwrap_or_default();
+            if let Err(error) = crate::test_discipline::tools::deny_escalated(offer, &reason) {
+                eprintln!("hgs: the tool offer was not recorded as denied: {error:#}");
+            }
+            events.push(Event::new("install_tool_denied", json!({"by":"You","proposal":id,"offer":offer,"reason":reason})));
+        }
         return Ok(json!({"status":"rejected","proposal":id}));
     }
     let member = team.proposals[at]["member"].clone();
@@ -5421,6 +5459,17 @@ pub(crate) fn inapplicable(team: &Team, proposal: &Value) -> Option<String> {
         return Some("the team has finished".into());
     }
     let mode = proposal["mode"].as_str().unwrap_or_default();
+    // Task #220: an install card whose offer was decided or is gone withdraws.
+    if kind == "install-tool" {
+        let offer = proposal["change"]["offer"].as_str().unwrap_or_default();
+        let Some(found) = crate::test_discipline::tools::offer(offer) else {
+            return Some("the tool offer is gone".into());
+        };
+        if !matches!(found.state.as_str(), "offered" | "failed") {
+            return Some(format!("the offer of {} is {}", found.tool, found.state));
+        }
+        return None;
+    }
     trial(team, kind, &proposal["member"], &proposal["change"], mode).err().map(|error| format!("{error:#}"))
 }
 
@@ -5586,6 +5635,12 @@ fn run_proposal(team: &mut Team, kind: &str, member: &Value, change: &Value, mod
             apply(team, "settings", &value, &Actor::Human, offline, events)?
         }
         "switch-setting" => switch_setting(team, change, id, reason, events)?,
+        // Task #220: the owner's Allow installs the tool the card names.
+        "install-tool" => {
+            let offer = change["offer"].as_str().context("The install-tool proposal names its offer")?;
+            let allowed = crate::test_discipline::tools::allow_escalated(offer)?;
+            json!({"tool":allowed.tool,"state":allowed.state,"command":allowed.command.join(" "),"folder":allowed.folder})
+        }
         op if OWNER_OPS.contains(&op) => {
             let mut value = change["input"].clone();
             value["team"] = json!(team.id);

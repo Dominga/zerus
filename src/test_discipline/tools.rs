@@ -563,6 +563,22 @@ pub fn lead_deny(team: &str, id: &str, reason: &str) -> anyhow::Result<Offer> {
     })
 }
 
+/// Task #220: the owner allowed the lead's install card: marked installing and
+/// started, as the direct Allow does.
+pub fn allow_escalated(id: &str) -> anyhow::Result<Offer> {
+    let (offer, changed) = locked(|store| answer(store, id, true, ""))?;
+    if changed && offer.state == "installing" {
+        start_install(&offer)?;
+    }
+    Ok(offer)
+}
+
+/// Task #220: the owner denied the lead's install card; the reason is
+/// remembered on the offer, so the team works without the tool.
+pub fn deny_escalated(id: &str, reason: &str) -> anyhow::Result<Offer> {
+    locked(|store| answer(store, id, false, reason)).map(|(offer, _)| offer)
+}
+
 /// One answer to an offer: deny remembers its reason, allow marks it installing
 /// (the caller starts the runner), and a decided offer keeps its first answer.
 fn answer(store: &mut Store, id: &str, allow: bool, reason: &str) -> anyhow::Result<(Offer, bool)> {
@@ -587,6 +603,12 @@ fn answer(store: &mut Store, id: &str, allow: bool, reason: &str) -> anyhow::Res
 thread_local! {
     /// A test runs the install in place instead of a detached runner.
     static INLINE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A test in another module runs an allowed install in place.
+#[cfg(test)]
+pub(crate) fn inline_install(on: bool) {
+    INLINE.with(|inline| inline.set(on));
 }
 
 fn start_install(offer: &Offer) -> anyhow::Result<()> {

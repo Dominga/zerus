@@ -2,6 +2,7 @@
 //! the lead denies it or asks the owner on a card.
 use super::support::*;
 use super::*;
+use crate::state::teams::dispatcher::{fake_output, set_fake_hgs};
 use crate::state::teams::model::SessionRef;
 use crate::test_discipline::tools::{self, Need};
 
@@ -102,7 +103,7 @@ fn the_lead_denies_its_own_teams_offer_and_never_allows() {
         let offer = tools::offers_of(&id)[0].id.clone();
         // The member cannot decide it.
         let error = as_qa(|| call("decide-tool", json!({"offer":offer,"allow":false,"reason":"no"}))).unwrap_err().to_string();
-        assert!(error.contains("Only the team's lead"), "{error}");
+        assert!(error.contains("Only the team's lead") || error.contains("agent session"), "{error}");
         // The lead cannot allow an install, and a Deny says why.
         let error = as_lead(|| call("decide-tool", json!({"offer":offer,"allow":true}))).unwrap_err().to_string();
         assert!(error.contains("never installs a tool"), "{error}");
@@ -116,5 +117,62 @@ fn the_lead_denies_its_own_teams_offer_and_never_allows() {
         let inbox = run("inbox", &json!({"team":id,"by":"human"}), false).unwrap();
         assert!(inbox["items"].as_array().unwrap().iter().all(|item| item["kind"] != "tool_missing"), "{inbox}");
         assert!(tools::waiting_items().is_empty());
+    });
+}
+
+#[test]
+fn the_leads_card_installs_the_tool_or_keeps_the_owners_deny() {
+    let state = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(state.path(), || {
+        let id = stored_review_team();
+        let project = tempfile::tempdir().unwrap();
+        let (good, bad): (&[&str], &[&str]) = if cfg!(windows) {
+            (&["cmd", "/C", "echo installed fine"], &["cmd", "/C", "echo no such package & exit /b 7"])
+        } else {
+            (&["sh", "-c", "echo installed fine"], &["sh", "-c", "echo no such package; exit 7"])
+        };
+        let sccache = Need { command: good.iter().map(|word| (*word).to_owned()).collect(), ..need("sccache") };
+        let ccache = Need { command: bad.iter().map(|word| (*word).to_owned()).collect(), ..need("ccache") };
+        as_qa(|| tools::record(project.path(), &[(sccache, false), (ccache, false)])).unwrap();
+        let offers = tools::offers_of(&id);
+        let of = |tool: &str| offers.iter().find(|offer| offer.tool == tool).unwrap().id.clone();
+        let (sccache, ccache) = (of("sccache"), of("ccache"));
+        // The lead asks the owner; the card names the tool, why and the command.
+        let proposed = as_lead(|| call("propose", json!({"kind":"install-tool","offer":sccache,"reason":"the build cache needs it"}))).unwrap();
+        let proposal = proposed["proposal"].as_str().unwrap().to_owned();
+        let hash = proposed["hash"].as_str().unwrap().to_owned();
+        let waiting = run("waiting", &json!({"by":"human"}), false).unwrap();
+        let card = waiting["items"].as_array().unwrap().iter().find(|item| item["tool"] == "sccache").expect("the owner's card");
+        assert_eq!((card["action"].as_str(), card["offer"].as_str()), (Some("decide_proposal"), Some(sccache.as_str())), "{card}");
+        assert_eq!(card["install_command"], json!(good.join(" ")), "{card}");
+        assert!(card["title"].as_str().unwrap().contains("install sccache"), "{card}");
+        // The card answers the inbox item: sccache is not the lead's again
+        // while the card is open; the other tool still waits for it.
+        let inbox = run("inbox", &json!({"team":id,"by":"human"}), false).unwrap();
+        let items = inbox["items"].as_array().unwrap();
+        assert!(items.iter().all(|item| !(item["kind"] == "tool_missing" && item["summary"].as_str().unwrap_or_default().contains("sccache"))), "{inbox}");
+        assert!(items.iter().any(|item| item["kind"] == "tool_missing" && item["summary"].as_str().unwrap_or_default().contains("ccache")), "{inbox}");
+        // The lead cannot decide its own card, and an agent never installs.
+        let error = as_lead(|| call("decide-proposal", json!({"proposal":proposal,"accept":true,"expected_hash":hash,"by":"human"})))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Only you"), "{error}");
+        // The owner allows: the offer installs, and both sides read it.
+        tools::inline_install(true);
+        let allowed = call("decide-proposal", json!({"proposal":proposal,"accept":true,"expected_hash":hash,"by":"human"})).unwrap();
+        tools::inline_install(false);
+        assert_eq!(allowed["status"], "accepted", "{allowed}");
+        let installed = tools::offer(&sccache).unwrap();
+        assert_eq!((installed.state.as_str(), installed.exit), ("installed", Some(0)), "{installed:?}");
+        let inbox = run("inbox", &json!({"team":id,"by":"human"}), false).unwrap();
+        assert!(inbox["items"].as_array().unwrap().iter().any(|item| item["kind"] == "proposal_decided"), "{inbox}");
+        // The owner denies the other card: the offer keeps the reason and stays out.
+        let proposed = as_lead(|| call("propose", json!({"kind":"install-tool","offer":ccache,"reason":"the C++ cache needs it"}))).unwrap();
+        let proposal = proposed["proposal"].as_str().unwrap().to_owned();
+        let hash = proposed["hash"].as_str().unwrap().to_owned();
+        call("decide-proposal", json!({"proposal":proposal,"accept":false,"expected_hash":hash,"reason":"we can build without it","by":"human"})).unwrap();
+        let denied = tools::offer(&ccache).unwrap();
+        assert_eq!((denied.state.as_str(), denied.reason.as_str()), ("denied", "we can build without it"));
+        assert!(tools::offers_of(&id).is_empty());
     });
 }

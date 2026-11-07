@@ -951,9 +951,12 @@ Spotlight and System Settings for the unchanged `hgs-tray.app` bundle.
 
 Settings → Mobile connection also lists and pairs [phones](#machines-and-accounts). Settings → Mobile connection → Phone notifications sets when the phone notifies: immediately, as soon as you are away from every Zerus computer, or after 5, 10, 15 or 30 minutes away. The choice is shared through the swarm catalog; computers this one synchronizes with directly whose hgs is too old to receive it are named there.
 
-The tray has two counters: all sessions and **Needs attention**. Attention includes
-input, approvals, errors and unread main-agent replies. An offline host retains
-its last total but adds no live attention requests; a dot marks incomplete data.
+The tray has two counters: **active** sessions (the session list's Active filter:
+working or Background, Scheduled or Waiting, or needing attention, a subagent
+that asks included) and **Needs attention**. Attention includes input, approvals,
+errors and unread main-agent replies. An offline host adds only its Review later
+sessions to either counter; a dot marks incomplete data. The tooltip keeps the
+total number of sessions.
 Linux application badges and the macOS Dock show the attention count, hiding zero.
 
 Zerus Next's tray menu (on Linux, macOS and Windows) has:

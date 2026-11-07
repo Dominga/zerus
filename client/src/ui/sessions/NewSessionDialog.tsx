@@ -89,7 +89,8 @@ function Choice(props: {
   const pick = (key: string | undefined) => {
     props.onOpen(false);
     button.focus();
-    if (key !== undefined && key !== props.selected) props.onPick(key);
+    // Committing the current item also records an explicit Destination choice.
+    if (key !== undefined) props.onPick(key);
   };
   const onKey = (e: KeyboardEvent) => {
     if (props.disabled) return;
@@ -109,7 +110,7 @@ function Choice(props: {
         e.preventDefault();
         if (props.open) { setActive(to(active())); return; }
         const next = to(props.selected);
-        if (next !== undefined && next !== props.selected) props.onPick(next);
+        if (next !== undefined) props.onPick(next);
       }
     }
   };

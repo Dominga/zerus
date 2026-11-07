@@ -178,7 +178,10 @@ fn encode<S: AsRef<str>>(shell: &Shell, words: &[S]) -> Result<String> {
     );
     let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
     let program = match shell {
-        Shell::PowerShell(path) => format!("& '{}'", path),
+        Shell::PowerShell(path) => format!(
+            "$LASTEXITCODE=127;$PSNativeCommandUseErrorActionPreference=$false;& '{}'",
+            path
+        ),
         Shell::Cmd(path) => format!("\"{}\"", path),
         Shell::Posix => {
             return Err(Error::new(
@@ -187,10 +190,15 @@ fn encode<S: AsRef<str>>(shell: &Shell, words: &[S]) -> Result<String> {
             ))
         }
     };
-    let command = format!(
+    let mut command = format!(
         "{program} -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
         STANDARD.encode(bytes)
     );
+    if matches!(shell, Shell::PowerShell(_)) {
+        // A native command in PowerShell's -Command otherwise flattens nonzero
+        // exit codes to 1. Initialize refusal before dispatch, then pass it on.
+        command.push_str(";exit $LASTEXITCODE");
+    }
     // cmd's command-line limit is smaller than CreateProcess's. Refuse before
     // an operation when the exact transport cannot represent it.
     if command.len() > 8000 {
@@ -330,7 +338,13 @@ mod tests {
         let shell =
             parse_probe(b"hgs-remote-v2|%OS%|%SystemRoot%|Windows_NT|C:\\Windows\r\n").unwrap();
         let command = encode(&shell, &words).unwrap();
-        let encoded = command.split_whitespace().last().unwrap();
+        let encoded = command
+            .rsplit(" -EncodedCommand ")
+            .next()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
         let bytes = STANDARD.decode(encoded).unwrap();
         let utf16: Vec<_> = bytes
             .as_chunks::<2>()

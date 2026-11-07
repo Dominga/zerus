@@ -1045,5 +1045,9 @@
   "winget: %1": "winget: %1",
   "worktree %1": "рабочее дерево %1",
   "~%1 GB estimated": "~%1 ГБ по оценке",
-  "✓ %1": "✓ %1"
+  "✓ %1": "✓ %1",
+  "Refresh this session's identity before opening its terminal.": "Обновите сведения о сессии, прежде чем открывать её терминал.",
+  "Could not open session terminal": "Не удалось открыть терминал сессии",
+  "This native adapter does not provide Terminal.": "Этот адаптер агента не предоставляет терминал.",
+  "This session has no recorded conversation ID.": "Для этой сессии не записан идентификатор разговора."
 }

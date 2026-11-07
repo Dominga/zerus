@@ -772,8 +772,37 @@ the exact observed run even when its reusable session label later changes owner.
 
 ## Project wrappers
 
-An executable `run_COMMAND.sh` in the project folder runs inside the tmux session.
-Use it to prepare the environment and launch the native agent.
+On Linux and macOS an executable `run_COMMAND.sh` in the project folder runs
+inside the tmux session. On Windows `run_COMMAND.ps1` runs through the Windows
+session host, with the existing PowerShell selection: a canonical native
+`pwsh.exe`, then Windows PowerShell. A Store alias that cannot be
+resolved to a native executable is not selected. `--bare` bypasses the wrapper.
+Use the script to prepare the environment and launch the native agent.
+
+Unix keeps its existing `.sh` behavior and does not automatically select `.ps1`.
+A project can provide both platform-specific wrappers. No PowerShell dependency
+is introduced on Linux or macOS.
+
+The Windows wrapper runs with `-NoLogo`, `-NoProfile` and process-scoped
+`-ExecutionPolicy Bypass`. Zerus does not change machine policy or load a user
+profile. Saved recipes retain the wrapper and its arguments across resume,
+fork, recovery and Start fresh. At spawn, a fixed encoded bootstrap transfers
+the script path and argument array as data, then clears that private data before
+invoking the script. This avoids PowerShell `-File` splitting a literal argument
+such as `-name:value`; empty, quoted and Unicode strings reach `$args` intact.
+The wrapper remains responsible for forwarding those arguments to its agent and
+returning its exit code. Windows PowerShell 5.1 has
+[native argument forwarding limitations](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_parsing?view=powershell-5.1)
+for empty strings and embedded quotes. [PowerShell 7.3+ improves native argument
+passing](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_parsing?view=powershell-7.6); its Windows mode still uses legacy rules for batch/npm shims. Prefer a
+native agent executable when forwarding complex arguments.
+
+PowerShell stays the supervised process while its native agent is a child.
+Existing native process/confirmation guards still apply. In particular, a
+Codex resume/fork may need its first message in Terminal until native startup
+confirms the conversation; a wrapper is not evidence of that confirmation.
+For a plain PowerShell shell on Windows use `hgs sh PROJECT --new -d`; this is
+already supported and is untracked, like an ordinary Unix shell session.
 
 ```sh
 hgs codex sample-project                 # run_codex.sh starts a new conversation

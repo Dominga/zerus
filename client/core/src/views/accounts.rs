@@ -383,6 +383,11 @@ fn profile_usage(entry: &FleetEntry, raw: &Value, r: &UsageRef, state: &Accounts
             u.windows = cached.windows;
             u.balances = cached.balances;
             u.credits = cached.credits;
+            u.retry_at = cached.retry_at;
+            if cached.status == "rate_limited" {
+                u.status = cached.status;
+                u.auth_status = cached.auth_status;
+            }
             u.seeded = true;
         } else if matches!(u.status.as_str(), "unavailable" | "offline")
             && u.identity == Identity::default()
@@ -747,6 +752,9 @@ fn identity_key(p: &Profile, with_account: bool) -> String {
 }
 
 fn quality(u: &Usage) -> u8 {
+    if u.status == "rate_limited" && !u.windows.is_empty() {
+        return if u.offline { 2 } else { 3 };
+    }
     match u.status.as_str() {
         "ok" | "configured" if u.offline => 2,
         "ok" | "configured" => 3,
@@ -758,7 +766,9 @@ fn quality(u: &Usage) -> u8 {
 fn better(usage: &Usage, previous: &Usage) -> bool {
     quality(usage) > quality(previous)
         || (quality(usage) == quality(previous)
-            && usage.checked_at.unwrap_or(0.0) > previous.checked_at.unwrap_or(0.0))
+            && (usage.checked_at.unwrap_or(0.0) > previous.checked_at.unwrap_or(0.0)
+                || (usage.checked_at == previous.checked_at
+                    && usage.retry_at.unwrap_or(0.0) > previous.retry_at.unwrap_or(0.0))))
 }
 
 /// accountPermission (AccountsPage.cpp:80-88).
@@ -1645,6 +1655,36 @@ mod tests {
             })
             .collect();
         json!({ "profiles": profiles })
+    }
+
+    #[test]
+    fn cached_rate_limit_remains_visible_before_inspect_and_wins_a_same_sample_tie() {
+        let state = AccountsState::default();
+        let local = entry("", "live", 0);
+        let mut catalog = launch_catalog(&[("claude-work", "claude")]);
+        let quota = json!({"status":"rate_limited","auth_status":"signed_in","checked_at":100,"retry_at":300,
+            "identity":{"email":"work@example.test"},"windows":[{"id":"five_hour","used_percent":42,"window_minutes":300}]});
+        catalog["profiles"][0]["account_status"] = quota.clone();
+        let raw = &catalog["profiles"][0];
+        let reference = usage_ref(&local.computer, raw);
+        let seeded = profile_usage(&local, raw, &reference, &state);
+        assert!(seeded.seeded);
+        assert_eq!(seeded.status, "rate_limited");
+        assert_eq!(seeded.retry_at, Some(300.0));
+        assert_eq!(seeded.checked_at, Some(100.0));
+        assert_eq!(seeded.windows[0].used, 42.0);
+        let launching = host_profiles(&local, &catalog, &state, &["claude"]);
+        assert_eq!(launching[0].0.usage.retry_at, Some(300.0));
+        let mut previous = usage::usage(&quota);
+        previous.status = "ok".into();
+        previous.retry_at = None;
+        assert!(better(&seeded, &previous));
+        assert!(!better(&previous, &seeded));
+        previous.checked_at = Some(301.0);
+        assert!(
+            better(&previous, &seeded),
+            "a genuinely newer sample still wins"
+        );
     }
 
     fn ids(profiles: &[(Profile, Value)]) -> Vec<String> {

@@ -4093,6 +4093,32 @@ precedence; older authentication problems are labelled **Last reported** when
 their report is stale or offline. Viewing accounts never refreshes Claude's
 credentials on Zerus's behalf.
 
+Claude usage refreshes share a cache on the account's owning computer. Account
+views and the selected session footer normally request usage every five minutes;
+their clocks, manual Refresh and requests from other GUI clients share a five-minute
+cache interval per account. Account-list reads (every 30 seconds in
+the desktop) use saved reports and never contact the usage endpoint. Arch and
+Mac clients viewing the same owning computer therefore share its cooldown.
+Verified native account UUIDs share a cache across profiles on that computer;
+otherwise the selected profile home and credential identity keep reports separate.
+Every Claude inspection first reads current native sign-in status, even during
+a cooldown. Cache keys bind that observed email, organization identity and plan,
+plus any stable credential account identifiers. Token values, expiry, scope and
+tier changes do not reset the same account's cooldown. A different account never
+inherits the prior account's windows or wait; an unconfirmed native identity
+cannot adopt a previous report. Cache and lock files must be private regular
+files; links and special files are refused without waiting for a writer.
+
+On HTTP 429, the last successful windows and their original sample time remain
+visible, labelled **rate limited** with their age and next retry time. Refresh
+also respects `Retry-After` (seconds or an HTTP date); an absent or unreadable
+header waits five minutes. A 429 uses a minimum 60-second cooldown even when the
+server requests less; it does not require waiting the healthy five-minute interval.
+No token refresh or agent message obtains these
+limits. The private cache keeps at most 256 account snapshots, four known Claude
+windows each and no tokens or request history. Active cooldowns are never evicted
+to admit another account. Only expired entries can be replaced at capacity.
+
 **Add account** creates a separate profile on the selected host and starts native
 sign-in. Default/native profiles retain existing authorization. Its agents use New
 session's rows: a large colored provider logo, the agent and what adding does.

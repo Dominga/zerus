@@ -1,5 +1,6 @@
 //! Named, per-machine native agent profiles. The catalog contains labels, never credentials.
 mod inspection;
+mod claude_usage;
 mod model_defaults;
 mod claude;
 mod claude_settings;

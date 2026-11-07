@@ -464,6 +464,8 @@ export interface Usage {
   label: string;
   auth_status: string;
   checked_at: number | null;
+  /** Provider cooldown; older peers may omit it. */
+  retry_at?: number | null;
   /** The values come from the cached account status until inspect answers. */
   seeded: boolean;
   identity: Identity;

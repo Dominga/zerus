@@ -12,7 +12,7 @@ import { accountMachine, accountsPage, loadAccounts, requestedProfile, setAccoun
 import { connectionOf, osOf } from "../../store/overview";
 import { useNow } from "../../store/latest";
 import { sessionsWidth, setPage } from "../../store/ui";
-import { clock, providerName, stateText, windowsAt } from "../lib/usage";
+import { clock, providerName, rateLimitNotice, stateText, windowsAt } from "../lib/usage";
 import { UsageMeters } from "../components/UsageMeter";
 import { accountManagement } from "../../store/accountManagement";
 import { accountSetup } from "../../store/accountSetup";
@@ -71,6 +71,7 @@ function AccountRow(props: { a: Account; now: number }) {
       <Show when={props.a.usage.windows.length}>
         <span class="acct-row-usage"><UsageMeters windows={windowsAt(props.a.usage.windows, props.now)} compact resetFrom={90} /></span>
       </Show>
+      <Show when={rateLimitNotice(props.a.usage, props.now)}><span class="dim">{rateLimitNotice(props.a.usage, props.now)}</span></Show>
     </button>
   );
 }
@@ -90,6 +91,7 @@ function UsagePanel(props: { a: Account }) {
       <Show when={u().offline}><Status>{tr("Machine is offline. Showing the last available account data.")}</Status></Show>
       <Show when={u().refreshing}><Status kind="busy">{tr("Updating… Previous values remain visible.")}</Status></Show>
       <Show when={!u().refreshing && u().refresh_error}><Status kind="warn">{tr("Update failed. Showing the last available values.")}</Status></Show>
+      <Show when={rateLimitNotice(u(), now())}><Status kind="warn">{rateLimitNotice(u(), now())}</Status></Show>
       <Show when={!u().windows.length && !u().balances.length && !u().offline}><p>{stateText(u())}</p></Show>
       <For each={u().windows}>{(p) => {
         const w = () => panelWindow(p, now());

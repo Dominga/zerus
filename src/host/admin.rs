@@ -505,6 +505,11 @@ mod native {
             crate::desktop::portable_frontend::record,
         )
         .map_err(|error| Error::new(1, format!("cannot enable local sessions: {error}")))?;
+        // Task #227: an install or update restarted the sessions; one sweep
+        // gives the attempts a restart left unconfirmed back to their members.
+        if let Err(error) = crate::state::teams::dispatcher::recover_after_update() {
+            eprintln!("hgs: the team recovery sweep after the install failed: {error}");
+        }
         if json {
             print_json(&install_json(&report, layout, VERSION));
         } else {

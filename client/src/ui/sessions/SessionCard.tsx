@@ -450,21 +450,34 @@ export function teamSummary(team: Team): string[] {
   ].filter(Boolean);
 }
 
-/** A compact parent's second line: its child sessions at a glance, collapsing them. */
+/**
+ * A compact parent's second line: its child sessions at a glance, collapsing
+ * them. The chevron keeps its place; on a narrow row the counters shorten to
+ * their numbers (zerus-sa9qn.11), and the button and row descriptions keep
+ * every count in words.
+ */
 function CompactTeam(props: { team: Team; onToggle?: () => void }) {
+  const title = () => (props.team.collapsed ? tr("Show child sessions") : tr("Hide child sessions"));
+  const counter = (kind: string, count: number | undefined, text: string) => (
+    <Show when={count}><span class={kind} title={text}><span class="long">{text}</span><span class="short" aria-hidden="true">{count}</span></span></Show>
+  );
   return (
     <button class="cc-team" classList={{ open: !props.team.collapsed }} aria-expanded={!props.team.collapsed}
-      title={props.team.collapsed ? tr("Show child sessions") : tr("Hide child sessions")}
+      title={title()} aria-label={[title(), ...teamSummary(props.team)].join("\n")}
       onClick={(e) => { e.stopPropagation(); props.onToggle?.(); }} onDblClick={(e) => e.stopPropagation()}>
-      <svg class="team-glyph" width="16" height="12" viewBox="0 0 16 12" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
-        <circle cx="8" cy="3" r="2" /><circle cx="3" cy="5" r="1.6" /><circle cx="13" cy="5" r="1.6" />
-        <path d="M4 11A4 3 0 0 1 12 11M0 10.5A3 2.4 0 0 1 4.5 9M16 10.5A3 2.4 0 0 0 11.5 9" />
-      </svg>
-      <span class="cc-team-count">{tr("%1 of %2 working", props.team.working, props.team.total)}</span>
-      <Show when={props.team.needsYou}><span class="team-needs">{tr("Needs you: %1", props.team.needsYou ?? 0)}</span></Show>
-      <Show when={props.team.asking}><span class="team-asking">{tr("Asking: %1", props.team.asking ?? 0)}</span></Show>
-      <Show when={props.team.errors}><span class="team-errors">{tr("Errors: %1", props.team.errors ?? 0)}</span></Show>
-      <span class="grow" />
+      <span class="cc-team-body">
+        <svg class="team-glyph" width="16" height="12" viewBox="0 0 16 12" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+          <circle cx="8" cy="3" r="2" /><circle cx="3" cy="5" r="1.6" /><circle cx="13" cy="5" r="1.6" />
+          <path d="M4 11A4 3 0 0 1 12 11M0 10.5A3 2.4 0 0 1 4.5 9M16 10.5A3 2.4 0 0 0 11.5 9" />
+        </svg>
+        <span class="cc-team-count">
+          <span class="long">{tr("%1 of %2 working", props.team.working, props.team.total)}</span>
+          <span class="short" aria-hidden="true">{tr("%1 of %2", props.team.working, props.team.total)}</span>
+        </span>
+        {counter("team-needs", props.team.needsYou, tr("Needs you: %1", props.team.needsYou ?? 0))}
+        {counter("team-asking", props.team.asking, tr("Asking: %1", props.team.asking ?? 0))}
+        {counter("team-errors", props.team.errors, tr("Errors: %1", props.team.errors ?? 0))}
+      </span>
       <svg class="chev" width="8" height="6" viewBox="0 0 8 6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 2L4 5L7 2" /></svg>
     </button>
   );

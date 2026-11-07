@@ -86,7 +86,11 @@
   /* Card: row 94, card (2,4,-2,-6) = 84 px, radius 8. Instant hover like Qt. */
   .scard { position: absolute; left: 2px; right: 2px; top: 4px; bottom: 6px; border-radius: 8px; border: 1px solid transparent; background: transparent; color: var(--z-list-text); }
   .rowhit:hover .scard { background: var(--z-color-row-hover); }
-  .scard.selected, .rowhit:hover .scard.selected { background: var(--z-color-row-selected); border-color: var(--z-color-row-selected-border); }
+  /* Selection as in the owner's prototype (2026-11-07): the skin's green-tinted card surface and an
+     accent-mixed border (at least 3:1 on the card in every skin); edge marks still draw on top. */
+  .scard.selected, .rowhit:hover .scard.selected { background: var(--z-color-card-selected); border-color: color-mix(in srgb, var(--z-color-accent) 55%, var(--z-color-card-selected-border)); }
+  /* Keyboard focus in the list adds an accent ring, distinct from selection alone. */
+  .sp-scroll:focus-visible .scard.selected { outline: 2px solid var(--z-color-accent); outline-offset: 1px; }
   /* Emphasis edge: 4 px, 6 px from the card's top and bottom (4 px in the compact row). */
   .scard[data-emphasis]::before { content: ""; position: absolute; left: 0; top: 6px; bottom: 6px; width: 4px; border-radius: 2px; background: var(--edge); }
   .scard.compact[data-emphasis]::before { top: 4px; bottom: 4px; }
@@ -229,13 +233,21 @@
   .scard.compact .cc-line { display: contents; }
   .scard.compact.two { flex-direction: column; align-items: stretch; padding-top: 3px; padding-bottom: 3px; }
   .scard.compact.two .cc-line { display: flex; align-items: center; min-width: 0; height: 24px; }
-  .cc-team { display: flex; align-items: center; gap: 6px; min-width: 0; height: 20px; margin: 2px 3px 0 29px; padding: 0 6px; border-radius: 4px;
-    font-size: 11px; color: var(--z-list-muted); text-align: left; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; }
+  .cc-team { container: cc-team / inline-size; display: flex; align-items: center; gap: 6px; min-width: 0; height: 20px; margin: 2px 3px 0 29px; padding: 0 6px; border-radius: 4px;
+    font-size: 11px; color: var(--z-list-muted); text-align: left; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .cc-team:hover { background: var(--z-list-counter-hover); color: var(--z-list-text); }
   .cc-team:focus-visible { outline: 1px solid var(--z-color-accent); }
+  /* The counters shrink and clip; the chevron always keeps its place (zerus-sa9qn.11). */
+  .cc-team-body { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 6px; overflow: hidden; }
   .cc-team .team-glyph { flex: none; }
   .cc-team .chev { flex: none; transition: rotate var(--z-motion-base) var(--ease); }
   .cc-team.open .chev { rotate: 180deg; }
+  .cc-team .short { display: none; }
+  /* About 340 px rows and narrower: the counters show their numbers only. */
+  @container cc-team (max-width: 300px) {
+    .cc-team .long { display: none; }
+    .cc-team .short { display: inline; }
+  }
   .cc-team .team-asking, .cc-team .team-needs, .cc-team .team-errors { flex: none; padding: 0 4px; border-radius: 3px; font-weight: 600; }
   .cc-team .team-asking { color: var(--z-list-badge-muted); background: var(--z-list-chip); }
   .cc-team .team-needs { color: var(--z-list-tone-attention); background: color-mix(in srgb, var(--z-list-tone-attention) 16%, transparent); }
@@ -331,10 +343,10 @@
   .strip-band > .ell { flex: 1; min-width: 0; font-size: 11px; font-weight: 600; }
   .strip-tile { position: absolute; left: 4px; top: 4px; width: 84px; height: 84px; border-radius: 8px; color: var(--z-list-text); background: var(--z-list-tile-surface); border: 1px solid var(--z-list-tile-border); }
   .strip-tile:hover { background: var(--z-color-row-hover); }
-  .strip-tile.selected { background: var(--z-color-row-selected); }
+  .strip-tile.selected { background: var(--z-color-card-selected); }
   .rowhit.context-target .scard:not(.selected), .strip-tile.context-target:not(.selected) { background: var(--z-color-row-hover); }
   .rowhit.context-target .scard, .strip-tile.context-target { outline: 1px solid var(--z-color-row-selected-border); outline-offset: -1px; }
-  .strip-tile.selected:not([data-frame]), .strip-tile.selected[data-frame="neutral"] { border-color: var(--z-color-row-selected-border); }
+  .strip-tile.selected:not([data-frame]), .strip-tile.selected[data-frame="neutral"] { border-color: color-mix(in srgb, var(--z-color-accent) 55%, var(--z-color-card-selected-border)); }
   .strip-tile[data-frame]:not([data-frame="neutral"]) { border: 1.5px solid var(--frame); box-shadow: inset 0 0 7px 0 color-mix(in srgb, var(--frame) 34%, transparent); }
   .strip-tile[data-frame="working"] { --frame: var(--z-list-frame-working); }
   .strip-tile[data-frame="background"] { --frame: var(--z-list-frame-background); }

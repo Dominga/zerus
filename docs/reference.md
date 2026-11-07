@@ -705,8 +705,13 @@ rows. The artwork loads lazily, outside the entry bundle; until it arrives the
 tile shows the provider glyph. A compact parent row takes a second line that
 sums up its child sessions: working of all, **Needs you**, **Asking** and
 **Errors** counts, with the same collapse toggle; childless compact rows stay
-one line. The summary is part of the row's accessible description. Rows stay
-transparent and paint a surface only on hover and selection.
+one line. On rows narrower than about 340 px the counters show their numbers
+only and the toggle keeps its place; the toggle's label and the row's
+accessible description keep every count in words. Rows stay transparent and
+paint a surface only on hover and selection. A selected card uses the skin's
+green-tinted card surface and an accent border, as in the owner's prototype,
+with attention, unread, draft and error edges drawn on top; while the list has
+keyboard focus the selected card also gets an accent ring.
 
 Supervised children draw no attention for requests their parent can handle.
 A child is supervised when its own computer lists its parent as `live`; rows

@@ -1356,6 +1356,26 @@ mod tests {
         );
     }
     #[test]
+    fn projected_non_string_kimi_evidence_never_admits_recovery() {
+        let window = "You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends.";
+        for detail in [window.to_owned(), format!("429 {window}")] {
+            for code in [json!({"code":"insufficient_quota","message":"billing account exhausted"}),
+                json!(401), json!(["provider_policy"]), Value::Null, json!(false)] {
+                let mut s = snapshot("kimi");
+                journal::update_activity(&mut s, &json!({"hook_event_name":"StopFailure",
+                    "error_type":"APIProviderRateLimitError","error_message":detail,"error":code}));
+                let failure = s["provider_error"].clone();
+                assert!(failure.get("native_error_code").is_some_and(Value::is_null));
+                provider_errors::apply(&mut s, &failure);
+                assert_eq!(s["provider_error"]["native_error_code"], Value::Null);
+                assert_eq!(s["provider_error"]["detail"], detail);
+                assert!(!provider_errors::rolling_rate_error(&s["provider_error"]));
+                assert_eq!(class(&s["provider_error"]), "manual");
+                assert!(advance(Value::Null, &s, &on(), 11.0).is_null());
+            }
+        }
+    }
+    #[test]
     fn typed_kimi_window_requires_native_evidence_and_the_existing_enabled_policy() {
         let mut s = snapshot("kimi");
         s["provider_error"] = json!({"source":"provider_hook","message_id":"original-failure","at":10.0,

@@ -21,6 +21,12 @@ fn structured_kind(text: &str) -> Option<&'static str> {
 // Native structured refusal/reset evidence precedes a known transient message.
 // Generic saved error_kind=quota is deliberately not native type/code evidence.
 pub(super) fn native_kind(error: &Value) -> Option<&'static str> {
+    // A present non-string is invalid evidence, not an absent native code.
+    // Keep it manual even when the human message contains a known 429 window.
+    if ["native_error_type", "native_error_code"].iter()
+        .any(|key| error.get(*key).is_some_and(|value| !value.is_string())) {
+        return Some("provider");
+    }
     if category(string(error, "detail")) == "provider_policy" { return Some("provider_policy"); }
     let mut reset = None;
     for key in ["native_error_type", "native_error_code"] {

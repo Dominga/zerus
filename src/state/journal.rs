@@ -1541,8 +1541,15 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
                 if provider_errors::rolling_rate_limit(&detail(event))
                     || (string(record, "agent") == "kimi"
                         && string(event, "error_type") == provider_errors::KIMI_RATE_LIMIT_TYPE) {
-                    failure["native_error_type"] = json!(clipped(&event["error_type"], 1200));
-                    failure["native_error_code"] = json!(clipped(&event["error"], 1200));
+                    for (source, target) in [("error_type", "native_error_type"), ("error", "native_error_code")] {
+                        failure[target] = match event.get(source) {
+                            None => json!(""),
+                            Some(value @ Value::String(_)) => json!(clipped(value, 1200)),
+                            // Closed, bounded invalid-evidence marker. Do not
+                            // erase objects/numbers/arrays into an absent code.
+                            Some(_) => Value::Null,
+                        };
+                    }
                 }
                 let category = provider_errors::native_kind(&failure).unwrap_or_else(|| provider_errors::category(&format!(
                     "{} {} {}",

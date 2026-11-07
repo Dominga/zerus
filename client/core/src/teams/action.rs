@@ -122,13 +122,90 @@ pub enum TeamAction {
     },
     /// Task 11: confirms (`confirmation`, the typed word if any) or declines
     /// the addition `confirm` waiting for a running phase (`add-to-phase`).
+    /// Task 196: with `tasks` (and no `confirm`) it is the request Qt's
+    /// "Add task..." sends first; hgs answers with a warning and the pending
+    /// addition the confirmation names.
     AddToPhase {
         phase: u64,
+        #[serde(default)]
         confirm: String,
         #[serde(default)]
         confirmation: String,
         #[serde(default)]
         decline: bool,
+        #[serde(default)]
+        tasks: Vec<Value>,
+    },
+    /// Task 196: sends a draft phase back to the lead with what should change
+    /// (`reject-phase`, against the revision it was read at).
+    RejectPhase {
+        phase: u64,
+        comment: String,
+        #[serde(default)]
+        revision: Option<u64>,
+    },
+    /// Task 196: takes a send-back back; the draft waits for the owner again.
+    UndoRejectPhase {
+        phase: u64,
+    },
+    /// Task 196: discards a draft, or an accepted phase whose work has not
+    /// started (`accepted` and `tasks` only word the confirmation).
+    DiscardPhase {
+        phase: u64,
+        #[serde(default)]
+        tasks: u64,
+        #[serde(default)]
+        accepted: bool,
+    },
+    /// Task 196: an accepted phase whose work has not started goes back to a
+    /// draft that waits for the owner's approval again.
+    ReturnToDraft {
+        phase: u64,
+    },
+    /// Task 196: moves a phase before or after another (Move earlier/later).
+    MovePhase {
+        phase: u64,
+        to: u64,
+        position: String,
+    },
+    /// Task 196: pauses an accepted phase until the pause is removed; the
+    /// optional reason is the lead's to read.
+    PausePhase {
+        phase: u64,
+        #[serde(default)]
+        reason: String,
+    },
+    /// Task 196: removes a phase's pause.
+    UnpausePhase {
+        phase: u64,
+    },
+    /// Task 196: whether a phase waits for the owner's acceptance once its
+    /// tasks are decided ("Requires owner acceptance").
+    PhaseAcceptance {
+        phase: u64,
+        owner: bool,
+    },
+    /// Task 196: edits a draft phase, or an accepted one that has not
+    /// started: its title and its tasks' fields (`edit-draft`), against the
+    /// revision it was read at.
+    EditDraft {
+        phase: u64,
+        #[serde(default)]
+        revision: Option<u64>,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        barrier: Option<bool>,
+        #[serde(default)]
+        tasks_update: Vec<Value>,
+    },
+    /// Task 196: an edit of the plan while the team plans (`plan`): core reads
+    /// the whole team (`team status`), applies the change and sends the whole
+    /// plan once at the revision the owner saw (super::plan_edit), never from
+    /// the view's bounded summary.
+    PlanEdit {
+        revision: u64,
+        change: super::plan_edit::PlanChange,
     },
     /// Task 11: accepts a phase that waits for the owner's acceptance.
     AcceptPhase {
@@ -408,6 +485,29 @@ fn word(text: &str, what: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn phase_number(phase: u64) -> Result<(), String> {
+    if phase == 0 || phase > u64::from(u32::MAX) {
+        return Err("Not a phase number.".into());
+    }
+    Ok(())
+}
+
+/// Task 196: the tasks a request adds to a running phase: objects with a
+/// title, at most 20 (hgs's own bound for one addition).
+fn new_tasks(tasks: &[Value]) -> Result<(), String> {
+    if tasks.len() > 20 {
+        return Err("At most 20 tasks join a running phase at once.".into());
+    }
+    for task in tasks {
+        let title = task.get("title").and_then(Value::as_str).unwrap_or_default();
+        if title.trim().is_empty() {
+            return Err("A new task needs a title.".into());
+        }
+        plain(title, "A task title", 200)?;
+    }
+    Ok(())
+}
+
 fn task(task: u64) -> Result<(), String> {
     if task == 0 || task > u64::from(u32::MAX) {
         return Err("Not a task number.".into());
@@ -435,6 +535,16 @@ impl TeamAction {
             Self::UseLastReply { .. } => "use-last-reply",
             Self::Answer { .. } => "answer",
             Self::AddToPhase { .. } => "add-to-phase",
+            Self::RejectPhase { .. } => "reject-phase",
+            Self::UndoRejectPhase { .. } => "undo-reject-phase",
+            Self::DiscardPhase { .. } => "discard-phase",
+            Self::ReturnToDraft { .. } => "return-to-draft",
+            Self::MovePhase { .. } => "move-phase",
+            Self::PausePhase { .. } => "pause-phase",
+            Self::UnpausePhase { .. } => "unpause-phase",
+            Self::PhaseAcceptance { .. } => "phase-acceptance",
+            Self::EditDraft { .. } => "edit-draft",
+            Self::PlanEdit { .. } => "plan",
             Self::AcceptPhase { .. } => "accept-phase",
             Self::PhaseMode { .. } => "phase-mode",
             Self::SendBackPhase { .. } => "send-back-phase",
@@ -598,14 +708,74 @@ impl TeamAction {
                 phase,
                 confirm,
                 confirmation,
+                tasks,
                 ..
             } => {
                 if *phase == 0 {
                     return Err("Not a phase number.".into());
                 }
+                if !tasks.is_empty() {
+                    // Task 196: the request names its tasks, never a pending one.
+                    if !confirm.is_empty() {
+                        return Err("A request to add tasks names no pending addition.".into());
+                    }
+                    return new_tasks(tasks);
+                }
                 word(confirm, "pending addition")?;
                 plain(confirmation, "A confirmation", 200)
             }
+            Self::RejectPhase { phase, comment, .. } => {
+                phase_number(*phase)?;
+                if comment.trim().is_empty() {
+                    return Err("Say what the lead should change.".into());
+                }
+                plain(comment, "A comment", 2000)
+            }
+            Self::UndoRejectPhase { phase }
+            | Self::DiscardPhase { phase, .. }
+            | Self::ReturnToDraft { phase }
+            | Self::UnpausePhase { phase }
+            | Self::PhaseAcceptance { phase, .. } => phase_number(*phase),
+            Self::MovePhase { phase, to, position } => {
+                phase_number(*phase)?;
+                phase_number(*to)?;
+                if phase == to {
+                    return Err("A phase moves before or after another phase.".into());
+                }
+                if !matches!(position.as_str(), "before" | "after") {
+                    return Err("A phase moves before or after another.".into());
+                }
+                Ok(())
+            }
+            Self::PausePhase { phase, reason } => {
+                phase_number(*phase)?;
+                plain(reason, "A reason", 400)
+            }
+            Self::EditDraft { phase, title, tasks_update, .. } => {
+                phase_number(*phase)?;
+                if let Some(title) = title {
+                    if title.trim().is_empty() {
+                        return Err("A phase needs a title.".into());
+                    }
+                    plain(title, "A phase title", 120)?;
+                }
+                if tasks_update.len() > 200 {
+                    return Err("At most 200 task changes at once.".into());
+                }
+                for change in tasks_update {
+                    let id = change.get("id").and_then(Value::as_u64).unwrap_or(0);
+                    task(id)?;
+                    if let Some(title) = change.get("title") {
+                        let title = title.as_str().ok_or("A task title is text.")?;
+                        if title.trim().is_empty() {
+                            return Err(format!("Task #{id} needs a title."));
+                        }
+                        plain(title, "A task title", 200)?;
+                    }
+                }
+                Ok(())
+            }
+            Self::PlanEdit { change, .. } => change.check(),
             Self::AcceptPhase { phase } => {
                 if *phase == 0 {
                     return Err("Not a phase number.".into());
@@ -889,15 +1059,61 @@ impl TeamAction {
                 confirm,
                 confirmation,
                 decline,
+                tasks,
             } => {
                 put("phase", json!(phase));
-                put("confirm", json!(confirm));
-                if *decline {
-                    put("decline", json!(true));
-                } else if !confirmation.is_empty() {
-                    put("confirmation", json!(confirmation));
+                if !tasks.is_empty() {
+                    put("tasks", Value::Array(tasks.clone()));
+                } else {
+                    put("confirm", json!(confirm));
+                    if *decline {
+                        put("decline", json!(true));
+                    } else if !confirmation.is_empty() {
+                        put("confirmation", json!(confirmation));
+                    }
                 }
             }
+            Self::RejectPhase { phase, comment, revision } => {
+                put("phase", json!(phase));
+                put("comment", json!(comment.trim()));
+                if let Some(revision) = revision {
+                    put("revision", json!(revision));
+                }
+            }
+            Self::UndoRejectPhase { phase }
+            | Self::DiscardPhase { phase, .. }
+            | Self::ReturnToDraft { phase }
+            | Self::UnpausePhase { phase } => put("phase", json!(phase)),
+            Self::MovePhase { phase, to, position } => {
+                put("phase", json!(phase));
+                put("to", json!(to));
+                put("position", json!(position));
+            }
+            Self::PausePhase { phase, reason } => {
+                put("phase", json!(phase));
+                put("reason", json!(reason.trim()));
+            }
+            Self::PhaseAcceptance { phase, owner } => {
+                put("phase", json!(phase));
+                put("acceptance", json!(if *owner { "owner" } else { "lead" }));
+            }
+            Self::EditDraft { phase, revision, title, barrier, tasks_update } => {
+                put("phase", json!(phase));
+                if let Some(revision) = revision {
+                    put("revision", json!(revision));
+                }
+                if let Some(title) = title {
+                    put("title", json!(title.trim()));
+                }
+                if let Some(barrier) = barrier {
+                    put("barrier", json!(barrier));
+                }
+                if !tasks_update.is_empty() {
+                    put("tasks_update", Value::Array(tasks_update.clone()));
+                }
+            }
+            // The whole plan is built by `run` from a fresh read of the team.
+            Self::PlanEdit { revision, .. } => put("revision", json!(revision)),
             Self::AcceptPhase { phase } => put("phase", json!(phase)),
             Self::PhaseMode { phase, mode, reason } => {
                 put("phase", json!(phase));
@@ -1119,6 +1335,23 @@ impl TeamAction {
                 "Archive team?",
                 format!("Archive {name}? Its history, tasks and reports stay; the team leaves the list of teams."),
                 "Archive",
+            )),
+            // Task 196: Qt's phase confirmations, word for word.
+            Self::DiscardPhase { phase, tasks, accepted } => Some(ask(
+                "teamDiscardPhaseConfirm",
+                "Discard phase?",
+                if *accepted {
+                    format!("Phase {phase} is already accepted. Discard it and its {tasks} tasks? Only a phase whose work has not started can go; this cannot be undone.")
+                } else {
+                    format!("Discard phase {phase} and its {tasks} tasks?")
+                },
+                "Discard phase",
+            )),
+            Self::ReturnToDraft { phase } => Some(ask(
+                "teamReturnPhaseConfirm",
+                "Return phase to draft?",
+                format!("Phase {phase} goes back to a draft: its tasks are not handed out until you approve it again. Only a phase whose work has not started can return."),
+                "Return to draft",
             )),
             Self::Cancel { .. } => Some(ask(
                 "teamCancelTaskConfirm",
@@ -1348,9 +1581,43 @@ pub fn classify(action: &TeamAction, request_id: &str, exit: Exit) -> TeamOutcom
 /// Runs one call through `hgs`: blocks for at most its timeout plus a few
 /// seconds; callers run it off the UI thread. Never sends it twice.
 pub fn run(hgs: &Path, call: &TeamCall) -> TeamOutcome {
-    let (invocation, request_id) = match prepare(call) {
+    let (mut invocation, request_id) = match prepare(call) {
         Ok(prepared) => prepared,
         Err(outcome) => return outcome,
     };
+    // Task 196: a plan edit sends the whole plan, built from a fresh read of
+    // the whole team; a failed read sends nothing.
+    if let TeamAction::PlanEdit { change, .. } = &call.action {
+        let status = match read_status(hgs, call) {
+            Ok(status) => status,
+            Err(detail) => return outcome_failed(detail, &request_id),
+        };
+        let mut input: Map<String, Value> = serde_json::from_slice(invocation.stdin.as_deref().unwrap_or_default()).unwrap_or_default();
+        match super::plan_edit::plan_input(&status, change) {
+            Ok(plan) => input.extend(plan),
+            Err(detail) => return outcome_failed(detail, &request_id),
+        }
+        invocation.stdin = Some(Value::Object(input).to_string().into_bytes());
+    }
     classify(&call.action, &request_id, crate::run::run(hgs, &invocation))
+}
+
+/// Task 196: the whole team (`hgs team status --json`) a plan edit is built on.
+fn read_status(hgs: &Path, call: &TeamCall) -> Result<Value, String> {
+    let mut args: Vec<String> = (!call.computer.is_empty()).then(|| format!("@{}", call.computer)).into_iter().collect();
+    args.extend(["team".to_owned(), "status".to_owned(), "--json".to_owned()]);
+    let invocation = Invocation {
+        args,
+        stdin: Some(json!({"team": call.team}).to_string().into_bytes()),
+        timeout: Duration::from_secs(if call.computer.is_empty() { 15 } else { 45 }),
+        request_id: None,
+    };
+    match crate::run::run(hgs, &invocation) {
+        Exit::Code { code: 0, stdout, .. } => serde_json::from_slice::<Value>(&stdout)
+            .ok()
+            .filter(Value::is_object)
+            .ok_or_else(|| "The team could not be read; nothing was sent.".to_owned()),
+        Exit::Code { stderr, .. } => Err(stderr_text(&stderr).unwrap_or_else(|| "The team could not be read; nothing was sent.".to_owned())),
+        _ => Err("The team could not be read; nothing was sent.".to_owned()),
+    }
 }

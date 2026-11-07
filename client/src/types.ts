@@ -1054,7 +1054,15 @@ export interface TeamTaskView {
   questions?: { id: string; text: string; at: number }[];
   /** Task #60: the task this follow-up was spawned from; never a dependency. */
   origin?: number | null;
+  /** Task 196: a task not yet handed out: its description and criteria, for the plan's task editor. */
+  description?: string; criteria?: string[];
 }
+
+/** Task 196: one edit of the plan while the team plans (core plan_edit.rs `PlanChange`). */
+export type TeamPlanChange =
+  | { edit: "link"; dependency: number; task: number; add: boolean; soft?: boolean }
+  | { edit: "task"; task: Record<string, unknown> }
+  | { edit: "remove_task"; task: number };
 
 /** A task's pipeline run (core PipelineRunView). */
 export interface TeamPipelineRun {
@@ -1140,6 +1148,10 @@ export interface TeamPhaseView {
   acceptance: string; paused: boolean; health: string;
   /** Task #58: the mode the phase plans in, "standard" or "free"; "" from an older hgs. */
   mode?: string;
+  /** Task 196: the header's details from the phase record (core PhaseView). */
+  note?: string; rejection?: string; reworked?: boolean; added_by?: string; added_at?: number; accepted_by_auto?: boolean;
+  start_ahead?: boolean; waiting?: string; pause_by?: string; pause_reason?: string; pause_owner?: boolean; changes?: number;
+  owner_accepts?: boolean;
 }
 
 export interface TeamFinding { kind: string; text: string; task: number | null; member: string }
@@ -1200,7 +1212,18 @@ export type TeamAction =
   | { kind: "decide_proposal"; proposal: string; accept: boolean; expected_hash: string; reason?: string; answer?: string }
   | { kind: "use_last_reply"; task: number; attempt: string }
   | { kind: "answer"; member: string; question_id: string; expected_question_hash: string; answers: unknown[] }
-  | { kind: "add_to_phase"; phase: number; confirm: string; confirmation?: string; decline?: boolean }
+  | { kind: "add_to_phase"; phase: number; confirm?: string; confirmation?: string; decline?: boolean; tasks?: Record<string, unknown>[] }
+  /** Task 196: the phase header's actions (Qt TeamWorkspace phase header) and the plan's edits. */
+  | { kind: "reject_phase"; phase: number; comment: string; revision?: number | null }
+  | { kind: "undo_reject_phase"; phase: number }
+  | { kind: "discard_phase"; phase: number; tasks?: number; accepted?: boolean }
+  | { kind: "return_to_draft"; phase: number }
+  | { kind: "move_phase"; phase: number; to: number; position: "before" | "after" }
+  | { kind: "pause_phase"; phase: number; reason?: string }
+  | { kind: "unpause_phase"; phase: number }
+  | { kind: "phase_acceptance"; phase: number; owner: boolean }
+  | { kind: "edit_draft"; phase: number; revision?: number | null; title?: string; barrier?: boolean; tasks_update?: Record<string, unknown>[] }
+  | { kind: "plan_edit"; revision: number; change: TeamPlanChange }
   | { kind: "accept_phase"; phase: number }
   | { kind: "phase_mode"; phase: number; mode: "free" | "standard"; reason?: string }
   | { kind: "send_back_phase"; phase: number; comment: string }

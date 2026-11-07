@@ -333,6 +333,12 @@ pub struct TaskView {
     /// Task 55: the newest attempt's open questions to the lead (A3): the
     /// owner answers them with `hgs team reply` too.
     pub questions: Vec<QuestionView>,
+    /// Task 196: what the plan's task editor shows of a task not yet handed
+    /// out (draft or pending): its description (bounded) and criteria.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub criteria: Vec<String>,
 }
 
 /// Task 55: one open question of a member to the lead.
@@ -427,6 +433,46 @@ pub struct PhaseView {
     /// Task #58: the mode the phase plans in, "standard" or "free" (its own,
     /// else the team's); "" from an hgs that sends no phase modes.
     pub mode: String,
+    /// Task 196: the phase header's details from the phase's record (Qt's
+    /// TeamWorkspace phase header): the lead's note, the owner's send-back
+    /// comment and whether the lead reworked it, who proposed it and when,
+    /// whether Auto accepted it, why it waits ("Starts after ..."), its
+    /// pause's author and reason, the lead's edits since, and whether it
+    /// waits for the owner's acceptance.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub note: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub rejection: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub reworked: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub added_by: String,
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub added_at: f64,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub accepted_by_auto: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub start_ahead: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub waiting: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub pause_by: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub pause_reason: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub pause_owner: bool,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub changes: u64,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub owner_accepts: bool,
+}
+
+fn is_zero_f64(value: &f64) -> bool {
+    *value == 0.0
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 /// One open proposal, as its card shows it: hgs's own summary when the change
@@ -651,7 +697,17 @@ fn task(value: &Value) -> TaskView {
         subteam_team: value.get("subteam").map(|subteam| name(subteam, "team")).unwrap_or_default(),
         origin: value.get("origin").and_then(Value::as_u64).filter(|origin| *origin > 0),
         questions: open_questions(value),
+        description: if editable_task(value) { text(value, "description", EDITOR_CHARS) } else { String::new() },
+        criteria: if editable_task(value) { lines(value, "criteria", LINE_CHARS) } else { Vec::new() },
     }
+}
+
+/// Task 196: the longest description the plan's task editor is given.
+const EDITOR_CHARS: usize = 4000;
+
+/// Task 196: a task the plan's editor may change: not yet handed out.
+fn editable_task(value: &Value) -> bool {
+    matches!(name(value, "status").as_str(), "draft" | "pending") && array(value, "attempts").is_empty()
 }
 
 /// Task #58: phase `n`'s mode from status's `phase_modes`, else the team's
@@ -681,6 +737,35 @@ fn phase(value: &Value) -> PhaseView {
         paused: value.get("pause").is_some_and(|pause| !pause.is_null()),
         health: text(value, "health_line", LINE_CHARS),
         mode: String::new(),
+        start_ahead: flag(value, "start_ahead"),
+        pause_by: value.get("pause").map(|pause| name(pause, "by")).unwrap_or_default(),
+        pause_reason: value.get("pause").map(|pause| text(pause, "reason", LINE_CHARS)).unwrap_or_default(),
+        pause_owner: value.get("pause").is_some_and(|pause| flag(pause, "owner")),
+        owner_accepts: name(value, "acceptance") == "owner",
+        ..PhaseView::default()
+    }
+}
+
+/// Task 196: the details only the phase's record carries (`phases`).
+fn phase_record(view: &mut PhaseView, record: &Value) {
+    view.note = text(record, "note", TEXT_CHARS);
+    if let Some(rejection) = record.get("rejection").filter(|rejection| rejection.is_object()) {
+        view.rejection = text(rejection, "comment", TEXT_CHARS);
+        view.reworked = number(rejection, "reworked_at") > 0.0;
+    }
+    view.added_by = name(record, "added_by");
+    view.added_at = number(record, "added_at");
+    view.accepted_by_auto = matches!(name(record, "state").as_str(), "approved" | "queued") && name(record, "decided_by") == "Auto";
+    if let Some(waiting) = record.get("waiting").filter(|waiting| waiting.is_object()) {
+        view.waiting = text(waiting, "text", LINE_CHARS);
+    }
+    view.changes = record.get("changes").and_then(Value::as_array).map_or(0, |changes| changes.len() as u64);
+    if view.pause_by.is_empty() {
+        if let Some(pause) = record.get("pause").filter(|pause| pause.is_object()) {
+            view.pause_by = name(pause, "by");
+            view.pause_reason = text(pause, "reason", LINE_CHARS);
+            view.pause_owner = flag(pause, "owner");
+        }
     }
 }
 
@@ -785,6 +870,9 @@ pub fn team(value: &Value) -> TeamView {
             .map(|found| {
                 let mut view = phase(found);
                 view.mode = phase_mode(value, view.n);
+                if let Some(record) = array(value, "phases").iter().find(|record| count(record, "n") == view.n) {
+                    phase_record(&mut view, record);
+                }
                 view
             })
             .collect(),

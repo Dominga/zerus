@@ -1,6 +1,7 @@
 import { tr } from "../../i18n";
 import { act, hgsWords, type DecisionPort } from "./decisions";
-import type { ComputerId, TeamAction, TeamChoice, TeamConfirmation, TeamOutcome, TeamSummary } from "../../types";
+import { moveTarget } from "./phaseHeader";
+import type { ComputerId, TeamAction, TeamChoice, TeamConfirmation, TeamOutcome, TeamPlanChange, TeamSummary } from "../../types";
 
 // Task 40: the team bar's actions and the task card's actions, as Qt's
 // TeamWorkspace (headerActionsContent, the bar chips), TeamPanel (approvePlan,
@@ -589,6 +590,65 @@ export class TeamActions {
     return this.run(`reply:${question}`, { kind: "reply", question, text: answer });
   }
   move(task: ActTask, phase: number) { return this.run(`move:${task.id}`, { kind: "move_task", task: task.id, phase, revision: this.where().team.revision }); }
+
+  // Task 196: the phase header and its menu (Qt TeamWorkspace's phase header).
+  approvePhase(phase: number) { return this.run(`approve-phase:${phase}`, { kind: "approve", phase }); }
+  rejectPhase(phase: number, comment: string) {
+    if (!comment.trim()) return Promise.resolve(undefined);
+    return this.run(`reject-phase:${phase}`, { kind: "reject_phase", phase, comment: comment.trim(), revision: this.where().team.revision });
+  }
+  undoRejectPhase(phase: number) { return this.run(`undo-reject-phase:${phase}`, { kind: "undo_reject_phase", phase }); }
+  acceptOwnerPhase(phase: number) { return this.run(`accept-phase:${phase}`, { kind: "accept_phase", phase }); }
+  sendBackPhase(phase: number, comment: string) {
+    if (!comment.trim()) return Promise.resolve(undefined);
+    return this.run(`send-back-phase:${phase}`, { kind: "send_back_phase", phase, comment: comment.trim() });
+  }
+  /** Core asks first, in Qt's words: an accepted phase says so. */
+  discardPhase(phase: number) {
+    const team = this.where().team;
+    const state = team.phases.find((found) => found.n === phase)?.state ?? "";
+    const tasks = team.tasks.filter((task) => task.phase === phase).length;
+    return this.run(`discard-phase:${phase}`, { kind: "discard_phase", phase, tasks, accepted: state === "queued" || state === "running" });
+  }
+  returnToDraft(phase: number) { return this.run(`return-to-draft:${phase}`, { kind: "return_to_draft", phase }); }
+  /** Move earlier or later among the movable phases (drafts and accepted ones not started). */
+  movePhase(phase: number, later: boolean) {
+    const team = this.where().team;
+    const target = moveTarget(team, phase, later);
+    if (!target) return Promise.resolve(undefined);
+    return this.run(`move-phase:${phase}`, { kind: "move_phase", phase, to: target.to, position: target.position });
+  }
+  pausePhase(phase: number, reason: string) { return this.run(`pause-phase:${phase}`, { kind: "pause_phase", phase, reason: reason.trim() }); }
+  unpausePhase(phase: number) { return this.run(`unpause-phase:${phase}`, { kind: "unpause_phase", phase }); }
+  phaseAcceptance(phase: number, owner: boolean) { return this.run(`phase-acceptance:${phase}`, { kind: "phase_acceptance", phase, owner }); }
+  /** Edit phase: only what changed is sent, at the revision the team was read at. */
+  editPhase(phase: number, title: string | undefined, updates: { id: number; title?: string; description?: string; criteria?: string[]; assignee?: string; deps?: unknown[] }[]) {
+    if (title === undefined && updates.length === 0) return Promise.resolve(undefined);
+    const action: TeamAction = { kind: "edit_draft", phase, revision: this.where().team.revision, tasks_update: updates };
+    if (title !== undefined) action.title = title;
+    return this.run(`edit-draft:${phase}`, action);
+  }
+  /** Drag and delete of a dependency in a draft, or in an accepted phase not started (edit-draft). */
+  linkDraft(task: ActTask, dependency: number, add: boolean) {
+    const deps = task.deps.filter((dep) => dep.task !== dependency).map((dep) => ({ task: dep.task, kind: dep.hard ? "hard" : "soft" }));
+    if (add) deps.push({ task: dependency, kind: "hard" });
+    return this.editPhase(task.phase, undefined, [{ id: task.id, deps }]);
+  }
+  /** Planning: one edit of the plan; core sends the whole plan at the revision the owner saw. */
+  planEdit(change: TeamPlanChange) { return this.run(`plan-edit`, { kind: "plan_edit", revision: this.where().team.revision, change }); }
+  /**
+   * Add task... to a running phase: hgs warns first (the request keeps the
+   * addition pending); the owner's confirmation adds it, a cancel declines it.
+   */
+  async addTasks(phase: number, tasks: { title: string; assignee?: string; description?: string }[]) {
+    const requested = await this.run(`add-to-phase:${phase}`, { kind: "add_to_phase", phase, tasks });
+    if (!requested || requested === "cancelled" || requested.outcome !== "done") return requested;
+    const receipt = requested.receipt as { status?: string; pending?: string; warning?: string };
+    if (receipt.status !== "warning" || !receipt.pending) return requested;
+    const yes = await this.port.confirm({ name: "teamAddLateConfirm", title: tr("Add to running phase?"), text: receipt.warning ?? "", action: tr("Add") });
+    if (!yes) return this.run(`add-to-phase:${phase}:decline`, { kind: "add_to_phase", phase, confirm: receipt.pending, decline: true });
+    return this.run(`add-to-phase:${phase}:confirm`, { kind: "add_to_phase", phase, confirm: receipt.pending, confirmation: "add" });
+  }
   /** An inline form: nothing is sent without a reason. */
   submit(task: ActTask, form: TaskForm, reason: string, returnLater = false) {
     const action = formAction(task, form, reason, returnLater);

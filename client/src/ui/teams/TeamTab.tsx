@@ -5,8 +5,8 @@ import { agentKind, computerOffline } from "../../store/catalog";
 import { coordinatorActivity, activity } from "../../store/session";
 import { memberRow, showCatalog, showTeam, teams } from "../../store/teams";
 import { SHARE, SIDE, dragShare, dragSide, teamLayout, type TeamLayout } from "../../store/teamLayout";
-import { selected, setDetailTab, setSelectedKey, toast } from "../../store/ui";
-import { teamAction, teamTests, teamTimeline, teamsProfile } from "../../bridge";
+import { selected, setDetailTab, setSelectedKey } from "../../store/ui";
+import { teamTests, teamTimeline, teamsProfile } from "../../bridge";
 import { PlanView } from "./PlanView";
 import { TeamCatalogEditor } from "./TeamCatalogEditor";
 import { TeamSettingsDialog } from "./TeamSettingsDialog";
@@ -21,9 +21,9 @@ import { roleStyle } from "./roles";
 import { TeamProposals } from "./ProposalCards";
 import { TeamReports } from "./TeamReports";
 import { WaitingBanner } from "./Waiting";
-import { Blockers, PhaseModeControl, TaskActions, TeamBarActions, TeamBarChips, TeamModeControl, TeamQuestions } from "./TeamActions";
+import { Blockers, PhaseActions, TaskActions, TeamBarActions, TeamBarChips, TeamModeControl, TeamQuestions, createPlanEditing } from "./TeamActions";
 import { composer } from "../../store/composer";
-import type { ComputerId, TeamCall, TeamMemberView, TeamView } from "../../types";
+import type { ComputerId, TeamMemberView, TeamView } from "../../types";
 import type { Session } from "../sessions/types";
 
 // The Team tab (Qt's TeamWorkspace, design D3, HANDOFF §14): the team bar and
@@ -67,23 +67,10 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
   const [tests, setTests] = createSignal<TeamTestsView | null>(null);
   const graph = () => teams.graph(props.computer, props.team.id);
   const profile = () => teams.profile(props.computer, props.team.id);
-  // The plan's "Approve" on a draft phase (the owner, 2026-11-07: the button
-  // was never wired, so a phase could not be approved from the Teams tab).
-  // The same call Waiting for you sends; a confirmation the core asks for is
-  // shown and sent again only on the owner's yes.
-  const approvePhase = async (n: number) => {
-    const call = { computer: props.computer, team: props.team.id, team_name: props.team.name, action: { kind: "approve", phase: n } as TeamCall["action"] };
-    try {
-      let outcome = await teamAction(call);
-      if (outcome.outcome === "confirm") {
-        if (!window.confirm(outcome.confirmation.text)) return;
-        outcome = await teamAction({ ...call, confirmed: true });
-      }
-      if (outcome.outcome === "failed" || outcome.outcome === "uncertain") toast(tr("Approve phase"), outcome.detail, "error", true);
-    } catch (cause) {
-      toast(tr("Approve phase"), String(cause), "error", true);
-    }
-  };
+  // Task 196: the phase header's actions (PhaseActions) replace the plan's
+  // lone Approve (0706a4dc4); editing the plan (Qt planning mode, a draft's
+  // links) goes through core's plan edit and edit-draft.
+  const plan = createPlanEditing(() => ({ computer: props.computer, team: props.team }));
   let body!: HTMLDivElement;
   createEffect(() => {
     const hide = showTeam(props.computer, props.team.id);
@@ -127,6 +114,16 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
       </Show>
       <div class="team-body" ref={body}>
         <div class="team-canvas">
+          <Show when={plan.planning()}>
+            <div class="team-plan-tools" role="toolbar" aria-label={tr("Plan editing")}>
+              <button type="button" class="btn small" data-action="plan-add-task" title={tr("Add a task to the plan")} onClick={plan.addTask}>
+                <Icon name="plus" size={12} />{tr("Task")}
+              </button>
+              <span class="dim">{tr("Click a task to edit it; drag from a node's right edge onto a task to connect them; click a dependency to remove it.")}</span>
+              <Show when={plan.notice()}><span class="danger" role="status">{plan.notice()}</span></Show>
+            </div>
+          </Show>
+          {plan.dialog()}
           <Show when={graph()} fallback={<TeamPhases computer={props.computer} team={props.team} />}>
             {(shown) => (
               <PlanView
@@ -141,8 +138,8 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
                   const task = props.team.tasks.find((candidate) => candidate.id === id);
                   return task ? <TaskActions computer={props.computer} team={props.team} task={task} /> : <></>;
                 }}
-                phaseActions={(n) => <PhaseModeControl computer={props.computer} team={props.team} phase={n} />}
-                onApprovePhase={(n) => void approvePhase(n)}
+                phaseActions={(n) => <PhaseActions computer={props.computer} team={props.team} phase={n} />}
+                editing={plan.editing()}
               />
             )}
           </Show>
@@ -253,7 +250,7 @@ function TeamPhases(props: { computer: ComputerId; team: TeamView }) {
         <div class="team-phase" data-phase={phase.n} classList={{ draft: phase.state === "draft", running: phase.state === "running", done: phase.state === "done" }}>
           <span class="team-phase-n mono">{phase.n}</span>
           <b class="ell">{phase.title || tr("Phase %1", phase.n)}</b>
-          <PhaseModeControl computer={props.computer} team={props.team} phase={phase.n} />
+          <PhaseActions computer={props.computer} team={props.team} phase={phase.n} />
           <span class="grow" />
           <span class="team-phase-bar"><i style={{ width: phase.total ? `${(phase.done / phase.total) * 100}%` : "0%" }} /></span>
           <span class="mono dim">{phase.done}/{phase.total}</span>

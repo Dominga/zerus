@@ -1467,3 +1467,41 @@ fn the_time_view_reads_a_scope_in_bounded_pages() {
     )
     .is_err());
 }
+
+/// Task 196: the phase header's details from the phase records (Qt
+/// TeamWorkspace phase header): the lead's note, the send-back and whether it
+/// was reworked, who proposed a draft, "accepted by Auto", the queue's words,
+/// the lead's changes and the pause; a draft task carries what the plan's task
+/// editor shows, a handed-out one does not.
+#[test]
+fn task_196_the_phase_header_reads_the_phase_records() {
+    let status = json!({"id":"t1","name":"Checkout","status":"running","lead":"lead","members":[{"id":"lead"}],
+        "phase_summary":[
+            {"n":1,"state":"running"},
+            {"n":2,"state":"queued","acceptance":"owner","pause":{"by":"human","owner":true,"reason":"after the release"}},
+            {"n":3,"state":"rejected"},
+            {"n":4,"state":"draft","auto":true,"start_ahead":true}],
+        "phases":[
+            {"n":2,"state":"queued","decided_by":"Auto","note":"Ship first","waiting":{"text":"Starts after phase 1"},"changes":[{"at":1},{"at":2}]},
+            {"n":3,"state":"rejected","rejection":{"comment":"Split it","reworked_at":0},"added_by":"Lead","added_at":1700000000.0},
+            {"n":4,"state":"draft"}],
+        "tasks":[
+            {"id":1,"title":"API","status":"running","assignee":"lead","phase":1,"description":"secret","criteria":["a"],"attempts":[{"id":"x"}]},
+            {"id":2,"title":"Docs","status":"draft","assignee":"lead","phase":4,"description":"Write docs","criteria":["Readable"],"attempts":[]}]});
+    let view = view::team(&status);
+    let phase = |n: u64| view.phases.iter().find(|phase| phase.n == n).unwrap().clone();
+    let queued = phase(2);
+    assert_eq!((queued.note.as_str(), queued.waiting.as_str(), queued.changes), ("Ship first", "Starts after phase 1", 2));
+    assert!(queued.accepted_by_auto && queued.owner_accepts && queued.paused && queued.pause_owner);
+    assert_eq!((queued.pause_by.as_str(), queued.pause_reason.as_str()), ("human", "after the release"));
+    let rejected = phase(3);
+    assert_eq!((rejected.rejection.as_str(), rejected.reworked, rejected.added_by.as_str()), ("Split it", false, "Lead"));
+    assert_eq!(rejected.added_at, 1700000000.0);
+    assert!(phase(4).start_ahead && !phase(4).accepted_by_auto);
+    assert!(phase(1).note.is_empty() && !phase(1).accepted_by_auto);
+    let wire = serde_json::to_value(&phase(1)).unwrap();
+    assert!(wire.get("note").is_none() && wire.get("changes").is_none(), "empty details stay off the wire: {wire}");
+    let task = |id: u64| view.tasks.iter().find(|task| task.id == id).unwrap().clone();
+    assert_eq!((task(2).description.as_str(), task(2).criteria.clone()), ("Write docs", vec!["Readable".to_owned()]));
+    assert!(task(1).description.is_empty() && task(1).criteria.is_empty(), "a handed-out task's text is not sent");
+}

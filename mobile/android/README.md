@@ -331,14 +331,22 @@ questions.
 
 Session cards follow the desktop cards. A checkout line shows a small Git branch
 mark and `folder / branch` (or detached HEAD); a linked worktree names its main
-checkout folder, and ordinary folders show only their name with a folder mark. A subagent counter uses
-the desktop's compact active count, such as `3`, `2+` or `?`. Tapping it lists
-the children that are working, waiting for input, paused or unknown,
+checkout folder, and ordinary folders show only their name with a folder mark. A card lists
+the subagents that are working, waiting for input, paused or unknown beneath it,
 in stable ID order. Finished and failed turns stay hidden, as with the desktop default,
 unless the child has an unsent draft on this phone. Profile groups are counted
 but not listed. Tapping a child opens its session and then the child's activity
-once that conversation is verified; Back returns to the session. Open subagent
-lists persist with the other Sessions state. A running session with pending
+once that conversation is verified; Back returns to the session. Child sessions
+nest under their parent card (the listing's `parent` link: machine UUID and
+session ID, conversation for an older parent record). One counter covers both,
+as on the desktop (`2 of 5` working, gray **Asking**, amber **Needs you**), and
+tapping it hides or shows both; the phone keeps a collapsed parent across
+relaunches by machine UUID and session ID. Without shown rows the counter keeps
+the desktop's compact active subagent count, such as `3`, `2+` or `?`. A child
+supervised by a live parent shows an arrow before its title and stays quiet:
+no notification and gray badges unless only the person can answer it
+(`client/core/tests/fixtures/supervised-attention.json`). Cards show the
+recorded account's mark and label next to the machine. A running session with pending
 optional Codex questions, which the agent keeps working without, shows an
 amber question-mark chip with their count (`99+` above 99) right after its
 status badge, as on the desktop; its spoken description says how many are

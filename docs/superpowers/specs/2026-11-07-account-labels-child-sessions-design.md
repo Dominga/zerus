@@ -265,8 +265,9 @@ This change keeps desktop, the desktop service, shared fixtures and docs aligned
 * A shared fixture, `client/core/tests/fixtures/supervised-attention.json`,
   lists signal and parent-state cases; Android adopts it in its follow-up.
 * `docs/reference.md` documents the link, `adopt`/`parent`, and the policy.
-* Android and iOS keep notifying children until their follow-ups land; those
-  tasks are filed as explicit beads.
+* Android applies the policy, nesting and account marks from the shared
+  fixture (zerus-sa9qn.4); iOS keeps notifying children until its follow-up
+  lands (zerus-sa9qn.5).
 
 ---
 

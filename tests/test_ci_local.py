@@ -175,6 +175,33 @@ PY
         self.assertNotEqual(host["pid"], observed["pid"])
         self.assertNotEqual(host["net"], observed["net"])
 
+    def test_android_gradle_metadata_and_notices_share_the_private_home(self):
+        self.runner.android_enabled = True
+        self.runner.android_cache.mkdir(parents=True)
+        self.runner.rustup_source = self.runner.rustup
+        (self.runner.workspace / "notices.py").write_bytes((ROOT / "scripts/android-notices.py").read_bytes())
+        body = """python3 - <<'PY'
+import importlib.util,json,os,pathlib
+home = pathlib.Path(os.environ['HOME'])
+assert os.environ.get('GRADLE_USER_HOME') == str(home / '.gradle')
+cache = pathlib.Path(os.environ['GRADLE_USER_HOME']) / 'caches/modules-2/files-2.1'
+module = cache / 'org.example/metadata/1.0/fixture/metadata-1.0.module'
+module.parent.mkdir(parents=True)
+module.write_text(json.dumps({'variants': [{'name': 'common'}]}))
+spec = importlib.util.spec_from_file_location('notices', 'notices.py')
+notices = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(notices)
+entries = notices.Libraries(home / '.gradle/caches/modules-2/files-2.1', True).components(
+    {'configuration': notices.CONFIGURATION, 'components': [
+        {'id': 'org.example:metadata:1.0', 'categories': ['library'], 'files': [], 'redirects': []}]})
+assert 'org.example:metadata:1.0' in entries
+print('Gradle and notices use the same private metadata cache')
+PY
+"""
+        row = dict(name="Android private metadata", index=0, body=body, directory=".", env={}, timeout=10)
+        self.runner.run({"id": "android"}, row)
+        self.assertEqual(row["status"], "pass", (self.runner.output / row["log"]).read_text())
+
     def test_timeout_reaps_the_original_namespace_and_never_touches_other_child(self):
         unrelated = subprocess.Popen(["sleep", "20"])
         def settle():

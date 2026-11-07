@@ -133,6 +133,7 @@
   "Attention bar": "Полоса внимания",
   "Attention tint": "Подсветка внимания",
   "Automatic approvals are owned by the background service and may continue while this window is closed.": "Автоматические одобрения выполняет фоновая служба. Они могут продолжаться после закрытия этого окна.",
+  "Automatic approvals were turned on or off elsewhere. Check the switch, then change the categories again.": "Автоматические одобрения включили или выключили в другом месте. Проверьте переключатель и измените категории ещё раз.",
   "Automatic folder removal after Terminate is unavailable for this agent in background mode. Review the folder manually.": "Автоматическое удаление рабочей папки после завершения этого агента в фоновом режиме пока недоступно. Проверьте папку вручную.",
   "Automatic recovery is active.": "Работает автоматическое восстановление.",
   "Automatic recovery owns the next message; nothing was submitted": "Следующее сообщение за автоматическим восстановлением, ничего не отправлено",

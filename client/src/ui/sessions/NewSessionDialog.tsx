@@ -306,7 +306,10 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
 
   // The Git repository source focuses its URL field (606).
   let url: HTMLInputElement | undefined;
-  createEffect(on(() => s().focusUrl, () => queueMicrotask(() => url?.focus()), { defer: true }));
+  // Ordinary edits/form answers replace the whole state. Only a changed focus
+  // request may move focus; `on` alone does not compare the selected value.
+  const focusUrl = createMemo(() => s().focusUrl);
+  createEffect(on(focusUrl, () => queueMicrotask(() => url?.focus()), { defer: true }));
 
   const start = (e: Event) => {
     e.preventDefault();

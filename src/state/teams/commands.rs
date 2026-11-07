@@ -3255,6 +3255,48 @@ fn handoff_view(input: &Value) -> anyhow::Result<Value> {
     }
 }
 
+/// Task #269: the hooks `hgs team look` compares, from the member's live
+/// listing when it has one (its build, its tool call, Background work and the
+/// last event), else from the stored fields. The stuck bound is the tool's
+/// longer one while a tool call runs, as the dispatcher's stuck rule uses.
+fn look_hooks(team: &Team, member: &Member, seen: Option<&super::dispatcher::Seen>, at: f64) -> super::look::Hooks {
+    let in_tool = seen.is_some_and(|seen| {
+        seen.phase == "tool"
+            && !seen.tool.is_empty()
+            && seen.tool_started.is_some_and(|started| seen.turn_started.is_none_or(|turn| started >= turn))
+    });
+    let attempt_at = team
+        .tasks
+        .iter()
+        .find_map(|task| task.open_attempt().filter(|attempt| attempt.member == member.id).map(|attempt| attempt.activity_at))
+        .flatten();
+    let last = [seen.and_then(|seen| seen.last_event_at), member.seen_event_at, member.native_at, attempt_at,
+        super::dispatcher::last_progress(team, &member.id)]
+        .into_iter()
+        .flatten()
+        .reduce(f64::max);
+    let quiet = last.map(|last| (at - last).max(0.0)).unwrap_or(0.0);
+    let limit = if in_tool {
+        super::dispatcher::tool_stuck_minutes(team) * 60.0
+    } else {
+        super::ops::stuck_minutes(team) * 60.0
+    };
+    let hooks = super::look::Hooks {
+        live: seen.map_or_else(|| member.seen.is_some_and(|seen| seen.live), |seen| seen.live),
+        activity: seen.map_or_else(|| member.seen_activity.clone(), |seen| seen.activity.clone()),
+        phase: seen.map_or_else(|| member.seen_phase.clone(), |seen| seen.phase.clone()),
+        asking: seen.is_some_and(|seen| seen.asking) || member.pending.is_some() || member.terminal_question.is_some(),
+        background: seen.is_some_and(|seen| seen.background) || member.background_since.is_some(),
+        building: seen.is_some_and(|seen| seen.building),
+        build_label: seen.map(|seen| seen.build_label.clone()).unwrap_or_default(),
+        tool: seen.map(|seen| seen.tool.clone()).unwrap_or_default(),
+        last_event_at: last.or(member.seen_event_at),
+        quiet,
+        limit,
+    };
+    hooks
+}
+
 fn look(input: &Value) -> anyhow::Result<Value> {
     let wanted = text(input, "member").trim();
     ensure!(!wanted.is_empty(), "hgs team look needs a member: its id or role");
@@ -3286,19 +3328,17 @@ fn look(input: &Value) -> anyhow::Result<Value> {
         }
     };
     let at = now();
-    let quiet = member.seen_event_at.map(|seen| (at - seen).max(0.0)).unwrap_or(0.0);
-    let hooks = super::look::Hooks {
-        live: member.seen.is_some_and(|seen| seen.live),
-        activity: member.seen_activity.clone(),
-        phase: member.seen_phase.clone(),
-        asking: member.pending.is_some() || member.terminal_question.is_some(),
-        background: member.background_since.is_some(),
-        building: false,
-        tool: String::new(),
-        last_event_at: member.seen_event_at,
-        quiet,
-        limit: super::ops::stuck_minutes(team) * 60.0,
-    };
+    // Task #269: the live listing knows the build, the tool call and Background
+    // work; the stored member fields are the fallback when it is absent.
+    let seen = member.session.as_ref().and_then(|session| {
+        live_sessions().ok()?.into_iter().find(|seen| {
+            seen.host == session.host
+                && (seen.name == session.name
+                    || (!session.run_id.is_empty() && seen.run_id == session.run_id)
+                    || (!session.conversation_id.is_empty() && seen.conversation_id == session.conversation_id))
+        })
+    });
+    let hooks = look_hooks(team, &member, seen.as_ref(), at);
     let screen = member.session.as_ref().and_then(super::dispatcher::read_screen);
     let lines = screen.as_deref().map(|screen| super::dispatcher::last_lines(screen, 40)).unwrap_or_default();
     let shown = screen.as_ref().map(|_| super::look::classify(&member.agent, &lines));

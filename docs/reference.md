@@ -2971,12 +2971,23 @@ look again (feed `member_uncertain`, `member_uncertain_told`); agreement or a
 member no longer suspect ends it (`member_check_settled`). An idle lead with
 decisions waiting (task 95's stall, reason `idle`) is told itself once a round
 (`lead_idle_told`).
+- Task #269 (owner, 2026-11-08): a member waiting on its own Zerus build
+  (`hgs team run` or `hgs run`), on Background work (a job, subagents in
+  flight, a declared budget) or on a tool call in flight is not uncertain: the
+  quiet is expected, its state stays `working`, and the check and the snapshot
+  name what it waits on (`sources.waiting`, top-level `waiting`), e.g. "its own
+  Zerus build (release-candidate)" or "a tool call (Bash)". The build and
+  Background exemptions are the dispatcher's stuck rule's; a tool call gets
+  that rule's longer tool bound, and the prompt the agent sits at while it
+  waits is not a disagreement. A quiet member without such work is still
+  compared as before.
 
 `hgs team look MEMBER [--team ID]`, or `{"member":"dev","team":ID} | hgs team look
 --json`, reads the member's screen now and answers one compact snapshot: the
 reconciled `state` (`uncertain`, `settling` within the grace), `disagree`,
-`sources` (hooks, record, screen, process, activity), the last 12 `screen`
-lines, its open `task`, its `pulse` and `next`, what Zerus does next. It
+`sources` (hooks, record, screen, process, activity, waiting), the last 12
+`screen` lines, its open `task`, `waiting` (task #269: its own build, Background
+work or a tool call), its `pulse` and `next`, what Zerus does next. It
 changes nothing. A member is named by id, role or session; with several teams
 the caller's own team is taken first.
 

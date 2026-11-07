@@ -4162,6 +4162,19 @@ limits. The private cache keeps at most 256 account snapshots, four known Claude
 windows each and no tokens or request history. Active cooldowns are never evicted
 to admit another account. Only expired entries can be replaced at capacity.
 
+**Account marks.** Desktop session cards mark the session's recorded account
+with a colored circle holding the first letter or digit of the account's label:
+on collapsed rows before the title, and on expanded cards with the label in the
+footer. **Color and mark…**, beside **Rename…** in the account's details, chooses
+a color and an optional emoji. They are this desktop's preferences, stored for
+each member profile of the account (`accounts/color/` and `accounts/mark/`), like
+machine label colors; without a choice the color is a stable palette slot derived
+from the label, so every desktop shows the same default. Settings > Sessions >
+**Account marks** shows emoji instead of letters for accounts that have one. A
+session without a recorded account binding, or whose profile is not in the loaded
+catalog, shows no mark. The session list reads each live computer's account
+catalog once, without profile inspects, to resolve labels.
+
 **Add account** creates a separate profile on the selected host and starts native
 sign-in. Default/native profiles retain existing authorization. Its agents use New
 session's rows: a large colored provider logo, the agent and what adding does.

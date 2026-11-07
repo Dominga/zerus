@@ -9,6 +9,7 @@ import type { Session } from "./types";
 const entry = "\0session-card-render";
 const stores = "\0session-card-stores";
 const translations = "\0session-card-i18n";
+const marks = "\0session-card-marks";
 let server: ViteDevServer | undefined;
 let render: (compact: boolean, session: Session, online?: boolean) => string;
 
@@ -20,16 +21,20 @@ beforeAll(async () => {
     plugins: [{
       name: "session-card-render-stores", enforce: "pre",
       resolveId(id, importer) {
-        if ([entry, stores, translations].includes(id)) return id;
+        if ([entry, stores, translations, marks].includes(id)) return id;
         if (importer?.endsWith("/SessionCard.tsx")) {
           if (["../../store/catalog", "../../store/ui", "../../store/settings"].includes(id)) return stores;
           if (id === "../../i18n") return translations;
+          if (id === "../../store/accountMarks") return marks;
         }
       },
       load(id) {
         if (id === stores) return `export const state = {online: true};
           export const computerFresh = () => state.online, computerOffline = () => !state.online;
           export const now = () => 0, settings = {};`;
+        if (id === marks) return `export const sessionMark = (s) => s.accountId === "claude-a1"
+          ? {key: "work", label: "Work", letter: "W", emoji: "", glyph: "W", isEmoji: false, color: "#2b97ff", ink: "#10151b", provider: "claude", machine: "arch"}
+          : undefined;`;
         if (id === translations) return `export const trNoop = s => s;
           export const tr = (s, ...args) => s.replace(/%(\\d+)/g, (_, n) => String(args[n - 1]));`;
         if (id === entry) return `import {createComponent} from 'solid-js';
@@ -105,5 +110,22 @@ describe("full and compact session question presentation", () => {
       expect(question).toContain("qchip muted");
       expect(question).toContain("1000 optional questions waiting");
     }
+  });
+});
+
+describe("account marks", () => {
+  it("marks the recorded account with its letter in both views and its label on full cards", () => {
+    const compact = render(true, row({ accountId: "claude-a1" }));
+    expect(compact, compact).toContain("acct-mark");
+    expect(compact).toContain('aria-label="Account: Work"');
+    expect(text(compact)).toContain("W");
+    const full = render(false, row({ accountId: "claude-a1" }));
+    expect(full).toContain('class="acct-chip"');
+    expect(full).toContain("--mark:#2b97ff");
+    expect(text(full)).toContain("Work");
+  });
+
+  it("shows no mark for a session without a resolved account", () => {
+    for (const compact of [false, true]) expect(render(compact, row())).not.toContain("acct-mark");
   });
 });

@@ -260,7 +260,7 @@ fn class(error: &Value) -> &'static str {
     }
     let native_detail = provider_errors::native_detail(error);
     if ["", "provider", "quota", "rate_limit"].contains(&string(error, "error_kind"))
-        && provider_errors::rolling_rate_limit(&native_detail) {
+        && provider_errors::rolling_rate_error(error) {
         return "rate_limit";
     }
     let text = format!(
@@ -1354,6 +1354,28 @@ mod tests {
             advance(Value::Null, &s, &on(), 11.0)["action"],
             "retry_request"
         );
+    }
+    #[test]
+    fn typed_kimi_window_requires_native_evidence_and_the_existing_enabled_policy() {
+        let mut s = snapshot("kimi");
+        s["provider_error"] = json!({"source":"provider_hook","message_id":"original-failure","at":10.0,
+            "error_kind":"quota","native_error_type":"APIProviderRateLimitError",
+            "detail":"You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends."});
+        assert_eq!(class(&s["provider_error"]), "rate_limit");
+        let before = s.clone();
+        let job = advance(Value::Null, &s, &on(), 11.0);
+        assert_eq!(job["state"], "waiting");
+        assert_eq!(job["class"], "rate_limit");
+        assert_eq!(s, before);
+        assert_eq!(advance(job.clone(), &s, &on(), 12.0), job);
+        let mut disabled = on(); disabled.rate_limit = false;
+        assert!(advance(Value::Null, &s, &disabled, 11.0).is_null());
+        for (key, value) in [("native_error_type", ""), ("native_error_code", "quota"),
+            ("native_error_code", "authentication"), ("error_kind", "provider_policy")] {
+            let mut changed = s.clone(); changed["provider_error"][key] = json!(value);
+            assert_eq!(class(&changed["provider_error"]), "manual");
+            assert!(advance(Value::Null, &changed, &on(), 11.0).is_null());
+        }
     }
     #[test]
     fn kimi_rolling_window_uses_existing_rate_schedule_without_inventing_a_reset() {

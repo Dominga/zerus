@@ -1538,7 +1538,9 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
                 );
                 // Keep native type/code evidence when the rolling-window text
                 // would otherwise erase a permanent refusal during projection.
-                if provider_errors::rolling_rate_limit(&detail(event)) {
+                if provider_errors::rolling_rate_limit(&detail(event))
+                    || (string(record, "agent") == "kimi"
+                        && string(event, "error_type") == provider_errors::KIMI_RATE_LIMIT_TYPE) {
                     failure["native_error_type"] = json!(clipped(&event["error_type"], 1200));
                     failure["native_error_code"] = json!(clipped(&event["error"], 1200));
                 }
@@ -1550,6 +1552,10 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
                 )));
                 if category != "provider" || provider_errors::native_kind(&failure).is_some() {
                     failure["error_kind"] = json!(category);
+                }
+                if provider_errors::rolling_rate_error(&failure)
+                    && ["", "provider", "quota", "rate_limit"].contains(&string(&failure, "error_kind")) {
+                    failure["error_kind"] = json!("rate_limit");
                 }
                 // Keep a provider deadline separate from the chosen backoff.
                 for (key,scale) in [("retry_after",1.0),("retry_after_seconds",1.0),("retry_after_ms",0.001)] {
@@ -2383,6 +2389,24 @@ mod attention_regressions {
         record["turn_started"] = json!(123.0);
         update_activity(&mut record, &json!({"hook_event_name":"UserPromptQueued"}));
         assert!(record["turn_started"].as_f64().unwrap() > 123.0);
+    }
+    #[test]
+    fn kimi_stop_failure_preserves_typed_window_evidence_without_fabricating_a_status() {
+        let message = "You've reached your 5-hour usage limit. Your quota will reset when the current 5-hour window ends.";
+        let event = json!({"hook_event_name":"StopFailure","error_type":"APIProviderRateLimitError","error_message":message});
+        for (agent, expected) in [("kimi", "rate_limit"), ("claude", "quota")] {
+            let mut record = json!({"agent":agent,"run_id":"original","active_tools":{},"subagents":{}});
+            update_activity(&mut record, &event);
+            let failure = &record["provider_error"];
+            assert_eq!(failure["error_kind"], expected);
+            assert_eq!(failure["detail"], message);
+            if agent == "kimi" {
+                assert_eq!(failure["native_error_type"], "APIProviderRateLimitError");
+                let mut output = json!({});
+                provider_errors::apply(&mut output, failure);
+                assert_eq!(output["provider_error"], *failure);
+            } else { assert!(failure.get("native_error_type").is_none()); }
+        }
     }
     #[test]
     fn provider_failure_survives_heartbeat_and_children_but_clears_on_new_work() {

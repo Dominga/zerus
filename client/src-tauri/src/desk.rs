@@ -16,7 +16,6 @@
 //! ([`Gate`]), the Dock badge, the menus that are tracking, and the action
 //! each item of the menu names.
 // Linux shares this desk with its native SNI/DBusMenu adapter.
-#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -68,7 +67,8 @@ pub enum DeskInput {
         version: Option<String>,
         restart: bool,
     },
-    /// A notification's default action (`MacAttentionNotifier.mm:20-28`).
+    /// A notification's default action on macOS and Windows.
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
     Clicked(String),
     #[cfg(target_os = "linux")]
     LinuxClicked {
@@ -206,6 +206,7 @@ pub struct DeskState {
     _attention_owner: attention_barrier::Owner,
     inbox: Mutex<Inbox>,
     /// Zerus is the active app: the tracker's foreground test.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     focused: Arc<AtomicBool>,
 }
 
@@ -361,6 +362,7 @@ pub fn start(app: &AppHandle, pump: &crate::pump::Pump, attention: Option<LoadAt
         sender: Mutex::new(sender),
         _attention_owner: owner,
         inbox: Mutex::new(Inbox::default()),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         focused: Arc::clone(&focused),
     });
     let handle = app.clone();
@@ -378,6 +380,7 @@ pub fn sender(app: &AppHandle) -> Option<InputSender> {
 
 /// Whether Zerus is the active app (`Qt::ApplicationActive`): an active
 /// Zerus consumes attention edges without banners.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn set_focused(app: &AppHandle, focused: bool) {
     if let Some(state) = app.try_state::<DeskState>() {
         state.focused.store(focused, Ordering::Relaxed);
@@ -1292,6 +1295,8 @@ impl Bar {
     }
 
     /// No menu tracks and nothing waits for one to close: the status item may change.
+    /// Only AppKit needs this separate readiness check.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn quiet(&self) -> bool {
         self.tracking == 0 && !self.gate.is_open()
     }

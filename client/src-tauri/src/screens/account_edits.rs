@@ -1249,6 +1249,7 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--expect-scope", "account"]));
     }
+    #[cfg(unix)]
     fn english(notices: &[Text]) -> Vec<String> {
         notices.iter().map(Text::english).collect()
     }

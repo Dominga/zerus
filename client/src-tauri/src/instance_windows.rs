@@ -913,6 +913,7 @@ mod tests {
                 Request::AutomaticApprovals {
                     request_id: control["request_id"].as_str().unwrap().into(),
                     enabled: mode == "enable",
+                    categories: None,
                 }
             };
             let registration = responder
@@ -1016,6 +1017,7 @@ mod tests {
             let request = Request::AutomaticApprovals {
                 request_id: uuid::Uuid::new_v4().to_string(),
                 enabled: false,
+                categories: None,
             };
             let registration = responder
                 .prepare_ui_request(attempt.clone(), request.clone())

@@ -1655,9 +1655,15 @@ journal reservation, which records them, and again before delivery. Each check
 uses the current time with the cache state of the selecting inspection, so a
 warm cache that expires meanwhile needs Paid usage too. A category turned off
 or a cache expired before delivery finishes the reserved attempt as cancelled
-without sending anything. With `ZERUS_CLIENT_DESKTOP_SERVICE=1` the background service
-approves the default categories until its own policy stores the person's
-choices; the page then shows them read-only.
+without sending anything. With `ZERUS_CLIENT_DESKTOP_SERVICE=1` the background service owns the
+categories with the switch, in its durable policy (all except Paid usage for
+an existing policy). The page then changes them only through the service's
+authenticated route: a category change names the complete set and the
+switch's committed value, so it never turns approvals on or off. Like turning
+the switch off, a change that approves nothing more (removing a category, or
+any change while approvals are off) is accepted while the background workers
+are unavailable; adding a category while approvals are on needs them ready.
+Each change is an exact, idempotent receipt and cancels approvals in flight.
 
 Zerus Next uses its live event-stream catalog for the same bounded discovery;
 it does not add a peer poller. Its opt-in is device-local and is never seeded

@@ -81,6 +81,12 @@ pub enum Request {
     AutomaticApprovals {
         request_id: String,
         enabled: bool,
+        /// The complete set of approval categories to keep on (zerus-sz42x),
+        /// by ID. Absent, the request changes only the switch. Present, it
+        /// changes only the categories and `enabled` must equal the
+        /// committed switch, so a category change never turns approvals on.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        categories: Option<Vec<String>>,
     },
     CacheMaintenance {
         request_id: String,
@@ -182,7 +188,10 @@ impl Request {
             }
             Self::DesktopOwnershipObserve { query } => query.valid(),
             Self::ImportPendingReads { page, .. } => page.valid(),
-            Self::ActivationWait { .. } | Self::AutomaticApprovals { .. } => true,
+            Self::ActivationWait { .. } => true,
+            Self::AutomaticApprovals { categories, .. } => categories
+                .as_deref()
+                .is_none_or(|ids| crate::approvals::automatic::Set::from_ids(ids).is_some()),
             Self::CacheMaintenance {
                 request_id,
                 command,
@@ -730,6 +739,7 @@ mod tests {
             request: Request::AutomaticApprovals {
                 request_id: id(100 + n),
                 enabled: true,
+                categories: None,
             },
         }
     }
@@ -1600,7 +1610,8 @@ mod tests {
             envelope.request.fingerprint(),
             Request::AutomaticApprovals {
                 request_id: id(4),
-                enabled: false
+                enabled: false,
+                categories: None,
             }
             .fingerprint()
         );

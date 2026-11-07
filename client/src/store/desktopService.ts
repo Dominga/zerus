@@ -325,15 +325,21 @@ export function retainedSourceDetails(state: DesktopService | undefined): Migrat
   return Object.keys(details).length ? details : undefined;
 }
 
-/** Called by the existing opt-in confirmation only. An uncertain request is not replayed. */
+/** One switch or category change; `categories` (complete set) only for a category change. */
+type ApprovalRequest = { id: string; enabled: boolean; categories?: string[] };
+const sameIds = (a: unknown, b: readonly string[]) => Array.isArray(a) && a.length === b.length && a.every((id, n) => id === b[n]);
+
+/** The switch is changed by the existing opt-in confirmation only; a category
+ * change carries the committed switch value, so it can never turn approvals
+ * on. An uncertain request is not replayed. */
 export function createServiceApprovalIntent(
-  send: (id: string, enabled: boolean) => Promise<unknown>,
+  send: (id: string, enabled: boolean, categories?: string[]) => Promise<unknown>,
   id: () => string = () => crypto.randomUUID(),
   read?: () => Promise<unknown>,
 ) {
-  const [uncertain, setUncertain] = createSignal<{ id: string; enabled: boolean }>();
+  const [uncertain, setUncertain] = createSignal<ApprovalRequest>();
   const [checking, setChecking] = createSignal(false);
-  const settle = (result: Record<string, unknown>, request: { id: string; enabled: boolean }) => {
+  const settle = (result: Record<string, unknown>, request: ApprovalRequest) => {
     if (result?.request_id === request.id && result.op === "automatic_approvals"
       && result.accepted === false && result.durable === false && result.pending !== true) {
       setUncertain(undefined);
@@ -341,7 +347,8 @@ export function createServiceApprovalIntent(
       throw Error("Automatic approval settings are unavailable with this background service connection.");
     }
     if (result?.request_id !== request.id || result.op !== "automatic_approvals" || result.accepted !== true
-      || result.durable !== true || result.enabled !== request.enabled || result.pending === true) {
+      || result.durable !== true || result.enabled !== request.enabled || result.pending === true
+      || (request.categories && !sameIds(result.categories, request.categories))) {
       throw Error("The background service has not confirmed this approval setting.");
     }
     setUncertain(undefined);
@@ -355,6 +362,14 @@ export function createServiceApprovalIntent(
       const result = await send(request.id, enabled) as Record<string, unknown>;
       settle(result, request);
     },
+    /** The complete category set, with the switch value the service has committed. */
+    async submitCategories(enabled: boolean, categories: string[]) {
+      if (uncertain()) throw Error("The previous approval setting is unconfirmed. Check the background service before making another change.");
+      const request = { id: id(), enabled, categories: [...categories] };
+      setUncertain(request);
+      const result = await send(request.id, enabled, request.categories) as Record<string, unknown>;
+      settle(result, request);
+    },
     async check() {
       if (!read || checking()) return;
       setChecking(true);
@@ -365,6 +380,7 @@ export function createServiceApprovalIntent(
           && (result.request_id == null || result.accepted === false)) return;
         if (!request && result?.op === "automatic_approvals" && typeof result.request_id === "string" && typeof result.enabled === "boolean") {
           request = { id: result.request_id, enabled: result.enabled };
+          if (Array.isArray(result.categories) && result.categories.every((c) => typeof c === "string")) request.categories = result.categories as string[];
           setUncertain(request);
         }
         if (!request) throw Error("The background service has not confirmed this approval setting.");
@@ -374,7 +390,7 @@ export function createServiceApprovalIntent(
   };
 }
 export const serviceApprovalIntent = createServiceApprovalIntent(
-  (request_id, enabled) => invoke("desktop_service_automatic_approvals", { request_id, enabled }),
+  (request_id, enabled, categories) => invoke("desktop_service_automatic_approvals", { request_id, enabled, categories: categories ?? null }),
   () => crypto.randomUUID(),
   () => invoke("desktop_service_frontend_result", { operation: "automatic_approvals" }),
 );

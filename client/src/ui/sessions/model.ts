@@ -106,7 +106,8 @@ export function parentIndex(rows: Iterable<Session>, machineOf: (computer: strin
     return old && (!p.session_id || !old.sessionId) ? old.key : undefined;
   };
 }
-const parentKeyOf = createMemo(() => parentIndex(orderedRows(), (computer) => machineCards[computer]?.machine_id));
+/** A listed row's parent key: set only when its parent row is listed too (a child session). */
+export const parentKeyOf = createMemo(() => parentIndex(orderedRows(), (computer) => machineCards[computer]?.machine_id));
 
 export const listRows = createMemo<Row[]>(() => {
   if (stateFilter() === "archived") return archiveRows();

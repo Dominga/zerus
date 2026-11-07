@@ -5,6 +5,7 @@
   "client/darkSkin": "zerus-dark",
   "client/lightSkin": "zerus-light",
   "client/overviewFullWidth": false,
+  "client/overviewSubSessions": false,
   "client/overviewWidth": 1200,
   "client/windowGeometry": "",
   "downloads/cacheBytes": 0,

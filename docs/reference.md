@@ -45,7 +45,7 @@ the account profile that the calling session runs under is not passed on.
 
 ### Session references
 
-**Copy session reference** in the desktop session context menu copies a
+**Copy session reference** in the desktop session window's **Session actions** menu copies a
 `zerus://session?...` URI. Android offers the same action in the
 session toolbar and menu. It contains the stable computer UUID, a native machine
 name for routing, the session name and exact conversation identity; child and
@@ -108,7 +108,7 @@ icon immediately after the exact identifier. The desktop icon uses the same
 borderless style as header actions. The ID stays on one line whenever the pane
 has room. The icon copies the ID as plain text, as does the **Copy session ID**
 icon in the desktop session header, which copies without showing the ID;
-**Copy session reference** remains in the desktop session context menu and copies
+**Copy session reference** is in the desktop session window's **Session actions** menu and copies
 the portable URI. Successful text copies use the window's status confirmation
 without a system notification on Linux or macOS. Before that ID is reported,
 **Run ID** identifies the current
@@ -120,18 +120,36 @@ Machine, project and state filters still apply. Desktop ID results show the
 matched identifier and expose its complete value in the tooltip.
 
 The desktop session header keeps frequent actions as icons: open the session
-folder, open a shell there, **Copy session ID** and **Clear session**. Its **⋯**
-menu names the same actions (**Open folder**, **Open shell in session folder**,
-**Copy session ID** and **Clear session…**, each available exactly when its icon
-is) and also holds **Rename…**, **Fork session…**, **Copy connect command**
-(**Open externally** without clipboard mode, or the native DeepSeek UI), **Pause
-session** or **Resume session**, **Start fresh…**, **Move to archive** and
-**Terminate session…**. A stopped session hides the Clear session icon and offers
+folder, open a shell there, **Copy session ID** and **Clear session**. Its
+**Session actions** menu shares the same checked handlers. A stopped session
+hides the Clear session icon and offers
 **Start fresh…** in the menu; an archived session shows **Restore session** in its
 place. The session list context menu offers **Clear session…** for a live session
 where a stopped one offers **Start fresh…**. For a session that is not open, it
 becomes available once that session's own inspection confirms the conversation
 listed for it; choosing it opens the session and asks the same confirmation.
+
+### Session row and window menus
+
+A session row's right-click menu keeps Mark needs attention, Mute, Compact/Expand
+row, Open terminal, Copy connect command, Copy session ID, Clear, Rename,
+Move to project and Terminate. Paused and archived rows keep the corresponding
+available actions, such as Start fresh, Copy restore command and Forget.
+Multi-selection keeps its batch menu.
+
+Open terminal connects to the selected existing run in the external terminal
+configured for this computer, including connections to remote computers. It uses
+`hgs [@computer] a NAME --existing --run-id ID`, so a delayed terminal cannot
+resume a stopped agent or connect to a replacement run under the same name.
+Offline, paused, unidentified and unsupported adapters show a disabled reason;
+DeepSeek's Native UI remains in Session actions. Copy session ID copies the
+native conversation ID shown as Session ID in the header and Details, rather
+than its name or run ID. Rows without this identity show a disabled reason.
+
+The session window's top-right Session actions menu retains Expand all collapsed,
+Open folder, Open shell in session folder, Pause, Fork, Set parent (and Detach),
+Copy session name, Copy session reference and Copy folder path. Show running
+commands is there when available. Their existing checks and confirmations apply.
 
 Identifiers such as `zerus-ab12` are Beads task numbers, not session IDs. Desktop
 message search finds their public mentions; Android session search finds mentions
@@ -959,9 +977,12 @@ Spotlight and System Settings for the unchanged `hgs-tray.app` bundle.
 
 Settings → Mobile connection also lists and pairs [phones](#machines-and-accounts). Settings → Mobile connection → Phone notifications sets when the phone notifies: immediately, as soon as you are away from every Zerus computer, or after 5, 10, 15 or 30 minutes away. The choice is shared through the swarm catalog; computers this one synchronizes with directly whose hgs is too old to receive it are named there.
 
-The tray has two counters: all sessions and **Needs attention**. Attention includes
-input, approvals, errors and unread main-agent replies. An offline host retains
-its last total but adds no live attention requests; a dot marks incomplete data.
+The tray has two counters: **active** sessions (the session list's Active filter:
+working or Background, Scheduled or Waiting, or needing attention, a subagent
+that asks included) and **Needs attention**. Attention includes input, approvals,
+errors and unread main-agent replies. An offline host adds only its Review later
+sessions to either counter; a dot marks incomplete data. The tooltip keeps the
+total number of sessions.
 Linux application badges and the macOS Dock show the attention count, hiding zero.
 
 Zerus Next's tray menu (on Linux, macOS and Windows) has:
@@ -4774,7 +4795,7 @@ beside Activity and Terminal, or Native UI for DeepSeek. When disabled, its list
 count and output are not polled; normal Activity, fleet and account updates continue.
 The small **Background** summary is part of ordinary fleet polling even
 when this tab is disabled. Full process history and output remain opt-in. A
-background session's context menu offers **Show running commands** when Processes
+background session's **Session actions** menu offers **Show running commands** when Processes
 is enabled.
 
 **Live shells / processes** shows verified shells and independent command trees.

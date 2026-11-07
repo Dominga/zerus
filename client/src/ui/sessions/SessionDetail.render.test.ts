@@ -28,7 +28,7 @@ vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} } }));
 import * as bridge from "../../bridge";
 import { App } from "../../App";
 import { receive, activity } from "../../store/session";
-import { selected, setSelectedKey, setDetailTab, detailTab, setSubagentOpen, setMenu, setStateFilter } from "../../store/ui";
+import { selected, setSelectedKey, setDetailTab, detailTab, setSubagentOpen, setMenu, menu, setStateFilter } from "../../store/ui";
 import { inspectorTab, type InspectorTab } from "../../store/inspector";
 import { settingsReady, setSetting, restoreSettings } from "../../store/settings";
 import { openCleanup, closeCleanup } from "../../store/terminationCleanup";
@@ -177,4 +177,15 @@ it("keeps normal recorded archive browsing outside the live catalog", async () =
   expect(selected()?.key).toBe(key);
   expect(host.querySelector(".detail-head h1")!.textContent).toContain("archived");
   expect(bridge.reportDetailInvariant).not.toHaveBeenCalled();
+});
+
+
+it("keeps the moved row actions in the real session header menu", async () => {
+  await open(fixtureRow());
+  const button = host.querySelector<HTMLButtonElement>('button[data-tip="Session actions"]')!;
+  button.click(); await flush();
+  const labels = menu()!.items.flatMap((item) => "label" in item ? [item.label] : []);
+  for (const label of ["Expand all collapsed", "Open folder", "Open shell in session folder", "Pause session", "Fork session…", "Set parent…", "Copy session name", "Copy session reference", "Copy folder path"]) {
+    expect(labels, label).toContain(label);
+  }
 });

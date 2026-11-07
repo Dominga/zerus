@@ -224,6 +224,22 @@ mod tests {
                 .finish_with(&record, &manifest(), until, after)
                 .is_none());
         }
+        // A stable stranger/descendant with matching saved stamps still is not
+        // the record-bound direct pair. Pin initial admission, not only drift.
+        for change in 0..3 {
+            let unrelated = |pid, deadline| {
+                let mut value = observed(pid, deadline)?;
+                if pid == 10 {
+                    match change {
+                        0 => value.native.parent = 40,
+                        1 => value.stamp = "stale".into(),
+                        _ => value.native.birth.clear(),
+                    }
+                }
+                Some(value)
+            };
+            assert!(Pair::read(&record(), until, unrelated).is_none());
+        }
         let mut missing = record();
         missing["process_start"] = Value::Null;
         assert!(Pair::read(&missing, until, observed).is_none());

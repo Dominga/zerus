@@ -473,6 +473,7 @@ fn unix_only_usage(line: &str) -> bool {
         zerus_client_core::desktop::compact_to_send::HELP_MARKER,
         zerus_client_core::desktop::task_start_reconcile::HELP_MARKER,
         zerus_client_core::worktree_programs::custody::HELP_MARKER,
+        zerus_client_core::worktree_programs::presentation::HELP_MARKER,
         zerus_client_core::worktree_programs::stop::HELP_MARKER,
         zerus_client_core::worktree_programs::cleanup::HELP_MARKER,
     ]
@@ -3380,7 +3381,8 @@ mod tests {
         assert!(!neutral.contains("tmux"), "{neutral}");
         assert!(!neutral.contains("Ctrl+V"), "{neutral}");
         assert!(!neutral.contains("worktrees program-"), "{neutral}");
-        for marker in [zerus_client_core::worktree_programs::custody::HELP_MARKER, zerus_client_core::worktree_programs::stop::HELP_MARKER, zerus_client_core::worktree_programs::cleanup::HELP_MARKER] {
+        for marker in [zerus_client_core::worktree_programs::custody::HELP_MARKER, zerus_client_core::worktree_programs::presentation::HELP_MARKER, zerus_client_core::worktree_programs::stop::HELP_MARKER, zerus_client_core::worktree_programs::cleanup::HELP_MARKER] {
+            assert!(USAGE.lines().any(|line| line.trim() == marker));
             assert!(!neutral.lines().any(|line| line.trim() == marker));
         }
         assert!(!neutral.lines().any(|line| line.trim() == clone_marker));

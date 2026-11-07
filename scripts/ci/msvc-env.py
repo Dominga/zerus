@@ -3,7 +3,8 @@
 
 Usage: python scripts/ci/msvc-env.py PROGRAM [ARGUMENT...]
 
-vswhere finds the newest Visual Studio with the x64 C++ tools; vcvars64.bat
+vswhere finds Visual Studio 2022 with the x64 C++ tools (the Qt kit's
+msvc2022), else the newest with them; vcvars64.bat
 then provides cl, link, the Windows SDK and Visual Studio's CMake and Ninja.
 The environment applies only to PROGRAM, so earlier and later CI steps (and
 the Rust toolchain's own linker discovery) are not affected.
@@ -20,9 +21,16 @@ def developer_environment():
     vswhere = Path(program_files) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
     if not vswhere.is_file():
         raise SystemExit(f"msvc-env: vswhere is missing: {vswhere}")
-    install = subprocess.check_output([str(vswhere), "-latest", "-products", "*", "-requires",
-                                       "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-                                       "-property", "installationPath", "-utf8"]).decode("utf-8").strip()
+    def find(*selection):
+        found = subprocess.check_output([str(vswhere), *selection, "-products", "*", "-requires",
+                                         "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                                         "-property", "installationPath", "-utf8"]).decode("utf-8").strip()
+        return found.splitlines()[0].strip() if found else ""
+
+    # The Visual Studio of the Qt kit (msvc2022) first, as Zerus's qt
+    # templates choose it, then the newest (task 192: a machine with both
+    # had Visual Studio 18 picked, which has no Ninja of its own).
+    install = find("-version", "[17.0,18.0)") or find("-latest")
     vcvars = Path(install) / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
     if not install or not vcvars.is_file():
         raise SystemExit("msvc-env: no Visual Studio with the x64 C++ tools was found.")

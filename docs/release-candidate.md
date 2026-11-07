@@ -34,6 +34,23 @@ green. It is also the `release-candidate` template:
 hgs team run --template release-candidate --args '{"commit":"<sha>","exp_tag":"rc-..."}'
 ```
 
+### The Qt suites on Windows
+
+Git Bash cannot start under the release sandbox, so on Windows the script runs
+`scripts/ci/gui.sh`'s steps itself (task 192):
+- **Build:** Ninja with MSVC through `scripts/ci/msvc-env.py`, in
+  `.ci-build/gui`, the folder and generator Zerus's `qt-configure` uses. A
+  folder made by another generator is configured again with `--fresh`.
+- **Results:** per-function JUnit results go to
+  `artifacts/test-results/qt-functions`, and `QT_FORCE_STDERR_LOGGING=1`
+  keeps QtTest output in the CTest log.
+- **Limits:** a 240-second timeout per suite, and the retry policy
+  (`--repeat until-pass:2`, or `ZERUS_QT_RETRY`).
+- **Report:** `artifacts/test-results/qt.xml`.
+
+`--qt-only` runs just the machine-dependent scan and the Qt suites, records
+nothing, and is the way to look at a Qt failure.
+
 ## Publishing
 
 `scripts/publish_whitewh_main.py --commit <sha>` refuses unless

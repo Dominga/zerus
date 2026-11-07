@@ -49,26 +49,63 @@ def bash() -> str:
             return str(candidate)
     raise SystemExit("bash not found: install Git for Windows or put bash on PATH")
 
-def local_steps(commit: str) -> None:
+QT_RETRY = "2"
+
+
+def qt_windows(qt_root: str) -> None:
+    """The Qt suites on Windows, as scripts/ci/gui.sh runs them there.
+
+    Git Bash/MSYS cannot start under the release sandbox
+    (NtCreateDirectoryObject access denied), so this is gui.sh in Python:
+    Ninja with MSVC from scripts/ci/msvc-env.py (the generator Zerus's
+    qt-configure also uses for .ci-build/gui, and where release-candidate-local
+    finds .ci-build/gui/hgs-tray.exe), per-function results, QtTest output kept
+    in the CTest log, a 240-second timeout and the retry policy.
+    Task 192: the earlier Visual Studio generator path differed in all of these:
+    a failed suite left no QtTest output and was never retried, and its
+    hgs-tray.exe landed in Release/.
+    """
+    build = ROOT / ".ci-build/gui"
+    cache = build / "CMakeCache.txt"
+    msvc = [sys.executable, "scripts/ci/msvc-env.py"]
+    results = ROOT / "artifacts/test-results"
+    functions = results / "qt-functions"
+    configure = ["cmake", "-S", "tray", "-B", str(build), "-G", "Ninja", "-DCMAKE_C_COMPILER=cl", "-DCMAKE_CXX_COMPILER=cl",
+                 "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_TESTING=ON", f"-DZERUS_QT_RESULTS_DIR={functions.as_posix()}",
+                 f"-DCMAKE_PREFIX_PATH={Path(qt_root).as_posix()}"]
+    # A build folder made by another generator (the earlier Visual Studio
+    # path) is generated output: --fresh configures it again from scratch.
+    if cache.exists() and "CMAKE_GENERATOR:INTERNAL=Ninja\n" not in cache.read_text(encoding="utf-8", errors="replace"):
+        configure.insert(1, "--fresh")
+    run(msvc + configure)
+    run(msvc + ["cmake", "--build", str(build), "--parallel", os.environ.get("ZERUS_BUILD_JOBS", "2")])
+    shutil.rmtree(functions, ignore_errors=True)
+    functions.mkdir(parents=True, exist_ok=True)
+    retry = os.environ.get("ZERUS_QT_RETRY", QT_RETRY)
+    run(["ctest", "--test-dir", str(build), "--parallel", os.environ.get("ZERUS_TEST_JOBS", "4"), "--timeout", "240",
+         "--output-on-failure", *(["--repeat", f"until-pass:{retry}"] if retry else []),
+         "--output-junit", str(results / "qt.xml")],
+        {"ZERUS_TEST_HGS": str(ROOT / "target/release/hgs.exe"),
+         "QT_QPA_PLATFORM": "offscreen", "QT_QUICK_BACKEND": "software",
+         "ZERUS_GUI_THREAD_CHECKS": "fatal", "ZERUS_SETTINGS_SYNC": "1",
+         "QTWEBENGINE_CHROMIUM_FLAGS": "--disable-gpu",
+         # Without a console window QtTest writes to OutputDebugString.
+         "QT_FORCE_STDERR_LOGGING": "1",
+         "PATH": str(Path(qt_root) / "bin") + os.pathsep + os.environ.get("PATH", "")})
+
+
+def local_steps(commit: str, qt_only: bool = False) -> None:
     run([sys.executable, "scripts/check-machine-dependent-tests.py"])
-    run(["cargo", "build", "--locked", "--release", "--bin", "hgs"])
+    if not qt_only:
+        run(["cargo", "build", "--locked", "--release", "--bin", "hgs"])
     # The same order as fork-windows.yml after "Rust tests and release build".
     qt_root = os.environ.get("QT_ROOT_DIR", r"D:/Tools/zerus-deps/Qt/6.10.3/msvc2022_64")
     if os.name == "nt":
-        # Windows-native path: Git Bash/MSYS cannot start under the release
-        # sandbox (NtCreateDirectoryObject access denied), so CMake's Visual
-        # Studio generator and ctest stand in for scripts/ci/gui.sh.
-        run(["cmake", "-S", "tray", "-B", ".ci-build/gui", "-DCMAKE_BUILD_TYPE=Release",
-             "-DBUILD_TESTING=ON", f"-DCMAKE_PREFIX_PATH={qt_root}"])
-        run(["cmake", "--build", ".ci-build/gui", "--config", "Release", "--parallel", "2"])
-        run(["ctest", "--test-dir", ".ci-build/gui", "-C", "Release", "--parallel", "4", "--output-on-failure"],
-            {"ZERUS_QT_RETRY": "2", "ZERUS_TEST_HGS": str(ROOT / "target/release/hgs.exe"),
-             "QT_QPA_PLATFORM": "offscreen", "QT_QUICK_BACKEND": "software",
-             "ZERUS_GUI_THREAD_CHECKS": "fatal", "ZERUS_SETTINGS_SYNC": "1",
-             "QTWEBENGINE_CHROMIUM_FLAGS": "--disable-gpu",
-             "PATH": str(Path(qt_root) / "bin") + os.pathsep + os.environ.get("PATH", "")})
+        qt_windows(qt_root)
     else:
-        run([bash(), "scripts/ci/gui.sh", "all"], {"ZERUS_QT_RETRY": "2", "ZERUS_TEST_HGS": str(ROOT / "target/release/hgs.exe"), "QT_ROOT_DIR": qt_root})
+        run([bash(), "scripts/ci/gui.sh", "all"], {"ZERUS_QT_RETRY": QT_RETRY, "ZERUS_TEST_HGS": str(ROOT / "target/release/hgs.exe"), "QT_ROOT_DIR": qt_root})
+    if qt_only:
+        return
     run(["cargo", "test", "--locked", "--manifest-path", "client/core/Cargo.toml", "--lib", "fork_update"])
     run(["cargo", "test", "--locked", "--manifest-path", "client/core/Cargo.toml", "--test", "fork_handoff"])
     # Tauri build and the portable zip are run through their scripts so this
@@ -163,8 +200,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--commit", default="HEAD")
     parser.add_argument("--exp-tag", default="")
+    # Task 192: only the machine-dependent scan and the Qt suites, to look at a
+    # Qt failure; records nothing.
+    parser.add_argument("--qt-only", action="store_true")
     args = parser.parse_args()
     commit = subprocess.run(["git", "rev-parse", args.commit], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
+    if args.qt_only:
+        local_steps(commit, qt_only=True)
+        return 0
     try:
         local_steps(commit)
     except BaseException as error:

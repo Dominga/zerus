@@ -217,7 +217,7 @@ export function TerminateDialog(props: { row: ActionRow; close: () => void }) {
       return;
     }
     const target = targetOf(props.row, "terminate");
-    if (copy.action !== "terminate" || !target) return;
+    if (copy.action !== "terminate" || !target || !target.conversation_id || props.row.gitWorktree === false) return;
     void readCleanupOffer(target, { offer: terminationCleanupOffer, cancel: terminationCleanupCancel }, () => !closed, (state) => {
       setOffer(state.offer?.id); setRemove(state.offer?.checked ?? false); setOfferError(state.error ?? "");
       setPrograms(state.offer?.programs ?? []);

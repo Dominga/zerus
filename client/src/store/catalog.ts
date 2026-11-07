@@ -117,6 +117,7 @@ export function toSession(computer: ComputerId, key: string, v: ViewRow, marks: 
     cwd: text(v.folder),
     branch: optional(v.branch),
     worktree: optional(v.worktree),
+    gitWorktree: typeof v.git_worktree === "boolean" ? v.git_worktree : undefined,
     git: undefined,
     status,
     caption,

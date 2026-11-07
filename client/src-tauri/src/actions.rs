@@ -2566,6 +2566,49 @@ mod tests {
     }
 
     #[test]
+    fn delayed_terminate_accepts_the_original_live_run_before_its_first_native_event() {
+        use serde_json::json;
+        use zerus_client_core::{end_action::Captured, Exit};
+        let actions = Actions::new(
+            std::env::temp_dir().join(format!("zerus-cold-end-{}.json", uuid::Uuid::new_v4())),
+        );
+        let mut target = review();
+        target.conversation_id.clear();
+        let plan = Captured {
+            target: target.clone(),
+            action: Action::Terminate,
+            state: "running".into(),
+        };
+        let claim = actions.reserve_end(&target).unwrap();
+        let source = target.clone();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let writes = calls.clone();
+        let (outcome, _) = tauri::async_runtime::block_on(dispatch_end_reserved_with(
+            &actions, target, Action::Terminate,
+            "11111111-1111-4111-8111-111111111111".into(),
+            move |_, inv| {
+                if inv.args.last().is_some_and(|arg| arg == "--help") {
+                    return Exit::Code { code: 0, stdout: b"guarded-create-v1".to_vec(), stderr: String::new() };
+                }
+                let value = if inv.args.iter().any(|arg| arg == "inspect") {
+                    json!({"name":source.name,"run_id":source.run_id,"conversation_id":null,"runtime_state":"live"})
+                } else {
+                    assert!(inv.args.iter().any(|arg| arg == "session-action"));
+                    writes.fetch_add(1, Ordering::Relaxed);
+                    let body: serde_json::Value = serde_json::from_slice(inv.stdin.as_deref().unwrap()).unwrap();
+                    assert_eq!(body["action"], "terminate");
+                    assert_eq!(body["expected_run_id"], source.run_id);
+                    assert_eq!(body["expected_conversation_id"], "");
+                    json!({"request_id":body["request_id"],"name":source.name,"run_id":source.run_id,"conversation_id":"","status":"completed","result_target":{"name":source.name,"run_id":source.run_id,"conversation_id":"","archive_id":"22222222-2222-4222-8222-222222222222"}})
+                };
+                Exit::Code { code: 0, stdout: serde_json::to_vec(&value).unwrap(), stderr: String::new() }
+            }, Some((plan, claim)), None,
+        )).unwrap();
+        assert!(matches!(outcome, Outcome::Done { .. }), "{outcome:?}");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
     fn cleanup_terminate_rechecks_after_claim_and_requires_the_exact_archive_receipt() {
         use serde_json::json;
         use zerus_client_core::{termination_cleanup::Capture, Exit};

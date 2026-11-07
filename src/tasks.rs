@@ -40,7 +40,7 @@ fn paste_uncertain(message: &str) -> bool {
     message.starts_with(SENT_UNRECORDED) || message.starts_with("delivery uncertain")
 }
 
-const USAGE: &str = "usage: hgs task list --project P [--stage S] | list --project P --stage S --limit 1..200 [--after CURSOR|--before CURSOR] [--if-revision R] | get REF [--history-limit 1..80 [--history-before CURSOR] [--attachments metadata]] | attachment REF --file N [--entry ID] | add --project P [--backlog] [--start] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | start-plan REF --json | start-deliver REF --json [--recover-only] | cancel REF [--reason TEXT] | cancel-execution REF --json (guard JSON on stdin) | handoff REF --session SESSION [--host ALIAS] | start REF | report REF [--progress|--ready] [--considered REV] | comment REF [--content-json] | message REF --request-id UUID --mode queue|send|reopen|note [--expect-dispatch ID] [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | cutover --project P [--hold on|off [--confirm]] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
+const USAGE: &str = "usage: hgs task list --project P [--stage S] | list --project P --stage S --limit 1..200 [--after CURSOR|--before CURSOR] [--if-revision R] [--session ID [--host ALIAS]] | get REF [--history-limit 1..80 [--history-before CURSOR] [--attachments metadata]] | attachment REF --file N [--entry ID] | add --project P [--backlog] [--start] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | start-plan REF --json | start-deliver REF --json [--recover-only] | cancel REF [--reason TEXT] | cancel-execution REF --json (guard JSON on stdin) | handoff REF --session SESSION [--host ALIAS] | start REF | report REF [--progress|--ready] [--considered REV] | comment REF [--content-json] | message REF --request-id UUID --mode queue|send|reopen|note [--expect-dispatch ID] [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | cutover --project P [--hold on|off [--confirm]] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
   REF is T-xxxxxx with --project P, or PROJECT/T-xxxxxx; texts and --set settings are read from stdin;
   a change an agent makes prints one line, and --json prints the task";
 
@@ -613,7 +613,7 @@ fn list(config: &Config, args: &[String]) -> Result<Value> {
         let stage = only.ok_or_else(|| fail("--limit needs --stage"))?;
         return paged(config, args, (&id, &name), stage, limit, &machines);
     }
-    for paging in ["--after", "--before", "--if-revision"] {
+    for paging in ["--after", "--before", "--if-revision", "--session"] {
         if option(args, paging)?.is_some() {
             return Err(fail(format!("{paging} needs --stage and --limit")));
         }
@@ -660,9 +660,24 @@ fn paged(config: &Config, args: &[String], project: (&str, &str), stage: Stage, 
         (None, None) => index::Anchor::Start,
     };
     let wanted = option(args, "--if-revision")?;
+    // One session's view, by its identity (zerus-cg5h.26): never its name.
+    let session = match (option(args, "--session")?, option(args, "--host")?) {
+        (Some(session_id), host) => {
+            if session_id.is_empty() || session_id.len() > 256 || session_id.chars().any(char::is_control)
+                || !(session_id.starts_with("launch_id:") || session_id.starts_with("run_id:"))
+            {
+                return Err(fail("--session needs a session ID (launch_id:... or run_id:...)"));
+            }
+            let machine = machines.node(host)?;
+            Some((index::Scope::new(&machine, session_id), json!({"host": host.unwrap_or(""), "session_id": session_id})))
+        }
+        (None, Some(_)) => return Err(fail("--host needs --session")),
+        (None, None) => None,
+    };
+    let filter = session.as_ref().map(|(scope, _)| scope);
     let store = store(config, id)?;
     let indexed = index::Index::open(&store).and_then(|mut index| {
-        match indexed_page(&mut index, stage, limit, &anchor, wanted) {
+        match indexed_page_in(&mut index, stage, limit, &anchor, wanted, filter) {
             Ok(out) => Some(out),
             Err(failure) => {
                 index.discard(&failure);
@@ -672,8 +687,13 @@ fn paged(config: &Config, args: &[String], project: (&str, &str), stage: Stage, 
     });
     let mut out = match indexed {
         Some(out) => out,
-        None => documents_page(&store, stage, limit, &anchor, wanted)?,
+        None => documents_page_in(&store, stage, limit, &anchor, wanted, filter)?,
     };
+    if let Some((_, echo)) = session {
+        if out.get("unchanged").is_none() {
+            out["session"] = echo;
+        }
+    }
     if let Some(rows) = out.get_mut("tasks").and_then(Value::as_array_mut) {
         for row in rows {
             *row = label_view(std::mem::take(row), name, false, &[], machines)?;
@@ -707,20 +727,46 @@ fn page_reply(stage: Stage, limit: usize, rows: Vec<Value>, position: usize, nex
 }
 
 fn indexed_page(index: &mut index::Index, stage: Stage, limit: usize, anchor: &index::Anchor, wanted: Option<&str>) -> std::result::Result<Value, index::Failure> {
+    indexed_page_in(index, stage, limit, anchor, wanted, None)
+}
+
+fn indexed_page_in(index: &mut index::Index, stage: Stage, limit: usize, anchor: &index::Anchor, wanted: Option<&str>, filter: Option<&index::Scope>) -> std::result::Result<Value, index::Failure> {
     // The page's rows are checked against their files first, so an unchanged
     // revision means this page is unchanged too.
-    let page = index.page(stage, limit, anchor)?;
+    let page = index.page_in(stage, limit, anchor, filter)?;
     let revision = index.revision()?;
     if wanted == Some(revision.as_str()) {
         return Ok(json!({"unchanged": true, "revision": revision}));
     }
     Ok(page_reply(stage, limit, page.rows, page.position, page.next, page.previous,
-        &index.counts()?, index.damaged()?, revision))
+        &index.counts_in(filter)?, index.damaged()?, revision))
 }
 
 /// The same page read from every document, for when the index cannot answer.
+#[cfg(test)]
 fn documents_page(store: &ProjectStore, stage: Stage, limit: usize, anchor: &index::Anchor, wanted: Option<&str>) -> Result<Value> {
-    Ok(page_of(&documents(store)?, store.project_id(), stage, limit, anchor, wanted))
+    documents_page_in(store, stage, limit, anchor, wanted, None)
+}
+
+/// `documents_page`, of one session's view when `filter` is set.
+fn documents_page_in(store: &ProjectStore, stage: Stage, limit: usize, anchor: &index::Anchor, wanted: Option<&str>, filter: Option<&index::Scope>) -> Result<Value> {
+    let docs = documents(store)?;
+    Ok(match filter {
+        None => page_of(&docs, store.project_id(), stage, limit, anchor, wanted),
+        Some(scope) => page_of(&docs.only(scope), store.project_id(), stage, limit, anchor, wanted),
+    })
+}
+
+impl Documents {
+    /// The rows and counts of one session's view; damage and revision stay
+    /// the project's.
+    fn only(&self, scope: &index::Scope) -> Documents {
+        let rows: BTreeMap<&'static str, Vec<(String, String, Value)>> = self.rows.iter()
+            .map(|(stage, rows)| (*stage, rows.iter().filter(|row| scope.includes(&row.2)).cloned().collect::<Vec<_>>()))
+            .collect();
+        let counts = rows.iter().filter(|(_, rows)| !rows.is_empty()).map(|(stage, rows)| ((*stage).to_owned(), rows.len())).collect();
+        Documents { rows, counts, damaged: self.damaged.clone(), revision: self.revision.clone() }
+    }
 }
 
 /// Every task document read once, for pages built without the index: each

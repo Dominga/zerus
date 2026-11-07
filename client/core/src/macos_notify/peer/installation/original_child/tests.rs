@@ -1,6 +1,8 @@
 //! Isolated native task/audit/code controls. Apple system helpers are real
 //! native positives for the primitive, NOT a genuine Zerus bundle/permit.
 use super::*;
+use objc2::rc::Retained;
+use objc2_foundation::{NSDictionary, NSString};
 use std::{
     cell::{Cell, RefCell},
     io::{Read, Write},
@@ -13,6 +15,16 @@ use std::{
 type Hook = Box<dyn FnOnce(&mut Child)>;
 unsafe extern "C" {
     fn mach_port_type(task: u32, name: u32, kind: *mut u32) -> i32;
+}
+#[link(name = "Security", kind = "framework")]
+unsafe extern "C" {
+    static kSecCodeAttributeArchitecture: *const c_void;
+    fn SecStaticCodeCreateWithPathAndAttributes(
+        path: *const c_void,
+        flags: u32,
+        attributes: *const c_void,
+        code: *mut *mut c_void,
+    ) -> i32;
 }
 thread_local! {
     static AFTER: RefCell<Option<Hook>> = const { RefCell::new(None) };
@@ -134,9 +146,28 @@ fn expected(path: &str) -> Signature {
             )
         }
         .unwrap();
+        // A universal Apple tool's unqualified static selection can differ
+        // from the native slice actually executed on macOS 27. Pin this
+        // fixture's compile-target architecture before obtaining its CDHash;
+        // do not derive an expectation from the observed child or relax the
+        // exact anchor/hash, path, audit or original-child checks below.
+        let architecture = NSString::from_str(match std::env::consts::ARCH {
+            "aarch64" => "arm64",
+            "x86_64" => "x86_64",
+            other => panic!("unsupported native fixture architecture: {other}"),
+        });
+        // SAFETY: Security's static CFString is toll-free bridged to NSString.
+        let key = unsafe { (kSecCodeAttributeArchitecture as *const NSString).as_ref() }
+            .expect("native architecture attribute");
+        let attributes = NSDictionary::from_slices(&[key], &[&*architecture]);
         let mut out = std::ptr::null_mut();
         let code = unsafe {
-            let status = SecStaticCodeCreateWithPath(url.ptr(), 0, &mut out);
+            let status = SecStaticCodeCreateWithPathAndAttributes(
+                url.ptr(),
+                0,
+                Retained::as_ptr(&attributes).cast(),
+                &mut out,
+            );
             Cf::checked(status, out, SecStaticCodeGetTypeID())
         }
         .unwrap();

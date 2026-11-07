@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use zerus_lore::cli::{self, Env};
 use zerus_lore::history::{HistoryHit, HistorySource, Scope};
+use zerus_lore::working::{Role, Viewer};
 use zerus_lore::LoreError;
 
 const T0: i64 = 1_800_000_000;
@@ -22,6 +23,8 @@ struct Repo {
     _tmp: tempfile::TempDir,
     root: PathBuf,
     history: Option<Arc<dyn HistorySource>>,
+    caller: Option<Viewer>,
+    agent_session: bool,
 }
 
 impl Repo {
@@ -38,7 +41,7 @@ impl Repo {
         std::fs::write(root.join(".gitattributes"), "lore/** text eol=lf\n").unwrap();
         git(&root, &["add", "-A"]);
         git(&root, &["commit", "-qm", "init"]);
-        Self { _tmp: tmp, root, history: None }
+        Self { _tmp: tmp, root, history: None, caller: None, agent_session: false }
     }
 
     fn run_at(&self, now: i64, argv: &[&str], stdin: &str) -> cli::Output {
@@ -52,6 +55,8 @@ impl Repo {
             now: Some(now),
             history: self.history.clone(),
             history_scope: Scope::default(),
+            caller: self.caller.clone(),
+            agent_session: self.agent_session,
             ..Env::default()
         };
         cli::run(&full, &env)
@@ -249,6 +254,37 @@ fn find_ranks_and_marks_the_tiers() {
     let text = repo.run_at(T0, &["find", "swapchain resize", "-n", "6"], "").stdout;
     assert!(text.contains("[working pulse]") && text.contains("[history]"), "{text}");
     assert!(text.contains("(high confidence, durable, exact match") && text.contains("(low confidence, history"), "{text}");
+}
+
+/// Task 186 (merger's review of 132): the reader is the verified caller, and
+/// a read marks only its own copy.
+#[test]
+fn a_reader_is_the_caller_and_marks_only_its_own_copy() {
+    let mut repo = Repo::new();
+    let to_lead = repo.json(&["message", "send", "--to", "lead", "--team", "t", "for the lead"], "");
+    let to_qa = repo.json(&["message", "send", "--to", "qa", "--team", "t", "for qa"], "");
+    let (lead_id, qa_id) = (to_lead["id"].as_str().unwrap().to_owned(), to_qa["id"].as_str().unwrap().to_owned());
+    // The owner at the terminal sees both and marks neither: neither is its.
+    let seen = repo.json(&["messages", "--unread", "--team", "t"], "");
+    assert_eq!(seen["entries"].as_array().unwrap().len(), 2);
+    assert!(repo.refuse(&["message", "read", &qa_id], "").contains("only its recipient marks it read"));
+    // An agent session never reads as the owner, and a member sees only its own.
+    repo.agent_session = true;
+    assert!(repo.refuse(&["messages", "--role", "owner"], "").contains("a wider role (owner) is refused"));
+    let qa = repo.json(&["messages", "--unread", "--peek", "--team", "t", "--by", "qa"], "");
+    assert_eq!(qa["entries"].as_array().unwrap().len(), 1, "{qa}");
+    // A caller Zerus pins cannot claim another name or team.
+    repo.agent_session = false;
+    repo.caller = Some(Viewer { team: Some("t".into()), name: "lead".into(), role: Role::Lead });
+    assert!(repo.refuse(&["messages", "--by", "qa"], "").contains("--by differs from the caller"));
+    assert!(repo.refuse(&["messages", "--team", "other", "--by", "lead"], "").contains("--team differs"));
+    assert!(repo.refuse(&["messages", "--role", "owner", "--by", "lead"], "").contains("wider role"));
+    let lead = repo.json(&["messages", "--unread", "--by", "lead"], "");
+    assert_eq!(lead["entries"].as_array().unwrap().len(), 2, "the lead sees its team's");
+    let after = repo.json(&["messages", "--unread", "--by", "lead"], "");
+    let left: Vec<&str> = after["entries"].as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap()).collect();
+    assert_eq!(left, [qa_id.as_str()], "the lead's read marked its own message only");
+    assert!(!left.contains(&lead_id.as_str()));
 }
 
 #[test]

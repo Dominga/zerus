@@ -142,6 +142,11 @@ pub(crate) struct Settings {
     /// At most one inbox message reaches the lead per this many seconds (C2).
     #[serde(default = "default_inbox_interval")]
     pub inbox_interval_seconds: u64,
+    /// Task 186 (docs/lore.md 11.11 `urgent_bound`): minutes an urgent team
+    /// message may wait for a safe point (or, rung once, for its read) before
+    /// the lead hears, or the owner for a message to the lead; 1 to 120.
+    #[serde(default = "default_urgent_bound")]
+    pub urgent_bound_minutes: u64,
     /// Minutes an undecided report waits before the lead is reminded once;
     /// 0 turns the reminder off (C4).
     #[serde(default = "default_remind_lead")]
@@ -303,6 +308,10 @@ fn default_blocked_timeout() -> u64 {
 fn default_inbox_interval() -> u64 {
     120
 }
+
+fn default_urgent_bound() -> u64 {
+    10
+}
 fn default_remind_lead() -> u64 {
     15
 }
@@ -345,6 +354,7 @@ impl Default for Settings {
             start_timeout_seconds: default_start_timeout(),
             blocked_timeout_seconds: default_blocked_timeout(),
             inbox_interval_seconds: default_inbox_interval(),
+            urgent_bound_minutes: default_urgent_bound(),
             remind_lead_minutes: default_remind_lead(),
             remind_owner_minutes: default_remind_owner(),
             remind_owner_permission_minutes: default_remind_owner_permission(),
@@ -451,6 +461,24 @@ pub(crate) struct Unread {
     /// The lead was told about the oldest one.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lead_told: bool,
+    /// Task 186 (11.11): the schedule below is each message's own, not the
+    /// oldest's; a record written before it has none and rings as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub planned: bool,
+    /// When the next doorbell is due: a message that never rang (an urgent
+    /// one at once, a normal one at most every 5 minutes), or one that rang
+    /// once and waited past its bound. None: nothing to ring.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ring_at: Option<f64>,
+    /// When the lead hears that the member does not read: a message rang
+    /// twice and waited past its bound again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall_at: Option<f64>,
+    /// The oldest urgent message that has reached no safe point yet (never
+    /// rung, never put into a turn): past `urgent_bound` the lead hears, or
+    /// for a message to the lead the owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_urgent_at: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]

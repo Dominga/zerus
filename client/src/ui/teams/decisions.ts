@@ -486,6 +486,8 @@ export function waitingKindLabel(item: Pick<TeamWaitingItem, "kind" | "action">)
     case "deferred": return tr("Deferred");
     case "disk_low": return tr("Disk space");
     case "team_paused": return tr("Team paused");
+    // Task 186: an urgent team message the working lead has not received.
+    case "lead_message_undelivered": return tr("Urgent message");
     default: return item.kind;
   }
 }
@@ -506,6 +508,7 @@ export function waitingKindIcon(kind: string): string {
     case "deferred": return "clock";
     case "disk_low": return "hard-drive";
     case "team_paused": return "pause";
+    case "lead_message_undelivered": return "message-square";
     default: return "triangle-alert";
   }
 }

@@ -42,8 +42,10 @@ fn a_hand_out_rings_a_doorbell_and_its_text_lives_in_the_working_tier() {
         assert_eq!(sends.len(), 1);
         let pasted = sends[0].1["text"].as_str().unwrap();
         assert_eq!(sends[0].1["request_id"], attempt.id.as_str(), "the receipt keeps the hand-out's request identity");
-        assert!(!pasted.contains('\n') && pasted.chars().count() <= 300, "{pasted}");
-        assert!(pasted.starts_with("[Zerus team \u{b7} from: Lead \u{b7} task: #1 \u{b7} attempt: 1]") && pasted.contains("hgs team inbox"), "{pasted}");
+        assert!(!pasted.contains('\n') && pasted.chars().count() <= working::DOORBELL_CHARS, "{pasted}");
+        // Task 186: the header's fields, normal, the message's id, the command.
+        assert!(pasted.starts_with("[Zerus team \u{b7} from: Lead \u{b7} task: #1 \u{b7} attempt: 1 \u{b7} normal \u{b7} w-message-"), "{pasted}");
+        assert!(pasted.ends_with("] read it with hgs team inbox"), "{pasted}");
         assert!(!pasted.contains("Task #1: API"), "the task's text is never pasted to a hook agent: {pasted}");
         // The whole hand-out is stored, rung, unread.
         let unread = working::unread(store.connection(), &team_id, "dev", crate::state::now()).unwrap();
@@ -147,7 +149,8 @@ fn unread_messages_ring_only_at_an_idle_moment_twice_then_the_lead_hears() {
         run_step(&mut store, &team, &Step::RingMessages { member: "dev".into() }, "").unwrap();
         set_fake_hgs(None);
         let pasted = sends.borrow()[0].1["text"].as_str().unwrap().to_owned();
-        assert!(pasted.contains("URGENT") && pasted.contains("1 new message") && !pasted.contains("src/api.rs"), "{pasted}");
+        assert!(pasted.contains("URGENT") && pasted.contains("w-message-") && pasted.ends_with("read it with hgs team inbox") && !pasted.contains("src/api.rs"), "{pasted}");
+        assert!(pasted.chars().count() <= working::DOORBELL_CHARS, "{pasted}");
         let team = store.load(&team_id).unwrap().unwrap();
         let unread = team.member("dev").unwrap().unread.clone().unwrap();
         assert_eq!((unread.count, unread.urgent, unread.rings), (1, 1, 1));
@@ -157,13 +160,14 @@ fn unread_messages_ring_only_at_an_idle_moment_twice_then_the_lead_hears() {
         assert!(steps(&team, &idle, later).contains(&Step::RingMessages { member: "dev".into() }));
         // After two rings and the bound, the lead hears with the member's state.
         let mut twice = team.clone();
+        let bound = working::urgent_bound(&twice);
         let found = twice.members.iter_mut().find(|member| member.id == "dev").unwrap();
-        found.unread = Some(Unread { rings: 2, rung_at: Some(at), ..unread.clone() });
+        found.unread = Some(Unread { rings: 2, rung_at: Some(at), ring_at: None, stall_at: Some(at + bound), ..unread.clone() });
         assert!(!steps(&twice, &idle, at + working::URGENT_BOUND_SECONDS + 1.0).iter().any(|step| matches!(step, Step::RingMessages { .. })), "at most two rings");
-        assert!(super::super::super::doorbell::unread_stalled(twice.member("dev").unwrap(), at + working::URGENT_BOUND_SECONDS + 1.0).is_some());
+        assert!(super::super::super::doorbell::unread_stalled(twice.member("dev").unwrap(), at + working::URGENT_BOUND_SECONDS + 1.0, bound).is_some());
         let found = twice.members.iter_mut().find(|member| member.id == "dev").unwrap();
         found.unread.as_mut().unwrap().oldest_at = at - 2.0 * working::URGENT_BOUND_SECONDS;
-        found.unread.as_mut().unwrap().rung_at = Some(at - 2.0 * working::URGENT_BOUND_SECONDS);
+        found.unread.as_mut().unwrap().stall_at = Some(at - working::URGENT_BOUND_SECONDS);
         let item = inbox::items(&twice).into_iter().find(|item| item.kind == "unread_messages").expect("an inbox item for the lead");
         assert!(item.summary.contains("does not read") && item.detail.contains("Member state") && item.command.contains("hgs team look"), "{item:?}");
     });
@@ -188,4 +192,97 @@ fn the_leads_inbox_rings_urgent_for_a_question_and_its_text_is_stored() {
         assert_eq!((stored.len(), stored[0].kind.as_str(), stored[0].urgent()), (1, "inbox", true));
         assert!(stored[0].text.contains("Which port?"), "{}", stored[0].text);
     });
+}
+
+#[test]
+fn a_working_lead_gets_its_inbox_stored_and_never_typed() {
+    // Task 186 (HIGH 3, the lead's decision): hard rule 3 holds for the lead
+    // too. A Claude lead takes the urgent list at its next tool boundary.
+    let root = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(root.path(), || {
+        let mut team = team();
+        delivered(&mut team);
+        team.task_mut(1).unwrap().attempts[0].questions.push(Question { id: "q1".into(), text: "Which port?".into(), at: 11.0, ..Default::default() });
+        let team_id = team.id.clone();
+        let mut store = stored_store(root.path(), team);
+        let team = store.load(&team_id).unwrap().unwrap();
+        let working = Seen { activity: "busy".into(), phase: "working".into(), ..session("claude/x/lead", "r0", false) };
+        let found = steps(&team, &[working.clone(), session("codex/x/dev", "r1", false)], 20.0);
+        assert!(found.contains(&Step::InboxWaits) && !found.contains(&Step::Inbox), "{found:?}");
+        let sends = record_sends(0, "");
+        run_step(&mut store, &team, &Step::InboxWaits, "").unwrap();
+        set_fake_hgs(None);
+        assert!(sends.borrow().is_empty(), "nothing is typed into the working lead");
+        let stored = working::unread(store.connection(), &team_id, "lead", crate::state::now()).unwrap();
+        assert_eq!((stored.len(), stored[0].rings, stored[0].urgent()), (1, 0, true));
+        let saved = store.load(&team_id).unwrap().unwrap();
+        assert!(saved.inbox.told_at > 0.0, "the items count as told: the list waits stored");
+        assert!(saved.member("lead").unwrap().unread.as_ref().unwrap().held_urgent_at.is_some());
+        // The tool boundary takes it once, as added context; nothing for a
+        // session without an urgent message waiting.
+        assert!(working::urgent_waiting("claude/x/lead", "r0") && !working::urgent_waiting("codex/x/dev", "r1"));
+        let context = working::tool_context_for("claude/x/lead", "r0").expect("the next tool boundary receives it");
+        assert!(context.contains("Which port?") && context.contains("URGENT"), "{context}");
+        assert!(working::tool_context_for("claude/x/lead", "r0").is_none() && !working::urgent_waiting("claude/x/lead", "r0"));
+        let after = working::unread(store.connection(), &team_id, "lead", crate::state::now()).unwrap();
+        assert_eq!((after[0].safe_point.as_str(), after[0].state.as_str()), ("hook", "rung"), "delivered at a safe point, still unread");
+        assert!(store.load(&team_id).unwrap().unwrap().member("lead").unwrap().unread.as_ref().unwrap().held_urgent_at.is_none());
+        // A Kimi lead hears only when it is free, from a fresh list.
+        let mut kimi = team.clone();
+        kimi.members.iter_mut().find(|member| member.id == "lead").unwrap().agent = "kimi".into();
+        let found = steps(&kimi, &[working, session("codex/x/dev", "r1", false)], 20.0);
+        assert!(!found.iter().any(|step| matches!(step, Step::Inbox | Step::InboxWaits)), "{found:?}");
+    });
+}
+
+#[test]
+fn a_message_that_waited_for_the_turn_rings_at_its_end() {
+    // Task 186: a Codex lead has no tool-boundary hook: the stored list rings
+    // when the turn ends, recorded as the turn_end safe point.
+    let root = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(root.path(), || {
+        let mut team = team();
+        team.members.iter_mut().find(|member| member.id == "lead").unwrap().agent = "codex".into();
+        let team_id = team.id.clone();
+        let mut store = stored_store(root.path(), team);
+        super::super::super::doorbell::post_waiting(&mut store, &team_id, "lead", "44444444-4444-4444-8444-444444444444", "inbox", "zerus",
+            working::Urgency::Normal, "[Zerus team \u{b7} from: Zerus \u{b7} inbox]\nA report waits").unwrap();
+        let team = store.load(&team_id).unwrap().unwrap();
+        assert!(!working::urgent_waiting("claude/x/lead", "r0"), "a normal message waits for no tool boundary");
+        let busy = Seen { activity: "busy".into(), phase: "working".into(), ..session("claude/x/lead", "r0", false) };
+        let now = crate::state::now();
+        assert!(!steps(&team, &[busy], now).iter().any(|step| matches!(step, Step::RingMessages { .. })));
+        let free = session("claude/x/lead", "r0", true);
+        assert!(steps(&team, &[free], now).contains(&Step::RingMessages { member: "lead".into() }));
+        let sends = record_sends(0, "");
+        run_step(&mut store, &team, &Step::RingMessages { member: "lead".into() }, "").unwrap();
+        set_fake_hgs(None);
+        assert_eq!(sends.borrow().len(), 1);
+        let rung = working::unread(store.connection(), &team_id, "lead", crate::state::now()).unwrap();
+        assert_eq!((rung[0].rings, rung[0].safe_point.as_str()), (1, "turn_end"));
+    });
+}
+
+#[test]
+fn an_urgent_message_the_lead_never_received_is_the_owners_waiting_item() {
+    // Task 186 (11.11): past urgent_bound the owner hears, never the lead
+    // about itself; the bound is the team's setting.
+    let mut team = team();
+    team.status = TeamStatus::Running;
+    let now = 10_000.0;
+    team.members.iter_mut().find(|member| member.id == "lead").unwrap().unread =
+        Some(Unread { count: 1, urgent: 1, oldest: "w-message-1".into(), oldest_at: now - 200.0, planned: true,
+            ring_at: Some(now - 200.0), held_urgent_at: Some(now - 200.0), ..Default::default() });
+    let waiting = |team: &Team| super::super::super::owner_waiting::items(std::slice::from_ref(team), now)
+        .into_iter().filter(|item| item["kind"] == "lead_message_undelivered").collect::<Vec<_>>();
+    assert!(waiting(&team).is_empty(), "within the default 10 minutes");
+    team.settings.urgent_bound_minutes = 3;
+    let items = waiting(&team);
+    assert_eq!(items.len(), 1);
+    assert_eq!((items[0]["action"].as_str(), items[0]["session"].as_str()), (Some("open_terminal"), Some("claude/x/lead")));
+    assert!(items[0]["title"].as_str().unwrap().starts_with("URGENT"), "{}", items[0]["title"]);
+    assert!(!inbox::items(&team).iter().any(|item| item.kind == "unread_messages"), "the lead is not told about itself");
+    let mut bad = team.settings.clone();
+    bad.urgent_bound_minutes = 121;
+    assert!(ops::apply(&mut team, "settings", &json!({"settings":bad}), &Actor::Human, &BTreeSet::new(), &mut Vec::new()).is_err());
 }

@@ -47,7 +47,7 @@ fn expiry_follows_each_rule_exactly() {
     let read = store.send(&message("lead", "the build is green", false), None, T0).unwrap().entry;
     let unread = store.send(&message("owner", "please confirm the release", false), None, T0).unwrap().entry;
     assert_eq!(unread.expires, Some(T0 + 30 * day));
-    let marked = store.mark_read(&read.id, "lead", T0 + day).unwrap();
+    let marked = store.mark_read(&read.id, &Viewer { team: Some("t".into()), name: "lead".into(), role: Role::Lead }, T0 + day).unwrap();
     assert_eq!(marked.expires, Some(T0 + day + 7 * day));
     // The unread one is not dropped silently: an event, an inbox item.
     let cleaned = store.cleanup(T0 + 30 * day, &OpenClock).unwrap();
@@ -186,8 +186,35 @@ fn a_member_sees_its_messages_and_the_lead_all() {
     assert!(store.messages(&other, false, None, None, T0).unwrap().is_empty(), "no search crosses teams");
     // A team message is read once every known recipient read it.
     let team = store.send(&Message { recipients: vec!["qa".into(), "ui".into()], ..message("team", "two readers", false) }, None, T0).unwrap().entry;
-    assert_eq!(store.mark_read(&team.id, "qa", T0 + 1).unwrap().state, "queued");
-    assert_eq!(store.mark_read(&team.id, "ui", T0 + 2).unwrap().state, "read");
+    assert_eq!(store.mark_read(&team.id, &qa, T0 + 1).unwrap().state, "queued");
+    let ui = Viewer { team: Some("t".into()), name: "ui".into(), role: Role::Member };
+    assert_eq!(store.mark_read(&team.id, &ui, T0 + 2).unwrap().state, "read");
+}
+
+#[test]
+fn a_read_marks_only_the_readers_own_copy() {
+    // Task 186 (merger's review of 132): nobody hides or consumes another's
+    // message.
+    let (_dir, store) = open(Settings::default());
+    let for_qa = store.send(&message("qa", "for qa", false), None, T0).unwrap().entry;
+    let for_lead = store.send(&message("lead", "for the lead", false), None, T0).unwrap().entry;
+    let for_owner = store.send(&message("owner", "for the owner", false), None, T0).unwrap().entry;
+    let ui = Viewer { team: Some("t".into()), name: "ui".into(), role: Role::Member };
+    let lead = Viewer { team: Some("t".into()), name: "lead".into(), role: Role::Lead };
+    let refused = store.mark_read(&for_qa.id, &lead, T0 + 1).unwrap_err();
+    assert!(refused.message.contains("only its recipient marks it read"), "{}", refused.message);
+    assert!(store.mark_read(&for_qa.id, &ui, T0 + 1).is_err(), "a member never sees another's message");
+    assert!(store.mark_read(&for_owner.id, &lead, T0 + 1).is_err(), "the lead does not read the owner's");
+    assert!(store.mark_read(&for_lead.id, &Viewer::owner(), T0 + 1).is_err(), "the owner does not read the lead's");
+    assert_eq!(store.mark_read(&for_lead.id, &lead, T0 + 1).unwrap().state, "read");
+    assert_eq!(store.mark_read(&for_owner.id, &Viewer::owner(), T0 + 1).unwrap().state, "read");
+    // A team message with no named recipients: each reader's own mark only.
+    let all = store.send(&message("team", "for everyone", false), None, T0).unwrap().entry;
+    assert_eq!(store.mark_read(&all.id, &ui, T0 + 2).unwrap().state, "queued", "the first reader does not settle it");
+    let qa = Viewer { team: Some("t".into()), name: "qa".into(), role: Role::Member };
+    assert_eq!(store.messages(&qa, true, None, None, T0 + 3).unwrap().iter().filter(|e| e.id == all.id).count(), 1);
+    assert!(store.messages(&ui, true, None, None, T0 + 3).unwrap().iter().all(|e| e.id != all.id));
+    assert!(store.messages(&qa, true, None, None, T0 + 3).unwrap().iter().any(|e| e.id == for_qa.id), "qa's stays unread");
 }
 
 #[test]

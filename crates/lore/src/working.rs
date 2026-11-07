@@ -119,9 +119,40 @@ pub enum Role {
     Owner,
 }
 
+impl Role {
+    /// Member < lead < owner: a caller may read as a narrower role, never a
+    /// wider one (task 186).
+    pub fn rank(self) -> u8 {
+        match self {
+            Role::Member => 0,
+            Role::Lead => 1,
+            Role::Owner => 2,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Role::Member => "member",
+            Role::Lead => "lead",
+            Role::Owner => "owner",
+        }
+    }
+}
+
 impl Viewer {
     pub fn owner() -> Self {
         Self { team: None, name: "owner".into(), role: Role::Owner }
+    }
+
+    /// Task 186: whether a message is the reader's own copy, the one only it
+    /// marks read (11.11): addressed to its name, to `team` (its own read
+    /// mark), to `lead` for the lead and to `owner` for the owner, in its team.
+    pub fn addressed(&self, entry: &Entry) -> bool {
+        if entry.kind != "message" || self.team.as_deref().is_some_and(|team| team != entry.team) {
+            return false;
+        }
+        let to = entry.to.as_deref().unwrap_or_default();
+        to == self.name || to == "team" || (to == "lead" && self.role == Role::Lead) || (to == "owner" && self.role == Role::Owner)
     }
 
     fn sees(&self, entry: &Entry) -> bool {
@@ -719,16 +750,22 @@ impl Store {
         Ok(())
     }
 
-    /// Marks a message read by `reader` (11.11).
-    pub fn mark_read(&self, id: &str, reader: &str, now: i64) -> Result<Entry> {
-        let mut entry = self.get(id, now)?.filter(|entry| entry.kind == "message").ok_or_else(|| LoreError::new(format!("no message {id}")))?;
+    /// Marks a message read by `reader` (11.11). Task 186: only the reader's
+    /// own copy: a message addressed to someone else is refused, and a team
+    /// message gets the reader's own read mark, read for everyone only once
+    /// every named recipient read it (with no recipients named it stays
+    /// unread for the others until it expires).
+    pub fn mark_read(&self, id: &str, reader: &Viewer, now: i64) -> Result<Entry> {
+        let mut entry = self.get(id, now)?.filter(|entry| entry.kind == "message" && reader.sees(entry)).ok_or_else(|| LoreError::new(format!("no message {id}")))?;
+        if !reader.addressed(&entry) {
+            return Err(LoreError::new(format!(
+                "refused: message {id} is addressed to {}; only its recipient marks it read (read it with --peek)",
+                entry.to.as_deref().unwrap_or_default()
+            )));
+        }
         if entry.to.as_deref() == Some("team") {
-            entry.read_by.entry(reader.to_owned()).or_insert(now);
-            let everyone = if entry.recipients.is_empty() {
-                true // who must read it is unknown: the first reader settles it
-            } else {
-                entry.recipients.iter().all(|name| entry.read_by.contains_key(name))
-            };
+            entry.read_by.entry(reader.name.clone()).or_insert(now);
+            let everyone = !entry.recipients.is_empty() && entry.recipients.iter().all(|name| entry.read_by.contains_key(name));
             if everyone {
                 entry.state = "read".into();
                 entry.read_at = Some(entry.read_at.unwrap_or(now));

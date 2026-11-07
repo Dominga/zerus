@@ -16,14 +16,51 @@ fn now(ctx: &Ctx) -> i64 {
     ctx.env.now.unwrap_or_else(|| chrono::Utc::now().timestamp())
 }
 
+/// Task 186: who reads is the verified caller, never what the flags claim.
+/// - A caller the embedding pins (`LORE_CALLER`, set by Zerus for a team
+///   session) is that viewer: `--team` and `--by` must match it.
+/// - An agent session without one (`HGS_SESSION`, `HGS_RUN_ID` or
+///   `DSH_SESSION_ID`) is a member at most, or a lead it names; never the
+///   owner.
+/// - A person at the terminal is the owner.
+/// `--role` may only narrow the caller's role, never widen it.
 fn viewer(ctx: &Ctx) -> Result<Viewer> {
-    let role = match ctx.args.one("role").as_deref() {
-        None | Some("owner") => Role::Owner,
-        Some("lead") => Role::Lead,
-        Some("member") => Role::Member,
+    let asked = match ctx.args.one("role").as_deref() {
+        None => None,
+        Some("owner") => Some(Role::Owner),
+        Some("lead") => Some(Role::Lead),
+        Some("member") => Some(Role::Member),
         Some(other) => return Err(LoreError::new(format!("argument --role: invalid choice: {} (choose from 'member', 'lead', 'owner')", repr_str(other)))),
     };
-    Ok(Viewer { team: ctx.args.one("team"), name: ctx.by(), role })
+    let mut viewer = match &ctx.env.caller {
+        Some(caller) => {
+            if ctx.args.one("team").is_some_and(|team| caller.team.as_deref() != Some(team.as_str())) {
+                return Err(LoreError::new("refused: --team differs from the caller's team; you read as yourself"));
+            }
+            if ctx.args.by.as_deref().is_some_and(|by| by.trim() != caller.name) {
+                return Err(LoreError::new("refused: --by differs from the caller; you read as yourself"));
+            }
+            caller.clone()
+        }
+        None if ctx.env.agent_session => {
+            // A session may say it is its team's lead (lore cannot prove it
+            // without the embedding); it is never the owner.
+            let lead = asked == Some(Role::Lead) && ctx.args.one("team").is_some();
+            Viewer { team: ctx.args.one("team"), name: ctx.by(), role: if lead { Role::Lead } else { Role::Member } }
+        }
+        None => Viewer { team: ctx.args.one("team"), name: ctx.by(), role: Role::Owner },
+    };
+    if let Some(role) = asked {
+        if role.rank() > viewer.role.rank() {
+            return Err(LoreError::new(format!(
+                "argument --role: the caller reads as {}; a wider role ({}) is refused",
+                viewer.role.name(),
+                role.name()
+            )));
+        }
+        viewer.role = role;
+    }
+    Ok(viewer)
 }
 
 fn team(ctx: &Ctx) -> String {
@@ -361,13 +398,12 @@ pub(super) fn run(ctx: &mut Ctx, io: &mut Io) -> Result<i32> {
             let reader = viewer(ctx)?;
             let (to, from) = (ctx.args.one("to"), ctx.args.one("from"));
             let list = store.messages(&reader, ctx.args.flag("unread"), to.as_deref(), from.as_deref(), at)?;
+            // Task 186: a read marks only the reader's own copies; another's
+            // message is shown (the lead and the owner see them) and stays
+            // unread for its recipient.
             if !ctx.args.flag("peek") {
-                for entry in &list {
-                    let addressed = matches!(entry.to.as_deref(), Some(to) if to == reader.name || to == "team")
-                        || (reader.role != Role::Member && matches!(entry.to.as_deref(), Some("lead" | "owner")));
-                    if addressed {
-                        store.mark_read(&entry.id, &reader.name, at)?;
-                    }
+                for entry in list.iter().filter(|entry| reader.addressed(entry)) {
+                    store.mark_read(&entry.id, &reader, at)?;
                 }
             }
             say_list(ctx, io, &list, &notes);
@@ -375,7 +411,7 @@ pub(super) fn run(ctx: &mut Ctx, io: &mut Io) -> Result<i32> {
         "message read" => {
             let store = store(ctx)?;
             let reader = viewer(ctx)?;
-            let entry = store.mark_read(&ctx.args.positional[0].clone(), &reader.name, at)?;
+            let entry = store.mark_read(&ctx.args.positional[0].clone(), &reader, at)?;
             say_entry(ctx, io, &entry, &[]);
         }
         "brief set" => {

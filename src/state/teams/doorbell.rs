@@ -21,8 +21,7 @@ pub(crate) fn turn_hook(agent: &str) -> bool {
 /// What a doorbell pastes: the line, and for an agent without a turn hook
 /// the unread text after it (bounded as a turn's context is).
 pub(crate) fn paste(agent: &str, header: &str, list: &[Message]) -> String {
-    let urgent = list.iter().filter(|message| message.urgent()).count();
-    let mut text = working::doorbell(header, list.len().max(1), urgent);
+    let mut text = working::doorbell(header, list);
     if !turn_hook(agent) {
         if let Some((context, _)) = working::turn_context(list, false) {
             text.push_str("\n\n");
@@ -66,15 +65,48 @@ pub(crate) fn post_and_ring(
         Err(error) => return Sent::Refused(format!("the team message was not stored, so nothing was sent: {error:#}")),
     };
     let outcome = send(session, request_id, &paste(&agent, working::header_of(text), &list));
-    settle(store, team_id, member_id, &agent, request_id, &list, &outcome, false);
+    settle(store, team_id, member_id, &agent, request_id, &list, &outcome, "idle", false);
     outcome
+}
+
+/// Task 186 (docs/lore.md hard rule 3, 11.11): stores a team message for a
+/// recipient that is working, without typing anything: it waits for the next
+/// safe point. A Claude session takes an urgent one at its next tool
+/// boundary and every unread one at its next turn start (the hooks' added
+/// context); otherwise the dispatcher rings at the turn end
+/// (`RingMessages`). An error means nothing was stored.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn post_waiting(
+    store: &mut Store,
+    team_id: &str,
+    member_id: &str,
+    request_id: &str,
+    kind: &str,
+    by: &str,
+    urgency: Urgency,
+    text: &str,
+) -> anyhow::Result<()> {
+    let at = super::super::now();
+    #[cfg(test)]
+    POSTED.with(|posted| posted.borrow_mut().insert(request_id.to_owned(), text.to_owned()));
+    store.mutate_working(team_id, |tx, team, events| {
+        events.extend(working::cleanup(tx, team_id, at)?);
+        let new = NewMessage { request_id, by, to: member_id, kind, urgency, text };
+        working::post(tx, team_id, &new, at)?;
+        working::refresh(tx, team, member_id, at)?;
+        events.push(Event::new(
+            "message_waits",
+            json!({"to":team.role_of(member_id),"kind":kind,"urgent":urgency == Urgency::Urgent,"request_id":request_id}),
+        ));
+        Ok(())
+    })
 }
 
 /// After a doorbell: rung (and, without a turn hook, put into the turn) on a
 /// delivery that may have arrived; withdrawn when refused before anything
 /// reached the member and it never rang before.
 #[allow(clippy::too_many_arguments)]
-fn settle(store: &mut Store, team_id: &str, member_id: &str, agent: &str, request_id: &str, list: &[Message], outcome: &Sent, journal: bool) {
+fn settle(store: &mut Store, team_id: &str, member_id: &str, agent: &str, request_id: &str, list: &[Message], outcome: &Sent, safe_point: &str, journal: bool) {
     let at = super::super::now();
     let ids: Vec<String> = list.iter().map(|message| message.id.clone()).collect();
     let result = store.mutate_working(team_id, |tx, team, events| {
@@ -84,15 +116,15 @@ fn settle(store: &mut Store, team_id: &str, member_id: &str, agent: &str, reques
                 working::withdraw(tx, request_id)?;
             }
             Sent::Delivered | Sent::Uncertain(_) => {
-                working::rung(tx, &ids, "idle", at)?;
+                working::rung(tx, &ids, safe_point, at)?;
                 if !turn_hook(agent) {
-                    working::injected(tx, &ids, "idle", at)?;
+                    working::injected(tx, &ids, safe_point, at)?;
                 }
                 if journal {
                     events.push(Event::new(
                     "message_rung",
                     json!({"to":role,"count":ids.len(),"urgent":list.iter().any(Message::urgent),"request_id":request_id,
-                        "certain":matches!(outcome, Sent::Delivered)}),
+                        "certain":matches!(outcome, Sent::Delivered),"safe_point":safe_point}),
                     ));
                 }
             }
@@ -107,14 +139,25 @@ fn settle(store: &mut Store, team_id: &str, member_id: &str, agent: &str, reques
 /// The dispatcher's ring of a member's unread messages (the first ring of a
 /// message posted while the member worked, or the one ring more after the
 /// bound), only at an idle moment: never a paste into a busy composer.
+/// Task 186: each message by its own schedule; the doorbell names every
+/// unread one, and only the messages due count a ring. `safe_point` is
+/// `turn_end` for a message that waited for a turn, `idle` otherwise.
 pub(crate) fn ring(store: &mut Store, team: &Team, member_id: &str) -> anyhow::Result<Sent> {
     let member = team.member(member_id).context("unknown member")?;
     let session = member.session.clone().context("the member has no session")?;
-    let list = working::unread(store.connection(), &team.id, member_id, super::super::now())?;
+    let now = super::super::now();
+    let list = working::unread(store.connection(), &team.id, member_id, now)?;
     anyhow::ensure!(!list.is_empty(), "nothing unread");
+    let bound = working::urgent_bound(team);
+    let last = working::last_ring(&list);
+    let due: Vec<Message> = list.iter().filter(|message| working::next_ring(message, last, bound).is_some_and(|at| at <= now)).cloned().collect();
+    anyhow::ensure!(!due.is_empty(), "nothing is due to ring");
+    let waited = due.iter().any(|message| {
+        message.rings == 0 && message.injected_at.is_none() && last.is_none_or(|last| message.at >= last + working::COALESCE_SECONDS)
+    });
     let request_id = uuid::Uuid::new_v4().to_string();
     let outcome = send(&session, &request_id, &paste(&member.agent, "", &list));
-    settle(store, &team.id, member_id, &member.agent, &request_id, &list, &outcome, true);
+    settle(store, &team.id, member_id, &member.agent, &request_id, &due, &outcome, if waited { "turn_end" } else { "idle" }, true);
     Ok(outcome)
 }
 
@@ -141,6 +184,10 @@ pub(crate) fn posted_text(input: &serde_json::Value) -> String {
 /// urgent one). At most two rings; the lead's inbox takes it from there.
 pub(crate) fn due(member: &Member, now: f64) -> bool {
     let Some(unread) = member.unread.as_ref() else { return false };
+    // Task 186: each message's own schedule (`working::next_ring`).
+    if unread.planned {
+        return unread.ring_at.is_some_and(|at| now >= at);
+    }
     if unread.rings == 0 {
         return true;
     }
@@ -151,10 +198,21 @@ pub(crate) fn due(member: &Member, now: f64) -> bool {
 /// Whether the lead hears that `member` does not read (the inbox item): two
 /// rings and the bound again, or an urgent message the member's turn kept
 /// from ringing past `urgent_bound`.
-pub(crate) fn unread_stalled(member: &Member, now: f64) -> Option<String> {
+pub(crate) fn unread_stalled(member: &Member, now: f64, urgent_bound: f64) -> Option<String> {
     let unread = member.unread.as_ref()?;
-    let bound = if unread.urgent > 0 { working::URGENT_BOUND_SECONDS } else { working::RING_AGAIN_SECONDS };
     let minutes = ((now - unread.oldest_at).max(0.0) / 60.0).round() as u64;
+    // Task 186: by each message's own rings and the team's urgent_bound.
+    if unread.planned {
+        if unread.stall_at.is_some_and(|at| now >= at) {
+            return Some(format!("{} unread team message(s), the oldest {minutes} min old, rang twice", unread.count));
+        }
+        let held = unread.held_urgent_at.filter(|at| now - at >= urgent_bound)?;
+        let minutes = ((now - held).max(0.0) / 60.0).round() as u64;
+        return Some(format!(
+            "an urgent team message is undelivered: the member has worked {minutes} min without a safe point; stop it natively to deliver it at the turn end"
+        ));
+    }
+    let bound = if unread.urgent > 0 { working::URGENT_BOUND_SECONDS } else { working::RING_AGAIN_SECONDS };
     if unread.rings >= 2 && now - unread.rung_at.unwrap_or(unread.oldest_at) >= bound {
         return Some(format!("{} unread team message(s), the oldest {minutes} min old, rang twice", unread.count));
     }
@@ -164,6 +222,15 @@ pub(crate) fn unread_stalled(member: &Member, now: f64) -> Option<String> {
         ));
     }
     None
+}
+
+/// Task 186 (11.11): an urgent message to the lead that has reached no safe
+/// point within the team's `urgent_bound`: the owner's Waiting item (Zerus
+/// never stops the lead). Answers since when it waits and its minutes.
+pub(crate) fn lead_undelivered(team: &Team, now: f64) -> Option<(f64, u64)> {
+    let lead = team.member(&team.lead)?;
+    let held = lead.unread.as_ref().filter(|unread| unread.planned)?.held_urgent_at?;
+    (now - held >= working::urgent_bound(team)).then(|| (held, ((now - held).max(0.0) / 60.0).round() as u64))
 }
 
 #[cfg(test)]

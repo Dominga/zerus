@@ -69,6 +69,28 @@ fn inbox_marks_only_the_callers_own_messages_read() {
 }
 
 #[test]
+fn a_caller_outside_the_team_never_peeks_at_the_leads_messages() {
+    // Task 186 (11.6): an unverifiable caller with --team was read as the
+    // owner and saw the lead's message texts; now it is refused.
+    let (team, _, _) = review_team();
+    with_review_team(&team, || {
+        post("lead", "r-lead", "For the lead only", Urgency::Normal);
+        set_test_caller_identities(Some((None, Some("claude/x/outsider".into()), Some("r-outsider".into()))));
+        let refused = call("inbox", json!({})).unwrap_err().to_string();
+        set_test_caller_identities(Some((None, None, None)));
+        assert!(refused.contains("agent session cannot act as the owner"), "{refused}");
+        set_test_caller_identities(Some((None, Some("claude/x/stale".into()), None)));
+        let stale = call("inbox", json!({})).unwrap_err().to_string();
+        set_test_caller_identities(Some((None, None, None)));
+        assert!(stale.contains("could not verify"), "{stale}");
+        // The owner still peeks, marking nothing.
+        let owner = call("inbox", json!({"by":"human"})).unwrap();
+        assert_eq!(owner["messages"][0]["text"], "For the lead only");
+        assert!(owner["read"].is_null());
+    });
+}
+
+#[test]
 fn a_message_is_stored_with_its_urgency_within_its_bounds() {
     let (team, _, _) = review_team();
     with_review_team(&team, || {

@@ -270,7 +270,7 @@ fn all_items(team: &Team) -> Vec<Item> {
     // and the bound again, or an urgent one its turn kept back) is one item for
     // the lead, with the member's state; the messages stay unread for it.
     for member in team.members.iter().filter(|member| member.id != team.lead).filter(|_| active) {
-        let Some(why) = super::doorbell::unread_stalled(member, crate::state::now()) else { continue };
+        let Some(why) = super::doorbell::unread_stalled(member, crate::state::now(), super::working::urgent_bound(team)) else { continue };
         let unread = member.unread.as_ref().expect("a stall has unread messages");
         let role = team.name_of(&member.id);
         let state = serde_json::to_value(member.state).ok().and_then(|value| value.as_str().map(str::to_owned)).unwrap_or_default();

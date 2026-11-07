@@ -43,6 +43,12 @@ pub struct Env<'a> {
     pub stdin: Vec<u8>,
     /// `LORE_BY`.
     pub lore_by: Option<String>,
+    /// Task 186: the verified caller the embedding pins (`LORE_CALLER`); a
+    /// message read is this viewer's, whatever the flags say.
+    pub caller: Option<crate::working::Viewer>,
+    /// Task 186: the call runs inside an agent session (Zerus's session
+    /// markers): without a pinned caller it never reads as the owner.
+    pub agent_session: bool,
     /// The ranked search; without it `find` and `index` are refused.
     pub finder: Option<&'a dyn Finder>,
     /// A Zerus project store's reference roots (docs/lore.md 2.4).

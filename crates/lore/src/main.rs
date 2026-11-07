@@ -16,6 +16,10 @@ fn main() {
         cwd: std::env::current_dir().unwrap_or_default(),
         stdin,
         lore_by: std::env::var("LORE_BY").ok(),
+        caller: caller(std::env::var("LORE_CALLER").ok().as_deref()),
+        agent_session: ["HGS_SESSION", "HGS_RUN_ID", "DSH_SESSION_ID"]
+            .iter()
+            .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty())),
         finder: Some(&BUILTIN),
         roots: roots(),
         history: history_source(),
@@ -27,6 +31,25 @@ fn main() {
     print!("{}", output.stdout);
     eprint!("{}", output.stderr);
     std::process::exit(output.code);
+}
+
+/// Task 186: `LORE_CALLER` is `member:<team>:<name>`, `lead:<team>:<name>`
+/// or `owner`, set by the embedding for the session it runs lore for.
+fn caller(value: Option<&str>) -> Option<zerus_lore::working::Viewer> {
+    use zerus_lore::working::{Role, Viewer};
+    let value = value?.trim();
+    if value == "owner" {
+        return Some(Viewer::owner());
+    }
+    let mut parts = value.splitn(3, ':');
+    let role = match parts.next()? {
+        "member" => Role::Member,
+        "lead" => Role::Lead,
+        _ => return None,
+    };
+    let team = parts.next().filter(|team| !team.is_empty())?;
+    let name = parts.next().filter(|name| !name.is_empty())?;
+    Some(Viewer { team: Some(team.to_owned()), name: name.to_owned(), role })
 }
 
 /// docs/lore.md 2.4: a Zerus store's reference roots, the folders a cited

@@ -285,6 +285,9 @@ pub(crate) enum Step {
     ClearPermission { member: String },
     /// The one coalesced message that lists the lead's new inbox items (C2).
     Inbox,
+    /// Task 186: the same list for a lead in its own turn, stored without
+    /// typing anything; it waits for the lead's next safe point (hard rule 3).
+    InboxWaits,
     /// Reminds the free lead once that a report still waits for a decision (C4).
     /// Reminds a sub-lead once that its report waits for a decision (N9).
     RemindReviewer { task: u32, member: String },
@@ -1190,17 +1193,21 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             }
         }
     }
-    // C2: one message lists the new items, at most once per interval. The
-    // owner (2026-10-28): it reaches a lead in its own turn too, which takes
-    // queued input between its tool calls (a permission waited 8 minutes
-    // otherwise); a question or dialog on the lead's screen still holds it.
-    // Task 112: only an agent that takes queued input between its tool calls
-    // gets it in its turn; another (Kimi sends it after the turn) would read a
-    // list composed long before, with reports decided meanwhile, so it hears
-    // when it is free, from a fresh list.
+    // C2: one message lists the new items, at most once per interval.
+    // Task 186 (docs/lore.md hard rule 3, the lead's decision): nothing is
+    // typed into a lead's working turn. The owner's 2026-10-28 intent (a
+    // permission waited 8 minutes for the turn end) is kept by the hooks: for
+    // a lead whose agent has them (Claude, Codex) the list is stored at once
+    // (`InboxWaits`); a Claude lead takes an urgent one at its next tool
+    // boundary, both take every one at their next turn start, and the
+    // doorbell rings at the turn end. A question or dialog on the lead's
+    // screen still holds it.
+    // Task 112: another agent (Kimi) would read a list composed long before,
+    // with reports decided meanwhile, so it hears when it is free, from a
+    // fresh list.
     let mid_turn = team.member(&team.lead).is_some_and(|found| takes_input_mid_turn(&found.agent));
-    let lead_reachable = lead_ready || (mid_turn && lead.is_some_and(|found| found.live && !found.asking && found.activity == "busy"));
-    if lead_reachable {
+    let lead_working = !lead_ready && mid_turn && lead.is_some_and(|found| found.live && !found.asking && found.activity == "busy");
+    if lead_ready || lead_working {
         let items = inbox::items(team);
         let new = items.iter().filter(|item| !team.inbox.told.contains(&item.key)).count();
         // A permission or question the free lead left unanswered is told once
@@ -1208,7 +1215,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         let again = if lead_ready { inbox::overdue(&items, &team.inbox.told, now).len() } else { 0 };
         let interval = team.settings.inbox_interval_seconds as f64;
         if new + again > 0 && (team.inbox.told_at == 0.0 || now - team.inbox.told_at >= interval) {
-            steps.push(Step::Inbox);
+            steps.push(if lead_ready { Step::Inbox } else { Step::InboxWaits });
         }
     }
     // N10: a member that just became a sub-lead hears what that means once.
@@ -6446,13 +6453,17 @@ fn lead_hand_out_now(store: &mut Store, team_id: &str, task_id: u32, preparation
 
 /// Task 112: agents whose own input queue hands a pasted message to the agent
 /// between its tool calls (Claude, Codex); others send it after the turn.
+/// Task 186: nothing is pasted into a working turn any more; these are the
+/// agents whose hooks take a stored message at a safe point instead.
 pub(crate) fn takes_input_mid_turn(agent: &str) -> bool {
-    matches!(agent, "claude" | "codex")
+    super::doorbell::turn_hook(agent)
 }
 
 /// Sends the one coalesced inbox message and remembers which items it named
 /// (C2). A refusal leaves everything pending for the next interval.
-fn tell_lead_inbox(store: &mut Store, team: &Team) -> anyhow::Result<()> {
+/// Task 186: `ring` false stores it for a lead in its own turn, typing
+/// nothing; it waits for the next safe point.
+fn tell_lead_inbox(store: &mut Store, team: &Team, ring: bool) -> anyhow::Result<()> {
     // Task 112: the list is composed from the team as it is now, never from
     // this tick's earlier read: a report decided meanwhile is never told.
     let fresh = store.load(&team.id)?.context("Unknown team")?;
@@ -6481,9 +6492,14 @@ fn tell_lead_inbox(store: &mut Store, team: &Team) -> anyhow::Result<()> {
     }
     // Task 134: the text is stored and one line rings.
     let urgency = inbox::urgency(new.iter().chain(&again));
-    let outcome = super::doorbell::post_and_ring(store, &team.id, &team.lead, &lead, &uuid::Uuid::new_v4().to_string(), "inbox", "zerus", urgency, &text);
-    if matches!(outcome, Sent::Refused(_)) {
-        return Ok(());
+    let request_id = uuid::Uuid::new_v4().to_string();
+    if ring {
+        let outcome = super::doorbell::post_and_ring(store, &team.id, &team.lead, &lead, &request_id, "inbox", "zerus", urgency, &text);
+        if matches!(outcome, Sent::Refused(_)) {
+            return Ok(());
+        }
+    } else {
+        super::doorbell::post_waiting(store, &team.id, &team.lead, &request_id, "inbox", "zerus", urgency, &text)?;
     }
     change(store, &team.id, |team, events| {
         let named = new.len() + again.len();
@@ -7389,7 +7405,8 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
             }
             Ok(())
         }),
-        Step::Inbox => tell_lead_inbox(store, team),
+        Step::Inbox => tell_lead_inbox(store, team, true),
+        Step::InboxWaits => tell_lead_inbox(store, team, false),
         Step::SubInbox { member } => tell_sub_inbox(store, team, member),
         Step::SubBrief { member } => send_sub_brief(store, team, member),
         Step::RingMessages { member } => super::doorbell::ring(store, team, member).map(drop),

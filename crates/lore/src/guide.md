@@ -129,6 +129,8 @@ committed: pulses (what you do), messages and task briefs. It lives in
     lore pulses [--task <ref>] [--all]          # the current pulse per member and task
     lore message send --to <member|lead|team|owner> [--urgent] "<text>"
     lore messages --unread [--peek]             # reading marks read; --peek does not
+                                                # a read marks only your own copy;
+                                                # you read as the verified caller
     lore brief set --task <ref> < brief.md      # also committed as briefs/t<ref>.md
     lore brief show --task <ref>
     lore promote <id> --kind <kind> --field <name>=<value> [--dry-run]

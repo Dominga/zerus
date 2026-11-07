@@ -1,4 +1,4 @@
-import { For, Show, createSignal } from "solid-js";
+import { For, Show, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
 import { tr, trNoop } from "../../i18n";
 import { AGENT_LABEL, Icon } from "../lib/icons";
 import { computerFresh, computerOffline } from "../../store/catalog";
@@ -458,16 +458,48 @@ export function teamSummary(team: Team): string[] {
  * their numbers (zerus-sa9qn.11), and the button and row descriptions keep
  * every count in words.
  */
+/**
+ * Whether the summary shows short counters (zerus-sa9qn.12): it shortens once
+ * its long labels overflow, in any language, and lengthens again only when
+ * the width they needed is available. `needed` is that width (0 while long).
+ */
+export function fitCounters(state: { narrow: boolean; needed: number }, scrollWidth: number, clientWidth: number): { narrow: boolean; needed: number } {
+  if (!state.narrow) return scrollWidth > clientWidth + 1 ? { narrow: true, needed: scrollWidth } : state;
+  return clientWidth >= state.needed ? { narrow: false, needed: 0 } : state;
+}
+
 function CompactTeam(props: { team: Team; onToggle?: () => void }) {
   const title = () => (props.team.collapsed ? tr("Show child sessions") : tr("Hide child sessions"));
+  // Short counters when the long ones do not fit; the container query below
+  // about 300 px is the first approximation before any measurement.
+  let body: HTMLSpanElement | undefined;
+  let fit = { narrow: false, needed: 0 };
+  const [narrow, setNarrow] = createSignal(false);
+  const measure = () => {
+    if (!body) return;
+    fit = fitCounters(fit, body.scrollWidth, body.clientWidth);
+    setNarrow(fit.narrow);
+  };
+  onMount(() => {
+    if (!body || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(body);
+    onCleanup(() => observer.disconnect());
+  });
+  // Other counts or language: measure the long labels again.
+  createEffect(on(() => [props.team.working, props.team.total, props.team.needsYou, props.team.asking, props.team.errors, tr("Asking: %1", 0)], () => {
+    fit = { narrow: false, needed: 0 };
+    setNarrow(false);
+    queueMicrotask(measure);
+  }, { defer: true }));
   const counter = (kind: string, count: number | undefined, text: string) => (
     <Show when={count}><span class={kind} title={text}><span class="long">{text}</span><span class="short" aria-hidden="true">{count}</span></span></Show>
   );
   return (
-    <button class="cc-team" classList={{ open: !props.team.collapsed }} aria-expanded={!props.team.collapsed}
+    <button class="cc-team" classList={{ open: !props.team.collapsed, narrow: narrow() }} aria-expanded={!props.team.collapsed}
       title={title()} aria-label={[title(), ...teamSummary(props.team)].join("\n")}
       onClick={(e) => { e.stopPropagation(); props.onToggle?.(); }} onDblClick={(e) => e.stopPropagation()}>
-      <span class="cc-team-body">
+      <span class="cc-team-body" ref={body}>
         <svg class="team-glyph" width="16" height="12" viewBox="0 0 16 12" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
           <circle cx="8" cy="3" r="2" /><circle cx="3" cy="5" r="1.6" /><circle cx="13" cy="5" r="1.6" />
           <path d="M4 11A4 3 0 0 1 12 11M0 10.5A3 2.4 0 0 1 4.5 9M16 10.5A3 2.4 0 0 0 11.5 9" />

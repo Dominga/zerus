@@ -249,6 +249,9 @@
     .cc-team .long { display: none; }
     .cc-team .short { display: inline; }
   }
+  /* Longer translations: the row measured that its long labels overflow (zerus-sa9qn.12). */
+  .cc-team.narrow .long { display: none; }
+  .cc-team.narrow .short { display: inline; }
   .cc-team .team-asking, .cc-team .team-needs, .cc-team .team-errors { flex: none; padding: 0 4px; border-radius: 3px; font-weight: 600; }
   .cc-team .team-asking { color: var(--z-list-badge-muted); background: var(--z-list-chip); }
   .cc-team .team-needs { color: var(--z-list-tone-attention); background: color-mix(in srgb, var(--z-list-tone-attention) 16%, transparent); }

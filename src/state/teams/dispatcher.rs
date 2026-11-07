@@ -22,6 +22,12 @@ const TICK: Duration = Duration::from_secs(3);
 const IDLE_EXIT: Duration = Duration::from_secs(300);
 /// After a refused hand-off the member gets no new one for this long.
 const REFUSAL_PAUSE: f64 = 30.0;
+const REFUSAL_PAUSE_MAX: f64 = 15.0 * 60.0;
+
+/// Task 165: a member that keeps refusing waits 30 s, then double, capped.
+pub(crate) fn refusal_pause(count: u32) -> f64 {
+    (REFUSAL_PAUSE * 2f64.powi(count.saturating_sub(1).min(5) as i32)).min(REFUSAL_PAUSE_MAX)
+}
 /// How long a member may sit idle without ready work before the lead hears
 /// once that the plan starves it (C7).
 const STARVED_AFTER: f64 = 20.0 * 60.0;
@@ -1398,7 +1404,10 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         }
     }
     let refused_recently = |member: &Member| {
-        team.tasks.iter().flat_map(|t| &t.attempts).any(|a| a.member == member.id && a.state == AttemptState::Refused && now - a.sent_at < REFUSAL_PAUSE)
+        team.tasks.iter().flat_map(|t| &t.attempts)
+            .filter(|a| a.member == member.id && a.state == AttemptState::Refused)
+            .max_by(|a, b| a.sent_at.partial_cmp(&b.sent_at).unwrap_or(std::cmp::Ordering::Equal))
+            .is_some_and(|last| last.refusal_state == member.seen_phase && now - last.sent_at < refusal_pause(last.refusal_count.max(1)))
     };
     let outputs = InProgressOutputs::new(team);
     let own_rework = |member: &Member, task: Option<u32>| {
@@ -5163,6 +5172,7 @@ fn hand_out_now(
         eprintln!("hgs team worker: {member_id}: blocked input: {error}");
     }
     change(store, team_id, |team, events| {
+        let member_state = team.member(member_id).map(|member| member.seen_phase.clone()).unwrap_or_default();
         let task = team.task_mut(task_id).context("unknown task")?;
         let Some(attempt) = task.attempts.iter_mut().find(|a| a.id == attempt_id && a.state == AttemptState::Delivering) else {
             return Ok(());
@@ -5179,6 +5189,9 @@ fn hand_out_now(
             Sent::Refused(error) => {
                 attempt.state = AttemptState::Refused;
                 attempt.error = error.clone();
+                attempt.refusal_count = 1;
+                attempt.refusal_reason = error.clone();
+                attempt.refusal_state = member_state.clone();
                 task.status = TaskStatus::Pending;
                 if task.reopen_note.is_empty() {
                     task.reopen_note = note.clone();
@@ -5190,6 +5203,28 @@ fn hand_out_now(
                 attempt.error = error.clone();
                 task.continuation = None;
                 events.push(Event::new("unconfirmed", json!({"task":task_id,"attempt":n,"error":error})));
+            }
+        }
+        // Task 165: one attempt carries the refusal count. A repeat refusal
+        // with the same reason replaces the new record, so the task never
+        // grows an attempt per 30-second tick.
+        if let Sent::Refused(error) = &outcome {
+            if let Some(current) = task.attempts.iter().position(|found| found.id == attempt_id) {
+                let previous = (0..current).rev().find(|index| {
+                    task.attempts[*index].state == AttemptState::Refused
+                        && task.attempts[*index].member == member_id
+                        && task.attempts[*index].refusal_reason == *error
+                });
+                if let Some(previous) = previous {
+                    let count = task.attempts[current].refusal_count.max(1);
+                    task.attempts[previous].refusal_count += count;
+                    task.attempts[previous].sent_at = task.attempts[current].sent_at;
+                    task.attempts[previous].error = error.clone();
+                    let state = task.attempts[current].refusal_state.clone();
+                    task.attempts[previous].refusal_state = state;
+                    task.attempts[previous].id = attempt_id.clone();
+                    task.attempts.remove(current);
+                }
             }
         }
         if !matches!(outcome, Sent::Refused(_)) {

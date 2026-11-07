@@ -102,7 +102,7 @@ function AccountCard(props: { a: Account; now: number }) {
         <span class="ell muted">{accountIdentity(props.a)}</span>
         <span class="grow" />
         <span class="ov-ausage tabular">
-          <UsageMeters windows={windowsAt(usage().windows, props.now)} loading={usageLoading(usage())} compact summary={summaryText(usage())} />
+          <UsageMeters windows={windowsAt(usage().windows, props.now)} loading={usageLoading(usage())} compact resetFrom={0} summary={summaryText(usage())} />
           <Show when={usage().seeded && usage().checked_at !== null}><span class="dim">Checked {clock(usage().checked_at!)}</span></Show>
         </span>
       </span>

@@ -17,9 +17,9 @@ use zerus_mobile_connector::{
     windows_management::manage,
     workspace::Profile,
     workspace_cli,
-    workspace_provenance::{admit, record_start, Target},
+    workspace_provenance::{admit, record_start, Receipt, Target, RECEIPT},
 };
-use zerus_windows_private::{identity_of, ProcessIdentity};
+use zerus_windows_private::{identity_of, OriginalProcess, ProcessIdentity};
 struct Scratch(PathBuf, tempfile::TempDir);
 impl Scratch {
     fn new() -> Self {
@@ -429,26 +429,56 @@ impl Drop for Direct {
 }
 
 /// A failed assertion must not leave a detached fixture connector holding the test
-/// runner's inherited handles. Only this fixture's own journal owner, proven by its
-/// held lock and control record, is ended.
+/// runner's inherited handles. This asks through the connector's own Stop marker and
+/// never signals: a PID read from a file could be another process by now, and a stale
+/// control under another lock holder names a generation that holder ignores.
 impl Drop for Encrypted {
     fn drop(&mut self) {
-        if probe_lock(&self.state.join("connector.lock")) != LockState::Held {
+        let lock = self.state.join("connector.lock");
+        if probe_lock(&lock) != LockState::Held {
             return;
         }
         let control = std::fs::read(self.state.join("workspace-control.json")).ok();
-        let pid = control
+        let generation = control
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .and_then(|control| control["pid"].as_u64());
-        if let Some(pid) = pid {
-            let _ = Command::new("taskkill")
-                .args(["/F", "/PID", &pid.to_string()])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            .and_then(|control| control["generation"].as_str().map(str::to_owned));
+        let Some(generation) = generation else {
+            return;
+        };
+        let marker = json!({"version":1,"generation":generation}).to_string();
+        let name = "workspace-stop.json";
+        if let Ok(store) = Store::lock(&self.state, false) {
+            let previous = store.read(name).ok().flatten();
+            let _ = store.replace(
+                name,
+                &Store::revision(previous.as_deref()),
+                marker.as_bytes(),
+            );
+        }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while probe_lock(&lock) == LockState::Held && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
+}
+
+#[test]
+fn cleanup_ends_a_detached_connector_through_its_own_stop_marker() {
+    let encrypted = Encrypted::new();
+    let (code, started) = encrypted.call("start", &json!({"expected_revision":encrypted.revision}));
+    assert_eq!(code, 0, "{started}");
+    let private = encrypted.state.parent().unwrap();
+    let bytes = std::fs::read(private.join("lifecycle").join(RECEIPT)).unwrap();
+    let receipt: Receipt = serde_json::from_slice(&bytes).unwrap();
+    let original = OriginalProcess::open(&ProcessIdentity {
+        pid: receipt.pid,
+        birth: receipt.birth,
+        image: receipt.image,
+    })
+    .unwrap();
+    original.verify().unwrap();
+    drop(encrypted);
+    assert!(original.verify().is_err(), "the connector is still running");
 }
 
 #[test]

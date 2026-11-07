@@ -149,7 +149,8 @@ try to replace the read-only runner proxies or the owner's Rustup.
 ## Native Windows preflight
 
 `scripts/ci/local-windows.py` reads the selected exact source's workflow and
-runs supported Bash bodies on Windows, with private profiles and verified
+materializes clean Git checkouts from that immutable commit, excluding staged,
+untracked and ignored files, then runs supported Bash bodies with private profiles and verified
 Python3.13.15, Node24 and Rust1.99.1 tools. The private root supplies public tool
 copies; no installer, global PATH or default-toolchain mutation is performed.
 The controller needs PyYAML. For example, within a coordinator-admitted slot:
@@ -165,7 +166,8 @@ user PATH entries removed and the actual MSVC linker selected ahead of Git's
 unrelated `link.exe`. Four workers and a 10 GiB free-space floor bound each run.
 `PRIVATE_ROOT/STOP` pauses before the next command and stops only the current
 original private job. Each gated worker joins a non-breakaway kill-on-close job
-before release. Completion waits for that job's physical settlement; no WMI,
+before release. An assignment refusal closes the unreleased gate and settles
+the same original worker. Completion waits for that job's physical settlement; no WMI,
 PID adoption, path wildcard cleanup or existing scheduled task is used.
 
 This is a private-profile preflight, not a Windows security sandbox. Use only

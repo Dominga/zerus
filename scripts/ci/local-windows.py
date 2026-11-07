@@ -103,6 +103,45 @@ def producer_ready(producer, commit, target):
                 all((target / name).is_file() and CI.file_digest(target / name) == digest
                     for name, digest in producer['files'].items()))
 
+
+
+def close_gate(process):
+    if process is not None and process.stdin is not None and not process.stdin.closed:
+        try:
+            process.stdin.close()
+        except BrokenPipeError:
+            pass
+
+
+def settle_original_worker(process):
+    """Settle this Popen's original handle, including pre-assignment refusal."""
+    if process is None:
+        return
+    try:
+        close_gate(process)
+    except OSError:
+        process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+def immutable_checkout(repository, commit, destination, environment):
+    """Materialize only Git objects; the caller's index/worktree are not input."""
+    subprocess.run(['git', '-c', 'core.autocrlf=false', '-c', 'core.hooksPath=/dev/null',
+                    'clone', '--shared', '--no-checkout', str(repository), str(destination)],
+                   env=environment, check=True, stdout=subprocess.DEVNULL, timeout=120)
+    subprocess.run(['git', '-C', str(destination), '-c', 'core.autocrlf=false',
+                    '-c', 'core.hooksPath=/dev/null', 'checkout', '--detach', commit],
+                   env=environment, check=True, stdout=subprocess.DEVNULL, timeout=120)
+    if CI.git(destination, 'rev-parse', 'HEAD') != commit:
+        raise RuntimeError('private checkout does not match selected commit')
+
 def vc_environment(root):
     vswhere = Path(os.environ['ProgramFiles(x86)']) / 'Microsoft Visual Studio/Installer/vswhere.exe'
     selected = subprocess.check_output([str(vswhere), '-latest', '-products', '*', '-requires',
@@ -144,11 +183,16 @@ class Runner:
             self.report['tool_versions'][name] = dict(exit_code=result.returncode, version=result.stdout.strip())
             if result.returncode:
                 raise RuntimeError('private tool failed: ' + name)
+        if not re.fullmatch(r'v24\.[0-9]+\.[0-9]+', self.report['tool_versions']['node']['version']):
+            raise RuntimeError('wrong private Node major; Node24 required')
         if self.report['tool_versions']['python']['version'] != 'Python 3.13.15':
             raise RuntimeError('wrong private Python version')
-        spec = importlib.util.spec_from_file_location('owned_job', self.args.repo / 'scripts/ci/outside-job.py')
+        self.snapshot = self.output / 'snapshot'
+        immutable_checkout(self.args.repo, self.report['commit'], self.snapshot,
+                           self.environment(self.output / 'source-home'))
+        spec = importlib.util.spec_from_file_location('owned_job', self.snapshot / 'scripts/ci/outside-job.py')
         self.custody = importlib.util.module_from_spec(spec); spec.loader.exec_module(self.custody)
-        self.report['custody_source_sha256'] = CI.file_digest(self.args.repo / 'scripts/ci/outside-job.py')
+        self.report['custody_source_sha256'] = CI.file_digest(self.snapshot / 'scripts/ci/outside-job.py')
         self.report.update(workers=4, min_free_gib=10, slot_until=self.args.until)
         harness = self.output / 'harness'; harness.mkdir()
         for path in Path(__file__).parent.glob('local*.py'):
@@ -166,7 +210,7 @@ class Runner:
                       'c:\\program files (x86)\\windows kits', 'c:\\program files (x86)\\microsoft visual studio'))]
         paths += ['C:/Windows/System32', 'C:/Windows', 'C:/Strawberry/c/bin', 'C:/Program Files/Git/usr/bin']
         env = {name: value for name, value in os.environ.items() if name.upper() in
-               {'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'SYSTEMDRIVE', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMDATA'}}
+               {'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'SYSTEMDRIVE', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMDATA', 'COMPUTERNAME'}}
         env.update(self.sdk)
         env.update(HOME=str(home), USERPROFILE=str(home), APPDATA=str(home / 'AppData/Roaming'),
                    LOCALAPPDATA=str(home / 'AppData/Local'), TEMP=str(temporary), TMP=str(temporary),
@@ -183,7 +227,8 @@ class Runner:
 
     def run_job(self, job):
         workspace = self.output / 'checkouts' / job['id'];workspace.parent.mkdir(exist_ok=True)
-        shutil.copytree(self.args.repo, workspace, ignore=shutil.ignore_patterns('target', 'artifacts', '__pycache__'))
+        immutable_checkout(self.snapshot, self.report['commit'], workspace,
+                           self.environment(self.output / 'homes' / job['id']))
         subprocess.run(['cmd.exe', '/d', '/c', 'mklink', '/J', str(workspace / 'target'), str(self.target)], check=True,
                        stdout=subprocess.DEVNULL, env=self.environment(self.output / 'homes' / job['id']))
         job['checkout'] = str(workspace)
@@ -229,7 +274,7 @@ class Runner:
             print('RUN', job['id'], step['name'], flush=True)
             try:
                 with log.open('wb') as stream:
-                    process = subprocess.Popen([str(self.python), '-I', str(self.args.repo / 'scripts/ci/outside-job.py'), '--action', str(spec)],
+                    process = subprocess.Popen([str(self.python), '-I', str(self.snapshot / 'scripts/ci/outside-job.py'), '--action', str(spec)],
                                                cwd=workspace / directory, env=environment, stdin=subprocess.PIPE,
                                                stdout=stream, stderr=subprocess.STDOUT)
                     self.custody.assign_job(job_handle, int(process._handle))
@@ -252,9 +297,13 @@ class Runner:
             except (RuntimeError, OSError) as error:
                 step.update(status='fail', reason=str(error))
             finally:
-                self.custody.close_job(job_handle)
-                if process:
-                    process.wait(timeout=10)
+                try:
+                    close_gate(process)
+                finally:
+                    try:
+                        self.custody.close_job(job_handle)
+                    finally:
+                        settle_original_worker(process)
                 step.update(seconds=round(time.time() - step['started_at'], 2), log_sha256=CI.file_digest(log))
                 job['status'] = CI.summarize(job['steps']);CI.save(self.output / 'report.json', self.report)
             print(step['status'].upper(), job['id'], step['name'], step['seconds'], flush=True)
@@ -270,9 +319,7 @@ def main():
     args = parser.parse_args()
     if os.name != 'nt':parser.error('requires Windows')
     commit = CI.resolve(args.repo, args.sha)
-    if CI.git(args.repo, 'rev-parse', 'HEAD') != commit or CI.git(args.repo, 'diff', '--name-only'):
-        parser.error('private repo must be clean at the exact selected source')
-    workflow_bytes = (args.repo / CI.WORKFLOW).read_bytes()
+    workflow_bytes = subprocess.check_output(['git', '-C', str(args.repo), 'show', commit + ':' + CI.WORKFLOW])
     report = dict(version=1, commit=commit, platform='native Windows owner-machine preflight', completed=False,
                   workflow_sha256=CI.digest(workflow_bytes), runner_sha256=CI.file_digest(Path(__file__)),
                   jobs=plan(CI.load_workflow(workflow_bytes), set(args.jobs.split(',')) if args.jobs else None))

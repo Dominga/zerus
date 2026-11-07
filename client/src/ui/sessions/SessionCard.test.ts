@@ -18,12 +18,58 @@ import type { Session } from "./types";
 import { toSession } from "../../store/catalog";
 import { currentChildren, workingChildren } from "./subagents";
 import { groupRows } from "./group-rows";
-import { stripChildStatus } from "./SessionList";
+import { sessionRowName, stripChildStatus } from "./SessionList";
+import { setNow } from "../../store/ui";
+import type { Row } from "./group-rows";
+import type { CreationCard } from "../../types";
 import contract from "../../../../mobile/android/app/src/test/resources/subagent-caption-contract.json";
 
 const row = (extra: Partial<Session> = {}): Session => ({
   computer: "", state: "running", status: "ready", unread: false, unreadReply: true, unreadCandidate: false, draft: false, ...extra,
 }) as Session;
+
+describe("session tree item names", () => {
+  const card = (extra: Partial<Session> = {}, shape: Partial<Extract<Row, { type: "card" }>> = {}): Row => ({
+    type: "card", id: "fixture", expandable: false, expanded: false, compactRow: false,
+    session: row({ title: "Reviewer", caption: "Ready", cwd: "/fixture/project", project: "Example", machine: "Fixture PC", ...extra }), ...shape,
+  });
+  beforeEach(() => mocks.online.mockReturnValue(true));
+
+  it("names full, compact and nested rows from the same display identity", () => {
+    for (const shape of [{}, { compactRow: true }, { depth: 1, parentKey: "parent" }]) {
+      expect(sessionRowName(card({}, shape))).toBe("Reviewer, Ready, project, Fixture PC");
+    }
+    expect(sessionRowName(card({ cwd: "" }))).toBe("Reviewer, Ready, Example, Fixture PC");
+  });
+
+  it("follows attention, draft, offline and renamed content without a ticking name", () => {
+    expect(sessionRowName(card({ status: "attention", caption: "Needs input", title: "Review changed", cwd: "C:\\fixture\\next", machine: "Other PC" })))
+      .toBe("Review changed, Needs input, next, Other PC");
+    expect(sessionRowName(card({ draft: true }))).toContain(", Draft,");
+    const working = card({ status: "working", caption: "Working", turnStarted: 100 });
+    setNow(110); const first = sessionRowName(working);
+    setNow(120); expect(sessionRowName(working)).toBe(first);
+    expect(first).toBe("Reviewer, Working, project, Fixture PC");
+    mocks.online.mockReturnValue(false);
+    expect(sessionRowName(working)).toBe("Reviewer, Offline, project, Fixture PC");
+  });
+
+  it("includes the parent's child count in both compact and full rows", () => {
+    for (const compactRow of [false, true]) expect(sessionRowName(card({}, { compactRow,
+      team: { total: 8, working: 3, collapsed: true } }))).toContain("8 child sessions, collapsed");
+  });
+
+  it("names native children using their current or recorded status, and names creation rows", () => {
+    const parent = row({ title: "Parent", cwd: "/fixture/project", machine: "Fixture PC", activity: "idle" });
+    const child: Row = { type: "child", id: "child", parent, child: { id: "child", name: "Helper", state: "attention", summary: "" }, first: true, last: true };
+    expect(sessionRowName(child)).toBe("Helper, Needs input, project, Fixture PC");
+    expect(sessionRowName(card({ subagents: [child.child] }))).toContain("Subagents: 1");
+    mocks.online.mockReturnValue(false);
+    expect(sessionRowName(child)).toBe("Helper, Recorded, project, Fixture PC");
+    const creation = { tag: "Preparing review", host: "", machine: "Fixture PC", caption: "Preparing", target: "/fixture/next" } as CreationCard;
+    expect(sessionRowName({ type: "creation", id: "creation", creation })).toBe("Preparing review, Fixture PC, Preparing, /fixture/next");
+  });
+});
 
 describe("supervised child presentation (zerus-sa9qn.3)", () => {
   it("shows a quiet child's request, reply and error in gray, and its Review later mark as usual", () => {

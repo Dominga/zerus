@@ -72,16 +72,20 @@ def private_bus(scratch):
                 child.wait(timeout=3)
 
 
-def check_lists(expected, process_id, descriptions=None):
+def check_lists(expected, process_id, descriptions=None, tree_items=None):
     """Call off the GTK thread: AT-SPI requests must be served by that thread."""
     import gi
     gi.require_version("Atspi", "2.0")
     from gi.repository import Atspi
     expected = [] if expected is None else expected
     descriptions = [] if descriptions is None else descriptions
+    tree_items = [] if tree_items is None else tree_items
     if (not isinstance(expected, list) or len(expected) > 8
-            or not isinstance(descriptions, list) or len(descriptions) > 16 or not (expected or descriptions)):
+            or not isinstance(descriptions, list) or len(descriptions) > 16
+            or not isinstance(tree_items, list) or len(tree_items) > 100 or not (expected or descriptions or tree_items)):
         raise ValueError("Expected bounded accessibility lists or descriptions")
+    if not all(isinstance(name, str) and 0 < len(name) <= 500 for name in tree_items):
+        raise ValueError("Malformed accessibility tree item expectation")
     for entry in expected:
         if (not isinstance(entry, dict) or not isinstance(entry.get("name"), str) or len(entry["name"]) > 160
                 or not isinstance(entry.get("buttons"), list) or len(entry["buttons"]) > 100
@@ -96,6 +100,7 @@ def check_lists(expected, process_id, descriptions=None):
     end = time.monotonic() + 5
     observed = []
     observed_descriptions = []
+    observed_tree_items = []
     error = ""
     while time.monotonic() < end:
         nodes = []
@@ -148,14 +153,19 @@ def check_lists(expected, process_id, descriptions=None):
                         items.append(buttons)
                 observed.append({"name": name, "items": items})
             observed_descriptions = [{"name": name, "description": description} for _, _, name, description in nodes if name in described_names]
+            observed_tree_items = [name for _, role, name, _ in nodes if role == Atspi.Role.TREE_ITEM]
             if (all(any(row["name"] == entry["name"] and len(row["items"]) == len(entry["buttons"])
                        and all(len(buttons) == 1 and buttons[0].startswith(label)
                                for buttons, label in zip(row["items"], entry["buttons"]))
                        for row in observed) for entry in expected)
-                    and all(entry in observed_descriptions for entry in descriptions)):
-                return {"accessibility": observed, "native_descriptions": observed_descriptions, "accessibility_nodes": len(nodes)}
+                    and all(entry in observed_descriptions for entry in descriptions)
+                    and all(name in observed_tree_items for name in tree_items)):
+                return {"accessibility": observed, "native_descriptions": observed_descriptions,
+                        "native_tree_items": observed_tree_items, "accessibility_nodes": len(nodes)}
         except Exception as failure:
             error = str(failure)
         time.sleep(.1)
-    mismatch = "Native accessibility description did not match" if descriptions else "Native list/item/button structure did not match"
-    return {"accessibility": observed, "native_descriptions": observed_descriptions, "accessibility_failure": error or mismatch}
+    mismatch = ("Native tree item names did not match" if tree_items else
+                "Native accessibility description did not match" if descriptions else "Native list/item/button structure did not match")
+    return {"accessibility": observed, "native_descriptions": observed_descriptions,
+            "native_tree_items": observed_tree_items, "accessibility_failure": error or mismatch}

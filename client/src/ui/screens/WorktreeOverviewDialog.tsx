@@ -1,3 +1,4 @@
+import { TextInput } from "../lib/TextField";
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import { listen } from "@tauri-apps/api/event";
 import { Icon } from "../lib/icons";
@@ -74,7 +75,7 @@ export default function WorktreeOverviewDialog(props: { projects: Project[]; all
     <dialog ref={dialog} class="dlg su-dlg worktree-overview" aria-labelledby="worktree-overview-title" style={{ width: "min(1180px, calc(100vw - 48px))", height: "min(760px, calc(100vh - 48px))", position: "fixed", inset: "0", margin: "auto" }} onCancel={(event) => { event.preventDefault(); props.close(); }}>
       <div class="dlg-head"><Icon name="folder-git-2" size={18} class="accent" /><h2 id="worktree-overview-title">{tr("Worktrees")}</h2><span class="grow" /><button class="icon-btn" aria-label={tr("Close")} onClick={props.close}><Icon name="x" size={16} /></button></div>
       <div class="dlg-body wto-body">
-        <div class="row wto-toolbar"><input class="field grow" type="search" placeholder={tr("Search worktrees…")} aria-label={tr("Search folder, branch, project or session")} maxLength={4096} value={filter().search} onInput={(event) => change({ search: event.currentTarget.value })} />
+        <div class="row wto-toolbar"><TextInput class="field grow" type="search" placeholder={tr("Search worktrees…")} aria-label={tr("Search folder, branch, project or session")} maxLength={4096} value={filter().search} onInput={(event) => change({ search: event.currentTarget.value })} />
           <button ref={filtersButton} class="btn" aria-haspopup="dialog" classList={{ on: !!(filter().project || filter().computer || filter().category !== null || filter().show_main) }} onClick={showFilters}><Icon name="list-filter" size={14} />{tr("Filters")}</button>
           <div ref={filters} class="su-popover wto-filters" popover="auto" role="dialog" aria-label={tr("Filters")}>
             <div class="form-row"><label for="wto-project">{tr("Project")}</label><select id="wto-project" class="field" value={filter().project} onChange={(e) => change({ project: e.currentTarget.value })}><option value="">{tr("All projects")}</option><For each={props.projects}>{(p) => <option value={p.id}>{p.name}</option>}</For></select></div>

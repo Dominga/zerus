@@ -1,3 +1,4 @@
+import { TextInput } from "../../lib/TextField";
 import { desktopService, serviceApprovalIntent } from "../../../store/desktopService";
 import { Show, createSignal, onCleanup, onMount } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
@@ -63,9 +64,9 @@ export function ApprovalsSection() {
 
       <Group title={trNoop("Approval journal")}>
         <Actions>
-          <input class="field grow" placeholder={tr("Exact computer name (optional)")} aria-label={tr("Exact computer name (optional)")}
+          <TextInput class="field grow" placeholder={tr("Exact computer name (optional)")} aria-label={tr("Exact computer name (optional)")}
             value={host()} onInput={(e) => { setHost(e.currentTarget.value); edited(); }} />
-          <input class="field grow" placeholder={tr("Exact session name (optional)")} aria-label={tr("Exact session name (optional)")}
+          <TextInput class="field grow" placeholder={tr("Exact session name (optional)")} aria-label={tr("Exact session name (optional)")}
             value={session()} onInput={(e) => { setSession(e.currentTarget.value); edited(); }} />
           <button type="button" class="btn" onClick={firstPage}><Icon name="refresh-cw" size={13} />{tr("Refresh")}</button>
         </Actions>

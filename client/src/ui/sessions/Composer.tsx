@@ -1,3 +1,5 @@
+import { replaceText } from "../lib/text-edit";
+import { TextArea } from "../lib/TextField";
 import { Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import { createVoice, voicePort } from "../../store/voice";
 import { VoiceToolbar, VoicePreview } from "./VoiceControls";
@@ -198,7 +200,6 @@ export function Composer() {
   const handedBack = createMemo(() => `${v()?.handle ?? ""}:${v()?.text_epoch ?? ""}`);
   createEffect(on(handedBack, () => {
     const sel = composer.selection();
-    if (editor.value !== composer.text()) editor.value = composer.text();
     const start = Math.min(sel.start, sel.end), end = Math.max(sel.start, sel.end);
     try { editor.setSelectionRange(start, end, sel.start <= sel.end ? "forward" : "backward"); } catch { /* not rendered */ }
   }));
@@ -214,11 +215,10 @@ export function Composer() {
     if (e.isComposing || e.keyCode === 229) return;
     if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
       const next = suggestedInput(composer.text(), suggestion() ?? "", composer.locked());
-      if (next) {
+      if (next && replaceText(editor, next)) {
         e.preventDefault();
-        editor.value = next;
         editor.setSelectionRange(next.length, next.length);
-        composer.input(next, next.length, next.length);
+        composer.select(next.length, next.length);
       }
       return;
     }
@@ -246,7 +246,7 @@ export function Composer() {
     addEventListener("keydown", stopVoice, true); addEventListener("blur", blurVoice);
     onCleanup(() => { removeEventListener("keydown", stopVoice, true); removeEventListener("blur", blurVoice); });
     // Composer chords go through the window router (store/shortcuts.ts) while the focus is in the field.
-    const stops = [onCommand("message.send", () => { void composer.send(); }, editor)];
+    const stops = [onCommand("message.send", () => { void composer.send(); }, () => editor)];
     const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(() => setCompact(root.clientWidth < COMPACT_WIDTH * contentScale()));
     observer?.observe(root);
     onCleanup(() => { for (const stop of stops) stop(); observer?.disconnect(); void composer.flush(); });
@@ -254,7 +254,7 @@ export function Composer() {
   createEffect(() => {
     if (!composer.pushEnabled()) return;
     // Remove the action when disabled, so Cut keeps its keys (Qt 841-853).
-    const stop = onCommand("message.push", () => { void composer.push(); }, editor);
+    const stop = onCommand("message.push", () => { void composer.push(); }, () => editor);
     onCleanup(stop);
   });
 
@@ -306,7 +306,7 @@ export function Composer() {
         <SessionUsageChip />
       </div>
       <VoicePreview voice={voice} />
-      <textarea ref={editor} class="cmp-editor" hidden={!input()} style={{ height: `${editorHeight() * contentScale()}px` }} aria-label={tr("Message to selected agent")}
+      <TextArea ref={editor} historyKey={handedBack()} class="cmp-editor" hidden={!input()} style={{ height: `${editorHeight() * contentScale()}px` }} aria-label={tr("Message to selected agent")}
         placeholder={suggestion() || tr("Message this agent…")} readOnly={composer.locked()} disabled={!v()} value={composer.text()} title={editorTip()}
         onInput={(e) => { const c = caret(); composer.input(e.currentTarget.value, c.anchor, c.position); }}
         onSelect={remember} onKeyUp={remember} onMouseUp={remember}

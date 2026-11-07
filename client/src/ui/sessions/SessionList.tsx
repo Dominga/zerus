@@ -1,3 +1,4 @@
+import { TextInput } from "../lib/TextField";
 import { inspectSession, sessionFolderStatus } from "../../bridge";
 import { folderEntries, folderRequest, type FolderStatus } from "../../store/sessionFolders";
 import { groupOf } from "../../store/organization";
@@ -650,7 +651,7 @@ export function SessionList() {
           <button class="icon-btn hd" data-tip={tr("Session and machine actions")} onClick={(e) => openMenu(e, batchMenu())}><Icon name="more" size={18} /></button>
         </header>
         <div class="sp-search">
-          <input class="field" type="search" maxLength={256} placeholder={stateFilter() === "archived" ? tr("Search archive names and IDs…") : tr("Search sessions, IDs and messages…")} value={search()}
+          <TextInput class="field" type="search" maxLength={256} placeholder={stateFilter() === "archived" ? tr("Search archive names and IDs…") : tr("Search sessions, IDs and messages…")} value={search()}
             onInput={(e) => setSearch(e.currentTarget.value)} onFocus={() => setSearchFocused(true)} onBlur={() => setSearchFocused(false)}
             onKeyDown={(e) => {
               if (e.key === "Escape") setSearch("");

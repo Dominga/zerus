@@ -2249,5 +2249,21 @@
   "Attempt %1": "Попытка %1",
   "Show less": "Свернуть",
   "Task #%1": "Задача #%1",
-  "Task: %1": "Задача: %1"
+  "Task: %1": "Задача: %1",
+  "%1 is offline": "%1 не в сети",
+  "Not found on this computer": "Не найден на этом компьютере",
+  "On %1, click to play": "На %1, нажмите, чтобы воспроизвести",
+  "The file reference is invalid.": "Ссылка на файл недействительна.",
+  "The session folder is unknown": "Папка сессии неизвестна",
+  "This picture cannot be shown.": "Это изображение не удаётся показать.",
+  "Too large for a preview": "Слишком большой для предпросмотра",
+  "%1 — Zerus": "%1 — Zerus",
+  "Open in default app": "Открыть в приложении по умолчанию",
+  "Play": "Воспроизвести",
+  "Play %1": "Воспроизвести %1",
+  "Play / pause": "Воспроизвести / пауза",
+  "This video cannot be played.": "Это видео не удаётся воспроизвести.",
+  "Video message": "Видеосообщение",
+  "Loading %1 from %2…": "Загрузка %1 с %2…",
+  "Media": "Медиа"
 }

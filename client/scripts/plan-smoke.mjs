@@ -3,11 +3,12 @@
 // panel's sections and tabs (page "side-panel": scripts/side-panel-smoke.html,
 // src/perf/sidePanelSmoke.tsx) beside Qt's ux-6-inspector shots; task 208: the
 // Activity view's system notices (page "activity-notices") beside Qt's
-// activity-whitewh shot. Starts Vite and a
+// activity-whitewh shot; task 248: the media an agent names (page "agent-media").
+// Starts Vite and a
 // headless Chrome of its own (a new, empty profile under the output folder),
 // drives it over CDP only (Page.captureScreenshot; no OS input, no screen
 // capture), and closes both. No CLI, session or owner data is opened.
-//   node scripts/plan-smoke.mjs <output folder> [chrome.exe] [plan|side-panel|activity-notices]
+//   node scripts/plan-smoke.mjs <output folder> [chrome.exe] [plan|side-panel|activity-notices|agent-media]
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -65,8 +66,10 @@ try {
   await cdp.send("Emulation.setDeviceMetricsOverride", page === "side-panel"
     ? { width: 440, height: 1000, deviceScaleFactor: 1, mobile: false }
     : page === "activity-notices" ? { width: 760, height: 1100, deviceScaleFactor: 1, mobile: false }
+    : page === "agent-media" ? { width: 760, height: 1000, deviceScaleFactor: 1, mobile: false }
     : { width: 1180, height: 900, deviceScaleFactor: 1, mobile: false });
-  const cases = page === "activity-notices" ? [["activity-dark", "skin=whitewh-dark"], ["activity-light", "skin=whitewh-light"]] : page === "side-panel" ? [
+  const cases = page === "agent-media" ? [["media-dark", "skin=whitewh-dark"], ["media-light", "skin=whitewh-light"], ["media-viewer-dark", "skin=whitewh-dark&viewer=1"]]
+    : page === "activity-notices" ? [["activity-dark", "skin=whitewh-dark"], ["activity-light", "skin=whitewh-light"]] : page === "side-panel" ? [
     ["sections-dark", "skin=whitewh-dark"], ["sections-light", "skin=whitewh-light"], ["sections-folded-dark", "skin=whitewh-dark&fold=1"],
     ["tabs-dark", "skin=zerus-dark"],
   ] : [
@@ -84,7 +87,9 @@ try {
     if (!title.endsWith(": ready")) throw new Error(`${name}: the page never said it was ready (${title})`);
     await sleep(600);
     const errors = (await cdp.send("Runtime.evaluate", {
-      expression: page === "activity-notices"
+      expression: page === "agent-media"
+        ? "JSON.stringify({tiles: [...document.querySelectorAll('.media-tile')].map((e) => e.dataset.media + ': ' + (e.querySelector('.media-note')?.textContent ?? 'shown')), viewer: document.querySelector('dialog.media-viewer[open] h2')?.textContent ?? ''})"
+        : page === "activity-notices"
         ? "JSON.stringify([...document.querySelectorAll('.act-msg')].map((e) => e.className.replace('act-msg ', '') + ': ' + (e.querySelector('header b')?.textContent ?? '')))"
         : page === "side-panel"
         ? "JSON.stringify({sections: [...document.querySelectorAll('.insp-sections > [data-section]')].map((e) => e.dataset.section + (e.classList.contains('closed') ? ' (folded)' : '')), tabs: document.querySelectorAll('.insp-tabs .tab').length})"

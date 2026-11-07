@@ -695,9 +695,9 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 let app = ctx.app_handle().clone();
                 tauri::async_runtime::spawn_blocking(move || {
                     let response = match app.try_state::<composer::Composers>() {
-                        Some(composers) => composer::files::respond(&composers, &webview, &request, |computer, key, message| {
+                        Some(composers) => composer::files::respond_with(&composers, &webview, &request, |computer, key, message| {
                             app.try_state::<commands::AppState>()?.pump().poster(computer, key, message)
-                        }),
+                        }, |token| app.try_state::<std::sync::Arc<session_files::SessionFiles>>()?.media_path(token)),
                         None => tauri::http::Response::builder().status(404).body(Vec::new()).expect("a bare 404"),
                     };
                     responder.respond(response);
@@ -1975,6 +1975,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         session_files::session_file_external,
         session_files::session_file_act,
         session_files::session_file_close,
+        session_files::media::session_media,
+        session_files::media::session_media_external,
         composer::saved::saved_drafts,
         composer::saved::saved_draft,
         composer::saved::draft_conflicts,

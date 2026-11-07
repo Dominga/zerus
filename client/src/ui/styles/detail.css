@@ -390,9 +390,22 @@
   .irow-val.mono { font-size: .94em; }
   .irow-label { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--z-color-dim); }
   .irow .icon-btn.small { flex: none; margin-right: -4px; }
-  /* The copy button shows on hover or keyboard focus, so values stay uncluttered (owner 2026-11-07). */
-  .irow .irow-copy { opacity: 0; transition: opacity .12s; }
-  .irow:hover .irow-copy, .irow:focus-within .irow-copy { opacity: 1; }
+  /* A copyable row highlights on hover or keyboard focus and shows its copy mark (owner 2026-11-07).
+     The mark takes no space, so labels and numbers stay aligned with plain rows: in a Details
+     row it replaces the label at the right end; in Session usage it sits just left of the number. */
+  .copy-mark { position: absolute; display: grid; place-items: center; color: var(--z-color-muted); opacity: 0; pointer-events: none; transition: opacity .12s; }
+  .copyable { cursor: pointer; }
+  .copyable:hover .copy-mark, .copyable:focus-visible .copy-mark { opacity: 1; }
+  button.irow.copyable { position: relative; }
+  button.irow.copyable .copy-mark { top: 0; bottom: 0; right: 6px; }
+  button.irow.copyable .irow-label { transition: opacity .12s; }
+  button.irow.copyable:hover .irow-label, button.irow.copyable:focus-visible .irow-label { opacity: 0; }
+  .usage .u-val { position: relative; }
+  .usage .u-val .copy-mark { top: 0; bottom: 0; right: calc(100% + 6px); }
+  .usage tr.copyable td { transition: background var(--z-motion-fast); }
+  .usage tr.copyable:hover td, .usage tr.copyable:focus-visible td { background: var(--z-color-hover); }
+  .usage tr.copyable:focus-visible { outline: none; }
+  .usage tr.copyable:focus-visible td { box-shadow: inset 0 1px 0 var(--z-color-accent), inset 0 -1px 0 var(--z-color-accent); }
   .irow.done .irow-ico { color: var(--z-color-accent); }
   .irow.doing .irow-ico { color: var(--z-color-warn); }
   .irow.agent.working .irow-label { color: var(--z-color-status-working); }

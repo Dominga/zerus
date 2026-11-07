@@ -25,3 +25,16 @@ Status and your session show "parked until <condition>, ETA <time>", never
 Building. Done anyway? Report on the parked attempt as usual. The lead (or
 you) gives it back early: {"team":"ID","task":N,"reason":"..."} |
 hgs team unpark --json. The lead also parks a member's task.
+
+Zerus enforces it. hgs run refuses a job that waits (named a wait, or a
+sleep or ping loop around a check), naming this park. A turn that ends
+waiting gets the park offered. An attempt that runs a waiting job or
+repeats the same read-only check at intervals is parked by Zerus on a
+guessed condition; the lead is told once and sets the real one.
+
+Lead: waiting is always a park, never an instruction. hgs team reply and
+messages telling a member to wait for an install, a CI run, a card or a
+time are refused; answer a blocked member's question with a park:
+  {"team":"ID","question":"q1","text":"","park":{"condition":{...},
+   "eta_minutes":60}} | hgs team reply --json
+You get every park's outcome: met, failed with the reason, or overdue.

@@ -42,7 +42,8 @@ Members:
 - Shared folder: team-broker.
 - Codex on Windows: git-commit (read-only .git), powershell.exe (team-run).
 - Rights: a task needs a fitting member (hgs team rights).
-- Compacted: hgs team lore plans. Park: team-park
+- Compacted: hgs team lore plans. Waiting is always a park, never an
+  instruction: hgs guide team-park
 - A message naming a task its member lacks is refused: hand it out.
 - Cancel empty tasks first; all decided: extend/finish; owner stop is final
 Sub-teams: hgs guide team-tree

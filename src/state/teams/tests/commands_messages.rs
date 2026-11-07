@@ -125,3 +125,17 @@ fn a_lead_message_naming_a_task_binds_to_its_attempt_or_is_refused() {
         call("message", json!({"by":"human","to":"qa","text":"for 3: I changed my mind"})).unwrap();
     });
 }
+
+/// Task 161: the lead's message telling a member to wait for an outside
+/// event is refused with the park; an ordinary one goes.
+#[test]
+fn the_lead_never_messages_a_wait() {
+    let (team, _, _) = review_team();
+    with_review_team(&team, || {
+        as_lead(|| {
+            let error = call("message", json!({"to":"dev","text":"Keep your task and wait for the 1.58.0 install, then retest"})).unwrap_err().to_string();
+            assert!(error.starts_with("Waiting is a park, never an instruction") && error.contains("hgs team park --json"), "{error}");
+            call("message", json!({"to":"dev","text":"Rename the module first, then retest"})).unwrap();
+        });
+    });
+}

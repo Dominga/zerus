@@ -187,6 +187,11 @@ fn fields(input: &Value) -> Result<(String, String, PathBuf, u64)> {
         value => value.as_u64().filter(|m| (1..=MAX_MINUTES).contains(m))
             .ok_or(format!("timeout_minutes is 1 to {MAX_MINUTES}"))?,
     };
+    // Task 161: a job whose purpose is waiting is a park, never a build.
+    let script = super::teams::wait_loops::script_text(&command, &cwd);
+    if let Some(why) = super::teams::wait_loops::waiting_job(&label, &format!("{command}\n{script}")) {
+        return Err(super::teams::wait_loops::caller_job_refusal(&why));
+    }
     Ok((label, command, cwd, minutes))
 }
 
@@ -610,6 +615,21 @@ pub(crate) fn test_running_claim(id: &str, cwd: &Path, source: &str) -> PathBuf 
         "session":{},"started":now(),"timeout_secs":3600.0,"source":source,"pid":std::process::id()});
     storage::atomic(&running_path(id), &claim.to_string()).unwrap();
     running_path(id)
+}
+
+/// Task 161: a running job of a session, as a test sees it.
+#[cfg(test)]
+pub(crate) fn test_running_job(id: &str, label: &str, command: &str, session: Value, started: f64) -> PathBuf {
+    private_dir(&dir()).unwrap();
+    let claim = json!({"request_id":id,"label":label,"command":command,"cwd":".","session":session,"started":started,
+        "timeout_secs":36000.0,"source":"hgs_run","pid":std::process::id()});
+    storage::atomic(&running_path(id), &claim.to_string()).unwrap();
+    running_path(id)
+}
+
+/// Task 161: the live jobs of one session, for the wait-loop check.
+pub(crate) fn running_for(name: &str) -> Vec<Value> {
+    running(now()).into_iter().filter(|claim| claim["session"]["name"] == name).collect()
 }
 
 /// The builds running now, at most `MAX_RECORDS` claims read; the listing
@@ -1152,5 +1172,19 @@ pub(crate) mod tests {
             TEST_CALLER.with(|caller| *caller.borrow_mut() = None);
             assert!(dispatch(&["--bogus".into()]).is_err());
         });
+    }
+
+    /// Task 161: a job whose purpose is waiting is refused with the park; a
+    /// loop inside the script it names counts too.
+    #[test]
+    fn a_waiting_job_is_refused_with_the_park() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().display().to_string();
+        let error = fields(&json!({"label":"wait for 1.58.0 install","command":"hgs --version","cwd":cwd})).unwrap_err();
+        assert!(error.contains("a wait is a park, never a job") && error.contains("hgs team park --json"), "{error}");
+        std::fs::write(dir.path().join("check.cmd"), ":again\r\nhgs --version | findstr 1.58\r\nping -n 120 127.0.0.1 >nul\r\ngoto again\r\n").unwrap();
+        let error = fields(&json!({"label":"install check","command":"check.cmd","cwd":cwd})).unwrap_err();
+        assert!(error.contains("around a pause"), "{error}");
+        assert!(fields(&json!({"label":"cargo test","command":"cargo test --locked","cwd":cwd})).is_ok());
     }
 }

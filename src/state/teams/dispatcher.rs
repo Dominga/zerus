@@ -260,6 +260,9 @@ pub(crate) enum Step {
     HandOut { task: u32, member: String },
     /// Task 160: a parked task whose condition held goes back to its member.
     Resume { task: u32, member: String },
+    /// Task 161: look for a wait loop in a task's work (its runs, repeated
+    /// checks); one found becomes a park.
+    DetectWait { task: u32 },
     /// U45: switch the member's model and effort before it gets the task.
     SwitchModel { task: u32, member: String, from: String, model: String, effort: String },
     /// U45: the switch was not confirmed in time; the task waits for the lead.
@@ -1710,6 +1713,27 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     // Task 158 (owner, 2026-11-07): there is no work ahead or start ahead any
     // more; a draft's tasks wait for its approval, and an approved phase's
     // tasks are on the ready path above, alongside the phases before it.
+    // Task 161: a member's attempt that may have become a wait loop (its own
+    // waiting job, the same read-only check repeated) is looked at, at most
+    // every five minutes, ten minutes after its hand-out.
+    if team.status == TeamStatus::Running {
+        for task in team.tasks.iter().filter(|task| task.park.is_none()) {
+            let Some(attempt) = task.open_attempt() else { continue };
+            let Some(member) = team.member(&attempt.member).filter(|member| member.id != team.lead && member.session.is_some()) else { continue };
+            // Only a busy session (a turn or a run going on) can be looping.
+            let busy = member.session.as_ref().is_some_and(|session| seen.iter().any(|found| found.host == session.host && found.name == session.name && !found.free));
+            let start = attempt.delivered_at.unwrap_or(attempt.sent_at);
+            if attempt.state == AttemptState::Delivered
+                && attempt.report.is_none()
+                && attempt.open_question().is_none()
+                && now - start >= super::wait_loops::DETECT_AFTER
+                && now - attempt.wait_checked_at >= super::wait_loops::DETECT_EVERY
+                && busy
+            {
+                steps.push(Step::DetectWait { task: task.id });
+            }
+        }
+    }
     // Task 134: unread team messages ring at the member's next idle moment,
     // never into a busy composer, and once more past their bound; a member
     // given a task, a stage or a message this tick is not rung again (that
@@ -3374,7 +3398,107 @@ fn resume_parked(store: &mut Store, team: &Team, task_id: u32, member_id: &str) 
         events.push(Event::new("resumed", json!({"task":task_id,"member":park.member,"condition":super::park::label(&park.condition),
             "detail":park.detail,"unconfirmed":unconfirmed})));
         Ok(())
-    })
+    })?;
+    // Task 161: the lead gets every park's outcome; a failed or overdue one
+    // is in its inbox, a met one is told here.
+    tell_lead(store, team, "park", &format!(
+        "[Zerus team] Task #{task_id} ({}) is back with {}: its park ended, {} ({}).",
+        task.title,
+        team.name_of(&park.member),
+        super::park::label(&park.condition),
+        if park.detail.is_empty() { "condition met" } else { park.detail.as_str() }
+    ));
+    Ok(())
+}
+
+/// Task 161: one line for the lead, stored and rung; a refusal is left (the
+/// event journal has it).
+fn tell_lead(store: &mut Store, team: &Team, kind: &str, text: &str) {
+    let Some(lead) = team.member(&team.lead).and_then(|lead| lead.session.clone()) else { return };
+    let _ = super::doorbell::post_and_ring(store, &team.id, &team.lead, &lead, &uuid::Uuid::new_v4().to_string(), kind, "zerus", super::working::Urgency::Normal, text);
+}
+
+/// Task 161: a member's attempt that waits instead of working: a running job
+/// of its session whose purpose is waiting, or the same read-only check its
+/// turn repeated at intervals. Found, the task is parked on the condition
+/// Zerus guesses, the member is told to stop waiting, and the lead is told
+/// once with the guessed condition to correct.
+fn detect_wait(store: &mut Store, team: &Team, task_id: u32) -> anyhow::Result<()> {
+    let task = team.task(task_id).context("unknown task")?;
+    let attempt = task.open_attempt().context("no open attempt")?.clone();
+    let member = team.member(&attempt.member).context("unknown member")?.clone();
+    let session = member.session.clone().context("the member has no session")?;
+    let at = now();
+    let mut found: Option<(String, String)> = None;
+    if member.computer.is_empty() {
+        for claim in super::super::builds::running_for(&session.name) {
+            if claim["session"]["run_id"] != session.run_id.as_str() {
+                continue;
+            }
+            let label = claim["label"].as_str().unwrap_or_default();
+            let command = claim["command"].as_str().unwrap_or_default();
+            let cwd = std::path::PathBuf::from(claim["cwd"].as_str().unwrap_or("."));
+            let script = super::wait_loops::script_text(command, &cwd);
+            if let Some(why) = super::wait_loops::waiting_job(label, &format!("{command}\n{script}")) {
+                found = Some((format!("its run \"{label}\" ({why})"), format!("{label}\n{command}\n{script}")));
+                break;
+            }
+        }
+    }
+    if found.is_none() {
+        let events: Vec<Value> = hgs(&session.host, &["inspect", &session.name, "--after", "0"], None, Duration::from_secs(15))
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| serde_json::from_slice::<Value>(&output.stdout).ok())
+            .and_then(|value| value.get("events").and_then(Value::as_array).cloned())
+            .unwrap_or_default();
+        if let Some((command, times)) = super::wait_loops::repeated_check(&events, attempt.delivered_at.unwrap_or(attempt.sent_at)) {
+            found = Some((format!("it ran `{command}` {times} times at intervals"), command));
+        }
+    }
+    let Some((why, text)) = found else {
+        return change(store, &team.id, |team, _| {
+            if let Some(open) = team.task_mut(task_id).and_then(|task| task.attempts.iter_mut().find(|found| found.id == attempt.id)) {
+                open.wait_checked_at = at;
+            }
+            Ok(())
+        });
+    };
+    let (condition, what) = super::wait_loops::guess_condition(&text, at);
+    let mut parked = false;
+    change(store, &team.id, |team, events| {
+        if let Some(open) = team.task_mut(task_id).and_then(|task| task.attempts.iter_mut().find(|found| found.id == attempt.id)) {
+            open.wait_checked_at = at;
+        }
+        let request = json!({"task":task_id,"attempt":attempt.id,"condition":condition,"eta_minutes":super::wait_loops::GUESSED_ETA_MINUTES,
+            "note":format!("Parked by Zerus: the attempt was waiting ({why}).")});
+        let lead = ops::Actor::Member(team.lead.clone());
+        let mut inner = Vec::new();
+        if ops::apply(team, "park", &request, &lead, &BTreeSet::new(), &mut inner).is_ok() {
+            if let Some(park) = team.task_mut(task_id).and_then(|task| task.park.as_mut()) {
+                park.by = "Zerus (a wait loop)".into();
+            }
+            events.extend(inner);
+            events.push(Event::new("wait_parked", json!({"task":task_id,"member":member.id,"attempt":attempt.n,"why":why,"condition":what})));
+            parked = true;
+        }
+        Ok(())
+    })?;
+    if !parked {
+        return Ok(());
+    }
+    let _ = send(&session, &uuid::Uuid::new_v4().to_string(), &format!(
+        "[Zerus team] Your task #{task_id} was waiting ({why}), so Zerus parked it until {what}. Stop the wait now (end that job or loop) and end your turn: \
+Zerus watches the condition and gives the task back to you; take your next task meanwhile. A wait is always a park: hgs guide team-park."
+    ));
+    tell_lead(store, team, "park", &format!(
+        "[Zerus team] Task #{task_id} ({}) of {} was a wait loop ({why}); Zerus parked it until {what} (a guess, ETA {} min). \
+Set the real condition with hgs team unpark and hgs team park, or leave it.",
+        task.title,
+        team.name_of(&member.id),
+        super::wait_loops::GUESSED_ETA_MINUTES
+    ));
+    Ok(())
 }
 
 pub(crate) fn send(session: &SessionRef, request_id: &str, text: &str) -> Sent {
@@ -7444,6 +7568,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
     }
     match step {
         Step::Resume { task, member } => resume_parked(store, team, *task, member),
+        Step::DetectWait { task } => detect_wait(store, team, *task),
         Step::Brief => send_brief(store, &team.id),
         Step::AllDecided => send_all_decided(store, &team.id),
         Step::Permission { member } => sync_permission(store, team, member),
@@ -8022,9 +8147,38 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                     }
                 }
                 Ok(())
-            })
+            })?;
+            // Task 161: a turn that ended waiting or blocked on an outside
+            // event is offered the park, never kept as a wait.
+            let reply = team_reply(store, &team.id, *task);
+            if let (Some(attempt), Some(session)) = (attempt, session) {
+                if super::wait_loops::waiting_reply(&reply) {
+                    let (condition, what) = super::wait_loops::guess_condition(&reply, now());
+                    let request = json!({"team":team.id,"task":task,"attempt":attempt.id,"condition":condition,"eta_minutes":60,"note":"..."});
+                    let _ = send(&session, &uuid::Uuid::new_v4().to_string(), &format!(
+                        "[Zerus team] Your turn on task #{task} ended waiting. A wait is a park, never a turn or a loop: {request} | hgs team park --json \
+(a guess: until {what}; conditions ci, build, task, card, time; hgs guide team-park). Zerus watches it, gives the task back to you and tells the lead. \
+Otherwise finish with hgs team report."
+                    ));
+                    let _ = change(store, &team.id, |_, events| {
+                        events.push(Event::new("park_offered", json!({"task":task,"attempt":attempt.n,"until":what})));
+                        Ok(())
+                    });
+                }
+            }
+            Ok(())
         }
     }
+}
+
+/// Task 161: the last reply kept on a task's newest attempt.
+fn team_reply(store: &Store, team_id: &str, task_id: u32) -> String {
+    store
+        .load(team_id)
+        .ok()
+        .flatten()
+        .and_then(|team| team.task(task_id).and_then(|task| task.attempts.last()).map(|attempt| attempt.last_reply.clone()))
+        .unwrap_or_default()
 }
 
 /// After a restart nothing is re-sent: an attempt or report notice that was
@@ -9116,6 +9270,9 @@ mod dispatcher_shadow;
 #[cfg(test)]
 #[path = "tests/dispatcher_park.rs"]
 mod dispatcher_park;
+#[cfg(test)]
+#[path = "tests/dispatcher_wait_loops.rs"]
+mod dispatcher_wait_loops;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_areas.rs"]

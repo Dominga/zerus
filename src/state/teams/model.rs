@@ -1718,6 +1718,10 @@ pub(crate) struct Attempt {
     /// newest last, at most 20: a lead message naming the task is bound here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lead_messages: Vec<serde_json::Value>,
+    /// Task 161: when Zerus last looked for a wait loop in this attempt's
+    /// work (its runs and repeated checks), at most every five minutes.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub wait_checked_at: f64,
     /// The member's turn ended long enough ago without a report.
     #[serde(default)]
     pub no_report: bool,

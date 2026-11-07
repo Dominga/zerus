@@ -57,7 +57,10 @@ exec env CARGO_TARGET_DIR=/mnt/build /usr/bin/cargo "$@"
         destination.write_bytes(script.read_bytes())
         environment = dict(environment, HOME="/root", PATH="/usr/local/bin:/usr/bin:/bin",
                            GITHUB_WORKSPACE="/mnt/workspace", GITHUB_OUTPUT="/mnt/metadata/output",
-                           RUNNER_TEMP="/tmp/runner", TMPDIR="/tmp", CARGO_HOME="/home/user/.cargo")
+                           RUNNER_TEMP="/tmp/runner", TMPDIR="/tmp", CARGO_HOME="/home/user/.cargo",
+                           XDG_CONFIG_HOME="/home/user/.config", XDG_DATA_HOME="/home/user/.local/share",
+                           XDG_STATE_HOME="/home/user/.local/state", XDG_CACHE_HOME="/home/user/.cache",
+                           XDG_RUNTIME_DIR="/home/user/.runtime")
         for name in ("RUSTUP_HOME", "RUSTUP_TOOLCHAIN", "CARGO_TARGET_DIR", "DBUS_SESSION_BUS_ADDRESS"):
             environment.pop(name, None)
         command = ["docker", "exec", "--workdir", str(Path("/mnt/workspace") / directory)]

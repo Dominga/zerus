@@ -571,7 +571,10 @@ attempt; a replacement pending ID cancels the old intent. This watcher does not
 promise execution after Android stops the application.
 
 Details presents the agent's task lists, goal and reported usage, subagent
-activity, and native process inventory. Completing a response is independent of
+activity, and native process inventory. When the computer reports it, Details
+also shows the session's Keep cache warm setting and status read only; the phone
+cannot change it yet. A running keep-warm ping reads **Warming cache**, not
+Working, and is not current work (docs/reference.md, Keep cache warm). Completing a response is independent of
 completing a goal. Historical or partial inventories are labeled accordingly.
 Opening a child preserves its parent's composition and viewport. Child input is
 available only when the native adapter explicitly supports continuing that child.

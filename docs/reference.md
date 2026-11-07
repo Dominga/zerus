@@ -2586,7 +2586,17 @@ is shown under it; a computer whose `hgs` lacks `session-keep-warm-v1` shows an
 update hint. While a ping runs, the session reads **Ready** with **Warming
 cache** and counts in neither Active nor Working. Activity folds the ping, its
 reply and its Stop into one dim **Cache kept warm** row that expands to show
-both. Android support is a separate follow-up.
+both.
+
+Android follows the same status rule: while a ping runs the session reads
+**Warming cache**, is neither Working nor Active, and holds no reply in progress,
+so an earlier unread reply keeps its badge. The shared session-filter contract
+(`mobile/android/app/src/test/resources/session-filter-contract.json`) pins this
+for desktop core, the desktop frontend and Android. The phone's session Details
+show **Keep cache warm** read only (Off, On always, or the remaining time) and
+one status line: the next ping, **Warming the cache now**, a cold cache or the
+computer's reason, including why an agent is not eligible. Changing the setting
+from the phone needs a relay operation and is not available yet.
 
 ```sh
 hgs [@host] keep-warm SESSION --json

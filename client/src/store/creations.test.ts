@@ -443,6 +443,22 @@ describe("Edit choices… (1525-1528)", () => {
 describe("the notices (1577-1586)", () => {
   // A creation made after this window started (unix seconds); older failures stay quiet.
   const LIVE = 4_000_000_000;
+  it.each(["failed", "unknown", "storage_error"].flatMap((state) => [-1, 0, 1].map((offset) => ({ state, offset }))))(
+    "uses last state change for a first-seen old creation ($state, $offset seconds from start)", async ({ state, offset }) => {
+      vi.useFakeTimers();
+      const now = 1_794_000_000;
+      vi.setSystemTime(now * 1000);
+      const failed = card("late", { state, error: "Late failure.", created: now - 3600, updated: now + offset });
+      const t = setup([failed]);
+      try {
+        await t.started;
+        expect(t.store.creations()[0]).toMatchObject({ error: "Late failure.", created: now - 3600, updated: now + offset });
+        expect(t.notices).toHaveLength(offset < 0 ? 0 : 1);
+        t.emit(failed);
+        expect(t.notices).toHaveLength(offset < 0 ? 0 : 1);
+      } finally { t.dispose(); vi.useRealTimers(); }
+    },
+  );
   it("show once per state and error, using the normal toast timer", async () => {
     const t = setup([card("a", { state: "failed", caption: "Creation failed", error: "No folder.", created: LIVE })]);
     await t.started;

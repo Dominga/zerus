@@ -84,8 +84,10 @@ agent forwards that agent's link as `--parent-link`, hex-encoded JSON, behind
 the `launch-parent-v1` help marker, so an older peer launches without a parent
 (zerus-sa9qn.7). Remote adoption is not forwarded. A
 cross-computer link is a claim by the SSH-authenticated caller; the child's
-host cannot verify the parent on another computer, so it never treats a remote
-parent as live for attention (1.5).
+host records it with `source: forwarded` and cannot verify the parent on
+another computer, so its listing always reports that parent as `missing`, even
+when the IDs match a local session, and never treats it as live for attention
+(1.5, zerus-l4ehe).
 
 **Adopt.** Existing sessions such as `desktop-u` predate the feature. The
 coordinator runs `hgs parent desktop-u --json` with `{"action":"adopt"}` and

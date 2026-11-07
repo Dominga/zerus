@@ -225,6 +225,19 @@ class ParentLink(unittest.TestCase):
         self.assertEqual(plain.returncode, 0, plain.stderr)
         self.assertNotIn('--parent-link', plain.stdout)
 
+    def test_a_forwarded_parent_stays_missing_even_when_its_ids_match_here(self):
+        # zerus-l4ehe: another computer's claim is never matched to a session here.
+        link = self.parent(self.worker, 'adopt', caller=self.lead)['parent']
+        self.assertEqual(self.listed()[self.worker['name']]['parent']['state'], 'saved')
+        self.write(dict(self.read(self.worker), parent=dict(link, source='forwarded')))
+        row = self.listed()[self.worker['name']]
+        self.assertEqual((row['parent']['source'], row['parent']['state']), ('forwarded', 'missing'))
+        # A malformed --parent-link is refused without a panic (zerus-so6hr).
+        refused = subprocess.run([str(HGS), '--dry-run', 'claude', str(self.root), '--new', '-n', 'kid', '-d',
+                                  '--parent-link', '\u20acx'], env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(refused.returncode, 1, refused.stderr)
+        self.assertIn('--parent-link needs a launch link', refused.stderr)
+
     def test_adoption_needs_a_proven_caller_and_the_exact_target(self):
         self.assertIn('no live Zerus session', self.parent(self.worker, 'adopt', success=False))
         self.assertIn('cannot adopt itself', self.parent(self.lead, 'adopt', caller=self.lead, success=False))

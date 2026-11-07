@@ -23,13 +23,7 @@ import { TeamReports } from "./TeamReports";
 import { WaitingBanner } from "./Waiting";
 import { Blockers, PhaseModeControl, TaskActions, TeamBarActions, TeamBarChips, TeamModeControl, TeamQuestions } from "./TeamActions";
 import { composer } from "../../store/composer";
-<<<<<<< HEAD
-import type { ComputerId, TeamMemberView, TeamPulseView, TeamView } from "../../types";
-||||||| 425388389
-import type { ComputerId, TeamMemberView, TeamView } from "../../types";
-=======
-import type { ComputerId, TeamCall, TeamMemberView, TeamView } from "../../types";
->>>>>>> 0706a4dc4
+import type { ComputerId, TeamCall, TeamMemberView, TeamPulseView, TeamView } from "../../types";
 import type { Session } from "../sessions/types";
 
 // The Team tab (Qt's TeamWorkspace, design D3, HANDOFF §14): the team bar and

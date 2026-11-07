@@ -364,24 +364,75 @@ impl Encrypted {
     }
 
     /// A generation other than `previous`. Just after a restart, status can still name
-    /// the last run's generation (zerus-vsfy0), so every launch after the first must pass it.
-    fn running(&self, previous: Option<&str>) -> String {
-        let deadline = Instant::now() + Duration::from_secs(60);
-        let mut stale = 0;
+    /// the last run's generation (zerus-vsfy0), so every launch after the first must pass
+    /// it. Prints each change in what status says: that's the evidence on a machine where
+    /// these timings can't be watched.
+    fn running(&self, label: &str, previous: Option<&str>) -> String {
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(60);
+        let (mut stale, mut last) = (0, String::new());
         loop {
-            match self.generation() {
-                Some(generation) if Some(generation.as_str()) != previous => {
-                    if stale > 0 {
-                        println!("status named the previous generation {stale} time(s) first");
-                    }
-                    return generation;
-                }
-                Some(_) => stale += 1,
-                None => {}
+            let (code, status) = self.call("status", &json!({}));
+            let reading = format!(
+                "exit {code}, state {}, running {}, generation {}, error {}",
+                status["connector_state"], status["running"], status["generation"], status["error"]
+            );
+            if reading != last {
+                println!(
+                    "{label}: status at {} ms: {reading}",
+                    started.elapsed().as_millis()
+                );
+                last = reading;
             }
-            assert!(Instant::now() < deadline, "the connector never ran");
+            if status["running"] == true {
+                if let Some(generation) = status["generation"].as_str() {
+                    if Some(generation) != previous {
+                        if stale > 0 {
+                            println!(
+                                "{label}: status named the previous generation {stale} time(s) first"
+                            );
+                        }
+                        return generation.to_owned();
+                    }
+                    stale += 1;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{label}: the connector never ran"
+            );
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    /// What the private state shows now. Every branch of a plain Stop failure says the
+    /// same text, so this is how a run tells them apart. Call it only once this run has
+    /// published: it takes the state store for a moment.
+    fn report(&self, label: &str, moment: &str) {
+        let control = std::fs::read(self.state.join("workspace-control.json"))
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| {
+                serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|e| e.to_string())
+            });
+        let control = match control {
+            Ok(control) => format!(
+                "generation {}, pid {}, birth {}",
+                control["generation"], control["pid"], control["birth"]
+            ),
+            Err(error) => format!("unreadable: {error}"),
+        };
+        let (_, status) = self.call("status", &json!({}));
+        let store = match Store::lock(&self.state, false) {
+            Ok(_) => "free".to_owned(),
+            Err(error) => format!("not taken: {error}"),
+        };
+        println!(
+            "{label}: {moment}: control {control}; status generation {}; marker {}; journal lock {}; state store {store}",
+            status["generation"],
+            self.marker()
+                .map_or("absent".to_owned(), |m| String::from_utf8_lossy(&m).into_owned()),
+            probe_lock(&self.state.join("connector.lock")).name(),
+        );
     }
 
     fn stopped(&self) {
@@ -420,8 +471,12 @@ impl Encrypted {
                 .spawn()
                 .unwrap(),
         );
-        let generation = self.running(previous);
+        println!("{label}: launched, previous generation {previous:?}");
+        let generation = self.running(label, previous);
+        self.report(label, "before Stop");
         let (code, reply) = self.stop(&generation);
+        println!("{label}: Stop on {generation}: exit {code}, {reply}");
+        self.report(label, "after Stop");
         assert_eq!(code, 1, "{label}: {reply}");
         assert_eq!(reply["ok"], false, "{label}: {reply}");
         assert_eq!(
@@ -441,23 +496,31 @@ impl Encrypted {
         generation
     }
 
-    /// Writes the Stop marker for the generation in the control record, if it can.
-    fn ask_to_stop(&self) -> Option<String> {
-        let control = std::fs::read(self.state.join("workspace-control.json")).ok()?;
-        let control: serde_json::Value = serde_json::from_slice(&control).ok()?;
-        let generation = control["generation"].as_str()?.to_owned();
+    /// Writes the Stop marker for the generation in the control record, or says why not.
+    fn ask_to_stop(&self) -> Result<String, String> {
+        let control = std::fs::read(self.state.join("workspace-control.json"))
+            .map_err(|error| format!("control unreadable: {error}"))?;
+        let control: serde_json::Value = serde_json::from_slice(&control)
+            .map_err(|error| format!("control invalid: {error}"))?;
+        let generation = control["generation"]
+            .as_str()
+            .ok_or("control has no generation")?
+            .to_owned();
         let marker = json!({"version":1,"generation":generation}).to_string();
         let name = "workspace-stop.json";
-        let store = Store::lock(&self.state, false).ok()?;
-        let previous = store.read(name).ok()?;
+        let store =
+            Store::lock(&self.state, false).map_err(|error| format!("state store: {error}"))?;
+        let previous = store
+            .read(name)
+            .map_err(|error| format!("marker unreadable: {error}"))?;
         store
             .replace(
                 name,
                 &Store::revision(previous.as_deref()),
                 marker.as_bytes(),
             )
-            .ok()?;
-        Some(generation)
+            .map_err(|error| format!("marker not written: {error}"))?;
+        Ok(generation)
     }
 
     /// Ends a detached fixture connector through its own Stop marker, and never signals:
@@ -467,11 +530,22 @@ impl Encrypted {
     /// for one that did. Returns how many lock probes came back unknown on the way.
     fn end(&self) -> Result<u32, String> {
         let lock = self.state.join("connector.lock");
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(30);
         let mut unknown = 0;
         let mut asked: Option<String> = None;
+        let (mut last_probe, mut last_failure) = (None, String::new());
         loop {
-            match probe_lock(&lock) {
+            let probe = probe_lock(&lock);
+            if last_probe != Some(probe) {
+                println!(
+                    "cleanup: lock {} at {} ms",
+                    probe.name(),
+                    started.elapsed().as_millis()
+                );
+                last_probe = Some(probe);
+            }
+            match probe {
                 LockState::Absent | LockState::Free => return Ok(unknown),
                 LockState::Unknown => unknown += 1,
                 LockState::Held => {
@@ -482,19 +556,40 @@ impl Encrypted {
                         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
                         .and_then(|control| control["generation"].as_str().map(str::to_owned));
                     if asked.is_none() || (current.is_some() && current != asked) {
-                        asked = self.ask_to_stop().or(asked);
+                        match self.ask_to_stop() {
+                            Ok(generation) => {
+                                println!(
+                                    "cleanup: marker for {generation} written at {} ms",
+                                    started.elapsed().as_millis()
+                                );
+                                asked = Some(generation);
+                            }
+                            Err(failure) if failure != last_failure => {
+                                println!("cleanup: marker not written: {failure}");
+                                last_failure = failure;
+                            }
+                            Err(_) => {}
+                        }
                     }
                 }
             }
             if Instant::now() >= deadline {
                 return Err(format!(
-                    "lock {} after 30 s, marker for {asked:?}, {unknown} unknown probes",
+                    "lock {} after 30 s, marker for {asked:?}, {unknown} unknown probes, {last_failure}",
                     probe_lock(&lock).name()
                 ));
             }
             std::thread::sleep(Duration::from_millis(100));
         }
     }
+}
+
+/// Now, in the FILETIME ticks the kernel's exit time uses.
+fn wall_ticks() -> i64 {
+    let unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    (unix.as_secs() as i64 + 11_644_473_600) * 10_000_000 + i64::from(unix.subsec_nanos() / 100)
 }
 
 /// A fixture connector this test launched itself.
@@ -538,15 +633,22 @@ fn cleanup_ends_a_detached_connector_through_its_own_stop_marker() {
     original.verify().unwrap();
     let unknown = encrypted.end().unwrap();
     // The journal lock frees before the process has finished ending, so wait for the
-    // exit itself. An error here is missing evidence, not an exit.
-    let freed = Instant::now();
-    assert!(
-        original.wait_for_exit(Duration::from_secs(30)).unwrap(),
-        "the connector is still running"
-    );
+    // exit itself, and record it from the kernel. An error is missing evidence, not an exit.
+    let freed = wall_ticks();
+    // What the check before zerus-wv3b1 would have seen at this moment, for comparison.
+    let verify_now = original.verify();
+    let waited = Instant::now();
+    let exited = original.wait_for_exit(Duration::from_secs(30)).unwrap();
     println!(
-        "cleanup: {unknown} unknown lock probes, exit {} ms after the lock freed",
-        freed.elapsed().as_millis()
+        "cleanup: {unknown} unknown lock probes; verify at lock free: {}; waited {} us for the exit; exited {exited}",
+        if verify_now.is_ok() { "still running" } else { "ended" },
+        waited.elapsed().as_micros()
+    );
+    assert!(exited, "the connector is still running");
+    let (code, at) = original.exit_record().unwrap();
+    println!(
+        "cleanup: exit code {code}, kernel exit time {} ms after the lock was seen free",
+        (at as i64 - freed) / 10_000
     );
 }
 
@@ -567,9 +669,11 @@ fn only_the_exact_child_of_a_full_start_can_be_stopped() {
 
     let (code, started) = encrypted.call("start", &json!({"expected_revision":encrypted.revision}));
     assert_eq!(code, 0, "{started}");
-    let generation = encrypted.running(Some(&second));
+    let generation = encrypted.running("full Start", Some(&second));
     assert_eq!(started["generation"], generation.as_str());
+    encrypted.report("full Start", "before Stop");
     let (code, stopped) = encrypted.stop(&generation);
+    println!("full Start: Stop on {generation}: exit {code}, {stopped}");
     assert_eq!(code, 0, "{stopped}");
     assert!(stopped.get("refusal").is_none(), "{stopped}");
     encrypted.stopped();
@@ -584,8 +688,9 @@ fn only_the_exact_child_of_a_full_start_can_be_stopped() {
     // A full Start again gets its own receipt.
     let (code, started) = encrypted.call("start", &json!({"expected_revision":encrypted.revision}));
     assert_eq!(code, 0, "{started}");
-    let again = encrypted.running(Some(&generation));
+    let again = encrypted.running("second full Start", Some(&generation));
     let (code, stopped) = encrypted.stop(&again);
+    println!("second full Start: Stop on {again}: exit {code}, {stopped}");
     assert_eq!(code, 0, "{stopped}");
     encrypted.stopped();
 }

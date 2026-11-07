@@ -8,9 +8,9 @@ use std::time::Duration;
 use windows_sys::Win32::{
     Foundation::{FILETIME, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT},
     System::Threading::{
-        GetCurrentProcess, GetProcessTimes, OpenProcess, QueryFullProcessImageNameW,
-        WaitForSingleObject, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-        PROCESS_SYNCHRONIZE,
+        GetCurrentProcess, GetExitCodeProcess, GetProcessTimes, OpenProcess,
+        QueryFullProcessImageNameW, WaitForSingleObject, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
     },
 };
 
@@ -27,7 +27,13 @@ fn changed() -> io::Error {
     io::Error::other("process identity changed")
 }
 
-fn birth_of(process: HANDLE) -> io::Result<u64> {
+fn ticks(time: FILETIME) -> u64 {
+    (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
+}
+
+/// Creation and exit times, in FILETIME ticks. The exit time means nothing until the
+/// process has ended.
+fn times_of(process: HANDLE) -> io::Result<(u64, u64)> {
     let empty = FILETIME {
         dwLowDateTime: 0,
         dwHighDateTime: 0,
@@ -38,7 +44,11 @@ fn birth_of(process: HANDLE) -> io::Result<u64> {
     if unsafe { GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+    Ok((ticks(created), ticks(exited)))
+}
+
+fn birth_of(process: HANDLE) -> io::Result<u64> {
+    Ok(times_of(process)?.0)
 }
 
 fn image_of(process: HANDLE) -> io::Result<String> {
@@ -134,6 +144,21 @@ impl OriginalProcess {
             _ => Err(io::Error::last_os_error()),
         }
     }
+
+    /// The exit code and kernel exit time (FILETIME ticks) of this instance, once it
+    /// has ended. Refuses while it is still running.
+    pub fn exit_record(&self) -> io::Result<(u32, u64)> {
+        if !self.wait_for_exit(Duration::ZERO)? {
+            return Err(io::Error::other("the process is still running"));
+        }
+        let raw = self.handle.as_raw_handle() as HANDLE;
+        let mut code = 0;
+        // SAFETY: the owned handle has query access and stays open; `code` is live.
+        if unsafe { GetExitCodeProcess(raw, &mut code) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((code, times_of(raw)?.1))
+    }
 }
 
 #[cfg(test)]
@@ -182,6 +207,7 @@ mod tests {
         let identity = identity_of(child.id(), child.as_handle()).unwrap();
         let held = OriginalProcess::open(&identity).unwrap();
         held.verify().unwrap();
+        assert!(held.exit_record().is_err(), "no record while it runs");
         assert!(
             !held.wait_for_exit(Duration::ZERO).unwrap(),
             "still running"
@@ -189,6 +215,8 @@ mod tests {
         drop(child.stdin.take());
         child.wait().unwrap();
         assert!(held.wait_for_exit(Duration::from_secs(30)).unwrap());
+        let (_, exited) = held.exit_record().unwrap();
+        assert!(exited >= identity.birth, "{exited} {identity:?}");
         assert!(held.verify().is_err());
         assert!(OriginalProcess::open(&identity).is_err());
     }

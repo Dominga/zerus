@@ -233,6 +233,7 @@
   "Context compacted": "Контекст сжат",
   "Copied": "Скопировано",
   "Copies of large task messages that the background service could not remove. Removing a copy never sends or cancels the message.": "Копии больших сообщений задачам, которые фоновая служба не смогла удалить. Удаление копии не отправляет и не отменяет сообщение.",
+  "Copy %1": "Копировать: %1",
   "Copy": "Копировать",
   "Copy removed": "Копия удалена",
   "Copy the existing sign-in over SSH from": "Скопировать существующий вход через SSH с",

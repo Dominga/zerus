@@ -1600,6 +1600,30 @@ fn next_goal_as(store: &mut Store, request: &str, input: &Value, caller: &Actor)
     Ok(json!({"status":"planned","team":next_id,"previous":old.id}))
 }
 
+/// Task #220: the lead's answer to a missing tool its team's run raised. The
+/// lead denies it with a reason, for its own team only; it never allows an
+/// install - that is the owner's, on the lead's install-tool card.
+fn decide_tool_lead(input: &Value) -> anyhow::Result<Value> {
+    let request = text(input, "request_id").to_owned();
+    ensure!(canonical_uuid(&request), "A canonical request_id is required");
+    let mut store = Store::open(true)?;
+    let team = store.load(text(input, "team"))?.context("Unknown team")?;
+    let caller = actor(&team, "decide-tool", input)?;
+    ensure!(caller.is_lead(&team), "Only the team's lead denies a tool its own run asked for");
+    let id = text(input, "offer").to_owned();
+    ensure!(!id.is_empty(), "Name the offer: {{\"request_id\":\"UUID\",\"team\":\"...\",\"offer\":\"...\",\"allow\":false,\"reason\":\"...\"}}");
+    ensure!(input["allow"].as_bool() != Some(true), "The lead never installs a tool: ask the owner with hgs team propose --json, kind install-tool");
+    let reason: String = text(input, "reason").trim().chars().take(500).collect();
+    ensure!(!reason.is_empty(), "A Deny says why: add \"reason\"");
+    let denied = crate::test_discipline::tools::lead_deny(&team.id, &id, &reason)?;
+    // The team's feed names the decision, so its member reads it there too.
+    store.mutate(Some((&request, input)), &team.id, None, |_, events| {
+        events.push(Event::new("tool_denied", json!({"offer":denied.id,"tool":denied.tool,"by":caller.label(&team),"reason":reason})));
+        Ok(Value::Null)
+    })?;
+    Ok(json!({"status":"denied","offer":denied.id,"tool":denied.tool,"reason":reason}))
+}
+
 /// F8: the owner decides a proposal. An accepted one runs as the owner: an
 /// accepted next goal creates the next team, an accepted swap calls the swap
 /// operation. A decided proposal is idempotent: a replay returns its state.
@@ -4941,7 +4965,12 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         return decide_proposal(input);
     }
     // #742: the owner's Allow or Deny of a missing tool's install; not a team's.
+    // Task #220: a team's lead denies the offer its own run raised, and asks the
+    // owner with an install-tool card instead of installing it.
     if op == "decide-tool" {
+        if !text(input, "team").is_empty() {
+            return decide_tool_lead(input);
+        }
         return crate::test_discipline::tools::decide(input);
     }
     // Task 97: the owner's question queue spans teams and ordinary sessions.

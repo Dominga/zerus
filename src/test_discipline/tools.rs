@@ -535,28 +535,52 @@ pub fn decide(input: &Value) -> anyhow::Result<Value> {
     let id = input["offer"].as_str().unwrap_or_default().to_owned();
     let allow = input["allow"].as_bool().ok_or_else(|| anyhow::anyhow!("\"allow\" is true or false"))?;
     let reason: String = input["reason"].as_str().unwrap_or_default().chars().take(500).collect();
-    let offer = locked(|store| {
-        let offer = store.offers.iter_mut().find(|offer| offer.id == id).ok_or_else(|| anyhow::anyhow!("No tool offer {id}"))?;
-        match (offer.state.as_str(), allow) {
-            ("offered" | "failed", false) => {
-                offer.state = "denied".into();
-                offer.reason = reason.clone();
-            }
-            ("offered" | "failed", true) => {
-                anyhow::ensure!(!offer.command.is_empty(), "No package manager on this computer installs {}; install it yourself", offer.tool);
-                offer.state = "installing".into();
-            }
-            // Decided before: the same answer again changes nothing.
-            _ => return Ok((offer.clone(), false)),
-        }
-        offer.decided = now();
-        Ok((offer.clone(), true))
-    })?;
-    let (offer, changed) = offer;
+    let (offer, changed) = locked(|store| answer(store, &id, allow, &reason))?;
     if changed && offer.state == "installing" {
         start_install(&offer)?;
     }
     Ok(json!({"offer":offer.id,"tool":offer.tool,"state":offer.state,"command":offer.command.join(" ")}))
+}
+
+/// Task #220: the team's lead denies an offer its own team's run raised. The
+/// lead never allows an install; to get one, the lead asks the owner with an
+/// install-tool card.
+pub fn lead_deny(team: &str, id: &str, reason: &str) -> anyhow::Result<Offer> {
+    locked(|store| {
+        let found = store
+            .offers
+            .iter()
+            .find(|offer| offer.id == id && offer.team == team)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("No tool offer {id} waits for this team"))?;
+        anyhow::ensure!(
+            matches!(found.state.as_str(), "offered" | "failed"),
+            "The offer of {} is {}; there is nothing to deny",
+            found.tool,
+            found.state
+        );
+        answer(store, id, false, reason).map(|(offer, _)| offer)
+    })
+}
+
+/// One answer to an offer: deny remembers its reason, allow marks it installing
+/// (the caller starts the runner), and a decided offer keeps its first answer.
+fn answer(store: &mut Store, id: &str, allow: bool, reason: &str) -> anyhow::Result<(Offer, bool)> {
+    let offer = store.offers.iter_mut().find(|offer| offer.id == id).ok_or_else(|| anyhow::anyhow!("No tool offer {id}"))?;
+    match (offer.state.as_str(), allow) {
+        ("offered" | "failed", false) => {
+            offer.state = "denied".into();
+            offer.reason = reason.to_owned();
+        }
+        ("offered" | "failed", true) => {
+            anyhow::ensure!(!offer.command.is_empty(), "No package manager on this computer installs {}; install it yourself", offer.tool);
+            offer.state = "installing".into();
+        }
+        // Decided before: the same answer again changes nothing.
+        _ => return Ok((offer.clone(), false)),
+    }
+    offer.decided = now();
+    Ok((offer.clone(), true))
 }
 
 #[cfg(test)]

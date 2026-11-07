@@ -91,3 +91,30 @@ fn an_attributed_offer_waits_for_its_lead_not_the_owner() {
         assert_eq!((owner.len(), owner[0]["tool"].as_str()), (1, Some("ccache")), "{owner:?}");
     });
 }
+
+#[test]
+fn the_lead_denies_its_own_teams_offer_and_never_allows() {
+    let state = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(state.path(), || {
+        let id = stored_review_team();
+        let project = tempfile::tempdir().unwrap();
+        as_qa(|| tools::record(project.path(), &[(need("sccache"), false)])).unwrap();
+        let offer = tools::offers_of(&id)[0].id.clone();
+        // The member cannot decide it.
+        let error = as_qa(|| call("decide-tool", json!({"offer":offer,"allow":false,"reason":"no"}))).unwrap_err().to_string();
+        assert!(error.contains("Only the team's lead"), "{error}");
+        // The lead cannot allow an install, and a Deny says why.
+        let error = as_lead(|| call("decide-tool", json!({"offer":offer,"allow":true}))).unwrap_err().to_string();
+        assert!(error.contains("never installs a tool"), "{error}");
+        let error = as_lead(|| call("decide-tool", json!({"offer":offer,"allow":false}))).unwrap_err().to_string();
+        assert!(error.contains("A Deny says why"), "{error}");
+        let denied = as_lead(|| call("decide-tool", json!({"offer":offer,"allow":false,"reason":"we build without it"}))).unwrap();
+        assert_eq!((denied["status"].as_str(), denied["tool"].as_str()), (Some("denied"), Some("sccache")), "{denied}");
+        let stored = tools::offer(&offer).unwrap();
+        assert_eq!((stored.state.as_str(), stored.reason.as_str()), ("denied", "we build without it"));
+        // The lead's inbox no longer names it, and the owner's list never did.
+        let inbox = run("inbox", &json!({"team":id,"by":"human"}), false).unwrap();
+        assert!(inbox["items"].as_array().unwrap().iter().all(|item| item["kind"] != "tool_missing"), "{inbox}");
+        assert!(tools::waiting_items().is_empty());
+    });
+}

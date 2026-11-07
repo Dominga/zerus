@@ -73,7 +73,6 @@
   "Action cancelled.": "Действие отменено.",
   "Active: working, scheduled, waiting, needs attention or a draft": "Активные: работают, запланированы, ждут, требуют внимания или содержат черновик",
   "Activity is unavailable from the desktop service. Retry to reconnect.": "Активность недоступна в фоновой службе. Повторите подключение.",
-  "Activity stays on %1. Closing this window does not stop your agent.": "Активность остаётся на %1. Закрытие этого окна не останавливает агента.",
   "Activity, processes and project tasks are unavailable with this background service connection.": "История, процессы и задачи проекта недоступны при этом подключении к фоновой службе.",
   "Add %1 to machines": "Добавить %1 на компьютеры",
   "Add skin": "Добавить оформление",

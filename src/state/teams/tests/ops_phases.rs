@@ -1993,7 +1993,13 @@ fn phase_git_prerequisites_recheck_ancestry_on_approval() {
     assert!(apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &BTreeSet::new(), &mut events).is_err());
     git(&["branch", "tag-only", &base]);
     git(&["merge", "--ff-only", "prerequisite"]);
-    apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    // Six ancestry reads together exceed five seconds, but each has its own window.
+    plan::BEFORE_PREREQUISITE_GIT.with(|delay| delay.set(Some(|| std::thread::sleep(std::time::Duration::from_secs(1)))));
+    let started = std::time::Instant::now();
+    let approved = apply(&mut team, "approve-phase", &json!({"phase":2}), &Actor::Human, &BTreeSet::new(), &mut events);
+    plan::BEFORE_PREREQUISITE_GIT.with(|delay| delay.set(None));
+    approved.unwrap();
+    assert!(started.elapsed() >= std::time::Duration::from_secs(6));
     assert!(team.phases[0].checks.as_ref().unwrap().unresolved.is_empty());
 }
 

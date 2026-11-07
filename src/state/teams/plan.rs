@@ -1030,10 +1030,28 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
     found
 }
 
+pub(crate) const PHASE_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static BEFORE_PREREQUISITE_GIT: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
+}
+
+fn prerequisite_git(folder: &std::path::Path, args: &[&str], overall: std::time::Instant)
+    -> Result<Vec<u8>, super::super::worktrees::GitError>
+{
+    let deadline = overall.min(std::time::Instant::now() + std::time::Duration::from_secs(5));
+    #[cfg(test)]
+    if let Some(delay) = BEFORE_PREREQUISITE_GIT.with(std::cell::Cell::get) {
+        delay();
+    }
+    super::super::worktrees::git(folder, args, deadline)
+}
+
 fn prerequisite_branch(folder: &std::path::Path, branch: &str, deadline: std::time::Instant) -> Result<String, String> {
     // A tag with this name never satisfies a branch requirement.
     for reference in [format!("refs/heads/{branch}"), format!("refs/remotes/{branch}")] {
-        match super::super::worktrees::git(folder, &["show-ref", "--verify", "--quiet", &reference], deadline) {
+        match prerequisite_git(folder, &["show-ref", "--verify", "--quiet", &reference], deadline) {
             Ok(_) => return Ok(reference),
             Err(error) if error.code == Some(1) => {},
             Err(error) => return Err(format!("cannot verify branch {branch}: {}", error.detail.chars().take(200).collect::<String>())),
@@ -1042,8 +1060,8 @@ fn prerequisite_branch(folder: &std::path::Path, branch: &str, deadline: std::ti
     Err(format!("branch {branch} does not exist"))
 }
 
-/// Evaluate the bounded plan already in memory. Git shares one five-second
-/// deadline and a per-evaluation cache; no journal or team-list reads occur.
+/// Evaluate the bounded plan already in memory. Each Git call gets five seconds,
+/// capped by the caller's overall deadline; repeated refs share cached results.
 pub(crate) fn phase_checks(team: &Team, phase: &Phase, deadline: std::time::Instant) -> super::model::PhaseCheckResult {
     use super::model::{PhaseCheckResult, Prerequisite};
     let mut result = PhaseCheckResult::default();
@@ -1084,7 +1102,7 @@ pub(crate) fn phase_checks(team: &Team, phase: &Phase, deadline: std::time::Inst
                             }
                         } else { commit.clone() };
                         let base = if team.settings.base_branch.is_empty() { "HEAD" } else { &team.settings.base_branch };
-                        super::super::worktrees::git(folder,
+                        prerequisite_git(folder,
                             &["merge-base", "--is-ancestor", &reference, base], deadline)
                             .err().map(|error| if error.code == Some(1) {
                                 format!("{commit} is not an ancestor of {base}")

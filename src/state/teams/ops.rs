@@ -1,6 +1,6 @@
 //! WhiteWh fork: the team state machine shared by the CLI and dispatcher.
 //! Only the opt-in prerequisite check spawns Git, for draft commit/branch
-//! requirements. Snapshot refreshes share one five-second deadline.
+//! requirements. Calls get five seconds, within a shared 30-second deadline.
 use super::super::now;
 use super::model::*;
 use super::plan;
@@ -1740,7 +1740,7 @@ fn decide_phase(team: &mut Team, input: &Value, actor: &Actor, approve: bool, of
     let wanted: BTreeSet<u32> = ids.iter().copied().collect();
     if approve {
         accept_blockers(team, at, offline)?;
-        let checks = plan::phase_checks(team, &team.phases[at], std::time::Instant::now() + std::time::Duration::from_secs(5));
+        let checks = plan::phase_checks(team, &team.phases[at], std::time::Instant::now() + plan::PHASE_CHECK_TIMEOUT);
         ensure!(checks.unresolved.is_empty() || input["approve_anyway"].as_bool() == Some(true),
             "Unresolved prerequisites: {}. Choose Approve anyway to override this check", checks.unresolved.join("; "));
         if team.settings.phase_checks.critical_path_target || team.settings.phase_checks.unresolved_prerequisites {
@@ -6181,7 +6181,7 @@ pub(crate) fn apply(team: &mut Team, op: &str, input: &Value, actor: &Actor, off
     }
     if matches!(op, "plan" | "extend" | "edit-draft" | "rework-phase" | "return-to-draft" | "undo-reject-phase" | "move-phase" | "move-task" | "settings" | "approve" | "accept" | "cancel" | "discard-phase") {
         let enabled = team.settings.phase_checks.critical_path_target || team.settings.phase_checks.unresolved_prerequisites;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + plan::PHASE_CHECK_TIMEOUT;
         let checks: Vec<_> = team.phases.iter().map(|phase| {
             (enabled && phase.state.is_draft()).then(|| plan::phase_checks(team, phase, deadline))
         }).collect();

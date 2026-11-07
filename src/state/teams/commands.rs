@@ -236,6 +236,56 @@ fn dsh_member(team: &Team, conversation: &str) -> Option<String> {
         .map(|member| member.id.clone())
 }
 
+/// Task #220: the team session this process runs in - the team whose run
+/// raised a missing tool - with the member and the task it holds now. A
+/// process outside every team's session (a worker-started run, the owner's own
+/// shell) has none, and what it raises keeps the owner's path.
+pub(crate) fn calling_team() -> Option<(String, String, Option<u32>)> {
+    let record = caller_record();
+    let (dsh, env, run) = caller_identities();
+    if record.is_none() && dsh.is_none() && env.is_none() && run.is_none() {
+        return None;
+    }
+    let store = Store::open(false).ok()?;
+    for team in store.active_teams(ACTIVE_TEAMS).ok()? {
+        let member = record
+            .as_ref()
+            .and_then(|record| calling_member(&team, record))
+            .or_else(|| dsh_member(&team, dsh.as_deref().unwrap_or_default()))
+            .or_else(|| running_member(&team, env.as_deref().unwrap_or_default(), run.as_deref().unwrap_or_default()));
+        if let Some(member) = member {
+            let task = open_task(&team, &member);
+            return Some((team.id.clone(), member, task));
+        }
+    }
+    None
+}
+
+/// The member whose stored session this hgs session or run is: its run id
+/// first, which a rename never changes, then its session name (H7).
+fn running_member(team: &Team, session: &str, run: &str) -> Option<String> {
+    team.members
+        .iter()
+        .filter(|member| member.state != MemberState::Removed)
+        .find(|member| {
+            member.session.as_ref().is_some_and(|found| {
+                found.host.is_empty()
+                    && ((!run.is_empty() && found.run_id == run) || (!session.is_empty() && found.name == session))
+            })
+        })
+        .map(|member| member.id.clone())
+}
+
+/// The task a member holds now: its open attempt's task, the latest when a
+/// member holds several.
+pub(crate) fn open_task(team: &Team, member: &str) -> Option<u32> {
+    team.tasks
+        .iter()
+        .filter(|task| task.attempts.iter().any(|attempt| attempt.member == member && attempt.state.open()))
+        .map(|task| task.id)
+        .max()
+}
+
 /// Who asks. A team session is proven by ancestry; a dsh session by the
 /// conversation its harness exports; a report, question or `current` from
 /// elsewhere (a member on another computer) is authorized by its attempt id;
@@ -5560,4 +5610,8 @@ mod commands_status;
 #[cfg(test)]
 #[path = "tests/commands_other.rs"]
 mod commands_other;
+
+#[cfg(test)]
+#[path = "tests/commands_tools.rs"]
+mod commands_tools;
 

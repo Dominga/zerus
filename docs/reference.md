@@ -2323,6 +2323,43 @@ reassignment clears the rework reservation and its wait age. Returning an
 unstarted phase to a draft also clears rework reservations. Member-wait inbox
 items exclude held rework and members available to take it.
 
+Task 156 (owner, 2026-11-07): the owner's decisions are records that reach
+the right work by relevance.
+- Every owner answer to a card (allowed, denied, or a question answered) and
+  every `hgs team decide --json` (`{team, question, choice, why, spec?, files?,
+  tasks?, forbids?, supersedes?}` by the owner, or by the lead with
+  `owner_word` quoting the owner's own words in the lead's chat) is recorded at
+  once in the team's `decisions` (id `dN`, question, choice, why, by, at,
+  card, spec, files, tasks, forbids), journaled `decision_recorded`. A card
+  carries the same refs (`spec`, `files`, `binds`, `forbids`). A later
+  decision on the same question (the same content words, or the one it names
+  in `supersedes`) supersedes it: the old one stays with `superseded_by`. The
+  records live in Zerus state for every memory mode; a team with a lore
+  workspace also gets them as lore decision records (`t<team8>-dN`, superseded
+  ones marked).
+- A current decision binds a task that it names, whose outputs a file or spec
+  path of it touches, that lore's `find` returns it for (a background pass of
+  the team writer, ten tasks at a time, cached per task), or whose title,
+  description and criteria share its subject (two or more content words, a
+  third of the smaller set). Every hand-out carries "Decisions that bind this
+  task" with their ids; a task in flight that a newer decision binds gets one
+  message (`decision_told`). `hgs team decisions --json` lists them with the
+  open tasks each binds.
+- A report is checked against the decisions that bind its task (and those
+  binding everything): a term a decision forbids, as a whole word, in the
+  report or in the lines its commits add against the lead branch is flagged
+  (`decision_flags`, a `decision_conflict` event and lead inbox item); accept
+  is refused until the report is fixed or accepted with
+  `"against_decisions":true`.
+- A decision with a `spec` makes that spec a view: its Decisions section
+  between `<!-- zerus:decisions:begin -->` and `<!-- zerus:decisions:end -->`
+  is generated from the records (superseded ones struck through) and
+  committed in the lead branch's checkout when it is clean
+  (`decision_specs_written`); `{"action":"spec","spec":"PATH"}` shows it.
+- The lead's message to a member that hands down an owner decision ("the
+  owner decided ...") is refused by `hgs send` and `hgs team message`, naming
+  `hgs team decide`.
+
 A reassign, a take-over or a cancel of a task whose attempt its member is still
 working on (sent or delivered, not reported) tells that member at once: one
 `[Zerus team · from: Zerus · task: #N · stop]` message names the task and why it

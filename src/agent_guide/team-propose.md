@@ -34,8 +34,7 @@ is a fallback. A change Allow cannot apply is refused at once.
 A question to the owner goes this way, never only in your reply: the
 owner's option or answer on the card reaches your inbox.
 
-The owner's own answer from a plain shell (never from an agent session):
-  {"team":"ID","proposal":"p1","accept":true,"expected_hash":"...",
-   "reason":"...","by":"human","request_id":"UUID"} |
-  hgs team decide-proposal --json
-"accept" is required; false rejects and its reason reaches you.
+Every answer is a decision record that reaches the tasks it binds: add
+"spec":"docs/x.md#2", "files":["PATH"], "binds":[N], "forbids":["TERM"].
+The owner's word in your chat: {"question","choice","why","owner_word":
+{"text":"..."}} | hgs team decide --json; never message a decision.

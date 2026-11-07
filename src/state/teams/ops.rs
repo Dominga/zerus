@@ -5169,9 +5169,16 @@ fn propose(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event
     let content = json!({"kind":kind,"reason":reason,"change":change,"member":member,
         "goal":input["goal"].clone(),"mode":mode});
     let hash = format!("{:x}", Sha256::digest(content.to_string().as_bytes()));
-    let proposal = json!({"id":id,"kind":kind,"by":actor.label(team),"at":now(),"state":"open","reason":reason,
+    let mut proposal = json!({"id":id,"kind":kind,"by":actor.label(team),"at":now(),"state":"open","reason":reason,
         "member":member,"goal":input["goal"].clone(),"operation_request":operation_request,
         "mode":mode,"hash":hash,"change":change});
+    // Task 156: the spec, files, tasks and forbidden terms the owner's answer
+    // will carry as a decision.
+    let mut refs = super::decisions::NewDecision::default();
+    super::decisions::refs_from(team, input, &mut refs)?;
+    if !refs.spec.is_empty() || !refs.files.is_empty() || !refs.tasks.is_empty() || !refs.forbids.is_empty() {
+        proposal["refs"] = json!({"spec":refs.spec,"files":refs.files,"tasks":refs.tasks,"forbids":refs.forbids});
+    }
     team.proposals.push(proposal);
     events.push(Event::new("proposed", json!({"id":id,"kind":kind,"hash":hash})));
     // Task 127 (docs/lore.md 4.2): the team stores the lead's memory mode
@@ -5207,6 +5214,9 @@ fn decide_proposal(team: &mut Team, input: &Value, actor: &Actor, offline: &BTre
         team.proposals[at]["state"] = json!("rejected");
         team.proposals[at]["decided_at"] = json!(super::super::now());
         team.proposals[at]["note"] = json!(reason);
+        // Task 156: the owner's answer is a decision at once.
+        let card = team.proposals[at].clone();
+        super::decisions::record(team, super::decisions::from_card(&card, "rejected", "", &reason), super::super::now(), events);
         events.push(Event::new("proposal_decided", json!({"id":id,"accept":false,"reason":reason})));
         if kind == "switch-plan-mode" {
             // U59: the reason reaches the lead with the team's feed.
@@ -5508,9 +5518,11 @@ pub(crate) const OWNER_VALUE_SETTINGS: [&str; 3] = ["base_branch", "full_tests",
 
 /// The request fields a card never carries: who asks, its identity and any
 /// owner word, which the owner's Allow replaces.
-const CARD_RESERVED: [&str; 13] = [
+const CARD_RESERVED: [&str; 17] = [
     "kind", "reason", "team", "request_id", "by", "attempt", "input", "owner_word", "owner_word_checked", "owner_word_event",
     "owner_word_change", "owner_word_count", "roster_word",
+    // Task 156: what the owner's answer to the card amends and concerns.
+    "spec", "files", "binds", "forbids",
 ];
 
 /// Task #21: the change of an owner-operation card: the operation, its input
@@ -5718,6 +5730,15 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
             team.phases.iter().find(|found| found.n == ahead_phase).is_none_or(|found| matches!(found.state, PhaseState::Approved | PhaseState::Queued)),
             "This result worked ahead of phase {ahead_phase}; wait for the owner's approval of that phase"
         );
+    }
+    // Task 156: a report that contradicts a decision is fixed, or accepted
+    // knowingly with "against_decisions":true.
+    if accept && input["against_decisions"].as_bool() != Some(true) {
+        if let Some(flags) = team.task(id).and_then(|task| task.attempts.iter().rev().find(|a| a.state == AttemptState::Reported)).map(|attempt| attempt.decision_flags.clone()).filter(|flags| !flags.is_empty()) {
+            let named: Vec<String> = flags.iter().map(|flag| format!("{} (adds \"{}\"; the owner chose: {})", flag["decision"].as_str().unwrap_or_default(),
+                flag["term"].as_str().unwrap_or_default(), flag["choice"].as_str().unwrap_or_default())).collect();
+            bail!("Task #{id}'s report contradicts decision {}: reject it with the reason, or accept knowingly with \"against_decisions\":true", named.join("; "));
+        }
     }
     let lead_id = team.lead.clone();
     // U62 (#760): with the merge queue on, an accept queues the author's commit

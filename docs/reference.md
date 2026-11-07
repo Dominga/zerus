@@ -8334,3 +8334,43 @@ Iron-rules compatibility and failure handling:
 - An older hgs that rewrites a team record does not preserve unknown
   `iron_rules`/`project_id` fields. Keep team writers on a rules-aware hgs;
   additive deserialization alone cannot protect these fields from old writers.
+
+### Project memory
+
+Project memory (task 126, owner 2026-11-07) turns RustCodeLore on for a whole
+project, a project of the organization catalog with all its folders. It is off
+until the owner turns it on in the project's settings (Projects in Zerus Next
+and in the Qt GUI). The store is a lore root (`lore.toml` with commits off,
+records in `lore/*.jsonl` and `lore/plans/*.jsonl`, team workspaces under
+`teams/<team8>/`, each its own lore root, and the search index under
+`.cache/index.sqlite`). Its default folder is
+`HGS_STATE_DIR/lore/projects/<project id>`; Browse chooses another while the
+store holds no records. A store with records is moved, never repointed: after
+the owner confirms, hgs copies every file to an empty or new folder, compares
+each file's size and SHA-256 with the source, checks that the source did not
+change meanwhile, and only then switches. A failed check removes only the copy
+it made and switches nothing. The old store is kept and listed in `moved_from`;
+Zerus never deletes it. Turning memory off keeps the store as it is. The
+status shows the records (nonempty lines of the record files), the files and
+their size, and the index state: `none`, `built`, or `stale` when a record
+file changed after the index.
+
+`hgs project config get|set|move --json` (`project-memory-v1` in help) reads one
+JSON object on stdin naming `project` (the stable identity). Get returns
+`enabled`, `store`, `default_store`, `default`, `revision`, `moved_from` and
+`status` (`exists`, `records`, `files`, `bytes`, `index`). Set takes `enabled`
+and/or `store` (a full path, "" for the default); move takes `to`. Writes are
+the owner's (`by: "human"`; an agent session is refused) and carry a canonical
+`request_id` and `expected_revision` from get; the same request replays its
+receipt, and a stale revision is refused. Settings and receipts live in
+`HGS_STATE_DIR/project-memory.json`, per computer, like project iron rules.
+
+A team's memory is the owner's setting `settings.memory`: `mode` `plain` (as
+before) or `lore`. When a team is created (Create team for a draft, or at once
+for a team created without a draft) and its `project_id` has memory on, it
+gets `{"mode":"lore","source":"project"}` with the project's `store` and a
+shared `workspace` in it, whatever mode was chosen. Otherwise New team offers
+the mode, RustCodeLore by default: `lore` gives the team its own store under
+`HGS_STATE_DIR/lore/teams/<team8>` (`source` `team`). A team without
+`memory` keeps plain memory. A lead's settings that leave `memory` out keep the
+owner's choice; only the owner changes it.

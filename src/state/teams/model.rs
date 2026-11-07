@@ -94,10 +94,28 @@ pub(crate) struct FullTestsGrant {
     pub by: String,
 }
 
+/// Task 126 (owner, 2026-11-07): a team's memory. `plain` is memory as
+/// before; `lore` is RustCodeLore: a shared workspace in the project's store
+/// (`source` "project") or the team's own store under the state folder
+/// (`source` "team"). New team names only the mode; Zerus fills the rest.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct TeamMemory {
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub store: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub workspace: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Settings {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub iron_rules: Vec<String>,
+    /// Task 126: the team's memory; None is plain memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<TeamMemory>,
     /// Every dependency is hard, whatever the lead chose.
     #[serde(default)]
     pub all_hard: bool,
@@ -315,6 +333,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             iron_rules: Vec::new(),
+            memory: None,
             all_hard: false,
             folder_policy: FolderPolicy::default(),
             approval: Approval::default(),

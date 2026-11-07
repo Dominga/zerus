@@ -776,6 +776,12 @@ target_include_directories(test_ironrules PRIVATE ../src)
 target_link_libraries(test_ironrules PRIVATE Qt6::Test Qt6::Widgets hgs-tray-core)
 zerus_add_test(ironrules test_ironrules)
 set_tests_properties(ironrules PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# Task 126: project memory, RustCodeLore and its store.
+add_executable(test_projectmemory test_projectmemory.cpp)
+target_include_directories(test_projectmemory PRIVATE ../src)
+target_link_libraries(test_projectmemory PRIVATE Qt6::Test Qt6::Widgets hgs-tray-core)
+zerus_add_test(projectmemory test_projectmemory)
+set_tests_properties(projectmemory PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 add_executable(test_markdownhtml test_markdownhtml.cpp)
 target_link_libraries(test_markdownhtml PRIVATE Qt6::Test hgs-markdown)

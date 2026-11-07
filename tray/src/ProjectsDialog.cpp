@@ -15,6 +15,7 @@
 #include "WorkspaceColorDialog.h"
 #include "CollapsibleBlock.h"
 #include "IronRulesPanel.h"
+#include "ProjectMemoryPanel.h"
 #include "PageCards.h"
 #include <QRegularExpression>
 #include <QCollator>
@@ -477,6 +478,9 @@ ProjectsDialog::ProjectsDialog(HgsClient *client, QWidget *parent, bool embedded
     // The block's header names them and counts them.
     for(const char *name:{"inspectorPanelTitle","ironRulesCount"})if(auto *own=m_rules->findChild<QLabel *>(name))own->hide();
     m_rules->changed=[this](int count){m_rulesBlock->setNote(QString::number(count));};
+    // Task 126: project memory, RustCodeLore for the whole project and its store.
+    m_memoryBlock=new CollapsibleBlock(QStringLiteral("projects/memory"),tr("Project memory"));m_memoryBlock->setObjectName("projectMemoryBlock");
+    m_memory=new ProjectMemoryPanel;m_memory->setBackend(m_client->memoryTransport());m_memoryBlock->body()->addWidget(m_memory);inCard(m_memoryBlock,QStringLiteral("projectMemoryCard"));
     auto *foot = new QHBoxLayout; m_remove = smallButton(tr("Delete project…"),"deleteProject"); PageCards::danger(m_remove); foot->addWidget(m_remove); foot->addStretch(); form->addLayout(foot);
     // #700 (N4): the page's message stays in view under the details, outside their scroll.
     m_status = new QLabel; m_status->setObjectName("projectsStatus"); m_status->setTextFormat(Qt::PlainText); m_status->setWordWrap(true);
@@ -662,7 +666,7 @@ void ProjectsDialog::showProject()
     m_name->setEnabled(true); m_id->setText(project->id);
     m_headerName->setText(project->name);
     m_headerIcon->setPixmap(workspaceIcon("projects",QColor(project->color).isValid()?QColor(project->color):PageCards::token(m_dark,"folder")).pixmap(20,20));
-    m_rules->setProject(project->id,project->name);m_rulesBlock->setNote(QString::number(m_rules->rules().size()));
+    m_rules->setProject(project->id,project->name);m_memory->setProject(project->id);m_rulesBlock->setNote(QString::number(m_rules->rules().size()));
     m_projectSessions=m_sessionsProvider?m_sessionsProvider(project->id):QList<ProjectSession>{};
     showSessions();
     m_preview->setProject(project->name,QColor(project->color),project->vivid,project->id==m_projects->defaultProject());
@@ -1211,7 +1215,7 @@ void ProjectsDialog::setTheme(bool dark)
     m_newSession->setIcon(workspaceIcon("add",PageCards::token(dark,"accentText")));
     m_newTeam->setIcon(workspaceIcon("team",PageCards::token(dark,"text2")));
     for(auto *button:{m_newSession,m_newTeam,m_add,m_addFolder,m_openFolder})button->setIconSize(QSize(12,12));
-    for(auto *block:{m_foldersBlock,m_sessionsBlock,m_rulesBlock})block->setDark(dark);
+    for(auto *block:{m_foldersBlock,m_sessionsBlock,m_rulesBlock,m_memoryBlock})block->setDark(dark);
     m_sessions->setProperty("hgsDark",dark);m_sessions->viewport()->setProperty("hgsDark",dark);m_sessions->viewport()->update();
     showProject();
 }

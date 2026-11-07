@@ -277,6 +277,12 @@ QWidget *TeamNewTab::buildSettings()
     og->addWidget(fieldLabel(tr("Approval")), 1, 0); og->addLayout(approval, 1, 1, 1, 3);
     m_max = new QSpinBox; m_max->setObjectName("teamNewMaxMembers"); m_max->setRange(1, 32); m_max->setValue(6); m_max->setFixedWidth(80);
     og->addWidget(fieldLabel(tr("Max members")), 2, 0); og->addWidget(m_max, 2, 1, Qt::AlignLeft);
+    // Task 126: the team's memory, RustCodeLore by default. A project with
+    // RustCodeLore on gives the team a shared workspace in its store instead.
+    m_memory = segmented({{"lore", tr("RustCodeLore")}, {"plain", tr("Plain memory")}}, "lore", "teamNewMemory",
+                         [this](const QString &value) { m_memoryValue = value; touch("settings"); });
+    m_memory->setToolTip(tr("A project with RustCodeLore on gives the team a shared workspace in the project's store."));
+    og->addWidget(fieldLabel(tr("Memory")), 3, 0); og->addWidget(m_memory, 3, 1, Qt::AlignLeft);
     og->setColumnStretch(2, 1);
     v->addWidget(options);
     connect(m_review, &QCheckBox::toggled, this, [this] { touch("settings"); });
@@ -1058,6 +1064,8 @@ QJsonObject TeamNewTab::settingsJson() const
     const QString phase = m_phaseApproval->currentData().toString();
     if (phase.isEmpty()) settings.remove("phase_approval"); else settings.insert("phase_approval", phase);
     settings.insert("max_members", m_max->value());
+    // Task 126: only the mode; Zerus fills the store at Create team.
+    settings.insert("memory", QJsonObject{{"mode", m_memoryValue}});
     return settings;
 }
 
@@ -1251,6 +1259,9 @@ void TeamNewTab::applyDraft(const Teams::Team &team, const QJsonObject &settings
             m_review->setChecked(team.approval != "auto");
             m_phaseApproval->setCurrentIndex(qMax(0, m_phaseApproval->findData(team.phaseApproval)));
             if (team.maxMembers > 0) m_max->setValue(team.maxMembers);
+            const auto memory = settings.value("memory").toObject().value("mode").toString();
+            m_memoryValue = memory == QStringLiteral("plain") ? memory : QStringLiteral("lore");
+            for (auto *b : m_memory->findChildren<QPushButton *>()) b->setChecked(b->property("segment") == m_memoryValue);
         }
         if (!m_dirty.contains("members")) {
             m_members.clear();
@@ -1377,5 +1388,7 @@ void TeamNewTab::resetDraft()
     m_draft.clear(); m_leadSessionName.clear(); m_revision = m_appliedRevision = m_serverRevision = 0;
     m_dirty.clear(); m_keptFields.clear(); m_unseen.clear(); m_preflightErrors.clear(); m_preflightWarnings.clear();
     m_tasks.clear(); m_settings = {}; m_saveError.clear(); m_readError.clear(); m_createError.clear(); m_savedAt = {};
+    m_memoryValue = QStringLiteral("lore");
+    for (auto *b : m_memory->findChildren<QPushButton *>()) b->setChecked(b->property("segment") == m_memoryValue);
     renderLead(); renderPlan(); renderUnseen(); renderMembers();
 }

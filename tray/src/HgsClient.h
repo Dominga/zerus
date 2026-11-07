@@ -354,6 +354,9 @@ public:
                                const QString &expectedRunId, const QString &expectedConversationId = {}, const QString &agentId = {}, const QString &compactionId = {},
                                bool holdWhenUnconfirmed = false, const QString &rulesProject = {});
     IronRules::Transport rulesTransport();
+    // Task 126: `hgs project config get|set|move --json` on this computer
+    // (project-memory-v1), in the rules transport's shape; the host is unused.
+    IronRules::Transport memoryTransport();
     // U35: `hgs [@host] send-cancel <session> --json` for a message hgs still
     // holds; heldCancelFinished answers with its receipt ("cancelled") or why not.
     quint64 requestCancelHeld(const QString &host, const QString &name, const QString &requestId);

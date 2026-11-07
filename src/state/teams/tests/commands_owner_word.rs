@@ -359,7 +359,7 @@ fn a_task_joins_a_running_phase_on_the_owners_word_twice() {
 
 /// #728: the lead relaunches a stuck member on the owner's setting without a
 /// word; the owner has the same route; without the setting the word is still
-/// asked.
+/// asked. Task 209: the relaunch is a fresh conversation with a handoff brief.
 #[test]
 fn the_lead_relaunches_a_stuck_member_with_lead_restarts_stuck() {
     use crate::state::teams::model::MemberStuck;
@@ -369,11 +369,13 @@ fn the_lead_relaunches_a_stuck_member_with_lead_restarts_stuck() {
         Some(MemberStuck { at: 1.0, reason: "no_progress".into(), phase: "tool".into(), ..Default::default() });
     with_review_team(&team, || {
         let receipt = as_lead(|| call("relaunch", json!({"member":"dev"}))).unwrap();
-        assert_eq!(receipt["status"], json!("relaunching"));
-        assert!(stored().member("dev").unwrap().restart_pending);
+        assert_eq!((receipt["status"].as_str(), receipt["fresh"].as_bool()), (Some("relaunch"), Some(true)));
+        let saved = stored();
+        let dev = saved.member("dev").unwrap();
+        assert!(dev.session.is_none() && dev.launch_after_swap && dev.handoff.is_some(), "a fresh session with its brief");
         // The owner takes the same route.
         let owner = call("relaunch", json!({"member":"dev","by":"human"})).unwrap();
-        assert_eq!(owner["status"], json!("relaunching"));
+        assert_eq!((owner["status"].as_str(), owner["fresh"].as_bool()), (Some("relaunch"), Some(true)));
     });
     // Without the setting the lead still needs the owner's word.
     let (mut strict, _, _) = review_team();

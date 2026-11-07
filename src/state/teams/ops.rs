@@ -191,6 +191,12 @@ fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
         "The tests override is an object shaped like .zerus/tests.toml"
     );
     ensure!((1..=32).contains(&settings.max_members), "A team has 1 to 32 members");
+    // Task 209: the threshold a member's context is compacted at; a fraction of
+    // the window high enough that a compact helps, 95 by default.
+    ensure!(
+        (50..=100).contains(&settings.context_compact_percent),
+        "context_compact_percent is 50 to 100 (the share of the context window at which Zerus compacts a member)"
+    );
     ensure!(
         (30..=3600).contains(&settings.start_timeout_seconds),
         "The start warning waits 30 to 3600 seconds after delivery"
@@ -1226,7 +1232,7 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
 /// C4: the settings that decide who approves, how far a team may grow and
 /// what runs without the owner stay the owner's; the lead changes the rest.
 /// Spec 6.1 lets the lead set resume_after_limits too.
-pub(crate) const OWNER_SETTINGS: [&str; 25] = [
+pub(crate) const OWNER_SETTINGS: [&str; 26] = [
     "approval",
     // Task 126: the owner chooses the team's memory and its store.
     "memory",
@@ -1266,6 +1272,9 @@ pub(crate) const OWNER_SETTINGS: [&str; 25] = [
     // phase pause, and sets who accepts new phases.
     "lead_removes_own_pause",
     "phase_acceptance",
+    // Task 209: only the owner sets what Zerus does to a member's context (the
+    // share of the window at which it compacts, 95% by default).
+    "context_compact_percent",
 ];
 
 /// Task 126: a lead's whole settings object that leaves out `memory` keeps
@@ -4213,6 +4222,43 @@ fn swap_one(team: &mut Team, input: &Value, id: &str, keep_session: bool, actor:
     Ok(json!({"status":"swapped","member":id,"from":from,"to":to,"agent":agent,"tasks":handed,"lead":lead,"by":by}))
 }
 
+/// Task 209: gives a member a fresh conversation, keeping the seat and its open
+/// attempt. The old session is remembered (`replaced`), so the dispatcher's
+/// Launch step pauses and renames it before the new one takes the member's name;
+/// `handoff` makes the handoff brief the new session's first message. `why` is
+/// `relaunch` (the owner or the lead) or `context` (the auto rule).
+pub(crate) fn fresh_session(team: &mut Team, id: &str, why: &str, events: &mut Vec<Event>) -> anyhow::Result<()> {
+    let role = team.role_of(id);
+    let member = team.members.iter_mut().find(|member| member.id == id).context("Unknown member")?;
+    ensure!(member.state != MemberState::Removed, "This member was removed");
+    let from = member.session.take();
+    let from_name = from.as_ref().map(|session| session.name.clone()).unwrap_or_default();
+    if let Some(old) = from {
+        member.replaced = Some(old);
+    }
+    member.context = None;
+    member.context_compact = None;
+    member.context_retry_at = None;
+    member.restart_pending = false;
+    member.handoff = Some(super::model::HandoffNeed {
+        why: why.to_owned(),
+        at: now(),
+        from: from_name.clone(),
+        changes: Vec::new(),
+    });
+    // A fresh session starts even before its next task (H6): the member keeps
+    // its open attempt, so there may be no hand-out to carry the brief.
+    member.launch_after_swap = true;
+    member.launch_id.clear();
+    member.error.clear();
+    member.host_waits = 0;
+    member.seen = None;
+    member.settings_applied = false;
+    member.state = MemberState::NotCreated;
+    events.push(Event::new("fresh_session", json!({"member":role,"why":why,"from":from_name})));
+    Ok(())
+}
+
 /// Section 9.2: the root of a team's tree, by parent links among the loaded
 /// teams (a missing parent stops the walk at the team itself).
 pub(crate) fn root_of(team: &Team, all: &[Team]) -> Team {
@@ -6457,7 +6503,10 @@ fn apply_op(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &B
         "relaunch" => {
             // U54: the owner relaunches directly; the lead on its verified word.
             // U56: on the owner's setting, the lead also relaunches a member
-            // Zerus marks stuck.
+            // Zerus marks stuck. Task 209 (owner, 2026-11-07): a relaunch is a
+            // fresh conversation with a handoff brief, never the same one; the
+            // lead proposes it for a stuck member too, not only for one that
+            // failed to start.
             let member_id = text(input, "member").to_owned();
             let stuck = team.member(&member_id).is_some_and(|member| member.stuck.is_some());
             ensure!(
@@ -6468,25 +6517,20 @@ fn apply_op(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &B
             );
             let id = member_id;
             let by = actor.label(team);
-            let member = team.members.iter_mut().find(|m| m.id == id).context("Unknown member")?;
-            if member.stuck.is_some() {
-                // U56/#728: the real route for a stuck member: the dispatcher
-                // interrupts its session and resumes it in its conversation;
-                // the lead needs no word when the owner set lead_restarts_stuck,
-                // and the owner has the same route.
-                member.restart_pending = true;
-                member.error.clear();
-                member.host_waits = 0;
-                member.launch_id.clear();
-                events.push(Event::new("member_restart_requested", json!({"by":by,"member":id})));
-                return Ok(json!({"status":"relaunching","member":id}));
-            }
-            ensure!(member.session.is_none() && !member.error.is_empty(), "This member's session did not fail to start");
-            member.error.clear();
-            member.host_waits = 0;
-            member.launch_id.clear();
-            events.push(Event::new("relaunch", json!({"by":"You","member":id})));
-            Ok(json!({"status":"relaunch","member":id}))
+            // Task 209: a member that failed to start, is stuck, or simply runs
+            // in a conversation the owner wants replaced gets a new one. The old
+            // session is set aside by the Launch step (paused and renamed), so
+            // the new one takes the member's name, and the handoff brief goes as
+            // its first message.
+            let (state, from) = team
+                .member(&id)
+                .map(|member| (member.state, member.session.as_ref().map(|session| session.name.clone()).unwrap_or_default()))
+                .context("Unknown member")?;
+            ensure!(state != MemberState::Removed, "This member was removed");
+            ensure!(id != team.lead, "Relaunch the lead by swapping it (hgs team swap-member)");
+            fresh_session(team, &id, "relaunch", events)?;
+            events.push(Event::new("relaunch", json!({"by":by,"member":id,"fresh":true,"from":from})));
+            Ok(json!({"status":"relaunch","member":id,"fresh":true,"from":from}))
         }
         "pause-member" | "resume-member" => {
             ensure!(human_or_lead, "Only the lead or you pause a member");

@@ -2309,6 +2309,25 @@ While the action runs the task's `waits` is `{"for":"zerus","on":["context"],
 the same request instead of running it again; it is not an inbox item until it
 fails.
 
+Task 209 (owner, 2026-11-07): every member's native context pressure is also
+the rule. Zerus reads it with the session's own `hgs inspect`
+(`session_usage.context`, built from DeepSeek's `contextPressure` for dsh),
+keeps the last reading on the member (`context: {used, limit, percent, at}`,
+shown on the member card), and at `context_compact_percent` (a team setting,
+95 by default, set by the owner) compacts the context before the next hand-out
+and when the member idles mid-task: the native compact, or for an agent
+without one a fresh conversation with the handoff brief, and then the same
+attempt continues (`context_compact_started`, `context_compacted`,
+`context_compact_failed`; status shows the member's `state` as `compacting`
+while the request is confirmed). A report, or a finished turn, that says
+there is no context left while the meter is below the threshold is not a
+report: Zerus answers the member with the actual figure
+(`context_claim_refused`) and the attempt stays open; at or above the
+threshold the claim starts the compaction instead. Without a reading a claim
+cannot be disproved and is not refused. A relaunch gives a fresh conversation
+with the handoff brief, never the same conversation, and the lead may propose
+one for a stuck member, not only for one whose start failed.
+
 ### Stages Zerus runs itself: a command, a land, a branch per task
 
 The owner's catalog may give a preset a `command` stage — a command, its

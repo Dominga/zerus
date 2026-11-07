@@ -397,6 +397,20 @@ pub(crate) enum Step {
     /// U56/#728: the lead or the owner restarted a stuck member: interrupt its
     /// session and resume it in its conversation.
     RestartStuck { member: String },
+    /// Task 209: the member's context reached the team's threshold while it was
+    /// idle mid-task: compact it (or give it a fresh conversation) and continue
+    /// the same attempt.
+    CompactIdle { member: String },
+    /// Task 209: the started compaction is confirmed (or failed): the member is
+    /// told to go on and the attempt stays open.
+    CheckCompact { member: String },
+    /// Task 135/209: a fresh session (a relaunch, or a fresh conversation at the
+    /// threshold) with an open attempt gets the handoff brief as its first
+    /// message and continues the attempt.
+    SendHandoff { member: String },
+    /// Task 209: a reply that claims there is no context left while the meter
+    /// says otherwise is answered with the meter, never taken as No report.
+    AnswerContextClaim { task: u32 },
     /// U61: an auto-accepted draft whose phases ahead are done and whose plan has
     /// no blocker is accepted by Auto; the ready path hands its tasks out next.
     AutoAcceptDraft { phase: u32 },
@@ -657,6 +671,38 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             steps.push(Step::Launch { member: member.id.clone() });
         }
     }
+    // Task 209: the native context meter. A started compaction is checked each
+    // tick; an idle member whose context reached the team's threshold and that
+    // holds an open attempt is compacted and continues it; a fresh session
+    // (a relaunch, or an agent without native compaction) gets the handoff
+    // brief as its first message and continues the same attempt.
+    for member in &team.members {
+        if member.state == MemberState::Removed || member.id == team.lead {
+            continue;
+        }
+        if member.context_compact.is_some() {
+            steps.push(Step::CheckCompact { member: member.id.clone() });
+            continue;
+        }
+        let Some(session) = member.session.as_ref() else { continue };
+        let open = open_attempt_task(team, &member.id).is_some();
+        let free = session_of(member, seen).is_some_and(|found| found.live && found.free);
+        if open && free && member.handoff.as_ref().is_some_and(|need| now - need.at >= HANDOFF_RETRY_SECS) {
+            steps.push(Step::SendHandoff { member: member.id.clone() });
+            continue;
+        }
+        if !open || !free || member.context_retry_at.is_some_and(|retry| retry > now) {
+            continue;
+        }
+        if member.context.is_some_and(|context| context.fresh(now) && context.reached(team.settings.context_compact_percent)) {
+            // A session on another computer is its own host's to read: the
+            // reading comes from this computer's inspect; without one nothing
+            // is started.
+            if seen.iter().any(|found| found.host == session.host && found.name == session.name) {
+                steps.push(Step::CompactIdle { member: member.id.clone() });
+            }
+        }
+    }
     // Task 97: a native request nobody answered for `defer_minutes` is
     // answered safely and queued for the owner, once per request.
     if team.settings.defer_minutes > 0 {
@@ -753,6 +799,12 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                     }
                 }
             }
+            // Task 209: a member whose meter reached the threshold is compacted
+            // and continues the attempt: its finished turn is not decided (No
+            // report would end an attempt that is not stuck).
+            if context_due(team, &attempt.member, now) {
+                continue;
+            }
             // A2/C2: the report gate. A turn end is recorded only for a quiet
             // session: idle, no question, input or approval, no Background work
             // and no open team question. The report timeout counts from the
@@ -773,7 +825,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                             // attempt is decided all the same: No report keeps the
                             // quiet session's last reply for the lead instead of
                             // leaving the task in progress for hours (U20, #343 attempt 2).
-                            steps.push(Step::NoReport { task: task.id });
+                            steps.push(no_report_or_claim(team, task, now));
                         }
                     } else if found.live && found.idle && replied.is_some() && attempt.blocked_since.is_none() {
                         // The usual order: the member asks (or leaves Background
@@ -794,7 +846,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                         // L6: the session is gone; the old fallback keeps what
                         // it can, else marks No report.
                         if !attempt.no_report && now - ready >= team.settings.report_timeout_seconds as f64 {
-                            steps.push(Step::NoReport { task: task.id });
+                            steps.push(no_report_or_claim(team, task, now));
                         }
                     } else if quiet {
                         if attempt.report_ready_at.is_none() {
@@ -802,7 +854,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                             // written; the timeout starts now (C2).
                             steps.push(Step::GateOpen { task: task.id });
                         } else if !attempt.no_report && now - ready >= team.settings.report_timeout_seconds as f64 {
-                            steps.push(Step::NoReport { task: task.id });
+                            steps.push(no_report_or_claim(team, task, now));
                         }
                     } else if found.is_some_and(|found| !found.idle || !same_turn(attempt, ended, found)) {
                         steps.push(Step::WorkResumed { task: task.id });
@@ -823,7 +875,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                         && attempt.started_at.is_some()
                         && now - delivered >= team.settings.report_timeout_seconds as f64
                     {
-                        steps.push(Step::NoReport { task: task.id });
+                        steps.push(no_report_or_claim(team, task, now));
                     }
                 }
             }
@@ -4756,6 +4808,443 @@ pub(crate) fn check_context(session: &SessionRef, request: &ContextRequest) -> C
     }
 }
 
+/// Task 209: how often an active member's native context is read (seconds),
+/// how often one that holds no open attempt is, and how many inspects one tick
+/// may run so a slow agent never holds the tick.
+const CONTEXT_EVERY: f64 = 30.0;
+const CONTEXT_IDLE_EVERY: f64 = 120.0;
+const CONTEXT_READS_PER_TICK: usize = 4;
+/// Task 209: a compaction that refused or stayed unconfirmed is tried again
+/// after this long, never on every tick.
+const CONTEXT_RETRY_SECS: f64 = 600.0;
+/// Task 209: how long a handoff brief waits for its first refused send.
+const HANDOFF_RETRY_SECS: f64 = 5.0;
+
+/// Task 209: a member's native context reading, from its session's own
+/// `hgs inspect` (the listing carries no meter). None when the agent reports
+/// none or the read failed; the last reading stays on the member then.
+fn read_context(member: &Member) -> Option<MemberContext> {
+    let session = member.session.as_ref()?;
+    let output = hgs(&session.host, &["inspect", &session.name, "--json"], None, Duration::from_secs(10)).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(&output.stdout).ok()?;
+    let (used, limit) = super::context::reading(&value)?;
+    Some(MemberContext::of(used, limit, now()))
+}
+
+/// Task 209: keeps the reading with the team, so status and the member card
+/// show the percentage without a read of their own.
+fn record_context(store: &mut Store, team_id: &str, member_id: &str, context: MemberContext) -> anyhow::Result<()> {
+    change(store, team_id, |team, _| {
+        if let Some(found) = team.members.iter_mut().find(|member| member.id == member_id) {
+            found.context = Some(context);
+        }
+        Ok(())
+    })
+}
+
+/// Task 209: the task whose open attempt belongs to `member`, if any.
+fn open_attempt_task<'a>(team: &'a Team, member: &str) -> Option<&'a Task> {
+    team.tasks.iter().find(|task| task.open_attempt().is_some_and(|attempt| attempt.member == member))
+}
+
+/// Task 209: whether the member's context is at the team's threshold (or a
+/// compaction of it is being confirmed): the finished turn's report gate waits,
+/// because the compaction is what continues the attempt.
+fn context_due(team: &Team, member: &str, at: f64) -> bool {
+    let Some(found) = team.member(member) else { return false };
+    if found.context_compact.is_some() {
+        return true;
+    }
+    if found.context_retry_at.is_some_and(|retry| retry > at) {
+        return false;
+    }
+    found.context.is_some_and(|context| context.fresh(at) && context.reached(team.settings.context_compact_percent))
+}
+
+/// Task 209: the step a finished turn becomes. A turn that says it has no
+/// context left while a fresh meter says otherwise is answered with the figure
+/// once; the attempt stays open. Without a reading the claim is not refused.
+fn no_report_or_claim(team: &Team, task: &Task, at: f64) -> Step {
+    let Some(attempt) = task.attempts.last() else { return Step::NoReport { task: task.id } };
+    if attempt.context_answered_at.is_some() || !super::context::claims_exhausted(&attempt.last_reply) {
+        return Step::NoReport { task: task.id };
+    }
+    let fresh = team
+        .member(&attempt.member)
+        .and_then(|member| member.context)
+        .is_some_and(|context| context.fresh(at));
+    if fresh {
+        Step::AnswerContextClaim { task: task.id }
+    } else {
+        Step::NoReport { task: task.id }
+    }
+}
+
+/// Task 209: whether the member's collected reading asks for a context action
+/// before a hand-out: `compact` when its agent compacts natively, `fresh` when
+/// it does not, and empty when today's hand-out stands.
+fn due_context_action(team: &Team, member: &Member) -> String {
+    let Some(context) = member.context.filter(|context| context.fresh(now())) else { return String::new() };
+    if !context.reached(team.settings.context_compact_percent) || member.context_retry_at.is_some_and(|retry| retry > now()) {
+        return String::new();
+    }
+    if native_context(&member.agent, "compact") {
+        "compact".into()
+    } else {
+        "fresh".into()
+    }
+}
+
+/// Task 209: reads how many tokens a member's session holds and updates the
+/// member's reading. Called by the tick only; a hand-out or a report uses the
+/// reading already collected, never a second inspect.
+fn sample_contexts(store: &mut Store, teams: &[Team], seen: &[Seen], at: f64) {
+    let mut reads = 0;
+    for team in teams {
+        for member in team.members.iter().filter(|member| member.state != MemberState::Removed) {
+            if reads >= CONTEXT_READS_PER_TICK {
+                return;
+            }
+            let Some(session) = member.session.as_ref() else { continue };
+            if member.context_compact.is_some() {
+                continue;
+            }
+            let open = open_attempt_task(team, &member.id).is_some();
+            let every = if open { CONTEXT_EVERY } else { CONTEXT_IDLE_EVERY };
+            if member.context.is_some_and(|context| at - context.at < every) {
+                continue;
+            }
+            // A session the listing did not answer is not an idle one: its
+            // reading waits for the computer to answer.
+            if !seen.iter().any(|found| found.host == session.host && found.name == session.name) {
+                continue;
+            }
+            let Some(context) = read_context(member) else { continue };
+            reads += 1;
+            if let Err(error) = record_context(store, &team.id, &member.id, context) {
+                eprintln!("hgs team worker: {}: context: {error}", team.name);
+            }
+        }
+    }
+}
+
+/// Task 209: starts the context action for an idle member whose meter reached
+/// the threshold. A native compaction is submitted and confirmed on later
+/// ticks; an agent without one gets a fresh conversation with the handoff
+/// brief. Either way the member's open attempt continues.
+fn start_member_compact(store: &mut Store, team_id: &str, member_id: &str, reason: &str) -> anyhow::Result<()> {
+    let team = store.load(team_id)?.context("Unknown team")?;
+    let Some(member) = team.member(member_id).cloned() else { return Ok(()) };
+    if member.context_compact.is_some() || member.context_retry_at.is_some_and(|retry| retry > now()) {
+        return Ok(());
+    }
+    let Some(session) = member.session.clone() else { return Ok(()) };
+    let task = open_attempt_task(&team, member_id);
+    let (task_id, attempt_id) = task
+        .map(|task| (task.id, task.open_attempt().map(|attempt| attempt.id.clone()).unwrap_or_default()))
+        .unwrap_or((0, String::new()));
+    if !native_context(&member.agent, "compact") {
+        change(store, team_id, |team, events| {
+            let role = team.role_of(member_id);
+            super::ops::fresh_session(team, member_id, "context", events)?;
+            events.push(Event::new("context_compact_fresh", json!({"member":role,"task":task_id,"reason":reason})));
+            Ok(())
+        })?;
+        return Ok(());
+    }
+    match run_context(&member, &session, "compact") {
+        ContextStart::Started(request) => change(store, team_id, |team, events| {
+            let role = team.role_of(member_id);
+            let found = team.members.iter_mut().find(|found| found.id == member_id).context("Unknown member")?;
+            found.context_compact = Some(MemberCompact {
+                action: "compact".into(),
+                request_id: request.request_id,
+                run_id: request.run_id,
+                conversation: request.conversation,
+                started_at: request.started_at,
+                task: task_id,
+                attempt: attempt_id.clone(),
+                reason: reason.to_owned(),
+            });
+            events.push(Event::new(
+                "context_compact_started",
+                json!({"member":role,"task":task_id,"attempt":attempt_id,"reason":reason}),
+            ));
+            Ok(())
+        }),
+        // A native action that needed nothing (an agent without one, or a clear
+        // the command itself confirmed): the member is told to go on.
+        ContextStart::Done { step: _, conversation } => {
+            if let Some(conversation) = conversation {
+                change(store, team_id, |team, _| {
+                    if let Some(found) = team.members.iter_mut().find(|member| member.id == member_id).and_then(|member| member.session.as_mut()) {
+                        if found.run_id == session.run_id {
+                            found.conversation_id = conversation;
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+            finish_member_compact(store, team_id, member_id, reason)
+        }
+        ContextStart::Failed { step } => change(store, team_id, |team, events| {
+            let role = team.role_of(member_id);
+            if let Some(found) = team.members.iter_mut().find(|found| found.id == member_id) {
+                found.context_retry_at = Some(now() + CONTEXT_RETRY_SECS);
+            }
+            events.push(Event::new(
+                "context_compact_failed",
+                json!({"member":role,"task":task_id,"result":step.result,"reason":step.reason}),
+            ));
+            Ok(())
+        }),
+    }
+}
+
+/// Task 209: one tick's look at a started compaction. Confirmed: the member is
+/// told to continue the same attempt with the recall brief. Refused or past its
+/// bound: the member keeps working, the reading stays, and a retry waits.
+fn check_member_compact(store: &mut Store, team_id: &str, member_id: &str) -> anyhow::Result<()> {
+    let team = store.load(team_id)?.context("Unknown team")?;
+    let Some(member) = team.member(member_id).cloned() else { return Ok(()) };
+    let Some(pending) = member.context_compact.clone() else { return Ok(()) };
+    let reason = pending.reason.clone();
+    let Some(session) = member.session.clone() else {
+        return change(store, team_id, |team, events| {
+            let role = team.role_of(member_id);
+            if let Some(found) = team.members.iter_mut().find(|found| found.id == member_id) {
+                found.context_compact = None;
+            }
+            events.push(Event::new("context_compact_failed", json!({"member":role,"reason":"the member's session is gone"})));
+            Ok(())
+        });
+    };
+    if pending.request_id.is_empty() {
+        // A fresh conversation, not a native compaction: its brief is sent when
+        // the new session is up.
+        return Ok(());
+    }
+    let request = ContextRequest {
+        action: "compact".into(),
+        request_id: pending.request_id,
+        run_id: pending.run_id,
+        conversation: pending.conversation,
+        started_at: pending.started_at,
+    };
+    match check_context(&session, &request) {
+        ContextCheck::Waiting => Ok(()),
+        ContextCheck::Done { conversation } => {
+            if let Some(conversation) = conversation {
+                change(store, team_id, |team, _| {
+                    if let Some(found) = team.members.iter_mut().find(|member| member.id == member_id).and_then(|member| member.session.as_mut()) {
+                        found.conversation_id = conversation;
+                    }
+                    Ok(())
+                })?;
+            }
+            finish_member_compact(store, team_id, member_id, &reason)
+        }
+        ContextCheck::Refused(reason) | ContextCheck::Uncertain(reason) => change(store, team_id, |team, events| {
+            let role = team.role_of(member_id);
+            if let Some(found) = team.members.iter_mut().find(|found| found.id == member_id) {
+                found.context_compact = None;
+                found.context_retry_at = Some(now() + CONTEXT_RETRY_SECS);
+            }
+            events.push(Event::new("context_compact_failed", json!({"member":role,"reason":reason})));
+            Ok(())
+        }),
+    }
+}
+
+/// Task 209: the confirmed compaction's recall brief and the instruction to go
+/// on with the same attempt, as one working-tier message.
+fn finish_member_compact(store: &mut Store, team_id: &str, member_id: &str, reason: &str) -> anyhow::Result<()> {
+    let team = store.load(team_id)?.context("Unknown team")?;
+    let Some(member) = team.member(member_id).cloned() else { return Ok(()) };
+    let Some(session) = member.session.clone() else { return Ok(()) };
+    let task = open_attempt_task(&team, member_id).cloned();
+    let recent = recent_events(store, team_id);
+    let pulses = handoff::pulse_lines(&team, member_id, &recent, now());
+    let mut built = handoff::build(&team, member_id, handoff::Why::Compaction, &pulses, handoff::RECALL_UNITS);
+    if let Some(task) = &task {
+        built.text.push_str(&format!(
+            "\nContinue task #{} (attempt {}): the compaction changed nothing else; work from the files and report with hgs team report.\n",
+            task.id,
+            task.attempts.last().map(|attempt| attempt.n).unwrap_or(0)
+        ));
+    }
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let outcome = super::doorbell::post_and_ring(
+        store, team_id, member_id, &session, &request_id, "context", "Zerus", Urgency::Normal, &built.text,
+    );
+    change(store, team_id, |team, events| {
+        let role = team.role_of(member_id);
+        if let Some(found) = team.members.iter_mut().find(|found| found.id == member_id) {
+            found.context_compact = None;
+            // Read the window again after the compaction.
+            found.context = None;
+            found.context_retry_at = None;
+        }
+        match &outcome {
+            Sent::Delivered | Sent::Uncertain(_) => events.push(Event::new(
+                "context_compacted",
+                json!({"member":role,"task":task.as_ref().map(|task| task.id).unwrap_or(0),
+                    "attempt":task.as_ref().and_then(|task| task.attempts.last()).map(|attempt| attempt.n).unwrap_or(0),
+                    "reason":reason,"units":built.text.encode_utf16().count()}),
+            )),
+            Sent::Refused(error) => events.push(Event::new("context_compacted_unsent", json!({"member":role,"error":error}))),
+        }
+        Ok(())
+    })
+}
+
+/// Task 209/135: sends a fresh session's handoff brief as its first message and
+/// continues the member's open attempt under the same number.
+fn send_handoff_now(store: &mut Store, team_id: &str, member_id: &str) -> anyhow::Result<()> {
+    let team = store.load(team_id)?.context("Unknown team")?;
+    let Some(member) = team.member(member_id).cloned() else { return Ok(()) };
+    let Some(need) = member.handoff.clone() else { return Ok(()) };
+    let Some(session) = member.session.clone() else { return Ok(()) };
+    let task = open_attempt_task(&team, member_id).cloned();
+    let recent = recent_events(store, team_id);
+    let pulses = handoff::pulse_lines(&team, member_id, &recent, now());
+    let why = if need.why == "relaunch" { handoff::Why::Relaunch(&need) } else { handoff::Why::Swap(&need) };
+    let mut built = handoff::build(&team, member_id, why, &pulses, handoff::BRIEF_UNITS);
+    if let Some(task) = &task {
+        built.text.push_str(&format!(
+            "\nContinue task #{} (attempt {}): your previous session stopped mid-task. Work from the files; do not restart it; report with hgs team report.\n",
+            task.id,
+            task.attempts.last().map(|attempt| attempt.n).unwrap_or(0)
+        ));
+    }
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let outcome = super::doorbell::post_and_ring(
+        store, team_id, member_id, &session, &request_id, "handoff", "Zerus", Urgency::Normal, &built.text,
+    );
+    change(store, team_id, |team, events| {
+        match &outcome {
+            Sent::Delivered | Sent::Uncertain(_) => handoff_sent(team, events, member_id, &built, &need.why),
+            Sent::Refused(error) => {
+                // Keep the brief for a later attempt, but not on the next tick.
+                if let Some(found) = team.members.iter_mut().find(|found| found.id == member_id) {
+                    if let Some(need) = found.handoff.as_mut() {
+                        need.at = now();
+                    }
+                }
+                events.push(Event::new("handoff_unsent", json!({"member":team.role_of(member_id),"why":need.why,"error":error})));
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Task 209: answers a reply that claims there is no context left while the
+/// meter says otherwise. Below the threshold the member hears the actual
+/// figure and the attempt stays open; at or above it the compaction starts.
+/// Without a reading the claim cannot be disproved and No report stands.
+fn answer_context_claim(store: &mut Store, team_id: &str, task_id: u32) -> anyhow::Result<()> {
+    let team = store.load(team_id)?.context("Unknown team")?;
+    let Some(task) = team.task(task_id) else { return Ok(()) };
+    let Some(attempt) = task.attempts.last() else { return Ok(()) };
+    if attempt.state != AttemptState::Delivered || attempt.context_answered_at.is_some() {
+        return Ok(());
+    }
+    let Some(member) = team.member(&attempt.member) else { return Ok(()) };
+    let Some(context) = member.context.filter(|context| context.fresh(now())) else { return Ok(()) };
+    let threshold = team.settings.context_compact_percent;
+    if context.reached(threshold) {
+        return start_member_compact(store, team_id, &member.id, "claim");
+    }
+    let Some(session) = member.session.clone() else { return Ok(()) };
+    let text = format!(
+        "[Zerus team \u{b7} from: Zerus \u{b7} context]\nYour context is at {}; the team's threshold is {threshold}%, so there is no need to stop. \
+         Continue task #{} (attempt {}) and report it with hgs team report. If you see something else, say exactly what you see: hgs team ask.",
+        super::context::meter(context.percent, context.used, context.limit),
+        task_id,
+        attempt.n
+    );
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let outcome = super::doorbell::post_and_ring(
+        store, team_id, &member.id, &session, &request_id, "context", "Zerus", Urgency::Normal, &text,
+    );
+    change(store, team_id, |team, events| {
+        let role = team.role_of(&member.id);
+        let n = attempt.n;
+        let answered = matches!(&outcome, Sent::Delivered | Sent::Uncertain(_));
+        if let Some(found) = team.task_mut(task_id).and_then(|task| task.attempts.iter_mut().find(|found| found.id == attempt.id)) {
+            found.context_answered_at = Some(now());
+        }
+        events.push(Event::new(
+            "context_claim_refused",
+            json!({"member":role,"task":task_id,"attempt":n,"percent":context.percent,
+                "used":context.used,"limit":context.limit,"answered":answered}),
+        ));
+        Ok(())
+    })
+}
+
+/// Task 209: a report that claims there is no context left while the member's
+/// meter says otherwise is not a report. Returns the answer for the member: the
+/// attempt stays open and Zerus compacts when the meter reached the threshold.
+/// None when the text is no claim or no reading can be taken (an unverifiable
+/// claim is not refused).
+pub(crate) fn report_context_answer(store: &mut Store, team_id: &str, input: &Value) -> anyhow::Result<Option<String>> {
+    let text = input["text"].as_str().unwrap_or_default();
+    if !super::context::claims_exhausted(text) {
+        return Ok(None);
+    }
+    let Some(team) = store.load(team_id)? else { return Ok(None) };
+    let Some(task) = team.task(input["task"].as_u64().unwrap_or_default() as u32) else { return Ok(None) };
+    let attempt_id = input["attempt"].as_str().unwrap_or_default();
+    let Some(attempt) = task
+        .attempts
+        .iter()
+        .find(|attempt| attempt.state.open() && (attempt_id.is_empty() || attempt.id == attempt_id))
+    else {
+        return Ok(None);
+    };
+    let Some(member) = team.member(&attempt.member) else { return Ok(None) };
+    let Some(context) = read_context(member).or_else(|| member.context.filter(|context| context.fresh(now()))) else { return Ok(None) };
+    record_context(store, team_id, &member.id, context)?;
+    let threshold = team.settings.context_compact_percent;
+    if context.reached(threshold) {
+        change(store, team_id, |team, events| {
+            let role = team.role_of(&member.id);
+            events.push(Event::new(
+                "context_compact_requested",
+                json!({"member":role,"task":task.id,"attempt":attempt.n,"reason":"claim",
+                    "percent":context.percent,"used":context.used,"limit":context.limit}),
+            ));
+            Ok(())
+        })?;
+        return Ok(Some(format!(
+            "Your report was not accepted: your context is at {} and Zerus is compacting it. Continue task #{} (attempt {}) and report with hgs team report.",
+            super::context::meter(context.percent, context.used, context.limit),
+            task.id,
+            attempt.n
+        )));
+    }
+    change(store, team_id, |team, events| {
+        let role = team.role_of(&member.id);
+        events.push(Event::new(
+            "context_claim_refused",
+            json!({"member":role,"task":task.id,"attempt":attempt.n,"answered":false,
+                "percent":context.percent,"used":context.used,"limit":context.limit}),
+        ));
+        Ok(())
+    })?;
+    Ok(Some(format!(
+        "Your report was not accepted: your context is at {}, below the team's {threshold}% threshold, so there is no need to stop. \
+         Continue task #{} (attempt {}) and report it with hgs team report.",
+        super::context::meter(context.percent, context.used, context.limit),
+        task.id,
+        attempt.n
+    )))
+}
+
 /// U46: what a hand-out leaves for itself: its prepare steps, the conversation
 /// a clear produced, and whether it resumes a wait already recorded on the task.
 #[derive(Clone, Default)]
@@ -5293,7 +5782,25 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
             Ok(())
         })?;
     }
+    // Task 209: a member whose context is being compacted takes no new task
+    // until the compaction confirmed and it was told to go on.
+    if member.context_compact.is_some() {
+        return Ok(());
+    }
+    // U46: the role's or the member's own action; Task 209: else the collected
+    // meter: at the team's threshold the task waits for a compact (or a fresh
+    // conversation for an agent without one) before it is sent.
     let action = context_before_task(&team, &member);
+    let action = if action.is_empty() { due_context_action(&team, &member) } else { action };
+    if action == "fresh" {
+        change(store, team_id, |team, events| {
+            let role = team.role_of(member_id);
+            super::ops::fresh_session(team, member_id, "context", events)?;
+            events.push(Event::new("context_compact_fresh", json!({"member":role,"task":task_id,"reason":"threshold"})));
+            Ok(())
+        })?;
+        return Ok(());
+    }
     if action.is_empty() {
         return hand_out_now(store, team_id, task_id, member_id, from, host, Preparation::default());
     }
@@ -5453,7 +5960,8 @@ fn hand_out_now(
             )));
         if let Some(need) = team.member(member_id).and_then(|member| member.handoff.clone()) {
             let pulses = handoff::pulse_lines(team, member_id, &recent, now());
-            let built = handoff::build(team, member_id, handoff::Why::Swap(&need), &pulses, handoff::BRIEF_UNITS);
+            let why = if need.why == "relaunch" { handoff::Why::Relaunch(&need) } else { handoff::Why::Swap(&need) };
+            let built = handoff::build(team, member_id, why, &pulses, handoff::BRIEF_UNITS);
             if let Some((_, text)) = message.as_mut() {
                 // Under the hand-out's own header line: the doorbell is made from it (task 134).
                 *text = handoff::within(text, &built.text);
@@ -8008,6 +8516,11 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::PrepareContext { task, member } => check_context_step(store, &team.id, *task, member, host),
         Step::RestartStuck { member } => restart_stuck(store, &team.id, member),
         Step::RelaunchRights { member } => relaunch_rights(store, &team.id, member),
+        // Task 209: the context meter's three steps.
+        Step::CompactIdle { member } => start_member_compact(store, &team.id, member, "threshold"),
+        Step::CheckCompact { member } => check_member_compact(store, &team.id, member),
+        Step::SendHandoff { member } => send_handoff_now(store, &team.id, member),
+        Step::AnswerContextClaim { task } => answer_context_claim(store, &team.id, *task),
         Step::RightsWait { task, reason } => change(store, &team.id, |team, events| {
             let task_id = *task;
             let task = team.task_mut(task_id).context("unknown task")?;
@@ -8278,6 +8791,16 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
                     };
                 }
             }
+            // Task 209: a reply that claims there is no context left while the
+            // member's meter says otherwise is answered with the meter; it is
+            // not a No report, and the attempt stays open.
+            if let Some(attempt) = &attempt {
+                let claimed = super::context::claims_exhausted(&last_reply);
+                let fresh = team.member(&attempt.member).and_then(|member| member.context).is_some_and(|context| context.fresh(now()));
+                if claimed && fresh && attempt.context_answered_at.is_none() {
+                    return answer_context_claim(store, &team.id, *task);
+                }
+            }
             change(store, &team.id, |team, events| {
                 let role = team.task(*task).and_then(|t| t.attempts.last()).map(|a| team.role_of(&a.member)).unwrap_or_default();
                 if let Some(attempt) = team.task_mut(*task).and_then(|t| t.attempts.last_mut()) {
@@ -8395,6 +8918,9 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
             eprintln!("hgs team worker: {}: outbox: {error}", team.name);
         }
     }
+    // Task 209: the native context meter, a bounded number of inspects a tick;
+    // the reload below carries the readings into this tick's steps.
+    sample_contexts(store, &teams, &sessions, now());
     let teams: Vec<Team> = teams.iter().filter_map(|t| store.load(&t.id).ok().flatten()).collect();
     defer_watched(&teams, &sessions);
     for team in &teams {
@@ -9024,6 +9550,21 @@ fn apply_outbox(store: &mut Store, team: &Team, member: &Member, request: &Value
     }
     if op == "commit" {
         return super::commands::commit_in_team(team, &member.id, &input);
+    }
+    // Task 209: a report that claims there is no context left while the meter
+    // says otherwise is not a report. A sandboxed member never saw the
+    // command's own refusal, so the answer goes to it as a message.
+    if op == "report" && input["interim"].as_bool() != Some(true) {
+        if let Some(answer) = report_context_answer(store, &team.id, &input)? {
+            if let Some(session) = member.session.clone() {
+                let text = format!("[Zerus team \u{b7} from: Zerus \u{b7} context]\n{answer}");
+                let _ = super::doorbell::post_and_ring(
+                    store, &team.id, &member.id, &session, &uuid::Uuid::new_v4().to_string(),
+                    "context", "Zerus", Urgency::Normal, &text,
+                );
+            }
+            return Ok(json!({"status":"refused","request_id":request_id,"task":input["task"].clone(),"error":answer}));
+        }
     }
     let member_id = member.id.clone();
     let value = store.mutate(Some((&request_id, &input)), &team.id, None, |team, events| {

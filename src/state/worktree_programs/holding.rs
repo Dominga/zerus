@@ -115,12 +115,13 @@ fn serve(config: &crate::config::Config, input: RawFd, out: &mut impl Write) -> 
     let Control::Open {
         pipeline,
         discovery,
+        presentation,
     } = reader.next(input, Instant::now() + SETUP_WAIT)?
     else {
         return Err(INVALID.into());
     };
     let bytes = serde_json::to_vec(&discovery).map_err(failed)?;
-    let (manifest, scope) = discover_held(config, &bytes)?;
+    let (manifest, scope, presentation) = discover_presented(config, &bytes, presentation)?;
     let until = Instant::now() + Duration::from_secs(manifest.expires.saturating_sub(now() as u64));
     // Custody setup never writes inside the selected checkout, even when the
     // caller's TMPDIR points there. Paths are data; native object checks decide.
@@ -147,6 +148,7 @@ fn serve(config: &crate::config::Config, input: RawFd, out: &mut impl Write) -> 
             abi: custody::ABI.into(),
             pipeline: pipeline.clone(),
             manifest: Box::new(manifest.clone()),
+            presentation,
             holder: NativeChild {
                 pid: std::process::id(),
                 parent: original.parent,

@@ -44,6 +44,8 @@ mod cleaning;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod holding;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod presentation;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod stopping;
 // Exact historical completion/ownership DATA, never execution or drain proof.
 #[allow(dead_code)]
@@ -177,6 +179,18 @@ fn discover_bytes(config: &crate::config::Config, bytes: &[u8]) -> Result<wire::
 }
 
 fn discover_held(config: &crate::config::Config, bytes: &[u8]) -> Result<(wire::Manifest, Scope)> {
+    discover_presented(config, bytes, false).map(|(manifest, scope, _)| (manifest, scope))
+}
+
+fn discover_presented(
+    config: &crate::config::Config,
+    bytes: &[u8],
+    present: bool,
+) -> Result<(
+    wire::Manifest,
+    Scope,
+    Option<wire::presentation::Presentation>,
+)> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let wire::Discovery { capture } = wire::Discovery::decode(bytes)?;
     if super::session_action::status_machine(config)? != capture.machine {
@@ -205,6 +219,11 @@ fn discover_held(config: &crate::config::Config, bytes: &[u8]) -> Result<(wire::
     {
         return Err("A program needed to settle this action uses the working folder".into());
     }
+    // Optional PRESENTATION sampling shares the original discovery budget and
+    // brackets its existing census. It never changes membership or authority.
+    let pair = present
+        .then(|| presentation::Pair::before(&record, deadline))
+        .flatten();
     let programs = worktree_membership::programs(&scope, deadline).map_err(|e| e.to_string())?;
     let manifest = wire::Manifest {
         abi: wire::ABI.into(),
@@ -219,14 +238,16 @@ fn discover_held(config: &crate::config::Config, bytes: &[u8]) -> Result<(wire::
     };
     // No discovery result is published after expiry, ownership replacement,
     // a new original run/conversation, or a changed native checkout object.
-    if original(&manifest.capture)?["worktree_owner"] != ownership
+    let current_record = original(&manifest.capture)?;
+    if current_record["worktree_owner"] != ownership
         || owner(&manifest.capture)? != ownership
         || !manifest.valid(now() as u64)
     {
         return Err(INVALID.into());
     }
+    let display = pair.and_then(|pair| pair.finish(&current_record, &manifest, deadline));
     scope.current(deadline).map_err(|e| e.to_string())?;
-    Ok((manifest, scope))
+    Ok((manifest, scope, display))
 }
 
 #[cfg(test)]

@@ -100,6 +100,8 @@ pub enum Control {
     Open {
         pipeline: String,
         discovery: Discovery,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        presentation: bool,
     },
     Arm {
         pipeline: String,
@@ -199,6 +201,8 @@ pub enum Reply {
         abi: String,
         pipeline: String,
         manifest: Box<Manifest>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        presentation: Option<super::presentation::Presentation>,
         holder: NativeChild,
         socket: String,
     },
@@ -226,6 +230,7 @@ impl Reply {
                 manifest,
                 holder,
                 socket,
+                ..
             } => {
                 abi == ABI
                     && canonical_uuid(pipeline)
@@ -266,8 +271,10 @@ impl Reply {
         if bytes.len() > FRAME_BYTES {
             return Err("program_custody_reply_oversized");
         }
+        let bytes = super::presentation::sanitize_reply(bytes)
+            .map_err(|_| "program_custody_reply_invalid")?;
         let frame: Self =
-            serde_json::from_slice(bytes).map_err(|_| "program_custody_reply_invalid")?;
+            serde_json::from_slice(&bytes).map_err(|_| "program_custody_reply_invalid")?;
         frame
             .valid(now)
             .then_some(frame)
@@ -282,6 +289,7 @@ mod tests {
     fn custody_data_is_closed_bounded_and_never_a_drain_or_force_claim() {
         let pipeline = "99999999-9999-4999-8999-999999999999";
         let open = Control::Open {
+            presentation: false,
             pipeline: pipeline.into(),
             discovery: Discovery {
                 capture: super::super::tests::manifest().capture,
@@ -324,6 +332,7 @@ mod tests {
         };
         assert_eq!(Control::decode(&arm.encode().unwrap()).unwrap(), arm);
         let ready = Reply::Ready {
+            presentation: None,
             abi: ABI.into(),
             pipeline: pipeline.into(),
             manifest: Box::new(input.manifest.clone()),
@@ -340,6 +349,56 @@ mod tests {
             ready
         );
         assert!(Reply::decode(&ready.encode(1000).unwrap(), 1300).is_err());
+        // Old peers get the byte-compatible old Open/Ready shapes. New peers
+        // negotiate presentation only through the same selected helper help.
+        assert!(serde_json::to_value(&open)
+            .unwrap()
+            .get("presentation")
+            .is_none());
+        let old = serde_json::to_value(&ready).unwrap();
+        assert!(old.get("presentation").is_none());
+        for raw in [
+            serde_json::json!(true),
+            serde_json::json!({"abi":"unknown"}),
+            serde_json::json!({"unexpected":"field"}),
+        ] {
+            let mut value = old.clone();
+            value["presentation"] = raw;
+            let decoded = Reply::decode(&serde_json::to_vec(&value).unwrap(), 1000).unwrap();
+            assert_eq!(decoded, ready);
+        }
+        let display = super::super::presentation::Presentation::new(
+            &input.manifest,
+            super::super::presentation::Identity {
+                pid: 10,
+                birth: "agent-birth".into(),
+            },
+            super::super::presentation::Identity {
+                pid: 20,
+                birth: "supervisor-birth".into(),
+            },
+        );
+        let mut value = old.clone();
+        value["presentation"] = serde_json::to_value(&display).unwrap();
+        let encoded = serde_json::to_string(&value).unwrap();
+        let Reply::Ready {
+            presentation,
+            manifest,
+            ..
+        } = Reply::decode(encoded.as_bytes(), 1000).unwrap()
+        else {
+            panic!("Ready")
+        };
+        assert_eq!(presentation, Some(display));
+        assert_eq!(*manifest, input.manifest);
+        // Duplicate keys in the optional companion do not select identities.
+        let duplicate = encoded.replace("\"agent\":{", "\"agent\":null,\"agent\":{");
+        let Reply::Ready { presentation, .. } = Reply::decode(duplicate.as_bytes(), 1000).unwrap()
+        else {
+            panic!("Ready")
+        };
+        assert!(presentation.is_none());
+
         let observation = "88888888-8888-4888-8888-888888888888";
         let observe = Control::Observe {
             pipeline: pipeline.into(),

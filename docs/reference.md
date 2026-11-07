@@ -3061,10 +3061,15 @@ original confirmation or retry an unknown removal.
 
 For a local Linux or macOS native confirmation, a selected CLI that supports
 `worktree-program-stop-v1` and `worktree-program-cleanup-v1` can also stop the
-programs proven to use that generated checkout. The dialog lists the complete
-bounded native manifest before **Stop and remove folder** is confirmed. This
-includes editors and terminals the person opened there. Only those original
-process identities are eligible: immediately before each signal, Zerus checks
+programs proven to use that generated checkout. Before **Stop and remove folder**
+is confirmed, the dialog shows a count and warning for other programs, with an
+expandable list, including editors and terminals the person opened there. Only
+the selected session's own agent and wrapper can be omitted from this initial
+display, when their exact record binding, native birth identities and direct
+parent relationship remain verified across discovery; uncertain rows stay visible.
+This presentation never filters the complete native execution manifest. The
+separate Force confirmation always shows its complete freshly checked survivor
+list expanded. Only the original process identities are eligible: immediately before each signal, Zerus checks
 their native birth/pin and current cwd or open-file membership in the same held
 checkout. Newly discovered or replaced programs require fresh review. Programs
 needed to verify and settle the operation, and their protected ancestors, are

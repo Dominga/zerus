@@ -188,8 +188,6 @@
   .qchip { flex: none; margin-left: 6px; height: 20px; display: inline-flex; align-items: center; gap: 3px; padding: 0 5px 0 4px; border-radius: 5px; background: color-mix(in srgb, var(--z-list-tone-attention) 16%, transparent); color: var(--z-list-tone-attention); font-size: 11px; font-weight: 600; }
   .qchip.muted { background: var(--z-list-chip); color: var(--z-list-badge-muted); }
 
-  /* Card surface (zerus-sa9qn.2): always painted, as in the owner's prototype; hover and selection still win. */
-  .scard { background: color-mix(in srgb, var(--z-color-row-hover) 55%, transparent); border-color: color-mix(in srgb, var(--z-list-tree-line) 60%, transparent); }
   /* Agent tile: the large colored provider mark at the card's left; the lines start after it. */
   .agent-tile { --tile: 34px; flex: none; display: inline-grid; place-items: center; width: var(--tile); height: var(--tile); border-radius: calc(var(--tile) * .26);
     color: var(--agent); background: color-mix(in srgb, var(--agent) 14%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--agent) 34%, transparent); }

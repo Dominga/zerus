@@ -683,7 +683,11 @@ class WorkflowSecurityTests(unittest.TestCase):
                 self.assertNotIn("--parallel", text)
                 # The published recipes keep their check() and never use ccache.
                 self.assertIn("\ncheck() {\n", text)
+                self.assertIn("checkdepends=('xorg-server-xvfb')", text)
                 self.assertNotIn("ccache", text)
+        self.assertIn("xorg-server-xvfb", job(checks, "arch-package"))
+        self.assertIn("\tcheckdepends = xorg-server-xvfb\n",
+                      (ROOT / "packaging/aur/zerus-git/.SRCINFO").read_text())
         # Dev explicitly builds a usable package without the regression check().
         # The normal script and distributed recipes retain their full checks.
         dev_package = (ROOT / '.github/workflows/dev-arch.yml').read_text()

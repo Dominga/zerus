@@ -3110,6 +3110,24 @@ decisions waiting (task 95's stall, reason `idle`) is told itself once a round
   that rule's longer tool bound, and the prompt the agent sits at while it
   waits is not a disagreement. A quiet member without such work is still
   compared as before.
+- Task 278 (owner, 2026-11-08): the jobs a member waits on are registered,
+  whatever its activity says. These are the build Zerus runs for it, the
+  background jobs its hooks registered (a Claude `run_in_background` Bash,
+  confirmed against the agent's processes; a Codex exec session; a DeepSeek
+  job from its native host), and Background work under a declared budget. The
+  listing row carries the hooks' jobs as `background_jobs` (`command`,
+  `description`, `started_at`). They are never counted as the session's
+  Background work, so the session state, the capture gate and the reply badge
+  keep their rules. A member with such a job is "waiting for <job> since HH:MM"
+  (the first job, and how many more) in look's `waiting`. It is never suspect,
+  never uncertain over its idle prompt, and never stuck or silent. Its status
+  member card carries `jobs` (`kind` build, shell or job; `what`; `command`;
+  `since`) and `waiting_for`. Each job's start, command and end are kept in
+  the working tier (`working_jobs`, at most 500 ended rows a team) and
+  journaled as `job_started` and `job_ended`. The lead's handoff brief lists
+  them among its last pulses ("dev started waiting for its background job
+  `cargo test` (since 14:05)"). The hand-out still asks for builds and tests
+  through `hgs run` or `hgs team run`.
 
 What counts as work, not silence (task 181): a member inside one open tool call
 is held to the tool bound (six times the stuck bound, at least an hour) counted

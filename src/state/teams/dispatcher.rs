@@ -83,6 +83,9 @@ pub(crate) struct Seen {
     /// The MCP servers and services it runs, which are not Background work
     /// (G7).
     pub services: Vec<SeenService>,
+    /// Task 278: what it waits on: its Zerus build, the background jobs its
+    /// hooks registered, Background work under a declared budget.
+    pub jobs: Vec<SeenJob>,
     /// Waiting on an answer: a question or a permission request.
     pub asking: bool,
     /// Its process or native session runs.
@@ -135,6 +138,72 @@ pub(crate) fn cache_cold(record: &Value, now: f64) -> bool {
 pub(crate) struct SeenWork {
     pub command: String,
     pub started_at: f64,
+}
+
+/// Task 278: a job a session waits on (`MemberJob` once recorded).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct SeenJob {
+    pub kind: String,
+    pub what: String,
+    pub command: String,
+    pub since: f64,
+}
+
+/// One line of at most `chars` characters of `text`.
+fn short(text: &str, chars: usize) -> String {
+    let line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() <= chars {
+        line
+    } else {
+        format!("{}...", line.chars().take(chars).collect::<String>())
+    }
+}
+
+/// Task 278: the jobs a listed session waits on: the build Zerus runs for it,
+/// the background jobs its hooks registered (a Claude background shell, a
+/// Codex exec session, a DeepSeek job) and Background work it waits for under
+/// a declared budget.
+pub(crate) fn listed_jobs(record: &Value) -> Vec<SeenJob> {
+    let mut jobs = Vec::new();
+    let build = &record["build"];
+    if build.is_object() {
+        let label = build["label"].as_str().unwrap_or_default().trim();
+        jobs.push(SeenJob {
+            kind: "build".into(),
+            what: if label.is_empty() { "its own Zerus build".into() } else { format!("its own Zerus build ({})", short(label, 80)) },
+            command: build["command"].as_str().unwrap_or_default().to_owned(),
+            since: build["since"].as_f64().unwrap_or(0.0),
+        });
+    }
+    for job in record["background_jobs"].as_array().into_iter().flatten().take(8) {
+        let command = job["command"].as_str().unwrap_or_default();
+        if command.trim().is_empty() {
+            continue;
+        }
+        let description = job["description"].as_str().unwrap_or_default().trim();
+        jobs.push(SeenJob {
+            kind: "shell".into(),
+            what: format!("its background job `{}`", short(if description.is_empty() { command } else { description }, 80)),
+            command: command.to_owned(),
+            since: job["started_at"].as_f64().unwrap_or(0.0),
+        });
+    }
+    let work = &record["process_work"];
+    if work["count"].as_u64().unwrap_or(0) > 0 {
+        for job in work["jobs"].as_array().into_iter().flatten().take(8) {
+            let command = job["command"].as_str().unwrap_or_default();
+            if command.trim().is_empty() || jobs.iter().any(|known| known.command == command) {
+                continue;
+            }
+            jobs.push(SeenJob {
+                kind: "job".into(),
+                what: format!("its job `{}`", short(command, 80)),
+                command: command.to_owned(),
+                since: job["started_at"].as_f64().unwrap_or(0.0),
+            });
+        }
+    }
+    jobs
 }
 
 /// An MCP server or service of a session (G7).
@@ -244,6 +313,7 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 build_run: record["build"]["request_id"].as_str().unwrap_or_default().to_owned(),
                 build_label: record["build"]["label"].as_str().unwrap_or_default().to_owned(),
                 services,
+                jobs: if live { listed_jobs(record) } else { Vec::new() },
                 asking: live && matches!(field("phase"), "question" | "input" | "approval"),
                 last_event_at: record["last_event_at"].as_f64(),
                 tool: field("current_tool").to_owned(),
@@ -358,6 +428,8 @@ pub(crate) enum Step {
     Silent { task: u32, minutes: u64 },
     /// The MCP servers and services the member's session runs changed (G7).
     Services { member: String, services: Vec<SeenService> },
+    /// Task 278: what the member waits on changed.
+    Jobs { member: String, jobs: Vec<SeenJob> },
     /// H1: the member's session was stopped by a usage limit, or recovered
     /// from it (None).
     Limited { member: String, limited: Option<MemberLimit> },
@@ -950,6 +1022,12 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         if changed {
             steps.push(Step::Services { member: member.id.clone(), services: found.services.clone() });
         }
+        // Task 278: what the member waits on; status, look and the brief show it.
+        let jobs_changed = member.jobs.len() != found.jobs.len()
+            || member.jobs.iter().zip(&found.jobs).any(|(old, new)| old.kind != new.kind || old.command != new.command || old.since != new.since);
+        if jobs_changed {
+            steps.push(Step::Jobs { member: member.id.clone(), jobs: found.jobs.clone() });
+        }
         // U56: the member's phase and activity feed status; a busy member with
         // no session event for stuck_minutes is marked stuck, once per episode.
         // A question, a Zerus build or Background work is never stuck; the lead
@@ -1009,10 +1087,12 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             // Task 115: a member with an open native question or permission is
             // Waiting for you, never stuck in a silent turn: the stored card
             // outlives a tick whose phase has moved on.
+            // Task 278: nor is one waiting on a job it registered.
             let stuck = busy
                 && !found.asking
                 && !found.background
                 && !found.building
+                && found.jobs.is_empty()
                 && member.pending.is_none()
                 && member.terminal_question.is_none()
                 && quiet >= limit;
@@ -1049,6 +1129,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 build_label: found.build_label.clone(),
                 tool: found.tool.clone(),
                 tool_since: if in_tool { found.tool_started } else { None },
+                jobs: found.jobs.iter().map(|job| super::look::WaitJob { what: job.what.clone(), since: job.since }).collect(),
                 last_event_at: found.last_event_at,
                 quiet,
                 limit,
@@ -1218,7 +1299,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         };
         let Some(last) = last else { continue };
         let quiet = now - last;
-        if !(found.live && found.activity == "busy" && !found.asking && !found.background && quiet >= SILENT_MINUTES * 60.0) {
+        if !(found.live && found.activity == "busy" && !found.asking && !found.background && found.jobs.is_empty() && quiet >= SILENT_MINUTES * 60.0) {
             continue;
         }
         if found.agent == "dsh" {
@@ -2669,7 +2750,8 @@ fn hand_off_text_rules(
     // U30: a build Zerus runs is work; a job left in the member's own shell is a service.
     text += "\nStart builds and long tests through Zerus (hgs team run, or hgs run: hgs guide run) so your session shows \
              as Building and your reply waits for them; a job you leave in your own shell after your turn counts as a \
-             service, and your session looks idle.";
+             service, and your session looks idle. A background shell you start and wait on is shown to the lead as what \
+             you wait on, never as an uncertain status; builds and tests still go through hgs run or hgs team run.";
     text
 }
 
@@ -3469,6 +3551,45 @@ fn escalate_terminal(store: &mut Store, team: &Team, member_id: &str) -> anyhow:
             "tool":super::terminal_prompt::title(asked),"minutes":super::terminal_prompt::minutes(asked, at),
             "screen":!screen.is_empty()})));
         found.terminal_escalation = Some(TerminalEscalation { question_id: question.clone(), at, screen: screen.clone() });
+        Ok(())
+    })
+}
+
+/// Task 278: a member's jobs changed. The team record keeps the current ones
+/// (status, look and the brief read them); the working tier keeps each job's
+/// start, command and end, journaled as `job_started` and `job_ended` so the
+/// lead's brief sees what each member waits on.
+pub(crate) fn record_jobs(store: &mut Store, team: &Team, member_id: &str, jobs: &[SeenJob], at: f64) -> anyhow::Result<()> {
+    let before = team.member(member_id).map(|member| member.jobs.clone()).unwrap_or_default();
+    let key = |kind: &str, command: &str, since: f64| format!("{kind}:{since:.3}:{}", command.chars().take(160).collect::<String>());
+    let started: Vec<&SeenJob> =
+        jobs.iter().filter(|job| !before.iter().any(|old| key(&old.kind, &old.command, old.since) == key(&job.kind, &job.command, job.since))).collect();
+    let ended: Vec<&MemberJob> =
+        before.iter().filter(|old| !jobs.iter().any(|job| key(&old.kind, &old.command, old.since) == key(&job.kind, &job.command, job.since))).collect();
+    if !started.is_empty() || !ended.is_empty() {
+        let role = team.role_of(member_id);
+        let team_id = team.id.clone();
+        store.write_rows(&team.id, |tx, events| {
+            for job in &started {
+                let since = if job.since > 0.0 { job.since } else { at };
+                super::working::job_started(tx, &team_id, member_id, &key(&job.kind, &job.command, job.since), &job.kind, &job.what, &job.command, since)?;
+                events.push(Event::new("job_started", json!({"member":role,"kind":job.kind,"what":job.what,"since":since})));
+            }
+            for job in &ended {
+                super::working::job_ended(tx, &team_id, member_id, &key(&job.kind, &job.command, job.since), at)?;
+                let minutes = if job.since > 0.0 { ((at - job.since).max(0.0) / 60.0).round() as u64 } else { 0 };
+                events.push(Event::new("job_ended", json!({"member":role,"kind":job.kind,"what":job.what,"since":job.since,"minutes":minutes})));
+            }
+            super::working::prune_jobs(tx, &team_id)
+        })?;
+    }
+    change(store, &team.id, |team, _| {
+        if let Some(found) = team.members.iter_mut().find(|found| found.id == member_id) {
+            found.jobs = jobs
+                .iter()
+                .map(|job| MemberJob { kind: job.kind.clone(), what: job.what.clone(), command: job.command.clone(), since: job.since })
+                .collect();
+        }
         Ok(())
     })
 }
@@ -9552,6 +9673,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         }),
         Step::Restart { member } => restart_crashed(store, team, member),
         Step::CrashStopped { member } => crash_stopped(store, team, member),
+        Step::Jobs { member, jobs } => record_jobs(store, team, member, jobs, now()),
         Step::Services { member, services } => change(store, &team.id, |team, _| {
             if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
                 found.services = services
@@ -10861,6 +10983,9 @@ mod dispatcher_pause_cold;
 #[cfg(test)]
 #[path = "tests/dispatcher_store_locks.rs"]
 mod dispatcher_store_locks;
+#[cfg(test)]
+#[path = "tests/dispatcher_jobs.rs"]
+mod dispatcher_jobs;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_host_start.rs"]

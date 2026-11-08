@@ -313,15 +313,31 @@ pub(crate) fn pulse_lines(team: &Team, member: &str, items: &[Value], now: f64) 
         let detail = &item["detail"];
         let named = ["member", "to", "by"].iter().any(|key| detail[*key].as_str() == Some(role.as_str()));
         let task = detail["task"].as_u64();
-        if !named && !task.is_some_and(|task| mine.contains(&task)) {
+        let kind = item["kind"].as_str().unwrap_or_default();
+        // Task 278: the lead's brief names what every member waits on.
+        let job = matches!(kind, "job_started" | "job_ended");
+        if !named && !task.is_some_and(|task| mine.contains(&task)) && !(job && member == team.lead) {
             continue;
         }
-        let kind = item["kind"].as_str().unwrap_or_default();
         if kind.is_empty() {
             continue;
         }
         let minutes = ((now - item["at"].as_f64().unwrap_or(now)) / 60.0).max(0.0) as u64;
         let ago = if minutes < 120 { format!("{minutes} min ago") } else if minutes < 2880 { format!("{} h ago", minutes / 60) } else { format!("{} d ago", minutes / 1440) };
+        if job {
+            let who = detail["member"].as_str().unwrap_or_default();
+            let what = detail["what"].as_str().unwrap_or_default();
+            let since = super::look::clock(detail["since"].as_f64().unwrap_or(0.0));
+            lines.push(if kind == "job_started" {
+                format!("{ago} {who} started waiting for {what}{}", if since.is_empty() { String::new() } else { format!(" (since {since})") })
+            } else {
+                format!("{ago} {who}: {what} ended")
+            });
+            if lines.len() == PULSES {
+                break;
+            }
+            continue;
+        }
         lines.push(match task {
             Some(task) => format!("{ago} {} #{task}", kind.replace('_', " ")),
             None => format!("{ago} {}", kind.replace('_', " ")),

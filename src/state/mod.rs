@@ -690,6 +690,8 @@ fn live_row(session: &mut Value, record: Value, shared: &Shared, process_work: &
     let summary = journal::summary(&record, true);
     phases.mark("summary");
     session["process_work"] = process_work.summary(&record, summary["activity"] == "idle" && summary["phase"] == "idle");
+    // Task 278: the background jobs its hooks registered, whatever its activity.
+    session["background_jobs"] = process_work.registered(&record, true);
     session
         .as_object_mut()
         .ok_or("invalid session")?

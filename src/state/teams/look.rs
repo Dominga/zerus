@@ -58,6 +58,9 @@ pub(crate) struct Hooks {
     /// Task 181: when the open tool call began (Claude's record, or a DeepSeek
     /// session's PreToolUse with no result after it).
     pub tool_since: Option<f64>,
+    /// Task 278: the jobs the listing registers for it (its Zerus build, a
+    /// background job its hooks registered, Background work under a budget).
+    pub jobs: Vec<WaitJob>,
     pub last_event_at: Option<f64>,
     /// Seconds since its last progress, and the stuck bound it is held to.
     pub quiet: f64,
@@ -85,6 +88,34 @@ impl Hooks {
             "unknown"
         }
     }
+}
+
+/// Task 278: a job a member waits on, and since when.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct WaitJob {
+    pub what: String,
+    pub since: f64,
+}
+
+/// "14:05" for a start time, empty when it is unknown.
+pub(crate) fn clock(at: f64) -> String {
+    use chrono::TimeZone;
+    if at <= 0.0 {
+        return String::new();
+    }
+    chrono::Local.timestamp_opt(at as i64, 0).single().map(|time| time.format("%H:%M").to_string()).unwrap_or_default()
+}
+
+/// Task 278: "waiting for <job> since T" in words, the first registered job
+/// and how many more.
+pub(crate) fn job_words(jobs: &[WaitJob]) -> Option<String> {
+    let first = jobs.first()?;
+    let since = clock(first.since);
+    let mut text = if since.is_empty() { first.what.clone() } else { format!("{} since {since}", first.what) };
+    if jobs.len() > 1 {
+        text += &format!(" (and {} more)", jobs.len() - 1);
+    }
+    Some(text)
 }
 
 /// The Terminal's recognised panel.
@@ -229,7 +260,7 @@ pub(crate) fn due(team: &Team, member: &Member, hooks: &Hooks, now: f64) -> Opti
     let explained = waiting(hooks).is_some();
     let suspect = (hooks.busy() && !hooks.asks() && quiet && !explained)
         || (unread && quiet)
-        || (!hooks.busy() && !hooks.asks() && !hooks.background && !hooks.building && unreported)
+        || (!hooks.busy() && !hooks.asks() && !hooks.background && !hooks.building && hooks.jobs.is_empty() && unreported)
         || open;
     if !suspect {
         return None;
@@ -244,6 +275,10 @@ pub(crate) fn due(team: &Team, member: &Member, hooks: &Hooks, now: f64) -> Opti
 /// dispatcher's stuck rule already exempts the first two; the look must not
 /// call them uncertain either, and names the wait instead.
 pub(crate) fn waiting(hooks: &Hooks) -> Option<String> {
+    // Task 278: a registered job names itself and its start.
+    if let Some(words) = job_words(&hooks.jobs) {
+        return Some(words);
+    }
     if hooks.building {
         let label = hooks.build_label.trim();
         return Some(if label.is_empty() {
@@ -305,7 +340,7 @@ pub(crate) fn compare(hooks: &Hooks, record: Option<&str>, screen: Option<(Scree
     // a tool call gets the dispatcher's longer tool bound (`limit`).
     // Task 181: a member inside one long tool call is held to the tool bound
     // (`limit` is already that bound then).
-    let hard = hooks.building || hooks.background;
+    let hard = hooks.building || hooks.background || !hooks.jobs.is_empty();
     let waiting = waiting(hooks);
     if said == "working" && hooks.limit > 0.0 && hooks.quiet >= hooks.limit && !hard {
         disagree.push(format!(

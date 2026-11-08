@@ -2098,6 +2098,8 @@ fn normalize(record: &Value, row: &Value, inspected: &Value) -> Value {
     recovery::enrich(record,&mut value);
     let process_source = if inspected["jobs"].is_array() || inspected["shellCalls"].is_array() { inspected } else { row };
     value["process_work"] = processes::dsh_work(record,process_source,alive && value["activity"] == "idle" && value["phase"] == "idle");
+    // Task 278: its own running jobs, whatever its activity.
+    value["background_jobs"] = processes::dsh_registered(record,process_source,alive);
     value
 }
 

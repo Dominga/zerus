@@ -120,6 +120,7 @@ mod workspace;
 mod git_status;
 pub(crate) mod repositories;
 mod launch_observation;
+pub(crate) mod launch_identity;
 /// Evidence about original launch `launch` under this process's own state
 /// root (`HGS_STATE_DIR` or its default), read within `deadline`. A root that
 /// cannot be resolved without creating it is Unknown.

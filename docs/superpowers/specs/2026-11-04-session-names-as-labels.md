@@ -362,6 +362,14 @@ Unknown holder identities keep the veto. Last-holder release checks the original
 file again after taking it; the existing recovery puts an unfinished take back.
 An explicit person's unlock is respected, and only a confirmed Zerus release
 permits a later new publication. None of this is removal or signal consent.
+
+Initial terminal creation and fork allocate one session UUID and run UUID before
+the native fork/terminal spawn. A separate internal declaration binds the public
+`HGS_SESSION_ID`/`HGS_RUN_ID` handoff; the current helper consumes it before native
+help, refuses a mismatched final record, and never adopts a caller's inherited
+public session ID as a child's allocation. Resume keeps its saved ID and clears
+the new-launch declaration. This allocation alone does not publish the ID layout.
+
 Native constructor/transition continuity and the required outer CLI writer bit
 remain prerequisites before P3e activation; the canonical connector deployment
 is still owner-approved separately.

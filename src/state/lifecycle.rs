@@ -72,6 +72,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     }
     let mut name = required_env("HGS_SESSION")?;
     let agent = required_env("HGS_AGENT")?;
+    let allocation=launch_identity::Allocation::take()?;
     home_var(&agent)?;
     let codex_no_daemon = agent == "codex" && codex_daemon_flag(&base[0])?;
     for key in ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME"] {
@@ -145,6 +146,9 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     std::env::remove_var("HGS_ARCHIVE_ID");
     let resume_session_id = nonempty_env("HGS_RESUME_SESSION_ID").filter(|id| session_id::canonical(id));
     std::env::remove_var("HGS_RESUME_SESSION_ID");
+    if allocation.is_some() && (resume_session_id.is_some() || expected.is_some() || replaces.is_some()) {
+        return Err("A new launch identity cannot replace a saved resume identity".into());
+    }
     let requested_terminal = nonempty_env("HGS_TERMINAL_NAME");
     std::env::remove_var("HGS_TERMINAL_NAME");
     let fork_hint_revision = nonempty_env(agent_hint::FORK_REVISION_ENV);
@@ -216,6 +220,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             "transcript": null, "startup_kind":startup_kind,"launch_id":nonempty_env("HGS_LAUNCH_ID"), "account_id": nonempty_env("HGS_ACCOUNT_ID"), "agent_home": nonempty_env(home_var(&agent)?), "pid": std::process::id(),
             "process_start": process_start(std::process::id()),
             "supervisor": {"pid": std::process::id(), "start": process_start(std::process::id())}});
+        if let Some(allocation)=&allocation {record["session_id"]=json!(allocation.session());}
         // The live tracked agent that launched this new session, proven by the
         // launching hgs (zerus-sa9qn.2). A resume never adopts its launcher.
         if startup_kind == "new" || nonempty_env("HGS_FORK_PARENT_ID").is_some() {
@@ -325,6 +330,10 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
             journal_identity(&mut record, &name, retried);
         }
         record["terminal_name"] = json!(terminal);
+        if allocation.as_ref().is_some_and(|allocation| allocation.session()!=string(&record,"session_id")
+            || allocation.run()!=string(&record,"run_id")) {
+            return Err("The new launch no longer matches its original identity".into());
+        }
         backend::current().set_run_marker(&terminal, &token)?;
         if let Some(owner)=super::worktree_lifecycle::for_folder(std::path::Path::new(string(&record,"launch_dir"))) {
             record["worktree_owner"]=owner;
@@ -859,6 +868,7 @@ fn session_spec(
     let mut environment = BTreeMap::from([
         ("HGS_SESSION", name.to_owned()),
         ("HGS_SESSION_ID", string(record, "session_id").to_owned()),
+        (launch_identity::DECLARATION, String::new()),
         // The terminal this launch asks for; its supervisor keeps the label.
         ("HGS_TERMINAL_NAME", terminal.clone()),
         ("HGS_AGENT", string(record, "agent").to_owned()),

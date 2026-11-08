@@ -554,6 +554,43 @@ mod tests {
     fn a_provider_lock_fifo_refuses_promptly_without_changing_the_binding() {
         control_within("provider_fifo",std::time::Duration::from_secs(5));
     }
+
+    #[test]
+    fn legacy_move_preparation_retains_the_original_existing_git_veto() {
+        control_within("move_existing_veto", std::time::Duration::from_secs(15));
+    }
+
+    #[test]
+    fn the_record_job_transaction_retains_the_actual_legacy_git_veto() {
+        control_within("move_record_transaction", std::time::Duration::from_secs(15));
+    }
+
+    #[test]
+    fn legacy_move_preparation_never_relocks_a_manual_unlock_or_foreign_veto() {
+        control_within("move_no_relock", std::time::Duration::from_secs(15));
+    }
+
+    #[test]
+    fn interrupted_legacy_retention_keeps_its_negative_and_original_object() {
+        control_within("move_retention_cut", std::time::Duration::from_secs(15));
+    }
+
+    #[test]
+    fn legacy_move_refuses_writable_special_hardlinked_and_symlinked_git_files() {
+        control_within("move_invalid_files", std::time::Duration::from_secs(15));
+    }
+
+    #[test]
+    fn legacy_move_never_rebuilds_a_lost_marker_or_proof() {
+        control_within("move_lost_metadata", std::time::Duration::from_secs(15));
+    }
+
+    #[test]
+    fn a_manual_unlock_or_relock_between_capture_and_retention_refuses() {
+        for case in ["move_between_unlock", "move_between_relock", "move_between_replace"] {
+            control_within(case, std::time::Duration::from_secs(15));
+        }
+    }
     fn git(dir: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
             .args(args)
@@ -646,6 +683,152 @@ mod tests {
             assert_eq!(intents_left(), 0);
         };
         match case.as_str() {
+            "move_existing_veto" | "move_no_relock" | "move_retention_cut" |
+            "move_invalid_files" | "move_lost_metadata" | "move_between_unlock" | "move_record_transaction" |
+            "move_between_relock" | "move_between_replace" => {
+                use std::os::unix::fs::PermissionsExt;
+                // This is the private native publication fixture; legacy
+                // cleanup's separate readable-directory rules are unchanged.
+                fs::set_permissions(root(), fs::Permissions::from_mode(0o700)).unwrap();
+                let _writer = storage::lock(None).unwrap();
+                let mut legacy = record.clone();
+                let binding = storage::legacy_record_path(string(&legacy, "name"));
+                atomic(&binding, &legacy.to_string()).unwrap();
+                if case == "move_no_relock" {
+                    let before = fs::read(&binding).unwrap();
+                    assert!(Protection::for_legacy_move(&mut legacy).is_err());
+                    assert!(!lock.exists(), "no Git lock may be minted for an old holder");
+                    assert_eq!(fs::read(&binding).unwrap(), before);
+                    place("the-persons-lock");
+                    let original = crate::platform::file_identity(&lock).unwrap();
+                    assert!(Protection::for_legacy_move(&mut legacy).is_err());
+                    let after = crate::platform::file_identity(&lock).unwrap();
+                    assert_eq!((original.device,original.inode),(after.device,after.inode));
+                    assert_eq!(fs::read_to_string(&lock).unwrap(), "the-persons-lock\n");
+                    assert_eq!(fs::read(&binding).unwrap(), before);
+                    return;
+                }
+                // This exact case runs alone in the wrapper's private child.
+                // Let Git itself create the genuine 0644 veto; never chmod a
+                // positive fixture into satisfying the new proof.
+                // SAFETY: only this owned, single-case child changes its mask.
+                let previous_mask = unsafe { libc::umask(0o022) };
+                place(&own);
+                // SAFETY: restore that same private child's original mask.
+                unsafe { libc::umask(previous_mask) };
+                use std::os::unix::fs::MetadataExt;
+                assert_eq!(fs::metadata(&lock).unwrap().mode() & 0o7777, 0o644);
+                if case == "move_record_transaction" {
+                    let original=crate::platform::file_identity(&lock).unwrap();
+                    let moved=storage::owner_transfer::begin(&_writer,&legacy,
+                        std::time::Instant::now()+std::time::Duration::from_secs(10)).unwrap();
+                    assert!(storage::is_id_layout_record(&moved,&id));
+                    assert!(!binding.exists());
+                    assert_eq!(storage::read_id(&id).unwrap()["session_id"],moved["session_id"]);
+                    assert!(!storage::owner_transfer::blocked(&moved));
+                    let retained=Protection::retained_for_move(&moved).unwrap().unwrap();
+                    retained.verify().unwrap();drop(retained);
+                    let after=crate::platform::file_identity(&lock).unwrap();
+                    assert_eq!((original.device,original.inode),(after.device,after.inode));
+                    assert_eq!(fs::read_to_string(&lock).unwrap(),format!("{own}\n"));
+                    assert_eq!(fs::metadata(&lock).unwrap().mode() & 0o7777,0o644);
+                    return;
+                }
+                if case == "move_invalid_files" {
+                    let before = fs::read(&binding).unwrap();
+                    for mode in [0o664,0o646,0o4644,0o2644,0o1644] {
+                        fs::set_permissions(&lock, fs::Permissions::from_mode(mode)).unwrap();
+                        assert!(Protection::for_legacy_move(&mut legacy).is_err(), "mode{mode:o}");
+                        assert_eq!(fs::read(&binding).unwrap(), before);
+                    }
+                    fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
+                    let link = lock.with_extension("extra-link");
+                    fs::hard_link(&lock,&link).unwrap();
+                    assert!(Protection::for_legacy_move(&mut legacy).is_err());
+                    assert_eq!(fs::read(&binding).unwrap(), before);
+                    fs::remove_file(&link).unwrap();
+                    let retained = lock.with_extension("original-file");
+                    fs::rename(&lock,&retained).unwrap();
+                    std::os::unix::fs::symlink(&retained,&lock).unwrap();
+                    assert!(Protection::for_legacy_move(&mut legacy).is_err());
+                    assert_eq!(fs::read_to_string(&retained).unwrap(),format!("{own}\n"));
+                    assert_eq!(fs::read(&binding).unwrap(),before);
+                    return;
+                }
+                if case.starts_with("move_between_") {
+                    let before = fs::read(&binding).unwrap();
+                    let repo = main.clone(); let checkout = checkout.clone();
+                    let hook_lock = lock.clone(); let reason = own.clone(); let selected = case.clone();
+                    protection::BEFORE_LEGACY_RETENTION.with(|slot|*slot.borrow_mut()=Some(Box::new(move || {
+                        if selected == "move_between_replace" {
+                            fs::rename(&hook_lock,hook_lock.with_extension("retained-original")).unwrap();
+                            fs::write(&hook_lock,format!("{reason}\n")).unwrap();
+                        } else {
+                            git(&repo,&["worktree","unlock",checkout.to_str().unwrap()]);
+                            if selected == "move_between_relock" {
+                                git(&repo,&["worktree","lock","--reason",&reason,checkout.to_str().unwrap()]);
+                            }
+                        }
+                    })));
+                    assert!(Protection::for_legacy_move(&mut legacy).is_err());
+                    assert_eq!(fs::read(&binding).unwrap(),before);
+                    if case == "move_between_unlock" {assert!(!lock.exists());}
+                    else {assert_eq!(fs::read_to_string(&lock).unwrap(),format!("{own}\n"));}
+                    return;
+                }
+                let original = crate::platform::file_identity(&lock).unwrap();
+                let receipt = root().join("worktree-protections").join(format!("{}.json", storage::label_key(string(&ownership,"id"))));
+                if case == "move_lost_metadata" {
+                    let held=Protection::for_legacy_move(&mut legacy).unwrap().unwrap();
+                    held.verify().unwrap();drop(held);
+                    let proof=fs::read(&receipt).unwrap();
+                    let mut missing=legacy.clone();missing.as_object_mut().unwrap().remove("worktree_protection");
+                    atomic(&binding,&missing.to_string()).unwrap();
+                    assert!(Protection::for_legacy_move(&mut missing).is_err());
+                    assert!(serde_json::from_slice::<Value>(&fs::read(&binding).unwrap()).unwrap().get("worktree_protection").is_none());
+                    assert_eq!(fs::read(&receipt).unwrap(),proof);
+                    atomic(&binding,&legacy.to_string()).unwrap();fs::remove_file(&receipt).unwrap();
+                    assert!(Protection::for_legacy_move(&mut legacy).is_err());
+                    assert!(matches!(release_locked(&legacy),Release::Kept(..)));
+                } else if case == "move_retention_cut" {
+                    // Negative record write succeeds; receipt publication is
+                    // cut. There is still no ID-layout record or new authority.
+                    storage::cut::arm(1);
+                    let result = Protection::for_legacy_move(&mut legacy);
+                    storage::cut::disarm();
+                    assert!(result.is_err());
+                    assert!(!receipt.exists());
+                    let mut current:Value = serde_json::from_slice(&fs::read(&binding).unwrap()).unwrap();
+                    assert_eq!(current["worktree_protection"], ownership["id"]);
+                    assert!(Protection::for_legacy_move(&mut current).is_err(), "missing proof is never rebuilt");
+                    fs::remove_file(&binding).unwrap();
+                    assert!(matches!(release_locked(&current), Release::Kept(..)));
+                } else {
+                    let held = Protection::for_legacy_move(&mut legacy).unwrap().unwrap();
+                    held.verify().unwrap();
+                    let mut expected = record.clone();
+                    expected["worktree_protection"] = ownership["id"].clone();
+                    assert_eq!(legacy, expected, "all delivery/history/parent fields remain original");
+                    assert_eq!(serde_json::from_slice::<Value>(&fs::read(&binding).unwrap()).unwrap(), expected);
+                    let proof = fs::read(&receipt).unwrap();
+                    drop(held);
+                    let again = Protection::for_legacy_move(&mut legacy).unwrap().unwrap();
+                    again.verify().unwrap();
+                    drop(again);
+                    assert_eq!(fs::read(&receipt).unwrap(), proof);
+                    assert_eq!(fs::metadata(&lock).unwrap().mode() & 0o7777, 0o644);
+                    unlock();
+                    assert!(Protection::for_legacy_move(&mut legacy).is_err());
+                    assert!(!lock.exists(), "a retained proof never authorizes relocking");
+                    assert_eq!(fs::read(&receipt).unwrap(), proof);
+                    return;
+                }
+                let after = crate::platform::file_identity(&lock).unwrap();
+                assert_eq!((original.device,original.inode),(after.device,after.inode));
+                assert_eq!(fs::read_to_string(&lock).unwrap(), format!("{own}\n"));
+                assert!(!storage::id_record_path(&id).unwrap().exists());
+                assert!(taken_left(&lock).is_empty());
+            }
             "independent_provider_alias" | "provider_fifo" => {
                 let _writer=storage::lock(None).unwrap();
                 let mut legacy=record.clone();

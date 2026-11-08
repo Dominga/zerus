@@ -13,6 +13,11 @@ pub(super) mod native_domain;
 #[cfg(unix)]
 pub(super) mod job_round;
 
+// Dormant original-record/job transaction; no constructor calls this yet.
+#[cfg(unix)]
+#[allow(dead_code)]
+pub(super) mod owner_transfer;
+
 pub(super) fn root() -> PathBuf {
     nonempty_env("HGS_STATE_DIR")
         .map(PathBuf::from)

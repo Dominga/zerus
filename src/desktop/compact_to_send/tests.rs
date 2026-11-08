@@ -1478,7 +1478,8 @@ mod actor {
             assert!(f.row(&original).send.is_none(), "{name}: never reserved");
             assert_eq!(ran.counts(), (1, 0), "{name}");
         }
-        // The operation's own deadline caps the wait.
+        // The operation's own deadline can expire before the compaction starts
+        // or cap the wait after its drain; each closed outcome stays exact.
         let ran = Arc::new(Ran::default());
         let mut f = Fixture::with(executor(ran.clone(), true, "submitted", true));
         f.runtime.fixture_wait(
@@ -1490,8 +1491,29 @@ mod actor {
         f.admit(&original);
         f.until("deadline", |f| f.row(&original).receipt.drained);
         let receipt = f.row(&original).receipt;
-        assert_eq!(receipt.code, ledger::CHAIN_EXPIRED);
-        assert_eq!(ran.counts(), (1, 0));
+        match (receipt.compaction.step, receipt.send.step) {
+            (Step::NotStarted, Step::NotStarted) => {
+                assert_eq!(receipt.compaction.code, wire::NOT_STARTED);
+                assert_eq!(receipt.send.code, wire::NOT_STARTED);
+                assert_eq!(receipt.code, "");
+                assert_eq!(receipt.result(&original.plan), Some(Settled::NotStarted));
+                assert_eq!(ran.counts(), (0, 0));
+            }
+            (Step::Recorded, Step::NotStarted) => {
+                assert_eq!(receipt.compaction.code, "");
+                assert_eq!(receipt.send.code, wire::NOT_STARTED);
+                assert_eq!(receipt.code, ledger::CHAIN_EXPIRED);
+                assert_eq!(
+                    receipt.result(&original.plan),
+                    Some(Settled::NotSent { compacted: true })
+                );
+                assert_eq!(ran.counts(), (1, 0));
+            }
+            (compaction, send) => {
+                panic!("unexpected deadline outcome: {compaction:?}/{send:?}")
+            }
+        }
+        assert!(f.row(&original).send.is_none(), "never reserved");
     }
 
     /// A stop or a revoke ends the wait at once, never after its budget.

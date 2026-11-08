@@ -13,8 +13,8 @@ pub(crate) struct Directory {
 // boundary. It cannot affect a concurrent test or any production build.
 #[cfg(all(test, unix))]
 thread_local! { static SYNC_FAILURE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) }; }
-// Its one caller, the fence probe, runs on Linux only.
-#[cfg(all(test, target_os = "linux"))]
+// Its callers are the fence probe (Linux) and the task refusal tests (Unix).
+#[cfg(all(test, unix))]
 pub(in crate::state) fn fail_publication_sync(path: Option<PathBuf>) {
     SYNC_FAILURE.with(|slot| *slot.borrow_mut() = path);
 }

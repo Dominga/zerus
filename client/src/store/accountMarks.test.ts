@@ -67,6 +67,15 @@ describe("account colors", () => {
     };
     expect(accountAppearance(values, [one, two])).toEqual({ color: "#2b97ff", emoji: "🦊", hidden: false });
   });
+  it("prefers the computer's mark, with this desktop's own standing in until it moves or for an older hgs (zerus-sa9qn.6)", () => {
+    const desktop = { [`accounts/color/${profileToken("", "claude-a1")}`]: "#ff9234", [`accounts/mark/${profileToken("", "claude-a1")}`]: "🐙" };
+    const kept = member({ marks_supported: true, mark_color: "#2b97ff", mark_emoji: "🦊" });
+    expect(accountAppearance(desktop, [kept])).toEqual({ color: "#2b97ff", emoji: "🦊", hidden: false });
+    expect(accountAppearance(desktop, [member({ marks_supported: true, mark_color: "", mark_emoji: "" })])).toEqual({ color: "#ff9234", emoji: "🐙", hidden: false });
+    // An older hgs reports nothing; its values are ignored if a client sends any.
+    expect(accountAppearance(desktop, [member({ mark_color: "#2b97ff" })])).toEqual({ color: "#ff9234", emoji: "🐙", hidden: false });
+    expect(accountAppearance({}, [member({ marks_supported: true, mark_color: "red", mark_emoji: "A" })])).toEqual({ color: "", emoji: "", hidden: false });
+  });
   it("shows the emoji only with emoji account marks", () => {
     const work = account([member()], "a", "Work");
     const values = { [`accounts/mark/${profileToken("", "claude-a1")}`]: "🦊" };

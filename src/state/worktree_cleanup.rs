@@ -234,6 +234,9 @@ pub(super) fn bindings() -> Result<Vec<Reference>> {
             if !storage::binding_stem(directory,stem) { continue; }
             count += 1;
             if count > 5000 { return Err("Too many session bindings to check".into()); }
+            // Every physical holder (including routed legacy bindings) uses
+            // main's bounded binding_bytes read. Do not re-resolve the label:
+            // that would substitute the command-selected same-label twin.
             if let Some(reference) = binding_reference(directory,&path)? { result.push(reference); }
         }
     }

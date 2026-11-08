@@ -178,9 +178,13 @@ This fails open: an unverifiable parent never silences a request.
   `account_id`. A row without a recorded binding, or whose profile is not in the
   loaded catalog, shows no mark rather than a guess.
 
-Storing color and emoji on the host would reach phones and other desktops, but
-`accounts.json` refuses unknown fields in older `hgs` versions; a sibling file and
-mutation are a follow-up.
+Color and emoji are kept on the host since zerus-sa9qn.6, so phones and other
+desktops show them: `accounts.json` refuses unknown fields in older `hgs`
+versions, so they live in a sibling `account-marks.json`, changed by `hgs account
+mark` and listed as `mark` on account rows and `account_mark` on session rows.
+The desktop preferences above remain for computers with an older `hgs` and move
+to the host once (`--if-unset`, the host value wins). Hiding one account's mark
+stays a desktop preference.
 
 ---
 
@@ -397,7 +401,8 @@ team strip says `3 of 5`, the footer uses spacing, and tooltips use line breaks.
 * Android: nesting, supervised quiet attention and account marks from the shared
   fixture.
 * iOS: the same.
-* Host-stored account color and emoji (sibling file, mutation, phones).
+* Host-stored account color and emoji (sibling file, mutation, phones): done in
+  zerus-sa9qn.6.
 * Resolve cross-computer parents for supervision in the desktop catalog.
 * Route a supervised child's blocking question to its parent session as a
   guarded message (needs owner direction: it sends text into an agent).

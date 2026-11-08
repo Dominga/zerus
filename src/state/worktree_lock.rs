@@ -385,7 +385,8 @@ mod tests {
     }
     /// zerus-lr1l2: the initial binding scan reads each file bounded: a
     /// canonical FIFO, a link or an oversized binding keeps the lock for
-    /// review, promptly, and never blocks the release.
+    /// review, promptly, and never blocks the release. zerus-zy12o: so does
+    /// a label that routes to a FIFO.
     #[test]
     fn a_fifo_link_or_oversized_binding_keeps_the_lock_without_blocking() {
         control_within("unreadable", std::time::Duration::from_secs(60));
@@ -658,6 +659,26 @@ mod tests {
                     .unwrap();
                 kept("an oversized binding");
                 fs::remove_file(&huge).unwrap();
+                // zerus-zy12o: a regular legacy binding whose label routes
+                // through `name_routes` to a FIFO in `bindings/`. The scan
+                // reads the routed record before it reaches that folder.
+                let routed = "claude/example/routed";
+                let mut legacy = record.clone();
+                legacy["name"] = json!(routed);
+                let legacy_path = storage::legacy_record_path(routed);
+                fs::write(&legacy_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+                let route = storage::route_path(routed);
+                fs::create_dir_all(route.parent().unwrap()).unwrap();
+                fs::write(&route, json!({"version": 1, "name": routed}).to_string()).unwrap();
+                let bindings = root().join("bindings");
+                fs::create_dir_all(&bindings).unwrap();
+                let fifo = bindings.join(legacy_path.file_name().unwrap());
+                let name = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+                assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+                kept("a label routed to a FIFO");
+                for path in [&fifo, &route, &legacy_path] {
+                    fs::remove_file(path).unwrap();
+                }
                 clean();
                 // With only readable bindings left, the lock is released.
                 assert_eq!(release_locked(&record), Release::Released(checkout.clone()));

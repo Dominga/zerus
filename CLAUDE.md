@@ -23,7 +23,10 @@ The Tauri desktop client lives in `client/`: the SolidJS frontend in
 [retirement acceptance checklist](docs/qt-release-acceptance.md) and
 `docs/superpowers/specs/2026-10-27-tauri-web-ui-design.md`. Its UI
 never separates values with dots; `scripts/check-ui-separators.py` enforces it
-in CI (mobile clients are out of that rule's scope).
+in CI (mobile clients are out of that rule's scope). Team app builds, dev servers
+and launches go through the `tauri-build`, `tauri-dev` and `tauri-launch`
+templates, which carry the development identity; only the release-candidate
+package step builds the switch identity.
 
 The repository language is English. Write documentation and other project-facing
 text in English; conversations may use the user's preferred language.

@@ -9,12 +9,11 @@ Each request is one JSON object on stdin with "team":"ID" and a new lowercase "r
 To start a team:
   {"request_id":"U","name":"Checkout","goal":"...","folder":"DIR"} | hgs team create --json
 
-Plan a goal. Tasks one member can finish in a sitting, each with a title, checkable
+Plan a goal. Tasks one member can finish, each with a title, checkable
 criteria, an assignee or "role", deps on tasks accepted first and "estimate_minutes".
 Every task gets an estimate.
-Tasks writing the same "output" paths never run apart: chain them; name files or a
-module (a folder is advisory). A
-follow-up for a miss carries "origin":ID and no dep. A member without the rights or
+Tasks writing the same "output" paths never run apart: chain them; name files, not a folder
+(advisory). A follow-up for a miss carries "origin":ID and no dep. A member without the rights or
 tool a task needs is refused, naming who can.
   {"request_id":"U","team":"ID","phases":[{"n":1,"title":"Cart"}],
    "members":[{"id":"api","role":"Backend","agent":"codex"}],
@@ -50,7 +49,7 @@ peer of its role; "hold":true keeps a reject back until hgs team release. No rep
 use-last-reply. Only hgs team report reports; a question comes by hgs team ask, answered
 with hgs team reply. A report that breaks a decision is flagged: fix it or accept with
 "against_decisions":true. Pipelines (review, test) pass or return; you decide at round 3.
-Never merge, build or test a member's work by hand. Watch with
+Never merge, build or test a member's work by hand; app: tauri-*; package. Watch with
 hgs team status --json; stuck: retry, reassign or
 cancel. hgs team answer takes a native question: allow only what the task
 needs, else ask the owner.

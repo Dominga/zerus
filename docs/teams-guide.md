@@ -109,6 +109,7 @@ The **Team** tab is the team workspace:
 | **Profile** | Where the phase's time and tokens went: the critical path, each member's lanes, spans, top losses, and the estimate against the worked time. |
 | **Tests** | The tests the team ran: the queue, the suites, their results (passed, failed, reused, passed on retry, flaky), durations and budgets. |
 | **Builds** | The builds the team ran and their queue, with their results. |
+| **App builds** | Zerus Next (Tauri) is built, run in development and launched only through the `tauri-build`, `tauri-dev` and `tauri-launch` templates. They carry the development identity, so they never raise or block your own Zerus. Only the release-candidate/package step builds the switch identity. |
 
 - The **member panel** lists the members with their state, their task and
   their queue (including a stage queue for a member doing reviews or tests).

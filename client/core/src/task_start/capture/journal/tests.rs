@@ -117,7 +117,8 @@ fn ui_exit_and_absent_outbox_only_reopen_the_same_original_read_identity() {
     );
     f.write();
     assert_eq!(
-        Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(NEXT)).err(),
+        retry_busy(|| Journal::prepare(f.capture().unwrap(), &CheckId::fixture_initial(NEXT)))
+            .err(),
         Some(Error::Unavailable)
     );
     assert_eq!(
@@ -387,6 +388,12 @@ fn stale_prepared_snapshot_and_missing_lock_never_discard_an_offered_or_unknown_
     let before = saved(&f);
     journal.offer().unwrap();
     drop(journal);
+    // discard consumes this exact stale snapshot; do not reconstruct or replay
+    // it. Wait for the old writer, then unlock the fixture probe explicitly so
+    // a parallel fork cannot keep that probe's description locked until exec.
+    let idle = retry_busy(|| before.slot.lock(false)).unwrap();
+    idle.unlock().unwrap();
+    drop(idle);
     assert_eq!(
         before.discard_prepared(&f.intent.reconcile_id),
         Err(Error::Unavailable)

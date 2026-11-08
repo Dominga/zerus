@@ -37,10 +37,13 @@ class Mobile(test_tasks.DeliveryFixture):
         return result.stderr.strip().removeprefix("hgs: ")
 
     def accept(self, task):
-        self.hgs("send", task["ref"])
+        sent = self.hgs("send", task["ref"])
+        origin = sent["task"]["execution"]["current"]["id"]
+        self.assertEqual(origin, sent["receipt"]["request_id"])
         self.wait_received(task["text"])
         self.confirm()
-        self.as_agent("report", task["ref"], "--json", text="Done.")
+        result = json.loads(self.as_agent("report-attempt", task["ref"], "--attempt", origin, "--json", text="Done."))
+        self.assertTrue(result["moved_to_review"])
         self.hgs("stage", task["ref"], "done")
 
     def test_a_phone_sends_a_task_to_a_session_here(self):
@@ -51,6 +54,15 @@ class Mobile(test_tasks.DeliveryFixture):
         self.assertLessEqual(set(answer), {"schema", "ok", "task", "stage", "session", "receipt"})
         self.wait_received("Add rate limiting")
         self.assertEqual(self.hgs("get", task["ref"])["task"]["stage"], "active")
+
+    def test_a_person_can_review_and_accept_active_managed_work_without_an_agent_report(self):
+        task = self.add("Explicit human review", "--target", self.name)
+        sent = self.hgs("send", task["ref"])["task"]
+        self.assertEqual(sent["stage"], "active")
+        self.assertGreater(sent["execution"]["attempts"], 0)
+        reviewed = self.hgs("report", task["ref"], text="The person verified this work.")
+        self.assertTrue(reviewed["moved_to_review"])
+        self.assertEqual(self.hgs("stage", task["ref"], "done")["task"]["stage"], "done")
 
     def test_a_send_refused_before_the_paste_says_why(self):
         task = self.add("Add rate limiting")

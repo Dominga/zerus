@@ -41,9 +41,9 @@ Every partial, missing and unverified row names the bead that tracks it.
 
 | Area | done | partial | missing | other |
 | --- | --- | --- | --- | --- |
-| Sessions list, row actions and header | 22 | 2 | 5 | 2 owner decisions |
+| Sessions list, row actions and header | 25 | 2 | 2 | 2 owner decisions |
 | Archive and search | 10 | 4 | 1 | |
-| Composer and sending | 31 | 4 | | |
+| Composer and sending | 34 | 1 | | |
 | Activity | 13 | 3 | 1 | |
 | Questions and approvals | 12 | | | |
 | Notifications | 7 | 5 | | |
@@ -53,7 +53,7 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Settings | 17 | | 1 | |
 | Machines, accounts, projects, new session, tasks and worktrees | 18 | | | |
 | Terminal, processes and platform session support | 8 | | | |
-| Total (192 rows) | 156 | 22 | 10 | 4 |
+| Total (192 rows) | 162 | 19 | 7 | 4 |
 
 ## Owner decisions
 
@@ -70,9 +70,8 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Bead | Priority | Gap |
 | --- | --- | --- |
 | `zerus-5wmh.13.14` | P2 | Windows: focus-aware banners, update alert, tray theme, watchdog, startup note |
-| `zerus-5wmh.13.7` | P3 | Composer and voice small controls |
+| `zerus-5wmh.13.7.5` | P3 | Drop image data (no file path) into the composer |
 | `zerus-5wmh.13.8` | P3 | Activity rendering: full tool output, View process, Markdown, inline-code links, empty state |
-| `zerus-5wmh.13.10` | P3 | Session list keyboard navigation |
 | `zerus-5wmh.13.11` | P3 | Compact-row tooltip, global Compact session rows, saved-session terminal, batch folder removal |
 | `zerus-5wmh.13.15` | P3 | Tray Refresh entry, Linux without a tray host, Linux launch during service start |
 | `zerus-5wmh.13.16` | P3 | Alert text language and the in-window 99+ cap |
@@ -101,10 +100,10 @@ Keyboard commands for every area are listed once, under Shortcuts and navigation
 | Compact-row tooltip with the hidden state, detail, folder, machine and Git lines | partial (`zerus-5wmh.13.11`) | the title tooltip shows the name only: `ui/sessions/SessionCard.tsx:553` | `SessionList.cpp:245-249` |
 | Strip tiles: tooltip and context menu | done | `ui/sessions/SessionList.tsx:1023-1024` | `SessionList.cpp:267-286` |
 | Ctrl or Cmd-click and Shift-click selection; Esc clears it | done | `ui/sessions/SessionList.tsx:326-337,603-608` | `SessionList.cpp:296-312,588` |
-| Keyboard range selection with Shift+Up, Down, Home, End | **missing** (`zerus-5wmh.13.10`) | `ui/sessions/SessionList.tsx:614-637` handles plain arrows only | `SessionList.cpp:589-602` |
+| Keyboard range selection with Shift+Up, Down, Home, End | done | `ui/sessions/SessionList.tsx:635-640`; from the range's far end, the open conversation kept: `ui/sessions/organize.ts:31-47` | `SessionList.cpp:589-602` |
 | Up and Down move; Right and Left expand or collapse a row and go to the parent | done | `ui/sessions/SessionList.tsx:614-633` | `SessionList.cpp:604-622` |
-| Left and Right on a plain row collapse or expand its project; Home and End | **missing** (`zerus-5wmh.13.10`) | no project branch in the list key handler (`ui/sessions/SessionList.tsx:624-633`) | `SessionList.cpp:623-627` |
-| Enter on a row jumps to the latest Activity | **missing** (`zerus-5wmh.13.10`) | Enter is handled in search results only | `SessionsWindow.cpp:565,5499-5504` |
+| Left and Right on a plain row collapse or expand its project; Home and End | done | `ui/sessions/SessionList.tsx:641-675`; Right reopens the project hiding the open row, and the arrows go on past it | `SessionList.cpp:623-627` |
+| Enter on a row jumps to the latest Activity | done (a focused button in the list keeps its own Enter) | `ui/sessions/SessionList.tsx:676-680`; `store/ui.ts:61-71`, taken by the mounted Activity: `ui/sessions/Activity.tsx:989` | `SessionsWindow.cpp:565,5499-5504` |
 | Selection bar and menu: Mark read, Mark needs attention, Compact, Expand, Pause, Resume or Restore, Archive, Forget and Terminate with confirmation | done | `ui/sessions/selection.ts:11-31,113-136`; `store/batch.ts:134-145`; `ui/sessions/ActionDialogs.tsx:326-345` | `SessionSelection.cpp:52-218,258-286` |
 | Selection Move to project | **missing** (`zerus-5wmh.18`) | disabled with "Arrives with project organisation." (`ui/sessions/selection.ts:19`; `ui/sessions/selection-ui.ts:59-66`); a single row can move | `SessionSelection.cpp:184-195` |
 | Selection Terminate: remove working folders after stopping | **missing** (`zerus-5wmh.13.11`) | the batch dialog has no such option (`ui/sessions/selection.ts:111-112`) | `SessionSelection.cpp:274-283` |
@@ -173,21 +172,21 @@ Keyboard commands for every area are listed once, under Shortcuts and navigation
 | Attach from a file picker (8 files, 10 MiB each, 20 MiB total), `[File #n]` and `[Image #n]` at the cursor | done | `ui/sessions/Composer.tsx:318-321`; `core/attachments.rs:143-149` | `MessageComposer.cpp:856-863,969-1000` |
 | Attachment chips: thumbnails, size, preview, guarded open, remove with its reference, keyboard use | done (adds Undo) | `ui/sessions/Attachments.tsx:26-131` | `MessageComposer.cpp:1008-1124` |
 | Paste an image (32-megapixel limit) | done | `ui/sessions/Composer.tsx:230-237`; `store/composer.ts:471-485` | `MessageComposer.cpp:197-202,393-398` |
-| Paste files copied in a file manager; drop raw image data on the editor | partial (`zerus-5wmh.13.7`) | paste accepts image blobs only (`ui/sessions/Composer.tsx:230-237`); drops carry file paths only (`store/drops.ts:158-164`) | `MessageComposer.cpp:186-196,230-246` |
+| Paste files copied in a file manager; drop raw image data on the editor | partial (`zerus-5wmh.13.7.5`) | copied local files attach on paste, before an image or the text: `ui/sessions/Composer.tsx:211-234`, `ui/sessions/paste-files.ts`, bounded native file list `tauri/clipboard.rs:75-128`; dropped image data is not taken, as drops carry file paths only (`store/drops.ts:158-164`), and on Windows the native drag-drop never passes it to the page | `MessageComposer.cpp:186-196,230-246` |
 | Drag and drop on the session panel: attach, or paste paths into Terminal, with an overlay hint | done | `store/drops.ts:9-49,158-164`; `ui/sessions/SessionDetail.tsx:282` | `SessionFileDrop.h`; `SessionsWindow.cpp:1595-1610,2618-2660` |
 | Reference an existing file (path only; browse locally or check a remote path) | done (a remote file's existence is not checked, as in Qt; `zerus-5wmh.13.18`) | `ui/sessions/FileReferenceDialog.tsx`; `ui/sessions/file-reference.ts`; bounded local check `tauri/file_reference.rs:54-98`; inserted as an ordinary edit into the draft it opened on: `ui/sessions/Composer.tsx:173-193` | `MessageComposer.cpp:297-303,865-959` |
 | The agent's suggested next message as placeholder; Tab inserts it | done | `ui/sessions/Composer.tsx:183-190,217-225,311`; `store/suggestions.ts` | `MessageComposer.cpp:209-215,556-570,822-825` |
 | Model and effort chip: Apply, Save for resume, provider notice, Open Terminal, OpenCode picker with favorites | done | `ui/sessions/ModelSettingsDialog.tsx:30-66`; `ui/sessions/ModelPicker.tsx:82-159` | `MessageComposer.cpp:317-363,1389-1667`; `OpenCodeModelPicker.cpp` |
 | Voice message: record, Space or Esc stops, preview, provider choice, Discard with confirmation, Send voice, permission and cold-cache dialogs | done | `ui/sessions/VoiceControls.tsx:15-158`; `core/voice_composer.rs:2063-2141` | `speech/SpeechComposer.cpp:60-99,426-533` |
-| Stop and preview button while recording in send-immediately mode | partial (`zerus-5wmh.13.7`) | keyboard only (`ui/sessions/Composer.tsx:240-245`); `core/voice_composer.rs:2022` `stop_preview` has no button | `speech/SpeechComposer.cpp:90-92` |
-| Voice notice chip opens a dialog with the full notice | partial (`zerus-5wmh.13.7`) | plain chip with a tooltip: `ui/sessions/VoiceControls.tsx:43-45` | `speech/SpeechComposer.cpp:492-499` |
+| Stop and preview button while recording in send-immediately mode | done | `ui/sessions/VoiceControls.tsx:33-39` | `speech/SpeechComposer.cpp:90-92` |
+| Voice notice chip opens a dialog with the full notice | done (a microphone permission notice opens its recovery, as in Qt) | `ui/sessions/VoiceControls.tsx:50-54,135-175`; `store/voice.ts:117-124` | `speech/SpeechComposer.cpp:492-499` |
 | Round video: mode switch, mirrored circular preview, playback | done | `ui/sessions/VoiceControls.tsx:33-39,102-108` | `speech/RoundVideo.cpp`; `speech/SpeechComposer.cpp:93-97` |
 | Compaction indicator; Cancel send while waiting on compaction or startup | done | `ui/sessions/Composer.tsx:176-182,292-299`; `ui/sessions/HeldMessage.tsx:13-31` | `SessionsWindow.cpp:958-968`; `ActivityView.cpp:1270-1280` |
 | Cold-cache dialog: Send with full context, Compact and continue, Clear context | done | `ui/sessions/ComposerDialogs.tsx:15-33`; `core/cache.rs:196-230` | `SessionsWindow.cpp:4816-4851` |
 | Stopped session: Start to send (Resume, Compact and resume, Start fresh), then sends | done | `ui/sessions/ComposerDialogs.tsx:36-54`; `core/send.rs:286-334` | `SessionsWindow.cpp:4704-4803` |
 | Clear context with confirmation (Dismiss and clear), draft kept | done | `ui/sessions/ComposerDialogs.tsx:57-69`; `ui/sessions/SessionDetail.tsx:101-104,138-139` | `SessionsWindow.cpp:606-617,994-1029,4638-4670` |
 | Start fresh with confirmation | done | `ui/sessions/ActionDialogs.tsx:133-142` | `SessionsWindow.cpp:648,4681-4702` |
-| Prompt-cache chip: countdown, warning, Usage details, Clear context | partial (`zerus-5wmh.13.7`) | no Usage details button (`ui/sessions/Composer.tsx:113-158`); the Context chip still opens the inspector (`ui/sessions/UsageChips.tsx:101`) | `SessionsWindow.cpp:987-1002` |
+| Prompt-cache chip: countdown, warning, Usage details, Clear context | done | `ui/sessions/CacheChip.tsx:13-61` | `SessionsWindow.cpp:987-1002` |
 | Usage-limit chip with Refresh usage; Context chip opens the inspector | done | `ui/sessions/UsageChips.tsx:44-101` | `SessionsWindow.cpp:916-927,1063` |
 | Narrow toolbar shortens chips | done | `ui/sessions/Composer.tsx:56-57,251` | `ComposerToolbar.cpp` |
 | Subagent composer: sends to the child, own drafts, no voice or push | done | `ui/sessions/Composer.tsx:165,220`; `tauri/composer/send.rs:277-297` | `SessionsWindow.cpp:1043-1070` |

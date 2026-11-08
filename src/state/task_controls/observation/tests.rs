@@ -265,3 +265,19 @@ fn bounded_private_no_follow_reads_refuse_unexpected_objects() {
     write(&f.dir.path().join(".lock"), &json!({}));
     assert!(f.read(&executor(), Conversation::Exact).is_err());
 }
+
+#[test]
+fn review_malformed_liveness_is_unknown_and_never_observed_as_live() {
+    let mut f = Fixture::new();
+    for state in [json!(false), json!(42), json!([]), json!({"live":true})] {
+        f.record["state"] = state.clone();
+        f.save();
+        let original = fs::read(&f.path).unwrap();
+        let refused = f.read(&executor(), Conversation::Exact).is_err();
+        assert_eq!(fs::read(&f.path).unwrap(), original);
+        assert!(
+            refused,
+            "malformed state {state} was accepted as live evidence"
+        );
+    }
+}

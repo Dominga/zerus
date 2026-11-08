@@ -10,6 +10,48 @@ pub(in crate::state) struct Directory {
 }
 
 impl Directory {
+    /// The native writer already exists. Task-control admission must not
+    /// create it or follow an alias while trying to acquire its exclusion.
+    pub(in crate::state) fn existing_private_lock(&self, name: &str) -> Result<File> {
+        if name.is_empty() || name.contains(['/', '\\', ':']) || name == "." || name == ".." {
+            return Err("Invalid existing exclusion filename".into());
+        }
+        self.verify()?;
+        #[cfg(unix)]
+        let file = {
+            use std::os::fd::{AsRawFd, FromRawFd};
+            let name = c_name(std::ffi::OsStr::new(name))?;
+            // SAFETY: one fixed component below the held original parent;
+            // no create, links, FIFO wait or inherited descriptor.
+            let fd = unsafe {
+                libc::openat(
+                    self.file.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDWR
+                        | libc::O_NOFOLLOW
+                        | libc::O_NONBLOCK
+                        | libc::O_NOCTTY
+                        | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+            unsafe { File::from_raw_fd(fd) }
+        };
+        #[cfg(windows)]
+        let file = crate::platform::no_follow(OpenOptions::new().read(true).write(true))
+            .open(self.path.join(name))
+            .map_err(|e| e.to_string())?;
+        if !crate::platform::verify_private_file(&file).map_err(|e| e.to_string())?
+            || file.metadata().map_err(|e| e.to_string())?.len() != 0
+        {
+            return Err("The original native exclusion file is unexpected".into());
+        }
+        self.verify()?;
+        Ok(file)
+    }
+
     /// One existing or newly created child under this original directory.
     /// A descendant alias is never resolved before the no-follow open, and
     /// creation uses the held parent rather than a second pathname walk.

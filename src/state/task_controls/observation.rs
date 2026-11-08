@@ -116,9 +116,11 @@ fn read_enabled(
         || ["paused", "pausing", "terminating", "rename_shadow"]
             .iter()
             .any(|key| !record[*key].is_null() && record[*key] != false)
-        || record["state"]
-            .as_str()
-            .is_some_and(|s| !matches!(s, "live" | "active"))
+        || match record.get("state") {
+            None | Some(Value::Null) => false, // Compatible legacy absence only.
+            Some(Value::String(s)) => !matches!(s.as_str(), "live" | "active"),
+            Some(_) => true, // Present malformed liveness is unknown, never live.
+        }
     {
         return Err("The indexed native session, original run or live binding changed".into());
     }

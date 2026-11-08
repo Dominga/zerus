@@ -484,7 +484,7 @@ pub(crate) fn session_member(store: &super::store::Store, session: &SessionRef) 
     }
     let db = store.connection();
     let mut query = match db.prepare(
-        "SELECT DISTINCT t.payload, m.member FROM teams t JOIN team_rule_members m ON t.id=m.team
+        "SELECT DISTINCT t.id, m.member FROM teams t JOIN team_rule_members m ON t.id=m.team
          WHERE m.name=?1 AND m.run=?2 AND m.host=?3 AND t.status IN ('planning','running','paused') LIMIT 2",
     ) {
         Ok(query) => query,
@@ -495,8 +495,10 @@ pub(crate) fn session_member(store: &super::store::Store, session: &SessionRef) 
         .query_map(params![session.name, session.run_id, session.host], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     anyhow::ensure!(rows.len() <= 1, "Session belongs to more than one active team");
-    let Some((payload, member)) = rows.into_iter().next() else { return Ok(None) };
-    Ok(Some((serde_json::from_str(&payload)?, member)))
+    drop(query);
+    let Some((id, member)) = rows.into_iter().next() else { return Ok(None) };
+    // Task 288: the team as the store assembles it (its tasks are rows).
+    Ok(store.load(&id)?.map(|team| (team, member)))
 }
 
 /// Task 186: the mark that a session has an urgent team message waiting for

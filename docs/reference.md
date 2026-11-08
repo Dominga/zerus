@@ -3081,6 +3081,43 @@ and fails with "The team database stayed busy for 60 s". Since task 287:
   wrote them. A write by an older hgs, which sets neither, still rebuilds it
   from the record.
 
+### A team's tasks and attempts are rows
+
+Since task 288 a team record keeps only its shared fields (members, phases,
+settings and the like) in `teams.payload`. Each task, without its attempts, is
+a row of `team_tasks` (its id, its place `ord` in the plan), and each attempt
+is a row of `team_attempts` (its task and its place in the task). Every row
+carries `rev`, the team revision that last wrote it; the `teams` row carries
+`layout` (2 for rows) and `head_rev`. The store assembles the same team as
+before for every reader (`load`, the list reads, the member lookup), with
+the revision per team as before.
+
+A change works on a copy of the team the store keeps. The copy is read
+before the write lock. Under the lock only the revision is checked, and when
+another writer changed the team meanwhile, only the rows written since are
+read. The change then writes the rows it changed: one attempt's row for an
+attempt, the task's row for the task's own fields, its place for a move, and
+the shared fields only when one of them changed. A team of 4.7 MB of tasks no
+longer reads, serializes and writes them all under the lock.
+Measured on a copy of the live store (team 33fbafeb, a 5.75 MB record,
+release build, 20 changes each), the lock was held as follows (median, p95
+and max):
+
+| Change | Whole record | Rows |
+| --- | --- | --- |
+| Member change with a request id | 49, 70, 84 ms | 27, 30, 34 ms |
+| Worker tick | 25, 42, 42 ms | 13, 16, 17 ms |
+
+The one-time migration held the lock for 89 ms.
+
+The first write open of a store migrates each team stored whole, one
+transaction a team, so an interrupted migration goes on at the next open and a
+migrated team is never migrated again. A team whose task ids repeat keeps the
+whole record (`layout` 1). An older hgs cannot read a migrated team. Its
+shared fields hold `"tasks"` as a sentence, not a list, so the older hgs
+answers "Invalid team record" and never writes the team back without its
+tasks. Every hgs and desktop on the computer is updated together.
+
 ### A stalled lead tells the owner
 
 When the lead's decisions (a member's report, question or permission) have

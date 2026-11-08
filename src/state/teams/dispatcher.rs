@@ -354,6 +354,10 @@ pub(crate) enum Step {
     WorkingMode { preset: String, title: String, reasons: Vec<String> },
     /// Task 270: profile the project once and cache the proposal on the team.
     ModeCheck,
+    /// Task 271 (owner, 2026-11-08): the lead's brief with the playbook, the
+    /// breaches, the owner's standing decisions and the integration line, at
+    /// team start, a phase start, or after a compaction or a clear.
+    LeadBrief { reason: String },
     /// The member's started session appeared, or its identity changed.
     Adopt { member: String, session: SessionRef },
     Launch { member: String },
@@ -2154,7 +2158,48 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             }
         }
     }
+    // Task 271 (owner, 2026-11-08): the lead's brief comes again at a phase
+    // start and after every compaction or clear of its session: the method and
+    // the rules, not only the plan. One fingerprint (the session's run and
+    // conversation, the open phase, and the context reading) keeps it to once
+    // per change; a compaction or a clear drops the reading.
+    if matches!(team.status, TeamStatus::Running | TeamStatus::Paused)
+        && team.brief == Notice::None
+        && team.playbook.is_some()
+    {
+        if let Some(session) = team.member(&team.lead).and_then(|member| member.session.as_ref()) {
+            if let Some(found) = seen.iter().find(|found| found.host == session.host && found.name == session.name && found.free) {
+                let phase = current_phase(team);
+                let used = team.member(&team.lead).and_then(|member| member.context.as_ref()).map_or(0, |context| context.used);
+                let briefed = team.lead_briefed.as_ref();
+                let same = briefed.is_some_and(|briefed| {
+                    briefed["run"].as_str() == Some(found.run_id.as_str())
+                        && briefed["conversation"].as_str() == Some(found.conversation_id.as_str())
+                        && briefed["phase"].as_u64() == Some(u64::from(phase))
+                        && !compacted(briefed, used)
+                });
+                // A team that never had its planning brief is not briefed
+                // here: the first real brief starts this coaching.
+                if !same && !(briefed.is_none() && team.brief_id.is_empty()) {
+                    let reason = match briefed {
+                        None => "the team started",
+                        Some(briefed) if briefed["phase"].as_u64() != Some(u64::from(phase)) => "the phase started",
+                        Some(briefed) if compacted(briefed, used) => "the lead's context was compacted or cleared",
+                        _ => "the lead's session was resumed",
+                    };
+                    steps.push(Step::LeadBrief { reason: reason.to_owned() });
+                }
+            }
+        }
+    }
     coalesce_lead(steps)
+}
+
+/// Task 271: whether the lead's context reading fell well below the one the last
+/// brief saw: a compaction or a clear.
+fn compacted(briefed: &Value, used: u64) -> bool {
+    let before = briefed["used"].as_u64().unwrap_or(0);
+    before > 0 && used > 0 && used.saturating_mul(10) < before.saturating_mul(6)
 }
 
 /// U49: whether a draining member owes nothing any more: no open attempt, no
@@ -3992,6 +4037,52 @@ fn propose_working_mode(store: &mut Store, team: &Team, preset: &str, title: &st
     change(store, &team.id, |team, events| {
         let lead = ops::Actor::Member(team.lead.clone());
         ops::apply(team, "propose", &input, &lead, &BTreeSet::new(), events)?;
+        Ok(())
+    })
+}
+
+/// Task 271: the phase the team works on now: the first with a task not
+/// finished, else the last phase recorded.
+fn current_phase(team: &Team) -> u32 {
+    team.tasks
+        .iter()
+        .filter(|task| !task.status.finished())
+        .map(|task| task.phase)
+        .min()
+        .or_else(|| team.phases.iter().map(|phase| phase.n).max())
+        .unwrap_or(0)
+}
+
+/// Task 271 (owner, 2026-11-08): the lead's brief: the playbook (the preset and
+/// the rules a-(i)), the open breaches with their fix, the owner's standing
+/// decisions from the lore, the integration line's last landing and who idles.
+/// It is sent at team start, at a phase start and after a compaction or a clear;
+/// the fingerprint records the session and phase it answered.
+fn send_lead_brief(store: &mut Store, team: &Team, reason: &str) -> anyhow::Result<()> {
+    let Some(lead) = team.member(&team.lead).and_then(|member| member.session.clone()) else {
+        anyhow::bail!("the lead has no session to brief");
+    };
+    let phase = current_phase(team);
+    let used = team.member(&team.lead).and_then(|member| member.context.as_ref()).map_or(0, |context| context.used);
+    let text = format!("[Zerus team · from: Zerus · brief · {}]\n{}", reason, super::playbook::brief(team));
+    let id = uuid::Uuid::new_v4().to_string();
+    let outcome = send(&lead, &id, &text);
+    let sent = match &outcome {
+        Sent::Delivered => "delivered",
+        Sent::Refused(_) => "refused",
+        Sent::Uncertain(_) => "uncertain",
+    };
+    change(store, &team.id, |team, events| {
+        team.lead_briefed = Some(json!({
+            "reason": reason,
+            "run": lead.run_id,
+            "conversation": lead.conversation_id,
+            "phase": phase,
+            "used": used,
+            "at": now(),
+        }));
+        team.playbook = Some(super::playbook::playbook(team));
+        events.push(Event::new("lead_briefed", json!({"reason":reason,"phase":phase,"sent":sent})));
         Ok(())
     })
 }
@@ -9317,6 +9408,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::SpecDecisions => spec_decisions(store, team),
         Step::WorkingMode { preset, title, reasons } => propose_working_mode(store, team, preset, title, reasons),
         Step::ModeCheck => check_working_mode(store, team),
+        Step::LeadBrief { reason } => send_lead_brief(store, team, reason),
         Step::Brief => send_brief(store, &team.id),
         Step::AllDecided => send_all_decided(store, &team.id),
         Step::Permission { member } => sync_permission(store, team, member),

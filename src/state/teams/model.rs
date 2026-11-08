@@ -3073,6 +3073,15 @@ pub(crate) struct Team {
     /// {"preset":""} means "checked, no repository to profile".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode_proposal: Option<serde_json::Value>,
+    /// Task 271 (owner, 2026-11-08): the lead playbook (the working-mode preset
+    /// and the rules a-(i), src/state/teams/playbook.rs), stored with the
+    /// team and carried in its lore by the lead brief.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playbook: Option<serde_json::Value>,
+    /// Task 271: the lead-session fingerprint (run, conversation, phase) and
+    /// reason of the last lead brief, so a compaction or a clear is briefed once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead_briefed: Option<serde_json::Value>,
     /// The member id of the lead.
     pub lead: String,
     #[serde(default)]

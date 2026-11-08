@@ -21,6 +21,7 @@ pub mod tools;
 use crate::cli::{Error, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use tools::Offer;
 
 const USAGE: &str = "usage: hgs test config [--propose|--write-proposal] | map [--write|--check] | affected [RANGE] [--staged] [--files FILE...] [--full] | durations --record FILE... --provider NAME [--target ID] | coverage --provider NAME --report TARGET=FILE... [--fail-on-gaps] | tools; each takes --dir DIR, --team TEAM and --json";
 
@@ -359,11 +360,14 @@ fn affected_tests(options: &Options) -> Result<i32> {
     if full && config.full.policy == config::FullPolicy::Owner {
         text.push_str("\nThe full run is the owner's call: ask with this time before starting it.\n");
     }
-    // #742: a tool these tests need and this computer lacks is offered to the owner.
+    // #742: a tool these tests need and this computer lacks is offered to the
+    // owner; task #220: a team's run offers it to its lead's inbox first.
     let offers = tools::refresh(&options.root, config).unwrap_or_default();
-    let waiting: Vec<&str> = offers.iter().filter(|offer| offer.state == "offered").map(|offer| offer.tool.as_str()).collect();
+    let waiting: Vec<&Offer> = offers.iter().filter(|offer| offer.state == "offered").collect();
     if !waiting.is_empty() {
-        text.push_str(&format!("\nMissing here, offered to the owner in Waiting for you: {}. Never install them yourself; work without them.\n", waiting.join(", ")));
+        let to = if waiting.iter().all(|offer| !offer.team.is_empty()) { "your lead, in its inbox" } else { "the owner in Waiting for you" };
+        let tools: Vec<&str> = waiting.iter().map(|offer| offer.tool.as_str()).collect();
+        text.push_str(&format!("\nMissing here, offered to {to}: {}. Never install them yourself; work without them.\n", tools.join(", ")));
     }
     print(options, json!({"active": loaded.active(), "full_policy": config.full.policy, "full_place": config.full.place, "selection": selection, "tools": offers}), &text);
     Ok(0)

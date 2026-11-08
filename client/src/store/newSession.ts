@@ -53,6 +53,8 @@ export interface NewSessionOptions {
   account?: string | null;
   /** A failed creation's plan (Edit choices…, `restoreCreationChoices`). */
   recipe?: Record<string, unknown>;
+  /** The session's name, as a cold card's + New gives it (`<name>-2`). */
+  name?: string;
 }
 
 /** The commands the store sends (bridge.ts); tests record their own. */
@@ -1164,6 +1166,7 @@ export function createNewSessionStore(deps: NewSessionDeps, launches: FolderLaun
       if (options.path) open.selectPath(options.path, false);
       if (options.account != null) open.selectAccount(options.account);
       if (options.recipe) open.restoreCreationChoices(options.recipe);
+      if (options.name) open.actions.setName(options.name);
       dialog = open;
       emit();
     } catch (failure) {

@@ -898,6 +898,9 @@ pub(crate) struct NativeRecovery {
     // A new consumer controller cannot replay or replace this original.
     _owner: Arc<Controller>,
     pub code: &'static str,
+    /// Task 180: the first failure's code (the check that refused), which the
+    /// app shows with its next step; `code` stays the takeover's own result.
+    pub reason: &'static str,
 }
 
 impl NativeRecovery {
@@ -932,6 +935,7 @@ fn native_takeover_until(
             Err(NativeRecovery {
                 _owner: owner,
                 code,
+                reason: diagnostic.1,
             })
         }
     }
@@ -982,7 +986,13 @@ fn failure_code(error: &OwnedError, stderr: Option<&str>) -> &'static str {
             Some("hgs: canonical frontend evidence unavailable") => {
                 return "canonical_frontend_evidence_unavailable"
             }
-            _ => (),
+            // Task 180: the portable binding's checks, by their exact lines.
+            Some(line) => {
+                if let Some(code) = crate::takeover_refusal::code(line) {
+                    return code;
+                }
+            }
+            None => (),
         }
     }
     match error {

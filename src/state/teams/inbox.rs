@@ -214,6 +214,44 @@ fn all_items(team: &Team) -> Vec<Item> {
                 team.name_of(&task.assignee), task.waits.as_ref().map(|wait| wait.reason.as_str()).unwrap_or_default()).trim_end().to_owned(),
         });
     }
+    // Task #220: a tool a team's run found missing waits for its lead, not the
+    // owner: the lead denies it with a reason, or asks the owner on a card.
+    if active {
+        // A card the lead already asked for answers it; the offer is not the
+        // lead's again until the owner's answer says so.
+        let asked: Vec<String> = team
+            .proposals
+            .iter()
+            .filter(|proposal| proposal["state"] == "open" && proposal["kind"] == "install-tool")
+            .filter_map(|proposal| proposal["change"]["offer"].as_str().map(str::to_owned))
+            .collect();
+        for offer in crate::test_discipline::tools::offers_of(&team.id).into_iter().filter(|offer| !asked.contains(&offer.id)) {
+            let who = if offer.member.is_empty() { team.name.clone() } else { team.name_of(&offer.member) };
+            let needs = format!("{who}'s run needs {}", offer.tool);
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "tool_missing",
+                key: format!("tool_missing:{}", offer.id),
+                task: offer.task,
+                member: who.clone(),
+                since: offer.since,
+                summary: summary(&format!("{needs} in {}: {}", offer.project_name, offer.why)),
+                command: format!(
+                    "{} | hgs team decide-tool --json",
+                    json!({"request_id":PLACEHOLDER,"team":team.id,"offer":offer.id,"allow":false,
+                        "reason":format!("We work without {} for now", offer.tool)})
+                ),
+                detail: format!(
+                    "Project: {} ({}).\nThe install command: {}\nAsk the owner to install it: {} | hgs team propose --json",
+                    offer.project_name,
+                    offer.folder,
+                    offer.command.join(" "),
+                    json!({"request_id":PLACEHOLDER,"team":team.id,"kind":"install-tool","offer":offer.id,
+                        "reason":format!("{needs}: {}", offer.why)})
+                ),
+            });
+        }
+    }
     // #752: two or more members in one folder build each other's half-done
     // edits; the lead proposes the build broker once (a switch card), and a
     // card the owner denied is not proposed again.
@@ -347,10 +385,10 @@ fn all_items(team: &Team) -> Vec<Item> {
                     format!("{} Reassigning it to {peer} frees it now.", wait.reason),
                 ),
                 (None, MemberState::Paused) => (resume, format!("{} Resume the member to free it.", wait.reason)),
-                (None, _) if !live => (relaunch, format!("{} Relaunch its session to free it.", wait.reason)),
+                (None, _) if !live => (relaunch, format!("{} Relaunch its session in a fresh conversation with a handoff brief to free it.", wait.reason)),
                 (None, _) if team.settings.lead_restarts_stuck && member_stuck => (
                     relaunch,
-                    format!("{} Restart it: relaunch interrupts its stuck turn, or relaunches it in its conversation.", wait.reason),
+                    format!("{} Relaunch it: a fresh conversation with a handoff brief continues the task.", wait.reason),
                 ),
                 (None, _) => (
                     owner,
@@ -449,7 +487,7 @@ fn all_items(team: &Team) -> Vec<Item> {
                     json!({"request_id":PLACEHOLDER,"team":team.id,"member":member.id})
                 ),
                 format!(
-                    "You may restart it: hgs team relaunch {} interrupts its stuck turn and continues it, or relaunches the session in its own conversation.",
+                    "You may relaunch it: hgs team relaunch {} gives it a fresh conversation with a handoff brief that continues the task.",
                     member.id
                 ),
             )
@@ -831,7 +869,18 @@ fn all_items(team: &Team) -> Vec<Item> {
                         "{} | hgs team reply --json",
                         json!({"request_id":PLACEHOLDER,"team":team.id,"question":question.id,"text":"..."})
                     ),
-                    detail: String::new(),
+                    // Task 161: a member blocked on an outside event is
+                    // answered with a park until its condition, with an ETA.
+                    detail: if super::wait_loops::waiting_reply(&question.text) || super::wait_loops::lead_wait_instruction(&question.text) {
+                        let (condition, what) = super::wait_loops::guess_condition(&question.text, question.at);
+                        format!(
+                            "Blocked on an outside event? Answer with a park until {what}, ETA: {} | hgs team reply --json",
+                            json!({"request_id":PLACEHOLDER,"team":team.id,"question":question.id,"text":"",
+                                "park":{"condition":condition,"eta_minutes":60,"note":"..."}})
+                        )
+                    } else {
+                        String::new()
+                    },
                 });
             }
         }
@@ -1078,6 +1127,31 @@ fn all_items(team: &Team) -> Vec<Item> {
             detail: if limit.detail.is_empty() { String::new() } else { summary(&limit.detail) },
         });
     }
+    // Task 160: a parked task whose condition failed is the lead's to decide;
+    // one well past its estimate is named too.
+    let now = crate::state::now();
+    for task in team.tasks.iter().filter(|_| active) {
+        let Some(park) = task.park.as_ref() else { continue };
+        let overdue = park.state == super::park::WAITING && now > park.eta + (park.eta - park.at).max(1800.0);
+        if park.state != super::park::FAILED && !overdue {
+            continue;
+        }
+        let kind = if overdue { "park_overdue" } else { "park_failed" };
+        items.push(Item {
+            subagents: Value::Null,
+            kind,
+            key: format!("{kind}:{}:{}", task.id, park.at as i64),
+            task: Some(task.id),
+            member: park.member.clone(),
+            since: if overdue { park.eta } else if park.checked_at > 0.0 { park.checked_at } else { park.at },
+            summary: summary(&format!("#{} {}", task.id, super::park::summary(park, now))),
+            command: format!(
+                "{{\"team\":\"{}\",\"task\":{}}} | hgs team unpark --json (give it back now), or reassign or cancel it",
+                team.id, task.id
+            ),
+            detail: String::new(),
+        });
+    }
     // Task 128 (docs/lore.md 6.1): a record Zerus cannot write until a field
     // is known waits here, with the workspace to write it in.
     if let Some((workspace, true)) = super::lore_sync::workspace(team) {
@@ -1094,6 +1168,131 @@ fn all_items(team: &Team) -> Vec<Item> {
                 detail: String::new(),
             });
         }
+    }
+    // Task 173: a member working with nothing handed to it, at once.
+    // Task #227: when its folder's branch names the task it works on, the item
+    // names it and one command binds the work in progress to that task.
+    for member in team.members.iter().filter(|_| active) {
+        let Some(flag) = member.unassigned.as_ref() else { continue };
+        let named = flag.task.and_then(|id| team.task(id).map(|task| (id, task.title.clone())));
+        let (summary, command, detail) = match &named {
+            Some((task, title)) => (
+                summary(&format!("{} {} on #{} {} with no attempt (unassigned work)", team.name_of(&member.id), flag.what, task, title)),
+                format!(
+                    "{} | hgs team retry --json (binds the work in progress to #{}), or reassign",
+                    json!({"request_id":"UUID","team":team.id,"task":task}),
+                    task
+                ),
+                format!("Its branch shows #{}; the retry keeps the work and tells the member to report under it, never to start over.", task),
+            ),
+            None => (
+                summary(&super::shadow::lead_line(team, member, flag)),
+                "{\"request_id\":\"UUID\",\"team\":\"ID\",\"task\":N} | hgs team retry --json (or reassign); hgs team look MEMBER shows what it runs".into(),
+                String::new(),
+            ),
+        };
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "unassigned_work",
+            key: format!("unassigned_work:{}:{}", member.id, flag.since as i64),
+            task: flag.task,
+            member: member.id.clone(),
+            since: flag.since,
+            summary,
+            command,
+            detail,
+        });
+    }
+    // Task #227: the attempts a restart gave back by itself, as one item: what
+    // Zerus re-sent or bound, with no action for the lead.
+    if active {
+        let cutoff = crate::state::now() - 30.0 * 60.0;
+        let recovered: Vec<&Value> = team
+            .crash_recovered
+            .iter()
+            .filter(|entry| entry["at"].as_f64().unwrap_or(0.0) >= cutoff)
+            .collect();
+        if !recovered.is_empty() {
+            let since = recovered.iter().filter_map(|entry| entry["at"].as_f64()).fold(f64::INFINITY, f64::min);
+            let named: Vec<String> = recovered
+                .iter()
+                .filter_map(|entry| {
+                    let task = entry["task"].as_u64()?;
+                    let attempt = entry["attempt"].as_u64().unwrap_or_default();
+                    Some(match entry["how"].as_str().unwrap_or("") {
+                        "resent" => format!("#{task} attempt {attempt} sent again"),
+                        "continued" => format!("#{task} attempt {attempt} continued on its own"),
+                        _ => format!("#{task} attempt {attempt}"),
+                    })
+                })
+                .collect();
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "attempt_recovered",
+                key: format!("attempt_recovered:{:.0}", since),
+                task: None,
+                member: "Zerus".into(),
+                since,
+                summary: summary(&format!("The restart gave {} attempt(s) back by itself: {}", named.len(), named.join(", "))),
+                command: "no action: Zerus kept each attempt's number; hgs team status --json shows them".into(),
+                detail: String::new(),
+            });
+        }
+    }
+    // Task #228: the scratch teams a QA member created for this team's tasks.
+    // The lead reads each creation and stop here; a team whose sessions could
+    // not be stopped is listed for the owner.
+    if active || finished {
+        let cutoff = crate::state::now() - 7.0 * 86400.0;
+        let recent: Vec<&super::model::ScratchChild> = team
+            .scratch_teams
+            .iter()
+            .filter(|record| record.at >= cutoff)
+            .collect();
+        if !recent.is_empty() {
+            let since = recent.iter().map(|record| record.at).fold(f64::INFINITY, f64::min);
+            let mut names = Vec::new();
+            for record in &recent {
+                let task = if record.task == 0 { String::new() } else { format!(" for task #{}", record.task) };
+                names.push(match record.state.as_str() {
+                    "stopped" => format!("{} ({}, stopped{task})", record.name, record.id),
+                    "listed" => format!("{} ({}, listed: its sessions could not be stopped{task})", record.name, record.id),
+                    _ => format!("{} ({}, created{task})", record.name, record.id),
+                });
+            }
+            let listed = recent.iter().any(|record| record.state == "listed");
+            items.push(Item {
+                subagents: Value::Null,
+                kind: "scratch_team",
+                key: format!("scratch_team:{since:.0}"),
+                task: None,
+                member: "Zerus".into(),
+                since,
+                summary: summary(&format!("Scratch teams created by the QA check: {}", names.join("; "))),
+                command: if listed {
+                    "The owner stops a listed team: {\"team\":\"<scratch team>\",\"by\":\"human\"} | hgs team stop --json".into()
+                } else {
+                    "no action: hgs team status --json shows them; Zerus stops them when the creating task is decided".into()
+                },
+                detail: names.join("; "),
+            });
+        }
+    }
+    // Task 156: a report that contradicts a decision, before its accept.
+    for task in team.tasks.iter().filter(|_| active) {
+        let Some(attempt) = task.attempts.iter().rev().find(|attempt| attempt.state == AttemptState::Reported && !attempt.decision_flags.is_empty()) else { continue };
+        let named: Vec<String> = attempt.decision_flags.iter().map(|flag| format!("{} (adds \"{}\")", flag["decision"].as_str().unwrap_or_default(), flag["term"].as_str().unwrap_or_default())).collect();
+        items.push(Item {
+            subagents: Value::Null,
+            kind: "decision_conflict",
+            key: format!("decision_conflict:{}:{}", task.id, attempt.n),
+            task: Some(task.id),
+            member: attempt.member.clone(),
+            since: attempt.report.as_ref().map_or(attempt.sent_at, |report| report.at),
+            summary: summary(&format!("#{} {}: the report contradicts decision {}", task.id, task.title, named.join(", "))),
+            command: format!("{{\"request_id\":\"UUID\",\"team\":\"{}\",\"task\":{},\"reason\":\"...\"}} | hgs team reject --json, or accept with \"against_decisions\":true", team.id, task.id),
+            detail: attempt.decision_flags.iter().map(|flag| format!("- {}: {}", flag["decision"].as_str().unwrap_or_default(), flag["choice"].as_str().unwrap_or_default())).collect::<Vec<_>>().join("\n"),
+        });
     }
     items.sort_by(|a, b| a.since.total_cmp(&b.since).then_with(|| a.key.cmp(&b.key)));
     items.truncate(ITEM_LIMIT);

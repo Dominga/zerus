@@ -93,7 +93,14 @@
   .acct-machines .mach-label { height: 18px; font-size: var(--fs-xs); }
   .acct-perm { flex: none; display: inline-flex; align-items: center; height: 18px; padding: 0 7px; border-radius: var(--z-radius-sm); background: var(--z-color-hover); color: var(--z-color-text-3); font-size: var(--fs-xs); }
   .acct-perm.bypass { background: var(--z-color-danger-bg); color: var(--z-color-danger); }
-  .acct-none { padding: 12px; font-size: var(--fs-sm); }
+  /* U25 (spec 9): the signed-out or expired pill, and the machines it strikes
+     through (AccountsPage.cpp:190-195, 224). */
+  .acct-sign { flex: none; display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: var(--z-radius-sm); background: var(--z-color-warn-bg); color: var(--z-color-warn); font-size: var(--fs-xs); }
+  .acct-sign[data-state="expired"] { background: var(--z-color-danger-bg); color: var(--z-color-danger); }
+  .acct-signs { display: flex; gap: 4px; }
+  .acct-mchip.off .mach-label, .acct-mrow.off .mach-label, .acct-more-row.off .mach-label { text-decoration: line-through; opacity: .6; }
+  .acct-none { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 12px; font-size: var(--fs-sm); }
+  .acct-none p { margin: 0; }
   .acct-detail { display: flex; flex-direction: column; gap: 14px; max-width: 720px; min-width: 0; }
   .acct-title { display: flex; align-items: center; gap: 10px; }
   .acct-title h2 { font-size: var(--fs-xl); font-weight: 600; }

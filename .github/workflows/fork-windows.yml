@@ -65,7 +65,7 @@ jobs:
             target
             services/mobile/connector/target
             services/mobile/relay/target
-          key: fork-windows-cli-${{ steps.rust.outputs.rustc }}-${{ hashFiles('Cargo.lock', 'services/mobile/connector/Cargo.lock', 'services/mobile/relay/Cargo.lock') }}
+          key: fork-windows-cli-${{ steps.rust.outputs.rustc }}-${{ hashFiles('Cargo.lock', 'crates/lore-bin/Cargo.lock', 'services/mobile/connector/Cargo.lock', 'services/mobile/relay/Cargo.lock') }}
           restore-keys: fork-windows-cli-${{ steps.rust.outputs.rustc }}-
       # The runner gives every step a synchronous pipe as stdin; hgs must not inherit it.
       - name: Rust tests and release build
@@ -73,6 +73,8 @@ jobs:
           mkdir -p artifacts/test-results
           cargo test --locked --features socraticode </dev/null 2>&1 | tee artifacts/test-results/rust.log
           cargo build --release --locked --features socraticode
+          # Task 182: lore runs as hgs's subprocess; its own Cargo.lock stays.
+          cargo build --release --locked --manifest-path crates/lore-bin/Cargo.toml --target-dir target/lore
           # WhiteWh fork: the mobile gateway's connector and relay (docs/fork-updates.md).
           cargo test --locked --lib --manifest-path services/mobile/connector/Cargo.toml </dev/null 2>&1 | tee artifacts/test-results/connector.log
           cargo build --release --locked --manifest-path services/mobile/connector/Cargo.toml
@@ -186,7 +188,8 @@ jobs:
         run: |
           # WhiteWh fork, task #65: the fork identity (ZERUS_FORK_BUILD and
           # ZERUS_FORK_FEED_URL from the job env) and the Qt fallback.
-          python scripts/package-windows.py --fork --cli target/release/hgs.exe --gui target/windows-next/release/hgs-tray.exe \
+          python scripts/package-windows.py --fork --cli target/release/hgs.exe --lore target/lore/release/lore.exe \
+            --gui target/windows-next/release/hgs-tray.exe \
             --connector services/mobile/connector/target/release/zerus-mobile-connector.exe \
             --mobile-relay services/mobile/relay/target/release/zerus-relay.exe \
             --qt-fallback .ci-build/gui/hgs-tray.exe --qt-root "$QT_ROOT_DIR" \
@@ -236,3 +239,4 @@ jobs:
           name: fork-windows-${{ github.run_number }}
           path: artifacts/test-results
           retention-days: 7
+

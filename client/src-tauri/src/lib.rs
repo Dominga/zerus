@@ -104,6 +104,8 @@ mod selection_diagnostic;
 mod session_files;
 #[cfg(feature = "live")]
 mod session_folders;
+// Task 180: a refused native takeover names its check in the app.
+mod takeover_refusal;
 #[cfg(feature = "live")]
 pub mod settings;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -153,6 +155,10 @@ mod wsl_mapping;
 // Task 102: Qt's presets and raised notices, read once at the first start.
 mod qt_first_start;
 mod model_servers;
+// G1: the Windows session host that stays for other computers.
+mod resident_host;
+// Task 258: Team Waiting notices while the window is closed.
+mod team_watch;
 #[cfg(any(windows, test))]
 mod windows_shell;
 #[cfg(feature = "live")]
@@ -196,6 +202,27 @@ fn attachments_root(cache_dir: &std::path::Path, replay: bool) -> std::path::Pat
 /// `drafts-replay` in a replay, so a replay never touches the real drafts.
 /// Qt's store is only ever read (Saved drafts and its recovery).
 #[cfg(feature = "live")]
+/// Task 235: writes the live listings to the catalog cache when they changed,
+/// at most every [`CATALOG_CACHE_EVERY`], off every UI and stream thread.
+#[cfg(feature = "live")]
+fn catalog_cache_writer(pump: pump::Pump, dir: std::path::PathBuf) {
+    let _ = std::thread::Builder::new().name("zerus-catalog-cache".into()).spawn(move || loop {
+        std::thread::sleep(CATALOG_CACHE_EVERY);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |at| at.as_secs_f64());
+        if let Some(listings) = pump.cache_snapshot(now) {
+            if !listings.is_empty() {
+                if let Err(error) = zerus_client_core::catalog_cache::save(&dir, listings) {
+                    eprintln!("zerus-client: role=catalog_cache operation=save error={error}");
+                }
+            }
+        }
+    });
+}
+
+/// Task 235: how often the catalog cache is written at most.
+#[cfg(feature = "live")]
+const CATALOG_CACHE_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
 fn drafts_root(data_dir: &std::path::Path, replay: bool) -> std::path::PathBuf {
     data_dir.join(zerus_client_core::drafts::dir(replay))
 }
@@ -331,6 +358,7 @@ pub fn run() {
             std::process::exit(2);
         }
     };
+    startup_log::begin();
     startup_log::record("entered", "gui_entry", None);
     startup_log::install_panic_hook();
     let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
@@ -419,13 +447,17 @@ pub fn run() {
                 any(target_os = "linux", target_os = "macos", windows)
             )))]
             let reply = None;
-            match instance::claim(
+            // Task 235: the cold start's named phases.
+            let claim_started = std::time::Instant::now();
+            let claim = instance::claim(
                 &name,
                 identity.launchd_label(),
                 activation,
                 reply,
                 renderer::choose,
-            ) {
+            );
+            startup_log::phase("instance_claim", Some(claim_started.elapsed()));
+            match claim {
                 instance::Claim::Claimed(claimed) => {
                     #[cfg(all(feature = "live", any(target_os = "linux", target_os = "macos")))]
                     {
@@ -506,18 +538,23 @@ pub fn run() {
     #[cfg(all(windows, feature = "live"))]
     {
         let replay = std::env::var_os("ZERUS_CLIENT_REPLAY").is_some_and(|list| !list.is_empty());
+        let select_started = std::time::Instant::now();
         let hgs = platform::windows::startup::select_hgs(
             options.hgs.as_deref(),
             identity.is_switch() && !replay,
         );
+        startup_log::phase("select_hgs", Some(select_started.elapsed()));
         std::env::set_var("ZERUS_CLIENT_HGS", hgs);
         platform::windows::startup::prepare(&args, &identity.bundle_id);
         if identity.is_switch() && !replay && !desktop_service::mode() {
             if let Some(responder) = &desktop_responder {
-                native_ownership = match desktop_ownership::native_takeover_recoverable(
+                let takeover_started = std::time::Instant::now();
+                let takeover = desktop_ownership::native_takeover_recoverable(
                     zerus_client_core::default_hgs(),
                     responder.clone(),
-                ) {
+                );
+                startup_log::phase("native_takeover", Some(takeover_started.elapsed()));
+                native_ownership = match takeover {
                     Ok(proof) => Some(proof),
                     Err(failure) => {
                         startup_log::record(
@@ -853,6 +890,18 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                     None => actions::Attention::new(local_read_path),
                 });
                 let pump = app.state::<commands::AppState>().pump();
+                // Task 235: the last session list shows at once, marked
+                // stale, until each computer's live listing replaces it; the
+                // live listings are written back, bounded, at most every 30 s.
+                if !replay {
+                    let cache_started = std::time::Instant::now();
+                    let cached = zerus_client_core::catalog_cache::load(&dir);
+                    let rows: usize = cached.iter().map(|cached| cached.rows.len()).sum();
+                    let seeded = pump.seed_cached(cached);
+                    startup_log::phase("catalog_cache_loaded", Some(cache_started.elapsed()));
+                    eprintln!("zerus-client: role=startup catalog_cache computers={seeded} rows={rows}");
+                    catalog_cache_writer(pump.clone(), dir.clone());
+                }
                 app.manage(approvals::start(
                     pump.clone(),
                     app.state::<actions::Actions>().inner().clone(),
@@ -1183,6 +1232,18 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 ));
                 app.manage(session_folders::SessionFolders::new(dir.clone(), opener.clone()));
                 app.manage(opener);
+                // Task 258: the same ownership and opt-in gate the attention
+                // notifier uses, so a switch build beside Qt posts nothing twice.
+                let watch_notifies = {
+                    let identity = app.state::<identity::Identity>().inner().clone();
+                    !desktop_service::mode()
+                        && (!identity.is_switch()
+                            || app.try_state::<desktop_ownership::NativeReady>().is_some())
+                        && identity.notifications(
+                            identity::flag("ZERUS_CLIENT_NOTIFICATIONS"),
+                            replay,
+                        )
+                };
                 // The menu-bar item, before the fleet starts so its first catalog reaches it.
                 #[cfg(target_os = "macos")]
                 {
@@ -1300,6 +1361,11 @@ fn launch(context: tauri::Context<tauri::Wry>, startup: Startup) {
                 app.manage(updates::start(app.handle()));
                 // WhiteWh fork, task #63: a fork build checks its own feed.
                 fork_updates::start(app.handle());
+                // Task 258: Team Waiting notices are decided by the app itself,
+                // so they arrive with the window closed too.
+                if watch_notifies && !replay {
+                    team_watch::start(app.handle().clone());
+                }
                 if menu_bar {
                     lifecycle::start_fleet(|| app.state::<commands::AppState>().start_source());
                 }
@@ -1684,6 +1750,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         desk::desk_take_pending,
         window_layer::window_layer_state,
         settings::hgs_version,
+        settings::hgs_setting,
         settings::open_repository,
         speech_settings::speech_input,
         files::files_usage,
@@ -1759,6 +1826,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         teams::teams_spans,
         teams::teams_profile,
         teams::team_tests,
+        teams::team_builds,
         teams::team_timeline,
         teams::team_action,
         teams::team_read,
@@ -1887,6 +1955,8 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         screens::account_edits::setup::account_setup_open,
         screens::account_edits::setup::account_setup_apply,
         screens::account_edits::setup::account_setup_close,
+        screens::account_edits::setup::account_bind_existing,
+        screens::account_edits::setup::account_ollama_models,
         screens::account_edits::distribution::account_distribution_open,
         screens::account_edits::distribution::account_distribution_apply,
         screens::account_edits::distribution::account_distribution_close,
@@ -1894,6 +1964,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         screens::machines_view,
         screens::machine_resolve,
         screens::machine_check,
+        screens::machine_test_host,
         screens::machine_change,
         screens::machine_ssh,
         screens::machine_setup::machine_setup,
@@ -2470,3 +2541,4 @@ mod tests {
         );
     }
 }
+

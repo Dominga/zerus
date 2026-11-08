@@ -1,6 +1,37 @@
 use super::*;
 use super::support::*;
 
+/// Task #239: a queued run whose runner died is answered where the member
+/// polls, with the worker log's tail - never "running" forever, never silence.
+#[test]
+fn a_run_whose_runner_died_is_an_outcome_with_the_worker_log() {
+    use crate::state::teams::outbox;
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let folder = dir.path().join("member");
+        std::fs::create_dir_all(&folder).unwrap();
+        let log = worker_dir().join("worker.log");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(&log, "start pid=1\nhgs team worker: run 2222: the runner ended while vitest started\n").unwrap();
+        let id = "22222222-2222-4222-8222-222222222222";
+        let marker = serde_json::json!({"request_id":id,"started":crate::state::now(),"timeout_secs":1800,"pid":4294967290u32});
+        outbox::write_running(&folder, id, &marker).unwrap();
+        let team = Team { id: "t".into(), name: "T".into(), ..Default::default() };
+        settle_stale_runs(&folder, &team);
+        let result = outbox::result(&folder, id).expect("the run is answered");
+        assert_eq!(result["status"], "refused", "{result}");
+        let error = result["error"].as_str().unwrap();
+        assert!(error.contains("Zerus's worker log") && error.contains("the runner ended while vitest started"), "{error}");
+        assert!(outbox::running(&folder, id).is_none());
+        // A runner that still lives is not answered.
+        let live = "33333333-3333-4333-8333-333333333333";
+        let marker = serde_json::json!({"request_id":live,"started":crate::state::now(),"timeout_secs":1800,"pid":std::process::id()});
+        outbox::write_running(&folder, live, &marker).unwrap();
+        settle_stale_runs(&folder, &team);
+        assert!(outbox::result(&folder, live).is_none() && outbox::running(&folder, live).is_some());
+    });
+}
+
 #[test]
 fn terminal_members_start_with_a_short_first_turn() {
     let team = team();
@@ -452,6 +483,8 @@ fn the_worker_answers_a_sandboxed_members_read_and_starts_its_run_at_low_integri
         let folder = dir.path().join("work");
         std::fs::create_dir_all(&folder).unwrap();
         t.folder = folder.display().to_string();
+        // Task 173: dev's run belongs to its handed task.
+        delivered(&mut t);
         store.create("11111111-1111-4111-8111-111111111111", &json!({}), t.clone(), vec![]).unwrap();
         let read = "88888888-8888-4888-8888-888888888888";
         let send = "99999999-9999-4999-8999-999999999999";

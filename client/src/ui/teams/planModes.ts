@@ -126,12 +126,25 @@ export function testsRows(tests: TeamTestsView | null | undefined): TestsRows {
   };
 }
 
-export function testStatus(status: string): "passed" | "failed" | "timed-out" | "reused" | "queued" {
+export function testStatus(status: string): "passed" | "flaky" | "failed" | "timed-out" | "reused" | "queued" {
   if (status === "passed") return "passed";
+  // Task 199 (Qt TeamTests statusName): a run that passed on a retry is not a failure.
+  if (status === "flaky") return "flaky";
   if (status === "timed_out" || status === "timed-out") return "timed-out";
   if (status === "reused") return "reused";
   if (status === "queued" || status === "waiting" || status === "running") return "queued";
   return "failed";
+}
+
+/** A run's status in words (Qt TeamTests statusName). */
+export function runStatusLabel(status: string): string {
+  const kind = testStatus(status);
+  if (kind === "passed") return tr("Passed");
+  if (kind === "flaky") return tr("Passed on retry");
+  if (kind === "timed-out") return tr("Timed out");
+  if (kind === "reused") return tr("Reused");
+  if (kind === "queued") return tr("Queued");
+  return tr("Failed");
 }
 
 /** Qt's run time: 45s, 3m 05s, 1h 20m. */
@@ -185,6 +198,22 @@ export function reportCounts(report: { passed: number; failed: number; skipped: 
 /** Task 88: a test's name as the Tests mode shows it: suite::name unless the name already starts with its suite. */
 export function caseName(test: { suite: string; name: string }): string {
   return !test.suite || test.name.startsWith(test.suite) ? test.name : `${test.suite}::${test.name}`;
+}
+
+/** Task 199 (Qt TeamTests): the suites seen in the queue and the history, by name. */
+export function testSuites(tests: TeamTestsView | null | undefined): string[] {
+  if (!tests) return [];
+  return [...new Set([...tests.queue.map((item) => item.suite), ...tests.runs.map((run) => run.suite)].filter(Boolean))].sort();
+}
+
+/** A suite's latest run and its last ten statuses, newest first. */
+export function suiteRuns(tests: TeamTestsView | null | undefined, suite: string): TeamTestsView["runs"] {
+  return (tests?.runs ?? []).filter((run) => run.suite === suite).slice(0, 10);
+}
+
+/** Force run's state for a suite: queued as forced already, or free to force. */
+export function forcedWaiting(tests: TeamTestsView | null | undefined, suite: string): boolean {
+  return !!tests?.queue.some((item) => item.suite === suite && item.forced);
 }
 
 /** Task 88: whether a test failed (a failure or an error). */

@@ -3,7 +3,7 @@ import type { Reply } from "../../types";
 // catalog store's row: the Rust view row plus the presentation fields derived
 // from it once per upsert (store/catalog.ts `toSession`).
 
-export type AgentKind = "claude" | "codex" | "kimi" | "deepseek" | "opencode" | "sh";
+export type AgentKind = "claude" | "codex" | "kimi" | "deepseek" | "opencode" | "ollama" | "sh";
 
 /** Presentation status, in the existing precedence order (design/webui). */
 export type Status =
@@ -68,6 +68,16 @@ export interface Session {
   attention?: "question" | "approval" | "reply";
   scheduleNext?: string;
   backgroundJobs?: number;
+  /** The host's state of the session and the facts its card turns into a badge and line 3 (session-states.ts). */
+  sessionState?: string;
+  stateReason?: { kind: string; text: string };
+  build?: { label: string; command: string; since: number };
+  lastActive?: number;
+  replyAt?: number;
+  cacheTtl?: { seconds: number; kept_warm: boolean };
+  /** What the session runs apart from its jobs; never Background work. */
+  services?: { name: string; command: string; since: number }[];
+  backgroundCommand?: string;
   subagents?: Subagent[];
   subagentCountsComplete?: boolean;
   reviewLater?: boolean;

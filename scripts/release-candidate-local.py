@@ -22,11 +22,42 @@ def run(command: list[str], cwd: Path = ROOT, env: dict[str, str] | None = None,
         return
     merged = dict(os.environ)
     merged.update(env or {})
-    # Task 192: CreateProcess finds only .exe files; npm and npx are .cmd
-    # scripts on Windows, so the program is resolved on PATH first.
+    # On Windows npm is npm.cmd: CreateProcess finds only .exe by a bare
+    # name, so the program is resolved on PATH first (task 169).
     program = shutil.which(command[0], path=merged.get("PATH")) or command[0]
     if subprocess.run([program, *command[1:]], cwd=cwd, env=merged).returncode != 0:
         raise SystemExit(f"release candidate step failed: {' '.join(command)}")
+
+
+def qt_fallback() -> str:
+    """The Qt desktop the package carries as its fallback: gui.sh's Ninja
+    build writes .ci-build/gui/hgs-tray.exe; the Visual Studio generator the
+    Windows-native leg uses writes it under its configuration folder."""
+    for candidate in (".ci-build/gui/hgs-tray.exe", ".ci-build/gui/Release/hgs-tray.exe"):
+        if (ROOT / candidate).exists():
+            return candidate
+    return ".ci-build/gui/hgs-tray.exe"
+
+
+def fork_identity(build: str, feed: str) -> tuple[str, str]:
+    """Task 213: the fork identity this leg embeds and packages.
+
+    The workflow takes it from the tag and run number (fork-windows.yml); a
+    local leg has no tag, so the caller passes the values explicitly (template
+    `release-candidate`, `fork_build` and `fork_feed`, or ZERUS_FORK_BUILD and
+    ZERUS_FORK_FEED). Both are given together or neither is (an experimental
+    build); the packaged body refuses the same, so this fails early with the
+    reason.
+    """
+    build = build.strip()
+    feed = feed.strip()
+    if bool(build) != bool(feed):
+        raise SystemExit("A fork build has both a build number and a feed, or neither (experimental).")
+    if build and (not build.isdigit() or int(build) <= 0):
+        raise SystemExit(f"The fork build is a positive number or empty (got {build!r}).")
+    if feed and not feed.startswith("https://github.com/WhiteWh/zerus/releases/"):
+        raise SystemExit(f"The fork feed is a release asset of WhiteWh/zerus (got {feed!r}).")
+    return build, feed
 
 
 def main() -> int:
@@ -34,8 +65,19 @@ def main() -> int:
     parser.add_argument("--commit", default="HEAD")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--qt-root", default=os.environ.get("QT_ROOT_DIR", r"D:/Tools/zerus-deps/Qt/6.10.3/msvc2022_64"))
+    # Task 213: the local leg takes the fork identity the workflow gets from its
+    # tag and run number. The environment names fork-windows.yml sets are read
+    # too, so the same values serve both legs.
+    parser.add_argument("--fork-build", default=os.environ.get("ZERUS_FORK_BUILD", ""),
+                        help="the fork build number the Tauri app embeds and build-info.json names "
+                             "[default: $ZERUS_FORK_BUILD; empty for an experimental build]")
+    parser.add_argument("--fork-feed", default=os.environ.get("ZERUS_FORK_FEED") or os.environ.get("ZERUS_FORK_FEED_URL", ""),
+                        help="the fork update feed [default: $ZERUS_FORK_FEED, else $ZERUS_FORK_FEED_URL; empty for an experimental build]")
     args = parser.parse_args()
+    fork_build, fork_feed = fork_identity(args.fork_build, args.fork_feed)
+    print(f"fork identity: build {fork_build or 'none (experimental)'}, feed {fork_feed or 'none (experimental)'}", flush=True)
     run(["cargo", "build", "--locked", "--release", "--bin", "hgs"], dry=args.dry_run)
+    run(["cargo", "build", "--locked", "--release", "--manifest-path", "crates/lore-bin/Cargo.toml", "--target-dir", "target/lore"], dry=args.dry_run)
     run(["cargo", "build", "--locked", "--release", "--manifest-path", "services/mobile/connector/Cargo.toml"], dry=args.dry_run)
     run(["cargo", "build", "--locked", "--release", "--manifest-path", "services/mobile/relay/Cargo.toml"], dry=args.dry_run)
     conpty = Path(os.environ.get("RUNNER_TEMP", ROOT / ".zerus-team/tmp")) / "conpty"
@@ -45,30 +87,25 @@ def main() -> int:
     results.mkdir(parents=True, exist_ok=True)
     client = ROOT / "client"
     target = ROOT / "target/windows-next"
-    # Task 192: the local candidate is an experimental fork build, as the
-    # whitewh-exp-* runner leg is: no build number and no feed, so it neither
-    # updates nor gets updated. The same two values go to the Tauri build
-    # (embedded) and to the zip's build-info.json, which check-windows-portable
-    # compares; a fixed build "1" with an empty feed matched neither.
-    fork_build = os.environ.get("ZERUS_FORK_BUILD", "")
-    fork_feed = os.environ.get("ZERUS_FORK_FEED_URL", "")
     run(["npm", "ci"], cwd=client, dry=args.dry_run)
+    print(f"tauri fork channel: ZERUS_FORK_BUILD={fork_build or '(unset)'} ZERUS_FORK_FEED_URL={fork_feed or '(unset)'}", flush=True)
     run(
         ["npm", "run", "tauri", "--", "build", "--ci", "--no-bundle",
          "--config", "src-tauri/tauri.windows.conf.json", "--features", "video"],
         cwd=client,
         env={"CARGO_TARGET_DIR": str(target), "CARGO_BUILD_JOBS": "4",
-             "ZERUS_FORK_BUILD": fork_build, "ZERUS_FORK_FEED_URL": fork_feed},
+             "ZERUS_FORK_BUILD": fork_build,
+             "ZERUS_FORK_FEED_URL": fork_feed},
         dry=args.dry_run,
     )
     run(["python", "client/scripts/collect-notices.py", "artifacts/windows-frontend-licenses"], dry=args.dry_run)
     run(["python", "scripts/package-windows.py", "--fork",
-         f"--fork-build={fork_build}", f"--fork-feed={fork_feed}",
-         "--cli", "target/release/hgs.exe",
+         "--fork-build", fork_build, "--fork-feed", fork_feed,
+         "--cli", "target/release/hgs.exe", "--lore", "target/lore/release/lore.exe",
          "--gui", "target/windows-next/release/hgs-tray.exe",
          "--connector", "services/mobile/connector/target/release/zerus-mobile-connector.exe",
          "--mobile-relay", "services/mobile/relay/target/release/zerus-relay.exe",
-         "--qt-fallback", ".ci-build/gui/hgs-tray.exe", "--qt-root", args.qt_root,
+         "--qt-fallback", qt_fallback(), "--qt-root", args.qt_root,
          "--frontend-licenses", "artifacts/windows-frontend-licenses",
          "--conpty", str(Path(os.environ.get("RUNNER_TEMP", ROOT / ".zerus-team/tmp")) / "conpty"),
          "--output", "artifacts/zerus-windows-x86_64.zip"], dry=args.dry_run)
@@ -79,5 +116,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-

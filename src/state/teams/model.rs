@@ -183,6 +183,21 @@ pub(crate) struct Settings {
     /// shared automatic-recovery policy is off.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub resume_after_limits: bool,
+    /// Task 209 (owner, 2026-11-07): the native context pressure, in percent of
+    /// the agent's window, at which Zerus compacts a member before it continues.
+    /// 95 by default; the owner sets it.
+    #[serde(default = "default_context_compact_percent")]
+    pub context_compact_percent: u8,
+    /// Task 254 (owner, 2026-11-08): a session whose prompt cache is cold and
+    /// whose context holds at least this share of its window is compacted
+    /// before a hand-out or a crash give-back; 30 by default, 0 never. The
+    /// owner sets it.
+    #[serde(default = "default_cold_compact_percent")]
+    pub cold_compact_percent: u8,
+    /// Task #228 (owner, 2026-11-07): the folder a QA member's scratch teams
+    /// start in; empty is <team folder>/.qa-scratch. Only the owner sets it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scratch_root: String,
     /// N19 (spec 7, 12): folders whose images and HTML the desktop previews
     /// as report evidence, besides the team and member folders.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -336,6 +351,15 @@ fn default_defer() -> u64 {
 fn default_background_red() -> u64 {
     30
 }
+/// Task 209: a member's context is compacted at 95% of its native window.
+pub(crate) const DEFAULT_CONTEXT_COMPACT_PERCENT: u8 = 95;
+pub(crate) const DEFAULT_COLD_COMPACT_PERCENT: u8 = 30;
+fn default_cold_compact_percent() -> u8 {
+    DEFAULT_COLD_COMPACT_PERCENT
+}
+fn default_context_compact_percent() -> u8 {
+    DEFAULT_CONTEXT_COMPACT_PERCENT
+}
 fn default_phase() -> u32 {
     1
 }
@@ -363,6 +387,9 @@ impl Default for Settings {
             background_red_minutes: default_background_red(),
             worktrees_forbidden: false,
             resume_after_limits: false,
+            context_compact_percent: DEFAULT_CONTEXT_COMPACT_PERCENT,
+            cold_compact_percent: DEFAULT_COLD_COMPACT_PERCENT,
+            scratch_root: String::new(),
             evidence_folders: Vec::new(),
             tree_depth: default_tree_depth(),
             tree_sessions: default_tree_sessions(),
@@ -501,6 +528,19 @@ pub(crate) struct Member {
     /// context action; it is written once per member.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub context_noted: bool,
+    /// Task 209: the last native context reading of the member's session: the
+    /// used tokens, the window and their ratio, as its agent reports them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<MemberContext>,
+    /// Task 209: a compaction, or a fresh conversation, Zerus is waiting to
+    /// confirm before the member continues; the request survives a worker
+    /// restart, so the action is never run twice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_compact: Option<MemberCompact>,
+    /// Task 209: a compaction that refused or stayed unconfirmed is retried no
+    /// sooner than this moment, so a broken agent is not asked every tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_retry_at: Option<f64>,
     pub agent: String,
     #[serde(default)]
     pub account: String,
@@ -588,6 +628,11 @@ pub(crate) struct Member {
     /// The lead was told once about this starvation episode (C7).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub starved_told: bool,
+    /// Task 173: the member's session works with nothing handed to it
+    /// (unassigned work), since when and what it runs; cleared once it has a
+    /// hand-out or stops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unassigned: Option<Unassigned>,
     /// Task 134: the member's unread team messages (the working tier), as
     /// status shows them ("unread: N"); None when it has read everything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -645,6 +690,10 @@ pub(crate) struct Member {
     pub seen_activity: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seen_event_at: Option<f64>,
+    /// Task 254: its session's prompt cache was cold at the last listing
+    /// (`session_state` cold, or its cache TTL passed since it was last active).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub seen_cold: bool,
     /// U56: a busy member with no session event for stuck_minutes, with the
     /// reason and the phase it was in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1147,6 +1196,39 @@ pub(crate) struct Parent {
     pub member: String,
 }
 
+/// Task #228: a QA member's scratch team names the parent team and the task
+/// whose decision stops it. It is not a delegated sub-team: it has no parent
+/// approval, no parent task report and no slot in the parent's `children`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct ScratchParent {
+    pub team: String,
+    /// The creating task, 0 when the member had none open.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub task: u32,
+    /// The parent member whose session leads the scratch team.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub member: String,
+}
+
+/// Task #228: one scratch team a parent lead sees: created, then stopped when
+/// the creating task was decided.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct ScratchChild {
+    pub id: String,
+    pub name: String,
+    /// The creating task, 0 when the member had none open.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub task: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub member: String,
+    pub at: f64,
+    /// "created" or "stopped".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_at: Option<f64>,
+}
+
 /// A member's session stopped by a usage limit (H1); `resets_at` is present
 /// only when the session reports a reset time.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -1169,6 +1251,60 @@ pub(crate) struct Continuation {
     pub report: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub questions: Vec<String>,
+}
+
+/// Task 209: one native context reading of a member's session.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct MemberContext {
+    /// The tokens the agent's window holds now (`contextPressure`).
+    pub used: u64,
+    /// The agent's context window.
+    pub limit: u64,
+    /// `used` in whole percent of `limit`, rounded down.
+    pub percent: u8,
+    /// When Zerus read it (epoch seconds).
+    pub at: f64,
+}
+
+impl MemberContext {
+    pub(crate) fn of(used: u64, limit: u64, at: f64) -> Self {
+        Self { used, limit, percent: super::context::percent(used, limit), at }
+    }
+    /// Whether the reading reached `threshold` percent of the window.
+    pub(crate) fn reached(&self, threshold: u8) -> bool {
+        self.limit > 0 && self.percent >= threshold
+    }
+    /// Whether the reading still stands for a claim (a turn moved it since).
+    pub(crate) fn fresh(&self, now: f64) -> bool {
+        self.at > 0.0 && now - self.at <= super::context::CLAIM_FRESH
+    }
+}
+
+/// Task 209: a compaction, or a fresh conversation, Zerus waits to confirm
+/// before the member continues. Kept on the member, so a restarted worker reads
+/// the same request instead of running it again.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct MemberCompact {
+    /// `compact`: the agent compacts its own conversation; `fresh`: the member
+    /// gets a new conversation with a handoff brief.
+    pub action: String,
+    /// The native request id a compaction is confirmed by (empty for fresh).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub run_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub conversation: String,
+    pub started_at: f64,
+    /// The task whose open attempt continues after the compaction; 0 without one.
+    #[serde(default)]
+    pub task: u32,
+    /// That attempt's id.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub attempt: String,
+    /// Why Zerus did it: `threshold`, `claim` or `relaunch`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
 }
 
 /// Task 135: what a fresh session of a member still has to be told. Set by a
@@ -1409,6 +1545,9 @@ pub(crate) enum AttemptState {
     Revoked,
     Reported,
     Rejected,
+    /// Task 160: parked on an outside event: not open (its member is free),
+    /// given back in the same attempt when the condition holds.
+    Parked,
 }
 
 impl AttemptState {
@@ -1563,6 +1702,116 @@ impl Question {
 
 /// A task kept back from the dispatcher until the lead releases it (A5): a
 /// rejection may return a task to a member who is not ready for it.
+/// Task 173: a member's work outside any hand-out.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Unassigned {
+    pub since: f64,
+    pub what: String,
+    /// Task #227: the task the member's screen or branch shows it working on,
+    /// so the lead's item names it and one command binds the work to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<u32>,
+}
+
+/// Task 160: a task parked on a named outside condition, with an estimate.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Park {
+    /// The parked attempt and its member: the task goes back to them.
+    pub attempt: String,
+    pub member: String,
+    /// Who parked it (the member, the lead or you) and when.
+    pub by: String,
+    pub at: f64,
+    pub condition: ParkCondition,
+    /// When the parker expects the condition to hold (an estimate).
+    pub eta: f64,
+    /// The member's notes for its return.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+    /// waiting, met or failed.
+    #[serde(default)]
+    pub state: String,
+    /// What the check saw: why it held or failed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub checked_at: f64,
+}
+
+/// Task 160: what a park waits for. Zerus checks each itself, bounded.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum ParkCondition {
+    /// A GitHub Actions run of the fork finishing (`repo` is OWNER/REPO).
+    Ci { repo: String, run: u64 },
+    /// A build installed: at least `version`, at least Dev `build`, or exactly
+    /// `commit`; `program` is an installed desktop answering --build-info
+    /// (empty: the hgs the team worker runs).
+    Build {
+        #[serde(default)]
+        version: String,
+        #[serde(default)]
+        build: u64,
+        #[serde(default)]
+        commit: String,
+        #[serde(default)]
+        program: String,
+    },
+    /// Another task accepted.
+    Task { task: u32 },
+    /// The owner's answer on a card.
+    Card { proposal: String },
+    /// A time, in seconds since 1970.
+    Time { at: f64 },
+}
+
+impl Default for ParkCondition {
+    fn default() -> Self {
+        Self::Time { at: 0.0 }
+    }
+}
+
+/// Task 156: one owner decision: the question, the choice, why, who and when,
+/// with the refs it concerns; superseded by a later one on the same question.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct Decision {
+    pub id: String,
+    pub question: String,
+    pub choice: String,
+    #[serde(default)]
+    pub why: String,
+    #[serde(default)]
+    pub by: String,
+    #[serde(default)]
+    pub at: f64,
+    /// The card it answered, if any.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub card: String,
+    /// The spec (and section) it amends, such as docs/lore.md#2.1.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub spec: String,
+    /// The output paths and tasks it concerns.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<u32>,
+    /// Terms a report must not add (a dependency, a tool), lowercase.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forbids: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub superseded_by: String,
+    /// The question's content words: a later decision with the same supersedes it.
+    #[serde(default)]
+    pub topic: String,
+}
+
+/// Task 156: lore's hits over decisions for one task, and what they were for.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct DecisionHits {
+    pub hash: String,
+    pub ids: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Hold {
     /// The lead or you.
@@ -1669,9 +1918,31 @@ pub(crate) struct Attempt {
     /// as the report by itself (owner, 2026-11-07).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub last_reply: String,
+    /// Task 173: the lead's messages about this attempt ({at, via, text}),
+    /// newest last, at most 20: a lead message naming the task is bound here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lead_messages: Vec<serde_json::Value>,
+    /// Task 161: when Zerus last looked for a wait loop in this attempt's
+    /// work (its runs and repeated checks), at most every five minutes.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub wait_checked_at: f64,
+    /// Task 156: the decisions this attempt's member was told of while it worked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions_told: Vec<String>,
+    /// Task 156: the decisions its report contradicts ({decision, term,
+    /// choice}), found in its changes before accept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decision_flags: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub decisions_scanned: bool,
     /// The member's turn ended long enough ago without a report.
     #[serde(default)]
     pub no_report: bool,
+    /// Task 209: a reply that claimed there was no context left while the
+    /// member's meter said otherwise was answered with the meter; the attempt
+    /// stays open and its report is still what ends it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_answered_at: Option<f64>,
     /// Task 36 (audit P8): the Zerus build the member's session was seen
     /// Building on for this attempt (a claimed `hgs team run`, or `hgs run`):
     /// its request id, or "build" when the listing names none. While it is
@@ -1854,6 +2125,10 @@ pub(crate) struct Task {
     /// Held back from the dispatcher until the lead releases it (A5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold: Option<Hold>,
+    /// Task 160: parked on an outside event; Zerus watches the condition and
+    /// gives the task back to the same member in the same attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub park: Option<Park>,
     #[serde(default)]
     pub attempts: Vec<Attempt>,
     #[serde(default)]
@@ -2143,6 +2418,38 @@ pub(crate) struct AddedLate {
 
 /// U29: an addition to a running phase that waits for the owner's
 /// confirmation of the warning. One per phase; it expires after 30 minutes.
+/// Task 162: one change of the plan the lead made inside the approved goal.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct LeadChange {
+    /// "lcN", in order.
+    pub id: String,
+    pub op: String,
+    /// What changed, in words ("added #12 Fix the login crash to phase 3").
+    pub summary: String,
+    pub by: String,
+    pub at: f64,
+    /// The tasks it changed as they were before it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks_before: Vec<Task>,
+    /// The tasks it added.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub added: Vec<u32>,
+    /// The phases it changed as they were before it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phases_before: Vec<Phase>,
+    /// The owner looked at it in the digest (it leaves Waiting).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub seen: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverted_at: Option<f64>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reverted_by: String,
+}
+
+/// Task 162: at most this many lead changes are kept (the oldest seen or
+/// reverted ones leave first).
+pub(crate) const LEAD_CHANGES_KEPT: usize = 300;
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct PendingAddition {
     pub id: String,
@@ -2511,6 +2818,20 @@ pub(crate) struct Team {
     pub memory_mode_offer: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub memory_mode_reason: String,
+    /// Task 159: the owner's scratch rule this team was created under (its
+    /// id): no per-plan approval, its folder trusted for the rule's agents.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub scratch_rule: String,
+    /// Task 156: the owner's decisions, oldest first (at most 500): kept in
+    /// Zerus state for every memory mode, mirrored into the team's lore.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<Decision>,
+    /// Task 156: lore's `find` hits over decisions per task (a workspace team).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub decision_hits: std::collections::BTreeMap<u32, DecisionHits>,
+    /// Task 156: the decisions the generated spec sections were last written for.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub decision_specs: String,
     /// Task 128: what the background writer last put into the team's lore
     /// workspace, and what waits on a field only a person can give.
     #[serde(default, skip_serializing_if = "LoreState::is_empty")]
@@ -2614,6 +2935,14 @@ pub(crate) struct Team {
     /// Section 9.1: the sub-teams delegated from this team, at most 32.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<String>,
+    /// Task #228: the parent team and creating task of a QA member's scratch
+    /// team; absent on every other team.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scratch_parent: Option<ScratchParent>,
+    /// Task #228: the scratch teams this team's members created, newest last,
+    /// at most 32; its lead reads created and stopped in the feed and inbox.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scratch_teams: Vec<ScratchChild>,
     /// U26: verified owner events already spent on a change, so one sentence
     /// authorizes one change: [{event, change}].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2621,6 +2950,12 @@ pub(crate) struct Team {
     /// U29: additions to running phases waiting for the owner's confirmation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_additions: Vec<PendingAddition>,
+    /// Task 162: the lead's changes of the plan inside the approved goal
+    /// (tasks added, moved, split or edited in accepted phases), each with
+    /// what it replaced, so the owner sees them in a digest and can revert
+    /// any; newest last, at most `LEAD_CHANGES_KEPT`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lead_changes: Vec<LeadChange>,
     /// #511 N3: members to tell that their worked-ahead attempt was revoked
     /// with its phase, newest last, at most 20. Task 24: also a member whose
     /// attempt in progress was revoked by a reassign, a take-over or a cancel
@@ -2645,6 +2980,34 @@ pub(crate) struct Team {
     /// was paused, by whom and why; only while it is paused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused: Option<TeamPause>,
+    /// Task #227: a retry on a task its member is working on does not revoke
+    /// it; the notice to continue reaches the member at its turn's safe point,
+    /// newest last, at most 20.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub continues: Vec<ContinueNotice>,
+    /// Task #227: the attempts a restart gave back by itself (re-sent, or
+    /// bound to the work already running), newest last, at most 20; the lead
+    /// reads them as one inbox item.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub crash_recovered: Vec<Value>,
+}
+
+/// Task #227: a retry while the member works on the task: "continue", never
+/// "start over". The notice is a team message queued for the member's turn end.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct ContinueNotice {
+    pub id: String,
+    pub task: u32,
+    pub attempt: u32,
+    pub member: String,
+    #[serde(default)]
+    pub by: String,
+    pub at: f64,
+    #[serde(default)]
+    pub notice: Notice,
+    /// A refused send is tried on later ticks, ten times at most.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub tries: u32,
 }
 
 /// Task 112: the pause of a team, as the team bar, Waiting for you and the
@@ -2880,7 +3243,9 @@ impl Team {
 
     /// A returned task reserves its member even while held or awaiting review.
     pub(crate) fn reserved_for_rework(&self, member: &str, task: Option<u32>) -> bool {
-        self.tasks.iter().filter(|found| found.rework() && found.assignee == member)
+        // Task 160 (owner, 2026-11-07): a held reject or a parked rework at
+        // the head of a member's queue never blocks its later hand-outs.
+        self.tasks.iter().filter(|found| found.rework() && found.assignee == member && found.hold.is_none() && found.park.is_none())
             .min_by(|a, b| a.rework_since.unwrap().total_cmp(&b.rework_since.unwrap()).then(a.id.cmp(&b.id)))
             .is_some_and(|found| Some(found.id) != task)
     }
@@ -3244,4 +3609,6 @@ mod tests {
         assert!(!attempt.questions[0].open());
     }
 }
+
+
 

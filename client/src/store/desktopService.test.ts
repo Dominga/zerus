@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createDesktopService, createServiceApprovalIntent, pendingReadNotice, retainedSourceNotice, retainedSourceDetails, ownershipNotice, createOwnershipActions, serviceStatus } from "./desktopService";
+import { createDesktopService, createServiceApprovalIntent, pendingReadNotice, retainedSourceNotice, retainedSourceDetails, ownershipNotice, takeoverRefusal, createOwnershipActions, serviceStatus } from "./desktopService";
 import { createApprovalOptIn } from "../ui/screens/settings/approval-opt-in";
 import { emptyBatch, isEmptyBatch, type DesktopService, type NotificationOwnership } from "../types";
 import { normalize } from "../bridge";
@@ -421,6 +421,26 @@ describe("notification ownership presentation", () => {
     expect(ownershipNotice(updated)).not.toContain("revoked");
     const current = view(); current.status = { ...current.status!, state: "service", rearm_required: false, identity_current: true };
     expect(ownershipNotice(current)).toBe("");
+  });
+  // Task 180 (owner, 2026-11-07, local build 152): a refused native takeover
+  // names its check and the next step, never a bare "not ready".
+  it("names the check that refused the native takeover and the next step", () => {
+    const refused = (code: string, check: string) => view({ native_recovery: true, native_recovery_reason: { code, check } });
+    const binding = takeoverRefusal(refused("frontend_binding_unavailable", "binding"))!;
+    expect(binding.check).toBe("App binding");
+    expect(binding.reason).toContain("frontend.json");
+    expect(binding.next).toContain("Install Zerus again");
+    expect(takeoverRefusal(refused("frontend_folders_not_private", "folder_privacy"))!.check).toBe("Folder privacy");
+    expect(takeoverRefusal(refused("agent_descended_frontend_refused", "ancestry"))!.check).toBe("Process ancestry");
+    expect(takeoverRefusal(refused("ownership_not_settled", "ownership_journal"))!.check).toBe("Ownership journal");
+    expect(takeoverRefusal(refused("timed_out", "other"))!.reason).toContain("timed_out");
+    // The notice says it instead of a bare "not ready"; without a reason the old notice stays.
+    const notice = ownershipNotice(refused("frontend_binding_unavailable", "binding"));
+    expect(notice).toContain("Zerus could not take over its sessions (App binding)");
+    expect(notice).not.toContain("not ready");
+    expect(takeoverRefusal(view({ native_recovery: true }))).toBeUndefined();
+    expect(ownershipNotice(view({ native_recovery: true, status: undefined }))).toContain("not ready");
+    expect(takeoverRefusal(view({ native_recovery: false, native_recovery_reason: { code: "frontend_binding_unavailable", check: "binding" } }))).toBeUndefined();
   });
   it("offers explicit activation for retained passive mode and keeps unknown activation on Check", () => {
     const current = view(); current.status = { ...current.status!, state: "service", rearm_required: false, identity_current: true };

@@ -11,7 +11,30 @@ pub const UNCERTAIN: &str = "Could not confirm the connection change. Refresh to
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct WslProfile {
+    pub distribution: String,
+    pub user: String,
+    pub hgs_path: String,
+}
+
+fn ssh_transport() -> String {
+    "ssh".into()
+}
+fn is_ssh(transport: &String) -> bool {
+    transport == "ssh"
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Connection {
+    /// `ssh` (the default) or `wsl-local` (MachinesPage.cpp:229-231).
+    #[serde(default = "ssh_transport", skip_serializing_if = "is_ssh")]
+    pub transport: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wsl: Option<WslProfile>,
+    /// The platform class this machine serves as a test runner, "" for none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub test_runner: String,
     pub hostname: String,
     pub user: String,
     pub port: Option<u16>,
@@ -48,6 +71,35 @@ fn ascii_field(value: &str, max: usize, allowed: &[u8]) -> bool {
 
 /// Match the machine CLI's local profile fields; blanks keep SSH inheritance.
 fn validate(connection: &Connection) -> Result<(), String> {
+    if !connection.test_runner.is_empty()
+        && !["windows", "linux", "macos", "android"].contains(&connection.test_runner.as_str())
+    {
+        return Err("A test runner serves windows, linux, macos or android.".into());
+    }
+    if connection.transport == "wsl-local" {
+        if !connection.hostname.is_empty() || !connection.user.is_empty() || connection.port.is_some() || !connection.identity_file.is_empty() {
+            return Err("A WSL connection has no SSH overrides.".into());
+        }
+        let wsl = connection.wsl.as_ref().ok_or("A WSL connection names its distribution, user and Linux hgs.")?;
+        for (name, value) in [("distribution", &wsl.distribution), ("user", &wsl.user)] {
+            if !ascii_field(value, 128, b"_.-") {
+                return Err(format!("WSL {name} must contain letters, digits, dots, underscores or hyphens."));
+            }
+        }
+        let path = &wsl.hgs_path;
+        if !path.starts_with('/') || path.starts_with("//") || path.len() > 4096
+            || path.chars().any(char::is_control) || path.split('/').any(|part| part == "..")
+        {
+            return Err("The Linux hgs path must be an absolute Linux path without parent traversal or control characters.".into());
+        }
+        return Ok(());
+    }
+    if connection.transport != "ssh" {
+        return Err("A connection type is SSH or Local WSL.".into());
+    }
+    if connection.wsl.is_some() {
+        return Err("An SSH connection has no WSL settings.".into());
+    }
     if !ascii_field(&connection.hostname, 253, b"._:%-") {
         return Err("Hostname must be a DNS name or IPv4/IPv6 address, without spaces.".into());
     }
@@ -242,6 +294,9 @@ mod tests {
     }
     fn connection() -> Connection {
         Connection {
+            transport: "ssh".into(),
+            wsl: None,
+            test_runner: String::new(),
             hostname: "peer.invalid".into(),
             user: String::new(),
             port: None,
@@ -380,6 +435,49 @@ mod tests {
             assert!(validate(&bad).is_err());
         }
     }
+
+    #[test]
+    fn a_wsl_connection_carries_its_profile_and_test_runner() {
+        let profile = WslProfile {
+            distribution: "Ubuntu".into(),
+            user: "dev".into(),
+            hgs_path: "/home/dev/.local/bin/hgs".into(),
+        };
+        let wsl = Connection {
+            transport: "wsl-local".into(),
+            wsl: Some(profile.clone()),
+            test_runner: "linux".into(),
+            hostname: String::new(),
+            user: String::new(),
+            port: None,
+            identity_file: String::new(),
+            enabled: true,
+        };
+        assert!(validate(&wsl).is_ok());
+        // The machine CLI's own fields, exactly: no SSH values on a WSL profile.
+        let json = serde_json::to_value(&wsl).unwrap();
+        assert_eq!(json["transport"], "wsl-local");
+        assert_eq!(json["wsl"]["distribution"], "Ubuntu");
+        assert_eq!(json["wsl"]["hgs_path"], "/home/dev/.local/bin/hgs");
+        assert_eq!(json["test_runner"], "linux");
+        assert!(json.get("hostname").is_some());
+        assert_eq!(json["port"], Value::Null);
+        assert!(validate(&Connection { hostname: "peer.invalid".into(), ..wsl.clone() }).is_err());
+        assert!(validate(&Connection { wsl: None, ..wsl.clone() }).is_err());
+        for hgs_path in ["", "relative/hgs", "//server/hgs", "/home/../hgs", "/home\t/hgs"] {
+            let bad = WslProfile { hgs_path: hgs_path.into(), ..profile.clone() };
+            assert!(validate(&Connection { wsl: Some(bad), ..wsl.clone() }).is_err(), "{hgs_path:?}");
+        }
+        for runner in ["", "linux", "macos", "windows", "android"] {
+            assert!(validate(&Connection { test_runner: runner.into(), ..wsl.clone() }).is_ok(), "{runner}");
+        }
+        assert!(validate(&Connection { test_runner: "solaris".into(), ..wsl.clone() }).is_err());
+        // An SSH connection never carries WSL settings, and a type is one of the two.
+        let ssh = connection();
+        assert!(validate(&Connection { wsl: Some(profile), ..ssh.clone() }).is_err());
+        assert!(validate(&Connection { transport: "carrier-pigeon".into(), ..ssh }).is_err());
+    }
+
     #[test]
     fn only_an_exact_positive_non_dry_reply_settles_and_unknown_never_replays() {
         let exit = |v: Value| Exit::Code {

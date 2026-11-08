@@ -592,6 +592,7 @@ fn replies(read: &TeamRead) -> Value {
         TeamRead::TestQueue { .. } | TeamRead::TestResults { .. } | TeamRead::TestWindow { .. } => {
             json!({"items":[]})
         }
+        TeamRead::Builds { .. } => json!({"folders":[]}),
     }
 }
 
@@ -1496,4 +1497,144 @@ fn the_time_view_reads_a_scope_in_bounded_pages() {
         }
     )
     .is_err());
+}
+
+/// Task 160: a parked task carries hgs status's words; any other task omits
+/// the field, so its wire shape is unchanged.
+#[test]
+fn task_160_a_parked_task_says_until_when() {
+    let status = json!({"id":"t1","name":"Checkout","status":"running","lead":"lead",
+        "members":[{"id":"lead","role":"Lead"},{"id":"dev","role":"Backend"}],
+        "tasks":[{"id":1,"title":"API","status":"pending","assignee":"dev",
+                  "parked":"parked until hgs version 1.58.0 installed, ETA 14:30 (in 25 min)"},
+                 {"id":2,"title":"Docs","status":"pending","assignee":"dev"}]});
+    let view = super::view::team(&status);
+    assert_eq!(view.tasks[0].parked, "parked until hgs version 1.58.0 installed, ETA 14:30 (in 25 min)");
+    assert_eq!(view.tasks[1].parked, "");
+    let wire = serde_json::to_value(&view.tasks[1]).unwrap();
+    assert!(wire.get("parked").is_none(), "{wire}");
+    assert_eq!(serde_json::to_value(&view.tasks[0]).unwrap()["parked"], view.tasks[0].parked.as_str());
+}
+
+/// Task 209: a member card shows its native context reading, and a member
+/// whose context is being compacted reads `compacting`.
+#[test]
+fn task_209_a_member_card_shows_its_context_and_compacting_state() {
+    let status = json!({"id":"t1","name":"Checkout","status":"running","lead":"lead",
+        "members":[
+            {"id":"lead","role":"Lead"},
+            {"id":"dev","role":"Backend","agent":"claude","state":"active",
+             "context":{"used":960000,"limit":1000000,"percent":96,"at":1000.0}},
+            {"id":"qa","role":"Tester","agent":"dsh","state":"compacting",
+             "context":{"used":970000,"limit":1000000,"percent":97,"at":1000.5},
+             "compacting":{"action":"compact","started_at":1000.0,"task":4,"reason":"threshold"}}
+        ],
+        "tasks":[]});
+    let view = super::view::team(&status);
+    let dev = view.members.iter().find(|member| member.id == "dev").unwrap();
+    let context = dev.context.as_ref().expect("the reading is on the card");
+    assert_eq!((context.used, context.limit, context.percent), (960000, 1000000, 96));
+    assert!(!dev.compacting);
+    let qa = view.members.iter().find(|member| member.id == "qa").unwrap();
+    assert!(qa.compacting);
+    assert_eq!(qa.state, "compacting");
+    assert_eq!(qa.context.as_ref().unwrap().percent, 97);
+    // A member with no meter shows none, and its wire shape is unchanged.
+    let lead = view.members.iter().find(|member| member.id == "lead").unwrap();
+    assert!(lead.context.is_none() && !lead.compacting);
+    assert!(serde_json::to_value(lead).unwrap().get("context").is_none());
+}
+
+/// Task 196: the phase header's details from the phase records (Qt
+/// TeamWorkspace phase header): the lead's note, the send-back and whether it
+/// was reworked, who proposed a draft, "accepted by Auto", the queue's words,
+/// the lead's changes and the pause; a draft task carries what the plan's task
+/// editor shows, a handed-out one does not.
+#[test]
+fn task_196_the_phase_header_reads_the_phase_records() {
+    let status = json!({"id":"t1","name":"Checkout","status":"running","lead":"lead","members":[{"id":"lead"}],
+        "phase_summary":[
+            {"n":1,"state":"running"},
+            {"n":2,"state":"queued","acceptance":"owner","pause":{"by":"human","owner":true,"reason":"after the release"}},
+            {"n":3,"state":"rejected"},
+            {"n":4,"state":"draft","auto":true,"start_ahead":true}],
+        "phases":[
+            {"n":2,"state":"queued","decided_by":"Auto","note":"Ship first","waiting":{"text":"Starts after phase 1"},"changes":[{"at":1},{"at":2}]},
+            {"n":3,"state":"rejected","rejection":{"comment":"Split it","reworked_at":0},"added_by":"Lead","added_at":1700000000.0},
+            {"n":4,"state":"draft"}],
+        "tasks":[
+            {"id":1,"title":"API","status":"running","assignee":"lead","phase":1,"description":"secret","criteria":["a"],"attempts":[{"id":"x"}]},
+            {"id":2,"title":"Docs","status":"draft","assignee":"lead","phase":4,"description":"Write docs","criteria":["Readable"],"attempts":[]}]});
+    let view = view::team(&status);
+    let phase = |n: u64| view.phases.iter().find(|phase| phase.n == n).unwrap().clone();
+    let queued = phase(2);
+    assert_eq!((queued.note.as_str(), queued.waiting.as_str(), queued.changes), ("Ship first", "Starts after phase 1", 2));
+    assert!(queued.accepted_by_auto && queued.owner_accepts && queued.paused && queued.pause_owner);
+    assert_eq!((queued.pause_by.as_str(), queued.pause_reason.as_str()), ("human", "after the release"));
+    let rejected = phase(3);
+    assert_eq!((rejected.rejection.as_str(), rejected.reworked, rejected.added_by.as_str()), ("Split it", false, "Lead"));
+    assert_eq!(rejected.added_at, 1700000000.0);
+    assert!(phase(4).start_ahead && !phase(4).accepted_by_auto);
+    assert!(phase(1).note.is_empty() && !phase(1).accepted_by_auto);
+    let wire = serde_json::to_value(&phase(1)).unwrap();
+    assert!(wire.get("note").is_none() && wire.get("changes").is_none(), "empty details stay off the wire: {wire}");
+    let task = |id: u64| view.tasks.iter().find(|task| task.id == id).unwrap().clone();
+    assert_eq!((task(2).description.as_str(), task(2).criteria.clone()), ("Write docs", vec!["Readable".to_owned()]));
+    assert!(task(1).description.is_empty() && task(1).criteria.is_empty(), "a handed-out task's text is not sent");
+}
+
+/// Task 199: the member card's details: who it reports to and whether it is a
+/// sub-lead, a drain, a usage limit, the account its session runs on, its
+/// services (bounded) and its budget; an older hgs sends none of them.
+#[test]
+fn task_199_a_member_carries_its_card_details() {
+    let services: Vec<Value> = (0..20).map(|n| json!({"name": format!("mcp-{n}"), "since": 1.0, "command": "npx server"})).collect();
+    let status = json!({"id":"t1","name":"Checkout","status":"running","lead":"lead","members":[
+        {"id":"lead","role":"Lead","agent":"claude"},
+        {"id":"arch","role":"Architect","agent":"claude","sub":true,"session_account":"native-claude"},
+        {"id":"api","role":"Backend","agent":"codex","parent":"arch","draining":true,"limit_resume":true,
+         "limited":{"at":10.0,"resets_at":20.0,"detail":"5-hour limit"},"services":services,
+         "budget":{"label":"build","state":"amber","minutes":15,"red_minutes":30,"elapsed_minutes":18}}]});
+    let view = view::team(&status);
+    let member = |id: &str| view.members.iter().find(|member| member.id == id).unwrap().clone();
+    let arch = member("arch");
+    assert!(arch.sub && arch.parent.is_empty());
+    assert_eq!(arch.session_account.as_deref(), Some("native-claude"));
+    let api = member("api");
+    assert_eq!((api.parent.as_str(), api.draining, api.limit_resume), ("arch", true, true));
+    assert_eq!(api.limited.as_ref().map(|limit| (limit.resets_at, limit.detail.as_str())), Some((20.0, "5-hour limit")));
+    assert_eq!(api.services.len(), 12, "services are bounded");
+    assert_eq!(api.budget.as_ref().map(|budget| (budget.state.as_str(), budget.elapsed_minutes)), Some(("amber", 18)));
+    let lead = member("lead");
+    assert!(lead.session_account.is_none() && lead.limited.is_none() && lead.services.is_empty());
+    let wire = serde_json::to_value(&lead).unwrap();
+    assert!(wire.get("sub").is_none() && wire.get("services").is_none() && wire.get("session_account").is_none(), "{wire}");
+}
+
+/// Task 199: the Builds view of `hgs team builds` (broker.rs builds_view):
+/// each shared folder, its build folders and what runs, waits and finished,
+/// bounded; the read sends `{team}` to `team builds`.
+#[test]
+fn task_199_builds_are_read_and_bounded() {
+    use super::read::{invocation, TeamRead};
+    let read = TeamRead::Builds { team: "t1".into() };
+    let call = invocation(&ComputerId::local(), &read).unwrap();
+    assert_eq!(call.args, ["team", "builds", "--json"]);
+    assert_eq!(serde_json::from_slice::<Value>(call.stdin.as_deref().unwrap()).unwrap(), json!({"team": "t1"}));
+    let timeline: Vec<Value> = (0..30).map(|n| json!({"member":"api","template":"cargo-build","at":n as f64,"hit":n % 2 == 0,"by":"ui","ms":1200,"exit":0})).collect();
+    let value = json!({"team":"t1","enabled":true,"folders":[{"folder":"D:/work/shared","members":["api","ui"],"build_folders":[
+        {"name":".","usual_ms":90000.0,"hit_rate":0.5,
+         "running":[{"member":"api","template":"cargo-build","started":100.0,"seconds":30.0,"usual_ms":90000.0,"snapshot":true}],
+         "queue":[{"member":"ui","template":"cargo-build","since":110.0,"seconds":20.0,"coalesced_with":"api","waiting_for":["qa"]}],
+         "timeline":timeline}],"changes":[],"overlaps":[]}],"members":{}});
+    let view = view::builds("t1", &value);
+    assert!(view.enabled);
+    let group = &view.folders[0].build_folders[0];
+    assert_eq!((view.folders[0].members.len(), group.name.as_str(), group.hit_rate), (2, ".", Some(0.5)));
+    assert_eq!((group.running[0].at, group.running[0].snapshot), (100.0, true));
+    assert_eq!((group.queue[0].coalesced_with.as_str(), group.queue[0].waiting_for.clone()), ("api", vec!["qa".to_owned()]));
+    assert_eq!(group.recent.len(), 20, "recent builds are bounded");
+    assert!(group.recent[0].hit && group.recent[0].by == "ui");
+    let empty = view::builds("t1", &json!({"folders":[]}));
+    assert!(!empty.enabled && empty.folders.is_empty());
 }

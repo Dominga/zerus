@@ -78,6 +78,9 @@ public slots:
     void jumpToLatest();
 
 signals:
+    // A rendered document was installed; a test that needs its text waits for
+    // this signal, not for a fixed delay after the work drains.
+    void rendered();
     void taskDocumentEditRequested();
     // Files are routed to the session owner, which knows their machine and cwd.
     void fileReferenceActivated(const QString &href);
@@ -184,3 +187,4 @@ private:
     ActivityWidth::ColumnLayout *m_queueColumn = nullptr;
     QAction *m_fullWidth = nullptr, *m_resetWidth = nullptr;
 };
+

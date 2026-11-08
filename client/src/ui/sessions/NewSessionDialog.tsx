@@ -46,7 +46,7 @@ export type NewSessionChild =
   | { kind: "claude-app"; target: string; computer: string; project: string; path: string };
 export const [newSessionChild, setNewSessionChild] = createSignal<NewSessionChild>();
 
-const AGENTS = new Set(["codex", "claude", "kimi", "dsh", "opencode"]);
+const AGENTS = new Set(["codex", "claude", "kimi", "dsh", "opencode", "ollama"]);
 const sameKeys = (a: string[], b: string[]) => a.length === b.length && a.every((key, i) => key === b[i]);
 
 /** The row whose key is `key`, keeping the last one found while a removed row is disposed. */

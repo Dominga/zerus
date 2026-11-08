@@ -119,3 +119,76 @@ fn a_message_is_stored_with_its_urgency_within_its_bounds() {
         assert!(error.contains("5 unread urgent messages") && error.contains("at most 5"), "{error}");
     });
 }
+
+/// Task 173: the lead's team message naming a task goes only to the member
+/// that holds it, bound to its attempt; anything else is refused with the
+/// hand-out, and a message naming no task goes through unbound.
+#[test]
+fn a_lead_message_naming_a_task_binds_to_its_attempt_or_is_refused() {
+    let (team, dev_attempt, _) = review_team();
+    with_review_team(&team, || {
+        as_lead(|| {
+            let sent = call("message", json!({"to":"dev","text":"On #1: keep the old field name"})).unwrap();
+            assert_eq!(sent["status"], "queued");
+            let error = call("message", json!({"to":"qa","text":"Lead, for 3: write the docs too"})).unwrap_err().to_string();
+            assert!(error.starts_with("Task #3 is not handed to qa"), "{error}");
+            assert!(error.contains("hgs team retry --json"), "{error}");
+            let error = call("message", json!({"to":"team","text":"Everyone help with #1"})).unwrap_err().to_string();
+            assert!(error.contains("Task #1 is not handed to qa"), "a broadcast naming a task is refused: {error}");
+            call("message", json!({"to":"qa","text":"Standup in 5"})).unwrap();
+        });
+        let saved = stored();
+        let attempt = saved.task(1).unwrap().attempts.iter().find(|attempt| attempt.id == dev_attempt).unwrap().clone();
+        assert_eq!(attempt.lead_messages.len(), 1);
+        assert_eq!(attempt.lead_messages[0]["text"], "On #1: keep the old field name");
+        assert_eq!(attempt.lead_messages[0]["via"], "team message");
+        assert!(saved.task(2).unwrap().attempts[0].lead_messages.is_empty());
+        // The owner's own message is never checked.
+        call("message", json!({"by":"human","to":"qa","text":"for 3: I changed my mind"})).unwrap();
+    });
+}
+
+/// Task 161: the lead's message telling a member to wait for an outside
+/// event is refused with the park; an ordinary one goes.
+#[test]
+fn the_lead_never_messages_a_wait() {
+    let (team, _, _) = review_team();
+    with_review_team(&team, || {
+        as_lead(|| {
+            let error = call("message", json!({"to":"dev","text":"Keep your task and wait for the 1.58.0 install, then retest"})).unwrap_err().to_string();
+            assert!(error.starts_with("Waiting is a park, never an instruction") && error.contains("hgs team park --json"), "{error}");
+            call("message", json!({"to":"dev","text":"Rename the module first, then retest"})).unwrap();
+        });
+    });
+}
+
+/// Task 156: the owner's decide is recorded at once and binds the work; a
+/// second one on the same question supersedes it; the lead cannot hand a
+/// decision down as a message.
+#[test]
+fn a_decision_is_recorded_listed_and_never_messaged() {
+    let (team, _, _) = review_team();
+    with_review_team(&team, || {
+        let first = call("decide", json!({"by":"human","question":"Which HTTP client does the API use?","choice":"ureq only",
+            "why":"one blocking client","tasks":[1],"forbids":["reqwest"]})).unwrap();
+        assert_eq!(first["status"], "recorded");
+        assert_eq!(first["decision"]["id"], "d1");
+        let second = call("decide", json!({"by":"human","question":"Which HTTP client does the API use?","choice":"ureq or hyper",
+            "why":"hyper for the relay","tasks":[1]})).unwrap();
+        assert_eq!(second["decision"]["id"], "d2");
+        let saved = stored();
+        assert_eq!(saved.decisions[0].superseded_by, "d2");
+        let list = call("decisions", json!({})).unwrap();
+        assert_eq!(list["decisions"][0]["decision"]["id"], "d2");
+        assert_eq!(list["decisions"][0]["binds"], json!([1]));
+        assert_eq!(list["decisions"][1]["binds"], json!([]), "a superseded decision binds nothing");
+        assert!(call("decide", json!({"by":"human","question":"","choice":"x"})).is_err());
+        as_lead(|| {
+            let error = call("message", json!({"to":"dev","text":"The owner decided: no reqwest anywhere"})).unwrap_err().to_string();
+            assert!(error.contains("hgs team decide --json"), "{error}");
+            // Without the owner's word the lead records nothing.
+            let error = call("decide", json!({"question":"Q","choice":"C"})).unwrap_err().to_string();
+            assert!(error.contains("owner_word"), "{error}");
+        });
+    });
+}

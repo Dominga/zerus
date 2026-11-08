@@ -213,6 +213,14 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
             _ => {}
         }
     }
+    // Task 162: the lead's changes of the plan inside the approved goal, in
+    // one digest that blocks nothing; each can be reverted.
+    if let Some((title, at, changes)) = super::lead_plan::digest(team) {
+        let mut found = item(team, "lead_changes", "digest", title, at, "open_team");
+        found["changes"] = changes;
+        found["seen"] = json!(format!("{{\"team\":\"{}\",\"by\":\"human\"}} | hgs team seen-lead-changes --json", team.id));
+        out.push(found);
+    }
     // F8: the lead's open proposals wait for the owner's Accept or Reject.
     for proposal in team.proposals.iter().filter(|proposal| proposal["state"] == "open") {
         let key = proposal["id"].as_str().unwrap_or_default();
@@ -220,13 +228,27 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
         let reason = proposal["reason"].as_str().unwrap_or_default();
         // #740: a question names itself.
         let asked = proposal["change"]["question"].as_str().filter(|_| proposal["kind"] == "question");
-        let title = match asked {
-            Some(question) => format!("The lead asks: {}", question.split_whitespace().collect::<Vec<_>>().join(" ")),
-            None if reason.is_empty() => format!("The lead proposes: {kind}"),
-            None => format!("The lead proposes: {kind} \u{2014} {reason}"),
+        // Task #220: an install card names the tool, why and the command Allow runs.
+        let install = proposal["change"]["tool"].as_str().filter(|_| proposal["kind"] == "install-tool");
+        let title = match (asked, install) {
+            (Some(question), _) => format!("The lead asks: {}", question.split_whitespace().collect::<Vec<_>>().join(" ")),
+            (None, Some(tool)) => format!(
+                "The lead asks to install {tool}: {}",
+                proposal["change"]["why"].as_str().filter(|why| !why.is_empty()).unwrap_or(reason)
+            ),
+            _ if reason.is_empty() => format!("The lead proposes: {kind}"),
+            _ => format!("The lead proposes: {kind} \u{2014} {reason}"),
         };
         let mut found = item(team, "owner_word_asked", &format!("proposal-{key}"), title, proposal["at"].as_f64().unwrap_or_default(), "decide_proposal");
         found["proposal"] = json!(key);
+        if install.is_some() {
+            // Task #220: the card's own fields, for the desktop's renderer.
+            found["offer"] = proposal["change"]["offer"].clone();
+            found["tool"] = proposal["change"]["tool"].clone();
+            found["folder"] = proposal["change"]["folder"].clone();
+            let words: Vec<String> = proposal["change"]["command"].as_array().into_iter().flatten().filter_map(|word| word.as_str().map(str::to_owned)).collect();
+            found["install_command"] = json!(words.join(" "));
+        }
         out.push(found);
     }
     // U29: an addition to a running phase waits for the owner's confirmation

@@ -288,12 +288,17 @@ fn barrier_holds(team: &Team, task: &Task) -> bool {
 /// are Draft, never Pending, so nothing runs before its phase is approved.
 pub(crate) fn ready(team: &Team) -> Vec<u32> {
     let cycles = cycle_tasks(&team.tasks);
+    let owner_wait = super::owner_steps::waiting_on_cards(team);
     let mut out: Vec<u32> = team
         .tasks
         .iter()
         .filter(|task| task.status == TaskStatus::Pending && !cycles.contains(&task.id))
         // A held task is Pending but never ready: the lead returns it later (A5).
         .filter(|task| task.hold.is_none())
+        // Task 160: nor a parked one: Zerus gives it back to its member.
+        .filter(|task| task.park.is_none())
+        // Task 159: nor one an open card of the owner holds back.
+        .filter(|task| !owner_wait.contains_key(&task.id))
         // Spec 0: a task Zerus could not prepare (U45 model, U46 context, U48
         // branch), or whose context action still runs, waits for a retry or a
         // reassignment, never for the next tick.
@@ -869,9 +874,14 @@ pub(crate) fn waiting_for_owner(team: &Team) -> bool {
 /// draft's, not in a paused phase, not behind a phase awaiting the owner's
 /// acceptance and not held by a barrier. Only such work makes a member
 /// starve; a phase that cannot start is the owner's or the plan's wait.
+/// Task 169 (wave 2 merge): nor a parked task (task 160: Zerus watches its
+/// outside event) or one an open owner card holds back (task 159): the lead
+/// cannot act on either.
 pub(crate) fn startable(team: &Team, task: &Task) -> bool {
     !task.status.finished()
         && task.status != TaskStatus::Draft
+        && task.park.is_none()
+        && !super::owner_steps::waiting_on_cards(team).contains_key(&task.id)
         && phase_pause(team, task.phase).is_none()
         && acceptance_block(team, task.phase).is_none()
         && barrier_blockers(team, task).is_empty()

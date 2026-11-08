@@ -52,7 +52,9 @@ fn a_retried_attempt_drops_its_interim_report_and_item() {
     )
     .unwrap();
     assert!(crate::state::teams::inbox::items(&team).iter().any(|item| item.kind == "interim_report"));
-    apply(&mut team, "retry", &json!({"task":1,"by":"human"}), &Actor::Human, &none, &mut events).unwrap();
+    // Task #227: a retry while the member works continues it; only a "fresh"
+    // retry starts the task over and drops the interim with the attempt.
+    apply(&mut team, "retry", &json!({"task":1,"by":"human","fresh":true}), &Actor::Human, &none, &mut events).unwrap();
     assert!(team.task(1).unwrap().attempts.iter().all(|attempt| attempt.interim.is_none()));
     assert!(!crate::state::teams::inbox::items(&team).iter().any(|item| item.kind == "interim_report"));
 }

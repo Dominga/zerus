@@ -271,6 +271,41 @@
 .pm-case-bad .pm-case-name { color: var(--z-color-danger); font-weight: 600; }
 .pm-case-message { flex-basis: 100%; margin: 0 0 2px 12px; color: var(--z-color-muted); white-space: pre-wrap; }
 
+/* Task 196: the phase header by state (Qt TeamWorkspace phase header): its
+   notes, the collapsed one-line summary, the lead's note on its own line, the
+   actions and their menu; and editing the plan (link handle, edge hit area). */
+.pt-phase:has(.pt-phase-lead-note) { flex-wrap: wrap; align-content: center; row-gap: 4px; }
+.pt-phase-lead-note { flex-basis: 100%; overflow: hidden; text-overflow: ellipsis; color: var(--z-color-text-3); font-size: var(--fs-2xs); padding-left: 28px; }
+.pt-phase-note { flex: none; font-size: var(--fs-2xs); overflow: hidden; text-overflow: ellipsis; max-width: 240px; }
+.pt-phase-note-dim { color: var(--z-color-muted); }
+.pt-phase-note-warn { color: var(--z-color-warn); }
+.pt-phase-note-accent { color: var(--z-color-accent); }
+.pt-phase-summary { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; color: var(--z-color-muted); font-size: var(--fs-2xs); }
+.pt-phase-rejected { border-color: color-mix(in srgb, var(--z-color-danger) 45%, var(--z-color-card-border)); }
+.pt-phase-awaiting { border-color: color-mix(in srgb, var(--z-color-warn) 55%, var(--z-color-card-border)); }
+.pt-phase-cancelled { opacity: .6; }
+.pt-chip-rejected { color: var(--z-color-danger); border-color: color-mix(in srgb, var(--z-color-danger) 40%, transparent); }
+.pt-chip-awaiting { color: var(--z-color-warn); border-color: color-mix(in srgb, var(--z-color-warn) 45%, transparent); }
+.pt-chip-queued { color: var(--z-color-accent); border-color: color-mix(in srgb, var(--z-color-accent) 30%, transparent); border-style: dashed; }
+.team-phase-actions { display: inline-flex; align-items: center; gap: 6px; flex: none; }
+.team-phase-actions .btn.small { height: 22px; padding: 0 8px; }
+.team-phase-notice { font-size: var(--fs-2xs); max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+.team-phase-check { display: inline-grid; place-items: center; width: 12px; }
+.team-phase-more-btn { width: 24px; height: 22px; }
+.pt-link-handle {
+  position: absolute; right: 0; top: 0; bottom: 0; width: 10px; cursor: crosshair; z-index: 1;
+  background: linear-gradient(to right, transparent, color-mix(in srgb, var(--z-color-accent) 25%, transparent));
+  opacity: 0; transition: opacity var(--z-motion-fast);
+}
+.pt-card:hover .pt-link-handle, .pt-link-handle:focus-visible { opacity: 1; }
+.pt-edge-hit { fill: none; stroke: transparent; stroke-width: 10; pointer-events: stroke; cursor: pointer; }
+.pt-edge-hit:hover { stroke: color-mix(in srgb, var(--z-color-danger) 35%, transparent); }
+.team-plan-tools { display: flex; align-items: center; gap: 10px; padding: 6px 12px; font-size: var(--fs-2xs); border-bottom: 1px solid var(--z-color-divider); }
+.team-plan-tools .dim { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.team-edit-phase .dlg-body, .team-add-task .dlg-body, .team-plan-task .dlg-body { display: flex; flex-direction: column; gap: 6px; min-width: min(520px, 86vw); }
+.team-edit-phase-task { display: flex; align-items: center; gap: 8px; }
+.team-edit-phase-task .field { flex: 1; }
+
 /* Task 197: Qt parity. One graph per phase (P1): the header, then one body
    that scrolls sideways on its own (P3), one SVG for all the phase's links
    under its cards; Board (P7) and Layers (P8) inside each phase. */

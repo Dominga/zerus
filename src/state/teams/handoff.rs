@@ -35,6 +35,9 @@ pub(crate) enum Why<'a> {
     /// A swap: the new session of a seat that was handed to another agent,
     /// model or account.
     Swap(&'a HandoffNeed),
+    /// Task 209: the owner or the lead relaunched the seat in a fresh
+    /// conversation (not only after a failed start).
+    Relaunch(&'a HandoffNeed),
     /// A compaction or a clear: the same seat, its context gone.
     Compaction,
 }
@@ -235,6 +238,13 @@ pub(crate) fn build(team: &Team, member: &str, why: Why<'_>, pulses: &[String], 
             }
             head += ".\n";
         }
+        Why::Relaunch(need) => {
+            head += "Why you are reading this: this seat was relaunched in a fresh conversation";
+            if !need.from.is_empty() {
+                head += &format!(", its old session {}", one(&need.from, 120));
+            }
+            head += ".\n";
+        }
         Why::Compaction => head += "Why you are reading this: your context was compacted or cleared.\n",
     }
     head += "It is built from the team's own record, not from the old session. Use it before you act, and do not ask the owner what it answers.\n";
@@ -245,7 +255,7 @@ pub(crate) fn build(team: &Team, member: &str, why: Why<'_>, pulses: &[String], 
         format!("Last pulses:\n{}\n", pulses.iter().take(PULSES).map(|line| format!("- {}", one(line, 160))).collect::<Vec<_>>().join("\n"))
     };
     let start = match why {
-        Why::Swap(_) => "Next: your task follows this brief; do it as it says and report as it says.\n".to_owned(),
+        Why::Swap(_) | Why::Relaunch(_) => "Next: your task follows this brief; do it as it says and report as it says.\n".to_owned(),
         Why::Compaction => format!(
             "Next: {{\"team\":\"{}\"}} | hgs team current --json shows your task and attempt; {}.\n",
             team.id,
@@ -280,6 +290,10 @@ pub(crate) fn build(team: &Team, member: &str, why: Why<'_>, pulses: &[String], 
     let misses = task
         .map(|task| task.control.iter().filter(|control| !answers(&text, &control.keys)).map(|control| control.q.clone()).collect())
         .unwrap_or_default();
+    // Task 184: the brief is working-tier text (docs/lore.md 11.9), kept in the
+    // team record and sent as a message: a token or a password URL a member
+    // pasted into a title, a description or a pulse is stored redacted.
+    let text = super::secrets::redact_working(&text);
     Built { text, task: task.map(|task| task.id).unwrap_or(0), misses }
 }
 

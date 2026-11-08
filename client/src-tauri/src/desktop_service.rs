@@ -136,6 +136,20 @@ fn startup_recovery() -> bool {
     STARTUP_RECOVERY.load(Ordering::Acquire) == 1
 }
 
+/// Task 180: the code of the check that refused the native takeover (a fixed
+/// code, never child text), shown with its next step instead of an empty
+/// list or a bare "not ready".
+static STARTUP_RECOVERY_REASON: std::sync::Mutex<&'static str> = std::sync::Mutex::new("");
+
+pub(crate) fn record_startup_recovery_reason(code: &'static str) {
+    *STARTUP_RECOVERY_REASON.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = code;
+}
+
+fn startup_recovery_reason() -> Option<Value> {
+    let code = *STARTUP_RECOVERY_REASON.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    (startup_recovery() && !code.is_empty()).then(|| json!({"code": code, "check": crate::takeover_refusal::check(code)}))
+}
+
 fn ownership_display(
     view: crate::desktop_ownership::View,
     activation: mode_transition::View,
@@ -143,6 +157,9 @@ fn ownership_display(
 ) -> Option<Value> {
     let mut value = serde_json::to_value(view).ok()?;
     value["native_recovery"] = json!(startup_recovery());
+    if let Some(reason) = startup_recovery_reason() {
+        value["native_recovery_reason"] = reason;
+    }
     value["activation"] = serde_json::to_value(activation).ok()?;
     value["activation"]["business_ready"] = business_ready.into();
     Some(value)

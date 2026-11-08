@@ -8,6 +8,8 @@ export const CARD_H = 60;
 export const GAP_X = 26;
 export const GAP_Y = 22;
 export const HEADER_H = 44;
+/** Task 196: the lead's note under an open phase's header (Qt teamPhaseNote). */
+export const NOTE_H = 26;
 export const ROW_H = CARD_H + GAP_Y;
 
 export interface PlacedNode {
@@ -157,7 +159,9 @@ export function phasePlans(team: TeamView, graph: PlanGraph): PlanPhase[] {
       const placed = ordered.flatMap((layer) => layer.nodes);
       const columns = Math.max(0, ...ordered.map((layer) => layer.nodes.length));
       return {
-        phase: { ...phaseRecord(team, n), done: phaseRecord(team, n).done || tasks.filter((task) => task.status === "accepted" || task.status === "done").length, total: tasks.length },
+        // Task 196 (P10): a cancelled task is not work the phase still owes, as
+        // Qt counts it: a Done phase with one cancelled task reads 7/7, not 7/8.
+        phase: { ...phaseRecord(team, n), done: phaseRecord(team, n).done || tasks.filter((task) => task.status === "accepted" || task.status === "done").length, total: tasks.filter((task) => task.status !== "cancelled").length },
         tasks,
         nodes: placed,
         layers: ordered,
@@ -174,8 +178,9 @@ export function buildRows(phases: PlanPhase[], collapsed: ReadonlySet<number>): 
   let top = 0;
   for (const phase of phases) {
     const isCollapsed = collapsed.has(phase.phase.n);
-    rows.push({ key: `phase:${phase.phase.n}`, kind: "header", phase, layer: 0, top, height: HEADER_H, nodes: [], end: isCollapsed || phase.nodes.length === 0 });
-    top += HEADER_H;
+    const height = HEADER_H + (!isCollapsed && phase.phase.note?.trim() ? NOTE_H : 0);
+    rows.push({ key: `phase:${phase.phase.n}`, kind: "header", phase, layer: 0, top, height, nodes: [], end: isCollapsed || phase.nodes.length === 0 });
+    top += height;
     if (isCollapsed || phase.nodes.length === 0) continue;
     phase.layers.forEach((layer, index) => {
       rows.push({ key: `phase:${phase.phase.n}:layer:${layer.layer}`, kind: "layer", phase, layer: layer.layer, top, height: ROW_H, nodes: layer.nodes, end: index === phase.layers.length - 1 });
@@ -187,7 +192,13 @@ export function buildRows(phases: PlanPhase[], collapsed: ReadonlySet<number>): 
 
 /** The phase chip's kind and text, as the plan header shows it. */
 export function phaseStatus(phase: PhaseView): { kind: string; label: string } {
+  // Task 196: Qt's phase states (TeamPhaseScroll.h phaseStateBadge).
+  if (phase.state === "cancelled") return { kind: "cancelled", label: "Cancelled" };
+  if (phase.state === "rejected") return { kind: "rejected", label: "Sent back" };
+  if (phase.state === "awaiting_acceptance") return { kind: "awaiting", label: "Awaiting your acceptance" };
+  if (phase.state === "planned") return { kind: "planned", label: "In the plan" };
   if (phase.paused) return { kind: "paused", label: "Paused" };
+  if (phase.state === "queued") return { kind: "queued", label: "Accepted, queued" };
   if (phase.state === "draft" || phase.status === "draft") return { kind: "draft", label: "Draft" };
   if (phase.status === "done") return { kind: "done", label: "Done" };
   if (phase.status === "in_work") return { kind: "running", label: "Running" };

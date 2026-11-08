@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { creditsText, loginLabel, memberStateLabel, memberStateText, memberOf, panelWindow, profileTags, summaryLine, visibleAccounts, visibleMembers } from "./accounts-ui";
+import { creditsText, loginLabel, memberStateLabel, memberStateText, memberOf, panelWindow, profileTags, summaryLine, visibleAccounts, visibleMembers, accountSignState, noAccountsMatch, signState, signedCounts } from "./accounts-ui";
 import { NOW, projected, usageOf } from "../../store/testing";
 import { dayTime } from "../lib/usage";
 import { emptyAccounts, type Account, type Profile } from "../../types";
@@ -43,8 +43,28 @@ describe("accounts page", () => {
     expect(visibleAccounts(view, "mac")).toEqual([other]);
   });
 
-  it("shows at most four machine chips, keeping the selected one", () => {
-    const many = account(Array.from({ length: 7 }, (_, i) => member({ key: `m${i}\u001fx`, host: `m${i}`, machine: `m${i}` })));
+  it("filters accounts by sign-in state with Qt's counts (task 202, AccountsPage.cpp:672-690, 717)", () => {
+    const signedIn = member();
+    const out = member({ key: "studio\u001fclaude-studio", host: "studio", machine: "studio", state: "signed-out", signed_in: false });
+    const expired = member({ key: "mac\u001fclaude-mac", host: "mac", machine: "mac", state: "expired", signed_in: false });
+    const mixed = account([member(), out], "mixed");
+    const view = { ...emptyAccounts(), accounts: [account([signedIn], "in"), account([out], "out"), account([expired], "expired"), mixed] };
+    expect([signState(signedIn), signState(out), signState(expired)]).toEqual(["in", "out", "expired"]);
+    // Any signed-out machine makes the account signed out; expired is kept for its pill.
+    expect(accountSignState(mixed, "*")).toBe("out");
+    expect(accountSignState(account([expired, signedIn], "mostly-in"), "*")).toBe("expired");
+    expect(signedCounts(view, "*")).toEqual({ in: 1, out: 3 });
+    expect(signedCounts(view, "studio")).toEqual({ in: 0, out: 2 });
+    expect(visibleAccounts(view, "*", "in").map((a) => a.key)).toEqual(["in"]);
+    expect(visibleAccounts(view, "*", "out").map((a) => a.key)).toEqual(["out", "expired", "mixed"]);
+    expect(visibleAccounts(view, "studio", "in")).toEqual([]);
+    expect(visibleAccounts(view, "*", "all")).toHaveLength(4);
+    // The empty result says "No accounts match" only when accounts exist at all.
+    expect(noAccountsMatch(view)).toBe(true);
+    expect(noAccountsMatch(emptyAccounts())).toBe(false);
+  });
+
+  it("shows at most four machine chips, keeping the selected one", () => {    const many = account(Array.from({ length: 7 }, (_, i) => member({ key: `m${i}\u001fx`, host: `m${i}`, machine: `m${i}` })));
     expect(visibleMembers(many, "m6\u001fx").map((m) => m.machine)).toEqual(["m0", "m1", "m2", "m6"]);
     expect(visibleMembers(many, "m1\u001fx").map((m) => m.machine)).toEqual(["m0", "m1", "m2", "m3"]);
     expect(visibleMembers(account(many.members.slice(0, 4)), undefined)).toHaveLength(4);
@@ -83,5 +103,15 @@ describe("accounts page", () => {
     expect(creditsText({ balance: "lots", unlimited: false })).toBe("Credits available: —");
     expect(creditsText({ balance: "12.5", unlimited: false })).toMatch(/^Credits available: 12[.,]50$/);
     expect(creditsText(null)).toBeUndefined();
+  });
+
+  it("the Accounts screen shows the sign-in segments, the pill and Clear filters (task 202)", async () => {
+    const fs = await import(/* @vite-ignore */ ["node", "fs"].join(":")) as { readFileSync(path: URL, encoding: "utf8"): string };
+    const screen = fs.readFileSync(new URL("./Accounts.tsx", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+    expect(screen).toContain('aria-label={tr("Sign-in state")}');
+    expect(screen).toContain("visibleAccounts(view(), accountMachine(), signFilter())");
+    expect(screen).toContain("<SignPill state={sign()} />");
+    expect(screen).toContain('noAccountsMatch(view()) ? tr("No accounts match")');
+    expect(screen).toContain('setSignFilter("all"); setAccountMachine("*")');
   });
 });

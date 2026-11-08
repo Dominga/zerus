@@ -45,6 +45,52 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
   const [broker, setBroker] = createSignal(Boolean(settings.build_broker));
   const [leadUnpause, setLeadUnpause] = createSignal(Boolean(settings.lead_removes_own_pause));
   const [acceptance, setAcceptance] = createSignal(settings.phase_acceptance === "owner");
+  // Task 199 (Qt TeamSettingsDialog U45): the models each member may switch to before a task.
+  const modelMembers = current.members.filter((member) => !member.lead && member.state !== "removed");
+  const [models, setModels] = createSignal<Record<string, { model: string; effort: string }[]>>(
+    Object.fromEntries(modelMembers.map((member) => [member.id, [...(member.models ?? [])]])),
+  );
+  const [adding, setAdding] = createSignal<Record<string, { model: string; effort: string }>>({});
+  const addModel = (id: string) => {
+    const entry = adding()[id];
+    const model = entry?.model.trim() ?? "";
+    if (!model || (models()[id] ?? []).some((choice) => choice.model === model && choice.effort === (entry?.effort ?? ""))) return;
+    setModels({ ...models(), [id]: [...(models()[id] ?? []), { model, effort: entry?.effort ?? "" }] });
+    setAdding({ ...adding(), [id]: { model: "", effort: "" } });
+  };
+  const modelsChanged = (member: TeamMemberView) => JSON.stringify(models()[member.id] ?? []) !== JSON.stringify(member.models ?? []);
+  // Task 199 (U51): intake keys act at once, as Qt; a new key's secret shows once.
+  const [intakes, setIntakes] = createSignal(current.intakes ?? []);
+  const [intakeLabel, setIntakeLabel] = createSignal("");
+  const [newKey, setNewKey] = createSignal<{ label: string; key: string } | undefined>();
+  const [intakeError, setIntakeError] = createSignal("");
+  const intake = async (action: { kind: "intake_key"; label?: string; revoke?: string }) => {
+    setIntakeError("");
+    try {
+      let outcome = await teamAction({ team: current.id, team_name: current.name, action });
+      if (outcome.outcome === "confirm") {
+        if (!window.confirm(outcome.confirmation.text)) return undefined;
+        outcome = await teamAction({ team: current.id, team_name: current.name, action, confirmed: true });
+      }
+      if (outcome.outcome !== "done") { setIntakeError(outcome.outcome === "confirm" ? outcome.confirmation.text : outcome.detail); return undefined; }
+      return outcome.receipt as Record<string, unknown>;
+    } catch (cause) {
+      setIntakeError(String(cause));
+      return undefined;
+    }
+  };
+  const createIntake = async () => {
+    const label = intakeLabel().trim();
+    if (!label || intakes().length >= 8) return;
+    const receipt = await intake({ kind: "intake_key", label });
+    if (!receipt) return;
+    setIntakes([...intakes(), { id: String(receipt.id ?? ""), label: String(receipt.label ?? label), created: Date.now() / 1000 }]);
+    setNewKey({ label, key: String(receipt.key ?? "") });
+    setIntakeLabel("");
+  };
+  const revokeIntake = async (id: string, label: string) => {
+    if (await intake({ kind: "intake_key", revoke: id, label })) setIntakes(intakes().filter((found) => found.id !== id));
+  };
   const [asking, setAsking] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
@@ -90,11 +136,13 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
   };
   const members = () =>
     current.members
-      .filter((member) => member.state !== "removed" && memberChanged(member))
-      .map((member) => ({
-        id: member.id,
-        iron_rules: (memberRules()[member.id] ?? "").split("\n").map((line) => line.trim()).filter(Boolean),
-      }));
+      .filter((member) => member.state !== "removed" && (memberChanged(member) || modelsChanged(member)))
+      .map((member) => {
+        const update: Record<string, unknown> = { id: member.id };
+        if (memberChanged(member)) update.iron_rules = (memberRules()[member.id] ?? "").split("\n").map((line) => line.trim()).filter(Boolean);
+        if (modelsChanged(member)) update.models = (models()[member.id] ?? []).map((choice) => (choice.effort ? choice : { model: choice.model }));
+        return update;
+      });
 
   const save = async () => {
     const invalid = parseOverride(tests()).error;
@@ -215,14 +263,66 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
         <Show when={proposal()}><pre class="nt-mono" data-tests-proposal>{testConfig()?.proposal ?? ""}</pre></Show>
 
         <h3>{tr("Phases")}</h3>
-        <label class="nt-check">
-          <input type="checkbox" checked={leadUnpause()} onChange={(event) => setLeadUnpause(event.currentTarget.checked)} />
-          {tr("The lead removes its own pause")}
+        <label class="nt-line">
+          <span>{tr("Who removes the lead's pause")}</span>
+          <select value={leadUnpause() ? "lead" : "owner"} onChange={(event) => setLeadUnpause(event.currentTarget.value === "lead")} data-setting="lead-unpause">
+            <option value="owner">{tr("Only with my consent")}</option>
+            <option value="lead">{tr("The lead removes its own pause")}</option>
+          </select>
         </label>
         <label class="nt-check">
           <input type="checkbox" checked={acceptance()} onChange={(event) => setAcceptance(event.currentTarget.checked)} />
           {tr("New phases require my acceptance")}
         </label>
+        <p class="nt-note">{tr("When every task of such a phase is decided, it waits for you to accept it or send it back to the lead with a comment.")}</p>
+
+        <h3>{tr("Member models")}</h3>
+        <p class="nt-note">{tr("Before a task that names one of these, Zerus switches the member to it. None: only the model it launched with. A change applies from the member's next task.")}</p>
+        <For each={modelMembers} fallback={<p class="nt-note">{tr("No members yet.")}</p>}>{(member) => (
+          <div class="nt-models" data-member={member.id}>
+            <span><b>{member.role || member.id}</b> <span class="nt-note">{member.model ? tr("launches with %1", member.model) : tr("launches with its agent's model")}</span></span>
+            <div class="nt-model-chips">
+              <For each={models()[member.id] ?? []}>{(choice, index) => (
+                <span class="team-chip" data-model={choice.model}>{choice.effort ? `${choice.model} ${choice.effort}` : choice.model}
+                  <button type="button" class="icon-btn small" aria-label={tr("Remove %1", choice.model)}
+                    onClick={() => setModels({ ...models(), [member.id]: (models()[member.id] ?? []).filter((_, at) => at !== index()) })}><Icon name="x" size={10} /></button>
+                </span>
+              )}</For>
+            </div>
+            <div class="nt-line">
+              <input placeholder={tr("+ model")} value={adding()[member.id]?.model ?? ""} data-field="model-add"
+                onInput={(event) => setAdding({ ...adding(), [member.id]: { model: event.currentTarget.value, effort: adding()[member.id]?.effort ?? "" } })} />
+              <select value={adding()[member.id]?.effort ?? ""}
+                onChange={(event) => setAdding({ ...adding(), [member.id]: { model: adding()[member.id]?.model ?? "", effort: event.currentTarget.value } })}>
+                <option value="">{tr("its effort")}</option>
+                <For each={["low", "medium", "high", "xhigh"]}>{(level) => <option value={level}>{level}</option>}</For>
+              </select>
+              <button type="button" class="btn ghost small" disabled={!(adding()[member.id]?.model ?? "").trim()} onClick={() => addModel(member.id)}>{tr("Add")}</button>
+            </div>
+          </div>
+        )}</For>
+
+        <h3>{tr("Intake keys")}</h3>
+        <p class="nt-note">{tr("A process presenting a key, such as a health watcher, may add up to five urgent tasks as one phase, and nothing else.")}</p>
+        <For each={intakes()} fallback={<p class="nt-note">{tr("No intake keys: only you and the lead change the plan.")}</p>}>{(key) => (
+          <div class="nt-line" data-intake={key.id}>
+            <b>{key.label}</b>
+            <span class="nt-note grow">{key.created ? tr("%1, created %2", key.id, new Date(key.created * 1000).toLocaleString()) : key.id}</span>
+            <button type="button" class="btn ghost small danger" onClick={() => void revokeIntake(key.id, key.label)}>{tr("Revoke")}</button>
+          </div>
+        )}</For>
+        <Show when={newKey()}>{(created) => (
+          <div class="nt-key" data-new-key>
+            <p class="nt-note">{tr("The key for %1, shown once: copy it now.", created().label)}</p>
+            <code class="nt-mono">{created().key}</code>
+          </div>
+        )}</Show>
+        <div class="nt-line">
+          <input placeholder={tr("Key name, such as health watcher")} value={intakeLabel()} maxLength={60} onInput={(event) => setIntakeLabel(event.currentTarget.value)} data-field="intake-label" />
+          <button type="button" class="btn ghost small" disabled={!intakeLabel().trim() || intakes().length >= 8}
+            title={intakes().length >= 8 ? tr("A team keeps at most eight keys; revoke one first") : undefined} onClick={() => void createIntake()}>{tr("Create key")}</button>
+        </div>
+        <Show when={intakeError()}><p class="nt-error">{intakeError()}</p></Show>
         <Show when={error()}><p class="nt-error">{error()}</p></Show>
       </div>
       <Show when={asking()}>

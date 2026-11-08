@@ -64,6 +64,29 @@ pub struct SetupRequest {
     label: String,
     #[serde(default)]
     api_key: String,
+    #[serde(default)]
+    ollama_model: String,
+    #[serde(default)]
+    ollama_endpoint: String,
+    #[serde(default)]
+    ollama_context: u64,
+    #[serde(default)]
+    ollama_prepare: String,
+}
+
+#[derive(Deserialize)]
+pub struct BindRequest {
+    host: String,
+    request_id: String,
+    name: String,
+    conversation_id: String,
+    directory: String,
+    #[serde(default)]
+    agent_home: String,
+    #[serde(default)]
+    preview: bool,
+    #[serde(default)]
+    expected_identity: String,
 }
 #[derive(Serialize)]
 pub struct SetupResult {
@@ -162,11 +185,15 @@ impl Screens {
                 .iter()
                 .find(|e| e.computer == host.computer)
                 .ok_or(account_actions::CHANGED)?;
-            let providers: Vec<String> = ["codex", "claude", "kimi", "dsh", "opencode"]
+            let mut providers: Vec<String> = ["codex", "claude", "kimi", "dsh", "opencode"]
                 .into_iter()
                 .filter(|p| accounts::launchable(entry, p))
                 .map(str::to_owned)
                 .collect();
+            // The fork's local Claude-on-Ollama account; hgs adds it with --provider claude.
+            if accounts::launchable(entry, "claude") {
+                providers.push("ollama".into());
+            }
             let saved: Vec<_> = catalog["removed_profiles"]
                 .as_array()
                 .into_iter()
@@ -429,6 +456,19 @@ impl Screens {
                         notices.push(format!("Finish installing DeepSeek on {}, then refresh Accounts and set its API key.",host.machine));
                     }
                 }
+                SetupKind::Add if provider == "ollama" => {
+                    let id = format!("claude-ollama-{}", &uuid::Uuid::new_v4().simple().to_string()[..10]);
+                    catalog = host.binding.create_ollama(
+                        &self.0.hgs,
+                        &id,
+                        &request.label,
+                        &request.ollama_model,
+                        &request.ollama_endpoint,
+                        request.ollama_context,
+                        &request.ollama_prepare,
+                    )?;
+                    profile = Some(format!("{}\u{1f}{id}", host.binding.computer.0));
+                }
                 SetupKind::Add => {
                     let id = format!(
                         "{}-{}",
@@ -509,6 +549,67 @@ impl Screens {
         result.map(|(_, view)| view)
     }
 }
+impl Screens {
+    fn bind_existing(
+        &self,
+        pump: &crate::pump::Pump,
+        request: BindRequest,
+    ) -> Result<Value, String> {
+        let view = self.accounts(false);
+        let host = view
+            .hosts
+            .iter()
+            .find(|h| h.computer.0 == request.host)
+            .ok_or(account_actions::CHANGED)?;
+        if !pump.online(&host.computer.0) {
+            return Err(format!("{} is offline.", host.name));
+        }
+        let hub = self.current();
+        let catalog = hub
+            .accounts
+            .catalogs
+            .get(&host.computer)
+            .and_then(|s| s.data.as_ref())
+            .ok_or(account_actions::CHANGED)?;
+        let machine = pump
+            .machine(&host.computer)
+            .and_then(|m| m.machine_id)
+            .ok_or(account_actions::CHANGED)?;
+        let binding = HostBinding::capture(host.computer.clone(), machine, catalog)?;
+        let mut sent = serde_json::json!({
+            "schema_version": 1,
+            "request_id": request.request_id,
+            "name": request.name,
+            "conversation_id": request.conversation_id,
+            "directory": request.directory,
+            "agent_home": request.agent_home,
+            "preview": request.preview,
+        });
+        if !request.preview {
+            sent["expected_identity"] = serde_json::json!(request.expected_identity);
+        }
+        binding.bind_existing(&self.0.hgs, &sent)
+    }
+
+    fn ollama_models(&self, pump: &crate::pump::Pump, host: &str, endpoint: &str) -> Result<Value, String> {
+        let view = self.accounts(false);
+        let host = view.hosts.iter().find(|h| h.computer.0 == host).ok_or(account_actions::CHANGED)?;
+        if !pump.online(&host.computer.0) {
+            return Err(format!("{} is offline.", host.name));
+        }
+        let hub = self.current();
+        let catalog = hub
+            .accounts
+            .catalogs
+            .get(&host.computer)
+            .and_then(|s| s.data.as_ref())
+            .ok_or(account_actions::CHANGED)?;
+        let machine = pump.machine(&host.computer).and_then(|m| m.machine_id).ok_or(account_actions::CHANGED)?;
+        let binding = HostBinding::capture(host.computer.clone(), machine, catalog)?;
+        binding.ollama_models(&self.0.hgs, endpoint)
+    }
+}
+
 #[cfg(feature = "live")]
 #[tauri::command(async)]
 pub fn account_setup_open(
@@ -541,6 +642,39 @@ pub fn account_setup_close(state: State<'_, Screens>, handle: String) {
         .setups
         .retain(|(h, _)| h != &handle);
 }
+#[cfg(feature = "live")]
+#[tauri::command(async)]
+pub fn account_bind_existing(
+    state: State<'_, Screens>,
+    source: State<'_, crate::commands::AppState>,
+    request: BindRequest,
+) -> Result<Value, String> {
+    state.bind_existing(&source.pump(), request)
+}
+
+#[cfg(feature = "live")]
+#[tauri::command(async)]
+pub fn account_ollama_models(
+    state: State<'_, Screens>,
+    source: State<'_, crate::commands::AppState>,
+    host: String,
+    endpoint: String,
+) -> Result<Value, String> {
+    state.ollama_models(&source.pump(), &host, &endpoint)
+}
+
+#[cfg(not(feature = "live"))]
+#[tauri::command]
+pub fn account_bind_existing() -> Result<Value, String> {
+    Err(REPLAY_NEEDS_HGS.into())
+}
+
+#[cfg(not(feature = "live"))]
+#[tauri::command]
+pub fn account_ollama_models() -> Result<Value, String> {
+    Err(REPLAY_NEEDS_HGS.into())
+}
+
 #[cfg(not(feature = "live"))]
 #[tauri::command]
 pub fn account_setup_open() -> Result<SetupView, String> {
@@ -564,6 +698,10 @@ mod tests {
             saved: String::new(),
             label: "Work".into(),
             api_key: String::new(),
+            ollama_model: String::new(),
+            ollama_endpoint: String::new(),
+            ollama_context: 0,
+            ollama_prepare: String::new(),
         }
     }
     #[test]
@@ -640,3 +778,4 @@ mod tests {
         assert!(screens.0.edits.0.lock().unwrap().busy);
     }
 }
+

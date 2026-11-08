@@ -1371,13 +1371,34 @@ of `docs/test-providers.md`) have their own templates beside the Qt ones:
 | `ctest` | `build_dir`, `config`, `tests` or `regex` | `ctest --test-dir build_dir --output-on-failure --output-junit <report> [-C config] [-R ^(tests)$ or regex]` |
 | `msbuild-build` | `project` (a `.sln` or project file), `config`, `platform`, `targets` | Visual Studio's MSBuild (vswhere), `/m /nologo /v:minimal [/p:Configuration] [/p:Platform] [/t:targets]` |
 | `vstest` | `tests` (assemblies), `filter` | `vstest.console tests /Logger:trx [/TestCaseFilter:filter]` |
+| `web-test` | `project` (default the member's folder), `paths` | the project's own `node_modules/vitest` run by `node` (or `npx --no-install vitest`), `run --reporter=default --reporter=junit --outputFile.junit=<report> paths...`; `npm ci` (or `npm install` without a lock file) first when `node_modules` are missing |
+
+A web project's vitest run (task 239) happens through the worker like the
+other templates: it reads its JUnit report per test file, keeps npm's cache in
+the member's `.zerus-team/npm`, and installs its dependencies only when the
+project has no `node_modules`. `hgs test affected` prints it for an `npm`
+provider, so a sandboxed member never runs `npx` itself.
 
 Every value is typed: a `source` or `build_dir` is a path inside the member's
 folder (it may not exist yet), a target or test name a plain word, a regex,
 generator, platform or filter one line of text. On Windows these templates load
 the Visual Studio environment as the Qt ones do, and the build cache and the
 scanning retry apply to them. `qt-configure` and `qt-build` are `cmake-configure`
-and `cmake-build` with this repository's fixed values; their argv is unchanged.
+and `cmake-build` with this repository's fixed values; `qt-build`'s argv is
+unchanged.
+
+`qt-configure` finds the installed Qt itself, so a fresh worktree needs no hand
+edit: it tries, in order, `QT_ROOT_DIR` and then `Qt6_DIR` from the environment;
+the project's `.zerus/tests.toml` `[tools] qt = "<install or lib/cmake/Qt6>"`
+(a literal string in single quotes keeps Windows backslashes; the per-computer
+`qt` of the templates settings file answers when the project names none); the
+`Qt6_DIR` of the folder's own or the main checkout's
+`.ci-build/gui/CMakeCache.txt`; and the known install roots (`D:/Tools/zerus-deps/Qt`,
+`C:/Qt`, the Qt online installer's and aqtinstall's folders in the person's
+home) for the version `tray/CMakeLists.txt` asks for, newest otherwise, trying
+`msvc2022_64` before the other kits. It passes the result as `-DQt6_DIR=<…>`.
+When nothing is found the run is refused with a line naming every place it
+searched and the version it wanted, so the missing piece is one setting away.
 
 `ctest` and `vstest` read their report (CTest's JUnit XML, VSTest's TRX, under
 `.zerus-team/results` in the member's folder, removed before each run) into one
@@ -1848,14 +1869,52 @@ A refusal is never the owner's word: a sentence carrying a negation ("Don't
 remove backend2", "не надо добавлять второго тестера") authorizes no roster,
 scale, drain or phase change in either language.
 
+### The lead plans inside the approved goal (task 162)
+
+Owner, 2026-11-07: the owner gates the team's goal and plan approval, roster
+changes (add, remove, swap, scale, drain, relaunch), wider rights, paid
+resources and budgets, release and publication, and destructive actions.
+Inside an approved goal (a running or paused team) the lead plans by itself:
+`add-to-phase` (the tasks join at once, `added_late` with the confirmation
+"inside the approved goal"), `extend` with `"phase"` into an accepted phase,
+`edit-draft` and `move-phase` of an accepted phase that has not started,
+`move-task`, and `cancel` (a split is an addition plus the cancel of the
+empty task). None of these is a card any more: a proposal of add-to-phase,
+edit-draft, move-phase, move-task or extend into a phase on a running team is
+refused with the operation to run instead.
+
+Each such change that touches accepted work is recorded in the team's
+`lead_changes` (`lcN`: the operation, a summary such as "added #12 Fix the
+login crash to phase 3; moved #9 from phase 2 to 3", who, when, the tasks and
+phases as they were before, the tasks it added), journaled
+`lead_changed_plan`. A change only of drafts, which the owner approves anyway,
+is not recorded. Waiting for you shows one `lead_changes` item per team (action
+`open_team`), which blocks nothing: the unseen changes, newest first, each
+with its revert request. `{"team","change":"lcN","by":"human"} | hgs team
+revert-lead-change --json` (the owner only) puts the tasks it changed back as
+they were, removes the tasks it added and restores its phases; it is refused
+while a later change touched the same work (revert that first), when a touched
+task has started since, or when another task depends on a task it added.
+`{"team","by":"human"} | hgs team seen-lead-changes --json` marks the digest
+seen (with `"change"`, up to that one). `hgs team lead-changes --json` lists
+them. At most 300 are kept, seen or reverted ones leaving first.
+
+The owner's typed word (`owner_word`) is no longer taken where a card exists:
+approve, approve-phase, discard-phase, return-to-draft, unpause-phase,
+phase-acceptance, accept-phase, add-member, scale, drain, swap-member,
+remove-member, relaunch and settings refuse it with the card to propose; for
+the lead's planning operations it is ignored. The owner's own add-to-phase
+keeps the warning and confirmation below.
+
 ### Tasks added to a running phase
 
-A task joins a running phase only on the owner's word twice. The first
-`hgs team add-to-phase` call (`{"team","phase","tasks"}`, the lead's with
-`owner_word`) changes nothing: it keeps the addition pending and answers with a
-warning and its `pending` id. The confirmation names that id in `confirm`, with
-the owner's newer word (the lead) or the typed `"confirmation":"add"` or the
-phase number (the owner on the desktop); only then the tasks join as Pending.
+The owner's task joins a running phase on a warning and a confirmation. The
+first `hgs team add-to-phase` call (`{"team","phase","tasks"}`) changes
+nothing: it keeps the addition pending and answers with a warning and its
+`pending` id. The confirmation names that id in `confirm`, with the typed
+`"confirmation":"add"` or the phase number (the owner on the desktop); only
+then the tasks join as Pending. The lead's addition inside the approved goal
+joins at once (above).
 An addition waits 30 minutes. An expired one is no longer listed in Waiting for
 you, cannot be confirmed and leaves the team on its next change.
 
@@ -2257,6 +2316,38 @@ While the action runs the task's `waits` is `{"for":"zerus","on":["context"],
 the same request instead of running it again; it is not an inbox item until it
 fails.
 
+Task 209 (owner, 2026-11-07): every member's native context pressure is also
+the rule. Zerus reads it with the session's own `hgs inspect`
+(`session_usage.context`, built from DeepSeek's `contextPressure` for dsh),
+keeps the last reading on the member (`context: {used, limit, percent, at}`,
+shown on the member card), and at `context_compact_percent` (a team setting,
+95 by default, set by the owner) compacts the context before the next hand-out
+and when the member idles mid-task: the native compact, or for an agent
+without one a fresh conversation with the handoff brief, and then the same
+attempt continues (`context_compact_started`, `context_compacted`,
+`context_compact_failed`; status shows the member's `state` as `compacting`
+while the request is confirmed). A report, or a finished turn, that says
+there is no context left while the meter is below the threshold is not a
+report: Zerus answers the member with the actual figure
+(`context_claim_refused`) and the attempt stays open; at or above the
+threshold the claim starts the compaction instead. Without a reading a claim
+cannot be disproved and is not refused. A relaunch gives a fresh conversation
+with the handoff brief, never the same conversation, and the lead may propose
+one for a stuck member, not only for one whose start failed.
+
+Task 254 (owner, 2026-11-08): a cold prompt cache counts too. A session whose
+listing says `session_state` cold (or, from a listing without it, whose cache
+TTL passed since it was last active) and whose context holds at least
+`cold_compact_percent` of its window (a team setting, 30 by default, 0 never,
+set by the owner) is compacted the same way before a hand-out and before a
+crashed attempt goes back to it; a warm session or a small context is
+delivered at once. A failed compaction for a cold cache still delivers the
+task and tells the lead (`context_compact_failed` with reason `cold`); at the
+95% threshold a failure still makes the task wait for the lead, as before. A
+crashed attempt is not given back to a paused team, a paused phase, a paused or
+draining member or a held task, by the tick or by the sweep after an update; it
+waits, unconfirmed, and goes back on the first tick after the pause ends.
+
 ### Stages Zerus runs itself: a command, a land, a branch per task
 
 The owner's catalog may give a preset a `command` stage — a command, its
@@ -2329,8 +2420,10 @@ hand-out with its reason, not the returned stage it followed.
 
 A non-final `hgs team reject` defaults to rework: the task keeps its assignee
 and the next attempt goes to that member as soon as it can take it. The member
-is reserved while the returned task is open, including a hold or an undecided
-report; no other task or stage is handed or rebalanced to it. A member with an
+is reserved while the returned task is open, including an undecided report;
+no other task or stage is handed or rebalanced to it. Task 160 (owner,
+2026-11-07): a held or parked rework reserves nobody, so it never blocks its
+member's later hand-outs; released, it reserves the member again. A member with an
 open approval, a usage limit or a stopped session keeps the rework without a
 time limit. The lead's inbox shows `#N waits for its member, N min`; an explicit
 `hgs team reassign` moves it. With `"fresh":true`, reject uses the previous
@@ -2344,6 +2437,191 @@ A draining member may finish its own reserved rework before leaving. Explicit
 reassignment clears the rework reservation and its wait age. Returning an
 unstarted phase to a draft also clears rework reservations. Member-wait inbox
 items exclude held rework and members available to take it.
+
+Task 173 (owner, 2026-11-07): no shadow work. Every piece of a member's work
+belongs to the attempt (or stage run) handed to it.
+- A lead's message to a member that names a task (`#N`, `task N`, `for N:`
+  for one of the team's tasks) is bound to that task's attempt when the task is
+  handed to that member (the attempt's `lead_messages`, at most 20, with a
+  `lead_message` event); otherwise it is refused, naming the task's state and
+  the hand-out to use (`hgs team retry`, `hgs team reassign`). This holds for
+  `hgs send` from the lead's own session to a member's session and for the
+  lead's `hgs team message` (a broadcast naming a task is refused). A message
+  naming no task goes through; it carries no work. Answers and decisions keep
+  their own commands (`hgs team reply`, `accept`, `reject`, `hold`); the
+  owner's messages and Zerus's own sends are never checked.
+- A team member's `hgs run` needs its open attempt or stage run; it may name
+  it in `"attempt"`, and one naming another attempt is refused. Without one:
+  "No task is handed to you in team NAME: ask the lead". The run's claim
+  records `team`, `task` and `attempt`. A sandboxed member's run is checked by
+  the worker the same way, and `hgs team run`'s refusal says the same. The
+  lead's own runs are not checked.
+- A member session building with nothing handed to it, or working past two
+  minutes in a turn that began after its last attempt ended, is flagged at
+  once: the member's `unassigned` ({since, what}), an `unassigned_work` event
+  and lead inbox item with what it runs, `hgs team look` state
+  `unassigned_work` (never idle) and its next action. The flag clears
+  (`unassigned_work_ended`) when the member is free again or gets a hand-out.
+
+Task 160 (owner, 2026-11-07): a task blocked on an outside event parks instead
+of keeping its member in a waiting loop. `hgs team park --json` (`{team, task,
+attempt, condition, eta_minutes, note}`) by the task's member, its reviewer or
+you parks an open attempt with no report or open question. The condition is
+one of:
+- `{"kind":"ci","repo":"OWNER/REPO","run":N}`: a GitHub Actions run finishing;
+- `{"kind":"build","version":"1.58.0","build":N,"commit":"SHA","program":"PATH"}`:
+  that build installed (at least the version, at least the Dev number, that
+  commit; `program` is an installed desktop answering `--build-info`, else the
+  hgs the team worker runs);
+- `{"kind":"task","task":N}`: another task accepted;
+- `{"kind":"card","proposal":"pN"}`: the owner's answer on a card;
+- `{"kind":"time","at":UNIX_SECONDS}`.
+
+The estimate is 1 to 10080 minutes. The task becomes Pending with a `park`
+(`attempt`, `member`, `by`, `at`, `condition`, `eta`, `note`, `state`
+waiting/met/failed, `detail`) and its attempt `parked`, which is not open: the
+member is free at once and takes its next ready task, and a
+parked task is never ready, never rebalanced and reserves nobody.
+
+Zerus checks the condition on a thread of the team worker, never the tick:
+task and card states and the clock on every 30-second pass, the installed
+build at most once a minute (a 15-second bounded `--version` or
+`--build-info`), a CI run through `api.github.com` at most every two minutes
+(`GITHUB_TOKEN` or `GH_TOKEN` for a private fork). Only an outcome writes the
+team (`park_met` or `park_failed`). A met park goes back to the same member at
+its next free turn, before any new task, in the same attempt (`resumed`), with
+a message naming the condition, what held and the member's note. A failed one
+(the run failed, the card was denied or withdrawn, the task was cancelled or
+rejected) is a `park_failed` lead inbox item with the reason, and one well past
+its estimate a `park_overdue` item. `hgs team unpark --json` (`{team, task,
+reason}`) gives it back early; a report on the parked attempt gives it back and
+reports; a cancel, reassign or take-over ends the park and its attempt.
+
+Status shows `parked` on the task ("parked until <condition>, ETA HH:MM (in N
+min)") and on its member; an idle member's session waits for it ("Waiting for
+#N: parked until ...", reason kind `team_parked`), never Building.
+
+Task 159 (owner, 2026-11-07): owner-only steps are planned for when the owner
+is there, in one click.
+- A lead's card may name the tasks that need it: `"for_tasks":[N]` (open
+  tasks, at most 50; part of the card's hash). While the card is open those
+  tasks are never ready, so no member is handed a task it would wait on; an
+  idle member's session says "Waiting for the owner's card pN for #M" (reason
+  kind `team_owner_card`). Allowed or answered, they are ready; denied, they are
+  held for the lead with "you denied card pN: REASON".
+- `hgs team waiting` marks the owner's cards (`owner_word_asked`) by presence:
+  while the desktop reports the owner away (locked, or idle 10 minutes) each
+  is `"notify":false, "held_for_presence":true`; otherwise `"notify":true` and
+  every card listed together shares one `"batch"` (with `"batch_size"`). Each
+  card names what waits on it (`waiting_tasks`, and "(#N wait for it)" in its
+  title). Without a desktop's presence nothing is held. The desktop posts a
+  batch as one notice and withdraws it with its last card.
+- One owner rule for scratch teams, granted once by card
+  (`{"kind":"scratch-rule","folder":"ABS","agents":["claude","codex"],"reason":"..."}`
+  | `hgs team propose --json`, or the owner's own `hgs team scratch-rule
+  --json`): a team that a running team's lead creates from its own session
+  with its folder inside that folder starts with approval `auto` (no per-plan
+  approval; `scratch_rule` names the rule, `scratch_rule_applied` in its feed).
+  Before each local member launches, its folder is trusted for the rule's
+  Claude and Codex agents in the account config that launch reads
+  (`.claude.json`, Codex's `config.toml` `[projects."FOLDER"]`); Kimi,
+  DeepSeek and OpenCode still ask at start-up. The rules live in the teams
+  settings file (Settings > Teams): `hgs team scratch-rules --json` lists
+  them, and `{"action":"revoke","id":"sXXXXXXXX","by":"human"}` revokes one;
+  teams created under it keep what they were given.
+- Task #228 (owner, 2026-11-07, on task 170): a QA member runs live checks on
+  its own scratch teams. Each team has a scratch root, `scratch_root` or
+  `<team folder>/.qa-scratch` (only the owner changes it in Settings > Teams);
+  the owner grants **one standing scratch rule per team** at that root, for the
+  agents of the team's roster: `{"standing":true,"by":"human"} | hgs team
+  scratch-rule --json` (or the lead's existing `scratch-rule` card naming the
+  team, whose folder is the root). A re-grant for the same team replaces its
+  rule, so a team never has two. A member with the QA right (task 154's
+  `operate` profile, which launches sessions) creates a scratch team from its
+  own session: `hgs team create --json` with a folder inside the root. It
+  becomes that scratch team's lead, its plan needs no card (`approval` and
+  `phase_approval` are `auto`), the root is trusted at member launch for
+  Claude and Codex as before, and the parent's `max_members`, `tree_depth` and
+  `tree_sessions` cap the new team; its members use the agents of the parent's
+  roster and their folders stay inside the root. A create outside the root,
+  without the QA right, or before the standing rule is granted is refused;
+  `scratch_parent` names the parent team, the creating task and the member.
+  The parent lead sees each scratch team as `scratch_team_created` and
+  `scratch_teams_stopped` in its feed and a `scratch_team` inbox item
+  (created, stopped, or listed). When the creating task is accepted, rejected
+  or cancelled, Zerus stops its scratch teams and terminates their sessions
+  except the creating member's own (that session is the parent team's work);
+  a session that cannot be stopped is listed for the owner in the inbox and
+  is never reported stopped.
+
+Task 161 (owner, 2026-11-07): neither the lead nor a member turns a task into a
+waiting loop; waiting on an outside event is always a park.
+- The lead's `hgs team reply` (and a parent lead's), `hgs team message` to
+  members and `hgs send` from the lead's session to a member are refused when
+  the text tells the member to wait for an outside event (a wait word with an
+  install, a build or version, CI, a card or approval, a time); the refusal
+  is the park request for the member's open task. A reply with
+  `"park":{condition, eta_minutes, note}` answers the question and parks the
+  task at once; the lead's inbox item for a question that says the member is
+  blocked or waiting carries that reply, with a guessed condition.
+- `hgs run` refuses a job whose purpose is waiting: its label says it waits
+  ("wait", "poll", "watch for", "until"), or its command (and the .cmd, .bat,
+  .ps1, .sh or .py script it names, first 64 KB) loops (`while`, `until`,
+  `for /l`, `goto`, `loop`) around a pause (`sleep`, `Start-Sleep`,
+  `timeout /t`, `ping -n`). The refusal names the caller's park request.
+- A turn that ends without a report and whose last reply says it waits or is
+  blocked on an outside event gets one message offering the park with a
+  guessed condition (`park_offered`); it is never kept as a wait.
+- Every five minutes, from ten minutes after its hand-out, a member's open,
+  delivered attempt with no report or open question is looked at
+  (`wait_checked_at`): a running job of its session whose purpose is waiting,
+  or the same read-only check (a version, a status, a CI run, a listing) its
+  turn ran three or more times at least a minute apart, parks the task on a
+  guessed condition (a CI run named, else an installed version named, else a
+  time 30 minutes on) with a 60-minute estimate, by "Zerus (a wait loop)"
+  (`wait_parked`). The member is told to stop the wait and end its turn; the
+  lead is told once with the guessed condition to correct. Zerus does not stop
+  the job itself; it ends at its own bound.
+- The lead gets every park's outcome without watching: a met park is told
+  when the task goes back to its member; a failed or overdue one is a lead
+  inbox item.
+
+Task 156 (owner, 2026-11-07): the owner's decisions are records that reach
+the right work by relevance.
+- Every owner answer to a card (allowed, denied, or a question answered) and
+  every `hgs team decide --json` (`{team, question, choice, why, spec?, files?,
+  tasks?, forbids?, supersedes?}` by the owner, or by the lead with
+  `owner_word` quoting the owner's own words in the lead's chat) is recorded at
+  once in the team's `decisions` (id `dN`, question, choice, why, by, at,
+  card, spec, files, tasks, forbids), journaled `decision_recorded`. A card
+  carries the same refs (`spec`, `files`, `binds`, `forbids`). A later
+  decision on the same question (the same content words, or the one it names
+  in `supersedes`) supersedes it: the old one stays with `superseded_by`. The
+  records live in Zerus state for every memory mode; a team with a lore
+  workspace also gets them as lore decision records (`t<team8>-dN`, superseded
+  ones marked).
+- A current decision binds a task that it names, whose outputs a file or spec
+  path of it touches, that lore's `find` returns it for (a background pass of
+  the team writer, ten tasks at a time, cached per task), or whose title,
+  description and criteria share its subject (two or more content words, a
+  third of the smaller set). Every hand-out carries "Decisions that bind this
+  task" with their ids; a task in flight that a newer decision binds gets one
+  message (`decision_told`). `hgs team decisions --json` lists them with the
+  open tasks each binds.
+- A report is checked against the decisions that bind its task (and those
+  binding everything): a term a decision forbids, as a whole word, in the
+  report or in the lines its commits add against the lead branch is flagged
+  (`decision_flags`, a `decision_conflict` event and lead inbox item); accept
+  is refused until the report is fixed or accepted with
+  `"against_decisions":true`.
+- A decision with a `spec` makes that spec a view: its Decisions section
+  between `<!-- zerus:decisions:begin -->` and `<!-- zerus:decisions:end -->`
+  is generated from the records (superseded ones struck through) and
+  committed in the lead branch's checkout when it is clean
+  (`decision_specs_written`); `{"action":"spec","spec":"PATH"}` shows it.
+- The lead's message to a member that hands down an owner decision ("the
+  owner decided ...") is refused by `hgs send` and `hgs team message`, naming
+  `hgs team decide`.
 
 A reassign, a take-over or a cancel of a task whose attempt its member is still
 working on (sent or delivered, not reported) tells that member at once: one
@@ -2699,6 +2977,23 @@ member no longer suspect ends it (`member_check_settled`). An idle lead with
 decisions waiting (task 95's stall, reason `idle`) is told itself once a round
 (`lead_idle_told`).
 
+What counts as work, not silence (task 181): a member inside one open tool call
+is held to the tool bound (six times the stuck bound, at least an hour) counted
+from the call's start, for DeepSeek too (its open call is the newest
+PreToolUse with no result, message or Stop after it in the session's events,
+read off the tick), and one waiting on its own Zerus build (`hgs run`, `hgs team
+run`) is Building; neither is `uncertain` or called silent. A Claude screen whose
+prompt is empty but lists running subagents (`◯ general-purpose ... tokens`) or
+`N shells still running` is working. A finished turn the hooks still call
+working (an idle prompt, no agent row, no shell, no request, silent for 2 min,
+two reads a minute apart agreeing) is settled in the record instead of being
+called uncertain: `hgs subagent settle NAME --json` marks it idle and its
+parent's turn done, ends the native subagents whose stop never came (a subagent
+cannot outlive its parent's turn) and leaves a background job with live
+evidence, a waiting request or a recent event alone; the member is then idle
+for hand-outs (feed `member_settled`). A DeepSeek session's state is its host's
+and is never settled this way.
+
 `hgs team look MEMBER [--team ID]`, or `{"member":"dev","team":ID} | hgs team look
 --json`, reads the member's screen now and answers one compact snapshot: the
 reconciled `state` (`uncertain`, `settling` within the grace), `disagree`,
@@ -2844,8 +3139,9 @@ phase.
 
 ### Test isolation
 
-A test template that Zerus runs for a member (`cargo-test`, `qt-test` and
-`android-test` unless the project names others) runs in a run folder of the
+A test template that Zerus runs for a member (`cargo-test`, `qt-test`,
+`android-test` and `web-test` unless the project names others) runs in a run
+folder of the
 member's own folder, `.zerus-team/runs/<template>-<time>`, with its own
 `HOME`, `TEMP`/`TMP`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`,
 `XDG_CACHE_HOME` and, on Windows, `APPDATA` and `LOCALAPPDATA` (on Unix also
@@ -8553,7 +8849,7 @@ and in the Qt GUI). The store is a lore root (`lore.toml`, records in
 `HGS_STATE_DIR/lore/projects/<project id>`; Browse chooses another while the
 store holds no records. As docs/lore.md section 2.5 has it (the owner's answer
 2), a store outside any git working tree, the default among them, is its own
-private git repository, made as crates/lore `private.rs` makes it: `git init`
+private git repository, made as CodeLore's `private.rs` makes it: `git init`
 on branch `main`, the local identity `Zerus <lore@zerus.invalid>`, the marker
 `zerus-lore-store` in its git folder, `commit.mode = "plain"`, no remote, and a
 first commit "lore: a new store"; RustCodeLore commits every write. Only an

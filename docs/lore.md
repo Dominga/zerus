@@ -4,7 +4,7 @@ Status: specification (task 122, owner request of 2026-11-07; amended by the
 owner's answers to its seven questions, task 141, 2026-11-07). Nothing here is
 implemented yet. RustCodeLore is the Rust implementation of CodeLore
 (`D:/Tools/CodeLore`, Python 0.3.0, github.com/WhiteWh/CodeLore): it starts as a
-port in `crates/lore` here and becomes the implementation itself (section 2.1).
+port in `crates/lore` here and is now the implementation itself, in CodeLore's own repository (section 2.1).
 The Python version stays the conformance reference until the Rust one matches
 it, then it is retired (section 8). Section 11 (task 131, owner, 2026-11-07)
 adds the working tier: a fast, expiring memory beside the durable lore, for
@@ -21,7 +21,7 @@ pulses, messages and briefs.
 | 3 | The areas are a hierarchy: General (descriptions and shared quick facts across the project's folders), then one area per project folder, then one per team created under the project (under the project, not under a folder). | Section 4.4: the project store's area tree with `general` at its root, `folder.<slug>` areas and `team.<slug>` areas under the project; section 3.1 creates them. |
 | 4 | A finished team's workspace is kept and searchable; it is exported into the project store only by a project rule or the owner's request. | Section 4.5: kept read-only and searchable; the project's `export_finished` rule or the owner's Export; never automatically otherwise. |
 | 5 | Faults are written automatically when every field is known. | Section 6.1: a fault is written as soon as symptom, cause, fix and check are known; only a record with a missing required field becomes a lead inbox item. |
-| 6 | RustCodeLore fully replaces the Python CodeLore: CodeLore is rewritten in Rust; the code lives in `crates/lore` here and moves into github.com/WhiteWh/CodeLore as the new implementation; Python is the conformance reference until parity, then retired. | Sections 2.1 and 8: the crate is the working implementation now, becomes CodeLore 1.0 in its own repository, and the Python 0.3.0 tree is retired after the conformance points hold. |
+| 6 | RustCodeLore fully replaces the Python CodeLore: CodeLore is rewritten in Rust; the code lives in github.com/WhiteWh/CodeLore (it started as `crates/lore` here; Zerus depends on it, task 256); Python is the conformance reference until parity, then retired. | Sections 2.1 and 8: the crate is the working implementation now, becomes CodeLore 1.0 in its own repository, and the Python 0.3.0 tree is retired after the conformance points hold. |
 | 7 | The home-computer model is a flag: by default writes wait for the home computer; the owner can ask for synchronisation between computers instead. | Sections 3.4-3.6: `sync = false` (the default, home computer) and `sync = true` (Loro replicas in `crates/replica`), with the conflict rules of section 3.5 and the owner-confirmed switch of section 3.6. |
 
 ### 0.2 The earlier points (2026-11-07, task 122)
@@ -125,7 +125,7 @@ The facts the port must keep. References are to `D:/Tools/CodeLore`, HEAD
 
 ### 2.1 Shape
 
-- **Crate:** a new `crates/lore` library with the same modules as the Python package. hgs does not link it (see "hgs runs the binary" below):
+- **Crate:** the `codelore` library (github.com/WhiteWh/CodeLore, `crates/lore` here until task 256) with the same modules as the Python package. hgs does not link it (see "hgs runs the binary" below):
 
   | Module | Role |
   |---|---|
@@ -142,16 +142,38 @@ The facts the port must keep. References are to `D:/Tools/CodeLore`, HEAD
   | `cover` | sources |
   | `guide` | the agent guide text, embedded |
 
-- **The crate is the implementation (answer 6).** `crates/lore` starts as this
-  repository's working tree and is carried by Zerus as a path dependency. When
-  the conformance points of section 8 hold it moves, whole, into
-  github.com/WhiteWh/CodeLore as the new implementation, versioned 1.0, with
-  its own CI, releases and guide; Zerus then depends on it by git revision or
-  crates.io instead of the path, and the two trees are not kept in sync by
-  hand. The Python 0.3.0 tree stays there as the conformance reference and the
-  fallback until that move, and is retired after it (section 8). The name
-  RustCodeLore is the crate's name during the port and disappears at 1.0,
-  where the tool is CodeLore again.
+- **The crate is the implementation (answer 6; the move is done, task 256).**
+  The Rust lore lives in github.com/WhiteWh/CodeLore (package `codelore`), with
+  its own CI, releases and guide, and Zerus has no copy of it: `crates/lore` is
+  gone. Zerus builds the `lore` binary it ships from a pinned git revision of
+  that repository, in the small package `crates/lore-bin` (bin `lore`, one line
+  of `main`, `codelore::app::main()`), whose own `Cargo.toml` names the
+  dependency (`zerus-lore = { package = "codelore", git = ..., rev = ... }`, so
+  `use zerus_lore::...` stays) and whose `Cargo.lock` pins it, so a build is
+  offline after the first fetch and CI caches key on that lock. hgs's own
+  `Cargo.toml` never names it: Cargo unifies features across one build, and
+  linking the crate would switch serde_json's `preserve_order` on for hgs (see
+  "hgs runs the binary"). Packaging (`scripts/package-*.py`, `install.sh`,
+  `tray/install.sh`, `mac-install.sh`, the AUR recipes, the CI workflows) builds
+  `crates/lore-bin/Cargo.toml` and reads the shipped version from its lock
+  (`scripts/lore_dependency.py`).
+- **Changing lore.** Commit the change in the CodeLore repository, with its tests
+  there (`cargo test --locked`, `cargo clippy --all-targets -- -D warnings`: the
+  lore suite runs in CodeLore, not here). When it is pushed, move Zerus to it:
+  set `rev` in `crates/lore-bin/Cargo.toml` to the commit, run
+  `cargo update -p codelore --manifest-path crates/lore-bin/Cargo.toml` (it
+  changes only the `codelore` entry of that lock, plus any dependency the new
+  commit needs), and run `cargo test --locked --manifest-path crates/lore-bin/Cargo.toml`.
+  Nothing else in Zerus changes for a lore change. The secret-scan vectors are
+  the one test file both repositories hold: Zerus's `tests/fixtures/secret-scan-vectors.json`
+  and CodeLore's `tests/fixtures/secret-scan-vectors.json` must stay equal, and
+  each repository pins the same SHA-256 of the file (its LF form) in a test
+  (`crates/lore-bin/tests/lore.rs` here, `tests/secret_vectors.rs` there); a change
+  to the vectors is made in both with the constant. The file stores every sample in a
+  real token format split by a `<split>` marker after its prefix, and each reader joins
+  it, so that no literal in a real token format is in either repository (GitHub secret
+  scanning flags them); a test that needs such a text writes it split in the source
+  (`concat!("ghp_", "...")`) and never as one literal.
 - **hgs runs the binary (task 128, lead's decision of 2026-11-07).** hgs
   calls the `lore` binary as a subprocess instead of linking the crate, for
   two reasons:
@@ -166,8 +188,9 @@ The facts the port must keep. References are to `D:/Tools/CodeLore`, HEAD
   hgs finds the binary as `HGS_LORE`, else `lore` beside the hgs executable,
   else on `PATH`. Without it a team keeps plain memory and its journal says
   so once (`lore_unavailable`). hgs passes a store's reference roots
-  (section 2.4) in `LORE_ROOTS`, the platform's path list. Shipping `lore`
-  beside hgs in the Windows zip and the installers is a separate task.
+  (section 2.4) in `LORE_ROOTS`, the platform's path list. Release packages ship
+  `lore` beside hgs in the Windows zip, the macOS app and the Linux installers;
+  model weights are fetched at runtime and are never packaged.
 - **Binaries:**
   - `lore`, a standalone CLI with the Python CLI's commands, flags, exit codes and `--json` shapes, byte-identical for the same store. Section 8 holds it to that. It is the same binary in the CodeLore repository after the move, so the owner's scripts and agents see one tool, not two.
   - `hgs lore …`, the same commands addressed by project instead of folder: `--project ID` (or the session's project), and `--team ID` for a team workspace. It also takes `@alias` (section 3.4).
@@ -462,7 +485,7 @@ The Python version is the reference until every point below holds. Then RustCode
    - The same metrics: first, top 3, top 10, MRR, bytes read (median and p90), calls and wall time per call.
    - Runs with and without embeddings.
    - The bar: every quality metric at least the Python value (ties allowed), and wall time per call at most Python's 0.75 s (0.6 s text only).
-   - The numbers go in `crates/lore/RESULTS.md` with the date, machine and commit.
+   - The numbers go in CodeLore's `docs/RESULTS-rust.md` with the date, machine and commit.
 5. **The agent test** RESULTS.md names as not yet run:
    - Two sessions solve the same 10 recorded faults, one with `hgs lore` and one with grep only.
    - The comparison counts tool calls, bytes read and correct fixes.
@@ -485,7 +508,7 @@ The Python version is the reference until every point below holds. Then RustCode
 
 ### Phase 4: memory in Zerus
 
-1. The `crates/lore` port with points 1-3 of section 8, in this repository.
+1. The `crates/lore` port with points 1-3 of section 8, in this repository (since task 256 in github.com/WhiteWh/CodeLore).
 2. Retrieval parity (point 4).
 3. Project settings, store creation with the area hierarchy (section 4.4), privacy and `hgs lore --project` locally, then over `@home`.
 4. The move.
@@ -543,7 +566,7 @@ The hard rules, which every later section keeps:
 1. **Verbatim text never enters the store's git or the Loro replica.** Not a transcript, not a terminal screen, not a pasted log. The working tier is never in JSONL and never in git, and it is not replicated (section 11.5). (A brief is authored text, not verbatim history, and is the one working-tier text that is committed, after the scan: section 11.12.) The only verbatim text that reaches a durable record is a quoted excerpt of at most 400 characters that a person or the lead's promote puts into a field, after the secret scan (sections 11.8 and 11.9).
 2. **Every durable write and every promote passes the secret scan** (section 11.9) before the commit, and is refused with the match named. This includes Teams' automatic writes (section 6.1) and the durable brief (section 11.12).
 3. **A doorbell never types into a working agent** (section 11.11). Nothing in this addendum pastes text into a composer of a session that is working.
-4. **The interface is the CLI** (section 11.13): `lore` and `hgs lore`, `--json`. There is no MCP server. `crates/lore` never depends on Zerus (section 11.14).
+4. **The interface is the CLI** (section 11.13): `lore` and `hgs lore`, `--json`. There is no MCP server. CodeLore never depends on Zerus (section 11.14).
 
 ### 11.2 The three kinds
 
@@ -619,7 +642,7 @@ Times are UTC. An entry's `expires` is recomputed by the rule below whenever the
 ### 11.7 Verbatim history: federated, never copied
 
 Storing verbatim text is cheap; reading it is what costs. So lore does not copy transcripts into its store and has no index of them. It asks Zerus's existing local content-search index over the sessions' histories (private, bounded: `hgs search --indexed`, `content-search-query-v1`, a page of at most 100 verified hits and 2 MiB, every returned session proved by a fresh binding) through a provider.
-- **The provider trait.** `crates/lore` defines `HistorySource` (a `Source` plug-in, section 11.14): `search(query, scope, limit) -> Vec<HistoryHit>`, where a `HistoryHit` is `{session, run_id, conversation_id, message_id, role, at, excerpt, score}`. Zerus implements it over the content-search index and registers it; standalone `lore` has none and says "no history source" once in `notes`.
+- **The provider trait.** The `codelore` crate defines `HistorySource` (a `Source` plug-in, section 11.14): `search(query, scope, limit) -> Vec<HistoryHit>`, where a `HistoryHit` is `{session, run_id, conversation_id, message_id, role, at, excerpt, score}`. Zerus implements it over the content-search index and registers it; standalone `lore` has none and says "no history source" once in `notes`.
 - **What `find` does with it:** it asks for at most 10 hits, takes the 3 best by the provider's score, ranks them below the working tier (their fused score multiplied by 0.25), and returns them as `"tier": "history"` with `{session, message_id, role, at, excerpt}`. A provider that is slow (over 500 ms) or unavailable adds one note and the search goes on without it; it never blocks a hand-out (section 6.2).
 - **Retention.** Lore keeps nothing. A history hit lives as long as the session's history and the index entry do: Zerus's own retention for histories decides, and a forgotten or changed session retires before any hit is exposed (the index's own rule). A hit that a person promotes (section 11.8) is the only way text of it persists in lore.
 - **Size bounds.** The excerpt is at most 400 characters, centred on the match; the history channel of one `find` is at most 8 KiB; no lore file holds a hit.
@@ -644,7 +667,7 @@ Storing verbatim text is cheap; reading it is what costs. So lore does not copy 
 ### 11.9 The secret scan
 
 Hard rule 2. Before the commit of **every durable write, every promote and every automatic Teams write**, every string field of the record (and every field of the draft a promote builds) is scanned. The write is refused and nothing is written if a field matches:
-- **Key and token patterns** (case-sensitive unless noted): a PEM private-key block (`-----BEGIN [A-Z ]*PRIVATE KEY-----`); AWS access key ids (`AKIA`/`ASIA` + 16 upper-case letters or digits); GitHub tokens (`gh[pousr]_` + 36 or more); Slack tokens (`xox[abprs]-`); Hugging Face (`hf_` + 30 or more); OpenAI-style and Anthropic keys (`sk-` or `sk-ant-` + 20 or more); Google API keys (`AIza` + 35); a JSON Web Token (three base64url parts, the first two starting `eyJ`); credentials in a URL (`://user:password@`); and an assignment to a name that says it is secret (`password`, `passwd`, `secret`, `token`, `api_key`, `apikey`, case-insensitive, followed by `=` or `:` and 8 or more non-space characters that are not a placeholder such as `<…>`, `***`, `xxxx` or `${…}`).
+- **Key and token patterns** (case-sensitive unless noted): a PEM private-key block (`-----BEGIN [A-Z ]*PRIVATE KEY-----`); AWS access key ids (`AKIA`/`ASIA` + 16 upper-case letters or digits); GitHub tokens (`gh[pousr]_` + 36 or more); Slack tokens (`xox[abprs]-`); Hugging Face (`hf_` + 30 or more); OpenAI-style and Anthropic keys (`sk-` or `sk-ant-` + 20 or more); Google API keys (`AIza` + 35); a JSON Web Token (three base64url parts, the first two starting `eyJ`); credentials in a URL (`://user:password@`); and an assignment to a name that ends in a word that says it is secret (`password`, `passwd`, `secret`, `token`, `api_key`, `apikey`, case-insensitive, so `DB_PASSWORD`, `access_token`, `client_secret` and a quoted JSON `"password"` count), followed by `=` or `:` and 8 or more non-space characters that are not a placeholder such as `<…>`, `***`, a run of `xxxx`, or `${…}`.
 - **High-entropy strings:** a token of 24 or more characters from `A-Za-z0-9+/_=-` whose Shannon entropy is at least 4.0 bits per character. Exempt: a hex string of 7 to 64 characters (a commit or hash, in any field), a UUID, and anything containing a `/` or `.` that reads as a path or name (`src/render/post.py`, `scene.depth_buffer`).
 - **The refusal names the match, never repeats it:** "refused: `fix` holds what looks like an AWS access key id (`AKIA…WXYZ`, 20 characters); nothing was written", showing at most the first 4 and last 4 characters and the field. `--json` gives `{"error", "details": [{"field","pattern","length","masked"}]}`.
 - **A known false positive** is cleared by an exact string in `lore.toml`'s `[secrets] allow = [...]` (the owner's edit; each entry is a literal, never a pattern). An allowed string is still redacted in history excerpts.
@@ -706,7 +729,7 @@ The interface is the CLI, `lore` and `hgs lore`, with `--json`. No MCP server is
 
 ### 11.14 The lore and Zerus boundary
 
-- **`crates/lore` never depends on Zerus** (section 2.1). The working tier is in the crate: the tables, the kinds, the expiry and bounds, the cleanup, the commands, the secret scan, the promote and the duplicate rules; they run standalone with no team and no history source.
+- **CodeLore never depends on Zerus** (section 2.1). The working tier is in the crate: the tables, the kinds, the expiry and bounds, the cleanup, the commands, the secret scan, the promote and the duplicate rules; they run standalone with no team and no history source.
 - **What Zerus supplies** through traits the crate defines: `HistorySource` (section 11.7: the content-search index), `Doorbell` (`ring(recipient, text, urgency) -> Delivered{safe_point}`: the delivery of section 11.11, which only Zerus can do, because only it knows a session's state and hooks), and `TaskClock` (`closed_at(task) -> Option<time>`, `open(task) -> bool`: how expiry learns a task's life). Standalone `lore` has no doorbell (messages stay unread until read, and urgent ones are only marked), no history (a note) and a task clock that reads the task from `lore plans` items (`#N` is the plan item id).
 - **Zerus implements and registers them** in `hgs lore` and the dispatcher; the registration is the only place the two meet, so the crate's own tests run with recorded fakes.
 
@@ -743,3 +766,4 @@ The owner's points and the two reviews fix the shape; these numbers and choices 
 - Semantic (embedding) search of working entries and of history.
 - A working tier shared across projects, or a working tier on a computer that holds no store.
 - Any delivery to a working composer, by any mechanism (hard rule 3).
+

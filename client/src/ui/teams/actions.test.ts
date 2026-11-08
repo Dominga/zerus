@@ -398,3 +398,112 @@ describe("member questions (task 55)", () => {
     expect(f.sent).toHaveLength(before);
   });
 });
+
+describe("Task 196: the phase header's actions", () => {
+  const phased = () => team({
+    tasks: [task({ id: 1, status: "in_progress", attempts: 1 }), task({ id: 2, phase: 2 }), task({ id: 3, phase: 3 }), task({ id: 4, phase: 3 })],
+    phases: [
+      { n: 1, title: "Build", state: "running", status: "in_work" },
+      { n: 2, title: "Polish", state: "queued", status: "queued" },
+      { n: 3, title: "Docs", state: "draft", status: "draft" },
+    ],
+  });
+
+  it("Discard names the phase's tasks and whether it was accepted; Move sends the neighbour", async () => {
+    const f = fake();
+    const model = actionsOf(f, phased());
+    await model.discardPhase(2);
+    await model.movePhase(3, false);
+    await model.movePhase(3, true);
+    expect(f.sent.map((call) => call.action)).toEqual([
+      { kind: "discard_phase", phase: 2, tasks: 1, accepted: true },
+      { kind: "move_phase", phase: 3, to: 2, position: "before" },
+    ]);
+  });
+
+  it("Reject and Send back need a comment; Reject names the revision", async () => {
+    const f = fake();
+    const model = actionsOf(f, phased());
+    await model.rejectPhase(3, "  ");
+    await model.sendBackPhase(2, "");
+    await model.rejectPhase(3, " Split it ");
+    expect(f.sent.map((call) => call.action)).toEqual([{ kind: "reject_phase", phase: 3, comment: "Split it", revision: 7 }]);
+  });
+
+  it("Edit phase sends only what changed; a dependency drag rewrites the task's deps", async () => {
+    const f = fake();
+    const model = actionsOf(f, phased());
+    await model.editPhase(3, undefined, []);
+    await model.linkDraft({ ...task({ id: 4, phase: 3 }), deps: [{ task: 2, hard: false }] }, 3, true);
+    expect(f.sent.map((call) => call.action)).toEqual([
+      { kind: "edit_draft", phase: 3, revision: 7, tasks_update: [{ id: 4, deps: [{ task: 2, kind: "soft" }, { task: 3, kind: "hard" }] }] },
+    ]);
+  });
+
+  it("Add task asks after hgs's warning and confirms or declines the pending addition", async () => {
+    for (const yes of [true, false]) {
+      const f = fake();
+      f.yes = yes;
+      const send = f.port.send;
+      f.port.send = async (call) => {
+        const outcome = await send(call);
+        const action = call.action as { kind: string; tasks?: unknown[] };
+        if (outcome.outcome === "done" && action.kind === "add_to_phase" && action.tasks)
+          return { ...outcome, receipt: { status: "warning", pending: "add-9", warning: "Phase 1 is running." } };
+        return outcome;
+      };
+      await actionsOf(f, phased()).addTasks(1, [{ title: "Docs", assignee: "api" }]);
+      expect(f.asked.map((asked) => asked.text)).toEqual(["Phase 1 is running."]);
+      expect(f.sent.map((call) => call.action)).toEqual([
+        { kind: "add_to_phase", phase: 1, tasks: [{ title: "Docs", assignee: "api" }] },
+        yes ? { kind: "add_to_phase", phase: 1, confirm: "add-9", confirmation: "add" } : { kind: "add_to_phase", phase: 1, confirm: "add-9", decline: true },
+      ]);
+    }
+  });
+
+  it("a plan edit names the revision the owner saw", async () => {
+    const f = fake();
+    await actionsOf(f, team({ status: "planning" })).planEdit({ edit: "link", dependency: 1, task: 2, add: true });
+    expect(f.sent.map((call) => call.action)).toEqual([{ kind: "plan_edit", revision: 7, change: { edit: "link", dependency: 1, task: 2, add: true } }]);
+  });
+});
+
+describe("Task 199: the member menu and card", () => {
+  it("sends each member action once with its member", async () => {
+    const f = fake();
+    const model = actionsOf(f, team());
+    await model.pauseMember("api");
+    await model.drain("api", "Backend", true);
+    await model.reportsTo("api", "lead");
+    await model.subLead("qa", true);
+    await model.scale({ role: "Backend", agent: "codex", count: 2 });
+    await model.swap("api", { model: "opus" });
+    await model.moveAccount("claude", "native-claude", "work");
+    await model.ironRules("api", ["Run the tests"]);
+    await model.forceTest("client-core");
+    expect(f.sent.map((call) => call.action)).toEqual([
+      { kind: "pause_member", member: "api" },
+      { kind: "drain", member: "api", role: "Backend", cancel: true },
+      { kind: "reports_to", member: "api", parent: "lead" },
+      { kind: "sub_lead", member: "qa", sub: true },
+      { kind: "scale", role: "Backend", agent: "codex", count: 2 },
+      { kind: "swap_member", member: "api", model: "opus" },
+      { kind: "move_account", provider: "claude", from_account: "native-claude", to_account: "work" },
+      { kind: "settings", settings: {}, members_update: [{ id: "api", iron_rules: ["Run the tests"] }] },
+      { kind: "force_test", suite: "client-core" },
+    ]);
+  });
+
+  it("answers a member's permission with the card's own ids, a deny with its reason, and nothing without ids", async () => {
+    const f = fake();
+    const model = actionsOf(f, team());
+    const question = { question_id: "claude-approval:ab", question_hash: "ab", answer: { question_id: "approval", allow: "1", deny: "3" } };
+    await model.answerMember("api", question, true);
+    await model.answerMember("api", question, false, " Not in prod ");
+    await model.answerMember("api", { question_id: "x" }, true);
+    expect(f.sent.map((call) => call.action)).toEqual([
+      { kind: "answer", member: "api", question_id: "claude-approval:ab", expected_question_hash: "ab", answers: [{ question_id: "approval", selected_option_ids: ["1"], text: "" }] },
+      { kind: "answer", member: "api", question_id: "claude-approval:ab", expected_question_hash: "ab", answers: [{ question_id: "approval", selected_option_ids: ["3"], text: "Not in prod" }] },
+    ]);
+  });
+});

@@ -7,7 +7,7 @@ vi.hoisted(() => {
     setItem: (key: string, value: string) => { values.set(key, value); }, removeItem: (key: string) => { values.delete(key); } });
 });
 vi.mock("../bridge", () => ({
-  onCreations: vi.fn(async () => () => {}), creationsView: vi.fn(async () => []),
+  onCreations: vi.fn(async () => () => {}), onTeamDecided: vi.fn(() => () => {}), creationsView: vi.fn(async () => []),
   archivePage: vi.fn(), resetArchivePages: vi.fn(async () => {}), cancelArchivePages: vi.fn(async () => {}),
   runAction: vi.fn(), inspectSession: vi.fn(), pendingReadMarks: vi.fn(async () => []),
   attentionMarks: vi.fn(async () => ({ marks: {}, replies: {} })), updateAttentionMarks: vi.fn(async () => {}),

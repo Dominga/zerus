@@ -13,6 +13,8 @@ compile_commands.json
 __pycache__/
 /target/
 /artifacts/
+# The release candidate's per-commit evidence (scripts/release-candidate.py).
+/.zerus-release/
 /.ci-build/
 /dist/
 
@@ -28,6 +30,7 @@ __pycache__/
 
 # Zerus team runtime files in a member's folder (outbox, run results)
 .zerus-team/
+.lore-bench/
 # Task 192: the release candidate's evidence (scripts/release-candidate.py) and
 # test_guiprofile's report when run outside ctest are generated; untracked,
 # they made the Tauri build of the next candidate sourceDirty.

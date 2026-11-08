@@ -1568,6 +1568,20 @@ pub fn machine_check(
     Ok(state.check(alias))
 }
 
+/// "Test session host" (MachinesPage.cpp:215-219, 413-423): one bounded
+/// `hgs session-host status --json` on this computer; it changes nothing.
+#[tauri::command]
+pub async fn machine_test_host() -> Result<zerus_client_core::machine_probe::HostTest, String> {
+    if crate::actions::blocked() {
+        return Err(REPLAY_NEEDS_HGS.into());
+    }
+    tauri::async_runtime::spawn_blocking(|| {
+        zerus_client_core::machine_probe::host_status(&zerus_client_core::default_hgs())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[tauri::command(async)]
 pub fn projects_view(state: State<'_, Screens>) -> Result<Revisioned<ProjectsView>, String> {
     Ok(state.projects())

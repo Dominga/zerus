@@ -55,6 +55,8 @@ export const newSessionFromRail = () => open((loaded) => ({ computer: loaded.sel
 export const newSessionFromPanel = () => open((loaded) => ({ computer: loaded.selectedHostTarget() }));
 /** A project header's "New session…" (showGroupMenu 2572-2573); `project` is its id or name. */
 export const newSessionForProject = (project: string) => open((loaded) => ({ project, computer: loaded.selectedHostTarget() }));
+/** A cold card's "+ New" (SessionsWindow.cpp:1749): the same agent, project, machine and folder, named `<name>-2`. */
+export const newSessionFromCold = (agent: string, project: string, computer: string, path: string, name: string) => open(() => ({ agent, project, computer, path, name }));
 /** The Worktrees tab's selected checkout, without creating it by inspection. */
 export const newSessionFromWorktree = (project: string, computer: string, path: string) => open(() => ({ project, computer, path }));
 

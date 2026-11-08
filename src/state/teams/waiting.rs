@@ -199,6 +199,13 @@ fn member_reason(team: &Team, member: &Member) -> Option<Value> {
     if working {
         return None;
     }
+    // Task 160: a member whose task is parked waits for that condition, never
+    // for a build of its own: Zerus watches it.
+    if let Some((task, park)) = team.tasks.iter().find_map(|task| task.park.as_ref().filter(|park| park.member == member.id).map(|park| (task, park))) {
+        let text = super::park::summary(park, crate::state::now());
+        let text = format!("Waiting for #{}: {text}", task.id);
+        return reason(team, "team_parked", text, json!({"task":task.id,"eta":park.eta,"state":park.state}));
+    }
     let parent = if member.parent.is_empty() { team.lead.as_str() } else { member.parent.as_str() };
     // U36: a report in a stage of its pipeline waits for that stage.
     if let Some(task) = team.tasks.iter().filter(mine).filter(|task| task.status.in_stage()).max_by_key(|task| task.id) {
@@ -216,6 +223,11 @@ fn member_reason(team: &Team, member: &Member) -> Option<Value> {
         .filter(mine)
         .filter(|task| matches!(task.status, TaskStatus::Pending | TaskStatus::Draft))
         .min_by_key(|task| (!ready.contains(&task.id), task.status == TaskStatus::Draft, task.id))?;
+    // Task 159: a task an open card of the owner holds back waits for it.
+    if let Some(cards) = super::owner_steps::waiting_on_cards(team).get(&next.id) {
+        return reason(team, "team_owner_card", format!("Waiting for the owner's card {} for #{}", cards.join(", "), next.id),
+            json!({"task":next.id,"cards":cards}));
+    }
     let phase_of = |n: u32| team.phases.iter().find(|phase| phase.n == n);
     if next.status == TaskStatus::Draft || phase_of(next.phase).is_some_and(|phase| phase.state.is_draft()) {
         return reason(team, "team_draft_phase",

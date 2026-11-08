@@ -3,7 +3,7 @@ import { createVirtualizer } from "@tanstack/solid-virtual";
 import { Icon } from "../lib/icons";
 import { tr } from "../../i18n";
 import type { PlanGraph, TeamView } from "./types";
-import type { TeamProfileView, TeamTaskView, TeamTestsView, TeamTimelineView } from "../../types";
+import type { TeamBuildsView, TeamProfileView, TeamTaskView, TeamTestsView, TeamTimelineView } from "../../types";
 import { HeatLegend, HeatLine, PlanModeBar, ProfilePanel, TestsPanel, runStatusLabel, stageLabel } from "./plan-panels";
 import { ProfileTime } from "./TimeView";
 import { spawnedFrom, heatModeSeed, stageChips, type PlanMode } from "./planModes";
@@ -19,6 +19,7 @@ import { AgentBadge } from "../sessions/SessionCard";
 import { agentKind } from "../../store/catalog";
 import { roleStyle } from "./roles";
 import { stageName } from "./actions";
+import { phaseHeader } from "./phaseHeader";
 import "../styles/plan.css";
 
 export interface PlanViewProps {
@@ -43,6 +44,25 @@ export interface PlanViewProps {
   phaseActions?: (n: number) => JSX.Element;
   /** Task 197 (P2): the tasks with a problem and its reason (Qt problemTasks/problemTexts). */
   problems?: ReadonlyMap<number, TaskProblem>;
+  /**
+   * Task 196: editing the plan (Qt planning mode and a draft's edits): which
+   * tasks take a dependency, a drag from a card's right edge onto another
+   * links them, an edge's click removes it (asked first), and a click on a
+   * card edits it while the team plans.
+   */
+  editing?: {
+    canLink: (task: number) => boolean;
+    link: (dependency: number, task: number) => void;
+    unlink: (dependency: number, task: number) => void;
+    editTask?: (id: number) => void;
+  };
+  /** Task 199: a task the side column opens (a queue row, Needs your answer); each new object opens it again. */
+  openTask?: { task: number } | null;
+  /** Task 199: the Tests mode's Builds tab and Force run (TestsPanel). */
+  builds?: TeamBuildsView | null;
+  buildsError?: string;
+  onLoadBuilds?: () => void;
+  onForceTest?: (suite: string) => Promise<string>;
   /** Task 197: whether the task's member works on it now (its session is busy). */
   working?: (task: TeamTaskView) => boolean;
   /** Task 197 (P8): only one member's tasks; empty for every member. */
@@ -79,6 +99,12 @@ function short(value: string, limit = 150): string {
 }
 
 function statusLabel(kind: string): string {
+  // Task 196: Qt's phase state badges.
+  if (kind === "rejected") return tr("Sent back");
+  if (kind === "awaiting") return tr("Awaiting your acceptance");
+  if (kind === "queued") return tr("Accepted, queued");
+  if (kind === "planned") return tr("In the plan");
+  if (kind === "cancelled") return tr("Cancelled");
   if (kind === "done") return tr("Done");
   if (kind === "running") return tr("Running");
   if (kind === "approved") return tr("Approved");
@@ -151,6 +177,12 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   );
   const [hover, setHover] = createSignal<number | null>(null);
   const [selected, setSelected] = createSignal<number | null>(null);
+  createEffect(() => {
+    const request = props.openTask;
+    if (!request) return;
+    setMode("graph");
+    setSelected(request.task);
+  });
   const problems = () => props.problems ?? new Map<number, TaskProblem>();
   const planning = () => props.team.status === "planning";
   const byId = createMemo(() => new Map(props.team.tasks.map((task) => [task.id, task])));
@@ -240,10 +272,29 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   };
   const stepZoom = (delta: number) => setZoom((value) => Math.max(0.4, Math.min(1.6, Math.round((value + delta) * 10) / 10)));
 
+  // Task 196: a drag from a card's right edge onto another card makes that
+  // task depend on this one (Qt's graph editing).
+  const startLink = (event: PointerEvent, from: number) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const handle = event.currentTarget as HTMLElement;
+    try { handle.setPointerCapture(event.pointerId); } catch { /* a synthetic event */ }
+    const done = (up: PointerEvent) => {
+      handle.removeEventListener("pointerup", done);
+      const target = document.elementFromPoint(up.clientX, up.clientY)?.closest("[data-task]");
+      const to = Number(target?.getAttribute("data-task"));
+      if (to && to !== from && props.editing?.canLink(to)) props.editing.link(from, to);
+    };
+    handle.addEventListener("pointerup", done);
+  };
+
   /** Qt's phase header: title, chips, "Healthy N/M", the progress, and the
    * draft's decision. A collapsed phase is this one line with its tasks' titles. */
-  const header = (phase: PlanPhase, collapsible = true) => {
+  const header = (phase: PlanPhase, collapsible = true, actions?: JSX.Element) => {
     const status = phaseStatus(phase.phase);
+    // Task 196: Qt's header by state: its notes, the collapsed one-line summary and the lead's note.
+    const head = phaseHeader(props.team, phase.phase);
+    const note = phase.phase.note?.trim() ?? "";
     const tasks = phase.tasks.filter((task) => visibleTask(task));
     const total = tasks.length;
     const done = tasks.filter((task) => task.status === "accepted").length;
@@ -276,7 +327,13 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         <Show when={closed} fallback={<Show when={phase.phase.acceptance}><span class="pt-acceptance">{short(phase.phase.acceptance, 80)}</span></Show>}>
           <span class="pt-inline" data-inline={phase.phase.n}>{tasks.slice(0, 12).map((task) => `#${task.id} ${task.title}`).join(", ")}</span>
         </Show>
-        {props.phaseActions?.(phase.phase.n)}
+        <For each={head.notes}>{(shown) => (
+          <span class={`pt-phase-note pt-phase-note-${shown.tone}`} data-note={shown.id} title={shown.tip || shown.text}>{short(shown.text, 80)}</span>
+        )}</For>
+        <Show when={closed && head.summary}>
+          <span class="pt-phase-summary" data-summary="1" title={head.summary.split(", #").join("\n#")}>{short(head.summary, 140)}</span>
+        </Show>
+        {actions ?? props.phaseActions?.(phase.phase.n)}
         <span class="pt-grow" />
         <Show when={running && total > 0 && status.kind !== "done"}>
           <span class="pt-healthy" classList={{ warn: healthy < total }} data-healthy={`${healthy}/${total}`} title={phase.phase.health || undefined}>
@@ -292,7 +349,10 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           </span>
           <span class="pt-count">{done}/{total}</span>
         </Show>
-        <Show when={phaseNeedsApproval(phase.phase)}>
+        <Show when={!closed && note}>
+          <span class="pt-phase-lead-note" data-note="lead" title={note}>{tr("Lead's note: %1", short(note, 160))}</span>
+        </Show>
+        <Show when={phaseNeedsApproval(phase.phase) && !props.phaseActions}>
           <span class="pt-approval">{tr("Needs approval")}</span>
           <Show when={props.onApprovePhase}>
             <button type="button" class="btn small" data-approve={phase.phase.n}
@@ -351,8 +411,17 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         onPointerEnter={() => setHover(task.id)}
         onFocus={() => setHover(task.id)}
         onBlur={() => setHover(null)}
-        onClick={() => open(task.id)}
+        onClick={() => (props.editing?.editTask ? props.editing.editTask(task.id) : open(task.id))}
       >
+        <Show when={props.editing?.canLink(task.id) || (props.editing && task.status !== "cancelled" && props.editing.editTask)}>
+          <span
+            class="pt-link-handle"
+            role="presentation"
+            title={tr("Drag from a node's right edge onto a task to connect them")}
+            onClick={(event) => event.stopPropagation()}
+            onPointerDown={(event) => startLink(event, task.id)}
+          />
+        </Show>
         <span class="pt-card-l1">
           <span class="pt-state"><Icon name={statusIcon(task, !!problem)} size={12} /></span>
           <span class="pt-id">#{task.id}</span>
@@ -415,6 +484,18 @@ export function PlanView(props: PlanViewProps): JSX.Element {
               <For each={routes}>
                 {(route) => <path d={orthoPath(route.points)} class={routeClass(route, litNow)} marker-end={`url(#${marker}-dep)`} data-edge={`${route.from}-${route.to}`} />}
               </For>
+              <Show when={props.editing}>
+                <For each={routes.filter((route) => props.editing!.canLink(route.to))}>
+                  {(route) => (
+                    <path
+                      d={orthoPath(route.points)}
+                      class="pt-edge-hit"
+                      data-edge={`${route.from}-${route.to}`}
+                      onClick={() => props.editing!.unlink(route.from, route.to)}
+                    ><title>{tr("Remove the dependency of #%1 on #%2", route.to, route.from)}</title></path>
+                  )}
+                </For>
+              </Show>
               <For each={originRoutes}>
                 {(route) => <path d={orthoPath(route.points)} class="pt-origin-edge" marker-end={`url(#${marker})`} data-origin={route.from} />}
               </For>
@@ -707,9 +788,11 @@ export function PlanView(props: PlanViewProps): JSX.Element {
                   return (
                     <Show when={phase()}>{(shown) => {
                       const entry = () => layouts().get(shown().phase.n);
+                      // Task 196: made once per row, so an open menu or dialog survives a poll.
+                      const actions = props.phaseActions?.(shown().phase.n);
                       return (
                         <div class="pt-row" style={{ top: `${item.start}px` }} data-phase={shown().phase.n}>
-                          {header(shown())}
+                          {header(shown(), true, actions)}
                           <Show when={!isCollapsed(shown().phase.n) && entry()}>
                             {graphBody(shown(), entry()!.layout, entry()!.routes, entry()!.originRoutes)}
                           </Show>
@@ -763,7 +846,8 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         </div>
       </Show>
       <Show when={mode() === "tests"}>
-        <TestsPanel tests={props.tests} onMore={() => props.onLoadTests?.(props.tests?.next ?? null)} />
+        <TestsPanel tests={props.tests} onMore={() => props.onLoadTests?.(props.tests?.next ?? null)}
+          builds={props.builds} buildsError={props.buildsError} onLoadBuilds={props.onLoadBuilds} onForce={props.onForceTest} />
       </Show>
     </section>
   );

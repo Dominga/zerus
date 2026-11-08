@@ -48,11 +48,14 @@ pub(crate) fn post_and_ring(
     text: &str,
 ) -> Sent {
     let at = super::super::now();
+    // Task 184: the message is working-tier text (docs/lore.md 11.9); the
+    // stored text, its header and the paste are the redacted one.
+    let text = super::secrets::redact_working(text);
     #[cfg(test)]
-    POSTED.with(|posted| posted.borrow_mut().insert(request_id.to_owned(), text.to_owned()));
+    POSTED.with(|posted| posted.borrow_mut().insert(request_id.to_owned(), text.clone()));
     let posted = store.mutate_working(team_id, |tx, team, events| {
         events.extend(working::cleanup(tx, team_id, at)?);
-        let new = NewMessage { request_id, by, to: member_id, kind, urgency, text };
+        let new = NewMessage { request_id, by, to: member_id, kind, urgency, text: &text };
         // Zerus's own delivery journals as it always has (handed_out,
         // delivered, inbox_told...); the message adds no event of its own.
         working::post(tx, team_id, &new, at)?;
@@ -64,7 +67,7 @@ pub(crate) fn post_and_ring(
         Ok(found) => found,
         Err(error) => return Sent::Refused(format!("the team message was not stored, so nothing was sent: {error:#}")),
     };
-    let outcome = send(session, request_id, &paste(&agent, working::header_of(text), &list));
+    let outcome = send(session, request_id, &paste(&agent, working::header_of(&text), &list));
     settle(store, team_id, member_id, &agent, request_id, &list, &outcome, "idle", false);
     outcome
 }

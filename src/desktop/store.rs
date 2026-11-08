@@ -1219,7 +1219,8 @@ mod tests {
 
     #[test]
     fn canonical_aliases_share_the_os_lock() {
-        let temp = tempfile::tempdir().unwrap();
+        // Task 180: a private root, whatever the runner's folder inherits.
+        let temp = crate::host::staging::private_tempdir();
         let root = temp.path().join("desktop");
         platform::private_dir(&root).unwrap();
         let location = Location {

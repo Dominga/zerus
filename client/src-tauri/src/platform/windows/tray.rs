@@ -181,10 +181,21 @@ fn dispatch(app: &AppHandle, action: MenuAction) {
             let _ = crate::lifecycle::request_main(app);
         }
         MenuAction::Updates => crate::updates::open_page(app),
-        MenuAction::Restart => crate::updates::open_page(app),
+        // Qt's UpdateController::restartIntoInstalledBundle; the fork build's
+        // `updates_restart` installs its verified replacement instead.
+        MenuAction::Restart => {
+            if let Err(error) = crate::updates::updates_restart(app.clone()) {
+                eprintln!("zerus-client: restart to finish update: {error}");
+            }
+        }
         MenuAction::Refresh => {
             let fleet = app.state::<crate::commands::AppState>();
             fleet.refresh();
+        }
+        MenuAction::OpenLog => {
+            if let Err(error) = crate::startup_log::open(app) {
+                eprintln!("zerus-client: open log: {error}");
+            }
         }
         MenuAction::Session { computer, key } => crate::desk::menu_session(app, computer, key),
         MenuAction::Quit => crate::exit_flush::quit_with_flush(app, 0),

@@ -12,9 +12,11 @@ impl Canonical {
     pub(crate) fn recover(
         &self,
         identity: &crate::identity::Identity,
-        _original: &crate::desktop_ownership::NativeRecovery,
+        original: &crate::desktop_ownership::NativeRecovery,
     ) -> Arc<Responder> {
         crate::desktop_service::enter_startup_recovery();
+        // Task 180: the app shows which check refused and the next step.
+        crate::desktop_service::record_startup_recovery_reason(original.reason);
         let responder = responder(identity);
         self.replace(responder)
     }

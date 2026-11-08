@@ -227,9 +227,19 @@ fn an_edit_racing_the_first_hand_out_is_either_early_or_refused() {
     run_step(&mut store, &t, &Step::AutoAcceptDraft { phase: 2 }, "").unwrap();
     let saved = store.load(&t.id).unwrap().unwrap();
     assert!(saved.phases[0].state.is_accepted());
+    // Task 162 (wave 2 merge): inside the approved goal the lead still edits
+    // the accepted phase while its work has not started; the change is
+    // recorded for the owner's digest, who may revert it.
+    let mut edited = saved.clone();
     let mut later = Vec::new();
-    let error = ops::apply(&mut saved.clone(), "edit-draft", &json!({"phase":2,"tasks_update":[{"id":4,"title":"Too late"}]}), &lead, &BTreeSet::new(), &mut later)
+    ops::apply(&mut edited, "edit-draft", &json!({"phase":2,"tasks_update":[{"id":4,"title":"After Auto"}]}), &lead, &BTreeSet::new(), &mut later).unwrap();
+    assert_eq!(edited.task(4).unwrap().title, "After Auto");
+    assert_eq!(edited.lead_changes.len(), 1, "{:?}", edited.lead_changes);
+    // Once its work started, the edit is refused.
+    let mut started = saved.clone();
+    started.task_mut(4).unwrap().attempts.push(Attempt { member: "dev".into(), state: AttemptState::Delivered, ..Default::default() });
+    let error = ops::apply(&mut started, "edit-draft", &json!({"phase":2,"tasks_update":[{"id":4,"title":"Too late"}]}), &lead, &BTreeSet::new(), &mut later)
         .unwrap_err()
         .to_string();
-    assert!(!error.is_empty(), "the edit after the fix is refused");
+    assert!(error.contains("has started"), "{error}");
 }

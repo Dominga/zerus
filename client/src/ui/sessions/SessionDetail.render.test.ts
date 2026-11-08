@@ -208,7 +208,7 @@ describe("an archive search keeps the archive status and paging (zerus-5wmh.13.1
   });
 
   it("never says no matches while the archive scan is still partial (zerus-080n8)", async () => {
-    vi.mocked(bridge.archivePage).mockResolvedValue({ rows: [], next_cursor: "c", previous_cursor: null, total: 0, total_capped: true, position: 0, partial: true, searched: 25_000 } as never);
+    vi.mocked(bridge.archivePage).mockResolvedValue({ rows: [], next_cursor: "c", previous_cursor: null, total: 0, total_capped: true, position: 0, partial: true, searched: 25_000, bounded: true } as never);
     put(fixtureRow());
     setStateFilter("archived"); await flush();
     setSearch("needle"); await flush();

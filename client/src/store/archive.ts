@@ -331,7 +331,7 @@ export function createArchive(deps: ArchiveDeps) {
     // An exact page that comes back empty after rows means the archive changed under its cursor.
     // A bounded page (zerus-080n8) may be empty while its scan goes on, or at the end of the
     // range after a partial run or a full page stopped by the budget (zerus-bv0a7).
-    if (!rows.length && p.rows.length && typeof page.searched !== "number") { put(computer, { ...p, request: 0, error: tr(ARCHIVE_CHANGED) }); return; }
+    if (!rows.length && p.rows.length && page.bounded !== true) { put(computer, { ...p, request: 0, error: tr(ARCHIVE_CHANGED) }); return; }
     batch(() => {
       put(computer, {
         ...p, request: 0, shownRequest: id, error: "", loaded: true, rows, cursor: page.next_cursor ?? "", previous: page.previous_cursor ?? "",

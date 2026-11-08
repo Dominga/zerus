@@ -241,7 +241,7 @@ PY
 
     def test_synthetic_root_contract_accepts_a_private_toolchain_mount_under_w(self):
         # Only the namespace destination changes; the source stays in our private fixture.
-        self.runner.rustup = Path("/w/fixture-private-toolchain")
+        self.runner.rustup = Path("/") / "w" / "fixture-private-toolchain"
         self.test_synthetic_root_is_trusted_without_mapping_host_root_or_reading_owner_files()
 
     def test_synthetic_root_contract_refuses_a_broad_mount_under_w(self):

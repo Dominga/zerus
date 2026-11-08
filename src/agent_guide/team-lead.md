@@ -42,6 +42,8 @@ Decide reports. A report reaches hgs team inbox; check its claim:
   {"request_id":"U","team":"ID","task":4} | hgs team accept --json
 reject needs "reason" and reworks the same member; "fresh":true gives it to a free peer of
 its role; "hold":true keeps it until hgs team release. No report: use-last-reply.
+Remove your old builds at report: extra targets, worktrees, package folders; never a
+member's or the owner's.
 Only hgs team report reports; a question comes by hgs team ask, answered with hgs team reply.
 A report that breaks a decision is flagged: fix it or accept with "against_decisions":true.
 Pipelines (review, test) pass or return; you decide at round 3. Never merge, build or test a

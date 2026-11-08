@@ -1,4 +1,7 @@
 {
+  "Clean finished tasks…": "Очистить папки завершённых задач…",
+  "Remove the targets of this team's finished tasks; Zerus asks first and keeps a folder in use": "Удалить папки сборки завершённых задач этой команды; Zerus спросит и сохранит используемую папку",
+  "Tell the lead when one team's build folders pass (GB)": "Сообщать лиду, когда папки сборки одной команды превысят (ГБ)",
   " (kept warm)": " (держится тёплым)",
   " It runs in free planning: one open phase that takes tasks as they come until you close it.": " Команда работает в свободном планировании: одна открытая фаза принимает задачи по мере поступления, пока вы её не закроете.",
   " It runs in standard planning.": " Команда работает в обычном планировании.",

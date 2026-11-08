@@ -6,9 +6,9 @@ use crate::desktop::creation_clone::lease::Lease;
 use anyhow::{ensure, Context, Result};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, OnceLock,
 };
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use zerus_client_core::desktop::compact_to_send::Verified;
 use zerus_desktop_ledger::operations::Ticket;
 
@@ -16,12 +16,16 @@ pub(super) struct Consent {
     pub original: Verified,
     pub lease: Arc<Lease>,
     pub cancel: AtomicBool,
-    /// The whole operation's deadline, fixed at admission: nothing starts
-    /// after it.
-    pub chain: Instant,
+    /// The whole operation's bound ([`super::runtime::CHAIN`]).
+    length: Duration,
+    /// Its deadline, fixed at the operation's own first turn, when it gets
+    /// the work slot, and never renewed: nothing starts after it. An
+    /// operation queued behind another's wait keeps its whole bound
+    /// (zerus-qw7wp).
+    started: OnceLock<Instant>,
 }
 impl Consent {
-    pub fn admitted(original: Verified, lease: Arc<Lease>, chain: Instant) -> Result<Arc<Self>> {
+    pub fn admitted(original: Verified, lease: Arc<Lease>, length: Duration) -> Result<Arc<Self>> {
         // The operation names a local session; the lease's native source
         // still binds this service and computer.
         ensure!(
@@ -32,8 +36,14 @@ impl Consent {
             original,
             lease,
             cancel: AtomicBool::new(false),
-            chain,
+            length,
+            started: OnceLock::new(),
         }))
+    }
+    /// The operation's deadline; its first call, at the operation's first
+    /// turn, starts it.
+    pub fn chain(&self) -> Instant {
+        *self.started.get_or_init(|| Instant::now() + self.length)
     }
     /// The same live original, lease and writer as the row; with a ticket,
     /// exactly `child`'s own reservation.

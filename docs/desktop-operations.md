@@ -421,8 +421,10 @@ reading any receipt, and records a send never reserved as never started
 A compaction that never started also ends the send. After one that ran or
 may have, the same live operation waits, and only it: a restart never resumes
 a wait. The wait has one budget of 600 seconds from the compaction's drain,
-never renewed, inside the operation's own deadline of 690 seconds from
-admission.
+never renewed, inside the operation's own deadline of 690 seconds from its
+first turn. The service runs one operation at a time, so an operation admitted
+while another waits stays queued; its deadline starts only when it gets that
+turn, and the time spent queued never expires it (zerus-qw7wp).
 
 Off the actor, with the operation's loans, each read checks the selected
 session's own record from the held original root, with the root checked

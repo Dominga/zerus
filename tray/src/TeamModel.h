@@ -326,6 +326,8 @@ struct Task {
     // Task #60: the task this follow-up was spawned from (0 for none); it
     // never blocks, unlike deps.
     int origin = 0;
+    // Task #229: "crit" or "minor" for a follow-up; empty for ordinary work.
+    QString severity;
     // C3: why the task waits and what unblocks it.
     struct Wait { QString for_, unblock; QStringList on; bool known = false; };
     Wait wait;
@@ -394,6 +396,10 @@ struct Phase {
     int n = 0;
     QString title, approval, state, addedBy, decidedBy;
     bool barrier = false;      // no task starts before every lower phase is finished
+    // Task #229: "plan" or "minor"; a Minor phase never gates its origin.
+    QString kind;
+    QList<int> crit;           // open critical tasks holding the phase
+    QString critGate;          // why they hold it, as hgs words it
     double addedAt = 0, decidedAt = 0;
     QList<int> tasks;          // task ids; a discarded phase keeps them
     QList<PhaseChange> changes; // F10: the lead's changes since the owner last saw it
@@ -528,6 +534,9 @@ struct Team {
         QString state;   // U25: planned|draft|rejected|queued|running|done (empty: older hgs); U63: awaiting_acceptance
         int done = 0, total = 0;
         bool barrier = false;
+        QString kind;        // Task #229: plan|minor
+        QList<int> crit;     // Task #229: open critical tasks holding it
+        QString critGate;    // Task #229: why they hold it
         PhasePause pause;    // U63: a paused phase reads "queued" with a pause
         QString acceptance;  // U63: "owner" or "lead"
     };
@@ -669,6 +678,9 @@ struct PhaseGroup {
     int n = 0;
     QString title;
     bool barrier = false, draft = false;
+    QString kind;        // Task #229: plan|minor
+    QList<int> crit;     // Task #229: open critical tasks holding it
+    QString critGate;
     QList<int> tasks;
     int done = 0;
     bool finished() const { return !tasks.isEmpty() && done == tasks.size(); }

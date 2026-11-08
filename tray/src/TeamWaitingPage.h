@@ -37,6 +37,8 @@ public:
         // and a question's options.
         QString deferred, request, text, session, outcome;
         QJsonArray questions;
+        // Task #230: the lead's plan changes the digest names, each revertible.
+        QJsonArray changes;
         double since = 0;
         int phase = 0, task = 0;
         // U63 (owner, 2026-10-31): a phase that waits for the owner's

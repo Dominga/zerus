@@ -415,8 +415,8 @@ describe("rows", () => {
     const old = archivedSession("", "Local", arow(3, 10));
     const scope = { machines: [] as string[], includes: (at: number) => at >= 100, compact: (key: string) => key === two.key };
     expect(archiveListRows([one, two, old], scope)).toEqual([
-      { type: "card", id: one.key, session: one, expandable: false, expanded: false, compactRow: false },
-      { type: "card", id: two.key, session: two, expandable: false, expanded: false, compactRow: true },
+      { type: "card", id: one.key, session: one, expandable: false, expanded: false, compactRow: false, depth: 0, team: undefined },
+      { type: "card", id: two.key, session: two, expandable: false, expanded: false, compactRow: true, depth: 0, team: undefined },
     ]);
     expect(archiveListRows([one, two, old], { ...scope, machines: ["box"] }).map((r) => r.id)).toEqual([two.key]);
   });

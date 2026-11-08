@@ -4,6 +4,7 @@ GUI for one release as qt/zerus-qt.exe, a fallback started by hand."""
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile

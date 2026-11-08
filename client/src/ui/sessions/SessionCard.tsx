@@ -418,7 +418,7 @@ export function fullTooltip(s: Session, team?: TeamSummary): string {
     s.summary,
     visibleUnreadReply(s, computerFresh(s.computer)) ? tr("New reply (not viewed yet)") : "",
     (s.subagents ?? []).length ? tr("Subagents: %1", agentsLabel(s)) : "",
-    team ? tr("Team: %1 · %2 of %3 phases", team.name, team.phases_done, team.phases_total) : "",
+    team ? tr("Team: %1, %2 of %3 phases", team.name, team.phases_done, team.phases_total) : "",
   ];
   return lines.filter(Boolean).join("\n");
 }

@@ -19,7 +19,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -34,7 +33,6 @@ use zerus_client_core::menubar::{
     tray_conf_value, Apply, Desk, DeviceMarks, Entry, Face, Gate, OpenMode,
 };
 use zerus_client_core::readmarks::Queued;
-use zerus_client_core::shell;
 use zerus_client_core::text::Text;
 use zerus_client_core::{text, Change, ComputerId};
 
@@ -1175,9 +1173,70 @@ fn window_notice_if(
     });
 }
 
-/// Qt's `TrayAgent::notify` on macOS: `osascript display notification`,
-/// shown at once without the app's own permission (`TrayAgent.cpp:796-830`).
-pub fn tray_notify(title: &str, body: &str) {
+/// Qt's `TrayAgent::notify` (`TrayAgent.cpp:655-830`): a short message from
+/// the tray, such as a new session's terminal advisory or "the terminal did
+/// not open" (zerus-5wmh.13.13). macOS shows it with `osascript display
+/// notification`, at once and without the app's own permission. Linux posts
+/// a desktop notification, and Windows the tray balloon, as Qt's tray did;
+/// where this app does not own them (the desktop service's mode, no tray
+/// yet) the window shows the notice instead. A click on it opens nothing.
+pub fn tray_notify(app: &AppHandle, title: &str, body: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app;
+        macos_tray_notify(title, body);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if app
+            .try_state::<crate::platform::linux_notify::Poster>()
+            .is_some()
+        {
+            crate::platform::linux_notify::deliver(app, Vec::new(), vec![tray_notice(title, body)]);
+        } else {
+            window_notice(app, title, body);
+        }
+    }
+    #[cfg(windows)]
+    {
+        if app
+            .try_state::<crate::platform::windows::tray::WindowsShell>()
+            .is_some()
+        {
+            crate::platform::windows::tray::deliver(
+                app,
+                Vec::new(),
+                vec![tray_notice(title, body)],
+            );
+        } else {
+            window_notice(app, title, body);
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    window_notice(app, title, body);
+}
+
+/// A tray message's notification: its own token each time, so the
+/// notification daemon shows every message, and one that no click target,
+/// update or withdrawal knows (`attention::target` refuses it).
+#[cfg(any(target_os = "linux", windows, test))]
+fn tray_notice(title: &str, body: &str) -> zerus_client_core::attention::Notice {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis());
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    zerus_client_core::attention::Notice {
+        token: format!("zerus-tray-message:{at}:{n}"),
+        title: title.to_owned(),
+        body: body.to_owned(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_tray_notify(title: &str, body: &str) {
+    use std::process::Stdio;
+    use zerus_client_core::shell;
     let spawned = crate::child_environment::command("osascript")
         .arg("-e")
         .arg(shell::notification_script(title, body))
@@ -1347,6 +1406,24 @@ impl Bar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// zerus-5wmh.13.13: each tray message is its own notification, and a
+    /// click on it opens no session, update or anything else.
+    #[test]
+    fn a_tray_message_has_its_own_token_that_nothing_routes() {
+        let first = tray_notice("Zerus: the terminal did not open", "detail");
+        let second = tray_notice("Zerus: the terminal did not open", "detail");
+        assert_ne!(first.token, second.token);
+        assert_eq!(
+            (first.title.as_str(), first.body.as_str()),
+            ("Zerus: the terminal did not open", "detail")
+        );
+        for notice in [&first, &second] {
+            assert!(notice.token.starts_with("zerus-tray-message:"));
+            assert!(attention::target(&notice.token).is_none());
+            assert!(!zerus_client_core::updates::is_update_token(&notice.token));
+        }
+    }
     use std::collections::BTreeSet;
     use zerus_client_core::attention::Tracker;
     use zerus_client_core::{ComputerStatus, ViewRow};

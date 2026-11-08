@@ -1705,6 +1705,7 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
     let online_pump = pump.clone();
     let watch_pump = pump.clone();
     let emit = app.clone();
+    let notify_app = app.clone();
     let terminal_dir = dir.to_path_buf();
     let launcher = Arc::new(Mutex::new(
         zerus_client_core::terminal_launch::Launcher::new(Default::default()),
@@ -1780,6 +1781,7 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
                         Ok(advisory) => {
                             if let Some(advisory) = advisory {
                                 crate::desk::tray_notify(
+                                    &notify_app,
                                     zerus_client_core::terminal_launch::ADVISORY_TITLE,
                                     &advisory,
                                 );
@@ -1788,6 +1790,7 @@ pub fn start(app: &AppHandle, dir: &Path, replay: bool, allowed: bool) -> Creati
                         }
                         Err(error) => {
                             crate::desk::tray_notify(
+                                &notify_app,
                                 "Zerus: the terminal did not open",
                                 &format!("{error}\n\n{command}"),
                             );

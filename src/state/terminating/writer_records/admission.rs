@@ -3,6 +3,7 @@
 //! Future hosts must validate their ORIGINAL durable request (including no
 //! replay) and native source before using this single-use local object. No
 //! producer, migration, mutator, helper launch or graceful controller calls it.
+use super::io::{IoAdmission, IoExchange, Settled};
 use super::store::Directory;
 use super::*;
 use crate::{platform, state::storage};
@@ -12,8 +13,10 @@ use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
+    process::Child,
     time::Duration,
 };
+use zerus_client_core::run::writer_custody::{Failure, Report};
 
 const RECORD_BYTES: usize = 1 << 20;
 const BINDING_BYTES: usize = 32 << 10;
@@ -106,21 +109,143 @@ impl OriginalRequest {
         // A late refusal preserves its pending row; no implicit recovery/erase.
         self.source.recheck(writer)?;
         Ok(Reserved {
-            source: self.source,
+            source: Arc::new(self.source),
             reservation,
         })
     }
 }
 
 pub(super) struct Reserved {
-    source: Source,
+    source: Arc<Source>,
     reservation: Reservation,
 }
 impl Reserved {
-    /// Keep the source for last-boundary checks while lending the ORIGINAL
-    /// reservation to the existing I/O bridge. Neither part grants input.
-    pub(super) fn into_parts(self) -> (Source, Reservation) {
+    /// Old primitive composition controls only. Production composition keeps
+    /// this pair private and consumes it through into_io.
+    #[cfg(test)]
+    pub(super) fn into_parts(self) -> (Arc<Source>, Reservation) {
         (self.source, self.reservation)
+    }
+
+    /// Consume the paired ORIGINAL source/row, before any guarded host spawn.
+    /// Refusal returns that same pair; it neither retires nor retries it.
+    pub(super) fn into_io(
+        self,
+        writer: &storage::Guard,
+    ) -> std::result::Result<SourceIoAdmission, (Box<Self>, Failure)> {
+        if Instant::now() >= self.source.until {
+            return Err((Box::new(self), Failure::Expired));
+        }
+        if self.source.recheck(writer).is_err() {
+            return Err((Box::new(self), Failure::SourceChanged));
+        }
+        let Self {
+            source,
+            reservation,
+        } = self;
+        match IoAdmission::reserve_holding(reservation, Some(source.clone())) {
+            Ok(admission) => Ok(SourceIoAdmission { source, admission }),
+            Err((reservation, failure)) => Err((
+                Box::new(Self {
+                    source,
+                    reservation: *reservation,
+                }),
+                failure,
+            )),
+        }
+    }
+}
+
+/// Dormant composition only. The host still owns the original durable receipt,
+/// native image/configuration/target/consent checks and trusted guarded spawn.
+/// A captured record, hash or this admission cannot authorize any effect.
+pub(super) struct SourceIoAdmission {
+    source: Arc<Source>,
+    admission: IoAdmission,
+}
+impl SourceIoAdmission {
+    pub(super) fn attach(self, child: Child) -> SourceIoExchange {
+        SourceIoExchange {
+            source: Some(self.source),
+            exchange: self.admission.attach(child),
+        }
+    }
+
+    pub(super) fn attach_withheld(self, child: Child) -> SourceIoExchange {
+        SourceIoExchange {
+            source: Some(self.source),
+            exchange: self.admission.attach_withheld(child),
+        }
+    }
+}
+
+/// Source checks bracket the host's native check under its SAME state writer.
+/// This boundary recheck is not asynchronous writer/descendant settlement or
+/// cross-process crash custody. Those remain required host preconditions.
+pub(super) struct SourceIoExchange {
+    source: Option<Arc<Source>>,
+    exchange: IoExchange,
+}
+impl SourceIoExchange {
+    pub(super) fn send(
+        &mut self,
+        writer: &storage::Guard,
+        input: Vec<u8>,
+        check: impl FnOnce(&mut Child, Instant) -> bool,
+    ) -> std::result::Result<(), Failure> {
+        let source = self.source.as_ref().ok_or(Failure::Invalid)?;
+        self.exchange.send(input, |child, until| {
+            source.recheck(writer).is_ok() && check(child, until) && source.recheck(writer).is_ok()
+        })
+    }
+
+    pub(super) fn close_empty_input(
+        &mut self,
+        writer: &storage::Guard,
+        check: impl FnOnce(&mut Child, Instant) -> bool,
+    ) -> std::result::Result<(), Failure> {
+        let source = self.source.as_ref().ok_or(Failure::Invalid)?;
+        self.exchange.close_empty_input(|child, until| {
+            source.recheck(writer).is_ok() && check(child, until) && source.recheck(writer).is_ok()
+        })
+    }
+
+    pub(super) fn cancel(&mut self) {
+        self.exchange.cancel();
+    }
+
+    pub(super) fn failure(&self) -> Option<Failure> {
+        self.exchange.failure()
+    }
+
+    /// The same Core exchange supplies exit, original EOFs and all joins.
+    /// The source companion remains held even if this wrapper is dropped
+    /// while Core retains the original exchange for physical retirement.
+    pub(super) fn poll(&mut self) -> Option<SourceIoSettled> {
+        let settled = self.exchange.poll()?;
+        Some(SourceIoSettled {
+            _source: self.source.take()?,
+            settled,
+        })
+    }
+}
+
+/// Physical helper data, never an operation receipt, replay or cleanup permit.
+pub(super) struct SourceIoSettled {
+    _source: Arc<Source>,
+    settled: Settled,
+}
+impl SourceIoSettled {
+    pub(super) fn report(&self) -> &Report {
+        self.settled.report()
+    }
+
+    /// Preserve the original row/owner/loan retirement checks. Input may have
+    /// legitimately changed the record; retiring ONLY its physically settled
+    /// helper row neither approves that effect nor supplies any new consent.
+    /// Additional inherited writers/descendants must still settle at the host.
+    pub(super) fn retire(&mut self, until: Instant) -> Result<()> {
+        self.settled.retire(until)
     }
 }
 
@@ -355,3 +480,6 @@ thread_local! {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod source_io_tests;

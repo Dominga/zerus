@@ -20,12 +20,25 @@ impl IoAdmission {
     pub(super) fn reserve(
         original: Reservation,
     ) -> std::result::Result<Self, (Box<Reservation>, Failure)> {
+        Self::reserve_holding(original, None)
+    }
+
+    /// Keep an additional original source companion in the SAME Core charge,
+    /// including retirement after Drop. This data supplies no input authority.
+    pub(super) fn reserve_holding(
+        original: Reservation,
+        companion: Option<Arc<dyn Send + Sync>>,
+    ) -> std::result::Result<Self, (Box<Reservation>, Failure)> {
         if Instant::now() >= original.until {
             return Err((Box::new(original), Failure::Expired));
         }
         let source = match original.resources() {
             Ok(source) => source,
             Err(_) => return Err((Box::new(original), Failure::SourceChanged)),
+        };
+        let source: Arc<dyn Send + Sync> = match companion {
+            Some(companion) => Arc::new((source, companion)),
+            None => source,
         };
         match Admission::reserve(source, original.until) {
             Ok(admitted) => Ok(Self { original, admitted }),

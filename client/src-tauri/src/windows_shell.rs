@@ -191,6 +191,17 @@ pub fn wide_text<const N: usize>(text: &str) -> [u16; N] {
     out
 }
 
+/// A version heading never displaces the existing bounded tray statistics.
+#[cfg(any(feature = "live", test))]
+pub fn versioned_tooltip<const N: usize>(title: &str, body: &str) -> String {
+    let units = title.encode_utf16().count() + 1 + body.encode_utf16().count();
+    if units < N {
+        format!("{title}\n{body}")
+    } else {
+        body.to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,5 +418,23 @@ mod tests {
         assert_eq!(wide_text::<4>("a😀z"), [97, 0xd83d, 0xde00, 0]);
         assert_eq!(wide_text::<3>("ab😀"), [97, 98, 0]);
         assert_eq!(wide_text::<3>("a\0b"), [97, 98, 0]);
+    }
+
+    #[test]
+    fn the_version_heading_never_displaces_bounded_tray_statistics() {
+        let body = "4 active, 0 need attention, 55 sessions total\n55 here\n0 on mac\n0 on va-kids";
+        let dev = "Zerus 0.48.4-dev.123456789012345";
+        assert_eq!(
+            versioned_tooltip::<128>(dev, body),
+            format!("{dev}\n{body}")
+        );
+        let preview = format!("Zerus 0.48.4-preview.{}.aaaaaaa", "x".repeat(32));
+        assert_eq!(versioned_tooltip::<128>(&preview, body), body);
+
+        assert_eq!(versioned_tooltip::<9>("Zerus", "😀"), "Zerus\n😀");
+        assert_eq!(versioned_tooltip::<8>("Zerus", "😀"), "😀");
+        assert_eq!(wide_text::<9>(&versioned_tooltip::<9>("Zerus", "😀"))[8], 0);
+        let error = "Zerus: reconnecting to hgs on this computer";
+        assert_eq!(versioned_tooltip::<8>(dev, error), error);
     }
 }

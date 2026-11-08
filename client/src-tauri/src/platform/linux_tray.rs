@@ -128,7 +128,7 @@ impl Tray {
             shown: HashMap::new(),
             next: 0,
             revision: 0,
-            tooltip: "Zerus".into(),
+            tooltip: String::new(),
             icons: Vec::new(),
             foreground,
             tracking: false,
@@ -326,12 +326,13 @@ impl ItemService {
     }
     #[zbus(property)]
     fn tool_tip(&self) -> (String, Vec<Icon>, String, String) {
+        let title = crate::desk::tooltip_title();
         let tray = lock(&self.0);
         (
             String::new(),
             tray.icons.clone(),
+            title,
             tray.tooltip.clone(),
-            String::new(),
         )
     }
 }
@@ -1325,7 +1326,8 @@ mod tests {
         );
         let item = Proxy::new(&client, owner.as_str(), PATH, SNI).unwrap();
         let tooltip: (String, Vec<Icon>, String, String) = item.get_property("ToolTip").unwrap();
-        assert_eq!(tooltip.2, "new tooltip");
+        assert_eq!(tooltip.2, crate::desk::tooltip_title());
+        assert_eq!(tooltip.3, "new tooltip");
         item.call::<_, _, ()>("ProvideXdgActivationToken", &("after-badge-close",))
             .unwrap();
         item.call::<_, _, ()>("Activate", &(0_i32, 0_i32)).unwrap();
@@ -1552,7 +1554,8 @@ mod tests {
             5
         );
         let tooltip: (String, Vec<Icon>, String, String) = item.get_property("ToolTip").unwrap();
-        assert_eq!(tooltip.2, "1 needs attention\n1 here");
+        assert_eq!(tooltip.2, crate::desk::tooltip_title());
+        assert_eq!(tooltip.3, "1 needs attention\n1 here");
         item.call::<_, _, ()>("ProvideXdgActivationToken", &("fixture-activation",))
             .unwrap();
         item.call::<_, _, ()>("Activate", &(10_i32, 20_i32))

@@ -1044,20 +1044,30 @@ fn deliver(app: &AppHandle, changes: Changes) {
     let _ = (app, changes);
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+pub(crate) fn tooltip_title() -> String {
+    crate::cli::version_line(&crate::cli::BUILD)
+        .trim_end()
+        .to_owned()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+fn tooltip_body(desk: &Desk) -> String {
+    crate::native_text::lines(&desk.tooltip())
+}
+
 fn publish(app: &AppHandle, desk: &Desk) {
+    #[cfg(any(target_os = "macos", windows))]
+    let title = tooltip_title();
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    let body = tooltip_body(desk);
     #[cfg(target_os = "linux")]
-    crate::platform::linux_tray::offer(
-        app,
-        desk.face(),
-        crate::native_text::lines(&desk.tooltip()),
-        desk.menu(),
-        desk.badge(),
-    );
+    crate::platform::linux_tray::offer(app, desk.face(), body, desk.menu(), desk.badge());
     #[cfg(target_os = "macos")]
     {
         let (face, tooltip, menu, badge) = (
             desk.face(),
-            crate::native_text::lines(&desk.tooltip()),
+            format!("{title}\n{body}"),
             desk.menu(),
             desk.badge(),
         );
@@ -1070,7 +1080,7 @@ fn publish(app: &AppHandle, desk: &Desk) {
     crate::platform::windows::tray::offer(
         app,
         desk.face(),
-        crate::native_text::lines(&desk.tooltip()),
+        crate::windows_shell::versioned_tooltip::<128>(&title, &body),
         desk.menu(),
         desk.badge(),
     );

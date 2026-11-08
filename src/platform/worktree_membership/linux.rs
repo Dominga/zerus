@@ -338,6 +338,13 @@ fn shares(reference: u32, other: u32, kind: libc::c_int) -> bool {
     unsafe { libc::syscall(libc::SYS_kcmp, reference, other, kind, zero, zero) == 0 }
 }
 
+/// Whether kcmp(2) works here. Docker's default seccomp profile, for
+/// example, refuses it without CAP_SYS_PTRACE (zerus-igl4q).
+#[cfg(test)]
+pub(crate) fn kcmp_available() -> bool {
+    shares(std::process::id(), std::process::id(), KCMP_FILES)
+}
+
 /// The tasks one process's membership reads (zerus-lo8o1). The tasks of a
 /// thread group need not share one fs context or descriptor table, and its
 /// leader can exit while other tasks live on, so the leader's own entry
@@ -439,6 +446,15 @@ fn task_set(process: &Path, exited: bool, deadline: Instant) -> io::Result<Optio
 /// Skipping a descriptor that vanished mid-read is of a kind with the
 /// explicit Remove policy, which already ignores descriptors that cannot be
 /// inspected (EACCES/EPERM).
+///
+/// Where kcmp(2) is refused (for example under Docker's default seccomp
+/// profile, without CAP_SYS_PTRACE), no task can be proven to share the
+/// reference's fs context or descriptor table, so every task is read itself
+/// (zerus-igl4q, design-tima2's ruling). Membership stays complete, at more
+/// reads per process. A multi-threaded holder then refuses, because its own
+/// root pin, seen through a thread's table, is not the leader's excluded pin.
+/// The production holder is a single-threaded hgs child, and that refusal
+/// fails closed.
 fn same_tasks(before: &[Task], after: &[Task]) -> bool {
     before
         .iter()
@@ -1269,6 +1285,12 @@ for op in sys.stdin:
     struct Python(std::process::Child);
     impl Python {
         fn start(cwd: &Path, code: &str) -> Self {
+            let (child, line) = Self::spawn(cwd, code);
+            assert_eq!(line, "ready\n", "the control child did not start");
+            child
+        }
+        /// Starts a child and returns its first line.
+        fn spawn(cwd: &Path, code: &str) -> (Self, String) {
             use std::io::BufRead;
             let mut child = std::process::Command::new("python3")
                 .args(["-I", "-c", code])
@@ -1281,8 +1303,7 @@ for op in sys.stdin:
             std::io::BufReader::new(child.stdout.take().unwrap())
                 .read_line(&mut line)
                 .unwrap();
-            assert_eq!(line, "ready\n", "the control child did not start");
-            Python(child)
+            (Python(child), line)
         }
         fn pid(&self) -> u32 {
             self.0.id()
@@ -1363,7 +1384,10 @@ for op in sys.stdin:
     /// zerus-lo8o1: a live process whose leader is outside the checkout but
     /// one of whose threads has its own fs context (CLONE_FS unshared) with
     /// its cwd inside, or its own descriptor table (CLONE_FILES unshared)
-    /// with a file inside, is an occupant.
+    /// with a file inside, is an occupant. Where unshare is refused (for
+    /// example under Docker's default seccomp profile), the thread's context
+    /// stays the process's own: only the precondition that the leader is
+    /// outside is skipped, and the occupancy is still asserted (zerus-igl4q).
     #[test]
     fn a_thread_with_its_own_fs_context_or_descriptor_table_in_the_checkout_is_an_occupant() {
         let elsewhere = tempfile::tempdir().unwrap();
@@ -1376,15 +1400,19 @@ for op in sys.stdin:
         ] {
             let (_dir, root, _scope, inventory) = checkout();
             let code = format!(
-                "import ctypes,os,sys,threading,time\nsys.argv=['',{root:?}]\nready=threading.Event()\ndef work():\n    assert ctypes.CDLL(None,use_errno=True).unshare({unshare})==0\n    {work}\n    ready.set()\n    time.sleep(30)\nthreading.Thread(target=work,daemon=True).start()\nready.wait(5)\nprint('ready',flush=True)\ntime.sleep(30)\n",
+                "import ctypes,os,sys,threading,time\nsys.argv=['',{root:?}]\nready=threading.Event()\nown=[False]\ndef work():\n    own[0]=ctypes.CDLL(None,use_errno=True).unshare({unshare})==0\n    {work}\n    ready.set()\n    time.sleep(30)\nthreading.Thread(target=work,daemon=True).start()\nready.wait(5)\nprint('ready own' if own[0] else 'ready shared',flush=True)\ntime.sleep(30)\n",
                 root = root.to_str().unwrap()
             );
-            let child = Python::start(elsewhere.path(), &code);
+            let (child, line) = Python::spawn(elsewhere.path(), &code);
             let process = PathBuf::from(format!("/proc/{}", child.pid()));
-            assert!(
-                !inventory.contains(native_object(&process.join("cwd")).unwrap()),
-                "the leader itself is outside the checkout"
-            );
+            match line.as_str() {
+                "ready own\n" => assert!(
+                    !inventory.contains(native_object(&process.join("cwd")).unwrap()),
+                    "the leader itself is outside the checkout"
+                ),
+                "ready shared\n" => {}
+                other => panic!("the control child did not start: {other:?}"),
+            }
             let _owned = roster::owned(&[child.pid()]);
             let rows = programs(&inventory, soon()).unwrap();
             assert!(rows.iter().any(|row| row.pid == child.pid()), "{unshare}");
@@ -1601,7 +1629,11 @@ for op in sys.stdin:
     /// of the plan. Between the plan and the reads it unshares, keeping that
     /// cwd, and the leader moves out. The tasks are the same, but the plan's
     /// sharing no longer holds, so the process is read again: an occupant
-    /// for the census, member() and sample() alike.
+    /// for the census, member() and sample() alike. Where kcmp is refused,
+    /// every task is read itself and the plan cannot leave the thread out;
+    /// where unshare is refused, the leader stays with the thread in the
+    /// checkout. Each skips only its precondition; the occupancy is still
+    /// asserted (zerus-igl4q).
     #[test]
     fn a_thread_that_unshares_after_the_plan_is_read_again() {
         use std::io::{BufRead, Write};
@@ -1612,7 +1644,7 @@ for op in sys.stdin:
                 .args([
                     "-I",
                     "-c",
-                    "import ctypes,os,sys,threading,time\ngo=threading.Event()\nmoved=threading.Event()\ndef work():\n    go.wait(30)\n    assert ctypes.CDLL(None,use_errno=True).unshare(0x200)==0\n    moved.set()\n    time.sleep(30)\nthreading.Thread(target=work,daemon=True).start()\nprint('ready',flush=True)\nsys.stdin.readline()\ngo.set()\nmoved.wait(5)\nos.chdir(sys.argv[1])\nprint('moved',flush=True)\ntime.sleep(30)\n",
+                    "import ctypes,os,sys,threading,time\ngo=threading.Event()\nmoved=threading.Event()\nown=[False]\ndef work():\n    go.wait(30)\n    own[0]=ctypes.CDLL(None,use_errno=True).unshare(0x200)==0\n    moved.set()\n    time.sleep(30)\nthreading.Thread(target=work,daemon=True).start()\nprint('ready',flush=True)\nsys.stdin.readline()\ngo.set()\nmoved.wait(5)\nif own[0]:\n    os.chdir(sys.argv[1])\nprint('moved' if own[0] else 'kept',flush=True)\ntime.sleep(30)\n",
                     away.path().to_str().unwrap(),
                 ])
                 .current_dir(&root)
@@ -1641,16 +1673,24 @@ for op in sys.stdin:
                 .filter(|tid| *tid != child.pid())
                 .collect();
             assert_eq!(threads.len(), 1);
-            assert!(
-                shares(child.pid(), threads[0], KCMP_FS),
-                "the plan leaves the thread out"
-            );
+            if kcmp_available() {
+                assert!(
+                    shares(child.pid(), threads[0], KCMP_FS),
+                    "the plan leaves the thread out"
+                );
+            }
             let _owned = roster::owned(&[child.pid()]);
+            let moved = std::rc::Rc::new(std::cell::Cell::new(None));
+            let reply = moved.clone();
             roster::on_plan(move || {
                 writeln!(input, "go").unwrap();
                 let mut line = String::new();
                 output.read_line(&mut line).unwrap();
-                assert_eq!(line, "moved\n");
+                reply.set(Some(match line.as_str() {
+                    "moved\n" => true,
+                    "kept\n" => false,
+                    other => panic!("the control child did not answer: {other:?}"),
+                }));
             });
             let found = match reader {
                 "census" => programs(&inventory, soon())
@@ -1660,10 +1700,12 @@ for op in sys.stdin:
                 "member" => member(&process, &inventory, soon()).unwrap(),
                 _ => sampled(child.pid(), &root),
             };
-            assert!(
-                !inventory.contains(native_object(&process.join("cwd")).unwrap()),
-                "the leader moved out"
-            );
+            if moved.get().expect("the hook ran") {
+                assert!(
+                    !inventory.contains(native_object(&process.join("cwd")).unwrap()),
+                    "the leader moved out"
+                );
+            }
             assert!(found, "{reader}");
         }
     }

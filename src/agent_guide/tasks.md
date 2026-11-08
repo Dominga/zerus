@@ -1,6 +1,6 @@
 Project tasks (hgs guide tasks)
 
-REF: PROJECT/T-xxxxxx; text: stdin; --json: task.
+Own session/project. REF: T-xxxxxx or PROJECT/T-xxxxxx; text: stdin; --json: task.
 
   hgs task list [--stage review|active|todo|backlog|done]
   hgs task get REF
@@ -37,8 +37,8 @@ Plans create none. Use Start dialog or ask the parent for a child.
 Bind its live ID to the receipt. Parent reports; children never use its identity.
 Unknown launch: review, not retry. No task Pause yet.
 
-Rename keeps owner/text; edit: To do/Backlog. UUID replay keeps edits;
-changed input refuses. Files: --content-json. Read get first.
+Edit: To do/Backlog. UUID replay keeps edits; changed input refuses.
+Files: --content-json. Read get first.
 
 Discussion: hgs task message REF --request-id UUID --mode queue|send|reopen|note
   --expect-dispatch ID --content-json

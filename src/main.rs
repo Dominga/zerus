@@ -13,6 +13,7 @@ mod metrics;
 #[cfg(unix)]
 mod mobile_peers;
 mod native_ui;
+mod path_info;
 mod phones;
 mod platform;
 mod presence;

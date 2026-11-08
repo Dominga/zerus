@@ -423,6 +423,19 @@ export async function copyText(text: string): Promise<void> {
 export type FileReferenceCheck = { status: "file"; path: string } | { status: "missing" } | { status: "busy" };
 export const fileReferenceCheck = (dialog: number, path: string): Promise<FileReferenceCheck> =>
   inTauri() ? invoke<FileReferenceCheck>("file_reference_check", { dialog, path }) : Promise.resolve({ status: "missing" });
+/**
+ * A remote computer's existence check (zerus-5wmh.13.18): `hgs path-info`,
+ * one bounded call per dialog that its close cancels. "unchecked" is a
+ * computer without the command, whose path is inserted as before.
+ */
+export type FileReferenceRemoteCheck = { status: "file" | "missing" | "unreadable" | "unchecked" | "busy" | "superseded" };
+/** Whether the remote computer checks paths; null while that is unknown. */
+export const fileReferenceRemoteSupport = (dialog: number, computer: string): Promise<boolean | null> =>
+  inTauri() ? invoke<boolean | null>("file_reference_remote_support", { dialog, computer }) : Promise.resolve(null);
+export const fileReferenceCheckRemote = (dialog: number, computer: string, path: string): Promise<FileReferenceRemoteCheck> =>
+  inTauri() ? invoke<FileReferenceRemoteCheck>("file_reference_check_remote", { dialog, computer, path }) : Promise.resolve({ status: "unchecked" });
+/** The dialog closed: its remote calls end. */
+export const fileReferenceCancel = (dialog: number): Promise<void> => inTauri() ? invoke<void>("file_reference_cancel", { dialog }) : Promise.resolve();
 /** Browse… for an existing local file: only its path, null when none was chosen. */
 export const fileReferencePick = (): Promise<string | null> => inTauri() ? invoke<string | null>("file_reference_pick") : Promise.resolve(null);
 

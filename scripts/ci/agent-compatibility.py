@@ -129,12 +129,31 @@ def diagnostic(event, **fields):
     print(file=sys.stderr)
     print('ZERUS_NATIVE_DIAGNOSTIC=' + json.dumps(dict(event=event, **fields)), file=sys.stderr, flush=True)
 
+def traceback_fields(text):
+    limit = 8192
+    if len(text) <= limit:
+        return dict(traceback=text, truncated=False)
+    marker = ' [traceback truncated] '
+    head = (limit - len(marker)) // 2
+    tail = limit - len(marker) - head
+    return dict(traceback=text[:head] + marker + text[-tail:], truncated=True)
+
 class DiagnosticResult(unittest.TextTestResult):
     def startTest(self, test):
         global current
         super().startTest(test)
         current = dict(id=test.id(), started_monotonic=time.monotonic())
         diagnostic('start', **current)
+
+    def addFailure(self, test, err):
+        super().addFailure(test, err)
+        # Preserve unittest's full result; flush its existing text before cleanup
+        # or an aggregate timeout can prevent the final printErrors().
+        diagnostic('failure', id=test.id(), **traceback_fields(self.failures[-1][1]))
+
+    def addError(self, test, err):
+        super().addError(test, err)
+        diagnostic('error', id=test.id(), **traceback_fields(self.errors[-1][1]))
 
     def stopTest(self, test):
         global current

@@ -274,7 +274,10 @@ fn reads_decode_only_what_changed() {
     drop(index);
     let (_, decoded, stamped) = counted(|| Index::open(&store).unwrap());
     assert_eq!(decoded, 1);
-    assert!(stamped >= 600, "{stamped}");
+    // Every file the folder lists is looked up; files it does not list are
+    // not (zerus-cg5h.30).
+    let listed = fs::read_dir(store.dir().join("tasks")).unwrap().count();
+    assert!(listed > 300 && stamped >= listed && stamped < listed + 10, "{stamped} {listed}");
     // A new task file from such a writer changes the folder: a full check.
     let extra = new_task(&store, "T-extra1", Stage::Todo, "Z", "Late");
     write_plain(&store, &extra);
@@ -374,7 +377,7 @@ fn an_unknown_journal_makes_every_earlier_row_suspect() {
 fn rows_past_the_maximum_age_are_read_again() {
     let temp = tempfile::tempdir().unwrap();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
-    let tasks: Vec<TaskDoc> = (0..20)
+    let tasks: Vec<TaskDoc> = (0..20u8)
         .map(|n| new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"))
         .collect();
     for task in &tasks {
@@ -471,7 +474,7 @@ fn a_cursor_with_a_non_hex_rank_is_refused_without_panicking() {
 fn a_clock_set_back_leaves_no_row_trusted_by_its_future_date() {
     let temp = tempfile::tempdir().unwrap();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
-    let tasks: Vec<TaskDoc> = (0..20)
+    let tasks: Vec<TaskDoc> = (0..20u8)
         .map(|n| new_task(&store, &format!("T-{n:06}"), Stage::Todo, "V", "Plain"))
         .collect();
     for task in &tasks {
@@ -1798,11 +1801,11 @@ fn the_phone_s_done_page_comes_from_the_index_as_from_the_documents() {
             }
         }
     }
-    // Choosing the page decodes no task: it stamps each task file once (for
-    // writers without the journal), as the store's inventory did, without
-    // its cache; the page reads only its own documents.
+    // Choosing the page decodes no task: it stamps each task file the folder
+    // lists once (for writers without the journal), without the store's
+    // inventory cache; the page reads only its own documents.
     let (_, decoded, stamped) = counted(|| index.done_entries().unwrap().unwrap());
-    assert_eq!((decoded, stamped), (0, 3 * 31));
+    assert_eq!((decoded, stamped), (0, fs::read_dir(store.dir().join("tasks")).unwrap().count()));
     let entries = index.done_entries().unwrap().unwrap();
     let loads = zerus_replica::load_count_for_test();
     store.done_page_of(entries, None, 7, 1_300, None).unwrap();
@@ -1842,4 +1845,89 @@ fn a_done_row_without_session_metadata_declines_instead_of_hiding_the_task() {
     index.db.execute("UPDATE tasks SET row=?1 WHERE uuid=?2", params![row.to_string(), task.uuid()]).unwrap();
     let entries = index.done_entries().unwrap().unwrap();
     assert_eq!(entries.iter().map(|e| (e.uuid.as_str(), e.sent.clone())).collect::<Vec<_>>(), [(task.uuid(), None)]);
+}
+
+/// zerus-cg5h.30: the stamp check before an index placement, like the
+/// periodic full check, looks up only the task files the folder lists and
+/// reads no stored row of an unchanged task, and still finds what a writer
+/// without the journal changed: appended updates, a removed snapshot, a new
+/// task and a mark alone.
+#[test]
+fn a_full_stamp_check_looks_up_only_listed_files_and_still_finds_journalless_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let tasks: Vec<TaskDoc> = (0..20u8)
+        .map(|n| {
+            let task = new_task(&store, &format!("T-{n:06}"), Stage::Todo, &format!("V{}", char::from(b'a' + n)), "Plain");
+            write_plain(&store, &task);
+            task
+        })
+        .collect();
+    let mut index = Index::open(&store).unwrap();
+    STORED.with(|n| n.set(0));
+    let (_, decoded, stamped) = counted(|| index.check_files().unwrap());
+    assert_eq!((decoded, stamped, STORED.with(Cell::get)), (0, 20, 0), "one lookup per listed file, no stored row");
+    let row = |index: &Index, uuid: &str| -> Option<(Option<String>, Option<String>)> {
+        index
+            .db
+            .query_row("SELECT row, error FROM tasks WHERE uuid=?1", [uuid], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()
+            .unwrap()
+    };
+    let dir = store.dir().join("tasks");
+    // Appended updates: the task's snapshot keeps its stamp.
+    let mut updated = store.load(tasks[0].uuid()).unwrap();
+    let snapshot = stamp(&dir.join(format!("{}.loro", updated.uuid())));
+    updated.set_title("Updated outside the index", &Actor::Person, 2).unwrap();
+    store.save(&mut updated).unwrap();
+    assert!(dir.join(format!("{}.updates", updated.uuid())).exists());
+    assert_eq!(stamp(&dir.join(format!("{}.loro", updated.uuid()))), snapshot);
+    // A removed task, a new task and a mark alone.
+    fs::remove_file(dir.join(format!("{}.loro", tasks[1].uuid()))).unwrap();
+    let added = new_task(&store, "T-added1", Stage::Todo, "Z", "Added");
+    write_plain(&store, &added);
+    let marked = ids::new_uuid();
+    fs::write(dir.join(format!("{marked}.managed")), b"{}").unwrap();
+    index.check_files().unwrap();
+    let (updated_row, _) = row(&index, updated.uuid()).unwrap();
+    assert!(updated_row.unwrap().contains("Updated outside the index"));
+    assert!(row(&index, tasks[1].uuid()).is_none(), "the removed task keeps its row");
+    assert!(row(&index, added.uuid()).unwrap().0.is_some(), "the added task was not found");
+    assert!(row(&index, &marked).unwrap().1.is_some(), "the mark alone was not found");
+    // Unchanged again: one lookup per listed file.
+    STORED.with(|n| n.set(0));
+    let (_, decoded, stamped) = counted(|| index.check_files().unwrap());
+    let listed = fs::read_dir(&dir).unwrap().count();
+    assert_eq!((decoded, stamped, STORED.with(Cell::get)), (0, listed, 0));
+}
+
+/// zerus-cg5h.30: the stamps one folder listing gives each task are those a
+/// lookup of its files gives (`stamped`), so a full check reads no unchanged
+/// task again: for snapshots, appended updates, marks, a mark alone, and a
+/// snapshot that is a link (stamped as what it links to) or a dangling one.
+#[test]
+fn listed_stamps_are_the_stamps_of_a_lookup() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = project(temp.path());
+    let mut floored = new_task(&store, "T-floor1", Stage::Todo, "W", "Floored");
+    assert!(floored.floor().unwrap());
+    aged_save(&store, &mut floored);
+    floored.comment("Appended", &Actor::Person, 3).unwrap();
+    store.save(&mut floored).unwrap();
+    let tasks = store.dir().join("tasks");
+    fs::write(tasks.join(format!("{}.managed", ids::new_uuid())), b"{}").unwrap();
+    #[cfg(unix)]
+    {
+        let linked = new_task(&store, "T-link01", Stage::Todo, "X", "Linked");
+        let target = temp.path().join("elsewhere.loro");
+        fs::write(&target, linked.snapshot().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, tasks.join(format!("{}.loro", linked.uuid()))).unwrap();
+        std::os::unix::fs::symlink(temp.path().join("nowhere"), tasks.join(format!("{}.loro", ids::new_uuid()))).unwrap();
+    }
+    let listed = super::listed(store.dir()).unwrap();
+    assert_eq!(listed.keys().cloned().collect::<Vec<_>>(), store.uuids().unwrap());
+    assert!(listed.values().any(|s| !s.ends_with(MISSING)), "no mark in the fixture");
+    for (uuid, stamps) in &listed {
+        assert_eq!(stamps, &files(store.dir(), uuid), "{uuid}");
+    }
 }

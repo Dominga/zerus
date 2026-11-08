@@ -15,8 +15,10 @@ const parent = () => toSession("", "run:1", { name: "dsh/example/review", conver
 describe("a child's own conversation ID (zerus-5wmh.13.17)", () => {
   it("is kept when the roster reports one, bounded and printable", () => {
     const rows = childRows({ one: { state: "ready", conversation_id: "child-conversation-one" }, two: { state: "ready" },
-      three: { state: "ready", conversation_id: 7 }, four: { state: "ready", conversation_id: "x".repeat(300) }, five: { state: "ready", conversation_id: "bad\nid" } });
-    expect(Object.fromEntries(rows.map((r) => [r.id, r.conversationId]))).toEqual({ one: "child-conversation-one", two: undefined, three: undefined, four: undefined, five: undefined });
+      three: { state: "ready", conversation_id: 7 }, four: { state: "ready", conversation_id: "x".repeat(300) }, five: { state: "ready", conversation_id: "bad\nid" },
+      // review-win-e on #1825 (zerus-5wmh.13.17.2.1): C1 controls such as U+0085 are refused too.
+      six: { state: "ready", conversation_id: `next${String.fromCharCode(0x85)}line` }, seven: { state: "ready", conversation_id: `c1${String.fromCharCode(0x9f)}` } });
+    expect(Object.fromEntries(rows.map((r) => [r.id, r.conversationId]))).toEqual({ one: "child-conversation-one", two: undefined, three: undefined, four: undefined, five: undefined, six: undefined, seven: undefined });
   });
 });
 

@@ -294,6 +294,18 @@ export function createCreations(deps: CreationsDeps) {
     for (const list of shownCards(scope, { ...state, adoptedGroup }).values()) n += list.length;
     return n;
   });
+  /**
+   * The cards a search shows (SessionSearch.cpp:287-305): unbound, shown
+   * pending, under All or Active, inside the machine, account, folder and
+   * project scopes, whose details contain the query; in card order. None
+   * without a query.
+   */
+  const searchCards = createMemo((): CreationCard[] => {
+    const scope = deps.scope();
+    if (!scope.query || (scope.filter !== "all" && scope.filter !== "active")) return [];
+    const shown = shownCards(scope, { ...placement(), revealed: undefined });
+    return [...shown.values()].flat().sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  });
   /** The footer's creations, after the sessions' text or alone. */
   const creationFooter = (afterSessions: boolean) => footerText(shownCount(), afterSessions);
   const creationStatusMenu = () => statusMenu(creations(), choose);
@@ -349,7 +361,7 @@ export function createCreations(deps: CreationsDeps) {
   return {
     creations, selectedCreation, selectedCard, revealed, adopted, cardVersion: (id: string) => versions[id] ?? 0,
     start, apply, selectCreation, choose, act, editChoices, returnToFilters, admitted, adopt,
-    withCreations, creationCount: shownCount, creationFooter, creationStatusMenu,
+    withCreations, creationCount: shownCount, creationFooter, creationStatusMenu, searchCards,
     hideCreation: (id: string) => act(id, "hide"),
     details: (id: string) => deps.bridge.creationDetails(id),
   };
@@ -392,6 +404,7 @@ export const creationStatusMenu = app.creationStatusMenu;
 export const creationFooter = app.creationFooter;
 /** The shown creation rows, also when sessions are absent or a project is collapsed. */
 export const creationCount = app.creationCount;
+export const searchCards = app.searchCards;
 export const withCreations = app.withCreations;
 export const runCreationAction = app.act;
 export const hideCreation = app.hideCreation;

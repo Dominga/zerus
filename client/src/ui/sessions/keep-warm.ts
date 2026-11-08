@@ -5,6 +5,7 @@
  * presents it. Values are never separated with dots.
  */
 import { tr, trNoop, uiLanguage } from "../../i18n";
+import type { KeepWarmChoice } from "../../bridge";
 import type { KeepWarmState } from "../../types";
 
 /** The slider's last position: Always. */
@@ -98,14 +99,28 @@ export function mergeKeepWarm(listing?: KeepWarmState, inspected?: KeepWarmState
   };
 }
 
-/** The slider position: the hours left (rounded up, 1 to 7), or Always. */
+/**
+ * How far past a whole hour the time left may be and still show that hour
+ * (zerus-ua4bi): the host sets `until` from its own clock, and the row reads
+ * its clock every 30 s, so a fresh 1 h choice can be a little over an hour away.
+ */
+export const POSITION_SLACK_SECONDS = 5 * 60;
+
+/** The slider position: the hours left (rounded up past the slack, 1 to 7), or Always. */
 export function positionOf(state: KeepWarmState | undefined, now: number): number {
   if (!state?.enabled) return 2;
   if (state.until === null) return ALWAYS;
-  return Math.min(7, Math.max(1, Math.ceil((state.until - now) / 3600)));
+  return Math.min(7, Math.max(1, Math.ceil((state.until - now - POSITION_SLACK_SECONDS) / 3600)));
 }
 
+/** What a slider position asks the host for: exactly its accepted 1 to 7 hours, or Always. */
+export const choiceAt = (position: number): KeepWarmChoice => (position >= ALWAYS ? { kind: "always" } : { kind: "hours", hours: Math.min(7, Math.max(1, Math.round(position))) });
+
+/** A position's name: "3 h" or "Always" (the slider's value text and the mark's tooltip). */
 export const durationLabel = (position: number) => (position >= ALWAYS ? tr("Always") : tr("%1 h", position));
+
+/** A position as the row shows it: "3 h", or an infinity sign for Always. */
+export const durationMark = (position: number) => (position >= ALWAYS ? "\u221e" : tr("%1 h", position));
 
 /** "1 h", "48 m", "1 h 30 m". */
 export function durationText(seconds: number): string {
@@ -123,6 +138,16 @@ export function remainingText(state: KeepWarmState | undefined, now: number): st
   const hours = Math.floor(left / 3600), minutes = Math.floor((left % 3600) / 60);
   if (!hours) return tr("%1 m left", minutes);
   return minutes ? tr("%1 h %2 m left", hours, minutes) : tr("%1 h left", hours);
+}
+
+/** The time left as the header shows it: "2 h 14 m", "45 m", "<1 m", or an infinity sign for Always. */
+export function remainingMark(state: KeepWarmState, now: number): string {
+  if (state.until === null) return durationMark(ALWAYS);
+  const left = state.until - now;
+  if (left < 60) return tr("<1 m");
+  const hours = Math.floor(left / 3600), minutes = Math.floor((left % 3600) / 60);
+  if (!hours) return tr("%1 m", minutes);
+  return minutes ? tr("%1 h %2 m", hours, minutes) : tr("%1 h", hours);
 }
 
 /** The one line under the row: why it cannot be on, what it is doing, or when it pings next. */
@@ -155,4 +180,16 @@ export function tooltipLines(state: KeepWarmState | undefined, contextTokens: nu
     ? tr("Each ping reads the whole cached context (about %1 tokens) from this account's usage.", tokens(contextTokens))
     : tr("Each ping reads the whole cached context from this account's usage."));
   return lines;
+}
+
+/**
+ * The session header's keep-warm mark (zerus-yacns): shown only while it is
+ * on, as the time left or an infinity sign; its name and a tooltip with the
+ * whole state the Details row shows. Undefined while it is off or unreported.
+ */
+export function headerKeepWarm(state: KeepWarmState | undefined, now: number, contextTokens: number): { mark: string; label: string; tooltip: string } | undefined {
+  if (!state?.enabled) return undefined;
+  const label = tr("Keep cache warm: %1", remainingText(state, now));
+  const line = statusLine(state, now);
+  return { mark: remainingMark(state, now), label, tooltip: [label, ...(line ? [line] : []), ...tooltipLines(state, contextTokens), tr("Click to change it in Details.")].join("\n") };
 }

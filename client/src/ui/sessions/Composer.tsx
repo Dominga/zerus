@@ -24,7 +24,8 @@ import { AttachmentsChip } from "./Attachments";
 import { RecoveryChip } from "./RecoveryChip";
 import { SessionUsageChip, UsageLimitChip } from "./UsageChips";
 import { allowRetryShown, moveFocusOff } from "./composer-ui";
-import { focusTranscript, following, jumpToLatest, unseen } from "./Activity";
+import { focusTranscript, following, jumpToLatest, shownSearchPreview, unseen } from "./Activity";
+import { jumpButton } from "./search-hit";
 import type { ChipTone } from "../../types";
 import { tr } from "../../i18n";
 import { CacheChip } from "./CacheChip";
@@ -262,7 +263,9 @@ export function Composer() {
     const text = status().text, session = v()?.session_status ?? "";
     return session && session !== text ? `${text}\n${session}` : text;
   };
-  const jumpCaption = () => (unseen() > 0 ? tr("Jump to latest activity (%1 new)", unseen()) : tr("Jump to latest activity"));
+  // While a search hit shows, the button stays and goes back to the latest activity (ActivityView.cpp:1631-1636).
+  const jump = () => jumpButton({ following: following(), unseen: unseen(), searchShown: !!shownSearchPreview() });
+  const jumpCaption = () => jump().caption;
   const editorTip = () => v()?.waiting ?? (v()?.session_blocks_input ? v()!.session_status : undefined);
   // A required question card stands in for the editor, its grip and the action row; the toolbar stays (setInputVisible, 1126-1131).
   // They stay mounted and only hide, as Qt's setVisible: the editor's command, observer and flush need it.
@@ -283,7 +286,7 @@ export function Composer() {
             <Icon name="check-check" size={13} /><Show when={!compact()}>{tr("Mark as read")}</Show>
           </button>
         </Show>
-        <Show when={!following()}>
+        <Show when={jump().visible}>
           <button type="button" class="tchip icon" title={jumpCaption()} aria-label={jumpCaption()}
             onClick={(e) => { if (document.activeElement === e.currentTarget) moveFocusOff(focusTranscript, editor); jumpToLatest(); }}><Icon name="chevrons-down" size={14} /></button>
         </Show>

@@ -9,7 +9,11 @@
 //! effect-free observation child decides it, in each read of the wait and
 //! once more right before the send's spawn turn (zerus-5wmh.66.4.10). A
 //! restart never resumes a wait.
-use super::child::{self, Ended};
+// Only the Linux runner starts an original child; macOS refuses every
+// original at admission.
+#[cfg(target_os = "linux")]
+use super::child;
+use super::child::Ended;
 use super::ledger::{self, Child};
 use super::ready::{self, Readiness};
 use super::receipt::{self, Evidence, Observed, Roots};
@@ -65,6 +69,7 @@ enum Proof {
     Admitting,
 }
 /// Each whole child, the CLI's own lock wait included.
+#[cfg(target_os = "linux")]
 pub(super) const DEADLINE: Duration = Duration::from_secs(30);
 /// The one bounded deadline of the receipt read after the physical drain,
 /// never renewed: a later result is Unknown.
@@ -355,9 +360,12 @@ impl Runtime {
         exclusion: Option<Arc<HandoffLock>>,
     ) -> Value {
         let id = authority.id().to_owned();
+        // Only this epoch's own request is ever answered not admitted or
+        // sealed; another connection's stays unavailable (zerus-tlb9q).
+        let ours = authority.deferred_input_scope() == Some(&self.scope);
         // A request this epoch answered not admitted never admits: a copy of
-        // it queued behind that refusal gets the same answer (zerus-tlb9q).
-        if self.fences.session_resume.sealed(&id) {
+        // it queued behind that refusal gets the same answer.
+        if ours && self.fences.session_resume.sealed(&id) {
             return self.refusal(id, wire::NOT_ADMITTED);
         }
         // No qualified seam yet attests the code a macOS child runs before it
@@ -365,8 +373,6 @@ impl Runtime {
         if self.mac_fence {
             return self.refusal(id, MAC_UNAVAILABLE);
         }
-        // Only this epoch's own request can be proven never admitted.
-        let ours = authority.deferred_input_scope() == Some(&self.scope);
         self.refresh(store, exclusion);
         let mut proof = Proof::Before;
         let result = (|| -> Result<wire::Admission> {
@@ -398,12 +404,10 @@ impl Runtime {
             };
             // The original opaque permit, consumed AFTER the writer lock.
             let intent = authority.session_resume()?;
-            if intent.scope != self.scope {
-                // Another connection's request: this epoch settles nothing
-                // about it, so it stays unavailable and is never sealed.
-                proof = Proof::Unprovable;
-                anyhow::bail!("session resume connection changed");
-            }
+            ensure!(
+                intent.scope == self.scope,
+                "session resume connection changed"
+            );
             let verified = intent.verify().map_err(anyhow::Error::msg)?;
             lease.current(
                 &tx,
@@ -439,7 +443,7 @@ impl Runtime {
         match (result, proof) {
             (Ok(value), _) => json!(value),
             // Refused before the admission, with no row in this transaction.
-            (Err(_), Proof::NoRow) => self.not_admitted(id),
+            (Err(_), Proof::NoRow) if ours => self.not_admitted(id),
             // Refused before the transaction: a fresh writer transaction on
             // the same held store proves the absence first.
             (Err(_), Proof::Before)

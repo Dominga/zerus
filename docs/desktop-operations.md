@@ -258,12 +258,13 @@ admission whose ledger provably holds no row for the request. In the writer
 transaction the actor reads the row first, and only that successful empty
 read, followed by a refusal before `ledger::admit`, proves it. A refusal
 before that transaction (the owner stopping, no lease) is proven by a fresh
-BEGIN IMMEDIATE read on the same held store, and only for a request of this
-epoch's own scope. A busy or unreadable store, an existing row, another
-connection's request and any failure from the admission on stay
-unavailable. Before the reply the actor seals the request ID for the service
-epoch, and a sealed ID never admits: a copy of the same request held behind
-the refusal gets the same answer. The seals belong to the epoch, outside the
+BEGIN IMMEDIATE read on the same held store. Only a request of this epoch's
+own scope is ever answered not admitted or sealed. A busy or unreadable
+store, an existing row, another connection's request (an expired one
+included) and any failure from the admission on stay unavailable. Before
+the reply the actor seals the request ID for the service epoch, and a sealed
+ID never admits: a copy of the same request held behind the refusal gets the
+same answer, while another connection's copy stays unavailable. The seals belong to the epoch, outside the
 background runtime, so a runtime the service stops and starts again under
 the same epoch keeps them; a new epoch refuses the old scope anyway. Each
 kind seals at most 1024 IDs per epoch and never evicts one; a full fence

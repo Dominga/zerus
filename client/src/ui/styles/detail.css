@@ -27,6 +27,10 @@
   .dh-chip { display: inline-flex; align-items: center; gap: 4px; flex: 0 1 auto; min-width: 0; height: 18px; color: var(--z-color-muted); }
   .dh-chip svg { flex: none; opacity: .85; }
   .dh-model { flex: 0 1 260px; text-align: right; }
+  /* Keep cache warm mark (zerus-yacns): the agent badge's 18 px, so the chip row never grows; it never wraps or shrinks. */
+  .dh-warm { flex: none; display: inline-flex; align-items: center; gap: 3px; height: 18px; padding: 0 5px; border-radius: 4px; color: var(--z-color-muted); white-space: nowrap; font-variant-numeric: tabular-nums; transition: background var(--z-motion-fast); }
+  .dh-warm svg { flex: none; color: var(--z-color-accent); }
+  .dh-warm:hover { background: var(--z-color-hover); color: var(--z-color-text); }
   .account-usage { border: 0; background: transparent; }
   .usage-refresh { width: 22px; height: 22px; color: var(--z-color-muted); }
   .usage-refresh .su-spin { display: inline-flex; color: var(--z-color-accent); }

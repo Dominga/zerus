@@ -339,6 +339,15 @@ class Accounts(unittest.TestCase):
         (self.config/'account-marks.json').write_text(json.dumps(marks))
         mark('native-codex','--color','#a6cc38')
         self.assertEqual(json.loads((self.config/'account-marks.json').read_text()),{'marks':{'native-codex':{'color':'#a6cc38','later':1}},'version':2})
+        # A write never leaves a file the reader refuses: a record at the
+        # 64 KiB cap with a newer hgs's field keeps it, and the edit refuses
+        # (zerus-etuiw).
+        full='{"padding":"'+'x'*(64*1024-len('{"padding":""}'))+'"}'
+        (self.config/'account-marks.json').write_text(full)
+        self.assertEqual(len((self.config/'account-marks.json').read_bytes()),64*1024)
+        self.assertEqual({r['id']:r['mark'] for r in self.ls()['profiles']}['native-codex'],{'color':None,'emoji':None})
+        self.assertIn(b'would exceed 64 KiB',mark('native-codex','--color','#2b97ff',ok=False).stderr)
+        self.assertEqual((self.config/'account-marks.json').read_text(),full)
         # A malformed record shows no marks and refuses writes instead of
         # dropping other accounts' choices.
         (self.config/'account-marks.json').write_text('{"marks":')

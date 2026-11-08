@@ -26,7 +26,8 @@ pub use schema::{
     MAX_TEXT, SCHEMA,
 };
 pub use store::{
-    Admitted, Changes, Damaged, Keep, Position, ProjectStore, DEPENDS_ON_INCOMING_COPY, MARK_FORMAT,
+    Admitted, Changes, CopyReview, CopyReviewOutcome, Damaged, Keep, Position, ProjectStore,
+    DEPENDS_ON_INCOMING_COPY, MARK_FORMAT,
 };
 pub use sync::{
     canonical_version, version_includes, Document, DonePage, DoneRow, Imported, Inventory, Update,

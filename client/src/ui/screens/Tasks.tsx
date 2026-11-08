@@ -17,8 +17,10 @@ import { ACTION_ICON, ACTION_LABEL, actionLabel, actOnTask, boardActions, canDra
 import { taskProject as project, projectSessions as sessions, findTaskSession as find, projectTasks as rows, sessionTaskRows } from "../../store/taskContext";
 import "../styles/tasks.css";
 import { tr, trNoop } from "../../i18n";
+import { copyReviewOutcomes } from "../../store/taskCopyReview";
 
 const TaskCreate = lazy(() => import("./TaskCreate"));
+const TaskCopyReview = lazy(() => import("./TaskCopyReview"));
 
 const FILTERS = ["current", ...STAGES] as const;
 type Filter = typeof FILTERS[number];
@@ -166,6 +168,7 @@ export function TasksPanel() {
       <div class="tk-tiles" role="tablist" aria-label={tr("Task stages")}><For each={FILTERS}>{(s) => <button class={`tk-tile st-${s}`} data-filter={s} classList={{ on: stage() === s, drop: dropTile() === s }} onDragOver={(e) => { if (tileOver(e, s)) setDropTile(s); }} onDragLeave={() => setDropTile(undefined)} onDrop={(e) => { setDropTile(undefined); if (!tileOver(e, s)) return; const task = readTaskDrag(e, project()!.id), action = stageDropAction(task, s); setDraggedTask(undefined); if (task && action) void actOnTask(project()!.id, task, action); }} role="tab" aria-label={`${tr(LABEL[s])} ${tileCount(s)}`} aria-selected={stage() === s} tabindex={stage() === s ? 0 : -1} onClick={() => setStage(s)} onKeyDown={(e) => { const i = FILTERS.indexOf(s), next = e.key === "ArrowRight" ? (i + 1) % 6 : e.key === "ArrowLeft" ? (i + 5) % 6 : e.key === "Home" ? 0 : e.key === "End" ? 5 : -1; if (next >= 0) { e.preventDefault(); setStage(FILTERS[next]); e.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("button")[next]?.focus(); } }}><span class="tk-tile-ico"><Icon name={ICON[s]} size={14} /></span><span class="tk-tile-label">{tr(LABEL[s])}</span><b class="tk-tile-count">{tileCount(s)}</b></button>}</For></div>
       <Show when={tasks.error()}><div class="notice danger tk-line" role="alert">Tasks could not be read: {tasks.error()}</div></Show>
       <Show when={tasks.damaged()}><div class="notice warn tk-line">{tasks.damaged()} task files of {project()!.name} could not be read.</div></Show>
+      <Show when={tasks.keptDamaged().length || Object.keys(copyReviewOutcomes()).some((key) => key.startsWith(`${project()!.id}\n`))}><Suspense><TaskCopyReview project={project()!.id} name={project()!.name} /></Suspense></Show>
       <Show when={tasks.truncated()}><div class="notice warn tk-line">{tr("Showing the first 10,000 tasks.")}</div></Show>
       <Show when={pageError()}><div class="notice warn tk-line" role="status">{tr("More tasks could not be read: %1", pageError())}</div></Show>
       <Show when={drag() && canAssign(drag()!, project()!.id)}><div class="tk-drophint" role="status"><Icon name="corner-down-right" size={13} />{tr("Drop onto a session in the list to assign it; onto the project header for Any session.")}</div></Show>

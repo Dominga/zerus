@@ -1359,10 +1359,18 @@ through sccache by `RUSTC_WRAPPER` or `build.rustc-wrapper` in cargo's
 starts it. Zerus never lets a sandboxed member's run start it: a server
 started in a Low-integrity or Codex-sandbox token inherits that token, and
 every later build of any folder fails with "error writing dependencies to
-...\deps\X.d: Access is denied (os error 5)". Before such a run the team
-worker, with its normal token, starts the server if none runs
-(`sccache --start-server`); when it cannot, the run builds without the wrapper
-(`RUSTC_WRAPPER` empty) instead. A `hgs run` or a cargo template whose failure
+...\deps\X.d: Access is denied (os error 5)"; a build script such a server
+compiled runs at Low too ("failed to write asset"). A sandboxed member's run
+therefore always builds without the wrapper (`RUSTC_WRAPPER` empty, task 320):
+its compiler writes its outputs at the run's own level, so its next build
+overwrites them (outputs the Medium server wrote would carry a Medium label it
+may not overwrite), and its sccache client never starts the server after the
+server's idle time ended it. The team worker, with its normal token, still
+keeps the server at its own level before such a run: it restarts one that runs
+in a restricted token and starts one if none runs (`sccache --start-server`).
+Before a run at the worker's own level (a non-sandboxed member's `hgs run`, a
+cargo template) a server found in a restricted token is restarted the same way
+and the run's output says so. A `hgs run` or a cargo template whose failure
 is that signature (os error 5 writing a `.d`, `.rlib` or `.rmeta`) makes the
 worker restart the server (`--stop-server`, `--start-server`) and run the
 build once more; the run's output says so and the lead's inbox gets one line.

@@ -17,6 +17,19 @@
 //!
 //! Zerus's own per-team build cache (templates.rs `cache_use`) gives each run a
 //! private server on a port of its own and is not this server.
+//!
+//! Task 320 (2026-11-08, 14:35): the start at claim time was not enough. The
+//! server ends after its idle time, and the next sccache client starts it
+//! again: a DeepSeek member's Low run (ui3's tauri build) did, and every
+//! cargo build of every member then compiled through a Low server - a
+//! non-sandboxed member's Medium run could no longer write its `.d` files, and
+//! a build script the Low server compiled ran at Low too (tauri-codegen
+//! "failed to write asset"). A Low run that does use the Medium server is no
+//! better: its outputs carry the server's Medium label, which its own next
+//! build may not overwrite (qa's 12:25 build). So a sandboxed run never builds
+//! through the shared server at all - its compiler writes its outputs at its
+//! own level, and it rebuilds them - and a Medium run first restarts a server
+//! it finds in a restricted token, before it builds.
 
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -29,6 +42,9 @@ pub(crate) const DEFAULT_PORT: u16 = 4226;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
 /// What a run's tail says when the server was restarted and the run repeated.
 pub(crate) const RESTART_NOTE: &str = "build cache: the shared sccache server could not write this build's outputs (os error 5); Zerus restarted it from its worker and ran the build again";
+/// Task 320: what a run's tail says when the server ran in a restricted token
+/// and was restarted before the run.
+pub(crate) const RESTARTED_BEFORE_NOTE: &str = "build cache: the shared sccache server ran in a restricted token (Low integrity), so no build could overwrite its outputs; Zerus restarted it from its worker before this run";
 
 #[cfg(test)]
 thread_local! {
@@ -42,6 +58,8 @@ thread_local! {
 pub(crate) struct Fake {
     pub program: Option<PathBuf>,
     pub running: bool,
+    /// Task 320: the running server's token is restricted (Low integrity).
+    pub restricted: bool,
     /// Exit code of `--start-server`; a start that succeeds makes it run.
     pub start_exit: i32,
     pub calls: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
@@ -116,11 +134,13 @@ fn control(program: &Path, flag: &str) -> Result<(), String> {
             match flag {
                 "--start-server" if fake.start_exit == 0 => {
                     fake.running = true;
+                    fake.restricted = false;
                     Ok(())
                 }
                 "--start-server" => Err(format!("sccache --start-server exited with {}", fake.start_exit)),
                 _ => {
                     fake.running = false;
+                    fake.restricted = false;
                     Ok(())
                 }
             }
@@ -159,17 +179,42 @@ pub(crate) fn restart() -> Result<(), String> {
     control(&program, "--start-server")
 }
 
-/// The environment a sandboxed member's run gets: nothing when the shared
-/// server runs (started by this, the worker, if it did not), else no wrapper,
-/// so the run builds without the cache instead of starting a restricted server.
+/// The environment a sandboxed member's run gets: always no wrapper (task
+/// 320), so its compiler writes its outputs at the run's own level and its
+/// next build may overwrite them, and its sccache client never starts a
+/// restricted server. The worker (this process) still keeps the shared server
+/// at its own level for everyone else: a restricted one is restarted, a
+/// missing one started.
 pub(crate) fn sandboxed_env() -> Vec<(String, String)> {
     if configured().is_none() {
         return Vec::new();
     }
-    match ensure_started() {
-        Ok(()) => Vec::new(),
-        Err(_) => vec![("RUSTC_WRAPPER".into(), String::new())],
+    if !ensure_unrestricted() {
+        let _ = ensure_started();
     }
+    vec![("RUSTC_WRAPPER".into(), String::new())]
+}
+
+/// Task 320: whether the shared server runs in a restricted token (Low or
+/// Untrusted integrity), as the health line reads it. Unknown is not
+/// restricted: a server Zerus cannot read is left alone.
+pub(crate) fn server_restricted() -> bool {
+    #[cfg(test)]
+    if let Some(fake) = FAKE.with(|found| found.borrow().clone()) {
+        return fake.running && fake.restricted;
+    }
+    if !running() {
+        return false;
+    }
+    listening_pid(port()).and_then(process_integrity).is_some_and(|level| matches!(level.as_str(), "low" | "untrusted"))
+}
+
+/// Task 320: before a run at the worker's level, a shared server found in a
+/// restricted token is restarted from this process, so the run's compiler
+/// writes its outputs at its own level. True when it was restarted. A
+/// sandboxed process never does it.
+pub(crate) fn ensure_unrestricted() -> bool {
+    configured().is_some() && !crate::platform::sandboxed() && server_restricted() && restart().is_ok()
 }
 
 /// The signature of a broken server: a build through sccache that may not
@@ -251,7 +296,14 @@ mod tests {
 
     fn with_fake(running: bool, start_exit: i32) -> std::rc::Rc<std::cell::RefCell<Vec<String>>> {
         let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        fake(Some(Fake { program: Some(PathBuf::from("C:/Users/example/.cargo/bin/sccache.exe")), running, start_exit, calls: calls.clone() }));
+        fake(Some(Fake { program: Some(PathBuf::from("C:/Users/example/.cargo/bin/sccache.exe")), running, start_exit, calls: calls.clone(), ..Fake::default() }));
+        calls
+    }
+
+    fn with_restricted_server() -> std::rc::Rc<std::cell::RefCell<Vec<String>>> {
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        fake(Some(Fake { program: Some(PathBuf::from("C:/Users/example/.cargo/bin/sccache.exe")), running: true, restricted: true,
+            start_exit: 0, calls: calls.clone() }));
         calls
     }
 
@@ -285,15 +337,51 @@ mod tests {
         reset();
     }
 
+    /// Task 320: a sandboxed run never builds through the shared server: its
+    /// outputs keep its own level, so its next build overwrites them, and its
+    /// client never starts a restricted server. The worker still keeps the
+    /// server at its own level for the others.
     #[test]
-    fn a_sandboxed_run_builds_without_the_wrapper_when_the_server_cannot_start() {
+    fn a_sandboxed_run_always_builds_without_the_wrapper() {
+        let no_wrapper = [("RUSTC_WRAPPER".to_owned(), String::new())];
         crate::platform::set_test_sandboxed(Some(false));
-        with_fake(false, 0);
-        assert!(sandboxed_env().is_empty(), "the worker started it: the run uses it");
+        let calls = with_fake(false, 0);
+        assert_eq!(sandboxed_env(), no_wrapper, "the worker started the server, yet the run does not use it");
+        assert_eq!(*calls.borrow(), ["--start-server"]);
+        let calls = with_fake(true, 0);
+        assert_eq!(sandboxed_env(), no_wrapper, "a running server is not used either");
+        assert!(calls.borrow().is_empty(), "{:?}", calls.borrow());
         with_fake(false, 2);
-        assert_eq!(sandboxed_env(), [("RUSTC_WRAPPER".to_owned(), String::new())], "never a restricted server");
+        assert_eq!(sandboxed_env(), no_wrapper, "never a restricted server");
+        let calls = with_restricted_server();
+        assert_eq!(sandboxed_env(), no_wrapper);
+        assert_eq!(*calls.borrow(), ["--stop-server", "--start-server"], "the worker restarted the restricted server for the others");
         fake(Some(Fake { program: None, ..Default::default() }));
         assert!(sandboxed_env().is_empty(), "cargo does not use sccache: nothing changes");
+        reset();
+    }
+
+    /// Task 320: a run at the worker's level restarts a restricted server
+    /// before it builds; a healthy or stopped one is left alone, and a
+    /// sandboxed process never touches it.
+    #[test]
+    fn a_restricted_server_is_restarted_before_a_medium_run() {
+        crate::platform::set_test_sandboxed(Some(false));
+        let calls = with_restricted_server();
+        assert!(server_restricted());
+        assert!(ensure_unrestricted());
+        assert_eq!(*calls.borrow(), ["--stop-server", "--start-server"]);
+        assert!(!server_restricted(), "the new server runs at the worker's level");
+        assert!(!ensure_unrestricted(), "once is enough");
+        let calls = with_fake(true, 0);
+        assert!(!ensure_unrestricted());
+        let calls_stopped = with_fake(false, 0);
+        assert!(!ensure_unrestricted(), "a stopped server is not restricted");
+        assert!(calls.borrow().is_empty() && calls_stopped.borrow().is_empty());
+        let calls = with_restricted_server();
+        crate::platform::set_test_sandboxed(Some(true));
+        assert!(!ensure_unrestricted(), "a sandboxed process never restarts it");
+        assert!(calls.borrow().is_empty());
         reset();
     }
 

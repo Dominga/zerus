@@ -5,8 +5,11 @@ use std::{
     fs,
     os::unix::{fs::PermissionsExt, net::UnixListener},
     path::PathBuf,
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
 };
+// Only the Linux image tests start a process of their own.
+#[cfg(target_os = "linux")]
+use std::process::Command;
 use zerus_client_core::{desktop::ui_requests::Request, operation_recovery::task_start as policy};
 
 const HELPER: &str = r#"#!/usr/bin/env python3

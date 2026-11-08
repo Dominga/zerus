@@ -899,7 +899,7 @@ impl Runtime {
     }
     /// Runs `hook` in the final spawn turn, after the worker's own checks and
     /// before the consent veto and the spawn.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(super) fn fixture_spawn_hook(&mut self, hook: Hook) {
         self.spawn_hook = Some(hook);
     }

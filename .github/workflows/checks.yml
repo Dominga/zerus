@@ -1248,10 +1248,11 @@ jobs:
               raise SystemExit('The selected macOS CLI producer, integration/release and native jobs must all succeed.')
           PY
 
-  # Root CLI Clippy for the macOS binary, check only (zerus-3ldf4). The macOS
-  # CLI jobs build and test the root hgs but never lint it, so macOS-only
-  # unused items reached main unseen (zerus-snrs7). It restores the CLI
-  # producer's cache and never saves one; it publishes and admits nothing.
+  # Root CLI Clippy for macOS, all targets, check only (zerus-3ldf4,
+  # zerus-8evem). The macOS CLI jobs build and test the root hgs but never
+  # lint it, so macOS-only unused items reached main unseen (zerus-snrs7). It
+  # restores the CLI producer's cache and never saves one; it publishes and
+  # admits nothing.
   clippy-macos:
     name: macOS CLI Clippy (check only)
     needs: source
@@ -1284,8 +1285,8 @@ jobs:
             cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}complete
             cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-${{ hashFiles('Cargo.lock') }}
             cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.rustc }}-${{ steps.rust.outputs.epoch }}-
-      - name: Root CLI Clippy for the macOS binary
-        run: cargo +1.99.1 clippy --locked --bin hgs -- -D warnings
+      - name: Root CLI Clippy for macOS, all targets
+        run: cargo +1.99.1 clippy --locked --all-targets -- -D warnings
 
   # Compiler caches use one entry per saving run and restore the newest by
   # prefix. A save follows a successful build that compiled something, keeping

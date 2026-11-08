@@ -1738,3 +1738,25 @@ fn an_older_journalless_move_never_places_from_a_stale_stage() {
         .unwrap();
     assert_eq!(task.rank(), expected, "the next add must still go after the actual last task");
 }
+
+#[test]
+fn task_file_checks_never_postpone_a_due_project_version_refresh() {
+    // review-win-d on #1767 (zerus-k2388): checking only task files before a
+    // placement must not count as the periodic check, which also reads the
+    // project document again.
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let mut doc = store.project().unwrap();
+    doc.set_settings(&zerus_replica::Settings { agent_limit: 3, ..doc.settings() }).unwrap();
+    store.save_project(&doc).unwrap();
+    let mut index = Index::open(&store).unwrap();
+    assert_holds_the_inventory(&store, &index);
+    // An older writer updates the project without the journal.
+    doc.set_settings(&zerus_replica::Settings { agent_limit: 4, ..doc.settings() }).unwrap();
+    fs::write(store.dir().join("project.loro"), doc.snapshot().unwrap()).unwrap();
+    // The periodic check is due; a task-file check alone must not satisfy it.
+    index.db.execute("UPDATE meta SET value='0' WHERE key='checked'", []).unwrap();
+    index.check_files().unwrap();
+    let actual = index.live_inventory().unwrap();
+    assert_eq!(actual, store.live_inventory().unwrap().0, "task-only checking renewed the project-version clock");
+}

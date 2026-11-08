@@ -1032,8 +1032,9 @@ impl<'a> Index<'a> {
         let mut uuids: BTreeSet<String> = self.store.uuids()?.into_iter().collect();
         uuids.extend(known.keys().cloned());
         let uuids: Vec<String> = uuids.into_iter().collect();
+        // The periodic full check keeps its own clock: it also reads the
+        // project document again, which this check does not (zerus-k2388).
         self.refresh(&uuids, Some(&known), None)?;
-        self.db.execute("INSERT OR REPLACE INTO meta VALUES('checked', ?1)", [super::now().to_string()])?;
         Ok(())
     }
 

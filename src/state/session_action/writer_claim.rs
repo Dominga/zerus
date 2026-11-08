@@ -104,13 +104,35 @@ impl Bound {
         {
             return Err(REFUSED.into());
         }
+        // A retained RootA alone cannot prove that an unchanged configured
+        // alias still selects RootA. Pin the CURRENT referent, directory-only,
+        // and compare native objects; never adopt it as the captured root.
+        let selected_path = platform::canonical(&self.configured_root).map_err(|_| REFUSED)?;
+        let selected = Directory::open(&selected_path).map_err(|_| REFUSED)?;
+        if !selected.private().map_err(|_| REFUSED)?
+            || selected.object().map_err(|_| REFUSED)? != self.root.object().map_err(|_| REFUSED)?
+        {
+            return Err(REFUSED.into());
+        }
+        #[cfg(test)]
+        AFTER_ROOT_REFERENT.with(|slot| {
+            if let Some(change) = slot.borrow_mut().take() {
+                change();
+            }
+        });
         for directory in [&self.root, &self.directory] {
             directory.verify().map_err(|_| REFUSED)?;
             if !directory.private().map_err(|_| REFUSED)? {
                 return Err(REFUSED.into());
             }
         }
-        if Instant::now() >= self.until {
+        selected.verify().map_err(|_| REFUSED)?;
+        if !selected.private().map_err(|_| REFUSED)?
+            || selected.object().map_err(|_| REFUSED)? != self.root.object().map_err(|_| REFUSED)?
+            || storage::root() != self.configured_root
+            || platform::canonical(&self.configured_root).map_err(|_| REFUSED)? != selected_path
+            || Instant::now() >= self.until
+        {
             return Err(REFUSED.into());
         }
         Ok(())
@@ -324,6 +346,7 @@ pub(super) fn claim(fresh: FreshExecution) -> Result<OriginalClaim> {
 
 #[cfg(test)]
 thread_local! {
+    static AFTER_ROOT_REFERENT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static AFTER_ABSENCE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static AFTER_PUBLICATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }

@@ -136,3 +136,45 @@ impl Inventories for Indexed<'_> {
         Ok(self.store.live_inventory()?.0.digest())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zerus_replica::{Actor, NewTask, Stage, Target, TaskDoc};
+
+    /// review-win-e on #1736: a task an older replica's merged upgrade left
+    /// below the execution schema is repaired before the indexed digest and
+    /// answer read it, and a phone holding the stale version receives the
+    /// repair, as from the store's own inventories.
+    #[test]
+    fn indexed_digests_and_answers_repair_a_task_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::open(temp.path(), "project-1").unwrap();
+        let mut stale = TaskDoc::create(NewTask {
+            project: "project-1",
+            id: "T-repair",
+            text: "Repair me",
+            stage: Stage::Todo,
+            target: Target::Any,
+            author: Actor::Person,
+            rank: "V",
+            now: 1,
+        })
+        .unwrap();
+        assert!(stale.floor().unwrap());
+        stale.lower_stored_schema_for_test(5);
+        store.save(&mut stale).unwrap();
+        let old = stale.inventory_version();
+        let digest = Indexed::new(&store).live_digest().unwrap();
+        assert!(!store.load(stale.uuid()).unwrap().needs_schema_repair());
+        assert_eq!(digest, store.live_inventory().unwrap().0.digest());
+        let request: Request = serde_json::from_value(json!({
+            "schema": 1, "project": "project-1",
+            "inventory": {"project": {}, "tasks": {stale.uuid(): old}},
+        }))
+        .unwrap();
+        let answered = answer_with(&store, request, &mut Indexed::new(&store)).unwrap();
+        assert!(answered.updates.iter().any(|u| u.task.as_deref() == Some(stale.uuid())));
+        assert_eq!(answered.digest, digest);
+    }
+}

@@ -40,6 +40,11 @@ const ROWS: i64 = 5;
 /// a row remembers whether its task loaded, which the mark decides. An index
 /// made under another mark rule (before the seal, for one) is built again.
 const SCHEMA: i64 = ROWS * 1000 + zerus_replica::MARK_FORMAT;
+/// The rule rows are read under, kept in meta: "repaired-1" reads a task as
+/// the store's inventory does, repairing a lowered execution schema first
+/// (zerus-cg5h.21). Rows of an index without it are read again once; the
+/// row shape is unchanged, so this needs no other index file.
+const DERIVED: &str = "repaired-1";
 /// The histories kept: the most recently read tasks.
 const HISTORIES: i64 = 16;
 /// The one-task history cache this index replaces.
@@ -115,6 +120,8 @@ thread_local! {
     pub(super) static STAMPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Task histories read from their documents into the index.
     pub(super) static MATERIALIZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Reads rows as the build before the repair rule did, without it.
+    pub(super) static LEGACY_DERIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// A file's length, modification time and inode, or `-` when it is missing,
@@ -256,11 +263,24 @@ fn held(task: &TaskDoc) -> Option<Held> {
     })
 }
 
-fn derive(store: &ProjectStore, uuid: &str) -> Derived {
+/// A task's row and the stamps of its files, read as the store's inventory
+/// reads it (zerus-cg5h.21): a task whose execution schema an older
+/// replica's merged upgrade lowered is repaired and saved first, and the
+/// version read and the stamps taken are one observation.
+fn derive(store: &ProjectStore, uuid: &str, stamp: impl FnOnce() -> (String, bool)) -> (Derived, (String, bool)) {
+    #[cfg(test)]
+    if LEGACY_DERIVE.with(std::cell::Cell::get) {
+        return (derive_from(store.load(uuid)), stamp());
+    }
+    let (loaded, stamps) = store.observe(uuid, stamp);
+    (derive_from(loaded), stamps)
+}
+
+fn derive_from(loaded: zerus_replica::Result<TaskDoc>) -> Derived {
     #[cfg(test)]
     DECODED.with(|n| n.set(n.get() + 1));
     let damaged = |error: String, held| Derived::Damaged(cut(&error, ERROR_BYTES).to_owned(), held);
-    let task = match store.load(uuid) {
+    let task = match loaded {
         Ok(task) => task,
         Err(error) => return damaged(error.to_string(), None),
     };
@@ -574,7 +594,11 @@ impl<'a> Index<'a> {
         let now = now();
         let quiet = changes.documents.as_ref().is_some_and(BTreeSet::is_empty);
         let periodic = now < checked || now - checked >= FULL_CHECK_MS;
+        // An index whose rows a build without the repair rule read (#1724)
+        // reads every row again once.
+        let rederive = self.meta("derived")?.as_deref() != Some(DERIVED);
         let full = !built
+            || rederive
             || changes.documents.is_none()
             // The folder changed while the journal says nothing did: a
             // writer that does not keep the journal.
@@ -608,7 +632,14 @@ impl<'a> Index<'a> {
             let mut uuids: BTreeSet<String> = self.store.uuids()?.into_iter().collect();
             uuids.extend(known.keys().cloned());
             let uuids: Vec<String> = uuids.into_iter().collect();
-            self.refresh(&uuids, Some(&known), changes.documents.as_ref())?;
+            let every: BTreeSet<String>;
+            let noted = if rederive {
+                every = uuids.iter().cloned().collect();
+                Some(&every)
+            } else {
+                changes.documents.as_ref()
+            };
+            self.refresh(&uuids, Some(&known), noted)?;
         } else if let Some(documents) = &changes.documents {
             let uuids: Vec<String> = documents.iter().filter(|d| ids::is_uuid(d)).cloned().collect();
             self.refresh(&uuids, None, Some(documents))?;
@@ -654,6 +685,7 @@ impl<'a> Index<'a> {
             set.execute(params!["folder", folder])?;
             if full {
                 set.execute(params!["checked", now.to_string()])?;
+                set.execute(params!["derived", DERIVED])?;
             }
             match project {
                 Some((files, Some(version))) => {
@@ -710,10 +742,12 @@ impl<'a> Index<'a> {
         for chunk in uuids.chunks(CHUNK) {
             let mut work = Vec::new();
             for uuid in chunk {
-                let (now, settled) = stamped(&dir, uuid, read_at);
                 // When it was read orders the background queue; whether its
                 // files were settled decides if a page may trust it.
-                let (checked, trusted) = (read_at, settled);
+                let checked = read_at;
+                // A task the journal names is read whatever its stamps, and
+                // stamped only with that read.
+                let forced = noted.is_some_and(|noted| noted.contains(uuid));
                 #[allow(clippy::type_complexity)]
                 let stored: Option<(String, Option<String>, Option<String>, Option<Held>)> = self
                     .db
@@ -725,15 +759,21 @@ impl<'a> Index<'a> {
                         Ok((r.get(0)?, r.get(1)?, r.get(2)?, held))
                     })
                     .optional()?;
-                let stamps = match known {
-                    Some(known) => known.get(uuid).cloned(),
-                    None => stored.as_ref().map(|s| s.0.clone()),
-                };
-                let unchanged = stamps.as_deref() == Some(now.as_str()) || (stamps.is_none() && gone(&now));
-                if unchanged && !noted.is_some_and(|noted| noted.contains(uuid)) {
-                    continue;
+                if !forced {
+                    let (now, _) = stamped(&dir, uuid, read_at);
+                    let stamps = match known {
+                        Some(known) => known.get(uuid).cloned(),
+                        None => stored.as_ref().map(|s| s.0.clone()),
+                    };
+                    let unchanged = stamps.as_deref() == Some(now.as_str()) || (stamps.is_none() && gone(&now));
+                    if unchanged {
+                        continue;
+                    }
                 }
-                let derived = (!gone(&now)).then(|| derive(self.store, uuid));
+                // A repair saves the task: its row keeps the stamps taken
+                // with that read, and a task whose files are gone has none.
+                let (derived, (now, trusted)) = derive(self.store, uuid, || stamped(&dir, uuid, read_at));
+                let derived = (!gone(&now)).then_some(derived);
                 // Read again to the same row: only its stamps and time change.
                 let same = match (&derived, &stored) {
                     (Some(Derived::Row { row, held, .. }), Some((_, Some(old), None, was))) => row == old && held == was,

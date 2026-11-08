@@ -1295,7 +1295,8 @@ fn the_index_holds_the_inventory_of_every_loaded_task_and_the_project() {
     assert_eq!(damaged, 1);
     drop(index);
     // Saves through the store: a note, a task completed, the project's settings.
-    let uuids: Vec<String> = store.uuids().unwrap();
+    // The project's damaged file has a random UUID: take loaded tasks only.
+    let uuids: Vec<String> = store.uuids().unwrap().into_iter().filter(|uuid| store.load(uuid).is_ok()).collect();
     let mut noted = store.load(&uuids[0]).unwrap();
     noted.comment("More detail", &Actor::Person, 5).unwrap();
     store.save(&mut noted).unwrap();
@@ -1356,4 +1357,53 @@ fn the_phone_s_inventories_come_from_the_index_without_reading_every_task() {
     assert_eq!(decoded, 1);
     assert_eq!(live, store.live_inventory().unwrap().0);
     assert_eq!(live.digest(), store.live_inventory().unwrap().0.digest());
+}
+
+/// A task cut over to the execution schema whose stored schema an older
+/// replica's merged upgrade lowered, saved as such: the store's inventory
+/// repairs it before reading its version (zerus-cg5h.21, review-win-e).
+fn unrepaired(store: &ProjectStore) -> TaskDoc {
+    let mut task = new_task(store, "T-repair", Stage::Todo, "V", "Repair me");
+    assert!(task.floor().unwrap());
+    task.lower_stored_schema_for_test(5);
+    assert!(task.needs_schema_repair());
+    store.save(&mut task).unwrap();
+    assert!(store.load(task.uuid()).unwrap().needs_schema_repair());
+    task
+}
+
+#[test]
+fn the_index_repairs_a_task_before_it_holds_its_version() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let stale = unrepaired(&store);
+    let index = Index::open(&store).unwrap();
+    // The index's read repaired and saved it, as the store's inventory does.
+    let saved = store.load(stale.uuid()).unwrap();
+    assert!(!saved.needs_schema_repair());
+    let (_, live, _) = held(&index);
+    assert_eq!(live.tasks[stale.uuid()], saved.inventory_version());
+    assert_ne!(live.tasks[stale.uuid()], stale.inventory_version());
+    assert_holds_the_inventory(&store, &index);
+    // Its stamps are those of the repaired files.
+    let files: String = index.db.query_row("SELECT files FROM tasks WHERE uuid=?1", [stale.uuid()], |r| r.get(0)).unwrap();
+    assert_eq!(files, stamped(store.dir(), stale.uuid(), now()).0);
+}
+
+#[test]
+fn rows_an_older_build_held_are_read_again_with_the_repair() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let stale = unrepaired(&store);
+    // A warm index of the build before this rule (#1724): rows read
+    // without the repair, and no mark of the rule.
+    LEGACY_DERIVE.with(|legacy| legacy.set(true));
+    let index = Index::open(&store).unwrap();
+    LEGACY_DERIVE.with(|legacy| legacy.set(false));
+    assert_eq!(held(&index).1.tasks[stale.uuid()], stale.inventory_version());
+    index.db.execute("DELETE FROM meta WHERE key = 'derived'", []).unwrap();
+    drop(index);
+    let index = Index::open(&store).unwrap();
+    assert!(!store.load(stale.uuid()).unwrap().needs_schema_repair());
+    assert_holds_the_inventory(&store, &index);
 }

@@ -43,6 +43,10 @@ zerus-presence-sampler = { path = "crates/presence-sampler" }
 zerus-content-search = { path = "crates/content-search" }
 zerus-client-core = { path = "client/core", default-features = false }
 
+[dev-dependencies]
+# Documents an older replica leaves, for the task index's tests.
+zerus-replica = { path = "crates/replica", features = ["test-support"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 async-io = "2.6"
 zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }

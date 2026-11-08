@@ -1,0 +1,335 @@
+// Task 270 (owner, 2026-11-08): the project profile selects the working mode:
+// the branch pipeline for a code repository whose tests run, one shared folder
+// for a huge binary or asset one, and a branch per task for code without tests.
+use super::*;
+use std::path::Path;
+use std::process::Command;
+
+fn git(folder: &Path, args: &[&str]) {
+    let status = Command::new("git").current_dir(folder).args(args).status().unwrap();
+    assert!(status.success(), "git {args:?}");
+}
+
+/// A repository with `files` committed on `main`.
+fn repo(files: &[(&str, &[u8])]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-b", "main"]);
+    for (path, content) in files {
+        let target = dir.path().join(path);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(target, content).unwrap();
+    }
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-m", "init"]);
+    dir
+}
+
+fn tests_config(providers: bool, merge_queue: bool) -> Vec<u8> {
+    let mut text = String::from("version = 1\n");
+    if providers {
+        text += "\n[[provider]]\nname = \"rust\"\nkind = \"cargo\"\nsources = [\"src/**\"]\ntests = [\"src/**/*.rs\"]\n";
+    }
+    if merge_queue {
+        text += "\n[merge_queue]\nenabled = true\n";
+    }
+    text.into_bytes()
+}
+
+fn code_repository(with_tests: bool) -> tempfile::TempDir {
+    let source = b"fn main() { println!(\"hi\"); }\n".to_vec();
+    repo(&[("src/main.rs", &source), (".zerus/tests.toml", &tests_config(with_tests, with_tests))])
+}
+
+/// A code repository whose tracked bytes are mostly one binary asset.
+fn binary_repository() -> tempfile::TempDir {
+    let source = b"int main(void) { return 0; }\n".to_vec();
+    let asset = vec![0u8; 1024 * 1024];
+    repo(&[("src/main.c", &source), ("assets/hero.png", &asset)])
+}
+
+#[test]
+fn a_code_repository_proposes_the_branch_pipeline() {
+    let dir = code_repository(true);
+    let proposal = propose(dir.path()).expect("a profile for a Git repository");
+    assert_eq!((proposal.preset.as_str(), proposal.pipeline.as_str()), (BRANCH_PIPELINE, "code"), "{proposal:?}");
+    assert_eq!(proposal.profile.suites, 1);
+    assert!(proposal.profile.merge_queue);
+    assert_eq!(proposal.settings["branch_per_task"]["template"], "task/{id}");
+    assert_eq!(proposal.settings["base_branch"], "main");
+    assert_eq!(proposal.settings["folder_policy"], "worktree");
+    let reasons = proposal.reasons.join("\n");
+    assert!(reasons.contains("tracked files") && reasons.contains("test subsystem") && reasons.contains("merge queue"), "{reasons}");
+    assert!(proposal.title.contains("branch per task") && proposal.title.contains("merge queue"), "{}", proposal.title);
+}
+
+#[test]
+fn a_binary_heavy_repository_proposes_one_shared_folder() {
+    let dir = binary_repository();
+    let proposal = propose(dir.path()).expect("a profile for a Git repository");
+    assert_eq!(proposal.preset, SHARED_FOLDER, "{proposal:?}");
+    assert!(proposal.profile.binary_share() > 0.9, "{:?}", proposal.profile);
+    assert_eq!(proposal.settings["folder_policy"], "shared");
+    assert_eq!(proposal.settings["build_broker"], true);
+    assert!(proposal.settings["branch_per_task"].is_null());
+    let reasons = proposal.reasons.join("\n");
+    assert!(reasons.contains("binary files") && reasons.contains("shared folder"), "{reasons}");
+}
+
+#[test]
+fn a_code_repository_without_tests_proposes_a_branch_per_task() {
+    let dir = code_repository(false);
+    let proposal = propose(dir.path()).expect("a profile for a Git repository");
+    assert_eq!(proposal.preset, BRANCH_PER_TASK, "{proposal:?}");
+    assert_eq!(proposal.profile.suites, 0);
+    assert!(proposal.pipeline.is_empty());
+    assert_eq!(proposal.settings["branch_per_task"]["template"], "task/{id}");
+    assert!(proposal.reasons.join(" ").contains("no test subsystem"), "{:?}", proposal.reasons);
+}
+
+/// A game or asset repository with engine markers is a shared folder even when
+/// its binaries are not most of the bytes yet.
+#[test]
+fn an_engine_project_proposes_one_shared_folder() {
+    let dir = repo(&[
+        ("Game.uproject", b"{\"FileVersion\":3}\n"),
+        ("Config/DefaultEngine.ini", b"[/Script/EngineSettings.GameMapsSettings]\n"),
+        ("Content/Maps/Main.umap", &vec![0u8; 64 * 1024]),
+    ]);
+    let proposal = propose(dir.path()).expect("a profile for a Git repository");
+    assert_eq!(proposal.preset, SHARED_FOLDER, "{proposal:?}");
+    assert!(proposal.profile.engine.iter().any(|marker| marker.contains("uproject")), "{:?}", proposal.profile.engine);
+    assert!(proposal.reasons.join(" ").contains("engine assets"), "{:?}", proposal.reasons);
+}
+
+/// Git LFS is enough on its own: its files are not cloned per member.
+#[test]
+fn a_repository_in_lfs_proposes_one_shared_folder() {
+    let dir = repo(&[
+        ("src/main.rs", b"fn main() {}\n"),
+        (".gitattributes", b"*.psd filter=lfs diff=lfs merge=lfs -text\n"),
+    ]);
+    let proposal = propose(dir.path()).expect("a profile for a Git repository");
+    assert_eq!(proposal.preset, SHARED_FOLDER, "{proposal:?}");
+    assert!(proposal.profile.lfs);
+}
+
+#[test]
+fn the_mode_writes_the_settings_the_preset_names() {
+    let code = code_repository(true);
+    let profile = profile(code.path()).unwrap();
+    let mut settings = Settings::default();
+    apply(&mut settings, BRANCH_PIPELINE, &profile.branch).unwrap();
+    assert_eq!(settings.branch_per_task.as_ref().map(|branch| branch.template.as_str()), Some("task/{id}"));
+    assert_eq!(settings.base_branch, "main");
+    assert_eq!(settings.folder_policy, super::super::model::FolderPolicy::Worktree);
+    apply(&mut settings, SHARED_FOLDER, "main").unwrap();
+    assert!(settings.branch_per_task.is_none() && settings.base_branch.is_empty());
+    assert_eq!(settings.folder_policy, super::super::model::FolderPolicy::Shared);
+    assert!(settings.build_broker);
+    assert!(apply(&mut settings, "a hunch", "main").is_err());
+}
+
+#[test]
+fn a_team_whose_settings_disagree_with_its_project_names_what_is_missing() {
+    let dir = binary_repository();
+    let mut team = Team {
+        id: "t".into(),
+        name: "T".into(),
+        lead: "lead".into(),
+        folder: dir.path().display().to_string(),
+        status: TeamStatus::Running,
+        ..Default::default()
+    };
+    // A code team's settings on a binary project: branches where it needs one folder.
+    team.settings.branch_per_task = Some(super::super::model::BranchPerTask { template: "task/{id}".into() });
+    team.settings.base_branch = "main".into();
+    let (proposal, wrong) = disagreement(&team).expect("a disagreement");
+    assert_eq!(proposal.preset, SHARED_FOLDER);
+    assert!(wrong.iter().any(|why| why.contains("own folders")), "{wrong:?}");
+    assert!(wrong.iter().any(|why| why.contains("branch per task")), "{wrong:?}");
+    // The proposed mode clears it.
+    apply(&mut team.settings, SHARED_FOLDER, "main").unwrap();
+    assert!(disagreement(&team).is_none());
+    // A project that cannot be profiled has no proposal.
+    team.folder = tempfile::tempdir().unwrap().path().display().to_string();
+    assert!(proposal_of(&team).is_none());
+}
+
+fn proposal_of(team: &Team) -> Option<Proposal> {
+    propose(Path::new(&team.folder))
+}
+
+#[test]
+fn the_request_names_its_mode_and_an_explicit_setting_wins() {
+    assert_eq!(requested_mode(&json!({})), None);
+    assert_eq!(requested_mode(&json!({"working_mode":"auto"})).as_deref(), Some("auto"));
+    assert_eq!(requested_mode(&json!({"working_mode":"shared-folder"})).as_deref(), Some("shared-folder"));
+    let mut explicit = json!({"settings":{"base_branch":"release"}});
+    assert!(super::explicit(&explicit, BRANCH_PIPELINE));
+    assert!(!super::explicit(&explicit, SHARED_FOLDER), "a branch setting does not answer the shared folder");
+    explicit["settings"] = json!({});
+    assert!(!super::explicit(&explicit, SHARED_FOLDER));
+}
+
+// --- the flow: create writes the mode, the draft shows and applies it, a running team gets one card
+
+use crate::state::teams::ops;
+use crate::state::teams::ops::Actor;
+use std::collections::BTreeSet;
+
+fn created(folder: &Path, mode: &str) -> Team {
+    let (team, _) = ops::create(
+        "t270",
+        &json!({"name":"Mode","folder":folder.display().to_string(),"lead":{"id":"lead","agent":"claude"},"working_mode":mode}),
+    )
+    .unwrap();
+    team
+}
+
+#[test]
+fn create_writes_the_proposed_mode_into_the_settings() {
+    let code = code_repository(true);
+    let team = created(code.path(), "auto");
+    assert_eq!(team.working_mode, BRANCH_PIPELINE);
+    assert_eq!(team.settings.branch_per_task.as_ref().map(|branch| branch.template.as_str()), Some("task/{id}"));
+    assert_eq!(team.settings.base_branch, "main");
+    assert_eq!(team.settings.folder_policy, super::super::model::FolderPolicy::Worktree);
+    let binary = binary_repository();
+    let team = created(binary.path(), "auto");
+    assert_eq!(team.working_mode, SHARED_FOLDER);
+    assert_eq!(team.settings.folder_policy, super::super::model::FolderPolicy::Shared);
+    assert!(team.settings.build_broker);
+    assert!(team.settings.branch_per_task.is_none());
+}
+
+#[test]
+fn an_explicit_mode_wins_at_create() {
+    let binary = binary_repository();
+    let team = created(binary.path(), "branch-per-task");
+    assert_eq!(team.working_mode, BRANCH_PER_TASK);
+    assert!(team.settings.branch_per_task.is_some());
+    assert_eq!(team.settings.folder_policy, super::super::model::FolderPolicy::Worktree);
+    // A plain folder (not a repository of its own) keeps the plain flow.
+    let plain = tempfile::tempdir().unwrap();
+    let team = created(plain.path(), "auto");
+    assert!(team.working_mode.is_empty(), "{:?}", team.working_mode);
+    assert!(team.settings.branch_per_task.is_none());
+}
+
+#[test]
+fn the_draft_shows_the_proposal_and_create_applies_the_accepted_mode() {
+    let dir = binary_repository();
+    let (mut team, _) = ops::create(
+        "t270",
+        &json!({"name":"Mode","folder":dir.path().display().to_string(),"lead":{"id":"lead","agent":"claude"}}),
+    )
+    .unwrap();
+    // The project proposes the shared folder, its reasons and its settings.
+    let proposal = propose(dir.path()).expect("the proposal");
+    assert_eq!(proposal.preset, SHARED_FOLDER);
+    assert!(proposal.value()["reasons"].as_array().is_some_and(|reasons| !reasons.is_empty()));
+    // The owner picks another preset in the draft.
+    ops::apply(&mut team, "plan", &json!({"tasks":[{"id":1,"title":"A","assignee":"lead"}]}), &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
+    team.status = TeamStatus::Draft;
+    team.draft = Some(super::super::model::Draft { revision: 1, ..Default::default() });
+    ops::apply(
+        &mut team,
+        "draft",
+        &json!({"action":"update","revision":1,"set":{"working_mode":"branch-per-task"}}),
+        &Actor::Human,
+        &BTreeSet::new(),
+        &mut Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(team.working_mode, BRANCH_PER_TASK);
+    // Create team writes it; the proposal's own preset is not applied over it.
+    let value = ops::apply(&mut team, "draft", &json!({"action":"create"}), &Actor::Human, &BTreeSet::new(), &mut Vec::new());
+    assert!(value.is_ok(), "{value:?}");
+    assert_eq!(team.working_mode, BRANCH_PER_TASK);
+    assert!(team.settings.branch_per_task.is_some());
+    assert_ne!(team.settings.folder_policy, super::super::model::FolderPolicy::Shared);
+}
+
+#[test]
+fn a_running_team_whose_settings_disagree_gets_one_card() {
+    let dir = binary_repository();
+    let (mut team, _) = ops::create(
+        "t270",
+        &json!({"name":"Mode","folder":dir.path().display().to_string(),"lead":{"id":"lead","agent":"claude"},"working_mode":"branch-per-task"}),
+    )
+    .unwrap();
+    team.status = TeamStatus::Running;
+    use crate::state::teams::dispatcher::{steps_with, Step};
+    let now = crate::state::now();
+    let steps = steps_with(&team, &[], now, None);
+    assert!(
+        steps.iter().any(|step| matches!(step, Step::WorkingMode { preset, .. } if preset == SHARED_FOLDER)),
+        "{steps:?}"
+    );
+    // A safe point needs no open attempt: one in flight is not the moment.
+    team.tasks = vec![super::super::model::Task {
+        id: 1,
+        title: "A".into(),
+        assignee: "lead".into(),
+        status: super::super::model::TaskStatus::InProgress,
+        attempts: vec![super::super::model::Attempt {
+            n: 1,
+            id: "a1".into(),
+            member: "lead".into(),
+            state: super::super::model::AttemptState::Delivered,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }];
+    let steps = steps_with(&team, &[], now, None);
+    assert!(!steps.iter().any(|step| matches!(step, Step::WorkingMode { .. })), "{steps:?}");
+    team.tasks.clear();
+    // The lead's card: one, with the preset and its reasons.
+    let mut events = Vec::new();
+    let lead = Actor::Member(team.lead.clone());
+    ops::apply(
+        &mut team,
+        "propose",
+        &json!({"kind":"working-mode","preset":SHARED_FOLDER,"reason":"the project is binary-heavy"}),
+        &lead,
+        &BTreeSet::new(),
+        &mut events,
+    )
+    .unwrap();
+    let cards: Vec<&Value> = team.proposals.iter().filter(|proposal| proposal["kind"] == "working-mode").collect();
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0]["change"]["preset"], SHARED_FOLDER);
+    // One card: a second tick offers nothing while it is open.
+    let steps = steps_with(&team, &[], now, None);
+    assert!(!steps.iter().any(|step| matches!(step, Step::WorkingMode { .. })), "{steps:?}");
+    // The owner's Allow writes the preset; the disagreement is gone.
+    let id = cards[0]["id"].as_str().unwrap().to_owned();
+    // U57: the owner's Allow is bound to the card's content hash.
+    let hash = cards[0]["hash"].as_str().unwrap_or_default().to_owned();
+    ops::apply(
+        &mut team,
+        "decide-proposal",
+        &json!({"proposal":id,"accept":true,"reason":"yes","expected_hash":hash}),
+        &Actor::Human,
+        &BTreeSet::new(),
+        &mut events,
+    )
+    .unwrap();
+    assert_eq!(team.working_mode, SHARED_FOLDER);
+    assert_eq!(team.settings.folder_policy, super::super::model::FolderPolicy::Shared);
+    assert!(team.settings.build_broker);
+    assert!(disagreement(&team).is_none());
+}
+
+#[test]
+fn an_unknown_mode_is_refused_at_create() {
+    let dir = code_repository(true);
+    // An unknown preset with a project to profile is refused, not guessed.
+    let refused = ops::create(
+        "t270",
+        &json!({"name":"Mode","folder":dir.path().display().to_string(),"lead":{"id":"lead","agent":"claude"},"working_mode":"the old way"}),
+    );
+    assert!(refused.is_err(), "{:?}", refused.map(|(team, _)| team.settings));
+}

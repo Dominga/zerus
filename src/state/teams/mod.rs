@@ -52,6 +52,7 @@ pub(crate) mod timing;
 pub(crate) mod usage_sampler;
 pub(crate) mod waiting;
 pub(crate) mod working;
+pub(crate) mod working_mode;
 pub(crate) mod doorbell;
 
 use std::collections::BTreeSet;

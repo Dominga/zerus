@@ -1412,12 +1412,25 @@ fn draft_get_in(store: &mut Store, input: &Value) -> anyhow::Result<Value> {
     }
     let draft = team.draft.clone().unwrap_or_default();
     let validation = super::plan::validate(&team, &BTreeSet::new());
+    // Task 270 (owner, 2026-11-08): New team shows the working mode Zeros
+    // proposes for the project, with its reasons, and the preset the owner
+    // accepted so far (empty: the proposal).
+    let proposal = super::working_mode::propose(std::path::Path::new(team.folder.trim()));
+    let working = super::working_mode::requested_mode(&json!({"working_mode":team.working_mode}));
+    let working = match (proposal.as_ref(), working) {
+        (Some(proposal), Some(mode)) if mode == "auto" => json!({"accepted":"auto","preset":proposal.preset,"proposal":proposal.value()}),
+        (Some(proposal), Some(mode)) => json!({"accepted":mode,"preset":mode,"proposal":proposal.value()}),
+        (Some(proposal), None) => json!({"accepted":"auto","preset":proposal.preset,"proposal":proposal.value()}),
+        (None, Some(mode)) => json!({"accepted":mode,"preset":mode,"proposal":Value::Null}),
+        (None, None) => json!({"accepted":"auto","preset":Value::Null,"proposal":Value::Null}),
+    };
     // Feedback 2026-11-04 (5): the answer carries what the draft holds, so the
     // lead and the owner can check what was saved.
     let fields = json!({"name":team.name,"goal":team.goal,"addendum":team.lead_protocol,"settings":team.settings,
         "members":team.members,"tasks":team.tasks,"phases":team.phases,"plan_mode":team.plan_mode,"plan_mode_offer":team.plan_mode_offer,
         "plan_mode_reason":team.plan_mode_reason});
-    Ok(json!({"draft":draft,"revision":draft.revision,"unseen":draft.unseen,"owner_edited":cleared,"preflight":validation,"fields":fields}))
+    Ok(json!({"draft":draft,"revision":draft.revision,"unseen":draft.unseen,"owner_edited":cleared,"preflight":validation,
+        "fields":fields,"working_mode":working}))
 }
 
 /// F5: the owner starts a draft team; the lead session is adopted when given,
@@ -5474,6 +5487,15 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             // caller asks for them.
             let include_cancelled = input["include_cancelled"].as_bool() == Some(true);
             let mut value = view_with_cancelled(&team, &teams, sessions.as_deref(), include_cancelled);
+            // Task 270 (owner, 2026-11-08): the project's working mode: the
+            // preset the team follows, the cached proposal with its reasons, and
+            // what the settings still miss of it (no Git read on a poll).
+            let disagreeing = super::working_mode::cached_disagreement(&team).map(|(_, wrong)| wrong);
+            value["working_mode"] = json!({
+                "preset": team.working_mode,
+                "proposal": team.mode_proposal,
+                "disagreeing": disagreeing,
+            });
             // D2: the findings page takes a before cursor.
             value["findings"] = findings_page(&team, input["before"].as_u64());
             // U38: the profile only on request, as hgs team profile gives it.

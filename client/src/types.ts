@@ -865,6 +865,8 @@ export interface ComposerView {
   /** False while a required card stands in for the editor and the action row (Qt's setInputVisible). */
   input_visible: boolean;
   queue: QueueView | null;
+  /** The interrupted prompt Rust offers an empty field (zerus-5wmh.13.4): taken once, only while this field is still empty and nothing typed is on its way. */
+  offer?: { id: number; text: string } | null;
 }
 
 // The question card (src-tauri composer/questions.rs, core questions.rs).

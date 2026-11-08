@@ -27,6 +27,7 @@ pub mod fetch;
 pub mod files;
 pub mod handed;
 mod history_hint;
+mod interrupted;
 pub mod questions;
 pub mod queue;
 pub mod saved;
@@ -307,6 +308,16 @@ pub struct SubagentView {
     pub hint: String,
 }
 
+/// Text Rust offers the message field (Qt's `offerDraft`): the webview takes
+/// it once, only while its own field is still empty and nothing it typed is
+/// on its way, as an ordinary edit (zerus-5wmh.13.4, zerus-c0xz8). Typing the
+/// webview has not handed over yet therefore always wins.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct DraftOffer {
+    pub id: u64,
+    pub text: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct ComposerView {
     pub handle: u64,
@@ -384,6 +395,9 @@ pub struct ComposerView {
     /// The editor and the action row show: false while a required card
     /// stands in for them (`MessageComposer::setInputVisible`).
     pub input_visible: bool,
+    /// The interrupted prompt offered to an empty field, while Rust's draft is
+    /// still empty, loaded and idle.
+    pub offer: Option<DraftOffer>,
 }
 
 /// One composer's draft and state (`MessageComposer::Draft` plus its sets).
@@ -446,6 +460,8 @@ pub(crate) struct Composer {
     pub(crate) handed: Option<handed::Handed>,
     /// A reload's one lookup of the held identity ran.
     pub(crate) probed: bool,
+    /// The interrupted prompt offered to the field ([`DraftOffer`]); any edit ends it.
+    pub(crate) offer: Option<DraftOffer>,
 }
 
 impl Composer {
@@ -483,6 +499,7 @@ impl Composer {
             checkpoint: None,
             handed: None,
             probed: false,
+            offer: None,
         }
     }
 
@@ -645,6 +662,13 @@ pub(crate) struct Hub {
     pub(crate) events: VecDeque<ComposerEvent>,
     /// The window is hidden: a handed-over send is not checked.
     pub(crate) hidden: bool,
+    /// The prompts a Stop gives back once their turns read interrupted
+    /// (Qt's `m_interruptPrompts`), by draft key, at most 16.
+    pub(crate) interrupted: interrupted::Prompts,
+    /// Numbers the draft offers, so the webview takes each one once.
+    next_offer: u64,
+    /// Numbers the Stops whose prompts wait (`interrupted::Prompt::stop`).
+    pub(crate) next_stop: u64,
 }
 
 impl Hub {
@@ -1253,6 +1277,8 @@ impl Composers {
         composer.draft.text = text;
         composer.position = position;
         composer.anchor = anchor;
+        // The webview took the offer, or typed its own text: either ends it.
+        composer.offer = None;
         if !composer.error && !composer.uncertain {
             composer.notice.clear();
         }
@@ -1627,6 +1653,7 @@ impl Composers {
     /// `continueAfterCompact` and `continueAfterStart`, 3607), and the
     /// question cards follow (`renderQuestion`).
     fn after_observe(&self, accepted_details: bool) {
+        self.restore_interrupted();
         self.reconcile();
         self.continue_open();
         self.settle_gave_up();
@@ -1637,6 +1664,59 @@ impl Composers {
             self.queue_observed();
         }
         self.changed();
+    }
+
+    /// Qt's `restoreInterruptedPrompt`: once the open session's stopped turn
+    /// reads interrupted, its prompt is offered to the message field, which
+    /// must be empty and idle: a draft the person started, or a message on
+    /// its way, always wins (`offerDraft`). The draft itself is not written
+    /// here: the webview may hold typing Rust has not received yet, so it
+    /// takes the offer only while its own field is empty ([`DraftOffer`]).
+    /// Runs before the local rows' reconcile, which may drop the row that
+    /// holds the exact sent text.
+    fn restore_interrupted(&self) {
+        let mut hub = self.lock();
+        let Some(key) = hub.open_key.clone() else {
+            return;
+        };
+        if hub.closed
+            || hub
+                .open
+                .as_ref()
+                .is_some_and(|open| open.subagent.is_some())
+        {
+            return;
+        }
+        let (Some(prompt), Some(details)) = (
+            hub.interrupted.get(&key).cloned(),
+            hub.followed.details.clone(),
+        ) else {
+            return;
+        };
+        match interrupted::verdict(&prompt, &details) {
+            interrupted::Verdict::Wait => return,
+            interrupted::Verdict::Drop => {
+                hub.interrupted.remove(&key);
+                return;
+            }
+            interrupted::Verdict::Restore => hub.interrupted.remove(&key),
+        }
+        hub.next_offer += 1;
+        let id = hub.next_offer;
+        let Some(composer) = hub.composers.get_mut(&key) else {
+            return;
+        };
+        if !composer.loaded
+            || composer.has_content()
+            || composer.busy()
+            || prompt.text.trim().is_empty()
+        {
+            return;
+        }
+        composer.offer = Some(DraftOffer {
+            id,
+            text: prompt.text,
+        });
     }
 
     /// A reloaded webview gets the view and the draft keys again. Its
@@ -1829,6 +1909,10 @@ impl Composers {
             question,
             queue: self.queue_part(hub),
             input_visible,
+            offer: composer
+                .offer
+                .clone()
+                .filter(|_| composer.loaded && !composer.has_content() && !composer.busy()),
         })
     }
 }

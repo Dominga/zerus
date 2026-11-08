@@ -51,7 +51,7 @@ type Item = Extract<MenuEntry, { label: string }> & { action: () => void };
  * snapshot of the row as it is now, which the store checks against the
  * listed row when they run.
  */
-export function actionEntries(s: Session, details?: Details, options: { context?: boolean } = {}): { change: Item; stop: Item & { shown: boolean }; rename: Item; fork: Item; archive?: Item; end: Item } {
+export function actionEntries(s: Session, details?: Details, options: { context?: boolean } = {}): { change: Item; stop: Item & { shown: boolean; interrupt: () => Promise<Outcome | undefined> }; rename: Item; fork: Item; archive?: Item; end: Item } {
   const row = snapshotOf(s);
   const archived = row.state === "archived";
   const m = menuState(row, !computerOffline(s.computer), updating(s.computer, s.name), details, {
@@ -60,6 +60,8 @@ export function actionEntries(s: Session, details?: Details, options: { context?
     occupied: archived && archiveNameOccupied(row, catalog.rows),
   });
   const hint = (enabled: boolean, reason?: string) => (enabled || !reason ? undefined : tr(reason));
+  // The Stop's interrupt, whose outcome the composer reads (zerus-5wmh.13.4).
+  const interrupt = () => details ? perform(row, { kind: "interrupt", turn_started: details.turn_started }) : Promise.resolve(undefined);
   return {
     change: {
       label: tr(m.change.label), icon: archived || row.state !== "running" ? "play" : "pause", disabled: !m.change.enabled, hint: hint(m.change.enabled, m.change.reason),
@@ -67,7 +69,7 @@ export function actionEntries(s: Session, details?: Details, options: { context?
     },
     stop: {
       label: tr("Stop"), icon: "circle-stop", shown: m.stop.visible, disabled: !m.stop.enabled, hint: hint(m.stop.enabled, m.stop.reason),
-      action: () => { if (details) void perform(row, { kind: "interrupt", turn_started: details.turn_started }); },
+      interrupt, action: () => { void interrupt(); },
     },
     rename: { label: tr("Rename…"), icon: "pencil", disabled: !m.rename, action: () => send({ type: "open", kind: "rename", row }) },
     fork: forkEntry(s, details),

@@ -48,7 +48,8 @@ function fakes(reply: SendReply = { kind: "sending" }, opened: ComposerView | nu
     answer: async (token, answer) => { calls.push(`answer ${token} ${JSON.stringify(answer)}`); return answerReply; },
     remove: async (_h, index) => { calls.push(`remove ${index}`); }, undo: async () => { calls.push("undo"); },
     allowRetry: async () => { calls.push("allow retry"); }, cancelSend: async () => { calls.push("cancel send"); },
-    interrupted: async () => { calls.push("interrupted"); },
+    interrupted: async () => { calls.push("interrupted"); return 7; },
+    interruptFailed: async (stop: number) => { calls.push(`interruptFailed ${stop}`); },
     clear: async (_h, run, conversation, dismiss) => { calls.push(`clear ${run} ${conversation} ${dismiss}`); return { kind: "notice", text: "Context cleared. Your draft is ready to send.", error: false }; },
     refresh: async (h) => { calls.push(`refresh ${h}`); },
     openAttachment: async (path) => { calls.push(`open file ${path}`); return openReply(); },
@@ -102,6 +103,63 @@ describe("child draft identity", () => {
     for (const other of [null, "", "not-a-uuid", id.toUpperCase(), "00000000-0000-0000-0000-000000000000"]) {
       expect(draftKey({ ...SESSION, session_id: other }), String(other)).toBe(KEY);
     }
+  });
+});
+
+describe("composer Stop and the interrupted prompt (zerus-5wmh.13.4)", () => {
+  it("numbers the Stop and reports its refusal by that number, even after another composer opened", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      expect(await c.interrupted()).toBe(0);
+      c.apply(view());
+      const stopped = await c.interrupted();
+      expect(stopped).toBe(7);
+      // zerus-btmir: the refusal belongs to that Stop, not to whichever composer is open now.
+      c.apply(view({ handle: 2, key: "fixture\nclaude/project/other" }));
+      await c.interruptFailed(stopped);
+      await c.interruptFailed(0);
+      expect(f.calls).toEqual(["interrupted", "interruptFailed 7"]);
+    });
+  });
+
+  // review-win-d's controls for PR #1778 (zerus-c0xz8): typing Rust has not received yet wins.
+  for (const when of ["before", "after"] as const) {
+    it(`keeps the next draft typed ${when} Stop rather than the offered old prompt`, async () => {
+      const f = fakes();
+      await createRoot(async () => {
+        const c = createComposer(f.port, f.timers);
+        c.apply(view());
+        if (when === "before") c.input("my next message", 15, 15);
+        await c.interrupted();
+        if (when === "after") c.input("my next message", 15, 15);
+        expect(f.calls.some((call) => call.startsWith("edit "))).toBe(false);
+        c.apply(view({ offer: { id: 1, text: "the interrupted old prompt" } }));
+        f.advance(EDIT_MS);
+        await tick();
+        expect(c.text()).toBe("my next message");
+        expect(f.calls.filter((call) => call.startsWith("edit "))).toEqual(["edit 1 my next message"]);
+      });
+    });
+  }
+
+  it("takes an offer into an empty field once, as an ordinary edit", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view());
+      c.apply(view({ offer: { id: 4, text: "Fix the build" } }));
+      expect(c.text()).toBe("Fix the build");
+      expect(c.selection()).toEqual({ start: 13, end: 13 });
+      f.advance(EDIT_MS);
+      await tick();
+      expect(f.calls.filter((call) => call.startsWith("edit "))).toEqual(["edit 1 Fix the build"]);
+      // The same offer again (a repeated view) is not taken twice.
+      c.input("", 0, 0);
+      f.advance(EDIT_MS); await tick();
+      c.apply(view({ offer: { id: 4, text: "Fix the build" } }));
+      expect(c.text()).toBe("");
+    });
   });
 });
 

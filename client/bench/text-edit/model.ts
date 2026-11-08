@@ -22,7 +22,7 @@ const port={open:async()=>state,
    setTimeout(()=>model.apply({...state,handle,rev,text_epoch,text,position,anchor}),30);
  },
  send:async(_h:number,_r:number,_e:number,text:string)=>{sends.push(text); return {kind:"sending"} as const;},
- push:async()=>({kind:"sending"} as const),interrupted:async()=>{},
+ push:async()=>({kind:"sending"} as const),interrupted:async()=>{},interruptFailed:async()=>{},
 } as ComposerPort;
 export const model=createComposer(port);
 export const open=async()=>{await model.open({computer:"fixture",key:"run:fixture",name:"claude/project/test",archive_id:null});};

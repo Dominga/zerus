@@ -2145,6 +2145,10 @@ pub(crate) struct Task {
     pub control: Vec<Control>,
     #[serde(default)]
     pub deps: Vec<Dependency>,
+    /// Task #289: dependencies the lead kept after they were cancelled: the
+    /// task does not need their cancelled work, so the inbox notice clears.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept_cancelled: Vec<u32>,
     /// Task #60 (owner, 2026-11-06): the task this one was added for (a missed
     /// item or a bug it produced), in the same team. Unlike `deps` it never
     /// blocks or gates: the task is placed at least in its origin's layer and
@@ -2700,6 +2704,16 @@ impl PhaseKind {
     }
 }
 
+/// Task #289: a notice the lead marked seen, with the change signature it had
+/// then; it returns only when that signature differs.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub(crate) struct SeenNotice {
+    pub key: String,
+    pub signature: String,
+    #[serde(default)]
+    pub at: f64,
+}
+
 /// What happened to a phase appended by `extend`.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -3136,6 +3150,10 @@ pub(crate) struct Team {
     /// any; newest last, at most `LEAD_CHANGES_KEPT`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lead_changes: Vec<LeadChange>,
+    /// Task #289: the inbox notices the lead marked seen, oldest first, at most
+    /// 300; each returns to the inbox when its content changes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seen_notices: Vec<SeenNotice>,
     /// #511 N3: members to tell that their worked-ahead attempt was revoked
     /// with its phase, newest last, at most 20. Task 24: also a member whose
     /// attempt in progress was revoked by a reassign, a take-over or a cancel

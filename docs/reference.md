@@ -2893,6 +2893,30 @@ with the count. Zerus's own messages are at most 32 KiB each. A RustCodeLore
 team keeps its team messages here too: hgs does not link the lore crate, and a
 message must not wait for a store on another computer.
 
+#### Decisions and notices (task 289)
+
+Owner, 2026-11-08: the lead's inbox has two kinds of item. A **decision** is
+something only the lead can settle: a report, a question, a permission, a task
+wait, a card to propose. A **notice** is information: a decided proposal
+(`proposal_decided`), a task whose dependency was cancelled
+(`dependency_cancelled`), a member that does not read (`unread_messages`) and the
+lead-changes digest (`lead_changes`). Every item says `"notice": true|false`.
+
+A notice carries a `seen` command and is hidden by
+`{"request_id":"UUID","team":"ID","items":["proposal:p77"]} | hgs team seen
+--json`, which stores the notice's content signature with the team (at most 300,
+across restarts). The notice returns by itself when its content changes (a new
+decision note, another cancelled dependency, another unread count, a newer
+digest); a decision is never marked seen - it is answered. Unknown or
+decision keys come back in `unknown` and mark nothing.
+
+`dependency_cancelled` offers `keep` next to hold and cancel:
+`{"request_id":"UUID","team":"ID","task":N} | hgs team keep --json` (or
+`"deps":[ids]` for some of them) records that the task does not need the
+cancelled work, so the notice clears; the dependencies stay on the plan. The
+idle-lead nag counts and names decisions only, so a notice can never keep it
+alive ("You are idle while 1 decision(s) wait").
+
 ### Scaling and draining the roster
 
 `hgs team scale --json {"request_id":"<uuid>","team":"<id>","role":"Backend",

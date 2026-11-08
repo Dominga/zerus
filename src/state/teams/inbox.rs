@@ -54,6 +54,15 @@ impl Item {
         // U18: every item says how long it has waited, so the desktop and the
         // lead see the stuck ones without reading timestamps.
         value["age"] = json!(age(crate::state::now(), self.since));
+        // Task #289: the lead knows a notice from a decision and how to mark it
+        // seen; the key is what `hgs team seen --json` takes.
+        value["notice"] = json!(notice(self.kind));
+        if notice(self.kind) {
+            value["seen"] = json!(format!(
+                "{{\"request_id\":\"UUID\",\"team\":\"TEAM\",\"items\":[\"{}\"]}} | hgs team seen --json",
+                self.key
+            ));
+        }
         if !self.detail.is_empty() {
             value["detail"] = json!(self.detail);
         }
@@ -62,6 +71,30 @@ impl Item {
         }
         value
     }
+}
+
+/// Task #289 (owner, 2026-11-08): notices are information for the lead, never a
+/// decision waiting: a decided proposal, a cancelled dependency, a member that
+/// does not read and the digests. They can be marked seen and return only when
+/// their content changes.
+const NOTICES: [&str; 4] = ["proposal_decided", "dependency_cancelled", "unread_messages", "lead_changes"];
+
+pub(crate) fn notice(kind: &str) -> bool {
+    NOTICES.contains(&kind)
+}
+
+/// A notice's change signature: the same key marked seen comes back when its
+/// words, time, member or task change.
+pub(crate) fn signature(item: &Item) -> String {
+    use sha2::{Digest, Sha256};
+    let text = format!("{}\n{}\n{}\n{}\n{}\n{:?}\n{:.0}", item.kind, item.key, item.summary, item.detail, item.member, item.task, item.since);
+    format!("{:x}", Sha256::digest(text.as_bytes()))
+}
+
+/// Whether the lead marked this notice seen with exactly this content.
+fn is_seen(team: &Team, item: &Item) -> bool {
+    let signature = signature(item);
+    team.seen_notices.iter().any(|seen| seen.key == item.key && seen.signature == signature)
 }
 
 /// One line of a text, never a paragraph: the inbox message stays readable.
@@ -123,6 +156,8 @@ pub(crate) fn items(team: &Team) -> Vec<Item> {
 pub(crate) fn items_for(team: &Team, reviewer: &str) -> Vec<Item> {
     let mut items = all_items(team);
     items.retain(|item| reviewer_of(team, item) == reviewer);
+    // Task #289: a notice the lead marked seen stays out until it changes.
+    items.retain(|item| !notice(item.kind) || !is_seen(team, item));
     items
 }
 
@@ -138,7 +173,9 @@ fn reviewer_of(team: &Team, item: &Item) -> String {
     }
 }
 
-fn all_items(team: &Team) -> Vec<Item> {
+/// Every item, seen notices included: `hgs team seen` marks what it finds here,
+/// and `items` hides what is already seen (task #289).
+pub(crate) fn all_items(team: &Team) -> Vec<Item> {
     let active = matches!(team.status, TeamStatus::Running | TeamStatus::Paused);
     // N5: a finished team has no open work, but the owner's decision on the
     // lead's proposal is still the lead's to read (spec 4).
@@ -724,8 +761,12 @@ fn all_items(team: &Team) -> Vec<Item> {
                 task.title,
                 names.join(", ")
             )),
-            command: format!("{} | hgs team status --json", json!({"team":team.id})),
-            detail: "Re-plan it if it needed the cancelled work: give it a new dependency, hold it, or cancel it too.".into(),
+            command: format!("{} | hgs team keep --json", json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id})),
+            detail: format!(
+                "Keep it if it does not need the cancelled work: the keep command above records that and clears this notice. Otherwise re-plan it: hold it with {} | hgs team hold --json, or cancel it too with {} | hgs team cancel --json.",
+                json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id}),
+                json!({"request_id":PLACEHOLDER,"team":team.id,"task":task.id,"reason":"..."})
+            ),
         });
     }
     // #718: flaky suites to file a task for, suites over their budgets, the

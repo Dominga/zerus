@@ -301,7 +301,9 @@ pub(crate) fn waiting(hooks: &Hooks) -> Option<String> {
 /// waits for its decision, oldest first, at most five.
 pub(crate) fn lead_idle_text(team: &Team, stall: &LeadStall, now: f64) -> String {
     let minutes = ((now - stall.oldest).max(0.0) / 60.0).round() as u64;
-    let mut items: Vec<super::inbox::Item> = super::inbox::items(team);
+    // Task #289: the nag names the decisions the stall counts, never a notice
+    // (a decided proposal, a cancelled dependency, an unread count, a digest).
+    let mut items: Vec<super::inbox::Item> = super::inbox::items(team).into_iter().filter(super::lead_stall::decision).collect();
     items.sort_by(|a, b| a.since.total_cmp(&b.since));
     let mut text = format!(
         "[Zerus team \u{b7} from: Zerus \u{b7} look]\nYou are idle while {} decision(s) wait, the oldest for {minutes} min:\n",

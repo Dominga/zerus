@@ -73,8 +73,10 @@ pub(crate) fn prompt_of(details: &Value, local: &[LocalMessage]) -> Option<Promp
     let run = details["run_id"].as_str().unwrap_or("");
     let conversation = details["conversation_id"].as_str().unwrap_or("");
     let clipped = recorded.chars().count() > CLIP && recorded.ends_with('\u{2026}');
+    // Only the one ellipsis hgs appends: the prompt's own 4000th character
+    // may be an ellipsis too, as Qt's `chopped(1)` keeps it (zerus-34rs0).
     let known = if clipped {
-        recorded.trim_end_matches('\u{2026}')
+        recorded.strip_suffix('\u{2026}').unwrap_or(recorded)
     } else {
         recorded
     };
@@ -226,6 +228,29 @@ mod tests {
         assert_eq!(
             prompt_of(&whole, &[old]).map(|p| (p.text, p.conversation)),
             Some(("Fix the build".into(), "new-conversation".into()))
+        );
+    }
+
+    /// review-win-d's control for PR #1778 (zerus-34rs0).
+    #[test]
+    fn clipping_removes_only_the_ellipsis_hgs_appends() {
+        let prefix = "x".repeat(CLIP - 1);
+        // The prompt's 4000th character is an ellipsis; hgs appends one more.
+        let clipped = details(&format!("{prefix}\u{2026}\u{2026}"), "working");
+        let wrong = local(
+            &format!("{prefix}y is a different 4000th character"),
+            "run",
+            Status::Sending,
+        );
+        assert_eq!(prompt_of(&clipped, &[wrong]), None);
+        let right = local(
+            &format!("{prefix}\u{2026} and the rest of it"),
+            "run",
+            Status::Sending,
+        );
+        assert_eq!(
+            prompt_of(&clipped, &[right]).map(|p| p.text),
+            Some(format!("{prefix}\u{2026} and the rest of it"))
         );
     }
 

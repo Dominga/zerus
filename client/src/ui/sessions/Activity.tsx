@@ -20,8 +20,10 @@ import { recordingBlob } from "./voice-playback";
 import { cardTarget, createOpen, readCards, rowScope } from "./attachment-card";
 import { createStore, reconcile } from "solid-js/store";
 import { Icon } from "../lib/icons";
+import { ToolRow, TOOL_OUTPUT, outputKey, type ProcessLinks } from "./ToolEvents";
+import { processes, processViewKey, recordedProcess } from "../../store/processes";
 import { selected, toast, contentScale, subagentOpen, setSubagentOpen, setMenu, setDetailTab, takeLatestRequest, type MenuEntry } from "../../store/ui";
-import { activity } from "../../store/session";
+import { activity, processesTarget } from "../../store/session";
 import { orderedRows } from "../../store/catalog";
 import { flag, num, setSetting } from "../../store/settings";
 import type { ActivitySource, AttachmentScope } from "../../store/activitySource";
@@ -34,6 +36,7 @@ import { buildTranscript, createActivityProjections, VOICE_STATE_LABEL, voiceSta
 import { DELETE_TEXT, DELETE_TITLE, retryReason, routeInspect } from "./local-actions";
 import { NOT_DELIVERED_HINT } from "./inbox-actions";
 import { createInboxRemoveScope, InboxRemove, RemoveQueuedDialog, type InboxRemovePorts, type InboxRemoveScope } from "./InboxRemove";
+import { emptyActivity } from "./activity-empty";
 import { markdownReady } from "./markdown";
 import { ActivitySession, Body } from "./MarkdownBody";
 
@@ -578,7 +581,11 @@ function EchoBody(props: { item: ActivityItem; scope?: AttachmentScope }) {
   return <ItemBody {...props} item={shown()} />;
 }
 
-function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?: string; postersEnabled?: boolean; expanded?: boolean; onExpanded?: (open: boolean) => void }) {
+function Item(props: {
+  item: TranscriptItem; scope?: AttachmentScope; sourceId?: string; postersEnabled?: boolean; expanded?: boolean; onExpanded?: (open: boolean) => void;
+  /** A tool row's Show more state per event, and View process links. */
+  shown?: (index: number) => number | undefined; onMore?: (index: number) => void; process?: ProcessLinks;
+}) {
   const [open, toggleOpen] = layoutDisclosure(() => props.expanded, props.onExpanded);
   const it = props.item;
   if (it.kind === "media") return <MediaCard item={it} scope={rowScope(it, props.scope)} sourceId={props.sourceId} postersEnabled={props.postersEnabled} expanded={props.expanded} onExpanded={props.onExpanded} />;
@@ -595,18 +602,8 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?:
     );
   return (
     <Show when={it.kind !== "tools" && it.kind !== "tool" && it.kind !== "warm"} fallback={
-      <div class="act-tools" id={`item-${it.id}`} classList={{ open: open(), warn: !!it.warn, warm: it.kind === "warm", inherited: !!it.inherited }}>
-        <button class="act-tools-head" onClick={toggleOpen} aria-expanded={open()}>
-          <Icon name="chevron-right" size={12} class="chev" />
-          <b>{it.title}</b>
-          <Show when={it.kind === "tools"}><span class="muted">/ {it.body}</span></Show>
-          <span class="act-time">{it.at}</span>
-        </button>
-        <Show when={it.kind === "tool"}><div class="act-tool-cmd mono">{it.body}</div></Show>
-        <Show when={open() && it.lines}>
-          <div class="act-tool-lines mono"><For each={it.lines}>{(l) => <div>{l}</div>}</For></div>
-        </Show>
-      </div>
+      <ToolRow item={it} open={open()} onToggle={toggleOpen} shown={(index) => props.shown?.(index)}
+        onMore={(index) => props.onMore?.(index)} process={props.process} />
     }>
       <article class={`act-msg k-${it.kind}`} id={`item-${it.id}`} classList={{ inherited: !!it.inherited }}>
         <header>
@@ -758,12 +755,27 @@ export function ActivityView(props: { source?: ActivitySource }) {
       for (const key of virtualizer.itemSizeCache.keys()) if (!content.has(String(key))) virtualizer.itemSizeCache.delete(key);
       const disclosures = Object.fromEntries(Object.entries(expanded).filter(([key]) => content.has(key)));
       setExpanded(reconcile(disclosures));
+      setMore(reconcile(Object.fromEntries(Object.entries(more).filter(([key]) => content.has(key.slice(0, key.lastIndexOf("#")))))));
       setView("items", reconcile(items, { key: "id" }));
       setView({ expired, loaded, pane, tool });
       reading.changed(); end.changed();
     }));
   });
   const [expanded, setExpanded] = createStore<Record<string, boolean>>({});
+  /** Show more per tool event (`outputKey`), kept while its row is loaded so a row scrolled back keeps its height. */
+  const [more, setMore] = createStore<Record<string, number>>({});
+  /**
+   * View process from the live main Activity while Processes is on
+   * (ActivityView.cpp:1129-1134): only in the Processes view of the session
+   * the tab follows now, checked when offered and again when used (zerus-u81tf).
+   */
+  const processView = () => { const target = processesTarget(); return target ? processViewKey(target) : undefined; };
+  const processLinks = (): ProcessLinks | undefined => source() === activity && !subagentOpen() && flag("processes/enabled") ? {
+    linkable: (process) => recordedProcess(processes.view(), process, processView()),
+    open: (process) => { if (processes.reveal(process, processView())) setDetailTab("processes"); },
+  } : undefined;
+  /** The guidance an empty Activity shows (ActivityView.cpp:1145-1150). */
+  const empty = createMemo(() => emptyActivity(source().summary(), !!s()?.tracked));
   let olderQueued = false;
   // Keep a named row and its offset while the end pin is released.
   const selectionInside = () => {
@@ -928,7 +940,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
     const pointerEnded = () => motion.release();
     window.addEventListener("pointerup", pointerEnded); window.addEventListener("pointercancel", pointerEnded); window.addEventListener("blur", pointerEnded);
     onCleanup(() => { window.removeEventListener("pointerup", pointerEnded); window.removeEventListener("pointercancel", pointerEnded); window.removeEventListener("blur", pointerEnded); });
-    activityTexts.set(scroller, () => activityText(view.items, expanded));
+    activityTexts.set(scroller, () => activityText(view.items, expanded, more));
     const selectionChanged = () => {
       if (!selectionCoversActivity(scroller)) activityAll.delete(scroller);
       const inside = selectionInside();
@@ -1026,6 +1038,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
     motion.reset(); setLayoutHeld(false); latestAfterScroll = false;
     activityAll.delete(scroller);
     setExpanded(reconcile({}));
+    setMore(reconcile({}));
     measuredContent.clear(); setMeasuring([]); setSelectionIndexes([]);
     heights.clear();
     virtualizer.measure();
@@ -1135,7 +1148,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
           </Show>
           <Show when={!states().archived} fallback={<div class="notice"><Icon name="archive" size={14} /><div>{tr("This conversation is archived.")}</div></div>}>
             <Show when={view.loaded || view.items.length} fallback={<div class="act-older hint">{tr("Reading activity…")}</div>}>
-              <Show when={view.items.length} fallback={<div class="act-older hint">{tr("No recorded activity yet.")}</div>}>
+              <Show when={view.items.length} fallback={<div class="act-empty"><b>{empty().title}</b><p class="muted">{empty().text}</p></div>}>
                 {/* Reserve the current virtual extent through range swaps. Without
                     it, a synchronous layout between removing rows and updating
                     spacers makes WebKit clamp scrollTop even during a gesture.
@@ -1156,7 +1169,10 @@ export function ActivityView(props: { source?: ActivitySource }) {
                           virtualizer.measureElement(node);
                         }}
                         style={{ "margin-top": `${flow().margins.get(id) ?? 0}px` }}>
-                        <Show when={item()}>{(it) => <Item item={it()} scope={scope()} sourceId={source().target()?.id} postersEnabled={placed() && !pageHidden()} expanded={!!expanded[id]} onExpanded={(open) => { heights.invalidate(id); setExpanded(id, open); }} />}</Show>
+                        <Show when={item()}>{(it) => <Item item={it()} scope={scope()} sourceId={source().target()?.id} postersEnabled={placed() && !pageHidden()} expanded={!!expanded[id]} onExpanded={(open) => { heights.invalidate(id); setExpanded(id, open); }}
+                          shown={(index) => more[outputKey(id, index)]}
+                          onMore={(index) => { heights.invalidate(id); setMore(outputKey(id, index), (more[outputKey(id, index)] ?? TOOL_OUTPUT.first) + TOOL_OUTPUT.step); }}
+                          process={processLinks()} />}</Show>
                       </div>
                     );
                   }}</For>

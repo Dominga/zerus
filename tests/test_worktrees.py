@@ -87,9 +87,15 @@ class Worktrees(Repository,unittest.TestCase):
         receipt=store/f'{request}.json';saved=receipt.read_bytes()
         for delayed in (args,[item for item in args if item!='--receipt']):
             result=subprocess.run(delayed,env=self.env,text=True,capture_output=True,timeout=8)
-            self.assertEqual(result.returncode,0,result.stderr);self.assertEqual(json.loads(result.stdout),fence)
+            if '--receipt' in delayed:
+                self.assertEqual(result.returncode,0,result.stderr);self.assertEqual(json.loads(result.stdout),fence)
+            else:
+                self.assertEqual(result.returncode,1,result.stderr);self.assertEqual(result.stdout,'')
+                self.assertIn('outcome is unconfirmed',result.stderr)
+                self.assertIn(request,result.stderr);self.assertIn('Do not retry creation',result.stderr)
             self.assertFalse((self.root/'receipt-checkout').exists())
             self.assertEqual(self.git('-C',str(self.repo),'branch','--list','receipt-work'),'')
+            self.assertEqual(receipt.read_bytes(),saved)
         self.assertEqual(self.receipt_control('status',request),fence)
         result=subprocess.run(cancel,env=self.env,text=True,capture_output=True,timeout=5)
         self.assertEqual(result.returncode,0,result.stderr);self.assertEqual(json.loads(result.stdout),fence)
@@ -97,6 +103,39 @@ class Worktrees(Repository,unittest.TestCase):
         wrong=cancel.copy();wrong[wrong.index('--fingerprint')+1]='0'*64
         result=subprocess.run(wrong,env=self.env,text=True,capture_output=True,timeout=5)
         self.assertNotEqual(result.returncode,0);self.assertEqual(receipt.read_bytes(),saved)
+
+    def test_plain_uuid_failure_reports_detail_and_never_replays_the_original_hook(self):
+        request=str(uuid.uuid4());args=[arg for arg in self.receipt_create(request) if arg!='--receipt']
+        count=self.root/'checkout-hook-count';hook=self.repo/'.git/hooks/post-checkout'
+        hook.write_text('#!'+sys.executable+'\nfrom pathlib import Path\np=Path('+repr(str(count))+')\np.write_text(p.read_text()+"x" if p.exists() else "x")\nraise SystemExit(7)\n')
+        hook.chmod(0o700)
+        result=subprocess.run(args,env=self.env,text=True,capture_output=True,timeout=10)
+        self.assertEqual(result.returncode,1,result.stderr);self.assertEqual(result.stdout,'')
+        value=self.receipt_control('status',request)
+        self.assertEqual(value['status'],'failed');self.assertIs(value['effects_started'],True)
+        self.assertIn(value['detail'],result.stderr);self.assertIn(request,result.stderr)
+        self.assertIn('Do not retry creation',result.stderr)
+        self.assertEqual(count.read_text(),'x')
+        self.assertTrue((self.root/'receipt-checkout').is_dir())
+        self.assertIn('receipt-work',self.git('-C',str(self.repo),'branch','--list','receipt-work'))
+        receipt=self.root/'state/worktree-requests'/f'{request}.json';saved=receipt.read_bytes()
+        for repeated in (args,self.receipt_create(request)):
+            again=subprocess.run(repeated,env=self.env,text=True,capture_output=True,timeout=5)
+            if '--receipt' in repeated:
+                self.assertEqual(again.returncode,0,again.stderr);self.assertEqual(json.loads(again.stdout),value)
+            else:
+                self.assertEqual(again.returncode,1,again.stderr);self.assertEqual(again.stdout,'')
+                self.assertEqual(again.stderr,result.stderr)
+            self.assertEqual(count.read_text(),'x');self.assertEqual(receipt.read_bytes(),saved)
+        self.assertEqual(self.receipt_control('status',request),value)
+
+    def test_plain_opaque_failure_keeps_the_legacy_lane(self):
+        args=[arg for arg in self.receipt_create('legacy-mobile-request',branch='main') if arg!='--receipt']
+        result=subprocess.run(args,env=self.env,text=True,capture_output=True,timeout=10)
+        self.assertEqual(result.returncode,1,result.stderr);self.assertEqual(result.stdout,'')
+        self.assertIn("Branch 'main' already exists",result.stderr)
+        self.assertFalse((self.root/'receipt-checkout').exists())
+        self.assertFalse((self.root/'state/worktree-requests').exists())
 
     def test_a_replaced_empty_receipt_store_never_erases_the_original_fence(self):
         state=Path(self.env['HGS_STATE_DIR']);store=state/'worktree-requests'
@@ -134,6 +173,11 @@ class Worktrees(Repository,unittest.TestCase):
         self.assertEqual(self.receipt_control('status',request)['status'],'unconfirmed')
         repeated=subprocess.run(args,env=self.env,text=True,capture_output=True,timeout=5)
         self.assertEqual(repeated.returncode,0,repeated.stderr);self.assertEqual(json.loads(repeated.stdout)['status'],'unconfirmed')
+        original=receipt.read_bytes()
+        plain=subprocess.run([arg for arg in args if arg!='--receipt'],env=self.env,text=True,capture_output=True,timeout=5)
+        self.assertEqual(plain.returncode,1,plain.stderr);self.assertEqual(plain.stdout,'')
+        self.assertIn('outcome is unconfirmed',plain.stderr);self.assertIn(request,plain.stderr)
+        self.assertIn('Do not retry creation',plain.stderr);self.assertEqual(receipt.read_bytes(),original)
         receipt.write_text('{broken')
         repeated=subprocess.run(args,env=self.env,text=True,capture_output=True,timeout=5)
         self.assertNotEqual(repeated.returncode,0);self.assertEqual(receipt.read_text(),'{broken')

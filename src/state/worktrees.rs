@@ -6,6 +6,8 @@ use std::fs::{self, OpenOptions};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+mod creation_cli;
+
 const MAX_OUTPUT: usize = 1024 * 1024;
 const MAX_TREES: usize = 512;
 const TTL: f64 = 30.0;
@@ -461,7 +463,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     {
         let value = match action {
             "create" if args.iter().any(|arg| arg == "--receipt") => super::worktree_requests::create(&args[1..])?,
-            "create" if super::worktree_requests::has_receipt_id(&args[1..]) => super::worktree_requests::create_direct(&args[1..])?,
+            "create" if super::worktree_requests::has_receipt_id(&args[1..]) => creation_cli::outcome(super::worktree_requests::create_direct(&args[1..])?)?,
             "create" => create(&args[1..])?,
             "status" | "cancel" => super::worktree_requests::control(action, &args[1..])?,
             "review" => super::worktree_cleanup::review_command(&args[1..])?,

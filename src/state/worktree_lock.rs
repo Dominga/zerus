@@ -632,7 +632,7 @@ mod tests {
         let Ok(case) = std::env::var("ZERUS_WORKTREE_LOCK_CONTROL") else {
             return;
         };
-        fs::create_dir_all(root()).unwrap();
+        storage::private_dir(&root()).unwrap();
         let base = root().parent().unwrap().join("git");
         let main = base.join("main");
         fs::create_dir_all(&main).unwrap();
@@ -841,7 +841,7 @@ mod tests {
                 let binding=root().join("dsh/bindings").join(format!("{}.json",storage::label_key(string(&legacy,"name"))));
                 atomic(&binding,&legacy.to_string()).unwrap();
                 let mut candidate=record.clone();candidate["layout"]=json!("id");
-                storage::publish_new_id(&mut candidate).unwrap();
+                storage::publish_new_id(&_writer, &mut candidate).unwrap();
                 storage::remove_record(&candidate).unwrap();
                 let foreign=base.join("foreign-provider-locks");fs::create_dir(&foreign).unwrap();
                 let aux=root().join("dsh/bindings.lock");
@@ -866,7 +866,7 @@ mod tests {
                 fs::create_dir(&foreign).unwrap();
                 std::os::unix::fs::symlink(&foreign,root().join("worktree-protections")).unwrap();
                 let mut candidate=record.clone(); candidate["layout"]=json!("id");
-                let result=storage::publish_new_id(&mut candidate);
+                let result=storage::publish_new_id(&_writer, &mut candidate);
                 let entries=fs::read_dir(&foreign).unwrap().count();
                 assert!(result.is_err() && entries==0,
                     "receipt alias was followed: result={result:?}, foreign entries={entries}");
@@ -874,7 +874,7 @@ mod tests {
             "review_missing_receipt" => {
                 let _writer=storage::lock(None).unwrap();
                 let mut candidate=record.clone();candidate["layout"]=json!("id");
-                storage::publish_new_id(&mut candidate).unwrap();
+                storage::publish_new_id(&_writer, &mut candidate).unwrap();
                 let retained=lock.with_extension("retained-original");
                 fs::rename(&lock,&retained).unwrap();
                 atomic(&lock,&format!("{own}\n")).unwrap();
@@ -894,7 +894,7 @@ mod tests {
                 let mut writer = Some(storage::lock(None).unwrap());
                 let mut candidate = record.clone(); candidate["layout"] = json!("id");
                 let file = storage::id_record_path(&id).unwrap();
-                storage::publish_new_id(&mut candidate).unwrap();
+                storage::publish_new_id(writer.as_ref().unwrap(), &mut candidate).unwrap();
                 assert_eq!(fs::read_to_string(&lock).unwrap(),format!("{own}\n"));
                 assert_eq!(serde_json::from_slice::<Value>(&fs::read(&file).unwrap()).unwrap(),candidate);
                 assert_eq!(storage::read_id(&id).unwrap()["session_id"],id);
@@ -927,7 +927,7 @@ mod tests {
                 }
                 let before = fs::read(&file).unwrap();
                 let mut changed = candidate.clone(); changed["run_id"] = json!("another-run");
-                assert!(storage::publish_new_id(&mut changed).is_err());
+                assert!(storage::publish_new_id(writer.as_ref().unwrap(), &mut changed).is_err());
                 assert_eq!(fs::read(&file).unwrap(),before);
                 let removed = Command::new("git").current_dir(&main)
                     .args(["worktree","remove"]).arg(&checkout).output().unwrap();
@@ -940,7 +940,7 @@ mod tests {
                 // different from relocking after the person's manual unlock.
                 let mut later=record.clone(); later["layout"]=json!("id");
                 later["session_id"]=json!(uuid::Uuid::new_v4().to_string());
-                storage::publish_new_id(&mut later).unwrap();
+                storage::publish_new_id(writer.as_ref().unwrap(), &mut later).unwrap();
                 fs::rename(&checkout,base.join("removed-by-person")).unwrap();
                 storage::remove_record(&later).unwrap();
                 assert_eq!(release_locked(&later),Release::Released(checkout.clone()));
@@ -958,7 +958,7 @@ mod tests {
                     fs::rename(&destination,&original).unwrap();
                     std::os::unix::fs::symlink(&outside,&destination).unwrap();
                 })));
-                assert!(storage::publish_new_id(&mut candidate).is_err());
+                assert!(storage::publish_new_id(&_writer, &mut candidate).is_err());
                 assert_eq!(fs::read_dir(&foreign).unwrap().count(),0);
                 assert!(!storage::id_record_path(&id).unwrap().exists());
                 assert_eq!(fs::read_to_string(&lock).unwrap(),format!("{own}\n"));
@@ -980,7 +980,7 @@ mod tests {
                 let binding=directory.join(format!("{}.json",storage::label_key(string(&legacy,"name"))));
                 atomic(&binding,&legacy.to_string()).unwrap();
                 let mut candidate=record.clone();candidate["layout"]=json!("id");
-                storage::publish_new_id(&mut candidate).unwrap();
+                storage::publish_new_id(&_writer, &mut candidate).unwrap();
                 let object=crate::platform::file_identity(&lock).unwrap();
                 storage::remove_record(&candidate).unwrap();
                 if provider != "root" {
@@ -1021,7 +1021,7 @@ mod tests {
                 storage::BEFORE_NEW_ID.with(|hook| *hook.borrow_mut()=Some(Box::new(move || {
                     fs::write(destination,bytes).unwrap();
                 })));
-                assert!(storage::publish_new_id(&mut candidate).is_err());
+                assert!(storage::publish_new_id(&_writer, &mut candidate).is_err());
                 assert_eq!(fs::read_to_string(path).unwrap(),expected);
                 assert_eq!(fs::read_to_string(&lock).unwrap(),format!("{own}\n"));
             }
@@ -1036,7 +1036,7 @@ mod tests {
                         candidate["name"]=json!("dsh/example/shared");candidate["backend"]=json!("dsh");
                         candidate["conversation_id"]=json!("session-native");
                     }
-                    assert!(storage::publish_new_id(&mut candidate).is_err());
+                    assert!(storage::publish_new_id(&_writer, &mut candidate).is_err());
                     assert_eq!(fs::read_dir(&foreign).unwrap().count(),0);
                     assert!(!lock.exists());
                     fs::remove_file(alias).unwrap();
@@ -1045,12 +1045,12 @@ mod tests {
             "publication_shared" => {
                 let _writer = storage::lock(None).unwrap();
                 let mut one = record.clone(); one["layout"] = json!("id");
-                storage::publish_new_id(&mut one).unwrap();
+                storage::publish_new_id(&_writer, &mut one).unwrap();
                 let object = crate::platform::file_identity(&lock).unwrap();
                 let mut two = record.clone(); two["layout"] = json!("id");
                 let two_id = uuid::Uuid::new_v4().to_string(); two["session_id"] = json!(two_id);
                 two["run_id"] = json!("second-run"); two["conversation_id"] = json!("second-conversation");
-                storage::publish_new_id(&mut two).unwrap();
+                storage::publish_new_id(&_writer, &mut two).unwrap();
                 assert_eq!(fs::read_to_string(&lock).unwrap(),format!("{own}\n"));
                 storage::remove_record(&one).unwrap();
                 assert!(matches!(release_locked(&one),Release::Kept(..)));
@@ -1068,14 +1068,14 @@ mod tests {
                 let mut candidate = record.clone(); candidate["layout"] = json!("id");
                 place("A person's lock");
                 let before = fs::read(&lock).unwrap();
-                assert!(storage::publish_new_id(&mut candidate).is_err());
+                assert!(storage::publish_new_id(&_writer, &mut candidate).is_err());
                 assert_eq!(fs::read(&lock).unwrap(),before);
                 assert!(!storage::id_record_path(&id).unwrap().exists());
                 unlock();
-                storage::publish_new_id(&mut candidate).unwrap();
+                storage::publish_new_id(&_writer, &mut candidate).unwrap();
                 unlock();
                 let mut another = candidate.clone(); another["session_id"] = json!(uuid::Uuid::new_v4().to_string());
-                assert!(storage::publish_new_id(&mut another).is_err());
+                assert!(storage::publish_new_id(&_writer, &mut another).is_err());
                 assert!(!lock.exists());
                 assert!(!storage::id_record_path(string(&another,"session_id")).unwrap().exists());
                 assert!(storage::read_id(&id).is_ok());
@@ -1112,7 +1112,7 @@ mod tests {
                     let mut candidate = record.clone(); candidate["layout"] = json!("id");
                     let id = uuid::Uuid::new_v4().to_string();candidate["session_id"] = json!(id);
                     storage::cut::arm(budget);
-                    let result = storage::publish_new_id(&mut candidate);
+                    let result = storage::publish_new_id(&_writer, &mut candidate);
                     storage::cut::disarm();
                     let file = storage::id_record_path(&id).unwrap();
                     if file.exists() {
@@ -1127,7 +1127,7 @@ mod tests {
                             // a fresh identity or cleaned up automatically.
                             let before=fs::read(&lock).unwrap();
                             let mut retry=candidate.clone();retry["session_id"]=json!(uuid::Uuid::new_v4().to_string());
-                            assert!(storage::publish_new_id(&mut retry).is_err());
+                            assert!(storage::publish_new_id(&_writer, &mut retry).is_err());
                             assert_eq!(fs::read(&lock).unwrap(),before);
                         }
                     }

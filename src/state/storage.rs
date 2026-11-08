@@ -500,11 +500,12 @@ thread_local! {
 }
 
 /// Dormant P3e primitive: publish a NEW, preallocated identity, never move or
-/// recreate a prior one. Caller holds the writer and original input exclusion.
+/// recreate a prior one. Caller retains the actual Root writer. Terminal IDs
+/// create and retain their Fresh input lock/kind before record publication.
 /// No production writer calls this until the complete fleet floor is enabled.
 /// An error is not a no-effect witness and must never re-mint a native request.
 #[allow(dead_code)]
-pub(super) fn publish_new_id(record: &mut Value) -> Result<()> {
+pub(super) fn publish_new_id(_writer: &Guard, record: &mut Value) -> Result<()> {
     use super::provider_binding::Provider;
     use super::repositories::directory::Directory;
     let id = string(record,"session_id");
@@ -545,6 +546,12 @@ pub(super) fn publish_new_id(record: &mut Value) -> Result<()> {
     // A protective Git veto is durable before either the superset or record.
     // Keep its actual repository/directory/lock resources through publication.
     let protection = worktree_lock::Protection::acquire(&published)?;
+    #[cfg(unix)]
+    let fresh_input = if namespace.is_none() {
+        Some(native_domain::Fresh::create_under(_writer, &published, std::time::Instant::now() + std::time::Duration::from_secs(5))?)
+    } else { None };
+    #[cfg(not(unix))]
+    if namespace.is_none() { return Err("Fresh ID native input is unverified on this computer".into()); }
     labels::add(name,id)?;
     if !labels::listed_in(&state.path,name).is_some_and(|ids| ids.iter().any(|i| i == id)) {
         return Err("The original label index did not retain the new identity".into());
@@ -556,6 +563,8 @@ pub(super) fn publish_new_id(record: &mut Value) -> Result<()> {
         return Err("The selected state root changed before ID publication".into());
     }
     if let Some(protection) = &protection {protection.verify()?;}
+    #[cfg(unix)]
+    if let Some(input) = &fresh_input {input.verify()?;}
     cut_write()?;
     directory.write_new(&format!("{id}.json"),bytes.as_bytes())?;
     crate::platform::sync_dir(&directory.path).map_err(|e| e.to_string())?;
@@ -564,6 +573,8 @@ pub(super) fn publish_new_id(record: &mut Value) -> Result<()> {
         return Err("The selected state root changed after ID publication".into());
     }
     if let Some(protection) = &protection {protection.verify()?;}
+    #[cfg(unix)]
+    if let Some(input) = &fresh_input {input.verify()?;}
     session_index::note(&published,kind);
     *record = published;
     Ok(())

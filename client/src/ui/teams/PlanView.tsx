@@ -809,24 +809,10 @@ export function PlanView(props: PlanViewProps): JSX.Element {
       <Show when={heatView()}>
         <HeatLegend profile={props.profile} />
       </Show>
-      {/* Task #219: Board, Layers, Profile and Tests keep a phase header each, with its Standard | Free toggle. */}
-      <Show when={mode() !== "graph" && phases().length > 0}>
-        <div class="pm-phase-strip" aria-label={tr("Phases")}>
-          <For each={phases()}>
-            {(phase) => {
-              const status = phaseStatus(phase.phase);
-              return (
-                <div class="pm-phase-head" data-phase={phase.phase.n} data-mode={phase.phase.mode ?? "standard"}>
-                  <span class="pm-phase-n">{phase.phase.n}</span>
-                  <b class="pm-phase-name">{phase.phase.title || tr("Phase %1", phase.phase.n)}</b>
-                  <span class={`pt-chip pt-chip-${status.kind}`}>{statusLabel(status.kind)}</span>
-                  {props.phaseActions?.(phase.phase.n)}
-                </div>
-              );
-            }}
-          </For>
-        </div>
-      </Show>
+      {/* Task 335 (owner, 2026-11-08): no phase strip above the plan. Qt has
+          none: each view with phase headers carries the Standard/Free toggle in
+          the phase's own header (Board and Layers below, Lanes in its header),
+          and Profile and Tests have no phase headers, as in Qt. */}
       <Show when={mode() === "graph"}>
         <div class="pt-plan-body">
           <div class="pt-plan-scroll" ref={scroller} onPointerLeave={() => setHover(null)}>
@@ -896,7 +882,8 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         </div>
       </Show>
       <Show when={mode() === "lanes"}>
-        <LanesView team={props.team} includeCancelled={includeCancelled()} profile={props.profile} onOpen={open} onEdit={props.onLaneEdit} />
+        <LanesView team={props.team} includeCancelled={includeCancelled()} profile={props.profile} onOpen={open} onEdit={props.onLaneEdit}
+          phaseActions={props.phaseActions} />
       </Show>
       <Show when={mode() === "profile"}>
         <div class="pm-profile-scroll">

@@ -6257,7 +6257,12 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
             task.merge = Some(entry);
             events.push(Event::new("merge_queued", json!({"by":label,"task":id,"commit":commit})));
         }
-        return Ok(json!({"status":"merge_queued","task":id}));
+        // Task #267: the answer names the landing and the line it goes to.
+        let line = super::merge_queue::integration_branch(team).unwrap_or_default();
+        let head = super::merge_queue::integration_head(team).unwrap_or_default();
+        return Ok(json!({"status":"merge_queued","task":id,
+            "landing":{"state":"queued","line":line,"head":head,
+                "note":"Zerus lands it on the integration line when its affected tests pass; hgs team status names its landing."}}));
     }
     // A reject or a decision that skips the queue takes the task out of it.
     task.merge = None;
@@ -6345,7 +6350,14 @@ fn decide(team: &mut Team, input: &Value, actor: &Actor, accept: bool, events: &
         events.push(Event::new("held", json!({"by":label,"task":id,"reason":reason})));
     }
     let status = serde_json::to_value(team.task(id).unwrap().status)?;
-    Ok(json!({"status":status,"task":id}))
+    let mut answer = json!({"status":status,"task":id});
+    // Task #267: an accept outside the queue says whether its work is on the
+    // integration line: only the queue lands it.
+    if accept && !merged && !team.integration_folder().is_empty() {
+        answer["landing"] = json!({"state":"not_queued",
+            "why":"the merge queue is off for this team, so the accepted work is not on the integration line"});
+    }
+    Ok(answer)
 }
 
 fn reassign(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {

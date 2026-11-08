@@ -56,6 +56,8 @@ class DeepSeekAccounts(unittest.TestCase):
                 shim = Path(local['HOME']) / '.local/bin'; shim.mkdir(parents=True)
                 ssh = shim / 'ssh'
                 ssh.write_text('#!/usr/bin/env python3\nimport json,os,pathlib,shlex,sys\n'
+                    + 'if sys.argv[-1] == ' + repr('echo "hgs-remote-v2|%OS%|%SystemRoot%|$env:OS|$env:SystemRoot"') + ':\n'
+                    + '    print("hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot"); sys.exit(0)\n'
                     + 'pathlib.Path(' + repr(str(root / 'ssh-args.json')) + ').write_text(json.dumps(sys.argv[1:]))\n'
                     + 'args=shlex.split(sys.argv[-1])[1:]\n'
                     + 'os.execve(' + repr(str(HGS)) + ', [' + repr(str(HGS)) + ']+args, ' + repr(remote) + ')\n')

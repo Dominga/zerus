@@ -25,6 +25,8 @@ root = pathlib.Path(os.environ['ROUTING_ROOT'])
 alias = sys.argv[-2]
 if (root / ('offline-' + alias)).exists():
     print('ssh: connect to host ' + alias + ': Connection timed out', file=sys.stderr); sys.exit(255)
+if sys.argv[-1] == 'echo "hgs-remote-v2|%OS%|%SystemRoot%|$env:OS|$env:SystemRoot"':
+    print('hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot'); sys.exit(0)
 node = root / alias
 env = dict(os.environ, HOME=str(node / 'profile'), HGS_CONFIG_DIR=str(node / 'config'),
            HGS_STATE_DIR=str(node / 'state'), TASK_FIXTURE=str(node))

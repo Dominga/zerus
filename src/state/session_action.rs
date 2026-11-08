@@ -7,6 +7,11 @@ use sha2::{Digest, Sha256};
 use std::cell::{Cell, RefCell};
 
 mod status;
+// Dormant original-claim resource support. Production freshness minting and
+// all producer/adapter wiring remain deliberately unavailable.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)]
+mod writer_claim;
 pub(super) use status::dispatch as status_dispatch;
 pub(crate) use status::machine as status_machine;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -5606,6 +5606,15 @@ does not loop on exit code 4 (system tray unavailable). Compare
 `systemctl --user status hgs-tray.service` and `journalctl --user -u
 hgs-tray.service` when startup fails.
 
+Zerus Next does not exit without a tray host: on a desktop without a
+StatusNotifierItem host (GNOME without an AppIndicator extension, for example)
+it keeps running without an icon, writes "no tray host; open Zerus from the
+applications menu" to its journal once, opens from the applications menu and
+shows its icon as soon as a host starts. Opening Zerus from the menu while the
+service is starting or restarting waits up to 30 s for the service's window
+instead of starting a second one; Zerus reads the unit's state with
+`systemctl --user show` and never changes it.
+
 The separate `hgs-desktop.service` uses the selected CLI's rendered registration
 and readiness contract. `zerus-setup --desktop-service` registers it for an AUR
 installation; the Next source installer registers it directly. Current-login

@@ -442,6 +442,49 @@ pub enum ServiceState {
 pub struct Service {
     pub state: ServiceState,
     pub pid: i64,
+    /// systemd's InvocationID of the unit's current run, when it has one.
+    pub invocation: Option<u128>,
+}
+
+/// The login service's systemd unit on Linux (`tray/packaging/hgs-tray.service`).
+pub const SYSTEMD_UNIT: &str = "hgs-tray.service";
+
+/// A systemd invocation ID: 32 hex digits, as `INVOCATION_ID` and
+/// `systemctl show` print it (dashes, if any, are ignored).
+pub fn invocation_id(text: &str) -> Option<u128> {
+    let digits: String = text.trim().chars().filter(|c| *c != '-').collect();
+    (digits.len() == 32 && digits.chars().all(|c| c.is_ascii_hexdigit()))
+        .then(|| u128::from_str_radix(&digits, 16).ok())
+        .flatten()
+        .filter(|id| *id != 0)
+}
+
+/// `systemctl --user show --property=ActiveState,MainPID,InvocationID`, as
+/// Qt's `SingleInstance::systemdService` reads it (`SingleInstance.cpp:48-71`).
+#[cfg(any(target_os = "linux", test))]
+pub fn systemd_service(properties: &str) -> Service {
+    let (mut active, mut pid, mut invocation) = ("", 0_i64, None);
+    for line in properties.lines() {
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        match name.trim() {
+            "ActiveState" => active = value.trim(),
+            "MainPID" => pid = value.trim().parse().unwrap_or(0),
+            "InvocationID" => invocation = invocation_id(value),
+            _ => {}
+        }
+    }
+    let state = match active {
+        "active" | "reloading" | "refreshing" => ServiceState::Running,
+        "activating" | "deactivating" => ServiceState::Starting,
+        _ => return Service::default(),
+    };
+    Service {
+        state,
+        pid: pid.max(0),
+        invocation,
+    }
 }
 
 /// `launchctl print gui/<uid>/<label>`: only the job's own properties, one
@@ -475,13 +518,110 @@ pub fn launchd_service(description: &str) -> Service {
     Service {
         state,
         pid: pid.max(0),
+        invocation: None,
     }
 }
 
 /// A start that finds no instance leaves the socket to a service another
-/// process runs or is about to run (`SingleInstance::waitsForService`).
-pub fn waits_for_service(service: &Service, own_pid: i64) -> bool {
-    service.state != ServiceState::Absent && service.pid != own_pid
+/// process runs or is about to run (`SingleInstance::waitsForService`). The
+/// unit's own run never waits on itself: its main process, or any process of
+/// that run (a wrapper's child) by its `INVOCATION_ID`.
+pub fn waits_for_service(service: &Service, own_pid: i64, own_invocation: Option<u128>) -> bool {
+    service.state != ServiceState::Absent
+        && service.pid != own_pid
+        && !(own_invocation.is_some() && service.invocation == own_invocation)
+}
+
+/// The service this start belongs to: launchd's job on macOS, the systemd
+/// user unit on Linux; none for a build that is not the switch (no label).
+pub fn platform_service(
+    label: Option<&str>,
+    launchd: impl FnOnce(&str) -> Service,
+    systemd: impl FnOnce(&str) -> Service,
+) -> Service {
+    match label {
+        Some(label) if cfg!(target_os = "macos") => launchd(label),
+        Some(_) if cfg!(target_os = "linux") => systemd(SYSTEMD_UNIT),
+        _ => Service::default(),
+    }
+}
+
+/// The standard output of `command` when it exits successfully within
+/// `limit`; otherwise None, with the child killed and reaped. Its standard
+/// input is /dev/null, its error output is dropped, at most 64 KiB is read
+/// and, on Linux, it inherits no descriptor beyond those three.
+#[cfg(any(target_os = "linux", test))]
+pub fn bounded_read(command: Command, limit: Duration) -> Option<String> {
+    bounded_read_with(command, limit, |_| {})
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn bounded_read_with(
+    mut command: Command,
+    limit: Duration,
+    spawned: impl FnOnce(u32),
+) -> Option<String> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "linux")]
+    // SAFETY: the hook only makes an async-signal-safe syscall. Marking
+    // (rather than closing) keeps Rust's exec-error pipe until exec; a kernel
+    // without close_range refuses the read, which then waits for nothing.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            if libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 1u32 << 2) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().ok()?;
+    spawned(child.id());
+    let mut stdout = child.stdout.take()?;
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = Vec::new();
+        let _ = (&mut stdout).take(64 << 10).read_to_end(&mut text);
+        let _ = sender.send(text);
+    });
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            _ => {
+                // Not yet reaped, so the PID is still this child's.
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    if !status.success() {
+        return None;
+    }
+    let text = receiver.recv_timeout(Duration::from_millis(500)).ok()?;
+    Some(String::from_utf8_lossy(&text).into_owned())
+}
+
+/// `systemctl --user show` for `unit`, read-only and bounded at 2 s like
+/// `SingleInstance::currentService`; a missing systemctl, or a system that
+/// is not systemd, reads as no service at once.
+#[cfg(target_os = "linux")]
+fn systemd_now(unit: &str) -> Service {
+    let mut command = Command::new("systemctl");
+    command.args([
+        "--user",
+        "show",
+        "--property=ActiveState,MainPID,InvocationID",
+        unit,
+    ]);
+    bounded_read(command, Duration::from_secs(2))
+        .map(|text| systemd_service(&text))
+        .unwrap_or_default()
 }
 
 /// `launchctl print`, bounded at 2 s like `SingleInstance::currentService`.
@@ -538,6 +678,10 @@ pub trait Start {
     fn unlock(&mut self);
     fn forward(&mut self, activation: Activation) -> bool;
     fn service(&mut self) -> Service;
+    /// This process's systemd invocation (`INVOCATION_ID`), when it has one.
+    fn own_invocation(&self) -> Option<u128> {
+        None
+    }
     fn claim(&mut self) -> io::Result<()>;
     fn pause(&mut self, pause: Duration);
     fn elapsed(&self) -> Duration;
@@ -575,7 +719,7 @@ pub fn start(
             return Outcome::Forwarded;
         }
         let service = effects.service();
-        if waits_for_service(&service, own_pid) {
+        if waits_for_service(&service, own_pid, effects.own_invocation()) {
             if effects.elapsed() < timing.service_wait {
                 if !wait_reported {
                     wait_reported = true;
@@ -679,11 +823,17 @@ impl Start for UnixStart<'_> {
     }
 
     fn service(&mut self) -> Service {
-        if cfg!(target_os = "macos") {
-            self.label.map(launchd_now).unwrap_or_default()
-        } else {
-            Service::default()
-        }
+        #[cfg(target_os = "linux")]
+        let systemd = systemd_now;
+        #[cfg(not(target_os = "linux"))]
+        let systemd = |_: &str| Service::default();
+        platform_service(self.label, launchd_now, systemd)
+    }
+
+    fn own_invocation(&self) -> Option<u128> {
+        std::env::var("INVOCATION_ID")
+            .ok()
+            .and_then(|id| invocation_id(&id))
     }
 
     fn claim(&mut self) -> io::Result<()> {
@@ -1325,14 +1475,16 @@ mod tests {
             launchd_service(&text("running", "4242")),
             Service {
                 state: ServiceState::Running,
-                pid: 4242
+                pid: 4242,
+                invocation: None,
             }
         );
         assert_eq!(
             launchd_service(&text("spawn scheduled", "")),
             Service {
                 state: ServiceState::Starting,
-                pid: 0
+                pid: 0,
+                invocation: None,
             }
         );
         assert_eq!(
@@ -1345,35 +1497,185 @@ mod tests {
 
     #[test]
     fn only_another_service_process_keeps_the_socket() {
-        assert!(!waits_for_service(&Service::default(), 100));
+        assert!(!waits_for_service(&Service::default(), 100, None));
         assert!(!waits_for_service(
             &Service {
                 state: ServiceState::Running,
-                pid: 100
+                pid: 100,
+                invocation: None,
             },
-            100
+            100,
+            None
         ));
         assert!(waits_for_service(
             &Service {
                 state: ServiceState::Running,
-                pid: 200
+                pid: 200,
+                invocation: None,
             },
-            100
+            100,
+            None
         ));
         assert!(waits_for_service(
             &Service {
                 state: ServiceState::Starting,
-                pid: 0
+                pid: 0,
+                invocation: None,
             },
-            100
+            100,
+            None
         ));
         assert!(waits_for_service(
             &Service {
                 state: ServiceState::Starting,
-                pid: 200
+                pid: 200,
+                invocation: None,
             },
-            100
+            100,
+            None
         ));
+    }
+
+    #[test]
+    fn systemctl_show_reads_qts_states_and_the_run() {
+        let show = |active: &str, pid: &str, id: &str| {
+            systemd_service(&format!(
+                "ActiveState={active}\nMainPID={pid}\nInvocationID={id}\n"
+            ))
+        };
+        let id = "0123456789abcdef0123456789abcdef";
+        let run = invocation_id(id);
+        assert!(run.is_some());
+        for active in ["active", "reloading", "refreshing"] {
+            assert_eq!(
+                show(active, "4242", id),
+                Service {
+                    state: ServiceState::Running,
+                    pid: 4242,
+                    invocation: run,
+                },
+                "{active}"
+            );
+        }
+        for active in ["activating", "deactivating"] {
+            assert_eq!(
+                show(active, "0", "").state,
+                ServiceState::Starting,
+                "{active}"
+            );
+            assert_eq!(show(active, "0", "").pid, 0);
+            assert_eq!(show(active, "0", "").invocation, None);
+        }
+        for active in ["inactive", "failed", "", "maintenance"] {
+            assert_eq!(show(active, "4242", id), Service::default(), "{active}");
+        }
+        assert_eq!(systemd_service(""), Service::default());
+        assert_eq!(show("active", "-5", "nonsense").pid, 0);
+        assert_eq!(show("active", "1", "nonsense").invocation, None);
+        assert_eq!(invocation_id("01234567-89ab-cdef-0123-456789abcdef"), run);
+        assert_eq!(invocation_id(&"0".repeat(32)), None);
+        assert_eq!(invocation_id("0123"), None);
+    }
+
+    #[test]
+    fn the_units_own_run_never_waits_on_itself() {
+        let unit = |pid: i64, invocation: Option<u128>| Service {
+            state: ServiceState::Running,
+            pid,
+            invocation,
+        };
+        // ExecStart through a wrapper: MainPID is the wrapper, the run is ours.
+        assert!(!waits_for_service(&unit(200, Some(7)), 100, Some(7)));
+        assert!(
+            waits_for_service(&unit(200, Some(7)), 100, Some(8)),
+            "another run"
+        );
+        assert!(
+            waits_for_service(&unit(200, Some(7)), 100, None),
+            "a launch from the menu"
+        );
+        assert!(waits_for_service(&unit(200, None), 100, None));
+        assert!(
+            !waits_for_service(&unit(100, Some(7)), 100, None),
+            "the main process"
+        );
+    }
+
+    #[test]
+    fn only_the_switch_asks_its_platforms_service() {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let running = Service {
+            state: ServiceState::Running,
+            pid: 9,
+            invocation: None,
+        };
+        let launchd = |label: &str| {
+            asked.borrow_mut().push(format!("launchd {label}"));
+            running
+        };
+        let systemd = |unit: &str| {
+            asked.borrow_mut().push(format!("systemd {unit}"));
+            running
+        };
+        assert_eq!(platform_service(None, launchd, systemd), Service::default());
+        assert!(
+            asked.borrow().is_empty(),
+            "a build that is not the switch asks nothing"
+        );
+        let found = platform_service(Some("com.hgdev.hgs-tray"), launchd, systemd);
+        let expected: Vec<String> = if cfg!(target_os = "macos") {
+            vec!["launchd com.hgdev.hgs-tray".into()]
+        } else if cfg!(target_os = "linux") {
+            vec!["systemd hgs-tray.service".into()]
+        } else {
+            vec![]
+        };
+        assert_eq!(found == running, !expected.is_empty());
+        assert_eq!(*asked.borrow(), expected);
+    }
+
+    #[test]
+    fn a_bounded_read_answers_kills_or_refuses() {
+        let sh = |script: &str| {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", script]);
+            command
+        };
+        assert_eq!(
+            bounded_read(sh("printf 'ActiveState=active\\n'"), Duration::from_secs(5)).as_deref(),
+            Some("ActiveState=active\n")
+        );
+        assert_eq!(
+            bounded_read(sh("printf partial; exit 3"), Duration::from_secs(5)),
+            None,
+            "a failed show"
+        );
+        assert_eq!(
+            bounded_read(
+                Command::new("/nonexistent/systemctl"),
+                Duration::from_secs(5)
+            ),
+            None,
+            "no systemctl"
+        );
+        let begun = Instant::now();
+        let mut pid = 0;
+        assert_eq!(
+            bounded_read_with(sh("exec sleep 30"), Duration::from_millis(200), |id| pid =
+                id),
+            None
+        );
+        assert!(
+            begun.elapsed() < Duration::from_secs(5),
+            "the bound ends a hung show"
+        );
+        // Killed and reaped: not even a zombie keeps its PID.
+        // SAFETY: signal 0 only checks that the process exists.
+        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        assert_eq!(
+            (alive, io::Error::last_os_error().raw_os_error()),
+            (-1, Some(libc::ESRCH))
+        );
     }
 
     /// Scripted effects for `start`.
@@ -1382,6 +1684,7 @@ mod tests {
         lock_error: Option<String>,
         forwards: VecDeque<bool>,
         services: VecDeque<Service>,
+        invocation: Option<u128>,
         claim_error: Option<String>,
         elapsed: Duration,
         locked: bool,
@@ -1413,6 +1716,9 @@ mod tests {
         fn service(&mut self) -> Service {
             self.services.pop_front().unwrap_or_default()
         }
+        fn own_invocation(&self) -> Option<u128> {
+            self.invocation
+        }
         fn claim(&mut self) -> io::Result<()> {
             self.log.push("claim".into());
             match &self.claim_error {
@@ -1432,6 +1738,30 @@ mod tests {
     }
 
     #[test]
+    fn the_units_own_start_through_a_wrapper_claims_at_once() {
+        let mut script = Script {
+            services: [Service {
+                state: ServiceState::Running,
+                pid: 500,
+                invocation: Some(7),
+            }]
+            .into(),
+            invocation: Some(7),
+            ..Script::default()
+        };
+        assert_eq!(
+            start(&mut script, Activation::Show, 100, &fast()),
+            Outcome::Claimed
+        );
+        assert_eq!(script.elapsed, Duration::ZERO, "no wait on its own socket");
+        assert!(
+            !script.log.iter().any(|line| line.starts_with("report")),
+            "{:?}",
+            script.log
+        );
+    }
+
+    #[test]
     fn a_start_waits_for_the_starting_service_then_forwards() {
         let mut script = Script {
             forwards: [false, false, true].into(),
@@ -1439,10 +1769,12 @@ mod tests {
                 Service {
                     state: ServiceState::Starting,
                     pid: 0,
+                    invocation: None,
                 },
                 Service {
                     state: ServiceState::Running,
                     pid: 500,
+                    invocation: None,
                 },
             ]
             .into(),
@@ -1486,6 +1818,7 @@ mod tests {
             services: [Service {
                 state: ServiceState::Running,
                 pid: 100,
+                invocation: None,
             }]
             .into(),
             ..Script::default()
@@ -1507,6 +1840,7 @@ mod tests {
                 Service {
                     state: ServiceState::Running,
                     pid: 500,
+                    invocation: None,
                 },
                 100,
             )
@@ -1532,6 +1866,7 @@ mod tests {
             services: [Service {
                 state: ServiceState::Starting,
                 pid: 0,
+                invocation: None,
             }]
             .into(),
             forwards: [false, true].into(),

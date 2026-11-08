@@ -1467,6 +1467,24 @@ output and records the run under the session; the same `request_id` never runs
 twice, and asking again reads its state. `hgs run --list --json` lists the
 session's newest runs.
 
+Task 290 (owner, 2026-11-08): a run's command gets the environment the team's
+build templates have. A template starts from the team worker's environment (the
+owner's shell); `hgs run` starts its runner from the calling agent's own
+process, whose environment may lack the developer variables, and then MSVC's
+cl.exe dies with `D8050 ... failed to get command line into debug records`
+(stacker, ring) although the same cargo builds from the owner's shell. The
+claim now carries TEMP and TMP, SystemRoot, windir, SystemDrive, ComSpec and
+PATHEXT, PATH with the system folders, and the Visual Studio developer
+variables (`INCLUDE`, `LIB`, `LIBPATH`, the tools and Windows SDK folders and
+their PATH) read once from `vcvarsall.bat x64` through `vswhere` when the
+caller's shell does not already carry them; a sandboxed member's run still
+points TEMP and TMP into its own folder and keeps the build cache server's
+variables. The command inherits the rest of the environment as before. When a
+run fails and its output is the compiler-startup signature (D8050, the
+debug-record message, or `cannot execute ... c1.dll`), the result says so in
+`error` and carries `"compiler_cannot_start": true` instead of leaving only a
+tail to read.
+
 On Windows a Git Bash wrapper (`bash -c`, `env`, `nohup`, `timeout`, `xargs`,
 `sh -c`, `npx -c`) ends a Windows process between the session and hgs, so the
 process ancestry stops at a process that no longer exists. hgs then asks the

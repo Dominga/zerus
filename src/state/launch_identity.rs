@@ -2,6 +2,8 @@
 //! native admission, consent or permission to adopt an existing session.
 use super::*;
 
+pub(crate) mod helper;
+
 /// Distinct from the creation request's HGS_LAUNCH_ID. An old caller may
 /// inherit HGS_SESSION_ID, so that variable alone cannot allocate a new row.
 pub(crate) const DECLARATION: &str = "HGS_LAUNCH_SESSION_ID";

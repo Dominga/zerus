@@ -1388,6 +1388,63 @@ pub(super) fn reconcile(record:Value)->Value {
         });
     }
 
+    /// Task #396 (owner, 2026-11-09): Claude's chooser for one call of a batch
+    /// of three Explore subagents, as its terminal draws it, and the same
+    /// chooser clipped by a short terminal (no top rule or title).
+    const ARENA_PANEL:&str="────────────────────────────────────────
+ Agent
+  Explore(Arena participants and spawn events)
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don't ask again for Agent commands in D:\Work\Arena
+   3. No
+
+ Esc to cancel · Tab to amend
+";
+    const ARENA_CLIPPED:&str="  Explore(Arena participants and spawn events)
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don't ask again for Agent commands in D:\Work\Arena
+   3. No
+
+ Esc to cancel · Tab to amend
+";
+
+    /// Task #396: a three-subagent request read from the screen is a subagent
+    /// card with Claude's own one-time Yes and No (the desktop's Allow all and
+    /// Deny press them); a clipped chooser offers no choices and says why.
+    #[test] fn a_three_subagent_chooser_on_the_screen_is_answerable_and_a_clipped_one_is_not() {
+        let dir=tempfile::tempdir().unwrap();
+        crate::state::with_test_state_root(dir.path(),||{
+            let calls=[("toolu_one","Arena participants and spawn events"),("toolu_two","HUD and Neo widget architecture"),
+                ("toolu_three","Boss presets table and boss BPs")];
+            let first=json!({"subagent_type":"Explore","description":calls[0].1});
+            let mut r=hooked("Agent",first.clone());
+            for (id,description) in calls {
+                let input=json!({"subagent_type":"Explore","description":description});
+                if id!="toolu_one" {
+                    r["active_tools"][id]=json!({"name":"Agent"});
+                    channel::observe(&mut r,&json!({"hook_event_name":"PreToolUse","tool_use_id":id,"tool_name":"Agent","tool_input":input}));
+                    r["claude_tool_uses"][id]["at"]=json!(5.0);
+                }
+                subagents_confirm::group_add("conversation",id,&input);
+            }
+            let screen=card(&r,ARENA_PANEL);
+            assert_eq!(screen["subagent_confirmation"],true);
+            assert_eq!(screen["subagent_calls"],json!(["toolu_one","toolu_two","toolu_three"]));
+            assert_eq!((screen["can_answer"].clone(),screen["approval_choices"].clone()),(json!(true),json!(true)));
+            let labels:Vec<_>=options(&screen).into_iter().map(|(label,scope)|format!("{label}|{scope}")).collect();
+            assert_eq!(labels,vec!["Yes|once".to_owned(),"Yes, and don't ask again for Agent commands in D:\Work\Arena|broader".to_owned(),"No|once".to_owned()]);
+            assert!(screen["questions"][0]["question"].as_str().unwrap().starts_with("Start 3 subagents"));
+            // A short terminal clips the panel: nothing to choose, Terminal answers it.
+            let clipped=card(&r,ARENA_CLIPPED);
+            assert_eq!((clipped["can_answer"].clone(),clipped["approval_choices"].clone()),(json!(false),json!(false)));
+            assert_eq!(clipped["questions"][0]["options"],json!([]));
+            assert_eq!(clipped["subagent_confirmation"],true);
+            assert!(string(&clipped,"answer_unavailable_reason").contains("Terminal"));
+        });
+    }
+
     /// U19: a broader allow that stops asking - Claude's own "Yes, and don't
     /// ask again ..." on the screen card (as the phone lists it) or the hook
     /// card's - is remembered for the Zerus session and allows every call

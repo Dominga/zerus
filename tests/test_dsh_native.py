@@ -29,6 +29,27 @@ fixture = importlib.util.module_from_spec(_fixture_spec)
 _fixture_spec.loader.exec_module(fixture)
 
 
+def host_process(pid, end=None):
+    """Read a birth identity and state; unreadable is not an exited host."""
+    if sys.platform == 'linux':
+        try:
+            state, _, _, birth = fixture.process_stat(pid, end)
+        except (FileNotFoundError, ProcessLookupError):
+            return None
+        return state, birth
+    fixture.before(end)
+    timeout = 3 if end is None else min(3, end-time.monotonic())
+    result = subprocess.run(['ps', '-p', str(pid), '-o', 'stat=', '-o', 'lstart='],
+                            env={**os.environ, 'LC_ALL': 'C', 'TZ': 'UTC'},
+                            capture_output=True, text=True, timeout=timeout)
+    if result.returncode == 1 and not result.stdout.strip() and not result.stderr.strip():
+        return None
+    if result.returncode != 0:
+        raise RuntimeError('Cannot read the isolated host process: ' + result.stderr)
+    state, birth = result.stdout.strip().split(None, 1)
+    return state[0], birth
+
+
 @unittest.skipUnless(fixture.required() or DSH and HGS.exists(), 'official dsh and built hgs required')
 class NativeHarness(unittest.TestCase):
     @classmethod
@@ -770,14 +791,24 @@ class NativeHarness(unittest.TestCase):
                 # A cold restart reuses the native profile rather than trying
                 # to create it a second time with --from-default-profile.
                 pidfile=next((root/'state/dsh/hosts').glob('*/host.pid'))
-                os.kill(int(pidfile.read_text()),signal.SIGTERM)
+                pid=int(pidfile.read_text())
+                original=host_process(pid)
+                self.assertIsNotNone(original)
+                self.assertNotIn(original[0], ('Z', 'X'))
+                os.kill(pid,signal.SIGTERM)
                 sock=pidfile.parent/'host.sock'
-                for _ in range(100):
+                deadline=time.monotonic()+5
+                while time.monotonic()<deadline:
                     try:
                         with socket.socket(socket.AF_UNIX) as probe: probe.connect(str(sock))
-                    except OSError: break
+                    except OSError:
+                        # Socket teardown can precede exit. A reused PID is an
+                        # exited original, never a reason to signal that PID.
+                        current=host_process(pid, deadline)
+                        if current is None or current[1]!=original[1] or current[0] in ('Z', 'X'):
+                            break
                     time.sleep(.05)
-                else: self.fail('Isolated native host did not stop')
+                else: self.fail('Isolated native host did not exit')
                 run('resume','dsh/project/startup')
                 restarted=json.loads(run('inspect','dsh/project/startup'))
                 self.assertEqual(restarted['conversation_id'],inspection['conversation_id'])

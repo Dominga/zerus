@@ -7129,6 +7129,12 @@ again finishes it (fetching the base when it moved on), provided the folder is a
 clone of this repository with no changes and without that branch. Any other
 folder there is refused, never changed.
 
+Zerus's own merges into a member's folder (`git-merge-lead`) and into the lead
+branch (the merge queue and the accepted-work merge) pass the catalogs' `i18n`
+merge driver with `-c merge.i18n.driver=...`; a clone therefore needs no merge
+driver in its config, which Zerus refuses on purpose. A person merging by hand in
+a clone enables the documented one-line `git config` from `CONTRIBUTING.md`.
+
 **DeepSeek members in their sandbox.** On Windows a DeepSeek member's shell runs
 in DeepSeek's sandbox at Low integrity. It reads Zerus state but may not write
 it, and the session host keeps it out (a sandboxed caller hears

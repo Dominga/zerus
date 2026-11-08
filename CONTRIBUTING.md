@@ -252,6 +252,36 @@ Gitleaks on the candidate source archive and Beads data, and review binary asset
 and dependency notices. The local privacy script catches common accidental machine
 paths and keys; it is not a complete secret scanner.
 
+## Russian catalogs
+
+`client/src/i18n.next-ru.json` is the reviewed Next-only supplement (source
+key -> text; a plural is a list of three forms) and `client/src/i18n.ru.json` is
+generated from it and the shared Qt catalog by
+`client/scripts/generate-i18n-catalog.py`. `.gitattributes` names the merge
+driver `i18n` for both files, so two branches that add different keys merge
+without a conflict. A key both sides changed differently stays a conflict with
+both values in the file; the generated catalog is then rebuilt from the merged
+supplement instead of being merged.
+
+Enable the driver once per clone before merging by hand:
+
+```sh
+git config merge.i18n.driver "python3 scripts/i18n-merge.py %O %A %B %L %P"
+```
+
+Use `python` instead of `python3` in Git Bash on Windows. Zerus's own merge
+paths (the merge queue, `git-merge-lead` and the accepted-work merge) pass the
+same driver with `-c` at merge time; the repository's config stays free of
+merge drivers, which Zerus refuses on purpose. Configure the driver only in a
+checkout you merge by hand: a repository that has it configured is refused by
+Zerus's merge paths. After resolving a supplement conflict, regenerate and
+check the catalog:
+
+```sh
+python3 client/scripts/generate-i18n-catalog.py
+python3 client/scripts/generate-i18n-catalog.py --check
+```
+
 <a id="windows"></a>
 
 ## Windows

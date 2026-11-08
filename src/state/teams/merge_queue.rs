@@ -20,6 +20,22 @@ use std::time::{Duration, Instant};
 /// How long one git step of the queue may take.
 const GIT_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// The catalog merge driver `.gitattributes` names `i18n`: the reviewed
+/// supplement merges as a key union and the generated catalog is regenerated
+/// (scripts/i18n-merge.py). Zerus passes it with `-c` on its own merge paths and
+/// never writes it into a repository config: C2 refuses a repository's own merge
+/// drivers, which are arbitrary commands.
+pub(crate) const I18N_MERGE_DRIVER: &str = if cfg!(windows) {
+    "python scripts/i18n-merge.py %O %A %B %L %P"
+} else {
+    "python3 scripts/i18n-merge.py %O %A %B %L %P"
+};
+
+/// The `-c` argument that enables [`I18N_MERGE_DRIVER`] for one Git command.
+pub(crate) fn i18n_driver_config() -> String {
+    format!("merge.i18n.driver={I18N_MERGE_DRIVER}")
+}
+
 /// A bounded per-suite tested-point map; the merge log is bounded too.
 const MERGE_SUITES: usize = 64;
 /// One bounded batch of open ranges (the ordinary team task limit).
@@ -149,7 +165,8 @@ pub(crate) fn merge(lead: &str, entry: &MergeEntry, message: &str) -> Merged {
     if git(lead, &["merge-base", "--is-ancestor", &entry.commit, "HEAD"]).exit == Some(0) {
         return Merged::Done { merged: prev.clone(), prev };
     }
-    let outcome = git(lead, &["merge", "--no-edit", "-m", message, &entry.commit]);
+    let driver = i18n_driver_config();
+    let outcome = git(lead, &["-c", driver.as_str(), "merge", "--no-edit", "-m", message, &entry.commit]);
     if outcome.exit == Some(0) {
         let merged = git_text(lead, &["rev-parse", "HEAD"]).unwrap_or_default();
         return Merged::Done { prev, merged };

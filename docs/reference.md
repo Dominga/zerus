@@ -2629,6 +2629,27 @@ the right work by relevance.
   owner decided ...") is refused by `hgs send` and `hgs team message`, naming
   `hgs team decide`.
 
+Task 279 (owner, 2026-11-08): the owner's standing rules are kept with their
+words and source, so the lead records them at any age.
+- Every owner message of the lead's session is indexed already: it is a
+  `UserPromptSubmit` event of the lead's conversation in the events journal
+  (content search and lore history read it read-only).
+  `hgs team decisions --json {"team":"ID","action":"owner-messages","limit":40}`
+  lists them newest first with `id` (the journal's event id), `at` and `text`.
+- `hgs team decide --json` takes `owner_message: {"id":N,"quote":"..."}` for a
+  lead caller instead of `owner_word`: the message may be any age, Zerus checks
+  it is the owner's own `UserPromptSubmit` in the lead's conversation (never an
+  injected policy, a team message or a scheduled turn) and that the quote is in
+  it (case and spacing ignored); a wrong quote, a quote from another message or
+  an unknown id is refused with the message it names. The decision records
+  `owner_message` (id, quote, at), and `by` says "the lead on your message N".
+  The 30-minute `owner_word` path stays for a fresh sentence.
+- `"kind":"standing rule"` (or `"rule"`) makes it a standing rule: a decision
+  kind of its own, recalled in every lead brief ("Your standing rules ...") and
+  in the hand-out of every task it binds, each line carrying its source
+  (`From your message N: "..."`). It is superseded like any decision, and with a
+  `spec` it reaches the project's lore section too.
+
 A reassign, a take-over or a cancel of a task whose attempt its member is still
 working on (sent or delivered, not reported) tells that member at once: one
 `[Zerus team · from: Zerus · task: #N · stop]` message names the task and why it

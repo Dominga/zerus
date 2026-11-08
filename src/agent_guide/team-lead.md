@@ -30,7 +30,7 @@ owner, and no draft runs before approval. "barrier":true waits for earlier phase
 pause-phase {phase, reason} holds one. Accepted phase not started: return-to-draft
 re-approves it. A phase needing the owner's acceptance holds later ones until
 accept-phase (a card). A phase is standard or free (the owner closes a free one).
-Hourly Zerus names who is starved; a waiting role is not starved.
+Hourly Zerus names who is starved.
 
 Spawn from a task or review: {"team":"ID","origin":12,"severity":"crit","tasks":[...]}
 | hgs team spawn --json. A Crit joins its origin's running phase at once (no card),
@@ -40,7 +40,7 @@ mode; "tail":true for a task on all its minors), and blocks nothing.
 
 With an integration_folder, accepted work lands on one line through the
 merge queue; a new attempt starts from that head (never merge another member's commit),
-a conflict is ONE resolve task (hgs team status "integration"), and unlanded accepted
+a conflict is ONE resolve task, and unlanded accepted
 work is an inbox item.
 
 Decide reports. A report reaches hgs team inbox; check its claim:
@@ -50,9 +50,9 @@ peer of its role; "hold":true keeps a reject back until hgs team release. No rep
 use-last-reply. Only hgs team report reports; a question comes by hgs team ask, answered
 with hgs team reply. A report that breaks a decision is flagged: fix it or accept with
 "against_decisions":true. Pipelines (review, test) pass or return; you decide at round 3.
-Never merge, build or test a member's work by hand (hgs guide team-tests). Watch with
-hgs team status --json. Stuck: retry, reassign (pins it) or
-cancel. hgs team answer takes a native question or permission: allow only what the task
+Never merge, build or test a member's work by hand. Watch with
+hgs team status --json; stuck: retry, reassign or
+cancel. hgs team answer takes a native question: allow only what the task
 needs, else ask the owner.
 
 Park a blocked task. Waiting is always a park, never a loop, a message or an order. A
@@ -60,14 +60,15 @@ member asks how long CI, an install, a card or a time takes: answer with a park;
 freed at once and gets the task back in the same attempt when met:
   {"team":"ID","question":"q1","text":"","park":{"condition":{"kind":"ci",
    "repo":"O/R","run":123},"eta_minutes":40}} | hgs team reply --json
-You hear met, failed or overdue; park or unpark a member's task: hgs guide team-park.
+You hear met, failed or overdue; park or unpark: hgs guide team-park.
 
-Record a decision. An owner's card answer is recorded by Zerus; what the owner tells
-you in chat you record, with their words:
-  {"request_id":"U","team":"ID","question":"Which store?","choice":"SQLite","why":"...",
-   "files":["docs/x.md"],"binds":[7],"forbids":["postgres"],
-   "owner_word":{"text":"the owner's own words"}} | hgs team decide --json
-Zerus gives it to every task it binds; as a message it is refused.
+Record a decision. An owner's card answer is recorded by Zerus; what the owner told
+you in chat you cite at any age (hgs team decisions --json {"action":"owner-messages"}
+gives each id and words); a rule is "kind":"standing rule":
+  {"request_id":"U","team":"ID","question":"Which store?","choice":"SQLite",
+   "owner_message":{"id":12,"quote":"the owner's own words"}} | hgs team decide --json
+Zerus verifies the quote and gives it to every task it binds; as a message it is
+refused. A standing rule is in every lead brief and every hand-out it binds.
 
 Publish through the release gate. Nothing reaches whitewh/main by hand. Merge the
 work, then a member runs the local leg for that commit: template
@@ -86,17 +87,3 @@ unknown, never zero. hgs team look MEMBER shows one. All decided: extend or fini
 cancel empty tasks
 first; owner stop is final. A repeating routine request: hgs guide team-safe.
 Models, stages, scale: team-custom. Sub-teams: hgs guide team-tree.
-
-
-
-
-
-
-
-
-
-
-
-
-
-

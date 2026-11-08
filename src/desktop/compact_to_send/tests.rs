@@ -1706,34 +1706,30 @@ mod actor {
     }
 
     /// zerus-qw7wp: one work slot, so an operation queued behind another's
-    /// wait gets its turn late. Its chain starts at that turn, not at its
-    /// admission: after the first waits close to its whole budget, the
-    /// second still compacts and sends instead of expiring NotStarted.
+    /// wait keeps its clock unstarted until its own turn. Observe that
+    /// ownership directly: scaling the whole chain to milliseconds would
+    /// instead benchmark unrelated disk and thread scheduling on the host.
     #[test]
     fn a_second_operation_queued_behind_a_long_wait_still_runs() {
         let first_id = Arc::new(std::sync::Mutex::new(String::new()));
-        let second_started = Arc::new(std::sync::Mutex::new(None::<Instant>));
         let (ran_first, ran_second) = (Arc::new(Ran::default()), Arc::new(Ran::default()));
         // The first's compaction never completes; the second's does.
         let pending = executor(ran_first.clone(), true, "submitted", true);
         let completes = executor(ran_second.clone(), true, "completed", true);
-        let (which, started) = (first_id.clone(), second_started.clone());
+        let which = first_id.clone();
         let mut f = Fixture::new(move |state, plan, args, input, lock, resources| {
             if plan.compaction_request_id == *which.lock().unwrap() {
                 return pending(state, plan, args, input, lock, resources);
             }
-            if args[0] == "compact-context" {
-                started.lock().unwrap().get_or_insert_with(Instant::now);
-            }
             completes(state, plan, args, input, lock, resources)
         });
-        // The real budgets' shape: a wait close to the whole chain (600 s
-        // of 690 s), and preparations that take a moment.
-        let (wait, chain) = (Duration::from_millis(300), Duration::from_millis(345));
-        f.runtime
-            .fixture_wait(wait, Duration::from_millis(5), chain);
-        f.runtime
-            .fixture_prepare_hook(Arc::new(|| std::thread::sleep(Duration::from_millis(30))));
+        // Keep the real operation bound. Only the first's deliberately
+        // unfinished slot wait is short; the child/receipt path is real I/O.
+        f.runtime.fixture_wait(
+            Duration::from_millis(300),
+            Duration::from_millis(5),
+            runtime::CHAIN,
+        );
         // The queue runs by admission millisecond, then request ID: with the
         // first's ID lower, a tie between the two admissions still runs the
         // first first (zerus-mupq4).
@@ -1744,7 +1740,37 @@ mod actor {
         *first_id.lock().unwrap() = first.plan.compaction_request_id.clone();
         assert!(f.admit(&first).accepted);
         assert!(f.admit(&second).accepted);
-        let admitted = Instant::now();
+        assert_eq!(
+            f.runtime
+                .fixture_chain_started(&first.plan.compaction_request_id),
+            Some(None),
+            "admission must not start the first operation's clock"
+        );
+        assert_eq!(
+            f.runtime
+                .fixture_chain_started(&second.plan.compaction_request_id),
+            Some(None),
+            "admission must not start the queued operation's clock"
+        );
+        f.until("first holds the waiting work slot", |f| {
+            f.row(&first).receipt.compaction.step == Step::Recorded
+                && !f.row(&first).receipt.drained
+        });
+        assert!(
+            f.runtime
+                .fixture_chain_started(&first.plan.compaction_request_id)
+                .flatten()
+                .is_some(),
+            "the first turn must start the first operation's clock"
+        );
+        assert_eq!(
+            f.runtime
+                .fixture_chain_started(&second.plan.compaction_request_id),
+            Some(None),
+            "another operation's wait must not start the queued clock"
+        );
+        assert_eq!(f.row(&second).receipt.compaction.step, Step::Queued);
+        assert_eq!(ran_second.counts(), (0, 0));
         f.until("both settled", |f| {
             f.row(&first).receipt.drained && f.row(&second).receipt.drained
         });
@@ -1756,16 +1782,8 @@ mod actor {
         );
         assert!(row.send.is_none());
         assert_eq!(ran_first.counts(), (1, 0));
-        // The second got its turn only after a chain counted from its
-        // admission would have ended, and still ran both children once.
-        let turn = second_started
-            .lock()
-            .unwrap()
-            .expect("the second compacted");
-        assert!(
-            turn >= admitted + chain,
-            "the scenario queues the second past its admission chain"
-        );
+        // After the other operation's wait, this same queued original gets
+        // its own turn and runs both children exactly once.
         let row = f.row(&second);
         assert_eq!(row.receipt.compaction.step, Step::Recorded);
         assert_eq!(row.receipt.send.step, Step::Recorded);

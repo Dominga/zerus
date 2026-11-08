@@ -32,7 +32,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir_in(platform::canonical(std::env::temp_dir()).unwrap()).unwrap();
         platform::restrict_dir(dir.path()).unwrap();
         for child in ["ids", "sessions"] {
             platform::private_dir(&dir.path().join(child)).unwrap();

@@ -878,10 +878,10 @@ mod tests {
     /// #1437 review (desktop-u G1): each control runs in its own child with a
     /// private state root, and a child that outlives the scan's promised
     /// bound by far fails instead of hanging the suite.
-    fn control(case: &str) {
+    fn control(case: &str) -> String {
         let state = tempfile::tempdir().unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "state::labels::tests::control_fixture", "--ignored", "--test-threads=1"])
+            .args(["--exact", "state::labels::tests::control_fixture", "--ignored", "--nocapture", "--test-threads=1"])
             .env("HGS_STATE_DIR", state.path().join("sessions-root"))
             .env("TMUX_TMPDIR", state.path().join("tmux"))
             .env("ZERUS_ID_LAYOUT_CONTROL", case)
@@ -909,6 +909,7 @@ mod tests {
             "{case}: {stdout}{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        stdout.into_owned()
     }
 
     #[test]
@@ -939,7 +940,30 @@ mod tests {
     /// cut of a rename in place, an archive and a forget.
     #[test]
     fn the_label_index_stays_a_superset_at_every_crash_cut() {
-        control("cuts");
+        // Each crash cut gets the same bounded-child watchdog as one scan;
+        // the complete durability matrix is not a single scan's workload.
+        for op in ["rename", "archive", "forget"] {
+            let mut completed = false;
+            for writes in 0..64 {
+                let case = format!("cuts/{op}/{writes}");
+                let stdout = control(&case);
+                let prefix = format!("ZERUS_LABEL_CUT {case} ");
+                let outcomes: Vec<_> = stdout
+                    .lines()
+                    .filter_map(|line| line.strip_prefix(&prefix))
+                    .collect();
+                match outcomes.as_slice() {
+                    ["complete"] => {
+                        assert!(writes >= 2, "{op} completed after only {writes} writes");
+                        completed = true;
+                        break;
+                    }
+                    ["interrupted"] => {}
+                    _ => panic!("{case}: missing or ambiguous child outcome: {stdout}"),
+                }
+            }
+            assert!(completed, "{op} never completed within 64 crash cuts");
+        }
     }
 
     /// zerus-ucck P3c: while the ambiguity of a label is deferred to the
@@ -1125,39 +1149,35 @@ mod tests {
                 assert!(storage::label_taken(label));
                 assert!(started.elapsed() < SCAN_TIME);
             }
-            // Stop after each write of the operation, as if it crashed there.
-            "cuts" => {
-                let base = root();
-                for op in ["rename", "archive", "forget"] {
-                    let mut writes = 0;
-                    loop {
-                        std::env::set_var("HGS_STATE_DIR", base.join(format!("{op}-{writes}")));
-                        std::fs::create_dir_all(root()).unwrap();
-                        let mut first = record(label, "run-first");
-                        storage::write(&mut first).unwrap();
-                        let (_, id) = by_id(label, "run-twin");
-                        session_id::select(label, &id);
-                        storage::cut::arm(writes);
-                        let result = match op {
-                            "rename" => rename::dispatch(
-                                &[label.to_owned(), "claude/example/moved".to_owned()],
-                                false,
-                            )
-                            .map(drop),
-                            "archive" => archive::save(&storage::read_id(&id).unwrap()).map(drop),
-                            _ => storage::remove_record(&storage::read_id(&id).unwrap()),
-                        };
-                        storage::cut::disarm();
-                        session_id::clear();
-                        superset_holds(&format!("{op} cut after {writes} writes"));
-                        if result.is_ok() {
-                            break;
-                        }
-                        writes += 1;
-                        assert!(writes < 64, "{op} never completed");
-                    }
-                    assert!(writes >= 2, "{op} completed after only {writes} writes");
-                }
+            // One fresh process/store per cut; the parent exhausts each
+            // operation's write budgets through its first successful result.
+            case if case.starts_with("cuts/") => {
+                let mut fields = case.split('/');
+                assert_eq!(fields.next(), Some("cuts"));
+                let op = fields.next().unwrap();
+                let writes: usize = fields.next().unwrap().parse().unwrap();
+                assert!(fields.next().is_none() && writes < 64);
+                assert!(matches!(op, "rename" | "archive" | "forget"));
+                session_id::select(label, &id);
+                storage::cut::arm(writes);
+                let result = match op {
+                    "rename" => rename::dispatch(
+                        &[label.to_owned(), "claude/example/moved".to_owned()],
+                        false,
+                    )
+                    .map(drop),
+                    "archive" => archive::save(&storage::read_id(&id).unwrap()).map(drop),
+                    _ => storage::remove_record(&storage::read_id(&id).unwrap()),
+                };
+                storage::cut::disarm();
+                session_id::clear();
+                superset_holds(&format!("{op} cut after {writes} writes"));
+                let outcome = if result.is_ok() {
+                    "complete"
+                } else {
+                    "interrupted"
+                };
+                println!("\nZERUS_LABEL_CUT {case} {outcome}");
             }
             "terminal-move" => {
                 struct Moves(bool);

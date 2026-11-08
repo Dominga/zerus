@@ -19,7 +19,7 @@ vi.mock("../../bridge", async (original) => ({
 vi.mock("@xterm/xterm", () => ({ Terminal: class {
   cols = 80; rows = 24; options: Record<string, unknown>; textarea?: HTMLTextAreaElement;
   constructor(options: Record<string, unknown>) { this.options = options; }
-  loadAddon() {} onData() {} onBinary() {} onResize() {} write(_bytes: unknown, done?: () => void) { done?.(); }
+  loadAddon() {} onData() {} onBinary() {} onResize() {} attachCustomKeyEventHandler() {} write(_bytes: unknown, done?: () => void) { done?.(); }
   open(host: HTMLElement) { this.textarea = document.createElement("textarea"); host.append(this.textarea); }
   focus() { this.textarea?.focus(); } dispose() { this.textarea?.remove(); } reset() {} paste() {}
 } }));

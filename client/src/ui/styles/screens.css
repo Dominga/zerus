@@ -122,6 +122,14 @@
   .proj-default { margin: 2px 0 12px; }
   .proj-folders { display: flex; flex-direction: column; gap: 8px; min-height: 160px; }
   .proj-fhead { margin-bottom: 0; }
+  /* N6: the project's sessions and counts (ProjectsDialog) */
+  .proj-count { flex: none; margin-left: auto; padding: 0 6px; border-radius: 999px; font-size: var(--fs-2xs); font-variant-numeric: tabular-nums; color: var(--z-color-muted); background: var(--z-color-hover); }
+  .proj-sessions { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+  .proj-session-list { display: flex; flex-direction: column; gap: 2px; max-height: 160px; overflow: auto; }
+  .proj-session { display: flex; align-items: center; gap: 8px; width: 100%; padding: 5px 8px; border-radius: var(--z-radius-sm); font-size: var(--fs-sm); text-align: left; }
+  .proj-session:hover { background: var(--z-color-hover); }
+  .proj-session .muted { flex: none; }
+  .proj-empty { margin: 0; font-size: var(--fs-sm); }
   .su-tablewrap { flex: 1; min-height: 0; overflow: auto; border: 1px solid var(--z-color-card-border); border-radius: var(--z-radius-lg); background: var(--z-color-card); }
   .proj-factions, .proj-foot { flex-wrap: wrap; }
   .proj-foot { margin-top: 10px; }

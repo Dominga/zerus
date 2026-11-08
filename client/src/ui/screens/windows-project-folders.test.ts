@@ -2,7 +2,7 @@ import { createRoot } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
 import * as bridge from "../../bridge";
 import { machineCards } from "../../store/machines";
-import type { Folder, MachineMeta, Project } from "../../types";
+import type { Folder, FolderOut, MachineMeta, Project } from "../../types";
 import { createProjectFolders } from "./project-folders";
 import { createFolderLaunch } from "../sessions/folder-launch";
 
@@ -12,35 +12,39 @@ vi.mock("../../store/machines", () => ({ machineCards: {} }));
 vi.mock("../../store/notices", () => ({ bus: { notify: vi.fn() } }));
 const node = "10000000-0000-4000-8000-000000000001";
 const local = { host: "workstation", platform: "windows", machine_id: node } as MachineMeta;
-const folder: Folder = { id: "drive", key: "drive", machine: "old-local-name", computer: "Old name", machine_id: node, path: "C:\\Source", name: "Source" };
+const folder: Folder = { id: "drive", key: "drive", machine: "workstation", computer: "workstation", machine_id: node, path: "C:\\Source", name: "Source" };
 const project = { id: "alpha", accessible: true, folders: [folder] } as Project;
 
-describe("the Windows Projects read projection", () => {
-  it("keeps local metadata edit, removal, transfer and open fenced without any IPC", async () => {
+// N6 (Qt ProjectsDialog): the local computer's folders are edited and opened
+// like a peer's: the local Windows read model no longer fences them.
+describe("the Windows project folders", () => {
+  it("offers this computer as a place and edits its folder through the organization", async () => {
     machineCards[""] = local;
+    vi.mocked(bridge.projectFolders).mockResolvedValue([
+      { ...folder, machine_name: "workstation" } as FolderOut,
+    ]);
     await createRoot(async (dispose) => {
       const edits = createProjectFolders(() => [project], vi.fn());
-      expect(edits.enabled("alpha", folder)).toBe(false);
+      expect(edits.enabled("alpha", folder)).toBe(true);
       await edits.open("alpha", folder, {} as HTMLElement);
-      await edits.remove("alpha", folder);
-      await edits.transfer("alpha", folder, "other", true);
+      expect(bridge.projectFolders).toHaveBeenCalledWith("alpha");
+      expect(edits.prompt()?.places.map((place) => place.computer)).toContain("");
       await edits.openFolder("alpha", folder);
-      expect(edits.prompt()).toBeUndefined();
-      expect(bridge.projectFolders).not.toHaveBeenCalled();
-      expect(bridge.projectFolderOpen).not.toHaveBeenCalled();
+      expect(bridge.projectFolderOpen).toHaveBeenCalledWith("alpha", expect.objectContaining({ path: "C:\\Source" }));
       dispose();
     });
   });
-  it("does not probe or launch a projected local drive/UNC, even under its original alias", async () => {
+  it("launches a session in a local drive or UNC folder, probing it", async () => {
     const localFolderExists = vi.fn(async () => true);
     const launch = createFolderLaunch({ cards: () => ({ "": local }), online: () => true,
       bridge: { localFolderExists, newSessionContext: vi.fn() } });
     for (const path of ["C:\\Source", "\\\\server\\share\\Source"]) {
       const row = { ...folder, path };
-      expect(launch.folderLaunch(row).problem).toBe("Folder management is unavailable for this computer.");
-      expect(await launch.folderExists(row)).toBe(false);
+      expect(launch.folderLaunch(row).problem).toBe("");
+      expect(launch.folderLaunch(row).local).toBe(true);
+      expect(await launch.folderExists(row)).toBe(true);
     }
-    expect(localFolderExists).not.toHaveBeenCalled();
+    expect(localFolderExists).toHaveBeenCalledTimes(2);
     expect(launch.folderLaunch({ ...folder, machine: "peer", machine_id: "other", path: "//server/share" }).problem).toBe("");
   });
 });

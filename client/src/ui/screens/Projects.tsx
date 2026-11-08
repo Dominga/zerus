@@ -9,14 +9,14 @@ import * as organization from "../../store/organization";
 import { projectToShow, setProjectToShow } from "../../store/organization";
 import { projectsPage } from "../../store/projects";
 import { flag, num, setSetting, settingsLoaded } from "../../store/settings";
-import { setMenu, type MenuEntry } from "../../store/ui";
+import { setMenu, setPage, setSelectedKey, type MenuEntry } from "../../store/ui";
 import { PROJECT_EDITING } from "./reasons";
 import { machineCards } from "../../store/machines";
 import { IronRulesPanel } from "../sessions/IronRulesPanel";
 import { ProjectMemoryPanel } from "./ProjectMemoryPanel";
 import { folderButton, folderExists, folderLaunch, folderMenuEntry, newSessionInFolder } from "../sessions/newsession-view";
 import { copy } from "../../store/actions";
-import { nextSort, showAskedProject, shownProjects, sortFolders, type Sort, type SortColumn } from "./projects-ui";
+import { countsText, nextSort, projectCounts, projectSessions, showAskedProject, shownProjects, sortFolders, type Sort, type SortColumn } from "./projects-ui";
 import { createProjectFolders } from "./project-folders";
 const ProjectSwarmDialog = lazy(() => import("./ProjectSwarmDialog"));
 const WorktreeOverviewDialog = lazy(() => import("./WorktreeOverviewDialog"));
@@ -26,6 +26,9 @@ const ProjectFolderDialog = lazy(() => import("./ProjectFolderDialog"));
 import { catalogName, createCatalogEdits } from "./project-catalog";
 import { tr } from "../../i18n";
 import { legacyProjectStatus } from "../../store/legacyProjects";
+import { orderedRows } from "../../store/catalog";
+import { groups } from "../../store/organization";
+import { teams } from "../../store/teams";
 import { POINTER_DRAG, pointerDrag } from "../lib/pointerDrag";
 
 // Projects (ProjectsDialog.cpp), ported from design/webui/src/screens/Projects.tsx:
@@ -162,6 +165,13 @@ export function ProjectsScreen() {
   const launchButton = () => folderButton(folderLaunch(launchFolder(), launchExists.latest), launchFolder().machine);
   const launchReason = () => launchButton().disabled ? launchButton().tip : undefined;
   const launchSelected = () => { const p = project(), f = selected(); if (p && f) void newSessionInFolder(p.id, f); };
+  // N6 (Qt ProjectsDialog): the project's sessions with their states, the
+  // counts line and each project row's session count.
+  const projectRows = createMemo(() => projectSessions(project()?.id ?? "", orderedRows(), groups));
+  const projectTeams = createMemo(() => teams.list("")?.teams ?? []);
+  const counts = createMemo(() => projectCounts(project()?.id ?? "", projectRows(), projectTeams()));
+  const countsFor = (id: string) => projectCounts(id, projectSessions(id, orderedRows(), groups), projectTeams());
+  const openSession = (key: string) => { setSelectedKey(key); setPage("sessions"); };
   showAskedProject(projectToShow, () => setProjectToShow(undefined), view, choose);
 
   let menuAsked = 0;
@@ -237,6 +247,8 @@ export function ProjectsScreen() {
         <header class="su-head">
           <h1>{tr("Projects")}</h1>
           <span class="grow" />
+          <button class="btn" disabled={!project()?.accessible} onClick={() => setPage("newteam")}><Icon name="users" size={14} />{tr("New team…")}</button>
+          <button class="btn" disabled={launchButton().disabled} title={launchButton().tip} aria-describedby={launchReason() ? "project-folder-launch-reason" : undefined} onClick={launchSelected}><Icon name="plus" size={14} />{tr("New session…")}</button>
           <button class="btn" disabled={!organization.grouping().ready} aria-describedby={editDescription()} onClick={(e) => setOverviewOrigin(e.currentTarget)}><Icon name="folder-git-2" size={14} />{tr("Worktrees…")}</button>
           <button class="btn" disabled={!view().loaded} onClick={(e) => setSwarmOrigin({ element: e.currentTarget, connect: false })}><Icon name="network" size={14} />{tr("Swarm…")}</button>
         </header>
@@ -274,6 +286,7 @@ export function ProjectsScreen() {
                       title={`${p().is_default ? tr("%1, default project for sessions started outside Zerus", p().name) : p().name}\n${tr("Drag to reorder, or use Alt+Up / Alt+Down.")}`}
                       onClick={() => choose(p())} onContextMenu={(e) => listMenu(e, p().id)}>
                       <ProjectLabel project={p()} />
+                      <Show when={countsFor(p().id).sessions}><span class="proj-count" title={countsText(countsFor(p().id))}>{countsFor(p().id).sessions}</span></Show>
                     </button>
                   </Show>
                 </li>
@@ -341,6 +354,23 @@ export function ProjectsScreen() {
                   <span class="grow" />
                   <button class="btn small" disabled={!selected() || selected()?.machine !== machineCards[""]?.host || launchButton().disabled} onClick={() => { const f = selected(); if (f) void folderEdits.openFolder(p().id, { ...f }); }}><Icon name="folder-open" size={12} />{tr("Open folder")}</button>
                 </div>
+              </div>
+              <div class="proj-sessions" aria-label={tr("Sessions")}>
+                <div class="row proj-fhead">
+                  <h2 class="section-title">{tr("Sessions")}</h2>
+                  <span class="grow muted proj-counts" title={countsText(counts())}>{countsText(counts())}</span>
+                  <button class="btn small" disabled={launchButton().disabled} title={launchButton().tip} onClick={launchSelected}><Icon name="plus" size={12} />{tr("New session…")}</button>
+                </div>
+                <Show when={projectRows().length} fallback={<p class="muted proj-empty">{tr("No sessions in this project yet.")}</p>}>
+                  <ul class="proj-session-list">
+                    <For each={projectRows()}>{(s) => (
+                      <li><button class="proj-session" onClick={() => openSession(s.key)} title={`${s.name}\n${s.caption}`}>
+                        <span class="ell grow">{s.title}</span>
+                        <span class="muted ell">{s.caption}</span>
+                      </button></li>
+                    )}</For>
+                  </ul>
+                </Show>
               </div>
               <div class="su-hsplit" role="separator" aria-orientation="horizontal" title={tr("Drag to resize folders and worktrees.")} onPointerDown={startSplit} />
               <Suspense><ProjectWorktrees folder={selected()} project={p().id} /></Suspense>

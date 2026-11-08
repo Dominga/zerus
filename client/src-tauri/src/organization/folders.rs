@@ -44,11 +44,8 @@ pub(super) fn machine(pump: &Pump, place: &Place) -> Result<String, String> {
     {
         return Err("The selected computer changed. Select it again.".into());
     }
-    if place.computer.is_empty()
-        && (current.local_sessions == Some(false)
-            || zerus_client_core::paths::of(current.platform.as_deref(), true)
-                != zerus_client_core::paths::Style::Posix)
-    {
+    // N6: a folder of this computer is managed like a peer's; only a computer with no local sessions refuses.
+    if place.computer.is_empty() && current.local_sessions == Some(false) {
         return Err("Folder management is unavailable for this computer.".into());
     }
     Ok(if place.computer.is_empty() {
@@ -92,6 +89,23 @@ fn intent(pump: &Pump, project: String, change: Change, id: String) -> Result<In
     };
     Ok(Intent::Folder { project, change })
 }
+/// N6: the device-local change for this computer's Windows folder: the place's
+/// identity is checked first, and a transfer is refused (it names another project).
+fn local_change(org: &Organization, project: String, change: Change, id: String) -> Result<(String, folder_edit::Change), String> {
+    let folder = match change {
+        Change::Add { place, path, name } => {
+            machine(&org.0.pump, &place)?;
+            folder_edit::Change::Set { original: None, id, machine: place.host, path, name }
+        }
+        Change::Edit { original, place, path, name } => {
+            machine(&org.0.pump, &place)?;
+            folder_edit::Change::Set { original: Some(original), id, machine: place.host, path, name }
+        }
+        Change::Remove { original } => folder_edit::Change::Remove { original },
+        Change::Transfer { .. } => return Err("A folder of this computer is moved with the local layout; transfer needs the shared catalog.".into()),
+    };
+    Ok((project, folder))
+}
 #[derive(serde::Serialize)]
 pub struct Changed {
     #[serde(flatten)]
@@ -107,6 +121,21 @@ pub async fn project_folder_change(
 ) -> Result<Changed, String> {
     let org = state.inner().clone();
     let id = uuid::Uuid::new_v4().to_string();
+    // N6: this computer's Windows folders are edited in the device-local family
+    // (a Windows path means nothing to a peer); the shared catalog keeps the rest.
+    let local_windows = org.local_windows()
+        && matches!(&change, Change::Add { place, .. } | Change::Edit { place, .. } if place.computer.is_empty());
+    let node = match &change {
+        Change::Add { place, .. } | Change::Edit { place, .. } if place.computer.is_empty() => {
+            place.machine_id.clone().unwrap_or_default()
+        }
+        _ => String::new(),
+    };
+    let style = if local_windows {
+        zerus_client_core::paths::Style::Windows
+    } else {
+        zerus_client_core::paths::Style::Posix
+    };
     let folder = match &change {
         Change::Add { .. } => Some(id.clone()),
         Change::Edit {
@@ -124,17 +153,24 @@ pub async fn project_folder_change(
                 } else {
                     &place.computer
                 },
-                zerus_client_core::paths::clean(path, zerus_client_core::paths::Style::Posix)
+                zerus_client_core::paths::clean(path, style)
             )
         }),
         _ => None,
     };
-    tauri::async_runtime::spawn_blocking(move || Changed {
-        outcome: org.submit_checked(move |pump| intent(pump, project, change, id)),
-        folder,
+    tauri::async_runtime::spawn_blocking(move || {
+        if local_windows {
+            let (project, change) = local_change(&org, project, change, id)?;
+            org.local_windows_folder_change(&project, change, &node)?;
+            return Ok(Changed { outcome: EditOutcome::Done { conflicts: 0 }, folder });
+        }
+        Ok(Changed {
+            outcome: org.submit_checked(move |pump| intent(pump, project, change, id)),
+            folder,
+        })
     })
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?
 }
 #[tauri::command]
 pub async fn project_folder_open(
@@ -158,11 +194,7 @@ pub async fn project_folder_open(
                 .pump
                 .machine(&zerus_client_core::ComputerId::local())
                 .ok_or("Waiting for this computer's identity.")?;
-            if zerus_client_core::paths::of(local.platform.as_deref(), true)
-                != zerus_client_core::paths::Style::Posix
-            {
-                return Err("Folder management is unavailable for this computer.".into());
-            }
+            // N6: a local Windows folder opens from this computer like a peer's.
             if local.host.as_deref() != Some(&original.machine)
                 || (!original.machine_id.is_empty()
                     && local.machine_id.as_deref() != Some(&original.machine_id))

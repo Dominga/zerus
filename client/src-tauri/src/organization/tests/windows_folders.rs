@@ -94,7 +94,9 @@ fn projects_overlay_never_reaches_shared_source_launch_or_layout_edits() {
         None,
         "a read never dirties or prunes Layout"
     );
-    assert!(
+    // N6: this computer is a place now, and its folder changes land in the
+    // device-local family (the shared catalog is never written with a Windows path).
+    assert_eq!(
         folders::machine(
             &pump,
             &folders::Place {
@@ -103,8 +105,8 @@ fn projects_overlay_never_reaches_shared_source_launch_or_layout_edits() {
                 machine_id: Some(NODE.into())
             }
         )
-        .is_err(),
-        "the Windows native adapter stays fenced"
+        .unwrap(),
+        "workstation"
     );
     assert!(fake.applies().is_empty());
     fake.finish(org);

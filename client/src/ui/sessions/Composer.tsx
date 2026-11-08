@@ -14,7 +14,7 @@ import { computerFresh, computerOffline } from "../../store/catalog";
 import { detailsFor, followedFor } from "../../store/actions";
 import { onCommand, platform } from "../../store/shortcuts";
 import { clipboardFiles } from "../../bridge";
-import { pasteNative, pasteRoute } from "./paste-files";
+import { pasteNative, pasteRoute, samePaste, type PasteBinding } from "./paste-files";
 import { actionEntries } from "./ActionDialogs";
 import { snapshotOf } from "./actions-ui";
 import { markReadChip, runMarkRead } from "./mark-entries";
@@ -223,10 +223,11 @@ export function Composer() {
     if (route.kind === "paths") { void composer.attachPasted(route.paths); return; }
     const view = v();
     if (!view) return;
-    const bound: DraftBinding = { handle: view.handle, key: view.key, epoch: view.text_epoch };
+    const at = composer.selection();
+    const bound: PasteBinding = { handle: view.handle, key: view.key, epoch: view.text_epoch, text: composer.text(), start: at.start, end: at.end };
     void pasteNative(route, {
       native: clipboardFiles,
-      current: () => sameDraft(composer.view(), bound, composer.locked()),
+      current: () => samePaste(composer.view(), bound, composer.locked(), composer.text(), composer.selection()),
       attach: (paths) => { void composer.attachPasted(paths); },
       image: (file) => { void composer.pasteImage(file); },
       text: (text) => { if (document.activeElement === editor) document.execCommand("insertText", false, text); },

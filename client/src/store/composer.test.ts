@@ -1,3 +1,4 @@
+import { pasteNative, samePaste, type PasteBinding } from "../ui/sessions/paste-files";
 import { describe, expect, it } from "vitest";
 import { createRoot } from "solid-js";
 import { createComposer, draftKey, nameDraftKey, EDIT_MS, flushWhenHidden, MAX_TEXT_BYTES, reportVisibility, statusLine, TOO_LONG, type ComposerPort, type Images, type Notices } from "./composer";
@@ -1031,6 +1032,48 @@ describe("pasted copied files (MessageComposer insertFromMimeData, 186-196)", ()
       const before = f.calls.length;
       await c.attachPasted(["/srv/a.txt"]);
       expect(f.calls.length, "nothing attaches while the composer is locked").toBe(before);
+    });
+  });
+});
+
+describe("a paste that waits for the native clipboard (zerus-voy7d)", () => {
+  // The reviewer's control: a real composer, the actual pasteNative and its binding.
+  for (const change of ["typing", "a selection change"] as const) {
+    it(`does nothing after ${change}`, async () => {
+      const f = fakes();
+      await createRoot(async () => {
+        const c = createComposer(f.port, f.timers);
+        c.apply(view({ text: "original draft", position: 14, anchor: 14 }));
+        const opened = c.view()!, at = c.selection();
+        const bound: PasteBinding = { handle: opened.handle, key: opened.key, epoch: opened.text_epoch, text: c.text(), start: at.start, end: at.end };
+        let answer!: (paths: string[] | null) => void;
+        const effects: string[] = [];
+        const pending = pasteNative({ kind: "native", ask: true, image: undefined, text: "clipboard text" }, {
+          native: () => new Promise((resolve) => { answer = resolve; }),
+          current: () => samePaste(c.view(), bound, c.locked(), c.text(), c.selection()),
+          attach: () => { effects.push("attach"); }, image: () => { effects.push("image"); }, text: () => { effects.push("text"); },
+        });
+        if (change === "typing") c.input("user typed after paste", 22, 22); else c.select(0, 14);
+        answer(null); await pending;
+        expect(effects, "ordinary edits and selection changes keep text_epoch, but end this paste").toEqual([]);
+      });
+    });
+  }
+
+  it("applies when nothing changed meanwhile", async () => {
+    const f = fakes();
+    await createRoot(async () => {
+      const c = createComposer(f.port, f.timers);
+      c.apply(view({ text: "original draft", position: 14, anchor: 14 }));
+      const opened = c.view()!, at = c.selection();
+      const bound: PasteBinding = { handle: opened.handle, key: opened.key, epoch: opened.text_epoch, text: c.text(), start: at.start, end: at.end };
+      const effects: string[] = [];
+      await pasteNative({ kind: "native", ask: true, image: undefined, text: "clipboard text" }, {
+        native: async () => null,
+        current: () => samePaste(c.view(), bound, c.locked(), c.text(), c.selection()),
+        attach: () => { effects.push("attach"); }, image: () => { effects.push("image"); }, text: (t) => { effects.push(`text ${t}`); },
+      });
+      expect(effects).toEqual(["text clipboard text"]);
     });
   });
 });

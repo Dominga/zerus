@@ -1484,7 +1484,14 @@ finally:
         script = Path(__file__).resolve().parents[1] / 'scripts/install-linux-desktop-service.py'
         consumer = runpy.run_path(str(script))['Installer']
         process, status = self.serve()
-        selected = consumer(str(HGS), self.env)
+        hgs = HGS
+        if hgs.stat().st_size > 512 * 1024 * 1024:
+            # Debug symbols can exceed the installer's unchanged binary bound.
+            hgs = self.root / 'installer-hgs'
+            subprocess.run(['objcopy', '--strip-debug', str(HGS), str(hgs)],
+                           check=True, capture_output=True, text=True, timeout=30)
+            hgs.chmod(0o700)
+        selected = consumer(str(hgs), self.env)
         live = selected.probe()
         self.assertTrue(live['ipc_ready'])
         self.assertEqual(live['pid'], process.pid)
@@ -1492,7 +1499,7 @@ finally:
         self.assertFalse(any(value['ready'] for value in live['background'].values()))
         other = dict(self.env, HGS_CONFIG_DIR=str(self.root / 'other-config'),
                      HGS_STATE_DIR=str(self.root / 'other-state'))
-        absent = consumer(str(HGS), other).probe()
+        absent = consumer(str(hgs), other).probe()
         self.assertFalse(absent['ipc_ready'])
         self.assertNotEqual(absent['configuration'], live['configuration'])
         self.assertFalse((self.root / 'unexpected-tool').exists())

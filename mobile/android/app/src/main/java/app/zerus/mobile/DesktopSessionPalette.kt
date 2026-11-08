@@ -31,8 +31,13 @@ object DesktopSessionPalette {
         val working = SessionFilters.working(session, online)
         val unread = SessionFilters.visibleUnreadReply(session, online)
         val nativeKind = nativeKind(session, online)
-        // Muted, or quiet under a live parent (spec 2.1): gray instead of amber.
-        val kind = if(ChildSessions.silenced(session) && nativeKind in setOf(DesktopBadgeKind.Attention,DesktopBadgeKind.Unread)) DesktopBadgeKind.Neutral else nativeKind
+        // Muted, or quiet under a live parent (spec 2.1): requests and replies gray instead of amber.
+        // A quiet child's error is its parent's to handle, gray too; an explicitly muted error stays
+        // red (desktop badgeKind, zerus-nlck0).
+        val muted = SessionNotificationPreferences.muted(session)
+        val quiet = ChildSessions.quiet(raw)
+        val kind = if ((muted || quiet) && nativeKind in setOf(DesktopBadgeKind.Attention,DesktopBadgeKind.Unread) ||
+            quiet && !muted && nativeKind == DesktopBadgeKind.Error) DesktopBadgeKind.Neutral else nativeKind
         val caption = when {
             working -> if (raw.string("phase") == "compacting") "Compacting" else if (SessionFilters.backgroundIdle(session)) "Background" else "Working"
             kind == DesktopBadgeKind.Waiting -> SessionFilters.waitingLabel(session,includeProducer=false,compact=true)

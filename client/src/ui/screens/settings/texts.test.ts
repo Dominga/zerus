@@ -6,9 +6,11 @@ import { APPROVALS_TITLE, APPROVALS_BODY, APPROVALS_CONFIRM, APPROVALS_WARNING, 
 
 // Read from disk, as styles/motion.test.ts does: the specifier is built so
 // TypeScript (no Node types here) leaves it alone.
-const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as {
+const disk = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as {
   readFileSync(path: URL, encoding: "utf8"): string;
 };
+// Task 245: a Windows checkout may have CRLF line ends; the texts compare with LF.
+const fs = { readFileSync: (path: URL, encoding: "utf8") => disk.readFileSync(path, encoding).replace(/\r\n/g, "\n") };
 const here = new URL("./", import.meta.url);
 const repo = new URL("../../../../../", import.meta.url);
 const qt = ["tray/src/SettingsPage.h", "tray/src/UiLanguage.h"].map((file) => fs.readFileSync(new URL(file, repo), "utf8")).join("\n");

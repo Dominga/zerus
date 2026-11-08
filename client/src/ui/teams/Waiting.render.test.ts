@@ -178,4 +178,21 @@ describe("Waiting for you and the Activity strip (task 116)", () => {
     expect(renderBanner({ items: [], total: 0, more: false, next: null })).not.toContain("wait for you");
     expect(renderPage({ items: [], total: 0, more: false, next: null })).toContain("Nothing waits for you");
   });
+
+  // Task 245 (hgs task 162): the lead's plan changes inside the approved goal
+  // are one digest: its own label, Seen, and Revert naming the newest change.
+  it("the lead's changes have their label, Seen and Revert", () => {
+    const item = { id: "team-1/lead_changes/digest", kind: "lead_changes", team: "team-1", team_name: "Checkout", action: "open_team", since: 1_800_000_000, proposal: null,
+      title: "The lead changed the plan 2 times inside the approved goal, newest: split #4 into #4 and #9",
+      detail: { changes: [{ id: "lc2", summary: "split #4 into #4 and #9" }, { id: "lc1", summary: "moved #3 to phase 2" }] } };
+    const html = renderPage({ items: [item], total: 1, more: false, next: null });
+    expect(html).toContain("Lead's changes");
+    expect(html).not.toContain(">lead_changes<");
+    expect(html).toContain("data-waiting-seen");
+    expect(html).toMatch(/data-waiting-revert[^>]*title="Revert the newest change: split #4 into #4 and #9"|title="Revert the newest change: split #4 into #4 and #9"[^>]*data-waiting-revert/);
+    // Without changes in the item there is nothing to revert; Seen stays.
+    const bare = renderPage({ items: [{ ...item, detail: null }], total: 1, more: false, next: null });
+    expect(bare).toContain("data-waiting-seen");
+    expect(bare).not.toContain("data-waiting-revert");
+  });
 });

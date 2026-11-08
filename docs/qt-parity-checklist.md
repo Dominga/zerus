@@ -42,7 +42,7 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Area | done | partial | missing | other |
 | --- | --- | --- | --- | --- |
 | Sessions list, row actions and header | 25 | 2 | 2 | 2 owner decisions |
-| Archive and search | 10 | 4 | 1 | |
+| Archive and search | 11 | 3 | 1 | |
 | Composer and sending | 34 | 1 | | |
 | Activity | 16 | 1 | 0 | |
 | Questions and approvals | 12 | | | |
@@ -53,7 +53,7 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Settings | 17 | | 1 | |
 | Machines, accounts, projects, new session, tasks and worktrees | 18 | | | |
 | Terminal, processes and platform session support | 8 | | | |
-| Total (192 rows) | 165 | 17 | 6 | 4 |
+| Total (192 rows) | 166 | 16 | 6 | 4 |
 
 ## Owner decisions
 
@@ -141,7 +141,7 @@ Keyboard commands for every area are listed once, under Shortcuts and navigation
 | --- | --- | --- | --- |
 | Search box for sessions and archive; Esc clears; strip search button | done | `ui/sessions/SessionList.tsx:656-666,956` | `SessionsWindow.cpp:382-395` |
 | Matching on name, machine, model, effort, folder, branch, worktree, session, run and archive IDs | done | `store/content-search-model.ts:85-90` | `SessionSearch.cpp:239,274-275` |
-| Child conversation IDs match and the result says which ID matched | partial (`zerus-5wmh.13.17`) | only subagent IDs match; the result shows no matched ID (`store/content-search-model.ts:88`; `ui/sessions/SearchResults.tsx:49-51`) | `SessionSearch.cpp:239-268` |
+| Child conversation IDs match and the result says which ID matched | done | `store/content-search-model.ts:98,127`; `ui/sessions/subagents.ts:37`; `ui/sessions/SearchResults.tsx:56` | `SessionSearch.cpp:239-268` |
 | Message content search across machines, honoring the filters, with status and Search again | done | `store/contentSearch.ts:22-71`; `store/content-search-model.ts:27-79` | `SessionSearch.cpp:75-213,309-314` |
 | One result row per matching message | partial (`zerus-5wmh.13.17`) | one row per session with the newest excerpt only (`store/content-search-model.ts:94-104`) | `SessionSearch.cpp:276-282` |
 | Result rows with highlights, badges, author and time; keyboard navigation; opening a hit shows the saved message | done | `ui/sessions/SearchResults.tsx:26-55`; `store/contentSearch.ts:72-84` | `SessionSearch.cpp:132,253-262`; `SessionsWindow.cpp:434-456` |

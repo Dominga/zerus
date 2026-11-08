@@ -2520,6 +2520,7 @@
   "No session matches.": "Подходящих сессий нет.",
   "No session selected": "Сессия не выбрана",
   "No sessions are working, need attention or have drafts.": "Нет сессий, которые работают, требуют внимания или содержат черновики.",
+  "No sessions need attention": "Нет сессий, которым нужно внимание",
   "No sessions yet": "Сессий пока нет",
   "No shell commands recorded yet": "Команды оболочки еще не записаны",
   "No store yet: it is made when memory is turned on.": "Хранилища пока нет: оно создаётся при включении памяти.",

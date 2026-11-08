@@ -318,6 +318,12 @@ pub(crate) fn start_for_sandbox(id: &str, input: &Value, session: Value, folder:
     let mut claim = json!({"request_id":id,"label":label,"command":command,"cwd":cwd.display().to_string(),
         "session":session,"started":now(),"timeout_secs":minutes * 60,"source":"hgs_run",
         "env":{"TEMP":temp,"TMP":temp,"npm_config_cache":npm.display().to_string()}});
+    // Task 261: the shared sccache server is started here, by the worker's
+    // normal token, before the run; a run that cannot rely on it builds
+    // without the wrapper rather than start a server in its restricted token.
+    for (key, value) in super::build_cache_server::sandboxed_env() {
+        claim["env"][key] = json!(value);
+    }
     match sandbox {
         Sandbox::Low => claim["integrity"] = json!("low"),
         Sandbox::Codex => claim["sandbox"] = json!("codex"),
@@ -539,8 +545,28 @@ fn worker(id: &str) -> Result<i32> {
         claim_command(&claim)
     };
     let timeout = Duration::from_secs(claim["timeout_secs"].as_u64().unwrap_or(DEFAULT_MINUTES * 60));
-    let outcome = teams::templates::run_tree(&mut command, timeout, None);
+    let started = std::time::Instant::now();
+    let mut outcome = teams::templates::run_tree(&mut command, timeout, None);
+    // Task 261: a build the shared sccache server could not write is run once
+    // more after the worker restarted the server; the lead is told.
+    let mut restarted = false;
+    if super::build_cache_server::worth_restart(outcome.exit, &format!("{}\n{}", outcome.tail, outcome.excerpt)) {
+        let left = timeout.saturating_sub(started.elapsed());
+        if !left.is_zero() && super::build_cache_server::restart().is_ok() {
+            outcome = teams::templates::run_tree(&mut command, left, None);
+            outcome.tail = format!("{}\n{}", outcome.tail, super::build_cache_server::RESTART_NOTE);
+            restarted = true;
+        }
+    }
+    if restarted {
+        if let Some(team) = claim["team"].as_str() {
+            teams::dispatcher::tell_lead_cache_restarted(team, claim["task"].as_u64().unwrap_or(0), string(&claim, "label"), outcome.exit);
+        }
+    }
     let mut done = claim.clone();
+    if restarted {
+        done["cache_restarted"] = json!(true);
+    }
     if let Some(record) = done.as_object_mut() {
         record.remove("pid");
     }
@@ -1208,6 +1234,92 @@ pub(crate) mod tests {
             assert_eq!(running["status"], "running", "{running}");
             let claim = read(&running_path("55555555-5555-4555-8555-555555555555")).unwrap();
             assert!(claim["env"]["npm_config_cache"].as_str().unwrap().contains(".zerus-team"), "{claim}");
+            assert!(claim["env"].get("RUSTC_WRAPPER").is_none(), "no shared sccache here: the wrapper is left alone: {claim}");
+            // Task 261: a shared server the worker cannot start is never left
+            // to the sandboxed run: it builds without the wrapper.
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            super::super::build_cache_server::fake(Some(super::super::build_cache_server::Fake {
+                program: Some(PathBuf::from("C:/Users/example/.cargo/bin/sccache.exe")), running: false, start_exit: 2, calls: calls.clone() }));
+            crate::platform::set_test_sandboxed(Some(false));
+            HELD_RUNNER.with(|flag| flag.set(true));
+            let id = "66666666-6666-4666-8666-666666666666";
+            start_for_sandbox(id, &json!({"label":"cargo build","command":"cargo build","cwd":member.display().to_string(),"timeout_minutes":10}),
+                json!({"name":"dsh/x/qa","run_id":"r","conversation_id":"c"}), &member, Sandbox::Low).unwrap();
+            HELD_RUNNER.with(|flag| flag.set(false));
+            super::super::build_cache_server::fake(None);
+            crate::platform::set_test_sandboxed(None);
+            assert_eq!(*calls.borrow(), ["--start-server"], "the worker tried to start it itself");
+            let claim = read(&running_path(id)).unwrap();
+            assert_eq!(claim["env"]["RUSTC_WRAPPER"], "", "{claim}");
+        });
+    }
+
+    /// Task 261: a build the shared sccache server could not write (os error 5
+    /// on a `.d`) restarts the server from the runner once and runs again; a
+    /// second failure is not retried.
+    #[test]
+    fn a_broken_shared_cache_server_is_restarted_once_and_the_build_runs_again() {
+        let root = tempfile::tempdir().unwrap();
+        with_test_state_root(root.path(), || {
+            private_dir(&dir()).unwrap();
+            let flag = root.path().join("first-run-done");
+            // A fake build: a script for the platform's shell.
+            let fake_build = |name: &str, windows: &str, unix: &str| -> Vec<String> {
+                let script = root.path().join(name);
+                if cfg!(windows) {
+                    std::fs::write(&script, windows.replace('\n', "\r\n")).unwrap();
+                    vec!["cmd.exe".to_owned(), "/D".to_owned(), "/C".to_owned(), script.display().to_string()]
+                } else {
+                    std::fs::write(&script, unix).unwrap();
+                    vec!["sh".to_owned(), script.display().to_string()]
+                }
+            };
+            // The first run fails with the broken-server signature, the second passes.
+            let argv = fake_build(
+                "fake-build.cmd",
+                &format!("@echo off\nif exist \"{flag}\" exit /b 0\ntype nul > \"{flag}\"\necho error: error writing dependencies to `D:\\work\\target\\debug\\deps\\x-1.d`: Access is denied. (os error 5)\nexit /b 101\n", flag = flag.display()),
+                &format!("[ -e '{flag}' ] && exit 0\n: > '{flag}'\necho 'error: error writing dependencies to `/work/target/debug/deps/x-1.d`: Access is denied. (os error 5)'\nexit 101\n", flag = flag.display()),
+            );
+            let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            super::super::build_cache_server::fake(Some(super::super::build_cache_server::Fake {
+                program: Some(PathBuf::from("C:/Users/example/.cargo/bin/sccache.exe")), running: true, start_exit: 0, calls: calls.clone() }));
+            crate::platform::set_test_sandboxed(Some(false));
+            let session = json!({"name":"","run_id":"","conversation_id":""});
+            INLINE_RUNNER.with(|flag| flag.set(true));
+            let id = "77777777-7777-4777-8777-777777777777";
+            start_argv_for(id, "cargo build", &argv, root.path(), session.clone(), 1, &[]).unwrap();
+            let done = read(&result_path(id)).unwrap();
+            assert_eq!(done["exit"].as_i64(), Some(0), "the second run passed: {done}");
+            assert_eq!(done["cache_restarted"], true, "{done}");
+            assert!(done["tail"].as_str().unwrap().contains(super::super::build_cache_server::RESTART_NOTE), "{done}");
+            assert_eq!(*calls.borrow(), ["--stop-server", "--start-server"], "restarted once from the runner");
+            // The same signature again (the flag file is gone): one restart, one
+            // rerun, never a loop.
+            std::fs::remove_file(&flag).unwrap();
+            calls.borrow_mut().clear();
+            let argv = fake_build(
+                "always.cmd",
+                "@echo off\necho error: error writing dependencies to `D:\\w\\deps\\y.d`: Access is denied. (os error 5)\nexit /b 101\n",
+                "echo 'error writing dependencies to `/w/deps/y.d`: Access is denied. (os error 5)'\nexit 101\n",
+            );
+            let id = "88888888-8888-4888-8888-888888888888";
+            start_argv_for(id, "cargo build", &argv, root.path(), session.clone(), 1, &[]).unwrap();
+            let done = read(&result_path(id)).unwrap();
+            assert_eq!(done["exit"].as_i64(), Some(101), "{done}");
+            assert_eq!(*calls.borrow(), ["--stop-server", "--start-server"], "one restart only");
+            // An ordinary failure restarts nothing.
+            calls.borrow_mut().clear();
+            #[cfg(windows)]
+            let argv = vec!["cmd.exe".to_owned(), "/C".to_owned(), "exit".to_owned(), "3".to_owned()];
+            #[cfg(not(windows))]
+            let argv = vec!["sh".to_owned(), "-c".to_owned(), "exit 3".to_owned()];
+            let id = "99999999-9999-4999-8999-999999999999";
+            start_argv_for(id, "cargo build", &argv, root.path(), session, 1, &[]).unwrap();
+            INLINE_RUNNER.with(|flag| flag.set(false));
+            super::super::build_cache_server::fake(None);
+            crate::platform::set_test_sandboxed(None);
+            assert_eq!(read(&result_path(id)).unwrap()["exit"].as_i64(), Some(3));
+            assert!(calls.borrow().is_empty(), "{:?}", calls.borrow());
         });
     }
 

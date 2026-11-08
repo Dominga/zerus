@@ -147,6 +147,11 @@ pub(crate) struct Settings {
     /// the lead hears, or the owner for a message to the lead; 1 to 120.
     #[serde(default = "default_urgent_bound")]
     pub urgent_bound_minutes: u64,
+    /// Task 277 (owner, 2026-11-08): minutes an urgent message may stay
+    /// unread before it is an alarm in the lead's inbox (and, for the owner's
+    /// own message, on the owner's Waiting list); 0 turns the alarm off.
+    #[serde(default = "default_urgent_alarm")]
+    pub urgent_alarm_minutes: u64,
     /// Minutes an undecided report waits before the lead is reminded once;
     /// 0 turns the reminder off (C4).
     #[serde(default = "default_remind_lead")]
@@ -327,6 +332,10 @@ fn default_inbox_interval() -> u64 {
 fn default_urgent_bound() -> u64 {
     10
 }
+/// Task 277: an urgent message unread this long is an alarm; 3 minutes.
+fn default_urgent_alarm() -> u64 {
+    3
+}
 fn default_remind_lead() -> u64 {
     15
 }
@@ -379,6 +388,7 @@ impl Default for Settings {
             blocked_timeout_seconds: default_blocked_timeout(),
             inbox_interval_seconds: default_inbox_interval(),
             urgent_bound_minutes: default_urgent_bound(),
+            urgent_alarm_minutes: default_urgent_alarm(),
             remind_lead_minutes: default_remind_lead(),
             remind_owner_minutes: default_remind_owner(),
             remind_owner_permission_minutes: default_remind_owner_permission(),
@@ -480,6 +490,15 @@ pub(crate) struct Unread {
     pub urgent: u32,
     pub oldest: String,
     pub oldest_at: f64,
+    /// Task 277 (owner, 2026-11-08): the oldest unread urgent message, its
+    /// age and who sent it, so the lead's alarm and the owner's Waiting list
+    /// can name it without reading the working tier.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub urgent_oldest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub urgent_at: Option<f64>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub urgent_by: String,
     /// How often the doorbell rang for the oldest one.
     #[serde(default)]
     pub rings: u32,
@@ -506,6 +525,30 @@ pub(crate) struct Unread {
     /// for a message to the lead the owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_urgent_at: Option<f64>,
+}
+
+/// Task 277 (owner, 2026-11-08): an urgent message interrupted (or tried to
+/// interrupt) the member's busy turn. After the native stop the message opens
+/// a new turn that continues the same attempt; the attempt itself is kept.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct UrgentInterrupt {
+    /// The unread urgent message ids the interrupt was requested for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ids: Vec<String>,
+    /// The oldest unread urgent message at the request, so a newer urgent
+    /// message may still interrupt after a failure.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub oldest: String,
+    #[serde(default)]
+    pub at: f64,
+    /// The turn the interrupt was pinned to (the session's `turn_started`).
+    #[serde(default)]
+    pub turn: f64,
+    /// requested, sent or failed.
+    #[serde(default)]
+    pub state: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -637,6 +680,10 @@ pub(crate) struct Member {
     /// status shows them ("unread: N"); None when it has read everything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unread: Option<Unread>,
+    /// Task 277: an urgent message that interrupted (or tried to interrupt)
+    /// this member's busy turn; cleared once the new turn carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub urgent: Option<UrgentInterrupt>,
     /// Task 98: the member's Terminal refuses hand-outs because its composer
     /// holds a draft, a dialog or a prompt Zerus does not know; cleared by the
     /// next delivery.
@@ -672,6 +719,10 @@ pub(crate) struct Member {
     /// the session and are not Background work (G7).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub services: Vec<MemberService>,
+    /// Task 278: what the member waits on now: the build Zerus runs for it, a
+    /// background job its hooks registered, Background work under a budget.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jobs: Vec<MemberJob>,
     /// The conversation whose notifications the dispatcher muted: a member
     /// works for the lead, so its replies do not call the owner. Muted once
     /// per conversation; the owner may unmute it.
@@ -1002,6 +1053,9 @@ pub(crate) enum MergeWaitReason {
     Selection,
     Rollback,
     Ancestry,
+    /// Task #267: the landing conflicts on the integration line; a resolve
+    /// task waits for the reviewer, and later landings queue behind it.
+    Conflict,
     #[default]
     #[serde(other)]
     Other,
@@ -1072,6 +1126,14 @@ pub(crate) struct MergeEntry {
     /// Consecutive test-selection failures; the second returns the task.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub selection_failed: u32,
+    /// Task #267: the resolve task a conflict on the integration line became;
+    /// later landings wait behind it, and the landing retries once it is
+    /// decided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolve_task: Option<u32>,
+    /// Task #267: the files the landing conflicted in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflict_files: Vec<String>,
 }
 
 /// U62 (#760): one merge the queue kept, with the range it tested.
@@ -1160,6 +1222,19 @@ fn is_zero_u32(value: &u32) -> bool {
 
 fn is_zero_f64(value: &f64) -> bool {
     *value == 0.0
+}
+
+/// Task 278: a job a member waits on, with its start: `kind` build (a Zerus
+/// build), shell (a background job its hooks registered) or job (Background
+/// work under a declared budget).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub(crate) struct MemberJob {
+    pub kind: String,
+    pub what: String,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub since: f64,
 }
 
 /// An MCP server or service a member's session runs (G7): shown on the member
@@ -2070,12 +2145,25 @@ pub(crate) struct Task {
     pub control: Vec<Control>,
     #[serde(default)]
     pub deps: Vec<Dependency>,
+    /// Task #289: dependencies the lead kept after they were cancelled: the
+    /// task does not need their cancelled work, so the inbox notice clears.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept_cancelled: Vec<u32>,
     /// Task #60 (owner, 2026-11-06): the task this one was added for (a missed
     /// item or a bug it produced), in the same team. Unlike `deps` it never
     /// blocks or gates: the task is placed at least in its origin's layer and
     /// carries the link. Absent on tasks without one and on older records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<u32>,
+    /// Task #229 (owner, 2026-11-07): what a spawned follow-up is. "crit"
+    /// blocks using the phase's result: it joins its origin's running phase,
+    /// depends on the origin, and holds the phase's acceptance, its close and
+    /// the release candidate. "minor" is a shortcoming or missing
+    /// functionality that blocks nothing: it joins the next phase that has not
+    /// started, or a Minor phase. Empty on every task not spawned so, and on
+    /// older records.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub severity: String,
     #[serde(default)]
     pub assignee: String,
     /// The lead or you chose this member: Zerus does not give the task to
@@ -2198,10 +2286,18 @@ impl<'a> InProgressOutputs<'a> {
         Self { members }
     }
 
-    pub(crate) fn blocks(&self, task: &Task) -> bool {
-        self.members.get(task.assignee.as_str()).is_some_and(|active| active.iter().any(|other| {
-            other.id != task.id && (task.output.is_empty() || task.output_overlaps(other))
+    /// Task 155/259: the task may not move to `member`, which already has
+    /// work in progress writing the same files. Task 259: a folder-level
+    /// output is advisory, so only files and module paths hold; a task
+    /// without declared outputs stays with a member that already has work.
+    pub(crate) fn blocks_for(&self, member: &str, task: &Task) -> bool {
+        self.members.get(member).is_some_and(|active| active.iter().any(|other| {
+            other.id != task.id && (task.output.is_empty() || task.narrow_output_overlaps(other))
         }))
+    }
+
+    pub(crate) fn blocks(&self, task: &Task) -> bool {
+        self.blocks_for(task.assignee.as_str(), task)
     }
 }
 
@@ -2437,6 +2533,9 @@ pub(crate) struct LeadChange {
     /// The phases it changed as they were before it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub phases_before: Vec<Phase>,
+    /// Task #229: the phases it opened (a Minor phase), removed on a revert.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phases_added: Vec<u32>,
     /// The owner looked at it in the digest (it leaves Waiting).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub seen: bool,
@@ -2487,6 +2586,28 @@ pub(crate) struct Lane {
     pub label: String,
 }
 
+/// Task 259: a top-level container of areas (`client/src`, `crates/replica`,
+/// `mobile/android`), as opposed to a module path (`src/state/teams`).
+const CONTAINER_AREAS: [&str; 6] = ["client", "crates", "mobile", "services", "tray", "packaging"];
+
+/// Task 259: dotless root files, which are files and not whole areas.
+const ROOT_FILES: [&str; 9] = ["Makefile", "Dockerfile", "Containerfile", "LICENSE", "VERSION", "DEV_VERSION", "hgs", "AUTHORS", "COPYING"];
+
+/// Task 259 (owner, 2026-11-08): roles that do the same kind of work share
+/// their first word ("Frontend SolidJS" and "Frontend DeepSeek"), so a ready
+/// task may pass between them. Within it the exact role is only the
+/// preference; an unrelated role is no candidate.
+pub(crate) fn related_roles(a: &str, b: &str) -> bool {
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    a.eq_ignore_ascii_case(b) || role_family(a) == role_family(b)
+}
+
+fn role_family(role: &str) -> String {
+    role.split(|c: char| !c.is_alphanumeric()).find(|part| !part.is_empty()).unwrap_or_default().to_lowercase()
+}
+
 impl Task {
     pub(crate) fn requests_fresh_retry(&self) -> bool {
         self.fresh_retry && self.failed_by(&self.assignee)
@@ -2507,6 +2628,41 @@ impl Task {
         let b: Vec<_> = b.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
         a.starts_with(&b) || b.starts_with(&a)
     }
+    /// Task 259 (owner, 2026-11-08): a whole area, not a file or a module.
+    /// `src`, `tray` and a top-level folder; or an area directly inside a
+    /// container of areas (`client/src`, `crates/replica`, `mobile/android`).
+    /// A folder-level output is advisory: it never holds another task, since
+    /// it would hold every task touching that area while it is open. Plan
+    /// validation warns and asks for the files or module paths instead.
+    pub(crate) fn broad_output(path: &str) -> bool {
+        let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
+        match parts.as_slice() {
+            // `.` covers the whole repository: the broadest area there is.
+            [] => true,
+            [area] => Self::folder_like(area) && !ROOT_FILES.contains(area),
+            [container, area] => CONTAINER_AREAS.contains(container) && Self::folder_like(area),
+            _ => false,
+        }
+    }
+    /// A path component that names a folder rather than a file: it has no
+    /// extension (`src`, `crates`; `.github` counts as a folder). A dotless
+    /// root file such as `Makefile` is excused in `broad_output`.
+    fn folder_like(component: &str) -> bool {
+        !component.rsplit_once('.').is_some_and(|(name, ext)| !name.is_empty() && !ext.is_empty())
+    }
+    /// The task's outputs that are files or module paths: the ones that hold.
+    pub(crate) fn narrow_outputs(&self) -> impl Iterator<Item = &str> + '_ {
+        self.output.iter().map(String::as_str).filter(|path| !Self::broad_output(path))
+    }
+    /// The task's folder-level outputs, for the plan's warning.
+    pub(crate) fn broad_outputs(&self) -> Vec<&str> {
+        self.output.iter().map(String::as_str).filter(|path| Self::broad_output(path)).collect()
+    }
+    /// Task 259: an overlap of two files or module paths; the only output
+    /// overlap that holds two tasks apart. A folder-level path only advises.
+    pub(crate) fn narrow_output_overlaps(&self, other: &Task) -> bool {
+        self.narrow_outputs().any(|a| other.narrow_outputs().any(|b| Self::paths_overlap(a, b)))
+    }
 
     pub(crate) fn rework(&self) -> bool {
         self.rework_since.is_some() && !self.status.finished() && !self.assignee.is_empty()
@@ -2522,6 +2678,40 @@ impl Task {
     pub(crate) fn is_check(&self) -> bool {
         self.kind == TaskKind::Check
     }
+}
+
+/// Task #229: what a phase is. A plan phase belongs to the goal; a Minor phase
+/// holds the Minor follow-ups the lead spawned, may run in free mode and may end
+/// with tail tasks that depend on all its minors.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PhaseKind {
+    #[default]
+    Plan,
+    Minor,
+}
+
+impl PhaseKind {
+    pub(crate) fn is_plan(&self) -> bool {
+        *self == Self::Plan
+    }
+
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Plan => "plan",
+            Self::Minor => "minor",
+        }
+    }
+}
+
+/// Task #289: a notice the lead marked seen, with the change signature it had
+/// then; it returns only when that signature differs.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub(crate) struct SeenNotice {
+    pub key: String,
+    pub signature: String,
+    #[serde(default)]
+    pub at: f64,
 }
 
 /// What happened to a phase appended by `extend`.
@@ -2653,6 +2843,10 @@ pub(crate) struct LorePending {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Phase {
     pub n: u32,
+    /// Task #229: a plan phase (the default) or a Minor phase the lead opened
+    /// for a set of Minor follow-ups; a Minor phase may run in free mode.
+    #[serde(default, skip_serializing_if = "PhaseKind::is_plan")]
+    pub kind: PhaseKind,
     /// The display and approval order (F10): drafts may be moved before each
     /// other. 0 on a team stored before the field means n order.
     #[serde(default)]
@@ -2956,6 +3150,10 @@ pub(crate) struct Team {
     /// any; newest last, at most `LEAD_CHANGES_KEPT`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lead_changes: Vec<LeadChange>,
+    /// Task #289: the inbox notices the lead marked seen, oldest first, at most
+    /// 300; each returns to the inbox when its content changes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seen_notices: Vec<SeenNotice>,
     /// #511 N3: members to tell that their worked-ahead attempt was revoked
     /// with its phase, newest last, at most 20. Task 24: also a member whose
     /// attempt in progress was revoked by a reassign, a take-over or a cancel
@@ -2990,6 +3188,11 @@ pub(crate) struct Team {
     /// reads them as one inbox item.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub crash_recovered: Vec<Value>,
+    /// Task #275: a sandboxed member's queued call the worker refused or that
+    /// failed, newest last, at most 20; the member is told as a team message
+    /// and the lead reads each reason in its inbox.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outbox_failures: Vec<Value>,
 }
 
 /// Task #227: a retry while the member works on the task: "continue", never

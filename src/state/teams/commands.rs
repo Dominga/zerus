@@ -10,10 +10,10 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|phase-mode|lead-changes|revert-lead-change|seen-lead-changes|integrate-build|full-tests|test|run|templates|safe-action|reports-to|sub-lead|deferred|answer-deferred|defer-session|disk|test-config --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|spawn|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|phase-mode|lead-changes|revert-lead-change|seen-lead-changes|seen|keep|integrate-build|full-tests|test|run|templates|safe-action|reports-to|sub-lead|deferred|answer-deferred|defer-session|disk|test-config --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
-    "plan", "extend", "edit-draft", "move-phase", "move-task", "add-to-phase", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
+    "plan", "extend", "edit-draft", "move-phase", "move-task", "add-to-phase", "spawn", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
     // U63 (owner, 2026-10-31): a phase's pause and the owner's acceptance.
     "pause-phase", "unpause-phase", "phase-acceptance", "accept-phase", "send-back-phase",
     "rework-phase", "reports-to", "sub-lead", "finish", "approve", "commit", "discard", "pause", "resume", "stop",
@@ -29,7 +29,7 @@ const MUTATIONS: &[&str] = &[
     // Task 160: park a task on an outside event, and give it back.
     "park", "unpark",
     // Task 162: the owner reverts the lead's plan change or marks the digest seen.
-    "revert-lead-change", "seen-lead-changes",
+    "revert-lead-change", "seen-lead-changes", "seen", "keep",
 ];
 
 /// Task 162: the operations the lead once did on the owner's typed word and
@@ -681,6 +681,13 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
     // Task #58: every phase's own mode, phase 1 included; `plan_mode` stays
     // the team's default for a phase without one.
     value["phase_modes"] = ops::phase_modes_view(team);
+    // Task #229: the critical tasks open in the team and what each holds.
+    value["crit"] = json!(plan::open_crits_all(team).iter().map(|(phase, id)| json!({"phase":phase,"task":id})).collect::<Vec<_>>());
+    // Task #267: the integration line: its branch and head, and where every
+    // accepted task's work landed or why it has not.
+    if !team.settings.integration_folder.trim().is_empty() {
+        value["integration"] = super::merge_queue::landing(team);
+    }
     // U62 (#715): the full-run policy and the owner's one-time grant.
     value["full_tests"] = json!(team.settings.full_tests);
     value["full_tests_grant"] = json!(team.full_tests_grant);
@@ -1054,7 +1061,7 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
             .count()
     };
     let deferred = team.findings.iter().filter(|finding| finding.state == "deferred").count();
-    value["findings_summary"] = json!({"open":{"critical":open("critical"),"normal":open("normal"),"later":open("later")},"deferred":deferred});
+    value["findings_summary"] = json!({"open":{"critical":open("critical") + open("crit"),"normal":open("normal") + open("minor"),"later":open("later")},"deferred":deferred});
     value["findings"] = findings_page(team, None);
     // U58: a phase whose tasks are all cancelled reads cancelled; the status
     // hides cancelled tasks and those phases unless the caller asks for them.
@@ -1134,6 +1141,12 @@ fn session_account(member: &Member) -> String {
 /// A team as the session list shows it: members with their sessions and each
 /// task's state, without descriptions, reports or the feed. The list never
 /// reads the live session listing: the desktop polls it often (C1).
+/// Tests: the status summary of a team.
+#[cfg(test)]
+pub(crate) fn summary_for_test(team: &Team) -> Value {
+    summary(team, false)
+}
+
 fn summary(team: &Team, include_cancelled: bool) -> Value {
     let count = |status: TaskStatus| team.tasks.iter().filter(|task| task.status == status).count();
     // U58: the dashboard hides cancelled tasks and the phases whose tasks are
@@ -1153,7 +1166,9 @@ fn summary(team: &Team, include_cancelled: bool) -> Value {
                 "account":m.account,"session_account":session_account(m),
                 "session":m.session,"state":m.state,"error":m.error,"queue":member_queue(team, &m.id),
                 "stage_queue":super::stages::queue(team, &m.id),
-                "services":m.services,"question":m.permission});
+                "services":m.services,"question":m.permission,
+                // Task 278: what it waits on, with each job's start.
+                "jobs":m.jobs,"waiting_for":super::look::job_words(&m.jobs.iter().map(|job| super::look::WaitJob { what: job.what.clone(), since: job.since }).collect::<Vec<_>>())});
             // Task 115: the state contract's own state, so the session list's
             // member card says Waiting for you rather than busy.
             let (state, reason) = crate::state::session_state::member_state(m);
@@ -3263,6 +3278,10 @@ fn test_command(input: &Value) -> anyhow::Result<Value> {
             request.team = team_id.clone();
             request.task = input["task"].as_u64().and_then(|id| u32::try_from(id).ok());
             request.asked_by = if asked_by.is_empty() { "You".to_owned() } else { asked_by };
+            // Task #281: a run may be marked a performance measurement, and a
+            // comparison group alternates its binaries in rounds.
+            request.performance |= input["performance"].as_bool() == Some(true);
+            request.compare = text(input, "compare").to_owned();
             // #719: the desktop's Force run queues the suite as forced: the worker
             // runs it first at its next tick, never a reused result, and no
             // desktop call waits for the run.
@@ -3407,6 +3426,54 @@ fn handoff_view(input: &Value) -> anyhow::Result<Value> {
     }
 }
 
+/// Task #269: the hooks `hgs team look` compares, from the member's live
+/// listing when it has one (its build, its tool call, Background work and the
+/// last event), else from the stored fields. The stuck bound is the tool's
+/// longer one while a tool call runs, as the dispatcher's stuck rule uses.
+fn look_hooks(team: &Team, member: &Member, seen: Option<&super::dispatcher::Seen>, at: f64) -> super::look::Hooks {
+    let in_tool = seen.is_some_and(|seen| {
+        seen.phase == "tool"
+            && !seen.tool.is_empty()
+            && seen.tool_started.is_some_and(|started| seen.turn_started.is_none_or(|turn| started >= turn))
+    });
+    let attempt_at = team
+        .tasks
+        .iter()
+        .find_map(|task| task.open_attempt().filter(|attempt| attempt.member == member.id).map(|attempt| attempt.activity_at))
+        .flatten();
+    let last = [seen.and_then(|seen| seen.last_event_at), member.seen_event_at, member.native_at, attempt_at,
+        super::dispatcher::last_progress(team, &member.id)]
+        .into_iter()
+        .flatten()
+        .reduce(f64::max);
+    let quiet = last.map(|last| (at - last).max(0.0)).unwrap_or(0.0);
+    let limit = if in_tool {
+        super::dispatcher::tool_stuck_minutes(team) * 60.0
+    } else {
+        super::ops::stuck_minutes(team) * 60.0
+    };
+    let hooks = super::look::Hooks {
+        live: seen.map_or_else(|| member.seen.is_some_and(|seen| seen.live), |seen| seen.live),
+        activity: seen.map_or_else(|| member.seen_activity.clone(), |seen| seen.activity.clone()),
+        phase: seen.map_or_else(|| member.seen_phase.clone(), |seen| seen.phase.clone()),
+        asking: seen.is_some_and(|seen| seen.asking) || member.pending.is_some() || member.terminal_question.is_some(),
+        background: seen.is_some_and(|seen| seen.background) || member.background_since.is_some(),
+        building: seen.is_some_and(|seen| seen.building),
+        build_label: seen.map(|seen| seen.build_label.clone()).unwrap_or_default(),
+        // Task 278: the jobs it waits on, from the live listing, else as recorded.
+        jobs: match seen {
+            Some(seen) => seen.jobs.iter().map(|job| super::look::WaitJob { what: job.what.clone(), since: job.since }).collect(),
+            None => member.jobs.iter().map(|job| super::look::WaitJob { what: job.what.clone(), since: job.since }).collect(),
+        },
+        tool: seen.map(|seen| seen.tool.clone()).unwrap_or_default(),
+        tool_since: if in_tool { seen.and_then(|seen| seen.tool_started) } else { None },
+        last_event_at: last.or(member.seen_event_at),
+        quiet,
+        limit,
+    };
+    hooks
+}
+
 fn look(input: &Value) -> anyhow::Result<Value> {
     let wanted = text(input, "member").trim();
     ensure!(!wanted.is_empty(), "hgs team look needs a member: its id or role");
@@ -3438,20 +3505,17 @@ fn look(input: &Value) -> anyhow::Result<Value> {
         }
     };
     let at = now();
-    let quiet = member.seen_event_at.map(|seen| (at - seen).max(0.0)).unwrap_or(0.0);
-    let mut hooks = super::look::Hooks {
-        live: member.seen.is_some_and(|seen| seen.live),
-        activity: member.seen_activity.clone(),
-        phase: member.seen_phase.clone(),
-        asking: member.pending.is_some() || member.terminal_question.is_some(),
-        background: member.background_since.is_some(),
-        building: false,
-        tool: String::new(),
-        tool_since: None,
-        last_event_at: member.seen_event_at,
-        quiet,
-        limit: super::ops::stuck_minutes(team) * 60.0,
-    };
+    // Task #269: the live listing knows the build, the tool call and Background
+    // work; the stored member fields are the fallback when it is absent.
+    let seen = member.session.as_ref().and_then(|session| {
+        live_sessions().ok()?.into_iter().find(|seen| {
+            seen.host == session.host
+                && (seen.name == session.name
+                    || (!session.run_id.is_empty() && seen.run_id == session.run_id)
+                    || (!session.conversation_id.is_empty() && seen.conversation_id == session.conversation_id))
+        })
+    });
+    let mut hooks = look_hooks(team, &member, seen.as_ref(), at);
     // Task 181: a DeepSeek member's open tool call is work, held to the tool bound.
     if member.agent == "dsh" {
         if let Some(session) = member.session.as_ref() {
@@ -3659,9 +3723,9 @@ fn take_messages(team: &Team, member: &str, input: &Value, via: &str, mark: bool
     let given = text(input, "request_id");
     let request = if canonical_uuid(given) { given.to_owned() } else { uuid::Uuid::new_v4().to_string() };
     let ids: Vec<String> = list.iter().map(|message| message.id.clone()).collect();
-    let written = Store::open(true).and_then(|mut store| {
-        store.mutate_working(&team.id, |tx, team, events| read_messages(tx, team, member, &ids, via, &request, events))
-    });
+    // Task 287: marking messages read changes only their rows (and the
+    // receipt's event); the team record is not rewritten.
+    let written = Store::open(true).and_then(|mut store| store.write_rows(&team.id, |tx, events| read_messages(tx, team, member, &ids, via, &request, events)));
     match written {
         Ok(marked) => Ok((values, json!({"read":marked,"request_id":request,"via":via}))),
         Err(error) if read_only(&error) => {
@@ -3671,15 +3735,20 @@ fn take_messages(team: &Team, member: &str, input: &Value, via: &str, mark: bool
             Ok((values, json!({"queued":ids,"request_id":request,"via":via,"path":path.to_string_lossy(),
                 "note":"The sandbox blocks the team store: the read receipt waits in your folder and the team worker records it."})))
         }
-        Err(error) => Err(error),
+        // Task 287: a mark that failed (the store stayed busy) never empties the
+        // inbox: the messages are printed and stay unread for the next one.
+        Err(error) => Ok((values, json!({"read":[],"request_id":request,"via":via,"error":format!("{error:#}"),
+            "note":"These messages were not marked read (the team store did not take the receipt); they stay unread and come again with the next hgs team inbox."}))),
     }
 }
 
 /// Task 134: marks `member`'s messages `ids` read in one transaction with its
 /// event (the receipt: who, which, how, under which request id).
+/// Task 287: only the rows change; the member's unread summary in the team
+/// record follows at the worker's next tick.
 pub(crate) fn read_messages(
     tx: &rusqlite::Transaction,
-    team: &mut Team,
+    team: &Team,
     member: &str,
     ids: &[String],
     via: &str,
@@ -3688,7 +3757,6 @@ pub(crate) fn read_messages(
 ) -> anyhow::Result<Vec<String>> {
     let now = super::super::now();
     let marked = super::working::mark_read(tx, &team.id, member, ids, via, request, now)?;
-    super::working::refresh(tx, team, member, now)?;
     if !marked.is_empty() {
         events.push(Event::new("message_read", json!({"member":team.role_of(member),"ids":marked,"via":via,"request_id":request})));
     }
@@ -3736,9 +3804,12 @@ fn message_command(input: &Value) -> anyhow::Result<Value> {
     // Task 156: the lead's decision is recorded, never only messaged.
     ensure!(by != team.lead || !super::decisions::decision_like(&body), "{}", super::decisions::refusal(&team.id));
     // Task 161: the lead never tells a member to wait; waiting is a park.
-    if by == team.lead && super::wait_loops::lead_wait_instruction(&body) {
-        let open = recipients.iter().find_map(|member| team.tasks.iter().find_map(|task| task.open_attempt().filter(|attempt| attempt.member == *member).map(|attempt| (task.id, attempt.id.clone()))));
-        bail!("{}", super::wait_loops::lead_refusal(&team.id, open.as_ref().map(|found| found.0), open.as_ref().map_or("", |found| found.1.as_str())));
+    // Task #276: the refusal quotes the phrase that judged it an instruction.
+    if by == team.lead {
+        if let Some(phrase) = super::wait_loops::lead_wait_instruction(&body) {
+            let open = recipients.iter().find_map(|member| team.tasks.iter().find_map(|task| task.open_attempt().filter(|attempt| attempt.member == *member).map(|attempt| (task.id, attempt.id.clone()))));
+            bail!("{}", super::wait_loops::lead_refusal(&team.id, open.as_ref().map(|found| found.0), open.as_ref().map_or("", |found| found.1.as_str()), &phrase));
+        }
     }
     // Task 173: a lead message naming a task goes only to that task's holder
     // and is bound to its attempt; otherwise it is refused with the hand-out.
@@ -4140,20 +4211,29 @@ fn queue_write(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         Some(_) => super::outbox::request_path(&folder, &request_id),
         None => super::outbox::push(&folder, &request)?,
     };
+    let result = super::outbox::result_path(&folder, &request_id);
+    // Task #275: the caller is told where the outcome is and that a refusal or
+    // failure also comes as a team message, not only to a file nobody reads.
+    let delivery = format!(
+        "The team worker applies it; its result stays at {} and a refusal or failure also reaches you as a team message at your next safe point (urgent for a question or a report).",
+        result.display()
+    );
     let queued = json!({
-        "status":"queued", "request_id":request_id, "path":path.to_string_lossy(),
+        "status":"queued", "request_id":request_id, "path":path.to_string_lossy(), "result":result.to_string_lossy(),
+        "delivery": delivery,
         "note": if existing.is_some() {
-            "This request is already queued; ask again with the same request_id (or --wait) to read the outcome."
+            format!("This request is already queued. {delivery}")
         } else {
-            "The sandbox blocks the team store: the request waits in the member's folder and the team worker applies it. Run it again with --wait to read the outcome."
+            format!("The sandbox blocks the team store: the request waits in the member's folder. {delivery}")
         }
     });
     if !wait {
         return Ok(queued);
     }
     Ok(super::outbox::wait(&folder, &request_id, 30.0).unwrap_or_else(|| json!({
-        "status":"queued", "request_id":request_id, "path":path.to_string_lossy(),
-        "note":"The team worker has not applied it in 30 s; it stays queued in the member's folder."
+        "status":"queued", "request_id":request_id, "path":path.to_string_lossy(), "result":result.to_string_lossy(),
+        "delivery": delivery,
+        "note":"The team worker has not applied it in 30 s; it stays queued in the member's folder and the worker will apply it. Its result stays at the path in `result`, and a refusal or failure also reaches you as a team message."
     })))
 }
 
@@ -5656,7 +5736,17 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             let replayed = op == "draft"
                 && text(&filled, "action") == "discard"
                 && store.receipt(request, input)?.is_some();
-            let mut receipt = match store.mutate(Some((request, input)), team_id, revision, |team, events| {
+            // Task 287: a report's git reads run before the store's lock and are
+            // served inside it.
+            let reporting = if op == "report" && !parent_lead { store.load(team_id).ok().flatten() } else { None };
+            let prefetch = || {
+                if let Some(team) = reporting.as_ref() {
+                    if let Ok(caller) = actor(team, op, &filled) {
+                        ops::prefetch_git(team, op, &filled, &caller);
+                    }
+                }
+            };
+            let mut receipt = match super::dispatcher::with_git_answers(prefetch, || store.mutate(Some((request, input)), team_id, revision, |team, events| {
                 let actor = if parent_lead { Actor::ParentLead } else { actor(team, op, &filled)? };
                 let before = team.clone();
                 let result = ops::apply(team, op, &filled, &actor, &BTreeSet::new(), events)?;
@@ -5667,7 +5757,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                     events.push(Event::new("iron_rules_changed", json!({"by":actor.label(team)})));
                 }
                 Ok(result)
-            }) {
+            })) {
                 Ok(receipt) => receipt,
                 Err(error) if queues_instead(op) && read_only(&error) => {
                     return queue_write(op, input, wait)
@@ -5907,4 +5997,11 @@ mod commands_tools;
 #[cfg(test)]
 #[path = "tests/commands_scratch.rs"]
 mod commands_scratch;
+#[cfg(test)]
+#[path = "tests/inbox_notices.rs"]
+mod inbox_notices;
+
+
+
+
 

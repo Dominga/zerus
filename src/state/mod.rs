@@ -100,6 +100,7 @@ mod session_state;
 pub(crate) mod slow_calls;
 mod switch_account;
 mod builds;
+pub(crate) mod build_cache_server;
 pub(crate) mod build_dirs;
 pub(crate) mod subagent_lifecycle;
 mod native_subagents;
@@ -689,6 +690,8 @@ fn live_row(session: &mut Value, record: Value, shared: &Shared, process_work: &
     let summary = journal::summary(&record, true);
     phases.mark("summary");
     session["process_work"] = process_work.summary(&record, summary["activity"] == "idle" && summary["phase"] == "idle");
+    // Task 278: the background jobs its hooks registered, whatever its activity.
+    session["background_jobs"] = process_work.registered(&record, true);
     session
         .as_object_mut()
         .ok_or("invalid session")?

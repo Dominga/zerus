@@ -7,6 +7,7 @@ pub(crate) mod commands;
 pub(crate) mod context;
 pub(crate) mod decisions;
 pub(crate) mod dispatcher;
+pub(crate) mod dispatcher_rebalance;
 pub(crate) mod baseline;
 pub(crate) mod estimates;
 pub(crate) mod handoff;

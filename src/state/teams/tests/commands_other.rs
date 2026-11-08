@@ -707,14 +707,19 @@ fn the_lead_never_answers_its_own_permission_card() {
 #[test]
 fn a_bad_finding_is_refused_with_the_report_not_at_accept() {
     // N13: "high" is no severity: the member hears it at once, and the
-    // corrected report is accepted.
+    // corrected report is accepted. Task #292: the validation runs on the
+    // owner's path, not the sandbox's queued write; the test forces it so it
+    // reads the same on a sandboxed machine.
+    crate::platform::set_test_sandboxed(Some(false));
     let (team, attempt, _) = review_team();
     with_review_team(&team, || {
         let error = call("report", json!({"task":1,"attempt":attempt,"text":"Done",
             "report":{"summary":"Done","findings":[finding("high","Lost write")]}}))
         .unwrap_err()
         .to_string();
-        assert!(error.contains("A finding is critical, normal or later"), "{error}");
+        // Task #229: a finding may name crit or minor too (the same severities
+        // a spawned follow-up takes), so the refusal names all five.
+        assert!(error.contains("A finding is critical (crit), normal (minor) or later"), "{error}");
         assert_eq!(stored().task(1).unwrap().attempts[0].report, None);
         let error = call("report", json!({"task":1,"attempt":attempt,"text":"Done",
             "report":{"summary":"Done","findings":[{"severity":"normal","title":"No scenario"}]}}))
@@ -729,6 +734,7 @@ fn a_bad_finding_is_refused_with_the_report_not_at_accept() {
         assert_eq!(team.findings.len(), 1);
         assert_eq!(team.findings[0].severity, "critical");
     });
+    crate::platform::set_test_sandboxed(None);
 }
 
 #[test]
@@ -2043,5 +2049,79 @@ fn a_note_and_a_message_with_a_secret_are_stored_redacted() {
         let messages = crate::state::teams::working::unread(&store.connection(), "rv", "dev", crate::state::now()).unwrap();
         assert!(messages.iter().any(|message| message.text.contains("[redacted: aws-access-key-id]")), "{messages:?}");
         assert!(messages.iter().all(|message| !message.text.contains(concat!("AKIA", "ABCDEFGHIJKLWXYZ"))), "{messages:?}");
+    });
+}
+
+/// Task #269: `hgs team look` reads the member's own build (and a tool call)
+/// from the live listing, so a quiet build is named, not called uncertain.
+#[test]
+fn look_reads_the_members_build_and_tool_call_from_the_live_listing() {
+    use crate::state::teams::dispatcher::{tool_stuck_minutes, Seen};
+    use crate::state::teams::look;
+    let mut team = Team::default();
+    team.members.push(Member { id: "qa".into(), role: "QA".into(), agent: "kimi".into(), ..Default::default() });
+    let qa = team.member("qa").unwrap();
+    let at = 10_000.0;
+    let seen = Seen {
+        live: true,
+        activity: "busy".into(),
+        phase: "working".into(),
+        building: true,
+        build_label: "cargo-build".into(),
+        last_event_at: Some(at - 1500.0),
+        ..Default::default()
+    };
+    let hooks = look_hooks(&team, qa, Some(&seen), at);
+    assert!(hooks.building);
+    assert_eq!(hooks.build_label, "cargo-build");
+    assert_eq!(hooks.quiet, 1500.0);
+    assert_eq!(hooks.limit, super::super::ops::stuck_minutes(&team) * 60.0);
+    assert_eq!(look::waiting(&hooks).as_deref(), Some("its own Zerus build (cargo-build)"));
+    // A tool call in flight gets the dispatcher's longer tool bound and is named.
+    let seen = Seen {
+        live: true,
+        activity: "busy".into(),
+        phase: "tool".into(),
+        tool: "Bash".into(),
+        tool_started: Some(at - 3000.0),
+        turn_started: Some(at - 4000.0),
+        last_event_at: Some(at - 3000.0),
+        ..Default::default()
+    };
+    let hooks = look_hooks(&team, qa, Some(&seen), at);
+    assert_eq!(hooks.limit, tool_stuck_minutes(&team) * 60.0);
+    assert_eq!(look::waiting(&hooks).as_deref(), Some("a tool call (Bash)"));
+    // Without a listing the stored fields and the usual bound are used.
+    let hooks = look_hooks(&team, qa, None, at);
+    assert!(!hooks.building && hooks.tool.is_empty());
+    assert_eq!(hooks.limit, super::super::ops::stuck_minutes(&team) * 60.0);
+}
+/// Task #275: a queued call's answer names the request id, where its result
+/// stays and that a refusal or failure reaches the member as a team message.
+#[test]
+fn a_queued_call_says_where_its_result_arrives() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let folder = dir.path().join("work");
+        std::fs::create_dir_all(&folder).unwrap();
+        let (mut team, _, _) = review_team();
+        team.folder = folder.to_string_lossy().into_owned();
+        team.status = TeamStatus::Running;
+        team.members.iter_mut().find(|member| member.id == "dev").unwrap().session = Some(SessionRef {
+            name: "codex/x/dev".into(),
+            run_id: "r1".into(),
+            conversation_id: "dev-conversation".into(),
+            ..Default::default()
+        });
+        Store::open(true).unwrap().create("66666666-6666-4666-8666-666666666666", &json!({}), team.clone(), vec![]).unwrap();
+        set_test_caller_identities(Some((Some("dev-conversation".into()), None, None)));
+        let request_id = "77777777-7777-4777-8777-777777777777";
+        let queued = queue_write("ask", &json!({"request_id":request_id,"team":team.id,"text":"How?","attempt":""}), false).unwrap();
+        set_test_caller_identities(None);
+        assert_eq!(queued["status"], json!("queued"));
+        assert_eq!(queued["request_id"], json!(request_id));
+        assert!(queued["result"].as_str().unwrap().ends_with(&format!("{request_id}.result.json")), "{queued}");
+        assert!(queued["delivery"].as_str().unwrap().contains("team message"), "{queued}");
+        assert!(queued["note"].as_str().unwrap().contains("team message"), "{queued}");
     });
 }

@@ -21,6 +21,7 @@
 //! off the dispatcher's tick. `hgs team look <member>` gives the same compact
 //! snapshot in one call, and an uncertain member is told to the lead once.
 use super::model::{AttemptState, LeadStall, Member, MemberCheck, MemberState, Team};
+use super::plan;
 use serde_json::{json, Value};
 
 /// Sources must disagree this long (two reads) before the member is uncertain.
@@ -50,10 +51,16 @@ pub(crate) struct Hooks {
     pub asking: bool,
     pub background: bool,
     pub building: bool,
+    /// Task 36: the label of the build Zerus runs for the session, empty when
+    /// it is not building (or has none).
+    pub build_label: String,
     pub tool: String,
     /// Task 181: when the open tool call began (Claude's record, or a DeepSeek
     /// session's PreToolUse with no result after it).
     pub tool_since: Option<f64>,
+    /// Task 278: the jobs the listing registers for it (its Zerus build, a
+    /// background job its hooks registered, Background work under a budget).
+    pub jobs: Vec<WaitJob>,
     pub last_event_at: Option<f64>,
     /// Seconds since its last progress, and the stuck bound it is held to.
     pub quiet: f64,
@@ -81,6 +88,34 @@ impl Hooks {
             "unknown"
         }
     }
+}
+
+/// Task 278: a job a member waits on, and since when.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct WaitJob {
+    pub what: String,
+    pub since: f64,
+}
+
+/// "14:05" for a start time, empty when it is unknown.
+pub(crate) fn clock(at: f64) -> String {
+    use chrono::TimeZone;
+    if at <= 0.0 {
+        return String::new();
+    }
+    chrono::Local.timestamp_opt(at as i64, 0).single().map(|time| time.format("%H:%M").to_string()).unwrap_or_default()
+}
+
+/// Task 278: "waiting for <job> since T" in words, the first registered job
+/// and how many more.
+pub(crate) fn job_words(jobs: &[WaitJob]) -> Option<String> {
+    let first = jobs.first()?;
+    let since = clock(first.since);
+    let mut text = if since.is_empty() { first.what.clone() } else { format!("{} since {since}", first.what) };
+    if jobs.len() > 1 {
+        text += &format!(" (and {} more)", jobs.len() - 1);
+    }
+    Some(text)
 }
 
 /// The Terminal's recognised panel.
@@ -220,9 +255,12 @@ pub(crate) fn due(team: &Team, member: &Member, hooks: &Hooks, now: f64) -> Opti
     let quiet = hooks.quiet >= SUSPECT_AFTER;
     let unread = hooks.asks() && member.pending.is_none() && member.terminal_question.is_none();
     let open = member.check.as_ref().is_some_and(|check| check.state != "agree");
-    let suspect = (hooks.busy() && !hooks.asks() && quiet && !hooks.building)
+    // Task #269: a member waiting on its own Zerus build, Background work or a
+    // tool call is quiet for a reason; it is not suspect.
+    let explained = waiting(hooks).is_some();
+    let suspect = (hooks.busy() && !hooks.asks() && quiet && !explained)
         || (unread && quiet)
-        || (!hooks.busy() && !hooks.asks() && !hooks.background && !hooks.building && unreported)
+        || (!hooks.busy() && !hooks.asks() && !hooks.background && !hooks.building && hooks.jobs.is_empty() && unreported)
         || open;
     if !suspect {
         return None;
@@ -231,11 +269,41 @@ pub(crate) fn due(team: &Team, member: &Member, hooks: &Hooks, now: f64) -> Opti
     Some(member.check.as_ref().is_none_or(|check| now - check.at >= every))
 }
 
+/// Task #269: what a quiet member is waiting on, when its own work explains
+/// the quiet: a Zerus build (`hgs team run`, `hgs run`), Background work (a
+/// job, subagents, a declared budget), or a tool call in flight. The
+/// dispatcher's stuck rule already exempts the first two; the look must not
+/// call them uncertain either, and names the wait instead.
+pub(crate) fn waiting(hooks: &Hooks) -> Option<String> {
+    // Task 278: a registered job names itself and its start.
+    if let Some(words) = job_words(&hooks.jobs) {
+        return Some(words);
+    }
+    if hooks.building {
+        let label = hooks.build_label.trim();
+        return Some(if label.is_empty() {
+            "its own Zerus build".into()
+        } else {
+            format!("its own Zerus build ({label})")
+        });
+    }
+    if hooks.background {
+        return Some("Background work in flight (a job, subagents or a declared budget)".into());
+    }
+    let tool = hooks.tool.trim();
+    if !tool.is_empty() {
+        return Some(format!("a tool call ({tool})"));
+    }
+    None
+}
+
 /// The idle lead's message (task 95's stall, told to the lead itself): what
 /// waits for its decision, oldest first, at most five.
 pub(crate) fn lead_idle_text(team: &Team, stall: &LeadStall, now: f64) -> String {
     let minutes = ((now - stall.oldest).max(0.0) / 60.0).round() as u64;
-    let mut items: Vec<super::inbox::Item> = super::inbox::items(team);
+    // Task #289: the nag names the decisions the stall counts, never a notice
+    // (a decided proposal, a cancelled dependency, an unread count, a digest).
+    let mut items: Vec<super::inbox::Item> = super::inbox::items(team).into_iter().filter(super::lead_stall::decision).collect();
     items.sort_by(|a, b| a.since.total_cmp(&b.since));
     let mut text = format!(
         "[Zerus team \u{b7} from: Zerus \u{b7} look]\nYou are idle while {} decision(s) wait, the oldest for {minutes} min:\n",
@@ -257,6 +325,9 @@ pub(crate) struct Compared {
     pub state: String,
     pub disagree: Vec<String>,
     pub sources: Value,
+    /// Task #269: what the member waits on (its own build, Background work or a
+    /// tool call), when that explains a quiet hook.
+    pub waiting: Option<String>,
 }
 
 /// Compares the views. `record` names a request Zerus read from the session;
@@ -265,10 +336,15 @@ pub(crate) fn compare(hooks: &Hooks, record: Option<&str>, screen: Option<(Scree
     let said = hooks.view();
     let mut disagree = Vec::new();
     let minutes = |seconds: f64| (seconds.max(0.0) / 60.0).round() as u64;
+    // Task #269: the member is waiting on its own build, Background work or a
+    // tool call; a quiet hook is expected and is named, never uncertain. The
+    // build and Background work are exempt like the dispatcher's stuck rule;
+    // a tool call gets the dispatcher's longer tool bound (`limit`).
     // Task 181: a member inside one long tool call is held to the tool bound
-    // (`limit` is already that bound then), and one waiting on its own Zerus
-    // build is Building: neither is silence.
-    if said == "working" && !hooks.building && hooks.limit > 0.0 && hooks.quiet >= hooks.limit {
+    // (`limit` is already that bound then).
+    let hard = hooks.building || hooks.background || !hooks.jobs.is_empty();
+    let waiting = waiting(hooks);
+    if said == "working" && hooks.limit > 0.0 && hooks.quiet >= hooks.limit && !hard {
         disagree.push(format!(
             "activity: no session event for {} min while hooks say working (bound {} min)",
             minutes(hooks.quiet),
@@ -285,7 +361,10 @@ pub(crate) fn compare(hooks: &Hooks, record: Option<&str>, screen: Option<(Scree
         };
         let clash = match (said, kind) {
             (_, Screen::Unknown) => false,
-            ("working", Screen::Asking | Screen::Prompt | Screen::Draft) => true,
+            // While a build, job or tool runs, the agent is normally back at its
+            // prompt; the wait is not a disagreement. An asking panel stays one.
+            ("working", Screen::Prompt | Screen::Draft) => waiting.is_none(),
+            ("working", Screen::Asking) => true,
             ("asking", Screen::Prompt | Screen::Working | Screen::Draft) => true,
             ("idle", Screen::Working | Screen::Draft) => true,
             ("idle", Screen::Asking) => record.is_none(),
@@ -308,13 +387,14 @@ pub(crate) fn compare(hooks: &Hooks, record: Option<&str>, screen: Option<(Scree
     };
     let sources = json!({
         "hooks":{"view":said,"activity":hooks.activity,"phase":hooks.phase,"asking":hooks.asking,"tool":hooks.tool,
-            "tool_since":hooks.tool_since,"last_event_at":hooks.last_event_at},
+            "tool_since":hooks.tool_since,"building":hooks.building,"build_label":hooks.build_label,"last_event_at":hooks.last_event_at},
         "record":{"view":if record.is_some() { "asking" } else { "none" },"request":record},
         "screen":screen.map(|(kind, detail)| json!({"view":kind.name(),"detail":detail})).unwrap_or(json!({"view":"unread"})),
         "process":{"view":if hooks.live { "running" } else { "stopped" },"background":hooks.background,"building":hooks.building},
+        "waiting":waiting,
         "activity":{"minutes_quiet":minutes(hooks.quiet),"stuck_after_minutes":minutes(hooks.limit)},
     });
-    Compared { state, disagree, sources }
+    Compared { state, disagree, sources, waiting }
 }
 
 /// Task 181: a DeepSeek session's open tool call: the oldest PreToolUse of
@@ -428,6 +508,18 @@ pub(crate) fn next_action(team: &Team, member: &Member, state: &str) -> String {
             format!("Waits for its report on #{}; marks it stuck after the stuck bound without an event.", task.id)
         }
         (Some((task, _)), _) => format!("Waits for its report on #{}; reminds it when its turn ended without one.", task.id),
+        // Task 263 (owner, 2026-11-08): the member is idle because another
+        // open task's outputs hold its ready work; name the holder so the
+        // lead sees what stands in the way instead of "hands it the next".
+        (None, "idle") if member.state == MemberState::Active => {
+            let held = plan::held_ready(team, &member.id);
+            if let Some((task, holder)) = held.first().copied() {
+                let more = if held.len() > 1 { format!(" and {} more task(s)", held.len() - 1) } else { String::new() };
+                format!("Its ready task #{task}{more} is held by #{holder}'s outputs; {}.", plan::holder_unblock(team, holder))
+            } else {
+                "Hands it the next ready task, if one is ready for it.".into()
+            }
+        }
         (None, _) if member.state == MemberState::Active => "Hands it the next ready task, if one is ready for it.".into(),
         _ => "Nothing: the member is not active.".into(),
     }
@@ -451,6 +543,7 @@ pub(crate) fn snapshot(team: &Team, member: &Member, check: &MemberCheck, now: f
         "sources":check.sources,"screen":check.screen,"task":task,
         // Task #232: the request it waits on, named ("Bash: Run this command?").
         "request":recorded_request(member),
+        "waiting":check.sources.get("waiting").cloned().unwrap_or(Value::Null),
         // Task 173: never shown as idle while it works with no task handed.
         "unassigned":member.unassigned.as_ref().map(|flag| json!({"what":flag.what,"since":flag.since})),
         "pulse":{"minutes_since_event":minutes(member.seen_event_at),"stuck":member.stuck,

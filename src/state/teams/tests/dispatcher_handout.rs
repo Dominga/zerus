@@ -215,23 +215,33 @@ fn a_ready_task_goes_to_a_free_member_with_the_same_role() {
     // Your or the lead's choice stays with its member.
     team.task_mut(2).unwrap().pinned = true;
     assert!(!steps(&team, &seen, 1.0).iter().any(|s| matches!(s, Step::Rebalance { .. })));
-    // Another role is not the same work.
+    // Task 259 (owner, 2026-11-08): another role doing the same kind of work
+    // is no wall when nobody of the exact role is free - rights decide, and
+    // the exact role only orders the choice.
     team.task_mut(2).unwrap().pinned = false;
+    team.members.iter_mut().find(|m| m.id == "dev2").unwrap().role = "Backend DeepSeek".into();
+    let now = steps(&team, &seen, 1.0);
+    assert!(now.contains(&Step::Rebalance { task: 2, from: "dev".into(), to: "dev2".into() }), "{now:?}");
+    // An unrelated role stays out of a task whose role family is another one.
     team.members.iter_mut().find(|m| m.id == "dev2").unwrap().role = "Frontend".into();
-    assert!(!steps(&team, &seen, 1.0).iter().any(|s| matches!(s, Step::Rebalance { .. })));
+    let now = steps(&team, &seen, 1.0);
+    assert!(!now.iter().any(|s| matches!(s, Step::Rebalance { .. })), "{now:?}");
 }
 
 #[test]
 fn rebalance_keeps_shared_output_and_unknown_output_with_the_working_member() {
+    // Task 259: a folder-level path (`src`, `src/`, `.`) is advisory and holds
+    // nothing; the file and module paths still keep the task with its member.
     for (active, queued, moves) in [
         (vec!["src/api.rs"], vec!["src/api.rs"], false),
-        (vec!["src"], vec!["src/api.rs"], false),
-        (vec!["src/api.rs"], vec!["src/"], false),
-        (vec!["."], vec!["docs/api.md"], false),
+        (vec!["src"], vec!["src/api.rs"], true),
+        (vec!["src/api.rs"], vec!["src/"], true),
+        (vec!["."], vec!["docs/api.md"], true),
         (vec!["src/api"], vec!["src/apis/new.rs"], true),
         (vec!["src/api.rs"], vec!["docs/api.md"], true),
         (vec!["src/api.rs"], vec![], false),
         (vec![], vec![], false),
+        (vec!["src/api"], vec!["src/api/items.rs"], false),
     ] {
         let (mut team, seen) = team_with_two_backends();
         team.task_mut(1).unwrap().output = active.iter().map(|p| p.trim_end_matches('/').to_string()).collect();

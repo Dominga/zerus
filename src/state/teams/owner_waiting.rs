@@ -174,6 +174,16 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
                 found["member"] = json!(member);
                 out.push(found);
             }
+            // Task 277 (owner, 2026-11-08): your own urgent message to a member
+            // that stayed unread; the button opens the team to see it.
+            "urgent_message" => {
+                let member_id = attention["member_id"].as_str().unwrap_or_default().to_owned();
+                let mut found = item(team, "urgent_message", &member_id, summary, at, "open_team");
+                found["member"] = attention["member"].clone();
+                found["member_id"] = attention["member_id"].clone();
+                found["minutes"] = attention["minutes"].clone();
+                out.push(found);
+            }
             // Task 95: the lead stalled while its decisions wait. The round is
             // part of the id, so each round (at most hourly) is notified once
             // by the desktops, which notify a waiting id once.
@@ -219,6 +229,22 @@ fn team_items(team: &Team, now: f64, out: &mut Vec<Value>) {
         let mut found = item(team, "lead_changes", "digest", title, at, "open_team");
         found["changes"] = changes;
         found["seen"] = json!(format!("{{\"team\":\"{}\",\"by\":\"human\"}} | hgs team seen-lead-changes --json", team.id));
+        out.push(found);
+    }
+    // Task #229: the lead's critical follow-ups, one item each, blocking nothing
+    // for the owner but naming the task, its phase and its origin; the desktop's
+    // notification for a Waiting item comes from here.
+    for task in team.tasks.iter().filter(|task| task.severity == "crit" && !task.status.finished()) {
+        let origin = task.origin.map(|origin| format!(" (from #{origin})")).unwrap_or_default();
+        let title = format!("The lead added critical task #{} to phase {}{origin}: {}", task.id, task.phase, task.title);
+        let at = task.added_late.as_ref().map_or(team.updated, |late| late.at);
+        let mut found = item(team, "crit_added", &task.id.to_string(), title, at, "open_task");
+        found["task"] = json!(task.id);
+        found["phase"] = json!(task.phase);
+        found["severity"] = json!("crit");
+        if let Some(origin) = task.origin {
+            found["origin"] = json!(origin);
+        }
         out.push(found);
     }
     // F8: the lead's open proposals wait for the owner's Accept or Reject.

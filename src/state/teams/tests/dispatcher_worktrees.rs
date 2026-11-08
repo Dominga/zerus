@@ -88,6 +88,9 @@ fn a_commit_records_its_sha_and_refuses_another_branch() {
     assert!(refused_repository_config("worktree\tINCLUDEIF.onbranch:x.path\n").is_some());
     // U21: a merge driver is a command git runs during the merge.
     assert!(refused_repository_config("local\tmerge.ours.driver\n").is_some());
+    // Task 272: the catalogs' driver is passed with -c at merge time, never
+    // configured in a repository; a repository that configures it is refused.
+    assert!(refused_repository_config("local\tmerge.i18n.driver\n").is_some());
     assert_eq!(refused_repository_config("local\tmerge.ff\n"), None);
     // C2: a call with more than 1 MB of output finishes without blocking:
     // git show --name-only prints every file of this commit.

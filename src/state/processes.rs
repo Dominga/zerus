@@ -511,6 +511,30 @@ pub(super) fn dsh_snapshot(record: &Value, inspected: &Value) -> Value {
         false,
     )
 }
+/// Task 278: a DeepSeek session's own jobs that still run (its native host's
+/// job registry, or a background shell call), whatever its activity says: what
+/// it waits on, for the team's look and stuck rule.
+pub(super) fn dsh_registered(record: &Value, inspected: &Value, live: bool) -> Value {
+    if !live || (!inspected["jobs"].is_array() && !inspected["shellCalls"].is_array()) {
+        return json!([]);
+    }
+    let jobs = native::dsh(record, inspected);
+    let mut current: Vec<&Value> = jobs
+        .values()
+        .filter(|j| {
+            j["observed"] == true
+                && (string(j, "source") == "dsh_jobs" || (string(j, "source") == "dsh_calls" && j["background"] == true))
+                && matches!(string(j, "status"), "starting" | "running" | "stopping")
+        })
+        .collect();
+    current.sort_by(|a, b| a["started_at"].as_f64().unwrap_or(0.).total_cmp(&b["started_at"].as_f64().unwrap_or(0.)));
+    json!(current
+        .iter()
+        .take(super::session_state::MAX_JOBS)
+        .map(|j| json!({"id":j["native_id"],"command":journal::clipped(&j["command"],240),
+            "description":journal::clipped(&j["description"],160),"started_at":j["started_at"],"provider":"dsh"}))
+        .collect::<Vec<_>>())
+}
 pub(super) fn dsh_work(record: &Value, inspected: &Value, live: bool) -> Value {
     if !live || (!inspected["jobs"].is_array() && !inspected["shellCalls"].is_array()) {
         return json!({"count":null,"started_at":null,"command":"","sampled_at":now()});

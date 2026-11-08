@@ -2,11 +2,46 @@ use super::*;
 
 #[test]
 fn a_lead_wait_instruction_is_recognised_and_ordinary_direction_is_not() {
-    assert!(lead_wait_instruction("Keep 138 and wait for the 1.58.0 install"));
-    assert!(lead_wait_instruction("Poll the CI run until it is green, then merge"));
-    assert!(lead_wait_instruction("Подожди, пока не установится новая сборка"));
-    assert!(!lead_wait_instruction("Rebase on the lead branch and fix the two failing tests"));
-    assert!(!lead_wait_instruction("Wait for QA's review comments before the rename"), "a teammate is not an outside event");
+    assert!(lead_wait_instruction("Keep 138 and wait for the 1.58.0 install").is_some());
+    assert!(lead_wait_instruction("Poll the CI run until it is green, then merge").is_some());
+    assert!(lead_wait_instruction("Подожди, пока не установится новая сборка").is_some());
+    assert!(lead_wait_instruction("Please check again in 5 minutes").is_some());
+    assert!(lead_wait_instruction("You should wait for the owner to answer").is_some());
+    assert!(lead_wait_instruction("Wait until the build passes, then report").is_some());
+    assert!(lead_wait_instruction("Don't wait for the card; fix the parser").is_none());
+    assert!(lead_wait_instruction("Rebase on the lead branch and fix the two failing tests").is_none());
+    assert!(lead_wait_instruction("Wait for QA's review comments before the rename").is_none(), "a teammate is not an outside event");
+}
+
+/// Task #276 (owner, 2026-11-08): the answers refused today as "waiting" only
+/// described state, and pass now.
+#[test]
+fn a_leads_answer_that_only_describes_state_is_not_a_wait_instruction() {
+    for answer in [
+        "Held until #5 is accepted.",
+        "The owner allows card p77; go on with the rename.",
+        "Waiting for the owner's answer on the p77 card.",
+        "It waits until the CI run is green.",
+        "The task is blocked until #5 is accepted, then it continues.",
+        "Zerus will wait for the card, and the build waits for #5.",
+        "Queued until the owner approves the install; meanwhile do the docs.",
+    ] {
+        assert!(lead_wait_instruction(answer).is_none(), "state was refused: {answer}");
+    }
+}
+
+/// A real instruction is still refused, and its phrase is quoted.
+#[test]
+fn a_real_wait_instruction_is_refused_with_its_phrase() {
+    let phrase = lead_wait_instruction("Rebase done. Wait for the owner to answer, then continue").expect("an instruction");
+    assert!(phrase.contains("wait for the owner"), "{phrase}");
+    let refusal = lead_refusal("T", Some(138), "A1", &phrase);
+    assert!(refusal.starts_with("Waiting is a park, never an instruction"), "{refusal}");
+    assert!(refusal.contains(&format!("\"{phrase}\"")), "the trigger is quoted: {refusal}");
+    assert!(refusal.contains("hgs team park --json") && refusal.contains("\"task\":138"), "{refusal}");
+    assert!(refusal.contains("the owner"), "the condition it names: {refusal}");
+    let phrase = lead_wait_instruction("Check again in 10 minutes").expect("an instruction");
+    assert!(lead_refusal("T", None, "", &phrase).contains("\"kind\":\"time\""), "a time park: {phrase}");
 }
 
 #[test]
@@ -68,7 +103,7 @@ fn the_guessed_condition_is_a_ci_run_a_version_or_a_time() {
 
 #[test]
 fn refusals_name_the_park_command() {
-    let lead = lead_refusal("T", Some(138), "A1");
+    let lead = lead_refusal("T", Some(138), "A1", "wait for the owner");
     assert!(lead.starts_with("Waiting is a park, never an instruction"), "{lead}");
     assert!(lead.contains("\"task\":138") && lead.contains("\"attempt\":\"A1\"") && lead.contains("hgs team park --json"), "{lead}");
     let job = job_refusal("its name says it waits (\"wait\")", "T", None, "");

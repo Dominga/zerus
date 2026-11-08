@@ -9,6 +9,7 @@ import { selected, setDetailTab, setSelectedKey } from "../../store/ui";
 import { useModel, windowPort } from "./ProposalCards";
 import { TeamActions } from "./actions";
 import { TextDialog } from "./TeamActions";
+import { SwapMemberDialog } from "./SwapMemberDialog";
 import { roleStyle } from "./roles";
 import { memberProgress, unreadBadge, type MemberStatus } from "./team-model";
 import { accountLabel, limitText, memberMenu, memberAccount, moveAffected, reportsOf, scaleRoom, waitingForTask, type MemberMenuId } from "./members";
@@ -279,7 +280,8 @@ export function MemberCard(props: {
           submit={(count) => void model.scale({ role: props.member.role, agent: props.member.agent, count, model: props.member.model || undefined, effort: props.member.effort || undefined, account: props.member.account || undefined })} />
       </Show>
       <Show when={dialog() === "swap"}>
-        <SwapDialog member={props.member} close={() => setDialog(undefined)} submit={(change) => void model.swap(props.member.id, change)} />
+        {/* Task 218: the Swap dialog offers the agent's real models, efforts and accounts, or adopts a live session. */}
+        <SwapMemberDialog computer={props.computer} team={props.team} member={props.member} close={() => setDialog(undefined)} />
       </Show>
       <Show when={dialog() === "move_account"}>
         <MoveAccountDialog team={props.team} member={props.member} close={() => setDialog(undefined)}
@@ -312,51 +314,6 @@ function ScaleDialog(props: { role: string; member: TeamMemberView; room: number
       <div class="dlg-foot"><span class="spacer" />
         <button type="button" class="btn" onClick={props.close}>{tr("Cancel")}</button>
         <button type="button" class="btn primary" onClick={() => { props.submit(count()); props.close(); }}>{tr("Add")}</button>
-      </div>
-    </dialog>
-  );
-}
-
-/** H6: Swap session, agent or model... (Qt swapDialog): only what changes is sent; Fresh keeps the settings with a new session. */
-function SwapDialog(props: { member: TeamMemberView; close: () => void; submit: (change: { agent?: string; model?: string; effort?: string; account?: string; fresh?: boolean }) => void }) {
-  const modal = useModal(props.close);
-  const [agent, setAgent] = createSignal(props.member.agent);
-  const [model, setModel] = createSignal(props.member.model);
-  const [effort, setEffort] = createSignal(props.member.effort);
-  const [account, setAccount] = createSignal(props.member.account);
-  const [fresh, setFresh] = createSignal(false);
-  const change = () => {
-    const out: { agent?: string; model?: string; effort?: string; account?: string; fresh?: boolean } = {};
-    if (agent() !== props.member.agent) out.agent = agent();
-    if (model().trim() !== props.member.model) out.model = model().trim();
-    if (effort() !== props.member.effort) out.effort = effort();
-    if (account().trim() !== props.member.account) out.account = account().trim();
-    if (fresh()) out.fresh = true;
-    return out;
-  };
-  return (
-    <dialog ref={modal.ref} class="dlg team-member-dialog" onCancel={modal.cancel} onClick={(event) => event.stopPropagation()}>
-      <div class="dlg-head"><h2>{tr("Swap %1", props.member.role || props.member.id)}</h2></div>
-      <div class="dlg-body">
-        <p class="team-confirm-text">{tr("Keeps its role, tasks, folder and branch; an open task goes to the new session with what was done so far")}</p>
-        <label class="dim">{tr("Agent")}</label>
-        <select class="field" value={agent()} onChange={(event) => setAgent(event.currentTarget.value)} data-field="swap-agent">
-          <For each={AGENTS.includes(props.member.agent) ? AGENTS : [props.member.agent, ...AGENTS]}>{(name) => <option value={name}>{name}</option>}</For>
-        </select>
-        <label class="dim">{tr("Model")}</label>
-        <input class="field" value={model()} onInput={(event) => setModel(event.currentTarget.value)} data-field="swap-model" />
-        <label class="dim">{tr("Effort")}</label>
-        <select class="field" value={effort()} onChange={(event) => setEffort(event.currentTarget.value)} data-field="swap-effort">
-          <For each={EFFORTS.includes(props.member.effort) ? EFFORTS : [props.member.effort, ...EFFORTS]}>{(level) => <option value={level}>{level || tr("its effort")}</option>}</For>
-        </select>
-        <label class="dim">{tr("Account")}</label>
-        <input class="field" value={account()} placeholder={tr("Default account")} onInput={(event) => setAccount(event.currentTarget.value)} data-field="swap-account" />
-        <label class="team-proposal-option"><input type="checkbox" checked={fresh()} onChange={(event) => setFresh(event.currentTarget.checked)} />
-          {tr("A fresh session with the same settings")}</label>
-      </div>
-      <div class="dlg-foot"><span class="spacer" />
-        <button type="button" class="btn" onClick={props.close}>{tr("Cancel")}</button>
-        <button type="button" class="btn primary" disabled={Object.keys(change()).length === 0} onClick={() => { props.submit(change()); props.close(); }}>{tr("Swap")}</button>
       </div>
     </dialog>
   );

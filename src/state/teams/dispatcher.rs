@@ -83,6 +83,9 @@ pub(crate) struct Seen {
     /// The MCP servers and services it runs, which are not Background work
     /// (G7).
     pub services: Vec<SeenService>,
+    /// Task 278: what it waits on: its Zerus build, the background jobs its
+    /// hooks registered, Background work under a declared budget.
+    pub jobs: Vec<SeenJob>,
     /// Waiting on an answer: a question or a permission request.
     pub asking: bool,
     /// Its process or native session runs.
@@ -135,6 +138,72 @@ pub(crate) fn cache_cold(record: &Value, now: f64) -> bool {
 pub(crate) struct SeenWork {
     pub command: String,
     pub started_at: f64,
+}
+
+/// Task 278: a job a session waits on (`MemberJob` once recorded).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct SeenJob {
+    pub kind: String,
+    pub what: String,
+    pub command: String,
+    pub since: f64,
+}
+
+/// One line of at most `chars` characters of `text`.
+fn short(text: &str, chars: usize) -> String {
+    let line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() <= chars {
+        line
+    } else {
+        format!("{}...", line.chars().take(chars).collect::<String>())
+    }
+}
+
+/// Task 278: the jobs a listed session waits on: the build Zerus runs for it,
+/// the background jobs its hooks registered (a Claude background shell, a
+/// Codex exec session, a DeepSeek job) and Background work it waits for under
+/// a declared budget.
+pub(crate) fn listed_jobs(record: &Value) -> Vec<SeenJob> {
+    let mut jobs = Vec::new();
+    let build = &record["build"];
+    if build.is_object() {
+        let label = build["label"].as_str().unwrap_or_default().trim();
+        jobs.push(SeenJob {
+            kind: "build".into(),
+            what: if label.is_empty() { "its own Zerus build".into() } else { format!("its own Zerus build ({})", short(label, 80)) },
+            command: build["command"].as_str().unwrap_or_default().to_owned(),
+            since: build["since"].as_f64().unwrap_or(0.0),
+        });
+    }
+    for job in record["background_jobs"].as_array().into_iter().flatten().take(8) {
+        let command = job["command"].as_str().unwrap_or_default();
+        if command.trim().is_empty() {
+            continue;
+        }
+        let description = job["description"].as_str().unwrap_or_default().trim();
+        jobs.push(SeenJob {
+            kind: "shell".into(),
+            what: format!("its background job `{}`", short(if description.is_empty() { command } else { description }, 80)),
+            command: command.to_owned(),
+            since: job["started_at"].as_f64().unwrap_or(0.0),
+        });
+    }
+    let work = &record["process_work"];
+    if work["count"].as_u64().unwrap_or(0) > 0 {
+        for job in work["jobs"].as_array().into_iter().flatten().take(8) {
+            let command = job["command"].as_str().unwrap_or_default();
+            if command.trim().is_empty() || jobs.iter().any(|known| known.command == command) {
+                continue;
+            }
+            jobs.push(SeenJob {
+                kind: "job".into(),
+                what: format!("its job `{}`", short(command, 80)),
+                command: command.to_owned(),
+                since: job["started_at"].as_f64().unwrap_or(0.0),
+            });
+        }
+    }
+    jobs
 }
 
 /// An MCP server or service of a session (G7).
@@ -244,6 +313,7 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 build_run: record["build"]["request_id"].as_str().unwrap_or_default().to_owned(),
                 build_label: record["build"]["label"].as_str().unwrap_or_default().to_owned(),
                 services,
+                jobs: if live { listed_jobs(record) } else { Vec::new() },
                 asking: live && matches!(field("phase"), "question" | "input" | "approval"),
                 last_event_at: record["last_event_at"].as_f64(),
                 tool: field("current_tool").to_owned(),
@@ -271,6 +341,12 @@ pub(crate) enum Step {
     /// Task 134: the member's unread team messages ring their doorbell (at an
     /// idle moment only; the second ring after their bound).
     RingMessages { member: String },
+    /// Task 277 (owner, 2026-11-08): an urgent message interrupts the
+    /// member's busy turn natively; `turn` pins the displayed turn.
+    InterruptMessages { member: String, turn: f64, run: String, conversation: String },
+    /// Task 277: the stopped turn opens a new one with the urgent message on
+    /// top and "continue your task from where you stopped"; the attempt goes on.
+    ContinueUrgent { member: String },
     /// The member's started session appeared, or its identity changed.
     Adopt { member: String, session: SessionRef },
     Launch { member: String },
@@ -358,6 +434,8 @@ pub(crate) enum Step {
     Silent { task: u32, minutes: u64 },
     /// The MCP servers and services the member's session runs changed (G7).
     Services { member: String, services: Vec<SeenService> },
+    /// Task 278: what the member waits on changed.
+    Jobs { member: String, jobs: Vec<SeenJob> },
     /// H1: the member's session was stopped by a usage limit, or recovered
     /// from it (None).
     Limited { member: String, limited: Option<MemberLimit> },
@@ -509,9 +587,47 @@ pub(crate) enum Step {
     InterruptStop { stop: String },
 }
 
+/// Task 277 (owner, 2026-11-08): the urgent-message step for `member` this
+/// tick. A stopped turn asks for the new turn that carries the message; a
+/// busy one asks for the native interrupt. None when there is nothing urgent
+/// to deliver, the member is asking at a safe point, or the same message
+/// already interrupted (the alarm covers it, and a newer urgent message may
+/// try once more).
+fn urgent_step(team: &Team, member: &Member, seen: &[Seen], given: bool) -> Option<Step> {
+    if member.id == team.lead || member.state == MemberState::Removed || member.pending.is_some() || member.terminal_question.is_some() {
+        return None;
+    }
+    let found = session_of(member, seen);
+    if let Some(urgent) = member.urgent.as_ref() {
+        if urgent.state == "requested" {
+            let stopped = found.is_none_or(|found| !found.live || (found.free && can_take_a_message(found)));
+            return stopped.then(|| Step::ContinueUrgent { member: member.id.clone() });
+        }
+        let newer = member.unread.as_ref().is_some_and(|unread| {
+            unread.urgent > 0 && !unread.urgent_oldest.is_empty() && unread.urgent_oldest != urgent.oldest
+        });
+        if !newer {
+            return None;
+        }
+    }
+    member.unread.as_ref().filter(|unread| unread.urgent > 0)?;
+    if given {
+        // The delivery this tick already rings for everything unread.
+        return None;
+    }
+    let found = found.filter(|found| found.live && !found.free && !found.asking)?;
+    let turn = found.turn_started?;
+    Some(Step::InterruptMessages {
+        member: member.id.clone(),
+        turn,
+        run: found.run_id.clone(),
+        conversation: found.conversation_id.clone(),
+    })
+}
+
 /// U18: the lead's turn has ended and it can take a message, also while its own
 /// subagents or Background jobs run (an idle agent with Background work accepts
-/// new messages); never during a turn, a question, an approval or a sign-in.
+/// a new message); never during a turn, a question, an approval or a sign-in.
 fn can_take_a_message(found: &Seen) -> bool {
     if found.free {
         return true;
@@ -531,6 +647,19 @@ fn deliver(task: &Task, member: &Member) -> Step {
         Step::HandOut { task: task.id, member: member.id.clone() }
     } else {
         Step::Rebalance { task: task.id, from: task.assignee.clone(), to: member.id.clone() }
+    }
+}
+
+/// Task 263 (owner, 2026-11-08): a task claims its files for this tick only
+/// when the tick actually hands it out, or starts its member for it. A task
+/// that merely waits for its busy member used to claim them too, and every
+/// later ready task writing the same files was skipped in silence (218-226
+/// VS 198): the idle member got nothing. Now the later task goes ahead, and
+/// once the waiting task can start, the later task's in-progress work holds
+/// it back instead (plan::output_holders), so the two still never run apart.
+fn claim_outputs<'a>(claimed: &mut Vec<&'a Task>, task: &'a Task) {
+    if task.narrow_outputs().next().is_some() {
+        claimed.push(task);
     }
 }
 
@@ -937,6 +1066,12 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         if changed {
             steps.push(Step::Services { member: member.id.clone(), services: found.services.clone() });
         }
+        // Task 278: what the member waits on; status, look and the brief show it.
+        let jobs_changed = member.jobs.len() != found.jobs.len()
+            || member.jobs.iter().zip(&found.jobs).any(|(old, new)| old.kind != new.kind || old.command != new.command || old.since != new.since);
+        if jobs_changed {
+            steps.push(Step::Jobs { member: member.id.clone(), jobs: found.jobs.clone() });
+        }
         // U56: the member's phase and activity feed status; a busy member with
         // no session event for stuck_minutes is marked stuck, once per episode.
         // A question, a Zerus build or Background work is never stuck; the lead
@@ -996,10 +1131,12 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             // Task 115: a member with an open native question or permission is
             // Waiting for you, never stuck in a silent turn: the stored card
             // outlives a tick whose phase has moved on.
+            // Task 278: nor is one waiting on a job it registered.
             let stuck = busy
                 && !found.asking
                 && !found.background
                 && !found.building
+                && found.jobs.is_empty()
                 && member.pending.is_none()
                 && member.terminal_question.is_none()
                 && quiet >= limit;
@@ -1033,8 +1170,10 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 asking: found.asking,
                 background: found.background,
                 building: found.building,
+                build_label: found.build_label.clone(),
                 tool: found.tool.clone(),
                 tool_since: if in_tool { found.tool_started } else { None },
+                jobs: found.jobs.iter().map(|job| super::look::WaitJob { what: job.what.clone(), since: job.since }).collect(),
                 last_event_at: found.last_event_at,
                 quiet,
                 limit,
@@ -1204,7 +1343,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         };
         let Some(last) = last else { continue };
         let quiet = now - last;
-        if !(found.live && found.activity == "busy" && !found.asking && !found.background && quiet >= SILENT_MINUTES * 60.0) {
+        if !(found.live && found.activity == "busy" && !found.asking && !found.background && found.jobs.is_empty() && quiet >= SILENT_MINUTES * 60.0) {
             continue;
         }
         if found.agent == "dsh" {
@@ -1690,7 +1829,11 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
     // dependants goes first, then the lowest number.
     let ready = plan::dispatch_order(team, ready_ids);
     // Task 155: the outputs of the tasks taken in this tick's order; a later
-    // task writing the same files waits for them.
+    // task writing the same files waits for them. Task 263: a task claims them
+    // only when the tick actually hands it out (or starts its member for it) -
+    // a task that merely waits for a busy member does not hold a later
+    // member's ready task, and once it can start the later task's work holds
+    // it back instead (plan::output_holders).
     let mut claimed: Vec<&Task> = Vec::new();
     for id in ready {
         let Some(task) = team.task(id) else { continue };
@@ -1711,11 +1854,10 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         // apart on separate branches. One waits while an open task with an
         // overlapping output runs, or while an earlier one in this order waits
         // for its member; it never goes to another member to run beside it.
-        if !plan::output_holders(team, task).is_empty() || claimed.iter().any(|other| other.output_overlaps(task)) {
+        // Task 259: only files and module paths hold; a folder-level output is
+        // advisory and never holds a whole area.
+        if !plan::output_holders(team, task).is_empty() || claimed.iter().any(|other| other.narrow_output_overlaps(task)) {
             continue;
-        }
-        if !task.output.is_empty() {
-            claimed.push(task);
         }
         // U45: a task with models or for a role goes to a member that can run
         // one of its models, switched first when it must be.
@@ -1729,6 +1871,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 if let (Some(member), Some(_)) = (member, found.filter(|found| super::models::confirmed(pending, &found.model, &found.effort))) {
                     if switching.contains(member.id.as_str()) && available(member, &BTreeSet::new(), Some(id)) && super::stages::held(team, &member.id).is_none() {
                         switching.remove(member.id.as_str());
+                        claim_outputs(&mut claimed, task);
                         steps.push(deliver(task, member));
                     }
                 } else if now - pending.at >= super::models::CONFIRM_SECONDS {
@@ -1769,12 +1912,14 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             match chosen {
                 Some((member, super::models::Fit::Ready)) => {
                     busy.insert(member.id.as_str());
+                    claim_outputs(&mut claimed, task);
                     steps.push(deliver(task, member));
                 }
                 Some((member, super::models::Fit::Switch(choice))) => {
                     busy.insert(member.id.as_str());
                     let found = session_of(member, seen);
                     let from = found.filter(|found| !found.model.is_empty()).map(|found| super::models::label(&found.model, &found.effort)).unwrap_or_default();
+                    claim_outputs(&mut claimed, task);
                     steps.push(Step::SwitchModel { task: id, member: member.id.clone(), from, model: choice.model.clone(), effort: choice.effort.clone() });
                 }
                 None => {
@@ -1785,6 +1930,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                             && super::models::fit(m, task, super::models::launch_model(m)).is_some()
                     }) {
                         if launching.insert(member.id.clone()) {
+                            claim_outputs(&mut claimed, task);
                             steps.push(Step::Launch { member: member.id.clone() });
                         }
                     }
@@ -1806,6 +1952,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
                 continue;
             }
             busy.insert(member.id.as_str());
+            claim_outputs(&mut claimed, task);
             steps.push(Step::HandOut { task: id, member: member.id.clone() });
             continue;
         }
@@ -1818,19 +1965,35 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         // Members with one role do the same work: a ready task goes to a free
         // one when its assignee is busy. Only an explicit fresh rejection
         // prefers a member that did not fail it; rework keeps its member.
+        // Task 259 (owner, 2026-11-08): no idle member while a ready task
+        // waits. A task with free outputs goes to an idle member of a
+        // compatible role when its assignee cannot take it: the same role, or
+        // one that does the same kind of work (Frontend SolidJS and Frontend
+        // DeepSeek share "Frontend"). Rights decide; the exact role and the
+        // plan's assignee only order the choice. A member Zerus has not
+        // started yet keeps its task - the plan's assignee is launched for it;
+        // only one that has a session and still cannot work now (busy, held by
+        // a stage, failed, or already given another task) is replaced.
         // U36: a test holding the assignee's folder keeps its next task back;
-        // a free member with the same role may take it.
+        // a free member of a compatible role may take it.
         let held = super::stages::held(team, &member.id).is_some();
         if !team.requires_assignee(task) && (task.requests_fresh_retry() || !outputs.blocks(task)) {
-            let failed = |m: &Member| task.failed_by(&m.id);
-            let assignee_fits = available(member, &busy, Some(id)) && !failed(member) && !held;
+            let assignee_fits = available(member, &busy, Some(id)) && !task.failed_by(&member.id) && !held;
             if !assignee_fits {
-                let role = team.role_of(&member.id);
-                if let Some(peer) = team.members.iter().find(|m| {
-                    m.id != member.id && m.id != team.lead && team.role_of(&m.id) == role && available(m, &busy, Some(id)) && !failed(m)
-                        && super::stages::held(team, &m.id).is_none()
-                }) {
+                // Task 259: the idle member of a compatible role, with the
+                // rights, whose own work in progress does not write the same
+                // files; the plan's assignee is only replaced once started.
+                let peer = super::dispatcher_rebalance::peer(
+                    team,
+                    task,
+                    member,
+                    member.session.is_some(),
+                    &|other| available(other, &busy, Some(id)),
+                    &outputs,
+                );
+                if let Some(peer) = peer {
                     busy.insert(peer.id.as_str());
+                    claim_outputs(&mut claimed, task);
                     steps.push(Step::Rebalance { task: id, from: member.id.clone(), to: peer.id.clone() });
                     continue;
                 }
@@ -1842,6 +2005,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         }
         if member.session.is_none() {
             if member.launch_id.is_empty() && member.error.is_empty() && launching.insert(member.id.clone()) {
+                claim_outputs(&mut claimed, task);
                 steps.push(Step::Launch { member: member.id.clone() });
             }
             continue;
@@ -1850,6 +2014,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
             continue;
         }
         busy.insert(member.id.as_str());
+        claim_outputs(&mut claimed, task);
         steps.push(if member.needs_settings() { Step::Settings { member: member.id.clone() } } else { Step::HandOut { task: id, member: member.id.clone() } });
     }
     // Task 158 (owner, 2026-11-07): there is no work ahead or start ahead any
@@ -1913,6 +2078,22 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         }
         if session_of(member, seen).is_some_and(|found| found.free && can_take_a_message(found)) {
             steps.push(Step::RingMessages { member: member.id.clone() });
+        }
+    }
+    // Task 277 (owner, 2026-11-08): an urgent message interrupts a busy
+    // member's turn natively and then opens a new turn that carries it and
+    // says to continue the task (the attempt goes on); ordinary messages still
+    // wait for the turn end. A member handed a task, a stage or a resume this
+    // tick gets that delivery first, and a question or approval is a safe
+    // point of its own.
+    for member in team.members.iter().filter(|member| member.state != MemberState::Removed) {
+        let given = steps.iter().any(|step| match step {
+            Step::HandOut { member: to, .. } | Step::StageOut { member: to, .. } | Step::Resume { member: to, .. } => *to == member.id,
+            Step::Rebalance { to, .. } => *to == member.id,
+            _ => false,
+        });
+        if let Some(step) = urgent_step(team, member, seen, given) {
+            steps.push(step);
         }
     }
     // U49: a draining member finishes its open attempt and stage run, takes
@@ -2629,7 +2810,8 @@ fn hand_off_text_rules(
     // U30: a build Zerus runs is work; a job left in the member's own shell is a service.
     text += "\nStart builds and long tests through Zerus (hgs team run, or hgs run: hgs guide run) so your session shows \
              as Building and your reply waits for them; a job you leave in your own shell after your turn counts as a \
-             service, and your session looks idle.";
+             service, and your session looks idle. A background shell you start and wait on is shown to the lead as what \
+             you wait on, never as an uncertain status; builds and tests still go through hgs run or hgs team run.";
     text
 }
 
@@ -3433,6 +3615,45 @@ fn escalate_terminal(store: &mut Store, team: &Team, member_id: &str) -> anyhow:
     })
 }
 
+/// Task 278: a member's jobs changed. The team record keeps the current ones
+/// (status, look and the brief read them); the working tier keeps each job's
+/// start, command and end, journaled as `job_started` and `job_ended` so the
+/// lead's brief sees what each member waits on.
+pub(crate) fn record_jobs(store: &mut Store, team: &Team, member_id: &str, jobs: &[SeenJob], at: f64) -> anyhow::Result<()> {
+    let before = team.member(member_id).map(|member| member.jobs.clone()).unwrap_or_default();
+    let key = |kind: &str, command: &str, since: f64| format!("{kind}:{since:.3}:{}", command.chars().take(160).collect::<String>());
+    let started: Vec<&SeenJob> =
+        jobs.iter().filter(|job| !before.iter().any(|old| key(&old.kind, &old.command, old.since) == key(&job.kind, &job.command, job.since))).collect();
+    let ended: Vec<&MemberJob> =
+        before.iter().filter(|old| !jobs.iter().any(|job| key(&old.kind, &old.command, old.since) == key(&job.kind, &job.command, job.since))).collect();
+    if !started.is_empty() || !ended.is_empty() {
+        let role = team.role_of(member_id);
+        let team_id = team.id.clone();
+        store.write_rows(&team.id, |tx, events| {
+            for job in &started {
+                let since = if job.since > 0.0 { job.since } else { at };
+                super::working::job_started(tx, &team_id, member_id, &key(&job.kind, &job.command, job.since), &job.kind, &job.what, &job.command, since)?;
+                events.push(Event::new("job_started", json!({"member":role,"kind":job.kind,"what":job.what,"since":since})));
+            }
+            for job in &ended {
+                super::working::job_ended(tx, &team_id, member_id, &key(&job.kind, &job.command, job.since), at)?;
+                let minutes = if job.since > 0.0 { ((at - job.since).max(0.0) / 60.0).round() as u64 } else { 0 };
+                events.push(Event::new("job_ended", json!({"member":role,"kind":job.kind,"what":job.what,"since":job.since,"minutes":minutes})));
+            }
+            super::working::prune_jobs(tx, &team_id)
+        })?;
+    }
+    change(store, &team.id, |team, _| {
+        if let Some(found) = team.members.iter_mut().find(|found| found.id == member_id) {
+            found.jobs = jobs
+                .iter()
+                .map(|job| MemberJob { kind: job.kind.clone(), what: job.what.clone(), command: job.command.clone(), since: job.since })
+                .collect();
+        }
+        Ok(())
+    })
+}
+
 /// Task 139: the members whose screens are being read, `team\nmember`.
 static CHECKING: std::sync::Mutex<BTreeSet<String>> = std::sync::Mutex::new(BTreeSet::new());
 
@@ -3665,6 +3886,37 @@ fn resume_parked(store: &mut Store, team: &Team, task_id: u32, member_id: &str) 
         if park.detail.is_empty() { "condition met" } else { park.detail.as_str() }
     ));
     Ok(())
+}
+
+/// Task 261: the lead's line when a run restarted the shared sccache server.
+fn cache_restarted_text(team: &Team, member: &str, task: u32, what: &str, exit: Option<i32>) -> String {
+    format!(
+        "[Zerus team] Build cache: {}'s {what}{} failed writing its outputs through the shared sccache server (os error 5: the server was running in a restricted token). \
+         Zerus restarted the server from its worker and ran it again: {}.",
+        team.role_of(member),
+        if task > 0 { format!(" for #{task}") } else { String::new() },
+        match exit {
+            Some(0) => "it passed".to_owned(),
+            Some(code) => format!("exit {code}"),
+            None => "no exit code".to_owned(),
+        }
+    )
+}
+
+/// Task 261: from a run that is not the dispatcher's (`hgs run` of a member):
+/// the lead of `team_id` hears that the shared sccache server was restarted.
+pub(crate) fn tell_lead_cache_restarted(team_id: &str, task: u64, label: &str, exit: Option<i32>) {
+    let Ok(mut store) = Store::open(true) else { return };
+    let Ok(Some(team)) = store.load(team_id) else { return };
+    let member = team
+        .tasks
+        .iter()
+        .find(|found| u64::from(found.id) == task)
+        .and_then(|found| found.attempts.last())
+        .map(|attempt| attempt.member.clone())
+        .unwrap_or_default();
+    let text = cache_restarted_text(&team, &member, u32::try_from(task).unwrap_or(0), label, exit);
+    tell_lead(&mut store, &team, "build_cache", &text);
 }
 
 /// Task 161: one line for the lead, stored and rung; a refusal is left (the
@@ -3949,6 +4201,9 @@ pub(crate) fn member_folder_path(team: &Team, member: &Member) -> anyhow::Result
 /// (a temp dir) so a TEMP inside another repository cannot leak into discovery
 /// without touching the process environment other tests share.
 pub(crate) fn git_command(folder: &str) -> std::process::Command {
+    // Task 287: a git started while this thread holds the store's write lock
+    // is a warning in the lock log.
+    super::store::note_process("git", &[folder.to_owned()]);
     let mut command = std::process::Command::new("git");
     // A member's folder may carry its own config: no fsmonitor, hooks or
     // optional locks run for these reads.
@@ -4010,12 +4265,47 @@ pub(crate) fn set_git_ceiling(ceiling: &str) {
     GIT_CEILING.with(|value| *value.borrow_mut() = Some(ceiling.to_owned()));
 }
 
-pub(crate) fn git_at(folder: &str, args: &[&str]) -> Option<String> {
-    let output = git_command(folder).args(args).output().ok()?;
-    if !output.status.success() {
-        return None;
+thread_local! {
+    /// Task 287: git answers gathered before a store transaction and served
+    /// inside it (`with_git_answers`), so no git runs under the write lock.
+    static GIT_MEMO: std::cell::RefCell<Option<std::collections::HashMap<(String, Vec<String>), Option<String>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Task 287: runs `prefetch` (the git reads a change will make, outside any
+/// transaction), then `then` (the change) with those answers served from
+/// memory. A read `prefetch` did not make still runs, and the store logs it.
+pub(crate) fn with_git_answers<T>(prefetch: impl FnOnce(), then: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            GIT_MEMO.with(|memo| *memo.borrow_mut() = None);
+        }
     }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    GIT_MEMO.with(|memo| *memo.borrow_mut() = Some(std::collections::HashMap::new()));
+    let _reset = Reset;
+    prefetch();
+    then()
+}
+
+pub(crate) fn git_at(folder: &str, args: &[&str]) -> Option<String> {
+    let key = (folder.to_owned(), args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<String>>());
+    if let Some(answer) = GIT_MEMO.with(|memo| memo.borrow().as_ref().and_then(|memo| memo.get(&key).cloned())) {
+        return answer;
+    }
+    let answer = (|| {
+        let output = git_command(folder).args(args).output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    })();
+    GIT_MEMO.with(|memo| {
+        if let Some(memo) = memo.borrow_mut().as_mut() {
+            memo.insert(key, answer.clone());
+        }
+    });
+    answer
 }
 
 /// F1.4: the reason a member's folder cannot be started in, or None when it
@@ -4632,6 +4922,7 @@ fn check_folder_branch(team: &Team, member: &Member, folder: &str) -> anyhow::Re
 }
 
 /// One change to a team outside any request: the dispatcher's own record.
+#[track_caller]
 fn change(store: &mut Store, team: &str, change: impl FnOnce(&mut Team, &mut Vec<Event>) -> anyhow::Result<()>) -> anyhow::Result<()> {
     store.mutate(None, team, None, |team, events| {
         change(team, events)?;
@@ -5550,7 +5841,15 @@ pub(crate) fn prepare_branch(team: &Team, task_id: u32, member_id: &str) -> Opti
     let (moved, how) = if exists {
         (git_bounded(&folder, &["checkout", &branch]), "checked out".to_owned())
     } else {
-        let base = if team.settings.base_branch.is_empty() {
+        // Task #267: with an integration folder the team's base is named once:
+        // a new task's branch starts from the integration line's head, never
+        // from the member's previous branch or another member's commit.
+        let base = if !team.settings.integration_folder.trim().is_empty() {
+            match super::merge_queue::integration_branch(team) {
+                Some(base) => base,
+                None => return Some(step(&current, "refused", "The integration line's branch was not read".into())),
+            }
+        } else if team.settings.base_branch.is_empty() {
             match lead_branch(team) {
                 Ok(base) => base,
                 Err(error) => return Some(step(&current, "refused", format!("{error:#}"))),
@@ -5607,6 +5906,81 @@ pub(crate) fn accepted_predecessors(team: &Team, task_id: u32) -> Vec<AcceptedWo
         .collect()
 }
 
+/// Task #267: with an integration folder, a new task's folder starts from the
+/// current integration head, never from the member's previous branch; work it
+/// has uncommitted is committed on that branch first, so nothing is lost.
+/// None without an integration folder, for the lead, for a shared folder and
+/// for a task continuing its own branch (a retry or a task branch).
+pub(crate) fn prepare_integration_base(team: &Team, task_id: u32, member_id: &str) -> Option<PrepareStep> {
+    if team.settings.integration_folder.trim().is_empty() || member_id == team.lead {
+        return None;
+    }
+    let member = team.member(member_id)?;
+    if member.folder == MemberFolder::Shared || !member.computer.is_empty() {
+        return None;
+    }
+    let task = team.task(task_id)?;
+    if !task.attempts.is_empty() {
+        return None;
+    }
+    let folder = match member_folder_path(team, member) {
+        Ok(folder) if !folder.is_empty() => folder,
+        Ok(_) => return None,
+        Err(_) => return None,
+    };
+    if same_path(&folder, &team.integration_folder()) || same_path(&folder, &team.folder) {
+        return None;
+    }
+    let step = |from: &str, result: &str, reason: String| PrepareStep {
+        step: "base".into(),
+        member: String::new(),
+        from: from.to_owned(),
+        to: String::new(),
+        at: now(),
+        result: result.into(),
+        reason,
+    };
+    // A task branch is created from the integration head by prepare_branch.
+    if task_branch(team, task_id, member_id).is_some() {
+        return None;
+    }
+    let Some(base) = super::merge_queue::integration_branch(team) else {
+        return Some(step("", "refused", "The integration line's branch was not read".into()));
+    };
+    let current = match git_bounded(&folder, &["rev-parse", "--abbrev-ref", "HEAD"]) {
+        Ok(current) => current,
+        Err((_, error)) => return Some(step("", "refused", format!("the folder's branch was not read: {error}"))),
+    };
+    if current == base {
+        return Some(step(&current, "skipped", "the folder is on the integration line already".into()));
+    }
+    let head = super::merge_queue::integration_head(team).unwrap_or_default();
+    let here = git_bounded(&folder, &["rev-parse", "HEAD"]).unwrap_or_default();
+    if !head.is_empty() && here == head {
+        return Some(step(&current, "skipped", "the folder is at the integration head already".into()));
+    }
+    // Dirty work is committed on its old branch first, as the lead did by hand.
+    let changes = match git_bounded(&folder, &["status", "--porcelain", "--untracked-files=no"]) {
+        Ok(changes) => changes,
+        Err((_, error)) => return Some(step(&current, "refused", format!("the folder's changes were not read: {error}"))),
+    };
+    if !changes.is_empty() {
+        if let Err((_, error)) = git_bounded(&folder, &["add", "-u"]) {
+            return Some(step(&current, "refused", format!("the folder's changes were not staged: {error}")));
+        }
+        let message = format!("Zerus: {member_id}'s unfinished work before task #{task_id}");
+        if let Err((_, error)) = git_bounded(&folder, &["commit", "-q", "-m", &message]) {
+            return Some(step(&current, "refused", format!("the folder's changes were not committed: {error}")));
+        }
+    }
+    let head = super::merge_queue::integration_head(team).unwrap_or_default();
+    match git_bounded(&folder, &["checkout", "-B", &current, &base]) {
+        Ok(_) => Some(step(&current, "done", format!("{} starts from the integration head {base} ({})", if changes.is_empty() { "the folder" } else { "the committed work stays on the old branch; the folder" }, head.chars().take(9).collect::<String>()))),
+        Err((true, error)) => Some(step(&current, "uncertain", error)),
+        Err((false, error)) => Some(step(&current, "refused", error)),
+    }
+}
+
 /// Task 155 (owner, 2026-11-07): before the hand-out, the accepted work of
 /// the task's dependencies is merged into the member's branch, outside any
 /// sandbox, so a dependent task starts from its predecessors' accepted
@@ -5616,6 +5990,42 @@ pub(crate) fn accepted_predecessors(team: &Team, task_id: u32) -> Vec<AcceptedWo
 /// the member. None when nothing is accepted yet, for the lead's own task and
 /// for a member working in the team's own folder (the lead merges there).
 pub(crate) fn prepare_dependencies(team: &Team, task_id: u32, member_id: &str) -> Option<PrepareStep> {
+    // Task #267: with an integration folder the accepted work is already on
+    // the line every hand-out starts from, so no member branch ever merges
+    // another member's commit; the step says so for the lead's status.
+    if !team.settings.integration_folder.trim().is_empty() && member_id != team.lead {
+        let wanted = accepted_predecessors(team, task_id);
+        if wanted.is_empty() {
+            return None;
+        }
+        let names = wanted.iter().map(|work| format!("#{}", work.task)).collect::<Vec<_>>().join(", ");
+        // A dependent starts only from what is on the line: while a landing
+        // waits (the queue, its tests or a conflict's resolve task), it waits
+        // with that reason instead of starting without its predecessor.
+        if let Some(missing) = wanted.iter().find(|work| !super::merge_queue::landed(team, &work.commit)) {
+            let state = team.task(missing.task).and_then(|task| task.merge.as_ref()).map_or_else(|| "no landing".to_owned(), |entry| {
+                if entry.state == "conflict" { format!("its landing conflicts; resolve task #{} waits", entry.resolve_task.unwrap_or_default()) } else { format!("its landing is {}", entry.state) }
+            });
+            return Some(PrepareStep {
+                step: "dependencies".into(),
+                member: String::new(),
+                from: String::new(),
+                to: names,
+                at: now(),
+                result: "refused".into(),
+                reason: format!("#{}'s accepted work ({}) is not on the integration line yet: {state}", missing.task, missing.commit.chars().take(9).collect::<String>()),
+            });
+        }
+        return Some(PrepareStep {
+            step: "dependencies".into(),
+            member: String::new(),
+            from: String::new(),
+            to: names,
+            at: now(),
+            result: "skipped".into(),
+            reason: "the accepted work lands on the integration line; the folder starts from its head".into(),
+        });
+    }
     let wanted = accepted_predecessors(team, task_id);
     if wanted.is_empty() || member_id == team.lead {
         return None;
@@ -5686,7 +6096,10 @@ pub(crate) fn prepare_dependencies(team: &Team, task_id: u32, member_id: &str) -
             Err((false, _)) => {}
         }
         let message = format!("Merge the accepted work of #{} ({}) before task #{task_id}", work.task, short(&work.commit));
-        match git_bounded(&folder, &["merge", "--no-ff", "--no-edit", "-m", &message, &work.commit]) {
+        // The catalogs merge as data (scripts/i18n-merge.py); like the merge
+        // queue, this path passes the driver rather than trusting repo config.
+        let driver = super::merge_queue::i18n_driver_config();
+        match git_bounded(&folder, &["-c", driver.as_str(), "merge", "--no-ff", "--no-edit", "-m", &message, &work.commit]) {
             Ok(_) => merged.push(format!("#{} ({})", work.task, short(&work.commit))),
             Err((timed_out, error)) => {
                 let files = git_bounded(&folder, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
@@ -5975,11 +6388,27 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
     anyhow::ensure!(!team.reserved_for_rework(member_id, Some(task_id)), "member reserved for rework");
     if let Some(task) = team.task(task_id).filter(|task| task.assignee != member_id && !task.assignee.is_empty()) {
         anyhow::ensure!(!team.rebalance_blocked(task), "task must stay with its member");
+        // Task 259: a task given across roles never lands beside work in
+        // progress in the same files in the new member's folder.
+        anyhow::ensure!(!InProgressOutputs::new(&team).blocks_for(member_id, task), "the member has work in progress in the same files");
     }
     // U48 (spec 1, step 2): the task's branch, confirmed before the hand-out;
     // a refused or unconfirmed one leaves the task waiting. A confirmed one
     // waits on the task for the attempt that hands it out.
     if let Some(step) = if can_hand_out(&team, task_id) { prepare_branch(&team, task_id, member_id) } else { None } {
+        if matches!(step.result.as_str(), "refused" | "uncertain") {
+            return change(store, team_id, |team, events| task_waits(team, task_id, member_id, &step, events));
+        }
+        change(store, team_id, |team, _| {
+            let task = team.task_mut(task_id).context("unknown task")?;
+            super::models::record(task, PrepareStep { member: member_id.to_owned(), ..step });
+            Ok(())
+        })?;
+    }
+    // Task #267: with an integration folder the folder starts from the
+    // integration head (its dirty work committed on the old branch first); the
+    // predecessors' work is there because it landed.
+    if let Some(step) = if can_hand_out(&team, task_id) { prepare_integration_base(&team, task_id, member_id) } else { None } {
         if matches!(step.result.as_str(), "refused" | "uncertain") {
             return change(store, team_id, |team, events| task_waits(team, task_id, member_id, &step, events));
         }
@@ -6208,7 +6637,8 @@ fn hand_out_now(
         }
         task.attempts.last_mut().unwrap().prepare = prepared;
         if let (false, Some((from_role, to_role))) = (rebalanced.is_empty(), roles) {
-            events.push(Event::new("rebalanced", json!({"task":task_id,"from":from_role,"to":to_role,"from_member":rebalanced,"to_member":member_id})));
+            let cross_role = from_role != to_role;
+            events.push(Event::new("rebalanced", json!({"task":task_id,"from":from_role,"to":to_role,"from_member":rebalanced,"to_member":member_id,"cross_role":cross_role})));
         }
         task.status = TaskStatus::Assigned;
         let task = team.task(task_id).unwrap();
@@ -6317,7 +6747,8 @@ fn hand_out_now(
             }
         }
         Ok(())
-    })
+    })?;
+    Ok(())
 }
 
 /// Task 135: the brief went out with the session's first message (a refused
@@ -6844,7 +7275,8 @@ fn record_context_start(
             ..TaskWait::zerus("context", "waiting", "", now())
         });
         if let (false, Some((from_role, to_role))) = (rebalanced.is_empty(), roles) {
-            events.push(Event::new("rebalanced", json!({"task":task_id,"from":from_role,"to":to_role,"from_member":rebalanced,"to_member":member_id})));
+            let cross_role = from_role != to_role;
+            events.push(Event::new("rebalanced", json!({"task":task_id,"from":from_role,"to":to_role,"from_member":rebalanced,"to_member":member_id,"cross_role":cross_role})));
         }
         Ok(())
     })
@@ -6892,7 +7324,8 @@ fn record_waits(
             ..TaskWait::zerus("context", if step.result == "uncertain" { "uncertain" } else { "refused" }, &step.reason, step.at)
         });
         if let (false, Some((from_role, to_role))) = (rebalanced.is_empty(), roles) {
-            events.push(Event::new("rebalanced", json!({"task":task_id,"from":from_role,"to":to_role,"from_member":rebalanced,"to_member":member_id})));
+            let cross_role = from_role != to_role;
+            events.push(Event::new("rebalanced", json!({"task":task_id,"from":from_role,"to":to_role,"from_member":rebalanced,"to_member":member_id,"cross_role":cross_role})));
         }
         events.push(Event::new(
             "prepare_failed",
@@ -7048,14 +7481,14 @@ fn tell_lead_blocked(store: &mut Store, team: &Team, task_id: u32) -> anyhow::Re
     })
 }
 
-/// One message for the lead: the open tasks Zerus gave to another member
-/// with the same role, and to whom.
+/// One message for the lead: the open tasks Zerus gave to another member,
+/// with the same role or (task 259) across roles, and to whom.
 pub(crate) fn rebalanced_text(team: &Team, tasks: &[u32]) -> String {
     let mut text = String::from("[Zerus team \u{b7} from: Zerus \u{b7} tasks moved]\n");
     for task in tasks.iter().filter_map(|id| team.task(*id)) {
         if let Some(attempt) = task.open_attempt() {
             text += &format!(
-                "#{} {}: given to {} instead of {}, which was busy or failed its last attempt.\n",
+                "#{} {}: given to {} instead of {}, which could not take it now.\n",
                 task.id,
                 task.title,
                 team.name_of(&attempt.member),
@@ -7063,7 +7496,9 @@ pub(crate) fn rebalanced_text(team: &Team, tasks: &[u32]) -> String {
             );
         }
     }
-    text + "Members with one role share their work; nothing to do unless you want another member (hgs team reassign keeps your choice)."
+    text + "Zerus hands a ready task with free outputs to an idle member of a compatible role; the plan's member \
+            and the exact role stay the preference. Nothing to do unless you want another member \
+            (hgs team reassign keeps your choice)."
 }
 
 fn tell_lead_rebalanced(store: &mut Store, team: &Team, tasks: &[u32]) -> anyhow::Result<()> {
@@ -7746,7 +8181,7 @@ fn check_dsh_silent(store: &mut Store, team: &Team, task_id: u32, listing_last: 
 
 /// #761: the member's last report or turn end, the progress a DeepSeek listing
 /// does not show once the turn is over.
-fn last_progress(team: &Team, member: &str) -> Option<f64> {
+pub(crate) fn last_progress(team: &Team, member: &str) -> Option<f64> {
     team.tasks
         .iter()
         .flat_map(|task| task.attempts.iter())
@@ -8669,11 +9104,13 @@ pub(crate) fn merge_lead(folder: &str, source: &str, branch: &str, timeout: Dura
         }
     }
     let merge = if fetch_from_source { "FETCH_HEAD" } else { branch };
+    let driver = super::merge_queue::i18n_driver_config();
     let mut command = std::process::Command::new("git");
     command
         .arg("-C")
         .arg(folder)
         .args(["-c", hooks.as_str(), "-c", "core.fsmonitor=false", "-c", "commit.gpgsign=false", "-c", "gpg.program="])
+        .args(["-c", driver.as_str()])
         .arg("--no-optional-locks")
         .args(["merge", "--no-edit", merge]);
     let remaining = deadline.saturating_duration_since(Instant::now()).max(Duration::from_secs(1));
@@ -8834,6 +9271,8 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::SubInbox { member } => tell_sub_inbox(store, team, member),
         Step::SubBrief { member } => send_sub_brief(store, team, member),
         Step::RingMessages { member } => super::doorbell::ring(store, team, member).map(drop),
+        Step::InterruptMessages { member, turn, run, conversation } => super::doorbell::interrupt(store, team, member, *turn, run, conversation),
+        Step::ContinueUrgent { member } => super::doorbell::continue_after_interrupt(store, team, member),
         Step::RemindReviewer { task, member } => remind_reviewer(store, team, *task, member),
         Step::RemindReport { task } => remind_report(store, team, *task),
         Step::Unassigned { member, what, task } => change(store, &team.id, |team, events| {
@@ -9302,6 +9741,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         }),
         Step::Restart { member } => restart_crashed(store, team, member),
         Step::CrashStopped { member } => crash_stopped(store, team, member),
+        Step::Jobs { member, jobs } => record_jobs(store, team, member, jobs, now()),
         Step::Services { member, services } => change(store, &team.id, |team, _| {
             if let Some(found) = team.members.iter_mut().find(|found| found.id == *member) {
                 found.services = services
@@ -9525,12 +9965,18 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
     sample_contexts(store, &teams, &sessions, now());
     let teams: Vec<Team> = teams.iter().filter_map(|t| store.load(&t.id).ok().flatten()).collect();
     defer_watched(&teams, &sessions);
-    for team in &teams {
-        for step in steps_with(team, &sessions, now(), Some(&listed)) {
-            if let Err(error) = run_step(store, team, &step, host) {
-                eprintln!("hgs team worker: {}: {step:?}: {error}", team.name);
-            }
+    for (index, team) in teams.iter().enumerate() {
+        // Task 287: a member's call waiting for the store gets it between two
+        // teams (SQLite's busy wait queues nobody).
+        if index > 0 {
+            std::thread::sleep(TEAM_YIELD);
         }
+        // Task 277 (owner, 2026-11-08): a hand-out or stage message that
+        // reached the member's turn is taken, not unread.
+        if let Err(error) = super::doorbell::mark_taken(store, team) {
+            eprintln!("hgs team worker: {}: taken hand-outs: {error}", team.name);
+        }
+        run_team_steps(store, team, &sessions, &listed, host);
         // U62 (#717): the team's test queue. An empty queue is a no-op (no load
         // read); a read is at most once per 30 s, and results become notices.
         // U62 (#760): the merge queue first, so its tests run in the same tick.
@@ -9545,6 +9991,58 @@ pub(crate) fn tick(store: &mut Store, host: &str) -> anyhow::Result<bool> {
     // thread of its own so removing gigabytes never holds up a tick.
     crate::state::build_dirs::maintain_in_background(now());
     Ok(true)
+}
+
+/// Task 287: the pause between two teams of a tick, longer than SQLite's
+/// longest busy-wait sleep, so a waiting member call takes the lock.
+const TEAM_YIELD: Duration = Duration::from_millis(100);
+
+/// Task 287 (owner, 2026-11-08): a team's steps of one tick are one
+/// transaction. Every change the steps make goes to the store's working copy
+/// of the team (`Store::begin_batch`), which is written once at the end; a
+/// change with a request id or of the working tier writes it first.
+fn run_team_steps(store: &mut Store, team: &Team, sessions: &[Seen], listed: &BTreeSet<String>, host: &str) {
+    if let Err(error) = store.begin_batch(&team.id) {
+        eprintln!("hgs team worker: {}: {error:#}", team.name);
+    }
+    if let Err(error) = refresh_unread(store, team) {
+        eprintln!("hgs team worker: {}: unread: {error:#}", team.name);
+    }
+    let fresh = store.load(&team.id).ok().flatten();
+    let team = fresh.as_ref().unwrap_or(team);
+    for step in steps_with(team, sessions, now(), Some(listed)) {
+        if let Err(error) = run_step(store, team, &step, host) {
+            eprintln!("hgs team worker: {}: {step:?}: {error}", team.name);
+        }
+    }
+    if let Err(error) = store.end_batch() {
+        eprintln!("hgs team worker: {}: the tick's changes were not written: {error:#}", team.name);
+    }
+}
+
+/// Task 287: marking messages read changes only their rows; the tick brings
+/// each member's unread summary in the team record up to date from them, in
+/// its own transaction, before its steps ring anyone.
+pub(crate) fn refresh_unread(store: &mut Store, team: &Team) -> anyhow::Result<()> {
+    let at = now();
+    let mut fresh = Vec::new();
+    for member in team.members.iter().filter(|member| member.unread.is_some()) {
+        let summary = super::working::summary(store.connection(), &team.id, &member.id, member.unread.as_ref(), super::working::urgent_bound(team), at)?;
+        if summary != member.unread {
+            fresh.push((member.id.clone(), summary));
+        }
+    }
+    if fresh.is_empty() {
+        return Ok(());
+    }
+    change(store, &team.id, |team, _| {
+        for (id, summary) in fresh {
+            if let Some(member) = team.members.iter_mut().find(|member| member.id == id) {
+                member.unread = summary;
+            }
+        }
+        Ok(())
+    })
 }
 
 /// DeepSeek reports only the running total of its tokens and keeps no history,
@@ -9646,6 +10144,7 @@ fn take_outbox_with(
                 if let Err(error) = super::outbox::settle(folder, &request, &outcome) {
                     eprintln!("hgs team worker: {}: outbox {}: {error}", team.name, path.display());
                 }
+                announce_outbox(store, team, member, folder, &request, &outcome);
                 continue;
             }
             if request["op"] == "run" {
@@ -9657,6 +10156,7 @@ fn take_outbox_with(
                         if let Err(error) = super::outbox::settle(folder, &request, &outcome) {
                             eprintln!("hgs team worker: {}: outbox {}: {error}", team.name, path.display());
                         }
+                        announce_outbox(store, team, member, folder, &request, &outcome);
                     }
                     Ok(None) => {}
                     Err(error) => eprintln!("hgs team worker: {}: run {}: {error:#}", team.name, request["request_id"]),
@@ -9672,6 +10172,7 @@ fn take_outbox_with(
             if let Err(error) = super::outbox::settle(folder, &request, &outcome) {
                 eprintln!("hgs team worker: {}: outbox {}: {error}", team.name, path.display());
             }
+            announce_outbox(store, team, member, folder, &request, &outcome);
         }
     }
     Ok(())
@@ -9940,6 +10441,17 @@ fn start_run(
     if request["member"].as_str() != Some(member.id.as_str()) {
         return refuse(format!("the folder belongs to {}", team.name_of(&member.id)));
     }
+    // Task #229: a Crit holds the release: no release candidate starts while one
+    // is open in the team.
+    if target_template == "release-candidate" {
+        let crits = super::plan::open_crits_all(team);
+        if !crits.is_empty() {
+            return refuse(format!(
+                "A critical task is open: {}; the release candidate starts once it is decided",
+                crits.iter().map(|(phase, id)| format!("#{id} in phase {phase}")).collect::<Vec<_>>().join(", ")
+            ));
+        }
+    }
     let attempt = request["attempt"].as_str().unwrap_or_default();
     // U36: a test stage builds under its stage run, as an attempt.
     if !attempt_of(team, attempt, &member.id) {
@@ -10118,6 +10630,11 @@ fn run_request(store: &mut Store, folder: &Path, request: &Value) {
         // stage run given to the member is its attempt too.
         anyhow::ensure!(attempt_of(&team, attempt, &member.id), "attempt {attempt} is not this member's");
         let outcome = run_outcome(&team, &member, folder, request)?;
+        // Task 261: the run restarted the shared sccache server: the lead hears.
+        if outcome.tail.contains(super::super::build_cache_server::RESTART_NOTE) {
+            let task = team.tasks.iter().find(|task| task.attempts.iter().any(|found| found.id == attempt)).map_or(0, |task| task.id);
+            tell_lead(store, &team, "build_cache", &cache_restarted_text(&team, &member.id, task, request["template"].as_str().unwrap_or_default(), outcome.exit));
+        }
         Ok(record_run(store, &team, &member, request, &outcome))
     })();
     let outcome = match outcome {
@@ -10127,6 +10644,66 @@ fn run_request(store: &mut Store, folder: &Path, request: &Value) {
     if let Err(error) = super::outbox::settle_running(folder, &id, &outcome) {
         eprintln!("hgs team worker: run {id}: {error}");
     }
+}
+
+/// Task #275: a sandboxed member's queued call answers in a file it never
+/// reads. A refused or failed outcome is also a team message at its next safe
+/// point (urgent for a question or a report), and the lead's inbox names the
+/// reason. The result file stays as before, and a `messaged` outcome (task
+/// 209's context claim, told already) is not told twice.
+fn announce_outbox(store: &mut Store, team: &Team, member: &Member, folder: &Path, request: &Value, outcome: &Value) {
+    let status = outcome["status"].as_str().unwrap_or_default();
+    if !matches!(status, "refused" | "failed" | "error") || outcome["messaged"] == true {
+        return;
+    }
+    let error = outcome["error"].as_str().unwrap_or("the worker could not apply it");
+    let op = request["op"].as_str().unwrap_or("call");
+    let request_id = request["request_id"].as_str().unwrap_or_default();
+    let urgent = matches!(op, "ask" | "report");
+    let mut text = format!(
+        "[Zerus team \u{b7} from: Zerus \u{b7} outbox]\nYour queued {op} (request {request_id}) was {}; it was NOT applied.\n{error}\n",
+        if status == "failed" { "failed" } else { "refused" },
+    );
+    // Task #275: a "too long" refusal names the limit and how to send it.
+    if error.to_lowercase().contains("too long") {
+        let limit = match op {
+            "ask" => "4000 characters",
+            "report" => "64 KiB",
+            _ => "the limit named above",
+        };
+        text += &format!(
+            "The limit is {limit}; put the long text in a file and name its path in the text (for example \"see D:/work/question.md\").\n"
+        );
+    }
+    text += &format!(
+        "Fix it and send it again. Its result stays at {}.",
+        super::outbox::result_path(folder, request_id).display()
+    );
+    if let Some(session) = member.session.as_ref() {
+        let message = uuid::Uuid::new_v4().to_string();
+        let _ = super::doorbell::post_and_ring(
+            store,
+            &team.id,
+            &member.id,
+            session,
+            &message,
+            "outbox",
+            "Zerus",
+            if urgent { Urgency::Urgent } else { Urgency::Normal },
+            &text,
+        );
+    }
+    let record = json!({"member":member.id,"op":op,"request_id":request_id,"error":error,"urgent":urgent,"at":now()});
+    let team_id = team.id.clone();
+    let _ = store.mutate(None, &team_id, None, |team, events| {
+        team.outbox_failures.push(record.clone());
+        if team.outbox_failures.len() > 20 {
+            let extra = team.outbox_failures.len() - 20;
+            team.outbox_failures.drain(..extra);
+        }
+        events.push(Event::new("outbox_refused", record.clone()));
+        Ok(Value::Null)
+    });
 }
 
 /// One queued request, applied as the member's own write (U20). The member's
@@ -10152,9 +10729,8 @@ fn apply_outbox(store: &mut Store, team: &Team, member: &Member, request: &Value
         let ids: Vec<String> = input["ids"].as_array().into_iter().flatten().filter_map(|id| id.as_str().map(str::to_owned)).take(200).collect();
         let via = if input["via"] == "current" { "current" } else { "inbox" };
         let member_id = member.id.clone();
-        let marked = store.mutate_working(&team.id, |tx, team, events| {
-            super::commands::read_messages(tx, team, &member_id, &ids, via, &request_id, events)
-        })?;
+        // Task 287: the rows and the receipt only, never the team record.
+        let marked = store.write_rows(&team.id, |tx, events| super::commands::read_messages(tx, team, &member_id, &ids, via, &request_id, events))?;
         return Ok(json!({"status":"read","read":marked,"request_id":request_id}));
     }
     if op != "expect" {
@@ -10203,13 +10779,16 @@ fn apply_outbox(store: &mut Store, team: &Team, member: &Member, request: &Value
                     "context", "Zerus", Urgency::Normal, &text,
                 );
             }
-            return Ok(json!({"status":"refused","request_id":request_id,"task":input["task"].clone(),"error":answer}));
+            return Ok(json!({"status":"refused","request_id":request_id,"task":input["task"].clone(),"error":answer,"messaged":true}));
         }
     }
     let member_id = member.id.clone();
-    let value = store.mutate(Some((&request_id, &input)), &team.id, None, |team, events| {
-        ops::apply(team, op, &input, &ops::Actor::Member(member_id.clone()), &BTreeSet::new(), events)
-    })?;
+    let actor = ops::Actor::Member(member_id.clone());
+    // Task 287: the report's git reads run before the store's lock.
+    let value = with_git_answers(
+        || ops::prefetch_git(team, op, &input, &actor),
+        || store.mutate(Some((&request_id, &input)), &team.id, None, |team, events| ops::apply(team, op, &input, &actor, &BTreeSet::new(), events)),
+    )?;
     // 9.6: a queued reply is the same answer the direct path routes down to the
     // sub-team's question; the answer is already recorded, so a routing error
     // is logged and never refused as if nothing had been applied.
@@ -10537,6 +11116,12 @@ mod dispatcher_crash;
 #[cfg(test)]
 #[path = "tests/dispatcher_pause_cold.rs"]
 mod dispatcher_pause_cold;
+#[cfg(test)]
+#[path = "tests/dispatcher_store_locks.rs"]
+mod dispatcher_store_locks;
+#[cfg(test)]
+#[path = "tests/dispatcher_jobs.rs"]
+mod dispatcher_jobs;
 
 #[cfg(test)]
 #[path = "tests/dispatcher_host_start.rs"]
@@ -10622,6 +11207,4 @@ mod dispatcher_decisions;
 #[cfg(test)]
 #[path = "tests/dispatcher_areas.rs"]
 mod tests;
-
-
 

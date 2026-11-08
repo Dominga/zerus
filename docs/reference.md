@@ -1352,6 +1352,24 @@ each other's entries); `qt-build` sets the launcher first in a build folder
 configured without it. A tool not found on `PATH` (or in cargo's bin folder)
 is named at the start of the run's output and the run builds without it.
 
+The owner's own shared sccache server is separate (task 261): when cargo builds
+through sccache by `RUSTC_WRAPPER` or `build.rustc-wrapper` in cargo's
+`config.toml`, every build on the computer shares one server on
+`SCCACHE_SERVER_PORT` (4226 by default), and the first build after none runs
+starts it. Zerus never lets a sandboxed member's run start it: a server
+started in a Low-integrity or Codex-sandbox token inherits that token, and
+every later build of any folder fails with "error writing dependencies to
+...\deps\X.d: Access is denied (os error 5)". Before such a run the team
+worker, with its normal token, starts the server if none runs
+(`sccache --start-server`); when it cannot, the run builds without the wrapper
+(`RUSTC_WRAPPER` empty) instead. A `hgs run` or a cargo template whose failure
+is that signature (os error 5 writing a `.d`, `.rlib` or `.rmeta`) makes the
+worker restart the server (`--stop-server`, `--start-server`) and run the
+build once more; the run's output says so and the lead's inbox gets one line.
+`hgs team builds` carries the server's health as `cache_server`:
+`configured`, `program`, `port`, `running`, the `pid` and `integrity` of the
+process listening on the port, and `restricted` when that is Low.
+
 A build or test template (`cargo-build`, `cargo-test`, `cargo-clippy`,
 `qt-configure`, `qt-build`, `qt-test`) that fails with MSVC's C1083 "Cannot open
 compiler generated file ... Permission denied" or D8050 "failed to get command
@@ -1898,6 +1916,43 @@ task has started since, or when another task depends on a task it added.
 `{"team","by":"human"} | hgs team seen-lead-changes --json` marks the digest
 seen (with `"change"`, up to that one). `hgs team lead-changes --json` lists
 them. At most 300 are kept, seen or reverted ones leaving first.
+
+### Critical and Minor follow-ups (task 229)
+
+Owner, 2026-11-07: "one task or review can spawn new tasks with a status -
+Crit or Minor. Crit: blocks using the phase's result (its release). Minor:
+shortcomings or missing functionality that do not block the phase's result."
+The lead spawns them with `{"team","origin":N,"severity":"crit"|"minor",
+"tasks":[...]} | hgs team spawn --json`; each spawned task carries its `origin`
+(a task or review) and its `severity`, and a report's or a review's finding
+may name that severity for the lead to turn into a task.
+
+A **Crit** joins the running phase of its origin at once and without a card.
+It becomes a hard dependency of what its origin produced (`deps` names the
+origin), so nothing that uses the phase's result runs before it is decided, and
+while it is open the phase cannot be accepted or closed, no release candidate
+starts (the `release-candidate` run is refused naming the crits), and `finish`
+waits. The owner is told at once, without acting: Waiting for you shows one
+`crit_added` item per open crit, "The lead added critical task #N to phase P
+(from #origin): title" (action `open_task`, the desktop notifies it like any
+Waiting item), the plan feed carries `task_spawned`, and the change is the
+lead's own `lead_changes` entry (`lcN`, "opened critical #N ..."), revertible
+until the crit starts.
+
+A **Minor** blocks nothing. It joins the next phase that has not started, or a
+Minor phase the lead opens (`"new_phase":true`, or when no later phase is
+unstarted): a phase of `kind` "minor" that runs at once without an approval
+card and in free mode, ordered right after the origin's phase. A Minor phase
+may end with **tail tasks** (`"tail":true`) that depend on every Minor in it,
+such as the release build with the fixes. A Minor never gates its origin's
+phase.
+
+`hgs team status --json` carries each task's `severity` and `origin`, each
+phase's `kind`, `crit` (its open critical task ids) and `crit_gate` (the line
+that holds it), and the team's `crit` list of open crits with their phases;
+`hgs team events` carries `task_spawned` with the severity, the origin, the
+phase and the gate. The desktop renders these fields; the CLI is their source.
+
 
 The owner's typed word (`owner_word`) is no longer taken where a card exists:
 approve, approve-phase, discard-phase, return-to-draft, unpause-phase,
@@ -2558,12 +2613,18 @@ Task 161 (owner, 2026-11-07): neither the lead nor a member turns a task into a
 waiting loop; waiting on an outside event is always a park.
 - The lead's `hgs team reply` (and a parent lead's), `hgs team message` to
   members and `hgs send` from the lead's session to a member are refused when
-  the text tells the member to wait for an outside event (a wait word with an
-  install, a build or version, CI, a card or approval, a time); the refusal
+  the text tells the member to wait for an outside event: a wait word with an
+  install, a build or version, CI, a card or approval, a time. The refusal
   is the park request for the member's open task. A reply with
   `"park":{condition, eta_minutes, note}` answers the question and parks the
   task at once; the lead's inbox item for a question that says the member is
   blocked or waiting carries that reply, with a guessed condition.
+  Task #276 (owner, 2026-11-08): the detector judges the *instruction*, not a
+  wait word beside an event word, one clause at a time: "held until #5 is
+  accepted" or "the owner allows card p77" describe state and pass, while an
+  imperative to the member ("wait for the owner to answer", "check again in 5
+  minutes", "poll the CI until it is green") is refused, quotes the phrase that
+  triggered it, and offers the park of the condition that phrase names.
 - `hgs run` refuses a job whose purpose is waiting: its label says it waits
   ("wait", "poll", "watch for", "until"), or its command (and the .cmd, .bat,
   .ps1, .sh or .py script it names, first 64 KB) loops (`while`, `until`,
@@ -2642,10 +2703,44 @@ redundant `.` components and duplicate paths, and retain this field in task
 status. A task has at most 128 paths, each at most 1024 characters and together
 at most 32 KiB. Absolute paths, parent (`..`) components, colons and control
 characters are refused; `.` covers the repository. Existing tasks without
-output remain valid. Rebalance keeps a queued task with its original member
-when its output overlaps that member's task in progress (equal paths or
-containment by path components). It also keeps a task without output whenever
-that member has work in progress. `src/api` does not overlap `src/apis`.
+output remain valid. Task 259 (owner, 2026-11-08): a path is a file or a module,
+not a whole area. A bare top-level folder (`src`, `tray`, `client`) or a whole
+area directly under a top-level container (`client/src`, `crates/replica`,
+`mobile/android`) is a folder-level output: it is advisory and never holds
+another task, since it would hold every task touching that area while it is
+open. Plan validation warns once per task and asks for the files or module
+paths; an overlap that only these folder-level paths cause suggests a soft
+order instead of a hard dependency. Rebalance keeps a queued task with its
+original member only when a file or module path overlaps that member's task in
+progress (equal paths or containment by path components); it also keeps a task
+without output whenever that member has work in progress. `src/api` does not
+overlap `src/apis`.
+
+Task 259 (owner, 2026-11-08): no idle member while a ready task with free
+outputs waits. Zerus hands such a task to a free member of a compatible role
+when its assignee cannot take it: the same role, or one doing the same kind of
+work (Frontend SolidJS and Frontend DeepSeek share "Frontend"), and only when
+that member's launch rights allow the task. The exact role and the planned
+member order the choice, never wall off a compatible one; a member Zerus has not
+started yet keeps its task. A pinned task, `keep_assignees` or a rework stays
+with its member; while an idle member could take one of those, the lead's inbox
+carries one `idle_with_ready_work` item naming the member, the task and the
+reassign command. Every move records a `rebalanced` event with its `cross_role`
+flag, and the lead gets one message that `hgs team reassign` reverts.
+
+Task 263 (owner, 2026-11-08): a ready task waiting for its busy member never
+holds back other members' ready work. The dispatcher claims a task's files for
+a tick only when that tick hands it out or starts its member for it; a task
+that merely waits for a busy member no longer blocks a later ready task writing
+the same files (once it can start, that later task's work holds it back
+instead, so the two still never run apart). A real hold - a task that runs, or
+a returned task waiting for its member - is named rather than silent:
+`waits` on the held task is `{"for":"outputs","on":[198],"unblock":"#198 waits
+for ui2 (Frontend): hold or reassign #198"}`, and `hgs team look` says which
+task holds the member's ready work and what frees it. When a member is idle
+only because such a hold keeps its ready work, the lead's inbox carries one
+`idle_with_ready_work` item with that reason (the hold command for a waiting
+holder, `hgs team look` for a running one).
 
 A stage member may ask the lead with `hgs team ask` (its question belongs to the
 stage run and the lead answers it with `hgs team reply`), and the stage hand-off
@@ -2718,7 +2813,11 @@ only peeks. Task 186 (docs/lore.md 11.6): only you peek at the lead's messages.
 A call with `team` from a caller Zerus cannot verify (a session outside the
 team, a stale session marker) is refused, never read as yours; a parent lead or
 an intake key reads no team's messages. In a sandbox the receipt waits in the member's folder for the
-worker (`messages-read`), as a report does. Nothing else marks a message read.
+worker (`messages-read`), as a report does. Task 277 (owner, 2026-11-08) adds
+one more receipt: a hand-out or stage message whose text reached the member's
+turn (`injected_at`) for an attempt it holds is stale, not unread, and the
+worker marks it read (`read_via: taken`), so "does not read" counts only
+messages that never reached it. Nothing else marks a message read.
 
 Delivery does not depend on the agent's discipline. A Claude or Codex member's
 turn-start hook (`UserPromptSubmit`) gets the unread text Zerus has not put into
@@ -2762,16 +2861,61 @@ Status shows each member's `unread`: `count`, `urgent`, the oldest message and
 its rings, and the schedule `ring_at`, `stall_at` and `held_urgent_at`. Zerus
 Next's member row shows `unread: N`.
 
+Task 277 (owner, 2026-11-08): an urgent message does not wait for the turn end.
+While the member works, Zerus interrupts its turn natively through `hgs
+interrupt` (Claude, Codex and Kimi stop; DeepSeek aborts; OpenCode stops),
+pinned to the displayed turn and its run and conversation, then waits for the
+stop and opens a new turn that carries the message and `Continue your task from
+where you stopped.`; the attempt goes on untouched. Claude and Codex get the
+text from the turn hook, the others in the prompt. A member already handed a
+task, a stage or a resume this tick gets that delivery first, and a question or
+approval is a safe point of its own. An urgent message unread or not acted on
+after `urgent_alarm_minutes` (team setting, default 3, 0 off) is an alarm: the
+lead's inbox gets one urgent `urgent_unread` item naming the member, the sender
+and why (its turn was interrupted and the message waits for the stop, the new
+turn delivered it but it was not acted on, Zerus could not interrupt its turn,
+or it waits for the turn end); for a message you sent, your Waiting list gets
+the same item (`urgent_message`). Ordinary unread notices stay folded into the
+one `unread_messages` item. The lead's inbox message is urgent when it names a
+question, a permission, a Terminal question, a crash, a blocked input, a stuck
+member or an urgent unread message.
+
 The lead's inbox message is urgent when it names a question, a permission, a
-Terminal question, a crash, a blocked input or a stuck member. `hgs team message
+Terminal question, a crash, a blocked input, a stuck member or an urgent unread
+message (task 277). `hgs team message
 --json` with `{"request_id","to","text","urgent"}` (`to`: a member id, `lead`
 or `team`, one message per other member) stores a note from the lead, a member
 or you (`by`: the member id, or `owner`) of at most 2,000 characters, and Zerus
-rings it at the recipient's next idle moment. A recipient with 50 unread normal
+rings it at the recipient's next idle moment; an urgent one interrupts a busy
+member's turn as above. A recipient with 50 unread normal
 or 5 unread urgent messages takes no more of that kind; the sender is refused
 with the count. Zerus's own messages are at most 32 KiB each. A RustCodeLore
 team keeps its team messages here too: hgs does not link the lore crate, and a
 message must not wait for a store on another computer.
+
+#### Decisions and notices (task 289)
+
+Owner, 2026-11-08: the lead's inbox has two kinds of item. A **decision** is
+something only the lead can settle: a report, a question, a permission, a task
+wait, a card to propose. A **notice** is information: a decided proposal
+(`proposal_decided`), a task whose dependency was cancelled
+(`dependency_cancelled`), a member that does not read (`unread_messages`) and the
+lead-changes digest (`lead_changes`). Every item says `"notice": true|false`.
+
+A notice carries a `seen` command and is hidden by
+`{"request_id":"UUID","team":"ID","items":["proposal:p77"]} | hgs team seen
+--json`, which stores the notice's content signature with the team (at most 300,
+across restarts). The notice returns by itself when its content changes (a new
+decision note, another cancelled dependency, another unread count, a newer
+digest); a decision is never marked seen - it is answered. Unknown or
+decision keys come back in `unknown` and mark nothing.
+
+`dependency_cancelled` offers `keep` next to hold and cancel:
+`{"request_id":"UUID","team":"ID","task":N} | hgs team keep --json` (or
+`"deps":[ids]` for some of them) records that the task does not need the
+cancelled work, so the notice clears; the dependencies stay on the plan. The
+idle-lead nag counts and names decisions only, so a notice can never keep it
+alive ("You are idle while 1 decision(s) wait").
 
 ### Scaling and draining the roster
 
@@ -2847,6 +2991,41 @@ store; its write open switches it back to the rollback journal when no other
 connection has it open, and this hgs's next write open switches it again.
 `hgs team list` reads every record before it parses any, so a read never holds
 the store while megabytes of JSON parse.
+
+### The team store's write lock is held briefly
+
+One team write at a time holds the store's write lock (`BEGIN IMMEDIATE` to its
+commit), and SQLite queues nobody: a waiting call retries until its 60 s bound
+and fails with "The team database stayed busy for 60 s". Since task 287:
+
+- Every write logs how long it held the lock, with the code that took it, in
+  `logs/team-store-locks.log` under the state root (one JSON line: `caller` as
+  file and line, `team`, `held_ms`, `waited_ms`, `outcome` commit or rollback,
+  `level`). A hold of 200 ms or more is `warn` and also goes to
+  `logs/slow-calls.log`. Both logs keep 256 KB plus one older file. A process
+  started while the lock is held (a git that slipped into a transaction) is a
+  `warn` line naming the holder.
+- A member's report makes its git reads (its folder's HEAD and branch, the
+  test delta against the lead's commit) before the transaction; the
+  transaction reads the answers from memory.
+- `hgs team inbox` and `hgs team current` mark messages read by changing only
+  the message rows and adding the receipt's event. The team record is not
+  rewritten and its revision does not move. The member's unread summary in the
+  record follows at the worker's next tick. A mark that fails (the store stayed
+  busy) still prints the messages, with `read.error`; they stay unread and come
+  again with the next inbox.
+- The worker applies a team's steps of one tick to a working copy and writes
+  it in one transaction at the end. A change with a request id, or one of the
+  working tier (a doorbell), writes the copy first and the batch goes on after
+  it. If another writer changed the team meanwhile, the worker's changes are
+  merged over that record: objects key by key, lists of records by their `id`
+  (or a phase's `n`). A value both changed keeps the other writer's, which the
+  next tick recomputes from. The worker pauses 100 ms between teams so a
+  waiting call takes the lock.
+- The member projection (`team_rule_members`) is rebuilt only when the members
+  change. The members are kept in their own column with the revision that
+  wrote them. A write by an older hgs, which sets neither, still rebuilds it
+  from the record.
 
 ### A stalled lead tells the owner
 
@@ -2976,6 +3155,34 @@ look again (feed `member_uncertain`, `member_uncertain_told`); agreement or a
 member no longer suspect ends it (`member_check_settled`). An idle lead with
 decisions waiting (task 95's stall, reason `idle`) is told itself once a round
 (`lead_idle_told`).
+- Task #269 (owner, 2026-11-08): a member waiting on its own Zerus build
+  (`hgs team run` or `hgs run`), on Background work (a job, subagents in
+  flight, a declared budget) or on a tool call in flight is not uncertain: the
+  quiet is expected, its state stays `working`, and the check and the snapshot
+  name what it waits on (`sources.waiting`, top-level `waiting`), e.g. "its own
+  Zerus build (release-candidate)" or "a tool call (Bash)". The build and
+  Background exemptions are the dispatcher's stuck rule's; a tool call gets
+  that rule's longer tool bound, and the prompt the agent sits at while it
+  waits is not a disagreement. A quiet member without such work is still
+  compared as before.
+- Task 278 (owner, 2026-11-08): the jobs a member waits on are registered,
+  whatever its activity says. These are the build Zerus runs for it, the
+  background jobs its hooks registered (a Claude `run_in_background` Bash,
+  confirmed against the agent's processes; a Codex exec session; a DeepSeek
+  job from its native host), and Background work under a declared budget. The
+  listing row carries the hooks' jobs as `background_jobs` (`command`,
+  `description`, `started_at`). They are never counted as the session's
+  Background work, so the session state, the capture gate and the reply badge
+  keep their rules. A member with such a job is "waiting for <job> since HH:MM"
+  (the first job, and how many more) in look's `waiting`. It is never suspect,
+  never uncertain over its idle prompt, and never stuck or silent. Its status
+  member card carries `jobs` (`kind` build, shell or job; `what`; `command`;
+  `since`) and `waiting_for`. Each job's start, command and end are kept in
+  the working tier (`working_jobs`, at most 500 ended rows a team) and
+  journaled as `job_started` and `job_ended`. The lead's handoff brief lists
+  them among its last pulses ("dev started waiting for its background job
+  `cargo test` (since 14:05)"). The hand-out still asks for builds and tests
+  through `hgs run` or `hgs team run`.
 
 What counts as work, not silence (task 181): a member inside one open tool call
 is held to the tool bound (six times the stuck bound, at least an hour) counted
@@ -2997,8 +3204,9 @@ and is never settled this way.
 `hgs team look MEMBER [--team ID]`, or `{"member":"dev","team":ID} | hgs team look
 --json`, reads the member's screen now and answers one compact snapshot: the
 reconciled `state` (`uncertain`, `settling` within the grace), `disagree`,
-`sources` (hooks, record, screen, process, activity), the last 12 `screen`
-lines, its open `task`, its `pulse` and `next`, what Zerus does next. It
+`sources` (hooks, record, screen, process, activity, waiting), the last 12
+`screen` lines, its open `task`, `waiting` (task #269: its own build, Background
+work or a tool call), its `pulse` and `next`, what Zerus does next. It
 changes nothing. A member is named by id, role or session; with several teams
 the caller's own team is taken first.
 
@@ -7268,6 +7476,12 @@ again finishes it (fetching the base when it moved on), provided the folder is a
 clone of this repository with no changes and without that branch. Any other
 folder there is refused, never changed.
 
+Zerus's own merges into a member's folder (`git-merge-lead`) and into the lead
+branch (the merge queue and the accepted-work merge) pass the catalogs' `i18n`
+merge driver with `-c merge.i18n.driver=...`; a clone therefore needs no merge
+driver in its config, which Zerus refuses on purpose. A person merging by hand in
+a clone enables the documented one-line `git config` from `CONTRIBUTING.md`.
+
 **DeepSeek members in their sandbox.** On Windows a DeepSeek member's shell runs
 in DeepSeek's sandbox at Low integrity. It reads Zerus state but may not write
 it, and the session host keeps it out (a sandboxed caller hears
@@ -8561,22 +8775,47 @@ What the test queue makes of its results, by the project's thresholds:
 - Coverage. `hgs test coverage` also names the targets without unique coverage;
   the monthly run of `test-map-coverage.yml` reports them.
 
+#### One integration line (#267)
+
+Owner, 2026-11-08: with an `integration_folder` the team has one line. An
+accepted task's commit lands on it at acceptance through the merge queue, in
+acceptance order (below). A member's new attempt starts from that line's head,
+never from its own previous branch or another member's commit: the task
+branch is created from the integration branch, and a folder that gets a new
+task with uncommitted work commits it on its old branch first, then moves to
+the integration head (only when it is clean after that). Zerus no longer merges
+predecessors' commits into member branches: the `dependencies` prepare step
+reads "skipped" with that reason, so "a member's accepted commit conflicts"
+cannot occur; the team's base is named once, by the integration branch.
+`hgs team status` carries `integration`: `branch`, `head`, `landed`
+task/commit pairs and every accepted task's `unlanded` state and why (queued,
+testing, conflict with its `resolve` task, or no landing queued); the lead's
+inbox lists each with an `unlanded` item, and an accept answers with its
+`landing`.
+
 #### The merge queue (#760)
 
 With `[merge_queue] enabled = true` (the owner may override it), the lead's or
 the owner's accept of a report does not decide it at once: it answers
-`merge_queued`, the task stays undecided with a `merge` entry (status shows it)
-and the worker takes the queue in accept order, one merge under test at a time.
-A check, a phase build, a sub-team's task and work done in the lead's own
-folder are decided at once as before.
+`merge_queued` with a `landing` (`{state:"queued",line,head}`), the task stays
+undecided with a `merge` entry (status shows it) and the worker takes the queue
+in accept order, one merge under test at a time. A check, a phase build, a
+sub-team's task and work done in the lead's own folder are decided at once as
+before.
 
 - The worker merges the commit the author reported (`folder_head`; a clone's
   branch is fetched first) into the lead's folder: a fast-forward or a merge
   commit "Merge accepted work from MEMBER (SHA) (#N): TITLE", hooks and the
   repository's code-running config off. A lead folder with uncommitted changes
   makes it wait, with that note.
-- A conflict is aborted and the task goes back to its author (pinned, Pending,
-  rejected by Zerus) with the conflicting files.
+- Task #267: a conflict is aborted and becomes ONE resolve task for the
+  reviewer (the lead when the team has none), with the two commits and the
+  conflicting files (`merge_resolve_task` in the feed); the conflicting landing
+  keeps its `merge` entry in state `conflict` and stays undecided, and no later
+  landing runs while one conflict waits. Once the resolve task is decided, the
+  landing is back in the queue and retries even when nothing else changed; its
+  commit is on the line already when the resolution landed it, and the queue
+  then keeps it without merging again.
 - A clean merge queues the task's affected tests of `prev..merged` in the
   test queue (forced, never reused) on the merged commit. All green keeps the
   merge and accepts the task; any failure resets the lead branch to `prev`

@@ -24,6 +24,17 @@ fn canonical(path: &str) -> String {
         .map_or_else(|_| path.to_owned(), |p| p.to_string_lossy().into_owned())
 }
 
+/// A stable short hash of the source folder: every member, test and local
+/// build gets its own development identity, data and WebView2 folders.
+fn folder_hash(path: &Path) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in path.to_string_lossy().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")[..12].to_owned()
+}
+
 /// `--build-info` and `--version` report Zerus' identity as the Qt GUI does:
 /// the product version, the Dev number from `ZERUS_DEV_BUILD_NUMBER`, a local
 /// preview label from `ZERUS_LOCAL_PREVIEW_LABEL` and the clean source commit
@@ -119,6 +130,18 @@ fn embed_identity() {
 
 fn main() {
     embed_identity();
+    // Every non-switch build is scoped to its source folder: a test or member
+    // build can never share the owner's data, WebView2 folder or instance.
+    let manifest =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR"));
+    let root = manifest
+        .join("../..")
+        .canonicalize()
+        .expect("the repository root");
+    println!(
+        "cargo:rustc-env=ZERUS_DEV_FOLDER_HASH={}",
+        folder_hash(&root)
+    );
     // WhiteWh fork, task #63: the fork build number and feed the updater
     // reads with option_env! (crate::fork_updates), as the Qt build embeds them.
     println!("cargo:rerun-if-env-changed=ZERUS_FORK_BUILD");

@@ -2130,6 +2130,59 @@ class PullRequestRunCancellationTests(unittest.TestCase):
         self.assertEqual(namespace["doomed"]([], 7, "feature", "ufna/zerus", 12, closed), [])
         self.assertEqual(namespace["ACTIVE"], ("queued", "in_progress", "waiting", "pending", "requested"))
 
+    def test_runs_that_ignore_the_cancel_are_force_cancelled_after_a_minute(self):
+        namespace = {}
+        handler = job((self.WORKFLOWS / "pr-closed.yml").read_text(), "cancel")
+        script = inline_python(handler)
+        exec(compile(script, "workflow-pr-closed", "exec"), namespace)
+        closed = namespace["when"]("2026-11-08T12:00:00Z")
+
+        def sweep(call, sleep):
+            with patch("sys.stdout", new_callable=io.StringIO):
+                namespace["sweep"](call, sleep, 7, "feature", "ufna/zerus", 12, closed)
+
+        def run(number, status="queued", linked=(7,)):
+            return {"id": number, "event": "pull_request", "status": status, "head_branch": "feature",
+                    "head_repository": {"full_name": "ufna/zerus"}, "created_at": "2026-11-08T11:00:00Z",
+                    "pull_requests": [{"number": value} for value in linked]}
+
+        def harness(first, second, failures=()):
+            """A fake gh api: two listings around the one wait, and every POST."""
+            calls, waits = [], []
+            def call(*args):
+                if args[:2] == ("-X", "GET"):
+                    listed = second if waits else first
+                    status = next(arg.split("=", 1)[1] for arg in args if arg.startswith("status="))
+                    return 0, json.dumps({"workflow_runs": [entry for entry in listed if entry["status"] == status]}), ""
+                calls.append(args[2].rsplit("/", 2)[1:])
+                return next(((1, "", error) for path, error in failures if args[2].endswith(path)), (0, "", ""))
+            return call, waits.append, calls, waits
+
+        # 1 ignores the cancel; 2 honours it; 3 is another PR's; 4 is first
+        # listed after the wait; 12 is this workflow's own run.
+        before = [run(1), run(2, "in_progress"), run(3, linked=(8,)), run(12, "in_progress")]
+        after = [run(1), run(3, linked=(8,)), run(4), run(12, "in_progress")]
+        call, sleep, calls, waits = harness(before, after)
+        sweep(call, sleep)
+        self.assertEqual(waits, [60])
+        self.assertEqual(calls, [["1", "cancel"], ["2", "cancel"], ["1", "force-cancel"], ["4", "cancel"]])
+        # Nothing to cancel: no wait and no second listing.
+        call, sleep, calls, waits = harness([run(3, linked=(8,))], [])
+        sweep(call, sleep)
+        self.assertEqual((calls, waits), ([], []))
+        # HTTP 409 means the run had finished; any other failure fails the job.
+        call, sleep, calls, waits = harness([run(1)], [run(1)], [("1/force-cancel", "gh: Conflict (HTTP 409)")])
+        sweep(call, sleep)
+        call, sleep, calls, waits = harness([run(1)], [run(1)], [("1/force-cancel", "gh: Server Error (HTTP 500)")])
+        with self.assertRaises(SystemExit):
+            sweep(call, sleep)
+        self.assertEqual(calls, [["1", "cancel"], ["1", "force-cancel"]])
+        # The only POST is a run's cancel or force-cancel.
+        self.assertEqual(re.findall(r"'-X', '(\w+)', f?'([^']*)'", script),
+                         [("GET", "repos/ufna/zerus/actions/runs"),
+                          ("POST", "repos/ufna/zerus/actions/runs/{run_id}/{endpoint}")])
+        self.assertEqual(re.findall(r"stop\(call, .*'([\w-]+)'\)", script), ["cancel", "force-cancel", "cancel"])
+
 
 if __name__ == "__main__":
     unittest.main()

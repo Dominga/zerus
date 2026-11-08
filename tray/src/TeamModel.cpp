@@ -558,6 +558,9 @@ Team parse(const QJsonObject &v)
         member.sub = m.value("sub").toBool();
         member.models = parseModelChoices(m.value("models"));
         member.contextBeforeTask = str(m, "context_before_task");
+        member.afterTask = str(m, "after_task");
+        member.afterTaskOn = str(m, "after_task_on");
+        member.afterTaskAt = m.value("after_task_at").toInt();
         member.draining = m.value("draining").toBool();
         if (m.value("input_block").isObject()) {
             const auto block = m.value("input_block").toObject();
@@ -1119,6 +1122,12 @@ QJsonObject Member::json() const
     // U45/U46: kept through a plan edit, and absent when never set.
     if (!models.isEmpty()) o.insert("models", modelChoicesJson(models));
     if (!contextBeforeTask.isEmpty()) o.insert("context_before_task", contextBeforeTask);
+    // Task #7: the After-a-task policy goes with the plan member when set.
+    if (!afterTask.isEmpty()) {
+        o.insert("after_task", afterTask);
+        if (!afterTaskOn.isEmpty()) o.insert("after_task_on", afterTaskOn);
+        if (afterTaskAt > 0) o.insert("after_task_at", afterTaskAt);
+    }
     if (!session.isEmpty()) {
         // F8: an adopted session keeps its identity, so hgs finds the same one.
         QJsonObject ref{{"host", host}, {"name", session}};

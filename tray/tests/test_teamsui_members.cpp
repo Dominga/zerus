@@ -3,6 +3,7 @@
 // The fixture (the fake hgs, its teams and the shot helpers) is shared:
 // support/TeamsUiFixture.h.
 #include "TeamsUiFixture.h"
+#include <QSpinBox>
 #include "Settings.h"
 #include "ActivityView.h"
 #include "CollapsibleBlock.h"
@@ -101,6 +102,7 @@ private slots:
     void editMemberPrefillsAndSendsPartialUpdates();
     void editMemberPromptClearIsOptional_data();
     void editMemberPromptClearIsOptional();
+    void editMemberAfterTaskPolicyIsPrefilledAndSent();
     void editMemberRefusalLeavesTheMemberUnchanged_data();
     void editMemberRefusalLeavesTheMemberUnchanged();
     void editMemberWideningIsExplicit();
@@ -207,6 +209,42 @@ void TestTeamsUiMembers::editMemberPromptClearIsOptional()
     QTRY_VERIFY(!workspace.findChild<QDialog *>("teamMemberEditDialog"));
 }
 
+// Task #7: the member editor's After-a-task policy is prefilled and sent as
+// one partial update, so the setting reaches the server through the same path.
+void TestTeamsUiMembers::editMemberAfterTaskPolicyIsPrefilledAndSent()
+{
+    auto value = editableMemberTeam();
+    auto members = value["members"].toArray(); auto member = members[1].toObject();
+    member["after_task"] = "compact"; member["after_task_on"] = "percent"; member["after_task_at"] = 85;
+    members[1] = member; value["members"] = members;
+    setTeam(value);
+    HgsClient client(FakeCli::program(script())); TeamController controller(&client); TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel); workspace.resize(1300, 900); workspace.show();
+    controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+    QTRY_VERIFY(controller.watched() && editMenuButton(workspace));
+    chooseMenuAction("teamWorkspaceMemberEdit"); editMenuButton(workspace)->click();
+    QDialog *dialog = nullptr;
+    QTRY_VERIFY((dialog = workspace.findChild<QDialog *>("teamMemberEditDialog")) && dialog->isVisible());
+    auto *mode = dialog->findChild<QComboBox *>("teamMemberEditAfterTask");
+    auto *on = dialog->findChild<QComboBox *>("teamMemberEditAfterOn");
+    auto *at = dialog->findChild<QSpinBox *>("teamMemberEditAfterAt");
+    QVERIFY(mode && on && at);
+    QCOMPARE(mode->currentData().toString(), QString("compact"));
+    QCOMPARE(on->currentData().toString(), QString("percent"));
+    QCOMPARE(at->value(), 85);
+    // The criterion decides the threshold's range: tokens take a token count.
+    on->setCurrentIndex(on->findData("tokens"));
+    QCOMPARE(at->maximum(), 10000000);
+    at->setValue(250000);
+    dialog->findChild<QPushButton *>("teamMemberEditSave")->click();
+    QTRY_COMPARE(calls(script(), "settings").size(), 1);
+    const auto update = calls(script(), "settings").first().value("members_update").toArray().first().toObject();
+    QCOMPARE(update.value("id").toString(), QString("backend"));
+    QCOMPARE(update.value("after_task").toString(), QString("compact"));
+    QCOMPARE(update.value("after_task_on").toString(), QString("tokens"));
+    QCOMPARE(update.value("after_task_at").toInt(), 250000);
+    QTRY_VERIFY(!workspace.findChild<QDialog *>("teamMemberEditDialog"));
+}
 void TestTeamsUiMembers::editMemberRefusalLeavesTheMemberUnchanged_data()
 {
     QTest::addColumn<QString>("reason");

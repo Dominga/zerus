@@ -845,3 +845,67 @@ fn clear_context_first_is_refused_where_the_agent_cannot_clear() {
     assert_eq!(error, "Member \"dev\": field \"clear_context_first\" needs a new \"prompt\" for a member that runs");
 }
 
+
+/// Task #7: only the owner sets a member's After-a-task policy, and a mode, a
+/// criterion, a threshold or an agent that does not fit is refused by name.
+#[test]
+fn only_the_owner_sets_a_members_after_task_policy() {
+    fn set(team: &mut Team, actor: &Actor, update: Value) -> anyhow::Result<Value> {
+        let mut events = Vec::new();
+        apply(team, "settings", &json!({"members_update":[update]}), actor, &BTreeSet::new(), &mut events)
+    }
+    let mut team = running_team();
+    // The lead cannot set it directly on a running team.
+    let error = set(
+        &mut team.clone(),
+        &Actor::Member("lead".into()),
+        json!({"id":"dev","after_task":"compact","after_task_on":"percent","after_task_at":80}),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.starts_with("The lead changes only a member's model and effort"), "{error}");
+    // The owner sets it, and a running member takes it from the next task.
+    set(&mut team, &Actor::Human, json!({"id":"dev","after_task":"compact","after_task_on":"percent","after_task_at":80})).unwrap();
+    let dev = team.member("dev").unwrap();
+    assert_eq!((dev.after_task.as_str(), dev.after_task_on.as_str(), dev.after_task_at), ("compact", "percent", 80));
+    // A mode needs its criterion and a positive threshold; a bad value names
+    // its field.
+    let error = set(&mut team.clone(), &Actor::Human, json!({"id":"dev","after_task":"clear","after_task_on":"percent","after_task_at":0}))
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "Member \"dev\": field \"after_task_at\" is a positive threshold");
+    let error = set(&mut team.clone(), &Actor::Human, json!({"id":"dev","after_task_on":"megabytes"})).unwrap_err().to_string();
+    assert_eq!(error, "Member \"dev\": field \"after_task_on\" must be percent or tokens, not \"megabytes\"");
+    let error = set(&mut team.clone(), &Actor::Human, json!({"id":"dev","after_task":"hold"})).unwrap_err().to_string();
+    assert_eq!(error, "Member \"dev\": field \"after_task\" must be empty (keep), compact or clear, not \"hold\"");
+    let error = set(&mut team.clone(), &Actor::Human, json!({"id":"dev","after_task":"compact","after_task_on":"percent","after_task_at":101}))
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "Member \"dev\": field \"after_task_at\" is 1 to 100 percent, not 101");
+    // A mode without a criterion is refused, and keep takes neither.
+    let error = set(&mut team.clone(), &Actor::Human, json!({"id":"dev","after_task":"compact","after_task_on":"","after_task_at":80}))
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "Member \"dev\": field \"after_task_on\" names the criterion: percent or tokens");
+    let error = set(&mut team.clone(), &Actor::Human, json!({"id":"dev","after_task":"","after_task_on":"percent"})).unwrap_err().to_string();
+    assert_eq!(error, "Member \"dev\": field \"after_task\": \"after_task_on\" and \"after_task_at\" only go with compact or clear");
+    // An agent without the native action is refused when the policy is set.
+    team.members.iter_mut().find(|member| member.id == "dev").unwrap().agent = "dsh".into();
+    let error = set(&mut team.clone(), &Actor::Human, json!({"id":"dev","after_task":"clear","after_task_on":"tokens","after_task_at":1000}))
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, "Member \"dev\": field \"after_task\": DeepSeek has no clear-context action");
+    // A plan member is checked the same way.
+    let (mut planned, _) = create("t", &json!({"name":"T","lead":{"id":"lead","agent":"claude"}})).unwrap();
+    let mut events = Vec::new();
+    let error = plan(
+        &mut planned,
+        &json!({"members":[{"id":"dev","role":"Backend","agent":"claude","after_task":"compact","after_task_on":"percent","after_task_at":0}],
+            "tasks":[{"id":1,"title":"A","assignee":"dev"}]}),
+        &Actor::Human,
+        &mut events,
+    )
+    .unwrap_err()
+    .to_string();
+    assert_eq!(error, "A member \"dev\": field \"after_task_at\" is a positive threshold");
+}

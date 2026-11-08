@@ -34,6 +34,8 @@ While running, settings accepts members_update:
    "effort":"high"}]}
 Model/effort switches before the next task. Prompt changes send one "replaces
 previous instructions" message; clear_context_first:true clears first.
+after_task:compact|clear (after_task_on:percent|tokens, after_task_at) runs
+before the next task once the context passes the threshold.
 The owner edits prompt, model, effort, permissions and settings; the lead edits
 model/effort. Agent, account and computer stay with Swap member.
 

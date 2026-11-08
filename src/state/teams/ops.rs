@@ -233,6 +233,31 @@ pub(crate) fn check_permission_mode(agent: &str, mode: &str) -> anyhow::Result<(
     bail!("{agent} has no \"{mode}\" permissions mode; it takes {}", takes.join(", "))
 }
 
+/// Task #7: the "After a task" policy a member keeps: keep (empty), compact or
+/// clear, with the criterion (percent of the context window or tokens used) and
+/// its threshold. A field that does not fit is refused by name.
+pub(crate) fn check_after_task(agent: &str, mode: &str, on: &str, at: u32) -> anyhow::Result<()> {
+    ensure!(matches!(mode, "" | "compact" | "clear"), "field \"after_task\" must be empty (keep), compact or clear, not \"{mode}\"");
+    ensure!(matches!(on, "" | "percent" | "tokens"), "field \"after_task_on\" must be percent or tokens, not \"{on}\"");
+    if mode.is_empty() {
+        ensure!(
+            on.is_empty() && at == 0,
+            "field \"after_task\": \"after_task_on\" and \"after_task_at\" only go with compact or clear"
+        );
+        return Ok(());
+    }
+    ensure!(!on.is_empty(), "field \"after_task_on\" names the criterion: percent or tokens");
+    ensure!(at > 0, "field \"after_task_at\" is a positive threshold");
+    if on == "percent" {
+        ensure!(at <= 100, "field \"after_task_at\" is 1 to 100 percent, not {at}");
+    } else {
+        ensure!(at <= 10_000_000, "field \"after_task_at\" is at most 10000000 tokens, not {at}");
+    }
+    let supported = if mode == "clear" { super::dispatcher::native_context(agent, "clear") } else { super::dispatcher::native_context(agent, "compact") };
+    ensure!(supported, "field \"after_task\": {} has no {mode}-context action", super::dispatcher::agent_label(agent));
+    Ok(())
+}
+
 /// Owner feedback 2026-11-04 (9, 11): an unknown field or a wrong type names
 /// itself, the accepted fields and an example.
 fn parse_member_as(value: &Value, what: &str, example: &str) -> anyhow::Result<Member> {
@@ -261,6 +286,10 @@ fn parse_member_as(value: &Value, what: &str, example: &str) -> anyhow::Result<M
         "{who}: field \"context_before_task\" is none, compact or clear, not \"{}\"",
         member.context_before_task
     );
+    // Task #7: the After-a-task policy, checked here so a plan or add-member
+    // cannot store one the agent cannot run.
+    check_after_task(&member.agent, &member.after_task, &member.after_task_on, member.after_task_at)
+        .map_err(|error| anyhow::anyhow!("{who}: {error}"))?;
     member.launch_id.clear();
     member.error.clear();
     member.host_waits = 0;
@@ -952,7 +981,7 @@ fn ensure_draft_revision(team: &Team, input: &Value) -> anyhow::Result<()> {
 
 /// Task #6: the fields `members_update` takes. `clear_context_first` goes with
 /// a new `prompt`; agent, account and computer stay with Swap member.
-const MEMBER_UPDATE_FIELDS: [&str; 13] = [
+const MEMBER_UPDATE_FIELDS: [&str; 16] = [
     "id",
     "role",
     "folder",
@@ -964,6 +993,9 @@ const MEMBER_UPDATE_FIELDS: [&str; 13] = [
     "permissions",
     "permissions_profile",
     "context_before_task",
+    "after_task",
+    "after_task_on",
+    "after_task_at",
     "models",
     "iron_rules",
 ];
@@ -1118,6 +1150,27 @@ fn settings(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Even
                 "Member \"{id}\": field \"context_before_task\" is none, compact or clear, not \"{context}\""
             );
             member.context_before_task = context;
+        }
+        // Task #7: the owner sets the After-a-task policy; it reaches the
+        // member's next hand-out, so a running member takes it too.
+        if update.get("after_task").is_some() || update.get("after_task_on").is_some() || update.get("after_task_at").is_some() {
+            ensure!(matches!(actor, Actor::Human), "Only you set a member's After a task policy");
+            let named = |key: &str, current: &str| {
+                update.get(key).map(|value| value.as_str().unwrap_or_default().trim().to_owned()).unwrap_or_else(|| current.to_owned())
+            };
+            let mode = named("after_task", &member.after_task);
+            let on = named("after_task_on", &member.after_task_on);
+            let at = match update.get("after_task_at") {
+                Some(value) => value
+                    .as_u64()
+                    .and_then(|value| u32::try_from(value).ok())
+                    .with_context(|| format!("Member \"{id}\": field \"after_task_at\" is a whole number"))?,
+                None => member.after_task_at,
+            };
+            check_after_task(&member.agent, &mode, &on, at).map_err(|error| anyhow::anyhow!("Member \"{id}\": {error}"))?;
+            member.after_task = mode;
+            member.after_task_on = on;
+            member.after_task_at = at;
         }
         // #581 N6, spec 2: the owner edits the models a member may switch
         // between; an empty list leaves only its launch model.

@@ -127,6 +127,21 @@ pub(crate) struct SeenLimit {
     pub detail: String,
 }
 
+/// Task #7: whether a session record is idle and may take a message, the same
+/// test the listing's rows go through: live, activity idle, phase empty, idle
+/// or ready, no open optional questions, no auth wall and a send that works.
+fn record_free(record: &Value) -> bool {
+    let field = |key: &str| record[key].as_str().unwrap_or_default();
+    let live = field("process_state") != "exited"
+        && !matches!(field("state"), "paused" | "stopped" | "archived")
+        && (field("state") == "running" || field("process_state") == "running" || field("runtime_state") == "live");
+    live && field("activity") == "idle"
+        && matches!(field("phase"), "" | "idle" | "ready")
+        && record["optional_questions"]["count"].as_u64().unwrap_or(0) == 0
+        && record["auth_required"] != true
+        && record["send_available"] != false
+}
+
 /// Every session of this computer and its peers from one listing.
 pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
     let mut sessions = Vec::new();
@@ -144,13 +159,10 @@ pub(crate) fn seen(listing: &Value) -> Vec<Seen> {
                 && (field("state") == "running" || field("process_state") == "running" || field("runtime_state") == "live");
             let activity = field("activity").to_owned();
             let idle = live && activity == "idle";
-            // An idle agent whose own jobs run in the background (Background:
-            // a watcher, an MCP server, a long check) still takes messages.
-            let free = idle
-                && matches!(field("phase"), "" | "idle" | "ready")
-                && record["optional_questions"]["count"].as_u64().unwrap_or(0) == 0
-                && record["auth_required"] != true
-                && record["send_available"] != false;
+            // Task #7: an idle agent whose own jobs run in the background
+            // (Background: a watcher, an MCP server, a long check) still takes
+            // messages; the lead's policy asks the same question of its record.
+            let free = record_free(record);
             // Background work is not a finished turn, whatever the activity
             // says: a long command, a watcher or a native job still runs (A2).
             // C12: its command and start let a declared budget tell the lead
@@ -4166,6 +4178,64 @@ pub(crate) fn context_before_task(team: &Team, member: &Member) -> String {
     }
 }
 
+/// Task #7: whether the member's measured context meets its After-a-task
+/// criterion: at least the threshold of tokens used, or of the context window.
+fn after_task_due(member: &Member, used: Option<f64>, limit: Option<f64>) -> bool {
+    let Some(used) = used.filter(|used| *used > 0.0) else { return false };
+    if member.after_task_at == 0 {
+        return false;
+    }
+    let at = f64::from(member.after_task_at);
+    match member.after_task_on.as_str() {
+        "tokens" => used >= at,
+        "percent" => limit.is_some_and(|limit| limit > 0.0 && used * 100.0 >= at * limit),
+        _ => false,
+    }
+}
+
+/// Task #7: the context action a member's After-a-task policy asks for now,
+/// empty when it keeps its context or the record's native usage is not past the
+/// threshold.
+fn after_task_action(member: &Member, record: &Value) -> String {
+    if !matches!(member.after_task.as_str(), "compact" | "clear") {
+        return String::new();
+    }
+    if after_task_due(member, record["context"]["used"].as_f64(), record["context"]["limit"].as_f64()) {
+        member.after_task.clone()
+    } else {
+        String::new()
+    }
+}
+
+/// Task #7: the context action before a member's next task. A configured
+/// After-a-task policy replaces U46's every-task action and runs only when its
+/// threshold says the context is spent; the empty default keeps today's path.
+/// The member is free (the planner's gate), so only the usage is measured; a
+/// remote session's usage lives on its own computer, so it keeps its context.
+pub(crate) fn context_action(team: &Team, member: &Member) -> String {
+    if member.after_task.is_empty() {
+        return context_before_task(team, member);
+    }
+    let Some(session) = member.session.as_ref().filter(|session| session.host.is_empty()) else { return String::new() };
+    let Ok(record) = crate::state::storage::read(&session.name) else { return String::new() };
+    after_task_action(member, &record)
+}
+
+/// Task #7: the lead's hand-out action. C1 still hands the lead its own task
+/// without a message while it is busy, but its After-a-task policy runs only
+/// while the lead's session is free.
+pub(crate) fn lead_context_action(team: &Team, lead: &Member) -> String {
+    if lead.after_task.is_empty() {
+        return context_before_task(team, lead);
+    }
+    let Some(session) = lead.session.as_ref().filter(|session| session.host.is_empty()) else { return String::new() };
+    let Ok(record) = crate::state::storage::read(&session.name) else { return String::new() };
+    if !record_free(&record) {
+        return String::new();
+    }
+    after_task_action(lead, &record)
+}
+
 /// U46: whether this agent has the native context action. DeepSeek compacts but
 /// has no native clear; OpenCode has neither yet.
 pub(crate) fn native_context(agent: &str, action: &str) -> bool {
@@ -4915,7 +4985,7 @@ fn hand_out(store: &mut Store, team_id: &str, task_id: u32, member_id: &str, fro
             Ok(())
         })?;
     }
-    let action = context_before_task(&team, &member);
+    let action = context_action(&team, &member);
     if action.is_empty() {
         return hand_out_now(store, team_id, task_id, member_id, from, host, Preparation::default());
     }
@@ -6268,7 +6338,9 @@ fn lead_hand_out(store: &mut Store, team_id: &str, task_id: u32) -> anyhow::Resu
     // context action keeps today's path.
     let team = store.load(team_id)?.with_context(|| format!("Unknown team {team_id}"))?;
     let lead = team.member(&team.lead).cloned().context("the team has no lead")?;
-    let action = context_before_task(&team, &lead);
+    // Task #7: a configured lead policy runs only while the lead is free; the
+    // default path keeps U46's every-hand-out action as today.
+    let action = lead_context_action(&team, &lead);
     if action.is_empty() {
         return lead_hand_out_now(store, team_id, task_id, Preparation::default());
     }

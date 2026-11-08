@@ -11,6 +11,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSpinBox>
 #include <QTableWidget>
 #include <QVBoxLayout>
 
@@ -63,6 +64,20 @@ TeamMemberDialog::TeamMemberDialog(TeamController *teams, const Teams::Team &tea
     m_context->addItem(tr("Inherit role"), ""); m_context->addItem(tr("Keep context"), "none");
     m_context->addItem(tr("Compact"), "compact"); m_context->addItem(tr("Clear"), "clear");
     select(m_context, member.contextBeforeTask); form->addRow(tr("Before each task"), m_context);
+    // Task #7: after a task, when the free member's context passes the
+    // threshold, compact or clear it before the next task (keep by default).
+    m_afterTask = new QComboBox; m_afterTask->setObjectName("teamMemberEditAfterTask");
+    m_afterTask->addItem(tr("Keep context"), ""); m_afterTask->addItem(tr("Compact"), "compact");
+    m_afterTask->addItem(tr("Clear"), "clear");
+    select(m_afterTask, member.afterTask); form->addRow(tr("After a task"), m_afterTask);
+    m_afterOn = new QComboBox; m_afterOn->setObjectName("teamMemberEditAfterOn");
+    m_afterOn->addItem(tr("Percent of context"), "percent"); m_afterOn->addItem(tr("Tokens used"), "tokens");
+    select(m_afterOn, member.afterTaskOn.isEmpty() ? QStringLiteral("percent") : member.afterTaskOn);
+    form->addRow(tr("Criterion"), m_afterOn);
+    m_afterAt = new QSpinBox; m_afterAt->setObjectName("teamMemberEditAfterAt");
+    m_afterAt->setRange(1, 10000000); m_afterAt->setValue(member.afterTaskAt > 0 ? member.afterTaskAt : 80);
+    m_afterAt->setToolTip(tr("The action runs before the next task only when the context passes this threshold."));
+    form->addRow(tr("Threshold"), m_afterAt);
     fields->addLayout(form);
     fields->addWidget(new QLabel(tr("Allowed models (empty: only the launch model)")));
     modelList(fields);
@@ -76,6 +91,9 @@ TeamMemberDialog::TeamMemberDialog(TeamController *teams, const Teams::Team &tea
     connect(m_buttons, &QDialogButtonBox::rejected, this, &TeamMemberDialog::reject);
     for (auto *field : {m_model, m_effort, m_permissions, m_profile, m_context})
         connect(field, &QComboBox::currentTextChanged, this, [this] { sync(); });
+    for (auto *field : {m_afterTask, m_afterOn})
+        connect(field, &QComboBox::currentTextChanged, this, [this] { sync(); });
+    connect(m_afterAt, &QSpinBox::valueChanged, this, [this] { sync(); });
     for (auto *field : {m_prompt, m_rules}) connect(field, &QPlainTextEdit::textChanged, this, [this] { sync(); });
     for (auto *field : {m_clear, m_widen}) connect(field, &QCheckBox::toggled, this, [this] { sync(); });
     connect(m_models, &QTableWidget::cellChanged, this, [this] { sync(); });
@@ -116,6 +134,13 @@ QJsonObject TeamMemberDialog::changes() const
     put("permissions", m_permissions->currentData().toString(), m_before.permissions);
     put("permissions_profile", m_profile->currentData().toString(), m_before.permissionsProfile);
     put("context_before_task", m_context->currentData().toString(), m_before.contextBeforeTask);
+    // Task #7: the three fields go together; keep sends empty mode and zero.
+    const auto after = m_afterTask->currentData().toString();
+    const auto afterOn = after.isEmpty() ? QString() : m_afterOn->currentData().toString();
+    const int afterAt = after.isEmpty() ? 0 : m_afterAt->value();
+    if (after != m_before.afterTask || afterOn != m_before.afterTaskOn || afterAt != m_before.afterTaskAt) {
+        out.insert("after_task", after); out.insert("after_task_on", afterOn); out.insert("after_task_at", afterAt);
+    }
     put("iron_rules", QJsonArray::fromStringList(IronRules::lines(m_rules->toPlainText())), QJsonArray::fromStringList(m_before.ironRules));
     QList<Teams::ModelChoice> models;
     for (int row = 0; row < m_models->rowCount(); ++row) {
@@ -132,6 +157,9 @@ void TeamMemberDialog::sync()
 {
     const bool prompt = m_prompt->toPlainText() != m_before.prompt;
     m_clear->setVisible(prompt); if (!prompt) m_clear->setChecked(false);
+    const bool after = !m_afterTask->currentData().toString().isEmpty();
+    m_afterOn->setEnabled(after); m_afterAt->setEnabled(after);
+    m_afterAt->setMaximum(m_afterOn->currentData().toString() == "percent" ? 100 : 10000000);
     const bool profile = m_profile->currentData().toString() != m_before.permissionsProfile && !m_planning;
     m_widen->setVisible(profile); if (!profile) m_widen->setChecked(false);
     m_addModel->setEnabled(m_models->rowCount() < 20);

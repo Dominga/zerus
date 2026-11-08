@@ -3,6 +3,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Task #7: a zero After-a-task threshold stays out of the stored JSON.
+fn u32_is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TeamStatus {
@@ -458,6 +463,20 @@ pub(crate) struct Member {
     /// inherits the role's setting; "none" overrides it with none.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub context_before_task: String,
+    /// Task #7: what a free member does with its context after a task, before
+    /// its next one: empty keeps today's behaviour (U46 only), "compact" or
+    /// "clear" runs the action only when the criterion below says the context
+    /// is spent. Applies to the lead as to any member.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub after_task: String,
+    /// Task #7: the criterion the policy checks: "percent" of the context
+    /// window, or "tokens" used.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub after_task_on: String,
+    /// Task #7: the threshold for that criterion: 1-100 percent, or a token
+    /// count; zero when the member keeps its context.
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub after_task_at: u32,
     /// U46: the member already got the feed note that its agent has no native
     /// context action; it is written once per member.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

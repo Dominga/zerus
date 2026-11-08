@@ -7,6 +7,7 @@ class QComboBox;
 class QDialogButtonBox;
 class QLabel;
 class QPlainTextEdit;
+class QSpinBox;
 class QPushButton;
 class QTableWidget;
 class QVBoxLayout;
@@ -29,6 +30,8 @@ private:
     QWidget *m_fields;
     QPlainTextEdit *m_prompt, *m_rules;
     QComboBox *m_model, *m_effort, *m_permissions, *m_profile, *m_context;
+    QComboBox *m_afterTask, *m_afterOn;
+    QSpinBox *m_afterAt;
     QCheckBox *m_clear, *m_widen;
     QTableWidget *m_models;
     QPushButton *m_addModel, *m_save;

@@ -1831,7 +1831,8 @@ name, the fields it takes and an example, never dropped in silence. `agent`,
 still need a member without a session.
 
 A member that runs takes its start `prompt`, `model`, `effort`, `permissions`,
-`permissions_profile`, `context_before_task`, `models` and `iron_rules` while the
+`permissions_profile`, `context_before_task`, `after_task`, `after_task_on`,
+`after_task_at`, `models` and `iron_rules` while the
 team runs. A model or effort change reaches its session before the member's next
 task (the same `hgs settings` switch U45 uses); an agent that cannot switch in
 place takes it at its next start, and a refused switch leaves the member on the
@@ -1843,7 +1844,11 @@ recorded uncertain and never replayed, and the next hand-out carries the new
 prompt as well. An edit made while a message is on its way stays for the next
 one. Permissions and the permissions profile are the mode the member's next
 start gets; its running session keeps its own. A swap to another session drops
-the changes still pending for the session it replaced.
+the changes still pending for the session it replaced. The owner's After a task
+policy (fter_task empty keeps context, compact or clear, with
+fter_task_on percent/	okens and fter_task_at) reaches a free member's
+next hand-out only when its context passes the threshold; the lead's runs only
+while the lead is free.
 
 Only the owner changes a member while the team runs. The lead changes a member's
 `model` and `effort` directly; every other member field goes through the
@@ -1854,8 +1859,9 @@ member starts.
 
 In the Qt team workspace, a member's menu offers **Edit member** once its current
 settings have been read. The dialog starts with that member's prompt, model,
-effort, permissions/profile, per-task context action, allowed models and iron
-rules. Save sends only changed fields in one `members_update`; a refusal stays
+effort, permissions/profile, per-task context action, **After a task** mode with
+its criterion and threshold, allowed models and iron rules. The threshold field
+takes 1-100 percent, or a token count when the criterion is tokens. Save sends only changed fields in one `members_update`; a refusal stays
 in the dialog and preserves the draft while the stored member stays unchanged.
 A changed prompt reveals **Clear context first**, unchecked by default (only a
 running member can clear). Permissions-profile widening requires the owner's
@@ -2374,6 +2380,18 @@ While the action runs the task's `waits` is `{"for":"zerus","on":["context"],
 the same request instead of running it again; it is not an inbox item until it
 fails.
 
+The owner's **After a task** policy per member and for the lead (`after_task`
+empty keeps context, or `compact`/`clear`; `after_task_on` `percent` or
+`tokens`; `after_task_at` the threshold) runs the native action only when the
+free member's session record passes it (`context.used` against `context.limit`
+for percent, `context.used` for tokens), before its next hand-out. A configured
+policy replaces the role's every-task action; below the threshold the member
+keeps its context. A session on another computer, or one whose usage is not
+known, keeps its context. The lead's policy runs only while the lead is free:
+the lead's own task still reaches it without a message (C1), but its context
+action waits for a free lead. A mode the agent cannot run, a mode without a
+criterion, and a threshold outside 1-100 percent or above 10000000 tokens are
+refused by field, in a plan and in the owner's `members_update`.
 ### When Zerus starts a member
 
 A member's session starts with its first task hand-out, after a swap, or for

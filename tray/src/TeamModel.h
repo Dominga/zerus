@@ -132,6 +132,11 @@ struct Member {
     // compact or clear); sent back only when set.
     QList<ModelChoice> models;
     QString contextBeforeTask;
+    // Task #7: the After-a-task policy: keep (empty), compact or clear, with
+    // the criterion (percent of the context window or tokens used) and its
+    // threshold. The lead is a member too.
+    QString afterTask, afterTaskOn;
+    int afterTaskAt = 0;
     // U49: it finishes its open work, takes nothing new and then leaves.
     bool draining = false;
     // Task 98: hand-outs its Terminal refused in a row (a draft, a dialog or an

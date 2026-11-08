@@ -24,7 +24,7 @@ export function snapshotOf(s: ActionRow): ActionRow {
     resumable: s.resumable, activity: s.activity, processState: s.processState, archiveId: s.archiveId, attention: s.attention,
     unread: s.unread, sharedRead: s.sharedRead, allowed: s.allowed, archiveReason: s.archiveReason, terminateReason: s.terminateReason, forgetReason: s.forgetReason,
     phase: s.phase, runId: s.runId, conversationId: s.conversationId, replyId: s.replyId, attentionSignature: s.attentionSignature,
-    created: s.created, fingerprint: s.fingerprint,
+    created: s.created, fingerprint: s.fingerprint, sessionId: s.sessionId,
     cwdPath: s.cwdPath, terminalSupported: s.terminalSupported, terminalReported: s.terminalReported,
     terminalAttachSupported: s.terminalAttachSupported, terminalAttachReported: s.terminalAttachReported,
     muted: s.muted, sharedNotifications: s.sharedNotifications, notificationRevision: s.notificationRevision,
@@ -415,7 +415,7 @@ export function forgetOpening(menuRow: ActionRow, live: ActionRow, details?: Det
   return { row, bound: { binding, run: details ? details.run_id : row.runId ?? "", conversation: details ? details.conversation_id : row.conversationId ?? "" } };
 }
 
-export type DialogKind = "rename" | "terminate" | "fresh" | "forget" | "batch" | "fork";
+export type DialogKind = "rename" | "terminate" | "fresh" | "forget" | "batch" | "fork" | "resume_terminal";
 /** What a forget dialog named: whether it forgets an OpenCode binding, and the run and conversation then in view. */
 export interface ForgetScope { binding: boolean; run: string; conversation: string }
 export type DialogOpen =
@@ -423,7 +423,9 @@ export type DialogOpen =
   | { kind: "rename" | "terminate" | "fresh"; row: ActionRow }
   | { kind: "forget"; row: ActionRow; bound: ForgetScope }
   /** A selection's Forget or Terminate: `answer` gets true for the confirm button, false otherwise. */
-  | { kind: "batch"; copy: BatchConfirmation; answer: (confirmed: boolean) => void };
+  | { kind: "batch"; copy: BatchConfirmation; answer: (confirmed: boolean) => void }
+  /** Resume and open terminal (store/sessionTerminal.ts): `answer` gets true for the confirm button, false otherwise. */
+  | { kind: "resume_terminal"; row: ActionRow; answer: (confirmed: boolean) => void };
 export type DialogState = DialogOpen | undefined;
 export type DialogEvent = ({ type: "open" } & DialogOpen) | { type: "close" };
 
@@ -431,6 +433,7 @@ export type DialogEvent = ({ type: "open" } & DialogOpen) | { type: "close" };
 export function dialogReducer(_state: DialogState, event: DialogEvent): DialogState {
   if (event.type !== "open") return undefined;
   if (event.kind === "batch") return { kind: "batch", copy: event.copy, answer: event.answer };
+  if (event.kind === "resume_terminal") return { kind: "resume_terminal", row: event.row, answer: event.answer };
   if (event.kind === "fork") return { kind: "fork", row: event.row, details: event.details };
   return event.kind === "forget" ? { kind: "forget", row: event.row, bound: event.bound } : { kind: event.kind, row: event.row };
 }

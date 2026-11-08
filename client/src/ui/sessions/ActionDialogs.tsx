@@ -4,6 +4,7 @@ import { Icon } from "../lib/icons";
 import { catalog, computerOffline } from "../../store/catalog";
 import { GONE, change, copyCommand, copyFolder, copyName, copySessionId, copyReference, end, forget, interrupting, notify, perform, stillListed, pendingNotifications, toggleMute, updating } from "../../store/actions";
 import { bindBatchConfirm, running } from "../../store/batch";
+import { bindResumeTerminalConfirm } from "../../store/sessionTerminal";
 import { cancelRestoreFollow, forgetArchived, refreshArchiveWhenDone, restoreSession } from "../../store/restores";
 import type { MenuEntry } from "../../store/ui";
 import type { Details, Outcome } from "../../types";
@@ -35,6 +36,13 @@ const ForkDialog = lazy(() => import("./ForkDialog"));
 const [open, dispatch] = createSignal<ReturnType<typeof dialogReducer>>(undefined, { equals: false });
 const send = (event: DialogEvent) => dispatch(dialogReducer(open(), event));
 const closeDialog = () => send({ type: "close" });
+
+// Resume and open terminal asks once here; any way out but the confirm button is a Cancel.
+bindResumeTerminalConfirm((row) => new Promise<boolean>((resolve) => {
+  let answered = false;
+  const answer = (confirmed: boolean) => { if (!answered) { answered = true; resolve(confirmed); } };
+  send({ type: "open", kind: "resume_terminal", row, answer });
+}));
 
 // A selection's Forget or Terminate asks here; any way out but the confirm button is a Cancel.
 bindBatchConfirm((copy) => new Promise<boolean>((resolve) => {
@@ -295,6 +303,25 @@ function ForgetDialog(props: { row: ActionRow; bound: ForgetScope; close: () => 
   );
 }
 
+/** Resume and open terminal's one question (Qt's confirmLocalStart before `hgs a`, SessionsWindow.cpp:5469-5472). */
+function ResumeTerminalDialog(props: { row: ActionRow; answer: (confirmed: boolean) => void; close: () => void }) {
+  onCleanup(() => props.answer(false));
+  const confirm = () => { props.answer(true); props.close(); };
+  return (
+    <>
+      <div class="dlg-head"><Icon name="square-terminal" size={18} class="accent" /><h2 id="action-dlg-title">{tr("Resume and open terminal?")}</h2></div>
+      <div class="dlg-body"><div class="confirm-body" id="action-dlg-body" style={{ "white-space": "pre-line" }}>
+        {tr("Resume %1 on %2, then open its terminal.\n\nThe agent continues its saved conversation. The terminal opens once this same session reports running.", props.row.name, props.row.machine)}
+      </div></div>
+      <div class="dlg-foot">
+        <span class="spacer" />
+        <button type="button" class="btn" onClick={confirm}>{tr("Resume and open terminal")}</button>
+        <button type="button" class="btn primary" data-initial autofocus onClick={props.close}>{tr("Cancel")}</button>
+      </div>
+    </>
+  );
+}
+
 function FreshDialog(props: { row: ActionRow; close: () => void }) {
   const copy = freshCopy(props.row);
   const confirm = () => {
@@ -370,7 +397,8 @@ export function ActionDialogs() {
       <Show when={open()} keyed>
         {(p) => (p.kind === "fork" ? <ForkDialog row={p.row} details={p.details} close={closeDialog} /> : p.kind === "rename" ? <RenameDialog row={p.row} close={closeDialog} />
           : p.kind === "fresh" ? <FreshDialog row={p.row} close={closeDialog} /> : p.kind === "forget" ? <ForgetDialog row={p.row} bound={p.bound} close={closeDialog} />
-          : p.kind === "batch" ? <BatchDialog copy={p.copy} answer={p.answer} close={closeDialog} /> : p.kind === "terminate" ? <TerminateDialog row={p.row} close={closeDialog} /> : null)}
+          : p.kind === "batch" ? <BatchDialog copy={p.copy} answer={p.answer} close={closeDialog} /> : p.kind === "terminate" ? <TerminateDialog row={p.row} close={closeDialog} />
+          : p.kind === "resume_terminal" ? <ResumeTerminalDialog row={p.row} answer={p.answer} close={closeDialog} /> : null)}
       </Show>
     </dialog>
   );

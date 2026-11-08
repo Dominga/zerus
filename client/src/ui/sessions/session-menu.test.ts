@@ -278,13 +278,18 @@ describe("external terminal availability", () => {
   });
   it.each([
     [{ agent: "deepseek", terminal_supported: false }, "This native adapter does not provide Terminal."],
-    [{ state: "paused" }, "Resume this session before opening its terminal."],
     [{ run_id: "" }, "Refresh this session's identity before opening its terminal."],
   ])("explains an unavailable row %j", (extra, reason) => {
     const row = toSession("", "run:unavailable", { name: "codex/context/unavailable", agent: "codex", state: "running", status: "ready", run_id: "run-unavailable", conversation_id: "conversation-unavailable", ...extra } as ViewRow);
     const item = menuItem("Open terminal", sessionMenu(row));
     expect(item).toMatchObject({ disabled: true, hint: reason });
     item.action?.(); expect(sessionTerminalOpen).not.toHaveBeenCalled();
+  });
+  it("offers Resume and open terminal for a saved row instead (zerus-5wmh.13.11.3)", () => {
+    const row = toSession("", "run:saved", { name: "codex/context/saved", agent: "codex", state: "paused", status: "ready", run_id: "run-saved", conversation_id: "conversation-saved" } as ViewRow);
+    const items = sessionMenu(row);
+    expect(() => menuItem("Open terminal", items)).toThrow();
+    expect(menuItem("Resume and open terminal", items)).toBeDefined();
   });
   it("does not open a replacement run after the menu opened", () => {
     const [, target] = contextRows();

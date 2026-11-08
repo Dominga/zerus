@@ -47,14 +47,14 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Composer and sending | 35 | | | 1 intentional difference |
 | Activity | 17 | 0 | 0 | |
 | Questions and approvals | 12 | | | |
-| Notifications | 7 | 5 | | |
+| Notifications | 9 | 3 | | |
 | Tray, menu bar and Dock | 7 | 1 | | 2 owner decisions, 1 intentional difference |
 | Shortcuts and navigation | 6 | | | |
 | Lifecycle and updates | 7 | 1 | 1 | |
 | Settings | 17 | | | 1 intentional difference |
 | Machines, accounts, projects, new session, tasks and worktrees | 18 | | | |
 | Terminal, processes and platform session support | 8 | | | |
-| Total (193 rows) | 176 | 7 | 2 | 8 |
+| Total (193 rows) | 178 | 5 | 2 | 8 |
 
 ## Owner decisions
 
@@ -71,9 +71,6 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Bead | Priority | Gap |
 | --- | --- | --- |
 | `zerus-5wmh.13.14` | P2 | Windows: focus-aware banners, update alert, tray theme, watchdog, startup note |
-| `zerus-5wmh.13.8` | P3 | Activity rendering: full tool output, View process, Markdown, inline-code links, empty state |
-| `zerus-5wmh.13.16` | P3 | Alert text language; the labeled rail's exact-count tooltip (`zerus-nfmh1`) |
-| `zerus-5wmh.13.17` | P3 | Search result refinements after the search port (`zerus-5wmh.66.2.2`) |
 | `zerus-5wmh.18` | existing | Selection Move to project, with project organisation |
 | `zerus-5wmh.66.10` | existing | Desktop presence for phone alerts |
 | `zerus-5wmh.13.11.4` | P4 | Deferred: batch Terminate folder removal, one confirmation holding every session's program manifest |
@@ -248,8 +245,8 @@ In the default native alert mode the Zerus Next app posts alerts itself while it
 | Update available alert, once per release | Windows | partial (`zerus-5wmh.13.14`) | macOS and Linux post it (`tauri/updates.rs:739-761`); the Windows hook does nothing (`tauri/updates.rs:924-925`) | `TrayAgent.cpp:164-175` |
 | Short tray messages (a new session's terminal advisory, the terminal did not open) | Linux, Windows | done | `tauri/desk.rs:1183-1235`: a desktop notification on Linux and the tray balloon on Windows, the window's notice where the app does not own them; macOS keeps `osascript`; callers `tauri/creations.rs:1783,1792` | `TrayAgent.cpp:655-830` |
 | Phone alerts wait while the owner is at the desktop | Linux, macOS | partial (`zerus-5wmh.66.10`) | the app reports no presence; only the registered `hgs` service does (`src/desktop/presence_worker.rs`) | `TrayAgent.cpp:279-290`; `DesktopPresence.cpp` |
-| Alert text in the interface language | all | partial (`zerus-5wmh.13.16`) | English constants: `core/attention.rs:20-22,444-448`; `crates/freedesktop-notify/src/lib.rs:34` | `AttentionTracker.cpp:125-134`; `LinuxAttentionNotifier.cpp:52` |
-| In-window attention badge capped at 99+ | all | partial (`zerus-nfmh1`) | capped at 99+, the exact count in the Sessions button's name and icon-mode tooltip: `ui/components/Rail.tsx:46-51`, `ui/components/rail-badge.ts`; labeled skins show no tooltip, so no exact count on hover | `SessionsWindow.cpp:304-306,3374-3381` |
+| Alert text in the interface language | all | done (`zerus-5wmh.13.16`) | the tracker renders its titles and reasons through `Tracker::set_render` (`core/attention.rs:23-25,457-462,752`), which the desktop gives the interface-language renderer (`tauri/desk.rs:418`); the Linux open action is named in it too (`crates/freedesktop-notify/src/lib.rs:27-46`) | `AttentionTracker.cpp:125-134`; `LinuxAttentionNotifier.cpp:52` |
+| In-window attention badge capped at 99+ | all | done (`zerus-nfmh1`) | capped at 99+ (`ui/components/rail-badge.ts:2`), with the exact count in the Sessions button's name and its tooltip on every rail, labeled or not (`ui/components/Rail.tsx:46-53`) | `SessionsWindow.cpp:304-306,3374-3381` |
 
 ### Tray, menu bar and Dock
 

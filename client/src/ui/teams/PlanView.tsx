@@ -451,7 +451,9 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           <span class="pt-title">{task.title || tr("Task %1", task.id)}</span>
           <Show when={task.pipeline_run?.open}>{(stage) => <span class="pt-badge" data-stage={stage().kind}>{stageName(stage().kind)}</span>}</Show>
           <Show when={external.length > 0}>
-            <span class="pt-deps" title={tr("Depends on tasks in other phases")}>↤{external.map((id) => `#${id}`).join(" ")}</span>
+            <span class="pt-deps" title={`${tr("Depends on tasks in other phases")}\n${external.map((id) => `#${id}`).join(" ")}`}>
+              ↤{external.slice(0, 2).map((id) => `#${id}`).join(" ")}{external.length > 2 ? ` +${external.length - 2}` : ""}
+            </span>
           </Show>
         </span>
         <span class="pt-card-l2">

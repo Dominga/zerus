@@ -122,12 +122,12 @@
 .pt-dot-danger { background: var(--z-color-status-error); }
 .pt-dot-submitted { background: var(--z-color-status-working); }
 .pt-id { flex: none; color: var(--z-color-text-3); font-variant-numeric: tabular-nums; }
-.pt-title { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pt-title { flex: 1 1 auto; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pt-badge { flex: none; padding: 0 5px; border-radius: 6px; background: var(--z-color-accent-bg); color: var(--z-color-accent); font-size: 9px; font-weight: 700; text-transform: uppercase; }
 .pt-role { flex: none; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--z-color-text-2); }
 .pt-model { flex: none; max-width: 72px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--z-color-dim); }
 .pt-meta { color: var(--z-color-muted); }
-.pt-deps { margin-left: auto; color: var(--z-color-warn); white-space: nowrap; }
+.pt-deps { flex: none; margin-left: auto; color: var(--z-color-warn); white-space: nowrap; }
 /* Task #60: a follow-up's "spawned from" link; it never blocks, so it is muted. */
 .pt-origin { color: var(--z-color-text-3, inherit); white-space: nowrap; font-style: italic; }
 .pt-chip-origin { cursor: pointer; }

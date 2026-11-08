@@ -1,9 +1,12 @@
 # Fixed transport; only __HGS_ARGUMENTS__ is replaced with encoded JSON argv.
 $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';$p=$null
 try {
+# Avoid implicit first-cmdlet discovery on a cold Windows PowerShell 5.1 profile.
+$PSModuleAutoLoadingPreference='None'
+Import-Module -Name "$PSHOME\Modules\Microsoft.PowerShell.Utility" -ErrorAction Stop
 [string[]]$a=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__HGS_ARGUMENTS__'))|ConvertFrom-Json
 function q([string]$s) {'"'+[regex]::Replace($s,'(\\*)("|$)',{param($m)$b=$m.Groups[1].Value;if($m.Groups[2].Value -eq '"'){$b+$b+'\"'}else{$b+$b}})+'"'}
-$i=[Diagnostics.ProcessStartInfo]::new();$i.FileName=Join-Path $env:USERPROFILE '.local\bin\hgs.exe';$i.Arguments=($a|ForEach-Object{q $_})-join ' ';$i.UseShellExecute=$false
+$i=[Diagnostics.ProcessStartInfo]::new();$i.FileName=[IO.Path]::Combine($env:USERPROFILE,'.local\bin\hgs.exe');$i.Arguments=(@(foreach($v in $a){q $v}))-join ' ';$i.UseShellExecute=$false
 $pipe=[Console]::IsInputRedirected;$i.CreateNoWindow=$pipe;$i.RedirectStandardInput=$pipe;$i.RedirectStandardOutput=$pipe;$i.RedirectStandardError=$pipe
 $p=[Diagnostics.Process]::new();$p.StartInfo=$i;if(-not$p.Start()){throw 'start refused'}
 if($pipe){

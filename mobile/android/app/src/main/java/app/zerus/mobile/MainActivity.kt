@@ -935,13 +935,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     val latestKeys by rememberUpdatedState(keys)
     val renderedHistory by rememberUpdatedState(Triple(model.conversationEvents,model.hasOlder,model.hasNewer))
     fun requestLatest() {
-        if(model.selected?.target != target || latestPending || model.hasNewer && model.olderLoading) return
-        val needsHistory = model.hasNewer
-        val reason = if(needsHistory) model.historyReason(target) else ""
-        if(reason.isNotBlank()) {
-            Toast.makeText(context,"Could not reach the latest messages. $reason",Toast.LENGTH_LONG).show()
-            return
-        }
+        if(model.selected?.target != target || latestPending) return
+        val needsHistory = model.hasNewer || model.olderLoading
         // Await this accepted navigation, rather than hoping a content effect sees
         // a loading transition. A cached/identical read can finish in one frame.
         latestPending = true
@@ -1025,8 +1020,10 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
     var videoOverlayVisible by remember { mutableStateOf(false) }
     val readable = foreground && window.isWindowFocused && follow.opened && readReady &&
         !obscured && !videoCapture && !videoOverlayVisible
-    LaunchedEffect(target.key,listState,readable,model.hasOlder,model.olderLoading,model.olderError) {
-        if(!readable || !model.hasOlder || model.olderLoading || model.olderError.isNotBlank()) return@LaunchedEffect
+    LaunchedEffect(target.key,listState,readable,model.historyEpoch,model.hasOlder,model.olderLoading,model.olderError) {
+        // Entering canonical history is an explicit choice; scrolling a short recent
+        // inspection must never start indexing the entire conversation.
+        if(!readable || model.historyEpoch.isBlank() || !model.hasOlder || model.olderLoading || model.olderError.isNotBlank()) return@LaunchedEffect
         snapshotFlow { listState.isScrollInProgress && !programmatic && listState.firstVisibleItemIndex <= 3 }
             .distinctUntilChanged().collect { nearTop -> if(nearTop) model.loadOlder(target) }
     }
@@ -1048,7 +1045,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             delay(350)
             if (currentHistoryTarget == target.key && foreground && window.isWindowFocused && !programmatic) {
                 model.visibleMessages(target, viewport.first)
-                viewport.second?.let { (id, offset) -> model.saveConversationViewport(target,id,offset) }
+                viewport.second?.let { (id, offset) -> model.saveConversationViewport(target,id,offset,follow.following && !model.hasNewer) }
             }
         }
     }
@@ -1084,7 +1081,8 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 item(key = "history:earlier") { if (loadStatus?.initial != true) Column(Modifier.fillMaxWidth(),horizontalAlignment = Alignment.CenterHorizontally) {
                     if(model.olderError.isNotBlank()) {
                         Text(model.olderError,color = Amber,style = MaterialTheme.typography.bodySmall)
-                        TextButton(onClick = { model.retryHistory(target) },enabled = !model.olderLoading && historyReason.isBlank()) { Text("Retry history") }
+                        TextButton(onClick = { model.retryHistory(target) },enabled = !model.olderLoading &&
+                            (model.historyRetryIsLatest(target) || historyReason.isBlank())) { Text(model.historyRetryLabel(target)) }
                     } else if(model.hasOlder) TextButton(onClick = { model.loadOlder(target) },enabled = !model.olderLoading && historyReason.isBlank()) { Text("Load earlier messages") }
                     else if(model.historyEpoch.isNotBlank() && !model.historyIndexing) Text(if(model.historyComplete) "Beginning of conversation" else "No earlier page reported; history may be incomplete.",color = Muted,style = MaterialTheme.typography.labelSmall)
                     if(model.historyIndexing) Text("History is still indexing. Unread totals may be unavailable.",color = Muted,style = MaterialTheme.typography.labelSmall)
@@ -1138,7 +1136,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
                 item(key = "history:newer") {
                     if(model.hasNewer) Row(Modifier.fillMaxWidth(),horizontalArrangement = Arrangement.Center) {
                         TextButton(onClick = { model.loadNewer(target) },enabled = !model.olderLoading && historyReason.isBlank()) { Text("Load newer messages") }
-                        TextButton(onClick = ::requestLatest,enabled = !latestPending && !model.olderLoading && historyReason.isBlank()) { Text("Latest") }
+                        TextButton(onClick = ::requestLatest,enabled = !latestPending) { Text("Latest") }
                     }
                 }
                 if (queueVisible) item(key = "history:queue") { NativeInputQueue(model,target) }
@@ -1155,7 +1153,7 @@ private class MainListPullMotion(private val scope:CoroutineScope,private val ma
             }
             if ((!follow.following || model.hasNewer || latestPending) && (events.isNotEmpty() || questions.isNotEmpty()) &&
                 !(questions.isNotEmpty() && cardVisible))
-                FilledTonalButton(onClick = ::requestLatest,enabled = !latestPending && !(model.hasNewer && model.olderLoading),
+                FilledTonalButton(onClick = ::requestLatest,enabled = !latestPending,
                     modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp).heightIn(min = 48.dp).semantics {
                         contentDescription = "Jump to latest messages"
                         stateDescription = if(latestPending) "Loading latest messages" else unread?.description.orEmpty()

@@ -12,7 +12,7 @@ object UnreadPresentation {
         else -> null
     }
     fun opening(memory: ConversationAnchor?, saved: SavedConversationViewport?, boundary: String, keys: List<String>): OpeningReadingPosition {
-        val remembered = memory?.takeIf { !it.following } ?: saved?.let { ConversationAnchor("event:" + it.eventId,it.offset,false) }
+        val remembered = memory?.takeIf { !it.following } ?: saved?.takeUnless { it.following }?.let { ConversationAnchor("event:" + it.eventId,it.offset,false) }
         if(remembered != null && remembered.itemKey in keys) return OpeningReadingPosition(remembered)
         if(boundary.isNotBlank() && "history:unread" in keys) return OpeningReadingPosition(ConversationAnchor("history:unread",0,false),remembered != null)
         // A missing saved position never silently drops the reader at the newest message.

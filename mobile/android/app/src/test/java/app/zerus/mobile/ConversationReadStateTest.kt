@@ -20,6 +20,25 @@ class ConversationReadStateTest {
         assertNull(restored.record(target.copy(agentId="child",parentConversation="conversation")))
         assertEquals(state.record(target),restored.record(target.copy(run="resumed")))
     }
+    @Test fun followingTheTailSurvivesRestartWithoutBecomingAnOlderReadingAnchor() {
+        val state=ConversationReadState().viewport(target,"tail",0,following=true)
+        val encoded=ConversationReadPolicies.encode(state)
+        assertTrue(encoded.getJSONObject(0).getJSONObject("viewport").getBoolean("following"))
+        val restored=ConversationReadPolicies.decode(encoded)
+        assertEquals(state,restored)
+        val alias=restored.supersede(target,mapOf("tail" to "canonical-tail")).record(target)!!.viewport!!
+        assertEquals("canonical-tail",alias.eventId)
+        assertTrue(alias.following)
+        assertTrue(restored.record(target)!!.seen.isEmpty())
+        assertFalse(restored.record(target)!!.headComplete)
+    }
+    @Test fun legacySavedCanonicalViewportKeepsItsOlderReadingPosition() {
+        val encoded=ConversationReadPolicies.encode(ConversationReadState().viewport(target,"old",37,"cursor","epoch"))
+        encoded.getJSONObject(0).getJSONObject("viewport").remove("following")
+        val anchor=ConversationReadPolicies.decode(encoded).record(target)!!.viewport!!
+        assertFalse(anchor.following)
+        assertEquals(SavedConversationViewport("old",37,"cursor","epoch"),anchor)
+    }
     @Test fun capacityDoesNotEraseSeenRowsOrInventExactUnreadCounts() {
         val ids=(1..5000).map { "message:$it" }.toSet()
         val state=ConversationReadState().viewed(target,ids).viewed(target,setOf("new"))

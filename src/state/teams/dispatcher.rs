@@ -9705,6 +9705,13 @@ pub(crate) fn merge_lead(folder: &str, source: &str, branch: &str, timeout: Dura
         .args(["merge", "--no-edit", merge]);
     let remaining = deadline.saturating_duration_since(Instant::now()).max(Duration::from_secs(1));
     let mut outcome = super::templates::run_tree(&mut command, remaining, None);
+    // Task 377 (owner, 2026-11-08): the project's generated files (its catalogs)
+    // refresh in the merge commit, so both sides' strings stay.
+    if outcome.exit == Some(0) {
+        if let Some(head) = super::merge_queue::regenerate_and_amend(Path::new(folder)) {
+            outcome.tail = format!("{} {head}", outcome.tail.trim()).trim().to_owned();
+        }
+    }
     outcome.ms = elapsed();
     outcome
 }
@@ -10832,6 +10839,12 @@ fn sandbox_request(member: &Member, folder: &Path, request: &Value) -> Value {
 /// from the team's folder, never built into Zerus, so another project gets its
 /// own branch.
 fn lead_branch(team: &Team) -> anyhow::Result<String> {
+    // Task 377 (owner, 2026-11-08): with an integration folder the line is a
+    // named branch, never whatever the folder has checked out.
+    if !team.settings.integration_folder.trim().is_empty() {
+        return super::merge_queue::integration_branch(team)
+            .context("The team's line branch is not named: set base_branch (hgs team settings) or record the line");
+    }
     // Task 174: the lead branch is the integration folder's branch.
     let folder = team.integration_folder();
     anyhow::ensure!(!folder.is_empty(), "The team has no folder to merge from");

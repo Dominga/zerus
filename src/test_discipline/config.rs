@@ -63,6 +63,11 @@ pub struct TestsConfig {
     /// find it itself: `[tools]` names a tool (`qt`) and its path.
     #[serde(default, rename = "tools", skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub tool_paths: std::collections::BTreeMap<String, String>,
+    /// Task 377 (owner, 2026-11-08): the generated files a merge must refresh
+    /// (a catalog, a lockfile's checksum): shell commands run in the line's
+    /// folder after a merge, their changes folded into the merge commit.
+    #[serde(default, rename = "generate", skip_serializing_if = "Vec::is_empty")]
+    pub generated: Vec<String>,
     /// Task 85: the project's own `hgs team run` templates, typed like the
     /// built-ins; each runs only once the owner accepted its exact content.
     #[serde(default, rename = "template", skip_serializing_if = "Vec::is_empty")]

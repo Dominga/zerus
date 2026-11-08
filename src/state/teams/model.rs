@@ -3177,6 +3177,11 @@ pub(crate) struct Team {
     /// queue tested; a phase integration checks only what came after it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub merge_tested: String,
+    /// Task 377 (owner, 2026-11-08): the line's branch by name, recorded
+    /// when the integration folder was granted. The folder's current
+    /// checkout is never the line.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub line_branch: String,
     /// U62 (#760): the newest merged commit each suite ran on. A suite this
     /// computer cannot run keeps its own range open without holding the tested
     /// point of the suites that did run. Bounded.

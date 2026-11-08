@@ -23,11 +23,16 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(120);
 /// Task #267: the integration line's branch and head: the one base every
 /// hand-out starts from, and the line accepted work lands on.
 pub(crate) fn integration_branch(team: &Team) -> Option<String> {
-    let folder = team.integration_folder();
-    if folder.is_empty() {
-        return None;
+    // Task 377 (owner, 2026-11-08): the line is a named branch - the team's
+    // configured base branch, or the branch recorded when the integration
+    // folder was granted - never whatever the folder happens to have checked
+    // out (a merger's work branch is not the line).
+    let configured = team.settings.base_branch.trim();
+    if !configured.is_empty() {
+        return Some(configured.to_owned());
     }
-    git_text(folder, &["symbolic-ref", "--quiet", "--short", "HEAD"]).filter(|branch| !branch.is_empty())
+    let recorded = team.line_branch.trim();
+    (!recorded.is_empty()).then(|| recorded.to_owned())
 }
 
 /// The integration line's current head, or None when it cannot be read.
@@ -36,7 +41,8 @@ pub(crate) fn integration_head(team: &Team) -> Option<String> {
     if folder.is_empty() {
         return None;
     }
-    git_text(folder, &["rev-parse", "HEAD"]).filter(|head| !head.is_empty())
+    let line = integration_branch(team)?;
+    git_text(folder, &["rev-parse", &format!("refs/heads/{line}")]).filter(|head| !head.is_empty())
 }
 
 /// Task #267: once a conflict's resolve task is decided, its landing is back in
@@ -661,6 +667,26 @@ where
     let title = team.task(id).map(|task| task.title.clone()).unwrap_or_default();
     let short: String = entry.commit.chars().take(8).collect();
     let message = format!("Merge accepted work from {} ({short}) (#{id}): {title}", team.name_of(&entry.author));
+    // Task 377 (owner, 2026-11-08): the line is a named branch; a folder on
+    // another checkout lands nothing and says so, instead of merging the task
+    // into a work branch.
+    if let Some(line) = integration_branch(team) {
+        let folder = team.integration_folder();
+        let on = git_text(folder, &["symbolic-ref", "--quiet", "--short", "HEAD"]).unwrap_or_default();
+        if !on.is_empty() && on != line {
+            let note = format!(
+                "The integration folder is on {on}, not the line {line}: check out {line} there and the queue lands this task (hgs team status shows the line)."
+            );
+            if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
+                if found.note != note || found.wait_reason != MergeWaitReason::Other {
+                    found.note = note;
+                    found.wait_reason = MergeWaitReason::Other;
+                    events.push(Event::new("merge_wrong_checkout", json!({"task":id,"folder":folder,"on":on,"line":line})));
+                }
+            }
+            return Ok(migrated);
+        }
+    }
     match merge(team.integration_folder(), &entry, &message) {
         Merged::Busy(note) => {
             if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
@@ -701,6 +727,9 @@ where
             Ok(true)
         }
         Merged::Done { prev, merged } => {
+            // Task 377: a merge regenerates the project's generated files and
+            // keeps them in the merge commit.
+            let merged = regenerate_and_amend(Path::new(team.integration_folder())).unwrap_or(merged);
             if let Some(found) = team.task_mut(id).and_then(|task| task.merge.as_mut()) {
                 found.prev = prev.clone();
                 found.merged = merged.clone();
@@ -776,6 +805,35 @@ fn ancestry_at(folder: &str, commit: &str, head: &str) -> Ancestry {
         Some(1) => Ancestry::No,
         _ => Ancestry::Unknown,
     }
+}
+
+/// Task 377 (owner, 2026-11-08): after a merge, run the project's declared
+/// generators (a generated catalog, for one) in the line's folder and fold
+/// their output into the merge commit, so a merge keeps every side's strings.
+/// Returns the amended head when the generators changed anything.
+pub(crate) fn regenerate_and_amend(folder: &Path) -> Option<String> {
+    let loaded = crate::test_discipline::load(folder, None).ok()?;
+    let commands = loaded.config.generated;
+    if commands.is_empty() {
+        return None;
+    }
+    for command in &commands {
+        let mut process = super::test_queue::shell(command, folder);
+        process.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+        let _ = process.status();
+    }
+    let folder = folder.to_string_lossy().to_string();
+    let changed = git_text(&folder, &["status", "--porcelain", "--untracked-files=no"]).unwrap_or_default();
+    if changed.is_empty() {
+        return None;
+    }
+    let hooks = format!("core.hooksPath={}", if cfg!(windows) { "NUL" } else { "/dev/null" });
+    let _ = git(&folder, &["-c", hooks.as_str(), "add", "-A"]);
+    let amended = git(&folder, &["-c", hooks.as_str(), "-c", "commit.gpgsign=false", "commit", "--amend", "--no-edit"]);
+    if amended.exit != Some(0) {
+        return None;
+    }
+    git_text(&folder, &["rev-parse", "HEAD"]).filter(|head| !head.is_empty())
 }
 
 /// A stable fingerprint of the project's tests map and the team's override.

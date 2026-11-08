@@ -1234,6 +1234,7 @@ mod tests {
         assert!(screens.mark_migrate(&pump, &work_key, "red", "").is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn model_and_shared_permissions_reach_every_computer_of_the_account() {
         // zerus-f0uz8: one model and effort per account; one permission mode

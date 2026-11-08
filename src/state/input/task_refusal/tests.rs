@@ -187,6 +187,24 @@ fn pending_submitted_different_damaged_and_partial_receipts_are_never_overwritte
 }
 
 #[test]
+fn large_normal_receipts_remain_lookup_only_and_oversized_files_are_unknown() {
+    let f = Fixture::new();
+    let normal =
+        serde_json::to_vec(&json!({"status":"submitted", "text":"x".repeat(65536)})).unwrap();
+    assert!(normal.len() > BYTES);
+    f.write(&normal);
+    assert_eq!(f.publish().unwrap(), Observed::Existing);
+    assert_eq!(fs::read(f.file()).unwrap(), normal);
+    // A sparse unexpected file is rejected by metadata, without allocating
+    // or reading its body, falling through to an unbounded old reader, or
+    // mistaking it for absence. Its retained bytes/length stay untouched.
+    let file = OpenOptions::new().write(true).open(f.file()).unwrap();
+    file.set_len(READ_BYTES as u64 + 1).unwrap();
+    assert!(f.publish().is_err());
+    assert_eq!(file.metadata().unwrap().len(), READ_BYTES as u64 + 1);
+}
+
+#[test]
 fn an_error_after_noreplace_publication_is_unknown_and_lookup_never_retries_it() {
     let f = Fixture::new();
     platform::private_dir(&f.root.path().join(FOLDER)).unwrap();

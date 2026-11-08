@@ -16,6 +16,10 @@ use zerus_desktop_ledger::task_controls::TASK_CONTROLS;
 type Result<T> = std::result::Result<T, String>;
 const FOLDER: &str = "input_receipts";
 const BYTES: usize = 8192;
+// Ordinary receipts retain two copies of the bounded input text. Classifying
+// one must not impose the smaller new-refusal limit or perform an unbounded
+// read. Reuse the existing native input JSON allowance for this sole path.
+const READ_BYTES: usize = super::MAX_JSON;
 const STATUS: &str = "refused_before_input";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,7 +76,7 @@ impl Scope {
 pub(crate) enum Observed {
     Inactive,
     Absent,
-    /// A normal, oversized or other receipt: existing readers decide it.
+    /// A bounded normal/other receipt: existing readers decide it.
     Existing,
     /// Both variants permanently block this UUID; neither authorizes input.
     Refused {
@@ -230,24 +234,25 @@ fn lookup_locked(writer: &writer::Writer, scope: &Scope) -> Result<Observed> {
         dir.verify()?;
         return Ok(Observed::Absent);
     };
-    // A larger existing receipt is never a new bounded negative. Its normal
-    // reader can classify it; it is never overwritten or treated as absent.
-    if file.metadata().map_err(|e| e.to_string())?.len() > BYTES as u64 {
-        return Ok(Observed::Existing);
+    if file.metadata().map_err(|e| e.to_string())?.len() > READ_BYTES as u64 {
+        return Err("The native receipt exceeds its bounded read allowance".into());
     }
     let identity = platform::FileIdentity::of(&file).map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
     (&file)
-        .take(BYTES as u64 + 1)
+        .take(READ_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
-    if bytes.len() > BYTES {
+    if bytes.len() > READ_BYTES {
         return Err("The retained Start refusal changed".into());
     }
     let value: Value =
         serde_json::from_slice(&bytes).map_err(|_| "The native receipt is unreadable")?;
     if value["status"] != STATUS {
         return Ok(Observed::Existing);
+    }
+    if bytes.len() > BYTES {
+        return Err("The retained Start refusal exceeds its bound".into());
     }
     // Deserialize the original bytes as a closed struct so duplicate fields
     // are damaged evidence too; a Value round trip would erase duplicates.

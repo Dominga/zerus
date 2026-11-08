@@ -402,7 +402,8 @@ const CUTS: &[&str] = &[
 fn reached(root: &Path, cut: &str) -> ! {
     use std::io::Read;
     crate::fsx::write_private_durable(&root.join("publication-ready"), cut.as_bytes()).unwrap();
-    let _ = std::io::stdin().read(&mut [0; 1]);
+    // Retry interrupted reads instead of completing the crash-cut leaf early.
+    let _ = std::io::stdin().read_exact(&mut [0; 1]);
     // Only the marked one-shot leaf owns this pipe. EOF cannot enter a parent
     // branch or continue another filesystem step after the original dies.
     std::process::exit(0)

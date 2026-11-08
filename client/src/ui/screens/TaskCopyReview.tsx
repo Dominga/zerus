@@ -1,19 +1,20 @@
 import { For, Show, createEffect, on, onCleanup, onMount } from "solid-js";
 import { tasks } from "../../store/tasks";
 import { copy, notify } from "../../store/actions";
-import { copyReviewBusy, copyReviewCards, dismissCopyReview, copyReviewOutcome, openCopyReview, reviewingCopy, setReviewingCopy, confirmCopyReview } from "../../store/taskCopyReview";
+import { copyReviewBusy, copyReviewCards, createCopyReviewPanel, dismissCopyReview, copyReviewOutcome, reviewingCopy, setReviewingCopy, confirmCopyReview } from "../../store/taskCopyReview";
 import { tr } from "../../i18n";
 import { Icon } from "../lib/icons";
 
 export default function TaskCopyReview(props: { project: string; name: string }) {
+  const panel = createCopyReviewPanel();
   const cards = () => copyReviewCards(props.project, tasks.keptDamaged());
   const more = () => Math.max(0, tasks.damaged() - cards().filter((row) => tasks.keptDamaged().some((live) => live.uuid === row.uuid)).length);
   let visibleProject = props.project;
   createEffect(on(() => props.project, (next) => {
-    if (next !== visibleProject && reviewingCopy()?.project === visibleProject && !copyReviewBusy()) setReviewingCopy(undefined);
+    if (next !== visibleProject) panel.retire();
     visibleProject = next;
   }));
-  onCleanup(() => { if (reviewingCopy()?.project === visibleProject && !copyReviewBusy()) setReviewingCopy(undefined); });
+  onCleanup(panel.dispose);
   return <section class="tk-damaged-review" aria-label={tr("Damaged task copies")}>
     <For each={cards().map((row) => row.uuid)}>{(uuid) => {
       const outcome = () => copyReviewOutcome(props.project, uuid);
@@ -30,12 +31,12 @@ export default function TaskCopyReview(props: { project: string; name: string })
               : tr("Local copy outcome is unknown. Do not retry. Review the files manually. %1", result().reason)}</p>
         }</Show>
         <button type="button" class="btn small" disabled={copyReviewBusy() || !!reviewingCopy() || ["moved", "unknown"].includes(outcome()?.state ?? "")}
-          onClick={(event) => void openCopyReview(props.project, uuid, event.currentTarget)}>{tr("Review local copy…")}</button>
+          onClick={(event) => void panel.open(props.project, uuid, event.currentTarget)}>{tr("Review local copy…")}</button>
         <Show when={outcome()?.state === "moved"}><button type="button" class="btn small" onClick={() => dismissCopyReview(props.project, uuid)}>{tr("Dismiss")}</button></Show>
       </article>;
     }}</For>
     <Show when={more()}><p class="dim">{tr("+%1 more damaged tasks", more())}</p></Show>
-    <Show when={reviewingCopy()?.project === props.project && reviewingCopy()}>{(current) => <CopyReviewDialog current={current()} />}</Show>
+    <Show when={reviewingCopy()?.project === props.project && panel.owns(reviewingCopy()) && reviewingCopy()}>{(current) => <CopyReviewDialog current={current()} />}</Show>
   </section>;
 }
 

@@ -994,6 +994,7 @@
   "The session has no confirmed conversation yet.": "У сессии ещё нет подтверждённого разговора.",
   "The session is no longer available.": "Сессия больше недоступна.",
   "The session reference is on the clipboard": "Ссылка на сессию скопирована в буфер обмена",
+  "The session was not resumed. Check Terminal; your draft was kept without sending.": "Сессия не была возобновлена. Проверьте терминал; черновик сохранён без отправки.",
   "The start is still being delivered": "Запуск ещё не доставлен",
   "The system asks for reduced motion, so Zerus reduces it whatever this setting says.": "Система запрашивает уменьшение анимации, поэтому Zerus уменьшает её независимо от этой настройки.",
   "The task changed. Nothing was changed. Refresh the task.": "Задача изменилась. Ничего не изменено. Обновите задачу.",

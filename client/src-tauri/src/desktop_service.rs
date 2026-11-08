@@ -65,6 +65,11 @@ pub(crate) mod deferred_answer;
 /// Only Linux and macOS route it; Windows keeps every Send direct.
 #[cfg_attr(windows, allow(dead_code))]
 pub(crate) mod deferred_send;
+/// The composer's "Resume and send" handed to the service
+/// (zerus-5wmh.66.4.9, slice 3). Only Linux and macOS route it; Windows
+/// keeps it direct.
+#[cfg_attr(windows, allow(dead_code))]
+pub(crate) mod session_resume;
 #[allow(dead_code)]
 pub(crate) mod task_message;
 // Only Linux advertises the review; elsewhere its probe refuses.

@@ -6,7 +6,7 @@ import { running } from "./batch";
 import type { MenuEntry } from "./ui";
 import type { Details } from "../types";
 import type { Session } from "../ui/sessions/types";
-import { STATE_CHANGED, menuState, snapshotOf, terminal, type ActionRow } from "../ui/sessions/actions-ui";
+import { STATE_CHANGED, menuState, snapshotOf, terminal, terminalAfterResume, type ActionRow } from "../ui/sessions/actions-ui";
 import { toast } from "./notices";
 import { tr, trNoop } from "../i18n";
 
@@ -57,7 +57,8 @@ function resumeTerminalEntry(s: Session, row: ActionRow, details?: Details): Men
   const online = !computerOffline(s.computer);
   const m = menuState(row, online, updating(s.computer, s.name), details, { context: true, batchRunning: running() });
   const reason = !online ? tr("Machine unavailable. Reconnect when it is online.")
-    : !terminal(s, details) ? unavailable(s)
+    // Not `terminal`: a saved row has no live pane yet (zerus-5o1ns).
+    : !terminalAfterResume(s, details) ? unavailable(s)
     : !s.sessionId && !s.conversationId ? tr("Refresh this session's identity before opening its terminal.")
     : !m.change.enabled ? (m.change.reason ? tr(m.change.reason) : tr("This session cannot be resumed now.")) : undefined;
   return { label: tr("Resume and open terminal"), icon: "square-terminal", disabled: !!reason, hint: reason,

@@ -119,14 +119,30 @@ class Exchange(test_tasks.DeliveryFixture):
                               "updates": sent["updates"]})
 
     def accept(self, task):
-        self.hgs("send", task["ref"])
+        sent = self.hgs("send", task["ref"])
+        origin = sent["task"]["execution"]["current"]["id"]
+        self.assertEqual(origin, sent["receipt"]["request_id"])
         self.wait_received(task["text"])
         self.confirm()
-        self.as_agent("report", task["ref"], "--json", text="Done.")
+        result = json.loads(self.as_agent("report-attempt", task["ref"], "--attempt", origin, "--json", text="Done."))
+        self.assertTrue(result["moved_to_review"])
         self.hgs("stage", task["ref"], "done")
 
     def phone_tasks(self, *args):
         return self.run_hgs(["task", "list", "--project", "orchard", *args], self.phone)["tasks"]
+
+    def test_a_phone_can_accept_after_explicit_review_without_an_agent_report(self):
+        task = self.add("Phone review", "--target", self.name)
+        self.hgs("send", task["ref"])
+        self.confirm()
+        reviewed = self.run_hgs(["task", "mobile-cancel", "--json"], self.env,
+                                {"schema": 1, "project": "project-1", "task": task["uuid"]})
+        self.assertEqual(reviewed["stage"], "review")
+        self.pull()
+        accepted = self.run_hgs(["task", "stage", task["ref"], "done"], self.phone)
+        self.assertEqual(accepted["task"]["stage"], "done")
+        self.push()
+        self.assertEqual(self.hgs("get", task["ref"])["task"]["stage"], "done")
 
     def test_digests_name_every_project_and_change_with_a_task(self):
         before = self.digests()

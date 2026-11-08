@@ -1522,6 +1522,17 @@ impl TaskDoc {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl TaskDoc {
+    /// Writes the stored schema as an older replica's merged upgrade leaves
+    /// it, below what the task's execution needs (tests of other crates).
+    #[doc(hidden)]
+    pub fn lower_stored_schema_for_test(&mut self, value: i64) {
+        self.meta().insert("schema", value).unwrap();
+        self.doc.commit();
+    }
+}
+
 #[cfg(test)]
 impl TaskDoc {
     /// Records an attempt and its events as a writer of the execution schema

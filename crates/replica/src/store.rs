@@ -1248,8 +1248,9 @@ impl ProjectStore {
     /// Reads a task, saves it when its execution schema needs the repair, and
     /// stamps its files with `stamp`, all in one admission: the version read
     /// and the stamps taken are one observation, which no save of this store
-    /// comes between.
-    pub(crate) fn observe<S>(&self, uuid: &str, stamp: impl FnOnce() -> S) -> (Result<TaskDoc>, S) {
+    /// comes between. The inventory reads every task so, and so does any
+    /// cache of its versions (hgs's task index).
+    pub fn observe<S>(&self, uuid: &str, stamp: impl FnOnce() -> S) -> (Result<TaskDoc>, S) {
         let _turn = self.admission.enter();
         let loaded = self.load_admitted(uuid).and_then(|mut task| {
             if task.repair_schema()? {

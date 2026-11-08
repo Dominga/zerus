@@ -5,6 +5,7 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 /// One small private record, replaced atomically. No child text, environment,
 /// request/configuration identity or user content enters this file or stderr.
 pub(crate) fn record(step: &'static str, code: &'static str) {
+    crate::startup_log::record("failed", code, Some(step));
     eprintln!(
         "zerus-client: desktop startup refused; step={step} code={code}; writers remain stopped"
     );
@@ -57,10 +58,43 @@ fn write_record(path: &std::path::Path, step: &str, code: &str) -> std::io::Resu
 }
 
 pub(crate) fn show(context: tauri::Context<tauri::Wry>) {
+    show_message(
+        context,
+        crate::native_text::render(&zerus_client_core::text!(
+            "Zerus could not confirm desktop ownership. Background work has not started. Close this message, then start Zerus again through its normal launcher. If the problem continues, check the desktop service."
+        )),
+    );
+}
+
+/// The activation pipe belongs to a process that is not this user's Zerus
+/// window at this integrity level and session; nothing was sent to it.
+/// Task 110 shows it only when no Zerus process runs (second_start).
+pub(crate) fn show_untrusted(context: tauri::Context<tauri::Wry>) {
+    show_message(
+        context,
+        crate::native_text::render(&zerus_client_core::text!(
+            "Another program holds the Zerus activation channel, so Zerus did not start and sent it nothing. Close programs you do not trust, or sign out and sign in again, then start Zerus again."
+        )),
+    );
+}
+
+fn show_message(context: tauri::Context<tauri::Wry>, message: String) {
     let title = crate::native_text::render(&zerus_client_core::text!("Zerus could not start"));
-    let message = crate::native_text::render(&zerus_client_core::text!(
-        "Zerus could not confirm desktop ownership. Background work has not started. Close this message, then start Zerus again through its normal launcher. If the problem continues, check the desktop service."
-    ));
+    show_notice(context, title, message, true);
+}
+
+/// One native message box, then exit; no window, source or writer exists.
+pub(crate) fn show_notice(
+    context: tauri::Context<tauri::Wry>,
+    title: String,
+    message: String,
+    error: bool,
+) {
+    let kind = if error {
+        MessageDialogKind::Error
+    } else {
+        MessageDialogKind::Info
+    };
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
@@ -68,12 +102,13 @@ pub(crate) fn show(context: tauri::Context<tauri::Wry>) {
             app.dialog()
                 .message(message)
                 .title(title)
-                .kind(MessageDialogKind::Error)
+                .kind(kind)
                 .show(move |_| quit.exit(0));
             Ok(())
         })
         .run(context);
     if let Err(error) = result {
+        crate::startup_log::record("failed", "startup_dialog_failed", Some(&error.to_string()));
         eprintln!("zerus-client: could not show startup error: {error}");
     }
 }

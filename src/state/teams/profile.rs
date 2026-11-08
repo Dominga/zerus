@@ -269,8 +269,8 @@ fn wait_for_member(task: &Task, timeline: &Value, busy: &BTreeMap<String, Vec<(f
 }
 
 /// The losses one task's timeline shows: rework, waits on the lead and on
-/// permissions, a blocked chain, a wait for a free member, long tests, merges
-/// and conflicts.
+/// permissions, waits for a person's answer (task 118), a blocked chain, a
+/// wait for a free member, long tests, merges and conflicts.
 fn task_losses(task: &Task, timeline: &Value, tokens: &TokenMap, busy: &BTreeMap<String, Vec<(f64, f64)>>, now: f64, out: &mut Vec<Loss>) {
     let id = task.id;
     let spans: Vec<&Value> = timeline["spans"].as_array().into_iter().flatten().filter(|span| !span["from"].is_null()).collect();
@@ -310,13 +310,27 @@ fn task_losses(task: &Task, timeline: &Value, tokens: &TokenMap, busy: &BTreeMap
         let by: BTreeSet<&str> = spans.iter().filter(|span| span["kind"] == "permission").filter_map(|span| span["by"].as_str()).collect();
         out.push(loss("permission_wait", &id.to_string(), permission, None, json!({"task":id,"answered_by":by})));
     }
-    // A chain: the dependencies the task waited for, or a folder another task's
-    // stage held.
+    // Task 118: time that waited for a person's answer, its own cause apart
+    // from the lead's decisions and the permissions the lead answers, with the
+    // seconds of each reason (acceptance, permission, question, deferred, report).
+    let person = total(&["person"]);
+    if person > 0 {
+        let mut reasons: BTreeMap<&str, i64> = BTreeMap::new();
+        for span in spans.iter().filter(|span| span["kind"] == "person") {
+            *reasons.entry(span["reason"].as_str().unwrap_or("unknown")).or_default() += span["s"].as_i64().unwrap_or(0);
+        }
+        out.push(loss("person_wait", &id.to_string(), person, None, json!({"task":id,"reasons":reasons})));
+    }
+    // A folder another task's stage held. Task 81: waiting for dependencies is
+    // no loss by itself - a task that by the plan starts after them is not
+    // losing time while they work on schedule; what is late shows apart, in
+    // the task row's `lateness` (own and inherited), and `deps_s` stays in the
+    // summary's totals and in this detail.
     let (deps, held) = (total(&["deps"]), total(&["folder_held"]));
-    if deps + held > 0 {
+    if held > 0 {
         let on: Vec<u32> = task.deps.iter().map(|dep| dep.task).collect();
         let by: BTreeSet<u64> = spans.iter().filter(|span| span["kind"] == "folder_held").filter_map(|span| span["held_by"].as_u64()).collect();
-        out.push(loss("blocked_chain", &id.to_string(), deps + held, None, json!({"task":id,"deps_s":deps,"folder_held_s":held,"on":on,"held_by":by})));
+        out.push(loss("blocked_chain", &id.to_string(), held, None, json!({"task":id,"deps_s":deps,"folder_held_s":held,"on":on,"held_by":by})));
     }
     let member = wait_for_member(task, timeline, busy, now);
     if member > 0 {
@@ -457,6 +471,7 @@ pub(crate) fn profile(team: &Team, tasks: &[&Task], timelines: &[Value], all: &[
         *list = union(std::mem::take(list));
     }
     let mut parts: BTreeMap<String, Vec<(u32, String)>> = BTreeMap::new();
+    let mut history: Option<super::estimates::History> = None;
     for (task, timeline) in tasks.iter().zip(timelines) {
         task_losses(task, timeline, tokens, &busy, now, &mut losses);
         if let Some(extent) = extent(timeline, now) {
@@ -503,6 +518,10 @@ pub(crate) fn profile(team: &Team, tasks: &[&Task], timelines: &[Value], all: &[
             row["rework_tokens"] = json!(rework.total);
             row["rework_share"] = json!(((rework.total as f64 / spent.total as f64) * 1000.0).round() / 1000.0);
         }
+        // Task 81: how late it started and ended against the plan (own and
+        // inherited apart) and how far its own work ran over its estimate.
+        row["lateness"] = super::baseline::lateness(team, task, now);
+        row["overrun"] = super::baseline::overrun(team, task, kind_s(&["work", "rework"]), &mut history);
         rows.push(row);
     }
     let window = extents.values().fold(None, |acc: Option<(f64, f64)>, (from, to)| Some(acc.map_or((*from, *to), |(low, high)| (low.min(*from), high.max(*to)))));
@@ -620,6 +639,7 @@ pub(crate) fn profile(team: &Team, tasks: &[&Task], timelines: &[Value], all: &[
             "worked_s":worked,
             "totals":totals,
             "tokens":tokens_value(spent, unknown),
+            "lateness":lateness_summary(&rows),
         },
         "losses":{
             "by_time":page_of(&by_time, |loss| loss.s, "s", page.after_time.as_ref(), limit),
@@ -636,6 +656,26 @@ pub(crate) fn profile(team: &Team, tasks: &[&Task], timelines: &[Value], all: &[
         "models":group("model"),
         "tasks":{"items":task_rows.iter().take(task_limit).collect::<Vec<_>>(),"next_cursor":task_next},
     })
+}
+
+/// Task 81: how many tasks run late against the plan, their own and inherited
+/// seconds, and how many have no baseline or an unknown one.
+fn lateness_summary(rows: &[Value]) -> Value {
+    let (mut late, mut own, mut inherited, mut unknown) = (0, 0, 0, 0);
+    for row in rows {
+        let lateness = &row["lateness"];
+        match (lateness["start_late_s"].as_i64(), lateness["inherited_s"].as_i64(), lateness["own_s"].as_i64()) {
+            (Some(start), Some(inherits), Some(theirs)) => {
+                if start > 0 || lateness["end_late_s"].as_i64().unwrap_or(0) > 0 {
+                    late += 1;
+                }
+                own += theirs;
+                inherited += inherits;
+            }
+            _ => unknown += 1,
+        }
+    }
+    json!({"late":late,"own_s":own,"inherited_s":inherited,"unknown":unknown})
 }
 
 /// U38: two phases side by side: each one's summary and top three losses by
@@ -675,7 +715,18 @@ pub(crate) fn read_tokens(team: &Team, asks: &[Ask]) -> (TokenMap, bool) {
         }
         let session = team.member(&ask.member).and_then(|member| member.session.as_ref()).filter(|session| session.host.is_empty());
         let record = session.and_then(|session| {
-            records.entry(session.name.clone()).or_insert_with(|| super::super::storage::read(&session.name).ok()).clone()
+            records
+                .entry(session.name.clone())
+                .or_insert_with(|| {
+                    // A DeepSeek session has no storage record; its binding names the
+                    // conversation its recorded counter samples belong to.
+                    if super::super::dsh::exists(&session.name) {
+                        super::super::dsh::binding(&session.name).ok()
+                    } else {
+                        super::super::storage::read(&session.name).ok()
+                    }
+                })
+                .clone()
         });
         out.insert(key, record.and_then(|record| known(&super::super::usage::span_many(&record, &ask.windows))));
     }

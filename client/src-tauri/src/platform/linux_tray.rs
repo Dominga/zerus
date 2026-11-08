@@ -13,10 +13,8 @@ use tauri::{AppHandle, Manager};
 use zbus::blocking::{Connection, MessageIterator, Proxy};
 use zbus::export::futures_core::Stream;
 use zbus::zvariant::{ObjectPath, OwnedValue, Structure, Value};
-use zerus_client_core::menubar::{Apply, Entry, Face, OpenMode};
-use zerus_client_core::text::Text;
+use zerus_client_core::menubar::{Apply, Entry, Face};
 use zerus_client_core::trayicon::{self, Rect, Rgb, Step};
-use zerus_client_core::{text, ComputerId};
 
 use crate::desk::{Bar, Item, MenuAction};
 
@@ -107,7 +105,6 @@ struct Tray {
     tooltip: String,
     icons: Vec<Icon>,
     foreground: Rgb,
-    custom_terminal: bool,
     tracking: bool,
     activation: Option<String>,
     badge_count: i64,
@@ -134,7 +131,6 @@ impl Tray {
             tooltip: "Zerus".into(),
             icons: Vec::new(),
             foreground,
-            custom_terminal: false,
             tracking: false,
             activation: None,
             badge_count: 0,
@@ -155,7 +151,7 @@ impl Tray {
                 Apply::Tooltip(text) => self.tooltip = text,
                 Apply::Menu(entries) => {
                     self.bindings.clear();
-                    let items = self.bar.layout_modes(&entries, &OpenMode::LINUX);
+                    let items = self.bar.layout(&entries);
                     self.root.children = items.into_iter().map(|item| self.node(item)).collect();
                     self.revision = self.revision.wrapping_add(1);
                 }
@@ -167,7 +163,7 @@ impl Tray {
         self.next = self.next.checked_add(1).expect("DBusMenu IDs exhausted");
         let id = self.next;
         let mut props = Props::new();
-        let mut children = Vec::new();
+        let children = Vec::new();
         match item {
             Item::Action { id: shared, text } => {
                 props.insert("label".into(), string(&label(&text)));
@@ -181,29 +177,6 @@ impl Tray {
             }
             Item::Separator => {
                 props.insert("type".into(), string("separator"));
-            }
-            Item::OpenIn { modes, .. } => {
-                props.insert(
-                    "label".into(),
-                    string(&crate::native_text::render(&if self.custom_terminal {
-                        text!(
-                            "Open in  (own terminal= is set: terminal modes are indistinguishable)"
-                        )
-                    } else {
-                        text!("Open in")
-                    })),
-                );
-                props.insert("children-display".into(), string("submenu"));
-                for (shared, mode, checked) in modes {
-                    let mut node = self.node(Item::Action {
-                        id: shared,
-                        text: crate::native_text::render(&Text::new(mode.label())),
-                    });
-                    node.props.insert("toggle-type".into(), string("radio"));
-                    node.props
-                        .insert("toggle-state".into(), i32::from(checked).into());
-                    children.push(node);
-                }
             }
         }
         Node {
@@ -847,9 +820,6 @@ fn install_worker(
         .and_then(|c| zerus_client_core::menubar::tray_conf_value(c, "icon-color"))
         .and_then(|s| trayicon::parse_color(&s))
         .unwrap_or(Rgb::new(0xe8, 0xed, 0xf4));
-    let custom_terminal = conf
-        .and_then(|c| zerus_client_core::menubar::tray_conf_value(c, "terminal"))
-        .is_some_and(|value| !value.is_empty());
     let app = app.clone();
     std::thread::spawn(move || {
         let target = app.clone();
@@ -860,7 +830,6 @@ fn install_worker(
             badge.clone(),
         ) {
             Ok(native) => {
-                lock(&native.tray).custom_terminal = custom_terminal;
                 let state = app.state::<TrayState>();
                 let mut state = lock(&state.0);
                 if state.stopped {
@@ -996,25 +965,6 @@ fn dispatch(app: &AppHandle, action: MenuAction, token: Option<String>) {
         MenuAction::Open => {
             present(&target, token.as_deref());
         }
-        MenuAction::Session {
-            computer,
-            key,
-            running: false,
-            ..
-        } => {
-            present(&target, token.as_deref());
-            crate::desk::open_session(&target, &computer, &key);
-        }
-        MenuAction::Session {
-            computer,
-            name,
-            tty,
-            ..
-        } => {
-            let target = target.clone();
-            std::thread::spawn(move || crate::desk::open_running(&target, &computer, &name, &tty));
-        }
-        MenuAction::Mode(mode) => crate::desk::set_mode(&target, mode),
         MenuAction::Updates => {
             present(&target, token.as_deref());
             crate::updates::open_page(&target);
@@ -1038,71 +988,6 @@ pub fn present(app: &AppHandle, token: Option<&str>) {
         }
     }
 }
-pub fn open_running(app: &AppHandle, computer: &ComputerId, name: &str, tty: &str) {
-    use zerus_client_core::terminal_launch::{Launcher, Opened, Settings};
-    let conf = crate::desk::tray_conf();
-    let mode = app
-        .try_state::<crate::desk::DeskState>()
-        .map(|_| crate::desk::current_mode(app))
-        .unwrap_or(OpenMode::Automatic);
-    let command = zerus_client_core::shell::open_command(
-        &zerus_client_core::default_hgs().to_string_lossy(),
-        &computer.0,
-        name,
-        None,
-        zerus_client_core::shell::current_shell(),
-    );
-    if mode == OpenMode::Clipboard {
-        let app = app.clone();
-        tauri::async_runtime::spawn_blocking(move || {
-            match crate::clipboard::copy_text(app.clone(), command.clone()) {
-                Ok(()) => crate::desk::window_notice(
-                    &app,
-                    "Zerus: copied to the clipboard",
-                    &zerus_client_core::shell::notification_text(&command),
-                ),
-                Err(error) => crate::desk::window_notice(
-                    &app,
-                    "Zerus: the terminal did not open",
-                    &zerus_client_core::terminal_launch::not_opened(&error, &command),
-                ),
-            }
-        });
-        return;
-    }
-    let mut launcher = Launcher::new(Settings {
-        open_mode: mode.config().into(),
-        template: conf
-            .as_deref()
-            .and_then(|c| zerus_client_core::menubar::tray_conf_value(c, "terminal"))
-            .unwrap_or_default(),
-    });
-    match launcher.open_session(
-        &zerus_client_core::default_hgs().to_string_lossy(),
-        &computer.0,
-        name,
-        if computer == &ComputerId::local() {
-            tty
-        } else {
-            ""
-        },
-    ) {
-        Ok(Opened::Opened {
-            advisory: Some(text),
-        }) => crate::desk::window_notice(
-            app,
-            zerus_client_core::terminal_launch::ADVISORY_TITLE,
-            &text,
-        ),
-        Err(error) => crate::desk::window_notice(
-            app,
-            zerus_client_core::terminal_launch::NOT_OPENED_TITLE,
-            &zerus_client_core::terminal_launch::not_opened(&error, &command),
-        ),
-        _ => {}
-    }
-}
-
 fn color(context: &Context, rgb: Rgb) {
     context.set_source_rgba(
         f64::from(rgb.r) / 255.,
@@ -1424,8 +1309,9 @@ mod tests {
         let id = lock(&native.tray).root.children[2].id;
         menu.call::<_, _, ()>("Event", &(id, "clicked", Value::from(0_i32), 0_u32))
             .unwrap();
-        assert!(
-            matches!(rx.recv_timeout(Duration::from_secs(5)).unwrap().0,MenuAction::Session { key,.. } if key == "run:codex/p/b")
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)).unwrap().0,
+            MenuAction::Restart
         );
         let shell = bus.connect();
         shell.request_name(SHELLS[0]).unwrap();
@@ -1496,19 +1382,13 @@ mod tests {
         assert!(control.snapshot().unwrap().pinned);
     }
 
-    fn entries(name: &str) -> Vec<Entry> {
+    /// The owner's 0.48.0 menu: Open Zerus, a computer's line, an update's
+    /// restart and Quit; no session rows and no "Open in".
+    fn entries(line: &str) -> Vec<Entry> {
         vec![
             Entry::Open,
-            Entry::Label(Text::verbatim("fixture")),
-            Entry::Session {
-                computer: "fixture".into(),
-                key: format!("run:{name}"),
-                name: name.into(),
-                text: Text::verbatim(name),
-                running: false,
-                tty: String::new(),
-            },
-            Entry::OpenIn(OpenMode::Automatic),
+            Entry::Label(zerus_client_core::text::Text::verbatim(line)),
+            Entry::Restart,
             Entry::Quit,
         ]
     }
@@ -1534,39 +1414,44 @@ mod tests {
                 tx.send((a, t)).unwrap();
             }),
         );
-        update(&mut tray, "claude/R&D_with_underscores/a", 1);
+        update(&mut tray, "1 here", 1);
         let first = tray.root.children[2].id;
+        let line = |tray: &Tray| -> String {
+            let label: &str = (&tray.root.children[1].props["label"]).try_into().unwrap();
+            label.to_owned()
+        };
         tray.opened();
-        update(&mut tray, "codex/other/b", 2);
+        update(&mut tray, "2 here", 2);
         assert_eq!(tray.tooltip, "1 sessions");
+        assert_eq!(line(&tray), "1 here");
         assert_eq!(tray.root.children[2].id, first);
         tray.event(first, "clicked");
-        assert!(
-            matches!(rx.recv().unwrap().0,MenuAction::Session { key, .. } if key == "run:claude/R&D_with_underscores/a")
-        );
+        assert_eq!(rx.recv().unwrap().0, MenuAction::Restart);
         assert!(tray.event(0, "closed"));
         assert_eq!(tray.tooltip, "2 sessions");
+        assert_eq!(line(&tray), "2 here");
         assert_ne!(tray.root.children[2].id, first);
         tray.event(first, "clicked");
-        assert!(
-            matches!(rx.recv().unwrap().0,MenuAction::Session { key, .. } if key == "run:claude/R&D_with_underscores/a")
+        assert_eq!(
+            rx.recv().unwrap().0,
+            MenuAction::Restart,
+            "the shown menu's exact action"
         );
     }
 
     #[test]
-    fn linux_modes_are_exclusive_and_dbusmenu_mnemonics_keep_literal_names() {
+    fn the_menu_has_no_submenu_and_dbusmenu_mnemonics_keep_literal_names() {
         let mut tray = Tray::new(Rgb::new(255, 255, 255), Arc::new(|_, _| {}));
-        update(&mut tray, "claude/R&&D_name/a", 1);
-        let shown: &str = (&tray.root.children[2].props["label"]).try_into().unwrap();
-        assert_eq!(shown, "claude/R&D__name/a");
-        let modes = &tray.root.children[3].children;
-        assert_eq!(modes.len(), 4);
-        assert_eq!(
-            modes
+        update(&mut tray, "R&&D_name: unreachable", 1);
+        let shown: &str = (&tray.root.children[1].props["label"]).try_into().unwrap();
+        assert_eq!(shown, "R&D__name: unreachable");
+        assert_eq!(tray.root.children.len(), 4);
+        assert!(
+            tray.root
+                .children
                 .iter()
-                .map(|node| i32::try_from(&node.props["toggle-state"]).unwrap())
-                .collect::<Vec<_>>(),
-            [1, 0, 0, 0]
+                .all(|node| node.children.is_empty()),
+            "no \"Open in\" submenu"
         );
     }
 
@@ -1661,8 +1546,9 @@ mod tests {
         assert_eq!(held, revision);
         menu.call::<_, _, ()>("Event", &(first, "clicked", Value::from(0_i32), 0_u32))
             .unwrap();
-        assert!(
-            matches!(rx.recv_timeout(Duration::from_secs(5)).unwrap().0,MenuAction::Session { key, .. } if key == "run:claude/p/a")
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)).unwrap().0,
+            MenuAction::Restart
         );
         menu.call::<_, _, ()>("Event", &(0_i32, "closed", Value::from(0_i32), 0_u32))
             .unwrap();

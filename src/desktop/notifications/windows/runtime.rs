@@ -46,7 +46,9 @@ fn drain_events(
         }
         if pending.is_none() {
             let value = match events.try_recv() {
-                Ok(Candidate::Clicked(request)) => mappings.clicked(&request).map(Event::Clicked),
+                Ok(Candidate::Clicked(request)) => mappings
+                    .click(&request, std::time::Instant::now())
+                    .map(Event::Clicked),
                 Ok(Candidate::Closed(request)) => mappings.closed(&request).map(|value| {
                     native.retire(&request);
                     Event::Closed(value)
@@ -80,6 +82,8 @@ struct Status {
     native_drained: bool,
     resources: usize,
     mappings: usize,
+    clicks: (u64, u64),
+    coalesced: u64,
     fault: Option<&'static str>,
 }
 pub(in crate::desktop) struct Runtime {
@@ -270,6 +274,8 @@ impl Runtime {
                             value.restored = mappings.restored;
                             value.resources = slot.retained();
                             value.mappings = mappings.delivered.len();
+                            value.clicks = slot.clicks();
+                            value.coalesced = mappings.coalesced;
                         }
                         if !progress {
                             thread::park_timeout(IDLE);
@@ -351,7 +357,7 @@ impl Runtime {
     }
     pub fn status(&self) -> serde_json::Value {
         let value = self.status.lock().unwrap_or_else(|e| e.into_inner());
-        serde_json::json!({"ready":value.ready&&!self.stop.load(Ordering::Acquire),"restored":value.restored,"native_resources":value.resources,"mappings":value.mappings,"joined":self.joined,"drained":self.joined&&value.native_drained,"fault":value.fault,"cold_start_available":false})
+        serde_json::json!({"ready":value.ready&&!self.stop.load(Ordering::Acquire),"restored":value.restored,"native_resources":value.resources,"mappings":value.mappings,"clicks":{"activator":value.clicks.0,"delegate":value.clicks.1,"coalesced":value.coalesced},"joined":self.joined,"drained":self.joined&&value.native_drained,"fault":value.fault,"cold_start_available":false})
     }
 }
 impl Drop for Runtime {

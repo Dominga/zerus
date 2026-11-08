@@ -1,6 +1,6 @@
 [package]
 name = "hgs"
-version = "1.56.0"
+version = "1.57.2"
 edition = "2021"
 rust-version = "1.99"
 description = "Persistent local and remote agent sessions for Zerus"
@@ -74,6 +74,7 @@ windows = { version = "0.62.2", features = [
 ] }
 windows-sys = { version = "0.61", features = [
     "Wdk_System_Threading",
+    "Wdk_System_SystemServices",
     "Wdk_Storage_FileSystem",
     "Wdk_Foundation",
     "Win32_Foundation",
@@ -85,6 +86,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_IO",
     "Win32_System_JobObjects",
+    "Win32_System_Kernel",
     "Win32_System_LibraryLoader",
     "Win32_System_Pipes",
     "Win32_System_RemoteDesktop",

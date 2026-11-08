@@ -11,7 +11,11 @@ vi.hoisted(() => {
   vi.stubGlobal("window", { document, addEventListener: () => {}, removeEventListener: () => {} });
   vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }));
 });
-vi.mock("../../bridge", () => ({
+vi.mock("../../bridge", async (importOriginal) => ({
+  // Every bridge call the screens import exists; the entries below replace the ones this test drives.
+  ...(await importOriginal<typeof import("../../bridge")>()),
+  // The task store reads further board pages through this bridge call.
+  readTaskPage: vi.fn(async () => ({ tasks: [], page: { next: null } })),
   // The session entry points also initialize the bounded creation-card store.
   onCreations: vi.fn(async () => () => {}), creationsView: vi.fn(async () => []),
   inTauri: () => false,
@@ -49,7 +53,7 @@ vi.mock("../../bridge", () => ({
   processesShown: vi.fn(),
   windowVisibility: { hidden: () => false, onChange: () => () => {} },
   // The selected session's composer (store/composer), opened by store/session.
-  composerOpen: vi.fn(async () => null), composerEdit: vi.fn(async () => {}), composerPick: vi.fn(async () => {}), composerPasteImage: vi.fn(async () => {}),
+  composerOpen: vi.fn(async () => null), composerVisibility: vi.fn(async () => {}), composerEdit: vi.fn(async () => {}), composerPick: vi.fn(async () => {}), composerPasteImage: vi.fn(async () => {}),
   composerRemove: vi.fn(async () => {}), composerUndoRemove: vi.fn(async () => {}), composerAllowRetry: vi.fn(async () => {}), composerRefresh: vi.fn(async () => {}),
   composerTab: vi.fn(async () => {}), sendMessage: vi.fn(), sendAnswer: vi.fn(), sendCancel: vi.fn(async () => {}), sendInterrupted: vi.fn(async () => {}), clearContext: vi.fn(),
   localRetry: vi.fn(), localDelete: vi.fn(async () => {}), localInspect: vi.fn(async () => null),
@@ -59,6 +63,11 @@ vi.mock("../../bridge", () => ({
   // The session side panel's Tasks tab reads task details through the bridge.
   onExitFlush: vi.fn(async () => () => {}), acknowledgeExitFlush: vi.fn(async () => {}),
   readTaskDetails: vi.fn(async () => null),
+  // Task 107: the Teams store listens for a decision made on a card.
+  onTeamDecided: vi.fn(async () => () => {}),
+  // The fork's Claude app dialog and SocratiCode panel (task 70) read through the bridge.
+  claudeAppSessions: vi.fn(() => new Promise(() => {})), claudeAppResume: vi.fn(() => new Promise(() => {})),
+  socraticodeStatus: vi.fn(() => new Promise(() => {})), socraticodeAct: vi.fn(() => new Promise(() => {})),
 }));
 
 import * as bridge from "../../bridge";
@@ -196,7 +205,7 @@ describe("the app's archived Activity", () => {
     expect(followedFor(key)).toEqual({ value: undefined, settled: true });
     // Its recorded Activity stays read-only, while its own draft opens for editing.
     await flush();
-    expect(mocked.composerOpen).toHaveBeenLastCalledWith({ computer: "", key: `archive:${uuid(1)}`, name: "codex/example/a1", archive_id: uuid(1) });
+    expect(mocked.composerOpen).toHaveBeenLastCalledWith({ computer: "", key: `archive:${uuid(1)}`, name: "codex/example/a1", archive_id: uuid(1), session_id: null });
     reads[0].resolve({ events: [ev(1, "UserPromptSubmit", "Summarize the notes"), ev(2, "Stop", "Done.")], replace_events: false, conversation_id: "conv-a1", run_id: "run-a1", cleared_conversations: [], cursor: 2, summary: {} });
     await flush();
     expect(archiveActivity.events().map((e) => e.seq)).toEqual([1, 2]);
@@ -215,7 +224,7 @@ describe("the app's archived Activity", () => {
     expect(archiveActivity.events()).toEqual([]);
     await flush();
     expect(mocked.activityPort.follow).toHaveBeenCalledWith(expect.objectContaining({ key: "run:run-live" }));
-    expect(mocked.composerOpen).toHaveBeenLastCalledWith({ computer: "", key: "run:run-live", name: "codex/example/live", archive_id: null });
+    expect(mocked.composerOpen).toHaveBeenLastCalledWith({ computer: "", key: "run:run-live", name: "codex/example/live", archive_id: null, session_id: null });
     vi.advanceTimersByTime(10_000);
     expect(reads.length).toBe(2);
   });

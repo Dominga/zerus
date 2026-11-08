@@ -960,6 +960,7 @@ mod version {
         command
             .env_remove("HGS_RUN_ID")
             .env_remove("HGS_SESSION")
+            .env_remove("HGS_SESSION_ID")
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .stdout(output.try_clone().map_err(|e| fail(e.to_string()))?);
@@ -1321,13 +1322,20 @@ fn track(name: String, token: String, mut event: Value, output: &mut impl std::i
     let sid = session.as_str();
     let kind_value = string(&event, "hook_event_name").to_owned();
     let kind = kind_value.as_str();
+    if kind == "SessionHeartbeat" {
+        // Task 121: the heartbeat's whole effect is the session's last activity;
+        // it is a fast append that never waits on the state lock (Kimi stops a
+        // hook after 5 s, and a slow store under a delivery's lock outlived it).
+        super::heartbeat::observed(&token);
+        return Ok(0);
+    }
     if let Some(refusal) = command_refusal(&event, &home().to_string_lossy()) {
         eprintln!("{} [{}]", refusal.message, refusal.rule);
         return Ok(2);
     }
     let _guard = lock(None)?;
     let panes = live()?;
-    let own = read_run(&name, &token)?;
+    let own = read_own_run(&name, &token)?;
     let record = if continuations::foreign(own.as_ref(), sid) {
         continuations::owner(&event, sid, &panes)?
     } else {
@@ -1336,12 +1344,14 @@ fn track(name: String, token: String, mut event: Value, output: &mut impl std::i
     let Some(mut record) = record else {
         return Ok(0);
     };
-    if !matches(&record, panes.get(string(&record, "name"))) {
+    if !matches(&record, panes_of(&panes, &record)) {
         return Ok(0);
     }
     if let Some(scoped) = external_agents::route(&mut record, &event) {
+        if scoped["hgs_retired_external_hook"] == true { return Ok(0); }
         processes::observe(&mut record, &scoped);
         journal::update_activity(&mut record, &scoped);
+        subagent_lifecycle::reconcile(&mut record);
         if kind == "PermissionRequest" {
             let child = &mut record["subagents"][string(&scoped, "agent_id")];
             child["display_state"] = json!("approval");
@@ -1395,7 +1405,8 @@ fn track(name: String, token: String, mut event: Value, output: &mut impl std::i
         eprintln!("hgs is pausing this session; retry after resuming");
         return Ok(2);
     }
-    let successor = codex_clear_recovery::observe(&record, &event);
+    let successor = codex_clear_recovery::observe(&record, &event)
+        .or_else(|| codex_clear_recovery::terminal_start(&record, &event));
     let main_start = (kind == "SessionStart" && string(&event, "agent_id").is_empty()) || successor.is_some();
     let changed_conversation = main_start && sid != string(&record, "conversation_id");
     if main_start {
@@ -1441,6 +1452,8 @@ fn track(name: String, token: String, mut event: Value, output: &mut impl std::i
                 "prompt",
                 "last_message",
                 "subagents",
+                "subagent_retirements",
+                "subagents_ended_pruned",
                 "active_tools",
                 "last_error",
                 "subagent_groups",
@@ -1484,6 +1497,10 @@ fn track(name: String, token: String, mut event: Value, output: &mut impl std::i
     }
     let resumed_clear_end = kind == "SessionEnd" && string(&event, "agent_id").is_empty()
         && clear_context::ending_resume(&record);
+    let terminal_resume_end = kind == "SessionEnd" && string(&event,"agent_id").is_empty()
+        && clear_context::ending_terminal_resume(&record) && external_agents::main_codex_hook(&record);
+    let terminal_clear_at = if terminal_resume_end && clear_context::awaiting_start(&record)
+        && record["session_clear"]["source"] == "native_terminal" { record["session_clear"]["at"].clone() } else { Value::Null };
     if kind == "SessionEnd" && string(&event, "agent_id").is_empty() {
         record["session_end"] = json!({"reason": string(&event, "reason"), "at": now(),
             "run_id": record["run_id"], "conversation_id": sid});
@@ -1504,6 +1521,11 @@ fn track(name: String, token: String, mut event: Value, output: &mut impl std::i
         // process. Keep the exact deferred-start fence, never fabricate Ready.
         record["session_end"]["clear_request_id"] = record["clear_context_request"]["request_id"].clone();
         record["session_end"]["clear_event_at"] = record["last_event_at"].clone();
+    }
+    if terminal_resume_end {
+        record["session_end"]["terminal_resume"] = json!({"event_at":record["last_event_at"],
+            "pid":record["pid"],"process_start":record["process_start"],"supervisor":record["supervisor"],
+            "transcript":record["transcript"],"clear_at":terminal_clear_at});
     }
     compact_context::observe(&mut record, &event);
     questions::observe(&mut record, &event);
@@ -2887,5 +2909,46 @@ mod tests {
         fs::remove_file(&claude).unwrap();
         assert_eq!(launch().registered_version(&program), None);
         assert_eq!(asked(), 4);
+    }
+
+    /// Task 121: the heartbeat hook is a fast append. While another delivery
+    /// holds the state lock (a slow store), the heartbeat still finishes at
+    /// once and its time reaches the record on the next read.
+    #[test]
+    fn a_heartbeat_never_waits_on_the_state_lock() {
+        let _env = super::super::ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("hgs-heartbeat-hook-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("HGS_STATE_DIR", &dir);
+        std::env::set_var("HGS_SESSION", "kimi/p/lead");
+        std::env::set_var("HGS_RUN_ID", "run-heartbeat");
+        super::super::storage::set_test_root(None);
+        let held = lock(None).unwrap();
+        let started = std::time::Instant::now();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut output = Vec::new();
+            let event = json!({"hook_event_name":"SessionHeartbeat","session_id":"s","agent_id":"main"});
+            let result = track("kimi/p/lead".into(), "run-heartbeat".into(), event, &mut output);
+            let _ = sender.send(result);
+        });
+        let result = receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("the heartbeat hook waited on the state lock");
+        assert_eq!(result, Ok(0));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        drop(held);
+        let beat = super::super::storage::root().join("heartbeats").join("run-heartbeat.json");
+        let beat: Value = serde_json::from_slice(&fs::read(&beat).unwrap()).unwrap();
+        assert_eq!(beat["run_id"], "run-heartbeat");
+        // The next read folds it into the run's record, as the old write did.
+        let mut record = json!({"run_id":"run-heartbeat","last_event_at":1.0});
+        super::super::heartbeat::apply(&mut record);
+        assert!(record["last_event_at"].as_f64().unwrap() > 1.0);
+        std::env::remove_var("HGS_STATE_DIR");
+        std::env::remove_var("HGS_SESSION");
+        std::env::remove_var("HGS_RUN_ID");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

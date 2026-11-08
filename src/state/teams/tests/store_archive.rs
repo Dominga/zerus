@@ -261,3 +261,86 @@ fn archive_prerequisites_resolve_evicted_tasks_in_live_and_proposed_requirements
         assert!(error.contains("Unresolved prerequisites") && error.contains("#99999"), "{error}");
     });
 }
+
+#[test]
+fn archived_task_stubs_and_the_full_task_keep_the_origin() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
+        let mut team = legacy(50);
+        team.tasks[1].origin = Some(1);
+        insert(&store, &team);
+        store.mutate(None, &team.id, None, |_, _| Ok(Value::Null)).unwrap();
+        let saved = store.load(&team.id).unwrap().unwrap();
+        assert!(saved.task(2).unwrap().archived.is_some());
+        assert_eq!(saved.task(2).unwrap().origin, Some(1));
+        let page = store.archived_tasks(&team.id, 1, 0, 50).unwrap();
+        let stub = page["items"].as_array().unwrap().iter().find(|task| task["id"] == 2).unwrap();
+        assert_eq!(stub["origin"], 1);
+        assert_eq!(store.task(&team.id, 2).unwrap()["origin"], 1);
+    });
+}
+
+#[test]
+fn evicted_phase_modes_are_pruned_while_live_modes_and_free_planning_survive() {
+    use crate::state::teams::model::PlanMode;
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
+        let mut team = legacy(0);
+        team.phases = (1..=202).map(|n| Phase {
+            n, state: PhaseState::Approved, tasks: vec![n], ..Default::default()
+        }).collect();
+        team.tasks = (1..=202).map(|id| Task {
+            id, phase: id, status: if id <= 201 { TaskStatus::Accepted } else { TaskStatus::Pending },
+            ..Default::default()
+        }).collect();
+        team.phase_modes = [(1, PlanMode::Free), (2, PlanMode::Free), (202, PlanMode::Standard)].into();
+        insert(&store, &team);
+        store.mutate(None, &team.id, None, |_, _| Ok(Value::Null)).unwrap();
+        let mut saved = store.load(&team.id).unwrap().unwrap();
+        assert!(!saved.phase_modes.contains_key(&1));
+        assert_eq!(saved.phase_modes.get(&2), Some(&PlanMode::Free));
+        assert_eq!(saved.phase_modes.get(&202), Some(&PlanMode::Standard));
+        assert_eq!(super::super::ops::free_phase(&saved), None, "archived free phases stay closed");
+        saved.phase_modes.insert(202, PlanMode::Free);
+        assert_eq!(super::super::ops::open_phase(&saved), 202);
+        assert_eq!(super::super::ops::free_phase(&saved), Some(202));
+    });
+}
+
+#[test]
+fn a_follow_up_resolves_an_evicted_origin_without_restoring_it_into_the_plan() {
+    use crate::state::teams::{model::Member, ops::{self, Actor}, plan};
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open_at(&dir.path().join("teams.sqlite3"), true).unwrap();
+        let mut team = legacy(0);
+        team.members = vec![
+            Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() },
+            Member { id: "dev".into(), role: "Backend".into(), agent: "codex".into(), ..Default::default() },
+        ];
+        team.phases = (1..=202).map(|n| Phase {
+            n, state: PhaseState::Approved, tasks: vec![n], ..Default::default()
+        }).collect();
+        team.tasks = (1..=202).map(|id| Task {
+            id, title: format!("Task {id}"), assignee: "dev".into(), phase: id,
+            status: if id <= 201 { TaskStatus::Accepted } else { TaskStatus::Pending },
+            ..Default::default()
+        }).collect();
+        insert(&store, &team);
+        store.mutate(None, &team.id, None, |_, _| Ok(Value::Null)).unwrap();
+        assert!(store.load(&team.id).unwrap().unwrap().tasks.iter().all(|task| task.id != 1));
+        let input = json!({"tasks":[{"id":203,"title":"Follow up","assignee":"dev","origin":1,"deps":[{"task":202}]}]});
+        store.mutate(Some(("11111111-1111-4111-8111-111111111112", &input)), &team.id, None, |team, events| {
+            ops::apply(team, "extend", &input, &Actor::Human, &Default::default(), events)
+        }).unwrap();
+        let saved = store.load(&team.id).unwrap().unwrap();
+        assert_eq!(saved.task(203).unwrap().origin, Some(1));
+        assert!(saved.task(1).unwrap().archived.is_some(), "resolved through the indexed archive helper");
+        assert!(saved.tasks.iter().all(|task| task.id != 1), "the origin stays out of the live plan");
+        let layers = plan::layers(&saved.tasks);
+        assert_eq!(layers.get(&203), Some(&1), "the hard dependency still places the follow-up");
+        assert_eq!(store.task(&team.id, 203).unwrap()["origin"], 1);
+    });
+}

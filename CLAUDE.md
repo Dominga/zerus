@@ -1,8 +1,9 @@
 # Agent instructions
 
 Zerus provides a desktop UI and the `hgs` CLI for persistent local and remote
-agent sessions. The CLI lives in `src/`; the Qt GUI lives in `tray/src/`;
-replicated documents (Loro) live in `crates/replica/`, the only code that
+agent sessions. The CLI lives in `src/`; the released GUI lives in `client/`. `tray/` retains
+compatible installers, the guarded updater and shared artwork, not a Qt build.
+Read-only Qt migration decoders remain in the Rust client. Replicated documents (Loro) live in `crates/replica/`, the only code that
 imports Loro.
 The Rust mobile relay lives in `services/mobile/relay/` and the Rust outbound
 connector in `services/mobile/connector/`; the legacy Python connector remains in
@@ -18,10 +19,11 @@ only from trusted main; see `docs/ios-distribution.md`.
 `design/` contains prototypes and original artwork, not runtime dependencies.
 The Tauri desktop client lives in `client/`: the SolidJS frontend in
 `client/src`, a pure-Rust core in `client/core` and the Tauri app in
-`client/src-tauri`, each its own Cargo package and lock. It grows beside the
-Qt GUI; see `docs/superpowers/specs/2026-10-27-tauri-web-ui-design.md`. Its UI
+`client/src-tauri`, each its own Cargo package and lock. It is the Zerus Next GUI; see the
+[retirement acceptance checklist](docs/qt-release-acceptance.md) and
+`docs/superpowers/specs/2026-10-27-tauri-web-ui-design.md`. Its UI
 never separates values with dots; `scripts/check-ui-separators.py` enforces it
-in CI (the Qt GUI and mobile clients are out of that rule's scope).
+in CI (mobile clients are out of that rule's scope).
 
 The repository language is English. Write documentation and other project-facing
 text in English; conversations may use the user's preferred language.
@@ -104,22 +106,52 @@ Explicit desktop termination cleanup may remove verified generated caches only
 after its Remove worktree choice and exact successful termination. Keep branch
 and archive-restore identity. Bind cleanup to the checkout ownership recorded
 at session launch and bind removal fingerprints to that nonce. Missing or
-replaced ownership, unknown local data, source changes, other occupants and
-uncertain process use require fresh manual review. Background
-maintenance continues to preserve all ignored data. Never stop unrelated system
-services to make a worktree removable; uncertain removals are never replayed.
+replaced ownership, unknown local data, source changes, other session references
+and unconfirmed process use require fresh manual review, except for the explicit
+permission-denial rule below. Background maintenance continues to preserve all
+ignored data. Uncertain removals are never replayed.
 Termination cleanup runs in the background after its original confirmation.
 Show removed, kept and unknown outcomes with explicit review actions. Only a
 verified refusal before deletion may be checked for a new removal; never replay
-an unknown outcome. Manual acceptance of unreadable process paths lasts five
-minutes for the exact checkout review and tolerates unrelated process churn.
-Fresh known-use, session, ownership and file protections still apply; automatic
-cleanup never uses that manual acceptance.
+an unknown outcome. Outside the explicit Terminate/Remove permission-denial
+exception, manual acceptance of unreadable process paths lasts five minutes for
+the exact checkout review and tolerates unrelated process churn. Fresh known-use,
+session, ownership and file protections still apply; automatic cleanup never
+uses that manual acceptance.
 On Linux and macOS, Terminate must confirm the exit of the selected agent's
 verified background process trees before worktree cleanup. Pin birth identities
 before terminal teardown loses ancestry; bound verification and restore temporary
-stops on refusal. Folder paths, executable names and shared process groups never
-authorize stopping other programs. Keep Pause and native Stop semantics unchanged.
+stops on refusal.
+
+Owner decisions of 2026-11-05 apply only to explicit Terminate with Remove
+working folder: Zerus may stop every program proven by its cwd or open files to
+use that session's verified generated worktree, including editors and terminals
+the person opened there. A complete bounded native manifest lists those programs
+before native confirmation and binds the original checkout object, ownership
+nonce, session/run/archive identity, selected CLI and configuration. Renderer
+PIDs or paths grant no authority. Before each signal, recheck the process
+birth/pin and actual membership in that same checkout; new or changed members
+require fresh review. Never signal the executing custodian or an ancestor or
+resource needed to verify and settle the action.
+
+For this explicit Remove choice, processes whose cwd/open-file membership cannot
+be inspected because of EACCES or EPERM are ignored for the removal decision:
+do not list or signal them, and they do not keep the folder. Apply this rule
+from the actual inspection result, never from executable names or an allowlist
+of system programs. Proven occupants remain listed and must be stopped first. This
+exception grants no signal authority and does not relax checkout ownership,
+process identity, confirmation, custody or unknown-removal protections.
+
+Normal stop is bounded and distinguishes confirmed exit, known surviving
+originals and unknown outcomes. Force is a separate native-confirmed action with
+a new request UUID, bound to the original stop result and freshly verified
+survivors, only after the prior writer/helper and pipes physically settle. Never
+escalate automatically or infer Force authority from a timeout. Stop-incomplete
+and removal-Unknown remain distinct; Force, restart, status and Retry never
+resume or replay an unknown removal or reconstruct consent. Keep branch and
+archive identity. Background cleanup, Pause and native Stop keep their existing
+scope; outside this explicit confirmed Remove choice, folder paths, executable
+names and shared process groups never authorize stopping other programs.
 
 A session is Working, Building, Waiting for you, Waiting for dependencies
 (always with its reason), Cooling, Cold or Stopped; Offline stays (owner
@@ -198,6 +230,10 @@ PRs need no additional manual trust approval for ordinary Dev integration.
 Main regressions cover shared Rust/protocol contracts, Linux CLI, Arch, macOS and
 Android. PRs add Windows/iOS for affected desktop, native or shared paths;
 unknown change inventories retain both. Nightly and Stable retain the full matrix.
+Shared candidate tests may run once in a same-SHA qualification job when final
+sealing requires its successful result. Do not start a second full matrix for a
+SHA already under full verification; check the resolved source and wait, or select
+missing platforms. A PR run does not replace the release's own required gate.
 iOS TestFlight Dev uploads follow successful Nightly verification, using the exact
 source's main CI sequence. Manual checks remain available. Public
 standard GitHub runners are free; do not introduce paid larger runners or raise

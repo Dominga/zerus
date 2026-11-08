@@ -463,6 +463,74 @@ mod tests {
         assert_eq!(f.actions.pending_marks().len(), 1);
     }
 
+    /// #1421 review: a session renamed while its mark waits is read under its
+    /// new label; delivery still guards run and conversation.
+    #[test]
+    fn a_renamed_sessions_pending_mark_is_read_under_its_new_label() {
+        use zerus_client_core::{Change, ComputerId, ComputerStatus, RowOut, ViewRow};
+        let f = Fixture::new("renamed", |_| exit(0, applied(true, false)));
+        let id = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+        let computer = ComputerId::from("mac");
+        let listed = |name: &str| ViewRow {
+            name: name.into(),
+            run_id: Some("run-1".into()),
+            conversation_id: Some("conv-1".into()),
+            session_id: Some(id.into()),
+            reply_id: Some("r1".into()),
+            shared_read: true,
+            state: "running".into(),
+            ..ViewRow::default()
+        };
+        let pump = crate::pump::Pump::default();
+        pump.push(Change::Computer {
+            computer: computer.clone(),
+            status: ComputerStatus::Live,
+        });
+        pump.push(Change::Upsert {
+            computer: computer.clone(),
+            key: "run:run-1".into(),
+            row: listed("claude/sample-project/review"),
+        });
+        f.actions.set_termination_pump(pump.clone());
+        f.actions
+            .queue_marks(vec![mark(
+                "mac",
+                "claude/sample-project/review",
+                Some("r1"),
+                None,
+            )])
+            .unwrap();
+        assert_eq!(f.pump(), 1);
+        assert_eq!(
+            f.calls()[0].args,
+            ["@mac", "read", "claude/sample-project/review", "--json"]
+        );
+        // Renamed before the host showed the read: the next delivery uses the
+        // new label.
+        f.actions.observe(&zerus_client_core::Batch {
+            upserts: vec![RowOut {
+                computer,
+                key: "run:run-1".into(),
+                row: listed("claude/sample-project/renamed"),
+            }],
+            ..zerus_client_core::Batch::default()
+        });
+        f.at(120_000);
+        assert_eq!(f.pump(), 1);
+        let calls = f.calls();
+        assert_eq!(
+            calls.last().unwrap().args,
+            ["@mac", "read", "claude/sample-project/renamed", "--json"]
+        );
+        let input: Value =
+            serde_json::from_slice(calls.last().unwrap().stdin.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            (&input["run_id"], &input["conversation_id"]),
+            (&json!("run-1"), &json!("conv-1"))
+        );
+        drop(pump);
+    }
+
     /// The JSON the frontend's `markAllRead` passes to `queue_read_marks` (the
     /// payload asserted in `client/src/store/marks.test.ts`) is queued as
     /// `queue_read_marks` does and delivered through `read NAME --json`.

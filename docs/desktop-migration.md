@@ -1,5 +1,31 @@
 # Desktop import evidence and writer handoff
 
+## Release 0.48.0 scope (owner, 2026-11-05)
+
+The release imports Qt projects/organization and uses shared `hgs` accounts;
+already delivered preference imports remain. Other Qt state is configure again:
+drafts, unsent organization edits, pending operations, task-message/task-Start
+outboxes and markers, unknown deliveries, attention/notification history and
+identities, repository clone settings and caches. Qt files/blobs stay untouched
+for manual recovery. Their operations are neither executed, replayed nor
+re-offered as Next recovery choices, including from older private reports.
+
+Production runtime-report execution is disabled. Existing Next preload guards
+remain with their original writers; no new source family is added. The adapters, immutable
+records and transport contracts below remain historical/component documentation,
+not promises of full-family migration. Next's own interim stores, original IDs,
+recovery-only rules and service-handoff markers remain active; an unreadable or
+incomplete reservation pair refuses a fresh attempt. Next dev drafts remain
+eligible from their separate roots; Qt draft import and Saved drafts recovery
+are disabled. Previously imported Next copies are not purged.
+
+One GUI explanation per production profile lists the omissions. **Got it** saves
+only Next notice metadata; failed persistence keeps the notice available. It
+changes no pending record, permission, consent or retry. The
+[G3 release scope](qt-release-acceptance.md#g3-scope-for-0480--owner-decision-2026-11-05)
+replaces the former complete-source-family requirement. Platform and native
+caller qualifications remain separate.
+
 G1 (`hgs desktop`) and G3 (read-only migration) agreed this v1 contract on
 2026-10-30. The shared Rust crate is `crates/desktop-migration`, package
 `zerus-desktop-migration`. It contains structural types and pure validation,
@@ -73,6 +99,26 @@ source path, time, key names and the exact source-byte hash; a changed Qt source
 since the original switch is recorded and remains eligible for a new family.
 Failed/partial families remain unhandled. Already handled settings/layout/drafts
 never re-seed after rollback.
+
+## Unix first-run state directory
+
+Host telemetry, presence and worktree-cache writers create missing state folders
+privately, regardless of the user's umask. Older versions could create
+`~/.local/state/hgs/sessions` as 0755 during an ordinary listing, preventing the
+next GUI startup from reading desktop ownership. Before a new native startup
+intent, the selected helper's explicit `desktop prepare-state --json` operation
+removes group/other access from that existing, owned directory through a pinned
+no-follow handle. Service startup does the same. An alias to the same verified
+already-private directory remains valid without mutation; repair through a
+symbolic link, wrong owner, non-directory or changed object is refused. It never
+repairs descendants or creates a service/ownership grant. Missing state stays missing. Ordinary status
+and lookup commands remain read-only.
+
+For an affected older installation, after verifying that the sessions directory
+is a real directory owned by the current user, `chmod 700` on that directory
+alone followed by a full GUI relaunch recovers startup. Do not recursively change
+permissions, follow a symlink, change ownership or remove session files. A custom
+`HGS_STATE_DIR` selects the directory instead of the default path above.
 
 ## Locks and live proof
 
@@ -617,6 +663,45 @@ fresh identity/hash recheck before publication. Every snapshot/manifest keeps
 approval reservation and never delivers a request. Source discovery and G1's
 policy/UI integration remain separate.
 
+## Legacy per-computer project lists
+
+The production switch also checks the retained Qt `imported_machines` markers.
+A verified online computer already marked there is recorded as complete without
+reading its legacy list again. Other online computers use the existing bounded
+`project ls --json` read on the Organization worker; there is no new poller.
+Only missing POSIX links are added. Existing locations in any project preserve
+renames and moves; Next fields, defaults, order, assignments and tombstones win.
+Windows lists refuse with `legacy_projects_windows_unsupported` rather than send
+Windows paths to the POSIX shared writer.
+The Migration report asks the person to add those folders again in Projects on
+that Windows computer, because their list is not imported.
+
+The separate private `legacy_project_lists_v1` family is bounded and records one
+reservation per physical computer before dispatch. Its original catalog/route
+binding and digest witnesses contain no project names or paths. A lost or unknown
+apply remains observation-only across restart, never an ordinary retrying draft.
+Completion needs a fresh checked catalog and matching live source after the
+original child and its pipes have drained. The Migration report shows key names
+and fixed reasons only. Ambiguous retained history and the 2 MiB proposal cap
+are explicit blocked outcomes requiring review; neither silently drops data. A
+proposal carries no session assignments: both of its sides omit them, so the
+writer leaves every assignment as it is, and the catalog itself is bounded only by
+the 8 MiB `swarm get` read.
+
+If a post-import catalog/configuration read fails, the same worker retries only
+those reads, backing off from 250 ms to a 30 s cap. The reservation remains pending
+and Apply is never dispatched again. After three failures, Projects and the
+Migration report show a blocked verification state while reads continue; a fresh
+verified read clears that state and releases the catalog fence. A failure alone
+never releases it. Separate desktops have separate reservations, as Qt did;
+concurrent imports can add copies before sync, and the location rule prevents
+further additions once those copies are visible.
+
+A computer whose catalog, configuration or route changed during its import
+(`legacy_projects_changed`) is not retried in the same session: its list is
+checked again the next time Zerus starts, and the Migration report says so.
+The worker adds no in-session retry for it.
+
 ## Retained Qt shared organization
 
 On the production switch only, the existing local organization topic queues a
@@ -719,9 +804,23 @@ writer commits values with the handled record, naming the original
 `workspace/organization` key and the exact Qt store hash, path, time and
 mtime-after-switch condition. A handled family stays handled across rollback;
 the Qt store is never written. Vivid never belongs in organization-layout/shared
-state. Local Windows drive/UNC folders still wait on the Windows Next Projects local
-folder model (`.66.2.31`, G3 dependent `.66.5.3.10`); no independent G3 folder
-stack is created. No G1 evidence/marker or effect authority is added.
+state.
+
+Local Windows drive/UNC folders use the existing `local_windows_folders` Layout
+family (`.66.2.31`, [#745](https://github.com/ufna/zerus/pull/745)). The bounded
+first-G3 preparer ([#763](https://github.com/ufna/zerus/pull/763)) and production
+organization-worker caller ([#870](https://github.com/ufna/zerus/pull/870)) fulfill
+`.66.5.3.10` without an independent folder stack. A current live local Windows
+watch must match the catalog; original explicit folder machine IDs must match
+that node, never an inferred alias or path owner. Existing whole-family presence,
+including empty or unsupported values, wins before Qt is read. Source,
+generation/revision, node and fresh live-project checks precede the existing
+Layout writer commit; folders and `g3_local_windows_folders` handled metadata
+share that checkpoint. Absent Qt organization stays unhandled without a repeated
+error or fabricated empty family, and a handled family never reseeds on restart
+or rollback. This local presentation import adds no G1 evidence/marker or effect
+authority and does not enable native Windows folder actions. Windows PC
+qualification and whole-G3 acceptance remain separate and pending.
 
 ## Delivery boundary
 

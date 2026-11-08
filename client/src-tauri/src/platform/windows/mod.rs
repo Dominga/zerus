@@ -8,6 +8,7 @@ use windows_sys::Win32::{
 
 #[cfg(feature = "live")]
 mod drawing;
+pub mod foreground;
 #[cfg(feature = "live")]
 pub mod startup;
 #[cfg(feature = "live")]

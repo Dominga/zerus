@@ -17,7 +17,14 @@ spec = importlib.util.spec_from_file_location("check_macos_bundle", ROOT / "scri
 check = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(check)
 
-QT_INFO = plistlib.loads((ROOT / "tray/packaging/Info.plist").read_bytes())
+# Historical Qt privacy strings remain compatibility fixtures after its build
+# sources are removed; they are not read from a new Qt bundle template.
+QT_INFO = {
+    "NSMicrophoneUsageDescription": "Zerus records your voice when you start dictation and sends it to your selected speech computer for recognition.",
+    "NSCameraUsageDescription": "Zerus records video messages when you hold the video recording button.",
+    "CFBundleIconName": "hgs-zerus-swarm",
+    "CFBundleDevelopmentRegion": "en",
+}
 SWITCH_INFO = plistlib.loads((ROOT / "client/src-tauri/Info.switch.plist").read_bytes())
 VERSION = (ROOT / "VERSION").read_text().strip()
 OTOOL = """hgs-tray:
@@ -69,7 +76,9 @@ class SwitchBundle(unittest.TestCase):
         self.assertEqual(SWITCH_INFO["CFBundleDisplayName"], installed_folder())
         self.assertIs(SWITCH_INFO["LSHasLocalizedDisplayName"], True)
         self.assertEqual(SWITCH_INFO["CFBundleName"], "Zerus")
-        self.assertIs(SWITCH_INFO["LSUIElement"], True)
+        # A regular app at launch, so Mission Control moves its window between
+        # Spaces; the menu-bar mode is the client's run-time policy (zerus-v5ft5).
+        self.assertNotIn("LSUIElement", SWITCH_INFO)
         self.assertEqual(SWITCH_INFO["ZerusGUI"], "tauri")
         protocol = (ROOT / "client/core/src/desktop/notifications.rs").read_text()
         abi = re.search(r'pub const ABI: &str = "([^"]+)";', protocol).group(1)
@@ -83,7 +92,14 @@ class SwitchBundle(unittest.TestCase):
 
     def test_native_entry_precedes_renderer_and_is_not_tied_to_gui_live_data(self):
         main = (ROOT / "client/src-tauri/src/main.rs").read_text()
-        self.assertLess(main.index("notification_host::run()"), main.index("renderer::choose()"))
+        # The authenticated callback is now passed to the entry dispatcher;
+        # renderer/instance setup lives behind the library's ordinary run().
+        dispatch = main.index("zerus_client_lib::entry::notification_host(")
+        gui = main.index("zerus_client_lib::run();")
+        self.assertLess(dispatch, gui)
+        headless = main[dispatch:gui]
+        self.assertIn("zerus_client_lib::notification_host::run,", headless)
+        self.assertIn("std::process::exit(status);", headless)
         manifest = (ROOT / "client/src-tauri/Cargo.toml").read_text()
         native = manifest.split('[target.\'cfg(target_os = "macos")\'.dependencies]', 1)[1].split('\n[', 1)[0]
         self.assertIn('zerus-client-core = { path = "../core", features = ["macos-native-peer"] }', native)
@@ -112,13 +128,13 @@ class SwitchBundle(unittest.TestCase):
 
     def test_the_tauri_profile_refuses_what_local_signing_would_refuse(self):
         with tempfile.TemporaryDirectory() as root, self.tools():
-            app = self.bundle(root, LSUIElement=False, ZerusGUI="qt")
+            app = self.bundle(root, LSUIElement=True, ZerusGUI="qt")
             (app / "Contents/Frameworks/Helper.dylib").parent.mkdir(parents=True)
             (app / "Contents/Frameworks/Helper.dylib").write_bytes(MACH_O)
             (app / "Contents/Resources/link").symlink_to("/usr")
             (app / "Contents/Resources/setup/com.hgdev.hgs-tray.plist").unlink()
             findings = check.tauri_bundle_findings(app, VERSION)
-        self.assertIn("Info.plist LSUIElement is False, expected True", findings)
+        self.assertIn("Info.plist sets LSUIElement; the switch bundle launches as a regular app", findings)
         self.assertIn("Info.plist ZerusGUI is 'qt', expected 'tauri'", findings)
         self.assertIn("Contents/Frameworks/Helper.dylib: nested code; the switch bundle has one executable", findings)
         self.assertIn("Contents/Resources/link: symbolic link", findings)

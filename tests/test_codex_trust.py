@@ -22,6 +22,8 @@ def render(*args):
  if (root/'selection').exists(): selected=int((root/'selection').read_text());(root/'selection').unlink()
  global labels
  if (root/'labels').exists(): labels=(root/'labels').read_text(encoding='utf-8').split('\n')
+ back=(root/'overview').exists()
+ if back: labels=['Trust and continue','Back to Agent Command Center']
  target=(root/'target').read_text() if (root/'target').exists() else 'uvx'
  folder=(root/'folder').read_text() if (root/'folder').exists() else '/work/example'
  note=(root/'note').read_text(encoding='utf-8').split('\n') if (root/'note').exists() else []
@@ -30,7 +32,7 @@ def render(*args):
   'settings. Folder settings can run code automatically, even without a model request.',
   'Continue only if you trust these files. Your trust decision will be saved.' if target=='uvx' else 'Changed disclosure','']
  for i,label in enumerate(labels):lines += [('› ' if selected==i else '  ')+str(i+1)+'. '+label]
- lines += ['','enter continue · esc quit']
+ lines += ['','enter continue · esc back' if back else 'enter continue · esc quit']
  os.write(1,b'\x1b[2J\x1b[H'+'\r\n'.join(lines).encode())
 signal.signal(signal.SIGUSR1,render);render();(root/'agent-pid').write_text(str(os.getpid()))
 try:
@@ -45,8 +47,9 @@ try:
    elif buf.startswith(b'\r'):
     buf=buf[1:];(root/'submitted').write_text(labels[selected])
     if not (root/'hold-dialog').exists():
-     if selected==1:sys.exit(0)
-     os.write(1,b'\x1b[2J\x1b[HReady for your first message')
+     if selected==1 and (not (root/'overview').exists() or (root/'exit-back').exists()):sys.exit(0)
+     text='Agent command center' if selected==1 else 'Ready for your first message'
+     os.write(1,b'\x1b[2J\x1b[H'+text.encode())
    elif buf[0]==27 and len(buf)<3:break
    else:buf=buf[1:]
 finally:termios.tcsetattr(fd,termios.TCSANOW,original)
@@ -133,6 +136,43 @@ class FolderTrust(unittest.TestCase):
         self.assertEqual(receipt['status'],'answered')
         self.assertEqual((self.root/'submitted').read_text(),"Quit")
         before=self.received();self.assertEqual(self.answer(p),receipt);self.assertEqual(self.received(),before)
+
+    def overview(self):
+        self.redraw('overview', '1', 'esc back')
+        self.card = self.inspect()['pending_questions'][0]
+        self.assertTrue(self.card['can_answer'])
+        self.assertEqual(self.card['questions'][0]['options'][1]['label'], 'Back to Agent Command Center')
+
+    def test_explicit_back_keeps_the_process_and_is_not_replayed(self):
+        self.overview()
+        self.assertEqual(self.received(), b'')
+        p = self.payload(1)
+        receipt = self.answer(p)
+        self.assertEqual(receipt['status'], 'answered')
+        self.assertEqual((self.root/'submitted').read_text(), 'Back to Agent Command Center')
+        os.kill(self.record['pid'], 0)
+        before = self.received()
+        self.assertEqual(self.answer(p), receipt)
+        self.assertEqual(self.received(), before)
+        self.assertEqual(self.inspect()['pending_questions'], [])
+
+    def test_overview_trust_is_explicit_and_a_variant_change_refuses_without_input(self):
+        old = self.payload()
+        self.overview()
+        self.answer(old, success=False)
+        self.assertEqual(self.received(), b'')
+        receipt = self.answer(self.payload())
+        self.assertEqual(receipt['status'], 'answered')
+        self.assertEqual((self.root/'submitted').read_text(), 'Trust and continue')
+
+    def test_back_cannot_use_quits_exit_acknowledgement(self):
+        self.overview()
+        (self.root/'exit-back').touch()
+        p = self.payload(1)
+        self.assertIn('delivery uncertain', self.answer(p, success=False))
+        before = self.received()
+        self.assertIn('delivery uncertain', self.answer(p, success=False))
+        self.assertEqual(self.received(), before)
 
     def test_changed_target_rejects_stale_approval(self):
         self.redraw('target','different-command','Changed disclosure')

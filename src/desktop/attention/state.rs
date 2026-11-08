@@ -144,7 +144,21 @@ pub(super) fn save(
         [&projected.conversation],
     )?;
     for candidate in &projected.candidates {
-        let (intent, payload) = remember(db, &projected.conversation, candidate, baseline)?;
+        let Some((intent, payload)) = remember(db, &projected.conversation, candidate, baseline)?
+        else {
+            // A compact tombstone is permanently blocked. Preserve Tracker's
+            // request/seen state without resurrecting its retired token/payload.
+            for entry in projected.state.values_mut() {
+                if entry.get("token").and_then(Value::as_str) == Some(candidate.action.token()) {
+                    let entry = entry
+                        .as_object_mut()
+                        .context("invalid attention tracker entry")?;
+                    entry.remove("token");
+                    entry.remove("retry_at");
+                }
+            }
+            continue;
+        };
         let original: Action = serde_json::from_str(&payload)?;
         let replacement = original.token();
         for entry in projected.state.values_mut() {
@@ -238,8 +252,9 @@ pub(super) fn consume_history(db: &mut Connection, p: Projection) -> Result<()> 
             |r| r.get(0),
         )?;
         if !exists {
-            let (intent, payload) = remember(db, &p.conversation, c, true)?;
-            install(db, c, &intent, &payload)?;
+            if let Some((intent, payload)) = remember(db, &p.conversation, c, true)? {
+                install(db, c, &intent, &payload)?;
+            }
         }
     }
     Ok(())
@@ -268,7 +283,7 @@ fn remember(
     session: &str,
     c: &Candidate,
     baseline: bool,
-) -> Result<(String, String)> {
+) -> Result<Option<(String, String)>> {
     let tx = db.transaction()?;
     let existing: Option<(String, String)> = tx
         .query_row(
@@ -293,7 +308,10 @@ fn remember(
             params![c.logical, c.ready],
         )?;
         tx.commit()?;
-        return Ok(old);
+        return Ok(Some(old));
+    }
+    if super::retention::suppressed(&tx, &c.logical)? {
+        return Ok(None);
     }
     let identity = serde_json::to_string(&c.key.identity)?;
     let payload = serde_json::to_string(&c.action)?;
@@ -310,10 +328,9 @@ fn remember(
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    ensure!(
-        count < MAX_EDGES && bytes + charge as i64 <= MAX_EDGE_BYTES,
-        "attention edge quota"
-    );
+    if count >= MAX_EDGES || bytes + charge as i64 > MAX_EDGE_BYTES {
+        return Err(super::retention::Pressure.into());
+    }
     tx.execute("INSERT INTO desktop_attention_edges(logical,session,intent,identity,payload,blocked,bytes) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![c.logical,session,c.key.id,identity,payload,baseline||c.consumed,charge as i64])?;
     tx.execute(
         "UPDATE desktop_attention_edges SET ready=?2 WHERE logical=?1",
@@ -326,7 +343,7 @@ fn remember(
         )?;
     }
     tx.commit()?;
-    Ok((c.key.id.clone(), payload))
+    Ok(Some((c.key.id.clone(), payload)))
 }
 fn retire_token(db: &mut Connection, token: &str) -> Result<()> {
     let Some(target) = attention::target(token) else {
@@ -335,6 +352,20 @@ fn retire_token(db: &mut Connection, token: &str) -> Result<()> {
     let Some(intent) = target.get("notice").and_then(Value::as_str) else {
         return Ok(());
     };
+    let exists: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM desktop_intents WHERE id=?1)",
+        [intent],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        let attempted: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM desktop_attempts WHERE intent_id=?1)",
+            [intent],
+            |r| r.get(0),
+        )?;
+        ensure!(!attempted, "attempted attention intent is missing");
+        return Ok(()); // A compacted baseline never had a native delivery.
+    }
     ledger::withdraw(db, intent, 1)?;
     db.execute(
         "UPDATE desktop_attention_edges SET live=0,dirty=1 WHERE intent=?1 AND live=1",

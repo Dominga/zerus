@@ -12,6 +12,33 @@ vi.mock("./ui", () => ({ selected: () => undefined, machineFilter: () => [], set
 vi.mock("../bridge", () => ({}));
 vi.mock("./creations", () => ({ creationAdmitted: () => {} }));
 
+describe("the remembered folder mode (task 102, NewSessionDialog.cpp 259, 849, 949)", () => {
+  const ctx = (folder_mode?: string) => (w: World) => {
+    w.context = { branch: "work-1a2b3c4d", own_windows_session: null, build_style: "posix", remembered: { agent: "codex", accounts: {}, open_terminal: false, folder_mode }, swarm: "" };
+  };
+  it("opens on Auto unless the folder itself was chosen last", async () => {
+    for (const [mode, auto] of [[undefined, true], ["", true], ["auto", true], ["none", false]] as const) {
+      const t = setup(ctx(mode));
+      await t.open({ computer: "mac" });
+      expect(t.state().autoPreferred, String(mode)).toBe(auto);
+    }
+  });
+  it("remembers only a choice made in this dialog", async () => {
+    const chosen = setup(ctx("none"));
+    await chosen.open({ agent: "codex", path: "/workspace/example" });
+    chosen.act.setAuto(true);
+    expect(chosen.state().autoPreferred).toBe(true);
+    await chosen.choose("work");
+    await chosen.start();
+    expect(chosen.choices()).toMatchObject({ auto_preferred: true, worktree_chosen: true });
+    const untouched = setup(ctx("auto"));
+    await untouched.open({ agent: "codex", path: "/workspace/example" });
+    await untouched.choose("work");
+    await untouched.start();
+    expect(untouched.choices()).toMatchObject({ worktree_chosen: false });
+  });
+});
+
 describe("accounts (NewSessionDialog.cpp 865-1023)", () => {
   // macOS gives the dialog's first focus to the list: while it loads, its only row (Run shell) is no choice.
   it("focusWhileCatalogLoadsKeepsRememberedAgent", async () => {

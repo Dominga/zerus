@@ -23,6 +23,8 @@ on:
 permissions:
   contents: read
 
+cache-mode: none
+
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -48,6 +50,13 @@ jobs:
           assert version == pathlib.Path('VERSION').read_text().strip(), 'Update VERSION first.'
           assert os.environ['RUN_MACOS'] == 'true', 'Stable candidates require full macOS qualification.'
           PY
+  source:
+    name: Stable source recipe
+    needs: version
+    cache-mode: none
+    uses: ./.github/workflows/release-source.yml
+    with:
+      version: ${{ inputs.version }}
   verify:
     needs: version
     cache-mode: read
@@ -56,95 +65,84 @@ jobs:
       ref: ${{ github.sha }}
       run_linux: true
       run_arch: true
+      arch_check_in_source: true
       run_macos: true
       # Stable releases carry the tested portable zip, as nightlies do.
       run_windows: true
       run_ios: true
+  macos-unsigned:
+    # Only this credential-free build overlaps verification. Signing still
+    # waits for the complete matrix and this exact run's checked bundle.
+    if: inputs.macos_cask && vars.MACOS_CASKS_ENABLED == 'true'
+    needs: version
+    uses: ./.github/workflows/macos-bundle.yml
+    with:
+      channel: stable
+      run_tests: false
+      tests_in_verify: true
   macos:
     # Homebrew casks start once the macos-signing environment is provisioned; see
     # docs/macos-distribution.md. macos_cask=false skips the cask for one release.
-    if: inputs.macos_cask && vars.MACOS_CASKS_ENABLED == 'true'
-    needs: verify
+    if: >-
+      !cancelled() && needs.verify.result == 'success' && needs.macos-unsigned.result == 'success' &&
+      inputs.macos_cask && vars.MACOS_CASKS_ENABLED == 'true'
+    needs: [verify, macos-unsigned]
     uses: ./.github/workflows/macos-cask.yml
     with:
       channel: stable
+      reuse_unsigned: true
+      unsigned_release: ${{ needs.macos-unsigned.outputs.release }}
+      verify_installation: false
     secrets:
       MACOS_DEVELOPER_ID_P12: ${{ secrets.MACOS_DEVELOPER_ID_P12 }}
       MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
       APPLE_NOTARY_API_KEY_P8: ${{ secrets.APPLE_NOTARY_API_KEY_P8 }}
       APPLE_NOTARY_API_KEY_ID: ${{ secrets.APPLE_NOTARY_API_KEY_ID }}
       APPLE_NOTARY_API_ISSUER_ID: ${{ secrets.APPLE_NOTARY_API_ISSUER_ID }}
+  cask-install:
+    needs: macos
+    if: ${{ !cancelled() && needs.macos.result == 'success' }}
+    uses: ./.github/workflows/macos-cask-install.yml
+    with:
+      channel: stable
   assemble:
-    needs: [verify, macos]
+    needs: [verify, source, macos]
     # A skipped cask is acceptable only when it was not wanted for this release.
     if: >-
-      !cancelled() && needs.verify.result == 'success' &&
+      !cancelled() && needs.verify.result == 'success' && needs.source.result == 'success' &&
       (needs.macos.result == 'success' || (needs.macos.result == 'skipped' && !(inputs.macos_cask && vars.MACOS_CASKS_ENABLED == 'true')))
+    uses: ./.github/workflows/release-assemble.yml
+    with:
+      version: ${{ inputs.version }}
+      macos: ${{ needs.macos.result == 'success' }}
+  seal:
+    needs: [assemble, cask-install]
+    if: >-
+      !cancelled() && needs.assemble.result == 'success' &&
+      (needs.cask-install.result == 'success' || (needs.cask-install.result == 'skipped' && !(inputs.macos_cask && vars.MACOS_CASKS_ENABLED == 'true')))
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    container:
-      image: archlinux@sha256:996c3a1d6b0d87b01242f6fcd8cfa3ad3eece1a67ab5c8f108e20af1d7b97bdd
+    timeout-minutes: 10
     steps:
-      - name: Bootstrap Git before checkout
-        run: pacman -Syu --noconfirm --needed git
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 0
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: arch-x86_64-${{ github.sha }}
-          path: artifacts/arch
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: windows-x86_64-${{ github.sha }}
-          path: artifacts/windows
-      - if: needs.macos.result == 'success'
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: macos-signed-${{ github.sha }}
-          path: artifacts/macos-signed
-      - name: Arch release dependencies
-        run: |
-          pacman -Syu --noconfirm --needed base-devel git rust nodejs npm webkit2gtk-4.1 gtk3 alsa-lib gstreamer gst-plugins-base-libs libappindicator dbus gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav tmux openssh python namcap desktop-file-utils
-          useradd -m user
-          chown -R user:user "$GITHUB_WORKSPACE"
-      - name: Assemble exact verified candidate
-        env:
-          RELEASE_VERSION: ${{ inputs.version }}
-          MACOS_CASK: ${{ needs.macos.result == 'success' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          packages=(artifacts/arch/*.pkg.tar.zst)
-          portables=(artifacts/windows/*.zip)
-          test "${#packages[@]}" = 1
-          test "${#portables[@]}" = 1
-          macos=()
-          if [ "$MACOS_CASK" = true ]; then macos=(--macos artifacts/macos-signed); fi
-          runuser -u user -- python3 scripts/prepare-release.py --version "$RELEASE_VERSION" --package "${packages[0]}" \
-            --windows-zip "${portables[0]}" \
-            --windows-installer artifacts/windows/installer/zerus-windows-x86_64-setup.exe \
-            --windows-installer-info artifacts/windows/installer/windows-installer-info.json --output dist "${macos[@]}"
-          runuser -u user -- bash scripts/check-release-packages.sh dist
-      - name: Retain release packaging logs
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: release-packaging-${{ github.sha }}
-          path: artifacts/test-results/*
-          retention-days: 7
+          name: release-assembled-${{ github.sha }}
+          path: dist
+      - name: Seal only after assembly and the selected cask installation pass
+        run: python3 scripts/seal-release.py dist
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: zerus-${{ inputs.version }}-candidate
           path: dist
           retention-days: 14
-          include-hidden-files: true # .SRCINFO is required AUR metadata.
+          include-hidden-files: true
   draft:
     # An explicit status check keeps a skipped optional cask from skipping the draft.
     if: >-
-      !cancelled() && needs.assemble.result == 'success' && inputs.create_draft
-    needs: assemble
+      !cancelled() && needs.seal.result == 'success' && inputs.create_draft
+    needs: seal
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: release

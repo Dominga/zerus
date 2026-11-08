@@ -8,16 +8,56 @@ upstream Zerus; the branch `whitewh/main` carries it on top of upstream `main`.
 `.github/workflows/fork-windows.yml` runs on every push to `whitewh/main` and on
 manual dispatch, only in `WhiteWh/zerus`. On a standard `windows-2025` runner it:
 
-1. runs the Rust tests and builds the release `hgs.exe`;
-2. builds the desktop app with the pinned Qt 6.10.3 and runs its offscreen Qt suites;
-3. packages and self-tests the portable zip (`scripts/package-windows.py`,
-   `scripts/check-windows-portable.py`);
-4. publishes release `whitewh-<run number>` with `zerus-windows-x86_64.zip` and
+1. runs the Rust tests and builds the release `hgs.exe`, the mobile connector
+   and the relay;
+2. builds the Qt GUI with the pinned Qt 6.10.3 and runs its offscreen suites,
+   only for the Qt fallback below;
+3. runs the Tauri desktop's fork update tests and the Qt-to-Tauri handoff
+   (`client/core/tests/fork_handoff.rs`), then builds the Tauri desktop as
+   upstream does (`npm ci`, `tauri build --no-bundle` with
+   `tauri.windows.conf.json` and the `video` feature) as `hgs-tray.exe`;
+4. packages the zip with `scripts/package-windows.py --fork` (the fork
+   identity, the relay, the fork README section and the Qt fallback) and
+   self-tests it (`scripts/check-windows-portable.py --run --selftest`, which
+   also checks that `hgs-tray.exe --build-info` embeds the fork build and feed
+   `build-info.json` names);
+5. publishes release `whitewh-<run number>` with `zerus-windows-x86_64.zip` and
    `zerus-fork-feed.json`, marked as the latest release.
 
+The zip's `build-info.json` says `"desktop": "tauri"` and names the fork:
+`"fork": {"repository": "WhiteWh/zerus", "build": 42, "feed": "<feed URL>"}`
+(`build` null and `feed` empty for an experimental build).
+
+### The Qt fallback (one release)
+
+For one release the zip also keeps the Qt GUI as `qt\zerus-qt.exe`, with its
+own Qt runtime, MSVC runtime and Qt notices in `qt\`, declared in
+`build-info.json` as `"qt_fallback": {"executable": "qt/zerus-qt.exe",
+"qt_version": "6.10.3"}` (task #65, owner 2026-11-06). It is never the default:
+`hgs-tray.exe` is the Tauri app, and the portable check refuses Qt files
+anywhere else, an undeclared `qt\` folder, and a second `hgs.exe` or
+`hgs-tray.exe` in it. The owner starts it by hand if the Tauri desktop does not
+work: quit Zerus first, then run `qt\zerus-qt.exe`. It uses the build's own
+`hgs.exe` one folder up (`AppConfig::resolveHgsPath`), so the same accounts,
+sessions and agents. It never updates itself (its folder has no
+`build-info.json`), and the settings and drafts the Tauri app imported on its
+first start do not flow back from it. The zip's README says the same. The next
+release drops it: remove `--qt-fallback` and the Qt steps from
+`fork-windows.yml`.
+
+A local dry run uses the workflow's own commands from a clean checkout (the
+Tauri `--build-info` check refuses a dirty source): the release builds, `npm run
+tauri -- build ...` with `ZERUS_FORK_BUILD` and `ZERUS_FORK_FEED_URL` set,
+`scripts/package-windows.py --fork ... --qt-fallback .ci-build/gui/hgs-tray.exe`
+and `scripts/check-windows-portable.py <zip> --run --selftest`. Never push
+`whitewh/main` for it: a push publishes.
+
 A failing step publishes nothing. The run number is embedded in `hgs-tray.exe` as
-`ZERUS_FORK_BUILD`, together with the feed address `ZERUS_FORK_FEED_URL`; CMake
-accepts only release assets of `WhiteWh/zerus` for the latter.
+`ZERUS_FORK_BUILD`, together with the feed address `ZERUS_FORK_FEED_URL`
+(`client/src-tauri/build.rs`; the app accepts only release assets of
+`WhiteWh/zerus` for the latter, as CMake does for a Qt build). Until task #63 the
+fork shipped the Qt desktop (`scripts/package-windows-qt.py`, kept for hand
+builds); every build since is the Tauri app.
 
 An experimental build of any commit: push a tag `whitewh-exp-<name>` for it. The
 same workflow builds, tests and packages that commit and publishes the zip as a
@@ -88,6 +128,11 @@ banner in the lower right corner of the screen with each step and its progress
 The banner leaves once the new build's window is up. A failure stays on it for
 ten seconds and goes to the log.
 
+Only tests pass the helper `-Quiet`; neither updater ever does. A quiet helper
+shows no banner and starts every build with a hidden window, so
+`client/core/tests/fork_handoff.rs` runs the real helpers without anything
+appearing on the desktop, and checks that no window of theirs appeared.
+
 If the new build exits within 15 seconds, the helper restores the previous build,
 keeps the failed one as `<installation>.failed` and starts the previous build. If a
 program still runs from the folder after two minutes, the update waits for the
@@ -150,6 +195,114 @@ stay and older ones are removed.
 When `current` points to another build than the one running, that build does not
 update at all: start Zerus from `current`.
 
+## The Tauri desktop and the move from Qt (task #63)
+
+The Tauri desktop has the same fork channel as the Qt GUI
+(`client/core/src/fork_update.rs`, `client/src-tauri/src/fork_updates.rs`): the
+fork build number and the feed from the build environment, the same feed and zip
+checks (schema 1, a newer build, an HTTPS release asset of this fork up to 1 GiB,
+the published size and SHA-256, `tar.exe`, `hgs-tray.exe`, `hgs.exe` and a
+`build-info.json` naming the feed's commit), the same `<stage>-next` rule, and on
+Restart the Qt updater's own PowerShell helper, byte for byte
+(`client/core/src/fork_update/*.ps1`, which a test compares with
+`tray/src/ForkUpdater.cpp`): the idle wait, the banner, the one rollback copy, the
+15-second start check and the restore. Restart quits Zerus as Quit does, so
+drafts are saved. A fork build checks two minutes after start and hourly; a
+locally made portable build checks only on request and offers the feed's build
+as a replacement it asks about first.
+
+Settings > Updates shows **Fork updates from WhiteWh/zerus**: the running fork
+build (or its commit), the status, **Check for updates from WhiteWh/zerus**,
+**Replace this build with fork build N...** (confirmed in a dialog) and
+**Restart to install fork build N**. A verified build also sets the restart
+flag the tray and sidebar show. Upstream's channels never replace a fork build:
+the upstream release check stays informational and says so.
+
+The move needs nothing new on the Qt side. The installed Qt build's updater
+reads the feed, verifies the next zip (whose `hgs-tray.exe` is the Tauri app) and
+installs it with its helper, into the same layout: `<root>\app-<N>` with
+`current` re-pointed, or the plain folder with `.previous`. The Tauri app then
+finds that layout and updates itself to the following build.
+`client/core/tests/fork_handoff.rs` proves it on a real versioned root:
+
+1. a Tauri build that exits within 15 seconds hands `current` back to the Qt
+   build, which starts again;
+2. the Qt helper installs the Tauri zip: `current` -> `app-101`, Qt stays in
+   `app-100`;
+3. re-pointing `current` at `app-100` by hand starts the Qt build again;
+4. the Tauri updater installs the next zip: `current` -> `app-102`, `app-101`
+   stays as the rollback copy.
+
+Two builds are kept, so the Qt build is removed at the second Tauri update;
+roll back to Qt before that, or keep a copy of its `app-<N>` folder.
+
+### What the move carries over
+
+The Tauri app imports the Qt GUI's settings once, on its first start, from the
+same file the Qt build writes (`%APPDATA%\hgdev\hgs-tray.ini`; the Qt file is
+never changed, so a rollback finds it as it was), and the composer drafts once
+(`hgs-tray.ini.drafts`; a draft that clashes is kept under Saved drafts). Nothing
+on the Qt side has to run first. Accounts, `tray.conf` and the mobile
+connector's `connector.json` live in the hgs configuration both apps read, so
+they are shared, not copied.
+
+Carried over: theme, language, scale and the other workspace settings,
+notifications, processes, downloads, update channel, keyboard shortcuts,
+recovery policy, speech settings (not the microphone), new-session choices,
+window geometry and splitters, machine and project colours, collapsed rows,
+the composer drafts, the account list, the inspector width, visibility,
+tab and folded cards (`workspace/inspectorWidth`, `workspace/inspectorOpen`,
+`workspace/inspectorTab`, `workspace/inspectorClosed`), and the WhiteWh skin
+(`workspace/skin`: Tauri ports it as `whitewh-dark` and `whitewh-light`).
+
+Also carried over once, on a Tauri client that switched before them too
+(task 102; Qt's store is only read, never written):
+
+- the mobile services (`mobile/localRelay`, `mobile/localRelayPort`,
+  `mobile/runConnector`): Qt keeps them only in its store, not in
+  `connector.json` or `tray.conf`, so Tauri has its own copies and the same
+  switches under Settings -> Mobile connection (see below);
+- the new-session worktree choice (`workspace/launchWorktree`) as Tauri's
+  `newSession/folderMode`, the New session dialog's default;
+- the microphone (`speech/microphone`) as its name only
+  (`speech/microphoneName`, read from Windows' device registry for Qt's
+  endpoint id): the Voice page chooses the listed microphone with that name.
+  Qt's device id itself is never stored, and a device this computer no longer
+  knows imports nothing;
+- `pathMappings/*`: the WSL path presets (at most 64) into
+  `<data_dir>/wsl-path-mappings.json` at the first start, when that file does
+  not exist yet;
+- `privateStores/notified`: the private-store notices already raised (at most
+  512) into `<data_dir>/private-store-notices.json` at the first start, when
+  that file does not exist yet; Tauri keeps that set there from then on.
+
+Not carried over, and why:
+
+- task title, new-card and note drafts (`tasks/titleDraft/*`, `tasks/newCard/*`,
+  `tasks/noteDraft/*`): the Tauri task board keeps no draft fields, so there is
+  nowhere to put them; the owner loses only unsent board text;
+- the expanded and collapsed sessions and teams (`ui/collapsed/*`,
+  `ui/expanded/*`): Tauri keeps its own collapsed-row store, not Qt's keys;
+- automatic approvals: off after the move by design; turn them on again in
+  Settings;
+- the Teams UI preferences (`teams/*`, `team/*`, `ui/catalogHideUnusedRoles`):
+  the Tauri Teams screen has no matching keys for heat mode, hide finished,
+  per-team plan mode or the catalog role filter, so those visible choices reset;
+- `machines/residentHost`, `machines/otherTransport`: the resident host and
+  transport choice are not implemented in Tauri;
+- `socraticode/nativeQdrant`: SocratiCode/native Qdrant is not in Tauri;
+- `workspace/cacheKeepWarm`: cache keep-warm is not implemented in Tauri;
+- the extensions' switches (`extensions/*`): Tauri has no extensions surface;
+- `dataPlane/eventStream`: the event-stream data plane is not in Tauri;
+- pending reads, local read marks and the project organization, unless hgs
+  recovers the latter itself.
+
+The Startup shortcut keeps working while it points at `current\hgs-tray.exe`.
+In the plain layout the Qt updater stopped the mobile connector before the
+helper ran; the Tauri updater does not, so a connector running from the
+installation folder makes the helper wait for it (up to two minutes, then the
+update waits for the next restart). The versioned layout never waits for it.
+
 Switching an existing installation, with Zerus closed (`app` is its folder):
 
 ```powershell
@@ -200,7 +353,9 @@ usual problems, is in [fork-mobile-tailscale.md](fork-mobile-tailscale.md).
 
 Upstream's Windows gateway (`docs/superpowers/specs/2026-10-20-windows-mobile-gateway-design.md`)
 manages the bundled connector through `zerus-mobile-connector --manage`. The fork
-adds, under Settings -> Mobile connection (`tray/src/WindowsMobileServices.h`):
+adds, under Settings -> Mobile connection (`tray/src/WindowsMobileServices.h`;
+in Zerus Next the same two switches and startup, task 102,
+`client/src-tauri/src/mobile.rs`, `client/core/src/mobile/local_services.rs`):
 
 - **Start the connector when Zerus starts** (`mobile/runConnector`, on by
   default): at startup Zerus asks `--manage status` and, for a configured

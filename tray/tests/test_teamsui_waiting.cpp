@@ -10,11 +10,12 @@
 #include "TeamAttentionNotices.h"
 #include "TeamAttentionWatch.h"
 #include "TeamConversation.h"
+#include "TeamProposalCard.h"
 #include "TeamTaskCard.h"
 #include "TeamWaitingBanner.h"
 #include "TeamWaitingPage.h"
+#include "TeamWaitingNotices.h"
 #include "TeamWorkspace.h"
-#include "TeamProposalCard.h"
 
 // G6: the team card, its header and the workspace bar carry two compact bars —
 // the phase in work (or the next draft waiting) and the phases — readable at
@@ -141,9 +142,11 @@ QJsonArray answerItems(double now)
 class TestTeamsUiWaiting : public QObject, public TeamsUiFixture {
     Q_OBJECT
 private slots:
-    void phaseCheckCardShowsWarningAndSendsExplicitOverride();
     void waitingToolOffersAreAnsweredInPlace();
     void aLeadsQuestionIsAnsweredFromWaitingForYou();
+    void aConfirmedDecisionLeavesWaitingAtOnceAndARefusedOneStays();
+    void aLowDriveOpensBuildFoldersAndItsNoticeNamesTheDrive();
+    void aPausedTeamWaitsWithResumeTeamAndIsNeverNotified();
     void initTestCase()
     {
         setUpCase();
@@ -180,10 +183,14 @@ private slots:
     void waitingPagePagesStayStableWhileItemsArrive();
     void waitingPageEmptyAndRefused();
     void waitingItemsAreAnsweredInPlace();
+    void waitingReportHeldRetryAndFinishAnswerInPlace();
     void waitingAdditionCancelDeclinesIt();
     void waitingBannerAnswersInPlaceAndWithdrawsTheNotice();
     void aWaitingReadThatChangesNothingRedrawsNothing();
     void aPhaseIsAcceptedOrSentBackFromWaitingForYou();
+    void aStalledLeadShowsOnTheTeamBarAndNotifiesEachRound();
+    void deferredRequestsAreAnsweredUnderDeferred();
+    void phaseCheckCardShowsWarningAndSendsExplicitOverride();
 };
 
 // N32 of #499: Zerus started in the tray has no Sessions window, yet a team's
@@ -982,8 +989,8 @@ void TestTeamsUiWaiting::proposalsAreAcceptedOrRejectedOnce()
     QVERIFY(input["accept"].toBool());
     QCOMPARE(input["expected_hash"].toString(), QStringLiteral("h2"));
     QVERIFY(!input.contains("reason"));
-    // Until the store has taken it, the card's buttons stay off.
-    QTRY_VERIFY(cardOf("p2") && !cardOf("p2")->findChild<QPushButton *>("teamProposalAllow")->isEnabled());
+    // Task 107: confirmed by hgs, the card leaves at once, before the store's read.
+    QTRY_VERIFY(!cardOf("p2"));
     // A remove asks too.
     armConfirm(&panel, false);
     cardOf("p3")->findChild<QPushButton *>("teamProposalAllow")->click();
@@ -1192,6 +1199,8 @@ void TestTeamsUiWaiting::everyOwnerGateIsACardAnsweredWithAClick()
             QTRY_VERIFY(cardOf(id) && cardOf(id)->findChild<QPushButton *>("teamProposalAllow")->isEnabled());
             armConfirm(&panel, false);
         }
+        QFile held(script() + ".proposalhold");
+        QVERIFY(held.open(QIODevice::WriteOnly)); held.close();
         cardOf(id)->findChild<QPushButton *>("teamProposalAllow")->click();
         QTRY_COMPARE(int(calls(script(), "decide-proposal").size()), before + 1);
         const auto input = calls(script(), "decide-proposal").last();
@@ -1201,6 +1210,8 @@ void TestTeamsUiWaiting::everyOwnerGateIsACardAnsweredWithAClick()
         QCOMPARE(input["team"].toString(), QStringLiteral("team-1"));
         // Answered once: until the store takes it, its buttons stay off.
         QTRY_VERIFY(cardOf(id) && !cardOf(id)->findChild<QPushButton *>("teamProposalAllow")->isEnabled());
+        QVERIFY(QFile::remove(script() + ".proposalhold"));
+        QTRY_VERIFY(!cardOf(id));
     }
     // Deny sends a rejection with the card's hash; nothing else is sent.
     const int before = int(calls(script(), "decide-proposal").size());
@@ -1696,7 +1707,8 @@ void TestTeamsUiWaiting::waitingPageListsEveryKindAcrossTeams()
     }
     QCOMPARE(kinds, (QStringList{"Plan", "Phase draft", "Permission", "Proposal", "Report", "Held task", "All decided"}));
     // #724: every row opens its team; a one-click decision is answered in it
-    // too (Approve… for the drafts, Answer for the proposal and the permission).
+    // too (Approve… for the drafts, Answer for the proposal and the permission;
+    // task 116: and Answer for a report, a held task and the end of the team).
     QStringList answers;
     for (auto *row : page.findChildren<QFrame *>("teamWaitingRow")) {
         QCOMPARE(row->findChild<QPushButton *>("teamWaitingOpen")->text(), QStringLiteral("Open team"));
@@ -1704,7 +1716,7 @@ void TestTeamsUiWaiting::waitingPageListsEveryKindAcrossTeams()
         const auto *answer = row->findChild<QPushButton *>("teamWaitingAnswerToggle");
         answers << (approve ? approve->text() : answer ? answer->text() : QString());
     }
-    QCOMPARE(answers, (QStringList{"Approve…", "Approve…", "Answer", "Answer", "", "", ""}));
+    QCOMPARE(answers, (QStringList{"Approve…", "Approve…", "Answer", "Answer", "Answer", "Answer", "Answer"}));
     QCOMPARE(teams.size(), 6);
     const QString count = page.findChild<QLabel *>("teamWaitingCount")->text();
     QVERIFY2(count.contains("7 items") && count.contains("6 teams"), qPrintable(count));
@@ -1810,7 +1822,7 @@ void TestTeamsUiWaiting::waitingBannerFoldsOpensAndHides()
     }
     QCOMPARE(ids, (QStringList{"team-plan/plan_draft/plan", "team-1/phase_draft/2", "team-3/permission_escalated/Tester",
                                "team-2/owner_word_asked/proposal-p3", "team-2/report_escalated/4"}));
-    QCOMPARE(actions, (QStringList{"Approve…", "Approve…", "Answer", "Answer", "Accept…"}));
+    QCOMPARE(actions, (QStringList{"Approve…", "Approve…", "Answer", "Answer", "Answer"}));
     // No dots as separators: the rows keep their parts apart with space.
     for (auto *label : banner->findChildren<QLabel *>()) QVERIFY2(label->text() != QStringLiteral("·"), "a dot separator");
     auto *more = banner->findChild<QPushButton *>("teamWaitingBannerAll");
@@ -1964,10 +1976,10 @@ void TestTeamsUiWaiting::waitingItemsAreAnsweredInPlace()
         for (const auto &value : answerItems(now)) if (!gone.contains(value.toObject()["id"].toString())) left.append(value);
         QVERIFY(writeWaiting(script() + ".waiting", left));
     };
-    // A report and a held task are read in the team first: Open team only.
+    // Task 116: a report and a held task are answered here too, never only in
+    // the Team tab: each has its card.
     for (const auto &id : {report, held}) {
-        QVERIFY(row(id)->findChild<QPushButton *>("teamWaitingOpen"));
-        QVERIFY(!row(id)->findChild<QPushButton *>("teamWaitingAnswerToggle") && !row(id)->findChild<QPushButton *>("teamWaitingApprove"));
+        QVERIFY2(row(id)->findChild<QPushButton *>("teamWaitingAnswerToggle"), qPrintable(id));
     }
     const auto toggle = [&](const QString &id) { row(id)->findChild<QPushButton *>("teamWaitingAnswerToggle")->click(); };
     // Open the three cards: the proposal, the addition and the permission.
@@ -2074,6 +2086,93 @@ void TestTeamsUiWaiting::waitingItemsAreAnsweredInPlace()
     // An answer between rebuilds never shows as a window of its own.
     for (auto *window : QApplication::topLevelWidgets())
         QVERIFY2(!(window->objectName() == QLatin1String("teamWaitingAnswer") && window->isVisible()), "a stray answer window");
+}
+
+// Task 116 (owner, 2026-11-06): a report, a held task, a retry and the end of
+// the team are answered where they wait — the same operations as their task
+// cards, not only Open team in the Team tab.
+void TestTeamsUiWaiting::waitingReportHeldRetryAndFinishAnswerInPlace()
+{
+    Settings::set("workspace/skin", "whitewh");
+    const auto restore = qScopeGuard([] { Settings::remove("workspace/skin"); darkPalette(); });
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    auto team = answerTeam();
+    {
+        auto tasks = team["tasks"].toArray();
+        auto first = tasks[0].toObject(); first["status"] = "submitted"; tasks[0] = first;
+        auto second = tasks[1].toObject(); second["hold"] = QJsonObject{{"by", "You"}, {"reason", "After the release"}, {"at", 1}}; tasks[1] = second;
+        // The team has two tasks: #5 is added whole (indexing past the end of the
+        // array was undefined and crashed).
+        tasks.append(QJsonObject{{"id", 5}, {"phase", 1}, {"title", "Code review"}, {"assignee", "backend"}, {"status", "pending"},
+                                 {"waits", QJsonObject{{"for", "model"}, {"on", QJsonArray{"model"}}, {"unblock", "choose a model"}}}});
+        team["tasks"] = tasks;
+    }
+    setTeam(team);
+    auto report = waitingItem("report-1", "report_escalated", "decide_report", "Report on #1 Saved cards API from Backend waits for your decision", now - 300);
+    report["task"] = 1; report["member"] = "Backend";
+    auto held = waitingItem("held-2", "task_waits_owner", "release_task", "#2 Release notes is held by you: after the release", now - 360);
+    held["task"] = 2;
+    auto retry = waitingItem("retry-5", "task_waits_owner", "retry_task", "#5 Code review waits: hgs: unknown model", now - 400);
+    retry["task"] = 5;
+    auto finish = waitingItem("finish", "team_finished", "finish", "All 4 tasks decided: waits for you to finish", now - 900);
+    QJsonArray waiting{report, held, retry, finish};
+    QVERIFY(writeWaiting(script() + ".waiting", waiting));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamWaitingPage page(&controller);
+    QStringList answered;
+    page.answered = [&](const TeamWaitingPage::Item &item) { answered << item.id; };
+    darkPalette(); page.setDark(true);
+    page.resize(900, 1000); page.show();
+    const auto row = [&](const QString &id) -> QFrame * {
+        for (auto *frame : page.findChildren<QFrame *>("teamWaitingRow")) if (frame->property("itemId") == id) return frame;
+        return nullptr;
+    };
+    const QString reportId = report["id"].toString(), heldId = held["id"].toString(),
+                  retryId = retry["id"].toString(), finishId = finish["id"].toString();
+    // The store drops what was answered: so does the fake's list, for the polls.
+    const auto leave = [&](const QString &id) {
+        QJsonArray left;
+        for (const auto &value : waiting) if (value.toObject()["id"].toString() != id) left.append(value);
+        waiting = left;
+        QVERIFY(writeWaiting(script() + ".waiting", waiting));
+    };
+    QTRY_VERIFY(row(reportId) && row(heldId) && row(retryId) && row(finishId));
+    // The report: Reject with the member's reason.
+    row(reportId)->findChild<QPushButton *>("teamWaitingAnswerToggle")->click();
+    QTRY_VERIFY(row(reportId)->findChild<QLineEdit *>("teamWaitingReportReason"));
+    row(reportId)->findChild<QLineEdit *>("teamWaitingReportReason")->setText("Fix the flaky test first");
+    row(reportId)->findChild<QPushButton *>("teamWaitingReportReject")->click();
+    QTRY_COMPARE(calls(script(), "reject").size(), 1);
+    auto sent = calls(script(), "reject").first();
+    QCOMPARE(sent["team"].toString(), QStringLiteral("team-1"));
+    QCOMPARE(sent["task"].toInt(), 1);
+    QCOMPARE(sent["reason"].toString(), QStringLiteral("Fix the flaky test first"));
+    QTRY_VERIFY(!row(reportId)); leave(reportId);
+    // The held task: Release.
+    row(heldId)->findChild<QPushButton *>("teamWaitingAnswerToggle")->click();
+    QTRY_VERIFY(row(heldId)->findChild<QPushButton *>("teamWaitingReleaseAction"));
+    row(heldId)->findChild<QPushButton *>("teamWaitingReleaseAction")->click();
+    QTRY_COMPARE(calls(script(), "release").size(), 1);
+    sent = calls(script(), "release").first();
+    QCOMPARE(sent["task"].toInt(), 2);
+    QTRY_VERIFY(!row(heldId)); leave(heldId);
+    // The step Zerus could not take: Retry.
+    row(retryId)->findChild<QPushButton *>("teamWaitingAnswerToggle")->click();
+    QTRY_VERIFY(row(retryId)->findChild<QPushButton *>("teamWaitingReleaseAction"));
+    row(retryId)->findChild<QPushButton *>("teamWaitingReleaseAction")->click();
+    QTRY_COMPARE(calls(script(), "retry").size(), 1);
+    QCOMPARE(calls(script(), "retry").first()["task"].toInt(), 5);
+    QTRY_VERIFY(!row(retryId)); leave(retryId);
+    // The end of the team: the summary reaches the lead.
+    row(finishId)->findChild<QPushButton *>("teamWaitingAnswerToggle")->click();
+    QTRY_VERIFY(row(finishId)->findChild<QLineEdit *>("teamWaitingFinishSummary"));
+    row(finishId)->findChild<QLineEdit *>("teamWaitingFinishSummary")->setText("Shipped 0.43");
+    row(finishId)->findChild<QPushButton *>("teamWaitingFinishAction")->click();
+    QTRY_COMPARE(calls(script(), "finish").size(), 1);
+    QCOMPARE(calls(script(), "finish").first()["summary"].toString(), QStringLiteral("Shipped 0.43"));
+    QTRY_VERIFY(!row(finishId)); leave(finishId);
+    QCOMPARE(answered, (QStringList{reportId, heldId, retryId, finishId}));
 }
 
 // U29 (owner, 2026-10-31: an addition waited for the owner and could be
@@ -2229,8 +2328,9 @@ void TestTeamsUiWaiting::waitingBannerAnswersInPlaceAndWithdrawsTheNotice()
         return nullptr;
     };
     QTRY_VERIFY(bannerRow(permission) && bannerRow(held));
-    QCOMPARE(bannerRow(held)->findChild<QPushButton *>("teamWaitingBannerAction")->text(), QStringLiteral("Open team"));
-    QVERIFY(!bannerRow(held)->findChild<QToolButton *>("teamWaitingBannerOpen"));
+    // Task 116: a held task answers in its row too (Release), like the permission.
+    QCOMPARE(bannerRow(held)->findChild<QPushButton *>("teamWaitingBannerAction")->text(), QStringLiteral("Answer"));
+    QVERIFY(bannerRow(held)->findChild<QToolButton *>("teamWaitingBannerOpen"));
     auto *answer = bannerRow(permission)->findChild<QPushButton *>("teamWaitingBannerAction");
     QCOMPARE(answer->text(), QStringLiteral("Answer"));
     QVERIFY(bannerRow(permission)->findChild<QToolButton *>("teamWaitingBannerOpen"));
@@ -2481,6 +2581,129 @@ void TestTeamsUiWaiting::waitingToolOffersAreAnsweredInPlace()
     QTRY_COMPARE(answered, (QStringList{"tools/a1", "tools/b2"}));
 }
 
+// Task 95: the lead stalled while its decisions wait. The team bar says so
+// and opens the lead's session; the owner is notified once per round, by one
+// notice, never by both lists.
+void TestTeamsUiWaiting::aStalledLeadShowsOnTheTeamBarAndNotifiesEachRound()
+{
+    auto team = phasedTeam();
+    const auto stall = [](int round) {
+        return QJsonObject{{"kind", "lead_stalled"}, {"member", "Architect"}, {"member_id", "lead"}, {"since", 1792866600.0},
+                           {"minutes", 42}, {"reason", "rejected_tool"}, {"items", 3}, {"members", 2}, {"round", round},
+                           {"summary", "The lead stalled (a refused tool call ended its turn): 3 decisions wait for it, the oldest 42 min, 2 members blocked"}};
+    };
+    team["attention"] = QJsonArray{stall(1)};
+    setTeam(team);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(live);
+    QStringList opened;
+    workspace.openSession = [&opened](const QString &host, const QString &session) { opened << host + QLatin1Char('|') + session; };
+    workspace.resize(1300, 900); workspace.show();
+    controller.refresh(); workspace.showTeam("team-1");
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamHeaderLeadStalled"));
+    auto *bar = workspace.findChild<QPushButton *>("teamHeaderLeadStalled");
+    QCOMPARE(bar->text(), QStringLiteral("Lead stalled: 3 decisions wait"));
+    QVERIFY(bar->toolTip().contains(QStringLiteral("a refused tool call ended its turn")));
+    bar->click();
+    QCOMPARE(opened, QStringList{QStringLiteral("|claude/checkout/lead")});
+    QTRY_VERIFY(workspace.findChild<QPushButton *>("teamAttentionOpenLead"));
+    workspace.findChild<QPushButton *>("teamAttentionOpenLead")->click();
+    QCOMPARE(opened.size(), 2);
+    shot(&workspace, "task95-lead-stalled");
+
+    // One notice per round: the same round again raises nothing, the next one does.
+    TeamAttentionNotices notices;
+    const auto first = notices.observe({Teams::parse(team)});
+    QCOMPARE(first.raised.size(), 1);
+    QVERIFY(first.raised[0].body.startsWith(QStringLiteral("The lead stalled")));
+    QVERIFY(notices.observe({Teams::parse(team)}).raised.isEmpty());
+    auto next = team; next["attention"] = QJsonArray{stall(2)};
+    const auto second = notices.observe({Teams::parse(next)});
+    QCOMPARE(second.raised.size(), 1); QCOMPARE(second.cleared.size(), 1);
+    // Waiting for you lists the same round: the team's notice covers it.
+    const TeamWaitingNotices::Item waiting{QStringLiteral("team-1/lead_stalled/Architect-2"), QStringLiteral("team-1"),
+                                           QStringLiteral("Checkout redesign"), QStringLiteral("lead_stalled"), QStringLiteral("The lead stalled")};
+    QVERIFY(TeamWaitingNotices::covered({Teams::parse(next)}, waiting));
+    QVERIFY(!TeamWaitingNotices::covered({Teams::parse(team)}, waiting));
+    QCOMPARE(TeamWaitingPage::kindLabel(QStringLiteral("lead_stalled")), QStringLiteral("Lead stalled"));
+    // The lead moved: the bar clears.
+    team["attention"] = QJsonArray{};
+    setTeam(team);
+    QTRY_VERIFY(([&] { controller.refresh(); return !workspace.findChild<QPushButton *>("teamHeaderLeadStalled"); })());
+}
+
+// Task 97: what Zerus answered safely while the owner was away waits under
+// Deferred with its exact text; Allow, Deny or an answer becomes one message
+// (hgs team answer-deferred), with no team to read first.
+void TestTeamsUiWaiting::deferredRequestsAreAnsweredUnderDeferred()
+{
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    setTeam(answerTeam());
+    const QJsonArray items{
+        QJsonObject{{"id", "deferred/ab12"}, {"team", "team-1"}, {"team_name", "Checkout redesign"}, {"kind", "deferred"},
+                    {"title", "Deferred permission of Backend: Bash: cargo test --locked"}, {"since", now - 60}, {"action", "answer_deferred"},
+                    {"deferred", "ab12"}, {"request", "permission"}, {"text", "Bash: cargo test --locked"}, {"session", "codex/x/dev"},
+                    {"outcome", "Zerus denied it for now"}, {"questions", QJsonArray{}}},
+        QJsonObject{{"id", "deferred/cd34"}, {"team", ""}, {"team_name", "claude/p/solo"}, {"kind", "deferred"},
+                    {"title", "Deferred question of claude/p/solo: Which storage?"}, {"since", now - 30}, {"action", "answer_deferred"},
+                    {"deferred", "cd34"}, {"request", "question"}, {"text", "Which storage?"}, {"session", "claude/p/solo"},
+                    {"outcome", "Zerus chose Postgres (Recommended) for now"},
+                    {"questions", QJsonArray{QJsonObject{{"id", "q"}, {"question", "Which storage?"},
+                        {"options", QJsonArray{QJsonObject{{"id", "a"}, {"label", "SQLite"}}, QJsonObject{{"id", "b"}, {"label", "Postgres (Recommended)"}}}}}}}},
+        QJsonObject{{"id", "team-1/phase_draft/3"}, {"team", "team-1"}, {"team_name", "Checkout redesign"}, {"kind", "phase_draft"},
+                    {"title", "Phase 3 draft waits"}, {"since", now - 10}, {"action", "approve_phase"}, {"phase", 3}}};
+    QVERIFY(writeWaiting(script() + ".waiting", items));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamWaitingPage page(&controller);
+    QStringList answered;
+    page.answered = [&](const TeamWaitingPage::Item &item) { answered << item.id; };
+    page.resize(900, 900); page.show();
+    const auto row = [&](const QString &id) -> QFrame * {
+        for (auto *frame : page.findChildren<QFrame *>("teamWaitingRow")) if (frame->property("itemId") == id) return frame;
+        return nullptr;
+    };
+    QTRY_VERIFY(row("deferred/ab12") && row("deferred/cd34") && row("team-1/phase_draft/3"));
+    QVERIFY(page.findChild<QLabel *>("teamWaitingDeferredHead"));
+    QCOMPARE(row("deferred/ab12")->findChild<QLabel *>("teamWaitingKind")->text(), QStringLiteral("Deferred"));
+    // Deferred comes after everything else.
+    const auto rows = page.findChildren<QFrame *>("teamWaitingRow");
+    QCOMPARE(rows.first()->property("itemId").toString(), QStringLiteral("team-1/phase_draft/3"));
+    const int statusReads = calls(script(), "status").size();
+    for (const auto &id : {"deferred/ab12", "deferred/cd34"}) row(id)->findChild<QPushButton *>("teamWaitingAnswerToggle")->click();
+    QTRY_VERIFY(row("deferred/ab12")->findChild<QFrame *>("teamWaitingDeferred") && row("deferred/cd34")->findChild<QFrame *>("teamWaitingDeferred"));
+    auto *permission = row("deferred/ab12")->findChild<QFrame *>("teamWaitingDeferred");
+    QCOMPARE(permission->findChild<QLabel *>("teamWaitingDeferredText")->text(), QStringLiteral("Bash: cargo test --locked"));
+    QCOMPARE(permission->findChild<QLabel *>("teamWaitingDeferredOutcome")->text(), QStringLiteral("Zerus denied it for now"));
+    QVERIFY(permission->findChild<QPushButton *>("teamWaitingDeferredAllow") && permission->findChild<QPushButton *>("teamWaitingDeferredDeny"));
+    QVERIFY(!row("deferred/cd34")->findChild<QPushButton *>("teamWaitingDeferredAllow"));
+    for (auto *label : page.findChildren<QLabel *>()) QVERIFY2(!label->text().contains(QStringLiteral(" · ")), qPrintable(label->text()));
+    shot(&page, "task97-deferred");
+    // Allow: one owner operation, never a team read or a replayed tool.
+    permission->findChild<QPushButton *>("teamWaitingDeferredAllow")->click();
+    QTRY_COMPARE(calls(script(), "answer-deferred").size(), 1);
+    auto sent = calls(script(), "answer-deferred").first();
+    QCOMPARE(sent["id"].toString(), QStringLiteral("ab12"));
+    QCOMPARE(sent["decision"].toString(), QStringLiteral("allow"));
+    QCOMPARE(sent["by"].toString(), QStringLiteral("human"));
+    QTRY_VERIFY(!row("deferred/ab12"));
+    QVERIFY(writeWaiting(script() + ".waiting", QJsonArray{items[1], items[2]}));
+    // A question: an option is the owner's answer in words.
+    QPushButton *sqlite = nullptr;
+    for (auto *pick : row("deferred/cd34")->findChildren<QPushButton *>("teamWaitingDeferredOption")) if (pick->text() == QStringLiteral("SQLite")) sqlite = pick;
+    QVERIFY(sqlite);
+    sqlite->click();
+    QTRY_COMPARE(calls(script(), "answer-deferred").size(), 2);
+    sent = calls(script(), "answer-deferred").at(1);
+    QCOMPARE((QStringList{sent["id"].toString(), sent["decision"].toString(), sent["text"].toString()}),
+             (QStringList{"cd34", "answer", "SQLite"}));
+    QTRY_COMPARE(answered, (QStringList{"deferred/ab12", "deferred/cd34"}));
+    QCOMPARE(calls(script(), "status").size(), statusReads);
+}
+
 void TestTeamsUiWaiting::phaseCheckCardShowsWarningAndSendsExplicitOverride()
 {
     auto source = phasedTeam();
@@ -2524,4 +2747,169 @@ void TestTeamsUiWaiting::phaseCheckCardShowsWarningAndSendsExplicitOverride()
 }
 
 QTEST_MAIN(TestTeamsUiWaiting)
+// Task 109: a drive under its threshold waits for the owner as no team's item;
+// its row opens Settings > Build folders and its notice names the drive.
+void TestTeamsUiWaiting::aLowDriveOpensBuildFoldersAndItsNoticeNamesTheDrive()
+{
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    const QJsonObject low{{"id", "disk/D:"}, {"team", ""}, {"team_name", "D:"}, {"kind", "disk_low"}, {"since", now - 60},
+                          {"title", "Drive D: has 12.0 GB free, under 90.0 GB; Zerus's build folders there hold 31.0 GB"}, {"action", "open_disk"}};
+    QVERIFY(writeWaiting(script() + ".waiting", QJsonArray{low}));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamWaitingPage page(&controller);
+    int opened = 0;
+    page.openDisk = [&] { ++opened; };
+    page.resize(980, 520); page.show();
+    WAIT_VERIFY(page.findChild<QPushButton *>("teamWaitingOpenDisk"));
+    QCOMPARE(page.findChild<QPushButton *>("teamWaitingOpenDisk")->text(), QStringLiteral("Open Build folders"));
+    page.findChild<QPushButton *>("teamWaitingOpenDisk")->click();
+    QCOMPARE(opened, 1);
+    TeamWaitingNotices notices;
+    const auto fresh = notices.observe({{"disk/D:", "", "D:", "disk_low", low["title"].toString()}}, {}, true);
+    QCOMPARE(fresh.size(), 1);
+    QCOMPARE(fresh[0].title, QStringLiteral("Low disk space on D:"));
+    QCOMPARE(fresh[0].body, low["title"].toString());
+}
+
+// Task 112: a paused team waits for the owner's Resume team in Waiting for
+// you, saying since when and by whom; it is a state the owner set, so it is
+// listed but never notified, and Resume team resumes the team.
+void TestTeamsUiWaiting::aPausedTeamWaitsWithResumeTeamAndIsNeverNotified()
+{
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    const QJsonObject paused{{"id", "team-1/team_paused/1800000000"}, {"team", "team-1"}, {"team_name", "Checkout"}, {"kind", "team_paused"},
+                             {"since", now - 600}, {"title", "Team paused since 09:12 by You: members get no tasks"}, {"action", "resume_team"},
+                             {"paused_by", "You"}, {"paused_at", now - 600}};
+    QVERIFY(writeWaiting(script() + ".waiting", QJsonArray{paused}));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamWaitingPage page(&controller);
+    page.resize(980, 520); page.show();
+    WAIT_VERIFY(page.findChild<QPushButton *>("teamWaitingResumeTeam"));
+    QCOMPARE(TeamWaitingPage::kindLabel("team_paused"), QStringLiteral("Team paused"));
+    page.findChild<QPushButton *>("teamWaitingResumeTeam")->click();
+    QTRY_COMPARE(calls(script(), "resume").size(), 1);
+    QCOMPARE(calls(script(), "resume").first()["team"].toString(), QStringLiteral("team-1"));
+    TeamWaitingNotices notices;
+    QVERIFY(notices.observe({{paused["id"].toString(), "team-1", "Checkout", "team_paused", paused["title"].toString()}}, {}, true).isEmpty());
+    QVERIFY(notices.known(paused["id"].toString()));
+    // Resume team decides it: the item leaves at once.
+    QList<TeamWaitingPage::Item> all{TeamWaitingPage::parse(paused)};
+    QCOMPARE(TeamWaitingFeed::decidedIds(all, "team-1", "resume", {}), QStringList{paused["id"].toString()});
+    QVERIFY(TeamWaitingFeed::decidedIds(all, "team-2", "resume", {}).isEmpty());
+}
+
 #include "test_teamsui_waiting.moc"
+
+// Task 107 (owner, 2026-11-06: proposals already allowed stayed in "4 wait
+// for you" with Answer for minutes): hgs's receipt of a decision takes the
+// card out of the lead's cards, the banner, its count and its notification
+// at once, before any read; a read already in flight, which predates the
+// decision, never shows it again; a refused decision keeps it with why.
+void TestTeamsUiWaiting::aConfirmedDecisionLeavesWaitingAtOnceAndARefusedOneStays()
+{
+    Settings::remove(TeamWaitingNotices::kSetting);
+    const auto restore = qScopeGuard([this] {
+        Settings::remove(TeamWaitingNotices::kSetting);
+        QFile::remove(script() + ".waitingslow");
+        QFile::remove(script() + ".proposalrefuse");
+    });
+    QFile::remove(script() + ".waitingslow");
+    QFile::remove(script() + ".proposalrefuse");
+    const double now = double(QDateTime::currentSecsSinceEpoch());
+    const auto team = answerTeam();
+    setTeam(team);
+    const auto items = answerItems(now);
+    QVERIFY(writeWaiting(script() + ".waiting", items));
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamWaitingFeed feed(&controller);
+    feed.setInterval(600000);   // no poll: every read here is asked for
+    QSignalSpy withdrawn(&feed, &TeamWaitingFeed::withdrawn), dropped(&feed, &TeamWaitingFeed::dropped);
+    feed.setActive(true);
+    QTRY_COMPARE(feed.items().size(), 7);
+    const QString p1 = "team-1/owner_word_asked/proposal-p1", p2 = "team-1/owner_word_asked/proposal-p2";
+    const auto listed = [&feed](const QString &id) {
+        return std::any_of(feed.items().cbegin(), feed.items().cend(), [&id](const TeamWaitingPage::Item &item) { return item.id == id; });
+    };
+    // The lead's cards, as SessionsWindow wires them.
+    const auto parsed = Teams::parse(team);
+    TeamProposalCards cards;
+    cards.decide = [&controller](const QJsonObject &input, const TeamProposalCards::Done &done) { controller.act("decide-proposal", input, done); };
+    cards.setTeam(&parsed);
+    QCOMPARE(cards.count(), 2);
+    cards.resize(700, 500); cards.show();
+    const auto card = [&cards](const QString &proposal) -> QFrame * {
+        for (auto *frame : cards.findChildren<QFrame *>("teamProposalCard")) if (frame->isVisible() && frame->property("proposal") == proposal) return frame;
+        return nullptr;
+    };
+    QTRY_VERIFY(card("p1") && card("p2"));
+    // A read that predates the decision is still on its way, listing p1.
+    QVERIFY(FakeCli::replace(script() + ".waitingslow", "2"));
+    feed.refresh();
+    // The store takes the decision: later reads no longer list p1.
+    QJsonArray after = items; after.removeAt(0);
+    QVERIFY(writeWaiting(script() + ".waiting", after));
+    card("p1")->findChild<QPushButton *>("teamProposalAllow")->click();
+    QTRY_COMPARE(calls(script(), "decide-proposal").size(), 1);
+    // At once, before any read answered: out of the cards, the banner and its count.
+    QTRY_VERIFY(!listed(p1));
+    const auto seen = [&] {
+        QStringList out;
+        for (const auto &signal : std::as_const(dropped)) out << signal.first().toString();
+        for (const auto &call : calls(script(), "decide-proposal")) out << QStringLiteral("decide:") + call["proposal"].toString();
+        return out.join(QLatin1Char(' '));
+    };
+    QVERIFY2(feed.items().size() == 6 && feed.total() == 6, qPrintable(seen()));
+    QVERIFY2(dropped.count() == 1 && dropped.first().first().toString() == p1, qPrintable(seen()));
+    QCOMPARE(withdrawn.count(), 1);
+    QTRY_VERIFY(!card("p1"));
+    QCOMPARE(cards.count(), 1);
+    // An older team read still listing the proposal does not bring the card back.
+    cards.setTeam(&parsed);
+    QCOMPARE(cards.count(), 1);
+    QVERIFY(!card("p1"));
+    // The read in flight lands and the read after it: p1 never comes back.
+    QFile::remove(script() + ".waitingslow");
+    QElapsedTimer watch; watch.start();
+    while (watch.elapsed() < 3500) { QTest::qWait(100); QVERIFY(!listed(p1)); }
+    QCOMPARE(feed.items().size(), 6);
+    // Refused: p2 stays, on its card with the reason, and in the banner.
+    QVERIFY(FakeCli::replace(script() + ".proposalrefuse", "hgs: The plan changed since the warning"));
+    card("p2")->findChild<QLineEdit *>("teamProposalDenyReason")->setText("Not now");
+    card("p2")->findChild<QPushButton *>("teamProposalDeny")->click();
+    QTRY_VERIFY(card("p2") && card("p2")->findChild<QLabel *>() && [&] {
+        for (auto *label : card("p2")->findChildren<QLabel *>()) if (label->text().contains("The plan changed since the warning")) return true;
+        return false;
+    }());
+    QTest::qWait(300);
+    QVERIFY(listed(p2));
+    QCOMPARE(feed.items().size(), 6);
+    QCOMPARE(dropped.count(), 1);
+    // Task 111: hgs withdrew p2 (it can no longer apply): Allow is refused
+    // with that reason and the card, the banner item and its notice leave at
+    // once, as a confirmed decision's do.
+    QVERIFY(FakeCli::replace(script() + ".proposalrefuse",
+        "hgs: This proposal can no longer apply (Phase 2 is closed (done); propose the work in a new phase with extend instead); it was withdrawn and the lead is told why"));
+    QTRY_VERIFY(card("p2") && card("p2")->findChild<QPushButton *>("teamProposalAllow")->isEnabled());
+    card("p2")->findChild<QPushButton *>("teamProposalAllow")->click();
+    QTRY_VERIFY(!card("p2"));
+    QTRY_COMPARE(dropped.count(), 2);
+    QCOMPARE(dropped.last().first().toString(), p2);
+    QVERIFY(!listed(p2));
+    QCOMPARE(feed.items().size(), 5);
+    QVERIFY(TeamController::withdrawn("hgs: This proposal can no longer apply (x); it was withdrawn and the lead is told why"));
+    QVERIFY(!TeamController::withdrawn("hgs: The plan changed since the warning"));
+    // What else a confirmed change decides: a phase by its number, a report or
+    // a held task by its id; another team's or a change that names none, nothing.
+    QList<TeamWaitingPage::Item> all;
+    for (const auto &value : items) all << TeamWaitingPage::parse(value.toObject());
+    QCOMPARE(TeamWaitingFeed::decidedIds(all, "team-1", "approve-phase", {{"phase", 2}}), QStringList{"team-1/phase_draft/2"});
+    QCOMPARE(TeamWaitingFeed::decidedIds(all, "team-1", "accept", {{"task", 1}}), QStringList{"team-1/report_escalated/1"});
+    QCOMPARE(TeamWaitingFeed::decidedIds(all, "team-1", "release", {{"task", 2}}), QStringList{"team-1/task_waits_owner/2"});
+    QCOMPARE(TeamWaitingFeed::decidedIds(all, "team-1", "decide-proposal", {{"proposal", "p2"}}), QStringList{p2});
+    QVERIFY(TeamWaitingFeed::decidedIds(all, "team-2", "decide-proposal", {{"proposal", "p2"}}).isEmpty());
+    QVERIFY(TeamWaitingFeed::decidedIds(all, "team-1", "hold", {{"task", 2}}).isEmpty());
+    QVERIFY(TeamWaitingFeed::decidedIds(all, "team-1", "approve-phase", {{"phase", 9}}).isEmpty());
+}

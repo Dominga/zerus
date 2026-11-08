@@ -134,6 +134,14 @@ pub enum TeamAction {
     AcceptPhase {
         phase: u64,
     },
+    /// Task #58: switches one phase between free and standard planning
+    /// (`hgs team phase-mode`); the owner confirms it first.
+    PhaseMode {
+        phase: u64,
+        mode: String,
+        #[serde(default)]
+        reason: String,
+    },
     /// Task 11: sends a phase back to the lead with the owner's comment.
     SendBackPhase {
         phase: u64,
@@ -146,6 +154,46 @@ pub enum TeamAction {
         allow: bool,
         #[serde(default)]
         reason: String,
+    },
+    /// Task 97: the owner's answer to a request the owner queue deferred:
+    /// `allow` or `deny` a permission, or `answer` with the owner's text. The
+    /// session gets one message; the tool is never replayed.
+    AnswerDeferred {
+        id: String,
+        decision: String,
+        #[serde(default)]
+        text: String,
+    },
+    /// Task 108: the build folders Zerus holds on this computer: `list` (the
+    /// Disk view), `clean` (a dry run, or Clean now after a confirmation),
+    /// `policy` (the owner's cleanup policy) or `forget` (a folder the owner
+    /// reviewed). No team's.
+    Disk {
+        action: String,
+        #[serde(default)]
+        scope: String,
+        #[serde(default)]
+        dry_run: bool,
+        #[serde(default)]
+        policy: Value,
+        #[serde(default)]
+        paths: Vec<String>,
+        #[serde(default)]
+        path: String,
+        #[serde(default)]
+        refresh: bool,
+        /// Task 109: the open Disk view's live read: measures a few folders.
+        #[serde(default)]
+        measure: bool,
+    },
+    /// Task 88: the team's test configuration for its Tests settings:
+    /// `get` reads it, `check` checks a candidate override (`tests`, an
+    /// object shaped like .zerus/tests.toml, or null); neither writes. The
+    /// owner's Save is `settings` with `tests`.
+    TestConfig {
+        action: String,
+        #[serde(default)]
+        tests: Value,
     },
     /// Task 11: releases a task the owner held.
     Release {
@@ -388,8 +436,12 @@ impl TeamAction {
             Self::Answer { .. } => "answer",
             Self::AddToPhase { .. } => "add-to-phase",
             Self::AcceptPhase { .. } => "accept-phase",
+            Self::PhaseMode { .. } => "phase-mode",
             Self::SendBackPhase { .. } => "send-back-phase",
             Self::DecideTool { .. } => "decide-tool",
+            Self::AnswerDeferred { .. } => "answer-deferred",
+            Self::Disk { .. } => "disk",
+            Self::TestConfig { .. } => "test-config",
             Self::Release { .. } => "release",
             Self::Retry { .. } => "retry",
             Self::Finish { .. } => "finish",
@@ -433,6 +485,8 @@ impl TeamAction {
             self,
             Self::DraftStart { .. }
                 | Self::DecideTool { .. }
+                | Self::AnswerDeferred { .. }
+                | Self::Disk { .. }
                 | Self::CatalogPropose { .. }
                 | Self::CatalogDecide { .. }
                 | Self::CatalogApply
@@ -558,6 +612,15 @@ impl TeamAction {
                 }
                 Ok(())
             }
+            Self::PhaseMode { phase, mode, reason } => {
+                if *phase == 0 || *phase > u64::from(u32::MAX) {
+                    return Err("Not a phase number.".into());
+                }
+                if !matches!(mode.as_str(), "free" | "standard") {
+                    return Err("A plan mode is standard or free.".into());
+                }
+                plain(reason, "A reason", 2000)
+            }
             Self::SendBackPhase { phase, comment } => {
                 if *phase == 0 {
                     return Err("Not a phase number.".into());
@@ -570,6 +633,49 @@ impl TeamAction {
             Self::DecideTool { offer, reason, .. } => {
                 word(offer, "tool offer")?;
                 plain(reason, "A reason", 2000)
+            }
+            Self::TestConfig { action, tests } => {
+                if !matches!(action.as_str(), "get" | "check") {
+                    return Err("Read the test configuration or check an override.".into());
+                }
+                if !(tests.is_null() || tests.is_object()) {
+                    return Err("The tests override is an object shaped like .zerus/tests.toml.".into());
+                }
+                if tests.to_string().len() > 64 * 1024 {
+                    return Err("The tests override has at most 64 KiB.".into());
+                }
+                Ok(())
+            }
+            Self::Disk { action, scope, paths, path, policy, .. } => {
+                if !matches!(action.as_str(), "list" | "clean" | "policy" | "forget") {
+                    return Err("List, clean, set the policy or forget.".into());
+                }
+                if !matches!(scope.as_str(), "" | "policy" | "all") {
+                    return Err("Clean what the policy removes, or every folder of Zerus's.".into());
+                }
+                if action == "policy" && !policy.is_object() {
+                    return Err("The policy is missing.".into());
+                }
+                if action == "forget" && path.trim().is_empty() {
+                    return Err("Name the folder.".into());
+                }
+                if paths.len() > 500 {
+                    return Err("At most 500 folders at once.".into());
+                }
+                for folder in paths.iter().chain(std::iter::once(path)) {
+                    plain(folder, "A folder", 4096)?;
+                }
+                Ok(())
+            }
+            Self::AnswerDeferred { id, decision, text } => {
+                word(id, "deferred request")?;
+                if !matches!(decision.as_str(), "allow" | "deny" | "answer") {
+                    return Err("Allow, deny or answer it.".into());
+                }
+                if decision == "answer" && text.trim().is_empty() {
+                    return Err("Write the answer.".into());
+                }
+                plain(text, "An answer", 4000)
             }
             Self::Release { task: id } | Self::Retry { task: id } => task(*id),
             Self::DecideProposal {
@@ -793,6 +899,13 @@ impl TeamAction {
                 }
             }
             Self::AcceptPhase { phase } => put("phase", json!(phase)),
+            Self::PhaseMode { phase, mode, reason } => {
+                put("phase", json!(phase));
+                put("mode", json!(mode));
+                if !reason.trim().is_empty() {
+                    put("reason", json!(reason.trim()));
+                }
+            }
             Self::SendBackPhase { phase, comment } => {
                 put("phase", json!(phase));
                 put("comment", json!(comment));
@@ -806,6 +919,43 @@ impl TeamAction {
                 put("allow", json!(allow));
                 if !allow && !reason.is_empty() {
                     put("reason", json!(reason));
+                }
+            }
+            Self::TestConfig { action, tests } => {
+                put("action", json!(action));
+                if !tests.is_null() {
+                    put("tests", tests.clone());
+                }
+            }
+            Self::Disk { action, scope, dry_run, policy, paths, path, refresh, measure } => {
+                put("action", json!(action));
+                if !scope.is_empty() {
+                    put("scope", json!(scope));
+                }
+                if action == "clean" {
+                    put("dry_run", json!(dry_run));
+                }
+                if policy.is_object() {
+                    put("policy", policy.clone());
+                }
+                if !paths.is_empty() {
+                    put("paths", json!(paths));
+                }
+                if !path.is_empty() {
+                    put("path", json!(path));
+                }
+                if *refresh {
+                    put("refresh", json!(true));
+                }
+                if *measure {
+                    put("measure", json!(true));
+                }
+            }
+            Self::AnswerDeferred { id, decision, text } => {
+                put("id", json!(id));
+                put("decision", json!(decision));
+                if !text.trim().is_empty() {
+                    put("text", json!(text.trim()));
                 }
             }
             Self::Release { task } | Self::Retry { task } => put("task", json!(task)),
@@ -941,6 +1091,17 @@ impl TeamAction {
                 ),
                 "Stop team",
             )),
+            // Task 108: Clean now removes folders; a dry run and the rest ask nothing.
+            Self::Disk { action, dry_run: false, scope, .. } if action == "clean" => Some(ask(
+                "diskCleanConfirm",
+                "Remove build folders?",
+                if scope == "all" {
+                    "Remove every build folder Zerus holds on this computer? Only Zerus's own build output goes; a folder in use, or one that is not Zerus's, is kept. Builds make them again.".to_owned()
+                } else {
+                    "Remove the build folders the cleanup policy marks now? Only Zerus's own build output goes; a folder in use, or one that is not Zerus's, is kept. Builds make them again.".to_owned()
+                },
+                "Remove",
+            )),
             Self::Discard => Some(ask(
                 "teamDiscardConfirm",
                 "Discard plan?",
@@ -1002,6 +1163,23 @@ impl TeamAction {
                     "Approve and run",
                 )
             }),
+            // Task #58: Qt's teamPhaseModeDialog.
+            Self::PhaseMode { phase, mode, .. } if mode == "free" => Some(ask(
+                "teamPhaseModeConfirm",
+                "Switch to free planning?",
+                format!(
+                    "Switch phase {phase} to free planning? It stays open when its tasks are accepted: new tasks join it and run as they are added. The other phases keep their modes."
+                ),
+                "Switch to free",
+            )),
+            Self::PhaseMode { phase, .. } => Some(ask(
+                "teamPhaseModeConfirm",
+                "Switch to standard planning?",
+                format!(
+                    "Switch phase {phase} to standard planning? Its tasks keep their state and run on; new work is planned in a new phase, approved by you. The other phases keep their modes."
+                ),
+                "Switch to standard",
+            )),
             Self::CatalogApply => Some(ask(
                 "teamCatalogApplyConfirm",
                 "Apply the catalog draft?",

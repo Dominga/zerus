@@ -3,7 +3,7 @@ import * as bridge from "../bridge";
 import type { ProcessesView, ProcessTarget } from "../types";
 import type { Session } from "../ui/sessions/types";
 import type { MenuEntry } from "./ui";
-import { tr } from "../i18n";
+import { tr, trNoop } from "../i18n";
 
 // The Processes tab's view (Qt's ProcessView), held by the Rust hub
 // (src-tauri processes.rs) and sent with the batches when it changes. The
@@ -69,6 +69,14 @@ export function processTarget(s: Session, facts: { online: boolean; generation: 
     archive_id: s.archiveId ?? null, machine: s.rawMachine, online: facts.online, live: !recorded, generation: facts.generation,
   };
 }
+
+/**
+ * The hub's fixed summaries (core process_view.rs), shown translated; a count
+ * summary carries numbers and stays as the hub words it. "Reading processes…"
+ * shows until the followed session's first inventory comes (task 77).
+ */
+const FIXED_SUMMARIES = [trNoop("No shell commands recorded yet"), trNoop("Reading processes…")] as const;
+export const summaryText = (summary: string) => (FIXED_SUMMARIES as readonly string[]).includes(summary) ? tr(summary) : summary;
 
 /** The session tab's Processes entry (SessionsWindow.cpp:1330, 3786-3787): shown while Settings > Processes is on, with the hub's count. */
 export const processesTab = (enabled: boolean, count: number) =>

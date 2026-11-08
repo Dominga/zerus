@@ -2211,11 +2211,11 @@ void TestTeamsUiWorkspace::aNarrowToolbarKeepsOnlyItsIcons()
     QVERIFY(!workspace.findChild<QWidget *>("teamWorkspaceHeatWide")->isVisible());
     QCOMPARE(heatMenu->toolTip(), QStringLiteral("Heat: Off"));
     QStringList choices; for (auto *action : heatMenu->menu()->actions()) choices << action->text();
-    QCOMPARE(choices, (QStringList{"Off", "Time lost", "Tokens"}));
+    QCOMPARE(choices, (QStringList{"Off", "Lateness", "Tokens"}));
     Settings::remove("teams/heat/team-1");
     heatMenu->menu()->actions().at(1)->trigger();
     QCOMPARE(TeamUi::heatMode("team-1"), QStringLiteral("time"));
-    QTRY_COMPARE(workspace.findChild<QPushButton *>("teamWorkspaceHeatMenu")->toolTip(), QStringLiteral("Heat: Time lost"));
+    QTRY_COMPARE(workspace.findChild<QPushButton *>("teamWorkspaceHeatMenu")->toolTip(), QStringLiteral("Heat: Lateness"));
     workspace.findChild<QPushButton *>("teamWorkspaceHeatMenu")->menu()->actions().at(0)->trigger();
     QCOMPARE(TeamUi::heatMode("team-1"), QStringLiteral("off"));
     QTRY_COMPARE(segment("teamWorkspaceFilter", "problems")->text(), QStringLiteral("Problems"));
@@ -2223,6 +2223,10 @@ void TestTeamsUiWorkspace::aNarrowToolbarKeepsOnlyItsIcons()
     QVERIFY(split);
     split->setSizes({430, 1110});
     QTRY_VERIFY(segment("teamWorkspaceFilter", "problems")->text().isEmpty());
+    QTRY_VERIFY(workspace.findChild<QLabel *>("teamOriginLegend") && !workspace.findChild<QLabel *>("teamOriginLegend")->isVisible());
+    QVERIFY(workspace.findChild<QPushButton *>("teamOpenArchive")->isVisible());
+    for (const auto *view : {"graph", "layers"})
+        QVERIFY(segment("teamWorkspaceView", view)->toolTip().contains(QStringLiteral("Dashed: spawned from")));
     QVERIFY(segment("teamWorkspaceView", "graph")->text().isEmpty() && !segment("teamWorkspaceView", "graph")->icon().isNull());
     QVERIFY(segment("teamWorkspaceView", "graph")->toolTip().startsWith(QStringLiteral("Graph\n")));
     QCOMPARE(segment("teamWorkspaceView", "graph")->accessibleName(), QStringLiteral("Graph"));
@@ -2239,6 +2243,9 @@ void TestTeamsUiWorkspace::aNarrowToolbarKeepsOnlyItsIcons()
     QVERIFY(segment("teamWorkspaceView", "graph")->text().isEmpty());
     shot(bar(), "team-toolbar-wide-dark");
     lightPalette(); workspace.setTheme(false); QTest::qWait(200); shot(bar(), "team-toolbar-wide-light");
+    workspace.resize(2000, workspace.height());
+    split->setSizes({1700, 300});
+    QTRY_VERIFY(workspace.findChild<QLabel *>("teamOriginLegend") && workspace.findChild<QLabel *>("teamOriginLegend")->isVisible());
     darkPalette(); workspace.setTheme(true);
     Settings::remove("workspace/skin");
 }

@@ -20,6 +20,7 @@ const TOPICS: &[(&str, &str)] = &[
     ("team-safe", include_str!("agent_guide/team-safe.md")),
     ("team-propose", include_str!("agent_guide/team-propose.md")),
     ("team-broker", include_str!("agent_guide/team-broker.md")),
+    ("team-cpp", include_str!("agent_guide/team-cpp.md")),
     ("run", include_str!("agent_guide/run.md")),
     // WhiteWh fork (U62): the project's affected tests.
     ("tests", include_str!("agent_guide/tests.md")),
@@ -28,7 +29,7 @@ const TOPICS: &[(&str, &str)] = &[
     ("stop", include_str!("agent_guide/stop.md")),
     ("tasks", include_str!("agent_guide/tasks.md")),
 ];
-const USAGE: &str = "usage: hgs guide [send|wait|team|team-tests|team-lead|team-custom|team-draft|team-input|team-tree|team-run|team-safe|team-propose|team-broker|run|tests|designer|launch|stop|tasks]";
+const USAGE: &str = "usage: hgs guide [send|wait|team|team-tests|team-lead|team-custom|team-draft|team-input|team-tree|team-run|team-safe|team-propose|team-broker|team-cpp|run|tests|designer|launch|stop|tasks]";
 
 pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     let text = match args {
@@ -174,6 +175,8 @@ mod tests {
     fn the_lead_protocol_says_every_task_gets_an_estimate() {
         let lead = TOPICS.iter().find(|(name, _)| *name == "team-lead").unwrap().1;
         assert!(lead.contains("Every task gets an estimate"), "{lead}");
+        // Task #60: follow-ups name their origin.
+        assert!(lead.contains("\"origin\":ID") && lead.contains("no dep"), "{lead}");
     }
 
     /// U63 (owner, 2026-10-31): the lead protocol says an accepted phase that
@@ -196,6 +199,8 @@ mod tests {
     fn the_lead_proposes_owner_gates_and_never_asks_for_a_phrase() {
         let lead = TOPICS.iter().find(|(name, _)| *name == "team-lead").unwrap().1;
         assert!(lead.contains("Owner gates are cards") && lead.contains("Never ask the owner to type a phrase"), "{lead}");
+        // Task 97: a deferred prompt never stops the lead.
+        assert!(lead.contains("denied and queued for the owner; do everything else"), "{lead}");
         assert!(!lead.contains("owner_word") && !lead.contains("owner's sentence"), "{lead}");
         let propose = TOPICS.iter().find(|(name, _)| *name == "team-propose").unwrap().1;
         assert!(propose.contains("Never ask the owner to type a phrase"), "{propose}");

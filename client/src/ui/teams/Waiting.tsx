@@ -2,13 +2,15 @@ import { For, Match, Show, Switch, createEffect, createSignal, onCleanup, onMoun
 import { tr } from "../../i18n";
 import { Icon } from "../lib/icons";
 import { toast } from "../../store/notices";
+import { orderedRows } from "../../store/catalog";
 import { answeredWaiting, memberRow, showWaiting, teams, waiting } from "../../store/teams";
 import { teamsWaitingOlder } from "../../bridge";
 import { waitingNotices } from "../../store/waitingNotices";
 import { setDetailTab, setPage, setSelectedKey } from "../../store/ui";
+import { openSettings } from "../screens/settings/sections";
 import { ProposalCardList, useModel, windowPort } from "./ProposalCards";
 import {
-  BANNER_ROWS, WaitingAnswer, acceptanceSummary, approves, opensCard, toolOffer, waitingActionLabel, waitingAge,
+  BANNER_ROWS, WaitingAnswer, acceptanceSummary, approves, opensDisk, resumesTeam, deferredRequest, opensCard, splitDeferred, toolOffer, waitingActionLabel, waitingAge,
   waitingCount, waitingFields, waitingKindIcon, waitingKindLabel, type QuestionChoice,
 } from "./decisions";
 import type { TeamWaitingItem } from "../../types";
@@ -32,6 +34,18 @@ export function openTeam(item: TeamWaitingItem) {
   setPage("sessions");
   setSelectedKey(row.key);
   setDetailTab("team");
+}
+
+/** Task 116: a request only a member's Terminal takes (task 98's blocked
+ * composer, a terminal-only permission) opens that session's Terminal, its
+ * home view, in one click from the strip and the page. */
+export function openTerminal(item: TeamWaitingItem) {
+  const session = typeof item.detail?.session === "string" ? item.detail.session : "";
+  const row = session ? orderedRows().find((found) => found.name === session) : undefined;
+  if (!row) { toast(tr("Open Terminal"), tr("That session is not on the session list.")); return; }
+  setPage("sessions");
+  setSelectedKey(row.key);
+  setDetailTab("terminal");
 }
 
 /** Notifies each new item once while Waiting for you is shown. */
@@ -59,7 +73,7 @@ function Answer(props: { item: TeamWaitingItem }) {
   return (
     <div class="team-waiting-answer" onClick={(event) => event.stopPropagation()}>
       <Show when={read().notice}><div class="team-waiting-notice" role="status">{read().notice}</div></Show>
-      <Show when={read().reading && !read().team && props.item.action !== "decide_tool"}><div class="dim">{tr("Reading the team…")}</div></Show>
+      <Show when={read().reading && !read().team && props.item.action !== "decide_tool" && props.item.action !== "answer_deferred"}><div class="dim">{tr("Reading the team…")}</div></Show>
       <Switch>
         <Match when={props.item.action === "decide_proposal" && read().proposals}>
           <ProposalCardList cards={read().proposals!} tick={tick} />
@@ -131,6 +145,41 @@ function Answer(props: { item: TeamWaitingItem }) {
             </div>
           </div>
         </Match>
+        <Match when={props.item.action === "answer_deferred"}>{(() => {
+          const request = deferredRequest(props.item);
+          return (
+            <div class="team-waiting-card">
+              <div class="team-waiting-line dim">{request.session}</div>
+              <code class="team-waiting-command">{request.text}</code>
+              <Show when={request.outcome}><div class="team-waiting-line dim">{request.outcome}</div></Show>
+              <div class="team-waiting-line">{tr("Your answer reaches the session as one message; nothing runs again by itself.")}</div>
+              <Show when={request.permission} fallback={
+                <>
+                  <For each={request.questions}>{(asked) => (
+                    <div class="team-waiting-question" role="group" aria-label={asked.question}>
+                      <div class="team-waiting-line"><b>{asked.question}</b></div>
+                      <div class="team-proposal-answers">
+                        <For each={asked.options}>{(option) => (
+                          <button class="btn small" disabled={off()} onClick={() => void read().answerDeferred("answer", option.label)}>{option.label}</button>
+                        )}</For>
+                      </div>
+                    </div>
+                  )}</For>
+                  <div class="team-proposal-answers">
+                    <input class="field" maxlength={4000} placeholder={tr("Your answer")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
+                    <button class="btn small primary" disabled={off() || !reason().trim()} onClick={() => void read().answerDeferred("answer", reason())}>{tr("Answer")}</button>
+                  </div>
+                </>
+              }>
+                <div class="team-proposal-answers">
+                  <input class="field" maxlength={4000} placeholder={tr("A note for the session (optional)")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
+                  <button class="btn small danger" disabled={off()} onClick={() => void read().answerDeferred("deny", reason())}>{tr("Deny")}</button>
+                  <button class="btn small primary" disabled={off()} onClick={() => void read().answerDeferred("allow", reason())}>{tr("Allow")}</button>
+                </div>
+              </Show>
+            </div>
+          );
+        })()}</Match>
         <Match when={props.item.action === "decide_tool"}>
           <div class="team-waiting-card">
             <div class="team-waiting-line"><b>{offer.head}</b></div>
@@ -142,6 +191,41 @@ function Answer(props: { item: TeamWaitingItem }) {
               <input class="field" maxlength={500} placeholder={tr("Why deny? Zerus remembers it")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
               <button class="btn small danger" disabled={off()} onClick={() => void read().decideTool(false, reason())}>{tr("Deny")}</button>
               <button class="btn small primary" disabled={off() || !offer.canAllow} onClick={() => void read().decideTool(true)}>{offer.allow}</button>
+            </div>
+          </div>
+        </Match>
+        <Match when={props.item.action === "decide_report"}>
+          <div class="team-waiting-card">
+            <div class="team-waiting-line"><b>{props.item.title}</b></div>
+            <div class="team-proposal-answers">
+              <input class="field" maxlength={4000} placeholder={tr("Why reject? The member receives this")} value={reason()} disabled={off()} onInput={(event) => setReason(event.currentTarget.value)} />
+              <button class="btn small danger" disabled={off() || !reason().trim()} onClick={() => void read().rejectReport(reason())}>{tr("Reject")}</button>
+              <button class="btn small primary" disabled={off()} onClick={() => void read().acceptReport()}>{tr("Accept")}</button>
+            </div>
+          </div>
+        </Match>
+        <Match when={props.item.action === "release_task"}>
+          <div class="team-waiting-card">
+            <div class="team-waiting-line"><b>{props.item.title}</b></div>
+            <div class="team-proposal-answers"><span class="grow" />
+              <button class="btn small primary" disabled={off()} onClick={() => void read().release()}>{tr("Release")}</button>
+            </div>
+          </div>
+        </Match>
+        <Match when={props.item.action === "retry_task"}>
+          <div class="team-waiting-card">
+            <div class="team-waiting-line"><b>{props.item.title}</b></div>
+            <div class="team-proposal-answers"><span class="grow" />
+              <button class="btn small primary" disabled={off()} onClick={() => void read().retry()}>{tr("Retry")}</button>
+            </div>
+          </div>
+        </Match>
+        <Match when={props.item.action === "finish"}>
+          <div class="team-waiting-card">
+            <div class="team-waiting-line"><b>{props.item.title}</b></div>
+            <div class="team-proposal-answers">
+              <input class="field" maxlength={4000} placeholder={tr("A summary for the lead")} value={comment()} disabled={off()} onInput={(event) => setComment(event.currentTarget.value)} />
+              <button class="btn small primary" disabled={off() || !comment().trim()} onClick={() => void read().finishTeam(comment())}>{tr("Finish")}</button>
             </div>
           </div>
         </Match>
@@ -187,8 +271,20 @@ function Row(props: { item: TeamWaitingItem; compact?: boolean }) {
         <Show when={opensCard(item().action)}>
           <button class="btn small" classList={{ primary: !open() }} onClick={(event) => { event.stopPropagation(); setOpen(!open()); }}>{open() ? tr("Close") : tr("Answer")}</button>
         </Show>
+        <Show when={item().action === "open_terminal"}>
+          <button class="btn small" data-waiting-terminal onClick={(event) => { event.stopPropagation(); openTerminal(item()); }}>{tr("Open Terminal")}</button>
+        </Show>
         <Show when={item().team}>
           <button class="btn small ghost" onClick={(event) => { event.stopPropagation(); openTeam(item()); }}>{tr("Open team")}</button>
+        </Show>
+        <Show when={resumesTeam(item()) && item().team}>
+          <button class="btn small primary" data-waiting-resume-team onClick={(event) => {
+            event.stopPropagation();
+            void windowPort.send({ computer: "", team: item().team, team_name: item().team_name, action: { kind: "resume" } });
+          }}>{tr("Resume team")}</button>
+        </Show>
+        <Show when={opensDisk(item())}>
+          <button class="btn small" onClick={(event) => { event.stopPropagation(); openSettings("disk"); }}>{tr("Open Build folders")}</button>
         </Show>
       </div>
       <Show when={open()}><Answer item={item()} /></Show>
@@ -221,7 +317,16 @@ export function WaitingPage() {
       <Show when={failure()}><p class="team-waiting-error" role="alert">{failure()}</p></Show>
       <div class="team-waiting-list">
         <Show when={view()} fallback={<p class="dim team-empty">{tr("Reading what waits for you…")}</p>}>
-          <For each={view()!.items} fallback={<p class="dim team-empty">{tr("Nothing waits for you")}</p>}>{(item) => <Row item={item} />}</For>
+          <For each={splitDeferred(view()!.items).waiting} fallback={
+            <Show when={splitDeferred(view()!.items).deferred.length === 0}><p class="dim team-empty">{tr("Nothing waits for you")}</p></Show>
+          }>{(item) => <Row item={item} />}</For>
+          <Show when={splitDeferred(view()!.items).deferred.length > 0}>
+            <section class="team-waiting-deferred" aria-label={tr("Deferred")}>
+              <h2 class="team-waiting-group">{tr("Deferred")}</h2>
+              <p class="dim team-waiting-group-note">{tr("Zerus answered these safely while you were away; each session went on with other work.")}</p>
+              <For each={splitDeferred(view()!.items).deferred}>{(item) => <Row item={item} />}</For>
+            </section>
+          </Show>
           <Show when={view()!.more}>
             <button type="button" class="btn ghost small" disabled={loading()} onClick={() => void older()}>
               {tr("Show older")}

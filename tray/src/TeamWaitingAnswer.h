@@ -33,6 +33,10 @@ class TeamProposalCards;
 // - #742: a tool the project lacks on this computer: why, what it saves and
 //   the install command; Deny with a reason, or Allow, which Zerus runs as the
 //   owner's operation (hgs team decide-tool). It has no team to read.
+// - task 97: a request Zerus answered safely while the owner was away: its
+//   exact text and what Zerus did; Allow or Deny (with an optional note) for a
+//   permission, an option or the owner's words for a question. It has no team
+//   to read: hgs sends the session one message (hgs team answer-deferred).
 // - U63 (owner, 2026-10-31): a phase that waits for the owner's acceptance:
 //   how its tasks ended, Accept phase, or Send back with a comment (the lead
 //   reworks it in the same phase).
@@ -79,6 +83,12 @@ private:
     void declineAddition();
     // U63: accept-phase, or send-back-phase with the comment.
     void sendAcceptance(bool accept);
+    // Task 116: a report accepted or rejected with the member's reason, a
+    // held task released, a step Zerus could not take retried, the team
+    // finished with the lead's summary: the same operations as the team's card.
+    void sendReport(bool accept);
+    void sendRelease(bool retry);
+    void sendFinish();
     QString m_comment;
     // #740: the member the item names: by id, else (an older hgs) by role.
     const Teams::Member *memberOf(const Teams::Team &team) const;
@@ -92,6 +102,10 @@ private:
     // #742: Allow or Deny of a missing tool's install.
     void sendTool(bool allow);
     void renderTool(const TeamUi::Colors &c, bool waiting);
+    // Task 97: a deferred request: Allow or Deny a permission, or the owner's
+    // answer to a question; one message reaches the session.
+    void sendDeferred(const QString &decision, const QString &text);
+    void renderDeferred(const TeamUi::Colors &c, bool waiting);
     TeamController *m_teams;
     Item m_item;
     std::optional<Teams::Team> m_team;

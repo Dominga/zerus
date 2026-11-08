@@ -10,7 +10,7 @@ use super::store::{self, canonical_uuid, Event, Store, PAGE};
 use anyhow::{bail, ensure, Context};
 use std::collections::BTreeSet;
 
-pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|archive-phases|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|integrate-build|start-ahead|full-tests|test|run|templates|safe-action|reports-to|sub-lead --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
+pub(crate) const USAGE: &str = "usage: hgs [@host] team create|plan|extend|edit-draft|move-phase|move-task|add-to-phase|approve-phase|discard-phase|return-to-draft|pause-phase|unpause-phase|phase-acceptance|accept-phase|send-back-phase|reject-phase|undo-reject-phase|rework-phase|finish|approve|answer|commit|discard|pause|resume|stop|archive|archive-phases|status|inbox|list|events|spans|profile|current|report|ask|reply|hold|release|accept|reject|skip-stage|send-back|reassign|take-over|cancel|retry|check|expect|swap-member|escalate|use-last-reply|relaunch|add-member|scale|drain|pause-member|resume-member|remove-member|settings|finding|draft|propose|decide-proposal|next-goal|leftovers|intake-key|intake|waiting|close-phase|phase-mode|integrate-build|start-ahead|full-tests|test|run|templates|safe-action|reports-to|sub-lead|deferred|answer-deferred|defer-session|disk|test-config --json (JSON stdin) | hgs [@host] team catalog get|set|propose|decide|apply|discard|route|designer --json | hgs team worker [--stop]";
 
 const MUTATIONS: &[&str] = &[
     "plan", "extend", "edit-draft", "move-phase", "move-task", "add-to-phase", "approve-phase", "discard-phase", "return-to-draft", "reject-phase", "undo-reject-phase",
@@ -20,6 +20,8 @@ const MUTATIONS: &[&str] = &[
     "archive", "archive-phases", "report", "ask", "reply", "hold", "release", "accept", "reject", "skip-stage", "send-back", "reassign", "take-over", "cancel",
     "retry", "check", "expect", "swap-member", "use-last-reply", "relaunch", "add-member", "scale", "drain", "pause-member", "resume-member", "remove-member", "settings", "finding",
     "draft", "propose", "close-phase", "integrate-build", "start-ahead", "full-tests",
+    // Task #58: the owner switches one phase between free and standard planning.
+    "phase-mode",
 ];
 
 fn text<'a>(input: &'a Value, key: &str) -> &'a str {
@@ -599,6 +601,8 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
             if let Some(health) = validation.phases_health.get(&phase.n.to_string()) {
                 value["health"] = json!(health);
             }
+            // Task #58: the mode the phase plans in (its own, else the team's).
+            value["mode"] = json!(team.phase_mode(phase.n));
         }
     }
     value["layers"] = json!(plan::layers(&team.tasks));
@@ -609,6 +613,9 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
     // U59: the plan mode (standard or free) the team's phase runs in, and the
     // free phase's own state for the plan header.
     value["plan_mode"] = json!(team.plan_mode);
+    // Task #58: every phase's own mode, phase 1 included; `plan_mode` stays
+    // the team's default for a phase without one.
+    value["phase_modes"] = ops::phase_modes_view(team);
     // U62 (#715): the full-run policy and the owner's one-time grant.
     value["full_tests"] = json!(team.settings.full_tests);
     value["full_tests_grant"] = json!(team.full_tests_grant);
@@ -616,8 +623,7 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
     // approval chooses one of the two.
     value["plan_mode_offer"] = json!(team.plan_mode_offer);
     value["plan_mode_reason"] = json!(team.plan_mode_reason);
-    if team.plan_mode == super::model::PlanMode::Free {
-        let n = ops::open_phase(team);
+    if let Some(n) = ops::free_phase(team) {
         let tasks: Vec<&super::model::Task> = team.tasks.iter().filter(|task| task.phase == n).collect();
         let running: Vec<u32> = tasks.iter().filter(|task| !task.status.finished()).map(|task| task.id).collect();
         let accepted = tasks.iter().filter(|task| task.status == TaskStatus::Accepted).count();
@@ -924,9 +930,24 @@ pub(super) fn view_with_cancelled(team: &Team, teams: &[Team], sessions: Option<
             // event, and whether Zerus marks it stuck - status without inspect.
             entry["phase"] = json!(member.seen_phase);
             entry["activity"] = json!(member.seen_activity);
+            // Task 115: the member's state from the session state contract, so
+            // `hgs team status` and the member card say Waiting for you while
+            // its approval or question is open, not busy.
+            let (state, reason) = crate::state::session_state::member_state(member);
+            entry["session_state"] = json!(state);
+            entry["state_reason"] = reason.unwrap_or(Value::Null);
             entry["minutes_without_progress"] =
                 json!(member.seen_event_at.map(|at| ((crate::state::now() - at) / 60.0).max(0.0).round() as u64));
             entry["stuck"] = serde_json::to_value(&member.stuck).unwrap_or(Value::Null);
+            // Task 139: the last cross-check of its sources; an uncertain
+            // member never shows a confident phase or activity.
+            if let Some(check) = &member.check {
+                entry["check"] = json!({"state":check.state,"at":check.at,"since":check.since,"disagree":check.disagree});
+                if check.state == "uncertain" {
+                    entry["phase"] = json!("uncertain");
+                    entry["activity"] = json!("uncertain");
+                }
+            }
             let folder = super::dispatcher::member_folder_path(team, member).unwrap_or_default();
             // C11: a member on another computer works in a folder there; this
             // computer cannot read it, so its facts stay empty rather than
@@ -1063,6 +1084,11 @@ fn summary(team: &Team, include_cancelled: bool) -> Value {
                 "session":m.session,"state":m.state,"error":m.error,"queue":member_queue(team, &m.id),
                 "stage_queue":super::stages::queue(team, &m.id),
                 "services":m.services,"question":m.permission});
+            // Task 115: the state contract's own state, so the session list's
+            // member card says Waiting for you rather than busy.
+            let (state, reason) = crate::state::session_state::member_state(m);
+            value["session_state"] = json!(state);
+            value["state_reason"] = reason.unwrap_or(Value::Null);
             if let Some(held) = captured_hold(team, &m.id) {
                 value["captured_hold"] = held;
             }
@@ -1091,11 +1117,15 @@ fn summary(team: &Team, include_cancelled: bool) -> Value {
             "state":if cancelled.contains(&p.n) { json!("cancelled") } else { json!(p.state) },"tasks":p.tasks,
             "note":p.note,"rejection":p.rejection,"archived":p.archived,
             // U63: the phase's pause and who accepts it.
-            "pause":p.pause,"acceptance":p.acceptance}))
+            "pause":p.pause,"acceptance":p.acceptance,
+            // Task #58: the mode the phase plans in.
+            "mode":team.phase_mode(p.n)}))
         .collect();
     json!({
         "id":team.id,"name":team.name,"status":team.status,"project":team.project,"folder":team.folder,
         "plan_mode":team.plan_mode,
+        // Task #58: every phase's mode, phase 1 included.
+        "phase_modes":ops::phase_modes_view(team),
         "lead":team.lead,"members":members,"tasks":tasks,"phases":phases,
         "accepted":count(TaskStatus::Accepted),"submitted":count(TaskStatus::Submitted),
         "in_review":count(TaskStatus::InReview),"in_test":count(TaskStatus::InTest),
@@ -1725,6 +1755,22 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
         })?;
         return Ok(json!({"status":"answered","proposal":id,"answer":answer}));
     }
+    // Task 111: a proposal that can no longer apply is withdrawn, not run; the
+    // write stores the withdrawal and the lead's line.
+    if let Some(why) = ops::inapplicable(&team, &team.proposals[at]) {
+        store.mutate(None, &team_id, None, |_, _| Ok(Value::Null))?;
+        bail!("This proposal can no longer apply ({why}); it was withdrawn and the lead is told why");
+    }
+    // The Allow runs in several writes: marked first, so the change it makes
+    // never withdraws it before it is recorded as accepted.
+    store.mutate(None, &team_id, None, |team, _| {
+        if let Some(proposal) = team.proposals.iter_mut().find(|proposal| proposal["id"] == id && proposal["state"] == "open") {
+            if proposal["deciding"].is_null() {
+                proposal["deciding"] = json!(super::super::now());
+            }
+        }
+        Ok(Value::Null)
+    })?;
     let member = team.proposals[at]["member"].clone();
     let mut change = team.proposals[at]["change"].clone();
     if kind == "approve-phase" {
@@ -1823,14 +1869,10 @@ fn decide_proposal_in(store: &mut Store, input: &Value, caller: &Actor) -> anyho
         "switch-plan-mode" => {
             // U59: the desktop's dialog decides through this path; the switch
             // applies only the mode the proposal names.
+            // Task #58: a card that names a phase switches that phase only.
             let mode = team.proposals[at]["mode"].as_str().unwrap_or_default().to_owned();
-            let asked = team.proposals[at]["reason"].clone();
-            store.mutate(None, &team_id, None, |team, events| {
-                team.plan_mode = if mode == "free" { super::model::PlanMode::Free } else { super::model::PlanMode::Standard };
-                events.push(Event::new("plan_mode_switched", json!({"by":"You","mode":mode,"proposal":id,"reason":asked})));
-                Ok(Value::Null)
-            })?;
-            json!({"status":"switched","plan_mode":mode})
+            let asked = team.proposals[at]["reason"].as_str().unwrap_or_default().to_owned();
+            store.mutate(None, &team_id, None, |team, events| ops::apply_mode_proposal(team, &change, &mode, &id, &asked, events))?
         }
         // Task #21: a switch card for base_branch, full_tests or max_members
         // runs the settings change it names, as the owner's own.
@@ -2606,8 +2648,10 @@ fn current_team<'a>(teams: &'a [Team], named: &str, mut member_of: impl FnMut(&T
 fn spans_view(input: &Value) -> anyhow::Result<Value> {
     use super::spans;
     let store = Store::open(false)?;
-    let team = store.load(text(input, "team"))?.context("Unknown team")?;
+    let mut team = store.load(text(input, "team"))?.context("Unknown team")?;
     let now = now();
+    // Task 94: a phase already running when baselines arrived gets its plan now.
+    super::baseline::backfill(&mut team, now);
     let limit = input["limit"].as_u64().map_or(spans::TASK_PAGE, |n| (n as usize).clamp(1, spans::TASK_PAGE));
     let mut chosen: Vec<&Task> = match input["task"].as_u64() {
         Some(id) => vec![team.task(id as u32).with_context(|| format!("Unknown task #{id}"))?],
@@ -2665,8 +2709,10 @@ fn spans_view(input: &Value) -> anyhow::Result<Value> {
 fn profile_view(input: &Value) -> anyhow::Result<Value> {
     use super::profile;
     let store = Store::open(false)?;
-    let team = store.load(text(input, "team"))?.context("Unknown team")?;
+    let mut team = store.load(text(input, "team"))?.context("Unknown team")?;
     let now = now();
+    // Task 94: a phase already running when baselines arrived gets its plan now.
+    super::baseline::backfill(&mut team, now);
     let read = input["tokens"].as_bool() != Some(false);
     let page = profile::Page {
         limit: input["limit"].as_u64().map_or(profile::LOSS_PAGE, |n| n as usize),
@@ -2875,6 +2921,65 @@ fn test_command(input: &Value) -> anyhow::Result<Value> {
 
 /// The member's live attempt from its own session; `team` is optional when the
 /// session belongs to one team (spec section 5). Read only.
+/// Task 139: `hgs team look`: one member's compact verified snapshot - its
+/// screen read now, every source's view, the reconciled state, its task and
+/// pulse and what Zerus does next. Reads only; changes nothing.
+fn look(input: &Value) -> anyhow::Result<Value> {
+    let wanted = text(input, "member").trim();
+    ensure!(!wanted.is_empty(), "hgs team look needs a member: its id or role");
+    let named = text(input, "team");
+    let teams = Store::open(false)?.active_teams(ACTIVE_TEAMS)?;
+    let matches = |team: &Team| {
+        team.members.iter().find(|member| {
+            member.state != MemberState::Removed
+                && (member.id.eq_ignore_ascii_case(wanted)
+                    || member.role.eq_ignore_ascii_case(wanted)
+                    || member.session.as_ref().is_some_and(|session| session.name == wanted))
+        }).cloned()
+    };
+    let found: Vec<(&Team, Member)> = teams
+        .iter()
+        .filter(|team| named.is_empty() || team.id == named)
+        .filter_map(|team| matches(team).map(|member| (team, member)))
+        .collect();
+    let (team, member) = match found.len() {
+        0 => bail!("No running team has a member {wanted}"),
+        1 => found.into_iter().next().unwrap(),
+        _ => {
+            // The caller's own team first.
+            let record = caller_record();
+            let ids: Vec<String> = found.iter().map(|(team, _)| team.id.clone()).collect();
+            let own = record.as_ref().and_then(|record| found.iter().position(|(team, _)| calling_member(team, record).is_some()));
+            let index = own.with_context(|| format!("Several teams have a member {wanted}; name one with \"team\": {}", ids.join(", ")))?;
+            found.into_iter().nth(index).unwrap()
+        }
+    };
+    let at = now();
+    let quiet = member.seen_event_at.map(|seen| (at - seen).max(0.0)).unwrap_or(0.0);
+    let hooks = super::look::Hooks {
+        live: member.seen.is_some_and(|seen| seen.live),
+        activity: member.seen_activity.clone(),
+        phase: member.seen_phase.clone(),
+        asking: member.pending.is_some() || member.terminal_question.is_some(),
+        background: member.background_since.is_some(),
+        building: false,
+        tool: String::new(),
+        last_event_at: member.seen_event_at,
+        quiet,
+        limit: super::ops::stuck_minutes(team) * 60.0,
+    };
+    let screen = member.session.as_ref().and_then(super::dispatcher::read_screen);
+    let lines = screen.as_deref().map(|screen| super::dispatcher::last_lines(screen, 40)).unwrap_or_default();
+    let shown = screen.as_ref().map(|_| super::look::classify(&member.agent, &lines));
+    let record = super::look::recorded_request(&member);
+    let compared = super::look::compare(&hooks, record.as_deref(), shown.as_ref().map(|(kind, detail)| (*kind, detail.as_str())));
+    let kept = lines[lines.len().saturating_sub(super::look::SCREEN_LINES)..].to_vec();
+    let check = super::look::next_check(member.check.as_ref(), &compared, kept, at);
+    let mut value = super::look::snapshot(team, &member, &check, at);
+    value["screen_read"] = json!(screen.is_some());
+    Ok(value)
+}
+
 fn current(input: &Value) -> anyhow::Result<Value> {
     let named = text(input, "team");
     // A member on another computer has no local identity: its attempt id names
@@ -3276,7 +3381,7 @@ fn active_team_records(store: &Store) -> anyhow::Result<Vec<Team>> {
 }
 
 /// The stored team list the desktop polls: no live session listing (C1).
-fn list_items(teams: &[Team], include_cancelled: bool) -> Value {
+pub(crate) fn list_items(teams: &[Team], include_cancelled: bool) -> Value {
     json!({"items":teams.iter().map(|team| summary(team, include_cancelled)).collect::<Vec<_>>()})
 }
 
@@ -3326,6 +3431,83 @@ fn reopen_rejected_subteam(store: &mut Store, parent_id: &str, input: &Value) ->
         Ok(Value::Null)
     })
     .map(|_| ())
+}
+
+/// Task 112: a team paused before its pause was recorded reads it from its
+/// newest pause event, so it still says since when and by whom.
+pub(crate) fn fill_pause(store: &Store, team: &mut Team) {
+    if team.status != TeamStatus::Paused || team.paused.is_some() {
+        return;
+    }
+    let found = store.last_event(&team.id, &["paused", "replan_proposed"]).ok().flatten();
+    team.paused = Some(match found {
+        Some((at, detail)) => super::model::TeamPause {
+            at,
+            by: detail["by"].as_str().unwrap_or_default().to_owned(),
+            reason: if detail.get("finding").is_some() { "replan".into() } else { "paused".into() },
+        },
+        None => super::model::TeamPause { at: team.updated, ..Default::default() },
+    });
+}
+
+/// Task 88: the project's test configuration as the team uses it: the file
+/// (or the detected proposal) with the owner's override, every provider and
+/// its kind, the project templates with whether the owner accepted each, and
+/// the proposal `hgs test config --propose` would write. With `"action":
+/// "check"` and `"tests"`, a candidate override is checked as the owner's
+/// Save would apply it; nothing is written either way.
+fn test_config(input: &Value) -> anyhow::Result<Value> {
+    let team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
+    let folder = std::path::Path::new(&team.folder);
+    let (override_value, checking) = match text(input, "action") {
+        "" | "get" => (team.settings.tests.clone(), false),
+        "check" => {
+            let candidate = input["tests"].clone();
+            ensure!(candidate.is_null() || candidate.is_object(), "The tests override is an object shaped like .zerus/tests.toml");
+            ((!candidate.is_null()).then_some(candidate), true)
+        }
+        other => bail!("test-config action is get or check (got {other})"),
+    };
+    let detected = crate::test_discipline::detect::detect(folder);
+    let proposal = crate::test_discipline::detect::proposal(&detected);
+    let file = folder.join(crate::test_discipline::config::FILE);
+    let loaded = match crate::test_discipline::config::load(folder, override_value.as_ref()) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            return Ok(json!({"ok":false,"error":format!("{error:#}"),"checked":checking,"override":override_value,
+                "file":file.is_file(),"proposal":proposal}));
+        }
+    };
+    let source = match loaded.source {
+        crate::test_discipline::config::Source::File => "file",
+        crate::test_discipline::config::Source::Detected => "detected",
+        crate::test_discipline::config::Source::None => "none",
+    };
+    let providers: Vec<Value> = loaded
+        .config
+        .providers
+        .iter()
+        .map(|provider| {
+            let mut item = serde_json::to_value(provider).unwrap_or_default();
+            item["kind"] = json!(provider.kind.name());
+            item
+        })
+        .collect();
+    let accepted = super::templates::project_listed(folder).unwrap_or_default();
+    let templates: Vec<Value> = loaded
+        .config
+        .templates
+        .iter()
+        .map(|template| {
+            let hash = template.content_hash();
+            let mut item = serde_json::to_value(template).unwrap_or_default();
+            item["hash"] = json!(hash);
+            item["accepted"] = json!(accepted.iter().any(|known| known["hash"] == hash.as_str() && known["accepted"] == true));
+            item
+        })
+        .collect();
+    Ok(json!({"ok":true,"checked":checking,"source":source,"active":loaded.active(),"overridden":loaded.overridden,
+        "file":file.is_file(),"override":override_value,"providers":providers,"templates":templates,"proposal":proposal}))
 }
 
 /// 9.7: pause, resume or stop of a team reaches its sub-teams, level by level.
@@ -4054,7 +4236,23 @@ fn templates_command(input: &Value) -> anyhow::Result<Value> {
             }
             Ok(super::templates::listed())
         }
-        other => bail!("templates action is get or set (got {other})"),
+        // Task 85: the project templates of a folder's .zerus/tests.toml, each
+        // with its content hash and whether the owner accepted it.
+        "project" => {
+            let folder = text(input, "folder");
+            ensure!(!folder.is_empty(), "Name the folder whose project templates to list");
+            Ok(json!({"items":super::templates::project_listed(std::path::Path::new(folder))?}))
+        }
+        // Task 85: the owner accepts project templates by their content hash;
+        // they run outside a member's sandbox, so an agent never accepts one.
+        "accept" => {
+            let (dsh, session, run) = caller_identities();
+            owner_caller(input, caller_record().is_some(), dsh.is_some(), session.is_some(), run.is_some())?;
+            let hashes: Vec<String> = input["hashes"].as_array().into_iter().flatten().filter_map(|hash| hash.as_str().map(str::to_owned)).collect();
+            ensure!(!hashes.is_empty(), "Name the content hashes to accept (hgs team templates --json '{{\"action\":\"project\",\"folder\":...}}' lists them)");
+            Ok(json!({"accepted":super::templates::accept_project(&hashes)?}))
+        }
+        other => bail!("templates action is get, set, project or accept (got {other})"),
     }
 }
 
@@ -4186,6 +4384,25 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
     if op == "decide-tool" {
         return crate::test_discipline::tools::decide(input);
     }
+    // Task 97: the owner's question queue spans teams and ordinary sessions.
+    if op == "answer-deferred" {
+        return super::owner_queue::answer(input);
+    }
+    if op == "defer-session" {
+        return super::owner_queue::watch(input);
+    }
+    if op == "deferred" {
+        return Ok(super::owner_queue::listing(input["limit"].as_u64()));
+    }
+    // Task 108: the build folders Zerus holds and their cleanup; no team's.
+    if op == "disk" {
+        return crate::state::build_dirs::command(input);
+    }
+    // Task 88: the team's test configuration for its Tests settings; it reads
+    // and checks, never writes (the owner's Save is `settings`).
+    if op == "test-config" {
+        return test_config(input);
+    }
     match op {
         "create" => create(input),
         "answer" => answer(input),
@@ -4205,13 +4422,29 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
         // U50: what waits for the owner across every team, read only.
         "waiting" => {
             // #742: a missing tool's offer waits for the owner with or without a team.
-            let tools = crate::test_discipline::tools::waiting_items();
+            let mut tools = crate::test_discipline::tools::waiting_items();
+            // Task 97: Waiting for you > Deferred, with or without a team; a
+            // watched ordinary session keeps the worker that defers it alive.
+            tools.extend(super::owner_queue::waiting_items());
+            // Task 108: a drive under its free-space threshold.
+            tools.extend(crate::state::build_dirs::waiting_items());
+            if !super::owner_queue::watched().is_empty() {
+                if let Err(error) = super::dispatcher::ensure_worker() {
+                    eprintln!("hgs: the team dispatcher did not start: {error}");
+                }
+            }
             if !store::path().exists() {
                 let items = super::owner_waiting::sorted(tools);
                 let before = Some(&input["before"]).filter(|cursor| !cursor.is_null());
                 return Ok(super::owner_waiting::page(&items, before, input["limit"].as_u64()));
             }
-            let teams = active_team_records(&Store::open(false)?)?;
+            let store = Store::open(false)?;
+            let mut teams = active_team_records(&store)?;
+            // Task 111: a proposal that can no longer apply never waits for you.
+            for team in &mut teams {
+                ops::withdraw_inapplicable(team, &mut Vec::new());
+                fill_pause(&store, team);
+            }
             let mut items = super::owner_waiting::items(&teams, super::super::now());
             items.extend(tools);
             let items = super::owner_waiting::sorted(items);
@@ -4252,7 +4485,11 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                 let task = task.as_u64().and_then(|task| u32::try_from(task).ok()).filter(|task| *task > 0).context("A positive task id is required")?;
                 return store.task(text(input, "team"), task);
             }
-            let team = store.load(text(input, "team"))?.context("Unknown team")?;
+            let mut team = store.load(text(input, "team"))?.context("Unknown team")?;
+            // Task 111: a proposal that can no longer apply reads withdrawn at
+            // once; the next change stores it so.
+            ops::withdraw_inapplicable(&mut team, &mut Vec::new());
+            fill_pause(&store, &mut team);
             let finished = matches!(team.status, TeamStatus::Done | TeamStatus::Stopped);
             // Only a finished team reads the live listing, for its members left
             // running (F7); a watched running team is polled often and must not
@@ -4292,7 +4529,8 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             Ok(value)
         }
         "inbox" => {
-            let team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
+            let mut team = Store::open(false)?.load(text(input, "team"))?.context("Unknown team")?;
+            ops::withdraw_inapplicable(&mut team, &mut Vec::new());
             // Spec 5.6: a sub-lead reads its own inbox; you may name one.
             let named = text(input, "member").to_owned();
             let reviewer = if !named.is_empty() {
@@ -4320,6 +4558,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             Ok(super::broker::builds_view(&team, super::super::now()))
         }
         "current" => current(input),
+        "look" => look(input),
         "escalate" => escalate(input),
         op if MUTATIONS.contains(&op) => {
             let request = text(input, "request_id");
@@ -4616,6 +4855,13 @@ pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     } else {
         None
     };
+    // Task 139: `hgs team look MEMBER [--team ID]`, beside its JSON form.
+    if args.first().map(String::as_str) == Some("look") && args.get(1).is_some_and(|arg| !arg.starts_with("--")) && file.is_none() {
+        let team = args.iter().position(|arg| arg == "--team").and_then(|index| args.get(index + 1)).cloned().unwrap_or_default();
+        let result = run("look", &json!({"member":args[1],"team":team}), false).map_err(|e| e.to_string())?;
+        println!("{result}");
+        return Ok(0);
+    }
     let catalog = args.first().map(String::as_str) == Some("catalog");
     if catalog {
         args.remove(0);

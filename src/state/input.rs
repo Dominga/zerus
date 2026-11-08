@@ -276,12 +276,15 @@ fn checked_input(
     conversation_id: &str,
     allow_working: bool,
 ) -> Result<Value> {
+    // zerus-ucck P3c: the request's identities select among sessions that
+    // share the label.
+    expect(name, run_id, conversation_id)?;
     let record = read(name)?;
     if string(&record, "run_id") != run_id || string(&record, "conversation_id") != conversation_id
     {
         return Err("session identity changed; refresh before sending".into());
     }
-    if !matches(&record, live()?.get(name)) || !process_alive(&record) {
+    if !matches(&record, panes_of(&live()?, &record)) || !process_alive(&record) {
         return Err("the exact agent process is no longer running; resume it explicitly".into());
     }
     if claude_approval::current(&record).is_some() {
@@ -655,6 +658,16 @@ fn codex_warning_footer(row: &str) -> bool {
         && matches!(tail, "warning · f2 to view" | "warnings · f2 to view")
 }
 
+/// Native 0.167 adds the agent-picker hint before the idle shortcuts hint.
+/// Accept only that fixed row and its optional existing warning indicator;
+/// arbitrary trailing content still cannot terminate a draft.
+fn codex_shortcuts_footer(plain: &str) -> bool {
+    let plain = plain.trim();
+    if plain.starts_with("? for shortcuts") { return true; }
+    let Some(tail) = plain.strip_prefix("← for agents · ? for shortcuts") else { return false; };
+    tail.is_empty() || (tail.starts_with(' ') && codex_warning_footer(tail))
+}
+
 fn codex_footer_model(record: &Value) -> Option<&str> {
     if let Some(model) = record["model"].as_str().filter(|model| !model.is_empty()) {
         return Some(model);
@@ -775,7 +788,7 @@ fn composer_empty_for_model(agent: &str, screen: &str, cursor_x: usize, cursor_y
                 return input_background || single_line_footer
                     || lines.last().is_some_and(|line| {
                         let plain: String = styled_row(line).iter().map(|(ch, _)| ch).collect();
-                        plain.trim_start().starts_with("? for shortcuts")
+                        codex_shortcuts_footer(&plain)
                     });
             }
         }
@@ -803,7 +816,8 @@ fn terminal_check(record: &Value, empty: bool, sending: bool) -> Result<()> {
     let terminal = backend::current();
     let claim = backend::InputClaim {
         pane,
-        name: string(record, "name"),
+        // The pane's session is the record's own terminal (P3b).
+        name: terminal_name(record),
         run_id: string(record, "run_id"),
         agent: string(record, "agent"),
         pid: record["pid"].as_u64(),
@@ -932,13 +946,68 @@ pub(super) fn claude_draft(screen: &str, cursor_y: usize) -> Option<String> {
     (!text.is_empty()).then(|| text.to_owned())
 }
 
+/// Task 121: the draft in Kimi's input, from a recorded Kimi screen. Two
+/// layouts speak: Kimi 2.5.x draws the composer as a `│…│` box closed by a
+/// `╰…╯` border; older ones write a `>` prompt row with indented continuation
+/// rows ended by a full-width rule. The box's rows are read up from the border
+/// under the cursor; the plain prompt row is the last `>` row. A dialog or a
+/// trust panel has neither and reads as no draft.
+pub(super) fn kimi_draft(screen: &str, cursor_y: usize) -> Option<String> {
+    let lines: Vec<&str> = screen.lines().map(str::trim_end).collect();
+    let border = (cursor_y + 1..lines.len()).find(|&index| {
+        let row = lines[index].trim_start();
+        row.starts_with('╰') && row.ends_with('╯') && row.chars().all(|ch| "╰─╯".contains(ch))
+    });
+    if let Some(border) = border {
+        let mut rows: Vec<&str> = Vec::new();
+        for row in lines[..border].iter().rev() {
+            let Some(inner) = row
+                .strip_prefix(' ')
+                .and_then(|row| row.strip_prefix('│'))
+                .and_then(|row| row.strip_suffix('│'))
+            else {
+                break;
+            };
+            rows.push(inner.trim_end());
+        }
+        rows.reverse();
+        let text = rows.join("\n");
+        let text = text.trim_start();
+        let text = text.strip_prefix('>').unwrap_or(text).trim_start().trim_end();
+        return (!text.is_empty()).then(|| text.to_owned());
+    }
+    let prompt = lines.iter().rposition(|row| {
+        let row = row.trim_start();
+        row.starts_with('>') && !row.starts_with(">>")
+    })?;
+    let mut rows = vec![lines[prompt].trim_start().trim_start_matches('>').trim_start()];
+    for row in &lines[prompt + 1..] {
+        let trimmed = row.trim();
+        if trimmed.is_empty() {
+            break;
+        }
+        if trimmed.chars().count() >= 12 && trimmed.chars().all(|ch| "─━╌".contains(ch)) {
+            break;
+        }
+        if !row.starts_with(char::is_whitespace) {
+            break;
+        }
+        rows.push(row.trim_start());
+    }
+    let text = rows.join("\n");
+    let text = text.trim_end();
+    (!text.trim().is_empty()).then(|| text.to_owned())
+}
+
 /// The draft in the native composer, for the owner to see and submit from any
 /// window (owner, 2026-10-28: text left in Terminal blocked every send).
-/// Claude reads the styled capture, Codex the plain one; other agents none.
+/// Claude reads the styled capture, Codex the plain one, Kimi the plain one
+/// (both its box and its plain prompt row); other agents none.
 pub(super) fn native_draft(record: &Value, styled: &str, plain: &str, cursor_y: usize) -> Option<String> {
     match string(record, "agent") {
         "claude" => claude_draft(styled, cursor_y),
         "codex" => codex_draft(record, plain, cursor_y).filter(|draft| !draft.trim().is_empty()),
+        "kimi" => kimi_draft(plain, cursor_y),
         _ => None,
     }
 }
@@ -1034,15 +1103,23 @@ pub(super) fn task_reply_receipt(name: &str, request: &Value) -> Result<Option<V
 
 pub(super) fn submit(name: &str, input: &[u8], recovery_id: Option<&str>) -> Result<Value> {
     // N34: a BOM is not part of the request or of its digest.
-    submit_with(name, crate::state::without_bom(input), recovery_id, false)
+    submit_with(name, crate::state::without_bom(input), recovery_id, false, false)
 }
 
 /// A held message, by its deliverer, through the same checks as any send.
 pub(super) fn submit_held(name: &str, input: &[u8]) -> Result<Value> {
-    submit_with(name, input, None, true)
+    submit_with(name, input, None, true, false)
 }
 
-fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, held: bool) -> Result<Value> {
+/// `submit` for a question's answer: it refuses, before any key, when pending
+/// model or effort settings would be typed into the terminal first. Only the
+/// answer's own paste may reach the pane, so a refusal proves nothing was
+/// sent.
+pub(super) fn submit_answer(name: &str, input: &[u8]) -> Result<Value> {
+    submit_with(name, input, None, false, true)
+}
+
+fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, held: bool, answer: bool) -> Result<Value> {
     // N34: a BOM is not part of the request or of its digest.
     let input = crate::state::without_bom(input);
     let request: Request =
@@ -1074,6 +1151,11 @@ fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, held: bool) 
             _ => return Err("delivery uncertain: this request may already be in Terminal; do not resend automatically".into()),
         }
     }
+    // Task 121: a delivery whose Enter did not go leaves its own paste in the
+    // composer (`unsent_paste`). Before this delivery pastes, that exact paste
+    // is finished once, so a Zerus message never stays unsent there; a draft
+    // the person changed, another run or another conversation is left alone.
+    finish_leftover(name, &request)?;
     // U35: an opted-in message waits behind held ones and while the previous
     // input is unconfirmed; every other refusal stays.
     let opted = request.queue_when_unconfirmed && !held && recovery_id.is_none();
@@ -1094,7 +1176,11 @@ fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, held: bool) 
         }
         checked => checked?,
     };
-    let mut record = effort::apply_pending(name, checked)?;
+    let record = checked;
+    if answer && effort::pending_applies(&record) {
+        return Err("model or effort settings would be typed first; answer this question in Terminal".into());
+    }
+    let mut record = effort::apply_pending(name, record)?;
     if let Some(id) = recovery_id { recovery::check_submission(&record, id)?; }
     checked_send_terminal(&record)?;
     let attachments_root = root.join("attachments");
@@ -1126,8 +1212,8 @@ fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, held: bool) 
     // Enter would otherwise select its file/mention completion instead of
     // submitting. A space still has token affinity; a newline moves the cursor
     // off the token. Native submission trims the newline; receipts keep `text`.
-    let agent = string(&record, "agent");
-    let pasted = if (matches!(agent, "claude" | "kimi") && text.ends_with('\\'))
+    let agent = string(&record, "agent").to_owned();
+    let pasted = if (matches!(agent.as_str(), "claude" | "kimi") && text.ends_with('\\'))
         || (agent == "codex"
             && text.split_whitespace().next_back().is_some_and(|token| token.starts_with('@')))
     {
@@ -1149,7 +1235,7 @@ fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, held: bool) 
     }
     if let Some(id) = recovery_id { recovery::check_submission(&read(name)?, id)?; }
     let submitted_at = now();
-    if recovery_id.is_none() { recovery::cancel_for_input(name)?; }
+    if recovery_id.is_none() { recovery::cancel_for_input(&record)?; }
     let mut receipt = json!({"request_id":request_id,"name":name,"run_id":request.expected_run_id,
         "conversation_id":string(&record,"conversation_id"),"first_message":string(&record,"conversation_id").is_empty(),"digest":digest,"status":"in_progress",
         "submitted_at":submitted_at,"submitted_text":text,"text":request.text.trim(),"attachments":paths,"transport":"terminal"});
@@ -1164,11 +1250,19 @@ fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, held: bool) 
     let _ = attachments.keep();
     record["input_pending_at"] = json!(submitted_at);
     record["input_pending_request"] = json!(request_id);
+    // Task 98: the composer was empty, so an earlier delivery's leftover
+    // paste is gone.
+    if let Some(fields) = record.as_object_mut() {
+        fields.remove("unsent_paste");
+    }
     if let Err(error) = write(&mut record) {
         cleanup();
         return Err(error);
     }
     let pane = string(&record, "pane");
+    // Task 98: the composer's draft right after our own paste. When the Enter
+    // does not go, this hash is how Zerus later knows the leftover is its own.
+    let mut pasted_draft: Option<String> = None;
     let result: Result<()> = (|| {
         terminal.paste(&buffer, pane, backend::Paste::Composer)?;
         // Let bracketed-paste handlers finish before Enter. Never send a second
@@ -1178,17 +1272,50 @@ fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, held: bool) 
         if string(&record, "agent") == "codex" {
             settle_codex_paste(terminal, pane, &pasted);
         }
-        if !process_alive(&record) || !matches(&record, live()?.get(name)) {
+        pasted_draft = super::terminal::read_draft(&record)
+            .ok()
+            .and_then(|(draft, hash)| draft.filter(|draft| !draft.trim().is_empty()).map(|_| hash));
+        if !process_alive(&record) || !matches(&record, panes_of(&live()?, &record)) {
             return Err("agent changed after paste".into());
         }
         checked_terminal(&record, false)?;
         terminal.send(pane, &[backend::Key::Named("Enter")])?;
+        // Task 121: Kimi 2.5 may take that Enter as the paste's own confirm
+        // step; while the composer still holds exactly our paste, one more
+        // Enter submits it. A draft that still shows it afterwards is left
+        // recorded as unsent, never pasted again.
+        if agent == "kimi" {
+            if let Some(hash) = pasted_draft.as_deref() {
+                let ours = || {
+                    super::terminal::read_draft(&record).ok().is_some_and(|(draft, current)| {
+                        draft.is_some_and(|draft| !draft.trim().is_empty()) && current == hash
+                    })
+                };
+                let wait = |limit: Duration| {
+                    let deadline = std::time::Instant::now() + limit;
+                    while std::time::Instant::now() < deadline {
+                        if !ours() { return true; }
+                        std::thread::sleep(Duration::from_millis(200));
+                    }
+                    !ours()
+                };
+                if !wait(Duration::from_millis(1_500)) {
+                    terminal.send(pane, &[backend::Key::Named("Enter")])?;
+                    if !wait(Duration::from_millis(1_500)) {
+                        return Err("Kimi still shows the pasted message after Enter; nothing was pasted again".into());
+                    }
+                }
+            }
+        }
         receipt["status"] = json!("submitted");
         atomic(&receipt_path, &receipt.to_string())?;
         Ok(())
     })();
     cleanup();
     if let Err(error) = result {
+        if let Some(hash) = &pasted_draft {
+            record_unsent_paste(name, &receipt_path, &mut receipt, &request_id, hash);
+        }
         crate::analytics::adapters::delivery(&root, &record, &receipt, crate::analytics::adapters::Delivery::Uncertain);
         return Err(format!(
             "delivery uncertain: {error}; inspect Terminal before retrying"
@@ -1196,6 +1323,57 @@ fn submit_with(name: &str, input: &[u8], recovery_id: Option<&str>, held: bool) 
     }
     crate::analytics::adapters::delivery(&root, &record, &receipt, crate::analytics::adapters::Delivery::Submitted);
     Ok(receipt)
+}
+
+/// Task 98: a delivery pasted but its Enter did not go: the receipt and the
+/// session record keep the composer's draft hash, so `hgs terminal`'s
+/// submit_own_paste can finish exactly this paste once. Best effort: a
+/// failure only leaves the leftover for the owner, as before.
+fn record_unsent_paste(name: &str, receipt_path: &Path, receipt: &mut Value, request_id: &str, hash: &str) {
+    receipt["pasted_draft_hash"] = json!(hash);
+    let _ = atomic(receipt_path, &receipt.to_string());
+    if let Ok(mut fresh) = read(name) {
+        if fresh["run_id"] == receipt["run_id"] && fresh["conversation_id"] == receipt["conversation_id"] {
+            fresh["unsent_paste"] = json!({"request_id":request_id,"draft_hash":hash,"run_id":receipt["run_id"],
+                "conversation_id":receipt["conversation_id"],"at":now()});
+            let _ = write(&mut fresh);
+        }
+    }
+}
+
+/// Task 121: finishes the delivery's own leftover paste once with Enter before
+/// the next delivery. The record's `unsent_paste` and the composer's draft hash
+/// must still match exactly (the run, conversation, pane, process and draft);
+/// anything else is the owner's and is left. The claim is durable before the
+/// Enter, so a second delivery never finishes it again; an Enter that does not
+/// go is uncertain and stops the next delivery instead of pasting over it.
+fn finish_leftover(name: &str, request: &Request) -> Result<()> {
+    let mut record = read(name)?;
+    if record["unsent_paste"]["request_id"].as_str().is_none_or(str::is_empty) {
+        return Ok(());
+    }
+    let Ok((draft, hash)) = super::terminal::read_draft(&record) else { return Ok(()); };
+    let Ok(delivery) = super::terminal::own_paste(&record, draft.as_deref(), &hash) else { return Ok(()); };
+    let pane = string(&record, "pane").to_owned();
+    let Some(fields) = record.as_object_mut() else { return Ok(()); };
+    fields.remove("unsent_paste");
+    write(&mut record)?;
+    if let Err(error) = backend::current().send(&pane, &[backend::Key::Named("Enter")]) {
+        return Err(format!(
+            "delivery uncertain: the leftover paste may have been submitted ({error}); inspect Terminal before retrying"
+        ));
+    }
+    let receipt = absolute_root()?.join("input_receipts").join(format!("{delivery}.json"));
+    if let Ok(bytes) = std::fs::read(&receipt) {
+        if let Ok(mut original) = serde_json::from_slice::<Value>(&bytes) {
+            if original["status"] != "submitted" {
+                original["status"] = json!("submitted");
+                original["finished_by"] = json!(request.request_id);
+                atomic(&receipt, &original.to_string())?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Codex on Windows reads console key events, not VT input, so the pseudoconsole
@@ -1577,6 +1755,22 @@ mod tests {
         ));
     }
     #[test]
+    fn codex_0167_agents_shortcuts_footer_preserves_the_empty_composer_boundary() {
+        let screen = "\n\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n  GPT-6.1-Sol default · /fixture\n  ← for agents · ? for shortcuts                  ⚠ 4 warnings · f2 to view";
+        assert!(composer_empty("codex", screen, 2, 1));
+        for footer in ["← for agents · ? for shortcuts", "← for agents · ? for shortcuts   ⚠ 1 warning · f2 to view", "? for shortcuts"] {
+            assert!(composer_empty("codex", &screen.replace("← for agents · ? for shortcuts                  ⚠ 4 warnings · f2 to view", footer), 2, 1));
+        }
+        for footer in ["← for agents · ? for shortcuts draft", "← for agents · ? for shortcuts ⚠ 4 warnings · f2 to view draft", "← for agents · ? for shortcuts ⚠ 0 warnings · f2 to view", "← for agents · ? for shortcuts ⚠ 4 warnings · enter to approve", "← for agents · ? for shortcuts\n  more input", "← for agents · Approve command?"] {
+            assert!(!composer_empty("codex", &screen.replace("← for agents · ? for shortcuts                  ⚠ 4 warnings · f2 to view", footer), 2, 1), "{footer}");
+        }
+        for draft in ["", "retained draft", "\n  draft continuation"] {
+            assert!(!composer_empty("codex", &screen.replace("\x1b[2mAsk Codex to do anything\x1b[0m", draft), 2, 1));
+        }
+        assert!(!composer_empty("codex", screen, 3, 1));
+    }
+
+    #[test]
     fn codex_warning_footer_does_not_turn_an_empty_queue_composer_into_a_draft() {
         // Codex 0.166's separate warning row can occupy the shortcuts row.
         let screen = "Working\n\n\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n  GPT-6.1-Sol default · /fixture\n    ⚠ \x1b[33m2 warnings\x1b[0m · \x1b[1mf2\x1b[0m to view";
@@ -1697,5 +1891,31 @@ mod tests {
         ] {
             assert!(validate_launch_prompt(text).is_ok(), "{text:?}");
         }
+    }
+
+    // Task 121: a recorded Kimi 2.5.x box (its `│…│` composer) and the older
+    // `>` prompt row both read as the draft a delivery left; a dialog does not.
+    const KIMI_BOX: &str = include_str!("../../tests/fixtures/kimi-2.5-boxed-paste.txt");
+    const KIMI_PLAIN: &str = include_str!("../../tests/fixtures/kimi-2.1-plain-draft.txt");
+
+    #[test]
+    fn kimi_composer_drafts_are_read_from_recorded_screens() {
+        let rows: Vec<&str> = KIMI_BOX.lines().collect();
+        let cursor = rows.iter().position(|row| row.contains("[Zerus team")).unwrap();
+        let draft = kimi_draft(KIMI_BOX, cursor).unwrap();
+        assert!(draft.starts_with("[Zerus team · from: Zerus · starved] The lead's task got stuck in the"), "{draft}");
+        assert!(draft.contains("prompt, and this message waits there until Enter reaches it."), "{draft}");
+        // An empty box has nothing to submit.
+        let empty = " ╭──────────────────────────────╮\n │ >                            │\n ╰──────────────────────────────╯\n";
+        assert!(kimi_draft(empty, 1).is_none(), "{empty}");
+        // The plain composer: the prompt row and its continuation line.
+        let plain: Vec<&str> = KIMI_PLAIN.lines().collect();
+        let plain_cursor = plain.iter().position(|row| row.contains("a typed draft")).unwrap();
+        assert_eq!(
+            kimi_draft(KIMI_PLAIN, plain_cursor).unwrap(),
+            "a typed draft that no event submitted\nwith a continuation line"
+        );
+        // A folder-trust dialog is no composer.
+        assert!(kimi_draft(include_str!("../../tests/fixtures/kimi-folder-trust.txt"), 5).is_none());
     }
 }

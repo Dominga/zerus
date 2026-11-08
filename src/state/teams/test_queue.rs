@@ -77,6 +77,9 @@ pub(crate) struct Record {
     pub recorded_ms: u64,
     /// #732: the test runner (a Machine's alias) it ran on; empty is here.
     pub runner: String,
+    /// Task 88: one result per test from the provider's report, if it names one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report: Option<super::run_results::Report>,
 }
 
 /// #719: a request still in the queue: waiting, or running since `started`.
@@ -95,7 +98,7 @@ pub(crate) const PENDING_LIMIT: i64 = 100;
 
 const REQUEST_COLUMNS: &str = "id,team,suite,task,targets,commit_id,input_hash,asked_by,forced,at,seconds,budget_minutes,resources,command,platforms";
 // #718: reused_from, flags, due and recorded_ms after #719's task.
-const RECORD_COLUMNS: &str = "id,team,suite,commit_id,input_hash,status,duration_ms,excerpt,asked_by,at,affected,task,reused_from,flags,due,recorded_ms,runner";
+const RECORD_COLUMNS: &str = "id,team,suite,commit_id,input_hash,status,duration_ms,excerpt,asked_by,at,affected,task,reused_from,flags,due,recorded_ms,runner,report";
 
 fn add_column(db: &Connection, table: &str, column: &str, kind: &str) -> rusqlite::Result<()> {
     let present = db.prepare(&format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name=?1"))?.exists([column])?;
@@ -156,6 +159,8 @@ impl TestStore {
             add_column(&db, "queue", "reason", "TEXT NOT NULL DEFAULT ''")?;
             add_column(&db, "results", "runner", "TEXT NOT NULL DEFAULT ''")?;
             add_column(&db, "results", "task", "INTEGER")?;
+            // Task 88: one result per test, as JSON; empty for none.
+            add_column(&db, "results", "report", "TEXT NOT NULL DEFAULT ''")?;
             db.execute_batch("CREATE INDEX IF NOT EXISTS results_task ON results(team,task,at);")?;
             // #718: the columns an older database lacks.
             let present: Vec<String> = db
@@ -259,7 +264,7 @@ impl TestStore {
     /// hash, status, duration, a bounded excerpt and who asked.
     pub(crate) fn write(&self, record: &Record) -> anyhow::Result<()> {
         self.db.execute(
-            &format!("INSERT OR REPLACE INTO results({RECORD_COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)"),
+            &format!("INSERT OR REPLACE INTO results({RECORD_COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)"),
             params![
                 record.id,
                 record.team,
@@ -277,7 +282,8 @@ impl TestStore {
                 serde_json::to_string(&record.flags)?,
                 record.due as i64,
                 record.recorded_ms as i64,
-                record.runner
+                record.runner,
+                record.report.as_ref().map(serde_json::to_string).transpose()?.unwrap_or_default()
             ],
         )?;
         // Bounded: only the oldest records past the limit go.
@@ -330,6 +336,7 @@ impl TestStore {
             recorded_ms: source.duration_ms,
             runner: String::new(),
             task: request.task,
+            report: source.report.clone(),
         };
         self.write(&record)?;
         Ok(record)
@@ -391,6 +398,7 @@ impl TestStore {
             due: row.get::<_, i64>(14)? != 0,
             recorded_ms: row.get::<_, i64>(15)? as u64,
             runner: row.get(16)?,
+            report: row.get::<_, Option<String>>(17)?.filter(|text| !text.is_empty()).and_then(|text| serde_json::from_str(&text).ok()),
         })
     }
 }
@@ -662,6 +670,12 @@ pub(crate) fn run_due(store: &TestStore, project: &Path, requests: &[Request], n
         let started = std::time::Instant::now();
         let at = now + began.elapsed().as_secs_f64();
         store.start(&request.id, at)?;
+        // Task 88: the provider's report, removed first so an older one is
+        // never read as this run's.
+        let report = report_of(project, &request.team, &request.suite);
+        if let Some((path, _)) = &report {
+            let _ = std::fs::remove_file(path);
+        }
         let limit = Duration::from_secs((request.budget_minutes.max(1.0) * 60.0) as u64);
         let deadline = started + limit;
         let loaded = (request.asked_by == "merge queue").then(|| config::load(project, overrides).map_err(|error| error.to_string()));
@@ -742,6 +756,7 @@ pub(crate) fn run_due(store: &TestStore, project: &Path, requests: &[Request], n
             recorded_ms: (request.seconds * 1000.0) as u64,
             runner: String::new(),
             task: request.task,
+            report: report.map(|(path, format)| super::run_results::read(&path, format)),
         };
         store.write(&record)?;
         if record.status == "flaky" {
@@ -751,6 +766,25 @@ pub(crate) fn run_due(store: &TestStore, project: &Path, requests: &[Request], n
         written.push(record);
     }
     Ok(written)
+}
+
+/// Task 88: where a suite's provider says its run leaves its report.
+pub(crate) fn report_of(project: &Path, team: &str, suite: &str) -> Option<(std::path::PathBuf, super::run_results::Format)> {
+    let found = |overrides: Option<&serde_json::Value>| -> Option<Option<(std::path::PathBuf, super::run_results::Format)>> {
+        let loaded = crate::test_discipline::config::load(project, overrides).ok()?;
+        let provider = loaded.config.providers.iter().find(|provider| provider.name == suite)?;
+        Some(provider.results.as_ref().and_then(|results| Some((project.join(&results.path), super::run_results::Format::parse(&results.format)?))))
+    };
+    // The project's own file first; the owner's override only for a suite the
+    // project has, so no store is read for an unknown one.
+    match found(None)? {
+        Some(report) => Some(report),
+        None if !team.is_empty() => {
+            let overrides = super::store::Store::open(false).ok()?.load(team).ok()??.settings.tests.clone()?;
+            found(Some(&overrides))?
+        }
+        None => None,
+    }
 }
 
 impl Request {
@@ -863,7 +897,7 @@ mod tests {
             excerpt: "the log".into(),
             asked_by: "dev".into(),
             at: 10.0,
-            affected: Vec::new(), reused_from: String::new(), flags: Vec::new(), due: false, recorded_ms: 0, task: None, runner: String::new(),
+            affected: Vec::new(), reused_from: String::new(), flags: Vec::new(), due: false, recorded_ms: 0, task: None, runner: String::new(), report: None,
         };
         record_notices(&mut team, std::slice::from_ref(&record), 100.0);
         assert_eq!(team.test_load_at, 100.0);
@@ -916,7 +950,7 @@ mod tests {
         let record = |id: &str, suite: &str, at: f64| Record {
             id: id.into(), team: "t".into(), suite: suite.into(), commit: "c".into(), input_hash: "h".into(),
             status: "passed".into(), duration_ms: 10, excerpt: "ok".into(), asked_by: "dev".into(), at,
-            affected: vec!["a".into()], reused_from: String::new(), flags: Vec::new(), due: false, recorded_ms: 0, task: None, runner: String::new(),
+            affected: vec!["a".into()], reused_from: String::new(), flags: Vec::new(), due: false, recorded_ms: 0, task: None, runner: String::new(), report: None,
         };
         store.write(&record("1", "cargo", 1.0)).unwrap();
         store.write(&record("2", "cargo", 2.0)).unwrap();
@@ -928,6 +962,45 @@ mod tests {
         let older = store.results(Some("t"), Some(2.0), 10, None, None).unwrap();
         assert_eq!(older.len(), 1);
         assert_eq!(older[0].id, "1");
+    }
+
+    /// Task 88: a provider that names its report gets one result per test in
+    /// its record, kept in the database and read back with it.
+    #[test]
+    fn a_suite_with_a_report_keeps_one_result_per_test() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".zerus")).unwrap();
+        std::fs::create_dir_all(dir.path().join("out")).unwrap();
+        std::fs::write(dir.path().join(".zerus").join("tests.toml"),
+            "version = 1
+[[provider]]
+name = \"engine\"
+kind = \"command\"
+affected = \"all\"
+command = \"x\"
+results = { format = \"junit\", path = \"out/junit.xml\" }
+").unwrap();
+        std::fs::write(dir.path().join("fixture.xml"),
+            r#"<testsuite><testcase classname="math" name="adds" time="0.1"/><testcase classname="math" name="divides" time="0.2"><failure message="expected 2"/></testcase></testsuite>"#).unwrap();
+        // A report from an earlier run is removed before this one.
+        std::fs::write(dir.path().join("out").join("junit.xml"), "<testsuite><testcase name=\"stale\"/></testsuite>").unwrap();
+        let store = TestStore::open_at(&dir.path().join("tests.sqlite3"), false).unwrap();
+        let mut reported = request("rep", "engine", 1.0, false, "small");
+        reported.command = if cfg!(windows) { r"copy /y fixture.xml out\junit.xml >nul & exit /b 1".into() } else { "cp fixture.xml out/junit.xml; exit 1".into() };
+        store.enqueue(&reported).unwrap();
+        let written = run_due(&store, dir.path(), &store.queued("t").unwrap(), 100.0, &Default::default(), None).unwrap();
+        assert_eq!(written[0].status, "failed");
+        let report = written[0].report.clone().expect("the provider's report");
+        assert_eq!((report.passed, report.failed), (1, 1), "{report:?}");
+        assert_eq!(report.results[0].name, "divides");
+        let read = store.results(Some("t"), None, 10, None, None).unwrap();
+        assert_eq!(read[0].report, Some(report));
+        // A suite without a report keeps none.
+        let mut plain = request("plain", "other", 1.0, false, "small");
+        plain.command = if cfg!(windows) { "exit /b 0".into() } else { "true".into() };
+        store.enqueue(&plain).unwrap();
+        let written = run_due(&store, dir.path(), &store.queued("t").unwrap(), 101.0, &Default::default(), None).unwrap();
+        assert!(written[0].report.is_none());
     }
 
     #[test]
@@ -1060,7 +1133,7 @@ mod tests {
             let record = Record {
                 id: format!("r{index}"), team: "t".into(), suite: "s".into(), commit: "c".into(), input_hash: "h".into(),
                 status: "passed".into(), duration_ms: 1, excerpt: String::new(), asked_by: "dev".into(), at: index as f64,
-                affected: Vec::new(), reused_from: String::new(), flags: Vec::new(), due: false, recorded_ms: 0, task: None, runner: String::new(),
+                affected: Vec::new(), reused_from: String::new(), flags: Vec::new(), due: false, recorded_ms: 0, task: None, runner: String::new(), report: None,
             };
             store.write(&record).unwrap();
         }

@@ -26,8 +26,10 @@ mod platform;
 mod presence;
 mod private_stores;
 mod screen;
+mod self_exec;
 mod session_reference;
 mod speech;
+mod sqlite_file;
 mod state;
 mod status;
 mod swarm;
@@ -43,13 +45,50 @@ fn json_file_position(argv: &[String]) -> Option<usize> {
 }
 
 fn main() {
+    #[cfg(windows)]
+    let entered = std::time::Instant::now();
+    zerus_client_core::quit_origin::capture_process_entry();
+    // A creation launch child keeps the desktop actor's custody lock for its
+    // own lifetime only: marked close-on-exec before anything else starts;
+    // after the pure raw-input capture, which reads the unmodified
+    // environment and starts nothing.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Err(error) = desktop::creation_launch::adopt_custody() {
+        eprintln!("hgs: {error}");
+        std::process::exit(2);
+    }
+    // The same for a task message child, with its own descriptor.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Err(error) = desktop::task_message::adopt_custody() {
+        eprintln!("hgs: {error}");
+        std::process::exit(2);
+    }
+    // The same for a deferred send child, with its own descriptor.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Err(error) = desktop::deferred_send::adopt_custody() {
+        eprintln!("hgs: {error}");
+        std::process::exit(2);
+    }
+    // The same for a deferred answer child, with its own descriptor.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Err(error) = desktop::deferred_answer::adopt_custody() {
+        eprintln!("hgs: {error}");
+        std::process::exit(2);
+    }
+    // The same for a compact-to-send child, with its own descriptor.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Err(error) = desktop::compact_to_send::adopt_custody() {
+        eprintln!("hgs: {error}");
+        std::process::exit(2);
+    }
     // COM cold activation cannot load config, create jobs or acquire ownership.
     #[cfg(windows)]
     if let Some(code) = desktop::windows_notification_activation(std::env::args().nth(1).as_deref())
     {
         std::process::exit(code);
     }
-    // Fixed native implementation worker: bounded frame, no config/owner load.
+    // Native implementation workers validate a fixed bounded frame before
+    // selecting configuration or any ownership/manager operation.
     #[cfg(windows)]
     if let Some(code) =
         desktop::windows_registration_entry(&std::env::args().skip(1).collect::<Vec<_>>())
@@ -98,9 +137,19 @@ fn main() {
             std::process::exit(2);
         }
     }
-    let code = match cli::dispatch(argv) {
+    #[cfg(windows)]
+    let result = cli::dispatch_at(argv, entered);
+    #[cfg(not(windows))]
+    let result = cli::dispatch(argv);
+    let code = match result {
         Ok(code) => code,
         Err(err) => {
+            #[cfg(windows)]
+            desktop::startup_diagnostic::record(
+                &std::env::args().skip(1).collect::<Vec<_>>(),
+                err.code,
+                &err.message,
+            );
             // One write (eprintln! writes each piece on its own), so that no
             // frame a pseudoconsole paints shows the prefix without the message.
             let line = format!("hgs: {}\n", err.message);

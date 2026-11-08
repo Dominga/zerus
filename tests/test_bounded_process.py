@@ -1,4 +1,6 @@
 """Only synthetic owned descendants; no repository worker is started here."""
+import errno
+import importlib.util
 import os
 from pathlib import Path
 import subprocess
@@ -157,6 +159,115 @@ sys.exit(b.supervise([sys.executable,'-c','import os,time;print(os.getpid(),flus
         self.assertIn('original identities', result.stderr)
         self.assertIn('original descendants remain', result.stderr)
         self.assertFalse(Path('/proc', result.stdout.strip()).exists())
+
+
+def load():
+    """The supervisor module itself, for checks that start no process."""
+    spec = importlib.util.spec_from_file_location('bounded_scan', RUNNER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class ScriptedProc:
+    """A /proc whose reads follow a script: a path maps to its text, the
+    names it lists, or the error reading it raises. A listing may raise
+    part-way through, as a scandir of an exiting task can."""
+
+    def __init__(self, script, *parts):
+        self.script, self.parts = script, parts
+
+    def __truediv__(self, part):
+        return ScriptedProc(self.script, *self.parts, str(part))
+
+    def entry(self):
+        entry = self.script[self.parts]
+        if isinstance(entry, BaseException):
+            raise entry
+        return entry
+
+    def iterdir(self):
+        for name in self.entry():
+            if isinstance(name, BaseException):
+                raise name
+            yield self / name
+
+    def read_text(self):
+        return self.entry()
+
+
+@unittest.skipUnless(sys.platform.startswith('linux'), 'Linux /proc scan')
+class ProcScanRace(unittest.TestCase):
+    """zerus-abyw: a process that exits while /proc is scanned ends the scan
+    of that process, never the supervisor."""
+
+    def scan(self, script):
+        bounded = load()
+        bounded.Path = lambda root: ScriptedProc(script, root)
+        return bounded.children(10)
+
+    def test_a_process_that_exits_before_its_tasks_are_read_lists_nothing(self):
+        for error in (ProcessLookupError(errno.ESRCH, 'No such process'),
+                      FileNotFoundError(errno.ENOENT, 'No such file or directory')):
+            with self.subTest(error=error):
+                self.assertEqual(self.scan({('/proc', '10', 'task'): error}), set())
+
+    def test_a_thread_that_exits_mid_scan_keeps_what_the_others_listed(self):
+        esrch = ProcessLookupError(errno.ESRCH, 'No such process')
+        threads = {('/proc', '10', 'task', '10', 'children'): '20 21',
+                   ('/proc', '10', 'task', '11', 'children'): esrch,
+                   ('/proc', '10', 'task', '12', 'children'): '22'}
+        self.assertEqual(self.scan({('/proc', '10', 'task'): ['10', '11', '12'], **threads}), {20, 21, 22})
+        # The listing itself fails after its first thread.
+        partial = {('/proc', '10', 'task'): ['10', esrch], **threads}
+        self.assertEqual(self.scan(partial), {20, 21})
+
+    def test_an_unreadable_process_lists_nothing_and_other_errors_still_fail(self):
+        denied = PermissionError(errno.EACCES, 'Permission denied')
+        self.assertEqual(self.scan({('/proc', '10', 'task'): denied}), set())
+        with self.assertRaises(OSError):
+            self.scan({('/proc', '10', 'task'): OSError(errno.EIO, 'Input/output error')})
+
+    def test_a_collect_racing_an_exiting_child_keeps_it_in_custody(self):
+        # A real owned child inside a bounded supervisor; its task directory
+        # reads as exiting (ESRCH), then as unreadable (EACCES). Neither ends
+        # the collect, and neither drops the child from custody.
+        code = f"""import errno,importlib.util,sys,signal,subprocess
+spec=importlib.util.spec_from_file_location('bounded', {str(RUNNER)!r})
+b=importlib.util.module_from_spec(spec);spec.loader.exec_module(b)
+assert b.ctypes.CDLL(None,use_errno=True).prctl(36,1,0,0,0)==0
+child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'])
+tree=b.Tree(8)
+real=b.Path
+fault=[]
+class Racing:
+ def __init__(self,*parts): self.path=real(*parts)
+ def __truediv__(self,part): return Racing(self.path/part)
+ def iterdir(self):
+  if fault and self.path==real('/proc',str(child.pid),'task'): raise fault[0]
+  return (Racing(path) for path in self.path.iterdir())
+ def read_text(self): return self.path.read_text()
+try:
+ tree.collect()
+ started=tree.owned[child.pid][0]
+ b.Path=Racing
+ for error in (ProcessLookupError(errno.ESRCH,'No such process'),PermissionError(errno.EACCES,'Permission denied')):
+  fault[:]=[error]
+  tree.collect()
+  tree.prune()
+  assert tree.owned.get(child.pid,('gone',))[0]==started,error
+ print('custody kept through the race',flush=True)
+finally:
+ b.Path=real
+ assert tree.cleanup(),'private original child remains'
+ tree.close()
+ child.returncode=-signal.SIGKILL
+"""
+        result = subprocess.run([sys.executable, str(RUNNER), '--seconds', '5', '--max-processes', '8',
+                                 '--', sys.executable, '-c', code],
+                                capture_output=True, text=True, timeout=12)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'custody kept through the race')
 
 
 if __name__ == '__main__':

@@ -1,7 +1,7 @@
 //! Ephemeral, service-owned click delivery. Only an original authenticated
 //! frontend child can wait here; generic requests and display watches cannot.
 #![allow(dead_code)] // Callback/launcher attachment follows the platform lifecycle.
-use super::{Activation, Identity, Outbox, Target};
+use super::{AdmittedClick, Identity, Outbox, Target};
 use crate::desktop::{fanout::Queue, ownership, store::Store, ui_authority};
 use anyhow::{ensure, Context, Result};
 use rusqlite::OptionalExtension;
@@ -14,7 +14,7 @@ use zerus_client_core::desktop::{
 
 struct Pending {
     id: String,
-    value: Activation,
+    click: AdmittedClick,
     until: Instant,
 }
 struct Wait {
@@ -50,11 +50,11 @@ impl Launch {
     pub fn configuration(&self) -> &str {
         &self.configuration
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     pub fn current(&self) -> bool {
         Instant::now() < self.until && !self.cancelled.load(std::sync::atomic::Ordering::Acquire)
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     pub fn bind_preparation(
         &mut self,
         resources: Arc<dyn Send + Sync>,
@@ -63,11 +63,11 @@ impl Launch {
         self.preparation = Some(resources);
         self.cancelled = cancelled;
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     pub fn preparation_resources(&self) -> Option<Arc<dyn Send + Sync>> {
         self.preparation.clone()
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     pub fn release_preparation(&mut self) {
         self.preparation = None;
     }
@@ -79,6 +79,8 @@ pub(in crate::desktop) struct Router {
     waiting: Option<Wait>,
     stopping: bool,
     overflow: u64,
+    /// Foreground rights lent to and refused for receivers of an Open.
+    foreground: (u64, u64),
 }
 impl Router {
     pub fn new(configuration: &str, epoch: &str) -> Self {
@@ -89,9 +91,10 @@ impl Router {
             waiting: None,
             stopping: false,
             overflow: 0,
+            foreground: (0, 0),
         }
     }
-    pub fn offer(&mut self, store: &Store, outbox: &Outbox, value: Activation) -> Result<bool> {
+    pub fn offer(&mut self, store: &Store, outbox: &Outbox, click: AdmittedClick) -> Result<bool> {
         ensure!(!self.stopping, "activation transport stopped");
         self.expire();
         ensure!(
@@ -99,7 +102,7 @@ impl Router {
                 && outbox.session.service_epoch == self.epoch,
             "activation source changed"
         );
-        if outbox.current_activation(store, &value)?.is_none() {
+        if outbox.admitted_activation(store, &click)?.is_none() {
             return Ok(false);
         }
         if self.pending.len() == wire::QUEUE {
@@ -108,7 +111,7 @@ impl Router {
         }
         self.pending.push_back(Pending {
             id: uuid::Uuid::new_v4().to_string(),
-            value,
+            click,
             until: Instant::now() + wire::MAX_AGE,
         });
         Ok(true)
@@ -160,6 +163,15 @@ impl Router {
             return;
         }
         let wait = self.waiting.take().unwrap();
+        // Best-effort, after the handoff proof and before the reply exists.
+        #[cfg(any(windows, test))]
+        if activation.is_some() {
+            if wait.peer.lend_foreground() {
+                self.foreground.0 = self.foreground.0.saturating_add(1);
+            } else {
+                self.foreground.1 = self.foreground.1.saturating_add(1);
+            }
+        }
         // No replay after an uncertain pipe handoff. The frontend may start its
         // next wait; another native click is a distinct event with its own ID.
         let reply = Reply {
@@ -222,7 +234,7 @@ impl Router {
         );
         // The whole queue is capped at 32; no journal or session scan.
         while let Some(pending) = self.pending.pop_front() {
-            let Some(binding) = outbox.current_activation(store, &pending.value)? else {
+            let Some(binding) = outbox.admitted_activation(store, &pending.click)? else {
                 continue;
             };
             let raw:Option<String>=store.db.query_row("SELECT CASE WHEN length(CAST(identity AS BLOB))<=4096 THEN identity END FROM desktop_intents WHERE id=?1",[&binding.intent_id],|r|r.get(0)).optional()?.flatten();
@@ -250,14 +262,14 @@ impl Router {
             }
             let open = Open {
                 activation_id: pending.id,
-                post_request_id: pending.value.request_id,
+                post_request_id: pending.click.value.request_id,
                 target: wire::Target {
                     computer,
                     run,
                     conversation,
                 },
-                token: pending.value.token,
-                platform_context: pending.value.platform_context,
+                token: pending.click.value.token,
+                platform_context: pending.click.value.platform_context,
             };
             ensure!(open.valid(), "activation target invalid");
             return Ok(Some((open, pending.until)));
@@ -276,7 +288,7 @@ impl Router {
         }
     }
     pub fn status(&self) -> Value {
-        json!({"abi":wire::ABI,"pending":self.pending.len(),"limit":wire::QUEUE,"waiting":self.waiting.is_some(),"stopping":self.stopping,"overflow":self.overflow,"durable":false})
+        json!({"abi":wire::ABI,"pending":self.pending.len(),"limit":wire::QUEUE,"waiting":self.waiting.is_some(),"stopping":self.stopping,"overflow":self.overflow,"foreground":{"lent":self.foreground.0,"refused":self.foreground.1},"durable":false})
     }
 }
 impl Drop for Router {

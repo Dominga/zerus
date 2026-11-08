@@ -209,6 +209,7 @@ void TeamTaskCard::rebuild()
     meta->addWidget(new Pill(role, roleColor(role, m_dark)));
     meta->addStretch();
     v->addLayout(meta);
+    if (QWidget *heat = heatLine ? heatLine(m_team, task->id) : nullptr) v->addWidget(heat);
     // U36: the pipeline: its flow, where the open stage works, what it holds
     // and every round with its verdict and findings.
     if (auto *pipeline = pipelineSection(m_team, *task, c, m_dark)) v->addWidget(pipeline);
@@ -507,6 +508,12 @@ void TeamTaskCard::rebuild()
     for (const auto &t : m_team.tasks) for (const auto &d : t.deps) if (d.task == task->id) blocks << t.id;
     linkRow(tr("Depends on"), deps, soft);
     linkRow(tr("Blocks"), blocks, {});
+    // Task #60: the task this follow-up was spawned from, and the follow-ups
+    // spawned from this one; neither waits for the other.
+    QList<int> spawned;
+    for (const auto &t : m_team.tasks) if (t.origin == task->id) spawned << t.id;
+    if (task->origin > 0) linkRow(tr("Spawned from"), {task->origin}, {});
+    linkRow(tr("Follow-ups"), spawned, {});
     // Owner 2026-10-31 (#746): the estimate and, once it works, the time
     // spent against it; over it in the warning color.
     if (task->estimateKnown()) {

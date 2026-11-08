@@ -51,6 +51,10 @@ public:
     // empty label hides the chip (an hgs without U53 names no account).
     void setSession(const QString &key, const QString &provider, const QString &accountId, const QString &label);
     QString sessionKey() const { return m_key; }
+    // The owner's path from the status-bar usage chip: open the same account
+    // list when this session can switch, else the caller opens Accounts.
+    bool canSwitch() const;
+    void openList();
     void setOptions(const QList<AccountSwitch::Option> &options);
     // The session cannot change now (it works, is stopped or offline): the
     // chip is disabled and says why.

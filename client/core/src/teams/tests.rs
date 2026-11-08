@@ -480,6 +480,61 @@ fn inbox_waiting_spans_and_profile_project_their_replies() {
     assert!(!profile.losses.is_empty() && !profile.roles.is_empty());
 }
 
+/// Task 82: the profile's task rows carry each task's lateness against the
+/// plan and its overrun against the estimate; a row without a baseline has
+/// no lateness, an unstarted task no overrun, an unknown schedule says so.
+#[test]
+fn profile_task_rows_carry_lateness_and_overrun() {
+    let value = json!({
+        "summary": {"tasks": 3},
+        "tasks": {"items": [
+            {"task": 3, "lateness": {"planned_start": 100.0, "planned_end": 700.0, "start_late_s": 1500, "inherited_s": 1200,
+                "own_s": 300, "end_late_s": null, "from": 2, "actual_start": 1600.0, "actual_end": null},
+             "overrun": {"estimate_s": 600, "work_s": 1020, "overrun_s": 420, "ratio": 1.7, "running": true}},
+            {"task": 4, "lateness": {"planned_start": 900.0, "start_late_s": 0, "inherited_s": 0, "own_s": 0, "from": null},
+             "overrun": {"not_started": true}},
+            {"task": 5, "lateness": {"start_late_s": null, "inherited_s": null, "own_s": null, "unknown": "estimate missing"},
+             "overrun": {"estimate_s": null, "work_s": 60, "overrun_s": null, "ratio": null}},
+            {"task": 6, "lateness": null, "overrun": {"not_started": true}}
+        ], "next_cursor": 6}
+    });
+    let profile = view::profile(TEAM, &value);
+    assert!(profile.task_rows_more);
+    let row = |id: u64| profile.task_rows.iter().find(|row| row.task == id).unwrap();
+    let three = row(3).lateness.clone().unwrap();
+    assert_eq!(
+        (
+            three.known,
+            three.own_s,
+            three.inherited_s,
+            three.from,
+            three.actual_start
+        ),
+        (true, 300, 1200, Some(2), Some(1600.0))
+    );
+    let over = row(3).overrun.clone().unwrap();
+    assert_eq!(
+        (
+            over.started,
+            over.known,
+            over.overrun_s,
+            over.ratio,
+            over.running
+        ),
+        (true, true, 420, 1.7, true)
+    );
+    let four = row(4).lateness.clone().unwrap();
+    assert_eq!((four.known, four.start_late_s, four.from), (true, 0, None));
+    assert!(!row(4).overrun.clone().unwrap().started);
+    let five = row(5).lateness.clone().unwrap();
+    assert_eq!(
+        (five.known, five.unknown.as_str()),
+        (false, "estimate missing")
+    );
+    assert!(!row(5).overrun.clone().unwrap().known);
+    assert!(row(6).lateness.is_none());
+}
+
 #[test]
 fn waiting_pages_append_new_items_in_order_and_stop_at_the_last() {
     let start = Instant::now();
@@ -563,11 +618,13 @@ fn replies(read: &TeamRead) -> Value {
         } => fixture("events-older"),
         TeamRead::Inbox { .. } => fixture("inbox"),
         TeamRead::Waiting { .. } => fixture("waiting"),
-        TeamRead::Spans { .. } => fixture("spans"),
-        TeamRead::Profile { .. } => fixture("profile"),
+        TeamRead::Spans { .. } | TeamRead::ScopedSpans { .. } => fixture("spans"),
+        TeamRead::Profile { .. } | TeamRead::ScopedProfile { .. } => fixture("profile"),
         TeamRead::Catalog => fixture("catalog"),
         TeamRead::CatalogRoute { .. } => serde_json::json!({"rule": null, "template": null}),
-        TeamRead::TestQueue { .. } | TeamRead::TestResults { .. } => json!({"items":[]}),
+        TeamRead::TestQueue { .. } | TeamRead::TestResults { .. } | TeamRead::TestWindow { .. } => {
+            json!({"items":[]})
+        }
     }
 }
 
@@ -914,6 +971,49 @@ fn spans_and_profile_are_read_on_request_for_the_watched_team_only() {
     assert_eq!(keys, [team_key("spans", TEAM), team_key("profile", TEAM)]);
 }
 
+/// Task 72 (F3): Waiting for you is read as soon as it is followed, not after
+/// a poll interval, and an empty reply is an empty view ("Nothing waits for
+/// you"), never the reading state.
+#[test]
+fn waiting_is_read_at_once_and_an_empty_list_is_a_view() {
+    let (tx, rx) = mpsc::channel();
+    let poller = super::TeamsPoller::spawn_with(
+        ComputerId::local(),
+        Box::new(|read: &TeamRead| match read {
+            TeamRead::Waiting { .. } => Ok(json!({"items": [], "total": 0, "next": null})),
+            other => Ok(replies(other)),
+        }),
+        Box::new(move |change| {
+            let _ = tx.send(change);
+        }),
+    )
+    .unwrap();
+    let asked = Instant::now();
+    poller.follow(TeamsFollow {
+        waiting: true,
+        ..TeamsFollow::default()
+    });
+    let change = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the first Waiting view");
+    assert!(
+        asked.elapsed() < super::model::POLL,
+        "read after {:?}, not at once",
+        asked.elapsed()
+    );
+    let mut coalescer = Coalescer::new();
+    coalescer.push(change);
+    let batch = coalescer.take();
+    let waiting = batch
+        .teams
+        .iter()
+        .find(|out| out.key == "waiting")
+        .expect("a waiting entry");
+    assert_eq!(waiting.kind, "waiting");
+    assert_eq!(waiting.payload["items"], json!([]));
+    assert_eq!(waiting.payload["total"], 0);
+}
+
 /// The poller runs the reads off the calling thread and the coalescer folds
 /// its changes to one entry per key, each carrying a projected view.
 #[test]
@@ -1001,4 +1101,405 @@ fn a_failure_keeps_a_pending_view_in_the_batch() {
         json!({"code": "timed_out", "message": "late"})
     );
     assert!(coalescer.take().is_empty());
+}
+
+/// Task #58: status carries each phase's mode and the free phase; the list
+/// names the free phases; an older hgs sends neither.
+#[test]
+fn task_58_each_phase_carries_its_mode() {
+    let status = json!({"id":"t1","name":"Checkout","status":"running","lead":"lead","members":[{"id":"lead"}],
+        "plan_mode":"standard","phase_modes":{"1":"standard","2":"free"},
+        "free_phase":{"phase":2,"state":"idle","running":[]},
+        "phase_summary":[{"n":1,"title":"Build","state":"running"},{"n":2,"title":"Support","state":"running"},{"n":3,"state":"draft"}]});
+    let view = view::team(&status);
+    assert!(view.phase_modes_known);
+    assert_eq!(view.free_phase, Some(2));
+    let modes: Vec<(u64, &str)> = view.phases.iter().map(|phase| (phase.n, phase.mode.as_str())).collect();
+    assert_eq!(modes, [(1, "standard"), (2, "free"), (3, "standard")], "a phase not named reads the team's mode");
+    let older = view::team(&json!({"id":"t1","name":"Checkout","status":"running","lead":"lead","plan_mode":"free",
+        "phase_summary":[{"n":1,"state":"running"}]}));
+    assert!(!older.phase_modes_known);
+    assert_eq!((older.phases[0].mode.as_str(), older.free_phase), ("", None));
+    let list = view::list(&json!({"items":[
+        {"id":"a","name":"A","status":"running","lead":"lead","members":[],"phase_modes":{"1":"standard","3":"free"}},
+        {"id":"b","name":"B","status":"running","lead":"lead","members":[]}]}));
+    assert_eq!((list.teams[0].free_phases.clone(), list.teams[1].free_phases.clone()), (vec![3], vec![]));
+}
+
+/// Task #60: a follow-up's origin reaches the task view and the graph node,
+/// never as a dependency edge; an older record has none.
+#[test]
+fn task_60_a_follow_up_carries_its_origin() {
+    let status = json!({"id":"t1","name":"Checkout","status":"running","lead":"lead","members":[{"id":"lead"}],
+        "tasks":[{"id":1,"title":"API","status":"accepted","assignee":"lead"},
+                 {"id":2,"title":"Fix","status":"pending","assignee":"lead","origin":1},
+                 {"id":3,"title":"Gone origin","status":"pending","assignee":"lead","origin":9}],
+        "layers":{"1":0,"2":0,"3":0}});
+    let view = view::team(&status);
+    let origins: Vec<Option<u64>> = view.tasks.iter().map(|task| task.origin).collect();
+    assert_eq!(origins, [None, Some(1), Some(9)]);
+    let graph = view::graph(&status, &view);
+    assert_eq!(graph.nodes.iter().map(|node| node.origin).collect::<Vec<_>>(), [None, Some(1), None], "a task the graph lacks is no link");
+    assert!(graph.edges.is_empty(), "an origin is not a dependency edge");
+}
+
+/// Task 92: the Time view's lanes from this team's real replies, as Qt's
+/// `TeamProfile::Model::build` lays them out: a lane per profile member in
+/// its order (then the lead when it has time), each member's own spans in its
+/// lane with build and merge among them, every wait under the lane of the
+/// member its task was given, idle time never over the member's own work,
+/// and the critical paths from the profile.
+#[test]
+fn the_time_view_lays_out_qt_s_lanes_from_the_team_s_replies() {
+    use super::timeline::{self, MAX_SPANS};
+    let status = fixture("status");
+    let profile = fixture("profile");
+    let spans = fixture("spans");
+    let timelines = spans["tasks"].as_array().unwrap().clone();
+    let tests = vec![
+        json!({"id": "r1", "suite": "client-core", "status": "passed", "task": 1,
+               "at": profile["summary"]["from"].as_f64().unwrap() + 60.0, "duration_ms": 90_000}),
+        json!({"id": "r2", "suite": "old", "status": "failed", "task": 2, "at": 10.0, "duration_ms": 1000}),
+    ];
+    let now = profile["summary"]["to"].as_f64().unwrap() + 600.0;
+    let view = timeline::build(
+        TEAM,
+        Some(2),
+        &status,
+        &profile,
+        &timelines,
+        &tests,
+        false,
+        now,
+    );
+    assert_eq!(view.phase, Some(2));
+    // The same table tray/tests/test_teamsui_profile.cpp asserts for Qt's
+    // Model::build on these replies: each lane's own kinds and its waits.
+    let counts = |spans: &[timeline::TimelineSpan]| {
+        let mut kinds = std::collections::BTreeMap::<&str, usize>::new();
+        for span in spans {
+            *kinds.entry(span.kind.as_str()).or_default() += 1;
+        }
+        kinds
+            .iter()
+            .map(|(kind, n)| format!("{kind}:{n}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let table: Vec<String> = view
+        .lanes
+        .iter()
+        .map(|lane| {
+            format!(
+                "{}|{}|{}",
+                lane.member,
+                counts(&lane.spans),
+                counts(&lane.waits)
+            )
+        })
+        .collect();
+    assert_eq!(
+        table,
+        [
+            "core|build:6,question:1,work:5|delivery:3,deps:2,lead:2,member:3,start_delay:3",
+            "hgs||deps:1",
+            "ui1|build:13,work:5|delivery:5,deps:2,lead:5,member:5,start_delay:5",
+            "ui2|permission:2,question:8,work:11|delivery:3,deps:3,lead:1,member:6,start_delay:3",
+            "merger||deps:4",
+            "qa|work:1|delivery:1,deps:2,member:1,start_delay:1",
+        ]
+    );
+    let members: Vec<&str> = profile["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["member"].as_str().unwrap())
+        .collect();
+    let lanes: Vec<&str> = view.lanes.iter().map(|lane| lane.member.as_str()).collect();
+    assert_eq!(
+        &lanes[..members.len()],
+        &members[..],
+        "the profile's members, in its order"
+    );
+    assert!(lanes.len() <= members.len() + 1);
+    let assignee = |task: u64| {
+        status["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == task)
+            .map(|row| row["assignee"].as_str().unwrap().to_owned())
+            .unwrap_or_default()
+    };
+    let busy = [
+        "work",
+        "rework",
+        "stage",
+        "question",
+        "permission",
+        "background",
+    ];
+    // Every span of the replies is drawn once, in Qt's lane.
+    let (mut own, mut waited, mut builds) = (0, 0, 0);
+    for task in &timelines {
+        let id = task["task"].as_u64().unwrap();
+        for raw in task["spans"].as_array().unwrap() {
+            let Some(from) = raw["from"].as_f64() else {
+                continue;
+            };
+            if raw["to"].as_f64().is_some_and(|to| to <= from) {
+                continue;
+            }
+            let kind = raw["kind"].as_str().unwrap();
+            if busy.contains(&kind) {
+                own += 1;
+                let who = raw["member"]
+                    .as_str()
+                    .filter(|m| !m.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| assignee(id));
+                if let Some(lane) = view.lanes.iter().find(|lane| lane.member == who) {
+                    assert!(
+                        lane.spans
+                            .iter()
+                            .any(|span| span.task == id && span.kind == kind && span.from == from),
+                        "{kind} of #{id} in {who}"
+                    );
+                }
+            } else {
+                waited += 1;
+                if let Some(lane) = view.lanes.iter().find(|lane| lane.member == assignee(id)) {
+                    assert!(
+                        lane.waits
+                            .iter()
+                            .any(|span| span.task == id && span.kind == kind && span.from == from),
+                        "{kind} of #{id}"
+                    );
+                    assert!(
+                        !lane.spans.iter().any(|span| span.kind == kind),
+                        "a wait is never a lane's own span"
+                    );
+                }
+            }
+        }
+        builds += task["overlay"].as_array().map_or(0, |overlay| {
+            overlay
+                .iter()
+                .filter(|b| b["from"].as_f64().is_some())
+                .count()
+        });
+    }
+    let drawn_own: usize = view
+        .lanes
+        .iter()
+        .map(|lane| {
+            lane.spans
+                .iter()
+                .filter(|span| span.kind != "build")
+                .count()
+        })
+        .sum();
+    let drawn_waits: usize = view.lanes.iter().map(|lane| lane.waits.len()).sum();
+    let drawn_builds: usize = view
+        .lanes
+        .iter()
+        .map(|lane| {
+            lane.spans
+                .iter()
+                .filter(|span| span.kind == "build")
+                .count()
+        })
+        .sum();
+    assert!(own > 0 && waited > 0 && builds > 0);
+    assert!(drawn_own <= own && drawn_waits <= waited && drawn_builds <= builds);
+    let kinds: std::collections::BTreeSet<&str> = view
+        .lanes
+        .iter()
+        .flat_map(|lane| lane.waits.iter().map(|span| span.kind.as_str()))
+        .collect();
+    for kind in ["member", "deps", "delivery", "start_delay", "lead"] {
+        assert!(kinds.contains(kind), "the {kind} waits are drawn");
+    }
+    for lane in &view.lanes {
+        assert!(
+            lane.spans
+                .windows(2)
+                .all(|pair| pair[0].from <= pair[1].from),
+            "a lane's spans are in time order"
+        );
+        for idle in &lane.idle {
+            assert!(idle[0] < idle[1]);
+            assert!(
+                !lane
+                    .spans
+                    .iter()
+                    .filter(|span| busy.contains(&span.kind.as_str()))
+                    .any(|span| span.from < idle[1] - 1e-6 && span.to > idle[0] + 1e-6),
+                "{} is idle while it works",
+                lane.member
+            );
+        }
+    }
+    // The window covers every span; the critical paths come from the profile.
+    assert!(view.from > 0.0 && view.to > view.from);
+    assert!(view
+        .lanes
+        .iter()
+        .flat_map(|lane| lane.spans.iter().chain(&lane.waits))
+        .all(|span| span.from >= view.from && span.to <= view.to));
+    assert_eq!(
+        view.real_s,
+        profile["critical_path"]["real"]["s"].as_u64().unwrap()
+    );
+    assert_eq!(
+        view.real.iter().map(|span| span.task).collect::<Vec<_>>(),
+        [1]
+    );
+    assert!(
+        view.planned
+            .windows(2)
+            .all(|pair| pair[0].to == pair[1].from),
+        "the planned path runs end to end"
+    );
+    assert!(view
+        .planned
+        .iter()
+        .all(|span| [4, 6, 7, 12, 13, 14].contains(&span.task)));
+    // Only the window's test runs, named by suite; titles only for drawn tasks.
+    assert_eq!(view.tests.len(), 1);
+    assert_eq!(
+        (
+            view.tests[0].member.as_str(),
+            view.tests[0].stage_kind.as_str(),
+            view.tests[0].record.as_str()
+        ),
+        ("client-core", "passed", "r1")
+    );
+    assert!(!view.tests_more);
+    assert!(
+        view.titles.contains_key(&1)
+            && view
+                .titles
+                .values()
+                .all(|title| title.chars().count() <= timeline::TITLE_CHARS)
+    );
+    assert!(!view.estimates.is_empty());
+    assert_eq!(view.tasks, timelines.len() as u64);
+    assert!(!view.truncated);
+
+    // Bounded: a flood of spans keeps MAX_SPANS and says so.
+    let flood: Vec<Value> = (0..3).map(|n| json!({"task": n + 1, "spans": (0..MAX_SPANS / 2).map(|i| json!({"kind": "work", "member": "ui1",
+        "from": 1000.0 + i as f64, "to": 1000.5 + i as f64})).collect::<Vec<_>>()})).collect();
+    let flooded = timeline::build(
+        TEAM,
+        None,
+        &status,
+        &json!({"members": [{"member": "ui1"}]}),
+        &flood,
+        &[],
+        false,
+        0.0,
+    );
+    assert!(flooded.truncated);
+    assert_eq!(flooded.lanes[0].spans.len(), MAX_SPANS);
+}
+
+/// Task 118: time that waited for a person's answer is a wait under its
+/// task's lane, never the member's own busy time, so it counts as neither work
+/// nor busy and the lane's idle outline is not drawn over it.
+#[test]
+fn a_wait_for_a_person_is_drawn_as_a_wait_and_not_as_the_member_s_own_time() {
+    use super::timeline;
+    let status = fixture("status");
+    // Task 1 is ui2's.
+    let timelines = vec![json!({"task": 1, "spans": [
+        {"kind": "work", "member": "ui2", "from": 1000.0, "to": 1100.0},
+        {"kind": "person", "reason": "permission", "member": "ui2", "from": 1100.0, "to": 1400.0},
+        {"kind": "work", "member": "ui2", "from": 1400.0, "to": 1500.0},
+    ]})];
+    let view = timeline::build(
+        TEAM,
+        None,
+        &status,
+        &json!({"members": [{"member": "ui2"}]}),
+        &timelines,
+        &[],
+        false,
+        1600.0,
+    );
+    let lane = view.lanes.iter().find(|lane| lane.member == "ui2").unwrap();
+    assert_eq!(
+        lane.spans.iter().map(|span| span.kind.as_str()).collect::<Vec<_>>(),
+        ["work", "work"]
+    );
+    assert_eq!(
+        lane.waits.iter().map(|span| (span.kind.as_str(), span.from, span.to)).collect::<Vec<_>>(),
+        [("person", 1100.0, 1400.0)]
+    );
+}
+
+/// Task 92: the Time view's reads name the scope and their bounds.
+#[test]
+fn the_time_view_reads_a_scope_in_bounded_pages() {
+    let profile = TeamRead::ScopedProfile {
+        team: TEAM.into(),
+        phase: Some(3),
+    };
+    assert_eq!(profile.op(), "profile");
+    assert_eq!(
+        profile.request(),
+        json!({"team": TEAM, "limit": 20, "phase": 3})
+    );
+    assert_eq!(
+        TeamRead::ScopedProfile {
+            team: TEAM.into(),
+            phase: None
+        }
+        .request(),
+        json!({"team": TEAM, "limit": 20})
+    );
+    let spans = TeamRead::ScopedSpans {
+        team: TEAM.into(),
+        phase: Some(3),
+        after: 50,
+    };
+    assert_eq!(spans.op(), "spans");
+    assert_eq!(
+        spans.request(),
+        json!({"team": TEAM, "limit": 50, "phase": 3, "after": 50})
+    );
+    assert_eq!(
+        TeamRead::ScopedSpans {
+            team: TEAM.into(),
+            phase: None,
+            after: 0
+        }
+        .request(),
+        json!({"team": TEAM, "limit": 50})
+    );
+    let tests = TeamRead::TestWindow {
+        team: TEAM.into(),
+        from: Some(100.0),
+        before: Some(201.0),
+    };
+    assert_eq!(
+        tests.request(),
+        json!({"team": TEAM, "action": "results", "limit": 100, "from": 100.0, "before": 201.0})
+    );
+    let call = invocation(&ComputerId::from("studio"), &tests).unwrap();
+    assert_eq!(call.args, ["@studio", "team", "test", "--json"]);
+    assert_eq!(
+        invocation(&ComputerId::local(), &spans).unwrap().args,
+        ["team", "spans", "--json"]
+    );
+    // A spans reply without its tasks is refused before it is projected.
+    assert!(decode(
+        &spans,
+        Exit::Code {
+            code: 0,
+            stdout: br#"{"team":"x"}"#.to_vec(),
+            stderr: String::new()
+        }
+    )
+    .is_err());
 }

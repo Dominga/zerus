@@ -49,6 +49,11 @@ pub struct Reply {
     pub unavailable_sessions: u64,
     #[serde(default)]
     pub contents_unavailable: bool,
+    /// Task 77: the content index's coverage when hgs answered with it
+    /// (`ready`, `cold`, `indexing`, `partial` or `unavailable`); empty for
+    /// an hgs that only scans recent history.
+    #[serde(default)]
+    pub index_state: String,
 }
 fn empty_string<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
     Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
@@ -104,7 +109,12 @@ pub fn decode(query: &str, value: Value) -> Result<Reply, ReadError> {
     let value_coverage_incomplete = value["index_coverage"]["state"] != "ready";
     let incomplete = value_coverage_incomplete || has_cursor;
     let fallback = value.get("fallback").cloned().ok_or_else(invalid)?;
+    let state = value["index_coverage"]["state"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
     let mut reply = decode_channel(query, value)?;
+    reply.index_state = state;
     reply.truncated |= incomplete;
     reply.contents_unavailable |= value_coverage_incomplete;
     if !fallback.is_null() {
@@ -370,6 +380,7 @@ mod tests {
         assert_eq!(reply.results[99].at, 100.0);
         assert!(reply.truncated);
         assert!(reply.contents_unavailable);
+        assert_eq!(reply.index_state, "indexing");
         let old = hit();
         let mut fresh = hit();
         fresh["event"]["detail"] = json!("needle fresh public message");
@@ -468,5 +479,30 @@ mod tests {
         assert_eq!(row["account_id"], "");
         assert_eq!(row["account_home"], "");
         assert_eq!(row["cwd_canonical"], "");
+    }
+
+    /// Task 77 (live pass F4): this computer's index refused its folder, so
+    /// hgs answered from the recent-history scan alone. The reply says so,
+    /// and a peer's state never leaks from its channel's own fields.
+    #[test]
+    fn the_reply_names_an_unavailable_index_and_unreadable_sessions() {
+        let fallback = json!({"query":"needle","results":[hit()],"truncated":true,"unavailable_sessions":5,
+            "scanned_sessions":84,"scope":"public_messages_and_recorded_activity"});
+        let mut value = indexed(vec![], fallback);
+        value["index_coverage"]["state"] = json!("unavailable");
+        let reply = decode("needle", value).unwrap();
+        assert_eq!(reply.index_state, "unavailable");
+        assert!(reply.contents_unavailable && reply.truncated);
+        assert_eq!(reply.unavailable_sessions, 5);
+        assert_eq!(reply.results.len(), 1);
+        let legacy = decode(
+            "needle",
+            json!({"query":"needle","results":[],"truncated":false,"unavailable_sessions":0}),
+        )
+        .unwrap();
+        assert_eq!(legacy.index_state, "");
+        assert!(!legacy.contents_unavailable);
+        let wire = serde_json::to_value(&reply).unwrap();
+        assert_eq!(wire["index_state"], "unavailable");
     }
 }

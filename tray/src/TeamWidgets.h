@@ -831,7 +831,9 @@ public:
         double estimate = -1; bool estimateKnown = false, timeOver = false;
         // U38: the heat tint's fill and the loss at the second line's end
         // (it takes the working time's place).
-        QColor heatFill, heatColor; QString heat; };
+        QColor heatFill, heatColor; QString heat;
+        // Task 82: the overrun badge beside it ("x1.7"), in its own colour.
+        QString heatBadge; QColor heatBadgeColor; };
     // A phase group as the plan, board and layers show it: the heading is
     // "Phase 2 · QA fixes · 3/5". A finished phase starts collapsed; its tasks
     // are in `tasks` but no node is built, and one summary node stands in.
@@ -943,6 +945,7 @@ public:
     // G3: where a task landed; a dead-end sits below the tasks others need.
     QRectF nodeRect(int id) const { return m_rects.value(id); }
     QMap<int, QList<int>> edges;   // task -> its dependencies
+    QMap<int, int> origins;        // task -> the task it was spawned from
     QSet<QPair<int, int>> soft;    // (dependency, task) edges that need only In progress
     QSet<int> cycle, emphasis;     // emphasis: Show what blocks
     std::function<QSet<int>(int)> chain;
@@ -1394,6 +1397,17 @@ protected:
         // U38: the loss sits at the line's end, bold in its heat color; the
         // texts before it keep to the room left of it.
         double end = r.right() - 8;
+        // Task 82: the overrun badge at the end, the lateness left of it.
+        if (!n.heatBadge.isEmpty()) {
+            QFont badge = font(); badge.setPixelSize(10); badge.setWeight(QFont::DemiBold);
+            const double w = qMin(double(QFontMetrics(badge).horizontalAdvance(n.heatBadge)) + 8, qMax(0.0, end - right));
+            const QRectF pill(end - w, line2 + 2, w, lineH - 4);
+            p.setPen(QPen(n.heatBadgeColor, 1)); p.setBrush(QColor(n.heatBadgeColor.red(), n.heatBadgeColor.green(), n.heatBadgeColor.blue(), 30));
+            p.drawRoundedRect(pill, 4, 4);
+            p.setFont(badge); p.setPen(n.heatBadgeColor);
+            p.drawText(pill, Qt::AlignCenter, QFontMetrics(badge).elidedText(n.heatBadge, Qt::ElideRight, int(w) - 4));
+            end -= w + 6;
+        }
         if (!n.heat.isEmpty()) {
             QFont heat = font(); heat.setPixelSize(11); heat.setWeight(n.heatFill.isValid() ? QFont::DemiBold : QFont::Normal);
             p.setFont(heat); p.setPen(n.heatColor);
@@ -1696,6 +1710,25 @@ protected:
                     p.setPen(Qt::NoPen); p.setBrush(m_c.danger); p.drawEllipse(mid, 7, 7);
                     p.setPen(QPen(Qt::white, 1.5)); p.drawLine(mid + QPointF(-3, -3), mid + QPointF(3, 3)); p.drawLine(mid + QPointF(-3, 3), mid + QPointF(3, -3));
                 }
+            }
+            // Task 61: a follow-up's origin is a dashed violet link with an
+            // open head, drawn apart from the dependency edges; it never waits.
+            for (auto it = origins.cbegin(); it != origins.cend(); ++it) {
+                const int from = anchor(it.value()), to = anchor(it.key());
+                if (!from || !to || from == to) continue;
+                const QRectF a = m_rects.value(from), b = m_rects.value(to);
+                if (a.isNull() || b.isNull()) continue;
+                QPainterPath path;
+                const double x1 = a.right(), y1 = a.center().y(), x2 = b.left(), y2 = b.center().y();
+                const double bend = qMax(24.0, qAbs(x2 - x1) / 2.0);
+                path.moveTo(x1, y1);
+                path.cubicTo(x1 + bend, y1, x2 - bend, y2, x2, y2);
+                p.setPen(QPen(m_c.violet, 1.6, Qt::DashLine)); p.setBrush(Qt::NoBrush);
+                p.drawPath(path);
+                const QLineF tail(path.pointAtPercent(1), path.pointAtPercent(.96));
+                QLineF wing1 = tail; wing1.setLength(6); wing1.setAngle(tail.angle() + 35);
+                QLineF wing2 = tail; wing2.setLength(6); wing2.setAngle(tail.angle() - 35);
+                p.drawLine(wing1); p.drawLine(wing2);
             }
             if (const int from = m_dragFrom ? m_dragFrom : m_connectFrom; from && m_rects.contains(from)) {
                 p.setPen(QPen(m_c.accent, 1.6, Qt::DashLine)); p.drawLine(out(m_rects[from]), m_dragAt / zoom);

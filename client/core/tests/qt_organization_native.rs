@@ -198,3 +198,88 @@ fn real_cli_recovers_missing_catalogs_and_preserves_existing_fields_and_tombston
         );
     }
 }
+
+#[test]
+#[ignore = "requires HGS_ORGANIZATION_TEST_BIN selecting the locally built G3 CLI"]
+fn real_cli_sets_up_projects_when_qt_has_no_readable_organization() {
+    // P1: with Qt's store present the CLI never bootstraps by itself. A store
+    // that never saved an organization imports the default once; an unreadable
+    // one is bootstrapped with its pending GUI import, and a later readable
+    // organization fills only the missing fields.
+    let hgs = PathBuf::from(
+        std::env::var_os("HGS_ORGANIZATION_TEST_BIN").expect("select the built isolated test CLI"),
+    );
+    assert!(hgs.is_absolute());
+    for malformed in [false, true] {
+        let root = std::env::temp_dir().join(format!(
+            "zerus-g3-unreadable-native-{}-{malformed}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        let scratch = Scratch(root);
+        let config = scratch.0.join("config");
+        let state = scratch.0.join("state");
+        let home = scratch.0.join("home");
+        let xdg = home.join(".config");
+        fs::create_dir_all(xdg.join("hgdev")).unwrap();
+        fs::create_dir(&config).unwrap();
+        let env = [
+            ("HGS_CONFIG_DIR", config.to_str().unwrap()),
+            ("HGS_STATE_DIR", state.to_str().unwrap()),
+            ("HGS_SELF", "example-local"),
+            ("HGS_PEERS", ""),
+            ("HOME", home.to_str().unwrap()),
+            ("XDG_CONFIG_HOME", xdg.to_str().unwrap()),
+        ];
+        // Qt's real Linux store location, so the CLI sees Qt as present.
+        let qt = xdg.join("hgdev/hgs-tray.conf");
+        let ini = |organization: Option<&Value>| match organization {
+            Some(value) => format!(
+                "[General]\nlanguage=ru\n\n[workspace]\norganization={}\n",
+                serde_json::to_string(&value.to_string()).unwrap()
+            ),
+            None => "[General]\nlanguage=ru\n\n[window]\ngeometry=@ByteArray(AAAA)\n".into(),
+        };
+        let unreadable = json!({"version":99});
+        fs::write(&qt, ini(malformed.then_some(&unreadable))).unwrap();
+        let catalog = config.join("swarm/catalog.json");
+        let pending = config.join("swarm/gui-import-pending.json");
+        let got = invoke(&hgs, &env, &["swarm", "get"], json!({}));
+        assert_eq!(got["initialized"], false, "Qt present: no CLI bootstrap");
+        let settings = Settings::open(scratch.0.join("next/settings.json"), None);
+        let source = QtStore::Ini(qt.clone());
+        let result = qt_import::recover(&hgs, &env, &source, &settings, "");
+        let after: Value = serde_json::from_slice(&fs::read(&catalog).unwrap()).unwrap();
+        assert_eq!(after["imported"], true, "projects are set up");
+        if !malformed {
+            assert_eq!(result, Ok(()));
+            assert_eq!(
+                settings.organization_import().unwrap(),
+                OrganizationImport::Handled
+            );
+            assert!(!pending.exists());
+            continue;
+        }
+        assert_eq!(result, Err(qt_import::SOURCE_FAILED.into()));
+        assert_eq!(
+            settings.organization_import().unwrap(),
+            OrganizationImport::Unhandled
+        );
+        assert!(pending.exists(), "the later GUI import stays pending");
+        // The organization becomes readable: the next start fills it in.
+        let readable = json!({"version":2,"projects":[project("beta","Recovered Qt project")]});
+        fs::write(&qt, ini(Some(&readable))).unwrap();
+        qt_import::recover(&hgs, &env, &source, &settings, "").unwrap();
+        assert_eq!(
+            settings.organization_import().unwrap(),
+            OrganizationImport::Handled
+        );
+        assert!(!pending.exists());
+        let listed = invoke(&hgs, &env, &["swarm", "get"], json!({}));
+        assert!(listed["organization"]["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "Recovered Qt project"));
+    }
+}

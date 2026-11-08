@@ -20,6 +20,7 @@ import { LaunchWarning } from "./LaunchWarning";
 import { ModelPopover, type ModelPickerActions } from "./ModelPicker";
 import { ChooseWorktreeDialog } from "./WorktreePicker";
 import { NewWorktreeDialog } from "./NewWorktreeDialog";
+import { ClaudeAppDialog } from "./ClaudeAppDialog";
 import { sameSessions, type PickerSession } from "./worktree-dialogs";
 import type { Json } from "../lib/json";
 import { tr } from "../../i18n";
@@ -40,7 +41,9 @@ export type NewSessionChild =
   | { kind: "browse"; target: string; computer: string; project: string; path: string }
   | { kind: "browse-repository"; target: string; computer: string; parent: string }
   | { kind: "choose-worktree"; target: string; computer: string; project: string; path: string; style: PathStyle }
-  | { kind: "create-worktree"; target: string; computer: string; project: string; path: string; catalog: Json; branch: string; style: PathStyle };
+  | { kind: "create-worktree"; target: string; computer: string; project: string; path: string; catalog: Json; branch: string; style: PathStyle }
+  // WhiteWh fork: Continue a Claude app session (NewSessionDialog.cpp:246-254).
+  | { kind: "claude-app"; target: string; computer: string; project: string; path: string };
 export const [newSessionChild, setNewSessionChild] = createSignal<NewSessionChild>();
 
 const AGENTS = new Set(["codex", "claude", "kimi", "dsh", "opencode"]);
@@ -248,6 +251,12 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
     props.setPopup(undefined);
     setNewSessionChild({ kind: "create-worktree", target: s().host, computer: computerName(), project: project()?.id ?? "", path: folder()?.path ?? "", catalog: s().worktrees.catalog, branch: s().name, style: s().style });
   };
+  // WhiteWh fork: a Claude desktop app session continues as a new session;
+  // its dialog reads the app's list for this computer and folder.
+  const continueClaudeApp = () => {
+    props.setPopup(undefined);
+    setNewSessionChild({ kind: "claude-app", target: s().host, computer: computerName(), project: project()?.id ?? "", path: folder()?.path ?? "" });
+  };
 
   // The worktree options menu: Escape is the dialog's (it closes the menu first), arrows move.
   // As Qt's QMenu, opened by the keyboard its first enabled entry is active; by the mouse none is.
@@ -435,6 +444,10 @@ function NewSessionForm(props: { s: () => NewSessionState; popup: () => string |
                         <Icon name="add" size={14} /><span>{tr("Create manually…")}</span>
                       </button>
                     </Show>
+                    <div class="menu-sep" role="separator" />
+                    <button type="button" class="menu-item" role="menuitem" onClick={continueClaudeApp}>
+                      <AgentGlyph agent="claude" size={14} /><span>{tr("Continue a Claude app session…")}</span>
+                    </button>
                   </div>
                 </Show>
               </div>
@@ -607,6 +620,7 @@ const folderCalls = (target: string): FolderBrowserCalls => ({
 /** The control a child dialog gives the focus back to. */
 const OPENER: Record<NewSessionChild["kind"], string> = {
   browse: "ns-browse", "browse-repository": "ns-browse-repository", "choose-worktree": "ns-worktree-options", "create-worktree": "ns-worktree-options",
+  "claude-app": "ns-worktree-options",
 };
 
 /**
@@ -650,6 +664,10 @@ function NewSessionChildren() {
           create={(branch, base, destination) => bridge.createWorktree(child.target, child.path, child.catalog, branch, base, destination)}
           pickLocal={(start) => bridge.pickLocalFolder(start)} browse={folderCalls(child.target)}
           onCreated={(created) => act.worktreeCreated(child.target, child.project, created.path, created.catalog)} onClose={() => done(child.kind)} />
+      )}</Match>
+      <Match when={(() => { const c = newSessionChild(); return c?.kind === "claude-app" ? c : undefined; })()} keyed>{(child) => (
+        <ClaudeAppDialog host={child.target} folder={child.path}
+          onSent={() => { setNewSessionChild(undefined); closeNewSession(); }} onClose={() => done(child.kind)} />
       )}</Match>
     </Switch>
   );

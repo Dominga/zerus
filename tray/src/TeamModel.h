@@ -134,6 +134,11 @@ struct Member {
     QString contextBeforeTask;
     // U49: it finishes its open work, takes nothing new and then leaves.
     bool draining = false;
+    // Task 98: hand-outs its Terminal refused in a row (a draft, a dialog or an
+    // unknown prompt), hgs's reason, and whether the lead and you were told.
+    int inputRefusals = 0;
+    QString inputReason;
+    bool inputRaised = false;
     QJsonObject json() const;
 };
 
@@ -322,6 +327,9 @@ struct Task {
     Hold hold;
     // U59: the free phase's integration-and-build task, a lead task like any.
     bool phaseBuild = false;
+    // Task #60: the task this follow-up was spawned from (0 for none); it
+    // never blocks, unlike deps.
+    int origin = 0;
     // C3: why the task waits and what unblocks it.
     struct Wait { QString for_, unblock; QStringList on; bool known = false; };
     Wait wait;
@@ -458,6 +466,12 @@ struct BuildState {
 
 struct Team {
     QString id, name, status, project, folder, lead;
+    // Task 112: a paused team's pause (status's "paused"): when, by whom and
+    // why; pausedText() is what the team bar, the session's strip and
+    // Waiting for you say.
+    double pausedAt = 0;
+    QString pausedBy, pausedReason;
+    QString pausedText() const;
     QString projectId;
     // D1: settings.evidence_folders, where report evidence may be previewed.
     QStringList evidenceFolders;
@@ -540,7 +554,11 @@ struct Team {
     // C4: the undecided reports on the owner's attention list.
     // U18/N7: `summary` is the server's sentence (member and what waits),
     // `command` the hgs command that answers it.
-    struct Attention { QString kind, member, summary, command; int task = 0, minutes = 0, phase = 0, count = 0; double since = 0; };
+    // Task 95: a stalled lead ("lead_stalled") also names its reason (idle,
+    // question, rejected_tool, exited), the decisions and members it blocks
+    // and the notification round, which changes at most hourly.
+    struct Attention { QString kind, member, summary, command, reason; int task = 0, minutes = 0, phase = 0, count = 0, items = 0, members = 0, round = 0; double since = 0; };
+    const Attention *leadStall() const;
     QList<Attention> attention;
     // D2: findings_* from status (open items and the deferred list).
     QList<TeamFinding> findings;
@@ -581,7 +599,14 @@ struct Team {
         bool idle() const { return state == QLatin1String("idle"); }
     };
     FreePhase freePhase;
-    bool freeMode() const { return planMode == QLatin1String("free"); }
+    // Task #58: each phase's mode by number (phase_modes, phase 1 included);
+    // a phase not named plans in planMode. Known only from an hgs that sends it.
+    QHash<int, QString> phaseModes;
+    bool phaseModesKnown = false;
+    QString phaseMode(int n) const { return phaseModes.value(n, planModeKnown ? planMode : QStringLiteral("standard")); }
+    // Whether a phase plans in free mode now: the free phase hgs names (task
+    // #58: whichever phase it is), or the team's mode from an older hgs.
+    bool freeMode() const { return phaseModesKnown ? freePhase.known : planMode == QLatin1String("free"); }
     // U31: idle members may take independent tasks of the next draft phase.
     bool workAhead = false;
     // #756: the build broker (owner setting, off by default) and, while it

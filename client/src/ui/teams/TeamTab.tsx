@@ -6,7 +6,7 @@ import { coordinatorActivity, activity } from "../../store/session";
 import { memberRow, showCatalog, showTeam, teams } from "../../store/teams";
 import { SHARE, SIDE, dragShare, dragSide, teamLayout, type TeamLayout } from "../../store/teamLayout";
 import { selected, setDetailTab, setSelectedKey } from "../../store/ui";
-import { teamTests, teamsProfile } from "../../bridge";
+import { teamTests, teamTimeline, teamsProfile } from "../../bridge";
 import { PlanView } from "./PlanView";
 import { TeamCatalogEditor } from "./TeamCatalogEditor";
 import { TeamSettingsDialog } from "./TeamSettingsDialog";
@@ -21,7 +21,7 @@ import { roleStyle } from "./roles";
 import { TeamProposals } from "./ProposalCards";
 import { ArchivedTaskReport, TeamReports } from "./TeamReports";
 import { WaitingBanner } from "./Waiting";
-import { Blockers, TaskActions, TeamBarActions, TeamBarChips, TeamQuestions } from "./TeamActions";
+import { Blockers, PhaseModeControl, TaskActions, TeamBarActions, TeamBarChips, TeamModeControl, TeamQuestions } from "./TeamActions";
 import { composer } from "../../store/composer";
 import type { ComputerId, TeamMemberView, TeamView } from "../../types";
 import type { Session } from "../sessions/types";
@@ -114,7 +114,7 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
       </Show>
       <div class="team-body" ref={body}>
         <div class="team-canvas">
-          <Show when={graph()} fallback={<TeamPhases team={props.team} />}>
+          <Show when={graph()} fallback={<TeamPhases computer={props.computer} team={props.team} />}>
             {(shown) => (
               <PlanView
                 team={props.team}
@@ -122,12 +122,14 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; failure?: 
                 profile={profile()}
                 tests={tests()}
                 onLoadProfile={() => { void teamsProfile(props.computer); }}
+                loadTimeline={(phase) => teamTimeline(props.computer, props.team.id, phase)}
                 onLoadTests={loadTests}
                 onOpenReport={setReportTask}
                 taskActions={(id) => {
                   const task = props.team.tasks.find((candidate) => candidate.id === id);
                   return task && !task.archived ? <TaskActions computer={props.computer} team={props.team} task={task} /> : <></>;
                 }}
+                phaseActions={(n) => <PhaseModeControl computer={props.computer} team={props.team} phase={n} />}
               />
             )}
           </Show>
@@ -198,6 +200,7 @@ function TeamBar(props: {
       <Icon name="users" size={16} />
       <b class="team-name ell" title={props.team.goal || props.team.name}>{props.team.name}</b>
       <span class={`team-badge tone-${stateTone(props.state)}`} data-state={props.state}>{stateLabel(props.state)}</span>
+      <TeamModeControl computer={props.computer} team={props.team} />
       <div class="team-progress" role="img" aria-label={tr("%1 of %2 tasks accepted", counts().accepted, counts().total)}
         title={tr("%1 of %2 tasks accepted", counts().accepted, counts().total)}>
         <i class="seg accepted" style={{ width: share(counts().accepted) }} />
@@ -210,7 +213,11 @@ function TeamBar(props: {
       <button type="button" class="btn ghost small" onClick={props.onCatalog}>{tr("Catalog")}</button>
       <Show when={props.team.created > 0}><span class="dim team-age" title={tr("Since the team was created")}>{duration(now() - props.team.created)}</span></Show>
       <span class="grow" />
-      <TeamBarChips team={props.team} onPhase={props.onPhase} onFinish={() => setFinishOpen(true)} />
+      <TeamBarChips team={props.team} onPhase={props.onPhase} onFinish={() => setFinishOpen(true)} onLead={() => {
+        // Task 95: the lead's session shows what it waits on.
+        const lead = props.team.members.find((member) => member.lead);
+        if (lead) openRow(memberRow(props.computer, lead));
+      }} />
       <Show when={props.state === "planning"}><span class="team-note">{tr("The plan waits for your approval")}</span></Show>
       <Show when={props.state === "done"}><span class="team-note done"><Icon name="check" size={13} />{tr("All tasks are decided")}</span></Show>
       <Show when={props.team.status === "planning"}>
@@ -226,13 +233,14 @@ function TeamBar(props: {
 }
 
 /** The canvas until the plan view takes it: the phases with their progress. */
-function TeamPhases(props: { team: TeamView }) {
+function TeamPhases(props: { computer: ComputerId; team: TeamView }) {
   return (
     <div class="team-phases">
       <For each={props.team.phases} fallback={<p class="dim team-empty">{tr("No phases yet")}</p>}>{(phase) => (
         <div class="team-phase" data-phase={phase.n} classList={{ draft: phase.state === "draft", running: phase.state === "running", done: phase.state === "done" }}>
           <span class="team-phase-n mono">{phase.n}</span>
           <b class="ell">{phase.title || tr("Phase %1", phase.n)}</b>
+          <PhaseModeControl computer={props.computer} team={props.team} phase={phase.n} />
           <span class="grow" />
           <span class="team-phase-bar"><i style={{ width: phase.total ? `${(phase.done / phase.total) * 100}%` : "0%" }} /></span>
           <span class="mono dim">{phase.done}/{phase.total}</span>

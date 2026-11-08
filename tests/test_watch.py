@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import queue
+import shutil
 import sqlite3
 import subprocess
 import threading
@@ -30,9 +31,9 @@ def steady(row):
 class Stream:
     """One running `hgs watch --json` and the frames it has written."""
 
-    def __init__(self, test, *args):
+    def __init__(self, test, *args, executable=HGS):
         self.test = test
-        self.process = subprocess.Popen([str(HGS), *args, 'watch', '--json'], env=test.env,
+        self.process = subprocess.Popen([str(executable), *args, 'watch', '--json'], env=test.env,
                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE, text=True)
         self.frames = queue.Queue()
@@ -441,6 +442,49 @@ class WatchStream(unittest.TestCase):
         stream.quiet(lambda f: f.get('topic') == 'team', 3)
         self.assertEqual(stream.close(), 0)
 
+    def test_a_windowed_task_subscription_carries_each_stage_s_first_rows(self):
+        catalog = {"projects": [{"id": "project-1", "name": "orchard", "color": "#123456", "folders": [], "sessions": []}]}
+        result = subprocess.run([str(HGS), 'swarm', 'initialize'], input=json.dumps(catalog), env=self.env,
+                                text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for n in range(5):
+            self.task('add', '--project', 'orchard', *(('--backlog',) if n % 2 else ()), text=f'Task {n}')
+        stream, hello, *_ = self.start()
+        self.assertEqual(hello['limits']['tasks_window'], 200)
+        stream.send(op='subscribe', topic='tasks', project='project-1', window=2)
+        key, items, value = self.tasks_snapshot(stream)
+        self.assertEqual(key, 'project-1')
+        expected = []
+        for stage in ('review', 'active', 'todo', 'backlog', 'done'):
+            expected += self.task('list', '--project', 'project-1', '--stage', stage, '--limit', '2')['tasks']
+        self.assertEqual(items, expected)
+        self.assertEqual(value['counts'], {'review': 0, 'active': 0, 'todo': 3, 'backlog': 2, 'done': 0})
+        window = value['window']
+        self.assertEqual((window['schema'], window['limit']), (1, 2))
+        self.assertEqual(window['stages']['todo']['total'], 3)
+        self.assertIsNone(window['stages']['backlog']['next'])
+        # The stage's next page comes from the paged list with that cursor.
+        more = self.task('list', '--project', 'project-1', '--stage', 'todo', '--limit', '2',
+                         '--after', window['stages']['todo']['next'])
+        all_todo = self.task('list', '--project', 'project-1', '--stage', 'todo')['tasks']
+        self.assertEqual([t['uuid'] for t in items if t['stage'] == 'todo'] + [t['uuid'] for t in more['tasks']],
+                         [t['uuid'] for t in all_todo])
+        self.assertRegex(value['revision'], '.+')
+        self.assertRegex(value['digest'], '^[0-9a-f]{64}$')
+        # A change sends the window again.
+        self.task('add', '--project', 'orchard', '--position', '1', text='At the top')
+        _, items, changed = self.tasks_snapshot(stream, lambda v: v['digest'] != value['digest'], timeout=10)
+        self.assertEqual(changed['counts']['todo'], 4)
+        self.assertEqual(items[0]['text'], 'At the top')
+        # Windows outside 1..200 are refused, without ending the stream.
+        for bad in (0, 201):
+            stream.send(op='subscribe', topic='tasks', project='project-1', window=bad)
+            error = stream.next(lambda f: f['t'] == 'error' and f.get('topic') == 'tasks' and f['code'] == 'bad_request')
+            self.assertFalse(error['fatal'])
+        stream.send(op='ping', id='alive')
+        stream.next(lambda f: f['t'] == 'pong' and f['id'] == 'alive')
+        self.assertEqual(stream.close(), 0)
+
     @staticmethod
     def organization_rebuilt(rows):
         """The `swarm get` snapshot (without `written`) the organization rows encode."""
@@ -591,7 +635,7 @@ class WatchStream(unittest.TestCase):
 
     def test_git_follows_commits_checkouts_and_session_edits_until_unsubscribed(self):
         repo = self.repository()
-        stream, *_ = self.start()
+        stream, hello, *_ = self.start()
         stream.send(op='subscribe', topic='git', path=str(repo))
         first = stream.next(self.git_state(repo), timeout=10)
         volatile = ('sampled_at', 'remote_age_seconds')
@@ -623,7 +667,10 @@ class WatchStream(unittest.TestCase):
         (repo / 'tracked').write_text('edited by the agent\n')
         stream.quiet(self.git_state(repo, lambda v: v['changed_files'] == 1), 1.5)
         self.journal('PostToolUse', name=name, tool='Edit', detail=str(repo / 'tracked'))
-        edited = stream.next(self.git_state(repo, lambda v: v['changed_files'] == 1), timeout=5)
+        # Use the stream's advertised liveness bound, still well before the
+        # 30 s safety poll could conceal a missed file-changing hook.
+        edited = stream.next(self.git_state(repo, lambda v: v['changed_files'] == 1),
+                             timeout=hello['heartbeat_ms'] / 1000)
         self.assertEqual(edited['value']['branch'], 'feature')
         self.assertLess(time.monotonic() - started, 25)
         # An unchanged checkout sends nothing more, and unsubscribed nothing at all.
@@ -634,6 +681,40 @@ class WatchStream(unittest.TestCase):
         self.git('-C', str(repo), 'checkout', '-q', 'main')
         stream.quiet(lambda f: f['t'] == 'state' and f['topic'] == 'git', 2.5)
         self.assertTrue(all(len(line.encode()) <= 1 << 20 for line in stream.raw))
+        self.assertEqual(stream.close(), 0)
+
+    def test_git_rechecks_after_a_file_changing_hook_commits_through_a_busy_journal(self):
+        repo = self.repository()
+        name = 'codex/git-busy-journal'
+        saved = dict(version=1, name=name, agent='codex', run_id=str(uuid.uuid4()),
+                     conversation_id=str(uuid.uuid4()), cwd=str(repo), activity='idle', phase='idle',
+                     active_tools={}, subagents={}, last_event_at=time.time(), created=time.time())
+        (self.state / (hashlib.sha256(name.encode()).hexdigest() + '.json')).write_text(json.dumps(saved))
+        self.journal('UserPromptSubmit', name=name)
+        stream, hello, *_ = self.start()
+        stream.send(op='subscribe', topic='git', path=str(repo))
+        first = stream.next(self.git_state(repo))
+        self.assertEqual(first['value']['changed_files'], 0)
+        # Let Git's own late index metadata write settle before the edit.
+        stream.quiet(lambda f: False, 1.5)
+        with sqlite3.connect(self.state / 'events.sqlite3') as db:
+            db.execute('BEGIN EXCLUSIVE')
+            (repo / 'tracked').write_text('edited while the journal is busy\n')
+            payload = dict(type='PostToolUse', at=time.time(), agent_id='', tool='Edit',
+                           detail=str(repo / 'tracked'))
+            db.execute('INSERT INTO events(name, conversation, payload) VALUES (?, ?, ?)',
+                       (name, saved['conversation_id'], json.dumps(payload)))
+            # The real reader's 250 ms SQLite budget expires while the write
+            # is uncommitted; reopening must not baseline away this hook.
+            stream.quiet(lambda f: False, 1.5)
+        db.close()
+        # A conservative recheck may already have seen the edit while the
+        # journal was locked. Keep that frame rather than waiting for a duplicate.
+        matches = self.git_state(repo, lambda v: v.get('changed_files') == 1)
+        changed = next((frame for frame in stream.seen if matches(frame)), None)
+        if changed is None:
+            changed = stream.next(matches, timeout=hello['heartbeat_ms'] / 1000)
+        self.assertGreater(changed['rev'], first['rev'])
         self.assertEqual(stream.close(), 0)
 
     def test_git_folders_answer_like_git_status_and_are_limited(self):
@@ -681,6 +762,55 @@ class WatchStream(unittest.TestCase):
         self.assertEqual(process.stderr.read(), b'')
         process.stdin.close()
         process.stderr.close()
+
+    def install(self, path, mode=0o755):
+        """Puts a copy of the built CLI at `path` the way install.sh does:
+        a staged file renamed over it, so the running file stays as it was."""
+        staged = path.with_name(path.name + '.new')
+        shutil.copy2(HGS, staged)
+        staged.chmod(mode)
+        os.replace(staged, path)
+
+    def assert_replaced_ends(self, stream, installed):
+        """Only a ready replacement ends the stream: a missing path or a file
+        that is not executable yet keeps it running (two checks each)."""
+        stream.quiet(lambda f: f['t'] == 'error', 6)
+        installed.unlink()
+        stream.quiet(lambda f: f['t'] == 'error', 11)
+        self.assertIsNone(stream.process.poll())
+        self.install(installed, 0o644)
+        stream.quiet(lambda f: f['t'] == 'error', 11)
+        self.assertIsNone(stream.process.poll())
+        installed.chmod(0o755)
+        ready = time.monotonic()
+        error = stream.next(lambda f: f['t'] == 'error', timeout=15)
+        self.assertEqual((error['code'], error['fatal']), ('hgs_replaced', True), error)
+        # The same file read twice, 5 s apart: at most two checks after it.
+        self.assertLess(time.monotonic() - ready, 12)
+        self.assertEqual(stream.process.wait(timeout=5), 0)
+        self.assertEqual(stream.process.stderr.read(), '')
+
+    def test_a_replaced_executable_ends_the_stream_so_the_client_starts_the_new_one(self):
+        # zerus-5wmh.66.2.46: an update renames a new file over the CLI, as
+        # install.sh does; a stream left running would keep the old code's
+        # summaries (Clear's reason among them) beside the new CLI's commands.
+        installed = self.root / 'installed' / 'hgs'
+        installed.parent.mkdir()
+        self.install(installed)
+        stream = Stream(self, executable=installed)
+        stream.next(lambda f: f['t'] == 'snapshot' and f['topic'] == 'catalog.meta')
+        self.assert_replaced_ends(stream, installed)
+
+    def test_a_peer_whose_executable_is_replaced_ends_its_stream_through_ssh(self):
+        self.script('ssh', '#!/bin/sh\nfor argument do last="$argument"; done\nexec /bin/sh -c "$last"\n')
+        peer = self.root / '.local/bin/hgs'
+        peer.unlink()
+        self.install(peer)
+        stream = Stream(self, '@remote')
+        stream.next(lambda f: f['t'] == 'snapshot' and f['topic'] == 'catalog' and f['last'])
+        # The local `hgs @remote watch` only waits on ssh; the peer's own
+        # watcher sees its file replaced, and its last frame reaches the client.
+        self.assert_replaced_ends(stream, peer)
 
     def test_usage_marker_and_dry_run(self):
         result = subprocess.run([str(HGS), '-h'], env=self.env, text=True, capture_output=True, timeout=10)

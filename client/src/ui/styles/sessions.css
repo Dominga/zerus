@@ -44,6 +44,7 @@
   .sp-foot { display: flex; align-items: center; gap: 2px; height: 30px; margin: 0 -4px; padding: 0 6px 0 12px; border-top: 1px solid var(--z-color-divider); font-size: 11px; color: var(--z-color-muted); }
   .sp-foot .icon-btn.small { width: 26px; height: 26px; }
   .sp-empty { flex: 1; }
+  .sp-paused { align-content: center; }
 
   /* Docked width handle (QSplitter handle, 8 px, transparent). */
   /* Width handle: an 8 px strip on the edge; only a centred grip (4×52) shows,
@@ -61,6 +62,8 @@
   /* Drag to organise (SessionList.cpp): a 2 px accent line between rows, or a
      2 px frame (radius 5) around the project header a session moves into. */
   .drop-line, .drop-box { position: absolute; z-index: 5; top: 0; pointer-events: none; }
+  /* A pointer drag (lib/pointerDrag) selects no text and shows a moving cursor. */
+  body.pointer-dragging, body.pointer-dragging * { cursor: grabbing !important; user-select: none !important; -webkit-user-select: none !important; }
   .drop-line { height: 2px; border-radius: 1px; background: var(--z-color-accent); }
   .drop-box { left: 5px; right: 5px; border: 2px solid var(--z-color-accent); border-radius: 5px; }
   .rowhit.dragged .scard { opacity: .45; }
@@ -85,7 +88,6 @@
   .scard.compact[data-emphasis]::before { top: 4px; bottom: 4px; }
   /* While a card and its compact row morph into each other the card clips its lines. */
   .scard.morph { overflow: hidden; }
-  .sp-scroll.morphing .vrow { transition: transform 220ms cubic-bezier(.33, 1, .68, 1); }
   .scard[data-emphasis="attention"], .scard[data-emphasis="unread"] { --edge: var(--z-list-edge-attention); }
   .scard[data-emphasis="error"] { --edge: var(--z-list-edge-error); }
   .scard[data-emphasis="draft"] { --edge: var(--z-list-edge-draft); }
@@ -312,3 +314,12 @@
   :root[data-agent-mark="glyph"] .agent-badge .ab-label { display: none; }
 }
 
+.acct-switch { position: relative; display: inline-flex; }
+.acct-switch-pop { position: absolute; z-index: 40; bottom: calc(100% + 6px); left: 0; min-width: 220px; max-width: 320px; padding: 4px; border: 1px solid var(--z-color-card-border); border-radius: var(--z-radius-md); background: var(--z-color-raised); box-shadow: var(--z-shadow); }
+.acct-switch-row { display: flex; align-items: center; gap: 6px; width: 100%; padding: 6px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--z-color-text); font: inherit; text-align: left; cursor: pointer; }
+.acct-switch-row:hover:not(:disabled) { background: var(--z-color-hover); }
+.acct-switch-row:disabled { cursor: default; }
+.acct-switch-empty { display: block; padding: 8px; }
+.acct-switch-notice { margin: 4px; padding: 6px 8px; color: var(--z-color-text-2); font-size: var(--fs-xs); }
+.tchip.locked { opacity: .6; cursor: not-allowed; }
+.acct-switch-row:disabled { cursor: default; }

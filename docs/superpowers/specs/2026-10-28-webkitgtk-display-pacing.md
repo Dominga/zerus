@@ -214,20 +214,130 @@ not evidence that these two bugs should remain unfixed.
 
 ## Patch and client status
 
-- `0001-GTK-match-DRM-connectors-by-name.patch`: GTK 3/GTK 4 name lookup with
-  exact-mm compatibility fallback.
-- `0002-GLib-use-display-rate-for-timer-fallback.patch`: display-ID-aware timer
-  rate, fractional monotonic deadlines and no catch-up burst.
-- `0003-GTK3-arm-Wayland-frame-callback-before-GL-swap.patch`: GTK 3.24.52 GL
-  end-paint arms the real surface callback before the buffer swap. It also
-  applies to gtk-3-24 commit `4ef4903ed50e11bb13a34c5ea07523bd136370a4`.
-- The WebKit patches apply with `git apply --check` to WebKit main commit
-  `6740c3a3f01a5a450fa7698037385790dfa3aa87` as well as the verified 2.54.1
-  source. Main has not been built in this task.
+The complete patch set of the private arch stack is in `client/patches/`.
+WebKit patches 0001 and 0002 apply to the WebKitGTK 2.54.2 and 2.54.1 releases,
+0005 only to 2.54.1, and GTK patches 0003 and 0004 apply to GTK 3.24.52, each
+with `patch -p1` from the source root.
+
+- [0001](../../../client/patches/0001-GTK-match-DRM-connectors-by-name.patch):
+  GTK 3/GTK 4 name lookup with exact-mm compatibility fallback, in the form
+  under upstream review ([325789](https://bugs.webkit.org/show_bug.cgi?id=325789)).
+- [0002](../../../client/patches/0002-GLib-use-display-rate-for-timer-fallback.patch):
+  display-ID-aware timer rate, fractional monotonic deadlines and no catch-up
+  burst.
+- [0003](../../../client/patches/0003-GTK3-arm-Wayland-frame-callback-before-GL-swap.patch):
+  GTK 3.24.52 GL end-paint arms the real surface callback before the buffer
+  swap. It also applies to gtk-3-24 commit
+  `4ef4903ed50e11bb13a34c5ea07523bd136370a4`.
+- [The companion frame-clock correction 0004](../../../client/patches/0004-GDK-complete-paint-before-thaw.patch)
+  completes the paint phase before a backend freeze resumes. Otherwise a busy
+  producer can repeat paint after every thaw, starving layout and after-paint
+  while a resized window keeps its old child allocation. Apply it to the same
+  GTK source after patch 0003. The private-Xvfb regression is
+  `client/scripts/test-gtk-frame-clock.py`; the native Wayland resize and pacing
+  regression is `client/scripts/window-resize-smoke.py` with the `resize_fixture`
+  example. Both require an explicitly selected private build.
+- [0005](../../../client/patches/0005-Skia-keep-ended-animation-values.patch)
+  backports the WebKitGTK 2.54.2 `SkiaCompositingLayer` change. In 2.54.1 the
+  default Skia compositor painted a layer's own opacity, transform and filter
+  once an animation had ended on the compositor but before the web process
+  committed the final style, so every finite CSS entrance presented one frame
+  near its start values at its end. Its regressions are
+  `client/scripts/task-view-flicker-smoke.html?entrance` and
+  `client/scripts/entrance-survey-smoke.html` under
+  `client/scripts/menu-smoke.py --paint-column 100`. 2.54.2 already contains
+  the change (`patch --dry-run` reports 0005 as previously applied), so a
+  2.54.2 build omits it.
+- WebKit patches 0001 and 0002 apply with `git apply --check` to WebKit main
+  commit `6740c3a3f01a5a450fa7698037385790dfa3aa87` and to the verified 2.54.1
+  source, and to the verified 2.54.2 source without offset or fuzz. Main has
+  not been built in this task.
 - The client disables the near-60 feature through WebKit's public C API using
   runtime symbol lookup. Its Rust bindings predate that API, and dynamic lookup
   avoids a new hard WebKit 2.42 runtime requirement.
   `ZERUS_CLIENT_PERF_PREFERENCE=default` retains the control behavior.
+
+### Building the private prefix
+
+`SOURCES`, `BUILD` and `PREFIX` are private absolute directories, and `ZERUS`
+is a checkout of this repository. `PREFIX` is the final directory the launcher
+will select (see below). The WebKitGTK release is `webkitgtk-2.54.2.tar.xz`
+from webkitgtk.org, SHA-256
+`a76345b391bef6211fb5ab6cfab2e86b285d18cda17cbb9ade595f1252b86065`. A 2.54.1
+build (`ea0bbb02dbdbc596874a4e7ad35b66645b3e0a232bd0e4081de5ed92eb0a397d`)
+also applies 0005.
+
+```sh
+cd "$SOURCES" && tar -xJf webkitgtk-2.54.2.tar.xz && cd webkitgtk-2.54.2
+for patch in 0001-GTK-match-DRM-connectors-by-name 0002-GLib-use-display-rate-for-timer-fallback; do
+  patch -p1 < "$ZERUS/client/patches/$patch.patch"
+done
+cmake -S . -B "$BUILD/webkit" -G Ninja -DPORT=GTK -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_INSTALL_LIBDIR=lib -DUSE_GTK4=OFF \
+  -DENABLE_TOOLS=OFF -DENABLE_TESTING=OFF -DENABLE_MINIBROWSER=OFF -DENABLE_WEBDRIVER=OFF \
+  -DENABLE_DOCUMENTATION=OFF -DENABLE_INTROSPECTION=OFF -DENABLE_BUBBLEWRAP_SANDBOX=OFF \
+  -DENABLE_SPEECH_SYNTHESIS=OFF -DUSE_LIBBACKTRACE=OFF
+cmake --build "$BUILD/webkit" && cmake --install "$BUILD/webkit"
+
+cd "$SOURCES" && git clone --depth 1 --branch 3.24.52 https://gitlab.gnome.org/GNOME/gtk.git gtk-3.24.52
+cd gtk-3.24.52
+patch -p1 < "$ZERUS/client/patches/0003-GTK3-arm-Wayland-frame-callback-before-GL-swap.patch"
+patch -p1 < "$ZERUS/client/patches/0004-GDK-complete-paint-before-thaw.patch"
+meson setup "$BUILD/gtk" -Dbuildtype=release -Dprefix="$PREFIX/gtk" -Dlibdir=lib \
+  -Dx11_backend=true -Dwayland_backend=true -Dbroadway_backend=false -Dintrospection=false \
+  -Ddemos=false -Dexamples=false -Dtests=false -Dinstalled_tests=false -Dgtk_doc=false -Dman=false
+meson compile -C "$BUILD/gtk" && meson install -C "$BUILD/gtk"
+```
+
+The result has `lib/`, `libexec/webkit2gtk-4.1/` and the `gtk/` override that
+`tray/linux-launcher.py` requires. It is selected as described in
+[installation](../../installation.md). A WebKit-only prefix without `gtk/` uses
+system GTK and stays at 60 Hz.
+
+The prefix is not relocatable. `LD_LIBRARY_PATH` selects only its libraries.
+WebKit compiles its install directories in: the helper processes
+(`PKGLIBEXECDIR`), the injected bundle (`PKGLIBDIR`) and its translations.
+Release builds have `ENABLE_DEVELOPER_MODE` off, and WebKit then ignores
+`WEBKIT_EXEC_PATH`, so the launcher's value does not choose the helpers;
+`WEBKIT_INJECTED_BUNDLE_PATH` would move only the bundle.
+GTK likewise reads its settings, input-method cache and translations from its
+own `-Dprefix`. A copied or renamed prefix therefore keeps running
+`WebKitWebProcess`, `WebKitNetworkProcess` and the injected bundle from the tree
+it was installed to. On arch this was seen with both a copied 2.54.2 stage and
+the 2.54.1 prefixes. Install with `cmake --install` and `meson install` into
+the final `PREFIX` (or with `DESTDIR` and move the tree to exactly that path).
+A `DESTDIR` install skips meson's post-install `gio-querymodules` and
+`glib-compile-schemas` steps; the arch prefixes have run without those caches.
+Never copy a library from the build tree: its build-tree `DT_RPATH` is searched
+before `LD_LIBRARY_PATH`, and the installation step removes it.
+
+Keep the previously selected prefix as the rollback, together with every tree
+its compiled paths name. The arch 2.54.1 prefixes depend on two trees outside
+themselves. They run their helper processes and injected bundle from the 2.54.1
+base install their libraries came from, and read GTK data from that install's
+`gtk/`. The 0005 library of the Skia rollback was copied from the 2.54.1 build
+tree and keeps a `DT_RPATH` into it; a probe's UI process loaded JavaScriptCore
+from there, byte-identical to the prefix copy. Keep the base install and the
+2.54.1 build tree for as long as either prefix is the rollback.
+
+Qualify a new prefix before selecting it:
+
+- No library in `$PREFIX/lib` or `$PREFIX/gtk/lib` has an `RPATH` or `RUNPATH`
+  (`readelf -d`). With `LD_LIBRARY_PATH` and `WEBKIT_EXEC_PATH` set as
+  `tray/linux-launcher.py` sets them, a private-Xvfb `menu-smoke.py` window run
+  under `strace -f -e trace=execve,openat` execs and opens private files only
+  under `$PREFIX`. The `/proc/<pid>/exe` of its `WebKitWebProcess` and
+  `WebKitNetworkProcess`, and the injected bundle in the web process's maps,
+  are under `$PREFIX` too.
+- `client/scripts/test-gtk-frame-clock.py` in its private Xvfb.
+- `client/scripts/window-resize-smoke.py --webkit-prefix "$PREFIX" --min-fps 130
+  --timer-burst` on the physical display, holding the display lock as its usage
+  text describes. On the arch 144 Hz display the 2.54.1 set with 0005 measured
+  142.5 Hz rAF and 143 Hz GTK paint and after-paint. The 2.54.2 set measured
+  143 Hz for all three. Both applied every resize transition.
+- `task-view-flicker-smoke.html?entrance` and `entrance-survey-smoke.html` under
+  `menu-smoke.py --paint-column 100`, with the same launcher variables. No
+  presented frame may dim a finished entrance.
 
 ## Validation
 

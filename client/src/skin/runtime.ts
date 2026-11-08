@@ -5,9 +5,11 @@ import zerusDark from "./skins/zerus-dark.json";
 import zerusLight from "./skins/zerus-light.json";
 import fjord from "./skins/fjord.json";
 import paper from "./skins/paper.json";
+import whitewhDark from "./skins/whitewh-dark.json";
+import whitewhLight from "./skins/whitewh-light.json";
 
 // The base skin must come first: it defines the token set others may override.
-export const skins: ResolvedSkin[] = resolveSkins([zerusDark, zerusLight, fjord, paper] as SkinFile[]);
+export const skins: ResolvedSkin[] = resolveSkins([zerusDark, zerusLight, fjord, paper, whitewhDark, whitewhLight] as SkinFile[]);
 
 const sheet = document.createElement("style");
 sheet.id = "zerus-skins";
@@ -38,6 +40,10 @@ export const skinList = skinListSignal;
 /** The skin chosen for `appearance`; an unknown or mismatched id falls back to the slot's default. */
 export function chosenSkin(appearance: Appearance): string {
   const id = text(slot(appearance));
+  if (id === String(DEFAULTS[slot(appearance)]) && text("workspace/skin") === "whitewh") {
+    const ported = `whitewh-${appearance}`;
+    if (skinListSignal().some((s) => s.id === ported)) return ported;
+  }
   return skinListSignal().some((s) => s.id === id && s.appearance === appearance) ? id : String(DEFAULTS[slot(appearance)]);
 }
 
@@ -111,3 +117,5 @@ export function applySkin(s: ResolvedSkin) {
 }
 
 const camel = (name: string) => name.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
+
+

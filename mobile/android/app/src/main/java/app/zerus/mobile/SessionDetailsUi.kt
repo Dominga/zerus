@@ -218,6 +218,7 @@ import org.json.JSONObject
     val target = session.target
     val raw = model.activity
     val verified = model.activityVerified
+    val currentAgents = SessionFilters.currentActivity(session, SessionFilters.online(session, model.machines))
     // Polls replace the activity record; keep showing this target's previous view
     // while the next one is parsed so the sheet never collapses to a placeholder.
     var parsed by remember(target.key) { mutableStateOf<SessionDetailsView?>(null) }
@@ -269,9 +270,9 @@ import org.json.JSONObject
                         if (details.agents.isEmpty()) Text("No subagent activity reported.")
                         details.agents.forEach { agent ->
                             Text(agent.label, fontWeight = FontWeight.SemiBold)
-                            Text(SessionDetailsPresentation.agentStatus(agent.state) + if (agent.recorded) " / Last recorded" else "",
+                            Text(SessionDetailsPresentation.agentStatus(agent.state, agent.recorded || !currentAgents),
                                 style = MaterialTheme.typography.labelMedium)
-                            if (agent.group && agent.active != null && agent.total != null) Text("${agent.active} active / ${agent.total} total", style = MaterialTheme.typography.bodySmall)
+                            if (agent.group && agent.active != null && agent.total != null) Text("${SessionDetailsPresentation.agentActive(agent, currentAgents)} active / ${agent.total} total", style = MaterialTheme.typography.bodySmall)
                             SelectionContainer { Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 if (agent.task.isNotBlank()) Text(agent.task)
                                 if (agent.preview.isNotBlank()) Text(agent.preview, color = MaterialTheme.colorScheme.onSurfaceVariant)

@@ -39,7 +39,7 @@ fn cpu_delta(previous: &CpuSample, current: &CpuSample) -> Option<(f64, f64)> {
 fn sampled_cpu(root: &Path, mut current: CpuSample) -> std::io::Result<(Option<f64>, Option<f64>)> {
     let mut attempt = || -> std::io::Result<(Option<f64>, Option<f64>)> {
         let directory = root.join("telemetry");
-        fs::create_dir_all(&directory)?;
+        crate::platform::private_dir(&directory)?;
         let lock = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -355,6 +355,19 @@ mod tests {
             (None, None)
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn first_listing_creates_the_missing_state_directory_privately() {
+        use std::os::unix::fs::MetadataExt;
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("hgs/sessions");
+        sampled_cpu(&state, cpu(100, 60, 100.)).unwrap();
+        for path in [&state, &state.join("telemetry")] {
+            assert_eq!(fs::metadata(path).unwrap().mode() & 0o777, 0o700);
+        }
+    }
+
     #[test]
     fn briefly_held_lock_delays_sampling_instead_of_failing() {
         use fs2::FileExt;

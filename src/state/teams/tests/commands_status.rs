@@ -326,6 +326,39 @@ fn status_shows_the_plan_mode_and_the_free_phases_state() {
     assert!(value["free_phase"].is_null());
 }
 
+/// Task #58: status and the list carry each phase's mode: its own, else the
+/// team's; the free phase is the one whose own mode is free.
+#[test]
+fn status_and_the_list_carry_each_phases_mode() {
+    use super::super::model::{Phase, PhaseState, PlanMode, Task, TaskStatus};
+    let mut team = Team {
+        id: "t".into(),
+        name: "T".into(),
+        lead: "lead".into(),
+        status: TeamStatus::Running,
+        tasks: vec![
+            Task { id: 1, title: "A".into(), assignee: "dev".into(), phase: 1, status: TaskStatus::Accepted, ..Default::default() },
+            Task { id: 2, title: "B".into(), assignee: "dev".into(), phase: 2, status: TaskStatus::InProgress, ..Default::default() },
+        ],
+        phases: vec![Phase { n: 2, order: 2, state: PhaseState::Approved, tasks: vec![2], ..Default::default() }],
+        ..Default::default()
+    };
+    team.phase_modes.insert(2, PlanMode::Free);
+    let value = view_with(&team, &[], None);
+    assert_eq!(value["plan_mode"], "standard", "the team's own mode stays the default");
+    assert_eq!(value["phase_modes"], json!({"1":"standard","2":"free"}));
+    assert_eq!(value["phases"][0]["mode"], "free");
+    assert_eq!((value["free_phase"]["phase"].as_u64(), value["free_phase"]["running"].clone()), (Some(2), json!([2])));
+    let listed = summary(&team, true);
+    assert_eq!(listed["phase_modes"], json!({"1":"standard","2":"free"}));
+    assert_eq!(listed["phases"][0]["mode"], "free");
+    // An old record without phase modes reads the team's mode on every phase.
+    team.phase_modes.clear();
+    team.plan_mode = PlanMode::Free;
+    assert_eq!(view_with(&team, &[], None)["phase_modes"], json!({"1":"free","2":"free"}));
+    assert_eq!(summary(&team, true)["phases"][0]["mode"], "free");
+}
+
 #[test]
 fn status_shows_the_owners_phase_states_and_the_stuck_scope() {
     // U25: Build runs, Polish was sent back, Ship waits for the owner.
@@ -1009,9 +1042,10 @@ fn status_shows_the_budget_state_on_the_member() {
 /// progress, and whether it is stuck, from the dispatcher's last view.
 #[test]
 fn status_shows_each_members_phase_activity_and_minutes_without_progress() {
-    use super::super::model::MemberStuck;
+    use super::super::model::{MemberSeen, MemberStuck};
     let mut team = running_team();
     let dev = team.members.iter_mut().find(|member| member.id == "dev").unwrap();
+    dev.seen = Some(MemberSeen { at: crate::state::now() - 25.0 * 60.0, live: true });
     dev.seen_phase = "tool".into();
     dev.seen_activity = "busy".into();
     dev.seen_event_at = Some(crate::state::now() - 25.0 * 60.0);
@@ -1021,4 +1055,52 @@ fn status_shows_each_members_phase_activity_and_minutes_without_progress() {
     assert_eq!((dev["phase"].as_str(), dev["activity"].as_str()), (Some("tool"), Some("busy")));
     assert_eq!(dev["minutes_without_progress"], 25);
     assert_eq!(dev["stuck"]["reason"], "no_progress");
+    // Task 115: a busy tool reads Working in the same contract.
+    assert_eq!(dev["session_state"], "working");
+}
+
+/// Task 115: the Adventure team's Integrator (Kimi) sat on a native Bash
+/// permission while the last tick still stored it busy/working, so the lead
+/// read "active" from `hgs team status`. The member entry now carries the
+/// session state contract's own state, and the session list's team row too.
+#[test]
+fn a_member_with_an_open_approval_reads_waiting_for_you_in_status() {
+    use crate::state::teams::model::{Member, MemberSeen, PendingQuestion, Team, TeamStatus};
+    let mut team = Team {
+        id: "abcdef12-0000-4000-8000-000000000000".into(),
+        name: "Adventure".into(),
+        lead: "lead".into(),
+        status: TeamStatus::Running,
+        ..Default::default()
+    };
+    team.members.push(Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), ..Default::default() });
+    let mut integrator = Member { id: "integrator".into(), role: "Integrator".into(), agent: "kimi".into(), ..Default::default() };
+    integrator.seen = Some(MemberSeen { at: crate::state::now() - 120.0, live: true });
+    integrator.seen_phase = "working".into();
+    integrator.seen_activity = "busy".into();
+    integrator.seen_event_at = Some(crate::state::now() - 120.0);
+    integrator.pending = Some(PendingQuestion {
+        question_id: "q1".into(),
+        question_hash: "h1".into(),
+        approval: true,
+        at: crate::state::now(),
+        ..Default::default()
+    });
+    team.members.push(integrator);
+    let value = view_with(&team, &[], None);
+    let member = value["members"].as_array().unwrap().iter().find(|member| member["id"] == "integrator").unwrap();
+    assert_eq!(member["session_state"], "user", "{member}");
+    assert_eq!(member["state_reason"]["kind"], "approval", "{member}");
+    assert_eq!(member["state_reason"]["text"], "Needs approval", "{member}");
+    // The session list's own team row carries the same state.
+    let listed = summary(&team, true);
+    let row = listed["members"].as_array().unwrap().iter().find(|member| member["id"] == "integrator").unwrap();
+    assert_eq!((row["session_state"].clone(), row["state_reason"]["kind"].clone()), (json!("user"), json!("approval")));
+    // Answered, the stored phase decides again: it was working, not waiting.
+    let mut answered = team.clone();
+    answered.members.iter_mut().find(|member| member.id == "integrator").unwrap().pending = None;
+    let value = view_with(&answered, &[], None);
+    let member = value["members"].as_array().unwrap().iter().find(|member| member["id"] == "integrator").unwrap();
+    assert_eq!(member["session_state"], "working", "{member}");
+    assert!(member["state_reason"].is_null(), "{member}");
 }

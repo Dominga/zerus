@@ -1,5 +1,5 @@
 use super::*;
-use crate::state::teams::model::{Attempt, Dependency, DependencyKind, Member, Question, Report, RunRecord, SessionRef};
+use crate::state::teams::model::{Attempt, Baseline, Dependency, DependencyKind, Member, Question, Report, RunRecord, SessionRef};
 use crate::state::teams::spans;
 
 fn attempt(n: u32, member: &str, state: AttemptState, sent: f64, started: f64, reported: f64, decided: f64) -> Attempt {
@@ -91,7 +91,7 @@ fn the_losses_of_a_hand_built_team_rank_by_time_and_by_tokens() {
     let expected: Vec<(String, i64)> = [
         ("idle_member:dev", 1320),
         ("idle_member:qa", 1105),
-        ("blocked_chain:2", 900),
+        // Task 81: #2's 900 s wait for #1 is no loss; it was planned.
         // A tie on seconds goes by id.
         ("lead_wait:2", 400),
         ("long_test:2:b0:1900", 400),
@@ -108,7 +108,10 @@ fn the_losses_of_a_hand_built_team_rank_by_time_and_by_tokens() {
     let items = value["losses"]["by_time"]["items"].as_array().unwrap();
     let find = |id: &str| items.iter().find(|item| item["id"] == id).unwrap();
     assert_eq!((find("lead_wait:2")["lead_s"].clone(), find("lead_wait:2")["question_s"].clone()), (json!(100), json!(300)));
-    assert_eq!(find("blocked_chain:2")["on"], json!([1]));
+    assert!(items.iter().all(|item| item["kind"] != "blocked_chain"), "waiting for dependencies is no loss: {items:?}");
+    // The wait still counts in the totals, and a task with no baseline has no lateness.
+    assert_eq!(value["summary"]["totals"]["deps"], 900);
+    assert_eq!(value["tasks"]["items"][0]["lateness"], Value::Null);
     assert_eq!((find("rework:1:a1")["cause"].clone(), find("rework:1:a1")["share"].clone()), (json!("rejected"), json!(0.333)));
     assert_eq!(find("conflict:2:b1:1950")["template"], "git-merge-lead");
     // Only the rework spent tokens a loss can name.
@@ -406,4 +409,104 @@ fn idle_and_member_waits_use_the_members_busy_time_in_every_phase() {
     // The member worked #2 through the whole wait for #1: no member_wait loss.
     assert!(!value["losses"]["by_time"]["items"].as_array().unwrap().iter().any(|loss| loss["kind"] == "member_wait"), "{value}");
     assert_eq!(value["summary"]["totals"]["member"], 0);
+}
+
+/// Task 81: the rows carry lateness against the baseline and the overrun
+/// against the estimate, and the dependency wait is not heat.
+#[test]
+fn the_task_rows_carry_lateness_and_overrun() {
+    let mut team = known();
+    // #1 was planned 100-1000 (900 s), #2 after it, 1000-1900 (900 s).
+    team.tasks[0].baseline = Some(Baseline { at: 100.0, estimate_s: Some(900.0), start: Some(100.0), end: Some(1000.0), after: vec![], backfilled: false });
+    team.tasks[1].baseline = Some(Baseline { at: 100.0, estimate_s: Some(900.0), start: Some(1000.0), end: Some(1900.0), after: vec![1], backfilled: false });
+    let value = run(&team, &tokens(None), &Page { limit: 100, ..Default::default() });
+    let rows = value["tasks"]["items"].as_array().unwrap();
+    let late = |row: &Value| {
+        let late = &row["lateness"];
+        (late["start_late_s"].as_i64(), late["inherited_s"].as_i64(), late["own_s"].as_i64(), late["end_late_s"].as_i64())
+    };
+    // #1 started at 111 (11 s late), reported at 900: on time. #2 started at 1101
+    // (101 s late, #1 was accepted at 1000, on time: all its own), reported at 2000.
+    assert_eq!(late(&rows[0]), (Some(11), Some(0), Some(11), Some(0)), "{}", rows[0]);
+    assert_eq!(late(&rows[1]), (Some(101), Some(0), Some(101), Some(100)), "{}", rows[1]);
+    for row in rows {
+        let overrun = &row["overrun"];
+        let (work, estimate) = (overrun["work_s"].as_i64().unwrap(), overrun["estimate_s"].as_i64().unwrap());
+        assert_eq!((estimate, overrun["overrun_s"].as_i64().unwrap()), (900, work - 900), "{row}");
+        assert_eq!(overrun["ratio"].as_f64().unwrap(), (work as f64 / 900.0 * 1000.0).round() / 1000.0, "{row}");
+    }
+    assert_eq!(value["summary"]["lateness"], json!({"late":2,"own_s":112,"inherited_s":0,"unknown":0}));
+    // A task the plan gave no baseline is unknown in the summary, not on time.
+    team.tasks[1].baseline = None;
+    let value = run(&team, &tokens(None), &Page { limit: 100, ..Default::default() });
+    assert_eq!(value["summary"]["lateness"]["unknown"], 1);
+}
+
+/// A DeepSeek member has no native transcript: the tokens of its attempts are
+/// the difference of the counters Zerus sampled at the windows' ends, and a
+/// member whose counters were not sampled stays unknown, never zero.
+#[test]
+fn a_deepseek_members_attempts_get_their_tokens_from_counter_samples() {
+    use sha2::{Digest, Sha256};
+    let temp = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(temp.path(), || {
+        let name = "dsh/proj/dev";
+        let bindings = crate::state::storage::root().join("dsh/bindings");
+        std::fs::create_dir_all(&bindings).unwrap();
+        std::fs::write(
+            bindings.join(format!("{:x}.json", Sha256::digest(name.as_bytes()))),
+            json!({"backend":"dsh","agent":"dsh","name":name,"conversation_id":"session-A"}).to_string(),
+        )
+        .unwrap();
+        let counters = |uncached: u64, output: u64| json!({"tokenUsage":{"uncachedInputTokens":uncached,"outputTokens":output,"cacheReadTokens":uncached * 10}});
+        // dev's attempts run 115-400 and 505-900; the counters grow only while it works.
+        for (at, uncached, output) in [(115.0, 100, 50), (400.0, 400, 150), (505.0, 400, 150), (900.0, 900, 350)] {
+            crate::state::usage_samples::record(name, "session-A", at, &counters(uncached, output), true).unwrap();
+        }
+        let mut team = known();
+        team.members[1].agent = "dsh".into();
+        team.members[1].session = Some(SessionRef { name: name.into(), ..Default::default() });
+        let asks = asks(&timelines(&team, 5000.0), 5000.0);
+        let (read, capped) = read_tokens(&team, &asks);
+        assert!(!capped);
+        let first = read[&(1, "a1".to_owned())].expect("the first attempt has its tokens");
+        assert_eq!((first.uncached_input, first.output, first.total, first.cache_read), (300, 100, 400, 3000));
+        let second = read[&(1, "a2".to_owned())].expect("the second attempt has its tokens");
+        assert_eq!((second.uncached_input, second.output, second.total), (500, 200, 700));
+        // qa has no session here: its attempt stays unknown, not zero.
+        assert_eq!(read[&(2, "a1".to_owned())], None);
+        // The profile counts what is known and says the rest is partial.
+        let value = run(&team, &read, &Page { limit: 100, ..Default::default() });
+        assert_eq!((value["summary"]["tokens"]["total"].clone(), value["summary"]["tokens"]["partial"].clone()), (json!(1100), json!(true)));
+        let dev = value["members"].as_array().unwrap().iter().find(|member| member["member"] == "dev").unwrap();
+        assert_eq!(dev["tokens_per_accepted"], 1100, "{dev}");
+    });
+}
+
+/// Task 118: time that waited for a person's answer is its own loss, with the
+/// seconds of each reason, apart from the lead's waits, and counts in the totals.
+#[test]
+fn time_that_waited_for_a_person_is_its_own_loss_and_total() {
+    use crate::state::teams::model::Decider;
+    let mut team = known();
+    // #2's question was the owner's to answer, and the owner decided #1's last report.
+    team.task_mut(2).unwrap().attempts[0].questions[0].by = "You".into();
+    team.task_mut(1).unwrap().decided_by = Some(Decider::Human);
+    let value = run(&team, &tokens(None), &Page { limit: 100, ..Default::default() });
+    let items = value["losses"]["by_time"]["items"].as_array().unwrap();
+    let find = |id: &str| items.iter().find(|item| item["id"] == id).unwrap_or_else(|| panic!("{id} in {items:?}"));
+    assert_eq!((find("person_wait:2")["s"].clone(), find("person_wait:2")["reasons"].clone()), (json!(300), json!({"question":300})));
+    assert_eq!((find("person_wait:1")["s"].clone(), find("person_wait:1")["reasons"].clone()), (json!(100), json!({"report":100})));
+    assert_eq!(find("person_wait:1")["kind"], "person_wait");
+    // The lead's waits no longer hold them: #2's question and #1's second decision left.
+    assert_eq!((find("lead_wait:2")["lead_s"].clone(), find("lead_wait:2")["question_s"].clone()), (json!(100), json!(0)));
+    assert_eq!(find("lead_wait:1")["s"], 60);
+    // Its own cause in the totals.
+    let totals = &value["summary"]["totals"];
+    assert_eq!(totals["person"], 400);
+    assert!(totals["question"].is_null(), "{totals}");
+    assert_eq!(totals["lead"], 160);
+    // A member waiting for a person is not working: dev's busy time is its own.
+    let dev = value["members"].as_array().unwrap().iter().find(|member| member["member"] == "dev").unwrap();
+    assert_eq!(dev["busy_s"], 680);
 }

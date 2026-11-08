@@ -68,7 +68,7 @@ RESTART_ERROR = "connector stopped before recording the native result"
 # The calling agent's identity, which native hgs never receives. The rest of
 # the connector's environment, HGS_CONFIG_DIR and HGS_PEERS included, passes on.
 CONTEXT_KEYS = frozenset({
-    "TMUX", "TMUX_PANE", "HGS_SESSION", "HGS_RUN_ID", "HGS_EXPECTED_ID",
+    "TMUX", "TMUX_PANE", "HGS_SESSION", "HGS_SESSION_ID", "HGS_RUN_ID", "HGS_EXPECTED_ID",
     "HGS_EXECUTABLE", "HGS_AGENT", "HGS_FRESH", "HGS_FRESH_REPLACES", "HGS_REQUESTED_ID",
     "HGS_ARCHIVE_ID", "HGS_LAUNCH_ID", "HGS_FORK_PARENT_ID", "HGS_ACCOUNT_ID",
     "HGS_CLIENT", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME",

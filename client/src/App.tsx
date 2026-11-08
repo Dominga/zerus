@@ -1,5 +1,6 @@
+import { showQtUpgradeNotice } from "./store/qtUpgrade";
 import { DesktopServiceStatus } from "./ui/components/DesktopServiceStatus";
-import { desktopService } from "./store/desktopService";
+import { desktopService, serviceStatus, servicePaused, firstChoicePending } from "./store/desktopService";
 import { CleanupChip } from "./ui/screens/CleanupChip";
 import { worktreeReviewDialog } from "./store/worktreeCleanup";
 import { cleanupDialog } from "./store/terminationCleanup";
@@ -30,12 +31,14 @@ import { rememberRecentSession } from "./ui/sessions/goTo";
 import { updateCommands, updates } from "./store/updates";
 import { openUpdates } from "./store/desk";
 import { SessionUsageStrip } from "./ui/components/SessionUsageStrip";
-import { fleetRefresh, type BridgeMode } from "./bridge";
+import { fleetRefresh, sandboxCheck, type BridgeMode } from "./bridge";
 import { installUiLanguage, tr, uiLanguage } from "./i18n";
 import { WaitingPage } from "./ui/teams/Waiting";
 import { NewTeamPage } from "./ui/teams/NewTeamPage";
 import { CatalogPage } from "./ui/teams/CatalogPage";
 import { TeamDesigner } from "./ui/teams/TeamDesigner";
+import { connected, connectionError as hasConnectionError, statusSummary } from "./ui/status-summary";
+import { ModelServersScreen } from "./ui/screens/ModelServers";
 import { TeamConfirmDialog } from "./ui/teams/TeamConfirmDialog";
 
 // The client shell: the rail, the pages and the status bar.
@@ -79,26 +82,26 @@ function LoginItemButton() {
 
 function StatusBar(props: { mode: () => BridgeMode | "starting" }) {
   const computers = createMemo(() => Object.values(catalog.computers));
-  const connected = (status: string) => status === "live" || status === "polled";
-  const live = createMemo(() => computers().filter((c) => connected(c.status)).length);
   const problems = createMemo(() => computers().filter((c) => !connected(c.status)));
   const label = (id: string) => id || tr("this computer");
-  const connectionError = createMemo(() => problems().some((c) => c.status !== "probing"));
-  const summary = createMemo(() => tr("%1 of %2 machines connected", live(), computers().length) + (problems().length ? tr(", %1 offline", problems().map((c) => label(c.id)).join(", ")) : ""));
+  // Task 72 (F1): a computer still connecting is said to be connecting, never offline.
+  const connectionError = createMemo(() => hasConnectionError(computers()));
+  const summary = createMemo(() => statusSummary(computers(), label));
   return (
     <footer class="statusbar">
-      <Show when={computers().length} fallback={<span>{props.mode() === "starting" ? tr("Starting…") : tr("Connecting…")}</span>}>
+      <Show when={computers().length} fallback={<Show when={!servicePaused(desktopService.state()) && !firstChoicePending(desktopService.state())}><span>{props.mode() === "starting" ? tr("Starting…") : tr("Connecting…")}</span></Show>}>
         {connectionError() ? (
           <>
             <span class="danger">
               <For each={problems()}>{(c, i) => <>{i() ? "; " : ""}{label(c.id)}: {tr(STATE_TEXT[c.status] ?? c.status)}{c.status === "reconnecting" && c.attempt ? ` (attempt ${c.attempt})` : ""}</>}</For>
             </span>
-            <button type="button" class="btn small ghost" onClick={() => { void fleetRefresh().catch((error) => toast("Connection", String(error), "error", true)); }}>{tr("Retry now")}</button>
+            <Show when={!serviceStatus(desktopService.state())?.retry}><button type="button" class="btn small ghost" onClick={() => { void fleetRefresh().catch((error) => toast("Connection", String(error), "error", true)); }}>{tr("Retry now")}</button></Show>
           </>
         ) : (
           <span class="conn-ok"><span class="state-dot ready" hidden={problems().length > 0} />{summary()}</span>
         )}
       </Show>
+      <DesktopServiceStatus />
       <Show when={props.mode() === "replay"}>
         <span class="chip-accent" title={tr("Synthetic data from the replay fixture; no hgs is running")}>{tr("Replay")}</span>
       </Show>
@@ -126,6 +129,7 @@ function zoom(scale: number) {
 }
 
 export function App(props: { mode: () => BridgeMode | "starting" }) {
+  createEffect(() => { if (props.mode() === "tauri") void showQtUpgradeNotice(); });
   installUiLanguage();
   createEffect(() => { document.documentElement.lang = uiLanguage(); });
   createEffect(() => applySkin(skin()));
@@ -154,13 +158,13 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
   ];
   onMount(() => {
     const off = [installShortcutRouter(), ...commands.map(([id, run]) => onCommand(id, run))];
+    void sandboxCheck().then((reason) => { if (reason) toast(tr("Zerus is sandboxed"), reason, "error", true); }).catch(() => undefined);
     onCleanup(() => off.forEach((undo) => undo()));
   });
   return (
     <div class="app" classList={{ "rail-labeled": skin().layout.rail === "labeled" }}>
       <Rail />
-      <main class="page" classList={{ "with-service-status": desktopService.enabled() }}>
-        <DesktopServiceStatus />
+      <main class="page">
         <Switch>
           <Match when={page() === "sessions"}>
             <div class="sessions-page" classList={{ "layout-right": skin().layout["sessions-pane"] === "right" }}>
@@ -177,6 +181,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
           <Match when={page() === "newteam"}><NewTeamPage /></Match>
           <Match when={page() === "catalog"}><CatalogPage /></Match>
           <Match when={page() === "designer"}><TeamDesigner onClose={() => setPage("sessions")} /></Match>
+          <Match when={page() === "modelservers"}><ModelServersScreen /></Match>
         </Switch>
       </main>
       <StatusBar mode={props.mode} />

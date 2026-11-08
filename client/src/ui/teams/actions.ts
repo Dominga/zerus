@@ -12,9 +12,15 @@ import type { ComputerId, TeamAction, TeamChoice, TeamConfirmation, TeamOutcome,
 export interface ActTeam {
   id: string; name: string; status: string; plan_mode: string; revision: number; pending_phase: number | null;
   waiting_for_lead: boolean; settings: Record<string, unknown>;
+  /** Task 112: a paused team's pause: since when and by whom. */
+  paused?: { at?: number; by?: string; reason?: string } | null;
+  /** The owner's attention items as hgs words them (task 95 reads `lead_stalled`). */
+  attention?: unknown[];
   members: { id: string; role: string; agent: string; computer: string; lead: boolean; session: { name: string } | null }[];
   tasks: ActTask[];
-  phases: { n: number; title: string; state: string; status: string }[];
+  phases: { n: number; title: string; state: string; status: string; mode?: string }[];
+  /** Task #58: the free phase, and whether hgs sends each phase's mode. */
+  free_phase?: number | null; phase_modes_known?: boolean;
   widenings?: { member?: string; role?: string; from?: string; to?: string }[];
   children?: { team: string; name?: string; status?: string }[];
 }
@@ -35,10 +41,72 @@ export const finished = (task: Pick<ActTask, "status">) => FINISHED.has(task.sta
 export const inStage = (task: Pick<ActTask, "status">) => task.status === "in_review" || task.status === "in_test";
 const roleOf = (team: ActTeam, id: string) => team.members.find((member) => member.id === id)?.role || id;
 
+/** Whether a phase plans in free mode now: the free phase hgs names (task #58), or the team's mode from an older hgs. */
+export function freeMode(team: ActTeam): boolean {
+  return team.phase_modes_known ? (team.free_phase ?? 0) > 0 : team.plan_mode === "free";
+}
+
 /** U59: a free-mode team's empty queue is idle, not done (Qt allDecided). */
 export function allDecided(team: ActTeam): boolean {
-  if (team.tasks.length === 0 || team.plan_mode === "free") return false;
+  if (team.tasks.length === 0 || freeMode(team)) return false;
   return team.tasks.every(finished);
+}
+
+/** Task #58: the switch a phase offers (Qt's teamPhaseModeFree and teamWorkspaceLockPhase). */
+export interface PhaseModeSwitch { phase: number; mode: "free" | "standard"; text: string; enabled: boolean; why: string }
+
+/**
+ * Task #58: the owner's switch of one phase between free and standard planning:
+ * the free phase locks back to standard; a running phase opens to free while
+ * no phase is free. None for an hgs that sends no phase modes, or a team that
+ * is not running.
+ */
+export function phaseModeSwitch(team: ActTeam, n: number): PhaseModeSwitch | undefined {
+  if (!team.phase_modes_known || !["running", "paused"].includes(team.status)) return undefined;
+  const phase = team.phases.find((found) => found.n === n);
+  if (!phase) return undefined;
+  const free = team.free_phase ?? 0;
+  if (free === n) return { phase: n, mode: "standard", text: tr("Switch to standard…"), enabled: true, why: "" };
+  if (phase.mode === "free") return { phase: n, mode: "standard", text: tr("Switch to standard…"), enabled: true, why: "" };
+  // Only a running phase opens for tasks as they come (Qt: its menu's state).
+  if (phase.state !== "running") return undefined;
+  return { phase: n, mode: "free", text: tr("Switch to free planning…"),
+    enabled: free === 0, why: free > 0 ? tr("Phase %1 is free; switch it to standard first", free) : "" };
+}
+
+/** Task #59: the mode chip a phase header shows, for a phase a switch reaches (running, or the free one). */
+export interface ModeChip { mode: "free" | "standard"; text: string; tip: string }
+export function phaseModeChip(team: ActTeam, n: number): ModeChip | undefined {
+  const phase = team.phases.find((found) => found.n === n);
+  if (!phase) return undefined;
+  const free = (team.free_phase ?? 0) === n || phase.mode === "free";
+  if (free) return { mode: "free", text: tr("Free mode"), tip: tr("Free planning: the phase stays open and takes tasks as they come until you close it") };
+  if (!team.phase_modes_known || phase.state !== "running") return undefined;
+  return { mode: "standard", text: tr("Standard mode"), tip: tr("Standard planning: the phase is planned, approved and closed with its build") };
+}
+
+/** Task #59: the team bar's mode badge (Qt teamHeaderPlanMode), with the free phase it names. */
+export interface TeamModeBadge { mode: "free" | "standard"; text: string; tip: string; phase: number }
+export function teamModeBadge(team: ActTeam): TeamModeBadge | undefined {
+  if (["planning", "draft"].includes(team.status) || (!team.phase_modes_known && !team.plan_mode)) return undefined;
+  const phase = team.free_phase ?? 0;
+  if (freeMode(team)) {
+    return { mode: "free", phase, text: phase > 0 ? tr("Free mode: phase %1", phase) : tr("Free mode"),
+      tip: phase > 0 ? tr("Free planning: phase %1 stays open and takes tasks as they come until you close it", phase)
+        : tr("Free planning: the phase stays open and takes tasks as they come until you close it") };
+  }
+  return { mode: "standard", phase: 0, text: tr("Standard mode"), tip: tr("Standard planning: each phase is planned, approved and closed with its build") };
+}
+
+/** Task #58: the switch's question, Qt's teamPhaseModeDialog words; Cancel is focused. */
+export function phaseModeConfirmation(team: ActTeam, n: number, mode: "free" | "standard"): TeamConfirmation {
+  const title = team.phases.find((phase) => phase.n === n)?.title ?? "";
+  const name = title ? tr("Phase %1: %2", n, title) : tr("Phase %1", n);
+  return mode === "free"
+    ? { name: "teamPhaseModeConfirm", title: tr("Switch %1 to free planning?", name), action: tr("Switch to free"),
+      text: tr("%1 stays open when its tasks are accepted: idle, not done. New tasks join it and run as they are added, with the same pipelines, reports and acceptance. The other phases keep their modes.", name) }
+    : { name: "teamPhaseModeConfirm", title: tr("Switch %1 to standard planning?", name), action: tr("Switch to standard"),
+      text: tr("%1 is locked: its tasks keep their state and run on. New work is planned in a new phase, approved by you; nothing joins this one without a plan edit. The other phases keep their modes.", name) };
 }
 
 /** A stage kind in words (Qt stageName). */
@@ -59,7 +127,37 @@ export function stageName(kind: string): string {
 // ---------------------------------------------------------------------------
 // The team bar
 
-export interface BarChip { id: "pendingPhase" | "finishWaits" | "waitingForLead"; text: string; tip: string; phase?: number }
+export interface BarChip { id: "pendingPhase" | "finishWaits" | "waitingForLead" | "leadStalled" | "teamPaused"; text: string; tip: string; phase?: number }
+
+/**
+ * Task 112: "Team paused since 09:12 by You: members get no tasks" (the date
+ * when it was not today), as Qt's Team::pausedText says it.
+ */
+export function pausedText(team: Pick<ActTeam, "status" | "paused">, now: Date = new Date()): string {
+  if (team.status !== "paused") return "";
+  const at = team.paused?.at ? new Date(team.paused.at * 1000) : undefined;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const time = at ? `${pad(at.getHours())}:${pad(at.getMinutes())}` : "";
+  const since = !at ? "" : at.toDateString() === now.toDateString() ? time : `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${time}`;
+  const by = team.paused?.by ?? "";
+  if (!since) return tr("Team paused: members get no tasks");
+  return by ? tr("Team paused since %1 by %2: members get no tasks", since, by) : tr("Team paused since %1: members get no tasks", since);
+}
+
+/** Task 95: the stalled lead's attention item: its reason, what it blocks and the round. */
+export interface LeadStall { reason: string; items: number; members: number; round: number; summary: string }
+
+/** Task 95: the lead's decisions wait while its session does not work on them. */
+export function leadStall(team: Pick<ActTeam, "attention">): LeadStall | null {
+  for (const raw of team.attention ?? []) {
+    const item = (raw ?? {}) as Record<string, unknown>;
+    if (item.kind !== "lead_stalled") continue;
+    const count = (key: string) => (typeof item[key] === "number" ? (item[key] as number) : 0);
+    return { reason: typeof item.reason === "string" ? item.reason : "", items: count("items"), members: count("members"),
+      round: count("round"), summary: typeof item.summary === "string" ? item.summary : "" };
+  }
+  return null;
+}
 
 export interface BarAction {
   id: "resumeLimits" | "finish" | "discard" | "sendBack" | "approve" | "pause" | "resume" | "stop" | "archive";
@@ -74,6 +172,18 @@ const draftPhases = (team: ActTeam) => team.phases.filter((phase) => phase.state
 /** The bar's chips (Qt TeamWorkspace header row): the pending phase, Finish waiting, waiting for the lead. */
 export function barChips(team: ActTeam): BarChip[] {
   const chips: BarChip[] = [];
+  // Task 112: a paused team says so first, with since when and by whom.
+  if (team.status === "paused")
+    chips.push({ id: "teamPaused", text: pausedText(team), tip: tr("Only Resume team hands out tasks again; resuming a member's session does not") });
+  // Task 95: the stalled lead comes first: nothing moves until it does.
+  const stall = leadStall(team);
+  if (stall) {
+    const exited = stall.reason === "exited";
+    const text = stall.items === 1
+      ? (exited ? tr("Lead stopped: 1 decision waits") : tr("Lead stalled: 1 decision waits"))
+      : (exited ? tr("Lead stopped: %1 decisions wait", stall.items) : tr("Lead stalled: %1 decisions wait", stall.items));
+    chips.push({ id: "leadStalled", text, tip: stall.summary || tr("Open the lead's session to see what it waits on") });
+  }
   if ((team.pending_phase ?? 0) > 0 && team.status !== "planning") {
     const drafts = draftPhases(team);
     chips.push({ id: "pendingPhase", phase: team.pending_phase!, text: tr("Phase %1 waits for you", team.pending_phase!),
@@ -111,7 +221,7 @@ export function barActions(team: ActTeam, planMode: string): BarAction[] {
   } else if (status === "running") {
     action({ id: "pause", text: tr("Pause"), tip: tr("Running turns finish; nothing new is handed out") });
   } else if (status === "paused") {
-    action({ id: "resume", text: tr("Resume"), tip: tr("Hand out tasks again"), primary: true });
+    action({ id: "resume", text: tr("Resume team"), tip: tr("Hand out tasks again; resuming a member's session does not"), primary: true });
   }
   if (status === "running" || status === "paused") action({ id: "stop", text: tr("Stop…"), tip: tr("Cancel every open task"), danger: true });
   if (status === "done" || status === "stopped") action({ id: "archive", text: tr("Archive"), tip: tr("Archive the team") });
@@ -422,6 +532,10 @@ export class TeamActions {
   discard() { return this.run("discard", { kind: "discard" }, discardConfirmation(this.where().team)); }
   pause(impact: { teams: number; sessions: number }) { return this.run("pause", { kind: "pause" }, pauseConfirmation(this.where().team, impact)); }
   resume() { return this.run("resume", { kind: "resume" }); }
+  /** Task #58: one phase's mode, after the owner's confirmation. */
+  phaseMode(phase: number, mode: "free" | "standard") {
+    return this.run(`phase-mode:${phase}`, { kind: "phase_mode", phase, mode }, phaseModeConfirmation(this.where().team, phase, mode));
+  }
   stop(impact: { teams: number; sessions: number }) { return this.run("stop", { kind: "stop" }, stopConfirmation(this.where().team, impact)); }
   archive() { return this.run("archive", { kind: "archive" }); }
   /** Finish: the dialog with its summary is the confirmation. */

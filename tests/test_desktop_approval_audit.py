@@ -1,4 +1,5 @@
 """Selected-service audit reads through the real CLI and private passive actor."""
+from contextlib import closing
 import json
 import os
 import sqlite3
@@ -82,6 +83,28 @@ class ApprovalAudit(unittest.TestCase):
         self.assertEqual(absent['result']['entries'], [])
         self.assertIsNone(absent['journal'])
         self.assertFalse((self.state / 'approval-audit').exists())
+
+    @unittest.skipUnless(os.name == 'posix', 'SQLite POSIX record locks')
+    def test_audit_reader_lock_survives_service_restart(self):
+        import fcntl
+        self.state.mkdir(mode=0o700)
+        path = self.rows()
+        with closing(sqlite3.connect(path)) as db:
+            self.assertEqual(db.execute('PRAGMA journal_mode=WAL').fetchone(), ('wal',))
+        previous_epoch = None
+        for restart in range(2):
+            with self.subTest(restart=restart):
+                process, status = self.serve()
+                self.assertNotEqual(status['epoch'], previous_epoch)
+                previous_epoch = status['epoch']
+                self.assertTrue(self.request(status)['accepted'])
+                with path.open('r+b') as file:
+                    with self.assertRaises(BlockingIOError,
+                                           msg='live audit reader lost its SQLite shared lock'):
+                        fcntl.lockf(file, fcntl.LOCK_EX | fcntl.LOCK_NB, 512, 0x40000000)
+                self.stop(process)
+                with path.open('r+b') as file:
+                    fcntl.lockf(file, fcntl.LOCK_EX | fcntl.LOCK_NB, 512, 0x40000000)
 
     @unittest.skipUnless(os.name == 'posix', 'Unix open-journal replacement')
     def test_replacement_refuses_old_page(self):

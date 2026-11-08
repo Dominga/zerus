@@ -1,9 +1,10 @@
-import { For, Show, createSignal } from "solid-js";
+import { For, Show, createSignal, onMount } from "solid-js";
 import type { JSX } from "solid-js";
 import { tr } from "../../i18n";
 import { Icon } from "../lib/icons";
 import { teamAction } from "../../bridge";
 import type { TeamMemberView, TeamView } from "../../types";
+import { checkTestConfig, overrideText, parseOverride, readTestConfig, sourceLine, testsLines, testsPatch, type TestConfig } from "./testsSettings";
 import "../styles/newteam.css";
 
 type TeamSettings = Record<string, unknown>;
@@ -47,6 +48,27 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
   const [asking, setAsking] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
+  // Task 88: the project's test configuration and the owner's override.
+  const [tests, setTests] = createSignal(overrideText(settings.tests));
+  const [testConfig, setTestConfig] = createSignal<TestConfig | undefined>();
+  const [testCheck, setTestCheck] = createSignal<{ message: string; good: boolean } | undefined>();
+  const [checking, setChecking] = createSignal(false);
+  const [proposal, setProposal] = createSignal(false);
+  onMount(() => {
+    void readTestConfig(teamAction, current.id, current.name).then(setTestConfig).catch((cause) => setTestConfig({ ok: false, error: String(cause) }));
+  });
+  const checkTests = async () => {
+    setChecking(true);
+    try {
+      const result = await checkTestConfig(teamAction, current.id, current.name, tests());
+      setTestCheck({ message: result.message, good: result.good });
+      if (result.good && result.config) setTestConfig(result.config);
+    } catch (cause) {
+      setTestCheck({ message: String(cause), good: false });
+    } finally {
+      setChecking(false);
+    }
+  };
 
   const rulesChanged = () => lines(rules()).join("\n") !== lines(settings.iron_rules).join("\n");
   const memberChanged = (member: TeamMemberView) =>
@@ -63,6 +85,7 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
     if (broker() !== Boolean(settings.build_broker)) patch.build_broker = broker();
     if (leadUnpause() !== Boolean(settings.lead_removes_own_pause)) patch.lead_removes_own_pause = leadUnpause();
     if (acceptance() !== (settings.phase_acceptance === "owner")) patch.phase_acceptance = acceptance() ? "owner" : "lead";
+    Object.assign(patch, testsPatch(settings.tests, tests()));
     return patch;
   };
   const members = () =>
@@ -74,6 +97,11 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
       }));
 
   const save = async () => {
+    const invalid = parseOverride(tests()).error;
+    if (invalid) {
+      setError(invalid);
+      return;
+    }
     const patch = changed();
     const memberPatch = members();
     if (Object.keys(patch).length === 0 && memberPatch.length === 0) {
@@ -164,6 +192,27 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
           <input type="checkbox" checked={broker()} onChange={(event) => setBroker(event.currentTarget.checked)} />
           {tr("Build broker for members sharing a folder")}
         </label>
+
+        {/* Task 88: the project's test providers and templates, of any stack, and your override; nothing is written before Save. */}
+        <h3>{tr("Tests")}</h3>
+        <p class="nt-note" data-tests-source>{testConfig() ? (testConfig()!.ok ? sourceLine(testConfig()!) : tr("The project's test configuration does not load: %1", testConfig()!.error ?? "")) : tr("Reading the project's test configuration…")}</p>
+        <Show when={testConfig()?.ok}>
+          <ul class="nt-list" data-tests-list>
+            <For each={testsLines(testConfig()!)}>{(line) => <li>{line}</li>}</For>
+          </ul>
+        </Show>
+        <p class="nt-note">{tr("Your override, as JSON shaped like .zerus/tests.toml: providers merge by name, templates replace the project's list. Empty: the project's file alone.")}</p>
+        <textarea rows={8} class="nt-mono" data-tests-override value={tests()} placeholder={'{"provider": [{"name": "python", "kind": "pytest", "results": {"format": "junit", "path": "out/pytest.xml"}}]}'}
+          onInput={(event) => { setTests(event.currentTarget.value); setTestCheck(undefined); }} />
+        <div class="nt-row">
+          <button type="button" class="btn ghost small" data-tests-check disabled={checking()} title={tr("Ask hgs whether the project's file with this override loads; nothing is written")}
+            onClick={() => void checkTests()}>{checking() ? tr("Checking with hgs…") : tr("Check")}</button>
+          <button type="button" class="btn ghost small" data-tests-proposal-toggle onClick={() => setProposal(!proposal())}>
+            {proposal() ? tr("Hide the detected proposal") : tr("Show the detected proposal")}
+          </button>
+        </div>
+        <Show when={testCheck()}>{(result) => <p classList={{ "nt-note": true, "nt-error": !result().good }} data-tests-check-result>{result().message}</p>}</Show>
+        <Show when={proposal()}><pre class="nt-mono" data-tests-proposal>{testConfig()?.proposal ?? ""}</pre></Show>
 
         <h3>{tr("Phases")}</h3>
         <label class="nt-check">

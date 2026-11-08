@@ -136,7 +136,7 @@ class NativeCodexClear(unittest.TestCase):
         self.assertIn(self.animations, ('true', 'false'))
         # Plugins stay off (see assert_plugin_sync_off). Suites reusing this
         # fixture may serve a localhost provider and enable more features.
-        (native_home / 'config.toml').write_text('''model="gpt-6.1-sol"
+        (native_home / 'config.toml').write_text('model=' + json.dumps(getattr(self, 'native_model', 'gpt-6.1-sol')) + '''
 model_provider="fixture"
 check_for_update_on_startup=false
 [features]
@@ -486,6 +486,41 @@ wire_api="responses"
         test_input.InputTransport.send(self, test_input.InputTransport.payload(self, text='First fixture message'))
         self.assert_new_conversation(fresh['session_clear']['at'])
 
+    def test_a_confirmed_clear_then_old_session_end_accepts_the_first_new_message(self):
+        import test_clear_context
+        self.resumed()
+        test_input.InputTransport.send(self, test_input.InputTransport.payload(self, text='Confirm the fixture conversation'))
+        def initial_idle():
+            record = json.loads(self.record_path.read_text())
+            return record.get('phase') == 'idle' and not record.get('expected_id')
+        self.settle(initial_idle, 'Initial native turn did not settle')
+        self.assertEqual(test_clear_context.ClearContext.clear(self)['status'], 'confirmed')
+        self.assert_reset_decoration()
+        # Only this ordering is modeled; the following real clear SessionStart,
+        # prompt submission, response and Stop all come from the native Codex.
+        test_clear_context.ClearContext.hook(self, dict(hook_event_name='SessionEnd',
+            session_id=self.conversation_id, reason='other'))
+        ended = json.loads(self.record_path.read_text())
+        self.assertTrue(ended['session_clear']['awaiting_session_start'])
+        self.assertEqual(ended['conversation_id'], self.conversation_id)
+        self.assertEqual(ended['conversation_state'], 'ended')
+        message = 'First fixture message after the old conversation ended'
+        receipt = test_input.InputTransport.send(self, test_input.InputTransport.payload(self, text=message))
+        self.assertEqual(receipt['status'], 'submitted')
+        fresh = self.settle(lambda: (value if (value := test_clear_context.ClearContext.inspect(self)).get('conversation_id') != self.conversation_id
+                            and value.get('phase') == 'idle' else None), 'The native successor did not finish its first turn')
+        self.assertEqual(fresh['conversation_state'], 'active')
+        self.assertEqual(fresh['run_id'], self.run_id)
+        self.assertEqual(fresh['prompt'], message)
+        rollout = next((self.native_home / 'sessions').rglob('*' + fresh['conversation_id'] + '.jsonl'))
+        def submitted_messages():
+            rows = [json.loads(line) for line in rollout.read_text().splitlines()]
+            return [row for row in rows if row.get('type') == 'response_item'
+                    and row.get('payload', {}).get('role') == 'user'
+                    and row['payload'].get('content') == [dict(type='input_text', text=message)]]
+        # The successor's retained-message rollout need not have legacy event_msg rows.
+        self.assertEqual(len(self.settle(submitted_messages, 'Native rollout did not record the submitted prompt')), 1)
+
     def test_archive_restored_conversation_clears_and_settles_on_its_real_start(self):
         import test_clear_context
         test_clear_context.ResumedClearContext.restored(self)
@@ -523,6 +558,59 @@ wire_api="responses"
         self.tmux('send-keys', '-t', self.pane, '-l', message)
         self.wait_for(lambda: message in self.tmux('capture-pane', '-p', '-t', self.pane))
         self.tmux('send-keys', '-t', self.pane, 'Enter')
+        self.assert_new_conversation(None)
+
+    def test_resumed_terminal_clear_accepts_its_real_start_after_a_modeled_main_end(self):
+        import sys
+        hook = self.root / 'terminal-clear-end.py'
+        events = self.root / 'terminal-clear-events.jsonl'
+        hook.write_text('''import json,pathlib,subprocess,sys
+data=sys.stdin.buffer.read(1024*1024+1)
+if len(data)>1024*1024:raise SystemExit(2)
+event=json.loads(data)
+def deliver(value,raw,kind):
+ result=subprocess.run([HGS,'__state','hook'],input=raw,timeout=10)
+ with pathlib.Path(EVENTS).open('a') as out:
+  out.write(json.dumps({'kind':kind,'event':value['hook_event_name'],'id':value['session_id'],
+   'source':value.get('source'),'status':result.returncode})+'\\n')
+ return result.returncode
+if event.get('hook_event_name')=='SessionStart' and event.get('source')=='clear' and event.get('session_id')!=OLD:
+ # Model only the missing end ordering; preserve a native end if one arrived.
+ # forward the actual clear SessionStart bytes without inventing or replaying it.
+ previous=[json.loads(line) for line in pathlib.Path(EVENTS).read_text().splitlines()] if pathlib.Path(EVENTS).exists() else []
+ if not any(row['event']=='SessionEnd' and row['id']==OLD for row in previous):
+  end={'hook_event_name':'SessionEnd','session_id':OLD,'cwd':event['cwd'],
+   'transcript_path':TRANSCRIPT,'reason':'other'}
+  deliver(end,json.dumps(end).encode(),'modeled_end')
+raise SystemExit(deliver(event,data,'native'))
+'''.replace('HGS', repr(str(test_input.HGS))).replace('EVENTS', repr(str(events)))
+            .replace('OLD', repr(self.conversation_id)).replace('TRANSCRIPT', repr(self.record['transcript'])))
+        self.resumed(shlex.quote(sys.executable) + ' ' + shlex.quote(str(hook)))
+        self.tmux('send-keys', '-t', self.pane, '-l', '/clear')
+        self.wait_for(lambda: '/clear' in self.tmux('capture-pane', '-p', '-t', self.pane))
+        self.tmux('send-keys', '-t', self.pane, 'Enter')
+        self.settle(lambda: 'Previous fixture answer' not in self.tmux('capture-pane', '-p', '-t', self.pane),
+                    'Codex did not clear the resumed conversation')
+        self.assertNotIn('clear_context_request', json.loads(self.record_path.read_text()))
+        message = 'First fixture message after Terminal clear'
+        self.tmux('send-keys', '-t', self.pane, '-l', message)
+        self.wait_for(lambda: message in self.tmux('capture-pane', '-p', '-t', self.pane))
+        self.tmux('send-keys', '-t', self.pane, 'Enter')
+        self.settle(lambda: events.exists() and any(json.loads(line)['event'] == 'Stop'
+                    for line in events.read_text().splitlines()), 'Codex did not finish the first cleared turn')
+        order = [json.loads(line) for line in events.read_text().splitlines()]
+        print('ZERUS_CODEX_CLEAR_ORDER=' + json.dumps(order), flush=True)
+        self.assertIn(order[0]['kind'], ('modeled_end', 'native'))
+        self.assertEqual([(row['kind'], row['event']) for row in order[1:]],
+                         [('native', 'SessionStart'),
+                          ('native', 'UserPromptSubmit'), ('native', 'Stop')])
+        self.assertEqual(order[0]['event'], 'SessionEnd')
+        self.assertTrue(all(row['status'] == 0 for row in order), order)
+        self.assertEqual(order[0]['id'], self.conversation_id)
+        self.assertEqual(order[1]['source'], 'clear')
+        current = json.loads(self.record_path.read_text())
+        self.assertFalse(current.get('error'), current.get('error'))
+        self.assertEqual(current['conversation_id'], order[1]['id'])
         self.assert_new_conversation(None)
 
     def test_already_rejected_resumed_clear_recovers_from_a_real_hook_after_the_lost_start(self):

@@ -30,12 +30,60 @@ pub(crate) fn heads_at(path: &Path, limit: usize) -> anyhow::Result<(Vec<Value>,
     Store::open_at(path, false)?.heads(limit)
 }
 
-/// Task 8: the files whose stat changes when a team changes: the store and
-/// its rollback journal.
+/// Task 8: the files whose stat changes when a team changes: the store, its
+/// rollback journal and (task 105) its write-ahead log, where a WAL store's
+/// writes land until a checkpoint copies them into the store.
 pub(crate) fn files(path: &Path) -> Vec<PathBuf> {
-    let mut journal = path.as_os_str().to_owned();
-    journal.push("-journal");
-    vec![path.to_path_buf(), PathBuf::from(journal)]
+    let beside = |suffix: &str| {
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        PathBuf::from(name)
+    };
+    vec![path.to_path_buf(), beside("-journal"), beside("-wal")]
+}
+
+/// Task 105: how the store keeps its transactions. WAL lets every reader
+/// (`hgs team list`, the GUI's polls, status) read the last committed state
+/// while a writer works; the rollback journal (DELETE) made them wait behind
+/// a long write, and a write behind a long read, up to "database is locked".
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Journal {
+    Wal,
+    /// The mode before task 105, kept for measurements and as the fallback
+    /// where SQLite refuses WAL (a network folder).
+    #[cfg(test)]
+    Delete,
+}
+
+/// Task 105: how long a write open waits to switch the journal mode.
+const SWITCH_WAIT: Duration = Duration::from_secs(2);
+
+/// Task 105: a WAL store's log is truncated to this size after a checkpoint.
+/// A team's record is megabytes of JSON, so a smaller log would be cut and
+/// grown again on almost every write.
+const WAL_KEEP_BYTES: i64 = 64 * 1024 * 1024;
+/// Task 105: pages written before a commit checkpoints the log into the store
+/// (SQLite's default is 1000, about 4 MB: one write of a large team). Measured
+/// on a copy of team 33fbafeb's store, fewer checkpoints kept the writes'
+/// p95 lower and the reads' steadier.
+const WAL_CHECKPOINT_PAGES: i64 = 4000;
+
+/// Task 105: the `-wal` and `-shm` files stay when the last connection closes.
+/// A reader whose sandbox may not create files beside the store (a read-only
+/// sandbox) can then still open it read-only: SQLite reads a WAL database
+/// without write access only when those files exist.
+fn persist_wal(db: &Connection) {
+    let mut on: std::os::raw::c_int = 1;
+    // SAFETY: the handle belongs to this open connection for the call; the
+    // argument is the documented int pointer of SQLITE_FCNTL_PERSIST_WAL.
+    unsafe {
+        rusqlite::ffi::sqlite3_file_control(
+            db.handle(),
+            c"main".as_ptr(),
+            rusqlite::ffi::SQLITE_FCNTL_PERSIST_WAL,
+            (&mut on as *mut std::os::raw::c_int).cast(),
+        );
+    }
 }
 
 /// One feed entry to append with a mutation.
@@ -173,7 +221,30 @@ impl Store {
         Self::open_at(&path(), write).map_err(write_error)
     }
 
+    /// Task 117: a read on a hot path (every listing and inspection) waits
+    /// at most `wait` for a writer instead of the usual 10 s.
+    pub(crate) fn busy_timeout(&self, wait: Duration) -> anyhow::Result<()> {
+        Ok(self.db.busy_timeout(wait)?)
+    }
+
     pub(crate) fn open_at(path: &Path, write: bool) -> anyhow::Result<Self> {
+        Self::open_journal(path, write, Journal::Wal)
+    }
+
+    /// The store's journal mode now: `wal` or `delete`.
+    #[cfg(test)]
+    pub(crate) fn journal_mode(&self) -> anyhow::Result<String> {
+        Ok(self.db.query_row("PRAGMA journal_mode", [], |row| row.get(0))?)
+    }
+
+    /// Opens the store; a write open puts it in `journal` mode. Task 105: an
+    /// existing rollback-journal store becomes WAL at its first write open
+    /// (SQLite waits for the other connections to finish their transactions);
+    /// where SQLite refuses (a busy store, a network folder) it stays as it
+    /// was and the next write open tries again. An older hgs reads a WAL store
+    /// as it is, and its write open turns it back to DELETE when no other
+    /// connection has it open.
+    pub(crate) fn open_journal(path: &Path, write: bool, journal: Journal) -> anyhow::Result<Self> {
         if let Ok(meta) = path.symlink_metadata() {
             ensure!(meta.is_file() && !meta.file_type().is_symlink(), "Nonregular team store");
         }
@@ -201,8 +272,30 @@ impl Store {
         db.pragma_update(None, "temp_store", "MEMORY")?;
         if write {
             db.pragma_update(None, "max_page_count", STORE_PAGE_CAP)?;
+            let wanted = match journal {
+                Journal::Wal => "WAL",
+                #[cfg(test)]
+                Journal::Delete => "DELETE",
+            };
+            // The pragma answers the mode it kept; a refusal keeps the old one.
+            // Only a switch takes the store's lock, so it waits briefly: a busy
+            // store is switched by a later open instead of delaying this one.
+            let current: String = db.query_row("PRAGMA journal_mode", [], |row| row.get(0)).unwrap_or_default();
+            let mode = if current.eq_ignore_ascii_case(wanted) {
+                current
+            } else {
+                db.busy_timeout(SWITCH_WAIT)?;
+                let mode = db.query_row(&format!("PRAGMA journal_mode={wanted}"), [], |row| row.get(0)).unwrap_or(current);
+                db.busy_timeout(BUSY_WAIT)?;
+                mode
+            };
+            if mode.eq_ignore_ascii_case("wal") {
+                persist_wal(&db);
+                db.pragma_update(None, "journal_size_limit", WAL_KEEP_BYTES)?;
+                db.pragma_update(None, "wal_autocheckpoint", WAL_CHECKPOINT_PAGES)?;
+            }
             db.execute_batch(
-                "PRAGMA journal_mode=DELETE;
+                "
                 CREATE TABLE IF NOT EXISTS teams(id TEXT PRIMARY KEY,revision INTEGER NOT NULL,status TEXT NOT NULL,
                     updated REAL NOT NULL,payload TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS teams_updated ON teams(status,updated);
@@ -355,9 +448,13 @@ impl Store {
         let mut statement = self.db.prepare(
             "SELECT payload FROM teams WHERE ?1 OR status!='archived' ORDER BY updated DESC LIMIT ?2",
         )?;
-        let rows = statement.query_map(params![include_archived, limit], |row| {
-            row.get::<_, String>(0)})?;
-        rows.map(|row| self.decode(&row?)).collect()
+        // Task 105: the rows are read first and parsed after the statement
+        // ends, so the read never holds the store while megabytes of JSON parse.
+        let rows = statement
+            .query_map(params![include_archived, limit], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        drop(statement);
+        rows.iter().map(|row| self.decode(row)).collect()
     }
 
     /// The teams that still run: Planning, Running or Paused, most recently
@@ -367,8 +464,10 @@ impl Store {
         let mut statement = self.db.prepare(
             "SELECT payload FROM teams WHERE status IN ('planning','running','paused') ORDER BY updated DESC LIMIT ?1",
         )?;
-        let rows = statement.query_map(params![limit], |row| row.get::<_, String>(0))?;
-        rows.map(|row| self.decode(&row?)).collect()
+        // Task 105: read first, parse after the statement ends (see teams).
+        let rows = statement.query_map(params![limit], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+        drop(statement);
+        rows.iter().map(|row| self.decode(row)).collect()
     }
 
     /// The sum of the active teams' revisions, without reading their payloads:
@@ -401,6 +500,20 @@ impl Store {
 
     /// A page of one team's feed, newest first; `before` is the previous page's
     /// cursor. Entries appended meanwhile never shift an older page.
+    /// Task 112: the newest event of these kinds, its time and detail.
+    pub(crate) fn last_event(&self, team: &str, kinds: &[&str]) -> anyhow::Result<Option<(f64, Value)>> {
+        let list = kinds.iter().map(|kind| format!("'{}'", kind.replace('\'', ""))).collect::<Vec<_>>().join(",");
+        let found = self
+            .db
+            .query_row(
+                &format!("SELECT at,payload FROM events WHERE team=?1 AND kind IN ({list}) ORDER BY seq DESC LIMIT 1"),
+                params![team],
+                |row| Ok((row.get::<_, f64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        Ok(found.map(|(at, payload)| (at, serde_json::from_str(&payload).unwrap_or_default())))
+    }
+
     pub(crate) fn events(&self, team: &str, before: Option<i64>, limit: i64) -> anyhow::Result<Value> {
         let limit = limit.clamp(1, PAGE);
         let mut statement = self.db.prepare(
@@ -447,10 +560,18 @@ impl Store {
     /// indexed query: the payload is read only for the name and the lead.
     pub(crate) fn heads(&self, limit: usize) -> anyhow::Result<(Vec<Value>, bool)> {
         let mut statement = self.db.prepare(
-            "SELECT id,revision,status,updated,json_extract(payload,'$.name'),json_extract(payload,'$.lead')
+            "SELECT id,revision,status,updated,json_extract(payload,'$.name'),json_extract(payload,'$.lead'),
+                    json_extract(payload,'$.plan_mode'),json_extract(payload,'$.phase_modes')
              FROM teams ORDER BY updated DESC, id LIMIT ?1",
         )?;
         let rows = statement.query_map(params![limit.saturating_add(1) as i64], |row| {
+            // Task #58: the team's plan mode and each phase's own one (a phase
+            // not named plans in the team's), so a watcher sees a switch.
+            let phase_modes = row
+                .get::<_, Option<String>>(7)?
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .filter(Value::is_object)
+                .unwrap_or_else(|| json!({}));
             Ok(json!({
                 "id": row.get::<_, String>(0)?,
                 "revision": row.get::<_, i64>(1)?,
@@ -458,6 +579,8 @@ impl Store {
                 "updated": row.get::<_, f64>(3)?,
                 "name": row.get::<_, Option<String>>(4)?.unwrap_or_default(),
                 "lead": row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                "plan_mode": row.get::<_, Option<String>>(6)?.unwrap_or_else(|| "standard".into()),
+                "phase_modes": phase_modes,
             }))
         })?;
         let mut heads = rows.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -531,7 +654,17 @@ impl Store {
         resolve_dependencies(&transaction, &mut team, &input)?;
         let mut events = Vec::new();
         let mut receipt = change(&mut team, &mut events)?;
+        // Task 111: every change re-checks the open proposals; one that can no
+        // longer apply is withdrawn in the same write.
+        super::ops::withdraw_inapplicable(&mut team, &mut events);
+        // Task 112: only a paused team keeps its pause record.
+        if team.status != super::model::TeamStatus::Paused {
+            team.paused = None;
+        }
         let at = now();
+        // Task 81: a task of the approved plan gets its baseline schedule in the
+        // change that approves it or adds it.
+        super::baseline::stamp(&mut team, at);
         team.revision += 1;
         team.updated = at;
         append(&transaction, team_id, at, &events).map_err(write_error)?;
@@ -675,7 +808,7 @@ fn restore_phase(db: &Connection, team: &mut Team, input: &Value) -> anyhow::Res
     Ok(())
 }
 
-/// Resolve only referenced missing dependencies and prerequisites through the archive primary key.
+/// Resolve referenced missing dependencies, prerequisites and origins by archive primary key.
 /// This one helper serves loads and mutations, including proposed input.
 fn resolve_dependencies(db: &Connection, team: &mut Team, input: &Value) -> anyhow::Result<()> {
     let mut ids: std::collections::BTreeSet<u32> = team
@@ -684,9 +817,12 @@ fn resolve_dependencies(db: &Connection, team: &mut Team, input: &Value) -> anyh
         .filter(|task| task.archived.is_none())
         .flat_map(|task| task.deps.iter().map(|dep| dep.task).chain(task.requires.iter().filter_map(|required| {
             if let Prerequisite::Task { task } = required { Some(*task) } else { None }
-        })))
+        })).chain(task.origin))
         .collect();
     fn proposed(value: &Value, ids: &mut std::collections::BTreeSet<u32>) {
+        if let Some(id) = value.get("origin").and_then(Value::as_u64).and_then(|id| u32::try_from(id).ok()) {
+            ids.insert(id);
+        }
         for field in ["deps", "requires"] {
             if let Some(deps) = value.get(field).and_then(Value::as_array) {
                 for dep in deps {
@@ -798,6 +934,7 @@ fn archive_tasks(
             title: task.title.clone(),
             assignee: task.assignee.clone(),
             status: task.status,
+            origin: task.origin,
             archived: Some(summary),
             ..Default::default()
         };
@@ -882,6 +1019,10 @@ fn apply_archive_windows(team: &mut Team) {
         team.phases.iter().filter(|phase| phase.archived.is_some()).map(|phase| phase.n),
         ARCHIVED_PHASE_WINDOW,
     );
+    let evicted: std::collections::BTreeSet<u32> = team.phases.iter()
+        .filter(|phase| phase.archived.is_some() && !phases.contains(&phase.n))
+        .map(|phase| phase.n).collect();
+    team.phase_modes.retain(|phase, _| !evicted.contains(phase));
     team.phases.retain(|phase| phase.archived.is_none() || phases.contains(&phase.n));
     let tasks = newest_ids(
         team.tasks.iter().filter(|task| task.archived.is_some() && phases.contains(&task.phase)).map(|task| task.id),
@@ -967,6 +1108,298 @@ mod tests {
         let teams = teams.unwrap();
         assert_eq!(teams.len(), 40);
         assert_eq!(teams[0].id, "t39");
+    }
+
+    /// A store with `count` teams, each a record of about `bytes` bytes.
+    fn filled(path: &Path, journal: Journal, count: usize, bytes: usize) -> Store {
+        let mut store = Store::open_journal(path, true, journal).unwrap();
+        for index in 0..count {
+            let team = Team { id: format!("t{index}"), name: format!("Team {index}"), lead: "lead".into(), goal: "g".repeat(bytes),
+                status: TeamStatus::Running, ..Default::default() };
+            store.create(&format!("11111111-1111-4111-8111-{index:012}"), &json!({"n":index}), team, vec![]).unwrap();
+        }
+        store
+    }
+
+    /// Task 105 (ui1, 2026-11-06): `hgs team list` waited behind a writer and
+    /// failed with "database is locked" after ~15 s. A writer that holds the
+    /// store exclusively (as a rollback-journal writer does while it commits or
+    /// spills a large record) no longer stops a reader: it reads the last
+    /// committed state at once. The rollback journal it replaces is shown
+    /// failing the same read.
+    #[test]
+    fn a_reader_answers_while_a_writer_holds_the_store() {
+        for journal in [Journal::Wal, Journal::Delete] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("teams.sqlite3");
+            let writer = filled(&path, journal, 3, 50_000);
+            writer.db.execute_batch("BEGIN EXCLUSIVE; UPDATE teams SET payload=json_set(payload,'$.name','Renamed') WHERE id='t0';").unwrap();
+            let reader = Store::open_journal(&path, false, journal).unwrap();
+            reader.db.busy_timeout(Duration::from_millis(300)).unwrap();
+            let started = Instant::now();
+            let read = reader.teams(false, 100).and_then(|teams| Ok((teams, reader.heads(10)?.0)));
+            let took = started.elapsed();
+            match journal {
+                Journal::Wal => {
+                    let (teams, heads) = read.unwrap();
+                    assert!(took < Duration::from_secs(1), "{took:?}");
+                    assert_eq!(teams.len(), 3);
+                    // The uncommitted change is not seen.
+                    assert!(heads.iter().all(|head| head["name"] != "Renamed"), "{heads:?}");
+                }
+                Journal::Delete => assert!(read.unwrap_err().to_string().contains("locked"), "the old mode waited and failed"),
+            }
+            writer.db.execute_batch("COMMIT").unwrap();
+            drop(reader);
+            let after = Store::open_journal(&path, false, journal).unwrap();
+            assert!(after.heads(10).unwrap().0.iter().any(|head| head["name"] == "Renamed"));
+        }
+    }
+
+    /// Task 117 (owner, 2026-11-06): Activity stuck on "Could not refresh
+    /// activity: timed out". Every inspection reads the team reasons; a
+    /// rollback-journal writer that holds the store kept that read waiting its
+    /// whole busy timeout (10 s, measured here with 2 s), past the desktop's
+    /// 5 s limit. The read now waits at most 300 ms and answers with the last
+    /// good reasons (at most 2 minutes old); in WAL it reads at once.
+    #[test]
+    fn the_listing_reads_team_reasons_within_its_bound_or_from_the_last_good_ones() {
+        use crate::state::session_state::team_reasons_at;
+        use crate::state::teams::model::{Member, MemberState, SessionRef};
+        for journal in [Journal::Delete, Journal::Wal] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("teams.sqlite3");
+            let cache = dir.path().join("waiting-cache.json");
+            let mut writer = Store::open_journal(&path, true, journal).unwrap();
+            let lead = Member { id: "lead".into(), role: "Lead".into(), agent: "claude".into(), state: MemberState::Active,
+                session: Some(SessionRef { name: "claude/x/lead".into(), run_id: "r0".into(), ..Default::default() }), ..Default::default() };
+            let team = Team { id: "t0".into(), name: "Team".into(), lead: "lead".into(), status: TeamStatus::Running,
+                members: vec![lead], ..Default::default() };
+            writer.create("11111111-1111-4111-8111-000000000117", &json!({}), team, vec![]).unwrap();
+            let fresh = team_reasons_at(&path, &cache, Duration::from_millis(300), 1000.0);
+            assert_eq!(fresh.len(), 1, "{journal:?}");
+            assert!(cache.is_file(), "the last good reasons are kept");
+            writer.db.execute_batch("BEGIN EXCLUSIVE; UPDATE teams SET payload=json_set(payload,'$.name','Renamed');").unwrap();
+            if journal == Journal::Delete {
+                // Before task 117: the reader waits out its whole busy timeout.
+                let old = Store::open_journal(&path, false, journal).unwrap();
+                old.db.busy_timeout(Duration::from_secs(2)).unwrap();
+                let started = Instant::now();
+                assert!(old.active_teams(32).is_err());
+                let waited = started.elapsed();
+                assert!(waited >= Duration::from_millis(1900), "{waited:?}");
+                eprintln!("task 117 {journal:?}: the unbounded reader waited {waited:?}");
+            }
+            let started = Instant::now();
+            let bounded = team_reasons_at(&path, &cache, Duration::from_millis(300), 1000.0);
+            let took = started.elapsed();
+            eprintln!("task 117 {journal:?}: the bounded reader answered in {took:?}");
+            assert!(took < Duration::from_millis(1500), "{journal:?} {took:?}");
+            assert_eq!(bounded, fresh, "{journal:?}: the read or the last good reasons");
+            if journal == Journal::Delete {
+                // Older than two minutes, the kept reasons are not used.
+                assert!(team_reasons_at(&path, &cache, Duration::from_millis(50), 1121.0).is_empty());
+            }
+            writer.db.execute_batch("COMMIT").unwrap();
+        }
+    }
+
+    /// Task 105: an existing rollback-journal store becomes WAL at its first
+    /// write open with every team kept; an older hgs (whose write open asks for
+    /// DELETE) reads it and turns it back; a read-only open works after the last
+    /// writer closed, because the log files stay.
+    #[test]
+    fn an_old_store_migrates_and_an_older_hgs_still_reads_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("teams.sqlite3");
+        drop(filled(&path, Journal::Delete, 2, 1000));
+        let old = Store::open_journal(&path, false, Journal::Delete).unwrap();
+        assert_eq!(old.journal_mode().unwrap(), "delete");
+        drop(old);
+        let migrated = Store::open_at(&path, true).unwrap();
+        assert_eq!(migrated.journal_mode().unwrap(), "wal");
+        assert_eq!(migrated.teams(true, 10).unwrap().len(), 2);
+        drop(migrated);
+        // The log files stay for a reader that may not create them.
+        let wal = files(&path)[2].clone();
+        assert!(wal.exists(), "{wal:?}");
+        let reader = Store::open_at(&path, false).unwrap();
+        assert_eq!(reader.heads(10).unwrap().0.len(), 2);
+        drop(reader);
+        // An older hgs: its write open asks for DELETE and reads everything.
+        let older = Store::open_journal(&path, true, Journal::Delete).unwrap();
+        assert_eq!(older.journal_mode().unwrap(), "delete");
+        assert_eq!(older.teams(true, 10).unwrap().len(), 2);
+        drop(older);
+        // This hgs turns it into WAL again.
+        assert_eq!(Store::open_at(&path, true).unwrap().journal_mode().unwrap(), "wal");
+    }
+
+    /// The read `hgs team list` made before task 105: each record parsed while
+    /// the statement still held the store.
+    fn old_teams(store: &Store) -> anyhow::Result<Vec<Team>> {
+        let mut statement = store.db.prepare("SELECT payload FROM teams WHERE status!='archived' ORDER BY updated DESC LIMIT 1000")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
+    /// Task 105's measurement: `ZERUS_STORE_COPY` names a copy of a live
+    /// teams.sqlite3. Two writers rewrite its largest active team back to back
+    /// (the dispatcher and the owner's decisions) for `ZERUS_STORE_SECONDS`
+    /// (default 8) while three readers run `team list`'s read (open, teams,
+    /// heads) and a status read of that team without pause. Prints each case's
+    /// read and write times: before (rollback journal, the old read), the
+    /// rollback journal with the new read, and WAL with the new read.
+    #[test]
+    #[ignore]
+    fn store_contention_on_a_copy() {
+        let Some(source) = std::env::var_os("ZERUS_STORE_COPY") else { return };
+        let seconds: u64 = std::env::var("ZERUS_STORE_SECONDS").ok().and_then(|text| text.parse().ok()).unwrap_or(8);
+        let keep: Option<i64> = std::env::var("ZERUS_WAL_KEEP").ok().and_then(|text| text.parse().ok());
+        let checkpoint: Option<i64> = std::env::var("ZERUS_WAL_CHECKPOINT").ok().and_then(|text| text.parse().ok());
+        let only = std::env::var("ZERUS_STORE_CASES").unwrap_or_default();
+        // ZERUS_STORE_LIST: one reader runs exactly `hgs team list`'s work (the
+        // store read and the list items) every 250 ms, as the desktop polls.
+        let list = std::env::var_os("ZERUS_STORE_LIST").is_some();
+        for (case, journal, old_read) in [("before", Journal::Delete, true), ("delete_new_read", Journal::Delete, false), ("after", Journal::Wal, false)] {
+            if !only.is_empty() && !only.split(',').any(|wanted| wanted == case) {
+                continue;
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("teams.sqlite3");
+            std::fs::copy(&source, &path).unwrap();
+            let target: String = {
+                let store = Store::open_journal(&path, true, journal).unwrap();
+                assert_eq!(store.journal_mode().unwrap(), if journal == Journal::Wal { "wal" } else { "delete" });
+                store.db.query_row("SELECT id FROM teams WHERE status IN ('running','paused','planning') ORDER BY length(payload) DESC LIMIT 1", [], |row| row.get(0)).unwrap()
+            };
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let writers: Vec<_> = (0..2)
+                .map(|n| {
+                    let (path, target, stop) = (path.clone(), target.clone(), stop.clone());
+                    std::thread::spawn(move || {
+                        let mut store = Store::open_journal(&path, true, journal).unwrap();
+                        if let Some(keep) = keep {
+                            store.db.pragma_update(None, "journal_size_limit", keep).unwrap();
+                        }
+                        if let Some(pages) = checkpoint {
+                            store.db.pragma_update(None, "wal_autocheckpoint", pages).unwrap();
+                        }
+                        let mut times = Vec::new();
+                        let mut failed = 0;
+                        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                            let started = Instant::now();
+                            let result = store.mutate(None, &target, None, |team, events| {
+                                team.stop_reason = format!("writer {n} at {:?}", Instant::now());
+                                events.push(Event::new("measured", json!({"writer":n})));
+                                Ok(Value::Null)
+                            });
+                            if result.is_err() { failed += 1; }
+                            times.push(started.elapsed().as_secs_f64());
+                        }
+                        (times, failed)
+                    })
+                })
+                .collect();
+            let readers: Vec<_> = (0..if list { 1 } else { 3 })
+                .map(|_| {
+                    let (path, target, stop) = (path.clone(), target.clone(), stop.clone());
+                    std::thread::spawn(move || {
+                        let (mut reads, mut errors) = (Vec::new(), Vec::new());
+                        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                            let started = Instant::now();
+                            let read = Store::open_at(&path, false).and_then(|store| {
+                                let teams = if old_read { old_teams(&store)? } else { store.teams(false, 200)? };
+                                if list {
+                                    super::super::commands::list_items(&teams, false);
+                                } else {
+                                    store.heads(200)?;
+                                    store.load(&target)?;
+                                }
+                                Ok(())
+                            });
+                            reads.push(started.elapsed().as_secs_f64());
+                            if let Err(error) = read {
+                                errors.push(error.to_string());
+                            }
+                            if list {
+                                std::thread::sleep(Duration::from_millis(250));
+                            }
+                        }
+                        (reads, errors)
+                    })
+                })
+                .collect();
+            std::thread::sleep(Duration::from_secs(seconds));
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            let (mut writes, mut write_failures) = (Vec::new(), 0);
+            for writer in writers {
+                let (times, failures) = writer.join().unwrap();
+                writes.extend(times);
+                write_failures += failures;
+            }
+            let (mut reads, mut errors) = (Vec::new(), Vec::new());
+            for reader in readers {
+                let (times, failed) = reader.join().unwrap();
+                reads.extend(times);
+                errors.extend(failed);
+            }
+            let over = reads.iter().filter(|read| **read > 1.0).count();
+            let stats = |values: &mut Vec<f64>| {
+                values.sort_by(f64::total_cmp);
+                let at = |q: f64| values.get(((values.len() as f64 - 1.0) * q).round() as usize).copied().unwrap_or(0.0);
+                json!({"n":values.len(),"p50":at(0.5),"p95":at(0.95),"max":at(1.0)})
+            };
+            let failures = errors.len();
+            errors.dedup();
+            println!("{}", json!({"list":list,"case":case,"journal":format!("{journal:?}"),"team":target,"reads":stats(&mut reads),"reads_over_1s":over,
+                "read_failures":failures,"read_errors":errors.iter().take(2).collect::<Vec<_>>(),"writes":stats(&mut writes),
+                "write_failures":write_failures,"wal_keep":keep,"wal_checkpoint":checkpoint}));
+        }
+    }
+
+    /// Task 105's write breakdown on `ZERUS_STORE_COPY`: where one write of the
+    /// largest active team spends its time (median of 10): reading and parsing
+    /// its record, serializing it, the UPDATE with the member projection's
+    /// trigger, the same UPDATE without the trigger, and the commit.
+    #[test]
+    #[ignore]
+    fn store_write_breakdown_on_a_copy() {
+        let Some(source) = std::env::var_os("ZERUS_STORE_COPY") else { return };
+        for journal in [Journal::Delete, Journal::Wal] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("teams.sqlite3");
+            std::fs::copy(&source, &path).unwrap();
+            let store = Store::open_journal(&path, true, journal).unwrap();
+            let target: String = store.db.query_row("SELECT id FROM teams WHERE status IN ('running','paused','planning') ORDER BY length(payload) DESC LIMIT 1", [], |row| row.get(0)).unwrap();
+            let median = |mut values: Vec<f64>| { values.sort_by(f64::total_cmp); values[values.len() / 2] };
+            let (mut parse, mut serialize, mut update, mut bare, mut commit_ms) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            for round in 0..10 {
+                let started = Instant::now();
+                let payload: String = store.db.query_row("SELECT payload FROM teams WHERE id=?1", params![target], |row| row.get(0)).unwrap();
+                let mut team: Team = serde_json::from_str(&payload).unwrap();
+                parse.push(started.elapsed().as_secs_f64() * 1000.0);
+                team.stop_reason = format!("round {round}");
+                let started = Instant::now();
+                let text = serde_json::to_string(&team).unwrap();
+                serialize.push(started.elapsed().as_secs_f64() * 1000.0);
+                store.db.execute_batch("BEGIN IMMEDIATE").unwrap();
+                let started = Instant::now();
+                store.db.execute("UPDATE teams SET payload=?2 WHERE id=?1", params![target, text]).unwrap();
+                update.push(started.elapsed().as_secs_f64() * 1000.0);
+                let started = Instant::now();
+                store.db.execute_batch("COMMIT").unwrap();
+                commit_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+                store.db.execute_batch("BEGIN IMMEDIATE; DROP TRIGGER team_rules_update;").unwrap();
+                let started = Instant::now();
+                store.db.execute("UPDATE teams SET payload=?2 WHERE id=?1", params![target, text]).unwrap();
+                bare.push(started.elapsed().as_secs_f64() * 1000.0);
+                store.db.execute_batch("ROLLBACK").unwrap();
+            }
+            println!("{}", json!({"journal":format!("{journal:?}"),"team":target,"payload_bytes":store.load(&target).unwrap().map(|team| serde_json::to_string(&team).unwrap().len()),
+                "parse_ms":median(parse),"serialize_ms":median(serialize),"update_with_trigger_ms":median(update),
+                "update_without_trigger_ms":median(bare),"commit_ms":median(commit_ms)}));
+        }
     }
 
     #[test]

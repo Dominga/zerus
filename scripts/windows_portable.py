@@ -17,7 +17,7 @@ UNPACKED_LIMIT = 500_000_000
 ENTRY_LIMIT = 10_000
 MANIFEST_LIMIT = 64 * 1024
 # Standard SPDX license and exception identifiers named by the SPDX documents
-# of the bundled Qt modules; packaging/windows/licenses holds a <ID>.txt for each.
+# of immutable old Qt modules. Read-only validation retains their archived names.
 QT_LICENSE_TEXTS = (
     "AFL-2.1", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "BSD-4-Clause", "BSD-Source-Code", "BSL-1.0", "CC0-1.0", "FTL",
     "GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "HPND", "HPND-sell-variant", "IJG", "ISC", "Imlib2",
@@ -48,6 +48,16 @@ NEXT_REQUIRED = (
     "licenses/rust/desktop/inventory.json", "licenses/frontend/inventory.json",
 )
 NEXT_FORBIDDEN = re.compile(r"(?i)(?:^|/)(?:qt[^/]*\.(?:dll|exe|pak)|qwindows\.dll)$|/licenses/qt/")
+# WhiteWh fork, task #65 (owner, 2026-11-06): a fork zip keeps the Qt GUI for
+# one release as a fallback the owner starts by hand, never as the default:
+# qt/zerus-qt.exe with its own Qt runtime, app-local MSVC runtime and Qt
+# notices, declared in build-info.json as "qt_fallback". Qt files stay out of
+# every other place of a Tauri zip.
+QT_FALLBACK = "qt"
+QT_FALLBACK_REQUIRED = (
+    "zerus-qt.exe", "Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Network.dll", "Qt6Svg.dll", "Qt6Multimedia.dll",
+    "platforms/qwindows.dll", "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll",
+)
 # Never shipped: windeployqt copies ICU from the build machine's System32 (a
 # forwarder to icu.dll on current Windows; Qt6Core uses the system ICU), the
 # Mesa software OpenGL fallback has no notices in the bundle, and Microsoft's
@@ -156,8 +166,21 @@ def inspect(path, required=None):
     if desktop == "tauri":
         require(manifest.get("webview2_runtime") == "evergreen" and "qt_version" not in manifest,
                 "Tauri portable bundles require WebView2 Evergreen, without Qt.")
-        require(not any(NEXT_FORBIDDEN.search(name) for name in names),
+        fallback = manifest.get("qt_fallback")
+        folder = f"{TOP}/{QT_FALLBACK}/"
+        require(not any(NEXT_FORBIDDEN.search(name) for name in names
+                        if fallback is None or not name.startswith(folder)),
                 "Tauri portable bundle must not contain Qt deployment files.")
+        if fallback is not None:
+            require(isinstance(fallback, dict) and fallback.get("executable") == f"{QT_FALLBACK}/zerus-qt.exe" and
+                    isinstance(fallback.get("qt_version"), str) and VERSION.fullmatch(fallback["qt_version"]),
+                    "Invalid Windows portable Qt fallback declaration.")
+            absent = sorted(item for item in QT_FALLBACK_REQUIRED if f"{folder}{item}" not in names)
+            require(not absent, "Windows portable Qt fallback lacks: " + ", ".join(absent))
+            # The fallback is never the default and never a second CLI.
+            require(not any(name.startswith(folder) and name.rpartition("/")[2].casefold() in {"hgs.exe", "hgs-tray.exe"}
+                            for name in names),
+                    "The Qt fallback holds only zerus-qt.exe and its runtime.")
     wanted = required if required is not None else (NEXT_REQUIRED if desktop == "tauri" else REQUIRED)
     missing = sorted(item for item in wanted if f"{TOP}/{item}" not in names)
     require(not missing, "Windows portable bundle lacks: " + ", ".join(missing))

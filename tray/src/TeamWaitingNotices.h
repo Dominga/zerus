@@ -46,6 +46,8 @@ public:
         if (item.kind == QLatin1String("report")) return team.id + QStringLiteral("/report_escalated/%1").arg(item.task);
         if (item.kind == QLatin1String("permission")) return team.id + QStringLiteral("/permission_escalated/") + item.member;
         if (item.kind == QLatin1String("replan")) return team.id + QStringLiteral("/owner_word_asked/replan-");
+        // Task 95: the round is part of the id, so each round is one notice.
+        if (item.kind == QLatin1String("lead_stalled")) return team.id + QStringLiteral("/lead_stalled/%1-%2").arg(item.member).arg(qMax(1, item.round));
         return {};
     }
     static bool matches(const QString &waiting, const QString &id)
@@ -60,6 +62,12 @@ public:
             for (const auto &attention : team.attention) if (matches(waitingId(team, attention), item.id)) return true;
         }
         return false;
+    }
+    // Task 109: a drive low on space is no team's; its notice says what it is.
+    static QString title(const Item &item)
+    {
+        if (item.kind == QLatin1String("disk_low")) return tr("Low disk space on %1").arg(item.teamName);
+        return tr("Waiting for you in %1").arg(item.teamName.isEmpty() ? item.team : item.teamName);
     }
     bool known(const QString &id) const { return m_known.contains(id); }
     QStringList knownIds() const { return m_known; }
@@ -80,7 +88,10 @@ public:
             }
             m_known.append(item.id);
             if (covered(teams, item)) continue;
-            fresh.append({token(item), item.team, tr("Waiting for you in %1").arg(item.teamName.isEmpty() ? item.team : item.teamName), item.title});
+            // Task 112: a paused team is a state the owner (or the lead) set,
+            // not a question: shown in Waiting, never notified.
+            if (item.kind == QLatin1String("team_paused")) continue;
+            fresh.append({token(item), item.team, title(item), item.title});
         }
         if (complete) m_known.erase(std::remove_if(m_known.begin(), m_known.end(), [&present](const QString &id) { return !present.contains(id); }), m_known.end());
         while (m_known.size() > Limit) m_known.removeFirst();

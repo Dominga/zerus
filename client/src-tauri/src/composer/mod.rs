@@ -25,10 +25,15 @@
 
 pub mod fetch;
 pub mod files;
+pub mod handed;
 pub mod questions;
 pub mod queue;
 pub mod saved;
 pub mod send;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use handed::{CompactRoute, DeferredRoute};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use questions::AnswerRoute;
 #[cfg(feature = "media")]
 mod voice;
 
@@ -42,8 +47,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use zerus_client_core::attachments::{self, Attachment, Draft, FileRead, Selection};
 use zerus_client_core::cache::Chip;
-use zerus_client_core::drafts::{DraftStore, IndexPage, Loaded, StoredDraft, ALREADY_EXISTS};
+use zerus_client_core::drafts::{self, DraftStore, IndexPage, Loaded, StoredDraft, ALREADY_EXISTS};
 use zerus_client_core::local_messages::{LocalMessage, LocalMessages};
+use zerus_client_core::operation_recovery::deferred_input::Checkpoint;
 use zerus_client_core::send::{CompactSend, StartSend};
 use zerus_client_core::session_usage::ContextChip;
 use zerus_client_core::{Action, Batch, Outcome, Target, ViewRow};
@@ -90,6 +96,25 @@ const OPENED: usize = 512;
 /// At most this many composer events wait for the next batch; older ones go
 /// first.
 const COMPOSER_EVENTS: usize = 16;
+
+/// A waiting send given up at its time limit: the notice it left and the
+/// reading of its target then. Only that notice, still shown, goes, and only
+/// on a later reading of the same run and conversation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GaveUp {
+    pub(crate) notice: String,
+    pub(crate) run: String,
+    pub(crate) conversation: String,
+    pub(crate) phase: String,
+    pub(crate) activity: String,
+}
+
+impl GaveUp {
+    /// The notice still is this give-up's own.
+    fn shown(&self, notice: &str, error: bool) -> bool {
+        error && notice == self.notice
+    }
+}
 
 /// What Rust tells the webview besides the views: a notice (Qt's
 /// `showNotice`), or the Terminal tab to open. Drained with each batch.
@@ -181,6 +206,11 @@ pub struct SessionRef {
     pub archive_id: Option<String>,
     #[serde(default)]
     pub subagent: Option<SubagentRef>,
+    /// The row's durable session ID, when it lists one: its drafts are then
+    /// keyed by it (zerus-ucck P2c-2), so they follow the session, not its
+    /// label.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 impl SessionRef {
@@ -213,19 +243,31 @@ pub fn draft_key(computer: &str, name: &str, archive: Option<&str>) -> String {
 }
 
 /// Qt's child key is `machine\nsession\nparent conversation\nagent ID`.
+/// A live or saved session with a durable ID names it as `id:<session_id>`
+/// in both (zerus-ucck P2c-2); an archived session keeps its name and archive
+/// ID, as before.
 pub fn session_draft_key(session: &SessionRef) -> String {
+    let id = session
+        .session_id
+        .as_deref()
+        .filter(|_| !session.archived());
+    keyed(session, &drafts::session_part(&session.name, id))
+}
+
+/// The name key [`session_draft_key`] used before the session ID was known:
+/// the draft found there moves once to the ID key.
+pub(crate) fn legacy_draft_key(session: &SessionRef) -> Option<String> {
+    let legacy = keyed(session, &session.name);
+    (legacy != session_draft_key(session)).then_some(legacy)
+}
+
+fn keyed(session: &SessionRef, part: &str) -> String {
     session.subagent.as_ref().map_or_else(
-        || {
-            draft_key(
-                &session.computer,
-                &session.name,
-                session.archive_id.as_deref(),
-            )
-        },
+        || draft_key(&session.computer, part, session.archive_id.as_deref()),
         |child| {
             format!(
                 "{}\n{}\n{}\n{}",
-                session.computer, session.name, child.parent_conversation_id, child.agent_id
+                session.computer, part, child.parent_conversation_id, child.agent_id
             )
         },
     )
@@ -243,6 +285,18 @@ pub struct AttachmentView {
     /// The first lines of a text file, for the preview.
     pub excerpt: Option<String>,
     pub image_size: Option<attachments::image::Size>,
+}
+
+/// The message a "Compact and continue" holds while the desktop service
+/// compacts first (zerus-pabah): it left the composer but is not sent yet.
+/// Shown as pending until it is sent; if it is not, the draft comes back.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct HeldView {
+    /// The send's request: its local row, which this entry stands for.
+    pub request_id: String,
+    pub text: String,
+    /// The names of its files.
+    pub attachments: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -272,6 +326,9 @@ pub struct ComposerView {
     pub recording: bool,
     pub waiting: Option<String>,
     pub uncertain: bool,
+    /// The desktop service still sends this draft's message: no Allow
+    /// retry, and the status is not an error.
+    pub delivery_pending: bool,
     pub status: String,
     pub status_error: bool,
     pub can_send: bool,
@@ -309,8 +366,13 @@ pub struct ComposerView {
     /// "Cancel send": a start or a compaction waits to send this draft
     /// (`SessionsWindow.cpp:3763`).
     pub cancel_send: bool,
+    /// Cancel send stays shown but locked, with its reason as the title:
+    /// the desktop service holds this "Compact and continue".
+    pub cancel_locked: bool,
     /// A compaction waits to send this draft (compact-to-send).
     pub compacting: bool,
+    /// The message the desktop service holds until its compaction ends.
+    pub held: Option<HeldView>,
     /// Clear session and the cache popover's Clear context (`clearContext`).
     pub clear: send::ClearControl,
     /// The agent's question card shown in the composer (A2-1).
@@ -330,6 +392,9 @@ pub(crate) struct Composer {
     pub(crate) position: i64,
     pub(crate) anchor: i64,
     pub(crate) label: String,
+    /// [`StoredDraft::session_label`]: the label of the session an ID-keyed
+    /// draft belongs to, as last opened.
+    pub(crate) session_label: String,
     pub(crate) form_state: Map<String, Value>,
     pub(crate) rev: u64,
     pub(crate) text_epoch: u64,
@@ -339,6 +404,10 @@ pub(crate) struct Composer {
     pub(crate) uncertain: bool,
     pub(crate) error: bool,
     pub(crate) notice: String,
+    /// The waiting send of this draft was given up at its time limit
+    /// (zerus-le5s): its notice goes once the session moves on to work or
+    /// readiness, or the kept draft is sent or cleared.
+    pub(crate) gave_up: Option<GaveUp>,
     pub(crate) storage_error: Option<String>,
     pub(crate) removed: Option<(usize, Attachment)>,
     pub(crate) attaching: bool,
@@ -364,6 +433,16 @@ pub(crate) struct Composer {
     /// The SHA-256 digests of one attachment list (`attachments_rev`), for
     /// the continuations' draft marks: each list is hashed once.
     pub(crate) digests: Option<(u64, Vec<String>)>,
+    /// The deferred input reserved before its dispatch, saved with this
+    /// draft (zerus-5wmh.66.4.4): a send, or a continuation's start or
+    /// compaction. Kept while its outcome is uncertain and loaded back as
+    /// data; nothing sends from it.
+    pub(crate) checkpoint: Option<Checkpoint>,
+    /// The desktop service still reported this draft's send in progress:
+    /// it is checked again, read-only (zerus-5wmh.66.4.4).
+    pub(crate) handed: Option<handed::Handed>,
+    /// A reload's one lookup of the held identity ran.
+    pub(crate) probed: bool,
 }
 
 impl Composer {
@@ -376,6 +455,7 @@ impl Composer {
             position: 0,
             anchor: 0,
             label: String::new(),
+            session_label: String::new(),
             form_state: Map::new(),
             rev: 0,
             text_epoch: 0,
@@ -385,6 +465,7 @@ impl Composer {
             uncertain: false,
             error: false,
             notice: String::new(),
+            gave_up: None,
             storage_error: None,
             removed: None,
             attaching: false,
@@ -396,6 +477,9 @@ impl Composer {
             kept: None,
             delivering: None,
             digests: None,
+            checkpoint: None,
+            handed: None,
+            probed: false,
         }
     }
 
@@ -424,13 +508,31 @@ impl Composer {
             anchor: self.anchor,
             label: self.label.clone(),
             form_state: self.form_state.clone(),
+            session_label: self.session_label.clone(),
             sending: self.sending,
             uncertain: self.uncertain,
+            checkpoint: self.checkpoint.clone().map(Box::new),
+        }
+    }
+
+    /// The kept draft of a given-up waiting send was cleared: its notice,
+    /// about that draft, goes.
+    fn draft_cleared(&mut self) {
+        if !self.draft.text.is_empty() || !self.draft.attachments.is_empty() {
+            return;
+        }
+        if let Some(gave_up) = self.gave_up.take() {
+            if gave_up.shown(&self.notice, self.error) && !self.uncertain {
+                self.notice.clear();
+                self.error = false;
+            }
         }
     }
 
     /// Qt's `showError`: the status line shows it in the error colour.
     pub(crate) fn show_error(&mut self, text: impl Into<String>) {
+        // A newer error is not the given-up send's to dismiss.
+        self.gave_up = None;
         self.notice = text.into();
         self.error = true;
     }
@@ -463,6 +565,10 @@ pub(crate) struct Followed {
     /// Why the last inspect failed (`m_inspectError`, the whole text); a
     /// state clears it.
     pub(crate) inspect_error: Option<String>,
+    /// Task 117: inspects that failed in a row (the retry's back-off), and
+    /// when the details last arrived (a read or a state frame).
+    pub(crate) failures: u32,
+    pub(crate) refreshed_at: Option<f64>,
     pub(crate) opened_at: f64,
     /// When the last inspect started (Qt's `m_inspectionAge`).
     pub(crate) inspected_at: f64,
@@ -518,6 +624,11 @@ pub(crate) struct Hub {
     pub(crate) start: Option<(send::Pending, StartSend)>,
     /// Compact-to-send, by draft key (Qt's `m_compacts`).
     pub(crate) compacts: HashMap<String, (send::Pending, CompactSend)>,
+    /// The start or compaction calls whose continuation ended while they
+    /// were in flight, oldest first, at most [`send::ORPHANS`]. Each call's
+    /// late answer removes its entry and decides its held identity; Allow
+    /// retry retires its draft's entries (zerus-5wmh.66.4.4).
+    pub(crate) orphans: VecDeque<send::Orphan>,
     /// When the continuations were last polled (every 2.5 s).
     pub(crate) last_poll: f64,
     /// The draft key whose context reset runs: one at a time across all
@@ -533,6 +644,8 @@ pub(crate) struct Hub {
     pub(crate) queue: queue::Queue,
     /// Events for the next batch (`composer_events`), at most 16.
     pub(crate) events: VecDeque<ComposerEvent>,
+    /// The window is hidden: a handed-over send is not checked.
+    pub(crate) hidden: bool,
 }
 
 impl Hub {
@@ -564,6 +677,13 @@ pub(crate) struct Shared {
     changes: AtomicU64,
     /// Wakes the ticker, which sleeps while no composer is open.
     opened: Condvar,
+    /// The selected desktop service's deferred send route, if any.
+    pub(crate) deferred: Mutex<Option<Arc<handed::DeferredRoute>>>,
+    /// The selected service's compact-to-send route: Linux and macOS in
+    /// desktop-service mode only.
+    pub(crate) compact: Mutex<Option<Arc<handed::CompactRoute>>>,
+    /// Its deferred answer route, if any.
+    pub(crate) answer_route: Mutex<Option<Arc<questions::AnswerRoute>>>,
     /// The ticker sleeps (tests wait for it).
     #[cfg(test)]
     parked: std::sync::atomic::AtomicBool,
@@ -617,6 +737,9 @@ impl Composers {
             deps,
             changes: AtomicU64::new(0),
             opened: Condvar::new(),
+            deferred: Mutex::new(None),
+            compact: Mutex::new(None),
+            answer_route: Mutex::new(None),
             #[cfg(test)]
             parked: Default::default(),
         }));
@@ -667,7 +790,10 @@ impl Composers {
     }
 
     /// Opens the selected session's composer (None closes it). The same
-    /// catalog row under a new name is a rename: its draft moves (`renameDraft`).
+    /// catalog row under a new draft key, such as a new name, is a rename:
+    /// its draft moves (`renameDraft`). A session keyed by its durable ID
+    /// keeps its key across a rename; its draft under the name key moves
+    /// once to the ID key (zerus-ucck P2c-2).
     pub fn open(&self, session: Option<SessionRef>) -> Option<ComposerView> {
         let mut hub = self.lock();
         let next = session.as_ref().map(session_draft_key);
@@ -684,6 +810,7 @@ impl Composers {
             return None;
         };
         let key = session_draft_key(&session);
+        let legacy = legacy_draft_key(&session);
         let child_open = session.subagent.is_some();
         let renamed = hub
             .open
@@ -691,10 +818,18 @@ impl Composers {
             .filter(|old| {
                 old.computer == session.computer
                     && old.key == session.key
-                    && old.name != session.name
                     && old.subagent == session.subagent
             })
-            .and_then(|_| hub.open_key.clone());
+            .and_then(|_| hub.open_key.clone())
+            .filter(|old| old != &key)
+            // The name key's draft, still held, moves like a rename.
+            .or_else(|| {
+                legacy.clone().filter(|old| {
+                    hub.composers
+                        .get(old)
+                        .is_some_and(|c| c.loaded && (c.has_content() || c.checkpoint.is_some()))
+                })
+            });
         let child_changed =
             hub.open.as_ref().and_then(|old| old.subagent.as_ref()) != session.subagent.as_ref();
         if hub.followed.computer != session.computer
@@ -717,13 +852,25 @@ impl Composers {
         if let Some((pending, _)) = hub.compacts.get_mut(&key) {
             pending.session = session.clone();
         }
+        let name = session.name.clone();
         hub.open = Some(session);
         hub.open_key = Some(key.clone());
+        // A held send of this session is checked again at once.
+        Self::restart_checks(&mut hub, self.now());
         self.0.opened.notify_all();
         if let Some(old) = renamed {
             self.rename(&mut hub, &old, &key);
         }
+        if let Some(old) = legacy
+            .as_ref()
+            .filter(|old| !hub.composers.contains_key(&key) && !hub.composers.contains_key(*old))
+        {
+            self.adopt(old, &key, &name);
+        }
         self.ensure(&mut hub, &key);
+        if let Some(composer) = hub.composers.get_mut(&key).filter(|_| legacy.is_some()) {
+            composer.session_label = name;
+        }
         hub.order.retain(|k| k != &key);
         hub.order.push_back(key.clone());
         self.trim(&mut hub);
@@ -735,6 +882,30 @@ impl Composers {
             self.refresh_details();
         }
         view
+    }
+
+    /// The store's one-time move of a draft from its name key to its session
+    /// ID key, queued before the ID key's load so that load sees it.
+    fn adopt(&self, legacy: &str, key: &str, label: &str) {
+        let me = self.clone();
+        let (from, to) = (legacy.to_owned(), key.to_owned());
+        self.0.store.adopt(legacy, key, label, move |moved| {
+            if !moved {
+                return;
+            }
+            let mut hub = me.lock();
+            // A finished move may find the ID key listed already.
+            if hub.stored_keys.contains(&to) {
+                hub.stored_keys.retain(|k| *k != from);
+            } else {
+                for stored in hub.stored_keys.iter_mut().filter(|k| **k == from) {
+                    stored.clone_from(&to);
+                }
+            }
+            hub.local.rename(&from, &to);
+            drop(hub);
+            me.changed();
+        });
     }
 
     /// Loads a composer that is not in memory (`ensureDraftLoaded`).
@@ -768,8 +939,13 @@ impl Composers {
         composer.position = stored.position;
         composer.anchor = stored.anchor;
         composer.label = stored.label;
+        if composer.session_label.is_empty() {
+            composer.session_label = stored.session_label;
+        }
         composer.form_state = stored.form_state;
         composer.uncertain = stored.uncertain || stored.sending || loaded.notice.is_some();
+        // Its original identity, as data: a reload never continues it.
+        composer.checkpoint = stored.checkpoint.map(|checkpoint| *checkpoint);
         if let Some(notice) = loaded.notice {
             composer.show_error(notice);
         }
@@ -873,8 +1049,10 @@ impl Composers {
                             newer.anchor = moved.anchor;
                             newer.label = moved.label;
                             newer.form_state = moved.form_state;
-                            // An uncertain delivery stays uncertain.
+                            // An uncertain delivery stays uncertain, and
+                            // keeps its reserved identity (zerus-5wmh.66.4.4).
                             newer.uncertain = moved.uncertain;
+                            newer.checkpoint = moved.checkpoint;
                             newer.error = moved.error;
                             newer.notice = moved.notice;
                             newer.removed = moved.removed;
@@ -1075,6 +1253,7 @@ impl Composers {
         if !composer.error && !composer.uncertain {
             composer.notice.clear();
         }
+        composer.draft_cleared();
         self.save(composer);
         drop(hub);
         self.changed();
@@ -1185,6 +1364,7 @@ impl Composers {
         if let Some(removed) = composer.draft.remove(index) {
             composer.removed = Some((index, removed));
             composer.attachments_changed();
+            composer.draft_cleared();
             self.save(composer);
         }
         drop(hub);
@@ -1249,6 +1429,10 @@ impl Composers {
     }
 
     /// Allow retry (`MessageComposer.cpp:412-417`): clears an uncertain mark.
+    /// It is the user's explicit resolution of the draft's unresolved
+    /// delivery, so it also ends the held identity; the next attempt saves
+    /// its own before its call (zerus-5wmh.66.4.4). Nothing reaches it
+    /// automatically: only the composer's Allow retry command calls it.
     pub fn allow_retry(&self, handle: u64) {
         let mut hub = self.lock();
         let Some(composer) = Self::editable(&mut hub, handle) else {
@@ -1257,7 +1441,12 @@ impl Composers {
         composer.uncertain = false;
         composer.error = false;
         composer.notice.clear();
+        composer.checkpoint = None;
+        composer.handed = None;
         self.save(composer);
+        // Its late answers resolve nothing now: their tracking goes.
+        let key = composer.key.clone();
+        hub.orphans.retain(|orphan| orphan.key != key);
         drop(hub);
         self.changed();
     }
@@ -1393,6 +1582,8 @@ impl Composers {
                 hub.followed.details = Some(details);
                 hub.followed.expiry = expiry;
                 hub.followed.inspect_error = None;
+                hub.followed.failures = 0;
+                hub.followed.refreshed_at = Some(self.now());
                 hub.followed.streamed = true;
                 true
             }
@@ -1431,6 +1622,7 @@ impl Composers {
     fn after_observe(&self, accepted_details: bool) {
         self.reconcile();
         self.continue_open();
+        self.settle_gave_up();
         self.sync_questions();
         // Qt's pushInspected runs only for an accepted details read (3627,
         // 3653), never for an ended frame or an inspection failure.
@@ -1503,7 +1695,8 @@ impl Composers {
             error.clone()
         } else if let Some(waiting) = &composer.waiting {
             waiting.clone()
-        } else if composer.error || composer.uncertain {
+        } else if composer.error || composer.uncertain || composer.handed.is_some() {
+            // A held original shows the service's line from its hand-over.
             composer.notice.clone()
         } else {
             String::new()
@@ -1529,6 +1722,10 @@ impl Composers {
             || (status == session.session_status && session.session_status_error);
         // Qt's `locked` includes the session status's lock (1149).
         let locked = composer.busy() || !composer.loaded || session.session_blocks_input;
+        let compact_handed = composer
+            .handed
+            .as_ref()
+            .is_some_and(handed::Handed::compacts);
         Some(ComposerView {
             handle: composer.handle,
             key: composer.key.clone(),
@@ -1571,6 +1768,7 @@ impl Composers {
             recording: composer.recording_owner.is_some(),
             waiting: composer.waiting.clone(),
             uncertain: composer.uncertain,
+            delivery_pending: composer.handed.is_some(),
             status,
             status_error,
             can_send: composer.loaded
@@ -1602,8 +1800,26 @@ impl Composers {
             context: session.context,
             local: hub.local.rows(&composer.key).to_vec(),
             cancel_send: hub.compacts.contains_key(key)
-                || hub.start.as_ref().is_some_and(|(p, _)| p.key == key),
+                || hub.start.as_ref().is_some_and(|(p, _)| p.key == key)
+                || compact_handed,
+            cancel_locked: compact_handed,
             compacting: hub.compacts.contains_key(key),
+            // Only while the composer shows nothing of it: a held message
+            // that comes back (unconfirmed, failed, reloaded) is the draft.
+            held: composer
+                .handed
+                .as_ref()
+                .filter(|handed| composer.sending && handed.compacts())
+                .map(|handed| HeldView {
+                    request_id: handed.plan.row().to_owned(),
+                    text: composer.draft.text.clone(),
+                    attachments: composer
+                        .draft
+                        .attachments
+                        .iter()
+                        .map(|a| a.name.clone())
+                        .collect(),
+                }),
             clear: session.clear,
             question,
             queue: self.queue_part(hub),
@@ -1621,6 +1837,13 @@ pub fn composer_open(
     session: Option<SessionRef>,
 ) -> Option<ComposerView> {
     state.open(session)
+}
+
+/// The webview's page visibility: a hidden window checks no handed-over
+/// send (zerus-5wmh.66.4.4).
+#[tauri::command]
+pub fn composer_visibility(state: State<'_, Composers>, hidden: bool) {
+    state.set_hidden(hidden);
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -1894,6 +2117,7 @@ pub(crate) mod tests {
             name: "claude/sample-project/review".into(),
             archive_id: None,
             subagent: None,
+            session_id: None,
         }
     }
 
@@ -2150,6 +2374,248 @@ pub(crate) mod tests {
         );
         store.flush();
         assert_eq!(read_draft(&root.join("drafts"), KEY).draft.draft.text, "");
+    }
+
+    const SESSION_ID: &str = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+    const ID_KEY: &str = "studio\nid:3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+
+    fn with_id() -> SessionRef {
+        SessionRef {
+            session_id: Some(SESSION_ID.into()),
+            ..session()
+        }
+    }
+
+    fn stored(text: &str) -> StoredDraft {
+        let mut draft = StoredDraft::default();
+        draft.draft.text = text.into();
+        draft
+    }
+
+    /// zerus-ucck P2c-2: a live or saved session with a durable ID keys its
+    /// drafts by it; archived sessions and rows without one keep their keys.
+    #[test]
+    fn a_session_id_names_the_session_in_its_draft_keys() {
+        assert_eq!(session_draft_key(&with_id()), ID_KEY);
+        assert_eq!(legacy_draft_key(&with_id()).as_deref(), Some(KEY));
+        assert_eq!(legacy_draft_key(&session()), None);
+        let child = SessionRef {
+            subagent: Some(SubagentRef {
+                agent_id: "agent-2".into(),
+                parent_conversation_id: "conv-1".into(),
+            }),
+            ..with_id()
+        };
+        assert_eq!(
+            session_draft_key(&child),
+            format!("{ID_KEY}\nconv-1\nagent-2")
+        );
+        assert_eq!(
+            legacy_draft_key(&child).as_deref(),
+            Some("studio\nclaude/sample-project/review\nconv-1\nagent-2")
+        );
+        let archived = SessionRef {
+            key: "archive:archive-7".into(),
+            archive_id: Some("archive-7".into()),
+            ..with_id()
+        };
+        assert_eq!(session_draft_key(&archived), format!("{KEY}\narchive-7"));
+        assert_eq!(legacy_draft_key(&archived), None);
+        for other in ["", "not-a-uuid", "3F2A9C1D-6B7E-4C2A-9D1F-0A1B2C3D4E5F"] {
+            let row = SessionRef {
+                session_id: Some(other.into()),
+                ..session()
+            };
+            assert_eq!(
+                (session_draft_key(&row), legacy_draft_key(&row)),
+                (KEY.into(), None)
+            );
+        }
+    }
+
+    #[test]
+    fn a_draft_under_the_name_key_moves_once_and_follows_a_rename() {
+        let root = dir("adopt");
+        let store = drafts(&root);
+        store.save_durable(KEY, stored("typed before the upgrade"), |_| {});
+        let (c, _) = hub_on(&store);
+        c.open(Some(with_id()));
+        let view = until(&c, |v| v.loaded);
+        assert_eq!(
+            (view.key.as_str(), view.text.as_str()),
+            (ID_KEY, "typed before the upgrade")
+        );
+        store.flush();
+        let saved = root.join("drafts");
+        assert_eq!(read_draft(&saved, KEY).draft.draft.text, "");
+        assert_eq!(
+            read_draft(&saved, ID_KEY).draft.session_label,
+            "claude/sample-project/review"
+        );
+        // A rename keeps the key: nothing moves, and the next save names it.
+        let renamed = SessionRef {
+            name: "claude/sample-project/renamed".into(),
+            ..with_id()
+        };
+        c.open(Some(renamed));
+        let view = until(&c, |v| v.loaded);
+        assert_eq!(view.key, ID_KEY);
+        assert!(view.status != ALREADY_EXISTS, "{view:?}");
+        c.edit(
+            view.handle,
+            1,
+            view.text_epoch,
+            "after the rename".into(),
+            0,
+            0,
+        );
+        until(&c, |v| v.text == "after the rename");
+        c.flush();
+        store.flush();
+        let draft = read_draft(&saved, ID_KEY).draft;
+        assert_eq!(draft.draft.text, "after the rename");
+        assert_eq!(draft.session_label, "claude/sample-project/renamed");
+        assert_eq!(
+            read_draft(&saved, "studio\nclaude/sample-project/renamed").draft,
+            StoredDraft::default()
+        );
+    }
+
+    /// A downgrade to a GUI that reads only name keys (simulated by a run
+    /// whose rows list no session ID): its composer opens empty, nothing it
+    /// does touches the ID-keyed draft, and the next run of this build finds
+    /// that draft again. What the older GUI typed stays under the name key,
+    /// for Saved drafts, because the move never overwrites.
+    #[test]
+    fn a_downgrade_leaves_the_id_keyed_draft_for_the_next_upgrade() {
+        let root = dir("downgrade");
+        let store = drafts(&root);
+        store.save_durable(KEY, stored("typed before the upgrade"), |_| {});
+        let (upgraded, _) = hub_on(&store);
+        upgraded.open(Some(with_id()));
+        until(&upgraded, |v| {
+            v.loaded && v.text == "typed before the upgrade"
+        });
+        upgraded.flush();
+        drop(upgraded);
+        let (older, _) = hub_on(&store);
+        older.open(Some(session()));
+        let view = until(&older, |v| v.loaded);
+        assert_eq!((view.key.as_str(), view.text.as_str()), (KEY, ""));
+        older.edit(
+            view.handle,
+            1,
+            view.text_epoch,
+            "typed on the older GUI".into(),
+            0,
+            0,
+        );
+        until(&older, |v| v.text == "typed on the older GUI");
+        older.flush();
+        drop(older);
+        store.flush();
+        let saved = root.join("drafts");
+        assert_eq!(
+            read_draft(&saved, ID_KEY).draft.draft.text,
+            "typed before the upgrade"
+        );
+        let (again, _) = hub_on(&store);
+        again.open(Some(with_id()));
+        let view = until(&again, |v| v.loaded);
+        assert_eq!(
+            (view.key.as_str(), view.text.as_str()),
+            (ID_KEY, "typed before the upgrade")
+        );
+        store.flush();
+        assert_eq!(
+            read_draft(&saved, KEY).draft.draft.text,
+            "typed on the older GUI"
+        );
+    }
+
+    /// #1418 review (X8): a name-key composer still held in memory but no
+    /// longer the open row moves when its row is opened with its ID.
+    #[test]
+    fn a_held_name_key_composer_moves_when_its_row_reopens_with_an_id() {
+        let root = dir("adopt-held");
+        let store = drafts(&root);
+        let (c, _) = hub_on(&store);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.edit(
+            view.handle,
+            1,
+            view.text_epoch,
+            "held in memory".into(),
+            0,
+            0,
+        );
+        until(&c, |v| v.text == "held in memory");
+        let other = SessionRef {
+            key: "run:run-2".into(),
+            name: "codex/sample-project/other".into(),
+            ..session()
+        };
+        c.open(Some(other));
+        until(&c, |v| {
+            v.key == "studio\ncodex/sample-project/other" && v.loaded
+        });
+        assert!(c.lock().composers.contains_key(KEY), "still held");
+        c.open(Some(with_id()));
+        let view = until(&c, |v| v.key == ID_KEY && v.loaded && !v.text.is_empty());
+        assert_eq!(view.text, "held in memory");
+        assert!(!c.lock().composers.contains_key(KEY));
+        c.flush();
+        store.flush();
+        let saved = root.join("drafts");
+        assert_eq!(
+            read_draft(&saved, ID_KEY).draft.draft.text,
+            "held in memory"
+        );
+        assert_eq!(read_draft(&saved, KEY).draft.draft.text, "");
+    }
+
+    #[test]
+    fn a_row_that_gains_its_session_id_moves_its_open_draft() {
+        let root = dir("adopt-open");
+        let store = drafts(&root);
+        let (c, _) = hub_on(&store);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.edit(
+            view.handle,
+            1,
+            view.text_epoch,
+            "typed by name".into(),
+            0,
+            0,
+        );
+        c.open(Some(with_id()));
+        let view = until(&c, |v| v.key == ID_KEY && v.loaded);
+        assert_eq!(view.text, "typed by name");
+        store.flush();
+        let saved = root.join("drafts");
+        assert_eq!(read_draft(&saved, KEY).draft.draft.text, "");
+        assert_eq!(read_draft(&saved, ID_KEY).draft.draft.text, "typed by name");
+    }
+
+    #[test]
+    fn a_draft_at_the_session_id_key_is_never_replaced_by_the_name_key() {
+        let root = dir("adopt-kept");
+        let store = drafts(&root);
+        store.save_durable(KEY, stored("by name"), |_| {});
+        store.save_durable(ID_KEY, stored("by id"), |_| {});
+        let (c, _) = hub_on(&store);
+        c.open(Some(with_id()));
+        let view = until(&c, |v| v.loaded);
+        assert_eq!(view.text, "by id");
+        store.flush();
+        let saved = root.join("drafts");
+        assert_eq!(
+            read_draft(&saved, KEY).draft.draft.text,
+            "by name",
+            "kept for Saved drafts"
+        );
     }
 
     #[test]
@@ -2653,6 +3119,59 @@ pub(crate) mod tests {
         );
     }
 
+    /// A valid reserved identity of a send of `run-1` (zerus-5wmh.66.4.4).
+    pub(crate) fn held_checkpoint() -> Checkpoint {
+        use zerus_client_core::operation_recovery::deferred_input::{Intent, Kind};
+        Checkpoint::reserve(Intent {
+            kind: Kind::Send,
+            draft_revision: 1,
+            message_sha256: "a".repeat(64),
+            run_id: "run-1".into(),
+            conversation_id: "conv-1".into(),
+            question: None,
+            start: None,
+            retry_of: None,
+            consent: false,
+        })
+    }
+
+    #[test]
+    fn a_rename_back_keeps_an_uncertain_delivery_identity() {
+        let root = dir("rename-back-checkpoint");
+        let store = drafts(&root);
+        let mut there = StoredDraft::default();
+        there.draft.text = "already here".into();
+        store.save_durable(RENAMED, there, |_| {});
+        let (c, _) = hub_on(&store);
+        c.open(Some(session()));
+        let view = until(&c, |v| v.loaded);
+        c.edit(view.handle, 1, view.text_epoch, "first".into(), 5, 5);
+        let held = held_checkpoint();
+        {
+            let mut hub = c.lock();
+            let composer = hub.composers.get_mut(KEY).unwrap();
+            composer.uncertain = true;
+            composer.checkpoint = Some(held.clone());
+        }
+        let release = hold(&store);
+        c.open(Some(renamed()));
+        // Renamed back while the refused first rename is still queued: the
+        // newer composer takes the moved draft, its doubt and its identity.
+        let back = c.open(Some(session())).unwrap();
+        release.send(()).unwrap();
+        let view = until(&c, |v| v.loaded && v.key == KEY);
+        assert_eq!(view.handle, back.handle, "the newer composer stays");
+        assert_eq!(c.lock().composers[KEY].checkpoint.as_ref(), Some(&held));
+        store.flush();
+        assert_eq!(
+            read_draft(&root.join("drafts"), KEY)
+                .draft
+                .checkpoint
+                .as_deref(),
+            Some(&held)
+        );
+    }
+
     #[test]
     fn a_refused_remove_or_undo_hands_the_text_back() {
         let root = dir("hand-back");
@@ -2751,7 +3270,29 @@ pub(crate) mod tests {
             13,
         );
         // A delivery of it was interrupted: that must survive the move.
-        c.lock().composers.get_mut(KEY).unwrap().uncertain = true;
+        let cp = Checkpoint::reserve(
+            zerus_client_core::operation_recovery::deferred_input::Intent {
+                kind: zerus_client_core::operation_recovery::deferred_input::Kind::Send,
+                draft_revision: 1,
+                message_sha256:
+                    zerus_client_core::operation_recovery::deferred_input::message_sha256(
+                        "not saved yet",
+                        [],
+                    ),
+                run_id: "run-1".into(),
+                conversation_id: "conv-1".into(),
+                question: None,
+                start: None,
+                retry_of: None,
+                consent: false,
+            },
+        );
+        {
+            let mut hub = c.lock();
+            let composer = hub.composers.get_mut(KEY).unwrap();
+            composer.uncertain = true;
+            composer.checkpoint = Some(cp.clone());
+        }
         c.open(Some(renamed()));
         // Renamed back while the first rename, which the store refuses, waits.
         let back = c.open(Some(session())).unwrap();
@@ -2764,6 +3305,11 @@ pub(crate) mod tests {
         assert_eq!(view.text, "not saved yet");
         assert!(view.text_epoch > back.text_epoch);
         assert!(view.uncertain && !view.can_send, "still uncertain");
+        assert_eq!(
+            c.lock().composers[KEY].checkpoint.as_ref(),
+            Some(&cp),
+            "a rename back keeps the held identity (review-n's #1316 probe)"
+        );
         drop(read_only);
         // The failed save is retried and reaches the disk; no load replaced it.
         let view = until(&c, |v| !v.status_error);

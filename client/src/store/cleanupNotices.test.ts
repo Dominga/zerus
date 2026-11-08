@@ -4,8 +4,8 @@ const calls = vi.hoisted(() => ({ view: vi.fn(), restore: vi.fn(), check: vi.fn(
 vi.mock("../bridge", () => ({ inTauri: () => false, terminationCleanupView: calls.view, terminationCleanupRestore: calls.restore,
   terminationCleanupCheck: calls.check, terminationCleanupRemove: calls.remove }));
 vi.mock("./worktreeCleanup", () => ({ openWorktreeReview: calls.overflow }));
-import { bus, MAX_NOTICES, sessionNoticeKey } from "./notices";
-import { applyCleanup, cleanup, cleanupDialog, closeCleanup, emptyCleanup, type CleanupRow, type RestoreSource } from "./terminationCleanup";
+import { bus, MAX_NOTICES, NOTICE_MS, sessionNoticeKey } from "./notices";
+import { applyCleanup, cleanup, cleanupDialog, closeCleanup, openCleanup, emptyCleanup, type CleanupRow, type RestoreSource } from "./terminationCleanup";
 import { clearCleanupNotices, cleanupRestoring, reportCleanup, restoreCleanup, syncCleanupNotices } from "./cleanupNotices";
 
 const target = { computer: "example-peer", name: "claude/example/check", run_id: "run-1", conversation_id: "conversation-1" };
@@ -38,7 +38,7 @@ afterEach(() => { clearCleanupNotices(); vi.useRealTimers(); vi.unstubAllGlobals
 describe("archive cleanup recovery notices", () => {
   it("shows only native counts, selects the recorded row and performs no new check or restore", async () => {
     const warning = show(); await flush();
-    expect(warning).toMatchObject({ title: "Session archived", tone: "warn", sticky: true, text: "Working folder kept for review: 2 changed files." });
+    expect(warning).toMatchObject({ title: "Session archived", tone: "warn", sticky: false, text: "Working folder kept for review: 2 changed files." });
     expect(warning.text).not.toContain("/srv/");
     expect(warning.actions?.map((a) => a.label)).toEqual(["Review…", "Restore session"]);
     await warning.actions![0].run();
@@ -46,6 +46,43 @@ describe("archive cleanup recovery notices", () => {
     expect(calls.check).not.toHaveBeenCalled(); expect(calls.remove).not.toHaveBeenCalled(); expect(calls.restore).not.toHaveBeenCalled();
   });
 
+  it("expires the result while retaining its kept row and independent Review", async () => {
+    const retained = row(), warning = show(retained); await flush();
+    expect(warning.sticky).toBe(false);
+    vi.advanceTimersByTime(NOTICE_MS); await flush();
+    expect(bus.notices().some((n) => n.key === warning.key)).toBe(false);
+    expect(cleanup().rows).toEqual([retained]);
+    syncCleanupNotices(); expect(bus.notices().some((n) => n.key === warning.key)).toBe(false);
+    openCleanup(retained.id); expect(cleanupDialog()?.selected).toBe(retained.id);
+    expect(calls.check).not.toHaveBeenCalled(); expect(calls.remove).not.toHaveBeenCalled(); expect(calls.restore).not.toHaveBeenCalled();
+  });
+  it("shows native checking/removing phases then replaces progress with one timed result", async () => {
+    const step = (status: "checking" | "removing") => {
+      applyCleanup({ ...emptyCleanup(), revision: ++revision, busy: true, rows: [{ ...row(), busy: true, status, notice: null, restore: null }] });
+      syncCleanupNotices();
+    };
+    step("checking"); await flush();
+    const progress = bus.notices()[0];
+    expect(progress).toMatchObject({ title: "Checking working folder…", text: "work", busy: true, sticky: true, dismissible: false });
+    vi.advanceTimersByTime(NOTICE_MS * 2); expect(bus.notices()).toContain(progress);
+    step("removing"); await flush();
+    expect(bus.notices()).toHaveLength(1); expect(bus.notices()[0]).toMatchObject({ title: "Removing working folder…", busy: true });
+    const warning = show(); await flush();
+    expect(bus.notices()).toHaveLength(1); expect(warning).toMatchObject({ title: "Session archived", sticky: false });
+    vi.advanceTimersByTime(NOTICE_MS); expect(bus.notices()).toEqual([]);
+    expect(cleanup().rows[0].status).toBe("kept");
+    expect(calls.check).not.toHaveBeenCalled(); expect(calls.remove).not.toHaveBeenCalled();
+  });
+  it("drops progress if its original correlation disappears, while keeping the native row", async () => {
+    const pending = { ...row(), status: "checking" as const, busy: true, notice: null, restore: null };
+    applyCleanup({ ...emptyCleanup(), revision: ++revision, rows: [pending], busy: true });
+    syncCleanupNotices(); await flush();
+    expect(bus.notices()).toHaveLength(1);
+    applyCleanup({ ...emptyCleanup(), revision: ++revision, rows: [{ ...pending, source: null }], busy: true });
+    syncCleanupNotices(); await flush();
+    expect(bus.notices()).toEqual([]); expect(cleanup().rows).toHaveLength(1);
+    expect(calls.remove).not.toHaveBeenCalled(); expect(calls.check).not.toHaveBeenCalled();
+  });
   it("pins the original restore identity, disables both actions and prevents a second call", async () => {
     let resolve!: (outcome: Outcome) => void;
     calls.restore.mockReturnValue(new Promise<Outcome>((settle) => { resolve = settle; }));
@@ -68,7 +105,7 @@ describe("archive cleanup recovery notices", () => {
     await warning.actions![1].run();
     expect(bus.notices().some((n) => n.tone === "error" && n.text === "This session changed. Open its actions again.")).toBe(true);
     const retained = bus.notices().find((n) => n.key === warning.key)!;
-    expect(retained).toMatchObject({ title: "Session archived", tone: "warn", sticky: true });
+    expect(retained).toMatchObject({ title: "Session archived", tone: "warn", sticky: false });
     expect(retained.actions!.every((a) => !a.disabled?.())).toBe(true);
     expect(calls.restore).toHaveBeenCalledTimes(1); expect(calls.remove).not.toHaveBeenCalled();
   });

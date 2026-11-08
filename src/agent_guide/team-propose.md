@@ -2,7 +2,7 @@ Propose a change to the owner (hgs guide team-propose)
 
 Every change only the owner may make is a card: propose it, then wait for the
 owner's Allow or Reject. Never ask the owner to type a phrase or a sentence.
-Each kind sends its exact change:
+Shapes:
   {"kind":"add-member","members":[...]} (one or several)
   {"kind":"add-to-phase","phase":N,"tasks":[...]}
   {"kind":"cancel-tasks","tasks":[ids]}
@@ -21,14 +21,15 @@ Each kind sends its exact change:
   {"kind":"full-tests","release":"v1.2"} (one full test run)
   {"kind":"iron-rules","scope":"project","project":"ID","rules":[...],
    "expected_revision":N} (or "scope":"session" with the member's session)
-  swap-member, next-goal and switch-plan-mode as before
+  {"kind":"switch-plan-mode","mode":"free","phase":N} switches phase N
+    only (free or standard); without "phase", the team's mode
+  swap-member and next-goal as before
 with "reason" and a request_id, piped to hgs team propose --json. An
 operation's fields may also go in "input":{...}.
 
-The receipt carries the proposal id and its content hash. The owner's Allow
-applies exactly that change once; a changed or stale card is refused and
-nothing is applied twice. A Deny's reason reaches you. A typed owner word
-stays a fallback only. A change Allow could not apply is refused at once.
+The receipt carries the proposal id and content hash. Allow applies it once;
+a changed/stale card is refused. Deny's reason reaches you. A typed owner
+word stays a fallback only. An impossible Allow is refused at once.
 
 A question to the owner goes this way, never only in your reply: the owner
 picks an option or writes an answer on the card, and it reaches your inbox.

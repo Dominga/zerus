@@ -24,6 +24,28 @@ if (root / ('offline-' + alias)).exists():
 env = dict(os.environ, HGS_CONFIG_DIR=str(root / alias), HGS_STATE_DIR=str(root / alias / 'state'))
 args = shlex.split(sys.argv[-1])[1:]
 with (root / 'calls').open('a') as file: file.write(alias + ' ' + ' '.join(args) + '\\n')
+if (root / ('spoil-' + alias)).exists() and args[1:2] == [json.loads((root / ('spoil-' + alias)).read_text())['command']]:
+    # A member whose replica answer loses one field, or carries it in another
+    # form: {command, field[, value]}.
+    spoil = json.loads((root / ('spoil-' + alias)).read_text())
+    result = subprocess.run([os.environ['SWARM_TEST_HGS'], *args], input=sys.stdin.read(), env=env, text=True, capture_output=True)
+    sys.stderr.write(result.stderr)
+    if result.returncode: sys.exit(result.returncode)
+    output = json.loads(result.stdout)
+    if 'value' in spoil: output[spoil['field']] = spoil['value']
+    else: output.pop(spoil['field'], None)
+    print(json.dumps(output)); sys.exit(0)
+if (root / ('linger-' + alias)).exists() and args[1:2] == ['hello']:
+    # The answer comes at once, but a descendant keeps the pipe open.
+    result = subprocess.run([os.environ['SWARM_TEST_HGS'], *args], input=sys.stdin.read(), env=env, text=True, capture_output=True)
+    sys.stdout.write(result.stdout); sys.stdout.flush()
+    subprocess.Popen(['sleep', (root / ('linger-' + alias)).read_text()], stdout=sys.stdout)
+    sys.exit(result.returncode)
+if (root / ('reset-store-' + alias)).exists() and args[1:2] == ['replica-inventory']:
+    # The member's replica root is replaced after its hello: the store
+    # identity it answers with is created again.
+    (root / ('reset-store-' + alias)).unlink()
+    (root / alias / 'state' / 'replica' / 'store-id').unlink()
 if (root / ('noreplica-' + alias)).exists():
     # A member from before task replication: its hello has no replica field and
     # it knows no replica commands.
@@ -45,6 +67,20 @@ if (root / ('preference-' + alias)).exists():
     if result.returncode: sys.exit(result.returncode)
     output = json.loads(result.stdout)
     if 'kinds' in output: output['kinds'] = [kind for kind in output['kinds'] if kind != 'order']
+    print(json.dumps(output)); sys.exit(0)
+if (root / ('nosessionid-' + alias)).exists():
+    # A member from before session membership by ID (v0.47.0): it lists its
+    # kinds without "session_id", shows no twins and, as its exchange denies
+    # unknown fields, refuses a request that carries them.
+    request = sys.stdin.read()
+    if args[1:] == ['exchange'] and {'twins', 'known_twins'} & set(json.loads(request)):
+        print('unknown field from a newer member', file=sys.stderr); sys.exit(1)
+    result = subprocess.run([os.environ['SWARM_TEST_HGS'], *args], input=request, env=env, text=True, capture_output=True)
+    sys.stderr.write(result.stderr)
+    if result.returncode: sys.exit(result.returncode)
+    output = json.loads(result.stdout)
+    if 'kinds' in output: output['kinds'] = [kind for kind in output['kinds'] if kind != 'session_id']
+    for field in ('twins', 'known_twins'): output.pop(field, None)
     print(json.dumps(output)); sys.exit(0)
 if not (root / ('old-' + alias)).exists():
     os.execve(os.environ['SWARM_TEST_HGS'], [os.environ['SWARM_TEST_HGS'], *args], env)
@@ -507,6 +543,352 @@ class Swarm(unittest.TestCase):
         before = self.exchanges(); self.call('a', 'sync'); self.call('b', 'sync')
         self.assertEqual(self.exchanges(), before)
 
+    def test_the_cutover_status_names_each_member_s_replica(self):
+        # zerus-cg5h.4 S2b.2 C2: what each member's hello and last exchange
+        # said, information only.
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        task = self.task('a', 'add', '--project', 'a', text='Add rate limiting')['task']
+        self.converge()
+        hello = self.call('b', 'hello')['replica']
+        self.assertEqual(hello['task_schema'], 7)
+        self.assertRegex(hello['store'], r'^[0-9a-f-]{36}$')
+        self.assertEqual(self.call('b', 'hello')['replica']['store'], hello['store'])
+        status = self.task('b', 'cutover', '--project', 'a')
+        members = {m['alias']: m for m in status['members']}
+        self.assertEqual(set(members), {'a', 'c'})
+        for alias in 'ac':
+            self.assertEqual(members[alias]['task_schema'], 7, alias)
+            self.assertRegex(members[alias]['store'], r'^[0-9a-f-]{36}$')
+            self.assertEqual(members[alias]['inventory']['complete'], True, alias)
+        self.assertNotEqual(members['a']['store'], members['c']['store'])
+        self.assertEqual((status['phase'], status['closed']), ('not_cut_over', None))
+        # A cutover written here after the members' last exchange keeps it
+        # open until they exchange again.
+        tasks = next(p for p in (self.root / 'b/state/replica').iterdir() if p.is_dir()) / 'tasks'
+        (tasks / (task['uuid'] + '.managed')).write_text('{"saved":{}}')
+        status = self.task('b', 'cutover', '--project', 'a')
+        self.assertEqual(status['phase'], 'cutting_over')
+        self.assertEqual({k: status['closed'][k] for k in ('member', 'project', 'reason')},
+                         {'member': 'a', 'project': 'a', 'reason': 'inventory_before_cutover'})
+        self.assertIn("predates the latest cutover", status['closed_text'])
+        # A member whose Zerus does not replicate tasks receives none: not eligible.
+        (self.root / 'noreplica-c').touch()
+        self.assertTrue(self.call('b', 'sync')['c']['ok'])
+        self.assertEqual({m['alias'] for m in self.task('b', 'cutover', '--project', 'a')['members']}, {'a'})
+
+    def fence_check(self, node, task):
+        return self.task(node, 'cutover', '--project', 'a', '--task', task, '--check')
+
+    def test_the_fence_check_covers_every_writer_over_verified_routes(self):
+        # zerus-cg5h.4 S2b.2 C3c1 (review-n's A-B-C chain): a has only b as a
+        # peer, and c holds a's tasks through b. The writer universe covers c
+        # too, reached through b's relay and verified by its own hello.
+        self.join('a', 'b'); self.join('b', 'a')
+        for n in 'abab':
+            self.call(n, 'sync')
+        task = self.task('a', 'add', '--project', 'a', text='Add rate limiting')['task']
+        ids = {n: self.call(n, 'hello')['node_id'] for n in 'abc'}
+        before = self.fence_check('a', task['id'])
+        self.assertEqual(set(before['universe']['nodes']), {ids['b']})
+        # c joins through b: it is covered, and the incarnation changes.
+        self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        self.assertEqual(sorted(self.call('b', 'hello')['replica']['peers']), sorted([ids['a'], ids['c']]))
+        self.assertEqual(self.call('b', 'hello')['replica']['fence'], 1)
+        check = self.fence_check('a', task['id'])
+        nodes = check['universe']['nodes']
+        self.assertEqual(set(nodes), {ids['b'], ids['c']}, check)
+        self.assertEqual(nodes[ids['b']]['route'], [ids['b']])
+        self.assertEqual(nodes[ids['c']]['route'], [ids['b'], ids['c']])
+        for node in nodes.values():
+            self.assertEqual((node['protocol'], node['task_schema'], node['fence'], node['closed']),
+                             (1, 7, 1, None), node)
+            self.assertRegex(node['store'], r'^[0-9a-f-]{36}$')
+        self.assertEqual(nodes[ids['c']]['store'], self.call('c', 'hello')['replica']['store'])
+        self.assertEqual((check['universe_closed'], check['proof'], check['task']), (None, None, task['uuid']))
+        # An unfloored task has no proof: the fence closes before any exchange.
+        self.assertEqual(check['closed'], {'node': None, 'reason': 'no_floor'})
+        self.assertNotEqual(check['incarnation'], before['incarnation'])
+        self.assertEqual(check['universe']['me']['node'], ids['a'])
+        # A second read of an unchanged universe has the same incarnation.
+        self.assertEqual(self.fence_check('a', task['id'])['incarnation'], check['incarnation'])
+        # A store replaced behind the relay changes it (membership ABA).
+        (self.root / 'c/state/replica/store-id').unlink()
+        changed = self.fence_check('a', task['id'])
+        self.assertNotEqual(changed['incarnation'], check['incarnation'])
+        self.assertEqual(changed['universe_closed'], None)
+        # A node answering as another computer behind the relay is unverified.
+        (self.root / 'spoil-c').write_text(json.dumps({'command': 'hello', 'field': 'node_id',
+                                                        'value': str(uuid.UUID(int=3))}))
+        self.assertEqual(self.fence_check('a', task['id'])['universe_closed'],
+                         {'node': ids['c'], 'reason': 'unverified'})
+        (self.root / 'spoil-c').unlink()
+        # A hop that answers the relay from another store, or names none,
+        # breaks the route's binding to the store its hello showed.
+        for value in [{'value': str(uuid.UUID(int=5))}, {}]:
+            (self.root / 'spoil-b').write_text(json.dumps({'command': 'replica-relay', 'field': 'store', **value}))
+            self.assertEqual(self.fence_check('a', task['id'])['universe_closed'],
+                             {'node': ids['c'], 'reason': 'unverified'}, value)
+        (self.root / 'spoil-b').unlink()
+        # The same for a direct peer, which only this computer checks.
+        (self.root / 'spoil-b').write_text(json.dumps({'command': 'hello', 'field': 'node_id',
+                                                        'value': str(uuid.UUID(int=4))}))
+        self.assertEqual(self.fence_check('a', task['id'])['universe_closed'],
+                         {'node': ids['b'], 'reason': 'unverified'})
+        (self.root / 'spoil-b').unlink()
+        # A node that does not answer keeps the fence closed.
+        (self.root / 'offline-c').touch()
+        self.assertEqual(self.fence_check('a', task['id'])['universe_closed'],
+                         {'node': ids['c'], 'reason': 'unreachable'})
+        (self.root / 'offline-c').unlink()
+        # A hop without task replication excludes only itself: the node
+        # behind it, still a catalog machine, has no route and closes it.
+        (self.root / 'noreplica-b').touch()
+        check = self.fence_check('a', task['id'])
+        nodes = check['universe']['nodes']
+        self.assertEqual((nodes[ids['b']]['no_replica'], nodes[ids['b']]['closed']), (True, None))
+        self.assertEqual((nodes[ids['c']]['route'], nodes[ids['c']]['closed']), ([], 'unroutable'))
+        self.assertEqual(check['universe_closed'], {'node': ids['c'], 'reason': 'unroutable'})
+        (self.root / 'noreplica-b').unlink()
+        # The check runs only with --check, and changes no task.
+        self.assertEqual(self.task('a', 'get', task['id'], '--project', 'a')['task']['stage'], task['stage'])
+
+    def test_the_fence_check_covers_unreadable_incoming_and_re_enrolled_writers(self):
+        # C3c1 R2 (desktop-u and review-n on #1452).
+        self.join('a', 'b'); self.join('b', 'a')
+        for n in 'abab':
+            self.call(n, 'sync')
+        task = self.task('a', 'add', '--project', 'a', text='Add rate limiting')['task']
+        ids = {n: self.call(n, 'hello')['node_id'] for n in 'abc'}
+        baseline = self.fence_check('a', task['id'])
+        self.assertEqual(baseline['universe_closed'], None, baseline)
+        # A member whose replica cannot be read stays a writer and closes it.
+        replica = self.root / 'b/state/replica'
+        replica.rename(self.root / 'b-replica')
+        replica.write_text('not a directory')
+        check = self.fence_check('a', task['id'])
+        node = check['universe']['nodes'][ids['b']]
+        self.assertEqual((node['no_replica'], node['closed']), (False, 'unavailable'), node)
+        self.assertEqual(check['universe_closed'], {'node': ids['b'], 'reason': 'unavailable'})
+        replica.unlink(); (self.root / 'b-replica').rename(replica)
+        self.assertEqual(self.fence_check('a', task['id'])['universe_closed'], None)
+        # A writer that only joined b (b never enrolled it) holds a's tasks
+        # through b; b's catalog knows it, so a covers it: no route closes it.
+        self.join('c', 'b')
+        self.call('c', 'sync')
+        self.assertNotIn(ids['c'], self.call('b', 'hello')['replica']['peers'])
+        self.assertIn(ids['c'], self.call('b', 'hello')['replica']['writers'])
+        self.assertEqual(self.fence_check('a', task['id'])['universe_closed'], {'node': ids['c'], 'reason': 'unroutable'})
+        self.join('b', 'c')
+        self.converge()
+        reached = self.fence_check('a', task['id'])
+        self.assertEqual(reached['universe_closed'], None, reached)
+        # Membership ABA: b disconnected and enrolled again, with its node and
+        # store unchanged, is another incarnation.
+        before = reached['incarnation']
+        self.call('a', 'disconnect', 'b')
+        self.assertEqual(self.fence_check('a', task['id'])['universe_closed']['reason'], 'unroutable')
+        self.join('a', 'b')
+        again = self.fence_check('a', task['id'])
+        self.assertEqual(again['universe_closed'], None, again)
+        self.assertNotEqual(again['incarnation'], before)
+        self.assertNotEqual(again['universe']['me']['membership'], reached['universe']['me']['membership'])
+
+    def test_replica_task_answers_from_its_reread_and_its_own_store(self):
+        # C3c2: the fence's task exchange over the real CLI, directly and
+        # through a relay; it grants nothing and writes no floor.
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        task = self.task('a', 'add', '--project', 'a', text='Add rate limiting')['task']
+        self.converge()
+        hello = {n: self.call(n, 'hello') for n in 'abc'}
+        swarm = hello['a']['swarm_id']
+        request = dict(swarm_id=swarm, project='a', task=task['uuid'], version={}, updates=[],
+                       store=hello['b']['replica']['store'], remaining_ms=5000)
+        reply = self.call('b', 'replica-task', data=request)
+        self.assertEqual((reply['node_id'], reply['store'], reply['task']),
+                         (hello['b']['node_id'], request['store'], task['uuid']))
+        self.assertEqual((reply['loads'], reply['applied'], reply['floor']), (True, True, False), reply)
+        self.assertIsInstance(reply['stored_schema'], int)
+        self.assertTrue(reply['version'] and all(k.isdigit() and v > 0 for k, v in reply['version'].items()), reply)
+        self.assertEqual(len(reply['updates']), 1)
+        # Its own version sent back: the same version answers.
+        self.assertEqual(self.call('b', 'replica-task', data=dict(request, version=reply['version']))['version'],
+                         reply['version'])
+        # Asked as another store, it imports nothing and names its own.
+        other = self.call('b', 'replica-task', data=dict(request, store=str(uuid.UUID(int=7))))
+        self.assertEqual((other['store'], 'version' in other), (request['store'], False))
+        # A version not in its canonical form is refused.
+        self.call('b', 'replica-task', data=dict(request, version={'012': 1}), ok=False)
+        # Through b's relay to c, bound to c's store.
+        relay = dict(swarm_id=swarm, to=hello['c']['node_id'], command='replica-task', hops=0, remaining_ms=5000,
+                     input=dict(request, store=hello['c']['replica']['store']))
+        relayed = self.call('b', 'replica-relay', data=relay)
+        self.assertEqual((relayed['to'], relayed['reply']['store'], relayed['reply']['loads']),
+                         (hello['c']['node_id'], hello['c']['replica']['store'], True))
+        # The check closes before any exchange for a task that never cut over.
+        self.assertEqual(self.fence_check('a', task['id'])['closed'], {'node': None, 'reason': 'no_floor'})
+
+    def test_a_relay_never_answers_after_its_budget(self):
+        # review-n on #1452: an answer whose pipe a descendant keeps open past
+        # the relay's budget is never accepted after it.
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        ids = {n: self.call(n, 'hello')['node_id'] for n in 'abc'}
+        swarm = self.call('b', 'hello')['swarm_id']
+        relay = dict(swarm_id=swarm, to=ids['c'], command='hello', input={}, hops=0, remaining_ms=800)
+        self.assertEqual(self.call('b', 'replica-relay', data=relay)['reply']['node_id'], ids['c'])
+        (self.root / 'linger-c').write_text('2.5')
+        started = time.monotonic()
+        error = self.call('b', 'replica-relay', data=relay, ok=False)
+        elapsed = time.monotonic() - started
+        (self.root / 'linger-c').unlink()
+        self.assertLess(elapsed, 2.0, error)
+        self.assertIn('timed out', error)
+
+    def test_a_member_whose_hello_fails_has_no_complete_project(self):
+        # review-n on #1432: a failed hello records every project known here
+        # as unreachable for that member, never leaving an old completion.
+        self.join('a', 'b'); self.join('b', 'a')
+        for n in 'abab':
+            self.call(n, 'sync')
+        self.task('a', 'add', '--project', 'a', text='Offline outcome fixture')
+        for n in 'abab':
+            self.call(n, 'sync')
+        path = self.root / 'b/swarm/replica-members.json'
+        before = json.loads(path.read_text())['a']['projects']['a']
+        self.assertTrue(before['complete'])
+        (self.root / 'offline-a').touch()
+        self.assertFalse(self.call('b', 'sync')['a']['ok'])
+        after = json.loads(path.read_text())['a']['projects']['a']
+        self.assertEqual((after['complete'], after.get('reason')), (False, 'unreachable'))
+        (self.root / 'offline-a').unlink()
+        self.call('b', 'sync')
+        self.assertTrue(json.loads(path.read_text())['a']['projects']['a']['complete'])
+
+    def damage_between_inventory_and_exchange(self, owner):
+        """review-n on #1432 R2: a task of `owner` (b remote, a local) is
+        damaged after a healthy inventory and just before the exchange: the
+        exchange is not complete."""
+        self.join('a', 'b'); self.join('b', 'a')
+        for n in 'abab':
+            self.call(n, 'sync')
+        task = self.task(owner, 'add', '--project', 'a', text='Damage between inventory and exchange')
+        project = next(p for p in (self.root / owner / 'state/replica').iterdir()
+                       if p.is_dir() and (p / 'project-id').read_text().strip() == 'a')
+        target = project / 'tasks' / (task['task']['uuid'] + '.loro')
+        self.assertTrue(target.is_file())
+        flag = self.root / 'damage-before-exchange-b'
+        flag.write_text(str(target))
+        ssh = self.root / 'bin/ssh'
+        script = ssh.read_text()
+        needle = "if not (root / ('old-' + alias)).exists():"
+        hook = ("if args[1:2] == ['replica-exchange'] and (root / ('damage-before-exchange-' + alias)).exists():\n"
+                "    trigger = root / ('damage-before-exchange-' + alias)\n"
+                "    pathlib.Path(trigger.read_text()).write_bytes(b'damaged after a healthy inventory')\n"
+                "    trigger.unlink()\n")
+        self.assertIn(needle, script)
+        ssh.write_text(script.replace(needle, hook + needle, 1))
+        self.call('a', 'sync')
+        self.assertFalse(flag.exists(), 'the fixture did not reach the exchange')
+        record = json.loads((self.root / 'a/swarm/replica-members.json').read_text())['b']['projects']['a']
+        damaged = self.task(owner, 'list', '--project', 'a')['damaged']
+        self.assertEqual(len(damaged), 1)
+        self.assertFalse(record['complete'], record)
+        self.assertEqual(record.get('reason'), 'damaged_tasks', record)
+
+    def test_absent_or_unreadable_exchange_evidence_is_never_complete(self):
+        # review-n on #1432 R3: a replica answer that leaves out, or garbles,
+        # its refusals, import count, damaged count or pages records the
+        # project as malformed; the untouched answer is the control.
+        self.join('a', 'b'); self.join('b', 'a')
+        for n in 'abab':
+            self.call(n, 'sync')
+        spoils = [None,
+                  ('replica-exchange', 'refused'), ('replica-exchange', 'refused', None),
+                  ('replica-exchange', 'refused', {}), ('replica-exchange', 'refused', 'none'),
+                  ('replica-exchange', 'refused', [{'uuid': 1}]),
+                  ('replica-exchange', 'imported'), ('replica-exchange', 'imported', '1'),
+                  # zerus-tfqd6: more than the page carried, up to the largest
+                  # unsigned count, is unknown and never added up.
+                  ('replica-exchange', 'imported', 1), ('replica-exchange', 'imported', 2 ** 64 - 1),
+                  ('replica-exchange', 'refused', [{'uuid': str(uuid.UUID(int=1)), 'error': 'not sent'}]),
+                  ('replica-exchange', 'damaged'), ('replica-exchange', 'damaged', -1),
+                  ('replica-exchange', 'damaged', '0'), ('replica-exchange', 'more'),
+                  ('replica-exchange', 'more', 'false'), ('replica-exchange', 'updates', 'none'),
+                  ('replica-inventory', 'damaged'), ('replica-inventory', 'damaged', 0.5),
+                  # zerus-cg5h.4.5: a reply that names no store that answered.
+                  ('replica-exchange', 'store'), ('replica-exchange', 'store', 'not a store'),
+                  ('replica-inventory', 'store'), ('replica-inventory', 'store', None),
+                  ('replica-inventory', 'inventory', [])]
+        path = self.root / 'a/swarm/replica-members.json'
+        flag = self.root / 'spoil-b'
+        for n, spoil in enumerate(spoils):
+            with self.subTest(spoil=spoil):
+                # A task added there makes the digests differ, so the pages are exchanged.
+                self.task('b', 'add', '--project', 'a', text=f'Exchange evidence fixture {n}')
+                if spoil is None:
+                    flag.unlink(missing_ok=True)
+                else:
+                    flag.write_text(json.dumps(dict(zip(('command', 'field', 'value'), spoil))))
+                command = 'b swarm ' + ('replica-exchange' if spoil is None else spoil[0])
+                before = (self.root / 'calls').read_text().count(command)
+                self.call('a', 'sync')
+                self.assertGreater((self.root / 'calls').read_text().count(command), before,
+                                   'the sync never reached the answer')
+                record = json.loads(path.read_text())['b']['projects']['a']
+                if spoil is None:
+                    self.assertTrue(record['complete'], record)
+                else:
+                    self.assertFalse(record['complete'], record)
+                    self.assertEqual(record.get('reason'), 'malformed', record)
+        flag.unlink(missing_ok=True)
+        self.task('b', 'add', '--project', 'a', text='Exchange evidence fixture, healthy again')
+        self.call('a', 'sync')
+        self.assertTrue(json.loads(path.read_text())['b']['projects']['a']['complete'])
+
+    def test_a_store_replaced_after_its_hello_is_a_changed_identity(self):
+        # zerus-cg5h.4.5: each reply is bound to the store the hello showed.
+        # A replica root replaced between the hello and the exchange, or an
+        # exchange answered by another store, is never complete; the next
+        # hello observes the new store and completes again.
+        self.join('a', 'b'); self.join('b', 'a')
+        for n in 'abab':
+            self.call(n, 'sync')
+        path = self.root / 'a/swarm/replica-members.json'
+        store_id = self.root / 'b/state/replica/store-id'
+        before = store_id.read_text().strip()
+        self.task('b', 'add', '--project', 'a', text='Store binding fixture')
+        flag = self.root / 'reset-store-b'
+        flag.touch()
+        self.call('a', 'sync')
+        self.assertFalse(flag.exists(), 'the fixture did not reach the inventory')
+        self.assertNotEqual(store_id.read_text().strip(), before)
+        record = json.loads(path.read_text())['b']
+        self.assertEqual(record['store'], before, record)
+        self.assertFalse(record['projects']['a']['complete'], record)
+        self.assertEqual(record['projects']['a'].get('reason'), 'changed_identity', record)
+        self.call('a', 'sync')
+        record = json.loads(path.read_text())['b']
+        self.assertEqual(record['store'], store_id.read_text().strip())
+        self.assertTrue(record['projects']['a']['complete'], record)
+        # Another store answering the exchange alone does the same.
+        self.task('b', 'add', '--project', 'a', text='Store binding fixture, exchange')
+        spoil = self.root / 'spoil-b'
+        spoil.write_text(json.dumps({'command': 'replica-exchange', 'field': 'store',
+                                     'value': str(uuid.UUID(int=2))}))
+        self.call('a', 'sync')
+        spoil.unlink()
+        record = json.loads(path.read_text())['b']['projects']['a']
+        self.assertEqual((record['complete'], record.get('reason')), (False, 'changed_identity'), record)
+
+    def test_a_task_damaged_there_after_its_inventory_is_not_complete(self):
+        self.damage_between_inventory_and_exchange('b')
+
+    def test_a_task_damaged_here_after_its_inventory_is_not_complete(self):
+        self.damage_between_inventory_and_exchange('a')
+
     def test_a_large_project_travels_in_pages(self):
         self.join('a', 'b'); self.join('b', 'a')
         self.call('a', 'sync'); self.call('b', 'sync')
@@ -532,6 +914,61 @@ class Swarm(unittest.TestCase):
         self.assertTrue(self.call('b', 'sync')['c']['ok'])
         self.assertEqual(self.tasks('c'), ['Add rate limiting'])
         self.assertNotIn('tasks_outdated', self.call('b', 'get')['peers']['c'])
+
+    def test_membership_by_id_waits_for_every_member_to_list_the_kind(self):
+        # zerus-ucck P2c-1: a desktop may read membership by ID only while
+        # every machine of the catalog lists the session_id kind.
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        gate = lambda: self.call('b', 'get')['membership_by_id']
+        self.assertEqual(gate(), {'ready': True, 'missing': []})
+        (self.root / 'nosessionid-c').touch()  # c now answers like a release before the kind
+        self.assertTrue(self.call('b', 'sync')['c']['ok'])
+        c = self.call('c', 'get')['node_id']
+        self.assertEqual(gate(), {'ready': False, 'missing': [c]})
+        # After the update the gate opens again.
+        (self.root / 'nosessionid-c').unlink()
+        self.assertTrue(self.call('b', 'sync')['c']['ok'])
+        self.assertEqual(gate(), {'ready': True, 'missing': []})
+
+    def test_twins_travel_only_between_members_that_list_the_kind(self):
+        # zerus-ucck P2c-1 (#1413 review): session ID memberships live beside
+        # the catalog and reach only members that list the kind.
+        self.join('a', 'b'); self.join('b', 'a'); self.join('c', 'b'); self.join('b', 'c')
+        self.converge()
+        (self.root / 'nosessionid-c').touch()
+        a = self.call('a', 'get')
+        session = str(uuid.uuid4())
+        twin = {'id': str(uuid.uuid4()), 'actor': a['node_id'], 'clock': 1, 'machine': a['node_id'], 'session_id': session,
+                'label': 'codex/work/one', 'op': str(uuid.uuid4()), 'project': None}
+        twins = lambda node: self.root / node / 'swarm' / 'session-id-twins.json'
+        twins('a').write_text(json.dumps({'swarm_id': a['swarm_id'], 'entries': {a['node_id'] + '\n' + session: twin}}))
+        self.assertTrue(self.call('b', 'sync')['a']['ok'])
+        self.assertEqual(json.loads(twins('b').read_text())['entries'][a['node_id'] + '\n' + session], twin)
+        # #1413 review (N5): a change on b makes the digests differ, so b and c
+        # really exchange; c, which refuses twin fields, must still sync.
+        before = self.call('b', 'get')
+        desired = copy.deepcopy(before['organization'])
+        desired['projects'][0]['name'] += ' renamed'
+        self.patch('b', before, desired)
+        exchanges = lambda: sum(line.startswith('c ') and 'swarm exchange' in line
+                                for line in (self.root / 'calls').read_text().splitlines())
+        sent = exchanges()
+        self.assertTrue(self.call('b', 'sync')['c']['ok'], 'a member without the kind is never sent one')
+        self.assertGreater(exchanges(), sent, 'b and c exchanged')
+        self.assertFalse(twins('c').exists())
+        for node in 'abc':
+            catalog = (self.root / node / 'swarm' / 'catalog.json').read_text()
+            self.assertNotIn('session_id', catalog)
+        # A requester that names its kinds gets only those; one that names none
+        # (v0.47.0 and older) gets only the kinds v0.47.0 parses.
+        env = dict(self.env, HGS_CONFIG_DIR=str(self.root / 'b'), HGS_STATE_DIR=str(self.root / 'b' / 'state'))
+        exported = subprocess.run([str(HGS), 'swarm', 'export', '--kinds'], input=json.dumps({'kinds': ['project', 'session']}),
+                                  env=env, text=True, capture_output=True, timeout=40)
+        self.assertEqual(exported.returncode, 0, exported.stderr)
+        kinds = {op['key']['kind'] for op in json.loads(exported.stdout)['catalog']['operations'].values()}
+        self.assertLessEqual(kinds, {'project', 'session'})
+        self.assertIn('project', kinds)
 
     def test_the_worker_sends_a_new_task_within_seconds(self):
         self.join('a', 'b'); self.join('b', 'a')

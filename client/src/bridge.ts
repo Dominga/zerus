@@ -1,10 +1,12 @@
+import { withdrawnRefusal } from "./teamRefusals";
 import { desktopService } from "./store/desktopService";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type ActivityEvent, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalEvent, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type AttachmentRef, type Fetched, type ConflictsPage, type DraftSource, type SavedDraftDetail, type SavedDraftsPage, type QuestionEdit, type QuestionReply, type ClearControl, emptyUsage, type TerminalFinished, type SessionUsageRef, type Usage } from "./types";
+import { emptyAccounts, emptyBatch, emptyMachines, emptyProjects, isEmptyBatch, type AccountsView, type MachinesView, type ProjectsView, type Screen, type Action, type ActivityEvent, type Batch, type ComputerId, type Details, type EditOutcome, type Outcome, type ReadMark, type Target, type TerminalConnected, type TerminalFacts, type TerminalEvent, type TerminalStatus, type TerminalTarget, type ArchivePage, type ArchivedActivity, type ProcessTarget, type Answer, type ComposerTab, type ComposerView, type Inspect, type SendReply, type SessionRef, type AttachmentRef, type Fetched, type TaskFileSource, type ConflictsPage, type DraftSource, type SavedDraftDetail, type SavedDraftsPage, type QuestionEdit, type QuestionReply, type ClearControl, emptyUsage, type TerminalFinished, type SessionUsageRef, type Usage } from "./types";
 import type { CreatedWorktree, CreationAction, CreationAdmission, CreationCard, CreationEvent, FolderOut, LaunchAccounts, LaunchChoices, LaunchPlan, LaunchStart, MachineMeta, NewSessionContext, NewSessionFormInput, NewSessionFormView, PathStyle, RepositoryFields } from "./types";
 import type { ActivityPort, FollowRequest } from "./store/activity";
 import { documentVisibility, type PageVisibility } from "./store/visibility";
+import type { Text } from "./text";
 import { emptyUpdatesView, type UpdateChannel, type UpdatesView } from "./types";
 
 // The one path from the Rust side to the stores. The frontend asks for the next
@@ -13,6 +15,10 @@ import { emptyUpdatesView, type UpdateChannel, type UpdatesView } from "./types"
 // poll. A batch is applied in the frame after it arrives, at most one per
 // frame. Outside Tauri (`npm run dev` in a browser) a built-in replay of the
 // synthetic fixture stands in, so the UI works without the app.
+
+/** A local explanation only, with no runtime, import or permission action. */
+export const qtUpgradeNotice = () => desktop<boolean>("qt_upgrade_notice", {});
+export const acknowledgeQtUpgradeNotice = () => desktop<void>("qt_upgrade_notice_ack", {});
 
 export type BridgeMode = "tauri" | "replay";
 
@@ -52,6 +58,8 @@ export const readTaskSettings = (project: string) => desktop<import("./store/tas
 export const saveTaskSettings = (project: string, changes: Partial<import("./store/taskSettings").TaskSettings>) => desktop<import("./store/taskSettings").TaskSettings>("task_settings", { project, changes });
 export const taskStart = (input: import("./store/taskStart").StartInput) => desktop<import("./store/taskStart").StartView>("task_start", { input });
 export const taskStartRelease = (view: import("./store/taskStart").StartView) => desktop<import("./store/taskStart").StartView>("task_start_release", { project: view.project, task: view.task, id: view.id, snapshot: view.snapshot });
+export const taskStartCheck = (view: import("./store/taskStart").StartView) => desktop<import("./store/taskStart").StartView>("task_start_check", { project: view.project, task: view.task, id: view.id, snapshot: view.snapshot });
+export const taskStartDiscardCheck = (view: import("./store/taskStart").StartView) => desktop<import("./store/taskStart").StartView>("task_start_discard_check", { project: view.project, task: view.task, id: view.id, snapshot: view.snapshot, checkId: view.unsent_check_id });
 export const cancelTaskExecution = (project: string, task: string, execution: import("./store/taskCancel").Execution, reason: string) => desktop<string | null>("task_cancel_execution", { project, task, execution, reason });
 export const taskBoardAction = (project: string, task: string, expectedStage: string, action: import("./store/taskBoard").BoardAction) => desktop<void>("task_board_action", { project, task, expectedStage, action });
 export const taskFormOpen = (target: import("./store/taskEditor").TaskEditorTarget<import("./store/taskForms").FormKind>) => desktop<import("./store/taskEditor").TaskEditorView<import("./store/taskForms").FormKind>>("task_form_open", { project: target.project, task: target.task, kind: target.mode });
@@ -70,7 +78,22 @@ export const teamsFollow = (computer: ComputerId, follow: import("./store/teamsV
   inTauri() ? invoke<void>("teams_follow", { computer, list: follow.list, waiting: follow.waiting, team: follow.team, catalog: follow.catalog }) : Promise.resolve();
 /** One guarded owner action on a team (core action.rs); the outcome says whether it was applied, refused, unknown or must be confirmed first. The core runs `hgs team`, the webview never does. */
 export const teamAction = (call: import("./types").TeamCall) =>
-  inTauri() ? invoke<import("./types").TeamOutcome>("team_action", { call }) : Promise.reject(new Error("Teams need the desktop app."));
+  inTauri()
+    ? invoke<import("./types").TeamOutcome>("team_action", { call }).then((outcome) => {
+      // Task 107: a confirmed decision leaves Waiting for you at once; the core
+      // has already asked for a fresh read. Failed, unknown or to confirm: nothing.
+      // Task 111: a proposal hgs withdrew leaves too.
+      const withdrawn = outcome.outcome === "failed" && call.action.kind === "decide_proposal" && withdrawnRefusal(outcome.detail);
+      if (outcome.outcome === "done" || withdrawn) for (const listener of decidedListeners) listener(call);
+      return outcome;
+    })
+    : Promise.reject(new Error("Teams need the desktop app."));
+const decidedListeners: ((call: import("./types").TeamCall) => void)[] = [];
+/** Task 107: called with every team action hgs confirmed (outcome "done"). */
+export function onTeamDecided(listener: (call: import("./types").TeamCall) => void): () => void {
+  decidedListeners.push(listener);
+  return () => { const at = decidedListeners.indexOf(listener); if (at >= 0) decidedListeners.splice(at, 1); };
+}
 /**
  * Task #44: Qt's catalog editor. Core keeps the working copy and checks every
  * edit against the schema; the webview never parses or builds a catalog.
@@ -98,6 +121,11 @@ export const teamTaskRead = (computer: ComputerId, team: string, task: number) =
   teamsOnly<import("./types").TeamTaskDetailView>("team_task_read", { computer, team, task });
 /** Reads the watched team's feed page before the oldest event shown; false when there is none to read. */
 export const teamsOlder = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_older", { computer }) : Promise.resolve(false);
+/** Task 75: why this process is sandboxed, null on a normal desktop. */
+export const sandboxCheck = () => inTauri() ? invoke<string | null>("sandbox_check") : Promise.resolve(null);
+/** Task 69: moves one local session to another account after the owner confirms. */
+export const sessionSwitchAccount = (session: string, account: string, request: string) =>
+  inTauri() ? invoke<Record<string, unknown>>("session_switch_account", { session, account, request }) : Promise.reject(new Error("Accounts need the desktop app."));
 /** Task 51: loads the next older Waiting page; false when there is none. */
 export const teamsWaitingOlder = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_waiting_older", { computer }) : Promise.resolve(false);
 /** Task 51: raises or clears Waiting item notifications through the native notifier. */
@@ -108,7 +136,17 @@ export const teamsProfile = (computer: ComputerId) => inTauri() ? invoke<boolean
 /** Task 41: the Tests mode's queue and one bounded result page through the core. */
 export const teamTests = (computer: ComputerId, team: string, before: number | null) =>
   inTauri() ? invoke<import("./types").TeamTestsView>("team_tests", { computer, team, before }) : Promise.reject(new Error("Teams need the desktop app."));
+/** Task 92: the profile's Time view of one scope (a phase, or the plan with null), read on request through the core. */
+export const teamTimeline = (computer: ComputerId, team: string, phase: number | null) =>
+  inTauri() ? invoke<import("./types").TeamTimelineView>("team_timeline", { computer, team, phase }) : Promise.reject(new Error("Teams need the desktop app."));
+/** The UUID of the task a deep link's short reference names, after one bounded read that checks it. */
+export const resolveTaskReference = (project: string, reference: string) => desktop<string>("task_reference", { project, reference });
+/** One further page of a board stage after a cursor (`task list --stage --limit --after`). */
+export const readTaskPage = (project: string, stage: string, limit: number, after: string | null) => desktop<unknown>("task_page", { project, stage, limit, after });
 export const openTaskAttachment = (path: string) => desktop<string | null>("task_attachment_open", { path });
+/** One file of a task, read when its card needs it, checked against its page and kept in the private cache. */
+export const readTaskAttachment = (project: string, task: string, source: TaskFileSource) =>
+  desktop<Fetched>("task_attachment_read", { project, task, entry: source.entry, file: source.file, meta: source.meta });
 
 /** `next_batch` answers with raw JSON bytes (`ipc::Response`), so large batches skip script evaluation. */
 function decodeBatch(reply: unknown): Batch {
@@ -247,6 +285,9 @@ export function normalize(b: Partial<Batch>): Batch {
     desktop_service: b.desktop_service ?? undefined,
     processes_view: b.processes_view ?? undefined,
     composer: b.composer ?? undefined, draft_keys: b.draft_keys ?? undefined, composer_events: b.composer_events ?? undefined,
+    // Task 76: the Teams views (list, Waiting, a team) arrive in batch.teams;
+    // dropping them here left the Team tab and Waiting for you unread.
+    teams: b.teams ?? undefined,
   };
 }
 
@@ -523,7 +564,97 @@ export interface AccountModelCatalog {
   defaults: {model:string;effort:string}; provider_defaults: {model:string;effort:string}; effort_supported:boolean;
 }
 export interface AccountEditValues {label?:string;mode?:string;model?:string;effort?:string}
-export interface AccountEditView { handle: string; kind: AccountEditKind; label: string; machine: string; provider: string; permission_mode?:string; permission_detail?:string; models?:AccountModelCatalog|null }
+export interface AccountEditView { handle: string; kind: AccountEditKind; label: string; machine: string; provider: string; permission_mode?:string; permission_detail?:string; models?:AccountModelCatalog|null; permissions?:PermissionEditor|null }
+/** Task 68: the native permission catalog as client/core projects it (Qt's PermissionCatalog). */
+export interface PermissionOption { value: string; label: string; description: string }
+export interface PermissionChoice { label: Text; value: string; tooltip: Text; explanation: Text; bypass: boolean; unavailable: boolean; editor: boolean }
+export interface PermissionEditorRow { id: string; label: Text; description: Text; selected: string; unknown: boolean; unavailable: boolean; options: PermissionOption[] }
+export interface PermissionEditor { harness: string; choices: PermissionChoice[]; initial: string; saved_mode: string; selected: Record<string, string>; malformed: boolean; reset_label: Text; source_note: Text }
+export interface PermissionCheck { mode: string; summary: Text; choice_label: Text; problem: Text; rows: PermissionEditorRow[] }
+/** The core's answer about one native selection of an open permissions dialog. */
+export async function accountPermissionCheck(handle: string, selection: Record<string, string>): Promise<PermissionCheck> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("account_permission_check", { handle, selection });
+}
+/** Task 68: one project's or one exact session's iron rules (client/core iron_rules). */
+export type RulesTarget = { scope: "project"; project: string } | { scope: "session"; name: string; run_id: string; conversation_id: string };
+export type RulesOp = { op: "read" } | { op: "save"; rules: string[]; expected_revision: number; request_id?: string };
+export interface RulesCall { computer: ComputerId; target: RulesTarget; op: RulesOp }
+export type RulesOutcome =
+  | { outcome: "done"; view: { rules: string[]; revision: number }; request_id?: string }
+  | { outcome: "unsupported"; detail: Text }
+  | { outcome: "failed"; detail: Text; request_id?: string }
+  | { outcome: "uncertain"; detail: Text; request_id: string };
+/** Task 67: this computer's model servers (client/core model_servers over `hgs model-server`). */
+export interface ModelServer {
+  name: string; base_url: string; kind: string; ssh: string; has_key: boolean; up_minutes: number; contexts: unknown;
+  status: string[]; up: string[]; down: string[]; logs: string[]; read_only: boolean; agent_url: string; models_url: string;
+  status_text: string; up_text: string; down_text: string; logs_text: string;
+}
+export interface ModelServerModel { name: string; state: string; label: Text; since: number; usable: boolean; can_down: boolean; can_up: boolean }
+export interface ModelServerStatus {
+  error: string; detail: string; error_label: Text; problem: Text; source: string; models: ModelServerModel[];
+  free: number; total: number; memory: Text; low: boolean; used: number; raw: string[]; running: number; active: string[];
+}
+export interface ModelServerOutcome { text: Text; error: boolean }
+export interface ModelServerUpStart { started: boolean; id: string; limit_ms: number; outcome: ModelServerOutcome | null }
+export interface ModelServerUpPoll { running: boolean; outcome: ModelServerOutcome | null }
+export interface ModelServerLogs { lines: string[]; truncated: boolean }
+export interface ModelServerForm { was: string; name: string; base_url: string; kind: string; ssh: string; key_change: "" | "replace" | "remove"; key: string; status: string; up: string; down: string; logs: string }
+export interface ModelServerTest { tone: "ok" | "warn" | "error"; text: Text; raw: string[] }
+const desktopOnly = <T>(run: () => Promise<T>): Promise<T> => (inTauri() ? run() : Promise.reject(new Error(DESKTOP_ONLY)));
+export const modelServersList = () => desktopOnly(() => invoke<ModelServer[]>("model_servers_list"));
+export const modelServerStatus = (server: string) => desktopOnly(() => invoke<ModelServerStatus>("model_server_status", { server }));
+export const modelServerUp = (server: string, model: string) => desktopOnly(() => invoke<ModelServerUpStart>("model_server_up", { server, model }));
+export const modelServerUpResult = (server: string, model: string, id: string, expired: boolean) =>
+  desktopOnly(() => invoke<ModelServerUpPoll>("model_server_up_result", { server, model, id, expired }));
+export const modelServerSessions = (server: string) => desktopOnly(() => invoke<Record<string, string[]>>("model_server_sessions", { server }));
+export const modelServerDown = (server: string, model: string) => desktopOnly(() => invoke<Text | null>("model_server_down", { server, model }));
+export const modelServerLogs = (server: string, model: string) => desktopOnly(() => invoke<ModelServerLogs>("model_server_logs", { server, model }));
+export const modelServerSave = (form: ModelServerForm) => desktopOnly(() => invoke<ModelServer[]>("model_server_save", { form }));
+export const modelServerDelete = (name: string) => desktopOnly(() => invoke<ModelServer[]>("model_server_delete", { name }));
+export const modelServerTest = (form: ModelServerForm, what: "api" | "status") => desktopOnly(() => invoke<ModelServerTest>("model_server_test", { form, what }));
+export const modelServerTestLogs = (form: ModelServerForm, model: string) => desktopOnly(() => invoke<ModelServerTest>("model_server_test_logs", { form, model }));
+export const modelServerSession = (agent: string, folder: string, tag: string, server: string, model: string) =>
+  desktopOnly(() => invoke<void>("model_server_session", { agent, folder, tag, server, model }));
+/** Task 73: WSL path mapping and WSL file open (client/core wsl_mapping). Errors are core Text. */
+export interface WslFields { windows_root: string; mount_root: string; workspace_id: string }
+export interface WslTarget { alias: string; machine_id: string; distribution: string; user: string; environment: string; saved: WslFields }
+export interface WslOpened { handle: string; target: WslTarget }
+export interface WslMapped { windows: string; wsl: string; canonical: string }
+export interface WslFilePreview { wsl: string; windows: string; sha256: string }
+export interface WslScope { session: string; run_id: string; conversation_id: string; path: string; archive_id?: string; agent_id?: string }
+export async function wslMappingOpen(alias: string): Promise<WslOpened> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("wsl_mapping_open", { alias });
+}
+export async function wslMappingPreview(handle: string, source: string, fields: WslFields): Promise<WslMapped> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("wsl_mapping_preview", { handle, source, fields });
+}
+export async function wslMappingUse(handle: string, source: string, fields: WslFields, remember: boolean): Promise<string> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("wsl_mapping_use", { handle, source, fields, remember });
+}
+export async function wslFileOpen(alias: string, scope: WslScope): Promise<WslOpened> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("wsl_file_open", { alias, scope });
+}
+export async function wslFilePreview(handle: string, fields: WslFields): Promise<WslFilePreview> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("wsl_file_preview", { handle, fields });
+}
+export async function wslFileOpenOriginal(handle: string, fields: WslFields, remember: boolean): Promise<Text> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("wsl_file_open_original", { handle, fields, remember });
+}
+export async function wslDialogClose(handle: string): Promise<void> {
+  if (inTauri()) await invoke("wsl_dialog_close", { handle });
+}
+export async function ironRules(call: RulesCall): Promise<RulesOutcome> {
+  if (!inTauri()) throw new Error(DESKTOP_ONLY);
+  return invoke("iron_rules", { call });
+}
 export interface AccountEditResult { notices: string[]; errors: string[] }
 export async function accountEditOpen(account: string, profile: string, kind: AccountEditKind): Promise<AccountEditView> {
   if (!inTauri()) throw new Error(DESKTOP_ONLY);
@@ -837,6 +968,9 @@ export const updatesOpen = (target: "release" | "download" | "instructions") =>
   inTauri() ? invoke<void>("updates_open", { target }) : Promise.reject(UPDATES_DESKTOP_ONLY);
 export const updatesCopyCommand = () => inTauri() ? invoke<void>("updates_copy_command") : Promise.reject(UPDATES_DESKTOP_ONLY);
 export const updatesRestart = () => inTauri() ? invoke<void>("updates_restart") : Promise.reject(UPDATES_DESKTOP_ONLY);
+/** WhiteWh fork, task #63: the fork channel's Check now and the confirmed replacement. */
+export const forkUpdatesCheck = () => inTauri() ? invoke<void>("fork_updates_check") : Promise.reject(UPDATES_DESKTOP_ONLY);
+export const forkUpdatesConfirm = () => inTauri() ? invoke<void>("fork_updates_confirm") : Promise.reject(UPDATES_DESKTOP_ONLY);
 export const updatesFixLoginItem = (restart: boolean) => inTauri() ? invoke<string | null>("updates_fix_login_item", { restart }) : Promise.reject(UPDATES_DESKTOP_ONLY);
 /** `updates-changed`: the native worker's latest snapshot; resolves once listening. */
 export const onUpdates = (listener: (view: UpdatesView) => void) => onEvent<UpdatesView>("updates-changed", listener);
@@ -891,6 +1025,9 @@ const desktop = <T>(command: string, args: Record<string, unknown>): Promise<T> 
 /** Opens the selected session's composer (undefined: none is open); null outside the app. */
 export const composerOpen = (session: SessionRef | undefined) =>
   inTauri() ? invoke<ComposerView | null>("composer_open", { session: session ?? null }) : Promise.resolve(null);
+/** Whether the window is hidden: a hidden window checks no handed-over send. */
+export const composerVisibility = (hidden: boolean) =>
+  inTauri() ? invoke<void>("composer_visibility", { hidden }) : Promise.resolve();
 export const composerEdit = (handle: number, rev: number, epoch: number, text: string, position: number, anchor: number) =>
   desktop<void>("composer_edit", { handle, rev, epoch, text, position, anchor });
 /** The native file picker, then the reads; resolves once they ended. */
@@ -1005,6 +1142,12 @@ export const savedDraft = (source: DraftSource, key: string) => desktop<SavedDra
 export const draftRecover = (key: string) => desktop<void>("draft_recover", { key });
 /** Replaces the open composer's draft with the selected one; rejects with why not. */
 export const draftRestore = (handle: number, source: DraftSource, key: string) => desktop<void>("draft_restore", { handle, source, key });
+/** This run's drafts capture status, `null` when the run never captures. */
+export const draftCaptureStatus = () => desktop<import("./types").DraftCaptureStatus | null>("draft_capture_status", {});
+/** Queues the draft store's Retry; a recorded outcome never changes. */
+export const draftCaptureRetry = () => desktop<void>("draft_capture_retry", {});
+/** `draft-capture-changed`: the capture's status changed; resolves with the stop once listening. */
+export const onDraftCaptureChanged = (listener: () => void) => onEvent<null>("draft-capture-changed", listener);
 
 /** Availability is a local folder stat; opening does a fresh identity/directory check. */
 export const sessionFolderStatus = (computer: string, directory: string) => desktop<import("./store/sessionFolders").FolderStatus>("session_folder_status", { computer, directory });
@@ -1065,3 +1208,16 @@ export const projectCloneStatus = (id: string) => desktop<import("./ui/screens/P
 export const projectCloneClose = (id: string) => desktop<void>("project_clone_close", {id});
 export const projectCloneStep = (id: string, step: "begin" | "check" | "retire", source: {url: string; parent: string; name: string}) => desktop<import("./ui/screens/ProjectCloneDialog").CloneView>("project_clone_step", {id, step, source});
 export const projectCloneUse = (id: string, project: string | null, name: string) => desktop<{outcome: EditOutcome; project: string; folder: string}>("project_clone_use", {id, project, name});
+
+// WhiteWh fork: the Claude desktop app's sessions and the SocratiCode panel
+// (src-tauri/src/claude_app.rs, src-tauri/src/socraticode.rs). The replies are
+// the core's typed projections; the webview parses no hgs JSON.
+
+/** `hgs [@host] claude-app ls`, with each session's folder match for `folder`. */
+export const claudeAppSessions = (host: string, folder: string) => desktop<import("./store/claudeApp").ClaudeAppView>("claude_app_sessions", { host, folder });
+/** `hgs [@host] claude-app resume ID -n NAME --launch-id ID -d [--force]`; resolves with the launch id. */
+export const claudeAppResume = (host: string, session: string, name: string, force: boolean) => desktop<string>("claude_app_resume", { host, session, name, force });
+/** `hgs [@host] socraticode status PATH --qdrant native|docker`. */
+export const socraticodeStatus = (host: string, path: string, native: boolean) => desktop<import("./store/socraticode").SocratiCodePanel>("socraticode_status", { host, path, native });
+/** One of `install`, `install-qdrant`, `start`, `stop` or `connect`. */
+export const socraticodeAct = (action: import("./store/socraticode").SocratiCodeVerb, host: string, path: string, native: boolean) => desktop<import("./store/socraticode").Acted>("socraticode_act", { host, path, action, native });

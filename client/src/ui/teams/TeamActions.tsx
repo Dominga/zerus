@@ -4,7 +4,7 @@ import { Icon } from "../lib/icons";
 import { teams } from "../../store/teams";
 import { useModel, windowPort } from "./ProposalCards";
 import {
-  TeamActions, barActions, barChips, finishSummary, formText, moreItems, openQuestions, questionClosed, stageName, subtreeImpact, taskButtons,
+  TeamActions, barActions, barChips, finishSummary, formText, moreItems, openQuestions, phaseModeChip, phaseModeSwitch, questionClosed, teamModeBadge, stageName, subtreeImpact, taskButtons,
   type ActTask, type ActTeam, type BarAction, type BarChip, type TaskForm,
 } from "./actions";
 import type { ComputerId } from "../../types";
@@ -40,17 +40,59 @@ function TextDialog(props: {
   );
 }
 
+/** Task #58: a phase's mode chip and its switch (free <-> standard), confirmed first. */
+export function PhaseModeControl(props: { computer: ComputerId; team: ActTeam; phase: number }) {
+  const { model, tick } = useModel((changed) => new TeamActions(windowPort, () => ({ computer: props.computer, team: props.team }), changed));
+  const read = () => (tick(), model);
+  // Task #59: the phase's own mode, live from hgs: Free, or Standard for a running phase.
+  const chip = createMemo(() => phaseModeChip(props.team, props.phase));
+  const switching = createMemo(() => phaseModeSwitch(props.team, props.phase));
+  return (
+    <span class="team-phase-mode" data-phase-mode={chip()?.mode ?? ""} onClick={(event) => event.stopPropagation()}>
+      <Show when={chip()}>{(shown) => <span class={`pt-chip pt-chip-${shown().mode}`} title={shown().tip}>{shown().text}</span>}</Show>
+      <Show when={switching()}>{(shown) => (
+        <button type="button" class="btn ghost small" data-action="phase-mode" data-mode={shown().mode}
+          disabled={!shown().enabled || read().busy} title={shown().why || undefined}
+          onClick={(event) => { event.stopPropagation(); void model.phaseMode(shown().phase, shown().mode); }}>{shown().text}</button>
+      )}</Show>
+      <Show when={read().notice}><span class="danger team-phase-mode-notice" role="status">{read().notice}</span></Show>
+    </span>
+  );
+}
+
+/** Task #59: the team bar's mode (Qt teamHeaderPlanMode) and, for the free phase, its lock back to standard. */
+export function TeamModeControl(props: { computer: ComputerId; team: ActTeam }) {
+  const badge = createMemo(() => teamModeBadge(props.team));
+  const lock = createMemo(() => { const b = badge(); return b && b.phase > 0 ? phaseModeSwitch(props.team, b.phase) : undefined; });
+  const { model, tick } = useModel((changed) => new TeamActions(windowPort, () => ({ computer: props.computer, team: props.team }), changed));
+  const read = () => (tick(), model);
+  return (
+    <Show when={badge()}>{(shown) => (
+      <span class="team-mode" data-mode={shown().mode}>
+        <span class={`pt-chip pt-chip-${shown().mode}`} title={shown().tip}>{shown().text}</span>
+        <Show when={lock()?.mode === "standard" ? lock() : undefined}>{(switching) => (
+          <button type="button" class="btn ghost small" data-action="phase-mode" data-mode="standard" disabled={!switching().enabled || read().busy}
+            title={tr("Switch phase %1 to standard planning: its tasks stay, new work is planned in a new phase", switching().phase)}
+            onClick={() => void model.phaseMode(switching().phase, "standard")}>{switching().text}</button>
+        )}</Show>
+        <Show when={read().notice}><span class="danger team-phase-mode-notice" role="status">{read().notice}</span></Show>
+      </span>
+    )}</Show>
+  );
+}
+
 /** The bar's chips: the pending phase (opens it), Finish waiting, waiting for the lead. */
-export function TeamBarChips(props: { team: ActTeam; onPhase: (phase: number) => void; onFinish: () => void }) {
+export function TeamBarChips(props: { team: ActTeam; onPhase: (phase: number) => void; onFinish: () => void; onLead?: () => void }) {
   const chips = createMemo(() => barChips(props.team));
   const click = (chip: BarChip) => {
     if (chip.id === "pendingPhase" && chip.phase) props.onPhase(chip.phase);
     else if (chip.id === "finishWaits") props.onFinish();
+    else if (chip.id === "leadStalled") props.onLead?.();
   };
   return (
-    <For each={chips()}>{(chip) => chip.id === "waitingForLead"
-      ? <span class="team-chip accent" data-chip={chip.id}>{chip.text}</span>
-      : <button type="button" class="team-chip link" data-chip={chip.id} title={chip.tip} onClick={() => click(chip)}>{chip.text}</button>}
+    <For each={chips()}>{(chip) => chip.id === "waitingForLead" || chip.id === "teamPaused"
+      ? <span class="team-chip" classList={{ accent: chip.id === "waitingForLead", warn: chip.id === "teamPaused" }} data-chip={chip.id} title={chip.tip}>{chip.text}</span>
+      : <button type="button" class="team-chip link" classList={{ warn: chip.id === "leadStalled" }} data-chip={chip.id} title={chip.tip} onClick={() => click(chip)}>{chip.text}</button>}
     </For>
   );
 }

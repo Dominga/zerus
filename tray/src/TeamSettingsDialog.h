@@ -31,6 +31,17 @@ public:
     QJsonArray memberChanges() const;
     // Why Save is refused, or empty.
     QString problem() const;
+    // Task 88: the Tests section. The project's configuration as hgs reads it
+    // (`team test-config`), and the owner's override, edited as JSON shaped
+    // like .zerus/tests.toml: Check asks hgs without writing; only Save sends
+    // it (as `settings.tests`, which hgs checks again).
+    void loadTests();
+    void checkTests();
+    // The override the field holds: null for an empty field, or why it is not
+    // a JSON object.
+    QJsonValue testsOverride(QString *error = nullptr) const;
+    // What the section lists from a `test-config` answer, one line each.
+    static QStringList testsLines(const QJsonObject &config);
 
 private:
     void update();
@@ -49,6 +60,11 @@ private:
     };
 
     QPlainTextEdit *m_rules = nullptr;
+    QPlainTextEdit *m_tests = nullptr, *m_testsProposal = nullptr;
+    QLabel *m_testsSource = nullptr, *m_testsCheck = nullptr;
+    QVBoxLayout *m_testsList = nullptr;
+    QPushButton *m_testsCheckButton = nullptr, *m_testsProposalButton = nullptr;
+    void showTests(const QJsonObject &config);
     struct MemberRules { QString id; QStringList before; QPlainTextEdit *field; };
     QList<MemberRules> m_ruleMembers;
     TeamController *m_teams;

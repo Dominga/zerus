@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createRoot } from "solid-js";
-import { createSavedDrafts, draftOwnerRow, draftPresentation, draftSubagent, listStep, modifiedText, PAGE, REASONS, replaceText, TEXTS, type RestoreTarget, type SavedDraftsPort } from "./savedDrafts";
+import { createSavedDrafts, draftCaptureNotice, draftOwnerRow, draftPresentation, draftSubagent, listStep, modifiedText, PAGE, REASONS, replaceText, TEXTS, type RestoreTarget, type SavedDraftsPort } from "./savedDrafts";
 import type { DraftSource, SavedDraftDetail, SavedDraftItem } from "../types";
 import type { Session } from "../ui/sessions/types";
 
@@ -9,7 +9,7 @@ vi.mock("../ui/sessions/SessionCard", () => ({
 }));
 
 const item = (key: string, source: DraftSource = "client", extra: Partial<SavedDraftItem> = {}): SavedDraftItem => ({
-  key, kind: "message", computer: "", session: key.split("\n")[1] ?? "", title: key.replaceAll("\n", " / "), caption: key, machine: "this computer",
+  key, kind: "message", computer: "", session: key.split("\n")[1] ?? "", session_id: "", title: key.replaceAll("\n", " / "), caption: key, machine: "this computer",
   meta: "", detail: "first line", modified: 1_793_000_000, attachments: 0, source, archived: false, ...extra,
 });
 const detail = (text: string, extra: Partial<SavedDraftDetail> = {}): SavedDraftDetail => ({ text, attachments: 0, detail: "0 attachments", restorable: true, ...extra });
@@ -234,6 +234,11 @@ describe("Saved drafts (MessageComposer.cpp:1230-1387)", () => {
     expect(draftOwnerRow(message, [row({ computer: "studio" })]), "another computer's row").toBeUndefined();
     expect(draftOwnerRow({ ...message, archived: true }, [row({})])).toBeUndefined();
     expect(draftOwnerRow({ ...message, kind: "unknown" }, [row({})])).toBeUndefined();
+    // zerus-ucck P2c-2: a draft keyed by session ID belongs to the row with that ID, whatever its label.
+    const id = "3f2a9c1d-6b7e-4c2a-9d1f-0a1b2c3d4e5f";
+    const byId = item(`\nid:${id}`, "client", { session: "claude/p/old-label", session_id: id });
+    expect(draftOwnerRow(byId, [row({ sessionId: id, catalogKey: "run:renamed", name: "claude/p/new-label" })])?.catalogKey).toBe("run:renamed");
+    expect(draftOwnerRow(byId, [row({ name: "claude/p/old-label" })]), "a row named like it is another session").toBeUndefined();
     // A subagent key names the machine; the alias's row wins over a machine-name match.
     const subagent = item("studio\nclaude/p/a\nconv\nagent", "client", { kind: "subagent", computer: "studio", session: "claude/p/a" });
     expect(draftOwnerRow(subagent, [row({ computer: "", catalogKey: "run:machine" })])?.catalogKey).toBe("run:machine");
@@ -319,5 +324,21 @@ describe("Saved drafts (MessageComposer.cpp:1230-1387)", () => {
     expect([listStep(9, 1, "PageDown", 3), listStep(9, 7, "PageDown", 3), listStep(9, -1, "PageDown", 3)]).toEqual([4, 8, 3]);
     expect([listStep(9, 5, "PageUp", 3), listStep(9, 1, "PageUp", 3), listStep(9, 4, "PageUp", 0)]).toEqual([2, 0, 3]);
     expect([listStep(0, -1, "ArrowDown", 3), listStep(5, 1, "Enter", 3), listStep(5, 1, "a", 3)]).toEqual([undefined, undefined, undefined]);
+  });
+});
+
+describe("drafts capture notice", () => {
+  const status = (extra: object = {}) => ({ code: "draft_capture_captured", capture_id: null, manifests: 0, writes: true, paused: false, ...extra });
+  it("explains refused saves and a waiting import, in every mode, with nothing to say otherwise", () => {
+    expect(draftCaptureNotice(null)).toBeUndefined();
+    expect(draftCaptureNotice(status())).toBeUndefined();
+    // Not captured but the import already ran: nothing waits for Retry.
+    expect(draftCaptureNotice(status({ code: "draft_capture_too_large" }))).toBeUndefined();
+    const refused = draftCaptureNotice(status({ code: "draft_capture_private_slot", writes: false }))!;
+    expect(refused.text).toContain("Drafts are not being saved");
+    expect(refused.hint).toContain("Retry records the earlier drafts before any draft is saved");
+    const paused = draftCaptureNotice(status({ code: "draft_capture_unreadable", paused: true }))!;
+    expect(paused.text).toContain("Importing drafts from Qt is paused");
+    expect(paused.hint).toContain("Retry never records them later");
   });
 });

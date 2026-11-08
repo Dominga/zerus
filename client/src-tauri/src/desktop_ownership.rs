@@ -26,6 +26,8 @@ const GRANT_BACKOFF: Duration = Duration::from_millis(250);
 
 mod diagnostic;
 pub(crate) use diagnostic::Phase;
+mod observation;
+pub(crate) use observation::NativeCurrent;
 
 #[derive(Clone, Default, Debug, Serialize)]
 pub(crate) struct View {
@@ -42,6 +44,32 @@ struct Intent {
     exit_confirmed: bool,
     complete: bool,
     receipt: Option<Receipt>,
+    // A lookup after the verified original exit found no receipt at the
+    // original's unchanged journal revision. It never implies success.
+    not_applied: bool,
+}
+/// The exact status that justified a definitive not-applied lookup. A fresh
+/// recovery Grant is reserved only while the authority still reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Basis {
+    configuration: String,
+    journal: Option<String>,
+    revision: u64,
+}
+impl Basis {
+    fn holds(&self, status: &Status) -> bool {
+        status.matches(&self.configuration)
+            && status.journal == self.journal
+            && status.revision == self.revision
+            && !status.rearm_required
+    }
+}
+/// Why recovery may send a fresh Grant, captured under the admission lock.
+#[derive(Debug, PartialEq, Eq)]
+enum Reason {
+    Capacity,
+    Refused(Basis),
+    NotApplied(Basis),
 }
 #[derive(Default)]
 struct State {
@@ -57,6 +85,17 @@ struct State {
     // local codes are kept, never child output, IDs, paths or configuration.
     diagnostic: Option<(&'static str, &'static str)>,
 }
+/// A retained veto only; this cannot grant native ownership authority.
+pub(crate) type EffectCheck = Arc<dyn Fn() -> Result<(), &'static str> + Send + Sync>;
+/// Captured only after a fresh actor read matches this controller's OWN
+/// native Grant receipt. Read-only scope, never constructible from JSON.
+pub(crate) struct CurrentGrant(Status);
+impl CurrentGrant {
+    pub(crate) fn status(&self) -> &Status {
+        &self.0
+    }
+}
+
 pub(crate) struct Controller {
     hgs: PathBuf,
     responder: Option<Arc<Responder>>,
@@ -134,6 +173,33 @@ impl Controller {
         let _ = tauri::async_runtime::spawn_blocking(move || job.run()).await;
         owner.view()
     }
+    /// Additional original-selection/cancellation fence. It can only refuse;
+    /// native caller/current journal admission remains in the original actor.
+    pub(crate) async fn request_checked(
+        self: &Arc<Self>,
+        action: Action,
+        configuration: String,
+        check: EffectCheck,
+    ) -> Result<View, &'static str> {
+        let mut job = self
+            .admit(Some(action), Some(configuration), None)
+            .ok_or("ownership_transport_busy")?;
+        job.effect_check = Some(check);
+        let owner = self.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            if owner.mode == Mode::Service {
+                owner.record_view(Phase::WorkerStarted);
+            }
+            let result = job.execute();
+            if let Err(code) = result {
+                owner.state().code = code.into();
+            }
+            result
+        })
+        .await
+        .map_err(|_| "ownership_unconfirmed")??;
+        Ok(self.view())
+    }
     /// Image replacement can need another bounded drain after the actor's
     /// 750 ms attempt. Only a matched, definitive refusal admits a NEW Grant;
     /// uncertain originals remain on the read-only result path.
@@ -143,13 +209,18 @@ impl Controller {
         cancel: Arc<AtomicBool>,
     ) -> View {
         for attempt in 0..=GRANT_RETRIES {
-            let view = self
-                .request(
+            // Later attempts are retries: the same bound admission as recovery.
+            let view = if attempt == 0 {
+                self.request(
                     Some(Action::Grant),
                     Some(configuration.clone()),
                     Some(cancel.clone()),
                 )
-                .await;
+                .await
+            } else {
+                self.recovery_grant(configuration.clone(), cancel.clone())
+                    .await
+            };
             let retryable = self.retryable_grant();
             if !retryable || attempt == GRANT_RETRIES {
                 return view;
@@ -164,29 +235,137 @@ impl Controller {
         }
         unreachable!("the final bounded attempt returns its view")
     }
-    /// Only a complete original refusal, or capacity before an uncertain
-    /// original exists, can admit another fresh startup Grant.
+    /// Only a complete original refusal, a definitive not-applied lookup of an
+    /// original after its verified exit, or capacity before any original
+    /// exists, can admit another fresh startup Grant.
     pub(crate) fn retryable_grant(&self) -> bool {
+        Self::grant_reason(&self.state()).is_some()
+    }
+    /// The whole retry decision table, evaluated under the admission lock:
+    /// - a retained not-applied basis decides alone, whatever the last local
+    ///   diagnostic code (a transport-busy Check cannot mask it): a Grant
+    ///   bound to that basis while no newer status contradicts it, else none;
+    /// - a matched transient refusal of the current original;
+    /// - capacity only at a cold start, before any original exists.
+    ///   Nothing else, and never an unbound Grant that replaces a basis.
+    fn grant_reason(state: &State) -> Option<Reason> {
+        if let Some(basis) = Self::not_applied_basis(state) {
+            let contradicted = state
+                .status
+                .as_ref()
+                .is_some_and(|status| !basis.holds(status));
+            return (!contradicted).then_some(Reason::NotApplied(basis));
+        }
+        // A transient refusal is bound to its own receipt's authority scope:
+        // the authority refuses drain/resources before it moves a revision.
+        let refused = state.intent.as_ref().and_then(|intent| {
+            let receipt = intent.receipt.as_ref()?;
+            let transient = intent.complete
+                && intent.exit_confirmed
+                && matches!(intent.request, Request::DesktopOwnership { action: Action::Grant, .. })
+                && !receipt.accepted
+                && !receipt.durable
+                && state.status.as_ref() == Some(&receipt.current)
+                && matches!(&receipt.outcome, Outcome::Refused { code }
+                    if (state.code.is_empty() || state.code == *code
+                        || state.code == "ownership_transport_busy")
+                        && matches!(code.as_str(), "ownership_drain_pending" | "ownership_resources_pending" | "ownership_transport_busy"));
+            transient.then(|| Basis {
+                configuration: receipt.current.configuration.clone(),
+                journal: receipt.current.journal.clone(),
+                revision: receipt.current.revision,
+            })
+        });
+        if let Some(basis) = refused {
+            return Some(Reason::Refused(basis));
+        }
+        (!state.running && state.code == "ownership_transport_busy" && state.intent.is_none())
+            .then_some(Reason::Capacity)
+    }
+    /// A complete Grant original found definitively not applied after its
+    /// verified exit. It is a durable property of that original, independent
+    /// of later diagnostic codes; only a new intent replaces it.
+    fn not_applied_basis(state: &State) -> Option<Basis> {
+        let intent = state.intent.as_ref()?;
+        let Request::DesktopOwnership {
+            action: Action::Grant,
+            journal: Some(journal),
+            revision,
+            ..
+        } = &intent.request
+        else {
+            return None;
+        };
+        (intent.complete && intent.exit_confirmed && intent.not_applied && intent.receipt.is_none())
+            .then(|| Basis {
+                configuration: intent.configuration.clone(),
+                journal: Some(journal.clone()),
+                revision: *revision,
+            })
+    }
+    /// Recovery's next Grant. After a definitive not-applied lookup it stays
+    /// bound to that original status: the job compares its fresh authority
+    /// read before reserving any new intent, and a change is fenced.
+    pub(crate) async fn recovery_grant(
+        self: &Arc<Self>,
+        configuration: String,
+        cancel: Arc<AtomicBool>,
+    ) -> View {
+        // Revalidate the reason and capture its basis under the same state
+        // lock that marks this job running. A vanished allowance refuses.
+        let Some(job) = self.admit_with(
+            Some(Action::Grant),
+            Some(configuration),
+            Some(cancel),
+            |state| match Self::grant_reason(state)? {
+                Reason::NotApplied(basis) | Reason::Refused(basis) => Some(Some(basis)),
+                Reason::Capacity => Some(None),
+            },
+        ) else {
+            return self.view();
+        };
+        let owner = self.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || job.run()).await;
+        owner.view()
+    }
+    /// The current Grant original is unknown after its child's verified exit.
+    /// Only a read-only lookup of that exact original may follow; an
+    /// unverified exit or a known pending receipt is never looked up here.
+    pub(crate) fn uncertain_grant(&self) -> Option<String> {
         let state = self.state();
-        (!state.running && state.code == "ownership_transport_busy"
-                    && state.intent.as_ref().is_none_or(|intent| intent.complete))
-                    || state.intent.as_ref().is_some_and(|intent| {
-                    intent.complete && intent.exit_confirmed
-                        && matches!(intent.request, Request::DesktopOwnership { action: Action::Grant, .. })
-                        && intent.receipt.as_ref().is_some_and(|receipt| {
-                            !receipt.accepted && !receipt.durable
-                                && state.status.as_ref() == Some(&receipt.current)
-                                && matches!(&receipt.outcome, Outcome::Refused { code }
-                                    if (state.code.is_empty() || state.code == *code)
-                                        && matches!(code.as_str(), "ownership_drain_pending" | "ownership_resources_pending" | "ownership_transport_busy"))
-                        })
-                })
+        state
+            .intent
+            .as_ref()
+            .filter(|intent| {
+                !intent.complete
+                    && intent.exit_confirmed
+                    && intent.receipt.is_none()
+                    && matches!(
+                        intent.request,
+                        Request::DesktopOwnership {
+                            action: Action::Grant,
+                            ..
+                        }
+                    )
+            })
+            .map(|intent| intent.request.id().to_owned())
     }
     fn admit(
         self: &Arc<Self>,
         action: Option<Action>,
         configuration: Option<String>,
         cancel: Option<Arc<AtomicBool>>,
+    ) -> Option<Job> {
+        self.admit_with(action, configuration, cancel, |_| Some(None))
+    }
+    /// `allowed` runs under the state lock before `running` is set; `None`
+    /// refuses, `Some(basis)` binds the job to that basis.
+    fn admit_with(
+        self: &Arc<Self>,
+        action: Option<Action>,
+        configuration: Option<String>,
+        cancel: Option<Arc<AtomicBool>>,
+        allowed: impl FnOnce(&State) -> Option<Option<Basis>>,
     ) -> Option<Job> {
         if self.stop.load(Ordering::Acquire) {
             return None;
@@ -206,6 +385,7 @@ impl Controller {
         if state.running {
             return None;
         }
+        let basis = allowed(&state)?;
         state.running = true;
         drop(state);
         Some(Job {
@@ -216,15 +396,62 @@ impl Controller {
             resources: Arc::new(charge),
             deadline: None,
             refresh_absent_native: false,
+            basis,
+            keep_epoch: None,
+            effect_check: None,
         })
     }
-    pub(crate) fn granted(&self) -> bool {
-        let state = self.state();
+    fn granted_state(state: &State) -> bool {
         state
             .intent
             .as_ref()
             .and_then(|i| i.receipt.as_ref())
             .is_some_and(|r| r.service_granted() && state.status.as_ref() == Some(&r.current))
+    }
+    pub(crate) fn granted(&self) -> bool {
+        Self::granted_state(&self.state())
+    }
+
+    /// A busy, failed or original-result-only read cannot return a cached token.
+    pub(crate) async fn current_grant(
+        self: &Arc<Self>,
+        configuration: String,
+        cancel: Arc<AtomicBool>,
+    ) -> Option<CurrentGrant> {
+        let job = self.admit_with(None, Some(configuration), Some(cancel), |s| {
+            (!s.intent.as_ref().is_some_and(|i| !i.complete) && s.retired_native.is_none())
+                .then_some(None)
+        })?;
+        let owner = self.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            job.execute().ok()?;
+            let state = owner.state();
+            Self::granted_state(&state)
+                .then(|| CurrentGrant(state.status.clone().expect("Grant status")))
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+    /// Recheck exactly this already granted origin/revision before reserving a
+    /// single ordinary Grant. The actor still compares journal/revision under
+    /// its lock and authenticates the original frontend. No recovery/new origin.
+    pub(crate) async fn keep_epoch_refresh(
+        self: &Arc<Self>,
+        grant: CurrentGrant,
+        cancel: Arc<AtomicBool>,
+    ) -> View {
+        let Some(mut job) = self.admit_with(
+            Some(Action::Grant),
+            Some(grant.0.configuration.clone()),
+            Some(cancel),
+            |s| (Self::granted_state(s) && s.status.as_ref() == Some(&grant.0)).then_some(None),
+        ) else {
+            return self.view();
+        };
+        job.keep_epoch = Some(grant);
+        let _ = tauri::async_runtime::spawn_blocking(move || job.run()).await;
+        self.view()
     }
 }
 
@@ -236,6 +463,9 @@ struct Job {
     resources: Arc<dyn Send + Sync>,
     deadline: Option<Instant>,
     refresh_absent_native: bool,
+    basis: Option<Basis>,
+    keep_epoch: Option<CurrentGrant>,
+    effect_check: Option<EffectCheck>,
 }
 impl Drop for Job {
     fn drop(&mut self) {
@@ -279,8 +509,12 @@ impl Job {
         if self.stopped() {
             return Err("ownership_stopped");
         }
-        let held: Arc<dyn Send + Sync> =
-            Arc::new((self.resources.clone(), self.owner.clone(), route.clone()));
+        let held: Arc<dyn Send + Sync> = Arc::new((
+            self.resources.clone(),
+            self.owner.clone(),
+            route.clone(),
+            self.effect_check.clone(),
+        ));
         let mut call = invocation(args, input);
         self.bound(&mut call)?;
         let step = match args {
@@ -434,12 +668,22 @@ impl Job {
             {
                 if let Some(intent) = &mut state.intent {
                     intent.complete = true;
+                    intent.not_applied = true;
                 }
                 state.code = "ownership_not_applied".into();
             } else {
                 state.code = "ownership_unconfirmed".into();
             }
             return Ok(());
+        }
+        // This explicit mutation only tightens the owned legacy state directory;
+        // passive status/lookup never changes permissions. It precedes the first
+        // native intent and retains the same selected helper/resource bounds.
+        if self.owner.mode == Mode::Native
+            && self.action == Some(Action::NativeTakeover)
+            && has(wire::PREPARE_STATE_HELP_MARKER)
+        {
+            self.call(&route, &["desktop", "prepare-state", "--json"], vec![])?;
         }
         let bytes = self.call(&route, &["desktop", "ownership-status", "--json"], vec![])?;
         let status: Status =
@@ -466,6 +710,19 @@ impl Job {
             _ => (),
         }
         self.owner.state().status = Some(status.clone());
+        if self
+            .basis
+            .as_ref()
+            .is_some_and(|basis| !basis.holds(&status))
+        {
+            // The definitive negative no longer describes the authority.
+            self.owner.state().code = "ownership_changed".into();
+            return Ok(());
+        }
+        if self.keep_epoch.as_ref().is_some_and(|g| g.0 != status) {
+            self.owner.state().code = "ownership_changed".into();
+            return Ok(());
+        }
         let Some(action) = self.action else {
             self.owner.state().code.clear();
             return Ok(());
@@ -473,6 +730,14 @@ impl Job {
         if action == Action::Grant && status.rearm_required {
             self.owner.state().code = "ownership_rearm_required".into();
             return Ok(());
+        }
+        // All slow help/status work has finished. Check the SAME confirmed
+        // target before reserving any ownership original, then again at spawn.
+        if let Some(check) = &self.effect_check {
+            check()?;
+        }
+        if self.stopped() {
+            return Err("ownership_stopped");
         }
         let request = Request::DesktopOwnership {
             request_id: uuid::Uuid::new_v4().to_string(),
@@ -494,6 +759,7 @@ impl Job {
             exit_confirmed: false,
             complete: false,
             receipt: None,
+            not_applied: false,
         });
         drop(state);
         if self.owner.mode == Mode::Service {
@@ -526,6 +792,7 @@ impl Job {
             self.owner.clone(),
             route.clone(),
             registration.resources(),
+            self.effect_check.clone(),
         ));
         let spawned = Arc::new(AtomicBool::new(false));
         let original = spawned.clone();
@@ -534,12 +801,25 @@ impl Job {
             self.owner.state().intent.as_mut().unwrap().complete = true;
             return Err(code);
         }
+        let check = self.effect_check.clone();
+        let check_error = Arc::new(Mutex::new(None));
+        let original_error = check_error.clone();
         let result = run_owned_observed(
             helper,
             &call,
             &[],
             &self.cancel,
             move |command| {
+                // The target/cancellation fence survives registration and any
+                // later ownership-side wait. No mutating child on refusal.
+                if let Some(check) = check {
+                    if let Err(code) = check() {
+                        *original_error
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner) = Some(code);
+                        return Err(std::io::Error::other(code));
+                    }
+                }
                 let child = command.spawn()?;
                 original.store(true, Ordering::Release);
                 let _ = registration.bind_original(&child);
@@ -557,13 +837,23 @@ impl Job {
                 intent.complete = true;
             }
         }
+        if let Some(code) = *check_error.lock().unwrap_or_else(PoisonError::into_inner) {
+            return Err(code);
+        }
         let bytes = result.map_err(|_| "ownership_unconfirmed")?;
         route.executable()?;
         if self.stopped() || bytes.len() > wire::BYTES {
             return Err("ownership_unconfirmed");
         }
-        let receipt: Receipt =
-            serde_json::from_slice(&bytes).map_err(|_| "ownership_unconfirmed")?;
+        let receipt: Receipt = serde_json::from_slice(&bytes).map_err(|_| {
+            if let Some(code) = response_refusal(&bytes, request.id()) {
+                self.owner
+                    .state()
+                    .diagnostic
+                    .get_or_insert(("native_takeover.frontend_response", code));
+            }
+            "ownership_unconfirmed"
+        })?;
         self.settle(receipt, &request, &status.configuration)
     }
     fn settle(
@@ -603,20 +893,76 @@ impl NativeReady {
     }
 }
 /// Called after canonical claim, before Bootstrap or notifier construction.
-pub(crate) fn native_takeover(
+pub(crate) struct NativeRecovery {
+    // Keep the exact uncertain intent, original child/pipe charges and route.
+    // A new consumer controller cannot replay or replace this original.
+    _owner: Arc<Controller>,
+    pub code: &'static str,
+}
+
+impl NativeRecovery {
+    pub(crate) fn close(&self) -> Closed {
+        self._owner.close()
+    }
+}
+
+pub(crate) fn native_takeover_recoverable(
     hgs: PathBuf,
     responder: Arc<Responder>,
-) -> Result<NativeReady, &'static str> {
-    let owner = Controller::new(hgs, Some(responder), Mode::Native);
-    let result = native_startup(owner.clone(), Instant::now() + Duration::from_secs(15));
-    if let Err(code) = result {
-        let diagnostic = owner
-            .state()
-            .diagnostic
-            .unwrap_or(("native_takeover", code));
-        crate::startup_error::record(diagnostic.0, diagnostic.1);
+) -> Result<NativeReady, NativeRecovery> {
+    native_takeover_until(
+        Controller::new(hgs, Some(responder), Mode::Native),
+        Instant::now() + Duration::from_secs(15),
+    )
+}
+
+fn native_takeover_until(
+    owner: Arc<Controller>,
+    deadline: Instant,
+) -> Result<NativeReady, NativeRecovery> {
+    match native_startup(owner.clone(), deadline) {
+        Ok(ready) => Ok(ready),
+        Err(code) => {
+            let diagnostic = owner
+                .state()
+                .diagnostic
+                .unwrap_or(("native_takeover", code));
+            crate::startup_error::record(diagnostic.0, diagnostic.1);
+            owner.stop();
+            Err(NativeRecovery {
+                _owner: owner,
+                code,
+            })
+        }
     }
-    result
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn native_takeover(hgs: PathBuf, responder: Arc<Responder>) -> Result<NativeReady, &'static str> {
+    native_takeover_recoverable(hgs, responder).map_err(|failure| failure.code)
+}
+
+// A matching closed negative explains a refusal; it cannot complete, replay or
+// grant an uncertain ownership intent. Child-selected text is never published.
+fn response_refusal(bytes: &[u8], original: &str) -> Option<&'static str> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Refusal {
+        request_id: String,
+        accepted: bool,
+        durable: bool,
+        code: String,
+    }
+    let refusal: Refusal = serde_json::from_slice(bytes).ok()?;
+    if refusal.request_id != original || refusal.accepted || refusal.durable {
+        return None;
+    }
+    match refusal.code.as_str() {
+        "frontend_authentication_refused" => Some("frontend_authentication_refused"),
+        "frontend_identity_expired" => Some("frontend_identity_expired"),
+        "ownership_not_settled" => Some("ownership_not_settled"),
+        _ => None,
+    }
 }
 
 fn failure_code(error: &OwnedError, stderr: Option<&str>) -> &'static str {

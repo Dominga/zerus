@@ -10,7 +10,7 @@ pub(super) enum Reason {
     ReplyDecode,
     ReplyIdentity,
     Refused(Refusal),
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     ForeignContext,
     WorkerJoin,
 }
@@ -21,6 +21,9 @@ pub(super) enum Refusal {
     FrontendAuthenticationRefused,
     FrontendIdentityExpired,
     ActivationReceiverUnavailable,
+    /// A passive service: background work, and so its activation receiver,
+    /// is not running (src/desktop/delivery.rs passive_frontend_request).
+    DesktopBackgroundUnavailable,
 }
 
 impl Reason {
@@ -92,6 +95,9 @@ impl Reason {
             Self::Refused(Refusal::ActivationReceiverUnavailable) => {
                 "activation_receiver_unavailable"
             }
+            Self::Refused(Refusal::DesktopBackgroundUnavailable) => {
+                "desktop_background_unavailable"
+            }
             Self::ForeignContext => "foreign_platform_context",
             Self::WorkerJoin => "worker_join",
         }
@@ -152,6 +158,7 @@ mod tests {
         for code in [
             "frontend_identity_expired",
             "activation_receiver_unavailable",
+            "desktop_background_unavailable",
         ] {
             value["code"] = code.into();
             assert_eq!(classify(&value).code(), code);

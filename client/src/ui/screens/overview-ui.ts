@@ -30,7 +30,15 @@ export interface Figure { value: string; percent?: number; detail: string; tip: 
 const noMetrics = (meta?: MachineMeta) =>
   !meta || (meta.metrics.sampled_at === null && meta.metrics.cpu_state === null && meta.metrics.cpu_percent === null);
 
-export function cpuFigure(meta: MachineMeta | undefined): Figure {
+/**
+ * Task 72 (F2): no metrics yet because the computer is still connecting (or
+ * its machine data has not arrived): the card reads, it does not say an
+ * update is needed or that memory is unavailable.
+ */
+export const metricsLoading = (meta: MachineMeta | undefined, c: Pick<Connection, "tile" | "fresh">) =>
+  (c.tile === "connecting" || (!meta && c.fresh)) && noMetrics(meta);
+
+export function cpuFigure(meta: MachineMeta | undefined, loading = false): Figure {
   const m = meta?.metrics;
   if (m && m.cpu_percent !== null) {
     return {
@@ -40,18 +48,19 @@ export function cpuFigure(meta: MachineMeta | undefined): Figure {
       tip: tr("Average CPU use over the last %1 seconds, across all logical cores.", (m.cpu_interval_seconds ?? 0).toFixed(1)),
     };
   }
+  if (loading) return { value: "—", detail: tr("Reading metrics…"), tip: tr("Waiting for the computer's first sample.") };
   const detail = noMetrics(meta) ? tr("Update hgs for metrics") : m?.cpu_state === "unavailable" ? tr("CPU metrics unavailable") : tr("Waiting for second sample");
   return { value: "—", detail, tip: tr("CPU use needs two samples. Refresh again after a moment.") };
 }
 
-export function memoryFigure(meta: MachineMeta | undefined): Figure {
+export function memoryFigure(meta: MachineMeta | undefined, loading = false): Figure {
   const m = meta?.metrics;
   const total = m?.memory_total_bytes ?? 0;
   const used = m?.memory_used_bytes ?? 0;
   const tip = meta?.platform === "macos"
     ? tr("App, wired and compressed memory. Reclaimable file cache is excluded.")
     : tr("Total memory minus available memory, including reclaimable cache.");
-  if (total <= 0) return { value: "—", detail: tr("Memory unavailable"), tip };
+  if (total <= 0) return { value: "—", detail: loading ? tr("Reading metrics…") : tr("Memory unavailable"), tip };
   const percent = (100 * used) / total;
   return { value: `${Math.round(percent)}%`, percent, detail: tr("%1 of %2", bytes(used), bytes(total)), tip };
 }
@@ -59,6 +68,7 @@ export function memoryFigure(meta: MachineMeta | undefined): Figure {
 /** The sample time when it is not current; a live stream with a sample under 60 s old is current. */
 export function sampleNote(meta: MachineMeta | undefined, c: Connection, now: number): string {
   const at = meta?.metrics.sampled_at ?? null;
+  if (metricsLoading(meta, c)) return "";
   if (c.fresh && at !== null && now - at < 60) return "";
   return at !== null && at > 0 ? tr("Last sample %1", dayTime(at)) : tr("No sample yet");
 }

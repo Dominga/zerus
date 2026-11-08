@@ -1,6 +1,7 @@
 //! Optional Codex questions are asynchronous messages, not blocking tool calls.
-//! Preserve them independently of tool completion and acknowledge exact native
-//! questionItemIds. Skip is a local dismissal and never fabricates a user answer.
+//! Tool acceptance is not an answer. Native turn completion or a new ordinary
+//! user input closes the TUI's questions; neither fabricates a user answer.
+//! Actual replies still acknowledge exact native questionItemIds.
 use super::question_terminal::{Native, Transport};
 use super::*;
 use sha2::{Digest, Sha256};
@@ -38,6 +39,22 @@ fn parse_reply(text: &str) -> Vec<Value> {
 }
 fn observe(record: &Value, cache: &mut Value, event: &Value) {
     let payload = &event["payload"];
+    if event["type"] == "event_msg" {
+        let turn = string(payload, "turn_id");
+        if !turn.is_empty() && turn.len() <= 200 && !turn.chars().any(char::is_control) {
+            match string(payload, "type") {
+                "task_started" | "turn_started" => cache["active_turn"] = json!(turn),
+                "task_complete" | "turn_complete" | "turn_aborted" => {
+                    if let Some(items) = cache["items"].as_object_mut() {
+                        for card in items.values_mut().filter(|card| card["native_turn_id"] == turn) {
+                            card["closed"] = json!(string(payload, "type"));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
     if event["type"] == "response_item"
         && payload["type"] == "function_call"
         && matches!(
@@ -45,6 +62,10 @@ fn observe(record: &Value, cache: &mut Value, event: &Value) {
             "request_user_input_async" | "functions.request_user_input_async"
         )
     {
+        // A same-named tool in another namespace is not a user question.
+        if !["", "functions"].contains(&string(payload, "namespace")) {
+            return;
+        }
         let call = string(payload, "call_id");
         if call.is_empty() || call.len() > 200 {
             return;
@@ -83,6 +104,7 @@ fn observe(record: &Value, cache: &mut Value, event: &Value) {
             let native_id = json!(["request_user_input_async", call, index]).to_string();
             let id = format!("codex-async:{call}:{index}");
             if !cache["items"][&id].is_null() {
+                cache["items"][&id]["native_turn_id"] = cache["active_turn"].as_str().unwrap_or("").into();
                 continue;
             }
             let choices: Vec<_> = options
@@ -93,6 +115,7 @@ fn observe(record: &Value, cache: &mut Value, event: &Value) {
             let mut card = json!({"question_id":id,"tool_call_id":call,"native_question_id":native_id,
                 "run_id":record["run_id"],"conversation_id":record["conversation_id"],"source":"codex_async",
                 "created_at":search::timestamp(&event["timestamp"]),"optional":true,"can_skip":true,"can_answer":false,
+                "native_turn_id":cache["active_turn"].as_str().unwrap_or(""),
                 "questions":[{"id":"q_0","question":title,"options":choices,"allow_other":true,"required":false,"multi_select":false}]});
             card["question_hash"] = json!(questions::fingerprint(&card));
             cache["items"][id] = card;
@@ -105,7 +128,7 @@ fn observe(record: &Value, cache: &mut Value, event: &Value) {
                 .is_some_and(|v| v["accepted"] == true);
             for card in items
                 .values_mut()
-                .filter(|c| c["tool_call_id"] == payload["call_id"])
+                .filter(|c| c["tool_call_id"] == payload["call_id"] && c.get("native_turn_id").is_some())
             {
                 card["accepted"] = json!(accepted);
             }
@@ -126,6 +149,15 @@ fn observe(record: &Value, cache: &mut Value, event: &Value) {
     } else {
         vec![]
     };
+    // Only a committed native user-message event establishes new input. User-role
+    // response items can be harness context; mere assistant progress ends nothing.
+    if event["type"] == "event_msg" && payload["type"] == "user_message"
+        && texts.iter().any(|text| !text.trim().is_empty() && parse_reply(text).is_empty())
+    {
+        if let Some(items) = cache["items"].as_object_mut() {
+            for card in items.values_mut() { card["closed"] = json!("follow_up"); }
+        }
+    }
     for reply in texts.into_iter().flat_map(parse_reply) {
         if let Some(items) = cache["items"].as_object_mut() {
             for card in items.values_mut() {
@@ -181,6 +213,11 @@ fn index(record: &Value, cache_path: &Path, deadline: Option<Instant>) -> Result
     if header["type"] != "session_meta" || header["payload"]["id"] != id {
         return Err("Conversation transcript identity mismatch".into());
     }
+    // A native child is owned by its parent, not by the person at this terminal.
+    // Do not infer this from forked_from_id: an interactive fork is still user-owned.
+    if !header["payload"]["source"]["subagent"].is_null() {
+        return Ok(Some(json!({"items":{}})));
+    }
     let mut cache: Value = fs::read_to_string(cache_path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -193,9 +230,18 @@ fn index(record: &Value, cache_path: &Path, deadline: Option<Instant>) -> Result
     // Questions can stay unanswered long after they leave the recent-message
     // tail. Index the entire exact conversation once, then only appended bytes.
     // Reindex old tail-only caches while retaining explicit local dismissals.
-    if cache["scan_version"] != 2 {
+    if cache["scan_version"] != 3 {
         cache["offset"] = json!(0);
-        cache["scan_version"] = json!(2);
+        cache["scan_version"] = json!(3);
+        cache["active_turn"] = Value::Null;
+        // Re-establish native call scope and turn binding. Keep exact local skips,
+        // delivery receipts and recorded answers; reindexing cannot resend them.
+        if let Some(items) = cache["items"].as_object_mut() {
+            for card in items.values_mut() {
+                card["accepted"] = json!(false);
+                card.as_object_mut().unwrap().remove("native_turn_id");
+            }
+        }
     }
     let offset = cache["offset"].as_u64().unwrap_or(0);
     reader
@@ -230,6 +276,10 @@ fn index(record: &Value, cache_path: &Path, deadline: Option<Instant>) -> Result
         if count <= 1024 * 1024
             && (line.contains("request_user_input_async")
                 || line.contains("function_call_output")
+                || line.contains("\"user_message\"")
+                || line.contains("\"task_started\"") || line.contains("\"turn_started\"")
+                || line.contains("\"task_complete\"") || line.contains("\"turn_complete\"")
+                || line.contains("\"turn_aborted\"")
                 || line.contains("send_user_message_question_reply"))
         {
             if let Ok(event) = serde_json::from_str(&line) {
@@ -273,7 +323,8 @@ fn pending(record: &Value, cache: &Value) -> Vec<Value> {
         .as_object()
         .into_iter()
         .flat_map(|o| o.values())
-        .filter(|c| c["accepted"] == true && c["response"].is_null() && c["skipped"] != true)
+        .filter(|c| c["accepted"] == true && c["response"].is_null() && c["skipped"] != true
+            && (c["closed"].is_null() || matching_submission(record, c, &c["delivery"])))
         .cloned()
         .map(|mut card| {
             card["run_id"] = record["run_id"].clone();
@@ -294,7 +345,7 @@ pub(super) fn messages(record: &Value) -> Result<Vec<Value>> {
     Ok(cache["items"].as_object().into_iter().flat_map(|m|m.values()).filter(|c|c["accepted"]==true).map(|card|{
         let question=&card["questions"][0];
         let choices=question["options"].as_array().unwrap().iter().flat_map(|o|["\n- ",string(o,"label")]).collect::<String>();
-        let status=if card["skipped"]==true {"Skipped"}else if !card["response"].is_null(){"Answered"}else{"Optional"};
+        let status=if card["skipped"]==true {"Skipped"}else if !card["response"].is_null(){"Answered"}else if !card["closed"].is_null(){"Closed"}else{"Optional"};
         json!({"type":"AgentMessage","source":"codex_transcript","message_id":card["question_id"],"agent_id":"",
             "at":card["created_at"],"message_phase":"commentary","detail":format!("{}\n{}{}",status,string(question,"question"),choices)})
     }).collect())
@@ -631,6 +682,41 @@ fn recover_submissions(record: &Value, cache: &mut Value) -> Result<()> {
     Ok(())
 }
 
+/// A failure once input may have reached Codex (`touched`) is never a
+/// refusal: the answer, or its Skip, may already be there.
+fn after_input(touched: bool, error: String) -> String {
+    if touched && !error.contains("delivery uncertain") {
+        format!("delivery uncertain: {error}")
+    } else {
+        error
+    }
+}
+
+/// Codex's own Skip of `card`: its key while the panel is `visible`, then
+/// the skip recorded in the question cache at `path`. Once the key may have
+/// reached Codex (`touched`), every later failure, the key's own included,
+/// is uncertain: it may already have dismissed the panel.
+fn skip<T: Transport>(
+    terminal: &mut T,
+    touched: fn(&T) -> bool,
+    visible: bool,
+    path: &Path,
+    card: &Value,
+) -> Result<()> {
+    let skipped = (|| -> Result<()> {
+        if visible {
+            terminal.key("C-]")?;
+        }
+        let _guard = lock(Some(&path.with_extension("lock")))?;
+        let mut cache: Value =
+            serde_json::from_str(&fs::read_to_string(path).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+        cache["items"][string(card, "question_id")]["skipped"] = json!(true);
+        atomic(path, &cache.to_string())
+    })();
+    skipped.map_err(|error| after_input(touched(terminal), error))
+}
+
 pub(super) fn answer(
     record: &Value,
     card: &Value,
@@ -640,22 +726,14 @@ pub(super) fn answer(
     let mut terminal = Native::new(record, card);
     let screen = terminal.screen()?;
     if answers[0]["skip"] == true {
-        if visible_panel(&screen, card)? && unambiguous(record, card)? {
-            terminal.key("C-]")?;
-        }
-        let path = cache_path(record)?;
-        let _guard = lock(Some(&path.with_extension("lock")))?;
-        let mut cache: Value =
-            serde_json::from_str(&fs::read_to_string(&path).map_err(|e| e.to_string())?)
-                .map_err(|e| e.to_string())?;
-        cache["items"][string(card, "question_id")]["skipped"] = json!(true);
-        atomic(&path, &cache.to_string()).map_err(|e| {
-            if terminal.touched() {
-                format!("delivery uncertain: {e}")
-            } else {
-                e
-            }
-        })?;
+        let visible = visible_panel(&screen, card)? && unambiguous(record, card)?;
+        skip(
+            &mut terminal,
+            Native::touched,
+            visible,
+            &cache_path(record)?,
+            card,
+        )?;
         return Ok("answered");
     }
     available(record, card)?;
@@ -674,15 +752,13 @@ pub(super) fn answer(
             terminal.key("Enter")
         })();
         if let Err(error) = result {
-            return Err(if terminal.touched() {
-                format!("delivery uncertain: {error}")
-            } else {
-                error
-            });
+            return Err(after_input(terminal.touched(), error));
         }
     } else {
+        // Its own submission refuses pending settings, whose keys would
+        // reach the terminal before this answer: only its paste may.
         let payload = json!({"request_id":request_id,"text":envelope(card,&text),"expected_run_id":record["run_id"],"expected_conversation_id":record["conversation_id"]});
-        input::submit(string(record, "name"), payload.to_string().as_bytes(), None)?;
+        input::submit_answer(string(record, "name"), payload.to_string().as_bytes())?;
     }
     save_submission(record, card, answers, request_id)
         .map_err(|e| format!("delivery uncertain: {e}"))?;
@@ -752,6 +828,134 @@ mod tests {
             json!([])
         );
     }
+    fn boundary(kind: &str, turn: &str) -> Value {
+        json!({"type":"event_msg","payload":{"type":kind,"turn_id":turn}})
+    }
+    fn accepted_questions() -> (Value, Value) {
+        let record = json!({"run_id":"run","conversation_id":"conv"});
+        let mut cache = json!({"items":{}});
+        observe(&record, &mut cache, &boundary("task_started", "original-turn"));
+        observe(&record, &mut cache, &request());
+        observe(&record, &mut cache, &json!({"type":"response_item","payload":{
+            "type":"function_call_output","call_id":"call_one","output":"{\"accepted\":true}"}}));
+        (record, cache)
+    }
+    #[test]
+    fn native_turn_completion_closes_without_inventing_answers_or_reopening_on_acceptance() {
+        for kind in ["task_complete", "turn_complete", "turn_aborted"] {
+            let (record, mut cache) = accepted_questions();
+            assert_eq!(pending(&record, &cache).len(), 2);
+            observe(&record, &mut cache, &boundary(kind, "other-turn"));
+            assert_eq!(pending(&record, &cache).len(), 2);
+            observe(&record, &mut cache, &boundary(kind, ""));
+            assert_eq!(pending(&record, &cache).len(), 2);
+            observe(&record, &mut cache, &boundary(kind, "original-turn"));
+            assert!(pending(&record, &cache).is_empty());
+            assert!(cache["items"]["codex-async:call_one:0"]["response"].is_null());
+            observe(&record, &mut cache, &json!({"type":"response_item","payload":{
+                "type":"function_call_output","call_id":"call_one","output":"{\"accepted\":true}"}}));
+            assert!(pending(&record, &cache).is_empty());
+            observe(&record, &mut cache, &boundary("task_started", "next-turn"));
+            let mut next = request(); next["payload"]["call_id"] = json!("call_next");
+            observe(&record, &mut cache, &next);
+            observe(&record, &mut cache, &json!({"type":"response_item","payload":{
+                "type":"function_call_output","call_id":"call_next","output":"{\"accepted\":true}"}}));
+            observe(&record, &mut cache, &boundary(kind, "original-turn"));
+            let cards = pending(&record, &cache);
+            assert_eq!(cards.len(), 2);
+            assert!(cards.iter().all(|card| card["tool_call_id"] == "call_next"));
+        }
+    }
+    #[test]
+    fn only_committed_follow_up_closes_the_remaining_questions() {
+        let (record, mut cache) = accepted_questions();
+        let card = cache["items"]["codex-async:call_one:0"].clone();
+        observe(&record, &mut cache, &json!({"type":"event_msg","payload":{
+            "type":"user_message","message":envelope(&card,"One")}}));
+        assert_eq!(pending(&record, &cache).len(), 1);
+        assert!(!cache["items"]["codex-async:call_one:0"]["response"].is_null());
+        for event in [json!({"type":"response_item","payload":{"type":"message","role":"user",
+            "content":[{"type":"input_text","text":"Injected context"}]}}),
+            json!({"type":"event_msg","payload":{"type":"agent_message","message":"Continuing work"}}),
+            json!({"type":"event_msg","payload":{"type":"user_message","message":""}})] {
+            observe(&record, &mut cache, &event);
+            assert_eq!(pending(&record, &cache).len(), 1);
+        }
+        observe(&record, &mut cache, &json!({"type":"event_msg","payload":{
+            "type":"user_message","message":"Continue with the defaults."}}));
+        assert!(pending(&record, &cache).is_empty());
+        assert!(cache["items"]["codex-async:call_one:1"]["response"].is_null());
+    }
+    #[test]
+    fn closing_a_question_keeps_its_exact_submitted_answer_until_native_acknowledgement() {
+        let (record, mut cache) = accepted_questions();
+        let card = cache["items"]["codex-async:call_one:0"].clone();
+        cache["items"]["codex-async:call_one:0"]["delivery"] = submission(&record, &card,
+            &json!([{"question_id":"q_0","text":"One"}]), "original-request");
+        observe(&record, &mut cache, &boundary("task_complete", "original-turn"));
+        let cards = pending(&record, &cache);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0]["answer_delivery"]["request_id"], "original-request");
+        assert!(cache["items"]["codex-async:call_one:0"]["response"].is_null());
+        let mut other_run = record.clone(); other_run["run_id"] = json!("another-run");
+        assert!(pending(&other_run, &cache).is_empty());
+        observe(&record, &mut cache, &json!({"type":"event_msg","payload":{
+            "type":"user_message","message":envelope(&card,"One")}}));
+        assert!(pending(&record, &cache).is_empty());
+        assert_eq!(cache["items"]["codex-async:call_one:0"]["response"]["type"], "interaction.resolved");
+    }
+    #[test]
+    fn child_sources_and_foreign_namespaces_never_become_user_questions() {
+        let (record, mut cache) = accepted_questions();
+        let mut foreign = request();
+        foreign["payload"]["namespace"] = json!("collaboration");
+        foreign["payload"]["call_id"] = json!("child_question");
+        observe(&record, &mut cache, &foreign);
+        observe(&record, &mut cache, &json!({"type":"response_item","payload":{
+            "type":"function_call_output","call_id":"child_question","output":"{\"accepted\":true}"}}));
+        assert_eq!(pending(&record, &cache).len(), 2);
+        for child in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let id = uuid::Uuid::new_v4().to_string();
+            let path = dir.path().join(format!("rollout-{id}.jsonl"));
+            let source = if child { json!({"subagent":{"thread_spawn":{"parent_thread_id":"parent"}}}) } else { json!("cli") };
+            let rows = [json!({"type":"session_meta","payload":{"id":id,"source":source,"forked_from_id":"parent"}}),
+                request(), json!({"type":"response_item","payload":{"type":"function_call_output",
+                    "call_id":"call_one","output":"{\"accepted\":true}"}})];
+            fs::write(&path, rows.iter().map(|row| format!("{row}\n")).collect::<String>()).unwrap();
+            let record = json!({"run_id":"run","conversation_id":id,"transcript":path});
+            let cache = index(&record, &dir.path().join("cache.json"), None).unwrap().unwrap();
+            assert_eq!(pending(&record, &cache).len(), if child { 0 } else { 2 });
+        }
+    }
+    #[test]
+    fn version_two_cache_rebuilds_turn_closures_and_preserves_local_delivery_and_skip() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let path = dir.path().join(format!("rollout-{id}.jsonl"));
+        let rows = [json!({"type":"session_meta","payload":{"id":id}}),
+            boundary("task_started", "original-turn"), request(),
+            json!({"type":"response_item","payload":{"type":"function_call_output",
+                "call_id":"call_one","output":"{\"accepted\":true}"}}),
+            boundary("task_complete", "original-turn")];
+        fs::write(&path, rows.iter().map(|row| format!("{row}\n")).collect::<String>()).unwrap();
+        let (_, mut cache) = accepted_questions();
+        cache["items"]["codex-async:call_one:0"]["skipped"] = json!(true);
+        cache["items"]["codex-async:call_one:1"]["delivery"] = json!({"request_id":"original-delivery"});
+        let file = File::open(&path).unwrap();
+        let (identity, meta) = crate::platform::FileIdentity::with_metadata(&file).unwrap();
+        cache["inode"] = json!([identity.device, identity.inode]);
+        cache["offset"] = json!(meta.len()); cache["scan_version"] = json!(2);
+        cache["submission_scan_run"] = json!("run");
+        let cache_path = dir.path().join("cache.json");
+        fs::write(&cache_path, cache.to_string()).unwrap();
+        let record = json!({"run_id":"run","conversation_id":id,"transcript":path});
+        let cache = index(&record, &cache_path, None).unwrap().unwrap();
+        assert_eq!(cache["scan_version"], 3);
+        assert!(pending(&record, &cache).is_empty());
+        assert_eq!(cache["items"]["codex-async:call_one:0"]["skipped"], true);
+        assert_eq!(cache["items"]["codex-async:call_one:1"]["delivery"]["request_id"], "original-delivery");
+    }
     #[test]
     fn bounded_index_saves_its_progress_and_resumes() {
         let dir = tempfile::tempdir().unwrap();
@@ -818,6 +1022,86 @@ mod tests {
         // Every line but the last one ended a call, each oversized line included.
         assert_eq!(calls, lines.len());
         assert_eq!(pending(&record, &complete).len(), 2);
+    }
+    /// zerus-cqkoh: a Skip whose key may have reached Codex never fails as
+    /// a refusal; one that sent nothing does.
+    #[test]
+    fn a_skip_after_its_key_never_fails_as_a_refusal() {
+        struct Keys {
+            touched: bool,
+            fail: bool,
+        }
+        impl Transport for Keys {
+            fn screen(&mut self) -> Result<String> {
+                Ok(String::new())
+            }
+            fn key(&mut self, _: &str) -> Result<()> {
+                self.touched = true;
+                if self.fail {
+                    return Err("key not sent".into());
+                }
+                Ok(())
+            }
+            fn paste(&mut self, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn resolved(&mut self) -> Result<Option<Value>> {
+                Ok(None)
+            }
+        }
+        let touched = |keys: &Keys| keys.touched;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+        let card = json!({"question_id": "codex-async:call_one:0"});
+        // The key's own failure, after it may have gone out.
+        let mut keys = Keys {
+            touched: false,
+            fail: true,
+        };
+        let error = skip(&mut keys, touched, true, &path, &card).unwrap_err();
+        assert!(
+            error.starts_with("delivery uncertain: key not sent"),
+            "{error}"
+        );
+        // The cache after a sent key.
+        let mut keys = Keys {
+            touched: false,
+            fail: false,
+        };
+        let error = skip(&mut keys, touched, true, &path, &card).unwrap_err();
+        assert!(error.starts_with("delivery uncertain: "), "{error}");
+        // Nothing sent: the same failure is a refusal.
+        let mut keys = Keys {
+            touched: false,
+            fail: false,
+        };
+        let error = skip(&mut keys, touched, false, &path, &card).unwrap_err();
+        assert!(!error.contains("delivery uncertain"), "{error}");
+        assert!(!keys.touched);
+        // A sent key and a readable cache record the skip.
+        fs::write(&path, json!({"items": {}}).to_string()).unwrap();
+        let mut keys = Keys {
+            touched: false,
+            fail: false,
+        };
+        skip(&mut keys, touched, true, &path, &card).unwrap();
+        let cache: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(cache["items"]["codex-async:call_one:0"]["skipped"], true);
+    }
+    #[test]
+    fn a_failure_after_possible_input_is_uncertain() {
+        assert_eq!(
+            after_input(false, "cache unreadable".into()),
+            "cache unreadable"
+        );
+        assert_eq!(
+            after_input(true, "cache unreadable".into()),
+            "delivery uncertain: cache unreadable"
+        );
+        assert_eq!(
+            after_input(true, "delivery uncertain: late".into()),
+            "delivery uncertain: late"
+        );
     }
     #[test]
     fn only_complete_native_question_panels_accept_input() {

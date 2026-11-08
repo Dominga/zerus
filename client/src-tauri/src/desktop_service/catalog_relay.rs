@@ -162,7 +162,10 @@ impl Session {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         crate::child_environment::restore(command.as_std_mut());
-        command.env_remove("HGS_SESSION").env_remove("HGS_RUN_ID");
+        command
+            .env_remove("HGS_SESSION")
+            .env_remove("HGS_SESSION_ID")
+            .env_remove("HGS_RUN_ID");
         #[cfg(windows)]
         command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
         let mut child = command.spawn().map_err(|_| "catalog_relay_unavailable")?;

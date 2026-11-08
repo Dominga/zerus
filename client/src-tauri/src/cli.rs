@@ -11,7 +11,7 @@ pub struct Options {
     /// `--sessions`: open the window, here or in the running instance.
     pub sessions: bool,
     /// Exact UI navigation data, never a notification callback/permission.
-    #[cfg(all(feature = "live", target_os = "linux"))]
+    #[cfg(all(feature = "live", any(target_os = "linux", windows)))]
     pub target: Option<zerus_client_core::desktop::activation::Target>,
     /// `--background`: start in the menu bar only.
     pub background: bool,
@@ -43,7 +43,7 @@ pub enum Command {
 
 /// Consume only this new GUI process's launch input. The environment is never
 /// a callback authority; reject conflicts rather than silently changing targets.
-#[cfg(all(feature = "live", target_os = "linux"))]
+#[cfg(all(feature = "live", any(target_os = "linux", windows)))]
 pub fn take_navigation_environment(options: &mut Options) -> Result<(), String> {
     use zerus_client_core::desktop::activation::{decode_navigation, NAVIGATION_ENV};
     let raw = std::env::var_os(NAVIGATION_ENV);
@@ -104,7 +104,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             "--build-info" => return Ok(Command::BuildInfo),
             "--sessions" => options.sessions = true,
             "--background" => options.background = true,
-            #[cfg(all(feature = "live", target_os = "linux"))]
+            #[cfg(all(feature = "live", any(target_os = "linux", windows)))]
             zerus_client_core::desktop::activation::NAVIGATION_ARG => {
                 if options.target.is_some() {
                     return Err("Give only one desktop target".into());
@@ -187,8 +187,22 @@ pub fn usage() -> String {
 }
 
 #[cfg(windows)]
-pub fn usage() -> &'static str {
-    "Usage: hgs-tray [options]\n\n  --hgs <path>          path to the hgs binary\n  --sessions            open the Zerus window\n  --background          start in the notification area without a window\n  --install-login-item  opt in to starting in the background at login\n  --remove-login-item   remove this app's per-user login registration\n  -h, --help            this text\n  --version             installed release version and exit\n  --build-info          embedded build/source identity as JSON and exit\n\nAccepted Qt options: --local-poll, --peer-poll, --terminal, --icon-color, --open-mode (each takes a value).\n"
+pub fn usage() -> String {
+    let base = "Usage: hgs-tray [options]\n\n  --hgs <path>          path to the hgs binary\n  --sessions            open the Zerus window\n  --background          start in the notification area without a window\n  --install-login-item  opt in to starting in the background at login\n  --remove-login-item   remove this app's per-user login registration\n  -h, --help            this text\n  --version             installed release version and exit\n  --build-info          embedded build/source identity as JSON and exit\n\nAccepted Qt options: --local-poll, --peer-poll, --terminal, --icon-color, --open-mode (each takes a value).\n";
+    // The service's launcher reads these markers before passing a target.
+    #[cfg(feature = "live")]
+    {
+        format!(
+            "{base}\n  {} <json>  open an exact computer/run/conversation\n{}\n{}\n",
+            zerus_client_core::desktop::activation::NAVIGATION_ARG,
+            zerus_client_core::desktop::activation::NAVIGATION_HELP_MARKER,
+            zerus_client_core::desktop::activation::NAVIGATION_ENV_HELP_MARKER
+        )
+    }
+    #[cfg(not(feature = "live"))]
+    {
+        base.to_owned()
+    }
 }
 
 /// What `build.rs` embedded.
@@ -254,10 +268,30 @@ pub fn build_info_for(facts: &BuildFacts, identifier: &str) -> Value {
     let mut info = build_info(facts);
     info["CFBundleIdentifier"] = Value::from(identifier);
     info["ZerusGUI"] = Value::from("tauri");
+    // WhiteWh fork, task #65: the fork build and feed this build embeds (the
+    // ones crate::fork_updates reads), so the packaged zip can be checked
+    // against its build-info.json.
+    for (key, value) in fork_identity(option_env!("ZERUS_FORK_BUILD"), option_env!("ZERUS_FORK_FEED_URL")) {
+        info[key] = value;
+    }
     // Older Tauri rollback builds must use stock libraries: they cannot restore
     // the launcher's environment before starting agents or external programs.
     info["localWebKitChildEnvironment"] = Value::from(1);
     info
+}
+
+/// WhiteWh fork, task #65: `forkBuild` and `forkFeed` of a fork build; a
+/// feed outside the fork's releases is no feed, as the updater reads it.
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
+fn fork_identity(build: Option<&str>, feed: Option<&str>) -> Vec<(&'static str, Value)> {
+    let mut out = Vec::new();
+    if let Some(build) = build.and_then(|build| build.trim().parse::<u64>().ok()).filter(|build| *build > 0) {
+        out.push(("forkBuild", Value::from(build)));
+    }
+    if let Some(feed) = feed.map(str::trim).filter(|feed| feed.starts_with("https://github.com/WhiteWh/zerus/releases/")) {
+        out.push(("forkFeed", Value::from(feed)));
+    }
+    out
 }
 
 /// `hgs-tray --version` (`main.cpp:196-200`).
@@ -282,7 +316,7 @@ mod tests {
         list.iter().map(|arg| (*arg).to_owned()).collect()
     }
 
-    #[cfg(all(feature = "live", target_os = "linux"))]
+    #[cfg(all(feature = "live", any(target_os = "linux", windows)))]
     #[test]
     fn navigation_consumes_its_startup_inputs_in_an_isolated_child() {
         const CASE: &str =
@@ -301,16 +335,19 @@ mod tests {
             assert_eq!(options.target, Some(target.clone()));
             assert!(options.opens_sessions(true));
             assert!(std::env::var_os(NAVIGATION_ENV).is_none());
-            assert_eq!(
-                std::env::var("XDG_ACTIVATION_TOKEN").as_deref(),
-                Ok("synthetic-wayland")
-            );
-            assert_eq!(
-                take_activation_token(true).as_deref(),
-                Some("synthetic-wayland")
-            );
-            assert!(std::env::var_os("XDG_ACTIVATION_TOKEN").is_none());
-            assert!(take_activation_token(true).is_none());
+            #[cfg(target_os = "linux")]
+            {
+                assert_eq!(
+                    std::env::var("XDG_ACTIVATION_TOKEN").as_deref(),
+                    Ok("synthetic-wayland")
+                );
+                assert_eq!(
+                    take_activation_token(true).as_deref(),
+                    Some("synthetic-wayland")
+                );
+                assert!(std::env::var_os("XDG_ACTIVATION_TOKEN").is_none());
+                assert!(take_activation_token(true).is_none());
+            }
             for bad in [
                 "{}".to_owned(),
                 "x".repeat(8193),
@@ -338,8 +375,17 @@ mod tests {
                 assert_eq!(options, before);
                 assert!(std::env::var_os(NAVIGATION_ENV).is_none());
             }
-            use std::os::unix::ffi::OsStringExt;
-            std::env::set_var(NAVIGATION_ENV, std::ffi::OsString::from_vec(vec![0xff]));
+            #[cfg(unix)]
+            let invalid = {
+                use std::os::unix::ffi::OsStringExt;
+                std::ffi::OsString::from_vec(vec![0xff])
+            };
+            #[cfg(windows)]
+            let invalid = {
+                use std::os::windows::ffi::OsStringExt;
+                std::ffi::OsString::from_wide(&[0xd800])
+            };
+            std::env::set_var(NAVIGATION_ENV, invalid);
             assert!(take_navigation_environment(&mut Options::default()).is_err());
             assert!(std::env::var_os(NAVIGATION_ENV).is_none());
             return;
@@ -372,7 +418,7 @@ mod tests {
         assert!(output.contains("1 passed; 0 failed; 0 ignored"), "{output}");
     }
 
-    #[cfg(all(feature = "live", target_os = "linux"))]
+    #[cfg(all(feature = "live", any(target_os = "linux", windows)))]
     #[test]
     fn exact_desktop_navigation_is_explicit_and_never_parses_callback_or_token_data() {
         use zerus_client_core::desktop::activation::{self as wire, Target};
@@ -412,9 +458,12 @@ mod tests {
         ] {
             assert!(parse(&args(&argv)).is_err());
         }
-        assert!(valid_activation_token("synthetic-wayland"));
-        for token in ["".into(), "bad\nvalue".into(), "x".repeat(4097)] {
-            assert!(!valid_activation_token(&token));
+        #[cfg(target_os = "linux")]
+        {
+            assert!(valid_activation_token("synthetic-wayland"));
+            for token in ["".into(), "bad\nvalue".into(), "x".repeat(4097)] {
+                assert!(!valid_activation_token(&token));
+            }
         }
     }
 
@@ -614,6 +663,17 @@ mod tests {
             assert_eq!(identified["ZerusGUI"], "tauri");
             assert_eq!(identified["localWebKitChildEnvironment"], 1);
         }
+    }
+
+    #[test]
+    fn a_fork_build_names_its_build_and_feed() {
+        let feed = "https://github.com/WhiteWh/zerus/releases/latest/download/zerus-fork-feed.json";
+        assert_eq!(
+            fork_identity(Some("41"), Some(feed)),
+            vec![("forkBuild", Value::from(41u64)), ("forkFeed", Value::from(feed))]
+        );
+        assert!(fork_identity(Some(""), Some("")).is_empty(), "an experimental build has neither");
+        assert!(fork_identity(None, Some("https://example.com/feed.json")).is_empty());
     }
 
     #[test]

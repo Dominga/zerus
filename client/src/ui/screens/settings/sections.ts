@@ -3,13 +3,16 @@ import { setPage } from "../../../store/ui";
 import { AppearanceSection } from "./Appearance";
 import { SessionsSection } from "./Sessions";
 import { TeamsSection } from "./TeamsSection";
+import { ModelServersSection } from "./ModelServersSection";
 import { KeyboardSection } from "./Keyboard";
 import { VoiceSection, refreshVoice } from "./Voice";
 import { RecoverySection, refreshRecovery } from "./Recovery";
 import { FilesSection } from "./Files";
 import { AnalyticsSection } from "./Analytics";
 import { ApprovalsSection } from "./Approvals";
+import { ExtensionsSection } from "./Extensions";
 import { WorktreesSection, refreshWorktrees } from "./Worktrees";
+import { DiskSection } from "./Disk";
 import { MobileSection } from "./Mobile";
 import { ProcessesSection } from "./Processes";
 import { AboutSection, refreshAbout } from "./About";
@@ -24,7 +27,7 @@ import { trNoop } from "../../../i18n";
 
 export type SectionId =
   | "appearance" | "sessions" | "teams" | "recovery" | "processes" | "updates" | "mobile" | "files"
-  | "worktrees" | "approvals" | "voice" | "keyboard" | "analytics" | "about";
+  | "worktrees" | "disk" | "approvals" | "voice" | "keyboard" | "analytics" | "extensions" | "about" | "modelservers";
 
 export interface Section {
   id: SectionId;
@@ -47,10 +50,15 @@ export const SECTIONS: readonly Section[] = [
   { id: "voice", label: trNoop("Voice input"), icon: "mic", component: VoiceSection, refresh: refreshVoice },
   { id: "keyboard", label: "Keyboard", icon: "keyboard", component: KeyboardSection },
   { id: "analytics", label: trNoop("Private analytics"), icon: "gauge", component: AnalyticsSection },
+  { id: "extensions", label: trNoop("Extensions"), icon: "plug", component: ExtensionsSection },
   { id: "about", label: "About", icon: "info", component: AboutSection, refresh: refreshAbout },
   // SessionsWindow.cpp:2235 appends the fork's Teams section after Settings'
-  // own nav; Model servers follows but is not ported to the client yet.
+  // own nav, and Model servers after it (2241, task 67).
   { id: "teams", label: "Teams", icon: "users", component: TeamsSection },
+  { id: "modelservers", label: trNoop("Model servers"), icon: "hard-drive", component: ModelServersSection },
+  // Task 108: the build folders Zerus holds and their cleanup, after Model
+  // servers as in Qt.
+  { id: "disk", label: trNoop("Build folders"), icon: "trash-2", component: DiskSection },
 ];
 
 /** The sections the client has so far, in Qt's order. */

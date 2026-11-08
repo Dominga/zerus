@@ -7,15 +7,15 @@ import { UsageMeters } from "../components/UsageMeter";
 import { AgentBadge, MachineBadge, SessionCard } from "../sessions/SessionCard";
 import type { Session } from "../sessions/types";
 import type { Account } from "../../types";
-import { agentKind, catalog, orderedRows } from "../../store/catalog";
+import { agentKind, catalog, plainComputers, plainRows } from "../../store/catalog";
 import { machineCards, requestMachine } from "../../store/machines";
 import { accountsPage, loadAccounts, setAccountMachine, setRequestedProfile } from "../../store/accounts";
-import { createOverview, type MachineCardModel, type OverviewStats } from "../../store/overview";
+import { createOverview, overviewStats, type MachineCardModel, type OverviewStats } from "../../store/overview";
 import { setMachineFilter, setPage, setProjectFilter, setAccountFilter, setFolderFilter, setSelectedKey, setStateFilter, type StateFilter } from "../../store/ui";
 import { flag, num, setSetting } from "../../store/settings";
 import { accountTooltip, clock, summaryText, usageLoading, windowsAt } from "../lib/usage";
 import { machineKey } from "./machines-ui";
-import { accountIdentity, accountTone, accountsNote, cpuFigure, level, loadTip, memoryFigure, sampleNote, sampleTip, sessionsLabel } from "./overview-ui";
+import { accountIdentity, accountTone, accountsNote, cpuFigure, level, loadTip, memoryFigure, metricsLoading, sampleNote, sampleTip, sessionsLabel } from "./overview-ui";
 import { tr } from "../../i18n";
 
 // Overview (DashboardPage.cpp), ported from design/webui/src/screens/Dashboard.tsx:
@@ -38,8 +38,9 @@ function LoadBar(props: { percent?: number; fresh: boolean }) {
 
 function MachineCard(props: { m: MachineCardModel; stats: OverviewStats; now: number }) {
   const c = () => props.m.connection;
-  const cpu = () => cpuFigure(props.m.meta);
-  const memory = () => memoryFigure(props.m.meta);
+  const loading = () => metricsLoading(props.m.meta, c());
+  const cpu = () => cpuFigure(props.m.meta, loading());
+  const memory = () => memoryFigure(props.m.meta, loading());
   const counts = () => props.stats.per[props.m.computer] ?? { sessions: 0, attention: 0 };
   const note = () => sampleNote(props.m.meta, c(), props.now);
   const openSessions = () => { setMachineFilter([props.m.filter]); setProjectFilter([]); setAccountFilter([]); setFolderFilter(undefined); setStateFilter("all"); setPage("sessions"); };
@@ -216,7 +217,9 @@ function OverviewEdge(props: { right?: boolean }) {
 
 export function OverviewScreen() {
   let scroller: HTMLDivElement | undefined;
-  const ov = createOverview(orderedRows, () => catalog.computers, () => machineCards);
+  // Plain rows for the tiles and the live order, one dependency per batch;
+  // each live card renders its store row (zerus-5wmh.66.50).
+  const ov = createOverview(plainRows, plainComputers, () => machineCards, overviewStats, (s) => catalog.rows[s.key] ?? s);
   // Ages, resets and pace re-render every 15 s while shown (DashboardPage.cpp:322); nothing else runs on a timer.
   const now = useNow(15_000);
   const view = accountsPage;

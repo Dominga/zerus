@@ -10,6 +10,13 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PrivateStore {
+    pub path: String,
+    pub reason: String,
+    pub fix: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Details {
     pub run_id: String,
     pub conversation_id: String,
@@ -20,6 +27,15 @@ pub struct Details {
     pub fork_supported: bool,
     #[serde(default)]
     pub fork_reason: String,
+    /// The conversation this session was forked from: `Some(None)` for a
+    /// session that is not a fork (null), `None` when the hgs predates the
+    /// field (omitted again), so a client never confuses the two.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub fork_parent_id: Option<Option<String>>,
     pub allowed_actions: Option<Vec<String>>,
     pub action_reasons: BTreeMap<String, String>,
     /// Stop is offered only when the host can interrupt this turn
@@ -39,6 +55,16 @@ pub struct Details {
     /// inspection has no boolean.
     pub terminal_supported: Option<bool>,
     pub terminal_attach_supported: Option<bool>,
+    /// Task 75: this computer's refused private stores, with their fix.
+    #[serde(default)]
+    pub private_stores: Vec<PrivateStore>,
+}
+
+/// A present field, null included: only an absent one stays `None`.
+fn present<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 /// `hgs [@host] inspect NAME --after 0 --skip-processes [--archive ID]`, 5 s
@@ -63,7 +89,9 @@ pub fn details_invocation(target: &Target, archive_id: Option<&str>) -> Invocati
     }
 }
 
-/// One bounded child inspection when it opens. The CLI verifies roster membership.
+/// One bounded child inspection when it opens: `hgs inspect NAME ... --agent
+/// ID`, the CLI's child option since its first release (and the Qt client's).
+/// The CLI verifies roster membership.
 pub fn subagent_identity_invocation(
     target: &Target,
     archive_id: Option<&str>,
@@ -79,7 +107,7 @@ pub fn subagent_identity_invocation(
         return None;
     }
     let mut call = details_invocation(target, archive_id);
-    call.args.extend(["--subagent".into(), agent_id.into()]);
+    call.args.extend(["--agent".into(), agent_id.into()]);
     Some(call)
 }
 
@@ -206,6 +234,9 @@ pub fn parse_details(target: &Target, exit: Exit) -> Option<Details> {
         resume_message_can_send: flag(&value, "resume_message_can_send"),
         fork_supported: flag(&value, "fork_supported"),
         fork_reason: text(&value, "fork_reason"),
+        fork_parent_id: value
+            .get("fork_parent_id")
+            .map(|parent| parent.as_str().map(str::to_owned)),
         allowed_actions,
         action_reasons,
         interrupt_supported: flag(&value, "interrupt_supported"),
@@ -223,12 +254,54 @@ pub fn parse_details(target: &Target, exit: Exit) -> Option<Details> {
         terminal_attach_supported: value
             .get("terminal_attach_supported")
             .and_then(Value::as_bool),
+        private_stores: value
+            .get("private_stores")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .take(128)
+                    .filter_map(|row| {
+                        let path = text(row, "path");
+                        if path.is_empty() {
+                            return None;
+                        }
+                        Some(PrivateStore {
+                            path,
+                            reason: text(row, "reason"),
+                            fix: text(row, "fix"),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refused_private_stores_keep_their_path_reason_and_fix() {
+        let target = Target {
+            computer: "".into(),
+            name: "claude/example/review".into(),
+            run_id: "run".into(),
+            conversation_id: "conversation".into(),
+        };
+        let details = parse_details(
+            &target,
+            Exit::Code {
+                code: 0,
+                stdout: br#"{"run_id":"run","conversation_id":"conversation","private_stores":[{"path":"C:\\state","reason":"not private","fix":"restore the ACL"},{"reason":"no path"}]}"#.to_vec(),
+                stderr: String::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(details.private_stores.len(), 1);
+        assert_eq!(details.private_stores[0].path, "C:\\state");
+        assert_eq!(details.private_stores[0].fix, "restore the ACL");
+    }
 
     #[test]
     fn fork_capability_survives_the_bounded_inspection_projection() {
@@ -260,6 +333,47 @@ mod tests {
         assert!(absent.fork_reason.is_empty());
     }
 
+    /// A session that is not a fork (null) and an hgs that predates the field
+    /// (absent) stay apart through parsing and the serialized bridge value.
+    #[test]
+    fn fork_parent_id_keeps_absent_null_and_a_parent_apart() {
+        let target = Target {
+            computer: "studio".into(),
+            name: "codex/example/review-fork".into(),
+            run_id: "run".into(),
+            conversation_id: "".into(),
+        };
+        let parse = |extra: &str| {
+            parse_details(
+                &target,
+                Exit::Code {
+                    code: 0,
+                    stdout: format!(r#"{{"run_id":"run","conversation_id":""{extra}}}"#)
+                        .into_bytes(),
+                    stderr: String::new(),
+                },
+            )
+            .unwrap()
+        };
+        let parent = parse(r#","fork_parent_id":"source""#);
+        let none = parse(r#","fork_parent_id":null"#);
+        let older = parse("");
+        let odd = parse(r#","fork_parent_id":7"#);
+        assert_eq!(parent.fork_parent_id, Some(Some("source".into())));
+        assert_eq!(none.fork_parent_id, Some(None));
+        assert_eq!(older.fork_parent_id, None);
+        // Anything but a string never names a parent.
+        assert_eq!(odd.fork_parent_id, Some(None));
+        let sent = |details: &Details| serde_json::to_value(details).unwrap();
+        assert_eq!(sent(&parent)["fork_parent_id"], "source");
+        assert_eq!(sent(&none).get("fork_parent_id"), Some(&Value::Null));
+        assert_eq!(sent(&older).get("fork_parent_id"), None);
+        for details in [parent, none, older] {
+            let back: Details = serde_json::from_value(sent(&details)).unwrap();
+            assert_eq!(back, details);
+        }
+    }
+
     #[test]
     fn child_identity_uses_the_inspected_conversation_and_checks_parent_and_child() {
         let t = Target {
@@ -280,7 +394,7 @@ mod tests {
                 "--skip-processes",
                 "--archive",
                 "a1",
-                "--subagent",
+                "--agent",
                 "child"
             ]
         );

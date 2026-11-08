@@ -53,6 +53,7 @@ model's requests. Each case stops what it started, its sessions, the host and th
 model, and waits for every agent and supervisor through handles opened while they ran,
 and until nothing holds its executables, before its folders go.
 """
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -63,6 +64,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import unittest
 import uuid
 
@@ -942,8 +944,12 @@ class NativeWindowsClaude(NativeAgent, host.HostCase):
                            ("Escape", lambda: "What should Claude do instead?" in self.capture(name))):
             card = self.hook_card(name, api.BASH)
             worker = self.worker()
+            carded = time.monotonic()
             self.keys(name, {"named": key})
-            self.until(f"Terminal's {key}", check)
+            # zerus-dy5u: an intermittent Enter without effect; the failure
+            # must tell a key sent before the panel from one that was lost.
+            sent = f"panel_verified={card.get('panel_verified')}, sent {time.monotonic() - carded:.3f} s after the card"
+            self.until(f"Terminal's {key} ({sent})", check)
             self.until(f"the hook to end after {key}", lambda: not self.alive(*worker))
             self.until("no pending card", lambda: not self.inspect(name).get("pending_questions"))
             self.refused(name, card, self.choose(card, "No"))
@@ -1203,6 +1209,31 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
         conversation_id = conversation_id or self.row(name).get("conversation_id")
         return self.user_messages(conversation_id).count(text) if conversation_id else 0
 
+    def turn_ended(self, name, since):
+        # inspect takes the writer lock also needed by the native five-second
+        # Stop hook. New sessions journal by durable ID, and a renamed legacy
+        # session retains its original journal; neither key is its current label.
+        # Do not repeatedly launch inspectors ahead of that hook on
+        # a busy runner. Observe its journal read-only, then retain the public
+        # Stop/idle assertions; a missing or timed-out hook still fails the test.
+        record = self.record(name)
+        run, conversation = record.get("run_id"), record.get("conversation_id")
+        if not run or not conversation:
+            return None
+        path = self.state / "events.sqlite3"
+        try:
+            with closing(sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=0)) as database:
+                stopped = database.execute(
+                    "SELECT 1 FROM events WHERE name=? AND conversation=? "
+                    "AND json_extract(payload, '$.run_id')=? "
+                    "AND json_extract(payload, '$.type')='Stop' "
+                    "AND COALESCE(json_extract(payload, '$.agent_id'), '') IN ('', 'main') "
+                    "AND json_extract(payload, '$.at')>=? ORDER BY seq DESC LIMIT 1",
+                    (record.get("journal_name") or name, conversation, run, since)).fetchone()
+        except sqlite3.OperationalError:
+            return None  # Not created yet or momentarily busy; the original end still applies.
+        return super().turn_ended(name, since) if stopped else None
+
     def test_a_tracked_launch_reports_its_hooks_and_send_delivers_exact_messages(self):
         name = self.launch("messages", self.NO_HOOK_REVIEW)
         # Codex 0.162 starts its conversation with the first message, whose hooks confirm it;
@@ -1229,9 +1260,15 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
         self.assertEqual(self.accepted(name, text), 1, self.describe())
 
     def test_hgs_answers_request_user_input_async(self):
+        (self.api_root / 'hold-codex-questions').touch()
         name = self.launch("question", self.NO_HOOK_REVIEW)
-        # The question does not block the turn: Codex accepts it and the turn ends.
-        self.deliver(name, api.QUESTIONS)
+        # Keep a genuine question alive. Once its turn ends, Codex clears it;
+        # answering a stale card from an idle composer is not question coverage.
+        row = self.ready(name)
+        self.send(name, self.message(row, api.QUESTIONS))
+        self.until('the native optional question', lambda: any(
+            card.get('source') == 'codex_async' for card in self.inspect(name).get('pending_questions', [])))
+        self.keys(name, {'named': 'S-Left'})
         card = self.card(name, "codex_async")
         item, = card["questions"]
         self.assertEqual((item["question"], [option["label"] for option in item["options"]]),
@@ -1253,6 +1290,14 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
                                              "question": item["question"], "answer": "Two"}])
         self.until("the answered card to go", lambda: not [
             card for card in self.inspect(name).get("pending_questions", []) if card.get("source") == "codex_async"])
+
+    def test_optional_questions_close_when_codex_finishes_the_turn(self):
+        name = self.launch('question-end', self.NO_HOOK_REVIEW)
+        self.deliver(name, api.QUESTIONS)
+        self.assertEqual(self.inspect(name)['pending_questions'], [], self.describe())
+        self.assertEqual(self.row(name)['optional_questions']['count'], 0, self.describe())
+        self.assertFalse(any('<send_user_message_question_reply>' in text
+                             for text in self.user_messages(self.record(name)['conversation_id'])))
 
     def test_hgs_trusts_the_hooks_it_installed(self):
         # Without the bypass Codex stops at its review of the new hooks before SessionStart.
@@ -1347,6 +1392,60 @@ class NativeWindowsCodex(NativeAgent, host.HostCase):
         self.assertFalse((self.project / api.CODEX_STARTED).exists())
         self.keys(name, {"named": "Enter"})
         self.check_continuing_permission(name)
+
+    def untrusted_folder(self, git=False):
+        config = self.agent_home / 'config.toml'
+        config.write_text(config.read_text(encoding='utf-8').split('[projects.', 1)[0], encoding='utf-8')
+        target = self.project.parent if git else self.project
+        (target / '.codex').mkdir()
+        (target / '.codex/config.toml').write_text('# Synthetic project, no hooks or commands.\n', encoding='utf-8')
+        if git:
+            subprocess.run(['git', 'init', '-q', str(target)], check=True, env=self.env, timeout=15)
+        name = self.launch('folder-trust', self.NO_HOOK_REVIEW)
+        card = self.card(name, 'codex_folder_trust')
+        self.assertNotIn('projects', tomllib.loads(config.read_text(encoding='utf-8')))
+        self.assertFalse(self.record(name).get('conversation_id'))
+        return name, card, target
+
+    def test_explicit_folder_trust_names_the_git_root_then_sends(self):
+        name, card, target = self.untrusted_folder(git=True)
+        question = card['questions'][0]
+        self.assertEqual(question['question'], 'Trust this Git repository?')
+        self.assertIn(str(target).lower(), question['options'][0]['description'].lower())
+        payload, receipt = self.answer(name, card, [dict(question_id='trust', selected_option_ids=['trust_0'], text='')])
+        self.assertEqual(self.json('answer', name, '--json', input=json.dumps(payload)), receipt)
+        projects = tomllib.loads((self.agent_home / 'config.toml').read_text(encoding='utf-8'))['projects']
+        self.assertEqual({path.lower() for path, value in projects.items() if value['trust_level'] == 'trusted'},
+                         {str(target).lower()})
+        # Windows 0.167 opens a separate sandbox NUX after folder consent,
+        # even with this fixture's YOLO launch. Trust succeeded; the following
+        # chooser must still block input. Never set up a sandbox in this test.
+        notice = 'Set up the Codex agent sandbox'
+        self.until('the separate Windows sandbox setup chooser', lambda: notice in self.capture(name))
+        blocked = self.hgs('send', name, '--json', input=json.dumps(self.message(self.row(name), MESSAGES[0])), rc=None)
+        self.assertNotEqual(blocked.returncode, 0, blocked.stdout)
+        self.assertIn('terminal has a draft, dialog, or unrecognized prompt', blocked.stderr)
+        self.assertEqual(api.requests(self.api_root), [])
+        self.assertFalse(any(q.get('source') == 'codex_folder_trust'
+                             for q in self.inspect(name).get('pending_questions', [])))
+        # This is the fixture user's Terminal action, not an app trust answer
+        # or a sandbox/Administrator choice. The same process then takes input.
+        self.keys(name, {'named': 'Escape'})
+        self.until('sandbox setup dismissed in Terminal', lambda: notice not in self.capture(name))
+        self.assertIsNone(tomllib.loads((self.agent_home / 'config.toml').read_text(encoding='utf-8')).get('windows', {}).get('sandbox'))
+        self.deliver(name, MESSAGES[0])
+
+    def test_explicit_folder_cancel_keeps_trust_unchanged(self):
+        name, card, _ = self.untrusted_folder()
+        cancel = card['questions'][0]['options'][1]['label']
+        self.assertIn(cancel, ('Quit', 'Back to Agent Command Center'))
+        payload, receipt = self.answer(name, card, [dict(question_id='trust', selected_option_ids=['trust_1'], text='')])
+        self.assertEqual(self.json('answer', name, '--json', input=json.dumps(payload)), receipt)
+        if cancel == 'Back to Agent Command Center':
+            self.until('Back to the live command center', lambda: 'Agent command center' in self.capture(name))
+            self.assertEqual(self.row(name)['process_state'], 'running')
+        self.assertNotIn('projects', tomllib.loads((self.agent_home / 'config.toml').read_text(encoding='utf-8')))
+        self.assertFalse(self.record(name).get('conversation_id'))
 
     def test_clear_context_starts_a_new_conversation_in_the_same_agent(self):
         name = self.launch("clear", self.NO_HOOK_REVIEW)

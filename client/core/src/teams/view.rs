@@ -165,6 +165,9 @@ pub struct TeamSummary {
     /// Task 52: the team whose task this sub-team came from ("" for a team
     /// with no parent), so a tree action counts the whole tree from the list.
     pub parent: String,
+    /// Task #58: the phases that plan in free mode, from the list's
+    /// `phase_modes` (empty from an older hgs).
+    pub free_phases: Vec<u64>,
 }
 
 impl TeamSummary {
@@ -222,6 +225,18 @@ pub fn list(value: &Value) -> TeamList {
                 updated: number(item, "updated"),
                 revision: count(item, "revision"),
                 parent: item.get("parent").map(|parent| name(parent, "team")).unwrap_or_default(),
+                free_phases: item
+                    .get("phase_modes")
+                    .and_then(Value::as_object)
+                    .map(|modes| {
+                        modes
+                            .iter()
+                            .filter(|(_, mode)| mode.as_str() == Some("free"))
+                            .filter_map(|(n, _)| n.parse::<u64>().ok())
+                            .take(ITEMS_KEPT)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             }
         })
         .collect();
@@ -263,6 +278,12 @@ pub struct MemberView {
     pub iron_rules: Vec<String>,
     pub minutes_without_progress: u64,
     pub host_shared: bool,
+    /// Task 98: hand-outs its Terminal refused in a row (a draft, a dialog or
+    /// an unknown prompt), hgs's reason, and whether the lead and the owner
+    /// were told.
+    pub input_refusals: u64,
+    pub input_reason: String,
+    pub input_raised: bool,
     /// Task 11: the member's pending question or permission request as hgs
     /// sends it (`members[].question`, at most [`DETAIL_BYTES`]): its id,
     /// hash, tool, command, reason and the card's own allow and deny ids.
@@ -310,6 +331,9 @@ pub struct TaskView {
     pub subteam: bool,
     /// Task 52: that sub-team's id, for Cancel's and Reassign's question.
     pub subteam_team: String,
+    /// Task #60: the task this follow-up was added for ("spawned from"); it
+    /// never blocks, unlike `deps`.
+    pub origin: Option<u64>,
     /// Task 55: the newest attempt's open questions to the lead (A3): the
     /// owner answers them with `hgs team reply` too.
     pub questions: Vec<QuestionView>,
@@ -405,6 +429,9 @@ pub struct PhaseView {
     pub acceptance: String,
     pub paused: bool,
     pub health: String,
+    /// Task #58: the mode the phase plans in, "standard" or "free" (its own,
+    /// else the team's); "" from an hgs that sends no phase modes.
+    pub mode: String,
 }
 
 /// One open proposal, as its card shows it: hgs's own summary when the change
@@ -494,12 +521,19 @@ pub struct TeamView {
     pub folder: String,
     pub goal: String,
     pub plan_mode: String,
+    /// Task #58: the phase that takes tasks as they come (`free_phase`), if any.
+    pub free_phase: Option<u64>,
+    /// Task #58: whether hgs sends each phase's mode (`phase_modes`), so the
+    /// owner can switch one phase (`phase-mode`).
+    pub phase_modes_known: bool,
     pub lead: String,
     pub revision: u64,
     pub created: f64,
     pub updated: f64,
     pub waiting_for_lead: bool,
     pub pending_phase: Option<u64>,
+    /// Task 112: a paused team's pause ({at, by, reason}), or null.
+    pub paused: Value,
     /// The team's settings object as hgs stores it (a few dozen fields).
     pub settings: Value,
     pub members: Vec<MemberView>,
@@ -564,6 +598,9 @@ fn member(value: &Value, lead: &str) -> MemberView {
         iron_rules: lines(value, "iron_rules", TEXT_CHARS),
         minutes_without_progress: count(value, "minutes_without_progress"),
         host_shared: flag(value, "host_shared"),
+        input_refusals: value.get("input_block").map_or(0, |block| count(block, "count")),
+        input_reason: value.get("input_block").map_or_else(String::new, |block| text(block, "reason", LINE_CHARS)),
+        input_raised: value.get("input_block").is_some_and(|block| flag(block, "raised")),
         permission: bounded(
             value
                 .get("question")
@@ -622,7 +659,21 @@ fn task(value: &Value) -> TaskView {
         pipeline_run: pipeline_run(value),
         subteam: value.get("subteam").is_some_and(Value::is_object),
         subteam_team: value.get("subteam").map(|subteam| name(subteam, "team")).unwrap_or_default(),
+        origin: value.get("origin").and_then(Value::as_u64).filter(|origin| *origin > 0),
         questions: open_questions(value),
+    }
+}
+
+/// Task #58: phase `n`'s mode from status's `phase_modes`, else the team's
+/// `plan_mode` for a phase it does not name; "" from an older hgs.
+fn phase_mode(team: &Value, n: u64) -> String {
+    let Some(modes) = team.get("phase_modes").and_then(Value::as_object) else {
+        return String::new();
+    };
+    match modes.get(&n.to_string()).and_then(Value::as_str) {
+        Some(mode @ ("free" | "standard")) => mode.to_owned(),
+        _ if name(team, "plan_mode") == "free" => "free".into(),
+        _ => "standard".into(),
     }
 }
 
@@ -640,6 +691,7 @@ fn phase(value: &Value) -> PhaseView {
         acceptance: name(value, "acceptance"),
         paused: value.get("pause").is_some_and(|pause| !pause.is_null()),
         health: text(value, "health_line", LINE_CHARS),
+        mode: String::new(),
     }
 }
 
@@ -741,11 +793,14 @@ pub fn team(value: &Value) -> TeamView {
         folder: text(value, "folder", LINE_CHARS),
         goal: text(value, "goal", TEXT_CHARS),
         plan_mode: name(value, "plan_mode"),
+        free_phase: value.get("free_phase").and_then(|free| free.get("phase")).and_then(Value::as_u64),
+        phase_modes_known: value.get("phase_modes").is_some_and(Value::is_object),
         revision: count(value, "revision"),
         created: number(value, "created"),
         updated: number(value, "updated"),
         waiting_for_lead: flag(value, "waiting_for_lead"),
         pending_phase: value.get("pending_phase").and_then(Value::as_u64),
+        paused: value.get("paused").filter(|paused| paused.is_object()).map_or(Value::Null, |paused| bounded(Some(paused))),
         settings: match value.get("settings") {
             Some(Value::Object(settings)) => Value::Object(settings.clone()),
             _ => Value::Object(Map::new()),
@@ -761,6 +816,7 @@ pub fn team(value: &Value) -> TeamView {
             .take(ITEMS_KEPT)
             .map(|summary| {
                 let mut shown = phase(summary);
+                shown.mode = phase_mode(value, shown.n);
                 shown.archived = array(value, "phases").iter()
                     .any(|phase| phase["n"] == summary["n"] && phase["archived"].is_object());
                 shown
@@ -835,6 +891,9 @@ pub struct GraphNode {
     pub layer: u64,
     pub ready: bool,
     pub in_cycle: bool,
+    /// Task #60: the task it was spawned from, when the graph has it; drawn
+    /// as a link, never as a dependency edge.
+    pub origin: Option<u64>,
 }
 
 /// One edge: `to` depends on `from`.
@@ -885,6 +944,7 @@ pub fn graph(value: &Value, view: &TeamView) -> PlanGraph {
                 .unwrap_or(0),
             ready: view.ready.contains(&task.id),
             in_cycle: view.cycle.contains(&task.id),
+            origin: task.origin.filter(|origin| known.contains(origin)),
         })
         .collect();
     let edges = view
@@ -1182,6 +1242,97 @@ pub struct ProfileView {
     pub tokens_partial: bool,
     pub losses: Vec<ProfileLossView>,
     pub roles: Vec<ProfileRoleView>,
+    /// Task 82: each task's lateness against the plan and overrun against
+    /// its estimate, from the profile's first page of task rows.
+    pub task_rows: Vec<ProfileTaskView>,
+    /// More task rows follow the first page; their tasks show no heat.
+    pub task_rows_more: bool,
+}
+
+/// Task 82: a task's lateness against the plan baseline. `known` is false
+/// when the plan lacks a moment it needs (an estimate is missing); `from` is
+/// the predecessor the inherited part comes from.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct ProfileLatenessView {
+    pub known: bool,
+    pub unknown: String,
+    pub planned_start: Option<f64>,
+    pub planned_end: Option<f64>,
+    pub actual_start: Option<f64>,
+    pub actual_end: Option<f64>,
+    pub start_late_s: i64,
+    pub inherited_s: i64,
+    pub own_s: i64,
+    pub from: Option<u64>,
+}
+
+/// Task 82: a task's own work against its estimate; `known` is false
+/// without an estimate, `started` false before its first attempt.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct ProfileOverrunView {
+    pub started: bool,
+    pub known: bool,
+    pub estimate_s: i64,
+    pub work_s: i64,
+    pub overrun_s: i64,
+    pub ratio: f64,
+    pub running: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct ProfileTaskView {
+    pub task: u64,
+    /// Null when the task has no plan baseline (planned before it existed).
+    pub lateness: Option<ProfileLatenessView>,
+    pub overrun: Option<ProfileOverrunView>,
+}
+
+fn profile_task(row: &Value) -> Option<ProfileTaskView> {
+    let task = row
+        .get("task")
+        .and_then(Value::as_u64)
+        .filter(|task| *task > 0)?;
+    let int = |value: &Value, key: &str| value.get(key).and_then(Value::as_i64);
+    let moment = |value: &Value, key: &str| value.get(key).and_then(Value::as_f64);
+    let lateness = row
+        .get("lateness")
+        .filter(|late| late.is_object())
+        .map(|late| {
+            let unknown = late
+                .get("unknown")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            ProfileLatenessView {
+                known: unknown.is_empty() && int(late, "start_late_s").is_some(),
+                unknown,
+                planned_start: moment(late, "planned_start"),
+                planned_end: moment(late, "planned_end"),
+                actual_start: moment(late, "actual_start"),
+                actual_end: moment(late, "actual_end"),
+                start_late_s: int(late, "start_late_s").unwrap_or(0),
+                inherited_s: int(late, "inherited_s").unwrap_or(0),
+                own_s: int(late, "own_s").unwrap_or(0),
+                from: late.get("from").and_then(Value::as_u64),
+            }
+        });
+    let overrun = row
+        .get("overrun")
+        .filter(|over| over.is_object())
+        .map(|over| ProfileOverrunView {
+            started: !flag(over, "not_started"),
+            known: int(over, "overrun_s").is_some() && int(over, "estimate_s").is_some(),
+            estimate_s: int(over, "estimate_s").unwrap_or(0),
+            work_s: int(over, "work_s").unwrap_or(0),
+            overrun_s: int(over, "overrun_s").unwrap_or(0),
+            ratio: over.get("ratio").and_then(Value::as_f64).unwrap_or(0.0),
+            running: flag(over, "running"),
+        });
+    Some(ProfileTaskView {
+        task,
+        lateness,
+        overrun,
+    })
 }
 
 pub fn profile(team: &str, value: &Value) -> ProfileView {
@@ -1242,6 +1393,15 @@ pub fn profile(team: &str, value: &Value) -> ProfileView {
         })
         .collect(),
         roles,
+        task_rows: array(value.get("tasks").unwrap_or(&Value::Null), "items")
+            .iter()
+            .take(ITEMS_KEPT)
+            .filter_map(profile_task)
+            .collect(),
+        task_rows_more: value
+            .get("tasks")
+            .and_then(|tasks| tasks.get("next_cursor"))
+            .is_some_and(|next| !next.is_null()),
     }
 }
 
@@ -1276,6 +1436,30 @@ pub struct TestRunView {
     pub reused_from: String,
     pub due: bool,
     pub over_budget: bool,
+    /// Task 88: one result per test from the provider's report (counts,
+    /// note and at most `REPORT_RESULTS` results, failures first), or null.
+    pub report: Value,
+}
+
+/// Task 88: the results of one run the Tests mode shows; the counts cover the rest.
+const REPORT_RESULTS: usize = 200;
+
+/// Task 88: a run's report as the view carries it, every text bounded.
+fn test_report(value: Option<&Value>) -> Value {
+    let Some(report) = value.filter(|report| report.is_object()) else { return Value::Null };
+    let results: Vec<Value> = report["results"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(REPORT_RESULTS)
+        .map(|result| {
+            json!({"suite":text(result, "suite", LINE_CHARS),"name":text(result, "name", LINE_CHARS),"status":name(result, "status"),
+                "ms":result.get("ms").and_then(Value::as_u64).unwrap_or(0),"message":text(result, "message", LINE_CHARS)})
+        })
+        .collect();
+    let count = |key: &str| report.get(key).and_then(Value::as_u64).unwrap_or(0);
+    json!({"passed":count("passed"),"failed":count("failed"),"skipped":count("skipped"),"errors":count("errors"),
+        "note":text(report, "note", LINE_CHARS),"results":results})
 }
 
 /// `team test` for the Tests mode: the queue and one page of results.
@@ -1323,6 +1507,7 @@ pub fn tests(team: &str, queue: &Value, results: &Value) -> TestsView {
                 reused_from: name(run, "reused_from"),
                 due: flag(run, "due"),
                 over_budget: flag(run, "over_budget"),
+                report: test_report(run.get("report")),
             })
             .collect(),
         next: results.get("next_cursor").and_then(Value::as_f64),

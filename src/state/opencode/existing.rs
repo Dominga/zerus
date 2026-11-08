@@ -297,7 +297,7 @@ pub(crate) fn bind_existing(config: &crate::config::Config, dry: bool) -> Result
     let mut receipt = json!({"selection":payload(&request),"run_id":run,"status":"reserved"});
     atomic(&receipt_path, &receipt.to_string())?;
     if previous.is_none() {
-        save(&record(
+        save(&mut record(
             &request,
             run.as_str().ok_or("Invalid run identity")?,
         ))?;

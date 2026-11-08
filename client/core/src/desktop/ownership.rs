@@ -3,8 +3,11 @@ use super::{digest, ui_requests::Request};
 use serde::{Deserialize, Serialize};
 use zerus_desktop_migration::canonical_uuid;
 
+pub mod observation;
+
 pub const ABI: &str = "desktop-ownership-v1";
 pub const HELP_MARKER: &str = "Desktop ownership ABI: desktop-ownership-v1";
+pub const PREPARE_STATE_HELP_MARKER: &str = "Desktop state preparation: desktop-state-prepare-v1";
 pub const BYTES: usize = 16 * 1024;
 pub const MAX_REVISION: u64 = (1 << 53) - 1;
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createContentSearch, identityMatches, metadataMatches, mergeSessionMatch, searchCount, SEARCH_HITS, SEARCH_HOSTS, type SearchHit, type SearchReply } from "./content-search-model";
+import { coverageNotes, createContentSearch, identityMatches, metadataMatches, mergeSessionMatch, searchCount, SEARCH_HITS, SEARCH_HOSTS, type SearchHit, type SearchReply } from "./content-search-model";
 import type { Session } from "../ui/sessions/types";
 
 const host = (n: number, online = true) => ({ computer: `host-${n}`, machine: `machine-${n}`, online });
@@ -61,6 +61,21 @@ describe("bounded public-content search", () => {
   });
 });
 
+it("names why a host's contents are partial (task 77)", async () => {
+  const f = fixture(); f.search.configure("needle", [host(0)], true); await vi.advanceTimersByTimeAsync(350);
+  // This computer's index refused its folder: hgs answered from its recent-history scan.
+  f.answer(0, [hit("fresh")], { truncated: true, unavailable_sessions: 5, contents_unavailable: true, index_state: "unavailable" }); await tick();
+  expect(f.search.hits()).toHaveLength(1); expect(f.search.limited()).toBe(true);
+  expect(f.search.errors()).toEqual([
+    "machine-0: content index unavailable, recent history searched instead",
+    "machine-0: history unavailable in 5 of the searched sessions",
+  ]);
+  f.search.dispose();
+  expect(coverageNotes("studio", { unavailable_sessions: 0, contents_unavailable: true, index_state: "indexing" }))
+    .toEqual(["studio: content index still building, recent history searched too"]);
+  expect(coverageNotes("studio", { unavailable_sessions: 0, contents_unavailable: false, index_state: "ready" })).toEqual([]);
+  expect(coverageNotes("studio", { unavailable_sessions: 0, contents_unavailable: false })).toEqual([]);
+});
 it("shows mixed cold coverage inline and keeps fresh results available", async () => {
   const f = fixture(); f.search.configure("needle", [host(0)], true); await vi.advanceTimersByTimeAsync(350);
   f.answer(0, [hit("fresh")], { contents_unavailable: true }); await tick();

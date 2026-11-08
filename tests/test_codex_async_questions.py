@@ -142,7 +142,7 @@ class CodexAsync(unittest.TestCase):
         # An already-installed tail-only cache must be repaired automatically.
         cache.pop('scan_version');cache['items']={};cache_path.write_text(json.dumps(cache))
         result=self.inspect();self.assertEqual(result['pending_questions'][0]['question_id'],card['question_id'])
-        self.assertEqual(json.loads(cache_path.read_text())['scan_version'],2)
+        self.assertEqual(json.loads(cache_path.read_text())['scan_version'],3)
         # A durable local Skip survives reindexing, even for an old question.
         response,_=self.answer(card,dict(question_id='q_0',skip=True));self.assertEqual(response.returncode,0,response.stderr)
         cache=json.loads(cache_path.read_text());cache.pop('scan_version');cache_path.write_text(json.dumps(cache))
@@ -206,6 +206,18 @@ class CodexAsync(unittest.TestCase):
         before=self.received();current=self.inspect()['pending_questions'][0]
         self.assertFalse(current['can_answer']);self.assertIn('draft in Terminal',current['answer_unavailable_reason'])
         result,_=self.answer(card);self.assertNotEqual(result.returncode,0);self.assertEqual(self.received(),before)
+    def test_pending_settings_refuse_an_answer_before_any_key(self):
+        # zerus-cqkoh: pending model or effort settings would be typed before
+        # the answer. The CLI refuses first, so its rejected receipt is exact.
+        card=self.request();before=self.received()
+        self.record['pending_settings']=dict(request_id=str(uuid.uuid4()),run_id=self.run_id,conversation_id=self.conversation_id,
+            model='gpt-5.5',effort='high',receipt_name=self.name,receipt_run_id=self.run_id)
+        self.write_record()
+        result,payload=self.answer(card);self.assertNotEqual(result.returncode,0)
+        self.assertIn('settings would be typed first',result.stderr)
+        self.assertEqual(self.received(),before)
+        receipt=json.loads((self.state/'question_receipts'/(payload['request_id']+'.json')).read_text())
+        self.assertEqual(receipt['status'],'rejected',receipt)
     def test_different_native_ack_is_uncertain_and_never_retried(self):
         card=self.request();(self.root/'wrong-ack').touch()
         result,payload=self.answer(card);self.assertNotEqual(result.returncode,0);self.assertIn('delivery uncertain',result.stderr)

@@ -200,6 +200,74 @@ pub(crate) fn hook_profile(config: &Config, id: &str) -> Result<(String, PathBuf
     Ok((profile.provider, path))
 }
 
+/// Task 115: the home a launch of `provider` reads for `account` (empty: the
+/// default managed profile, else the native one). A caller that must prepare a
+/// file there before the launch (Kimi's read-only team rules) uses the same
+/// resolution the launch itself does.
+pub(crate) fn launch_home(config: &Config, provider: &str, account: &str) -> PathBuf {
+    let id = if account.is_empty() {
+        default_account(config, provider).ok().flatten().unwrap_or_default()
+    } else {
+        account.to_owned()
+    };
+    if id.is_empty() || native_id(&id) {
+        native_home(config, provider)
+    } else {
+        profile_home(config, &id)
+    }
+}
+
+/// Task 115: the owner's opt-in for a Kimi account's read-only hgs rules
+/// (`hgs account kimi-read-only [ACCOUNT] [--yes|--remove] [--json]`). A team
+/// launch never writes them: without `--yes` this names every exact pattern it
+/// would add and writes nothing. `--remove` takes back only those rules.
+fn kimi_read_only(config: &Config, account: &str, args: &[String], dry: bool) -> Result<Value> {
+    use crate::state::kimi_permissions::{apply, preview, remove, Write};
+    let account = if account.starts_with('-') { "" } else { account };
+    if !account.is_empty() {
+        let (profile, _, _) = lookup(config, account)?;
+        if profile.provider != "kimi" {
+            return Err(Error::new(1, "The read-only hgs rules are a Kimi account setting."));
+        }
+    }
+    let want_json = args.iter().any(|arg| arg == "--json");
+    let home = launch_home(config, "kimi", account);
+    if args.iter().any(|arg| arg == "--remove") {
+        let removed = remove(&home)
+            .map_err(|error| Error::new(1, format!("The Kimi rules were not removed: {error}")))?;
+        return Ok(json!({"account":account,"home":home,"removed":removed}));
+    }
+    let preview = preview(&home)
+        .map_err(|error| Error::new(1, format!("The Kimi config was not read: {error}")))?;
+    let name = if account.is_empty() { "native" } else { account };
+    if !args.iter().any(|arg| arg == "--yes") {
+        // The confirmation names the exact patterns and the file they go to.
+        if want_json {
+            return Ok(json!({"account":account,"home":home,"config":preview.config,
+                "patterns":preview.patterns,"present":preview.present,"missing":preview.missing,
+                "written":false,
+                "confirm":format!("Add {} read-only hgs rule(s) to the Kimi config at {}? Confirm with --yes.",
+                    preview.missing.len(), preview.config.display())}));
+        }
+        eprintln!("hgs: nothing was written. These rules would be added to {} for the Kimi account \"{name}\":", preview.config.display());
+        for pattern in &preview.missing {
+            eprintln!("  {pattern}");
+        }
+        return Err(Error::new(1, format!(
+            "Confirm with --yes to write {} read-only hgs rule(s); every command that changes anything still asks",
+            preview.missing.len()
+        )));
+    }
+    if dry {
+        return Ok(json!({"account":account,"home":home,"patterns":preview.patterns,
+            "missing":preview.missing,"written":false,"dry_run":true}));
+    }
+    let write = apply(&home, true)
+        .map_err(|error| Error::new(1, format!("The Kimi rules were not written: {error}")))?;
+    Ok(json!({"account":account,"home":home,"patterns":preview.patterns,
+        "present":preview.present,"written":write == Write::Written}))
+}
+
 /// The Claude account config a new launch without `--account` reads (U16,
 /// N18): the default managed profile's `.claude.json` (the launch sets
 /// `CLAUDE_CONFIG_DIR` to that profile), else the native one.
@@ -731,6 +799,9 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         "inspect"=>{println!("{}",inspection::inspect(config,args)?);},
         "model-settings"=>{println!("{}",model_defaults::inspect(config,id)?);},
         "model-defaults"=>{println!("{}",model_defaults::set(config,args,dry)?);},
+        // Task 115: the owner's explicit opt-in for a Kimi account's read-only
+        // hgs rules. A team launch never writes them.
+        "kimi-read-only"=>{println!("{}",kimi_read_only(config,id,args,dry)?);},
         "set-key"=>{println!("{}",deepseek::set_key(config,args,dry)?);},
         "install"=>return install::run(id,dry),
         "bind-existing"=>{
@@ -876,7 +947,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             println!("{}",import(config,id,arg(args,"--label").unwrap_or(id),crate::state::without_bom(&payload),args)?);
         },
         "login"=>{
-            if id=="native-dsh" {return crate::native_ui::open(config,"","@account",dry);}
+            if id=="native-dsh" {return crate::native_ui::open(config,"","@account",None,dry);}
             if id=="native-opencode" {
                 const GUIDANCE: &str = "Connect OpenCode providers with `opencode auth login` in a terminal on this computer";
                 if dry {println!("{GUIDANCE}");return Ok(0);}
@@ -1136,7 +1207,7 @@ fn transport(
     use std::process::Stdio;
     let mut command;
     if host.is_empty() || host == "@local" || config.is_self(host) {
-        command = Command::new(env::current_exe()?);
+        command = Command::new(crate::self_exec::current()?);
         command.args(args);
     } else {
         if !config.peers.iter().any(|s| s == host) {
@@ -1486,6 +1557,108 @@ mod permission_tests {
         }).to_string()).unwrap();
         assert_eq!(claude_launch_config(&config).unwrap(), claude::account_config().unwrap(), "a native default: the native config");
     }
+    #[test]
+    fn a_launch_home_is_the_profiles_or_the_native_one() {
+        // Task 115: the Kimi read-only rules are written where the launch reads
+        // its config: a managed profile's own home, else the native one.
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            home: dir.path().to_str().unwrap().into(),
+            dir: dir.path().join("config"),
+            state: dir.path().join("state"),
+            selves: vec![],
+            peers: vec![],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: BTreeMap::new(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        let native = std::env::var("KIMI_CODE_HOME")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(&config.home).join(".kimi-code"));
+        assert_eq!(launch_home(&config, "kimi", ""), native, "no catalog: the native home");
+        assert_eq!(launch_home(&config, "kimi", "native-kimi"), native);
+        fs::create_dir_all(&config.dir).unwrap();
+        fs::write(
+            config.dir.join("accounts.json"),
+            json!({
+                "profiles": {"work": {"provider": "kimi", "label": "Work"}},
+                "defaults": {"kimi": "work"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(launch_home(&config, "kimi", "work"), config.dir.join("accounts").join("work"));
+        assert_eq!(launch_home(&config, "kimi", ""), config.dir.join("accounts").join("work"), "the default profile");
+        fs::write(
+            config.dir.join("accounts.json"),
+            json!({
+                "profiles": {"work": {"provider": "kimi", "label": "Work"}},
+                "defaults": {"kimi": "native-kimi"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(launch_home(&config, "kimi", ""), native, "a native default");
+    }
+
+    #[test]
+    fn the_kimi_read_only_rules_need_the_owners_confirmation_and_a_kimi_account() {
+        // Task 115: a team launch never writes these; the owner's command names
+        // the exact patterns and writes only with --yes, into the account's own
+        // home, and --remove takes back only those rules.
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            home: dir.path().to_str().unwrap().into(),
+            dir: dir.path().join("config"),
+            state: dir.path().join("state"),
+            selves: vec![],
+            peers: vec![],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: BTreeMap::new(),
+            tab: false,
+            tab_colors: String::new(),
+        };
+        fs::create_dir_all(&config.dir).unwrap();
+        fs::write(
+            config.dir.join("accounts.json"),
+            json!({
+                "profiles": {"work": {"provider": "kimi", "label": "Work"}},
+                "defaults": {"kimi": "work"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let home = config.dir.join("accounts").join("work");
+        fs::create_dir_all(&home).unwrap();
+        let args = |list: &[&str]| list.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        let preview = kimi_read_only(&config, "work", &args(&["--json"]), false).unwrap();
+        assert_eq!(preview["written"], false);
+        assert_eq!(preview["missing"].as_array().unwrap().len(), 12);
+        assert!(!home.join("config.toml").exists(), "a preview writes nothing");
+        assert!(kimi_read_only(&config, "work", &args(&[]), false).is_err(), "confirmation required");
+        assert!(!home.join("config.toml").exists(), "a refusal writes nothing");
+        assert!(!kimi_read_only(&config, "work", &args(&["--yes"]), true).unwrap()["written"].as_bool().unwrap());
+        assert!(!home.join("config.toml").exists(), "a dry run writes nothing");
+        let written = kimi_read_only(&config, "work", &args(&["--yes", "--json"]), false).unwrap();
+        assert_eq!(written["written"], true);
+        let text = fs::read_to_string(home.join("config.toml")).unwrap();
+        assert!(text.contains("Bash(hgs team status --json)"), "{text}");
+        assert!(!text.contains("Bash(hgs inspect") && !text.contains(" *)"), "{text}");
+        let removed = kimi_read_only(&config, "work", &args(&["--remove", "--json"]), false).unwrap();
+        assert_eq!(removed["removed"].as_u64(), Some(12));
+        fs::write(
+            config.dir.join("accounts.json"),
+            json!({"profiles": {"claude-one": {"provider": "claude", "label": "C"}}}).to_string(),
+        )
+        .unwrap();
+        assert!(kimi_read_only(&config, "claude-one", &args(&["--json"]), false).is_err(), "a Kimi-only setting");
+    }
+
     #[test]
     fn claude_project_keys_use_forward_slashes_on_windows() {
         // N19: as Claude writes them; the mixed form was another project.

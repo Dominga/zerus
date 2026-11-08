@@ -13,7 +13,43 @@ pub(crate) struct Disk {
     pub hash: String,
     pub bytes: usize,
 }
+#[derive(Clone, Copy)]
+enum SourceAccess {
+    Private,
+    #[cfg(unix)]
+    OwnedReadOnly,
+}
+impl SourceAccess {
+    #[cfg(unix)]
+    fn permits(self, uid: u32, links: u64, mode: u32) -> bool {
+        let forbidden = match self {
+            Self::Private => 0o077,
+            Self::OwnedReadOnly => 0o022,
+        };
+        // SAFETY: geteuid has no preconditions. Ownership always comes from
+        // metadata on the opened no-follow file, never a caller's claim.
+        uid == unsafe { libc::geteuid() } && links == 1 && mode & forbidden == 0
+    }
+}
+
 pub(crate) fn current(path: &Path, limit: usize) -> io::Result<Option<Disk>> {
+    current_with_access(path, limit, SourceAccess::Private)
+}
+
+/// Owned, read-only legacy import source. Sharing read access cannot change its
+/// bytes; sharing write access is refused. Never use this for a Zerus writer.
+#[cfg(unix)]
+pub(crate) fn read_only_source(path: &Path, limit: usize) -> io::Result<Option<Disk>> {
+    current_with_access(path, limit, SourceAccess::OwnedReadOnly)
+}
+
+fn current_with_access(
+    path: &Path,
+    limit: usize,
+    access: SourceAccess,
+) -> io::Result<Option<Disk>> {
+    #[cfg(not(unix))]
+    let _ = access;
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -33,11 +69,10 @@ pub(crate) fn current(path: &Path, limit: usize) -> io::Result<Option<Disk>> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        // SAFETY: geteuid has no preconditions. Never follow or sync a shared,
-        // public or foreign leaf when proving this private source barrier.
-        if meta.uid() != unsafe { libc::geteuid() } || meta.nlink() != 1 || meta.mode() & 0o077 != 0
-        {
-            return Err(refused("checkpoint source is not private"));
+        if !access.permits(meta.uid(), meta.nlink(), meta.mode()) {
+            return Err(refused(
+                "checkpoint source ownership, links or permissions refused",
+            ));
         }
     }
     let mut bytes = Vec::new();
@@ -83,5 +118,21 @@ pub(crate) fn sync_parent(path: &Path) -> io::Result<()> {
     {
         let _ = path;
         Err(io::ErrorKind::Unsupported.into())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn foreign_owner_is_refused_by_both_source_policies() {
+        // Test kernel-metadata inputs independently of chown privileges.
+        let owner = unsafe { libc::geteuid() };
+        let foreign = owner.wrapping_add(1);
+        assert!(SourceAccess::OwnedReadOnly.permits(owner, 1, 0o644));
+        assert!(!SourceAccess::OwnedReadOnly.permits(foreign, 1, 0o644));
+        assert!(!SourceAccess::Private.permits(foreign, 1, 0o600));
+        assert!(!SourceAccess::Private.permits(owner, 1, 0o644));
     }
 }

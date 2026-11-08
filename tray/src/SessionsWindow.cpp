@@ -7,6 +7,7 @@
 #include "ArchiveBrowser.h"
 #include "NativeSessionCapabilities.h"
 #include "SessionsWindow.h"
+#include "DiskSettings.h"
 #include "SlowEventLog.h"
 #include "AgentWorking.h"
 #include "EventStream.h"
@@ -786,6 +787,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     connect(m_usageRefresh,&QPushButton::clicked,this,[this]{refreshAccountUsage(true);});
     connect(m_accountUsage,&QPushButton::clicked,this,[this]{
         const auto *entry=selected();if(!entry)return;
+        // Owner #83: the chip that shows usage also reaches the session's own switch.
+        if (m_composer->accountChip()->canSwitch()) { m_composer->accountChip()->openList(); return; }
         m_pages->setCurrentIndex(4);m_accountsPage->showAccount(entry->host,m_accountUsageData.value("id").toString());
     });
     m_meta->installEventFilter(this); m_title->installEventFilter(this);
@@ -814,7 +817,11 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
      connect(m_teamStripText,&QLabel::linkActivated,this,[this](const QString &link){if(link.startsWith("task:"))openTeamTask(link.mid(5).toInt());});
      auto *open=new QPushButton(tr("Open team panel"));open->setObjectName("teamStripOpen");open->setFlat(true);open->setCursor(Qt::PointingHandCursor);
      connect(open,&QPushButton::clicked,this,[this]{if(const auto *entry=selected())if(const auto *team=m_teams?m_teams->teamOfSession(entry->host,entry->session.name):nullptr)showTeam(team->id);});
-     strip->addWidget(m_teamStripText,1);strip->addWidget(open);}
+     // Task 112: Resume team, on a paused team's session.
+     m_teamStripResume=new QPushButton(tr("Resume team"));m_teamStripResume->setObjectName("teamStripResume");m_teamStripResume->hide();
+     connect(m_teamStripResume,&QPushButton::clicked,this,[this]{if(const auto *entry=selected())if(const auto *team=m_teams?m_teams->teamOfSession(entry->host,entry->session.name):nullptr)
+         if(team->status=="paused")m_teams->act("resume",QJsonObject{{"team",team->id}});});
+     strip->addWidget(m_teamStripText,1);strip->addWidget(m_teamStripResume);strip->addWidget(open);}
     activityLayout->addWidget(m_teamStrip);
     m_activityView = new ActivityView; m_activityView->setObjectName("mainActivity"); m_composer = new MessageComposer; m_question = new QuestionCard;
     auto *voice = new SpeechComposer(hgsPath, m_composer, [this] {
@@ -1809,6 +1816,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     // once each; the known ones are kept across restarts.
     m_teamNotices=std::make_shared<TeamAttentionNotices>(Settings::value("teams/attentionNotified").toStringList());
     connect(m_teams,&TeamController::watchedChanged,this,[this]{updateProposalCards();});
+    // Task 101: a failed read keeps the team; its strip says it is stale.
+    connect(m_teams,&TeamController::staleChanged,this,[this]{updateTeamPanel();});
     connect(m_teams,&TeamController::teamsChanged,this,[this]{
         const SlowEventLog::Scope scope(this,"teams changed");
         // U25 (spec 2.3): members other than the lead are muted by default.
@@ -2239,6 +2248,10 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
     m_modelServerSettings=new ModelServerSettings(m_modelServers);
     m_modelServerSettings->machines=[this]{return m_fleet.peerNames();};
     m_modelServerSettingsSection=m_settingsPage->addSection(tr("Model servers"),m_modelServerSettings);
+    // Task 108: the build folders Zerus holds on this computer and their cleanup.
+    m_diskSettings=new DiskSettings(m_teams);
+    m_diskSettings->confirm=[this](const QString &name,const QString &title,const QString &text,const QString &action){return m_teamPanel->confirm(name,title,text,action);};
+    m_diskSettingsSection=m_settingsPage->addSection(tr("Build folders"),m_diskSettings);
     connect(m_modelServers,&ModelServers::Controller::changed,this,[this]{
         const bool any=m_modelServers->available();
         if(m_modelServersNav->isHidden()==any)m_modelServersNav->setVisible(any);
@@ -2473,6 +2486,8 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         emit refreshRequested();
     });
     connect(&m_client, &HgsClient::inspectionReady, this, &SessionsWindow::acceptInspection);
+    m_inspectRetry = new QTimer(this); m_inspectRetry->setSingleShot(true);
+    connect(m_inspectRetry, &QTimer::timeout, this, &SessionsWindow::retryInspection);
     if (auto *streams = EventStreams::instance()) {
         connect(streams, &EventStreams::activityReady, this, [this](const QString &host, const QString &name, const QJsonObject &inspection) {
             acceptInspection(host, name, inspection, {});
@@ -2524,7 +2539,14 @@ SessionsWindow::SessionsWindow(const QString &hgsPath, QWidget *parent)
         if (entry->session.cmd == "dsh" && entry->session.state != "running" && error.contains("DeepSeek host is unavailable")) {
             m_details.remove("allowed_actions"); m_inspectError.clear(); renderDetails(); return;
         }
-        m_inspectError = tr("Could not refresh activity: %1").arg(error); renderDetails();
+        // Task 117: the last good read stays on screen and is read again by
+        // itself; it said "timed out" and stayed so while the stream followed.
+        m_inspectError = !m_details.isEmpty() && m_lastInspected.isValid()
+            ? tr("Activity not refreshed since %1, retrying: %2").arg(m_lastInspected.toString(QStringLiteral("HH:mm:ss")), error)
+            : tr("Could not refresh activity: %1").arg(error);
+        m_inspectRetryKey = entry->key;
+        m_inspectRetry->start(std::min(60000, 2000 << std::min(m_inspectRetries++, 5)));
+        renderDetails();
     });
     connect(&m_client, &HgsClient::writeDone, this, [this](const QString &operation, bool ok, const QString &detail) {
         if (finishSelectionAction(operation, ok, detail)) {if(!m_selectionRunning)m_archiveBrowser->refresh();return;}
@@ -4236,6 +4258,16 @@ void SessionsWindow::selectSession()
     renderDetails();
 }
 
+// Task 117: the session the failed refresh was for, read directly: the poll
+// does not read a session a live event stream follows.
+void SessionsWindow::retryInspection()
+{
+    const auto *entry = selected();
+    if (!isVisible() || !entry || entry->key != m_inspectRetryKey || m_inspectError.isEmpty() || !entry->online) return;
+    if (m_client.requestInspection(entry->host, entry->session.name, m_cursor, entry->session.archiveId, false))
+        m_inspectionAge.start();
+}
+
 void SessionsWindow::inspect()
 {
     if (!m_pending && !m_renameKey.isEmpty()) return;
@@ -4424,6 +4456,7 @@ void SessionsWindow::acceptInspection(const QString &host, const QString &name, 
     const auto previousProcesses=m_details.value("processes");
     const bool sameRun=m_details.value("run_id")==data.value("run_id") && m_details.value("host_generation")==data.value("host_generation");
     m_details = data; m_inspectError.clear();
+    m_lastInspected = QTime::currentTime(); m_inspectRetries = 0; m_inspectRetry->stop();
     // U35: a message just queued shows until a read lists it or a second read does not.
     if (auto held = m_justHeld.find(entry->key); held != m_justHeld.end()) {
         QSet<QString> listed;
@@ -5429,8 +5462,11 @@ void SessionsWindow::updateAccountChip(const Entry &entry, bool unavailable)
     chip->setOptions(AccountSwitch::options(m_sessionAccountDetailsProfiles, entry.host, s.cmd, AccountSwitch::accountOf(s.cmd, account), m_dark));
     // A team member's account changes only with swap-member (U53, U54).
     const auto *team = m_teams ? m_teams->teamOfSession(entry.host, s.name) : nullptr;
-    const bool member = team && QStringList{"planning", "running", "paused"}.contains(team->status);
-    chip->setLocked(member ? tr("A member of team %1: its account changes with Swap member in the team's Members.").arg(team->name) : QString());
+    const auto *member = team ? team->memberOfSession(entry.host, s.name) : nullptr;
+    // Owner #83: a member's account moves with Swap member; the lead's own
+    // session stays switchable here, since Swap member never applies to it.
+    const bool locked = team && QStringList{"planning", "running", "paused"}.contains(team->status) && member && !member->lead;
+    chip->setLocked(locked ? tr("A member of team %1: its account changes with Swap member in the team's Members.").arg(team->name) : QString());
     chip->setBlocked(accountSwitchBlockReason(entry));
 }
 
@@ -6933,12 +6969,39 @@ bool SessionsWindow::confirmLocalStart(const Entry original)
     showNotice(tr("The session changed. Open its actions again."), true); return false;
 }
 
+int SessionsWindow::askResumeTeam(const QString &team)
+{
+    // Task 112: one meaning of Pause: a paused team stays paused whatever its
+    // sessions do, so resuming one of them asks once about the team.
+    if (resumeTeamChoice) return resumeTeamChoice(team);
+    QMessageBox box(QMessageBox::Question, tr("Resume the team too?"),
+        tr("%1 is paused: its members get no tasks while it stays paused. Resume the team too?").arg(team),
+        QMessageBox::NoButton, this);
+    box.setObjectName("resumeTeamToo");
+    auto *both = box.addButton(tr("Resume team"), QMessageBox::AcceptRole);
+    auto *only = box.addButton(tr("Only this session"), QMessageBox::ActionRole);
+    auto *cancel = box.addButton(QMessageBox::Cancel);
+    box.setDefaultButton(both); box.setEscapeButton(cancel);
+    both->setFocus();
+    box.exec();
+    return box.clickedButton() == both ? 2 : box.clickedButton() == only ? 1 : 0;
+}
+
 void SessionsWindow::changeSession()
 {
     const auto *e = selected(); if (!e || !e->online || m_pending || !m_changeAction->isEnabled()) return;
     if (e->session.state != "running") {
         if (!confirmLocalStart(*e)) return;
         e = selected(); if (!e->online || m_pending || !m_changeAction->isEnabled()) return;
+    }
+    if (e->session.state != "running" && e->session.state != "archived" && m_teams) {
+        if (const auto *team = m_teams->teamOfSession(e->host, e->session.name); team && team->status == "paused") {
+            const QString id = team->id;
+            const int choice = askResumeTeam(team->name);
+            if (choice == 0) return;
+            if (choice == 2) m_teams->act("resume", QJsonObject{{"team", id}});
+            e = selected(); if (!e || !e->online || m_pending || !m_changeAction->isEnabled()) return;
+        }
     }
     const QString restoreKey = e->host + '\n' + e->session.name;
     if (e->session.state == "archived" && (!m_restoreWriteKey.isEmpty() || m_restores.contains(restoreKey)
@@ -7573,8 +7636,12 @@ void SessionsWindow::updateTeamPanel()
         const auto *found=entry?m_teams->teamOfSession(entry->host,entry->session.name):nullptr;
         const auto *member=found?found->memberOfSession(entry->host,entry->session.name):nullptr;
         m_teamStrip->setVisible(member);
+        if(m_teamStripResume)m_teamStripResume->setVisible(member&&found->status=="paused");
         if(member){
             QString text=tr("Team <b>%1</b> · %2").arg(found->name.toHtmlEscaped(),found->roleOf(member->id).toHtmlEscaped());
+            // Task 112: a paused team says so on every one of its sessions.
+            if(found->status=="paused")
+                text+=QStringLiteral(" · <span style='color:%1;'>%2</span>").arg(m_dark?QStringLiteral("#d6b25e"):QStringLiteral("#8a6414"),found->pausedText().toHtmlEscaped());
             for(const auto &task:found->tasks){
                 const auto *attempt=task.last();
                 const bool current=task.assignee==member->id&&!task.finished()&&task.status!="pending"&&task.status!="draft";
@@ -7583,7 +7650,14 @@ void SessionsWindow::updateTeamPanel()
                     Q_UNUSED(attempt);break;
                 }
             }
+            // Task 101: the last good read stays while hgs does not answer.
+            if(m_teams->stale()){
+                const auto at=m_teams->lastGoodRead();
+                text+=tr(" · <span style='color:%1;'>not refreshed since %2</span>").arg(m_dark?QStringLiteral("#d6b25e"):QStringLiteral("#8a6414"),
+                    at.isValid()?at.time().toString(QStringLiteral("HH:mm:ss")):tr("earlier"));
+            }
             m_teamStripText->setText(text);
+            m_teamStripText->setToolTip(m_teams->stale()?m_teams->staleError():QString());
             QColor fill(m_accent);fill.setAlphaF(m_dark?.10:.07);
             m_teamStrip->setStyleSheet(QStringLiteral("QFrame#teamStrip{background:%1;border:1px solid %2;border-radius:8px;} QPushButton#teamStripOpen{color:%3;border:none;background:transparent;}")
                 .arg(fill.name(QColor::HexArgb),[this]{QColor edge(m_accent);edge.setAlphaF(.45);return edge.name(QColor::HexArgb);}(),m_accent));
@@ -7865,6 +7939,7 @@ void SessionsWindow::showTeamWaiting()
     if(!m_teams)return;
     if(!m_teamWaitingPage){
         m_teamWaitingPage=new TeamWaitingPage(m_teams);m_teamWaitingPage->setDark(m_dark);
+        m_teamWaitingPage->openDisk=[this]{m_pages->setCurrentIndex(5);m_settingsPage->openSection(m_diskSettingsSection);m_diskSettings->refresh();};
         m_teamWaitingPage->openTeam=[this](const TeamWaitingPage::Item &item){
             m_pages->setCurrentIndex(0);showTeam(item.team);
             if(m_teamPanel&&m_teamPanel->openWorkspace)m_teamPanel->openWorkspace();
@@ -7908,3 +7983,4 @@ void SessionsWindow::startTeamDesigner(const QString &folder,const QString &goal
             timer->start();
         });
 }
+

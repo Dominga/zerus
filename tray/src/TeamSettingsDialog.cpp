@@ -1,5 +1,6 @@
 #include "TeamSettingsDialog.h"
 #include "IronRulesEditor.h"
+#include "NewSessionDense.h"
 #include "TeamController.h"
 #include "TeamWidgets.h"
 #include <QApplication>
@@ -8,10 +9,13 @@
 #include <QComboBox>
 #include <QDateTime>
 #include <QDialogButtonBox>
+#include <QJsonDocument>
+#include <QJsonParseError>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QPlainTextEdit>
 #include <QPointer>
 #include <QPushButton>
 #include <QScrollArea>
@@ -109,6 +113,40 @@ TeamSettingsDialog::TeamSettingsDialog(TeamController *teams, const Teams::Team 
     m_broker->setChecked(m_settings.value("build_broker").toBool());
     v->addWidget(m_broker);
     v->addWidget(note(tr("Each member builds its own snapshot of the shared folder, one build at a time per build folder, and an unchanged tree builds once."), c.muted, "teamSettingsBuildBrokerNote"));
+    // Task 88: the project's test providers and templates, of any stack, and
+    // the owner's override of them; nothing is written before Save.
+    v->addWidget(label(tr("Tests"), c.text2, 12, true));
+    m_testsSource = note(tr("Reading the project's test configuration…"), c.muted, "teamSettingsTestsSource");
+    v->addWidget(m_testsSource);
+    auto *testsList = new QWidget; testsList->setObjectName("teamSettingsTestsList");
+    m_testsList = new QVBoxLayout(testsList); m_testsList->setContentsMargins(0, 0, 0, 0); m_testsList->setSpacing(2);
+    v->addWidget(testsList);
+    v->addWidget(note(tr("Your override, as JSON shaped like .zerus/tests.toml: providers merge by name, templates replace the project's list. Empty: the project's file alone."), c.muted));
+    const auto before = m_settings.value("tests");
+    m_tests = new QPlainTextEdit(before.isObject() ? QString::fromUtf8(QJsonDocument(before.toObject()).toJson(QJsonDocument::Indented)) : QString());
+    m_tests->setObjectName("teamSettingsTestsOverride");
+    m_tests->setPlaceholderText(QStringLiteral("{\"provider\": [{\"name\": \"python\", \"kind\": \"pytest\", \"results\": {\"format\": \"junit\", \"path\": \"out/pytest.xml\"}}]}"));
+    m_tests->setFont(NewSessionDense::mono(11));
+    m_tests->setFixedHeight(m_tests->fontMetrics().lineSpacing() * 8 + 14);
+    v->addWidget(m_tests);
+    auto *testsButtons = new QHBoxLayout; testsButtons->setSpacing(6);
+    m_testsCheckButton = button(tr("Check"), "teamSettingsTestsCheck"); m_testsCheckButton->setProperty("ghost", true);
+    m_testsCheckButton->setToolTip(tr("Ask hgs whether the project's file with this override loads; nothing is written"));
+    m_testsProposalButton = button(tr("Show the detected proposal"), "teamSettingsTestsProposalToggle"); m_testsProposalButton->setProperty("ghost", true);
+    testsButtons->addWidget(m_testsCheckButton); testsButtons->addWidget(m_testsProposalButton); testsButtons->addStretch();
+    v->addLayout(testsButtons);
+    m_testsCheck = note(QString(), c.muted, "teamSettingsTestsCheckResult"); m_testsCheck->hide();
+    v->addWidget(m_testsCheck);
+    m_testsProposal = new QPlainTextEdit; m_testsProposal->setObjectName("teamSettingsTestsProposal"); m_testsProposal->setReadOnly(true);
+    m_testsProposal->setFont(NewSessionDense::mono(11)); m_testsProposal->setFixedHeight(m_testsProposal->fontMetrics().lineSpacing() * 8 + 14);
+    m_testsProposal->hide();
+    v->addWidget(m_testsProposal);
+    connect(m_tests, &QPlainTextEdit::textChanged, this, [this] { m_testsCheck->hide(); if (m_save) update(); });
+    connect(m_testsCheckButton, &QPushButton::clicked, this, [this] { checkTests(); });
+    connect(m_testsProposalButton, &QPushButton::clicked, this, [this] {
+        m_testsProposal->setVisible(!m_testsProposal->isVisible());
+        m_testsProposalButton->setText(m_testsProposal->isVisible() ? tr("Hide the detected proposal") : tr("Show the detected proposal"));
+    });
     // U63 (owner, 2026-10-31): who may lift a pause the lead put on an
     // accepted phase (only with the owner's consent by default), and whether
     // new phases wait for the owner's acceptance once their work is decided.
@@ -223,6 +261,96 @@ TeamSettingsDialog::TeamSettingsDialog(TeamController *teams, const Teams::Team 
     m_create->setEnabled(false);
     showIntakes();
     update();
+    loadTests();
+}
+
+QJsonValue TeamSettingsDialog::testsOverride(QString *error) const
+{
+    const QString text = m_tests ? m_tests->toPlainText().trimmed() : QString();
+    if (text.isEmpty()) return QJsonValue(QJsonValue::Null);
+    QJsonParseError parsed;
+    const auto document = QJsonDocument::fromJson(text.toUtf8(), &parsed);
+    if (parsed.error != QJsonParseError::NoError || !document.isObject()) {
+        if (error) *error = parsed.error != QJsonParseError::NoError
+            ? tr("The tests override is not valid JSON: %1").arg(parsed.errorString())
+            : tr("The tests override is a JSON object shaped like .zerus/tests.toml");
+        return QJsonValue(QJsonValue::Undefined);
+    }
+    const auto object = document.object();
+    return object.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(object);
+}
+
+QStringList TeamSettingsDialog::testsLines(const QJsonObject &config)
+{
+    QStringList lines;
+    for (const auto &value : config.value("providers").toArray()) {
+        const auto provider = value.toObject();
+        const auto results = provider.value("results").toObject();
+        QString line = tr("Provider %1 (%2)").arg(provider.value("name").toString(), provider.value("kind").toString());
+        if (!results.isEmpty()) line += tr(", results %1 from %2").arg(results.value("format").toString(), results.value("path").toString());
+        else line += tr(", no per-test report");
+        if (provider.value("disabled").toBool()) line += tr(", off");
+        lines << line;
+    }
+    for (const auto &value : config.value("templates").toArray()) {
+        const auto item = value.toObject();
+        lines << (item.value("accepted").toBool()
+            ? tr("Template %1: %2, accepted").arg(item.value("id").toString(), item.value("program").toString())
+            : tr("Template %1: %2, waits for your acceptance (hgs team templates accept %3)").arg(item.value("id").toString(), item.value("program").toString(), item.value("hash").toString().left(12)));
+    }
+    if (lines.isEmpty()) lines << tr("No test providers yet");
+    return lines;
+}
+
+void TeamSettingsDialog::showTests(const QJsonObject &config)
+{
+    const Colors c = colorsFor(m_dark);
+    while (auto *item = m_testsList->takeAt(0)) { if (auto *w = item->widget()) w->deleteLater(); delete item; }
+    const QString source = config.value("source").toString();
+    QString text = source == QLatin1String("file") ? tr("From the project's .zerus/tests.toml")
+        : source == QLatin1String("detected") ? tr("Detected from the project: no .zerus/tests.toml yet")
+        : tr("No test configuration: the project has no .zerus/tests.toml and no known stack");
+    if (config.value("overridden").toBool()) text += tr(", with your override");
+    m_testsSource->setText(text);
+    for (const auto &line : testsLines(config)) m_testsList->addWidget(label(line, c.text2, 11, false, "teamSettingsTestsItem"));
+    m_testsProposal->setPlainText(config.value("proposal").toString());
+}
+
+void TeamSettingsDialog::loadTests()
+{
+    if (!m_teams) return;
+    m_teams->call(QStringLiteral("test-config"), {{"team", m_team}}, [guard = QPointer<TeamSettingsDialog>(this)](bool ok, const QJsonObject &result, const QString &error) {
+        if (!guard) return;
+        if (!ok) { guard->m_testsSource->setText(error.isEmpty() ? tr("The test configuration could not be read") : error); return; }
+        if (!result.value("ok").toBool()) guard->m_testsSource->setText(tr("The project's test configuration does not load: %1").arg(result.value("error").toString()));
+        else guard->showTests(result);
+        guard->m_testsProposal->setPlainText(result.value("proposal").toString());
+    }, false);
+}
+
+void TeamSettingsDialog::checkTests()
+{
+    QString error;
+    const auto candidate = testsOverride(&error);
+    const Colors c = colorsFor(m_dark);
+    if (!error.isEmpty()) {
+        m_testsCheck->setText(error); m_testsCheck->setStyleSheet(QStringLiteral("color:%1;").arg(c.danger.name())); m_testsCheck->show();
+        return;
+    }
+    m_testsCheckButton->setEnabled(false);
+    m_testsCheck->setText(tr("Checking with hgs…")); m_testsCheck->setStyleSheet(QStringLiteral("color:%1;").arg(c.muted.name())); m_testsCheck->show();
+    QJsonObject input{{"team", m_team}, {"action", "check"}, {"tests", candidate}};
+    m_teams->call(QStringLiteral("test-config"), input, [guard = QPointer<TeamSettingsDialog>(this)](bool ok, const QJsonObject &result, const QString &error) {
+        if (!guard) return;
+        guard->m_testsCheckButton->setEnabled(true);
+        const Colors c = colorsFor(guard->m_dark);
+        const bool good = ok && result.value("ok").toBool();
+        const QString why = !ok ? error : result.value("error").toString();
+        guard->m_testsCheck->setText(good ? tr("hgs loads it: %1 providers, %2 templates. Save applies it.").arg(result.value("providers").toArray().size()).arg(result.value("templates").toArray().size())
+                                          : tr("hgs refuses it: %1").arg(why));
+        guard->m_testsCheck->setStyleSheet(QStringLiteral("color:%1;").arg((good ? c.accent : c.danger).name()));
+        if (good) guard->showTests(result);
+    }, false);
 }
 
 QJsonObject TeamSettingsDialog::changes() const
@@ -247,6 +375,12 @@ QJsonObject TeamSettingsDialog::changes() const
     if (leadUnpause != m_settings.value("lead_removes_own_pause").toBool()) out.insert("lead_removes_own_pause", leadUnpause);
     const bool ownerAccepts = m_settings.value("phase_acceptance").toString() == QLatin1String("owner");
     if (m_acceptance->isChecked() != ownerAccepts) out.insert("phase_acceptance", m_acceptance->isChecked() ? QStringLiteral("owner") : QStringLiteral("lead"));
+    // Task 88: the tests override, null to drop it.
+    QString error;
+    const auto tests = testsOverride(&error);
+    const auto stored = m_settings.value("tests");
+    const bool none = !stored.isObject() || stored.toObject().isEmpty();
+    if (error.isEmpty() && (tests.isNull() ? !none : tests != stored)) out.insert("tests", tests);
     return out;
 }
 
@@ -299,6 +433,7 @@ QString TeamSettingsDialog::problem() const
 {
     auto issue = IronRules::problem(m_rules->toPlainText()); if (!issue.isEmpty()) return issue;
     for (const auto &member : m_ruleMembers) { issue = IronRules::problem(member.field->toPlainText()); if (!issue.isEmpty()) return issue; }
+    testsOverride(&issue); if (!issue.isEmpty()) return issue;
 
     if (!m_branch->isChecked()) return {};
     const QString name = m_template->text().trimmed();

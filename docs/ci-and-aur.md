@@ -35,10 +35,9 @@ conservative change selection, including both sides of renames.
 | Android unit tests and lint | Always | `testDebugUnitTest` and `lintRelease` of the Firebase variant that Dev ships, with a synthetic `google-services.json` and no credentials |
 | Linux CLI | Always | Stable Rust unit tests, terminal smoke tests, Python integration modules, release build |
 | Native desktop client | Linux with the CLI; macOS/Windows with their desktop jobs | Linux `client/media` audio/video tests, including synthetic GStreamer recordings, and `client/src-tauri` tests under headless Xvfb plus clippy with video; native macOS `client/core` tests, `client/media` video checks and `client/src-tauri` clippy (its test suite runs on the local Mac gate until `zerus-5wmh.78` is fixed); native Windows `client/core` tests, `client/media` video checks and `client/src-tauri` clippy (its test suite stays pending `zerus-5wmh.52`), all on standard runners with Rust 1.99.1 |
-| Arch desktop | Always | Qt build and all CTest suites |
 | Arch package | Always | Production package with the recipe's `check()`, namcap, staged and installed bundle checks; the only producer of the `arch-x86_64-<commit>` candidate artifact |
-| macOS CLI and desktop | Always | Native CLI integration and all Qt CTest suites on two standard macOS jobs |
-| Windows client and desktop | Affected PR; full nightly/stable | Rust tests, Rust 1.99 clippy for the Windows target, Windows client and session host integration tests, MSVC Qt build with all offscreen CTest suites, and the portable zip checked from an isolated extraction |
+| macOS CLI | Always | Native CLI integration and the maintained Next core/Tauri checks |
+| Windows client and desktop | Affected PR; full nightly/stable | Rust tests, Rust 1.99 clippy for the Windows target, Windows client and session host integration tests, Tauri build with video and frontend notices, and the portable zip checked from an isolated extraction |
 | Windows real agents | Affected PR; full nightly/stable | One latest `win32-x64` Claude Code and Codex release in isolated session hosts of the release build, each against a local fake API; skipped or empty suites fail |
 | CI gate | Always | Requires every selected suite to succeed; fails on unexpected skips, cancellation and errors |
 
@@ -206,9 +205,22 @@ save them.
 | `client-native-` | Native desktop client | OS/arch, hash of `rustc +1.99.1 -Vv`, month, hashes of the three client lockfiles | Exact key missed; native checks passed | Monthly restart; Cargo registry and Git checkouts only, so multi-GB native target directories are never cached |
 | `arch-cargo-v1-` | Arch package | Month, hash of `Cargo.lock` and the connector's lock | Exact key missed; package built | Cargo registry only |
 | `android-gradle-v1-` | Android | Month, hash of the Gradle wrapper properties and `*.gradle.kts` | Exact key missed; tests and lint passed | Monthly restart; about 700 MB (`~/.gradle/caches` and `wrapper`) |
-| `arch-ccache-v1-`, `arch-package-ccache-v1-`, `mac-desktop-ccache-v1-` | Arch desktop, Arch package, macOS | Architecture (macOS), run ID | Build passed with ccache misses | `CCACHE_MAXSIZE` 150, 100 and 100 MB |
+| `arch-package-ccache-v1-` | Arch package | Run ID | Build passed with ccache misses | `CCACHE_MAXSIZE` 100 MB |
 
-Quick and relay checks reclaim only unused Android, .NET, Haskell and CodeQL installations on disposable hosted Ubuntu runners. Disk checkpoints record free bytes and build-directory sizes. Quick shares one Cargo target across its crates; the new cache family avoids restoring the former duplicated debug and incremental trees. Relay removes its completed host Cargo targets before Docker compiles the deployment image; the remaining memory-envelope checks run that image. PostgreSQL containers and volumes, Cargo registries and the Python test environment stay available. Runner classes and the repository cache limit are unchanged.
+Quick, relay and Linux native-client checks reclaim only unused Android, .NET, Haskell and CodeQL installations on disposable hosted Ubuntu runners. Disk checkpoints record free bytes and build-directory sizes. Quick shares one Cargo target across its crates; the new cache family avoids restoring the former duplicated debug and incremental trees. Relay removes its completed host Cargo targets before Docker compiles the deployment image; the remaining memory-envelope checks run that image. PostgreSQL containers and volumes, Cargo registries and the Python test environment stay available. Runner classes and the repository cache limit are unchanged.
+
+The hosted Linux native-client job reports disk use after checkout, dependency
+installation and cache restore, between its existing build phases, and after
+checks even when they fail. Reports include sizes for `target/client-native` and
+the Cargo registry/Git caches. After its fixed unused-tool cleanup, this job
+requires a fresh measurement of at least 24 GiB free before installing dependencies
+or compiling. A healthy run used 17.7 GiB from checkout to the end of its checks,
+8.7 GiB of it in the core test links, and the cleanup reclaimed 18.1 GiB; the
+remainder covers parallel link temporaries and growth. A refusal fails the job
+before any build with a run annotation naming the required and actual free bytes,
+instead of a linker crash on a full disk. Quick and relay do not use this minimum.
+Host build-target retirement remains relay-only. Local native-check script runs
+skip the hosted checkpoints and preparation.
 
 The Windows real-agent job restores the `windows-cli-` family of the Windows
 desktop job for its release build and never saves it, so two jobs cannot race to
@@ -341,7 +353,6 @@ and [Dependabot options](https://docs.github.com/en/code-security/reference/supp
 ```sh
 python3 scripts/ci/check-source.py
 bash scripts/ci/cli.sh
-bash scripts/ci/gui.sh
 cargo +1.99.1 test --locked
 # Arch only, as an ordinary user with the documented build dependencies:
 bash scripts/ci/arch.sh
@@ -911,7 +922,18 @@ identity transition, stale usage suppression, a single durable clear boundary,
 preserved process/run identity, unsent native drafts and foreign-directory
 rejection. A resumed conversation whose `SessionStart` is still deferred must
 pause, and clear from the GUI and from Terminal, where the next message's hook
-names the new conversation. A new session in a folder outside the fixture home,
+names the new conversation. A separate ordering fixture inserts a modeled main
+`SessionEnd`, unless the native agent already emitted it, immediately before
+forwarding the real clear `SessionStart` unchanged. The end ordering is controlled;
+the successor hook and native process/file ownership are real. It verifies an unrequested
+Terminal clear through the original supervised process, its held old rollout and
+the held successor's bounded native header, without inventing a clear request or
+replaying input. Process fixtures also require the complete owned reset before
+reopening the composer after that end; the end alone grants no input permission.
+They also refuse a nested interactive Codex even when the supervised process
+holds the successor, and an actually held successor outside the selected account's
+`sessions/` directory. The nearest native hook caller must be the supervised PID.
+A new session in a folder outside the fixture home,
 which Codex prints in full in its header, answers a first message from the localhost
 provider; idle polls must not treat that header above the history as a reset,
 and a later clear must still be confirmed. A separate fixture caches a newer
@@ -1448,8 +1470,8 @@ Each flavor installs the same ADE bundle:
 
 The Arch desktop dynamically links system GTK3/WebKitGTK and GStreamer; packages
 ship no Qt/KDE runtime or native UI plugin. Existing sealed Qt candidates remain
-valid for publication retries without changing their original bytes. The Qt
-source installer remains an explicit fallback until Linux acceptance.
+valid for publication retries without changing their original bytes. Qt
+source builds and Qt installer selections are retired on Linux/macOS.
 The runtime also declares curl for native account HTTP requests and procps-ng
 for process inspection. Optional Node.js/npm enable agent installation from
 Accounts; Git enables repository/worktree features. Arch's Node.js package does
@@ -1561,11 +1583,64 @@ GitHub releases or a schedule.
 ### 1. Build and review a candidate
 
 `release.yml` runs quick checks plus full Linux CLI, Arch, macOS and Windows
-validation from one exact commit. macOS can be explicitly disabled; Windows
-cannot, because the candidate carries the portable zip that this run tested. It
+validation from one exact commit, including macOS and Windows (the latter ships
+the portable zip that this run tested). It
 consumes that run's Arch package and Windows zip, verifies their embedded
-version/source commit, assembles source and binary archives, rebuilds both stable
-recipes, runs namcap and seals the result.
+version/source commit and assembles source and binary archives. In parallel with
+verification, a credential-free, cache-free source-recipe job builds the exact
+`git archive` with `makepkg` including `check()`, then runs namcap and
+`check-package.py`. Final assembly regenerates the tarball and requires identical
+raw-tar and compressed SHA-256 digests, recipe and `.SRCINFO` before reusing that
+same run's checked source package. Changed source, metadata or package bytes fail
+closed. It builds and checks only `zerus-ade-bin` afterwards.
+
+The signed cask install check and final assembly run in parallel. Neither produces
+the final candidate alone: the sealing job waits for both selected checks, then
+validates and uploads the immutable candidate. Optional casks may be skipped only
+when disabled for this run. Source/package jobs and sealing receive no credentials
+or cache access.
+
+Each required test suite runs once per candidate. Stable unsigned Mac packaging
+keeps bundle/self-tests but delegates core/Tauri/frontend regressions to its
+same-SHA verification gate. The verification Arch package uses `--nocheck` only
+when this release's source-recipe job supplies `check()` and the seal consumes
+that job's exact digest receipt. Ordinary PR/manual/Nightly Arch checks still run
+`check()`. Windows unit/lint/connector filesystem contracts run in parallel with
+the release CLI, desktop and portable build; both jobs are required by the suite
+gate. Host, client, package and installer-survival checks still test the release
+binaries in the packaging job.
+
+Do not start a second full matrix, including candidate verification, while
+another full matrix already tests that exact SHA. Before a manual candidate or
+full CI dispatch, check the resolved source (the `Resolve commit` job), wait for
+an existing full run, or select only a missing platform where appropriate.
+An existing PR run is not a substitute for the release's own required gate. Main CI regression also
+observes exact-SHA upstream-main Stable/Nightly candidate verification before
+starting: an active (or already successful) verify in an active candidate run
+suppresses only the duplicate regression scheduling. This observation is read-only
+and is never a test-pass receipt. A failed candidate or unavailable/bounded API
+observation runs regression normally. A race in which a candidate starts after
+that observation still needs the same scheduling rule; never cancel an unrelated
+candidate or substitute another SHA to reduce runner use.
+
+A maintainer may measure the credential-free graph on a reviewed branch without
+calling `release.yml` or changing a release in progress:
+
+```sh
+gh workflow run ci.yml --ref REVIEWED_BRANCH -f release_rehearsal=true \
+  -f run_linux=true -f run_arch=true -f run_macos=true \
+  -f run_windows=true -f run_ios=true
+```
+
+Leave `ref` empty so the workflow and tested source are the same commit. This runs
+one full manual matrix alongside the same reusable source recipe and unsigned Mac
+build, then the same assembly and sealing helpers. Partial coverage cannot produce
+a successful rehearsal. It has no signing/notary/environment secrets and no draft
+or publication step; its final artifact is named `release-rehearsal-SHA`, which the
+publisher cannot consume. The measurement excludes protected signing/notarization
+and signed cask installation, so report those separately. Do not start this while
+a PR/full matrix already tests the SHA, or while an active release needs the Mac
+runner slots.
 Stable and nightly candidates call the common `checks.yml` workflow directly
 with read-only cache access. Their verification never includes the main-push dev
 publisher or requests its tag-writing permissions.
@@ -1621,9 +1696,11 @@ an empty output directory. Build artifacts are ignored and are never committed t
 the application or AUR repositories.
 
 Once the repository variable `MACOS_CASKS_ENABLED` is `true`, the candidate run
-also builds the Apple Silicon bundle against the pinned official Qt, signs and
-notarizes it in the main-only `macos-signing` environment and installs the result
-through a local tap before assembly (`macos-cask.yml`). The candidate then uses
+also builds the unsigned Apple Silicon Zerus Next bundle, without Qt (`--gui tauri`),
+in parallel with full verification. Only after verification and that same run's
+bundle both succeed does it sign and notarize in the main-only `macos-signing` environment and installs the result
+through a local tap alongside final assembly (`macos-cask-install.yml`); sealing
+waits for both. The candidate then uses
 release-info schema 2 and contains the `zerus-VERSION-macos-arm64.zip` asset and
 `homebrew/zerus.rb`. Until then, and with `-f macos_cask=false`, the candidate has
 no macOS asset. Details, secrets and retry rules are in

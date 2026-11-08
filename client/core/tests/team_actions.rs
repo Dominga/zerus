@@ -415,6 +415,60 @@ fn every_action_sends_its_request_once_and_gives_the_receipt() {
         expected.insert("request_id".into(), json!(request_id));
         assert_eq!(request, Value::Object(expected));
     }
+    // Task 97: a deferred request belongs to no team; the owner's answer is
+    // sent as it is, and an answer without words never runs.
+    reply(&fake, "answer-deferred", "", json!({"stdout": {"status": "sent"}}));
+    let outcome = run(
+        &fake.path(),
+        &TeamCall {
+            team: String::new(),
+            ..call(TeamAction::AnswerDeferred { id: "0a1b2c3d4e5f6a7b".into(), decision: "allow".into(), text: String::new() })
+        },
+    );
+    let TeamOutcome::Done { request_id, .. } = &outcome else { panic!("{outcome:?}") };
+    let (op, request) = requests(&fake).pop().unwrap();
+    assert_eq!(op, "answer-deferred");
+    assert_eq!(request, json!({"id":"0a1b2c3d4e5f6a7b","decision":"allow","by":"human","request_id":request_id}));
+    let before_deferred = requests(&fake).len();
+    let empty = run(
+        &fake.path(),
+        &TeamCall {
+            team: String::new(),
+            ..call(TeamAction::AnswerDeferred { id: "0a1b2c3d4e5f6a7b".into(), decision: "answer".into(), text: " ".into() })
+        },
+    );
+    assert!(matches!(empty, TeamOutcome::Failed { .. }), "{empty:?}");
+    assert_eq!(requests(&fake).len(), before_deferred);
+    // Task 108: the Disk view belongs to no team. A list and a dry run go at
+    // once; Clean now asks first, then sends exactly what was confirmed.
+    let disk = |action: &str, dry_run: bool| TeamAction::Disk {
+        action: action.into(), scope: "policy".into(), dry_run, policy: Value::Null, paths: vec![], path: String::new(), refresh: false, measure: false,
+    };
+    reply(&fake, "disk", "", json!({"stdout": {"decisions": []}}));
+    let listed = run(&fake.path(), &TeamCall { team: String::new(), ..call(disk("list", false)) });
+    assert!(matches!(listed, TeamOutcome::Done { .. }), "{listed:?}");
+    assert_eq!(requests(&fake).pop().unwrap().1["action"], "list");
+    // Task 109: the open Disk view's live read asks hgs to measure.
+    let live = run(&fake.path(), &TeamCall { team: String::new(), ..call(TeamAction::Disk {
+        action: "list".into(), scope: String::new(), dry_run: false, policy: Value::Null, paths: vec![], path: String::new(), refresh: false, measure: true,
+    }) });
+    assert!(matches!(live, TeamOutcome::Done { .. }), "{live:?}");
+    assert_eq!(requests(&fake).pop().unwrap().1["measure"], true);
+    let dry = run(&fake.path(), &TeamCall { team: String::new(), ..call(disk("clean", true)) });
+    assert!(matches!(dry, TeamOutcome::Done { .. }), "{dry:?}");
+    assert_eq!(requests(&fake).pop().unwrap().1["dry_run"], true);
+    let before_clean = requests(&fake).len();
+    let asked = run(&fake.path(), &TeamCall { team: String::new(), confirmed: false, ..call(disk("clean", false)) });
+    let TeamOutcome::Confirm { confirmation } = &asked else { panic!("{asked:?}") };
+    assert_eq!((confirmation.name.as_str(), confirmation.action.as_str()), ("diskCleanConfirm", "Remove"));
+    assert_eq!(requests(&fake).len(), before_clean, "nothing runs before the owner confirms");
+    let cleaned = run(&fake.path(), &TeamCall { team: String::new(), confirmed: true, ..call(disk("clean", false)) });
+    assert!(matches!(cleaned, TeamOutcome::Done { .. }), "{cleaned:?}");
+    let (op, request) = requests(&fake).pop().unwrap();
+    assert_eq!((op.as_str(), request["dry_run"].clone(), request["scope"].clone(), request["by"].clone()), ("disk", json!(false), json!("policy"), json!("human")));
+    let wrong = run(&fake.path(), &TeamCall { team: String::new(), ..call(TeamAction::Disk { action: "wipe".into(), scope: String::new(), dry_run: true,
+        policy: Value::Null, paths: vec![], path: String::new(), refresh: false, measure: false }) });
+    assert!(matches!(wrong, TeamOutcome::Failed { .. }), "{wrong:?}");
     // A send back without a comment and an answer without a choice never run.
     let before = requests(&fake).len();
     for action in [
@@ -966,4 +1020,68 @@ fn catalog_set_import_export_and_designer_send_their_requests() {
     // Without a folder nothing starts.
     let none = TeamAction::CatalogDesigner { folder: String::new(), goal: "x".into(), agent: String::new(), model: String::new(), effort: String::new(), project: String::new() };
     assert!(matches!(run(&fake.path(), &TeamCall { team: String::new(), ..call(none) }), TeamOutcome::Failed { .. }));
+}
+
+/// Task #58: the owner switches one phase's mode: the confirmation first
+/// (Qt's dialog words), then exactly `hgs team phase-mode --json` with the
+/// phase, the mode and the owner's identity.
+#[test]
+fn a_phase_mode_switch_asks_first_then_sends_the_phase_and_its_mode() {
+    let switch = |mode: &str| TeamAction::PhaseMode { phase: 2, mode: mode.into(), reason: " release ".into() };
+    let Err(TeamOutcome::Confirm { confirmation }) = prepare(&TeamCall { confirmed: false, ..call(switch("free")) }) else { panic!("asks first") };
+    assert_eq!((confirmation.name.as_str(), confirmation.action.as_str()), ("teamPhaseModeConfirm", "Switch to free"));
+    assert!(confirmation.text.contains("phase 2") && confirmation.text.contains("other phases keep their modes"), "{}", confirmation.text);
+    let Err(TeamOutcome::Confirm { confirmation }) = prepare(&TeamCall { confirmed: false, ..call(switch("standard")) }) else { panic!("asks first") };
+    assert_eq!(confirmation.action, "Switch to standard");
+    let (invocation, request_id) = prepare(&call(switch("standard"))).unwrap();
+    assert_eq!(invocation.args, ["team", "phase-mode", "--json"]);
+    let sent: Value = serde_json::from_slice(invocation.stdin.as_deref().unwrap()).unwrap();
+    assert_eq!(sent, json!({"phase":2,"mode":"standard","reason":"release","team":TEAM,"by":"human","request_id":request_id}));
+    for bad in [TeamAction::PhaseMode { phase: 0, mode: "free".into(), reason: String::new() },
+                TeamAction::PhaseMode { phase: 2, mode: "open".into(), reason: String::new() }] {
+        assert!(matches!(prepare(&call(bad)), Err(TeamOutcome::Failed { .. })));
+    }
+}
+
+/// Task 88: the Tests settings read and check the team's test configuration;
+/// neither is a change (no confirmation), a candidate override goes as it is,
+/// and anything but an object or null is refused before anything runs.
+#[test]
+fn the_test_config_action_reads_and_checks_without_asking() {
+    let get = TeamAction::TestConfig { action: "get".into(), tests: Value::Null };
+    let (invocation, _) = prepare(&call(get.clone())).unwrap();
+    assert_eq!(&invocation.args[..3], ["team", "test-config", "--json"]);
+    let sent: Value = serde_json::from_slice(invocation.stdin.as_deref().unwrap()).unwrap();
+    assert_eq!((sent["action"].clone(), sent["team"].clone(), sent.get("tests").is_none()), (json!("get"), json!(TEAM), true));
+    assert!(get.confirmation("T").is_none());
+    let candidate = json!({"provider":[{"name":"python","kind":"pytest","results":{"format":"junit","path":"out/pytest.xml"}}]});
+    let check = TeamAction::TestConfig { action: "check".into(), tests: candidate.clone() };
+    let (invocation, _) = prepare(&TeamCall { confirmed: false, ..call(check) }).unwrap();
+    let sent: Value = serde_json::from_slice(invocation.stdin.as_deref().unwrap()).unwrap();
+    assert_eq!(sent["tests"], candidate);
+    for wrong in [TeamAction::TestConfig { action: "write".into(), tests: Value::Null }, TeamAction::TestConfig { action: "check".into(), tests: json!([1]) }] {
+        assert!(matches!(prepare(&call(wrong)), Err(TeamOutcome::Failed { .. })));
+    }
+    // From the webview's JSON.
+    let parsed: TeamAction = serde_json::from_value(json!({"kind":"test_config","action":"check","tests":{"provider":[]}})).unwrap();
+    assert!(matches!(parsed, TeamAction::TestConfig { .. }));
+}
+
+/// Task 88: a run's report reaches the Tests mode bounded: every count, at
+/// most 200 results, each text cut.
+#[test]
+fn a_test_runs_report_reaches_the_tests_mode_bounded() {
+    let results: Vec<Value> = (0..250).map(|n| json!({"suite":"math","name":format!("t{n}"),"status":if n == 0 { "failed" } else { "passed" },"ms":n,"message":"x".repeat(5000)})).collect();
+    let view = zerus_client_core::teams::view::tests(
+        "t",
+        &json!({"items":[]}),
+        &json!({"items":[{"id":"r1","suite":"engine","status":"failed","report":{"passed":249,"failed":1,"skipped":0,"errors":0,"note":"","results":results}},
+                         {"id":"r2","suite":"plain","status":"passed"}]}),
+    );
+    let report = &view.runs[0].report;
+    assert_eq!((report["passed"].clone(), report["failed"].clone()), (json!(249), json!(1)));
+    assert_eq!(report["results"].as_array().unwrap().len(), 200);
+    assert_eq!(report["results"][0]["status"], "failed");
+    assert!(report["results"][0]["message"].as_str().unwrap().chars().count() < 5000);
+    assert!(view.runs[1].report.is_null());
 }

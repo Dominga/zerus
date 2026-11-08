@@ -24,7 +24,11 @@ const QString additionPrefix = QStringLiteral("/owner_word_asked/addition-");
 bool TeamWaitingAnswer::opensCard(const QString &action)
 {
     return action == QLatin1String("decide_proposal") || action == QLatin1String("confirm_addition") || action == QLatin1String("answer_permission")
-           || action == QLatin1String("decide_tool") || action == QLatin1String("accept_phase");
+           || action == QLatin1String("decide_tool") || action == QLatin1String("accept_phase")
+           || action == QLatin1String("answer_deferred")
+           // Task 116: every kind waits with its answer, never only in the Team tab.
+           || action == QLatin1String("decide_report") || action == QLatin1String("release_task")
+           || action == QLatin1String("retry_task") || action == QLatin1String("finish");
 }
 
 bool TeamWaitingAnswer::approves(const QString &action)
@@ -77,7 +81,7 @@ TeamWaitingAnswer::TeamWaitingAnswer(TeamController *teams, const Item &item, bo
         };
     }
     // #742: a tool's offer has no team to read; the item carries all of it.
-    if (opensCard(item.action) && item.action != QLatin1String("decide_tool")) read([](const Team *) {});
+    if (opensCard(item.action) && item.action != QLatin1String("decide_tool") && item.action != QLatin1String("answer_deferred")) read([](const Team *) {});
     else render();
 }
 
@@ -152,6 +156,21 @@ QString TeamWaitingAnswer::staleReason(const Team &team) const
     if (action == QLatin1String("approve_plan")) {
         if (team.status == QLatin1String("planning")) return {};
         return tr("The plan no longer waits for your approval; nothing was sent.");
+    }
+    if (action == QLatin1String("decide_report")) {
+        const auto *task = team.task(m_item.task);
+        if (task && task->status == QLatin1String("submitted")) return {};
+        return tr("That report was decided meanwhile; nothing was sent.");
+    }
+    if (action == QLatin1String("release_task")) {
+        const auto *task = team.task(m_item.task);
+        if (task && task->held) return {};
+        return tr("That task is no longer held; nothing was sent.");
+    }
+    if (action == QLatin1String("retry_task")) {
+        const auto *task = team.task(m_item.task);
+        if (task && task->wait.known) return {};
+        return tr("That task no longer waits; nothing was sent.");
     }
     return {};
 }
@@ -360,6 +379,66 @@ void TeamWaitingAnswer::sendAcceptance(bool accept)
     });
 }
 
+void TeamWaitingAnswer::sendReport(bool accept)
+{
+    if (busy() || m_reading || m_done) return;
+    const QString reason = m_comment.trimmed();
+    if (!accept && reason.isEmpty()) return;
+    m_notice.clear();
+    read([this, accept, reason](const Team *team) {
+        if (!team) return;
+        if (const QString stale = staleReason(*team); !stale.isEmpty()) { m_notice = stale; render(); return; }
+        QJsonObject input{{"team", m_item.team}, {"task", m_item.task}};
+        if (!accept) input.insert("reason", reason);
+        m_sending = true; render();
+        QPointer<TeamWaitingAnswer> guard(this);
+        m_teams->act(accept ? QStringLiteral("accept") : QStringLiteral("reject"), input, [guard](bool ok, const QString &message) {
+            if (!guard) return;
+            guard->m_sending = false;
+            if (ok) guard->finish();
+            else { guard->m_notice = message; guard->render(); }
+        });
+    });
+}
+
+void TeamWaitingAnswer::sendRelease(bool retry)
+{
+    if (busy() || m_reading || m_done || !m_teams) return;
+    m_notice.clear();
+    read([this, retry](const Team *team) {
+        if (!team) return;
+        if (const QString stale = staleReason(*team); !stale.isEmpty()) { m_notice = stale; render(); return; }
+        m_sending = true; render();
+        QPointer<TeamWaitingAnswer> guard(this);
+        m_teams->act(retry ? QStringLiteral("retry") : QStringLiteral("release"), {{"team", m_item.team}, {"task", m_item.task}},
+            [guard](bool ok, const QString &message) {
+                if (!guard) return;
+                guard->m_sending = false;
+                if (ok) guard->finish();
+                else { guard->m_notice = message; guard->render(); }
+            });
+    });
+}
+
+void TeamWaitingAnswer::sendFinish()
+{
+    if (busy() || m_reading || m_done || !m_teams) return;
+    const QString summary = m_comment.trimmed();
+    if (summary.isEmpty()) return;
+    m_notice.clear();
+    read([this, summary](const Team *team) {
+        if (!team) return;
+        m_sending = true; render();
+        QPointer<TeamWaitingAnswer> guard(this);
+        m_teams->act(QStringLiteral("finish"), {{"team", m_item.team}, {"summary", summary}}, [guard](bool ok, const QString &message) {
+            if (!guard) return;
+            guard->m_sending = false;
+            if (ok) guard->finish();
+            else { guard->m_notice = message; guard->render(); }
+        });
+    });
+}
+
 void TeamWaitingAnswer::sendTool(bool allow)
 {
     if (busy() || m_done || !m_teams) return;
@@ -377,6 +456,84 @@ void TeamWaitingAnswer::sendTool(bool allow)
         guard->finish();
         if (guard && allow) { guard->m_notice = tr("Installing; its output shows here if it fails"); guard->render(); }
     });
+}
+
+void TeamWaitingAnswer::sendDeferred(const QString &decision, const QString &text)
+{
+    if (busy() || m_done || !m_teams || m_item.deferred.isEmpty()) return;
+    if (decision == QLatin1String("answer") && text.trimmed().isEmpty()) return;
+    m_notice.clear();
+    QJsonObject input{{"id", m_item.deferred}, {"decision", decision}};
+    if (!text.trimmed().isEmpty()) input.insert("text", text.trimmed());
+    m_sending = true; render();
+    QPointer<TeamWaitingAnswer> guard(this);
+    m_teams->act(QStringLiteral("answer-deferred"), input, [guard](bool ok, const QString &message) {
+        if (!guard) return;
+        guard->m_sending = false;
+        if (!ok) { guard->m_notice = message; guard->render(); return; }
+        guard->finish();
+    });
+}
+
+void TeamWaitingAnswer::renderDeferred(const Colors &c, bool waiting)
+{
+    auto *box = new QFrame; box->setObjectName("teamWaitingDeferred");
+    box->setProperty("deferred", m_item.deferred);
+    box->setStyleSheet(QStringLiteral("QFrame#teamWaitingDeferred{background:%1;border:1px solid %2;border-radius:7px;}")
+                           .arg(alpha(c.warn, .08).name(QColor::HexArgb), alpha(c.warn, .40).name(QColor::HexArgb)));
+    auto *v = new QVBoxLayout(box); v->setContentsMargins(8, 5, 8, 6); v->setSpacing(3);
+    v->addWidget(label(m_item.session, c.text3, 10, false, "teamWaitingDeferredSession"));
+    auto *text = label(m_item.text, c.fg, 11, false, "teamWaitingDeferredText");
+    text->setFont(NewSessionDense::mono(11));
+    text->setWordWrap(true); text->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    v->addWidget(text);
+    if (!m_item.outcome.isEmpty()) v->addWidget(label(m_item.outcome, c.text2, 11, false, "teamWaitingDeferredOutcome"));
+    auto *how = label(tr("Your answer reaches the session as one message; nothing runs again by itself."), c.text3, 10, false, "teamWaitingDeferredHow");
+    how->setWordWrap(true);
+    v->addWidget(how);
+    const bool permission = m_item.request == QLatin1String("permission");
+    if (!permission) {
+        for (const auto &value : m_item.questions) {
+            const auto asked = value.toObject();
+            auto *question = label(asked["question"].toString(), c.fg, 11, true, "teamWaitingDeferredQuestion");
+            question->setWordWrap(true);
+            v->addWidget(question);
+            auto *options = row(6);
+            for (const auto &option : asked["options"].toArray()) {
+                const QString choice = option.toObject()["label"].toString();
+                auto *pick = button(choice, "teamWaitingDeferredOption");
+                pick->setEnabled(!waiting);
+                QObject::connect(pick, &QPushButton::clicked, this, [this, choice] { sendDeferred(QStringLiteral("answer"), choice); });
+                options->addWidget(pick);
+            }
+            options->addStretch();
+            v->addLayout(options);
+        }
+    }
+    auto *answers = row(6);
+    auto *words = new QLineEdit(m_reason); words->setObjectName("teamWaitingDeferredWords");
+    words->setPlaceholderText(permission ? tr("A note for the session (optional)") : tr("Your answer"));
+    words->setMaxLength(4000); words->setEnabled(!waiting);
+    QObject::connect(words, &QLineEdit::textChanged, this, [this](const QString &typed) { m_reason = typed; });
+    answers->addWidget(words, 1);
+    if (permission) {
+        auto *deny = button(tr("Deny"), "teamWaitingDeferredDeny"); deny->setProperty("danger", true);
+        deny->setToolTip(tr("The session hears that you deny it"));
+        auto *allow = button(tr("Allow"), "teamWaitingDeferredAllow", true);
+        allow->setToolTip(tr("The session hears it may run it again; nothing runs by itself"));
+        deny->setEnabled(!waiting); allow->setEnabled(!waiting);
+        QObject::connect(deny, &QPushButton::clicked, this, [this] { sendDeferred(QStringLiteral("deny"), m_reason); });
+        QObject::connect(allow, &QPushButton::clicked, this, [this] { sendDeferred(QStringLiteral("allow"), m_reason); });
+        answers->addWidget(deny); answers->addWidget(allow);
+    } else {
+        auto *send = button(tr("Answer"), "teamWaitingDeferredAnswer", true);
+        send->setEnabled(!waiting);
+        QObject::connect(send, &QPushButton::clicked, this, [this] { sendDeferred(QStringLiteral("answer"), m_reason); });
+        QObject::connect(words, &QLineEdit::returnPressed, this, [this] { sendDeferred(QStringLiteral("answer"), m_reason); });
+        answers->addWidget(send);
+    }
+    v->addLayout(answers);
+    m_layout->addWidget(box);
 }
 
 void TeamWaitingAnswer::finish()
@@ -459,6 +616,11 @@ void TeamWaitingAnswer::render()
     }
     // A card of a decided proposal never shows again (its own late render).
     if (m_cards && (m_done || !stale.isEmpty())) m_cards->setTeam(nullptr);
+    if (m_item.action == QLatin1String("answer_deferred")) {
+        if (!m_done) renderDeferred(c, waiting);
+        if (parentWidget()) setVisible(hasContent());
+        return;
+    }
     if (m_item.action == QLatin1String("decide_tool")) {
         if (!m_done) renderTool(c, waiting);
         if (parentWidget()) setVisible(hasContent());
@@ -561,6 +723,77 @@ void TeamWaitingAnswer::render()
         QObject::connect(sendBack, &QPushButton::clicked, this, [this] { sendAcceptance(false); });
         QObject::connect(accept, &QPushButton::clicked, this, [this] { sendAcceptance(true); });
         answers->addWidget(comment, 1); answers->addWidget(sendBack); answers->addWidget(accept);
+        v->addLayout(answers);
+        m_layout->addWidget(box);
+    } else if (action == QLatin1String("decide_report")) {
+        // Task 116: a report the lead escalated: Accept, or Reject with the
+        // member's reason, the same controls as its task card.
+        auto *box = new QFrame; box->setObjectName("teamWaitingReport");
+        box->setStyleSheet(QStringLiteral("QFrame#teamWaitingReport{background:%1;border:1px solid %2;border-radius:7px;}")
+                               .arg(alpha(c.warn, .10).name(QColor::HexArgb), alpha(c.warn, .40).name(QColor::HexArgb)));
+        auto *v = new QVBoxLayout(box); v->setContentsMargins(8, 5, 8, 6); v->setSpacing(3);
+        auto *head = label(m_item.title, c.fg, 12, true, "teamWaitingReportHead");
+        head->setWordWrap(true);
+        v->addWidget(head);
+        auto *answers = row(6);
+        auto *reason = new QLineEdit(m_comment); reason->setObjectName("teamWaitingReportReason");
+        reason->setPlaceholderText(tr("Why reject? The member receives this"));
+        reason->setMaxLength(4000); reason->setEnabled(!waiting);
+        auto *reject = button(tr("Reject"), "teamWaitingReportReject"); reject->setProperty("danger", true);
+        reject->setToolTip(tr("Send the report back to the member with this reason"));
+        auto *accept = button(tr("Accept"), "teamWaitingReportAccept", true);
+        accept->setToolTip(tr("Accept the report; the task moves on as its card says"));
+        reject->setEnabled(!waiting && !m_comment.trimmed().isEmpty());
+        accept->setEnabled(!waiting);
+        QObject::connect(reason, &QLineEdit::textChanged, this, [this, reject](const QString &text) {
+            m_comment = text;
+            reject->setEnabled(!m_reading && !m_sending && !text.trimmed().isEmpty());
+        });
+        QObject::connect(reject, &QPushButton::clicked, this, [this] { sendReport(false); });
+        QObject::connect(accept, &QPushButton::clicked, this, [this] { sendReport(true); });
+        answers->addWidget(reason, 1); answers->addWidget(reject); answers->addWidget(accept);
+        v->addLayout(answers);
+        m_layout->addWidget(box);
+    } else if (action == QLatin1String("release_task") || action == QLatin1String("retry_task")) {
+        // Task 116: a task the owner held (Release) or one whose step Zerus
+        // could not take (Retry): answered where it waits.
+        auto *box = new QFrame; box->setObjectName("teamWaitingRelease");
+        box->setStyleSheet(QStringLiteral("QFrame#teamWaitingRelease{background:%1;border:1px solid %2;border-radius:7px;}")
+                               .arg(alpha(c.accent, .06).name(QColor::HexArgb), alpha(c.accent, .35).name(QColor::HexArgb)));
+        auto *v = new QVBoxLayout(box); v->setContentsMargins(8, 5, 8, 6); v->setSpacing(3);
+        auto *head = label(m_item.title, c.fg, 12, true, "teamWaitingReleaseHead");
+        head->setWordWrap(true);
+        v->addWidget(head);
+        auto *answers = row(6);
+        const bool retry = action == QLatin1String("retry_task");
+        auto *go = button(retry ? tr("Retry") : tr("Release"), "teamWaitingReleaseAction", true);
+        go->setToolTip(retry ? tr("Start the step again with the same context") : tr("Release the hold and hand the task out again"));
+        go->setEnabled(!waiting);
+        QObject::connect(go, &QPushButton::clicked, this, [this, retry] { sendRelease(retry); });
+        answers->addStretch(); answers->addWidget(go);
+        v->addLayout(answers);
+        m_layout->addWidget(box);
+    } else if (action == QLatin1String("finish")) {
+        // Task 116: the end of the team, with the summary the lead receives.
+        auto *box = new QFrame; box->setObjectName("teamWaitingFinish");
+        box->setStyleSheet(QStringLiteral("QFrame#teamWaitingFinish{background:%1;border:1px solid %2;border-radius:7px;}")
+                               .arg(alpha(c.accent, .08).name(QColor::HexArgb), alpha(c.accent, .40).name(QColor::HexArgb)));
+        auto *v = new QVBoxLayout(box); v->setContentsMargins(8, 5, 8, 6); v->setSpacing(3);
+        auto *head = label(m_item.title, c.fg, 12, true, "teamWaitingFinishHead");
+        head->setWordWrap(true);
+        v->addWidget(head);
+        auto *answers = row(6);
+        auto *summary = new QLineEdit(m_comment); summary->setObjectName("teamWaitingFinishSummary");
+        summary->setPlaceholderText(tr("A summary for the lead"));
+        summary->setMaxLength(4000); summary->setEnabled(!waiting);
+        auto *done = button(tr("Finish"), "teamWaitingFinishAction", true);
+        done->setEnabled(!waiting && !m_comment.trimmed().isEmpty());
+        QObject::connect(summary, &QLineEdit::textChanged, this, [this, done](const QString &text) {
+            m_comment = text;
+            done->setEnabled(!m_reading && !m_sending && !text.trimmed().isEmpty());
+        });
+        QObject::connect(done, &QPushButton::clicked, this, [this] { sendFinish(); });
+        answers->addWidget(summary, 1); answers->addWidget(done);
         v->addLayout(answers);
         m_layout->addWidget(box);
     } else if (action == QLatin1String("answer_permission") && !memberOf(team)->permission.record.value("questions").toArray().isEmpty()) {

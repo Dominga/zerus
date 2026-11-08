@@ -1,6 +1,6 @@
 use super::*;
 use crate::state::teams::model::{
-    Attempt, Dependency, DependencyKind, Member, PipelineRun, PipelineStage, Question, Report, RunRecord, StageRun, StageState,
+    Attempt, Decider, Dependency, DependencyKind, Member, PipelineRun, PipelineStage, Question, Report, RunRecord, StageRun, StageState,
 };
 
 fn attempt(n: u32, state: AttemptState, sent: f64, started: f64) -> Attempt {
@@ -390,4 +390,182 @@ fn the_journal_is_read_through_its_index_in_one_bounded_page() {
     assert_eq!(items[0].detail["n"], 0);
     // Another team's window is empty.
     assert_eq!(store.span_events("other", 0.0, f64::MAX, EVENT_LIMIT).unwrap(), (Vec::new(), false));
+}
+
+/// The spans of one kind as (from, to, reason).
+fn of_kind(value: &Value, kind: &str) -> Vec<(f64, f64, String)> {
+    value["spans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|span| span["kind"] == kind)
+        .map(|span| {
+            (span["from"].as_f64().unwrap(), span["to"].as_f64().unwrap_or(f64::MAX), span["reason"].as_str().unwrap_or_default().to_owned())
+        })
+        .collect()
+}
+
+fn working(sent: f64) -> Team {
+    team(vec![task(7, &[], TaskStatus::InProgress, vec![attempt(1, AttemptState::Delivered, sent, sent + 5.0)])])
+}
+
+/// Task 118: a request the owner answered, one the owner queue took (answered
+/// at once, or left on the screen until the owner answered) and one the lead
+/// answered: the first two are waits for a person, the last stays blocked.
+#[test]
+fn a_request_the_owner_answers_is_a_wait_for_a_person_and_the_leads_stays_blocked() {
+    let team = working(100.0);
+    let journal = [
+        entry(200.0, "question_forwarded", json!({"member":"Backend","approval":true})),
+        entry(260.0, "permission_answered", json!({"member":"Backend","by":"owner","decision":"allow","question_id":"p1"})),
+        entry(300.0, "question_forwarded", json!({"member":"Backend","approval":false})),
+        entry(330.0, "permission_answered", json!({"member":"Backend","by":"lead","decision":"answer","question_id":"p2"})),
+        entry(400.0, "question_forwarded", json!({"member":"Backend","approval":true})),
+        entry(430.0, "request_deferred", json!({"member":"Backend","question_id":"p3","kind":"permission","safe":"deny","delivery":"answered"})),
+        entry(500.0, "question_forwarded", json!({"member":"Backend","approval":false})),
+        entry(520.0, "request_deferred", json!({"member":"Backend","question_id":"p4","kind":"question","safe":"first","delivery":"screen"})),
+        entry(700.0, "permission_answered", json!({"member":"Backend","by":"owner","decision":"answer","question_id":"p4"})),
+        // Zerus's own safe action and an answer nobody recorded are not a person's.
+        entry(720.0, "question_forwarded", json!({"member":"Backend","approval":true})),
+        entry(725.0, "permission_answered", json!({"member":"Backend","by":"safe action s1","decision":"allow","question_id":"p5"})),
+        entry(740.0, "question_forwarded", json!({"member":"Backend","approval":true})),
+        entry(745.0, "permission_answered", json!({"member":"Backend","by":"unknown","decision":"unknown","question_id":"p6"})),
+    ];
+    let value = timeline(&team, 7, &journal, 800.0);
+    contiguous(&value);
+    assert_eq!(
+        of_kind(&value, "person"),
+        vec![(200.0, 260.0, "permission".to_owned()), (400.0, 430.0, "deferred".to_owned()), (500.0, 700.0, "deferred".to_owned())]
+    );
+    assert_eq!(of_kind(&value, "question"), vec![(300.0, 330.0, String::new())]);
+    assert_eq!(of_kind(&value, "permission"), vec![(720.0, 725.0, String::new()), (740.0, 745.0, String::new())]);
+    let totals = &value["totals"];
+    assert_eq!((totals["person"].as_i64(), totals["question"].as_i64(), totals["permission"].as_i64()), (Some(290), Some(30), Some(10)));
+    // Who answered is kept on the span.
+    let first = value["spans"].as_array().unwrap().iter().find(|span| span["kind"] == "person").unwrap();
+    assert_eq!((first["by"].clone(), first["decision"].clone(), first["member"].clone()), (json!("owner"), json!("allow"), json!("dev")));
+}
+
+/// An open request is the lead's until it goes to the owner (the team's
+/// `remind_owner_permission_minutes`), then a wait for a person; a request only
+/// the Terminal takes waits for a person from the start; the lead's own request
+/// always does.
+#[test]
+fn an_open_request_becomes_a_wait_for_a_person_when_it_goes_to_the_owner() {
+    use crate::state::teams::model::PendingQuestion;
+    let mut team = working(100.0);
+    team.settings.remind_owner_permission_minutes = 10;
+    team.members.iter_mut().find(|member| member.id == "dev").unwrap().pending =
+        Some(PendingQuestion { question_id: "p1".into(), approval: true, at: 200.0, ..Default::default() });
+    let journal = [entry(200.0, "question_forwarded", json!({"member":"Backend","approval":true}))];
+    // Not yet 10 minutes: the lead's.
+    let early = timeline(&team, 7, &journal, 700.0);
+    assert_eq!((of_kind(&early, "permission"), of_kind(&early, "person")), (vec![(200.0, f64::MAX, String::new())], vec![]));
+    // After them, from the escalation (200 + 600) to now.
+    let late = timeline(&team, 7, &journal, 1000.0);
+    contiguous(&late);
+    assert_eq!(of_kind(&late, "permission"), vec![(200.0, 800.0, String::new())]);
+    assert_eq!(of_kind(&late, "person"), vec![(800.0, f64::MAX, "permission".to_owned())]);
+    assert_eq!(late["totals"]["person"], 200);
+    // The reminder off: it is never escalated.
+    team.settings.remind_owner_permission_minutes = 0;
+    assert_eq!(of_kind(&timeline(&team, 7, &journal, 1000.0), "person"), vec![]);
+    // The lead's own request waits for the owner from the start.
+    team.settings.remind_owner_permission_minutes = 10;
+    team.task_mut(7).unwrap().attempts[0].member = "lead".into();
+    team.members.iter_mut().find(|member| member.id == "lead").unwrap().pending =
+        Some(PendingQuestion { question_id: "p2".into(), approval: true, at: 200.0, ..Default::default() });
+    let journal = [entry(200.0, "question_forwarded", json!({"member":"Lead","approval":true}))];
+    assert_eq!(of_kind(&timeline(&team, 7, &journal, 300.0), "person"), vec![(200.0, f64::MAX, "permission".to_owned())]);
+    // A request only the Terminal takes: nothing in the journal, the member's record says it.
+    let mut terminal = working(100.0);
+    terminal.members.iter_mut().find(|member| member.id == "dev").unwrap().terminal_question =
+        Some(PendingQuestion { question_id: "t1".into(), at: 250.0, ..Default::default() });
+    let value = timeline(&terminal, 7, &[], 400.0);
+    assert_eq!(of_kind(&value, "person"), vec![(250.0, f64::MAX, "permission".to_owned())]);
+}
+
+/// A task question the owner answered waits for a person; the lead's answer
+/// stays a question; one still open is the lead's.
+#[test]
+fn a_task_question_the_owner_answers_is_a_wait_for_a_person() {
+    let mut attempt = attempt(1, AttemptState::Delivered, 100.0, 105.0);
+    let asked = |id: &str, at: f64, answered: Option<f64>, by: &str| Question {
+        id: id.into(),
+        text: "Which?".into(),
+        at,
+        answer: String::new(),
+        answered_at: answered,
+        by: by.into(),
+        ..Default::default()
+    };
+    attempt.questions = vec![asked("q1", 200.0, Some(260.0), "You"), asked("q2", 300.0, Some(330.0), "Backend lead"), asked("q3", 400.0, None, "")];
+    let team = team(vec![task(7, &[], TaskStatus::InProgress, vec![attempt])]);
+    let value = timeline(&team, 7, &[], 500.0);
+    contiguous(&value);
+    assert_eq!(of_kind(&value, "person"), vec![(200.0, 260.0, "question".to_owned())]);
+    assert_eq!(of_kind(&value, "question"), vec![(300.0, 330.0, String::new()), (400.0, f64::MAX, String::new())]);
+    assert_eq!(value["totals"]["person"], 60);
+}
+
+/// The lead's decision on a report: the lead's wait; a wait for a person once
+/// the owner decided it, or it went to the owner (`remind_owner_minutes`).
+#[test]
+fn a_report_the_owner_decides_or_that_went_to_the_owner_waits_for_a_person() {
+    let reported = |decided: Option<f64>, status: TaskStatus| {
+        let mut one = attempt(1, AttemptState::Reported, 100.0, 105.0);
+        one.report = report(400.0, false);
+        one.turn_ended_at = Some(395.0);
+        one.decided_at = decided;
+        team(vec![task(7, &[], status, vec![one])])
+    };
+    // The lead decided: the lead's.
+    let mut lead = reported(Some(500.0), TaskStatus::Accepted);
+    lead.task_mut(7).unwrap().decided_by = Some(Decider::Lead);
+    let value = timeline(&lead, 7, &[], 600.0);
+    assert_eq!((of_kind(&value, "lead"), of_kind(&value, "person")), (vec![(400.0, 500.0, String::new())], vec![]));
+    // The owner decided it: all of it theirs.
+    let mut owner = reported(Some(500.0), TaskStatus::Accepted);
+    owner.task_mut(7).unwrap().decided_by = Some(Decider::Human);
+    let value = timeline(&owner, 7, &[], 600.0);
+    assert_eq!((of_kind(&value, "lead"), of_kind(&value, "person")), (vec![], vec![(400.0, 500.0, "report".to_owned())]));
+    // The owner decided it after it had gone to the owner (60 minutes): the
+    // lead's until then.
+    owner.task_mut(7).unwrap().attempts[0].decided_at = Some(5000.0);
+    let value = timeline(&owner, 7, &[], 6000.0);
+    contiguous(&value);
+    assert_eq!(
+        (of_kind(&value, "lead"), of_kind(&value, "person")),
+        (vec![(400.0, 4000.0, String::new())], vec![(4000.0, 5000.0, "report".to_owned())])
+    );
+    // Still open: the lead's, then the owner's from the escalation.
+    let open = reported(None, TaskStatus::Submitted);
+    let early = timeline(&open, 7, &[], 1000.0);
+    assert_eq!((of_kind(&early, "lead"), of_kind(&early, "person")), (vec![(400.0, f64::MAX, String::new())], vec![]));
+    let late = timeline(&open, 7, &[], 5000.0);
+    assert_eq!(
+        (of_kind(&late, "lead"), of_kind(&late, "person")),
+        (vec![(400.0, 4000.0, String::new())], vec![(4000.0, f64::MAX, "report".to_owned())])
+    );
+}
+
+/// U63 and task 118: a phase before waiting for the owner's acceptance is a
+/// wait for a person, with the phase it waited for.
+#[test]
+fn a_phase_waiting_for_the_owners_acceptance_is_a_wait_for_a_person() {
+    let mut one = attempt(1, AttemptState::Reported, 500.0, 505.0);
+    one.report = report(600.0, false);
+    one.decided_at = Some(650.0);
+    let mut team = team(vec![task(7, &[], TaskStatus::Accepted, vec![one])]);
+    team.task_mut(7).unwrap().phase = 2;
+    let journal = [
+        entry(100.0, "phase_awaiting_acceptance", json!({"phase":1})),
+        entry(480.0, "phase_owner_accepted", json!({"phase":1,"by":"owner"})),
+    ];
+    let value = timeline(&team, 7, &journal, 900.0);
+    contiguous(&value);
+    let person: Vec<&Value> = value["spans"].as_array().unwrap().iter().filter(|span| span["kind"] == "person").collect();
+    assert_eq!(person.len(), 1, "{value}");
+    assert_eq!((person[0]["reason"].clone(), person[0]["phase"].clone(), person[0]["s"].clone()), (json!("acceptance"), json!(1), json!(380)));
+    assert!(!value["spans"].as_array().unwrap().iter().any(|span| span["kind"] == "owner_acceptance"));
 }

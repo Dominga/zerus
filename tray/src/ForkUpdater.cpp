@@ -41,8 +41,12 @@ constexpr int firstCheckMs = 2 * 60 * 1000, checkIntervalMs = 60 * 60 * 1000;
 // Without Windows Forms the helper still runs, only without the banner. Each
 // helper defines Log first; the banner follows its parameters and log.
 const char *bannerScript = R"PS(
+# -Quiet is for tests only; the updaters never pass it. No banner shows, and
+# every build starts without a window.
+if ($Quiet) { $PSDefaultParameterValues['Start-Process:WindowStyle'] = 'Hidden' }
 $banner = $null
 try {
+    if ($Quiet) { throw 'quiet' }
     Add-Type -AssemblyName System.Windows.Forms, System.Drawing
     try { Add-Type -Namespace ZerusUpdate -Name Dpi -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();'; [void][ZerusUpdate.Dpi]::SetProcessDPIAware() } catch { }
     $graphics = [System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero); $scale = $graphics.DpiX / 96; $graphics.Dispose()
@@ -131,7 +135,7 @@ function Started($process) {
 // Runs detached once Zerus quits: waits until nothing runs from the installation,
 // sets it aside as the single rollback copy, moves the verified build in and
 // starts it. A build that exits within 15 seconds is replaced by the previous one.
-const char *installHead = R"PS(param([int]$ParentPid, [string]$Install, [string]$New, [string]$Previous, [string]$Stage, [int]$Build)
+const char *installHead = R"PS(param([int]$ParentPid, [string]$Install, [string]$New, [string]$Previous, [string]$Stage, [int]$Build, [switch]$Quiet)
 $ErrorActionPreference = 'Stop'
 $log = Join-Path (Split-Path -Parent $Install) 'zerus-fork-update.log'
 function Log([string]$message) { try { Add-Content -LiteralPath $log -Value ("{0:u} {1}" -f (Get-Date), $message) } catch { } }
@@ -202,7 +206,7 @@ if ($banner -and $banner.Visible) { Finish "Zerus build $Build is running." $fal
 // stop running from it. Once Zerus quits, the verified build becomes <root>\app-<N>,
 // <root>\current is re-pointed at it and started; a build that exits within 15
 // seconds hands current back. The two newest builds stay, older app-* go.
-const char *versionedHead = R"PS(param([int]$ParentPid, [string]$Root, [string]$Link, [string]$New, [string]$Target, [string]$Stage, [int]$Build)
+const char *versionedHead = R"PS(param([int]$ParentPid, [string]$Root, [string]$Link, [string]$New, [string]$Target, [string]$Stage, [int]$Build, [switch]$Quiet)
 $ErrorActionPreference = 'Stop'
 $log = Join-Path $Root 'update.log'
 function Log([string]$message) { try { Add-Content -LiteralPath $log -Value ("{0:u} {1}" -f (Get-Date), $message) } catch { } }

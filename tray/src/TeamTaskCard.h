@@ -35,6 +35,8 @@ public:
     std::function<void(const QString &team)> openTeam;
     std::function<void(const QString &host, const QString &session)> openSession;
     std::function<void(int task, const QPoint &global)> reassign;
+    // Task 82: the heat's lateness and overrun line under the meta row, or nullptr.
+    std::function<QWidget *(const Teams::Team &team, int task)> heatLine;
     // The actions a member's problem offers (the Team tab's own buttons).
     std::function<QWidget *(const Teams::Member &member, const Teams::Status &status)> problemActions;
     std::function<bool(const QString &name, const QString &title, const QString &text, const QString &action)> confirm;

@@ -54,7 +54,7 @@ async function statusbarSmoke() {
   batch("probing");
   log("statusbar probing applied");
   log(`calm text: ${JSON.stringify(document.querySelector<HTMLElement>(".statusbar .conn-ok")?.innerText)}`);
-  await until(() => document.querySelector<HTMLElement>(".statusbar .conn-ok")?.innerText.replace(/\s+/g, " ").trim() === "4 of 5 machines connected, build-02 offline", "the calm offline-name summary did not render");
+  await until(() => document.querySelector<HTMLElement>(".statusbar .conn-ok")?.innerText.replace(/\s+/g, " ").trim() === "4 of 5 machines connected, build-02 connecting", "the calm connecting-name summary did not render (task 72: probing is connecting, never offline)");
   require(![...document.querySelectorAll<HTMLButtonElement>(".statusbar button")].some((button) => button.textContent === "Retry now"), "Retry now shows without a connection error");
   log("statusbar calm checks passed");
 

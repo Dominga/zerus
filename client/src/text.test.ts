@@ -78,6 +78,33 @@ describe("core Text", () => {
     else if (value && typeof value === "object") Object.values(value).forEach((v) => allTexts(v, out));
     return out;
   }
+  it("the Russian UI shows the card's answer statuses translated, a detail as written", () => {
+    // The statuses the core's card builds (core tests/question_card_text_contract.rs),
+    // rendered as QuestionCard renders them (trText).
+    const cards = cardFixture as unknown as CardView[];
+    const status = (english: string) => {
+      const card = cards.find((view) => textIn("en", view.status) === english);
+      expect(card, english).toBeDefined();
+      return card!.status;
+    };
+    const translated: [string, string][] = [
+      ["Answer sent. Waiting for the agent…", "Ответ отправлен. Ждем агента…"],
+      ["The desktop service is still sending this answer. Its result appears here when it finishes.",
+        "Фоновая служба ещё отправляет этот ответ. Результат появится здесь, когда она закончит."],
+      ["The answer was not sent: the desktop service could not start it. The question may have changed. Your answer was kept, so you can submit it again.",
+        "Ответ не отправлен: фоновая служба не смогла его запустить. Возможно, вопрос изменился. Ответ сохранён, его можно отправить снова."],
+      ["The answer was not sent: it was refused before anything reached the agent. Your answer was kept, so you can submit it again.",
+        "Ответ не отправлен: он был отклонён до того, как что-либо дошло до агента. Ответ сохранён, его можно отправить снова."],
+      ["Delivery is not confirmed by the desktop service. Check Terminal before retrying.",
+        "Фоновая служба не подтвердила доставку. Проверьте терминал перед повтором."],
+    ];
+    for (const [english, russian] of translated) expect(textIn("ru", status(english))).toBe(russian);
+    // The uncertain prefix translates; the detail after it is shown as written.
+    expect(textIn("ru", status("Delivery is not confirmed. Check Terminal before retrying. Answer transfer failed (exit 1).")))
+      .toBe("Доставка не подтверждена. Проверьте терминал перед повторной попыткой. Answer transfer failed (exit 1).");
+    // A message the card does not know stays as written in Russian too.
+    expect(textIn("ru", status("Answer transfer failed (exit 1)."))).toBe("Answer transfer failed (exit 1).");
+  });
   it("the question card wire fixture matches CardView and its prose has Russian", () => {
     const cards = cardFixture as unknown as Record<string, unknown>[];
     expect(cards.length).toBeGreaterThan(5);

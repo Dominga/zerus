@@ -87,7 +87,7 @@ pub(super) fn identity(original: &Value) -> Result<Value> {
     .iter()
     .any(|key| record[*key] != original[*key])
         || !process_alive(&record)
-        || !matches(&record, live()?.get(string(&record, "name")))
+        || !matches(&record, panes_of(&live()?, &record))
         || pause_active(&record)
         || !string(&record, "error").is_empty()
     {

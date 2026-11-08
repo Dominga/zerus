@@ -118,6 +118,12 @@ pub(crate) fn layers(tasks: &[Task]) -> BTreeMap<u32, u32> {
                 }
                 d = d.max(depth(tasks, ids, back, memo, dep.task) + 1);
             }
+            // Task #60: a follow-up sits at least in its origin's layer, as if
+            // it had the origin's dependencies, without depending on the
+            // origin. The memo's 0 for a task in progress ends an origin loop.
+            if let Some(origin) = task.origin.filter(|origin| *origin != id && ids.contains(origin)) {
+                d = d.max(depth(tasks, ids, back, memo, origin));
+            }
         }
         memo.insert(id, d);
         d
@@ -919,6 +925,17 @@ pub(crate) fn validate(team: &Team, offline: &BTreeSet<String>) -> Validation {
                 ));
             }
         }
+        // Task #60: a follow-up's origin is a task of this team.
+        if let Some(origin) = task.origin {
+            if origin == task.id || team.task(origin).is_none() {
+                found.errors.push(finding(
+                    "origin",
+                    Some(task.id),
+                    None,
+                    format!("#{} {}: its origin #{} is not another task of the team", task.id, task.title, origin),
+                ));
+            }
+        }
     }
     let cycles = cycle_tasks(&team.tasks);
     if !cycles.is_empty() {
@@ -1034,6 +1051,7 @@ pub(crate) const PHASE_CHECK_TIMEOUT: std::time::Duration = std::time::Duration:
 
 #[cfg(test)]
 thread_local! {
+    pub(crate) static PHASE_CHECK_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(crate) static BEFORE_PREREQUISITE_GIT: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
     pub(crate) static PHASE_CHECK_TIMEOUT_OVERRIDE: std::cell::Cell<Option<std::time::Duration>> =
         const { std::cell::Cell::new(None) };
@@ -1066,6 +1084,8 @@ fn prerequisite_branch(folder: &std::path::Path, branch: &str, deadline: std::ti
 /// capped by the caller's overall deadline; repeated refs share cached results.
 pub(crate) fn phase_checks(team: &Team, phase: &Phase, deadline: std::time::Instant) -> super::model::PhaseCheckResult {
     use super::model::{PhaseCheckResult, Prerequisite};
+    #[cfg(test)]
+    PHASE_CHECK_CALLS.with(|count| count.set(count.get().saturating_add(1)));
     #[cfg(test)]
     let deadline = PHASE_CHECK_TIMEOUT_OVERRIDE.with(|timeout| {
         timeout.get().map_or(deadline, |timeout| std::time::Instant::now() + timeout)

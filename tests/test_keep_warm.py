@@ -3,10 +3,13 @@ import fcntl
 import os
 import json
 import subprocess
+import sys
 import time
 import unittest
+import uuid
 
 import test_input as fixtures
+import test_pause
 
 TEXT = "[Zerus keep-warm] Reply with exactly OK and do nothing else."
 
@@ -288,6 +291,51 @@ class KeepWarm(unittest.TestCase):
         self.assertEqual((warm["enabled"], warm["revision"]), (True, 1))
         store = json.loads((self.state / "keep-warm.json").read_text())
         self.assertEqual([entry["name"] for entry in store["sessions"].values()], [renamed])
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'uses the private child fd census to stage the lock wait')
+    def test_an_id_move_while_a_setting_waits_cannot_recreate_its_old_key(self):
+        from pathlib import Path
+        self.record['session_id'] = str(uuid.uuid4())
+        self.write_record()
+        child = None
+        try:
+            with (self.state / 'keep-warm.lock').open('a+b') as setting:
+                fcntl.flock(setting, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                body = dict(expected_run_id=self.run_id, expected_conversation_id=self.conversation_id,
+                            expected_revision=0, enabled=True, hours=3)
+                child = subprocess.Popen([str(fixtures.HGS), 'keep-warm', self.name, '--json'],
+                                         env=self.env, text=True, stdin=subprocess.PIPE,
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                child.stdin.write(json.dumps(body))
+                child.stdin.close()
+                child.stdin = None
+                # This actual CLI has read its original binding before opening
+                # this lock. It cannot advance while our original holds it.
+                until = time.monotonic() + 5
+                opened = False
+                while child.poll() is None and time.monotonic() < until:
+                    for fd in list(Path('/proc', str(child.pid), 'fd').iterdir())[:128]:
+                        try:
+                            opened |= os.readlink(fd) == str(self.state / 'keep-warm.lock')
+                        except FileNotFoundError:
+                            pass
+                    if opened:
+                        break
+                    time.sleep(0.005)
+                self.assertTrue(opened, 'the setting never opened its original lock')
+                with (self.state / '.lock').open('a+b') as writer:
+                    fcntl.flock(writer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    # Dormant transition fixture only; production writers are
+                    # still off. No native process, input or terminal changes.
+                    test_pause.Harness.move_to_id_layout(self, self.name)
+                fcntl.flock(setting, fcntl.LOCK_UN)
+            stdout, stderr = child.communicate(timeout=10)
+            self.assertNotEqual(child.returncode, 0, stdout + stderr)
+            self.assertFalse((self.state / 'keep-warm.json').exists())
+            self.assertEqual(self.received(), b'')
+        finally:
+            if child is not None and child.poll() is None:
+                child.communicate(timeout=10)
 
     def runtime_file(self):
         owner = next(iter(json.loads((self.state / "keep-warm.json").read_text())["sessions"]))

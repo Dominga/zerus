@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
 
@@ -35,6 +35,8 @@ import { openCleanup, closeCleanup } from "../../store/terminationCleanup";
 import { machineMeta } from "../../store/testing";
 import { listRows } from "./model";
 import { archive } from "../../store/archive";
+import { clearSearchPreview, setSearchPreview } from "../../store/searchSelection";
+import type { SearchHit } from "../../store/content-search-model";
 import { emptyBatch, type ViewRow } from "../../types";
 
 const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
@@ -188,4 +190,31 @@ it("keeps the moved row actions in the real session header menu", async () => {
   for (const label of ["Expand all collapsed", "Open folder", "Open shell in session folder", "Pause session", "Fork session…", "Set parent…", "Copy session name", "Copy session reference", "Copy folder path"]) {
     expect(labels, label).toContain(label);
   }
+});
+
+describe("a shown tool search hit (zerus-tso9j, zerus-2r73y)", () => {
+  const toolHit = (row: ViewRow, detail: string): SearchHit => ({ name: row.name!, run_id: row.run_id!, conversation_id: row.conversation_id!, archive_id: "", message_id: "m",
+    at: 1_793_000_000, role: "tool", snippet: "", event: { seq: 1, type: "PostToolUse", tool: "Bash", at: 1_793_000_000, detail }, content_truncated: false, session: null, group: "" });
+  const show = async (detail: string) => {
+    const row = fixtureRow(); const key = await open(row);
+    setSearchPreview({ key, run: row.run_id!, conversation: row.conversation_id!, query: "needle", hit: toolHit(row, detail) }); await flush();
+    return () => host.querySelector(".search-preview .act-tool-detail");
+  };
+  afterEach(() => clearSearchPreview());
+
+  it("Show more reveals a match past the first 2,000 characters", async () => {
+    const detail = await show(`${"x".repeat(2_200)}needle${"y".repeat(1_000)}`);
+    expect(detail()!.textContent).toHaveLength(2_000);
+    [...host.querySelectorAll<HTMLButtonElement>(".search-preview button")].find((b) => b.textContent === "Show more")!.click(); await flush();
+    expect(detail()!.textContent).toHaveLength(3_206);
+    expect([...detail()!.querySelectorAll("mark")].map((m) => m.textContent)).toEqual(["needle"]);
+  });
+
+  it("marks the query in a tool hit's output, and only inside the hit", async () => {
+    const detail = await show("a needle tool output with NEEDLE twice");
+    expect([...detail()!.querySelectorAll("mark")].map((m) => m.textContent)).toEqual(["needle", "NEEDLE"]);
+    clearSearchPreview(); await flush();
+    expect(host.querySelector(".search-preview")).toBeNull();
+    expect(host.querySelector(".act-scroll mark")).toBeNull();
+  });
 });

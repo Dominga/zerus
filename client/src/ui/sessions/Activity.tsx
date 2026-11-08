@@ -774,6 +774,10 @@ export function ActivityView(props: { source?: ActivitySource }) {
   const [expanded, setExpanded] = createStore<Record<string, boolean>>({});
   /** Show more per tool event (`outputKey`), kept while its row is loaded so a row scrolled back keeps its height. */
   const [more, setMore] = createStore<Record<string, number>>({});
+  /** Show more per event of the shown search hit (zerus-tso9j): the same steps, kept only for that hit. */
+  const [hitMore, setHitMore] = createSignal<Record<string, number>>({});
+  createEffect(on(() => preview()?.hit, () => setHitMore({}), { defer: true }));
+  const moreHit = (id: string, index: number) => setHitMore((m) => { const key = outputKey(id, index); return { ...m, [key]: (m[key] ?? TOOL_OUTPUT.first) + TOOL_OUTPUT.step }; });
   /**
    * View process from the live main Activity while Processes is on
    * (ActivityView.cpp:1129-1134): only in the Processes view of the session
@@ -1141,7 +1145,8 @@ export function ActivityView(props: { source?: ActivitySource }) {
             {/* The message as Activity shows it, Markdown and links with the query marked (ActivityView.cpp:664, 1592-1605). */}
             <div class="search-preview-body">
               <HighlightQuery.Provider value={p().query}>
-                <For each={searchHitItems(p().hit)}>{(item) => <Item item={item} scope={scope()} sourceId={source().target()?.id} postersEnabled={false} expanded={item.kind === "tool" || item.kind === "tools"} />}</For>
+                <For each={searchHitItems(p().hit)}>{(item) => <Item item={item} scope={scope()} sourceId={source().target()?.id} postersEnabled={false} expanded={item.kind === "tool" || item.kind === "tools"}
+                  shown={(index) => hitMore()[outputKey(item.id, index)]} onMore={(index) => moreHit(item.id, index)} />}</For>
               </HighlightQuery.Provider>
             </div>
           </section>}</Show>

@@ -1917,6 +1917,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         composer::send::send_answer,
         composer::send::local_retry,
         composer::send::local_delete,
+        composer::inbox::inbox_remove,
         composer::send::local_inspect,
         composer::send::send_cancel,
         composer::send::send_interrupted,

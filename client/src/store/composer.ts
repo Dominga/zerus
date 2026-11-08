@@ -5,7 +5,7 @@ import { notify } from "./actions";
 import { suggestions } from "./suggestions";
 import { anyHidden, documentVisibility, type PageVisibility } from "./visibility";
 import type { Timers } from "./terminal";
-import type { Answer, ClearControl, ColdPrompt, ComposerView, Inspect, SendReply, SessionRef, StartQuestion } from "../types";
+import type { Answer, ClearControl, ColdPrompt, ComposerView, InboxRemoveReply, Inspect, SendReply, SessionRef, StartQuestion } from "../types";
 import { trNoop, tr } from "../i18n";
 
 // The open composer (Qt MessageComposer) over the Rust hub. The webview owns
@@ -75,6 +75,8 @@ export interface ComposerPort {
   localRetry(handle: number, id: string): Promise<SendReply>;
   localDelete(handle: number, id: string): Promise<void>;
   localInspect(handle: number, id: string): Promise<Inspect | null>;
+  /** Remove of a not-delivered OpenCode message (src-tauri `inbox_remove`). */
+  inboxRemove(handle: number, run: string, conversation: string, messageId: string): Promise<InboxRemoveReply>;
 }
 
 /** Image decoding for pastes that are not PNG; tests pass their own. */
@@ -609,6 +611,18 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
     },
     /** Delete on a failed local row (the view asked first). */
     async localDelete(id: string) { const h = handle(); if (h !== undefined) await port.localDelete(h, id).catch(() => {}); },
+    /**
+     * Remove of a not-delivered OpenCode message, confirmed for the composer,
+     * run and conversation its dialog opened under: Rust checks them and the
+     * message again and sends nothing when they changed. Never retried.
+     */
+    async inboxRemove(opened: number, run: string, conversation: string, messageId: string): Promise<InboxRemoveReply> {
+      try {
+        return await port.inboxRemove(opened, run, conversation, messageId);
+      } catch (e) {
+        return { outcome: "uncertain", detail: typeof e === "string" ? e : e instanceof Error ? e.message : String(e) };
+      }
+    },
     /** Check Terminal or Check native UI on a failed row: where it leads, or nothing once another composer opened. */
     async localInspect(id: string): Promise<Inspect | undefined> {
       const h = handle();
@@ -627,6 +641,7 @@ export const composer = createRoot(() => createComposer({
   send: bridge.sendMessage, push: (...args) => bridge.sendPush(...args), sendNow: (id) => bridge.queueSendNow(id), answer: bridge.sendAnswer, remove: bridge.composerRemove, undo: bridge.composerUndoRemove,
   allowRetry: bridge.composerAllowRetry, cancelSend: bridge.sendCancel, interrupted: bridge.sendInterrupted, interruptFailed: bridge.sendInterruptFailed, clear: bridge.clearContext,
   refresh: bridge.composerRefresh, openAttachment: (path) => bridge.attachmentOpenDraft(path), localRetry: bridge.localRetry, localDelete: bridge.localDelete, localInspect: bridge.localInspect,
+  inboxRemove: bridge.inboxRemove,
 }, realTimers, browserImages, appNotices, suggestions.dismiss, async (session, control, execute) => {
   const [{ endActions }, { catalog, rowId }, { captureEnd, sameEnd }] = await Promise.all([import("./endActions"), import("./catalog"), import("./endActionBusy")]);
   const row = session ? catalog.rows[rowId(session.computer, session.key)] : undefined;

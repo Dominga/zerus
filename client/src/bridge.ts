@@ -964,6 +964,9 @@ export const clearContext = (handle: number, run: string, conversation: string, 
   desktop<SendReply>("clear_context", { handle, run, conversation, dismiss, delay });
 export const localRetry = (handle: number, id: string) => desktop<SendReply>("local_retry", { handle, id });
 export const localDelete = (handle: number, id: string) => desktop<void>("local_delete", { handle, id });
+/** Remove one not-delivered OpenCode message after the person confirmed it (src-tauri composer/inbox.rs); Rust checks it again first. */
+export const inboxRemove = (handle: number, run: string, conversation: string, messageId: string) =>
+  desktop<import("./types").InboxRemoveReply>("inbox_remove", { handle, run_id: run, conversation_id: conversation, message_id: messageId });
 export const localInspect = (handle: number, id: string) => desktop<Inspect | null>("local_inspect", { handle, id });
 /** Reads an Activity attachment into the private cache, after the reads ahead of it (composer/fetch.rs). */
 export async function attachmentFetch(computer: string, file: AttachmentRef): Promise<Fetched> {

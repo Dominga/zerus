@@ -219,6 +219,14 @@ export interface LocalItem {
   available: boolean[];
 }
 
+export interface InboxItem {
+  state: "queued" | "not_delivered";
+  messageId: string;
+  run: string;
+  conversation: string;
+  removable: boolean;
+}
+
 export interface ActivityItem {
   id: string;
   kind: "user" | "agent" | "tool" | "tools" | "question" | "approval" | "system" | "receipt" | "thinking" | "report" | "voice" | "cleared" | "context" | "warm";
@@ -239,6 +247,8 @@ export interface ActivityItem {
   label?: string;
   /** A local message row (this app's send) and its buttons. */
   local?: LocalItem;
+  /** An OpenCode inbox message (ActivityView.cpp:1036-1087): its native id, the run and conversation it was shown under, and whether the session offers Remove for it. */
+  inbox?: InboxItem;
   /** Codex question replies the message holds, shown as Question and Your answer blocks (ActivityView.cpp:347-363). */
   replies?: Reply[];
   /** History a fork began from, shown read-only and muted. */

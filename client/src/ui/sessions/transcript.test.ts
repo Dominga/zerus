@@ -10,6 +10,38 @@ const local = (status: "sending" | "error" | "sent", uncertain = false, extra: P
   ...extra,
 });
 
+describe("OpenCode inbox messages (ActivityView.cpp:1036-1038, 1072-1087; zerus-5wmh.13.6)", () => {
+  const row = (delivery: string, message_id = "msg_queued01"): ActivityEvent =>
+    ({ type: "UserPromptSubmit", at: 10, detail: "later", source: "opencode_native", message_id, delivery_state: delivery });
+  const summary = { run_id: "run-1", conversation_id: "conv-1", allowed_actions: ["rename", "forget", "remove_queued"] };
+
+  it("a queued message is stamped Queued and offers nothing", () => {
+    const [item] = buildTranscript([row("queued")], summary) as ActivityItem[];
+    expect(item).toMatchObject({ kind: "user", receipt: "Queued",
+      inbox: { state: "queued", messageId: "msg_queued01", run: "run-1", conversation: "conv-1", removable: false } });
+  });
+
+  it("a message not delivered after Stop is stamped and removable only while the session offers it", () => {
+    const [item] = buildTranscript([row("not_delivered")], summary) as ActivityItem[];
+    expect(item).toMatchObject({ receipt: "Not delivered",
+      inbox: { state: "not_delivered", messageId: "msg_queued01", run: "run-1", conversation: "conv-1", removable: true } });
+    const [unoffered] = buildTranscript([row("not_delivered")], { ...summary, allowed_actions: ["rename", "forget"] }) as ActivityItem[];
+    expect(unoffered.inbox?.removable).toBe(false);
+    const [unknown] = buildTranscript([row("not_delivered")]) as ActivityItem[];
+    expect(unknown.inbox?.removable).toBe(false);
+    const [nameless] = buildTranscript([row("not_delivered", "")], summary) as ActivityItem[];
+    expect(nameless.inbox?.removable).toBe(false);
+  });
+
+  it("an ordinary prompt keeps Sent and Queued at this time, and no stamp carries a separator dot", () => {
+    const items = buildTranscript([{ seq: 1, type: "UserPromptSubmit", at: 10, detail: "sent" },
+      { seq: 2, type: "UserPromptQueued", at: 11, detail: "waits" }, row("not_delivered")], summary) as ActivityItem[];
+    expect(items.map((i) => i.receipt)).toEqual(["Sent", "Queued at this time", "Not delivered"]);
+    expect(items.slice(0, 2).every((i) => i.inbox === undefined)).toBe(true);
+    expect(items.every((i) => !i.receipt?.includes("\u00b7"))).toBe(true);
+  });
+});
+
 describe("local message rows (ActivityView.cpp:665-720, 1053-1068)", () => {
   it("a native queued prompt keeps its queued label before answer labels", () => {
     const events: ActivityEvent[] = [{ seq: 1, type: "UserPromptQueued", at: 10, detail: "also lint",

@@ -27,6 +27,7 @@ pub mod fetch;
 pub mod files;
 pub mod handed;
 mod history_hint;
+pub mod inbox;
 mod interrupted;
 pub mod questions;
 pub mod queue;
@@ -392,6 +393,11 @@ pub struct ComposerView {
     /// The agent's question card shown in the composer (A2-1).
     pub question: Option<questions::QuestionView>,
     pub queue: Option<zerus_client_core::input_queue::QueueView>,
+    /// The not-delivered OpenCode message of this session whose removal
+    /// runs (Qt's `queued_removal`), and whether any removal runs across
+    /// sessions (`queued_removal_busy`): no other Remove can be clicked.
+    pub inbox_removing: Option<String>,
+    pub inbox_busy: bool,
     /// The editor and the action row show: false while a required card
     /// stands in for them (`MessageComposer::setInputVisible`).
     pub input_visible: bool,
@@ -658,6 +664,8 @@ pub(crate) struct Hub {
     /// (`SessionsWindow.cpp:2013-2016`); None is Activity's 2.5 s.
     pub(crate) poll: Option<f64>,
     pub(crate) queue: queue::Queue,
+    /// The one OpenCode inbox removal that runs (zerus-5wmh.13.6).
+    pub(crate) inbox: inbox::Inbox,
     /// Events for the next batch (`composer_events`), at most 16.
     pub(crate) events: VecDeque<ComposerEvent>,
     /// The window is hidden: a handed-over send is not checked.
@@ -1908,6 +1916,8 @@ impl Composers {
             clear: session.clear,
             question,
             queue: self.queue_part(hub),
+            inbox_removing: Self::inbox_part(hub, &composer.key).0,
+            inbox_busy: Self::inbox_part(hub, &composer.key).1,
             input_visible,
             offer: composer
                 .offer

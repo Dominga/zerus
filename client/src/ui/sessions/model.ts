@@ -135,13 +135,16 @@ export const listRows = createMemo<Row[]>(() => {
 });
 
 /**
- * The live list's rows with every parent team open: the logical order that
- * attention navigation searches, including child sessions a collapsed team
- * hides (window-commands.ts). Computed on demand, never kept.
+ * The live list's rows with every project and parent team open: the logical
+ * order that attention navigation searches, including the sessions a
+ * collapsed project or team hides, each child still under its parent
+ * (window-commands.ts). Computed on demand, never kept.
  */
-export function rowsWithTeamsOpen(): Row[] {
+export function rowsAllOpen(): Row[] {
   if (stateFilter() === "archived") return [];
-  return groupRows({ ...listScope(), teamCollapsed: () => false });
+  const scope = listScope();
+  const grouping = { ...scope.grouping, headers: scope.grouping.headers.map((header) => ({ ...header, collapsed: false })) };
+  return groupRows({ ...scope, grouping, teamCollapsed: () => false });
 }
 
 /** The list footer's counts of the cards shown (SessionsWindowRows.cpp:468-474). */

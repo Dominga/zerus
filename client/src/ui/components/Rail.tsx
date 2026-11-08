@@ -21,9 +21,10 @@ import { installedAppName, railVersion } from "../screens/settings/about-version
 // Glyphs and the 24px icon size follow tray/src/SessionsWindow.cpp:328-351.
 // Sessions is the one live screen of this phase; the others show where they will be.
 
+// Task #361: Qt's rail has no New team button; a new team starts at
+// "+ New team" on the selected session's tab row (SessionDetail).
 export const ITEMS: { id: Page; icon: string; label: string; tip: string; command: string }[] = [
   { id: "sessions", icon: "sessions", label: "Sessions", tip: "Sessions", command: "go.sessions" },
-  { id: "newteam", icon: "users", label: "New team", tip: "New team", command: "go.newteam" },
   { id: "designer", icon: "palette", label: "Team designer", tip: "Team designer", command: "go.designer" },
   { id: "projects", icon: "projects", label: "Projects", tip: "Projects", command: "go.projects" },
   { id: "machines", icon: "machines", label: "Machines", tip: trNoop("Machines and connection status"), command: "go.machines" },

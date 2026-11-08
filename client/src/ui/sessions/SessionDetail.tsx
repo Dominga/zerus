@@ -167,7 +167,7 @@ const TABS: readonly Tab[] = [{ id: "activity", label: "Activity" }, { id: "term
 /** Task #331: the strip renders these fixed ids, never a fresh tab object, so
  * a status poll, a team read or an unread change cannot remount a button and
  * restart the active tab's underline animation. */
-export const TAB_ORDER = ["activity", "terminal", "native", "processes", "taskview", "team"] as const;
+export const TAB_ORDER = ["activity", "terminal", "native", "processes", "taskview", "team", "newteam"] as const;
 
 /** The selected child's bounded page, an archive's recorded page, or the live parent follow. */
 export const activitySourceFor = (key: string): ActivitySource => (subagentOpen() ? subagentActivity : activityReadOnly(key) ? archiveActivity : activity);
@@ -220,7 +220,8 @@ createRoot(() => {
   createEffect(on(page, (p) => { if (p !== "sessions") void terminal.leavePage(); }, { defer: true }));
 });
 
-const tabs = () => {
+/** Task #361: the tab row's entries; the strip renders their ids in TAB_ORDER. */
+export const tabs = () => {
   const count = processes.view()?.count ?? 0;
   const all = [
     { id: "activity" as const, label: tr("Activity"), show: true },

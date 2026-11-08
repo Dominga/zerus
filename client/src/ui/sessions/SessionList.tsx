@@ -696,7 +696,8 @@ export function SessionList() {
         <header class="sp-head">
           <h1>{stateFilter() === "archived" ? tr("Archive") : tr("Sessions")}</h1>
           <span class="grow" />
-          <button class="icon-btn hd" data-tip={tr("New team")} aria-label={tr("New team")} onClick={() => setPage("newteam")}><Icon name="users" size={18} /></button>
+          {/* Task #361: Qt's list header holds New session, the collapse toggle and
+              the batch menu only; a new team starts at "+ New team" on the tab row. */}
           <button class="icon-btn hd" data-tip={tr("New session")} aria-label={tr("New session")} onClick={newSessionFromPanel}><Icon name="add" size={18} /></button>
           <button class="icon-btn hd" data-tip={toggleCaption()} onClick={toggleDock}><Icon name={toggleGlyph()} size={18} /></button>
           <button class="icon-btn hd" data-tip={tr("Session and machine actions")} onClick={(e) => openMenu(e, batchMenu())}><Icon name="more" size={18} /></button>

@@ -1075,16 +1075,16 @@ pub(crate) mod tests {
 
     /// Task 320: the helper side of the test below: a process that lowers
     /// itself as `low_exec` does writes an output in its Low folder, writes it
-    /// again, and tries to overwrite one a Medium process wrote there.
+    /// again, and tries to overwrite an output a Medium process wrote.
     #[cfg(windows)]
     #[test]
     fn low_rebuild_helper() {
-        let Some(own) = std::env::var_os("HGS_TEST_LOW_OWN") else { return };
+        let (Some(own), Some(medium)) = (std::env::var_os("HGS_TEST_LOW_OWN"), std::env::var_os("HGS_TEST_MEDIUM_OUTPUT")) else { return };
         crate::platform::lower_to_low_integrity().unwrap();
         let own = Path::new(&own);
         let first = fs::write(own.join("out.d"), b"first").is_ok();
         let again = fs::write(own.join("out.d"), b"again").is_ok();
-        let medium_denied = fs::write(own.join("medium.d"), b"low").is_err();
+        let medium_denied = fs::write(&medium, b"low").is_err();
         println!("low={} first={first} again={again} medium_denied={medium_denied}", crate::host::token::below_medium());
     }
 
@@ -1095,24 +1095,28 @@ pub(crate) mod tests {
     #[cfg(windows)]
     #[test]
     fn a_sandboxed_run_rebuilds_its_own_outputs_but_not_a_medium_servers() {
+        // The member's folder, as a DeepSeek sandbox's is: a Low folder. A new
+        // folder in the user's LocalLow inherits its Low label, with no ACL
+        // change (a team run may not relabel a folder).
+        let profile = std::env::var_os("USERPROFILE").map(PathBuf::from).expect("USERPROFILE");
+        let local_low = profile.join("AppData").join("LocalLow");
+        assert!(local_low.is_dir(), "{} is Windows's Low folder", local_low.display());
+        let own = tempfile::Builder::new().prefix("hgs-test-320-").tempdir_in(&local_low).unwrap();
+        // What the shared Medium server leaves: an output with the Medium label.
         let folder = tempfile::tempdir().unwrap();
-        let own = folder.path().join("target");
-        fs::create_dir_all(&own).unwrap();
-        fs::write(own.join("medium.d"), b"medium").unwrap();
-        // The member's folder, as a DeepSeek sandbox's is: Low, inherited by
-        // what is created in it later (the file above keeps its Medium level).
-        let labelled = Command::new("icacls").arg(&own).args(["/setintegritylevel", "(OI)(CI)L", "/Q"]).stdout(Stdio::null()).status().unwrap();
-        assert!(labelled.success());
+        let medium = folder.path().join("medium.d");
+        fs::write(&medium, b"medium").unwrap();
         let output = Command::new(std::env::current_exe().unwrap())
             .args(["state::builds::tests::low_rebuild_helper", "--exact", "--nocapture", "--test-threads=1"])
-            .env("HGS_TEST_LOW_OWN", &own)
+            .env("HGS_TEST_LOW_OWN", own.path())
+            .env("HGS_TEST_MEDIUM_OUTPUT", &medium)
             .stdin(Stdio::null())
             .output()
             .unwrap();
         let text = String::from_utf8_lossy(&output.stdout);
         assert!(text.contains("low=true first=true again=true medium_denied=true"), "{text}\n{}", String::from_utf8_lossy(&output.stderr));
-        assert_eq!(fs::read(own.join("out.d")).unwrap(), b"again", "the Low process rebuilt its own output");
-        assert_eq!(fs::read(own.join("medium.d")).unwrap(), b"medium");
+        assert_eq!(fs::read(own.path().join("out.d")).unwrap(), b"again", "the Low process rebuilt its own output");
+        assert_eq!(fs::read(&medium).unwrap(), b"medium");
     }
 
     /// Task 320: a non-sandboxed member's run is never sent through `low_exec`:

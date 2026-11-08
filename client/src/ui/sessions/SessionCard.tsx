@@ -541,6 +541,15 @@ function CompactTeam(props: { team: Team; onToggle?: () => void }) {
  * provider and mute at the right, then the expand button. A parent of child
  * sessions takes a second line with their summary (62 px).
  */
+/**
+ * What a compact row shows only in part (Qt's compactDescription,
+ * SessionCardDelegate.h:125-128): its title, status and provider, which the
+ * row draws as an icon only. The session's name follows a title that differs.
+ */
+export function compactDescription(s: Session): string {
+  return [s.title, s.name !== s.title ? s.name : "", statusCaption(s), AGENT_LABEL[s.agent]].filter(Boolean).join("\n");
+}
+
 export function CompactCard(props: { session: Session; selected: boolean; onExpand: () => void; team?: Team; onToggleTeam?: () => void }) {
   const s = () => props.session;
   return (
@@ -550,11 +559,12 @@ export function CompactCard(props: { session: Session; selected: boolean; onExpa
       <span class="cc-tile"><AgentTile agent={s().agent} size={22} /></span>
       <Show when={sessionMark(s())}>{(m) => <span class="cc-mark" title={markTooltip(s(), m())}><AccountMarkCircle mark={m()} size={14} /></span>}</Show>
       <Show when={s().parent?.state === "live"}><SupervisedMark session={s()} /></Show>
-      <span class="sc-title ell" style={titleReserve(s().title, 60)} title={s().name}>{s().title}</span>
+      <span class="sc-title ell" style={titleReserve(s().title, 60)} title={compactDescription(s())}>{s().title}</span>
       <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
       <StatusBadge kind={badgeKind(s())} caption={statusCaption(s())} />
       <OptionalQuestionsChip session={s()} />
-      <button class="cc-expand" title={tr("Expand session row")} onClick={(e) => { e.stopPropagation(); props.onExpand(); }} onDblClick={(e) => e.stopPropagation()}>
+      <button class="cc-expand" title={`${tr("Expand session row")}\n${compactDescription(s())}`} aria-description={compactDescription(s())}
+        onClick={(e) => { e.stopPropagation(); props.onExpand(); }} onDblClick={(e) => e.stopPropagation()}>
         <Icon name="expand-row" size={16} />
       </button>
       </div>

@@ -1467,3 +1467,84 @@ fn a_phone_keeps_accepting_done_snapshots_from_an_older_full_answerer() {
         serde_json::to_value(task.view().unwrap()).unwrap()
     );
 }
+
+#[test]
+fn review_a_fresh_fetch_keeps_a_corrupted_unsent_update_block_for_review() {
+    let (root, _b, phone, computer) = pair();
+    let uuid = pre_root_pair(&phone, &computer);
+    let mut exchange = Exchange::new();
+    let fresh = refuse_then_request_fresh(&mut exchange, &phone, &computer, &uuid);
+    let reply = answer(&computer, fresh).unwrap();
+    comment(
+        &phone,
+        &uuid,
+        "Unsent comment whose bytes must be kept for review",
+    );
+    assert_eq!(comments(&phone, &uuid), 1);
+    let snapshot = task_file(root.path(), &uuid);
+    let updates = snapshot.with_extension("updates");
+    let saved_snapshot = fs::read(&snapshot).unwrap();
+    let mut damaged_update = fs::read(&updates).unwrap();
+    // Keep the original complete local block, changing only its checksum.
+    assert!(damaged_update.len() > 5);
+    damaged_update[4] ^= 1;
+    fs::write(&updates, &damaged_update).unwrap();
+    let result = exchange.accept(&phone, reply);
+    eprintln!(
+        "refresh={result:?}; snapshot_same={}; updates_same={}; local_comments={}",
+        fs::read(&snapshot).unwrap() == saved_snapshot,
+        fs::read(&updates).ok().as_ref() == Some(&damaged_update),
+        comments(&phone, &uuid)
+    );
+    assert!(
+        result.is_err(),
+        "a damaged local update must refuse the fresh replacement"
+    );
+    assert_eq!(fs::read(snapshot).unwrap(), saved_snapshot);
+    assert_eq!(fs::read(updates).unwrap(), damaged_update);
+}
+
+#[test]
+fn a_fresh_fetch_keeps_a_truncated_unsent_block_unchanged() {
+    let (root, _b, phone, computer) = pair();
+    let uuid = pre_root_pair(&phone, &computer);
+    let mut exchange = Exchange::new();
+    let fresh = refuse_then_request_fresh(&mut exchange, &phone, &computer, &uuid);
+    let reply = answer(&computer, fresh).unwrap();
+    comment(&phone, &uuid, "Unsent comment in a cut block");
+    let snapshot = task_file(root.path(), &uuid);
+    let updates = snapshot.with_extension("updates");
+    let saved = fs::read(&snapshot).unwrap();
+    let mut cut = fs::read(&updates).unwrap();
+    cut.pop().unwrap();
+    fs::write(&updates, &cut).unwrap();
+    let error = exchange.accept(&phone, reply).unwrap_err().to_string();
+    assert!(error.contains("updates are not whole"), "{error}");
+    assert_eq!(fs::read(snapshot).unwrap(), saved);
+    assert_eq!(fs::read(updates).unwrap(), cut);
+}
+
+#[test]
+fn a_fresh_fetch_keeps_a_complete_but_unapplied_unsent_block_unchanged() {
+    let (root, _b, phone, computer) = pair();
+    let uuid = pre_root_pair(&phone, &computer);
+    let mut exchange = Exchange::new();
+    let fresh = refuse_then_request_fresh(&mut exchange, &phone, &computer, &uuid);
+    let reply = answer(&computer, fresh).unwrap();
+    comment(&phone, &uuid, "The missing dependency");
+    comment(&phone, &uuid, "An unsent comment depending on it");
+    let snapshot = task_file(root.path(), &uuid);
+    let updates = snapshot.with_extension("updates");
+    let saved = fs::read(&snapshot).unwrap();
+    let blocks = fs::read(&updates).unwrap();
+    // Remove the first whole block, leaving the second one's framing and
+    // checksum intact but its dependency absent from the saved snapshot.
+    let first = 8 + u32::from_le_bytes(blocks[..4].try_into().unwrap()) as usize;
+    assert!(first < blocks.len());
+    let pending = blocks[first..].to_vec();
+    fs::write(&updates, &pending).unwrap();
+    let error = exchange.accept(&phone, reply).unwrap_err().to_string();
+    assert!(error.contains("cannot be read"), "{error}");
+    assert_eq!(fs::read(snapshot).unwrap(), saved);
+    assert_eq!(fs::read(updates).unwrap(), pending);
+}

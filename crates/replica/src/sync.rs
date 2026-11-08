@@ -699,7 +699,7 @@ impl ProjectStore {
         let mut admitted = self
             .admit_until(Instant::now() + Duration::from_secs(2))
             .ok_or_else(|| Error::failed("the task store is busy; the local copy is kept"))?;
-        let current = admitted.load(uuid)?;
+        let current = admitted.load_complete(uuid)?;
         if !current.is_shallow() {
             return Err(Error::new(
                 "the local task copy changed before its refresh; it is kept for a person's review",

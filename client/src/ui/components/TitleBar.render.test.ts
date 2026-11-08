@@ -92,4 +92,14 @@ describe("the Compact skins' title bar (task 243)", () => {
     state({ page: "machines", strip: false });
     expect(render()).not.toContain("data-sessions-toggle");
   });
+
+  // Task #361: New team left the top bar; the session's own tab row offers it
+  // (Qt's m_teamNewTab), as the rail does not.
+  it("holds no New team icon", () => {
+    state({ page: "sessions", strip: false });
+    const html = plain(render());
+    expect(html).not.toContain('data-page="newteam"');
+    expect(html).not.toContain('aria-label="New team"');
+    expect(html).toContain('data-page="sessions"');
+  });
 });

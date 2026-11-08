@@ -8,7 +8,7 @@ import source from "./SessionDetail.tsx?raw";
 // each button mounted and let only a detailTab change toggle "on".
 describe("session tab strip stability", () => {
   it("keeps one button per tab id, so a data update cannot remount the underline", () => {
-    expect(source).toContain('export const TAB_ORDER = ["activity", "terminal", "native", "processes", "taskview", "team"] as const;');
+    expect(source).toContain('export const TAB_ORDER = ["activity", "terminal", "native", "processes", "taskview", "team", "newteam"] as const;');
     expect(source).toContain("<For each={TAB_ORDER}>");
     expect(source).not.toMatch(/<For\s+each=\{tabs\(\)/);
   });

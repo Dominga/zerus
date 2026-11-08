@@ -94,6 +94,8 @@ class InactiveControlCommands(test_tasks.Fixture):
                    "observed_pauses": [], "observed_stops": []}, "caller": {"kind": "person"},
                    "configuration": "b" * 64, "store_identity": "c" * 64, "cli_image": "d" * 64, "loaded_adapter": "e" * 64}
         self.assertEqual(self.call(["control", "execute", "--json"], execute)["request_id"], original)
+        execute["caller"]["surprise"] = 1
+        self.call(["control", "execute", "--json"], execute, code="invalid_task_control")
         status = {"schema": 1, "target": {"scope": "request", "request_id": original}}
         self.assertEqual(self.call(["control", "status", "--json"], status)["request_id"], original)
         self.assertEqual(path.read_bytes(), before)

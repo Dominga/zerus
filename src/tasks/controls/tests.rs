@@ -87,6 +87,20 @@ fn closed_wire_requires_exact_schema_targets_and_bounded_pages() {
 }
 
 #[test]
+fn a_person_caller_has_exactly_its_kind_and_preserves_the_existing_wire() {
+    let original = execute();
+    let Command::Execute(parsed) = read("execute", &original).unwrap() else {
+        panic!("expected execute");
+    };
+    assert_eq!(serde_json::to_value(parsed).unwrap(), original);
+    for key in ["surprise", "executor", "observed_stops"] {
+        let mut value = original.clone();
+        value["caller"][key] = 1.into();
+        assert!(read("execute", &value).is_err(), "accepted {key}");
+    }
+}
+
+#[test]
 fn stop_release_names_an_executor_and_explicit_observed_stops() {
     let mut value = json!({"schema":1,"request_id":ID,"action":"release_stop","target":{"scope":"executor","executor":executor()},"observed_pauses":[],"observed_stops":[ID]});
     assert!(read("plan", &value).is_ok());

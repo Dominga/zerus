@@ -15,7 +15,7 @@ enum WorkspaceNotifications {
             if scopes[key] != nil { ambiguous.insert(key); continue }
             let notices = current[NotificationSlot(connection: connection.id, computer: computer.string("id"), session: session.target.session).key] ?? []
             let notice = notices.count == 1 ? notices.first : nil
-            let active = notice != nil && notice?.live == true && notice?.online == true && notice?.suppressed == false && notice?.target.isEmpty == false &&
+            let active = notice != nil && notice?.live == true && notice?.online == true && notice?.suppressed == false && notice?.quiet == false && notice?.target.isEmpty == false &&
                 SessionFilters.currentActivity(session, true) && raw.string("run_id") == session.target.run && raw.string("conversation_id") == session.target.conversation
             var kind: String?
             if active && !SharedReadPolicies.attentionAcknowledged(session) {

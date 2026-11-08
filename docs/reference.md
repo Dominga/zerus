@@ -791,15 +791,17 @@ owner, 2026-11-07, zerus-sa9qn.16, replacing the crossed bell); the parent's **T
 toggle adds **Asking** (quiet requests waiting for it) and **Needs you**
 (person-only requests), which never raise the parent's own attention.
 `client/core/tests/fixtures/supervised-attention.json` lists the cases the
-desktop projects and Android checks; iOS follows (`zerus-sa9qn.5`).
+desktop projects and Android and iOS check.
 
-Android applies the same contract (zerus-sa9qn.4): child cards nest under a
+Android (zerus-sa9qn.4) and iOS (zerus-sa9qn.5) apply the same contract, iOS
+in ZerusKit `ChildSessions` and the session card: child cards nest under a
 parent shown in the same project group, 16 dp per level up to three levels
 with a connector, and a child without a shown parent stays at top level with
 **from PARENT**. A parent's counter is the same single toggle for its shown
 subagents and child sessions (`2 of 5`, gray **Asking**, amber **Needs you**),
 expanded by default; the phone remembers a collapsed parent across relaunches
-by machine UUID and session ID, at most 2048. A quiet child gets the mute
+by machine UUID and session ID, at most 2048 (iOS keeps them in its sealed
+`collapsed_teams` store). A quiet child gets the mute
 treatment on the phone: no system notification, gray badges and reply count,
 and the same arrow before its title; a request that waited quietly notifies
 once when the parent is gone, and a completion seen meanwhile is not replayed.

@@ -471,6 +471,7 @@
   "Lightness": "Яркость",
   "Limit tasks started by agents: use 0 to 1000 per hour.": "Лимит задач, запускаемых агентами: от 0 до 1000 в час.",
   "Limits %1 min ago, rate limited": "Лимиты %1 мин назад, запросы ограничены",
+  "Limits from %1, rate limited": "Лимиты на %1, запросы ограничены",
   "Lines added": "Добавлено строк",
   "Lines removed": "Удалено строк",
   "Linked worktree %1": "Связанное рабочее дерево %1",

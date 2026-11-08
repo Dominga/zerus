@@ -2507,5 +2507,7 @@
   "%1 answers, click to expand them": "Ответов: %1, нажмите, чтобы раскрыть",
   "%1 answers, click to fold them": "Ответов: %1, нажмите, чтобы свернуть",
   "This machine, 1 session": "Этот компьютер, 1 сеанс",
-  "This machine, %1 sessions": "Этот компьютер, %1 сеансов"
+  "This machine, %1 sessions": "Этот компьютер, %1 сеансов",
+  "+ New team": "+ Новая команда",
+  "Auto: follow the project": "Авто: следовать проекту"
 }

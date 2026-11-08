@@ -11,7 +11,7 @@ import {
   MEMORY_LABELS, defaultMemory, memberRoles, memoryMode, memoryModes, pickTemplate, startReason, templateTasks, withMemory, type FolderPolicy, type LeadChoice, type MemoryMode,
 } from "../../store/newTeamForm";
 import { setSetting, settings as settingsStore } from "../../store/settings";
-import { shownTemplates, templateSeats, templateTaskCount, toggledFavourite, type AccountChoice } from "../../store/newTeamSources";
+import { shownTemplates, templateSeats, templateTaskCount, toggledFavourite, coordinatorLine, type AccountChoice } from "../../store/newTeamSources";
 import { createModelCatalogs, modelOptions } from "./catalogControls";
 import { LeadConversation } from "./TeamTab";
 import { teamRoleModels } from "../../bridge";
@@ -261,6 +261,7 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
   // Task 200 (Qt buildLead): the lead pane's Chat, Goal and Plan.
   const [leadPage, setLeadPage] = createSignal<"chat" | "goal" | "plan">("chat");
   const draftLead = () => store.view()?.members.find((member) => member.lead);
+  const coordinatorText = () => props.coordinator ? coordinatorLine(props.coordinator, props.accounts ?? []) : "";
 
   return (
     <section class="nt" aria-label={tr("New team")}>
@@ -308,28 +309,34 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
           <p class="nt-note">{tr("This folder is not a Git repository. Every member will share it; worktrees are off.")}</p>
         </Show>
 
-        <Show when={store.view()?.working_mode?.proposal}>
-          {(proposal) => (
-            <section class="nt-working-mode" data-working-mode={proposal().preset}>
-              <div class="nt-inline">
-                <b>{tr("Working mode")}</b>
-                <span class="nt-hint">{tr("The project suggests %1", proposal().title || proposal().preset)}</span>
-              </div>
-              <label class="nt-field">
-                <span>{tr("How members work")} {mark("working_mode")}</span>
-                <select value={fields().working_mode} onChange={(event) => store.edit("working_mode", event.currentTarget.value)}>
-                  <option value="auto">{tr("Auto: follow the project (%1)", proposal().preset)}</option>
-                  <option value="branch-pipeline">{tr("Branch pipeline")}</option>
-                  <option value="branch-per-task">{tr("Branch per task")}</option>
-                  <option value="shared-folder">{tr("One shared folder")}</option>
-                  <option value="none">{tr("Keep the settings as they are")}</option>
-                </select>
-              </label>
-              <ul class="nt-working-reasons">
-                <For each={proposal().reasons}>{(reason) => <li>{reason}</li>}</For>
-              </ul>
-            </section>
-          )}
+        <Show when={!draft() || store.view()?.working_mode?.proposal}>
+          <section class="nt-working-mode" data-working-mode={store.view()?.working_mode?.proposal?.preset ?? "auto"}>
+            <div class="nt-inline">
+              <b>{tr("Working mode")}</b>
+              <Show when={store.view()?.working_mode?.proposal}>
+                {(proposal) => <span class="nt-hint">{tr("The project suggests %1", proposal().title || proposal().preset)}</span>}
+              </Show>
+            </div>
+            <Show when={store.view()?.working_mode?.proposal} fallback={<span class="nt-hint">{tr("Auto: follow the project")}</span>}>
+              {(proposal) => (
+                <>
+                  <label class="nt-field">
+                    <span>{tr("How members work")} {mark("working_mode")}</span>
+                    <select value={fields().working_mode} onChange={(event) => store.edit("working_mode", event.currentTarget.value)}>
+                      <option value="auto">{tr("Auto: follow the project (%1)", proposal().preset)}</option>
+                      <option value="branch-pipeline">{tr("Branch pipeline")}</option>
+                      <option value="branch-per-task">{tr("Branch per task")}</option>
+                      <option value="shared-folder">{tr("One shared folder")}</option>
+                      <option value="none">{tr("Keep the settings as they are")}</option>
+                    </select>
+                  </label>
+                  <ul class="nt-working-reasons">
+                    <For each={proposal().reasons}>{(reason) => <li>{reason}</li>}</For>
+                  </ul>
+                </>
+              )}
+            </Show>
+          </section>
         </Show>
 
         <div class="nt-members">
@@ -444,7 +451,7 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
       <aside class="nt-lead-pane" aria-label={tr("Lead")}>
         <div class="nt-lead-head">
           <b class="nt-caps">{tr("LEAD")}</b>
-          <span class="nt-hint ell grow">{draftLead()?.session?.name ?? (draft() ? "" : lead().mode === "this" ? props.coordinator?.name ?? "" : tr("A new session in the team folder"))}</span>
+          <span class="nt-hint ell grow">{draftLead()?.session?.name ?? (draft() ? "" : lead().mode === "this" ? coordinatorText() : tr("A new session in the team folder"))}</span>
           <div class="seg nt-lead-tabs" role="tablist" aria-label={tr("Lead")}>
             <For each={[["chat", tr("Chat")], ["goal", tr("Goal")], ["plan", tr("Plan")]] as const}>{([id, label]) => (
               <button type="button" role="tab" data-lead-page={id} aria-selected={leadPage() === id} classList={{ on: leadPage() === id }} onClick={() => setLeadPage(id)}>

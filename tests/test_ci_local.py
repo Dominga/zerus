@@ -121,6 +121,7 @@ class RealIsolation(unittest.TestCase):
             folder.mkdir(parents=True, exist_ok=True)
         self.runner.rustup = self.base / "rustup"
         self.runner.rustup.mkdir()
+        self.runner.rustup_source = self.runner.rustup
 
     def test_real_failure_does_not_hide_later_check_and_logs_are_hashed(self):
         job = {"id": "quick", "steps": []}
@@ -219,18 +220,28 @@ PY
     def test_synthetic_root_is_trusted_without_mapping_host_root_or_reading_owner_files(self):
         installer = ROOT / "scripts/install-mobile-connector-binary.py"
         (self.runner.workspace / "installer.py").write_bytes(installer.read_bytes())
+        canary = self.base / "outside-selected-binds"
+        canary.write_text("Private fixture data must not appear inside the namespace")
+        host_root = Path("/").stat()
         body = """python3 - <<'PY'
 import importlib.util,os,pathlib
 s=importlib.util.spec_from_file_location('installer','installer.py')
 m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
 m.trusted_parents(pathlib.Path('/mnt/workspace'))
 assert pathlib.Path('/').stat().st_uid in (0,os.geteuid())
-assert not pathlib.Path('/w').exists()
+inside_root = pathlib.Path('/').stat()
+assert (inside_root.st_dev, inside_root.st_ino) != HOST_ROOT
+assert not pathlib.Path(CANARY).exists()
 PY
-"""
+""".replace("HOST_ROOT", repr((host_root.st_dev, host_root.st_ino))).replace("CANARY", repr(str(canary)))
         row = dict(name="root permissions", index=0, body=body, directory=".", env={}, timeout=10)
         self.runner.run({"id": "quick"}, row)
         self.assertEqual(row["status"], "pass", (self.runner.output / row["log"]).read_text())
+
+    def test_synthetic_root_contract_accepts_a_private_toolchain_mount_under_w(self):
+        # Only the namespace destination changes; the source stays in our private fixture.
+        self.runner.rustup = Path("/w/fixture-private-toolchain")
+        self.test_synthetic_root_is_trusted_without_mapping_host_root_or_reading_owner_files()
 
     def test_job_checkouts_do_not_share_mutable_files(self):
         self.runner.pristine.mkdir()

@@ -44,7 +44,9 @@ export function Rail() {
         {(item) => (
           <button class="rail-btn" classList={{ on: page() === item.id }} aria-current={page() === item.id ? "page" : undefined}
             aria-label={item.id === "sessions" && counts().attention > 0 ? tr("Sessions — %1 need attention", counts().attention) : tr(item.label)}
-            data-tip={labeled() ? undefined : shortcutTooltip(item.id === "sessions" && counts().attention > 0 ? tr("Sessions — %1 need attention", counts().attention) : tr(item.tip), item.command)} data-tip-pos="right" onClick={() => setPage(item.id)}
+            // A labeled rail shows its names, but the capped badge keeps its exact count on hover, as Qt always did (zerus-nfmh1).
+            data-tip={item.id === "sessions" && counts().attention > 0 ? shortcutTooltip(tr("Sessions — %1 need attention", counts().attention), item.command)
+              : labeled() ? undefined : shortcutTooltip(tr(item.tip), item.command)} data-tip-pos="right" onClick={() => setPage(item.id)}
             onContextMenu={(e) => { if (item.id !== "sessions") return; e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, items: [markAllEntry(), expandAllCollapsedEntry()] }); }}>
             <Icon name={item.icon} size={24} />
             <Show when={item.id === "sessions" && counts().attention > 0}>

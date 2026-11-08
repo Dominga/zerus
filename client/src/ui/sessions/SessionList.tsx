@@ -58,11 +58,14 @@ import { composerClearControl } from "../../bridge";
 import { bulkSelect, clearMulti, multiCount, rangeStep, setAnchor, type RangeKey, dragItem, setDragItem, drop, setDrop, endDrag, placement, applyDrop, SESSION_MIME, type DragItem, type Drop } from "./organize";
 import { POINTER_DRAG, pointerDrag } from "../lib/pointerDrag";
 
-import { SearchResults } from "./SearchResults";
 import { followGitRows } from "../../store/gitInterests";
 import { pageHidden } from "../../store/visibility";
 import { page } from "../../store/ui";
 import "../styles/content-search.css";
+import { lazyView } from "../lazy-view";
+import { LazyBoundary } from "../lazy-boundary";
+// The search results replace the list only while searching (zerus-ycycu).
+const SearchResults = lazyView(() => import("./SearchResults"), (m) => m.SearchResults);
 
 const SavedDraftsDialog = lazy(() => import("./SavedDrafts").then((m) => ({ default: m.SavedDraftsDialog })));
 
@@ -743,7 +746,7 @@ export function SessionList() {
             </div>
           </Show>
         </>}>
-          <SearchResults />
+          <LazyBoundary loading={<div class="lazy-waiting">{tr("Loading…")}</div>}><SearchResults /></LazyBoundary>
         </Show>
         <Show when={!search().trim()}><SelectionBar /></Show>
         <footer class="sp-foot">

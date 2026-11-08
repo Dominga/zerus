@@ -166,6 +166,7 @@ fn read<T: serde::de::DeserializeOwned>(directory: &Path, kind: &str, slot: usiz
     );
     Ok(serde_json::from_slice(&bytes)?)
 }
+#[cfg(not(windows))]
 fn publish(directory: &Path, kind: &str, slot: usize, value: &impl Serialize) -> Result<()> {
     let bytes = serde_json::to_vec(value)?;
     ensure!(
@@ -176,6 +177,19 @@ fn publish(directory: &Path, kind: &str, slot: usize, value: &impl Serialize) ->
     file.write_all(&bytes)?;
     file.persist(path(directory, kind, slot))
         .map_err(|error| error.error)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn publish(directory: &Path, kind: &str, slot: usize, value: &impl Serialize) -> Result<()> {
+    let bytes = serde_json::to_vec(value)?;
+    ensure!(
+        bytes.len() <= wire::MAX_BYTES,
+        "label cache exceeds its bound"
+    );
+    // tempfile::persist stops at classic MoveFileExW. The existing atomic
+    // writer also has fs::rename's POSIX replacement of an open destination.
+    zerus_client_core::fsx::write_private_atomic(&path(directory, kind, slot), &bytes, false)?;
     Ok(())
 }
 
@@ -588,13 +602,22 @@ mod tests {
         // Original RED: an exclusive held cache prevented invalidation. This
         // old object can stay held; the pointer replacement is independent.
         let dir = directory(&config, false).unwrap();
+        let old: Attempt = read(&dir, "attempt", 1).unwrap();
         let held = std::fs::File::open(path(&dir, "attempt", 1)).unwrap();
         fs2::FileExt::try_lock_exclusive(&held).unwrap();
-        let token = begin_peer(&config, "local", until());
-        assert!(token.is_some());
-        finish_peer(&config, token, &json!({"node_id":node}));
-        drop(held);
+        let token = begin(&config, "peer:local", "", until())
+            .expect("the fresh attempt pointer must replace a held old object");
+        let current: Attempt = read(&dir, "attempt", 1).unwrap();
+        assert_ne!(current.nonce, old.nonce);
+        let retained: Attempt = serde_json::from_reader(&held).unwrap();
+        assert!(retained == old, "the held original must stay unchanged");
+        finish_peer(&config, Some(token), &json!({"node_id":node}));
         assert!(!cached(&config));
+        drop(held);
+        assert!(
+            !cached(&config),
+            "closing the old object must not revive its positive"
+        );
         let token = begin_peer(&config, "local", until());
         finish_peer(
             &config,

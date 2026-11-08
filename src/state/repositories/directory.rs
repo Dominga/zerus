@@ -609,7 +609,9 @@ impl Directory {
         let code = unsafe {
             NtCreateFile(
                 &mut handle,
-                FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | 0x100000,
+                // private() checks owner/DACL through this original handle;
+                // GetSecurityInfo requires READ_CONTROL, not just attributes.
+                FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | READ_CONTROL | 0x100000,
                 &attrs,
                 &mut status,
                 std::ptr::null(),
@@ -677,6 +679,26 @@ mod tests {
         // Causal control: the former pathname-based mkdir accepts this replacement.
         std::fs::create_dir(path.join("parent/checkout")).unwrap();
         assert!(path.join("parent/checkout").is_dir());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_created_directory_handle_can_read_its_original_security() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = crate::platform::canonical(temp.path()).unwrap();
+        let parent = Directory::open(&path).unwrap();
+        let created = parent.create("store", "unused").unwrap();
+        // Keep the creation handle: reopening first would hide missing rights
+        // because Directory::open requests GENERIC_READ (with READ_CONTROL).
+        let expected =
+            crate::platform::verify_private(&created.path, crate::platform::Private::Directory)
+                .unwrap();
+        assert_eq!(created.private().unwrap(), expected);
+        assert_eq!(
+            Directory::open(&created.path).unwrap().private().unwrap(),
+            expected
+        );
+        created.verify().unwrap();
     }
 
     #[cfg(windows)]

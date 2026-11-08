@@ -8,11 +8,11 @@ use crate::{ids, Error, Result};
 use loro::VersionVector;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// A document's version: each Loro peer that changed it (its ID as decimal
 /// text) and how many changes it made. Sorted, so equal versions compare and
@@ -80,6 +80,9 @@ pub struct DonePage {
 pub struct Imported {
     pub changed: usize,
     pub refused: Vec<Damaged>,
+    /// Healthy shallow copies that could not apply an update. Internal
+    /// phone recovery bookkeeping, never a field in the exchange envelope.
+    pub(crate) refresh: BTreeSet<String>,
 }
 
 const CACHE: &str = "inventory.json";
@@ -476,6 +479,25 @@ impl ProjectStore {
         theirs: &Inventory,
         limit: usize,
     ) -> Result<(Vec<Update>, bool)> {
+        self.updates_for_mode(ours, theirs, limit, false)
+    }
+
+    pub(crate) fn updates_for_phone(
+        &self,
+        ours: &Inventory,
+        theirs: &Inventory,
+        limit: usize,
+    ) -> Result<(Vec<Update>, bool)> {
+        self.updates_for_mode(ours, theirs, limit, true)
+    }
+
+    fn updates_for_mode(
+        &self,
+        ours: &Inventory,
+        theirs: &Inventory,
+        limit: usize,
+        phone: bool,
+    ) -> Result<(Vec<Update>, bool)> {
         let mut page = Vec::new();
         let mut size = 0;
         let mut add = |update: Update| {
@@ -504,6 +526,9 @@ impl ProjectStore {
             }
             let task = self.load(uuid)?;
             let bytes = match known {
+                Some(known) if phone && known.is_empty() && task.stage()? == Stage::Done => {
+                    task.shallow_snapshot()?
+                }
                 Some(known) => task.export_since_vv(&vector(known)?)?,
                 None => task.snapshot()?,
             };
@@ -530,6 +555,16 @@ impl ProjectStore {
     /// Imports another replica's updates. A document that cannot take them is
     /// refused and named; it never stops the others.
     pub fn import_updates(&self, updates: Vec<Update>) -> Result<Imported> {
+        self.import_phone_updates(updates, &BTreeSet::new())
+    }
+
+    /// A fresh phone fetch may replace a healthy shallow copy only when
+    /// the incoming whole state covers every locally saved operation.
+    pub(crate) fn import_phone_updates(
+        &self,
+        updates: Vec<Update>,
+        refresh: &BTreeSet<String>,
+    ) -> Result<Imported> {
         let mut imported = Imported::default();
         for update in updates {
             let (name, result) = match &update.document {
@@ -537,11 +572,22 @@ impl ProjectStore {
                     "project".to_owned(),
                     self.import_project(&update.bytes).map_err(Refusal::from),
                 ),
-                Document::Task(uuid) => (uuid.clone(), self.import_task(uuid, &update.bytes)),
+                Document::Task(uuid) => (
+                    uuid.clone(),
+                    if refresh.contains(uuid) {
+                        self.refresh_phone_task(uuid, &update.bytes)
+                            .map_err(Refusal::from)
+                    } else {
+                        self.import_task(uuid, &update.bytes)
+                    },
+                ),
             };
             match result {
                 Ok(changed) => imported.changed += usize::from(changed),
                 Err(refusal) => {
+                    if refusal.refresh {
+                        imported.refresh.insert(name.clone());
+                    }
                     let refused = Damaged::new(name, refusal.error.to_string());
                     imported.refused.push(match refusal.kept {
                         Some(reason) => refused.kept_for(reason),
@@ -574,7 +620,18 @@ impl ProjectStore {
                 Ok(mut task) => {
                     let before = task.current_vv();
                     if !task.import_block(bytes) {
-                        return Err(Error::new("the updates could not be applied").into());
+                        let shallow = task.is_shallow();
+                        return Err(Refusal {
+                            error: Error::new(if shallow {
+                                "the updates could not be applied to the shallow history; \
+                                 the local copy is kept and needs a fresh copy covering \
+                                 all its changes"
+                            } else {
+                                "the updates could not be applied"
+                            }),
+                            kept: None,
+                            refresh: shallow,
+                        });
                     }
                     // Every live import restores the execution schema a merged
                     // lower value replaced, before anything reads or exports it.
@@ -600,6 +657,7 @@ impl ProjectStore {
                                  person's review and nothing is sent for it"
                             )),
                             kept: Some(reason),
+                            refresh: false,
                         });
                     }
                 },
@@ -614,6 +672,7 @@ impl ProjectStore {
                      a person's review and nothing is sent for it",
                 ),
                 kept: Some(Keep::Marked),
+                refresh: false,
             });
         } else {
             (TaskDoc::from_bytes(bytes)?, false)
@@ -630,6 +689,36 @@ impl ProjectStore {
             self.set_aside(uuid)?;
         }
         self.save(&mut task)?;
+        Ok(true)
+    }
+
+    fn refresh_phone_task(&self, uuid: &str, bytes: &[u8]) -> Result<bool> {
+        // One admission covers the latest local version, the inclusion
+        // proof and the save. A writer through the same store cannot add
+        // an unsent edit between the check and the replacement.
+        let mut admitted = self
+            .admit_until(Instant::now() + Duration::from_secs(2))
+            .ok_or_else(|| Error::failed("the task store is busy; the local copy is kept"))?;
+        let current = admitted.load_complete(uuid)?;
+        if !current.is_shallow() {
+            return Err(Error::new(
+                "the local task copy changed before its refresh; it is kept for a person's review",
+            ));
+        }
+        let mut incoming = TaskDoc::from_bytes(bytes)?;
+        incoming.repair_schema()?;
+        if incoming.uuid() != uuid || incoming.view()?.project != self.project_id() {
+            return Err(Error::new("the fresh copy is for another task or project"));
+        }
+        if incoming.applied_version().is_none()
+            || !incoming.current_vv().includes_vv(&current.current_vv())
+        {
+            return Err(Error::new(
+                "the fresh copy does not cover all local changes; the shallow \
+                 copy and any unsent edits are kept for a person's review",
+            ));
+        }
+        admitted.save(&mut incoming)?;
         Ok(true)
     }
 
@@ -724,11 +813,16 @@ enum Recovery {
 struct Refusal {
     error: Error,
     kept: Option<Keep>,
+    refresh: bool,
 }
 
 impl From<Error> for Refusal {
     fn from(error: Error) -> Self {
-        Self { error, kept: None }
+        Self {
+            error,
+            kept: None,
+            refresh: false,
+        }
     }
 }
 

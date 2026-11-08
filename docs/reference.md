@@ -4424,7 +4424,26 @@ task that is not Done), which the connector adds to its heartbeat;
 `hgs task exchange --json` reads a phone's request on stdin, imports the
 phone's changes and answers a page of what the phone lacks, at most 512 KiB of
 updates, with a larger task in parts. A task the phone holds keeps coming to it
-after it becomes Done. A request may cover a range of task UUIDs, so a large
+after it becomes Done. Opening a missing Done task requests its UUID with an
+empty version and receives a Loro shallow snapshot at its current frontiers:
+all current fields, logical history, attachments, schema floor and execution
+facts, without the superseded CRDT edit operations. Live tasks, nonempty-version
+deltas and ordinary desktop replication keep their existing encoding; opening
+an already cached Done task does not rewrite it. The exchange remains schema 1,
+with the same required answer fields and existing bounded parts and hashes.
+Task-capable Android and iOS builds have used Loro 1.16.2 throughout; iOS
+0.1.0 (849) predates Tasks and never requests this operation.
+
+A change from another computer can depend on operations before a phone copy's
+shallow root. That merge is explicitly refused, keeping the local files. The
+phone makes at most one fresh empty-version fetch for that task per exchange.
+It replaces a healthy shallow copy only if the fresh state covers every
+operation in the latest saved local version, checked and saved under one store
+admission. Otherwise its unsent edits stay in place for a person's review;
+neither a refusal nor a failed fetch clears them. Later comments and a desktop
+reopen back to To do continue through the same exchange.
+
+A request may cover a range of task UUIDs, so a large
 inventory goes in parts; a refusal prints `{"schema": 1, "ok": false, "error":
 …}` with exit status 1. Both read what the phone holds from the project's task
 index, which keeps each task's version and the project document's version, so

@@ -187,7 +187,12 @@ pub(crate) fn waiting_on(team: &Team, id: u32) -> Vec<u32> {
 
 /// #759: the cancelled dependencies of a task, which no longer hold it.
 pub(crate) fn cancelled_deps(team: &Team, task: &Task) -> Vec<u32> {
-    task.deps.iter().filter(|dep| team.task(dep.task).is_some_and(|found| found.status == TaskStatus::Cancelled)).map(|dep| dep.task).collect()
+    task.deps
+        .iter()
+        .filter(|dep| !task.kept_cancelled.contains(&dep.task))
+        .filter(|dep| team.task(dep.task).is_some_and(|found| found.status == TaskStatus::Cancelled))
+        .map(|dep| dep.task)
+        .collect()
 }
 
 /// Every task that depends on `id`, directly or through another task (C6).

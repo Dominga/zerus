@@ -3606,6 +3606,69 @@ fn discard_empty_draft(team: &mut Team, phase: u32, by: &str) {
     }
 }
 
+/// Task #289 (owner, 2026-11-08): the lead marks notices seen; one stays out of
+/// its inbox until its content changes, and a restart keeps that (the signature
+/// is stored with the team). A decision is answered, never marked seen.
+fn seen(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you mark the inbox seen");
+    let keys: Vec<String> = input["items"]
+        .as_array()
+        .context("Name the notice keys to mark seen: {\"items\":[\"proposal:p77\"]}")?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .take(200)
+        .collect();
+    ensure!(!keys.is_empty(), "Name at least one notice to mark seen");
+    let notices: Vec<super::inbox::Item> = super::inbox::all_items(team).into_iter().filter(|item| super::inbox::notice(item.kind)).collect();
+    let at = now();
+    let mut marked = Vec::new();
+    let mut unknown = Vec::new();
+    for key in keys {
+        let Some(item) = notices.iter().find(|item| item.key == key) else {
+            unknown.push(key);
+            continue;
+        };
+        let signature = super::inbox::signature(item);
+        team.seen_notices.retain(|seen| seen.key != key);
+        team.seen_notices.push(SeenNotice { key: key.clone(), signature, at });
+        marked.push(key);
+    }
+    team.seen_notices.sort_by(|a, b| a.at.total_cmp(&b.at));
+    let extra = team.seen_notices.len().saturating_sub(300);
+    team.seen_notices.drain(0..extra);
+    let by = actor.label(team);
+    events.push(Event::new("notices_seen", json!({"by":by,"items":marked})));
+    Ok(json!({"status":"seen","seen":marked,"unknown":unknown}))
+}
+
+/// Task #289: the lead keeps a task after its dependency was cancelled - it does
+/// not need that work - so the dependency_cancelled notice clears.
+fn keep(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    let id = task_id(input)?;
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you keep a task's cancelled dependency");
+    let task = team.task(id).with_context(|| format!("Unknown task #{id}"))?;
+    let wanted: Vec<u32> = match input["deps"].as_array() {
+        Some(deps) => deps.iter().filter_map(Value::as_u64).filter_map(|dep| u32::try_from(dep).ok()).collect(),
+        None => plan::cancelled_deps(team, task),
+    };
+    ensure!(!wanted.is_empty(), "Task #{id} has no cancelled dependency to keep");
+    for dep in &wanted {
+        ensure!(task.deps.iter().any(|found| found.task == *dep), "Task #{id} does not depend on #{dep}");
+        ensure!(team.task(*dep).is_some_and(|found| found.status == TaskStatus::Cancelled), "Task #{dep} is not a cancelled dependency of #{id}");
+    }
+    let label = actor.label(team);
+    let task = team.task_mut(id).context("Unknown task")?;
+    for dep in &wanted {
+        if !task.kept_cancelled.contains(dep) {
+            task.kept_cancelled.push(*dep);
+        }
+    }
+    task.kept_cancelled.sort_unstable();
+    events.push(Event::new("dependency_kept", json!({"by":label,"task":id,"deps":wanted})));
+    Ok(json!({"status":"kept","task":id,"deps":wanted}))
+}
+
 /// Ends the team with the lead's or your summary; Done is final.
 fn finish(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you finish the team");
@@ -6686,6 +6749,10 @@ fn apply_op(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &B
             events.push(Event::new("scratch_rule_granted", json!({"folder":rule.folder,"agents":rule.agents})));
             Ok(json!({"status":"granted","folder":rule.folder,"agents":rule.agents}))
         }
+        // Task #289: the lead marks inbox notices seen, and keeps a task after
+        // its dependency was cancelled.
+        "seen" => seen(team, input, actor, events),
+        "keep" => keep(team, input, actor, events),
         "finding" => finding(team, input, actor, offline, events),
         "draft" => draft(team, input, actor, offline, events),
         "propose" => propose(team, input, actor, events),

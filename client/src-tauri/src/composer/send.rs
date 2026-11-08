@@ -3249,19 +3249,21 @@ impl Composers {
     /// The composer's Stop, before it interrupts the turn (1187-1191): a
     /// waiting send ends first. The Stop entry keeps Qt's other checks
     /// (`interrupt_supported`, one interrupt at a time).
-    pub fn interrupted(&self, handle: u64) {
+    /// Returns the Stop's number for a later refusal ([`Self::interrupt_failed`]),
+    /// 0 when nothing was kept.
+    pub fn interrupted(&self, handle: u64) -> u64 {
         self.cancel_open(handle, rules::INTERRUPTED);
-        self.remember_interrupted(handle);
+        self.remember_interrupted(handle)
     }
 
     /// As in Terminal, the prompt of the interrupted turn returns to the
     /// message field (`SessionsWindow.cpp:1192-1197`): the open session's
     /// turn prompt is kept now, bound to its run and conversation, and goes
     /// back once the turn reads interrupted (`restore_interrupted`).
-    fn remember_interrupted(&self, handle: u64) {
+    fn remember_interrupted(&self, handle: u64) -> u64 {
         let mut hub = self.lock();
         let Some(key) = hub.open_key.clone() else {
-            return;
+            return 0;
         };
         if hub
             .open
@@ -3269,25 +3271,30 @@ impl Composers {
             .is_some_and(|open| open.subagent.is_some())
             || !hub.composers.get(&key).is_some_and(|c| c.handle == handle)
         {
-            return;
+            return 0;
         }
         let prompt = hub
             .followed
             .details
             .clone()
             .and_then(|details| super::interrupted::prompt_of(&details, hub.local.rows(&key)));
-        hub.interrupted.set(&key, prompt);
+        let Some(mut prompt) = prompt else {
+            hub.interrupted.set(&key, None);
+            return 0;
+        };
+        hub.next_stop += 1;
+        prompt.stop = hub.next_stop;
+        let stop = prompt.stop;
+        hub.interrupted.set(&key, Some(prompt));
+        stop
     }
 
-    /// The interrupt was refused: its turn goes on, and its prompt is not
-    /// given back (Qt drops it when the request fails, 1204).
-    pub fn interrupt_failed(&self, handle: u64) {
-        let mut hub = self.lock();
-        let Some(key) = hub.open_key.clone() else {
-            return;
-        };
-        if hub.composers.get(&key).is_some_and(|c| c.handle == handle) {
-            hub.interrupted.remove(&key);
+    /// The interrupt of Stop `stop` was refused: its turn goes on, and its
+    /// prompt is not given back (Qt drops it when the request fails, 1204).
+    /// Bound to that Stop, whichever session is open by then (zerus-btmir).
+    pub fn interrupt_failed(&self, stop: u64) {
+        if stop != 0 {
+            self.lock().interrupted.refused(stop);
         }
     }
 
@@ -3531,14 +3538,14 @@ pub fn send_cancel(state: State<'_, Composers>, handle: u64) {
 }
 
 #[tauri::command]
-pub fn send_interrupted(state: State<'_, Composers>, handle: u64) {
-    state.interrupted(handle);
+pub fn send_interrupted(state: State<'_, Composers>, handle: u64) -> u64 {
+    state.interrupted(handle)
 }
 
-/// The composer's Stop was refused (`send_interrupted` came first).
+/// The interrupt of the Stop `send_interrupted` numbered was refused.
 #[tauri::command]
-pub fn send_interrupt_failed(state: State<'_, Composers>, handle: u64) {
-    state.interrupt_failed(handle);
+pub fn send_interrupt_failed(state: State<'_, Composers>, stop: u64) {
+    state.interrupt_failed(stop);
 }
 
 /// Blocking: it answers once the reset ended (`Composers::clear_context`).
@@ -8280,29 +8287,44 @@ mod continuations {
     }
 
     /// zerus-5wmh.13.4, Qt's interrupted prompt (`SessionsWindow.cpp:1192-1197,2279-2307`).
+    /// Rust offers it; the webview takes it with an ordinary edit (zerus-c0xz8).
     #[test]
-    fn stop_gives_the_interrupted_prompt_back_to_an_empty_field() {
+    fn stop_offers_the_interrupted_prompt_to_an_empty_field() {
         let root = dir("interrupted-prompt");
         let (c, _fake) = send_hub(&root);
         let view = opened(&c, turn("working"));
         c.interrupted(view.handle);
         // Still stopping: nothing yet.
         c.observe(&state(turn("tool")));
-        assert!(c.current().unwrap().text.is_empty());
+        assert!(c.current().unwrap().offer.is_none());
         c.observe(&state(turn("interrupted")));
-        let back = until(&c, |v| v.text == "Fix the build");
-        assert_eq!((back.position, back.anchor), (13, 13));
-        assert!(back.text_epoch > view.text_epoch);
-        // Given back once: a later interrupted state does not repeat it.
-        c.edit(back.handle, 1, back.text_epoch, String::new(), 0, 0);
+        let offered = until(&c, |v| v.offer.is_some());
+        let offer = offered.offer.clone().unwrap();
+        assert_eq!(offer.text, "Fix the build");
+        // The draft itself is untouched until the webview takes the offer.
+        assert!(offered.text.is_empty());
+        assert_eq!(offered.text_epoch, view.text_epoch);
+        c.edit(
+            offered.handle,
+            1,
+            offered.text_epoch,
+            offer.text.clone(),
+            13,
+            13,
+        );
+        let taken = until(&c, |v| v.text == "Fix the build");
+        assert!(taken.offer.is_none());
+        // Offered once: a later interrupted state does not offer it again.
+        c.edit(taken.handle, 2, taken.text_epoch, String::new(), 0, 0);
         c.observe(&state(turn("interrupted")));
-        assert!(until(&c, |v| v.text.is_empty()).text.is_empty());
+        assert!(until(&c, |v| v.text.is_empty()).offer.is_none());
     }
 
     #[test]
     fn a_draft_the_person_started_wins_over_the_interrupted_prompt() {
         let root = dir("interrupted-draft");
         let (c, _fake) = send_hub(&root);
+        // Typed before the state reads interrupted: no offer.
         let view = opened(&c, turn("working"));
         c.interrupted(view.handle);
         c.edit(
@@ -8314,14 +8336,28 @@ mod continuations {
             15,
         );
         c.observe(&state(turn("interrupted")));
-        assert_eq!(
-            until(&c, |v| v.text == "my next message").text,
-            "my next message"
+        let view = until(&c, |v| v.text == "my next message");
+        assert!(view.offer.is_none());
+        // Typed after the offer, before the webview took it: the edit ends it.
+        c.edit(view.handle, 2, view.text_epoch, String::new(), 0, 0);
+        c.observe(&state(turn("working")));
+        c.interrupted(view.handle);
+        c.observe(&state(turn("interrupted")));
+        let offered = until(&c, |v| v.offer.is_some());
+        c.edit(
+            offered.handle,
+            3,
+            offered.text_epoch,
+            "typed meanwhile".into(),
+            15,
+            15,
         );
+        let kept = until(&c, |v| v.text == "typed meanwhile");
+        assert!(kept.offer.is_none());
     }
 
     #[test]
-    fn a_turn_that_ends_another_way_or_a_refused_stop_gives_nothing_back() {
+    fn a_turn_that_ends_another_way_or_a_refused_stop_offers_nothing() {
         let root = dir("interrupted-other");
         let (c, _fake) = send_hub(&root);
         let view = opened(&c, turn("working"));
@@ -8329,7 +8365,7 @@ mod continuations {
         c.interrupted(view.handle);
         c.observe(&state(turn("idle")));
         c.observe(&state(turn("interrupted")));
-        assert!(c.current().unwrap().text.is_empty());
+        assert!(c.current().unwrap().offer.is_none());
         // Another run took the session.
         c.observe(&state(turn("working")));
         c.interrupted(view.handle);
@@ -8337,14 +8373,16 @@ mod continuations {
         moved["run_id"] = json!("run-2");
         c.observe(&state(moved));
         c.observe(&state(turn("interrupted")));
-        assert!(c.current().unwrap().text.is_empty());
-        // The interrupt request was refused.
+        assert!(c.current().unwrap().offer.is_none());
+        // The interrupt request was refused: another Stop's number drops nothing.
         c.observe(&state(turn("working")));
-        c.interrupted(view.handle);
-        c.interrupt_failed(view.handle + 100);
-        c.interrupt_failed(view.handle);
+        let stop = c.interrupted(view.handle);
+        assert_ne!(stop, 0);
+        c.interrupt_failed(stop + 100);
+        c.interrupt_failed(stop);
         c.observe(&state(turn("interrupted")));
-        assert!(c.current().unwrap().text.is_empty());
+        let view = c.current().unwrap();
+        assert!(view.offer.is_none() && view.text.is_empty());
     }
 
     /// zerus-le5s: the start gave up at 180 s, then the session moved on

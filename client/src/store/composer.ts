@@ -63,9 +63,10 @@ export interface ComposerPort {
   undo(handle: number): Promise<void>;
   allowRetry(handle: number): Promise<void>;
   cancelSend(handle: number): Promise<void>;
-  interrupted(handle: number): Promise<void>;
-  /** The Stop's interrupt was refused: its prompt is not given back (zerus-5wmh.13.4). */
-  interruptFailed(handle: number): Promise<void>;
+  /** Resolves to the Stop's number (0 for none) for a later refusal. */
+  interrupted(handle: number): Promise<number | void>;
+  /** That Stop's interrupt was refused: its prompt is not given back (zerus-5wmh.13.4, zerus-btmir). */
+  interruptFailed(stop: number): Promise<void>;
   clear(handle: number, run: string, conversation: string, dismiss: boolean, delay?: import("./endActionBusy").EndReference): Promise<SendReply>;
   refresh(handle: number): Promise<void>;
   /** Opens a draft attachment by its `zerus-file` path: null when it opened, else a notice; rejects with why not (Task 9). */
@@ -179,6 +180,8 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
   let rev = 0;
   let epoch = 0;
   let dirty = false;
+  /** The last draft offer this webview considered (`takeOffer`). */
+  let offered = 0;
   let timer: (() => void) | undefined;
   let hintTimer: (() => void) | undefined;
   /** The draft key of the session last opened; a view of another composer is an older answer. */
@@ -268,7 +271,24 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
         setError(undefined);
       }
       if (next.sending || next.waiting) setStarting(false);
+      takeOffer(next);
     });
+  }
+
+  /**
+   * Qt's offerDraft from Rust (zerus-5wmh.13.4): the interrupted prompt goes
+   * into this field once, only while it is still empty and nothing typed is
+   * on its way (zerus-c0xz8). It then reaches Rust as an ordinary edit, so
+   * the text the person typed meanwhile always wins.
+   */
+  function takeOffer(next: ComposerView) {
+    const offer = next.offer;
+    if (!offer || offer.id === offered) return;
+    offered = offer.id;
+    if (dirty || next.text_epoch !== epoch || text().trim() !== "" || next.attachments.length > 0 || operationLocked()) return;
+    setText(offer.text);
+    setSelection({ start: offer.text.length, end: offer.text.length });
+    changed();
   }
 
   /** A view from the batch envelope: only the composer last opened, and after any open under way. */
@@ -537,10 +557,14 @@ export function createComposer(port: ComposerPort, timers: Timers = realTimers, 
       setError(undefined);
       await port.allowRetry(h).catch(() => {});
     },
-    /** Before a Stop interrupts: Rust cancels this composer's start or compaction (Qt 1187-1191). */
-    async interrupted() { const h = handle(); if (h !== undefined) await port.interrupted(h).catch(() => {}); },
-    /** After Stop: the interrupt did not go through, so the turn's prompt stays with the turn (Qt 1204). */
-    async interruptFailed() { const h = handle(); if (h !== undefined) await port.interruptFailed(h).catch(() => {}); },
+    /** Before a Stop interrupts: Rust cancels this composer's start or compaction (Qt 1187-1191) and numbers the Stop. */
+    async interrupted(): Promise<number> {
+      const h = handle();
+      if (h === undefined) return 0;
+      return (await port.interrupted(h).catch(() => 0)) || 0;
+    },
+    /** That Stop's interrupt did not go through: its prompt stays with its turn (Qt 1204), whichever composer is open by then. */
+    async interruptFailed(stop: number) { if (stop) await port.interruptFailed(stop).catch(() => {}); },
     /** The status line's Refresh (Qt's sessionRefreshRequested). */
     async refresh() { const h = handle(); if (h !== undefined && !operationLocked()) await port.refresh(h).catch(() => {}); },
     /**

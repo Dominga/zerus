@@ -17,12 +17,14 @@ const KEPT: usize = 16;
 const STOPPING: [&str; 4] = ["working", "tool", "compacting", "interrupted"];
 
 /// The prompt a Stop will give back, bound to the run and conversation it
-/// was sent to.
+/// was sent to, and to that Stop (`stop`, numbered by the hub), so a late
+/// refusal of an older Stop never drops a newer one's prompt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Prompt {
     pub(crate) run: String,
     pub(crate) conversation: String,
     pub(crate) text: String,
+    pub(crate) stop: u64,
 }
 
 /// The prompts waiting for their sessions to report the turn interrupted, by
@@ -46,6 +48,12 @@ impl Prompts {
         self.0.retain(|(known, _)| known != key);
     }
 
+    /// The interrupt of Stop `stop` was refused: its prompt alone goes,
+    /// whichever session is open by then.
+    pub(crate) fn refused(&mut self, stop: u64) {
+        self.0.retain(|(_, prompt)| prompt.stop != stop);
+    }
+
     pub(crate) fn get(&self, key: &str) -> Option<&Prompt> {
         self.0
             .iter()
@@ -63,15 +71,19 @@ pub(crate) fn prompt_of(details: &Value, local: &[LocalMessage]) -> Option<Promp
         return None;
     }
     let run = details["run_id"].as_str().unwrap_or("");
+    let conversation = details["conversation_id"].as_str().unwrap_or("");
     let clipped = recorded.chars().count() > CLIP && recorded.ends_with('\u{2026}');
     let known = if clipped {
         recorded.trim_end_matches('\u{2026}')
     } else {
         recorded
     };
+    // The exact run and conversation: a row still sending in an earlier
+    // conversation of the run is not this turn's text (zerus-gy7cj).
     let sent = local.iter().rev().find(|message| {
         message.status != Status::Error
             && message.run_id == run
+            && message.conversation_id == conversation
             && if clipped {
                 message.text.starts_with(known)
             } else {
@@ -85,8 +97,9 @@ pub(crate) fn prompt_of(details: &Value, local: &[LocalMessage]) -> Option<Promp
     };
     Some(Prompt {
         run: run.to_owned(),
-        conversation: details["conversation_id"].as_str().unwrap_or("").to_owned(),
+        conversation: conversation.to_owned(),
         text,
+        stop: 0,
     })
 }
 
@@ -167,7 +180,8 @@ mod tests {
             Prompt {
                 run: "run".into(),
                 conversation: "conversation".into(),
-                text: "Fix the build".into()
+                text: "Fix the build".into(),
+                stop: 0
             }
         );
     }
@@ -193,6 +207,26 @@ mod tests {
             None
         );
         assert_eq!(prompt_of(&details("", "working"), &[]), None);
+    }
+
+    /// review-win-d's control for PR #1778 (zerus-gy7cj).
+    #[test]
+    fn a_pending_message_from_another_conversation_is_not_this_turns_exact_prompt() {
+        let prefix = "x".repeat(CLIP);
+        let mut old = local(&format!("{prefix}old turn suffix"), "run", Status::Sending);
+        old.conversation_id = "old-conversation".into();
+        old.uncertain = true;
+        let mut clipped = details(&format!("{prefix}\u{2026}"), "working");
+        clipped["conversation_id"] = json!("new-conversation");
+        assert_eq!(prompt_of(&clipped, &[old.clone()]), None);
+        // Unclipped, the recorded prompt itself is this turn's.
+        let mut whole = details("Fix the build", "working");
+        whole["conversation_id"] = json!("new-conversation");
+        old.text = "Fix the build".into();
+        assert_eq!(
+            prompt_of(&whole, &[old]).map(|p| (p.text, p.conversation)),
+            Some(("Fix the build".into(), "new-conversation".into()))
+        );
     }
 
     #[test]
@@ -229,6 +263,7 @@ mod tests {
             run: "run".into(),
             conversation: "c".into(),
             text: text.into(),
+            stop: 0,
         };
         prompts.set("a", Some(prompt("first")));
         prompts.set("a", Some(prompt("second")));
@@ -241,5 +276,25 @@ mod tests {
         assert!(prompts.get("k3").is_none());
         assert!(prompts.get("k4").is_some());
         assert!(prompts.get("k19").is_some());
+    }
+
+    #[test]
+    fn a_refusal_drops_only_its_own_stops_prompt() {
+        let mut prompts = Prompts::default();
+        let stopped = |stop: u64| Prompt {
+            run: "run".into(),
+            conversation: "c".into(),
+            text: "p".into(),
+            stop,
+        };
+        prompts.set("alpha", Some(stopped(1)));
+        prompts.set("beta", Some(stopped(2)));
+        prompts.refused(1);
+        assert!(prompts.get("alpha").is_none());
+        assert_eq!(prompts.get("beta").map(|p| p.stop), Some(2));
+        // An older Stop of the same session refused after a newer Stop.
+        prompts.set("beta", Some(stopped(3)));
+        prompts.refused(2);
+        assert_eq!(prompts.get("beta").map(|p| p.stop), Some(3));
     }
 }

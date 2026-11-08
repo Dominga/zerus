@@ -948,8 +948,10 @@ export const sendPush = (handle: number, rev: number, epoch: number, text: strin
 export const queueSendNow = (queueId: string | null) => desktop<boolean>("queue_send_now", { queue_id: queueId });
 export const sendAnswer = (token: number, answer: Answer) => desktop<SendReply>("send_answer", { token, answer });
 export const sendCancel = (handle: number) => desktop<void>("send_cancel", { handle });
-export const sendInterrupted = (handle: number) => desktop<void>("send_interrupted", { handle });
-export const sendInterruptFailed = (handle: number) => desktop<void>("send_interrupt_failed", { handle });
+/** Before a Stop: Rust numbers the Stop whose prompt it keeps (0 for none). */
+export const sendInterrupted = (handle: number) => desktop<number>("send_interrupted", { handle });
+/** That Stop's interrupt was refused: its prompt alone goes, whichever session is open by then. */
+export const sendInterruptFailed = (stop: number) => desktop<void>("send_interrupt_failed", { stop });
 /** Answers once the clear ended (up to 45 s). */
 export const clearContext = (handle: number, run: string, conversation: string, dismiss: boolean, delay?: import("./store/endActionBusy").EndReference) =>
   desktop<SendReply>("clear_context", { handle, run, conversation, dismiss, delay });

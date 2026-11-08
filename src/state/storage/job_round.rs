@@ -151,6 +151,9 @@ impl Drop for Held {
 }
 
 #[cfg(test)]
+mod compatibility;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};

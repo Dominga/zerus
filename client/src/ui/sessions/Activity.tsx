@@ -7,7 +7,6 @@ import { ActivityHeights, activityMeasureWindow, activityOverscan, createActivit
 import { searchPreview, clearSearchPreview } from "../../store/searchSelection";
 import { SearchHighlight } from "./SearchHighlight";
 import { For, Show, batch, createContext, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack, useContext, type JSX } from "solid-js";
-import { Dynamic } from "solid-js/web";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { createImageHandoff, fittedImage } from "./attachment-image";
 import { attachmentFetch, attachmentMedia, attachmentOpen, attachmentPin, attachmentUnpin, copyVerbatim, inTauri } from "../../bridge";
@@ -33,9 +32,11 @@ import { animationFrames, createActivityEnd, newLocalSends } from "./activity-en
 import { replyVisible } from "../../store/viewedReply";
 import { buildTranscript, createActivityProjections, VOICE_STATE_LABEL, voiceStateDetail, voiceStateIssue } from "./transcript";
 import { DELETE_TEXT, DELETE_TITLE, retryReason, routeInspect } from "./local-actions";
-import { markdownReady, markdownTree, type Inline, type MarkdownBlock } from "./markdown";
+import { markdownReady } from "./markdown";
+import { ActivitySession, Body } from "./MarkdownBody";
+
+export { Body } from "./MarkdownBody";
 import { activityAll, activityFlow, activityRange, measureActivityRows, activitySelectionIndexes, activitySelectionText, activityText, activityTexts, activityVirtualOffset, selectActivityAll, selectionCoversActivity } from "./activity-virtual";
-import { openExternal, openSessionFile } from "./sessionFiles";
 import { SessionFileDialog } from "./SessionFileDialog";
 import { captionText, statusOf } from "./SessionCard";
 import type { ActivityItem, ItemAttachment, LocalItem, MediaMessage, Session, TranscriptItem } from "./types";
@@ -163,10 +164,6 @@ const copyText = (text: string, what: string) => {
   void copyVerbatim(text).then(() => toast(tr("Copied"), what), () => toast(tr("Not copied"), tr("The clipboard is unavailable"), "error"));
 };
 
-// Inline Markdown stays text except its links: HTTP(S) uses the system
-// opener, and local/file references open the session's File reference dialog.
-
-const ActivitySession = createContext<() => Session | undefined>();
 const ActivityLayoutHeld = createContext<() => boolean>(() => false);
 
 /** Keep disclosure geometry while a gesture or persistent selection owns
@@ -182,70 +179,6 @@ function layoutDisclosure(expanded: () => boolean | undefined = () => undefined,
     onExpanded?.(next);
   };
   return [open, toggle] as const;
-}
-
-function inlines(parts: Inline[], session?: () => Session | undefined): JSX.Element[] {
-  return parts.map((part): JSX.Element => {
-    switch (part.kind) {
-      case "text": return part.text;
-      case "code": return <code>{part.text}</code>;
-      case "br": return <br />;
-      case "bold": return <b>{inlines(part.children, session)}</b>;
-      case "em": return <em>{inlines(part.children, session)}</em>;
-      case "del": return <del>{inlines(part.children, session)}</del>;
-      default: {
-        const link = part;
-        return <a href={link.href} title={link.href} draggable={false} onAuxClick={(event) => event.preventDefault()} onDragStart={(event) => event.preventDefault()} onClick={(event) => {
-          event.preventDefault();
-          if (link.kind === "external") openExternal(link.href);
-          else {
-            const current = session?.();
-            if (current) openSessionFile(current, link.href);
-          }
-        }}>{inlines(link.children, session)}</a>;
-      }
-    }
-  });
-}
-
-const HEADINGS = ["h1", "h2", "h3", "h4", "h5", "h6"] as const;
-
-function blocks(list: MarkdownBlock[], session?: () => Session | undefined): JSX.Element[] {
-  return list.map((b): JSX.Element => {
-    switch (b.kind) {
-      case "code": return <pre class="act-code mono">{b.text}</pre>;
-      case "text": return <>{inlines(b.inline, session)}</>;
-      case "heading": return <Dynamic component={HEADINGS[b.level - 1]} class="md-heading">{inlines(b.inline, session)}</Dynamic>;
-      case "hr": return <hr class="md-rule" />;
-      case "quote": return <blockquote class="md-quote">{blocks(b.blocks, session)}</blockquote>;
-      case "list": {
-        const items = b.items.map((item) => (
-          <li classList={{ "md-task": item.task }}>
-            <Show when={item.task}><input type="checkbox" class="md-check" checked={item.checked} disabled aria-label={item.checked ? tr("Done") : tr("Not done")} /></Show>
-            {blocks(item.blocks, session)}
-          </li>
-        ));
-        return b.ordered ? <ol class="md-list" start={b.start}>{items}</ol> : <ul class="md-list">{items}</ul>;
-      }
-      case "table": return (
-        <div class="act-table-wrap" role="region" aria-label={tr("Message table")} tabindex="0">
-          <table class="act-table" style={{ "--table-columns": b.header.length }}>
-            <thead><tr>{b.header.map((cell, column) => <th scope="col" style={{ "text-align": b.align[column] }}>{inlines(cell, session)}</th>)}</tr></thead>
-            <Show when={b.rows.length}><tbody>{b.rows.map((row) => <tr>{row.map((cell, column) => <td style={{ "text-align": b.align[column] }}>{inlines(cell, session)}</td>)}</tr>)}</tbody></Show>
-          </table>
-        </div>
-      );
-      default: return <p>{inlines(b.inline, session)}</p>;
-    }
-  });
-}
-
-export function Body(props: { text: string }) {
-  const session = useContext(ActivitySession);
-  // Rerenders once when the lazily loaded parser arrives; Activity places its
-  // rows only after that, so placed rows keep their height.
-  const tree = createMemo(() => { markdownReady(); return markdownTree(props.text); });
-  return <>{blocks(tree(), session)}</>;
 }
 
 // ---------------------------------------------------------------------------
@@ -633,13 +566,14 @@ function Item(props: { item: TranscriptItem; scope?: AttachmentScope; sourceId?:
   const it = props.item;
   if (it.kind === "media") return <MediaCard item={it} scope={rowScope(it, props.scope)} sourceId={props.sourceId} postersEnabled={props.postersEnabled} expanded={props.expanded} onExpanded={props.onExpanded} />;
   if (it.kind === "context") return <div class="act-label eyebrow" id={`item-${it.id}`}>{it.body}</div>;
-  if (it.kind === "thinking") return <div class="act-thinking" id={`item-${it.id}`} classList={{ inherited: !!it.inherited }}><span class="eyebrow">{tr("Thinking")}</span><p>{it.body}</p></div>;
+  // Thinking and subagent reports are Markdown, as in Qt (ActivityView.cpp:942-975).
+  if (it.kind === "thinking") return <div class="act-thinking" id={`item-${it.id}`} classList={{ inherited: !!it.inherited }}><span class="eyebrow">{tr("Thinking")}</span><div class="act-thinking-body act-body"><Body text={it.body ?? ""} /></div></div>;
   if (it.kind === "report")
     return (
       <div class="act-notice" id={`item-${it.id}`} classList={{ open: open(), inherited: !!it.inherited }}>
         <div class="row"><Icon name="bot" size={13} /><b>{it.title}</b><Show when={it.sender}><span class="muted">{tr("from %1", it.sender!)}</span></Show><span class="grow" /><span class="act-time">{it.at}</span></div>
         <button class="link" onClick={toggleOpen}>{open() ? tr("▾ Hide report") : tr("▸ Show report")}</button>
-        <Show when={open()}><p class="act-notice-body">{it.body}</p></Show>
+        <Show when={open()}><div class="act-notice-body act-body"><Body text={it.body ?? ""} /></div></Show>
       </div>
     );
   return (

@@ -44,7 +44,7 @@ Every partial, missing and unverified row names the bead that tracks it.
 | Sessions list, row actions and header | 22 | 2 | 5 | 2 owner decisions |
 | Archive and search | 10 | 4 | 1 | |
 | Composer and sending | 31 | 4 | | |
-| Activity | 10 | 5 | 2 | |
+| Activity | 12 | 3 | 2 | |
 | Questions and approvals | 12 | | | |
 | Notifications | 7 | 5 | | |
 | Tray, menu bar and Dock | 6 | 2 | 1 | 2 owner decisions |
@@ -198,14 +198,14 @@ Keyboard commands for every area are listed once, under Shortcuts and navigation
 | Capability | Status | Zerus Next evidence | Qt |
 | --- | --- | --- | --- |
 | GitHub-style Markdown (headings, lists, task lists, tables, quotes, code, strikethrough); raw HTML as text; no remote images | done | `ui/sessions/markdown.ts:1-169`; `ui/sessions/Activity.tsx:187-249` | `MarkdownHtml.cpp`; `MarkdownObjects.cpp` |
-| Bare URLs become links; a URL written as inline code becomes a link | partial (`zerus-5wmh.13.8`) | inline code never links: `ui/sessions/markdown.ts:72` | `MarkdownHtml.cpp:299-311,375-408` |
+| Bare URLs become links; a URL written as inline code becomes a link | done | `ui/sessions/markdown.ts:72-78,87-92` | `MarkdownHtml.cpp:299-311,375-408` |
 | Links: web pages open the browser; file references open a dialog (open, folder, download) | done | `ui/sessions/Activity.tsx:196-206`; `ui/sessions/SessionFileDialog.tsx:36-68` | `ActivityView.cpp:1737-1765` |
 | Copy a reply as Markdown; select, copy, Select All, context menu | done | `ui/sessions/Activity.tsx:144-157,669,1128-1137` | `ActivityView.cpp:798-800,1542-1547,1851-1866` |
 | Activity width: drag, double-click reset, Full width and Reset width | done | `ui/sessions/Activity.tsx:84-141` | `ActivityView.cpp:1253-1255,1498-1540` |
 | Follow latest; Jump to latest (N new) | done | `ui/sessions/Activity.tsx:685-719,1097-1105`; `ui/sessions/Composer.tsx:267,288-291` | `ActivityView.cpp:1607-1636` |
 | Tool calls grouped and expandable to each event's full output | partial (`zerus-5wmh.13.8`) | expanded rows show a 110-character preview per event (`ui/sessions/transcript.ts:197-201,568`) | `ActivityView.cpp:1105-1140` |
 | View process link from a tool event to its recorded process | **missing** (`zerus-5wmh.13.8`) | no such link in the client UI | `ActivityView.cpp:1129-1134` |
-| Thinking and subagent reports as Markdown | partial (`zerus-5wmh.13.8`) | plain text: `ui/sessions/Activity.tsx:636-642` (peer and background cards do render Markdown) | `ActivityView.cpp:942-975` |
+| Thinking and subagent reports as Markdown | done | `ui/sessions/Activity.tsx:570,576`; `ui/sessions/MarkdownBody.tsx` | `ActivityView.cpp:942-975` |
 | Session cleared marker; Question and Your answer blocks; queued and sent stamps | done | `ui/sessions/transcript.ts:512,543-549`; `ui/sessions/Activity.tsx:575-583,667` | `ActivityView.cpp:347-363,934-940,1029-1046` |
 | Local message stamps: Sending, Not sent, Submitted to terminal, Delivery not confirmed | done | `ui/sessions/transcript.ts:226-251` | `ActivityView.cpp:1053-1055` |
 | OpenCode queue: Queued or Not delivered stamp, waiting hint, Remove queued message with confirmation | **missing** (`zerus-5wmh.13.6`) | `core/input_queue.rs:546-558` (`inbox_removable`) has no caller; no UI reads `delivery_state` | `ActivityView.cpp:1036-1038,1072-1087`; `SessionsWindow.cpp:4433-4467` |

@@ -61,6 +61,7 @@ fn repo_with(extra: &str) -> Repo {
 
 fn repo_providers(providers: &str) -> Repo {
     let dir = tempfile::tempdir().unwrap();
+    crate::platform::owner_only_dir(dir.path()).unwrap();
     let lead = dir.path().join("lead");
     let member = dir.path().join("member");
     std::fs::create_dir_all(lead.join(".zerus")).unwrap();
@@ -141,7 +142,7 @@ fn settle(team: &mut Team, database: &TestStore, lead: &Path) -> Vec<Event> {
     let mut events = Vec::new();
     assert!(step_here(team, database, 100.0, &mut events).unwrap());
     let queued = database.queued(&team.id).unwrap();
-    run_due(database, lead, &queued, 101.0, &Default::default()).unwrap();
+    run_due(database, lead, &queued, 101.0, &Default::default(), team.settings.tests.as_ref()).unwrap();
     step_here(team, database, 102.0, &mut events).unwrap();
     events
 }
@@ -191,7 +192,7 @@ fn a_suite_of_another_platform_with_no_runner_is_recorded_not_run() {
     let suites: Vec<&str> = queued.iter().map(|request| request.suite.as_str()).collect();
     assert!(suites.contains(&"unit") && suites.contains(&"here") && !suites.contains(&"python"), "{suites:?}");
     assert!(!step(&mut team, &database, 100.5, &mut events, &host, &[]).unwrap(), "it waits for the suites that ran");
-    run_due(&database, &repo.lead, &queued, 101.0, &Default::default()).unwrap();
+    run_due(&database, &repo.lead, &queued, 101.0, &Default::default(), None).unwrap();
     step(&mut team, &database, 102.0, &mut events, &host, &[]).unwrap();
     let task = team.task(1).unwrap();
     assert_eq!(task.status, TaskStatus::Accepted);
@@ -223,7 +224,7 @@ fn a_not_run_suite_keeps_only_its_own_range_open() {
     let host = vec!["windows".to_owned()];
     assert!(step(&mut team, &database, 100.0, &mut events, &host, &[]).unwrap());
     let queued = database.queued("t1").unwrap();
-    run_due(&database, &repo.lead, &queued, 101.0, &Default::default()).unwrap();
+    run_due(&database, &repo.lead, &queued, 101.0, &Default::default(), None).unwrap();
     step(&mut team, &database, 102.0, &mut events, &host, &[]).unwrap();
     let first = team.merge_log[0].clone();
     let first_merged = team.merge_tested.clone();
@@ -255,7 +256,7 @@ fn a_not_run_suite_keeps_only_its_own_range_open() {
     ops::apply(&mut team, "accept", &json!({"task":2}), &Actor::Member("lead".into()), &BTreeSet::new(), &mut events).unwrap();
     assert!(step(&mut team, &database, 200.0, &mut events, &host, &[]).unwrap());
     let queued = database.queued("t1").unwrap();
-    run_due(&database, &repo.lead, &queued, 201.0, &Default::default()).unwrap();
+    run_due(&database, &repo.lead, &queued, 201.0, &Default::default(), None).unwrap();
     step(&mut team, &database, 202.0, &mut events, &host, &[]).unwrap();
     let second_merged = team.merge_tested.clone();
     assert_ne!(second_merged, first_merged);
@@ -696,7 +697,7 @@ fn a_suite_of_another_platform_with_a_runner_is_queued_and_waited_for() {
     assert!(python.platforms.contains(&"linux".to_owned()), "{:?}", python.platforms);
     // It waits for the runner's result like any queued suite.
     assert!(!step(&mut team, &database, 100.5, &mut events, &host, &runners).unwrap());
-    run_due(&database, &repo.lead, &queued, 101.0, &Default::default()).unwrap();
+    run_due(&database, &repo.lead, &queued, 101.0, &Default::default(), None).unwrap();
     step(&mut team, &database, 102.0, &mut events, &host, &runners).unwrap();
     assert_eq!(team.task(1).unwrap().status, TaskStatus::Accepted);
     assert!(team.merge_log[0].suites.iter().any(|suite| suite == "python"));
@@ -732,7 +733,7 @@ fn a_merged_report_whose_affected_tests_pass_is_kept_and_accepted() {
     assert_eq!((queued[0].suite.as_str(), queued[0].commit.as_str(), queued[0].task, queued[0].forced), ("unit", entry.merged.as_str(), Some(1), true));
     // Nothing decides before the result.
     assert!(!step_here(&mut team, &database, 100.5, &mut events).unwrap());
-    run_due(&database, &repo.lead, &queued, 101.0, &Default::default()).unwrap();
+    run_due(&database, &repo.lead, &queued, 101.0, &Default::default(), None).unwrap();
     assert!(step_here(&mut team, &database, 102.0, &mut events).unwrap());
     let task = team.task(1).unwrap();
     assert_eq!(task.status, TaskStatus::Accepted);
@@ -777,7 +778,7 @@ fn a_failed_merge_names_the_suites_not_run_here() {
     let host = vec!["windows".to_owned()];
     assert!(step(&mut team, &database, 100.0, &mut events, &host, &[]).unwrap());
     let queued = database.queued("t1").unwrap();
-    run_due(&database, &repo.lead, &queued, 101.0, &Default::default()).unwrap();
+    run_due(&database, &repo.lead, &queued, 101.0, &Default::default(), None).unwrap();
     step(&mut team, &database, 102.0, &mut events, &host, &[]).unwrap();
     let task = team.task(1).unwrap();
     assert_eq!(task.status, TaskStatus::Pending);
@@ -1121,7 +1122,7 @@ fn a_later_kept_merge_closes_an_open_range_only_after_all_its_suites_ran() {
     queue_next(&repo, &mut team, 2);
     let host = vec!["windows".to_owned()];
     step(&mut team, &database, 100.0, &mut events, &host, &[]).unwrap();
-    run_due(&database, &repo.lead, &database.queued("t1").unwrap(), 101.0, &Default::default()).unwrap();
+    run_due(&database, &repo.lead, &database.queued("t1").unwrap(), 101.0, &Default::default(), None).unwrap();
     step(&mut team, &database, 102.0, &mut events, &host, &[]).unwrap();
     assert_eq!(team.task(2).unwrap().status, TaskStatus::Accepted);
     assert_eq!(team.task(1).unwrap().untested_merge.as_ref(), Some(&range));
@@ -1132,7 +1133,7 @@ fn a_later_kept_merge_closes_an_open_range_only_after_all_its_suites_ran() {
     let queued = database.queued("t1").unwrap();
     assert!(queued.iter().any(|request| request.suite == "other"));
     assert!(queued.iter().all(|request| request.commit == head(&repo)));
-    run_due(&database, &repo.lead, &queued, 201.0, &Default::default()).unwrap();
+    run_due(&database, &repo.lead, &queued, 201.0, &Default::default(), None).unwrap();
     step(&mut team, &database, 202.0, &mut events, &host, &[]).unwrap();
     assert_eq!(team.task(3).unwrap().status, TaskStatus::Accepted);
     assert!(team.task(1).unwrap().untested_merge.is_none());
@@ -1383,3 +1384,227 @@ fn an_unusable_integration_folder_holds_the_queue_with_its_note() {
 
 
 
+
+
+fn ctest_repo() -> Repo {
+    let repo = repo_providers(r#"[[provider]]
+name = "gui"
+kind = "ctest"
+build_dir = "build/gui"
+sources = ["a.txt", "tests/**", "tests.txt"]
+tests = ["tests/*.cpp"]
+configure = '"{python}" .zerus/fixture.py configure "{build_dir}"'
+build = '"{python}" .zerus/fixture.py build "{build_dir}" {targets}'
+probe = '"{python}" .zerus/fixture.py probe "{build_dir}"'
+command = '"{python}" .zerus/fixture.py test "{build_dir}" {targets}'
+"#);
+    write(&repo.lead, ".gitignore", "build/\nstages.log\n.zerus/tests.local.toml\n");
+    std::fs::create_dir(repo.lead.join("tests")).unwrap();
+    write(&repo.lead, "tests/test_old.cpp", "old test\n");
+    write(&repo.lead, "tests.txt", "test_old\n");
+    write(&repo.lead, ".zerus/fixture.py", r#"import os, pathlib, sys
+stage, folder = sys.argv[1:3]
+folder = pathlib.Path(folder)
+assert os.environ.get('FIXTURE_LOCAL') == 'yes'
+assert stage == 'test' or os.environ.get('EXPECT_OWNER_STAGE') != 'yes' or os.environ.get('OWNER_STAGE') == 'yes'
+with open('stages.log', 'a') as log:
+    log.write(stage + ' ' + ' '.join(sys.argv[3:]) + '\n')
+if stage == 'probe':
+    if os.environ.get('PROBE_READY') == 'no':
+        print('x' * 5000)
+        print('fixture compiler is unavailable')
+        sys.exit(9)
+elif stage == 'configure':
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / 'CMakeCache.txt').write_text('fixture cache')
+elif stage == 'build':
+    if pathlib.Path('fail-build.txt').exists():
+        print('fixture source build failed')
+        sys.exit(7)
+    assert (folder / 'CMakeCache.txt').exists()
+    (folder / 'built.txt').write_text(pathlib.Path('tests.txt').read_text())
+elif stage == 'test':
+    assert (folder / 'built.txt').read_text() == pathlib.Path('tests.txt').read_text(), 'stale test binary'
+    print('Ran ' + (folder / 'built.txt').read_text().strip())
+"#);
+    write(&repo.lead, ".zerus/test-map.json", r#"{"schema":1,"providers":{"gui":{"kind":"ctest","rule":"build","targets":{"test_old":{"run":["old"],"tests":1}},"files":{"a.txt":["test_old"],"tests/test_old.cpp":["test_old"]},"test_files":{"tests/test_old.cpp":["test_old"]}}}}"#);
+    run_git(&repo.lead, &["add", "."]);
+    run_git(&repo.lead, &["commit", "-q", "-m", "fixture recipes"]);
+    run_git(&repo.member, &["merge", "--ff-only", &head(&repo)]);
+    write_local(&repo, "yes");
+    crate::test_discipline::config::load(&repo.lead, None).unwrap();
+    repo
+}
+
+fn write_local(repo: &Repo, ready: &str) {
+    let python = if cfg!(windows) { "python" } else { "python3" };
+    write(&repo.lead, ".zerus/tests.local.toml", &format!(
+        "[provider.gui.vars]\npython = '{python}'\n[provider.gui.env]\nFIXTURE_LOCAL = 'yes'\nPROBE_READY = '{ready}'\n"));
+}
+
+fn ctest_change(repo: &Repo) {
+    write(&repo.member, "a.txt", "changed\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "change"]);
+}
+
+#[test]
+fn ctest_queue_configures_missing_folder_then_builds_selected_targets() {
+    let repo = ctest_repo();
+    ctest_change(&repo);
+    let mut team = team(&repo);
+    accept(&mut team);
+    let database = database(&repo);
+    settle(&mut team, &database, &repo.lead);
+    assert_eq!(team.task(1).unwrap().status, TaskStatus::Accepted);
+    let stages = std::fs::read_to_string(repo.lead.join("stages.log")).unwrap();
+    assert_eq!(stages.lines().map(|line| line.split_whitespace().next().unwrap()).collect::<Vec<_>>(), ["probe", "configure", "build", "test"]);
+    assert!(stages.contains("build --target test_old"), "{stages}");
+}
+
+#[test]
+fn ctest_queue_uses_owner_overrides_for_every_preparation_stage() {
+    let repo = ctest_repo();
+    write(&repo.member, ".zerus/owner.py", "import os, runpy, sys\nassert sys.argv.pop(1) == 'owner'\nos.environ['OWNER_STAGE'] = 'yes'\nrunpy.run_path('.zerus/fixture.py', run_name='__main__')\n");
+    let mut local = std::fs::read_to_string(repo.lead.join(".zerus/tests.local.toml")).unwrap();
+    local.push_str("EXPECT_OWNER_STAGE = 'yes'\n");
+    write(&repo.lead, ".zerus/tests.local.toml", &local);
+    ctest_change(&repo);
+    let mut team = team(&repo);
+    team.settings.tests = Some(json!({"provider":[{
+        "name":"gui", "build_dir":"build/owner",
+        "probe":"\"{python}\" .zerus/owner.py owner probe \"{build_dir}\"",
+        "configure":"\"{python}\" .zerus/owner.py owner configure \"{build_dir}\"",
+        "build":"\"{python}\" .zerus/owner.py owner build \"{build_dir}\" {targets}"
+    }]}));
+    accept(&mut team);
+    let database = database(&repo);
+    settle(&mut team, &database, &repo.lead);
+    assert_eq!(team.task(1).unwrap().status, TaskStatus::Accepted);
+    assert!(repo.lead.join("build/owner/CMakeCache.txt").is_file());
+    assert!(repo.lead.join("build/owner/built.txt").is_file());
+    assert!(!repo.lead.join("build/gui").exists());
+    let stages = std::fs::read_to_string(repo.lead.join("stages.log")).unwrap();
+    assert_eq!(stages.lines().map(|line| line.split_whitespace().next().unwrap()).collect::<Vec<_>>(), ["probe", "configure", "build", "test"]);
+}
+
+#[test]
+fn ctest_queue_rebuilds_stale_folder_and_runs_a_new_test_missing_from_the_map() {
+    let repo = ctest_repo();
+    std::fs::create_dir_all(repo.lead.join("build/gui")).unwrap();
+    write(&repo.lead, "build/gui/CMakeCache.txt", "old cache");
+    write(&repo.lead, "build/gui/built.txt", "test_old\n");
+    write(&repo.member, "tests/test_new.cpp", "new test\n");
+    write(&repo.member, "tests.txt", "test_old\ntest_new\n");
+    run_git(&repo.member, &["add", "."]);
+    run_git(&repo.member, &["commit", "-q", "-m", "new test"]);
+    let mut team = team(&repo);
+    accept(&mut team);
+    let database = database(&repo);
+    settle(&mut team, &database, &repo.lead);
+    assert_eq!(team.task(1).unwrap().status, TaskStatus::Accepted);
+    assert_eq!(std::fs::read_to_string(repo.lead.join("stages.log")).unwrap().lines().collect::<Vec<_>>(), ["probe ", "build ", "test "]);
+    assert_eq!(std::fs::read_to_string(repo.lead.join("build/gui/built.txt")).unwrap().lines().collect::<Vec<_>>(), ["test_old", "test_new"]);
+}
+
+#[test]
+fn ctest_queue_build_failure_fails_the_suite_and_rolls_back() {
+    let repo = ctest_repo();
+    write(&repo.member, "fail-build.txt", "bad source");
+    ctest_change(&repo);
+    let prev = head(&repo);
+    let mut team = team(&repo);
+    accept(&mut team);
+    let database = database(&repo);
+    let mut events = Vec::new();
+    step_here(&mut team, &database, 100.0, &mut events).unwrap();
+    let queued = database.queued(&team.id).unwrap();
+    let records = run_due(&database, &repo.lead, &queued, 101.0,
+        &super::super::test_results::Policy { retries: 1, ..Default::default() }, None).unwrap();
+    assert_eq!(records[0].status, "failed");
+    assert!(records[0].flags.iter().any(|flag| flag == "build"));
+    step_here(&mut team, &database, 102.0, &mut events).unwrap();
+    assert_eq!(team.task(1).unwrap().status, TaskStatus::Pending);
+    assert_eq!(head(&repo), prev);
+    assert!(team.task(1).unwrap().decision_reason.contains("fixture source build failed"));
+    let stages = std::fs::read_to_string(repo.lead.join("stages.log")).unwrap();
+    assert_eq!(stages.lines().filter(|line| line.starts_with("build ")).count(), 1);
+    assert!(!stages.lines().any(|line| line.starts_with("test ")));
+}
+
+#[test]
+fn ctest_queue_probe_failure_is_not_run_or_green_on_a_later_run() {
+    let repo = ctest_repo();
+    write_local(&repo, "no");
+    ctest_change(&repo);
+    let mut team = team(&repo);
+    let prev = head(&repo);
+    accept(&mut team);
+    let database = database(&repo);
+    let mut events = Vec::new();
+    step_here(&mut team, &database, 100.0, &mut events).unwrap();
+    let queued = database.queued(&team.id).unwrap();
+    let first = run_due(&database, &repo.lead, &queued, 101.0, &Default::default(), None).unwrap();
+    assert_eq!(first[0].status, "not_run");
+    assert!(first[0].excerpt.contains("fixture compiler is unavailable"));
+    step_here(&mut team, &database, 102.0, &mut events).unwrap();
+    assert_eq!(team.task(1).unwrap().status, TaskStatus::Accepted);
+    assert_ne!(head(&repo), prev);
+    assert!(team.merge_log[0].suites.is_empty());
+    assert!(team.merge_log[0].not_run[0].starts_with("not run here: gui runs on "));
+    assert!(team.merge_tested.is_empty() && !team.merge_tested_suites.contains_key("gui"));
+    assert!(team.merge_not_run.contains_key("gui"));
+    assert!(database.last_green(&team.id, "gui", "").unwrap().is_none());
+    let mut next = queued[0].clone();
+    next.id = uuid::Uuid::new_v4().to_string();
+    database.enqueue(&next).unwrap();
+    let second = run_due(&database, &repo.lead, &[next], 103.0, &Default::default(), None).unwrap();
+    assert_eq!(second[0].status, "not_run");
+    assert!(database.last_green(&team.id, "gui", "").unwrap().is_none());
+}
+
+#[test]
+fn ctest_queue_refuses_tracked_or_unknown_local_configuration() {
+    for case in ["tracked", "provider", "key"] {
+        let repo = ctest_repo();
+        ctest_change(&repo);
+        let mut team = team(&repo);
+        accept(&mut team);
+        match case {
+            "tracked" => { run_git(&repo.lead, &["add", "-f", ".zerus/tests.local.toml"]); run_git(&repo.lead, &["commit", "-q", "-m", "tracked local"]); }
+            "provider" => write(&repo.lead, ".zerus/tests.local.toml", "[provider.unknown.vars]\nx = 'y'\n"),
+            _ => write(&repo.lead, ".zerus/tests.local.toml", "[provider.gui]\ncommand = 'not allowed'\n"),
+        }
+        let database = database(&repo);
+        let mut events = Vec::new();
+        step_here(&mut team, &database, 100.0, &mut events).unwrap();
+        let note = &team.task(1).unwrap().merge.as_ref().unwrap().note;
+        assert!(note.contains("local") && (note.contains("tracked") || note.contains("unknown") || note.contains("command")), "{case}: {note}");
+        assert!(database.queued(&team.id).unwrap().is_empty());
+    }
+}
+
+
+#[test]
+fn ctest_queue_missing_probe_program_or_placeholder_is_not_run() {
+    for missing_program in [false, true] {
+        let repo = ctest_repo();
+        if missing_program {
+            write(&repo.lead, ".zerus/tests.local.toml", "[provider.gui.vars]\npython = 'zerus-fixture-missing-program'\n");
+        } else {
+            write(&repo.lead, ".zerus/tests.local.toml", "[provider.gui.env]\nFIXTURE_LOCAL = 'yes'\n");
+        }
+        ctest_change(&repo);
+        let mut team = team(&repo);
+        accept(&mut team);
+        let database = database(&repo);
+        let mut events = Vec::new();
+        step_here(&mut team, &database, 100.0, &mut events).unwrap();
+        let queued = database.queued(&team.id).unwrap();
+        let records = run_due(&database, &repo.lead, &queued, 101.0, &Default::default(), None).unwrap();
+        assert_eq!(records[0].status, "not_run");
+        assert!(records[0].excerpt.starts_with("not run here: gui runs on "));
+        assert!(!repo.lead.join("build/gui/CMakeCache.txt").exists());
+        assert!(database.last_green(&team.id, "gui", "").unwrap().is_none());
+    }
+}

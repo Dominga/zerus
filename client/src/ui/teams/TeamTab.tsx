@@ -27,7 +27,7 @@ import { duration, memberProgress, memberStatus, progress, shownMembers, stateLa
 import { roleStyle } from "./roles";
 import { TeamProposals } from "./ProposalCards";
 import { ledTeamOf, leadsTeam } from "./leadTeam";
-import { TeamReports } from "./TeamReports";
+import { ArchivedTaskReport, TeamReports } from "./TeamReports";
 import { WaitingBanner } from "./Waiting";
 import { Blockers, PhaseActions, TaskActions, TeamBarActions, TeamBarChips, TeamModeControl, TeamQuestions, createPlanEditing } from "./TeamActions";
 import { TeamActions as TeamActionModel } from "./actions";
@@ -92,6 +92,9 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [catalogOpen, setCatalogOpen] = createSignal(false);
   const [tests, setTests] = createSignal<TeamTestsView | null>(null);
+  const [reportTask, setReportTask] = createSignal<number | null>(null);
+  const reportTeam = createMemo(() => props.team.id);
+  createEffect(() => { props.computer; reportTeam(); setReportTask(null); });
   const graph = () => teams.graph(props.computer, props.team.id);
   const profile = () => teams.profile(props.computer, props.team.id);
   // Task 196: the phase header's actions (PhaseActions) replace the plan's
@@ -174,7 +177,8 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
         onSettings={() => setSettingsOpen(true)}
         onCatalog={() => setCatalogOpen(true)} />
       <WaitingBanner />
-      <TeamReports computer={props.computer} team={props.team} />
+      <TeamReports computer={props.computer} team={props.team} onOpenReport={setReportTask} />
+      <Show when={reportTask()}>{(task) => <ArchivedTaskReport computer={props.computer} team={reportTeam()} task={task()} onClose={() => setReportTask(null)} />}</Show>
       <Show when={props.team.working_mode?.disagreeing?.length ? props.team.working_mode.disagreeing : undefined}>
         {(wrong) => (
           <section class="team-working-mode" data-working-mode={props.team.working_mode!.preset}>
@@ -244,9 +248,10 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
                 onLoadProfile={() => { void teamsProfile(props.computer); }}
                 loadTimeline={(phase) => teamTimeline(props.computer, props.team.id, phase)}
                 onLoadTests={loadTests}
+                onOpenReport={setReportTask}
                 taskActions={(id) => {
                   const task = props.team.tasks.find((candidate) => candidate.id === id);
-                  return task ? <TaskActions computer={props.computer} team={props.team} task={task} /> : <></>;
+                  return task && !task.archived ? <TaskActions computer={props.computer} team={props.team} task={task} /> : <></>;
                 }}
                 phaseActions={(n) => <PhaseActions computer={props.computer} team={props.team} phase={n} owner={props.owner} />}
                 editing={plan.editing()}

@@ -142,6 +142,11 @@ export function phasePlans(team: TeamView, graph: PlanGraph): PlanPhase[] {
           x: 0,
           y: 0,
         }));
+      const graphed = new Set(nodes.map((placed) => placed.node.id));
+      for (const task of tasks.filter((task) => task.archived && !graphed.has(task.id))) {
+        nodes.push({ node: { id: task.id, title: task.title, status: task.status, assignee: task.assignee,
+          role: "", phase: n, layer: 0, ready: false, in_cycle: false }, task, x: 0, y: 0 });
+      }
       const layers = new Map<number, PlacedNode[]>();
       for (const placed of nodes) {
         const layer = layers.get(placed.node.layer) ?? [];
@@ -161,7 +166,8 @@ export function phasePlans(team: TeamView, graph: PlanGraph): PlanPhase[] {
       return {
         // Task 196 (P10): a cancelled task is not work the phase still owes, as
         // Qt counts it: a Done phase with one cancelled task reads 7/7, not 7/8.
-        phase: { ...phaseRecord(team, n), done: phaseRecord(team, n).done || tasks.filter((task) => task.status === "accepted" || task.status === "done").length, total: tasks.filter((task) => task.status !== "cancelled").length },
+        // An archived phase keeps only some of its tasks live: its record's total stands.
+        phase: { ...phaseRecord(team, n), done: phaseRecord(team, n).done || tasks.filter((task) => task.status === "accepted" || task.status === "done").length, total: phaseRecord(team, n).archived ? Math.max(phaseRecord(team, n).total, tasks.length) : tasks.filter((task) => task.status !== "cancelled").length },
         tasks,
         nodes: placed,
         layers: ordered,

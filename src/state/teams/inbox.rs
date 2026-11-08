@@ -634,7 +634,7 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             member: name.clone(),
             since: crate::state::now(),
             summary: summary(&format!("Draining {name}: {listed} still to decide; {why}")),
-            command: format!("{} | hgs team status --json", json!({"team":team.id})),
+            command: format!("{} | hgs team status --json", json!({"team":team.id,"task":waiting[0]})),
             detail: format!("{name} is draining. {listed} keep it open: {why}."),
         });
     }
@@ -901,7 +901,7 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             member: "owner".into(),
             since: decided_at(proposal),
             summary: summary(&text),
-            command: format!("{} | hgs team status --json", json!({"request_id":PLACEHOLDER,"team":team.id})),
+            command: format!("{} | hgs team inbox --json", json!({"request_id":PLACEHOLDER,"team":team.id})),
             detail: proposal["note"].as_str().unwrap_or_default().to_owned(),
         });
     }
@@ -1110,7 +1110,7 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
                         member: team.name_of(&attempt.member),
                         since: interim.at,
                         summary: summary(&format!("Interim: {}", interim.text)),
-                        command: format!("{} | hgs team status --json", json!({"team":team.id})),
+                        command: format!("{} | hgs team status --json", json!({"team":team.id,"task":task.id})),
                         detail: interim.text.clone(),
                     });
                 }
@@ -1242,7 +1242,7 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             member: name.clone(),
             since: asked.at,
             summary: summary(&format!("{name} waits for an answer only its Terminal takes: {}", terminal_title(asked))),
-            command: format!("{} | hgs team status --json", json!({"team":team.id})),
+            command: format!("{} | hgs team inbox --json", json!({"team":team.id})),
             detail: format!(
                 "Zerus cannot answer it, so neither can you: {} Tell the owner to open {name}'s Terminal and answer it there; \
                  the member continues once it is answered.{}",
@@ -1315,7 +1315,7 @@ pub(crate) fn all_items(team: &Team) -> Vec<Item> {
             member: role.clone(),
             since: limit.at,
             summary: summary(&format!("{role} stopped by a usage limit{reset}")),
-            command: format!("{} | hgs team status --json", json!({"team":team.id})),
+            command: format!("{} | hgs team inbox --json", json!({"team":team.id})),
             detail: if limit.detail.is_empty() { String::new() } else { summary(&limit.detail) },
         });
     }
@@ -1692,7 +1692,7 @@ pub(crate) fn text_with(team: &Team, items: &[Item], again: &[Item], now: f64) -
         // summary line.
         if item.kind == "report" {
             if let Some(task) = item.task {
-                text += &format!("   Full report: task #{task} in {} | hgs team status --json\n", json!({"team":team.id}));
+                text += &format!("   Full report: task #{task} in {} | hgs team status --json\n", json!({"team":team.id,"task":task}));
             }
         }
     }
@@ -2530,7 +2530,7 @@ mod tests {
         assert!(text.contains("Done and checked") && text.contains("Which database?"), "{text}");
         assert!(text.contains("hgs team accept --json") && text.contains("hgs team reply --json"), "{text}");
         // N7: the message says how to read the whole report.
-        assert!(text.contains("Full report: task #1") && text.contains("hgs team status --json"), "{text}");
+        assert!(text.contains("Full report: task #1") && text.contains("hgs team status --json") && text.contains("\"task\":1"), "{text}");
         assert!(text.contains("hgs team inbox --json"), "{text}");
         // A long list is summarized, never sent whole.
         let mut many = team.clone();

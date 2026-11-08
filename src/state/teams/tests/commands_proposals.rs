@@ -850,3 +850,85 @@ fn the_tests_settings_read_check_and_save_through_hgs() {
         assert!(saved["providers"].as_array().unwrap().iter().any(|provider| provider["name"] == "python"));
     });
 }
+
+#[test]
+fn phase_approval_card_requires_the_owners_explicit_override() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        super::live_sessions_override(Some(Vec::new()));
+        super::set_test_caller_identities(Some((None, None, None)));
+        let _worker = hold_worker_lock();
+        let mut store = Store::open(true).unwrap();
+        let mut team = running_team();
+        ops::apply(&mut team, "settings", &json!({"settings":{"phase_checks":{"unresolved_prerequisites":true}}}), &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
+        ops::apply(&mut team, "extend", &json!({"tasks":[{"id":3,"title":"Later","assignee":"dev","requires":[{"task":999}]}]}), &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
+        let team_id = team.id.clone();
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+        let proposed = store.mutate(None, &team_id, None, |team, events| ops::apply(team, "propose",
+            &json!({"kind":"approve-phase","phase":2,"approve_anyway":true,"reason":"ready"}),
+            &Actor::Member("lead".into()), &BTreeSet::new(), events)).unwrap();
+        let saved = store.load(&team_id).unwrap().unwrap();
+        let card = saved.proposals.iter().find(|p| p["id"] == proposed["proposal"]).unwrap();
+        assert!(card["change"]["input"].get("approve_anyway").is_none(), "{card}");
+        let mut decision = json!({"team":team_id,"proposal":proposed["proposal"],"accept":true,"expected_hash":proposed["hash"]});
+        let error = decide_proposal_in(&mut store, &decision, &Actor::Human).unwrap_err().to_string();
+        assert!(error.contains("Unresolved prerequisites"), "{error}");
+        assert_eq!(store.load(&team_id).unwrap().unwrap().phases[0].state, super::super::model::PhaseState::Draft);
+        decision["approve_anyway"] = json!(true);
+        let receipt = decide_proposal_in(&mut store, &decision, &Actor::Human).unwrap();
+        assert_eq!(receipt["status"], "accepted", "{receipt}");
+        assert!(store.load(&team_id).unwrap().unwrap().phases[0].state.is_accepted());
+        assert_eq!(decide_proposal_in(&mut store, &decision, &Actor::Human).unwrap()["status"], "accepted");
+    });
+    super::live_sessions_override(None);
+    super::set_test_caller_identities(None);
+}
+
+#[test]
+fn phase_card_trial_override_preserves_other_approval_guards() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open(true).unwrap();
+        let mut team = running_team();
+        ops::apply(&mut team, "settings", &json!({"settings":{"phase_checks":{"unresolved_prerequisites":true}}}), &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
+        ops::apply(&mut team, "extend", &json!({"tasks":[{"id":2,"title":"Later","assignee":"dev","requires":[{"task":999}]}]}), &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
+        let team_id = team.id.clone();
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+        let propose = |team: &mut Team, events: &mut Vec<Event>| ops::apply(team, "propose", &json!({"kind":"approve-phase","phase":2,"reason":"ready"}), &Actor::Member("lead".into()), &BTreeSet::new(), events);
+        store.mutate(None, &team_id, None, |team, _| {
+            team.members.retain(|member| member.id != "dev");
+            Ok(Value::Null)
+        }).unwrap();
+        let error = store.mutate(None, &team_id, None, propose).unwrap_err().to_string();
+        assert!(error.contains("Allow could not apply"), "{error}");
+        assert!(!error.contains("Unresolved prerequisites"), "{error}");
+        assert!(store.load(&team_id).unwrap().unwrap().proposals.is_empty());
+    });
+}
+
+#[test]
+fn an_open_phase_approval_card_is_rechecked_without_running_phase_checks() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let _worker = hold_worker_lock();
+        let mut store = Store::open(true).unwrap();
+        let mut team = running_team();
+        ops::apply(&mut team, "settings", &json!({"settings":{"phase_checks":{"unresolved_prerequisites":true}}}),
+            &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
+        ops::apply(&mut team, "extend", &json!({"tasks":[{"id":3,"title":"Later","assignee":"dev","requires":[{"task":999}]}]}),
+            &Actor::Human, &BTreeSet::new(), &mut Vec::new()).unwrap();
+        let id = team.id.clone();
+        store.create("11111111-1111-4111-8111-111111111111", &json!({}), team, vec![]).unwrap();
+        let proposed = store.mutate(None, &id, None, |team, events| ops::apply(team, "propose",
+            &json!({"kind":"approve-phase","phase":2,"reason":"Review the prerequisite override"}),
+            &Actor::Member("lead".into()), &BTreeSet::new(), events)).unwrap();
+        let mut saved = store.load(&id).unwrap().unwrap();
+        let before = super::super::plan::PHASE_CHECK_CALLS.with(std::cell::Cell::get);
+        assert!(ops::withdraw_inapplicable(&mut saved, &mut Vec::new()).is_empty());
+        let status = run("status", &json!({"team":id}), false).unwrap();
+        let card = status["proposals"].as_array().unwrap().iter()
+            .find(|card| card["id"] == proposed["proposal"]).unwrap();
+        assert_eq!(card["state"], "open");
+        assert_eq!(super::super::plan::PHASE_CHECK_CALLS.with(std::cell::Cell::get), before);
+    });
+}

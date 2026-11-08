@@ -25,7 +25,16 @@ impl Fixture {
         // macOS's ordinary temporary prefix can itself contain a symlink.
         // Select the real owned fixture root before asking the strict reader.
         let root = fs::canonicalize(temp.path()).unwrap().join("state");
-        crate::platform::private_dir(&root.join("action_receipts")).unwrap();
+        // Task #32: the root itself must be private, as the product's store
+        // roots are; a temporary directory's inherited ACL is not private on
+        // every computer (#526: a Codex sandbox adds its users to the profile),
+        // so create it the way Zerus makes a private store, which the strict
+        // reader below then verifies.
+        crate::platform::owner_only_dir(&root.join("action_receipts")).unwrap();
+        assert!(
+            crate::platform::verify_private(&root, crate::platform::Private::Directory).unwrap(),
+            "the fixture root must be private, as the strict reader requires"
+        );
         Self { _temp: temp, root }
     }
     fn path(&self) -> PathBuf {

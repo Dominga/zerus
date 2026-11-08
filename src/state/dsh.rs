@@ -945,7 +945,7 @@ fn rpc_at(path: &Path, method: &str, params: Value, read_timeout: Duration) -> R
     parse_response(&response)
 }
 fn parse_response(response: &str) -> Result<Value> {
-    let response: Value = serde_json::from_str(&response)
+    let response: Value = serde_json::from_str(response)
         .map_err(|e| format!("Invalid native response; delivery uncertain: {e}"))?;
     if response["ok"] != true {
         return Err(string(&response, "error").into());
@@ -3753,9 +3753,7 @@ mod permissions_compat_tests {
         if !node_available() {
             return;
         }
-        let mut initial = CompatState::default();
-        initial.current = "danger-full-access".into();
-        initial.running = true;
+        let initial = CompatState { current: "danger-full-access".into(), running: true, ..Default::default() };
         let (url, shared, stop, server) = compat_server(initial);
         let applied = permissions_compat_json(&url, Some(TEST_SESSION), "apply", None, false, false).unwrap();
         assert_eq!(applied["ok"], json!(true));
@@ -3771,10 +3769,10 @@ mod permissions_compat_tests {
         if !node_available() {
             return;
         }
-        let mut initial = CompatState::default();
-        initial.catalog = (0..65)
-            .map(|index| (format!("preset-{index}"), format!("Preset {index}")))
-            .collect();
+        let initial = CompatState {
+            catalog: (0..65).map(|index| (format!("preset-{index}"), format!("Preset {index}"))).collect(),
+            ..Default::default()
+        };
         let (url, _, stop, server) = compat_server(initial);
         assert_eq!(
             permissions_compat_json(&url, Some(TEST_SESSION), "catalog", None, false, false).unwrap_err(),

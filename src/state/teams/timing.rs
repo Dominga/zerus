@@ -43,6 +43,10 @@ fn satisfied(team: &Team, id: u32, kind: DependencyKind) -> Moment {
     if dep.status == super::model::TaskStatus::Cancelled {
         return Moment::Unknown;
     }
+    if let Some(archived) = &dep.archived {
+        let at = if team.settings.all_hard || kind == DependencyKind::Hard { archived.accepted_at } else { archived.started_at };
+        return at.map_or(Moment::Unknown, Moment::At);
+    }
     let at = if team.settings.all_hard || kind == DependencyKind::Hard {
         dep.attempts.iter().rev().find_map(|attempt| attempt.decided_at)
     } else {
@@ -78,6 +82,7 @@ fn seconds(value: f64) -> i64 {
 /// member_s, lead_s}], unknown}. `worked_s` includes the running attempt up
 /// to `now`; `to` is null while it runs.
 pub(crate) fn timing(team: &Team, task: &Task, now: f64) -> Value {
+    if let Some(archived) = &task.archived { return archived.timing.clone(); }
     let live = !task.status.finished() && task.status != TaskStatus::Draft;
     let mut unknown = BTreeSet::new();
     let (mut worked, mut member, mut lead, mut deps) = (0.0, 0.0, 0.0, 0.0);

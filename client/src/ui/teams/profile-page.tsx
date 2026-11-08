@@ -17,6 +17,7 @@ export function ProfilePage(props: {
   loadTimeline?: (phase: number | null) => Promise<TeamTimelineView>;
   statusName: (status: string) => string;
   onOpen?: (task: number) => void;
+  onOpenReport?: (task: number) => void;
 }): JSX.Element {
   return (
     <div class="pm-profile-page">
@@ -24,7 +25,7 @@ export function ProfilePage(props: {
       <Show when={props.loadTimeline}>{(load) => (
         <ProfileTime team={props.team} load={load()} profile={props.profile} statusName={props.statusName} onOpen={props.onOpen} />
       )}</Show>
-      <ProfileDetails profile={props.profile} />
+      <ProfileDetails profile={props.profile} team={props.team} onOpenReport={props.onOpenReport} />
     </div>
   );
 }

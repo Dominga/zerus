@@ -38,7 +38,7 @@ const NOT_FILES: [&str; 5] = ["ProjectConfiguration", "ProjectReference", "Refer
 fn read_text(path: &Path) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
-        let units: Vec<u16> = rest.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+        let units: Vec<u16> = rest.as_chunks::<2>().0.iter().map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
         return String::from_utf16(&units).ok();
     }
     let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes);

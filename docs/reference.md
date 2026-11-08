@@ -1987,6 +1987,53 @@ remove-member, relaunch and settings refuse it with the card to propose; for
 the lead's planning operations it is ignored. The owner's own add-to-phase
 keeps the warning and confirmation below.
 
+### Editing a member while the team runs
+
+`hgs team settings` with `members_update` changes one member per entry, and the
+operation takes only the fields it names: an unknown field is refused with its
+name, the fields it takes and an example, never dropped in silence. `agent`,
+`account` and `computer` stay with Swap member; `folder`, `directory` and `role`
+still need a member without a session.
+
+A member that runs takes its start `prompt`, `model`, `effort`, `permissions`,
+`permissions_profile`, `context_before_task`, `after_task`, `after_task_on`,
+`after_task_at`, `models` and `iron_rules` while the
+team runs. A model or effort change reaches its session before the member's next
+task (the same `hgs settings` switch U45 uses); an agent that cannot switch in
+place takes it at its next start, and a refused switch leaves the member on the
+model its session kept. A prompt change is sent once to the member as a message
+marked "replaces previous instructions", after the clear the owner asked for
+with `"clear_context_first": true` (off by default; the clear needs the agent's
+own clear action, so DeepSeek and OpenCode refuse it); an unanswered send is
+recorded uncertain and never replayed, and the next hand-out carries the new
+prompt as well. An edit made while a message is on its way stays for the next
+one. Permissions and the permissions profile are the mode the member's next
+start gets; its running session keeps its own. A swap to another session drops
+the changes still pending for the session it replaced. The owner's After a task
+policy (`after_task` empty keeps context, `compact` or `clear`, with
+`after_task_on` `percent`/`tokens` and `after_task_at`) reaches a free member's
+next hand-out only when its context passes the threshold; the lead's runs only
+while the lead is free.
+
+Only the owner changes a member while the team runs. The lead changes a member's
+`model` and `effort` directly; every other member field goes through the
+`{"kind":"settings","members_update":[...]}` card the owner allows. A permissions
+mode the member's agent does not have (Codex has no `auto`) is refused in `plan`,
+`add-member` and `members_update`, never accepted and left to fail when the
+member starts.
+
+In the Qt team workspace, a member's menu offers **Edit member** once its current
+settings have been read. The dialog starts with that member's prompt, model,
+effort, permissions/profile, per-task context action, **After a task** mode with
+its criterion and threshold, allowed models and iron rules. The threshold field
+takes 1-100 percent, or a token count when the criterion is tokens. Save sends
+only changed fields in one `members_update`; a refusal stays
+in the dialog and preserves the draft while the stored member stays unchanged.
+A changed prompt reveals **Clear context first**, unchecked by default (only a
+running member can clear). Permissions-profile widening requires the owner's
+explicit checkbox confirmation. Agent, account, computer and folder changes stay
+with **Swap member**.
+
 ### Tasks added to a running phase
 
 The owner's task joins a running phase on a warning and a confirmation. The
@@ -2078,6 +2125,92 @@ Git checkout, otherwise the changed files its report names. A `hold` preset
 (the default) holds the folder while the task is in its test stage, so the
 implementer's next task in that folder waits; a `checkout` preset tests a
 detached checkout of the attempt's commits instead and frees it.
+
+### Closed phase records and task reads
+
+The team store (`teams/teams.sqlite3`) archives a phase after all its tasks
+are accepted, rejected or cancelled and the phase is closed: a lead-accepted
+phase closes on its last task decision; an owner-accepted phase must reach
+`done`. A phase with an untested merge range or a queued/testing merge entry
+stays live until its integration checks close. The open phase of a free-mode team is retained until it closes.
+Full task records, including attempts, reports, runs and questions, move to
+`team_task_archive` in the same transaction as their replacement in the live
+record. Original phase records are retained in `team_phase_archive`.
+
+The 500-task limit counts live, unarchived tasks. The 100-phase limit counts
+unarchived phases. Historical work consumes neither limit. The live record
+keeps the most recent 1,000 archived task stubs, with id, phase, title,
+assignee, final status, acceptance time, merge commit, optional origin and frozen timing totals.
+This window bounds routine plan reads to hundreds of kilobytes of archived
+task metadata. A task stub leaves the live window when its phase header
+leaves, so no archived phase is presented as a recordless draft. The live record also keeps at most 200 archived phase headers,
+with counts, outcomes and closure time. Older headers and task lists are paged
+from the archive. Evicting a finished phase header also removes its planning-mode
+override; archived phase pages do not carry a planning mode. Constant-size archive totals preserve the team's historical
+counts. Both windows use descending numeric IDs, so their membership is stable
+across repeated reads. Task IDs remain unique
+when stubs leave the window. Dependencies outside the window resolve through
+the archive's `(team, task)` primary key; existing dependency outcome rules
+still apply. Follow-up origins use the same indexed resolution without restoring
+historical tasks into the live plan.
+
+Read one full task, live or archived, without returning the whole team:
+
+```sh
+printf '%s' '{"team":"ID","task":42}' | hgs team status --json
+```
+
+This response is the task object. The byte limit is 8 MiB per task; larger
+historical records remain intact and yield an explicit size-limit error.
+Normal `status --json` keeps its team view and never includes archived full
+histories or stubs outside the live window. Inbox report links name the
+per-task form.
+
+Read archived stubs for one phase with stable ascending task-ID pages (default
+and maximum 50 rows):
+
+```sh
+printf '%s' '{"team":"ID","archived_phase":3,"cursor":0,"limit":50}' | hgs team status --json
+```
+
+Read archived phase headers, including those outside the 200-header window,
+with `{"team":"ID","archived_phases":true,"cursor":0,"limit":50}` through the
+same status command. Its cursor is a phase number; task pages use task IDs.
+Both responses contain `items` and `next_cursor`; pass the latter as `cursor`.
+The `(team, phase)` primary key and `(team, phase, task)` index bound each page. New archived phases do not
+shift an older page. GUI clients can use these pages and per-task reads off
+the UI thread.
+
+The Tauri Teams plan, reports and Profile show archived task stubs and frozen
+working time from the status window. They retain its limit of 1,000 task stubs
+and 200 phase headers; older omitted phases are named with their count. Opening
+an archived report reads just that task on a blocking worker. The report panel
+shows loading, failure and retry states, discards late replies after selection
+changes, and retains only the selected report (up to 64 Ki characters, with an
+explicit truncation notice). It does not load archive history on refresh.
+
+Existing records migrate on their next successful mutation. To migrate one
+without changing its plan, the owner or lead sends `hgs team archive-phases
+--json` with `team` and a canonical `request_id`; retries are idempotent.
+The archive and live payload commit together or roll back together. The existing
+1 GiB (262144-page) store cap remains. If SQLite reports a full database,
+Zerus names `teams.sqlite3` and its cap, refuses the change and preserves the
+original readable record. Archive retention or export is a separate policy. Explicit
+edits of archived work restore only that phase, subject to the live 500-task
+limit and an 8 MiB phase-history read cap, and retain the original history.
+
+The Qt workspace and Profile offer **Archived phases**. This reads phase headers
+and task summaries in replaceable pages of 50 through the archive status reads
+above, including phases outside the live window. Each summary shows the title,
+final outcome, recorded work time and closure time. Double-clicking a task reads
+its full report through the per-task status read. CLI I/O and JSON decoding run
+on the process worker, with a 15-second local deadline and an 8 MiB output cap.
+Loading, refusal and retry remain visible; navigating away discards stale replies.
+The drawer retains only its selected full task, and the archive browser retains
+one phase page and one task page. A phase link seeks directly to that phase; it
+does not scan earlier history. Archived Profile scopes show recorded metadata
+instead of reconstructing timelines from compact stubs. The live Profile cache
+keeps at most six scopes, 1,000 task rows and 1,000 timelines per scope.
 
 ### Reports and interim reports
 
@@ -2267,6 +2400,45 @@ continues in standard mode. The feed records `plan_mode_proposed`,
 `plan_mode_switched`, `plan_mode_denied`, `phase_build_added`,
 `free_phase_close_pending`, `free_phase_closed` and `free_phase_build_failed`.
 
+### Phase checks before start
+
+Team settings has a **Phase checks before start** group. Each check is independent
+and off by default (`settings.phase_checks.critical_path_target` and
+`settings.phase_checks.unresolved_prerequisites`). With both off, approval keeps
+its existing behavior and cards show no extra check result.
+
+A phase may name an optional positive `target_hours`, in `extend`, a `plan` phase,
+or `edit-draft` (`null` clears it). With the target check enabled, its approval
+card shows the longest dependency path weighted by task estimates in minutes.
+Missing estimates are shown as a lower bound and a count, for example
+`>= 6.5 h, 2 tasks without an estimate`. Only a known sum above the target warns;
+this check never refuses approval. The profile keeps its existing count-based
+critical path and output.
+
+Tasks may name at most 32 prerequisites in `requires`, including through
+`edit-draft.tasks_update`:
+
+```json
+{"requires":[{"task":12},{"commit":"0123456789abcdef0123456789abcdef01234567"},{"branch":"feature/api"}]}
+```
+
+A same-phase task requirement resolves when that distinct task exists in the
+phase; it adds no dependency or ordering. An earlier-phase requirement resolves
+when its task is accepted. A missing task, self-reference or later-phase task
+is unresolved. Commit and branch requirements resolve only when Git verifies
+that reference is an ancestor of the configured base branch (the team folder's
+`HEAD` when no base is set). Unknown references, Git failures and timeouts remain
+unresolved, with their reasons. File-existence requirements are not supported.
+
+Draft mutations save `phases[].checks` for approval cards; reads and GUI refreshes
+never invoke Git. Each Git call has five seconds within a shared ten-second
+check deadline; approval rechecks the current plan and Git ancestry. With the prerequisite check enabled,
+unresolved requirements refuse ordinary `approve-phase`. The card offers
+**Approve anyway**, sending `approve_anyway:true`; the override only bypasses
+prerequisites, preserving the other approval guards. An owner proposal card sends
+the owner's explicit override through `decide-proposal`; a lead cannot preselect
+it in the proposal. Existing approve requests and receipts remain compatible.
+
 ### When a phase starts
 
 One phase-start model (task 158; owner, 2026-11-07). A task of any approved
@@ -2428,6 +2600,30 @@ task and tells the lead (`context_compact_failed` with reason `cold`); at the
 crashed attempt is not given back to a paused team, a paused phase, a paused or
 draining member or a held task, by the tick or by the sweep after an update; it
 waits, unconfirmed, and goes back on the first tick after the pause ends.
+
+The owner's **After a task** policy per member and for the lead (`after_task`
+empty keeps context, or `compact`/`clear`; `after_task_on` `percent` or
+`tokens`; `after_task_at` the threshold) runs the native action only when the
+free member's session record passes it (`context.used` against `context.limit`
+for percent, `context.used` for tokens), before its next hand-out. A configured
+policy replaces the role's every-task action; below the threshold the member
+keeps its context. A session on another computer, or one whose usage is not
+known, keeps its context. The lead's policy runs only while the lead is free:
+the lead's own task still reaches it without a message (C1), but its context
+action waits for a free lead. A mode the agent cannot run, a mode without a
+criterion, and a threshold outside 1-100 percent or above 10000000 tokens are
+refused by field, in a plan and in the owner's `members_update`.
+
+### When Zerus starts a member
+
+A member's session starts with its first task hand-out, after a swap, or for
+the lead of a planning or draft team with its brief. It also starts when the
+member has work that would otherwise never reach it: a sub-lead with untold
+items in its inbox (its sub-brief and inbox steps follow once the session takes
+a message), and the member a waiting stage would go to when no other candidate
+is available. A paused, draining or removed member is not started this way, and
+neither is one whose start is already in flight or whose last start failed: a
+failed start waits for `hgs team relaunch`.
 
 ### Stages Zerus runs itself: a command, a land, a branch per task
 
@@ -7984,7 +8180,12 @@ eight conversations per session, and follow `hgs rename`.
 
 Private stores (read marks, the analytics store, the approval journal, the
 history index, voice storage and the Windows mobile configuration) are checked
-before use. A store that is this user's, lies in the hgs state or configuration
+before use. On Windows, each missing directory created for private storage gets
+a protected, inheritable DACL granting only the current user FullControl. New
+files inside it inherit that protection. Existing directories keep their ACLs,
+including a directory another process creates during the creation race; private
+directory creation does not silently repair them or relax the privacy check.
+A store that is this user's, lies in the hgs state or configuration
 folder and is only too open (another tool added a group to its ACL, or Unix mode
 bits wider than 0600/0700) is made private again in place: on Windows a
 protected DACL granting this user FullControl through a handle that never
@@ -9207,6 +9408,61 @@ file and unreal's `.uproject`), `widen` (`none`, `dependants`, `transitive`),
 `build_dir`,
 `resources`, `platforms`, `budget_minutes`, `budget_lines`, `reuse` (`auto`,
 `inputs`, `binary`, `never`), `disabled`.
+
+CTest providers may also declare optional `configure`, `build` and `probe`
+command strings. `configure` and `build` are required together when preparation
+is enabled; `probe` is optional. These stages run only in the **local merge
+queue**. Providers without preparation retain the existing behavior; remote
+runners are unchanged.
+
+The queue reads the provider from the merged checkout. It first runs `probe`,
+then runs `configure` only when the provider's `build_dir/CMakeCache.txt` is
+missing. It always runs `build` before CTest, including for an existing build
+folder. An incremental build therefore uses the merged sources instead of
+running old binaries. Probe, configuration, build, CTest and any retries share
+one existing suite deadline and bounded output capture. Configuration/build
+failures after a successful probe fail the suite and follow ordinary merge
+rollback, with a `build` flag and no flaky-test retry. A probe failure, missing probe executable or unresolved placeholder
+records `not_run` with a bounded `not run here: SUITE runs on ...; reason` message.
+It remains an untested range, never a pass or a green result eligible for reuse.
+
+Stage commands expand `{build_dir}` relative to the provider's `root`. In the
+build stage, `{targets}` means `--target` followed by the selected CMake target
+names. A whole-provider `(all)` selection expands it to nothing, so the default
+build includes a newly added test even if the previous map did not name it.
+That fallback may build other default targets too. CTest test names and CMake
+binary target names need not match: the existing map already records their
+relationship. The CTest command keeps its existing test-name selection.
+
+Named placeholders such as `{qt_prefix}`, `{cc}`, `{cxx}`, `{python}` and
+`{toolchain}` obtain their values only from the local file
+`.zerus/tests.local.toml`. The file is ignored by Git; if `git ls-files` finds it
+tracked, Zerus refuses it. Unknown providers, keys or malformed values are also
+refused. Its only provider tables are `vars` and `env`, for example:
+
+```toml
+[provider.tray.vars]
+python = "python3"
+toolchain = ""
+cc = "cc"
+cxx = "c++"
+qt_prefix = "/example/sdk/qt"
+
+[provider.tray.env]
+QT_QPA_PLATFORM = "offscreen"
+QT_QUICK_BACKEND = "software"
+```
+
+Use the local machine's actual SDK and compiler values. On Windows the local
+`toolchain` value can invoke `scripts/ci/msvc-env.py`. Local `env` entries replace
+the entire variable; they perform no expansion. Have the toolchain wrapper
+prepend the selected Qt kit's `bin` directory to `PATH` before invoking tools,
+or supply the complete `PATH` through local `env` for CTest. Local
+values cannot replace command strings or the reserved `build_dir`/`targets`
+placeholders. The local file is limited to 64 KiB, with at most 64 vars and 64
+environment entries per provider, and is excluded from exported project
+configuration. Commit portable recipes and placeholders, never machine paths.
+
 
 #### What the team enforces (U62)
 

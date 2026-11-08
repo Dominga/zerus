@@ -893,7 +893,7 @@ pub(super) fn records(limit: usize) -> Vec<Value> {
         .filter(|entry| entry.file_name().to_string_lossy().ends_with(".json"))
         .filter_map(|entry| Some((entry.metadata().and_then(|meta| meta.modified()).ok()?, entry.path())))
         .collect();
-    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     found.into_iter().take(limit).filter_map(|(_, path)| read(&path)).collect()
 }
 

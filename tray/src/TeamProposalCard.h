@@ -53,12 +53,13 @@ private:
         // #740: a question's options and the one the lead recommends.
         QStringList options;
         QString recommended;
+        bool approveAnyway = false;
         double at = 0;
         bool operator==(const View &other) const
         {
             return id == other.id && hash == other.hash && kind == other.kind && by == other.by && reason == other.reason
                 && what == other.what && lines == other.lines && options == other.options && recommended == other.recommended
-                && at == other.at;
+                && approveAnyway == other.approveAnyway && at == other.at;
         }
     };
     static QList<View> viewsOf(const Teams::Team &team);

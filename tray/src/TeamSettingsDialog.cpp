@@ -69,6 +69,17 @@ TeamSettingsDialog::TeamSettingsDialog(TeamController *teams, const Teams::Team 
         m_ruleMembers.append({member.id, member.ironRules, field});
         connect(field, &QPlainTextEdit::textChanged, this, [this] { if (m_save) update(); });
     }
+    v->addWidget(label(tr("Phase checks before start"), c.text2, 12, true, "teamSettingsPhaseChecks"));
+    const auto checks = m_settings.value("phase_checks").toObject();
+    m_targetCheck = new QCheckBox(tr("Critical path vs target (warning only)"));
+    m_targetCheck->setObjectName("teamSettingsCriticalPathTarget");
+    m_targetCheck->setChecked(checks.value("critical_path_target").toBool());
+    v->addWidget(m_targetCheck);
+    m_requiresCheck = new QCheckBox(tr("Unresolved prerequisites (refuse approval, with Approve anyway)"));
+    m_requiresCheck->setObjectName("teamSettingsPrerequisites");
+    m_requiresCheck->setChecked(checks.value("unresolved_prerequisites").toBool());
+    v->addWidget(m_requiresCheck);
+    v->addWidget(note(tr("Both checks are off by default. Each can be enabled separately."), c.muted));
     // U48: each hand-out starts the task's own branch in the member's folder.
     v->addWidget(label(tr("Branches"), c.text2, 12, true));
     const QString branchTemplate = m_settings.value("branch_per_task").toObject().value("template").toString();
@@ -302,6 +313,8 @@ TeamSettingsDialog::TeamSettingsDialog(TeamController *teams, const Teams::Team 
     m_save = buttons->addButton(tr("Save"), QDialogButtonBox::AcceptRole); m_save->setObjectName("teamSettingsSave"); m_save->setDefault(true);
     buttons->button(QDialogButtonBox::Cancel)->setObjectName("teamSettingsCancel");
     root->addWidget(buttons);
+    connect(m_targetCheck, &QCheckBox::toggled, this, [this] { update(); });
+    connect(m_requiresCheck, &QCheckBox::toggled, this, [this] { update(); });
     connect(m_branch, &QCheckBox::toggled, this, [this] { update(); });
     connect(m_restart, &QCheckBox::toggled, this, [this] { update(); });
     connect(m_broker, &QCheckBox::toggled, this, [this] { update(); });
@@ -419,6 +432,10 @@ void TeamSettingsDialog::checkTests()
 QJsonObject TeamSettingsDialog::changes() const
 {
     QJsonObject out;
+    const auto beforeChecks = m_settings.value("phase_checks").toObject();
+    if (m_targetCheck->isChecked() != beforeChecks.value("critical_path_target").toBool()
+        || m_requiresCheck->isChecked() != beforeChecks.value("unresolved_prerequisites").toBool())
+        out.insert("phase_checks", QJsonObject{{"critical_path_target", m_targetCheck->isChecked()}, {"unresolved_prerequisites", m_requiresCheck->isChecked()}});
     const auto rules = QJsonArray::fromStringList(IronRules::lines(m_rules->toPlainText()));
     if (rules != m_settings.value("iron_rules").toArray()) out.insert("iron_rules", rules);
     const QString before = m_settings.value("branch_per_task").toObject().value("template").toString();

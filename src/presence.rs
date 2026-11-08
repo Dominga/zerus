@@ -175,6 +175,13 @@ mod tests {
     use std::time::Duration;
     use zerus_presence_sampler::{Idle, IdleSource, Sample};
 
+    fn fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("private");
+        crate::platform::owner_only_dir(&root).unwrap();
+        (temp, root.join("state"))
+    }
+
     #[cfg(unix)]
     #[test]
     fn first_presence_write_creates_the_missing_state_directory_privately() {
@@ -207,12 +214,12 @@ mod tests {
 
     #[test]
     fn unknown_or_observation_only_input_never_renews_presence() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(!write_sample(dir.path(), Sample::default(), 100.0).unwrap());
-        assert!(!write_sample(dir.path(), sample(0, true, None), 100.0).unwrap());
-        assert!(!dir.path().join(FILE).exists());
+        let (_temp, dir) = fixture();
+        assert!(!write_sample(&dir, Sample::default(), 100.0).unwrap());
+        assert!(!write_sample(&dir, sample(0, true, None), 100.0).unwrap());
+        assert!(!dir.join(FILE).exists());
         write(
-            dir.path(),
+            &dir,
             &Input {
                 idle_seconds: 8.0,
                 locked: false,
@@ -220,7 +227,7 @@ mod tests {
             100.0,
         )
         .unwrap();
-        let original = fs::read(dir.path().join(FILE)).unwrap();
+        let original = fs::read(dir.join(FILE)).unwrap();
         for input in [
             sample(1, false, Some(false)),
             sample(600, false, Some(true)),
@@ -229,11 +236,11 @@ mod tests {
                 locked: Some(true),
             },
         ] {
-            assert!(!write_sample(dir.path(), input, 110.0).unwrap());
-            assert_eq!(fs::read(dir.path().join(FILE)).unwrap(), original);
+            assert!(!write_sample(&dir, input, 110.0).unwrap());
+            assert_eq!(fs::read(dir.join(FILE)).unwrap(), original);
         }
         assert_eq!(
-            listing(dir.path(), 221.0),
+            listing(&dir, 221.0),
             None,
             "unknown samples must not extend the original TTL"
         );
@@ -241,24 +248,24 @@ mod tests {
 
     #[test]
     fn service_samples_preserve_lock_age_and_input_contract() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(write_sample(dir.path(), sample(7, true, Some(true)), 100.0).unwrap());
-        assert!(write_sample(dir.path(), sample(37, true, Some(true)), 130.0).unwrap());
+        let (_temp, dir) = fixture();
+        assert!(write_sample(&dir, sample(7, true, Some(true)), 100.0).unwrap());
+        assert!(write_sample(&dir, sample(37, true, Some(true)), 130.0).unwrap());
         assert_eq!(
-            listing(dir.path(), 140.0).unwrap(),
+            listing(&dir, 140.0).unwrap(),
             json!({"idle_seconds":47.0,"locked":true,"locked_seconds":40.0})
         );
-        let original = fs::read(dir.path().join(FILE)).unwrap();
+        let original = fs::read(dir.join(FILE)).unwrap();
         assert!(write_sample(
-            dir.path(),
+            &dir,
             sample(MAX_IDLE_SECONDS as u64 + 1, true, Some(false)),
             140.0
         )
         .is_err());
-        assert_eq!(fs::read(dir.path().join(FILE)).unwrap(), original);
-        assert!(write_sample(dir.path(), sample(0, true, Some(false)), 150.0).unwrap());
+        assert_eq!(fs::read(dir.join(FILE)).unwrap(), original);
+        assert!(write_sample(&dir, sample(0, true, Some(false)), 150.0).unwrap());
         assert_eq!(
-            listing(dir.path(), 150.0).unwrap()["locked_seconds"],
+            listing(&dir, 150.0).unwrap()["locked_seconds"],
             Value::Null
         );
     }
@@ -266,30 +273,30 @@ mod tests {
 
     #[test]
     fn consecutive_locked_writes_keep_the_lock_time() {
-        let dir = tempfile::tempdir().unwrap();
+        let (_temp, dir) = fixture();
         let input = |idle_seconds, locked| Input { idle_seconds, locked };
-        assert_eq!(write(dir.path(), &input(10.0, true), 100.0).unwrap().locked_since, Some(100.0));
-        assert_eq!(write(dir.path(), &input(40.0, true), 130.0).unwrap().locked_since, Some(100.0));
-        assert_eq!(write(dir.path(), &input(0.0, false), 160.0).unwrap().locked_since, None);
-        assert_eq!(write(dir.path(), &input(1.0, true), 190.0).unwrap().locked_since, Some(190.0));
+        assert_eq!(write(&dir, &input(10.0, true), 100.0).unwrap().locked_since, Some(100.0));
+        assert_eq!(write(&dir, &input(40.0, true), 130.0).unwrap().locked_since, Some(100.0));
+        assert_eq!(write(&dir, &input(0.0, false), 160.0).unwrap().locked_since, None);
+        assert_eq!(write(&dir, &input(1.0, true), 190.0).unwrap().locked_since, Some(190.0));
     }
 
     #[test]
     fn listings_age_values_and_omit_stale_or_future_records() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(listing(dir.path(), 100.0), None);
-        write(dir.path(), &Input { idle_seconds: 5.0, locked: false }, 100.0).unwrap();
+        let (_temp, dir) = fixture();
+        assert_eq!(listing(&dir, 100.0), None);
+        write(&dir, &Input { idle_seconds: 5.0, locked: false }, 100.0).unwrap();
         assert_eq!(
-            listing(dir.path(), 130.0),
+            listing(&dir, 130.0),
             Some(json!({"idle_seconds": 35.0, "locked": false, "locked_seconds": null}))
         );
-        assert_eq!(listing(dir.path(), 220.0).unwrap()["idle_seconds"], 125.0);
-        assert_eq!(listing(dir.path(), 220.5), None);
+        assert_eq!(listing(&dir, 220.0).unwrap()["idle_seconds"], 125.0);
+        assert_eq!(listing(&dir, 220.5), None);
         // A wall clock moved backwards: presence written "in the future" is unknown.
-        assert_eq!(listing(dir.path(), -30.0), None);
-        write(dir.path(), &Input { idle_seconds: 0.0, locked: true }, 300.0).unwrap();
+        assert_eq!(listing(&dir, -30.0), None);
+        write(&dir, &Input { idle_seconds: 0.0, locked: true }, 300.0).unwrap();
         assert_eq!(
-            listing(dir.path(), 310.0),
+            listing(&dir, 310.0),
             Some(json!({"idle_seconds": 10.0, "locked": true, "locked_seconds": 10.0}))
         );
     }
@@ -314,33 +321,34 @@ mod tests {
 
     #[test]
     fn oversized_and_special_presence_leaves_never_supply_evidence() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(FILE);
-        write(dir.path(), &Input { idle_seconds: 0.0, locked: false }, 100.0).unwrap();
+        let (_temp, dir) = fixture();
+        let path = dir.join(FILE);
+        write(&dir, &Input { idle_seconds: 0.0, locked: false }, 100.0).unwrap();
         fs::write(&path, vec![b' '; MAX_INPUT_BYTES as usize + 1]).unwrap();
-        assert_eq!(listing(dir.path(), 100.0), None);
+        assert_eq!(listing(&dir, 100.0), None);
         #[cfg(unix)]
         {
             fs::remove_file(&path).unwrap();
-            let foreign = dir.path().join("foreign");
+            let foreign = dir.join("foreign");
             fs::write(&foreign, b"preserved").unwrap();
             std::os::unix::fs::symlink(&foreign, &path).unwrap();
-            assert_eq!(listing(dir.path(), 100.0), None);
+            assert_eq!(listing(&dir, 100.0), None);
             assert_eq!(fs::read(&foreign).unwrap(), b"preserved");
             fs::remove_file(&path).unwrap();
             use std::os::unix::ffi::OsStrExt;
             let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
             assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
-            assert_eq!(listing(dir.path(), 100.0), None);
+            assert_eq!(listing(&dir, 100.0), None);
         }
     }
 
     #[test]
     fn unreadable_records_are_replaced_and_never_listed() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join(FILE), b"{\"damaged\":").unwrap();
-        assert_eq!(listing(dir.path(), 10.0), None);
-        let record = write(dir.path(), &Input { idle_seconds: 2.0, locked: true }, 10.0).unwrap();
+        let (_temp, dir) = fixture();
+        crate::platform::private_dir(&dir).unwrap();
+        fs::write(dir.join(FILE), b"{\"damaged\":").unwrap();
+        assert_eq!(listing(&dir, 10.0), None);
+        let record = write(&dir, &Input { idle_seconds: 2.0, locked: true }, 10.0).unwrap();
         assert_eq!(record.locked_since, Some(10.0));
     }
 }

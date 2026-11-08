@@ -233,7 +233,8 @@ fn claude_rule_indicator(line: &str) -> Option<String> {
 /// signed cloud catalog, so its model switch offered nothing. Its models are
 /// the gateway's list, read within 3 s and kept for a minute.
 fn gateway_catalog(record: &Value) -> Vec<ModelOption> {
-    static CACHE: OnceLock<Mutex<BTreeMap<String, (Instant, Vec<ModelOption>)>>> = OnceLock::new();
+    type CatalogCache = Mutex<BTreeMap<String, (Instant, Vec<ModelOption>)>>;
+    static CACHE: OnceLock<CatalogCache> = OnceLock::new();
     let Some(server) = gateway_server(record) else { return vec![] };
     let key = super::model_servers::root(&server);
     let cache = CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));

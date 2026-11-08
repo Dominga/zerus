@@ -73,6 +73,7 @@ private:
     QList<Teams::Team::Intake> m_intakes;
     bool m_dark = true;
     QCheckBox *m_branch = nullptr, *m_restart = nullptr, *m_land = nullptr, *m_broker = nullptr, *m_acceptance = nullptr;
+    QCheckBox *m_targetCheck = nullptr, *m_requiresCheck = nullptr;
     QComboBox *m_leadUnpause = nullptr;   // U63: false = only with my consent
     QList<MemberModels> m_members;
     QLineEdit *m_template = nullptr, *m_base = nullptr, *m_label = nullptr, *m_key = nullptr;

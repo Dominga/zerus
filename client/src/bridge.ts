@@ -116,6 +116,9 @@ export const teamRoleModels = (computer: ComputerId, agent: string, account: str
 /** Task 11: reads one team once, as an answer in Waiting for you does before it sends. */
 export const teamRead = (computer: ComputerId, team: string) =>
   inTauri() ? invoke<import("./types").TeamView>("team_read", { computer, team }) : Promise.reject(new Error("Teams need the desktop app."));
+/** Reads exactly one selected live or archived task, never the team history. */
+export const teamTaskRead = (computer: ComputerId, team: string, task: number) =>
+  teamsOnly<import("./types").TeamTaskDetailView>("team_task_read", { computer, team, task });
 /** Reads the watched team's feed page before the oldest event shown; false when there is none to read. */
 export const teamsOlder = (computer: ComputerId) => inTauri() ? invoke<boolean>("teams_older", { computer }) : Promise.resolve(false);
 /** Task 75: why this process is sandboxed, null on a normal desktop. */

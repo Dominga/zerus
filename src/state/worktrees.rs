@@ -70,9 +70,13 @@ pub(super) fn git_holding(
     deadline: Instant,
     lock: Option<&fs::File>,
 ) -> std::result::Result<Vec<u8>, GitError> {
-    if mobile_stopped() || Instant::now() >= deadline {
-        return Err(error("timeout", "Git operation cancelled or timed out"));
+    let mut command = args;
+    while command.len() >= 2 && matches!(command[0], "-c" | "-C") {
+        command = &command[2..];
     }
+    let subcommand = command.first().copied().unwrap_or("command");
+    let timeout = || error("timeout", format!("git {subcommand} timed out or was cancelled"));
+    if mobile_stopped() || Instant::now() >= deadline { return Err(timeout()); }
     let mut command = Command::new("git");
     #[cfg(unix)]
     if let Some(lock) = lock {
@@ -132,7 +136,7 @@ pub(super) fn git_holding(
                     error("too_large", "Git operation exceeded the output limit")
                 }
                 crate::platform::RunError::Io(e) => error("metadata_error", e.to_string()),
-                _ => error("timeout", "Git operation cancelled or timed out"),
+                _ => timeout(),
             })?;
     if status.success() {
         Ok(out)
@@ -549,6 +553,7 @@ const CHECKOUT_SECONDS: u64 = 10 * 60;
 #[cfg(test)]
 thread_local! {
     static AFTER_CLONE: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
+    static BEFORE_CREATE_READ: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
 }
 
 /// Why `destination` is not a clone of `source` that a create may finish:
@@ -861,8 +866,11 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
         }),
         None => None,
     };
-    let deadline = total_deadline.min(Instant::now() + Duration::from_secs(5));
     let read = |args: &[&str]| -> Result<String> {
+        // Each read keeps its own window within the operation deadline.
+        let deadline = total_deadline.min(Instant::now() + Duration::from_secs(5));
+        #[cfg(test)]
+        if let Some(delay) = BEFORE_CREATE_READ.with(std::cell::Cell::get) { delay(); }
         #[cfg(unix)]
         let bytes = match &owned {
             Some(owned) => owned.git(&owned.source, args, 5)?,
@@ -949,6 +957,7 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
     )
     .open(cache.with_extension("lock"))
     .map_err(|e| e.to_string())?;
+    let deadline = total_deadline.min(Instant::now() + Duration::from_secs(5));
     while guard.try_lock_exclusive().is_err() {
         if Instant::now() >= deadline {
             return Err(
@@ -1303,6 +1312,17 @@ pub(super) fn create_with(args: &[String], control: Option<&Control<'_>>) -> Res
 mod tests {
     use super::*;
 
+    #[test]
+    fn timed_out_git_identifies_the_subcommand() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases: &[&[&str]] = &[&["rev-parse", "HEAD"], &["-c", "core.hooksPath=", "rev-parse", "HEAD"]];
+        for args in cases {
+            let failure = git(dir.path(), args, Instant::now()).unwrap_err();
+            assert_eq!(failure.state, "timeout");
+            assert!(failure.detail.contains("git rev-parse timed out"), "{}", failure.detail);
+        }
+    }
+
     /// N9: the sandbox grant is made only when the caller asks for it; every
     /// other worktree is created without touching its ACLs.
     #[test]
@@ -1363,11 +1383,33 @@ mod tests {
         create(&args)
     }
 
+    #[test]
+    fn pre_clone_reads_each_have_their_own_deadline() {
+        let _guard = crate::state::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let old = std::env::var("HGS_STATE_DIR").ok();
+        let dir = tempfile::tempdir().unwrap();
+        let (source, _, base) = repository(dir.path());
+        let destination = dir.path().join("member");
+        // At least five reads spend 5.5 seconds in delays, each within its window.
+        BEFORE_CREATE_READ.with(|delay| delay.set(Some(|| std::thread::sleep(Duration::from_millis(1100)))));
+        let started = Instant::now();
+        let created = clone_member(&source, &destination);
+        BEFORE_CREATE_READ.with(|delay| delay.set(None));
+        match old {
+            Some(old) => std::env::set_var("HGS_STATE_DIR", old),
+            None => std::env::remove_var("HGS_STATE_DIR"),
+        }
+        let created = created.unwrap();
+        assert!(started.elapsed() > Duration::from_secs(5), "the reads exceed one shared window");
+        assert_eq!(created["head"], base);
+        assert_eq!(run(&destination, &["symbolic-ref", "--short", "HEAD"]), "team/x/dev");
+    }
+
     /// Task 20: a clone that takes longer than the old 5 s window still gets
     /// its branch, from the base branch rather than the clone's default one.
     #[test]
     fn a_slow_clone_finishes_on_the_base_branch() {
-        let _guard = crate::state::ENV_LOCK.lock().unwrap();
+        let _guard = crate::state::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let old = std::env::var("HGS_STATE_DIR").ok();
         let dir = tempfile::tempdir().unwrap();
         let (source, main, base) = repository(dir.path());
@@ -1392,7 +1434,7 @@ mod tests {
     /// folder, is never touched.
     #[test]
     fn an_unfinished_clone_is_finished_on_relaunch() {
-        let _guard = crate::state::ENV_LOCK.lock().unwrap();
+        let _guard = crate::state::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let old = std::env::var("HGS_STATE_DIR").ok();
         let dir = tempfile::tempdir().unwrap();
         let (source, _, base) = repository(dir.path());

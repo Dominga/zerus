@@ -35,3 +35,4 @@ own calls and your scratch team's queue in your folder; a script still asks.
 
 A performance run checks the machine first, and a comparison alternates the
 binaries in rounds (hgs guide team-tests).
+Tauri shows archive stubs; open a report to read that task only.

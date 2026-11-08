@@ -189,7 +189,7 @@ pub(crate) fn enabled(team: &Team) -> bool {
     if team.integration_folder().is_empty() {
         return false;
     }
-    crate::test_discipline::config::load(Path::new(team.integration_folder()), team.settings.tests.as_ref())
+    crate::test_discipline::config::load_project(Path::new(team.integration_folder()), team.settings.tests.as_ref())
         .is_ok_and(|loaded| loaded.active() && loaded.config.merge_queue.enabled)
 }
 
@@ -555,7 +555,7 @@ where
         migrated = true;
     }
     if let Some(id) = team.tasks.iter().find(|task| task.merge.as_ref().is_some_and(|entry| entry.state == "testing")).map(|task| task.id) {
-        let entry = team.task(id).and_then(|task| task.merge.clone()).unwrap_or_default();
+        let mut entry = team.task(id).and_then(|task| task.merge.clone()).unwrap_or_default();
         let mut results = Vec::new();
         for request in &entry.requests {
             match database.result_of(request)? {
@@ -563,17 +563,28 @@ where
                 None => return Ok(migrated),
             }
         }
+        for record in results.iter().filter(|record| record.status == "not_run") {
+            push_not_run(&mut entry.not_run, &record.excerpt);
+            entry.not_run_since.entry(record.suite.clone()).or_insert_with(|| entry.prev.clone());
+        }
+        let not_run: Vec<&str> = results.iter().filter(|record| record.status == "not_run").map(|record| record.excerpt.as_str()).collect();
+        if !not_run.is_empty() {
+            // The persisted entry has no suite selection per range. Keep all
+            // ranges open rather than closing one whose missing suite is unknown.
+            entry.tested_ranges.clear();
+            events.push(Event::new("merge_not_run", json!({"task":id,"suites":not_run})));
+        }
         let failed: Vec<String> = results
             .iter()
-            .filter(|record| !matches!(record.status.as_str(), "passed" | "flaky" | "reused"))
+            .filter(|record| !matches!(record.status.as_str(), "passed" | "flaky" | "reused" | "not_run"))
             .map(|record| format!("{} {} (record {})", record.suite, record.status, record.id))
             .collect();
         if failed.is_empty() {
-            keep(team, id, &entry, results.iter().map(|record| record.suite.clone()).collect(), now, events)?;
+            keep(team, id, &entry, results.iter().filter(|record| record.status != "not_run").map(|record| record.suite.clone()).collect(), now, events)?;
         } else {
             let excerpt = results
                 .iter()
-                .find(|record| !matches!(record.status.as_str(), "passed" | "flaky" | "reused"))
+                .find(|record| !matches!(record.status.as_str(), "passed" | "flaky" | "reused" | "not_run"))
                 .map(|record| record.excerpt.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"))
                 .unwrap_or_default();
             let rolled = roll_back(team.integration_folder(), &entry).note();

@@ -397,6 +397,28 @@ pub async fn team_read(
 }
 
 const REPLAY: &str = "Teams need hgs; a replay has none.";
+
+/// One selected task, including archived history, read off the UI thread.
+#[tauri::command]
+pub async fn team_task_read(
+    teams: State<'_, Teams>,
+    computer: String,
+    team: String,
+    task: u32,
+) -> Result<zerus_client_core::teams::view::TaskDetailView, String> {
+    if teams.replay {
+        return Err(REPLAY.into());
+    }
+    let target = self::computer(&computer)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let read = TeamRead::Task { team, task };
+        zerus_client_core::teams::read::read(&default_hgs(), &target, &read)
+            .map(|value| zerus_client_core::teams::view::task_detail(&value))
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
 const NOT_OPEN: &str = "Open the catalog editor first.";
 
 type Editors = Arc<Mutex<BTreeMap<ComputerId, CatalogEditor>>>;

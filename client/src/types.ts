@@ -1162,6 +1162,7 @@ export interface TeamLaneView {
 }
 
 export interface TeamTaskView {
+  archived?: boolean;
   id: number; title: string; status: string; assignee: string; phase: number; deps: { task: number; hard: boolean }[];
   estimate_minutes: number; attempts: number;
   /** The newest attempt's state (`delivering`, `delivered`, `unconfirmed`, `reported`...), empty without one. */
@@ -1203,6 +1204,11 @@ export type TeamPlanChange =
   | { edit: "link"; dependency: number; task: number; add: boolean; soft?: boolean }
   | { edit: "task"; task: Record<string, unknown> }
   | { edit: "remove_task"; task: number };
+
+/** One task read on demand; only the newest available report crosses IPC. */
+export interface TeamTaskDetailView {
+  task: TeamTaskView; report: string; report_truncated: boolean;
+}
 
 /** A task's pipeline run (core PipelineRunView). */
 export interface TeamPipelineRun {
@@ -1284,6 +1290,7 @@ export interface TeamTestsView {
 }
 
 export interface TeamPhaseView {
+  archived?: boolean;
   n: number; title: string; state: string; status: string; done: number; total: number; barrier: boolean; auto: boolean;
   acceptance: string; paused: boolean; health: string;
   /** Task #58: the mode the phase plans in, "standard" or "free"; "" from an older hgs. */
@@ -1306,6 +1313,7 @@ export interface TeamFindingItem {
 export interface TeamFindingsPage { items: TeamFindingItem[]; next_cursor?: string }
 
 export interface TeamView {
+  archived_phases_not_shown?: number;
   id: string; name: string; status: string; project: string; folder: string; goal: string; plan_mode: string; lead: string;
   revision: number; created: number; updated: number; waiting_for_lead: boolean; pending_phase: number | null;
   /** Task #308: the team's working mode, the proposal and what its settings miss. */

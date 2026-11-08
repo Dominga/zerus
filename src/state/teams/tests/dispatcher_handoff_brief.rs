@@ -105,6 +105,14 @@ fn a_hand_off_lists_at_most_twenty_dependencies() {
     assert!(text.contains("#22 Dep 22 (accepted)"), "{text}");
     assert!(!text.contains("#23 Dep 23 (accepted) by"), "{text}");
     assert!(text.contains("[5 more dependencies omitted]"), "{text}");
+    // Archive pointers and live reports share the same twenty dependency slots.
+    for task in team.tasks.iter_mut().filter(|task| task.id == 1 || task.id % 2 == 0) {
+        task.archived = Some(Default::default());
+    }
+    let text = dependencies_text(&team, &task, "");
+    assert_eq!(text.lines().filter(|line| line.starts_with('#')).count(), DEPENDENCY_LIMIT);
+    assert!(text.contains("[5 more dependencies omitted]"), "{text}");
+    assert!(!text.lines().any(|line| line.starts_with("#23 ")), "{text}");
 }
 
 #[test]
@@ -132,7 +140,10 @@ fn dependency_reports_are_cut_to_two_thousand_characters() {
     let text = hand_off_text(&team, &task, &attempt, "", "");
     // Cut at a character boundary, with the note.
     assert_eq!(text.matches('é').count(), 2000);
-    assert!(text.contains("[cut: shown 2000 of 2500 characters; full report: hgs team status --json, task #1]"), "{text}");
+    assert!(text.contains(&format!(
+        "[cut: shown 2000 of 2500 characters; full report: {} | hgs team status --json]",
+        json!({"team":team.id,"task":1})
+    )), "{text}");
     // A report within the bound is whole, with no note.
     team.task_mut(1).unwrap().attempts = vec![attempt_with_report("dev", &"ζ".repeat(2000), AttemptState::Reported)];
     let text = hand_off_text(&team, &task, &attempt, "", "");
@@ -165,9 +176,15 @@ fn dependency_reports_stop_at_the_total_limit() {
     let text = hand_off_text(&team, &task, &attempt, "", "");
     // 500 shown whole, then 2,000 + 2,000, then the last 1,500 of the 6,000.
     assert!(text.contains("α".repeat(500).as_str()), "{text}");
-    assert!(!text.contains("task #1]"), "{text}");
-    assert!(text.contains("[cut: shown 2000 of 3000 characters; full report: hgs team status --json, task #4]"), "{text}");
-    assert!(text.contains("[cut: shown 1500 of 3000 characters; full report: hgs team status --json, task #6]"), "{text}");
+    assert!(!text.contains(&format!("full report: {} | hgs team status --json", json!({"team":team.id,"task":1}))), "{text}");
+    assert!(text.contains(&format!(
+        "[cut: shown 2000 of 3000 characters; full report: {} | hgs team status --json]",
+        json!({"team":team.id,"task":4})
+    )), "{text}");
+    assert!(text.contains(&format!(
+        "[cut: shown 1500 of 3000 characters; full report: {} | hgs team status --json]",
+        json!({"team":team.id,"task":6})
+    )), "{text}");
     assert!(text.contains("#7 Dep 7 (accepted) by dev (Backend), folder: work\n[report omitted: limit reached]"), "{text}");
     assert_eq!(text.matches('α').count(), 500);
     assert_eq!(text.matches('β').count(), 2000);

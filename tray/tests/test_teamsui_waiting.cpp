@@ -192,6 +192,7 @@ private slots:
     void aPhaseIsAcceptedOrSentBackFromWaitingForYou();
     void aStalledLeadShowsOnTheTeamBarAndNotifiesEachRound();
     void deferredRequestsAreAnsweredUnderDeferred();
+    void phaseCheckCardShowsWarningAndSendsExplicitOverride();
 };
 
 // N32 of #499: Zerus started in the tray has no Sessions window, yet a team's
@@ -1200,6 +1201,8 @@ void TestTeamsUiWaiting::everyOwnerGateIsACardAnsweredWithAClick()
             QTRY_VERIFY(cardOf(id) && cardOf(id)->findChild<QPushButton *>("teamProposalAllow")->isEnabled());
             armConfirm(&panel, false);
         }
+        QFile held(script() + ".proposalhold");
+        QVERIFY(held.open(QIODevice::WriteOnly)); held.close();
         cardOf(id)->findChild<QPushButton *>("teamProposalAllow")->click();
         QTRY_COMPARE(int(calls(script(), "decide-proposal").size()), before + 1);
         const auto input = calls(script(), "decide-proposal").last();
@@ -1209,6 +1212,8 @@ void TestTeamsUiWaiting::everyOwnerGateIsACardAnsweredWithAClick()
         QCOMPARE(input["team"].toString(), QStringLiteral("team-1"));
         // Answered once: until the store takes it, its buttons stay off.
         QTRY_VERIFY(cardOf(id) && !cardOf(id)->findChild<QPushButton *>("teamProposalAllow")->isEnabled());
+        QVERIFY(QFile::remove(script() + ".proposalhold"));
+        QTRY_VERIFY(!cardOf(id));
     }
     // Deny sends a rejection with the card's hash; nothing else is sent.
     const int before = int(calls(script(), "decide-proposal").size());
@@ -2699,6 +2704,48 @@ void TestTeamsUiWaiting::deferredRequestsAreAnsweredUnderDeferred()
              (QStringList{"cd34", "answer", "SQLite"}));
     QTRY_COMPARE(answered, (QStringList{"deferred/ab12", "deferred/cd34"}));
     QCOMPARE(calls(script(), "status").size(), statusReads);
+}
+
+void TestTeamsUiWaiting::phaseCheckCardShowsWarningAndSendsExplicitOverride()
+{
+    auto source = phasedTeam();
+    auto phases = source.value("phases").toArray();
+    auto phase = phases.first().toObject();
+    const int n = phase.value("n").toInt();
+    phase["target_hours"] = 1.0;
+    phase["checks"] = QJsonObject{{"known_hours", 6.5}, {"missing_estimates", 2}, {"target_exceeded", true},
+                                 {"unresolved", QJsonArray{"Task #5: task #1 has not been accepted"}}};
+    phases[0] = phase; source["phases"] = phases;
+    auto tasks = source.value("tasks").toArray();
+    auto task = tasks.first().toObject();
+    task.remove("estimate_source");
+    const QJsonArray prerequisites{QJsonObject{{"task", 999}}};
+    task["requires"] = prerequisites;
+    tasks[0] = task; source["tasks"] = tasks;
+    source["proposals"] = QJsonArray{QJsonObject{{"id", "phase-check"}, {"hash", "h1"}, {"kind", "approve-phase"}, {"state", "open"},
+        {"change", QJsonObject{{"op", "approve-phase"}, {"input", QJsonObject{{"phase", n}}}, {"summary", "Approve phase"}}}}};
+    const auto model = parse(source);
+    const auto plan = planInput(model);
+    QCOMPARE(plan.value("tasks").toArray().first().toObject().value("requires").toArray(), prerequisites);
+    QCOMPARE(plan.value("phases").toArray().first().toObject().value("target_hours").toDouble(), 1.0);
+    const auto approval = phaseApproval(model, n);
+    QVERIFY(approval.text.contains(">= 6.5 h"));
+    QVERIFY(approval.text.contains("2 tasks without an estimate"));
+    QVERIFY(approval.text.contains("exceeds"));
+    QCOMPARE(approval.action, QStringLiteral("Approve anyway"));
+    QCOMPARE(approval.input.value("approve_anyway").toBool(), true);
+    TeamProposalCards cards;
+    QJsonObject sent;
+    cards.decide = [&](const QJsonObject &input, const TeamProposalCards::Done &) { sent = input; };
+    cards.setTeam(&model); cards.show();
+    auto *allow = cards.findChild<QPushButton *>("teamProposalAllow");
+    QVERIFY(allow); QCOMPARE(allow->text(), QStringLiteral("Approve anyway"));
+    bool shown = false;
+    for (auto *line : cards.findChildren<QLabel *>()) shown |= line->text().contains("has not been accepted");
+    QVERIFY(shown);
+    allow->click();
+    QCOMPARE(sent.value("approve_anyway").toBool(), true);
+    QCOMPARE(sent.value("expected_hash").toString(), QStringLiteral("h1"));
 }
 
 QTEST_MAIN(TestTeamsUiWaiting)

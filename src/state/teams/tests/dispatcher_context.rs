@@ -665,3 +665,191 @@ fn a_fresh_sessions_handoff_brief_continues_the_open_attempt() {
         assert!(event_kinds(&store, &t.id).contains(&"handoff_sent".to_owned()));
     });
 }
+
+/// Task #7: a member without an After-a-task policy keeps its context, even
+/// with a full one; today's path (U46's own setting only) is the default.
+#[test]
+fn a_member_without_an_after_task_policy_keeps_its_context() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        with_context(&mut t, "dev", "none");
+        with_usage("codex/x/dev", 950_000, 1_000_000);
+        stored(&mut store, &t);
+        set_fake_hgs(Some(Box::new(|_, args: &[&str], _| match args.first().copied() {
+            Some("send") => Ok(fake_output(0, r#"{"status":"submitted"}"#, "")),
+            other => panic!("no policy runs no context action: {other:?}"),
+        })));
+        hand_out(&mut store, &t.id, 1, "dev", None, "").unwrap();
+        set_fake_hgs(None);
+        let saved = store.load(&t.id).unwrap().unwrap();
+        let attempt = saved.task(1).unwrap().attempts.last().unwrap();
+        assert!(attempt.prepare.is_empty(), "{attempt:?}");
+        assert_eq!(attempt.state, AttemptState::Delivered);
+    });
+}
+
+/// Task #7: below its threshold the policy keeps the context and hands out.
+#[test]
+fn an_after_task_policy_keeps_the_context_below_its_threshold() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        with_context(&mut t, "dev", "none");
+        with_after_task(&mut t, "dev", "compact", "percent", 80);
+        with_usage("codex/x/dev", 700_000, 1_000_000);
+        stored(&mut store, &t);
+        set_fake_hgs(Some(Box::new(|_, args: &[&str], _| match args.first().copied() {
+            Some("send") => Ok(fake_output(0, r#"{"status":"submitted"}"#, "")),
+            other => panic!("below the threshold no context action runs: {other:?}"),
+        })));
+        hand_out(&mut store, &t.id, 1, "dev", None, "").unwrap();
+        set_fake_hgs(None);
+        let saved = store.load(&t.id).unwrap().unwrap();
+        assert!(saved.task(1).unwrap().attempts.last().unwrap().prepare.is_empty());
+        assert_eq!(saved.task(1).unwrap().attempts.last().unwrap().state, AttemptState::Delivered);
+    });
+}
+
+/// Task #7: at its percent threshold the policy compacts before the next task,
+/// and the message waits for the confirmation.
+#[test]
+fn an_after_task_policy_compacts_before_the_next_task_at_its_threshold() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        with_context(&mut t, "dev", "none");
+        with_after_task(&mut t, "dev", "compact", "percent", 80);
+        with_usage("codex/x/dev", 850_000, 1_000_000);
+        stored(&mut store, &t);
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let request = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        let inspects = std::rc::Rc::new(std::cell::Cell::new(0));
+        let (seen, seen_request, seen_inspects) = (calls.clone(), request.clone(), inspects.clone());
+        set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| {
+            let call = args.first().copied().unwrap_or_default().to_owned();
+            seen.borrow_mut().push(call.clone());
+            match call.as_str() {
+                "compact-context" => {
+                    let id = input.unwrap()["request_id"].as_str().unwrap().to_owned();
+                    *seen_request.borrow_mut() = id.clone();
+                    Ok(fake_output(0, &json!({"request_id":id,"status":"submitted"}).to_string(), ""))
+                }
+                "inspect" => {
+                    seen_inspects.set(seen_inspects.get() + 1);
+                    let status = if seen_inspects.get() == 1 { "compacting" } else { "completed" };
+                    Ok(fake_output(0, &json!({"run_id":"r1","conversation_id":"c1","activity":"idle","phase":"idle",
+                        "compact_context_request":{"request_id":seen_request.borrow().clone(),"run_id":"r1",
+                            "conversation_id":"c1","status":status}}).to_string(), ""))
+                }
+                "send" => Ok(fake_output(0, r#"{"status":"submitted"}"#, "")),
+                other => panic!("unexpected hgs {other}"),
+            }
+        })));
+        hand_out(&mut store, &t.id, 1, "dev", None, "").unwrap();
+        assert_eq!(*calls.borrow(), ["compact-context"], "the action runs before the message");
+        let saved = store.load(&t.id).unwrap().unwrap();
+        assert_eq!(saved.task(1).unwrap().waits.as_ref().unwrap().action, "compact");
+        assert!(saved.task(1).unwrap().attempts.is_empty());
+        assert!(prepare_tick(&mut store, &t.id));
+        assert!(prepare_tick(&mut store, &t.id));
+        set_fake_hgs(None);
+        let saved = store.load(&t.id).unwrap().unwrap();
+        assert!(saved.task(1).unwrap().waits.is_none());
+        assert_eq!(saved.task(1).unwrap().attempts.last().unwrap().state, AttemptState::Delivered);
+        assert_eq!(*calls.borrow(), ["compact-context", "inspect", "inspect", "send"]);
+    });
+}
+
+/// Task #7: a token threshold counts the tokens used, not the window's share.
+#[test]
+fn an_after_task_policy_counts_tokens_when_it_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        with_context(&mut t, "dev", "none");
+        with_after_task(&mut t, "dev", "compact", "tokens", 200_000);
+        // A quarter of the window, but past the token threshold.
+        with_usage("codex/x/dev", 250_000, 1_000_000);
+        stored(&mut store, &t);
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let request = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        let inspects = std::rc::Rc::new(std::cell::Cell::new(0));
+        let (seen, seen_request, seen_inspects) = (calls.clone(), request.clone(), inspects.clone());
+        set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| {
+            let call = args.first().copied().unwrap_or_default().to_owned();
+            seen.borrow_mut().push(call.clone());
+            match call.as_str() {
+                "compact-context" => {
+                    let id = input.unwrap()["request_id"].as_str().unwrap().to_owned();
+                    *seen_request.borrow_mut() = id.clone();
+                    Ok(fake_output(0, &json!({"request_id":id,"status":"submitted"}).to_string(), ""))
+                }
+                "inspect" => {
+                    seen_inspects.set(seen_inspects.get() + 1);
+                    let status = if seen_inspects.get() == 1 { "compacting" } else { "completed" };
+                    Ok(fake_output(0, &json!({"run_id":"r1","conversation_id":"c1","activity":"idle","phase":"idle",
+                        "compact_context_request":{"request_id":seen_request.borrow().clone(),"run_id":"r1",
+                            "conversation_id":"c1","status":status}}).to_string(), ""))
+                }
+                "send" => Ok(fake_output(0, r#"{"status":"submitted"}"#, "")),
+                other => panic!("unexpected hgs {other}"),
+            }
+        })));
+        hand_out(&mut store, &t.id, 1, "dev", None, "").unwrap();
+        assert_eq!(*calls.borrow(), ["compact-context"], "the token criterion fires on the tokens used");
+        assert!(prepare_tick(&mut store, &t.id));
+        assert!(prepare_tick(&mut store, &t.id));
+        set_fake_hgs(None);
+        let saved = store.load(&t.id).unwrap().unwrap();
+        assert_eq!(saved.task(1).unwrap().attempts.last().unwrap().state, AttemptState::Delivered);
+    });
+}
+
+/// Task #7: the lead's policy runs only while the lead is free; a busy lead
+/// still gets its own task, without a message and without a context action.
+#[test]
+fn the_leads_after_task_policy_runs_only_while_the_lead_is_free() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.tasks.push(Task { id: 4, title: "Plan review".into(), assignee: "lead".into(), status: TaskStatus::Pending, ..Default::default() });
+        t.tasks.push(Task { id: 5, title: "Plan review 2".into(), assignee: "lead".into(), status: TaskStatus::Pending, ..Default::default() });
+        with_after_task(&mut t, "lead", "compact", "percent", 80);
+        stored(&mut store, &t);
+        // Busy: C1 hands the task out with no message and no context action.
+        busy_record("claude/x/lead");
+        set_fake_hgs(Some(Box::new(|_, args: &[&str], _| panic!("a busy lead runs no action: {args:?}"))));
+        lead_hand_out(&mut store, &t.id, 4).unwrap();
+        set_fake_hgs(None);
+        let saved = store.load(&t.id).unwrap().unwrap();
+        assert_eq!(saved.task(4).unwrap().attempts.last().unwrap().member, "lead");
+        // Free: the policy runs before the lead's next task.
+        free_record("claude/x/lead", 900_000, 1_000_000);
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let request = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        let (seen, seen_request) = (calls.clone(), request.clone());
+        set_fake_hgs(Some(Box::new(move |_, args: &[&str], input: Option<&Value>| {
+            let call = args.first().copied().unwrap_or_default().to_owned();
+            seen.borrow_mut().push(call.clone());
+            match call.as_str() {
+                "compact-context" => {
+                    let id = input.unwrap()["request_id"].as_str().unwrap().to_owned();
+                    *seen_request.borrow_mut() = id.clone();
+                    Ok(fake_output(0, &json!({"request_id":id,"status":"submitted"}).to_string(), ""))
+                }
+                other => panic!("unexpected hgs {other}"),
+            }
+        })));
+        lead_hand_out(&mut store, &t.id, 5).unwrap();
+        set_fake_hgs(None);
+        assert_eq!(*calls.borrow(), ["compact-context"]);
+        let saved = store.load(&t.id).unwrap().unwrap();
+        assert_eq!(saved.task(5).unwrap().waits.as_ref().unwrap().action, "compact");
+    });
+}

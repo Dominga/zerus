@@ -248,7 +248,9 @@ mod tests {
     #[test]
     fn pages_preserve_canonical_order() {
         let temp = tempfile::tempdir().unwrap();
-        let store = ProjectStore::open(temp.path(), "example").unwrap();
+        let root = temp.path().join("replica");
+        crate::platform::owner_only_dir(&root).unwrap();
+        let store = ProjectStore::open(&root, "example").unwrap();
         let mut task = task();
         // Equal times retain the canonical Loro order; merged earlier times
         // need chronological order rather than raw append positions.
@@ -263,7 +265,9 @@ mod tests {
     #[test]
     fn cursor_survives_append_compaction_and_eviction() {
         let temp = tempfile::tempdir().unwrap();
-        let store = ProjectStore::open(temp.path(), "example").unwrap();
+        let root = temp.path().join("replica");
+        crate::platform::owner_only_dir(&root).unwrap();
+        let store = ProjectStore::open(&root, "example").unwrap();
         let mut a = task();
         for n in 1..=6 {
             a.comment(&format!("note {n}"), &Actor::Person, 100 + n).unwrap();
@@ -319,6 +323,37 @@ mod tests {
         page(&store, a.uuid(), 80, None, false).unwrap();
         page(&store, b.uuid(), 1, None, false).unwrap();
         assert_eq!(index::MATERIALIZED.with(Cell::get), 3);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_new_store_and_history_index_inherit_only_the_owner() {
+        use crate::platform;
+        use std::fs;
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        fs::create_dir(&state).unwrap();
+        assert!(std::process::Command::new("icacls").arg(&state)
+            .args(["/grant", "*S-1-5-11:(OI)(CI)M", "/Q"])
+            .stdout(std::process::Stdio::null()).status().unwrap().success());
+        let config = Config {
+            home: temp.path().to_string_lossy().into_owned(),
+            dir: temp.path().join("config"), state,
+            selves: vec![], peers: vec![], base_peers: vec![],
+            peers_from_environment: false, machines: Default::default(),
+            tab: false, tab_colors: String::new(),
+        };
+        let store = super::super::store(&config, "example").unwrap();
+        let mut task = task();
+        store.save(&mut task).unwrap();
+        let dir = store_dir(&config, "example");
+        for _ in 0..2 {
+            page(&store, task.uuid(), 2, None, false).unwrap();
+        }
+        assert!(platform::verify_private(&dir, platform::Private::Directory).unwrap());
+        assert!(platform::verify_private(&dir.join("task-index-v1.sqlite3"), platform::Private::File).unwrap());
+        assert!(!platform::verify_private(&config.state, platform::Private::Directory).unwrap(),
+            "the existing parent keeps its foreign grant");
     }
 
     #[test]

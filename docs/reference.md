@@ -2710,6 +2710,18 @@ identity as JSON. It never creates missing parents or repeats an uncertain
 operation. Local creation rejects `--dry-run`; remote dry runs only print the
 transport command.
 
+`hgs [@host] path-info --path <path>` answers whether a path exists on that
+computer, with one metadata read: no content is read and nothing changes. The
+path is absolute (a Windows drive or UNC path on Windows) or starts with `~/`
+for the home folder. The reply is one line of JSON, versioned and closed:
+`{"schema": 1, "exists": true, "kind": "file", "size": 1234}`, where `kind` is
+`file`, `directory` or `other` and `size` is given for a file only. A path that
+does not exist reads `exists: false`; one this account cannot inspect reads
+`exists: null`, with `kind` and `size` null. A relative path or one with control
+characters exits 1; a malformed call exits 2. A peer call runs only when the
+peer's `hgs --help` names the command, as an older hgs would read an unknown
+command as a session launch; the path's `~` reaches the peer's hgs as written.
+
 The desktop folder
 list starts in alphabetical name order, ignoring case; column headings change
 the sort. Sorting preserves the selected folder and does not reorder the shared

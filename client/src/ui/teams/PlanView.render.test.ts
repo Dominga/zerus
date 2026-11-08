@@ -195,6 +195,30 @@ describe("the plan's Graph, Board and Layers (task 197)", () => {
     expect(html).toContain('data-scroll="board/t1/1"');
   });
 
+  it("marks a Crit node and its links violet and a Minor phase and task quietly", () => {
+    const { team, graph } = fixture();
+    team.phases[1].kind = "minor";
+    team.phases[1].crit = [6];
+    team.phases[1].crit_gate = "critical task #6 in phase 2 is open";
+    team.tasks[5].severity = "crit";
+    team.tasks[5].origin = 2;
+    team.tasks[3].severity = "crit";
+    team.tasks[4].severity = "minor";
+    const html = render({ team, graph, problems, now });
+    expect(html).toContain('data-severity="crit"');
+    expect(html).toContain("pt-card-crit");
+    expect(html).toContain("pt-edge-crit");
+    expect(plain(html)).toContain("Crit · #2");
+    expect(html).toContain('data-phase-kind="minor"');
+    expect(html).toContain(">Minor<");
+    expect(html).toContain("critical task #6 in phase 2 is open");
+    const board = render({ team, graph, problems, now, initialMode: "board" });
+    expect(board).toContain('data-severity="minor"');
+    expect(board).toContain("Minor");
+    const layers = render({ team, graph, problems, now, initialMode: "layers" });
+    expect(layers).toContain('data-severity="crit"');
+  });
+
   it("lists Layers as compact rows by layer then id, filtered by member", () => {
     const { team, graph } = fixture();
     const html = render({ team, graph, problems, now, initialMode: "layers" });

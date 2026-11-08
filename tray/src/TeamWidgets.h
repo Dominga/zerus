@@ -814,6 +814,8 @@ class TaskView : public QWidget {
 public:
     enum Mode { List, Graph, Wide };
     struct Node { int id = 0, layer = 0, phase = 1; QString title, role, kind, statusText, deps, agent, tooltip, subteam; QColor tone, roleTone; bool problem = false, draft = false, error = false, match = true; int attempt = 0;
+        // Task #229: "crit" or "minor"; a Crit's border and its links are violet.
+        QString severity;
         // U25 part 5 (spec 5.4): "↤#2" - only the dependencies from other
         // phases (the ones inside it are edges); the problem text on the
         // second line; whether the assignee's agent really works on it. The
@@ -850,6 +852,8 @@ public:
         int changes = 0;      // the lead's pending edits on a draft
         QStringList changeLines;   // those edits as a diff, for the header's tooltip
         bool autoDraft = false;   // U61: Auto accepts it once its plan is clean
+        QString kind;             // Task #229: plan|minor
+        QString critGate;         // Task #229: open critical tasks hold it
     };
     TaskView(const Colors &colors, Mode mode, QWidget *parent = nullptr) : QWidget(parent), m_c(colors), m_mode(mode)
     {
@@ -1343,6 +1347,7 @@ protected:
     void paintWideNode(QPainter &p, const Node &n, const QRectF &r, bool lit, bool target)
     {
         const QColor stroke = target ? m_c.accent
+                            : n.severity == QLatin1String("crit") ? m_c.violet
                             : n.error ? m_c.danger
                             : n.problem ? (n.tone == m_c.danger ? m_c.danger : m_c.warn)
                             : lit ? m_c.accent : m_c.border;
@@ -1470,6 +1475,7 @@ protected:
         if (!band.blockedTip.isEmpty()) tips << band.blockedTip;
         if (!band.changeLines.isEmpty())
             tips << QCoreApplication::translate("TeamPanel", "Changes from the lead:") + QLatin1Char('\n') + band.changeLines.join(QLatin1Char('\n'));
+        if (!band.critGate.isEmpty()) tips << band.critGate;
         if (tips.isEmpty()) m_bandTips.remove(band.n);
         else m_bandTips.insert(band.n, tips.join(QLatin1Char('\n')));
         const double line1 = r.top() + 3, lineH = 16;
@@ -1515,11 +1521,12 @@ protected:
         if (band.autoDraft) {
             // U61: a draft Auto accepts at its first hand-out, not one waiting for you.
             pill(Teams::autoDraftBadge(), m_c.folder);
-        } else if (!band.status.isEmpty()) {
-            pill(phaseStatusText(band.status), phaseStatusColor(m_c, band.status));
+        } else if (!band.status.isEmpty()) {            pill(phaseStatusText(band.status), phaseStatusColor(m_c, band.status));
         } else if (band.draft) {
             pill(QCoreApplication::translate("TeamPanel", "draft"), m_c.warn);
         }
+        if (band.kind == QLatin1String("minor")) pill(QCoreApplication::translate("TeamPanel", "Minor"), m_c.muted);
+        if (!band.critGate.isEmpty()) pill(QCoreApplication::translate("TeamPanel", "Crit gate"), m_c.violet);
         if (!band.status.isEmpty() || band.draft) {
             const QString progress = QStringLiteral("%1/%2").arg(band.done).arg(band.total);
             const double width = mf.horizontalAdvance(progress) + 2;
@@ -1696,6 +1703,8 @@ protected:
                 const bool bad = cycle.contains(dep) && cycle.contains(it.key());
                 const bool selected = m_edge == qMakePair(dep, it.key());
                 QColor color = selected || bad ? m_c.danger : hot ? m_c.accent : m_c.border;
+                const Node *a = nodeOf(dep), *b = nodeOf(it.key());
+                if (!selected && !bad && (a && a->severity == QLatin1String("crit") || b && b->severity == QLatin1String("crit"))) color = m_c.violet;
                 if (!hot && !selected && (!lit.isEmpty() || !emphasis.isEmpty()) && !(emphasis.contains(dep) && emphasis.contains(it.key()))) color = alpha(color, .35);
                 p.setPen(QPen(color, hot || selected ? 2 : 1.4, selected || soft.contains({dep, it.key()}) ? Qt::DashLine : Qt::SolidLine)); p.setBrush(Qt::NoBrush);
                 const auto path = edgePath(from, to);
@@ -1842,6 +1851,7 @@ protected:
         else if (hot) { color = m_c.accent; width = 2; }
         else if (blocking) { color = m_c.warn; width = 2; }
         const Node *a = nodeOf(dep), *b = nodeOf(task);
+        if (!selected && !bad && (a && a->severity == QLatin1String("crit") || b && b->severity == QLatin1String("crit"))) color = m_c.violet;
         const bool focusDim = (a && !a->match) && (b && !b->match);
         const bool dim = (!lit.isEmpty() && !hot) || (!emphasis.isEmpty() && !blocking && !selected) || focusDim;
         p.setOpacity(dim ? .2 : 1);
@@ -2062,6 +2072,7 @@ inline QList<TaskView::PhaseBand> phaseBands(const Team &team, const std::functi
         TaskView::PhaseBand band;
         band.n = group.n; band.title = group.title; band.heading = phaseHeading(group);
         band.barrier = group.barrier; band.draft = group.draft; band.done = group.done; band.total = group.tasks.size();
+        band.kind = group.kind; band.critGate = group.critGate;
         band.tasks = group.tasks; band.collapsed = !open(group);
         if (const auto *record = team.phase(group.n); record && record->autoDraft()) { band.autoDraft = true; }
         if (const auto *summary = team.phaseSummaryOf(group.n)) {

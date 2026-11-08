@@ -13,7 +13,7 @@ import {
   BANNER_ROWS, WaitingAnswer, acceptanceSummary, approves, opensDisk, resumesTeam, deferredRequest, opensCard, splitDeferred, toolOffer, waitingActionLabel, waitingAge,
   waitingCount, waitingFields, waitingKindIcon, waitingKindLabel, type QuestionChoice,
 } from "./decisions";
-import type { TeamWaitingItem } from "../../types";
+import type { TeamAction, TeamWaitingItem } from "../../types";
 
 // Waiting for you (task 11, Qt TeamWaitingPage, TeamWaitingBanner and
 // TeamWaitingAnswer): what waits for the owner across this computer's teams,
@@ -260,6 +260,14 @@ function Approve(props: { item: TeamWaitingItem; label?: string }) {
 function Row(props: { item: TeamWaitingItem; compact?: boolean }) {
   const [open, setOpen] = createSignal(false);
   const item = () => props.item;
+  const changes = () => {
+    const detail = item().detail as { changes?: { id: string; summary: string }[] } | null | undefined;
+    return Array.isArray(detail?.changes) ? detail!.changes! : [];
+  };
+  const send = async (action: TeamAction) => {
+    const outcome = await windowPort.send({ computer: "", team: item().team, team_name: item().team_name, action });
+    if (outcome.outcome === "done") answeredWaiting(item());
+  };
   return (
     <div class="team-waiting-row" classList={{ compact: props.compact, open: open() }} data-item={item().id} data-kind={item().kind}
       onClick={() => { if (!open()) openTeam(item()); }}>
@@ -288,6 +296,14 @@ function Row(props: { item: TeamWaitingItem; compact?: boolean }) {
         </Show>
         <Show when={opensDisk(item())}>
           <button class="btn small" onClick={(event) => { event.stopPropagation(); openSettings("disk"); }}>{tr("Open Build folders")}</button>
+        </Show>
+        <Show when={item().kind === "lead_changes"}>
+          <button class="btn small" data-waiting-seen onClick={(event) => { event.stopPropagation(); void send({ kind: "seen_lead_changes" }); }}>{tr("Seen")}</button>
+          <Show when={changes().length > 0}>
+            <button class="btn small ghost" data-waiting-revert onClick={(event) => {
+              event.stopPropagation(); void send({ kind: "revert_lead_change", change: changes()[0].id });
+            }}>{tr("Revert")}</button>
+          </Show>
         </Show>
       </div>
       <Show when={open()}><Answer item={item()} /></Show>

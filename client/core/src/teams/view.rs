@@ -509,6 +509,9 @@ pub struct TaskView {
     /// Task #60: the task this follow-up was added for ("spawned from"); it
     /// never blocks, unlike `deps`.
     pub origin: Option<u64>,
+    /// Task #229: `crit` or `minor` for a follow-up; empty for ordinary work.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub severity: String,
     /// Task 55: the newest attempt's open questions to the lead (A3): the
     /// owner answers them with `hgs team reply` too.
     pub questions: Vec<QuestionView>,
@@ -661,6 +664,15 @@ pub struct PhaseView {
     /// Task #58: the mode the phase plans in, "standard" or "free" (its own,
     /// else the team's); "" from an hgs that sends no phase modes.
     pub mode: String,
+    /// Task #229: "plan" or "minor"; empty from an older hgs.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+    /// Task #229: the open critical tasks holding the phase.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub crit: Vec<u64>,
+    /// Task #229: why the phase's critical tasks hold it, as hgs words it.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub crit_gate: String,
     /// Task 196: the phase header's details from the phase's record (Qt's
     /// TeamWorkspace phase header): the lead's note, the owner's send-back
     /// comment and whether the lead reworked it, who proposed it and when,
@@ -1033,6 +1045,7 @@ fn task(value: &Value) -> TaskView {
         subteam: value.get("subteam").is_some_and(Value::is_object),
         subteam_team: value.get("subteam").map(|subteam| name(subteam, "team")).unwrap_or_default(),
         origin: value.get("origin").and_then(Value::as_u64).filter(|origin| *origin > 0),
+        severity: text(value, "severity", LINE_CHARS),
         questions: open_questions(value),
         description: if editable_task(value) { text(value, "description", EDITOR_CHARS) } else { String::new() },
         criteria: if editable_task(value) { lines(value, "criteria", LINE_CHARS) } else { Vec::new() },
@@ -1094,6 +1107,9 @@ fn phase(value: &Value) -> PhaseView {
         paused: value.get("pause").is_some_and(|pause| !pause.is_null()),
         health: text(value, "health_line", LINE_CHARS),
         mode: String::new(),
+        kind: name(value, "kind"),
+        crit: array(value, "crit").iter().filter_map(Value::as_u64).take(ITEMS_KEPT).collect(),
+        crit_gate: text(value, "crit_gate", LINE_CHARS),
         start_ahead: flag(value, "start_ahead"),
         pause_by: value.get("pause").map(|pause| name(pause, "by")).unwrap_or_default(),
         pause_reason: value.get("pause").map(|pause| text(pause, "reason", LINE_CHARS)).unwrap_or_default(),

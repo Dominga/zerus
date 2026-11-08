@@ -2265,6 +2265,7 @@ void TeamWorkspace::graphNodes(TaskView *view, const Team &team, const QList<int
         }
         node.draft = task->status == "draft"; node.error = team.cycle.contains(id);
         node.late = task->addedLate.known;
+        node.severity = task->severity;
         node.attempt = task->last() ? task->last()->n : 0;
         const auto *assignee = team.member(task->assignee);
         if (assignee) node.agent = assignee->agent;
@@ -2441,7 +2442,7 @@ QWidget *TeamWorkspace::board(const Team &team)
             }
             // U38: the heat tint and its loss in the working time's place.
             if (auto *lost = heatOn ? heatBoardLabel(*heatOn, task, c) : nullptr) {
-                const QColor edge = problemTasks.contains(task.id) ? c.danger : c.border;
+                const QColor edge = task.severity == QLatin1String("crit") ? c.violet : problemTasks.contains(task.id) ? c.danger : c.border;
                 cardBox->setStyleSheet(QStringLiteral("QFrame#teamBoardCard{background:%1;border:1px solid %2;border-radius:9px;}")
                                            .arg(heatCardFill(heatOn, task, c).name(), edge.name()));
                 cardBox->setToolTip(lost->toolTip());
@@ -2741,12 +2742,23 @@ QWidget *TeamWorkspace::phaseScroll(const Team &team, const PhaseGroup &group)
     else if (state == "rejected") { numberTone = c.warn; numberFill = alpha(c.warn, .11); }
     else if (state == "awaiting_acceptance") { numberTone = c.folder; numberFill = alpha(c.folder, .25); }
     h->addWidget(new PhaseNumber(group.n, numberTone, numberFill));
-    const QString name = group.title.isEmpty() ? tr("Phase %1").arg(group.n) : tr("Phase %1 · %2").arg(group.n).arg(group.title);
+    QString name = group.title.isEmpty() ? tr("Phase %1").arg(group.n) : tr("Phase %1 · %2").arg(group.n).arg(group.title);
+    if (group.kind == QLatin1String("minor")) name += tr(" · Minor");
     auto *title = new ShrinkLabel(name, 90); title->setObjectName("teamPhaseTitle");
     {QFont f = title->font(); f.setPixelSize(13); f.setWeight(QFont::DemiBold); title->setFont(f);
      QPalette pal = title->palette(); pal.setColor(QPalette::WindowText, c.fg); title->setPalette(pal);}
     title->setAttribute(Qt::WA_TransparentForMouseEvents);
     h->addWidget(title);
+    if (group.kind == QLatin1String("minor")) {
+        auto *minor = label(tr("Minor"), c.muted, 11, true, "teamPhaseMinor");
+        minor->setToolTip(tr("A Minor phase: its follow-ups never gate another phase's result"));
+        h->addWidget(minor);
+    }
+    if (!group.critGate.isEmpty()) {
+        auto *gate = label(tr("Held by an open Crit"), c.violet, 11, false, "teamPhaseCritGate");
+        gate->setToolTip(group.critGate);
+        h->addWidget(gate);
+    }
     const QString kind = state == "draft" || state == "planned" ? QStringLiteral("draft") : state == "running" ? QStringLiteral("running")
                        : state == "done" ? QStringLiteral("accepted") : state == "rejected" ? QStringLiteral("rejected")
                        : state == "awaiting_acceptance" ? QStringLiteral("submitted") : QStringLiteral("pending");
@@ -3378,7 +3390,7 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
             // a task out of rounds.
             auto *stages = stageLineWidget(team, *task, c);
             const bool stageWarn = stages && stages->property("warn").toBool();
-            const QColor edge = problem ? toneColor(c, problemsByTask.value(task->id)) : stageWarn ? c.warn : c.border;
+            const QColor edge = task->severity == QLatin1String("crit") ? c.violet : problem ? toneColor(c, problemsByTask.value(task->id)) : stageWarn ? c.warn : c.border;
             auto *cardBox = new ClickFrame; cardBox->setObjectName("teamBoardCard"); cardBox->setCursor(Qt::PointingHandCursor);
             cardBox->setProperty("task", task->id);
             cardBox->setProperty("lane", task->lane.n);
@@ -3401,6 +3413,13 @@ QWidget *TeamWorkspace::boardColumns(const Team &team, const QList<int> &ids, in
                                          mark.kind.isEmpty() ? kindOfTask(*task, s) : mark.kind, 14, Qt::AlignLeft, nullptr, mark.tooltip.isEmpty() ? s.text : mark.tooltip);
             state->setObjectName("teamBoardState"); state->setProperty("statusText", s.text); r1->addWidget(state);
             auto *id = label(QStringLiteral("#%1").arg(task->id), c.fg, 12, true, "teamBoardId"); r1->addWidget(id);
+            if (task->severity == QLatin1String("crit") || task->severity == QLatin1String("minor")) {
+                const bool crit = task->severity == QLatin1String("crit");
+                auto *severity = label(crit ? tr("Crit") : tr("Minor"), crit ? c.violet : c.muted, 10, true, "teamBoardSeverity");
+                severity->setProperty("severity", task->severity);
+                if (crit && task->origin > 0) severity->setToolTip(tr("Critical follow-up of #%1").arg(task->origin));
+                r1->addWidget(severity);
+            }
             if (task->addedLate.known) r1->addWidget(outOfScopeMark(*task, c));
             QStringList deps; for (const auto &d : task->deps) deps << QStringLiteral("#%1").arg(d.task);
             if (!deps.isEmpty()) r1->addWidget(label(QStringLiteral("←") + deps.join(QStringLiteral(" ")), c.folder, 11, false, "teamBoardDeps"));
@@ -3507,10 +3526,11 @@ QWidget *TeamWorkspace::layerRows(const Team &team, const QList<int> &ids)
         const auto mark = phaseMark(team, *task);
         auto *line = new ClickFrame; line->setObjectName("teamLayerRow"); line->setProperty("task", id); line->setCursor(Qt::PointingHandCursor);
         line->setMinimumHeight(30);
+        if (task->severity == QLatin1String("crit") || task->severity == QLatin1String("minor")) line->setProperty("severity", task->severity);
         // Task 82: Layers takes the heat's tint, lateness and overrun too.
         const Heat *heatOn = heat(team);
         line->setStyleSheet(QStringLiteral("QFrame#teamLayerRow{background:%1;border:1px %4 %2;border-radius:8px;} QFrame#teamLayerRow:hover{border-color:%3;}")
-                                .arg(heatCardFill(heatOn, *task, c).name(), problem ? toneColor(c, problemsByTask.value(id)).name() : c.cardBorder.name(), c.accent.name(),
+                                .arg(heatCardFill(heatOn, *task, c).name(), task->severity == QLatin1String("crit") ? c.violet.name() : problem ? toneColor(c, problemsByTask.value(id)).name() : c.cardBorder.name(), c.accent.name(),
                                      task->status == "draft" ? QStringLiteral("dashed") : QStringLiteral("solid")));
         QString lineTip = QStringLiteral("#%1 %2 — %3").arg(id).arg(task->title, mark.tooltip.isEmpty() ? s.text : mark.tooltip);
         if (const QString tip = heatOn ? heatTip(*heatOn, *task) : QString(); !tip.isEmpty()) lineTip += QLatin1Char('\n') + tip;

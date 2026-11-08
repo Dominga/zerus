@@ -145,6 +145,7 @@ private slots:
     void theEstimateIsSetInThePlanAndWhenATaskJoinsAPhase();
     void phaseScrollsInEveryView();
     void phaseScrollDecisions();
+    void critAndMinorShowInEveryPlanMode();
 };
 
 void TestTeamsUiPlan::planningEditsSendTheWholePlan()
@@ -2292,6 +2293,48 @@ void TestTeamsUiPlan::spawnedFromHasItsOwnLinkAndLegend()
     auto *legend = workspace.findChild<QLabel *>("teamOriginLegend");
     QVERIFY(legend && legend->isVisible());
     QCOMPARE(legend->text(), QStringLiteral("Dashed: spawned from"));
+}
+
+void TestTeamsUiPlan::critAndMinorShowInEveryPlanMode()
+{
+    auto t = phasedTeam();
+    auto phases = t["phases"].toArray();
+    auto two = phases[1].toObject();
+    two["kind"] = "minor";
+    two["crit"] = QJsonArray{6};
+    two["crit_gate"] = "critical task #6 in phase 2 is open";
+    phases[1] = two; t["phases"] = phases;
+    auto tasks = t["tasks"].toArray();
+    tasks.append(QJsonObject{{"id", 6}, {"phase", 2}, {"title", "Lock the refund"}, {"assignee", "tester"},
+                             {"status", "pending"}, {"origin", 1}, {"severity", "crit"}, {"deps", QJsonArray{QJsonObject{{"task", 1}}}}});
+    tasks.append(QJsonObject{{"id", 7}, {"phase", 2}, {"title", "Polish the copy"}, {"assignee", "tester"},
+                             {"status", "pending"}, {"origin", 1}, {"severity", "minor"}});
+    t["tasks"] = tasks;
+    setTeam(t);
+    HgsClient client(FakeCli::program(script()));
+    TeamController controller(&client);
+    TeamPanel panel(&controller);
+    TeamWorkspace workspace(&controller, &panel);
+    workspace.setLive(prototypeLive);
+    workspace.resize(1200, 900);
+    workspace.show();
+    controller.refresh(); panel.showTeam("team-1"); workspace.showTeam("team-1");
+    QTRY_VERIFY(phaseGraphOf(&workspace, 2));
+    auto *graph = phaseGraphOf(&workspace, 2);
+    const auto node = [&](int id) {
+        for (const auto &n : graph->nodes) if (n.id == id) return n;
+        return TeamUi::TaskView::Node{};
+    };
+    QCOMPARE(node(6).severity, QStringLiteral("crit"));
+    QCOMPARE(node(7).severity, QStringLiteral("minor"));
+    // Board and Layers carry the Minor phase label, the Crit gate and the chips.
+    for (auto *b : workspace.findChild<QWidget *>("teamWorkspaceView")->findChildren<QPushButton *>())
+        if (b->property("segment") == "board") { b->click(); break; }
+    QTRY_VERIFY(workspace.findChild<QWidget *>("teamWorkspaceBoard"));
+    QTRY_VERIFY(workspace.findChild<QLabel *>("teamPhaseMinor"));
+    QVERIFY(workspace.findChild<QLabel *>("teamPhaseCritGate"));
+    QVERIFY(workspace.findChild<QLabel *>("teamBoardSeverity"));
+    shot(&workspace, "crit-minor-board-dark");
 }
 
 void TestTeamsUiPlan::addedLateTaskIsOutOfScopeEverywhere()

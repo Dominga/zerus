@@ -139,6 +139,16 @@ void TeamTaskCard::rebuild()
     auto *title = elided(task->title, c.fg, 14); QFont tf = title->font(); tf.setWeight(QFont::DemiBold); title->setFont(tf);
     title->setObjectName("teamTaskTitle");
     head->addWidget(title, 1);
+    if (task->severity == QLatin1String("crit") || task->severity == QLatin1String("minor")) {
+        const bool crit = task->severity == QLatin1String("crit");
+        auto *severity = label(crit ? (task->origin > 0 ? tr("Crit · #%1").arg(task->origin) : tr("Crit")) : tr("Minor"),
+                              crit ? c.violet : c.muted, 11, true);
+        severity->setObjectName("teamTaskSeverity");
+        severity->setProperty("severity", task->severity);
+        severity->setStyleSheet(QStringLiteral("QLabel#teamTaskSeverity{color:%1;border:1px solid %2;border-radius:7px;padding:0 6px;}")
+                                    .arg(crit ? c.violet.name() : c.muted.name(), crit ? alpha(c.violet, .55).name(QColor::HexArgb) : c.border.name()));
+        head->addWidget(severity);
+    }
     v->addLayout(head);
     auto *meta = row(8);
     const QString statusText = problem && !status.problem ? memberState.text : status.shortText;

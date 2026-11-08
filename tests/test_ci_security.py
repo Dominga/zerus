@@ -330,7 +330,7 @@ class WorkflowSecurityTests(unittest.TestCase):
         self.assertIn("uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1", windows)
         self.assertIn("package-manager-cache: false", windows)
         self.assertIn("npm ci </dev/null", windows)
-        self.assertIn("npm run tauri -- build --ci --no-bundle --config src-tauri/tauri.windows.conf.json --features video </dev/null", windows)
+        self.assertIn("npm run tauri -- build --ci --no-bundle --config src-tauri/tauri.windows.switch.conf.json --features video </dev/null", windows)
         self.assertIn("CARGO_BUILD_JOBS: 4", windows)
         self.assertIn("timeout-minutes: 25", windows)
         self.assertIn("--gui target/windows-next/release/hgs-tray.exe", windows)

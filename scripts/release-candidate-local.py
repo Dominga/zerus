@@ -91,7 +91,7 @@ def main() -> int:
     print(f"tauri fork channel: ZERUS_FORK_BUILD={fork_build or '(unset)'} ZERUS_FORK_FEED_URL={fork_feed or '(unset)'}", flush=True)
     run(
         ["npm", "run", "tauri", "--", "build", "--ci", "--no-bundle",
-         "--config", "src-tauri/tauri.windows.conf.json", "--features", "video"],
+         "--config", "src-tauri/tauri.windows.switch.conf.json", "--features", "video"],
         cwd=client,
         env={"CARGO_TARGET_DIR": str(target), "CARGO_BUILD_JOBS": "4",
              "ZERUS_FORK_BUILD": fork_build,

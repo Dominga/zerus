@@ -115,7 +115,7 @@ class ForkWorkflowTests(unittest.TestCase):
 
     def test_the_fork_builds_and_packages_the_tauri_app_with_its_identity(self):
         build = self.step("name: Build the Tauri Windows desktop with the fork channel")
-        self.assertIn("npm run tauri -- build --ci --no-bundle --config src-tauri/tauri.windows.conf.json --features video", build)
+        self.assertIn("npm run tauri -- build --ci --no-bundle --config src-tauri/tauri.windows.switch.conf.json --features video", build)
         package = self.step("name: Portable zip from the tested executables")
         for part in ["package-windows.py --fork", "--lore target/lore/release/lore.exe", "--gui target/windows-next/release/hgs-tray.exe",
                      "--mobile-relay services/mobile/relay/target/release/zerus-relay.exe",

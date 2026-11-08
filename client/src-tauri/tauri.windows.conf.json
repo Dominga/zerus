@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Zerus",
-  "identifier": "com.hgdev.hgs-tray",
-  "mainBinaryName": "hgs-tray",
+  "productName": "Zerus Next (dev)",
+  "identifier": "dev.zerus.next",
+  "mainBinaryName": "zerus-client",
   "bundle": {
     "active": false,
     "targets": []

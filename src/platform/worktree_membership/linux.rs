@@ -244,6 +244,8 @@ fn files(process: &Path, deadline: std::time::Instant) -> io::Result<Option<File
         Err(error) if unsettled(&error) => return Ok(None),
         Err(error) => return Err(error),
     };
+    #[cfg(test)]
+    let entries = roster::listed(entries);
     for (count, entry) in entries.enumerate() {
         bounded(count, deadline)?;
         let Some(entry) = settled(entry)? else {
@@ -288,8 +290,10 @@ fn settled<T>(result: io::Result<T>) -> io::Result<Option<T>> {
 }
 
 /// A descriptor closed between the table's listing and its own read: ENOENT
-/// for it while the task's entry is still there. This per-descriptor rule
-/// predates zerus-lo8o1; a task gone meanwhile is unsettled instead.
+/// for it while the task's entry is still there. It is skipped, never
+/// unsettled and never a denial. This per-descriptor rule predates
+/// zerus-lo8o1 and is kept with its documented residual (see `same_tasks`,
+/// zerus-1qnef); a task gone meanwhile is unsettled instead.
 fn closed(error: &io::Error, task: &Path) -> bool {
     error.kind() == io::ErrorKind::NotFound && task.exists()
 }
@@ -415,6 +419,26 @@ fn task_set(process: &Path, exited: bool, deadline: Instant) -> io::Result<Optio
 /// pidfd) would close it, and the census deliberately reads none. Same UID is
 /// the trust boundary. The leader keeps its pid and start-time identity,
 /// which the callers check around the reads.
+///
+/// The accepted descriptor-handoff residual (zerus-1qnef, design-tima2's
+/// ruling): a descriptor whose own read returns ENOENT while its task's
+/// entry remains is a closed descriptor and is skipped (`closed`), as before
+/// zerus-lo8o1. A process that duplicates a checkout file's descriptor to a
+/// number the table's listing missed, and closes the old number, inside the
+/// 1 to 4 ms table read is not seen through that file in that observation.
+/// Two stricter rules were measured on arch: any descriptor ENOENT is
+/// unsettled, or a second fd-number listing that changed is unsettled.
+/// - For open/close, dup/close and close-then-reopen churn, both stay at 0 to
+///   2% census limit, against 0% for this rule.
+/// - Once a process opens new descriptors and later closes older ones, at
+///   1k/s with 1000 held or 10k/s with 100 held, both reach 87 to 99%.
+///   Because any limit fails the whole census, one such process anywhere
+///   would fail Terminate/Remove closed host-wide.
+/// - A second listing alone is also defeated by number reuse.
+///
+/// Skipping a descriptor that vanished mid-read is of a kind with the
+/// explicit Remove policy, which already ignores descriptors that cannot be
+/// inspected (EACCES/EPERM).
 fn same_tasks(before: &[Task], after: &[Task]) -> bool {
     before
         .iter()
@@ -628,6 +652,8 @@ fn files_member(
         Err(e) if denied(&e) && !strict => return Ok(Some(false)),
         Err(e) => return Err(e),
     };
+    #[cfg(test)]
+    let fds = roster::listed(fds);
     for (count, fd) in fds.enumerate() {
         bounded(count, deadline)?;
         let Some(fd) = settled(fd)? else {
@@ -768,6 +794,24 @@ pub(crate) mod roster {
         static AFTER_PLAN: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
         static AFTER_LIST: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
         static AFTER_READ: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+        static AFTER_FDS: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+    }
+
+    /// A descriptor table's listing, collected before any of its reads, after
+    /// which this thread's descriptor hook runs once (zerus-1qnef). Only test
+    /// builds collect; production reads the listing as it goes.
+    pub(crate) fn listed(
+        fds: std::fs::ReadDir,
+    ) -> std::vec::IntoIter<std::io::Result<std::fs::DirEntry>> {
+        let listed: Vec<_> = fds.collect();
+        let hook = AFTER_FDS.with(|hook| hook.borrow_mut().take());
+        if let Some(mut hook) = hook {
+            hook();
+        }
+        listed.into_iter()
+    }
+    pub(crate) fn on_fds(hook: impl FnMut() + 'static) {
+        AFTER_FDS.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
     }
 
     /// Runs this thread's hook, once, between a process's reads and its
@@ -831,6 +875,7 @@ pub(crate) mod roster {
             AFTER_PLAN.with(|hook| *hook.borrow_mut() = None);
             AFTER_LIST.with(|hook| *hook.borrow_mut() = None);
             AFTER_READ.with(|hook| *hook.borrow_mut() = None);
+            AFTER_FDS.with(|hook| *hook.borrow_mut() = None);
         }
     }
 
@@ -1908,6 +1953,67 @@ for op in sys.stdin:
             !rows.unreadable.iter().any(|row| row.pid == pid),
             "a vanished read is not a denial"
         );
+        drop(owned);
+    }
+
+    /// zerus-1qnef, design-tima2's ruling: the accepted descriptor-handoff
+    /// residual, pinned. Between the table's listing and its reads, a
+    /// checkout file's descriptor 3 is duplicated to 7, a number the listing
+    /// missed, and 3 is closed. Descriptor 3 reads ENOENT while the task's
+    /// entry remains: a closed descriptor, skipped, never unsettled and never
+    /// a denial. The census, member() and sample() report the process absent
+    /// for that observation; a fresh one sees descriptor 7.
+    #[test]
+    fn a_descriptor_handed_on_during_the_table_read_is_the_accepted_residual() {
+        let (_dir, root, _scope, inventory) = checkout();
+        let owned = roster::owned(&[]);
+        let pid = i32::MAX as u32;
+        let entry = owned.path().join(pid.to_string());
+        synthetic(&entry, 'S');
+        fs::create_dir(entry.join("task")).unwrap();
+        for link in ["cwd", "root"] {
+            std::os::unix::fs::symlink("/", entry.join(link)).unwrap();
+        }
+        let (old, new) = (entry.join("fd").join("3"), entry.join("fd").join("7"));
+        let arm = || {
+            for fd in [&old, &new] {
+                let _ = fs::remove_file(fd);
+            }
+            std::os::unix::fs::symlink(root.join("held"), &old).unwrap();
+            let (old, new, held) = (old.clone(), new.clone(), root.join("held"));
+            roster::on_fds(move || {
+                std::os::unix::fs::symlink(&held, &new).unwrap();
+                fs::remove_file(&old).unwrap();
+            });
+        };
+        arm();
+        assert!(
+            programs(&inventory, soon()).unwrap().is_empty(),
+            "census: the residual"
+        );
+        assert!(
+            programs(&inventory, soon())
+                .unwrap()
+                .iter()
+                .any(|p| p.pid == pid),
+            "a fresh census sees descriptor 7"
+        );
+        arm();
+        assert!(!member_with_holder(&entry, &inventory, None, soon()).unwrap());
+        arm();
+        let rows = sample(soon()).unwrap();
+        assert!(
+            !rows
+                .paths
+                .iter()
+                .any(|(p, path, _)| *p == pid && path.starts_with(&root)),
+            "sample: the residual"
+        );
+        assert!(
+            !rows.unreadable.iter().any(|row| row.pid == pid),
+            "a closed descriptor is not a denial"
+        );
+        assert!(sampled(pid, &root), "a fresh sample sees descriptor 7");
         drop(owned);
     }
 }

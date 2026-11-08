@@ -50,7 +50,9 @@ export function openTerminal(item: TeamWaitingItem) {
 
 /** Notifies each new item once while Waiting for you is shown. */
 function announce(items: readonly TeamWaitingItem[], complete: boolean) {
-  for (const notice of waitingNotices().observe(items, complete)) toast(notice.title, notice.body, "info");
+  // Task #323 (N7): Qt raises only the OS notice; keep the shown set and the
+  // native post, never a toast stacked over the side panel.
+  waitingNotices().observe(items, complete);
 }
 
 /** The answer of one item, in its row. */

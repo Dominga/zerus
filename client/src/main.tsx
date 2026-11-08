@@ -25,8 +25,12 @@ import { startMotion } from "./ui/motion";
 import { platform } from "./store/shortcuts";
 import { loadMarkdown } from "./ui/sessions/markdown";
 import { startWindowTheme } from "./skin/window";
+import { systemLocale } from "./bridge";
+import { setSystemLocale } from "./ui/sessions/usage-number";
 
 const [mode, setMode] = createSignal<BridgeMode | "starting">("starting");
+// Task #323: the owner's regional format decides how usage numbers group.
+setSystemLocale(await systemLocale().catch(() => ""));
 
 // The motion and platform attributes are on the root before the first frame.
 document.documentElement.dataset.platform = platform;

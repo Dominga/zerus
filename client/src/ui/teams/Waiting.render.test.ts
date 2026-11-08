@@ -116,8 +116,8 @@ beforeAll(async () => {
           export const teamAction = async () => ({outcome: "failed", detail: "the render test sends nothing"});
           export const teamRead = async () => ({});
           export const inTauri = () => false;`;
-        if (id === notices) return `export const waitingNotices = () => ({ observe: () => [], withdraw: () => {} });`;
-        if (id === noticesStore) return `export const toast = () => {};`;
+        if (id === notices) return `export const waitingNotices = () => ({ observe: () => [{ title: "Waiting for you in X", body: "A card" }], withdraw: () => {} });`;
+        if (id === noticesStore) return `export const toast = () => { globalThis.__waitingToasts = (globalThis.__waitingToasts ?? 0) + 1; };`;
         if (id === settings) return `export const teamConfirm = async () => false;`;
         if (id === sections) return `export const openSettings = () => {};`;
         if (id === uiStore) return `export const setPage = () => {};
@@ -172,6 +172,13 @@ describe("Waiting for you and the Activity strip (task 116)", () => {
       expect(one, found.kind).toContain(escaped(found.title));
       expect(one, `${found.kind} control`).toContain(control(found));
     }
+  });
+
+  it("does not stack in-window notices, as Qt (task 323 N7)", () => {
+    const calls = globalThis as typeof globalThis & { __waitingToasts?: number };
+    calls.__waitingToasts = 0;
+    renderBanner({ items: fixture(), total: 18, more: false, next: null });
+    expect(calls.__waitingToasts).toBe(0);
   });
 
   it("nothing waits for you: the strip draws nothing and the page says so", () => {

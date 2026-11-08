@@ -283,3 +283,20 @@
 .team-inbox-tool-actions .field { flex: 1; min-width: 160px; }
 .team-inbox-tool-notice { flex-basis: 100%; color: var(--z-color-danger); font-size: var(--fs-2xs); overflow-wrap: anywhere; }
 .team-proposal-command { display: block; margin: 4px 0; padding: 4px 6px; border-radius: 4px; background: var(--z-color-field); color: var(--z-color-text); font-family: var(--z-font-mono); font-size: var(--fs-xs); overflow-wrap: anywhere; user-select: text; }
+
+/* Task #323 (N1): at 1200 px the team bar's progress bar covered the mode
+   button and cut Team settings. Qt's ResponsiveRow drops labels and the
+   progress first; do the same by the bar's own width, never the window's. */
+.team-tab { container-type: inline-size; }
+@container (max-width: 1150px) {
+  .team-bar { gap: 6px; padding: 0 8px; }
+  .team-progress { width: 90px; }
+  .team-age { display: none; }
+  .team-name { max-width: 26%; }
+}
+@container (max-width: 940px) {
+  .team-bar { gap: 4px; padding: 0 6px; }
+  .team-progress, .team-count, .team-age { display: none; }
+  .team-name { max-width: 170px; }
+  .team-bar .btn { padding: 0 6px; }
+}

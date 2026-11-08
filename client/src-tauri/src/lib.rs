@@ -80,6 +80,24 @@ fn app_quit(app: tauri::AppHandle) {
     exit_flush::quit_with_flush(&app, 0);
 }
 
+/// Task #323: the owner's regional format, as Qt's QLocale::system gives it.
+/// WebView2 reports its UI language (often en-US) rather than the Windows
+/// regional format, so usage numbers read "1,863,139,812" where Qt groups with
+/// spaces. The webview formats with this locale; empty when unknown.
+#[tauri::command]
+fn system_locale() -> String {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Globalization::GetUserDefaultLocaleName;
+        let mut buffer = [0u16; 85];
+        let length = unsafe { GetUserDefaultLocaleName(buffer.as_mut_ptr(), buffer.len() as i32) };
+        if length > 1 {
+            return String::from_utf16_lossy(&buffer[..length as usize - 1]);
+        }
+    }
+    String::new()
+}
+
 /// Task #247: Qt's `sandbox-folder grant FOLDER --json [--elevated]` for the
 /// creation panel's Fix folder rights (SessionsWindow.cpp:2036). The command
 /// changes only the owner's own access to that folder; hgs validates the path.
@@ -1745,6 +1763,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         commands::start,
         app_quit,
+        system_locale,
         sandbox_folder_grant,
         commands::fleet_refresh,
         commands::next_batch,
@@ -2178,6 +2197,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         commands::start,
         app_quit,
+        system_locale,
         sandbox_folder_grant,
         commands::fleet_refresh,
         commands::next_batch,

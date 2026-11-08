@@ -6,7 +6,9 @@ import type { TeamMemberView, TeamTaskView, TeamView } from "../../types";
 // (tray/src/TeamModel.cpp: memberStatus, displayStatus, statusLabel). Pure,
 // so the states are tested without a webview.
 
-export type Tone = "neutral" | "active" | "assigned" | "done" | "muted" | "dim" | "warn" | "danger" | "planning";
+// Task 342 (owner, 2026-11-08): the plan's five task states are told apart by
+// colour, so a tone names the state the plan CSS tints.
+export type Tone = "neutral" | "active" | "assigned" | "done" | "review" | "cancelled" | "muted" | "dim" | "warn" | "danger" | "planning";
 
 /** What the session list says about a member's session (Qt's Teams::Live). */
 export interface MemberLive {
@@ -47,8 +49,8 @@ export function currentTask(team: TeamView, member: TeamMemberView): TeamTaskVie
 }
 
 const ICONS: Record<Tone, string> = {
-  neutral: "circle", active: "play", assigned: "arrow-right", done: "check", muted: "pause", dim: "circle",
-  warn: "circle-question-mark", danger: "circle-alert", planning: "pencil",
+  neutral: "circle", active: "play", assigned: "arrow-right", done: "check", review: "eye", cancelled: "x",
+  muted: "pause", dim: "circle", warn: "circle-question-mark", danger: "circle-alert", planning: "pencil",
 };
 
 function make(kind: string, text: string, short: string, tone: Tone, task = 0, problem = false, icon?: string): MemberStatus {

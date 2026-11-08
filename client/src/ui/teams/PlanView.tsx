@@ -75,6 +75,9 @@ export interface PlanViewProps {
   now?: () => number;
   /** The mode it opens in (Graph by default). */
   initialMode?: PlanMode;
+  /** Task 342: the tests open it with cancelled tasks shown or finished ones hidden. */
+  initialShowCancelled?: boolean;
+  initialHideFinished?: boolean;
   /** Task #226: the Lanes mode's rename and move go through edit-draft; false on a refusal. */
   onLaneEdit?: (phase: number, updates: LaneEdit[]) => Promise<boolean>;
   class?: string;
@@ -84,17 +87,18 @@ const HEADER_H = 44;
 const COLLAPSED_H = 44;
 const SCROLLBAR = 12;
 
-/** The card tone class, from Qt's task tones. */
+/** The card tone class: task 342 (owner, 2026-11-08) gives the plan's five task
+ * states a colour each - done green, in work a light blue, in review a deeper
+ * blue, not started a pale grey and cancelled a grey hatch - while a problem or
+ * a wait keeps its amber/red. */
 function toneClass(tone: string): string {
-  if (tone === "active") return "working";
-  if (tone === "assigned") return "assigned";
+  if (tone === "active") return "work";
+  if (tone === "review") return "review";
   if (tone === "done") return "done";
   if (tone === "danger") return "danger";
   if (tone === "warn") return "warn";
-  // A dim task (a draft, a cancelled one) is muted: "pt-card-dim" is the
-  // hover chain's dimming.
-  if (tone === "dim") return "muted";
-  return "pending";
+  if (tone === "cancelled") return "cancelled";
+  return "notstarted";
 }
 
 function short(value: string, limit = 150): string {
@@ -146,13 +150,13 @@ function PhaseScroll(props: { key: string; class: string; children: JSX.Element;
 export function PlanView(props: PlanViewProps): JSX.Element {
   const now = () => props.now?.() ?? Date.now() / 1000;
   const [mode, setMode] = createSignal<PlanMode>(props.initialMode ?? "graph");
-  const [includeCancelled, setIncludeCancelled] = createSignal(false);
+  const [includeCancelled, setIncludeCancelled] = createSignal(props.initialShowCancelled ?? false);
   const [filter, setFilter] = createSignal<PlanFilter>("all");
   const [ownMember, setOwnMember] = createSignal("");
   const member = () => props.member ?? ownMember();
   const chooseMember = (id: string) => (props.onMember ? props.onMember(id) : setOwnMember(id));
   const hideKey = "zerus.teams.hideFinished";
-  const [hideFinished, setHideFinished] = createSignal(stored(hideKey) === "1");
+  const [hideFinished, setHideFinished] = createSignal(props.initialHideFinished ?? stored(hideKey) === "1");
   const switchHide = (on: boolean) => { setHideFinished(on); store(hideKey, on ? "1" : null); };
   const [zoom, setZoom] = createSignal(1);
   // Task 197 (P6): Off, Lateness or Tokens, remembered per team in this
@@ -179,7 +183,8 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     new Set(props.team.phases.filter((phase) => phase.status === "done").map((phase) => phase.n)),
   );
   const [hover, setHover] = createSignal<number | null>(null);
-  const [selected, setSelected] = createSignal<number | null>(null);
+  // Task 342: the tests open a task on mount; otherwise a click selects it.
+  const [selected, setSelected] = createSignal<number | null>(props.openTask?.task ?? null);
   createEffect(() => {
     const request = props.openTask;
     if (!request) return;
@@ -189,7 +194,8 @@ export function PlanView(props: PlanViewProps): JSX.Element {
   const problems = () => props.problems ?? new Map<number, TaskProblem>();
   const planning = () => props.team.status === "planning";
   const byId = createMemo(() => new Map(props.team.tasks.map((task) => [task.id, task])));
-  const visibleTask = (task: TeamTaskView | undefined) => !!task && (includeCancelled() || task.status !== "cancelled");
+  const visibleTask = (task: TeamTaskView | undefined) =>
+    !!task && (includeCancelled() || task.status !== "cancelled") && !(hideFinished() && task.status === "accepted");
   const allPhases = createMemo(() => phasePlans(props.team, props.graph));
   // U58 and owner 2026-10-30: cancelled tasks and the phases they emptied
   // stay out unless shown; Hide finished leaves out every decided phase.
@@ -658,7 +664,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     const phase = phaseOf(task.id);
     const blocks = props.team.tasks.filter((candidate) => candidate.deps.some((dep) => dep.task === task.id));
     return (
-      <aside class="pt-detail" aria-label={tr("Task %1: %2", task.id, task.title)}>
+      <aside class={`pt-detail pt-detail-${tone(task)}`} data-task-tone={tone(task)} aria-label={tr("Task %1: %2", task.id, task.title)}>
         <div class="pt-detail-head">
           <span class={`pt-dot pt-dot-${tone(task)}`} />
           <span class="pt-id">#{task.id}</span>
@@ -792,6 +798,14 @@ export function PlanView(props: PlanViewProps): JSX.Element {
           </Show>
         </Show>
         <span class="pt-grow" />
+        {/* Task 342 (owner, 2026-11-08): the five task states, as the cards tint. */}
+        <span class="pt-legend pt-state-legend" aria-label={tr("Task states")} data-state-legend>
+          <span class="pt-legend-item"><i class="pt-swatch pt-swatch-done" />{tr("Done")}</span>
+          <span class="pt-legend-item"><i class="pt-swatch pt-swatch-work" />{tr("In progress")}</span>
+          <span class="pt-legend-item"><i class="pt-swatch pt-swatch-review" />{tr("In review")}</span>
+          <span class="pt-legend-item"><i class="pt-swatch pt-swatch-notstarted" />{tr("Not started")}</span>
+          <span class="pt-legend-item"><i class="pt-swatch pt-swatch-cancelled" />{tr("Cancelled")}</span>
+        </span>
         <Show when={mode() === "graph"}>
           <span class="pt-legend" aria-label={tr("Link legend")}>
             <span class="pt-legend-item"><i class="pt-legend-dep" />{tr("Depends on")}</span>
@@ -886,7 +900,7 @@ export function PlanView(props: PlanViewProps): JSX.Element {
         </div>
       </Show>
       <Show when={mode() === "lanes"}>
-        <LanesView team={props.team} includeCancelled={includeCancelled()} profile={props.profile} onOpen={open} onEdit={props.onLaneEdit}
+        <LanesView team={props.team} includeCancelled={includeCancelled()} hideFinished={hideFinished()} profile={props.profile} onOpen={open} onEdit={props.onLaneEdit}
           phaseActions={props.phaseActions} />
       </Show>
       <Show when={mode() === "profile"}>
@@ -906,3 +920,4 @@ export function PlanView(props: PlanViewProps): JSX.Element {
     </section>
   );
 }
+

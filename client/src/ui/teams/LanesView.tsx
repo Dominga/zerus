@@ -19,6 +19,8 @@ export interface LaneEdit {
 export function LanesView(props: {
   team: TeamView;
   includeCancelled: boolean;
+  /** Task 342: Hide finished leaves accepted tasks out here too. */
+  hideFinished?: boolean;
   profile?: TeamProfileView | null;
   onOpen?: (id: number) => void;
   onEdit?: (phase: number, updates: LaneEdit[]) => Promise<boolean>;
@@ -34,11 +36,14 @@ export function LanesView(props: {
   onCleanup(() => setMenu(null));
 
   // The team's own phases; a phase with no tasks in any lane is still shown
-  // when it has tasks at all (lane 0). Empty phases are dropped.
+  // when it has tasks at all (lane 0). Empty phases are dropped. Task 342: a
+  // finished (accepted) task leaves the lanes while Hide finished is on, as it
+  // leaves every other plan mode.
   const sections = createMemo(() => {
     void version();
+    const tasks = props.hideFinished ? props.team.tasks.filter((task) => task.status !== "accepted") : props.team.tasks;
     return props.team.phases
-      .map((phase) => ({ phase, lanes: laneGroups(props.team.tasks, phase.n, props.includeCancelled) }))
+      .map((phase) => ({ phase, lanes: laneGroups(tasks, phase.n, props.includeCancelled) }))
       .filter((section) => section.lanes.length > 0);
   });
   const editable = (phase: number) => !!props.onEdit && laneEditable(props.team, phase);

@@ -44,6 +44,16 @@
       "violet": "#6c43b8",
       "violet-bg": "rgba(111,79,216,.08)",
       "status-background": "#2f66c9",
+      "plan-done": "#1c8a4e",
+      "plan-done-bg": "rgba(28,138,78,.12)",
+      "plan-work": "#3d9be9",
+      "plan-work-bg": "rgba(61,155,233,.14)",
+      "plan-review": "#1f5fb8",
+      "plan-review-bg": "rgba(31,95,184,.16)",
+      "plan-notstarted": "#9aa3b0",
+      "plan-notstarted-bg": "rgba(154,163,176,.12)",
+      "plan-cancelled": "#8a94a3",
+      "plan-cancelled-bg": "rgba(138,148,163,.12)",
       "entity-base": "#ffffff",
       "entity-ink-base": "#111820",
       "tree-line": "#cfd7df",
@@ -155,3 +165,4 @@
     }
   }
 }
+

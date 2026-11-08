@@ -2509,5 +2509,6 @@
   "This machine, %1 sessions": "Этот компьютер, %1 сеансов",
   "+ New team": "+ Новая команда",
   "Auto: follow the project": "Авто: следовать проекту",
-  "One additional rule per line (20 maximum)": "Одно дополнительное правило в строке (не более 20)"
+  "One additional rule per line (20 maximum)": "Одно дополнительное правило в строке (не более 20)",
+  "Task states": "Состояния задач"
 }

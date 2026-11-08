@@ -62,11 +62,17 @@ inline Colors colorsFor(bool dark)
 inline QColor toneColor(const Colors &c, Tone tone)
 {
     switch (tone) {
-    case Tone::Active: return c.accent;
-    case Tone::Assigned: return c.text3;
-    case Tone::Done: return c.accentMuted;
-    case Tone::Muted: return c.muted;
+    // Task 342 (owner, 2026-11-08): the five task states are told apart by
+    // colour in every plan mode - done green, in work a light blue, in review a
+    // deeper blue, not started a pale grey and cancelled a grey - while a
+    // problem or a wait keeps its amber/red.
+    case Tone::Active: return QColor(c.dark ? "#6fb6ff" : "#3d9be9");
+    case Tone::Assigned: return QColor(c.dark ? "#b7c0cc" : "#9aa3b0");
+    case Tone::Done: return QColor(c.dark ? "#5ec98a" : "#1c8a4e");
+    case Tone::Muted: return QColor(c.dark ? "#b7c0cc" : "#9aa3b0");
     case Tone::Dim: return c.dim;
+    case Tone::Review: return QColor(c.dark ? "#2f7fd6" : "#1f5fb8");
+    case Tone::Cancelled: return QColor(c.dark ? "#7f8a99" : "#8a94a3");
     case Tone::Warn: return c.warn;
     case Tone::Danger: return c.danger;
     case Tone::Planning: return c.folder;

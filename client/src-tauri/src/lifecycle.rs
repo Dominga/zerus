@@ -255,8 +255,8 @@ fn exit(app: &AppHandle) {
     if let Some(native) = app.try_state::<crate::native_ui::runtime::NativeUi>() {
         native.shutdown();
     }
-    // Quitting is not a hang (`Watchdog::stop`).
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    // Quitting is not a hang (`Watchdog::stop`), on Windows too (zerus-on8wl).
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     if let Some(dog) = app.try_state::<crate::watchdog::Watchdog>() {
         dog.stop();
     }

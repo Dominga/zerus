@@ -8,7 +8,7 @@ import { nativeBinding, nativeEntry, nativeRoute } from "./native-entry";
 import { nativeUi } from "../../store/native-ui";
 import { pageHidden } from "../../store/visibility";
 import { ProcessesTab } from "./Processes";
-import { TeamTab } from "../teams/TeamTab";
+import { LeadTeamHeader, TeamTab } from "../teams/TeamTab";
 import { NewTeamPage } from "../teams/NewTeamPage";
 import { WaitingBanner } from "../teams/Waiting";
 import { LeadProposals } from "../teams/ProposalCards";
@@ -338,6 +338,9 @@ export function SessionDetail() {
         <div class="work" ref={measure}>
         <Show when={selected()} fallback={<div class="work-main"><EmptyDetail /></div>}>
           <div class="work-main">
+            {/* Task 317 (F13): the lead's session carries its team bar and strip as Qt's
+                lead header does; the Team tab has its own bar. */}
+            <Show when={detailTab() !== "team"}><LeadTeamHeader /></Show>
             <div class="detail-tabs tabs" role="tablist">
               <For each={tabs().filter((t) => t.show)}>{(t) => (
                 <button class="tab" role="tab" classList={{ on: detailTab() === t.id }} aria-selected={detailTab() === t.id} onClick={() => { if (t.id === "terminal") terminal.opened(); setDetailTab(t.id); }}>{t.label}<Show when={t.id === "team" && teamAnswers(selectedTeam()) > 0}><span class="tab-count" data-tip={tr("Needs your answer")}>?{teamAnswers(selectedTeam())}</span></Show></button>

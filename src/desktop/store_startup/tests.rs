@@ -484,6 +484,20 @@ fn registry_cap_child() {
         !next.root.join(DATABASE).exists(),
         "cap refuses BEFORE CREATE_NEW/open"
     );
+    let auxiliary = next.root.join("manifest.json");
+    fs::write(&auxiliary, b"private backup metadata").unwrap();
+    fs::set_permissions(&auxiliary, fs::Permissions::from_mode(0o600)).unwrap();
+    let root = Directory::open(&next.root).unwrap();
+    BEFORE_RAW_OPEN.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(|_, _| {
+            panic!("auxiliary cap refusal must precede the raw open");
+        }))
+    });
+    let error = Pin::input(&root, "manifest.json").err().unwrap();
+    let unopened = BEFORE_RAW_OPEN.with(|slot| slot.borrow_mut().take().is_some());
+    assert!(error.to_string().contains("pin limit"), "{error:#}");
+    assert!(unopened);
+    assert_eq!(retained_count(), PIN_LIMIT);
     assert!(foreign_lock_refused(&path));
     external.execute_batch("ROLLBACK").unwrap();
     drop(external);

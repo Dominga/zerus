@@ -24,6 +24,7 @@ static PINS: std::sync::Mutex<Vec<Pin>> = std::sync::Mutex::new(Vec::new());
 pub(super) struct Pin {
     root: Arc<Directory>,
     file: Arc<File>,
+    name: &'static str,
 }
 impl Pin {
     pub(super) fn root(&self) -> &Directory {
@@ -38,9 +39,46 @@ impl Pin {
         Ok((id.device, id.inode))
     }
     pub(super) fn existing(root: Arc<Directory>) -> Result<Self> {
-        Self::acquire(root, false)
+        Self::acquire(root, DATABASE, false)
     }
-    fn acquire(root: Arc<Directory>, create: bool) -> Result<Self> {
+    /// Existing backup inputs may be aliases of a live SQLite file too.
+    /// Retain their raw descriptor before validation, using this SAME ceiling.
+    pub(super) fn input(root: &Directory, name: &'static str) -> Result<Option<Self>> {
+        root.verify().map_err(anyhow::Error::msg)?;
+        if absent(root, name)? {
+            return Ok(None);
+        }
+        let held = Arc::new(Directory::open(&root.path).map_err(anyhow::Error::msg)?);
+        ensure!(
+            held.object().map_err(anyhow::Error::msg)?
+                == root.object().map_err(anyhow::Error::msg)?,
+            "desktop input root changed"
+        );
+        root.verify().map_err(anyhow::Error::msg)?;
+        #[cfg(unix)]
+        {
+            Self::acquire(held, name, false).map(Some)
+        }
+        #[cfg(windows)]
+        {
+            // Preserve the original backup input's no-follow access/sharing.
+            // Windows locks are handle-scoped; only Unix needs retention.
+            let Some(file) = held
+                .read_private_optional(name)
+                .map_err(anyhow::Error::msg)?
+            else {
+                return Ok(None);
+            };
+            let pin = Self {
+                root: held,
+                file: Arc::new(file),
+                name,
+            };
+            pin.verify()?;
+            Ok(Some(pin))
+        }
+    }
+    fn acquire(root: Arc<Directory>, name: &'static str, create: bool) -> Result<Self> {
         root.verify().map_err(anyhow::Error::msg)?;
         #[cfg(unix)]
         {
@@ -48,11 +86,12 @@ impl Pin {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("desktop pin registry unavailable"))?;
             if !create {
-                let named = named_database(&root)?
+                let named = named_file(&root, name)?
                     .ok_or_else(|| anyhow::anyhow!("missing original desktop database"))?;
                 let object = root.object().map_err(anyhow::Error::msg)?;
                 for pin in pins.iter() {
-                    if pin.root.object().map_err(anyhow::Error::msg)? == object
+                    if pin.name == name
+                        && pin.root.object().map_err(anyhow::Error::msg)? == object
                         && pin.identity()? == named
                     {
                         pin.verify()?;
@@ -67,10 +106,15 @@ impl Pin {
                 "desktop database pin limit reached; start a new hgs process"
             );
             pins.try_reserve(1)?;
-            let file = open_original(&root, create)?;
+            #[cfg(test)]
+            if let Some(hook) = BEFORE_RAW_OPEN.with(|slot| slot.borrow_mut().take()) {
+                hook(&root, name);
+            }
+            let file = open_original(&root, name, create)?;
             pins.push(Self {
                 root,
                 file: Arc::new(file),
+                name,
             });
             let pin = pins.last().unwrap().clone();
             after_pin(&pin);
@@ -79,10 +123,11 @@ impl Pin {
         }
         #[cfg(windows)]
         {
-            let file = open_original(&root, create)?;
+            let file = open_original(&root, name, create)?;
             let pin = Self {
                 root,
                 file: Arc::new(file),
+                name,
             };
             pin.verify()?;
             Ok(pin)
@@ -95,24 +140,25 @@ impl Pin {
             "desktop database must be a private single-link regular file"
         );
         #[cfg(unix)]
-        let named = named_database(&self.root)?
+        let named = named_file(&self.root, self.name)?
             .ok_or_else(|| anyhow::anyhow!("missing original desktop database"))?;
         #[cfg(windows)]
         let named = {
-            let id = platform::FileIdentity::at(&self.root.path.join(DATABASE))?.0;
+            let id = platform::FileIdentity::at(&self.root.path.join(self.name))?.0;
             (id.device, id.inode)
         };
         ensure!(self.identity()? == named, "desktop database replaced");
         Ok(())
     }
     pub(super) fn bind(&self, db: &Connection) -> Result<()> {
+        ensure!(self.name == DATABASE, "non-database startup pin");
         self.verify()?;
         #[cfg(unix)]
         {
             let (device, inode) = self.identity()?;
             crate::sqlite_file::bind_private(
                 db,
-                &self.root.path.join(DATABASE),
+                &self.root.path.join(self.name),
                 crate::sqlite_file::Identity { device, inode },
             )?;
         }
@@ -148,8 +194,9 @@ impl Pin {
 }
 
 #[cfg(unix)]
-fn open_original(root: &Directory, create: bool) -> Result<File> {
+fn open_original(root: &Directory, name: &str, create: bool) -> Result<File> {
     use std::os::fd::FromRawFd;
+    let name = std::ffi::CString::new(name)?;
     let flags = libc::O_RDONLY
         | libc::O_NOFOLLOW
         | libc::O_NONBLOCK
@@ -165,7 +212,7 @@ fn open_original(root: &Directory, create: bool) -> Result<File> {
     let fd = unsafe {
         libc::openat(
             root.descriptor(),
-            c"state.sqlite3".as_ptr(),
+            name.as_ptr(),
             flags,
             0o600 as libc::c_uint,
         )
@@ -178,14 +225,14 @@ fn open_original(root: &Directory, create: bool) -> Result<File> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 #[cfg(windows)]
-fn open_original(root: &Directory, create: bool) -> Result<File> {
+fn open_original(root: &Directory, name: &str, create: bool) -> Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
     let mut options = fs::OpenOptions::new();
     options.read(true).write(create).create_new(create);
     // Root and all its original ancestors prohibit namespace replacement.
     platform::refuse_link(&mut options).share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
-    Ok(options.open(root.path.join(DATABASE))?)
+    Ok(options.open(root.path.join(name))?)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -220,7 +267,7 @@ impl<'a> Startup<'a> {
                 }
             });
         }
-        let pin = Pin::acquire(root, missing)?;
+        let pin = Pin::acquire(root, DATABASE, missing)?;
         let mode = inspect(&pin, location)?;
         #[cfg(test)]
         AFTER_OBSERVATION.with(|hook| {
@@ -377,7 +424,7 @@ fn empty_sidecars(root: &Directory) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn named_stat(root: &Directory, name: &str) -> std::io::Result<Option<libc::stat>> {
+pub(super) fn named_stat(root: &Directory, name: &str) -> std::io::Result<Option<libc::stat>> {
     let name = std::ffi::CString::new(name)?;
     let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: fixed startup components below the SAME retained parent. Stat
@@ -401,8 +448,8 @@ fn named_stat(root: &Directory, name: &str) -> std::io::Result<Option<libc::stat
     }
 }
 #[cfg(unix)]
-fn named_database(root: &Directory) -> Result<Option<(u64, u64)>> {
-    let Some(metadata) = named_stat(root, DATABASE)? else {
+fn named_file(root: &Directory, name: &str) -> Result<Option<(u64, u64)>> {
+    let Some(metadata) = named_stat(root, name)? else {
         return Ok(None);
     };
     ensure!(
@@ -416,7 +463,7 @@ fn named_database(root: &Directory) -> Result<Option<(u64, u64)>> {
     #[allow(clippy::unnecessary_cast)]
     Ok(Some((metadata.st_dev as u64, metadata.st_ino as u64)))
 }
-fn absent(root: &Directory, name: &str) -> Result<bool> {
+pub(super) fn absent(root: &Directory, name: &str) -> Result<bool> {
     #[cfg(unix)]
     {
         Ok(named_stat(root, name)?.is_none())
@@ -455,3 +502,12 @@ fn after_pin(_pin: &Pin) {
 #[cfg(test)]
 #[path = "store_startup/tests.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+pub(super) type OpenHook = Box<dyn FnOnce(&Directory, &str)>;
+#[cfg(all(test, unix))]
+thread_local! { pub(super) static BEFORE_RAW_OPEN: std::cell::RefCell<Option<OpenHook>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(all(test, unix))]
+pub(super) fn retained_count() -> usize {
+    PINS.lock().unwrap().len()
+}

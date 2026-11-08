@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File},
-    io::{Read, Write},
+    io::Write,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -118,13 +118,7 @@ impl<'a> Original<'a> {
         // SQLite connection may hold process-scoped locks on that same inode.
         let mut db = Input::pinned(&self.pin)?;
         let mut wal = Input::open(&self.root, WAL)?;
-        ensure!(
-            self.root
-                .read_private_optional("state.sqlite3-journal")
-                .map_err(anyhow::Error::msg)?
-                .is_none(),
-            "desktop rollback journal requires recovery before backup"
-        );
+        no_journal(&self.root)?;
         let database = db.copy(&self.root, &backup, &mut budget)?;
         let wal_digest = wal
             .as_mut()
@@ -135,10 +129,7 @@ impl<'a> Original<'a> {
             wal.unchanged(&self.root, &mut budget, wal_digest.as_ref().unwrap())?;
         } else {
             ensure!(
-                self.root
-                    .read_private_optional(WAL)
-                    .map_err(anyhow::Error::msg)?
-                    .is_none(),
+                super::startup::absent(&self.root, WAL)?,
                 "desktop WAL appeared during backup"
             );
         }
@@ -182,11 +173,13 @@ impl<'a> Original<'a> {
             metadata.version.len <= META_LIMIT,
             "desktop backup manifest too large"
         );
-        let mut bytes = Vec::new();
-        let mut manifest_file = &*metadata.file;
-        Read::by_ref(&mut manifest_file)
-            .take(META_LIMIT + 1)
-            .read_to_end(&mut bytes)?;
+        let mut bytes = vec![0u8; metadata.version.len as usize];
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let count = read_at(&metadata.file, &mut bytes[offset..], offset as u64)?;
+            ensure!(count > 0, "desktop backup manifest shrank");
+            offset += count;
+        }
         ensure!(
             bytes.len() <= META_LIMIT as usize,
             "desktop backup manifest too large"
@@ -235,6 +228,14 @@ impl<'a> Original<'a> {
         backup.verify().map_err(anyhow::Error::msg)
     }
 }
+fn no_journal(root: &Directory) -> Result<()> {
+    ensure!(
+        super::startup::absent(root, "state.sqlite3-journal")?,
+        "desktop rollback journal requires recovery before backup"
+    );
+    Ok(())
+}
+
 struct Budget {
     until: Instant,
     remaining: u64,
@@ -296,10 +297,47 @@ fn metadata_version(identity: platform::FileIdentity, metadata: fs::Metadata) ->
         changed,
     }
 }
+fn named_version(root: &Directory, name: &str) -> Result<Version> {
+    #[cfg(unix)]
+    {
+        let metadata = super::startup::named_stat(root, name)?
+            .context("desktop rollback backup input disappeared")?;
+        #[allow(clippy::unnecessary_cast)]
+        Ok(Version {
+            identity: platform::FileIdentity {
+                device: metadata.st_dev as u64,
+                inode: metadata.st_ino as u64,
+                modified: metadata.st_mtime as i64,
+                modified_nanos: metadata.st_mtime_nsec as i64,
+            },
+            len: u64::try_from(metadata.st_size)?,
+            changed: (metadata.st_ctime as i64, metadata.st_ctime_nsec as i64),
+        })
+    }
+    #[cfg(windows)]
+    {
+        let (identity, metadata) = platform::FileIdentity::at(&root.path.join(name))?;
+        Ok(metadata_version(identity, metadata))
+    }
+}
+fn read_at(file: &File, bytes: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        file.read_at(bytes, offset)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileExt;
+        file.seek_read(bytes, offset)
+    }
+}
 struct Input {
     name: &'static str,
     file: Arc<File>,
-    pin: Option<super::startup::Pin>,
+    pin: super::startup::Pin,
+    #[cfg(test)]
+    source: bool,
     version: Version,
 }
 impl Input {
@@ -314,14 +352,16 @@ impl Input {
         Ok(Self {
             name: DATABASE,
             file,
-            pin: Some(pin.clone()),
+            pin: pin.clone(),
+            #[cfg(test)]
+            source: true,
             version,
         })
     }
     fn open(root: &Directory, name: &'static str) -> Result<Option<Self>> {
-        root.read_private_optional(name)
-            .map_err(anyhow::Error::msg)?
-            .map(|file| {
+        super::startup::Pin::input(root, name)?
+            .map(|pin| {
+                let file = pin.file();
                 let version = version(&file)?;
                 ensure!(
                     version.len <= MAX_FILE,
@@ -329,27 +369,28 @@ impl Input {
                 );
                 Ok(Self {
                     name,
-                    file: Arc::new(file),
-                    pin: None,
+                    file,
+                    pin,
+                    #[cfg(test)]
+                    source: false,
                     version,
                 })
             })
             .transpose()
     }
+
     fn verify(&self, root: &Directory) -> Result<()> {
         ensure!(
             version(&self.file)? == self.version,
             "desktop rollback backup input changed"
         );
-        let named = if let Some(pin) = &self.pin {
-            pin.verify()?;
-            // Unix FileIdentity::at is path metadata, not a raw open/close.
-            let (identity, metadata) = platform::FileIdentity::at(&root.path.join(self.name))?;
-            metadata_version(identity, metadata)
-        } else {
-            let named = root.read_private(self.name).map_err(anyhow::Error::msg)?;
-            version(&named)?
-        };
+        #[cfg(test)]
+        if let Some(hook) = BEFORE_INPUT_NAME.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+        self.pin.verify()?;
+        // Unix uses metadata only, never an extra raw alias open/close.
+        let named = named_version(root, self.name)?;
         ensure!(
             named == self.version,
             "desktop rollback backup input replaced"
@@ -368,22 +409,13 @@ impl Input {
         let mut buffer = [0u8; 65536];
         loop {
             budget.read(0)?;
-            #[cfg(unix)]
-            let count = {
-                use std::os::unix::fs::FileExt;
-                self.file.read_at(&mut buffer, total)?
-            };
-            #[cfg(windows)]
-            let count = {
-                use std::os::windows::fs::FileExt;
-                self.file.seek_read(&mut buffer, total)?
-            };
+            let count = read_at(&self.file, &mut buffer, total)?;
             budget.read(count)?;
             if count == 0 {
                 break;
             }
             #[cfg(test)]
-            if self.pin.is_some() {
+            if self.source {
                 if let Some(hook) = DURING_SOURCE_COPY.with(|slot| slot.borrow_mut().take()) {
                     hook();
                 }
@@ -443,6 +475,8 @@ impl Input {
 thread_local! { static INTERRUPT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 #[cfg(test)]
 type CopyHook = Box<dyn FnOnce()>;
+#[cfg(test)]
+thread_local! { static BEFORE_INPUT_NAME: std::cell::RefCell<Option<CopyHook>> = const { std::cell::RefCell::new(None) }; }
 #[cfg(test)]
 thread_local! { static DURING_SOURCE_COPY: std::cell::RefCell<Option<CopyHook>> = const { std::cell::RefCell::new(None) }; }
 #[cfg(test)]

@@ -118,3 +118,18 @@
 .team-working-mode { border: 1px solid color-mix(in srgb, var(--z-color-warn) 55%, var(--z-color-border)); background: color-mix(in srgb, var(--z-color-warn) 6%, var(--z-color-raised)); border-radius: var(--z-radius-lg); padding: 7px 10px; display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
 .team-working-mode b { color: var(--z-color-warn); }
 .team-working-mode ul { margin: 0; padding-left: 18px; font-size: var(--fs-sm); color: var(--z-color-text-3); }
+
+/* Task #314 (F1): an indented member card keeps the pane's right edge, and
+   its badges shrink before the provider chip or Resume is cut. */
+.scard.team-member { left: 24px; right: 2px; width: auto; max-width: calc(100% - 26px); }
+.scard.team-member .sc-l1, .scard.team-member .sc-l2, .scard.team-member .sc-l3, .scard.team-member .sc-foot { right: 6px; }
+.scard.team-member .sc-title { min-width: 0; }
+.scard.team-member .agent-badge { flex: 0 1 auto; min-width: 0; max-width: 104px; }
+.scard.team-member .sc-l3 > .ell { min-width: 0; }
+/* Task #314 (F10): New team fills the window; only the form body scrolls and
+   the footer stays visible instead of a second page scrollbar. */
+.newteam-page, .newteam-page.embedded { width: 100%; max-width: none; box-sizing: border-box; overflow: hidden; }
+.newteam-page .nt { width: 100%; max-width: none; }
+.newteam-page .nt-split { width: 100%; min-width: 0; }
+.newteam-page .nt-body, .newteam-page .nt-lead-pane { min-width: 0; }
+.newteam-page .nt-foot { position: relative; z-index: 1; background: var(--z-color-page); }

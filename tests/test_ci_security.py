@@ -2141,10 +2141,10 @@ class PullRequestRunCancellationTests(unittest.TestCase):
             with patch("sys.stdout", new_callable=io.StringIO):
                 namespace["sweep"](call, sleep, 7, "feature", "ufna/zerus", 12, closed)
 
-        def run(number, status="queued", linked=(7,)):
+        def run(number, status="queued", linked=(7,), attempt=1):
             return {"id": number, "event": "pull_request", "status": status, "head_branch": "feature",
                     "head_repository": {"full_name": "ufna/zerus"}, "created_at": "2026-11-08T11:00:00Z",
-                    "pull_requests": [{"number": value} for value in linked]}
+                    "pull_requests": [{"number": value} for value in linked], "run_attempt": attempt}
 
         def harness(first, second, failures=()):
             """A fake gh api: two listings around the one wait, and every POST."""
@@ -2166,6 +2166,12 @@ class PullRequestRunCancellationTests(unittest.TestCase):
         sweep(call, sleep)
         self.assertEqual(waits, [60])
         self.assertEqual(calls, [["1", "cancel"], ["2", "cancel"], ["1", "force-cancel"], ["4", "cancel"]])
+        # A re-run keeps its ID with a new attempt: attempt 2 of run 5, started
+        # during the wait after attempt 1 honoured its cancel, gets an ordinary
+        # cancel, never a force-cancel (zerus-b8zze.2.1).
+        call, sleep, calls, waits = harness([run(1), run(5)], [run(1), run(5, attempt=2)])
+        sweep(call, sleep)
+        self.assertEqual(calls, [["1", "cancel"], ["5", "cancel"], ["1", "force-cancel"], ["5", "cancel"]])
         # Nothing to cancel: no wait and no second listing.
         call, sleep, calls, waits = harness([run(3, linked=(8,))], [])
         sweep(call, sleep)

@@ -17,6 +17,8 @@ export interface VoiceShown {
   provider: number | null; provider_enabled: boolean; provider_placeholder: string; provider_tooltip: string;
   refresh_enabled: boolean; refresh_label: string; send_label: string; send_enabled: boolean;
   notice_visible: boolean; notice_label: string; notice_detail: string;
+  /** The notice is the microphone permission's: its chip reopens the recovery. */
+  notice_permission?: boolean;
 }
 export type VoiceAsk = { kind: "cold_cache"; warning: string; ticket: number } | { kind: "discard"; session: string; ticket: number };
 export type VoiceInput = { kind: "update"; input_visible: boolean } | { kind: "press" | "send" | "discard" | "refresh" }
@@ -42,6 +44,8 @@ export function createVoice(port: VoicePort, owner: string = crypto.randomUUID()
   const [shown, setShown] = createSignal<VoiceShown>();
   const [ask, setAsk] = createSignal<VoiceAsk>();
   const [permission, setPermission] = createSignal(false);
+  /** The notice text the chip opened, as it read then (Qt's modal showResult). */
+  const [notice, setNotice] = createSignal<string>();
   const [error, setError] = createSignal("");
   const [frame, setFrame] = createSignal<Uint8Array>();
   const [mirrored, setMirrored] = createSignal(false);
@@ -89,7 +93,7 @@ export function createVoice(port: VoicePort, owner: string = crypto.randomUUID()
     finally { changing = false; }
   };
   return {
-    shown, ask, permission, frame, mirrored, error, stopPlayback, owner,
+    shown, ask, permission, notice, frame, mirrored, error, stopPlayback, owner,
     follow(next: VoiceContext | undefined) {
       const identity = JSON.stringify(next);
       if (identity === scope || closed) return;
@@ -99,7 +103,7 @@ export function createVoice(port: VoicePort, owner: string = crypto.randomUUID()
       if (!next && previous && opened) {
         void opened.then(() => { if (!closed && !context) return port.input(owner, previous.handle, { kind: "stop", forget_send: true }); }).catch(() => {});
       }
-      if (moved) { setShown(undefined); setFrame(undefined); setAsk(undefined); setPermission(false); setStopPlayback((n) => n + 1); }
+      if (moved) { setShown(undefined); setFrame(undefined); setAsk(undefined); setPermission(false); setNotice(undefined); setStopPlayback((n) => n + 1); }
       if (!next) return;
       if (!opened) {
         opened = port.open(owner, receive, (bytes) => { if (!closed && shown()?.key === context?.key && shown()?.video_preview) setFrame(bytes); });
@@ -110,8 +114,16 @@ export function createVoice(port: VoicePort, owner: string = crypto.randomUUID()
     input,
     confirm(confirmed: boolean) { const current = ask(); setAsk(undefined); if (current) void input({ kind: "confirm", ticket: current.ticket, confirmed }); },
     closePermission() { setPermission(false); },
+    /** The notice chip: the microphone recovery for a permission notice, else the full notice (Qt's showResult). */
+    openNotice() {
+      const current = shown();
+      if (!current?.notice_visible || current.key !== context?.key) return;
+      if (current.notice_permission) setPermission(true);
+      else setNotice(current.notice_detail);
+    },
+    closeNotice() { setNotice(undefined); },
     async close() {
-      closed = true; context = undefined; setShown(undefined); setFrame(undefined); setAsk(undefined);
+      closed = true; context = undefined; setShown(undefined); setFrame(undefined); setAsk(undefined); setNotice(undefined);
       try { await opened; if (opened) await port.close(owner); } catch { /* Opening failed; no action to retry. */ }
     },
   };

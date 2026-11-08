@@ -61,25 +61,45 @@ function pushText(out: Inline[], text: string) {
   else out.push({ kind: "text", text });
 }
 
-function inlines(tokens: Token[] | undefined, out: Inline[] = []): Inline[] {
+/** The lexer of the parse in progress, for an inline code span's address (`codeLink`). */
+let parsing: typeof MarkedLexer | undefined;
+
+/**
+ * The link of inline code that is exactly one bare http(s):// or www.
+ * address, as the bare URL autolink reads it, or undefined: an address
+ * quoted as code links like [`url`](url) (MarkdownHtml.cpp:299-311,375-408).
+ */
+function codeLink(text: string): string | undefined {
+  if (!parsing || !/^(?:https?:\/\/|www\.)/i.test(text)) return undefined;
+  const tokens = parsing.lexInline(text, { gfm: true, breaks: false });
+  const [only] = tokens;
+  return tokens.length === 1 && only.type === "link" && only.raw === text && linkKind(only.href) === "external" ? only.href : undefined;
+}
+
+function inlines(tokens: Token[] | undefined, out: Inline[] = [], inLink = false): Inline[] {
   for (const token of tokens ?? []) {
     switch (token.type) {
       case "text":
-        if ("tokens" in token && token.tokens?.length) inlines(token.tokens, out);
+        if ("tokens" in token && token.tokens?.length) inlines(token.tokens, out, inLink);
         else pushText(out, decodeEntities(token.text));
         break;
       case "escape": pushText(out, token.text); break;
-      case "codespan": out.push({ kind: "code", text: decodeEntities(token.text) }); break;
+      case "codespan": {
+        const text = decodeEntities(token.text);
+        const href = inLink ? undefined : codeLink(text);
+        out.push(href ? { kind: "external", href, children: [{ kind: "code", text }] } : { kind: "code", text });
+        break;
+      }
       case "br": out.push({ kind: "br" }); break;
-      case "strong": out.push({ kind: "bold", children: inlines(token.tokens) }); break;
-      case "em": out.push({ kind: "em", children: inlines(token.tokens) }); break;
-      case "del": out.push({ kind: "del", children: inlines(token.tokens) }); break;
+      case "strong": out.push({ kind: "bold", children: inlines(token.tokens, [], inLink) }); break;
+      case "em": out.push({ kind: "em", children: inlines(token.tokens, [], inLink) }); break;
+      case "del": out.push({ kind: "del", children: inlines(token.tokens, [], inLink) }); break;
       case "link":
       case "image": {
         // An image is only a link to its target: nothing is fetched to show it.
         const link = token as Tokens.Link | Tokens.Image;
         const kind = linkKind(link.href);
-        const children = token.type === "image" ? [{ kind: "text" as const, text: decodeEntities(link.text || link.href) }] : inlines(link.tokens);
+        const children = token.type === "image" ? [{ kind: "text" as const, text: decodeEntities(link.text || link.href) }] : inlines(link.tokens, [], true);
         if (kind) out.push({ kind, href: link.href, children });
         else pushText(out, link.raw);
         break;
@@ -138,7 +158,8 @@ export function plainBlocks(text: string): MarkdownBlock[] {
 /** The pure parse, for tests and for the loaded lexer. */
 export function parseMarkdown(text: string, lexer: typeof MarkedLexer): MarkdownBlock[] {
   if (text.length > MAX_SOURCE) return plainBlocks(text);
-  return blocks(lexer.lex(text, { gfm: true, breaks: false }), 0);
+  parsing = lexer;
+  try { return blocks(lexer.lex(text, { gfm: true, breaks: false }), 0); } finally { parsing = undefined; }
 }
 
 let lexer: typeof MarkedLexer | undefined;

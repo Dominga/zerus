@@ -1732,24 +1732,54 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn a_linux_holder_with_a_deleted_binary_runs_and_an_unreadable_one_is_gone() {
-        let dir = scratch("deleted");
+    fn check_deleted_holder(
+        fixture: &str,
+        start: impl FnOnce(&Path) -> std::process::Child,
+        mut before_exec: impl FnMut(&mut std::process::Child),
+    ) {
+        use std::os::unix::fs::MetadataExt;
+        struct Owned(std::process::Child);
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                if self.0.try_wait().unwrap().is_none() {
+                    self.0.kill().unwrap();
+                }
+                self.0.wait().unwrap();
+            }
+        }
+        let dir = scratch(fixture);
         let holder = dir.join("zci-holder");
-        let mut child = {
+        let mut child = Owned({
             // No other test forks while the copy is open for writing (ETXTBSY).
             let _tree = crate::PROCESS_TREE
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             fs::copy("/bin/sleep", &holder).unwrap();
-            Command::new(&holder)
-                .arg("30")
-                .stdin(Stdio::null())
-                .spawn()
-                .unwrap()
-        };
+            start(&holder)
+        });
+        let expected = fs::metadata(&holder).unwrap();
+        let until = Instant::now() + Duration::from_secs(3);
+        // Spawn completion is not the fixture's native executable observation.
+        // Keep the file until this original Child actually runs its object.
+        loop {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "holder exited before exec"
+            );
+            if fs::metadata(format!("/proc/{}/exe", child.0.id()))
+                .is_ok_and(|seen| (seen.dev(), seen.ino()) == (expected.dev(), expected.ino()))
+            {
+                break;
+            }
+            before_exec(&mut child.0);
+            assert!(
+                Instant::now() < until,
+                "original holder executable was not observed"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
         fs::remove_file(&holder).unwrap();
-        let pid = i64::from(child.id());
+        let pid = i64::from(child.0.id());
         let name = process_name(pid);
         let own = LockInfo::own();
         let info = LockInfo {
@@ -1758,14 +1788,30 @@ mod tests {
             host: own.host.clone(),
         };
         let stale = is_stale(Some(&info), Duration::from_secs(1), &own.host, process_name);
-        let _ = child.kill();
-        let _ = child.wait();
+        let _ = child.0.kill();
+        let _ = child.0.wait();
         assert_eq!(
             name,
             Some(Some("zci-holder".to_owned())),
             "the deleted binary keeps its name"
         );
         assert!(!stale, "its holder still runs");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_linux_holder_with_a_deleted_binary_runs_and_an_unreadable_one_is_gone() {
+        check_deleted_holder(
+            "deleted",
+            |holder| {
+                Command::new(holder)
+                    .arg("30")
+                    .stdin(Stdio::null())
+                    .spawn()
+                    .unwrap()
+            },
+            |_| {},
+        );
         // SAFETY: geteuid cannot fail.
         if unsafe { libc::geteuid() } != 0 {
             // PID 1 can be our own readable namespace init in local CI. Use
@@ -1797,6 +1843,33 @@ mod tests {
                 "the original live child's executable link is unreadable"
             );
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn deleted_holder_waits_for_the_original_exec_before_unlinking() {
+        let mut released = false;
+        check_deleted_holder(
+            "exec-gate",
+            |holder| {
+                Command::new("/bin/sh")
+                    .args(["-c", "read -r gate || exit 71; exec \"$1\" 30", "fixture"])
+                    .arg(holder)
+                    .stdin(Stdio::piped())
+                    .spawn()
+                    .unwrap()
+            },
+            |child| {
+                if !released {
+                    child.stdin.take().unwrap().write_all(b"go\n").unwrap();
+                    released = true;
+                }
+            },
+        );
+        assert!(
+            released,
+            "the original was observed before its fixture exec"
+        );
     }
 
     /// A PID whose process has exited and been reaped.

@@ -107,39 +107,43 @@ pub(in crate::platform) fn sample(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(_) => return Err(error()),
         };
-        // An exited leader with live tasks is a live process (zerus-lo8o1).
-        let tasks = match task_plan(&path, pid, before.1, deadline) {
-            Ok(Some(tasks)) => tasks,
-            Ok(None) => continue,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !path.exists() => continue,
-            Err(_) => return Err(error()),
-        };
+        // An exited leader with live tasks is a live process (zerus-lo8o1),
+        // read through one stable observation of its tasks.
         let links = |task: &Path| {
             [
                 fs::read_link(task.join("cwd")),
                 fs::read_link(task.join("root")),
             ]
         };
-        let mut contexts = Vec::from(links(&tasks.reference));
-        let image = fs::read_link(tasks.reference.join("exe"));
-        let files = files(&tasks.reference, deadline);
-        // Further tasks with an fs context or descriptor table of their own;
-        // a task gone meanwhile has none.
-        for task in &tasks.fs {
-            for link in links(task) {
-                match link {
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound && !task.exists() => {}
-                    other => contexts.push(other),
+        let reads = inspect(&path, pid, before.1, deadline, |tasks| {
+            let mut contexts = Vec::from(links(&tasks.reference));
+            let image = fs::read_link(tasks.reference.join("exe"));
+            let files = files(&tasks.reference, deadline);
+            // Further tasks with an fs context or descriptor table of their
+            // own; a task gone meanwhile has none.
+            for task in &tasks.fs {
+                for link in links(task) {
+                    match link {
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !task.exists() => {}
+                        other => contexts.push(other),
+                    }
                 }
             }
-        }
-        let mut tables = Vec::new();
-        for task in &tasks.files {
-            match self::files(task, deadline) {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound && !task.exists() => {}
-                other => tables.push(other),
+            let mut tables = Vec::new();
+            for task in &tasks.files {
+                match self::files(task, deadline) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound && !task.exists() => {}
+                    other => tables.push(other),
+                }
             }
-        }
+            Ok((contexts, image, files, tables))
+        });
+        let (contexts, image, files, tables) = match reads {
+            Ok(Some(reads)) => reads,
+            Ok(None) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !path.exists() => continue,
+            Err(_) => return Err(error()),
+        };
         let after = match identity(&path) {
             Ok(after) => after,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -148,18 +152,13 @@ pub(in crate::platform) fn sample(
         if after.1 != before.1 {
             // The leader exited during the reads: only a group with no live
             // task left has exited.
-            if !before.1 && matches!(task_plan(&path, pid, true, deadline), Ok(None)) {
+            if !before.1 && matches!(group_exited(&path, pid, deadline), Ok(true)) {
                 continue;
             }
             return Err(error());
         }
         if before != after {
             return Err(error());
-        }
-        if let Some(live) = &tasks.live {
-            if live_tasks(&path, pid, deadline).map_err(|_| error())? != *live {
-                return Err(error());
-            }
         }
         let name = read(&path.join("comm"))
             .map(|s| s.trim().to_owned())
@@ -293,6 +292,7 @@ fn shares(reference: u32, other: u32, kind: libc::c_int) -> bool {
 /// thread group need not share one fs context or descriptor table, and its
 /// leader can exit while other tasks live on, so the leader's own entry
 /// alone proves nothing then.
+#[derive(PartialEq)]
 struct Tasks {
     /// Read for its cwd, root and descriptors: the leader's own entry while
     /// the leader lives, otherwise the first live task's.
@@ -305,12 +305,21 @@ struct Tasks {
     /// Further live tasks with a descriptor table of their own, or that kcmp
     /// could not compare: read for their descriptors.
     files: Vec<PathBuf>,
-    /// For an exited leader: the live tasks, which must be the same after
-    /// the reads.
-    live: Option<Vec<u32>>,
 }
 
-fn task_ids(process: &Path, deadline: Instant) -> io::Result<Vec<u32>> {
+/// One observed task: its ID and whether it has exited.
+struct Task {
+    id: u32,
+    exited: bool,
+}
+
+/// One observation of a process's tasks, sorted by ID. Each task's own state
+/// is read only while the leader has `exited`, to find the live ones. A live
+/// leader's tasks are all taken as live: an exited one has no fs context or
+/// descriptor table for kcmp to match, so it is read itself, and its missing
+/// cwd is uncertainty. A task gone between the listing and its state read is
+/// not in the observation; any other read error is uncertainty.
+fn task_set(process: &Path, exited: bool, deadline: Instant) -> io::Result<Vec<Task>> {
     let mut ids = Vec::new();
     for (count, entry) in fs::read_dir(process.join("task"))?.enumerate() {
         bounded(count, deadline)?;
@@ -323,57 +332,67 @@ fn task_ids(process: &Path, deadline: Instant) -> io::Result<Vec<u32>> {
         }
     }
     ids.sort_unstable();
-    Ok(ids)
-}
-
-/// The live tasks of a group whose leader exited, each by its own state. A
-/// task gone meanwhile is left out; any other read error is uncertainty.
-fn live_tasks(process: &Path, pid: u32, deadline: Instant) -> io::Result<Vec<u32>> {
-    let mut live = Vec::new();
-    for tid in task_ids(process, deadline)? {
-        if tid == pid {
+    let mut tasks = Vec::with_capacity(ids.len());
+    for (count, id) in ids.into_iter().enumerate() {
+        bounded(count, deadline)?;
+        if !exited {
+            tasks.push(Task { id, exited: false });
             continue;
         }
-        let task = process.join("task").join(tid.to_string());
+        let task = process.join("task").join(id.to_string());
         match identity(&task) {
-            Ok((_, false, _)) => live.push(tid),
-            Ok(_) => {}
+            Ok((_, exited, _)) => tasks.push(Task { id, exited }),
             Err(e) if e.kind() == io::ErrorKind::NotFound && !task.exists() => {}
             Err(e) => return Err(e),
         }
     }
-    Ok(live)
+    Ok(tasks)
 }
 
-/// The tasks to read for `process`, whose leader is `exited` or not. None:
-/// the leader exited and no task of its group lives.
+/// Whether two observations list the same task IDs.
+///
+/// An ID alone identifies a task here (zerus-lo8o1.1). The kernel allocates
+/// task IDs cyclically up to pid_max (4194304 with systemd's 64-bit default,
+/// 32768 by kernel default), so a task replaced under its own ID inside one
+/// read window would need a wraparound of the whole ID space within that
+/// window. Same-UID processes are the trust boundary anyway. The leader keeps
+/// its pid and start-time identity, which the callers check around the reads.
+fn same_tasks(before: &[Task], after: &[Task]) -> bool {
+    before
+        .iter()
+        .map(|task| task.id)
+        .eq(after.iter().map(|task| task.id))
+}
+
+/// The tasks to read for `process` from one observation, its leader
+/// `exited` or not. None: the leader exited and no task of its group lives.
 fn task_plan(
     process: &Path,
     pid: u32,
     exited: bool,
+    set: &[Task],
     deadline: Instant,
 ) -> io::Result<Option<Tasks>> {
-    let (reference_id, reference, others, live) = if exited {
-        let live = live_tasks(process, pid, deadline)?;
-        let Some(&first) = live.first() else {
+    // An exited task other than the leader has released its fs context and
+    // descriptor table: there is nothing of it to read.
+    let mut live = set.iter().filter(|task| task.id != pid && !task.exited);
+    let (reference_id, reference) = if exited {
+        let Some(first) = live.next() else {
             return Ok(None);
         };
-        let reference = process.join("task").join(first.to_string());
-        (first, reference, live[1..].to_vec(), Some(live))
+        (first.id, process.join("task").join(first.id.to_string()))
     } else {
-        let mut others = task_ids(process, deadline)?;
-        others.retain(|&tid| tid != pid);
-        (pid, process.to_path_buf(), others, None)
+        (pid, process.to_path_buf())
     };
     let (mut fs_tasks, mut files_tasks) = (Vec::new(), Vec::new());
-    for (count, &tid) in others.iter().enumerate() {
+    for (count, task) in live.enumerate() {
         bounded(count, deadline)?;
-        let task = process.join("task").join(tid.to_string());
-        if !shares(reference_id, tid, KCMP_FS) {
-            fs_tasks.push(task.clone());
+        let path = process.join("task").join(task.id.to_string());
+        if !shares(reference_id, task.id, KCMP_FS) {
+            fs_tasks.push(path.clone());
         }
-        if !shares(reference_id, tid, KCMP_FILES) {
-            files_tasks.push(task);
+        if !shares(reference_id, task.id, KCMP_FILES) {
+            files_tasks.push(path);
         }
     }
     Ok(Some(Tasks {
@@ -381,8 +400,51 @@ fn task_plan(
         leader: !exited,
         fs: fs_tasks,
         files: files_tasks,
-        live,
     }))
+}
+
+/// Attempts at one stable observation of a process's tasks.
+const ATTEMPTS: usize = 4;
+
+/// Reads one process through its tasks (zerus-lo8o1, zerus-lo8o1.1). The
+/// task set, by ID, and the plan's kcmp sharing decisions are observed
+/// before and after the reads, and only an unchanged observation lets the
+/// reads stand. A task gone during them may have handed
+/// its context to a task created since; a task left out as sharing the
+/// reference may have unshared and kept a context the reference then left.
+/// A changed observation is read again, within ATTEMPTS and the deadline,
+/// and is never absence. None: the leader exited and no task of its group
+/// lives.
+fn inspect<T>(
+    process: &Path,
+    pid: u32,
+    exited: bool,
+    deadline: Instant,
+    mut read: impl FnMut(&Tasks) -> io::Result<T>,
+) -> io::Result<Option<T>> {
+    for _ in 0..ATTEMPTS {
+        let set = task_set(process, exited, deadline)?;
+        let Some(tasks) = task_plan(process, pid, exited, &set, deadline)? else {
+            return Ok(None);
+        };
+        #[cfg(test)]
+        roster::after_plan();
+        let result = read(&tasks);
+        let after = task_set(process, exited, deadline)?;
+        if same_tasks(&set, &after)
+            && task_plan(process, pid, exited, &after, deadline)?.as_ref() == Some(&tasks)
+        {
+            return result.map(Some);
+        }
+    }
+    Err(limit())
+}
+
+/// Whether a group whose leader exited has no live task left.
+fn group_exited(process: &Path, pid: u32, deadline: Instant) -> io::Result<bool> {
+    Ok(!task_set(process, true, deadline)?
+        .iter()
+        .any(|task| task.id != pid && !task.exited))
 }
 
 /// The process ID an entry names: its own number, or /proc/self's target.
@@ -402,8 +464,7 @@ pub(super) fn member(
 ) -> io::Result<bool> {
     member_with_holder(process, inventory, None, deadline)
 }
-/// One process's membership, its identity and, for an exited leader, its
-/// live tasks unchanged across the reads.
+/// One process's membership, its identity unchanged across the reads.
 fn member_with_holder(
     process: &Path,
     inventory: &objects::Inventory,
@@ -413,17 +474,13 @@ fn member_with_holder(
     let pid = process_id(process)?;
     let before = identity(process)?;
     // A group with no live task has no cwd to read: as before, NotFound.
-    let tasks = task_plan(process, pid, before.1, deadline)?
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "the process has exited"))?;
-    let found = member_tasks(&tasks, inventory, root, deadline)?;
+    let found = inspect(process, pid, before.1, deadline, |tasks| {
+        member_tasks(tasks, inventory, root, deadline)
+    })?
+    .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "the process has exited"))?;
     let after = identity(process)?;
     if before != after {
         return Err(limit());
-    }
-    if let Some(live) = &tasks.live {
-        if live_tasks(process, pid, deadline)? != *live {
-            return Err(limit());
-        }
     }
     Ok(found)
 }
@@ -453,8 +510,9 @@ fn member_tasks(
     Ok(found)
 }
 
-/// A further task's result: a task gone meanwhile has no membership. A
-/// missing read while its entry still exists stays uncertainty.
+/// A further task's result: a task gone meanwhile has no membership of its
+/// own; the changed task set then has the process read again. A missing
+/// read while its entry still exists stays uncertainty.
 fn vanished_or(task: &Path, result: io::Result<bool>) -> io::Result<bool> {
     match result {
         Err(e) if e.kind() == io::ErrorKind::NotFound && !task.exists() => Ok(false),
@@ -626,6 +684,20 @@ pub(crate) mod roster {
 
     thread_local! {
         static OWNED: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+        static AFTER_PLAN: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+    }
+
+    /// Runs this thread's hook, once, between a process's task plan and its
+    /// reads: a control's change to its own synthetic entry while the census
+    /// is inside one process (zerus-lo8o1.1).
+    pub(crate) fn after_plan() {
+        let hook = AFTER_PLAN.with(|hook| hook.borrow_mut().take());
+        if let Some(mut hook) = hook {
+            hook();
+        }
+    }
+    pub(crate) fn on_plan(hook: impl FnMut() + 'static) {
+        AFTER_PLAN.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
     }
 
     /// The directory this thread's census lists.
@@ -649,6 +721,7 @@ pub(crate) mod roster {
     impl Drop for Owned {
         fn drop(&mut self) {
             OWNED.with(|owned| *owned.borrow_mut() = None);
+            AFTER_PLAN.with(|hook| *hook.borrow_mut() = None);
         }
     }
 
@@ -715,16 +788,15 @@ fn collect_programs(
             }
             let before = identity(&process)?;
             // An exited leader with live tasks is a live process (zerus-lo8o1).
-            let Some(tasks) = task_plan(&process, pid, before.1, deadline)? else {
-                return Ok(None);
-            };
             let root = holder.and_then(|h| h.root_for(pid));
-            let membership = member_tasks(&tasks, inventory, root, deadline);
+            let membership = inspect(&process, pid, before.1, deadline, |tasks| {
+                member_tasks(tasks, inventory, root, deadline)
+            });
             let after = identity(&process)?;
             if after.1 != before.1 {
                 // The leader exited during the reads: only a group with no
                 // live task left has exited.
-                if !before.1 && task_plan(&process, pid, true, deadline)?.is_none() {
+                if !before.1 && group_exited(&process, pid, deadline)? {
                     return Ok(None);
                 }
                 return Err(limit());
@@ -732,12 +804,7 @@ fn collect_programs(
             if before != after {
                 return Err(limit());
             }
-            if let Some(live) = &tasks.live {
-                if live_tasks(&process, pid, deadline)? != *live {
-                    return Err(limit());
-                }
-            }
-            if !membership? {
+            if membership? != Some(true) {
                 return Ok(None);
             }
             if root.is_some() || invocation.get(&pid) == Some(&before.0) {
@@ -932,29 +999,61 @@ for op in sys.stdin:
         fs::write(&outside, b"other").unwrap();
         let until = || Instant::now() + std::time::Duration::from_secs(3);
         let scope = objects::Scope::open(&root, until()).unwrap();
-        let original = fs::File::open(&inside).unwrap();
-        let id = native_object(&PathBuf::from(format!(
-            "/proc/self/fd/{}",
-            std::os::fd::AsRawFd::as_raw_fd(&original)
-        )))
-        .unwrap();
+        // A single-threaded holder outside the checkout opens each file. This
+        // test process is no subject: libtest starts a thread for every test,
+        // so its task set never holds still for the one stable observation
+        // membership needs (zerus-lo8o1.1).
+        let (holder, mut hold) = holder(parent.path());
+        let process = PathBuf::from(format!("/proc/{}", holder.pid()));
+        let id = native_object(&process.join("fd").join(hold(&inside))).unwrap();
         assert!(scope.inventory(until()).unwrap().contains(id));
         let inventory = scope.inventory(until()).unwrap();
         drop(scope); // The observer's intentional root pin is not test evidence.
-        assert!(member(Path::new("/proc/self"), &inventory, until()).unwrap());
+        assert!(member(&process, &inventory, until()).unwrap());
         fs::rename(&inside, parent.path().join("moved-away")).unwrap();
         fs::write(&inside, b"replacement").unwrap();
         let scope = objects::Scope::open(&root, until()).unwrap();
         let inventory = scope.inventory(until()).unwrap();
         drop(scope);
         assert!(!inventory.contains(id));
-        assert!(!member(Path::new("/proc/self"), &inventory, until()).unwrap());
+        assert!(!member(&process, &inventory, until()).unwrap());
         std::os::unix::fs::symlink(&outside, root.join("outside-alias")).unwrap();
-        let _other = fs::File::open(root.join("outside-alias")).unwrap();
+        hold(&root.join("outside-alias"));
         let scope = objects::Scope::open(&root, until()).unwrap();
         let inventory = scope.inventory(until()).unwrap();
         drop(scope);
-        assert!(!member(Path::new("/proc/self"), &inventory, until()).unwrap());
+        assert!(!member(&process, &inventory, until()).unwrap());
+    }
+
+    /// A single-threaded python3 child in `cwd` that opens each path it is
+    /// given and answers with the descriptor number.
+    fn holder(cwd: &Path) -> (Python, impl FnMut(&Path) -> String) {
+        use std::io::{BufRead, Write};
+        let mut child = std::process::Command::new("python3")
+            .args([
+                "-I",
+                "-c",
+                "import os,sys\nfor path in sys.stdin:\n    print(os.open(path[:-1],os.O_RDONLY),flush=True)\n",
+            ])
+            .current_dir(cwd)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+        let hold = move |path: &Path| {
+            writeln!(input, "{}", path.to_str().unwrap()).unwrap();
+            let mut line = String::new();
+            output.read_line(&mut line).unwrap();
+            let descriptor = line.trim().to_owned();
+            assert!(
+                descriptor.parse::<u32>().is_ok(),
+                "the holder did not open {path:?}"
+            );
+            descriptor
+        };
+        (Python(child), hold)
     }
 
     /// zerus-89pkd: the census of a test build lists /proc unless a test owns
@@ -1239,6 +1338,221 @@ for op in sys.stdin:
             io::ErrorKind::NotFound,
             "the first live task without a cwd"
         );
+        drop(owned);
+    }
+
+    /// zerus-lo8o1.1, review-win-e's replacement control on #1869: a further
+    /// task that holds the checkout, through its fs context or its own
+    /// descriptor table, hands it to a task created after the plan, then
+    /// exits, so the process occupies the checkout throughout. The changed
+    /// task set is read again: the census, member() and sample() see the
+    /// replacement, never absence. A task that exits without a replacement
+    /// leaves nothing behind.
+    #[test]
+    fn a_context_handed_on_during_the_reads_is_never_absence() {
+        let (_dir, root, _scope, inventory) = checkout();
+        let owned = roster::owned(&[]);
+        let pid = i32::MAX as u32;
+        let entry = owned.path().join(pid.to_string());
+        synthetic(&entry, 'S');
+        fs::create_dir(entry.join("task")).unwrap();
+        for link in ["cwd", "root"] {
+            std::os::unix::fs::symlink("/", entry.join(link)).unwrap();
+        }
+        let worker = entry.join("task").join((pid - 2).to_string());
+        let next = entry.join("task").join((pid - 1).to_string());
+        // An occupant through its cwd, or through its own descriptor table:
+        // a descriptor for a file in the checkout, its cwd outside.
+        let occupant = |task: &Path, root: &Path, table: bool| {
+            synthetic(task, 'S');
+            let cwd = if table { Path::new("/") } else { root };
+            std::os::unix::fs::symlink(cwd, task.join("cwd")).unwrap();
+            std::os::unix::fs::symlink("/", task.join("root")).unwrap();
+            if table {
+                std::os::unix::fs::symlink(root.join("held"), task.join("fd").join("3")).unwrap();
+            }
+        };
+        for table in [false, true] {
+            // The worker is planned; between the plan and the reads it hands
+            // its context to `next` (or to nothing) and exits.
+            let arm = |hand_on: bool| {
+                let _ = fs::remove_dir_all(&next);
+                occupant(&worker, &root, table);
+                let (worker, next, root) = (worker.clone(), next.clone(), root.clone());
+                roster::on_plan(move || {
+                    if hand_on {
+                        occupant(&next, &root, table);
+                    }
+                    fs::remove_dir_all(&worker).unwrap();
+                });
+            };
+            arm(true);
+            assert!(
+                programs(&inventory, soon())
+                    .unwrap()
+                    .iter()
+                    .any(|p| p.pid == pid),
+                "a live leader's continuous checkout occupant was reported absent ({table})"
+            );
+            assert!(next.exists());
+            arm(true);
+            assert!(
+                member_with_holder(&entry, &inventory, None, soon()).unwrap(),
+                "{table}"
+            );
+            arm(true);
+            assert!(sampled(pid, &root), "sample ({table})");
+            arm(false);
+            assert!(
+                programs(&inventory, soon()).unwrap().is_empty(),
+                "gone alone ({table})"
+            );
+            arm(false);
+            assert!(
+                !member_with_holder(&entry, &inventory, None, soon()).unwrap(),
+                "{table}"
+            );
+            arm(false);
+            assert!(!sampled(pid, &root), "sample gone alone ({table})");
+        }
+        drop(owned);
+    }
+
+    /// zerus-lo8o1.1, review-win-e's kcmp-lifetime variant on #1869: a real
+    /// thread that shares the leader's fs context in the checkout is left out
+    /// of the plan. Between the plan and the reads it unshares, keeping that
+    /// cwd, and the leader moves out. The tasks are the same, but the plan's
+    /// sharing no longer holds, so the process is read again: an occupant
+    /// for the census, member() and sample() alike.
+    #[test]
+    fn a_thread_that_unshares_after_the_plan_is_read_again() {
+        use std::io::{BufRead, Write};
+        let away = tempfile::tempdir().unwrap();
+        for reader in ["census", "member", "sample"] {
+            let (_dir, root, _scope, inventory) = checkout();
+            let mut child = std::process::Command::new("python3")
+                .args([
+                    "-I",
+                    "-c",
+                    "import ctypes,os,sys,threading,time\ngo=threading.Event()\nmoved=threading.Event()\ndef work():\n    go.wait(30)\n    assert ctypes.CDLL(None,use_errno=True).unshare(0x200)==0\n    moved.set()\n    time.sleep(30)\nthreading.Thread(target=work,daemon=True).start()\nprint('ready',flush=True)\nsys.stdin.readline()\ngo.set()\nmoved.wait(5)\nos.chdir(sys.argv[1])\nprint('moved',flush=True)\ntime.sleep(30)\n",
+                    away.path().to_str().unwrap(),
+                ])
+                .current_dir(&root)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut input = child.stdin.take().unwrap();
+            let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+            let child = Python(child);
+            let mut line = String::new();
+            output.read_line(&mut line).unwrap();
+            assert_eq!(line, "ready\n", "the control child did not start");
+            let process = PathBuf::from(format!("/proc/{}", child.pid()));
+            let threads: Vec<u32> = fs::read_dir(process.join("task"))
+                .unwrap()
+                .map(|entry| {
+                    entry
+                        .unwrap()
+                        .file_name()
+                        .to_str()
+                        .unwrap()
+                        .parse()
+                        .unwrap()
+                })
+                .filter(|tid| *tid != child.pid())
+                .collect();
+            assert_eq!(threads.len(), 1);
+            assert!(
+                shares(child.pid(), threads[0], KCMP_FS),
+                "the plan leaves the thread out"
+            );
+            let _owned = roster::owned(&[child.pid()]);
+            roster::on_plan(move || {
+                writeln!(input, "go").unwrap();
+                let mut line = String::new();
+                output.read_line(&mut line).unwrap();
+                assert_eq!(line, "moved\n");
+            });
+            let found = match reader {
+                "census" => programs(&inventory, soon())
+                    .unwrap()
+                    .iter()
+                    .any(|row| row.pid == child.pid()),
+                "member" => member(&process, &inventory, soon()).unwrap(),
+                _ => sampled(child.pid(), &root),
+            };
+            assert!(
+                !inventory.contains(native_object(&process.join("cwd")).unwrap()),
+                "the leader moved out"
+            );
+            assert!(found, "{reader}");
+        }
+    }
+
+    /// zerus-lo8o1.1: a task set that changes on every observation within
+    /// the bounded attempts never establishes absence: uncertainty.
+    #[test]
+    fn a_task_set_that_never_settles_is_uncertainty() {
+        fn churn(entry: PathBuf, next: u32) {
+            roster::on_plan(move || {
+                let task = entry.join("task").join(next.to_string());
+                synthetic(&task, 'S');
+                for link in ["cwd", "root"] {
+                    std::os::unix::fs::symlink("/", task.join(link)).unwrap();
+                }
+                churn(entry.clone(), next - 1);
+            });
+        }
+        let (_dir, _root, _scope, inventory) = checkout();
+        let owned = roster::owned(&[]);
+        let pid = i32::MAX as u32;
+        let entry = owned.path().join(pid.to_string());
+        synthetic(&entry, 'S');
+        fs::create_dir(entry.join("task")).unwrap();
+        for link in ["cwd", "root"] {
+            std::os::unix::fs::symlink("/", entry.join(link)).unwrap();
+        }
+        assert!(programs(&inventory, soon()).unwrap().is_empty(), "settled");
+        churn(entry.clone(), pid - 10);
+        assert!(programs(&inventory, soon()).is_err(), "census");
+        churn(entry.clone(), pid - 100);
+        assert!(member_with_holder(&entry, &inventory, None, soon()).is_err());
+        churn(entry.clone(), pid - 1000);
+        assert!(sample(soon()).is_err(), "sample");
+        roster::on_plan(|| {});
+        drop(owned);
+    }
+
+    /// zerus-lo8o1.1: a new or vanished task ID is a changed observation even
+    /// when the plan stays the same. Exited tasks that appear on every
+    /// observation of an exited leader's group never settle it.
+    #[test]
+    fn task_ids_that_never_settle_are_uncertainty_without_a_plan_change() {
+        fn churn(entry: PathBuf, next: u32) {
+            roster::on_plan(move || {
+                synthetic(&entry.join("task").join(next.to_string()), 'Z');
+                churn(entry.clone(), next - 1);
+            });
+        }
+        let (_dir, _root, _scope, inventory) = checkout();
+        let owned = roster::owned(&[]);
+        let pid = i32::MAX as u32;
+        let entry = owned.path().join(pid.to_string());
+        synthetic(&entry, 'Z');
+        let live = entry.join("task").join((pid - 1).to_string());
+        synthetic(&live, 'S');
+        for link in ["cwd", "root"] {
+            std::os::unix::fs::symlink("/", live.join(link)).unwrap();
+        }
+        assert!(programs(&inventory, soon()).unwrap().is_empty(), "settled");
+        churn(entry.clone(), pid - 10);
+        assert!(programs(&inventory, soon()).is_err(), "census");
+        churn(entry.clone(), pid - 100);
+        assert!(member_with_holder(&entry, &inventory, None, soon()).is_err());
+        churn(entry.clone(), pid - 1000);
+        assert!(sample(soon()).is_err(), "sample");
+        roster::on_plan(|| {});
         drop(owned);
     }
 }

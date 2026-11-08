@@ -10071,6 +10071,7 @@ fn take_outbox_with(
                 if let Err(error) = super::outbox::settle(folder, &request, &outcome) {
                     eprintln!("hgs team worker: {}: outbox {}: {error}", team.name, path.display());
                 }
+                announce_outbox(store, team, member, folder, &request, &outcome);
                 continue;
             }
             if request["op"] == "run" {
@@ -10082,6 +10083,7 @@ fn take_outbox_with(
                         if let Err(error) = super::outbox::settle(folder, &request, &outcome) {
                             eprintln!("hgs team worker: {}: outbox {}: {error}", team.name, path.display());
                         }
+                        announce_outbox(store, team, member, folder, &request, &outcome);
                     }
                     Ok(None) => {}
                     Err(error) => eprintln!("hgs team worker: {}: run {}: {error:#}", team.name, request["request_id"]),
@@ -10097,6 +10099,7 @@ fn take_outbox_with(
             if let Err(error) = super::outbox::settle(folder, &request, &outcome) {
                 eprintln!("hgs team worker: {}: outbox {}: {error}", team.name, path.display());
             }
+            announce_outbox(store, team, member, folder, &request, &outcome);
         }
     }
     Ok(())
@@ -10570,6 +10573,66 @@ fn run_request(store: &mut Store, folder: &Path, request: &Value) {
     }
 }
 
+/// Task #275: a sandboxed member's queued call answers in a file it never
+/// reads. A refused or failed outcome is also a team message at its next safe
+/// point (urgent for a question or a report), and the lead's inbox names the
+/// reason. The result file stays as before, and a `messaged` outcome (task
+/// 209's context claim, told already) is not told twice.
+fn announce_outbox(store: &mut Store, team: &Team, member: &Member, folder: &Path, request: &Value, outcome: &Value) {
+    let status = outcome["status"].as_str().unwrap_or_default();
+    if !matches!(status, "refused" | "failed" | "error") || outcome["messaged"] == true {
+        return;
+    }
+    let error = outcome["error"].as_str().unwrap_or("the worker could not apply it");
+    let op = request["op"].as_str().unwrap_or("call");
+    let request_id = request["request_id"].as_str().unwrap_or_default();
+    let urgent = matches!(op, "ask" | "report");
+    let mut text = format!(
+        "[Zerus team \u{b7} from: Zerus \u{b7} outbox]\nYour queued {op} (request {request_id}) was {}; it was NOT applied.\n{error}\n",
+        if status == "failed" { "failed" } else { "refused" },
+    );
+    // Task #275: a "too long" refusal names the limit and how to send it.
+    if error.to_lowercase().contains("too long") {
+        let limit = match op {
+            "ask" => "4000 characters",
+            "report" => "64 KiB",
+            _ => "the limit named above",
+        };
+        text += &format!(
+            "The limit is {limit}; put the long text in a file and name its path in the text (for example \"see D:/work/question.md\").\n"
+        );
+    }
+    text += &format!(
+        "Fix it and send it again. Its result stays at {}.",
+        super::outbox::result_path(folder, request_id).display()
+    );
+    if let Some(session) = member.session.as_ref() {
+        let message = uuid::Uuid::new_v4().to_string();
+        let _ = super::doorbell::post_and_ring(
+            store,
+            &team.id,
+            &member.id,
+            session,
+            &message,
+            "outbox",
+            "Zerus",
+            if urgent { Urgency::Urgent } else { Urgency::Normal },
+            &text,
+        );
+    }
+    let record = json!({"member":member.id,"op":op,"request_id":request_id,"error":error,"urgent":urgent,"at":now()});
+    let team_id = team.id.clone();
+    let _ = store.mutate(None, &team_id, None, |team, events| {
+        team.outbox_failures.push(record.clone());
+        if team.outbox_failures.len() > 20 {
+            let extra = team.outbox_failures.len() - 20;
+            team.outbox_failures.drain(..extra);
+        }
+        events.push(Event::new("outbox_refused", record.clone()));
+        Ok(Value::Null)
+    });
+}
+
 /// One queued request, applied as the member's own write (U20). The member's
 /// input keys the store receipt, so a request applied twice (a worker that died
 /// before it removed the file) is a replay, not a second report. U42: a budget
@@ -10643,7 +10706,7 @@ fn apply_outbox(store: &mut Store, team: &Team, member: &Member, request: &Value
                     "context", "Zerus", Urgency::Normal, &text,
                 );
             }
-            return Ok(json!({"status":"refused","request_id":request_id,"task":input["task"].clone(),"error":answer}));
+            return Ok(json!({"status":"refused","request_id":request_id,"task":input["task"].clone(),"error":answer,"messaged":true}));
         }
     }
     let member_id = member.id.clone();

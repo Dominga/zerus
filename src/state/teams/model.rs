@@ -3123,6 +3123,11 @@ pub(crate) struct Team {
     /// reads them as one inbox item.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub crash_recovered: Vec<Value>,
+    /// Task #275: a sandboxed member's queued call the worker refused or that
+    /// failed, newest last, at most 20; the member is told as a team message
+    /// and the lead reads each reason in its inbox.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outbox_failures: Vec<Value>,
 }
 
 /// Task #227: a retry while the member works on the task: "continue", never

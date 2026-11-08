@@ -7041,6 +7041,77 @@ fn move_task(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Eve
     Ok(json!({"status":"moved","task":id,"from":from,"to":n}))
 }
 
+/// Task #370 (owner, 2026-11-08): queue a landing for an accepted task again,
+/// as a merge or, when the line would carry a rejected attempt, as a cherry-pick
+/// of the task's own commit.
+fn land(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you queue a landing");
+    let id = task_id(input)?;
+    let cherry = input["cherry_pick"].as_bool() == Some(true);
+    let label = actor.label(team);
+    let assignee = team.task(id).map(|task| task.assignee.clone()).unwrap_or_default();
+    let folder = team.member(&assignee).and_then(|member| super::dispatcher::member_folder_path(team, member).ok()).unwrap_or_default();
+    let task = team.task_mut(id).context("Unknown task")?;
+    ensure!(task.status == TaskStatus::Accepted || task.merge.is_some(), "Task #{id} is not accepted; there is nothing to land");
+    ensure!(task.landed.is_none(), "Task #{id} is marked landed; nothing waits");
+    if task.merge.as_ref().is_some_and(|entry| entry.state == "testing") {
+        bail!("Task #{id} is merged into the integration line and its tests run; wait for the queue's result");
+    }
+    let attempt = task
+        .attempts
+        .iter()
+        .rev()
+        .find(|attempt| attempt.state == AttemptState::Reported && !attempt.folder_head.is_empty())
+        .cloned();
+    match task.merge.as_mut() {
+        Some(entry) => {
+            entry.state = "queued".into();
+            entry.retry = true;
+            entry.blocked = false;
+            entry.cherry_pick = cherry;
+            entry.note.clear();
+            entry.wait_reason = MergeWaitReason::Other;
+            entry.prev.clear();
+            entry.merged.clear();
+            entry.conflict_files.clear();
+            entry.resolve_task = None;
+        }
+        None => {
+            let attempt = attempt.context("Task #{id} has no reported commit to land")?;
+            task.merge = Some(MergeEntry {
+                state: "queued".into(),
+                author: assignee.clone(),
+                commit: attempt.folder_head.clone(),
+                branch: attempt.folder_branch.clone(),
+                folder: folder.clone(),
+                at: now(),
+                by: label.clone(),
+                by_owner: matches!(actor, Actor::Human),
+                cherry_pick: cherry,
+                ..Default::default()
+            });
+        }
+    }
+    events.push(Event::new("landing_requested", json!({"by":label,"task":id,"cherry_pick":cherry})));
+    Ok(json!({"status":"queued","task":id,"cherry_pick":cherry}))
+}
+
+/// Task #370: mark an accepted task landed by a named commit on the integration
+/// line, for work that reached the line as a cherry-pick; journaled.
+fn mark_landed(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
+    ensure!(matches!(actor, Actor::Human) || actor.is_lead(team), "Only the lead or you mark a task landed");
+    let id = task_id(input)?;
+    let commit = text(input, "commit").trim().to_owned();
+    ensure!(!commit.is_empty(), "Name the integration line's commit: {{\"commit\":\"...\"}}");
+    ensure!(team.task(id).is_some_and(|task| task.status == TaskStatus::Accepted), "Only an accepted task is marked landed");
+    ensure!(super::merge_queue::landed(team, &commit), "That commit is not on the integration line");
+    let label = actor.label(team);
+    if let Some(task) = team.task_mut(id) {
+        task.landed = Some(Landed { commit: commit.clone(), by: label.clone(), at: now() });
+    }
+    events.push(Event::new("task_marked_landed", json!({"by":label,"task":id,"commit":commit})));
+    Ok(json!({"status":"landed","task":id,"commit":commit}))
+}
 fn retry(team: &mut Team, input: &Value, actor: &Actor, events: &mut Vec<Event>) -> anyhow::Result<Value> {
     let id = task_id(input)?;
     let assignee = team.task(id).map(|task| task.assignee.clone()).unwrap_or_default();
@@ -7397,6 +7468,9 @@ fn apply_with_checks(team: &mut Team, op: &str, input: &Value, actor: &Actor, of
         "skip-stage" => super::pipeline::skip_stage(team, input, actor, events),
         "send-back" => super::pipeline::send_back(team, input, actor, events),
         "retry" => retry(team, input, actor, events),
+        // Task #370: queue an accepted task's landing (a merge or a cherry-pick).
+        "land" => land(team, input, actor, events),
+        "landed" => mark_landed(team, input, actor, events),
         "take-over" => take_over(team, input, actor, events),
         "cancel" => cancel(team, input, actor, events),
         "check" => check(team, input, actor, events),

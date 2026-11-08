@@ -1352,6 +1352,24 @@ each other's entries); `qt-build` sets the launcher first in a build folder
 configured without it. A tool not found on `PATH` (or in cargo's bin folder)
 is named at the start of the run's output and the run builds without it.
 
+The owner's own shared sccache server is separate (task 261): when cargo builds
+through sccache by `RUSTC_WRAPPER` or `build.rustc-wrapper` in cargo's
+`config.toml`, every build on the computer shares one server on
+`SCCACHE_SERVER_PORT` (4226 by default), and the first build after none runs
+starts it. Zerus never lets a sandboxed member's run start it: a server
+started in a Low-integrity or Codex-sandbox token inherits that token, and
+every later build of any folder fails with "error writing dependencies to
+...\deps\X.d: Access is denied (os error 5)". Before such a run the team
+worker, with its normal token, starts the server if none runs
+(`sccache --start-server`); when it cannot, the run builds without the wrapper
+(`RUSTC_WRAPPER` empty) instead. A `hgs run` or a cargo template whose failure
+is that signature (os error 5 writing a `.d`, `.rlib` or `.rmeta`) makes the
+worker restart the server (`--stop-server`, `--start-server`) and run the
+build once more; the run's output says so and the lead's inbox gets one line.
+`hgs team builds` carries the server's health as `cache_server`:
+`configured`, `program`, `port`, `running`, the `pid` and `integrity` of the
+process listening on the port, and `restricted` when that is Low.
+
 A build or test template (`cargo-build`, `cargo-test`, `cargo-clippy`,
 `qt-configure`, `qt-build`, `qt-test`) that fails with MSVC's C1083 "Cannot open
 compiler generated file ... Permission denied" or D8050 "failed to get command

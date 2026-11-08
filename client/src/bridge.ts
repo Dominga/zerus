@@ -1115,6 +1115,10 @@ export const queueSendNow = (queueId: string | null) => desktop<boolean>("queue_
 export const sendAnswer = (token: number, answer: Answer) => desktop<SendReply>("send_answer", { token, answer });
 export const sendCancel = (handle: number) => desktop<void>("send_cancel", { handle });
 export const sendInterrupted = (handle: number) => desktop<void>("send_interrupted", { handle });
+/** U35 Cancel on a held row (`hgs send-cancel`); false when nothing started. */
+export const heldCancel = (handle: number, requestId: string) => desktop<boolean>("held_cancel", { handle, request_id: requestId });
+/** Send it on the Terminal draft bar: Enter in Terminal for the draft shown; false when nothing started. */
+export const terminalDraftSubmit = (handle: number) => desktop<boolean>("terminal_draft_submit", { handle });
 /** Answers once the clear ended (up to 45 s). */
 export const clearContext = (handle: number, run: string, conversation: string, dismiss: boolean, delay?: import("./store/endActionBusy").EndReference) =>
   desktop<SendReply>("clear_context", { handle, run, conversation, dismiss, delay });

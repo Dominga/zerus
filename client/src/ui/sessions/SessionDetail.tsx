@@ -36,7 +36,7 @@ import { Composer } from "./Composer";
 import { ComposerDialogs } from "./ComposerDialogs";
 import { QuestionCard } from "./QuestionCard";
 import { QueuePanel } from "./QueuePanel";
-import { HeldMessage } from "./HeldMessage";
+import { HeldInputBar, HeldMessage, TerminalDraftBar } from "./HeldMessage";
 import { onCommand } from "../../store/shortcuts";
 import { composer } from "../../store/composer";
 import { createSubagentIdentity } from "../../store/subagentIdentity";
@@ -286,7 +286,7 @@ export function SessionDetail() {
                         <p class="qcard-body">{tr("Sign in to DeepSeek to start using this session. Complete sign-in in the official DeepSeek UI, then return here.")}</p>
                         <div class="qcard-actions"><button class="btn small" onClick={() => nativeRoute(selected())()}>{tr("Sign in to DeepSeek…")}</button></div>
                       </div></div></Show>
-                      <HeldMessage /><QueuePanel /><LeadProposals /><QuestionCard />
+                      <HeldMessage /><QueuePanel /><LeadProposals /><QuestionCard /><HeldInputBar /><TerminalDraftBar />
                     </Show>
                     <div class="cmp-col"><Composer /></div>
                   </div>

@@ -27,6 +27,7 @@ pub mod changes;
 pub mod fetch;
 pub mod files;
 pub mod handed;
+pub mod held;
 pub mod questions;
 pub mod queue;
 pub mod reference;
@@ -130,6 +131,14 @@ pub enum ComposerEvent {
     },
     OpenTerminal {
         key: String,
+    },
+    /// A notice whose prose the webview translates: the held messages,
+    /// the Terminal draft and a Send that did nothing (`held`).
+    Said {
+        text: zerus_client_core::text::Text,
+        error: bool,
+        /// It stays until dismissed.
+        sticky: bool,
     },
 }
 
@@ -375,6 +384,11 @@ pub struct ComposerView {
     pub compacting: bool,
     /// The message the desktop service holds until its compaction ends.
     pub held: Option<HeldView>,
+    /// U35: the messages hgs holds until the agent takes the previous one,
+    /// oldest first (the held-messages bar above the composer).
+    pub held_inputs: Vec<held::HeldInputView>,
+    /// Text left in the agent's own Terminal input: the Terminal draft bar.
+    pub terminal_draft: Option<held::TerminalDraftView>,
     /// Clear session and the cache popover's Clear context (`clearContext`).
     pub clear: send::ClearControl,
     /// The agent's question card shown in the composer (A2-1).
@@ -648,6 +662,8 @@ pub(crate) struct Hub {
     pub(crate) events: VecDeque<ComposerEvent>,
     /// The window is hidden: a handed-over send is not checked.
     pub(crate) hidden: bool,
+    /// U35: the held messages and the open run's Terminal draft.
+    pub(crate) holds: held::Holds,
 }
 
 impl Hub {
@@ -686,6 +702,9 @@ pub(crate) struct Shared {
     pub(crate) compact: Mutex<Option<Arc<handed::CompactRoute>>>,
     /// Its deferred answer route, if any.
     pub(crate) answer_route: Mutex<Option<Arc<questions::AnswerRoute>>>,
+    /// Runs `hgs send-cancel` and `hgs terminal` (`held`); none in tests
+    /// that do not set one.
+    pub(crate) hgs: Mutex<Option<Arc<held::HgsRun>>>,
     /// The ticker sleeps (tests wait for it).
     #[cfg(test)]
     parked: std::sync::atomic::AtomicBool,
@@ -742,6 +761,7 @@ impl Composers {
             deferred: Mutex::new(None),
             compact: Mutex::new(None),
             answer_route: Mutex::new(None),
+            hgs: Mutex::new(None),
             #[cfg(test)]
             parked: Default::default(),
         }));
@@ -1630,6 +1650,7 @@ impl Composers {
         // 3653), never for an ended frame or an inspection failure.
         if accepted_details {
             self.queue_observed();
+            self.held_observed();
         }
         self.changed();
     }
@@ -1822,6 +1843,8 @@ impl Composers {
                         .map(|a| a.name.clone())
                         .collect(),
                 }),
+            held_inputs: held::inputs_view(hub, key),
+            terminal_draft: held::draft_view(hub, key),
             clear: session.clear,
             question,
             queue: self.queue_part(hub),

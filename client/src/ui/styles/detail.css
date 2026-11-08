@@ -287,6 +287,15 @@
   .act-queue-message + .act-queue-message { padding-top: 8px; border-top: 1px dashed var(--z-color-border); }
   .act-held-files { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
   .act-held-note { margin: 8px 0 0; color: var(--z-color-muted); font-size: 12px; }
+  /* U35 held messages and the Terminal draft bar (Qt HeldInputBar, TerminalDraftBar). */
+  .held-inputs { display: flex; flex-direction: column; gap: 4px; padding: 6px 10px; }
+  .held-input, .terminal-draft { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12px; }
+  .terminal-draft { padding: 6px 10px; }
+  .held-input > svg, .terminal-draft > svg { color: var(--z-color-muted); flex-shrink: 0; }
+  .held-input-label { flex: 1 1 auto; min-width: 0; }
+  .held-input-preview { flex: 0 1 220px; min-width: 0; color: var(--z-color-muted); }
+  .terminal-draft-text { flex: 1 1 auto; min-width: 0; }
+  .held-input .btn, .terminal-draft .btn { flex-shrink: 0; }
 
   /* Composer: toolbar 34, editor 76, action row 34. */
   .cmp-col { width: min(var(--col), calc(100% - 32px)); margin: 0 auto 10px; }

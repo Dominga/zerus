@@ -158,6 +158,7 @@ pub enum Action {
     Handoff,
     Reopen,
     DirectStart,
+    ReleaseStop,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,10 +175,15 @@ pub struct Request {
     pub observed_stops: Vec<String>,
 }
 impl Request {
+    /// Validate a bounded CLI envelope before any record admission. This
+    /// checks data only and grants neither actor nor native authority.
+    pub fn validate(&self) -> Result<()> {
+        self.encoded().map(|_| ())
+    }
     fn encoded(&self) -> Result<String> {
         uuid(&self.id)?;
         self.executor.key()?;
-        if self.action != Action::Stop {
+        if !matches!(self.action, Action::Stop | Action::ReleaseStop) {
             ensure!(
                 self.attempt.is_some() && self.task_version.is_some(),
                 "missing task guard"
@@ -197,6 +203,17 @@ impl Request {
         }
         ids(&self.observed_pauses)?;
         ids(&self.observed_stops)?;
+        if self.action == Action::ReleaseStop {
+            ensure!(
+                self.attempt.is_none()
+                    && self.slot.is_none()
+                    && self.task_version.is_none()
+                    && self.turn.is_none()
+                    && self.observed_pauses.is_empty()
+                    && !self.observed_stops.is_empty(),
+                "Stop release requires only an executor and explicitly observed Stop holds"
+            );
+        }
         json(self, REQUEST_BYTES)
     }
 }

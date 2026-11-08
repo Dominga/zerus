@@ -8,7 +8,7 @@ vi.hoisted(() => {
   vi.stubGlobal("localStorage", { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v); }, removeItem: (k: string) => { store.delete(k); } });
 });
 
-import { COMPOSER_HINT, TERMINAL_HINT, createDrops, routeDrop, type DropDeps, type DropState } from "./drops";
+import { COMPOSER_HINT, NO_FILES_NOTICE, TERMINAL_HINT, createDrops, nonFileUrl, routeDrop, type DropDeps, type DropState } from "./drops";
 
 const state = (change: Partial<DropState> = {}): DropState => ({
   selected: "\nrun:a", online: true, tab: "activity", subagent: false,
@@ -149,5 +149,56 @@ describe("a drop on the session's panel", () => {
     h.set({ tab: "terminal", terminal: { connected: true, generation: 5 } });
     await h.drops.drop(["/srv/a.txt"], 10, 10);
     expect(h.calls).toEqual(["files /srv/a.txt"]);
+  });
+
+  // zerus-5wmh.13.7.5: image data without a file never arrives; what does is said.
+  it("attaches dropped files with no notice", async () => {
+    const h = harness();
+    h.drops.enter(["/srv/a.png", "/srv/b.txt"], 10, 10);
+    await tick();
+    await h.drops.drop(["/srv/a.png", "/srv/b.txt"], 10, 10);
+    expect(h.calls).toEqual(["files /srv/a.png,/srv/b.txt", "reveal", "attach /srv/a.png,/srv/b.txt"]);
+  });
+
+  it("says to copy and paste when a drop names only web URLs or nothing, and attaches nothing", async () => {
+    for (const dropped of [["https://example.com/picture.png"], ["https://example.com/a.png", "data://image"], []]) {
+      const h = harness();
+      h.drops.enter(dropped, 10, 10);
+      await tick();
+      expect(h.drops.hint(), "no overlay promises an attachment").toBeUndefined();
+      await h.drops.drop(dropped, 10, 10);
+      expect(h.calls, JSON.stringify(dropped)).toEqual([`info ${NO_FILES_NOTICE}`]);
+    }
+  });
+
+  it("attaches a mixed drop's files and leaves its URLs out, with no notice", async () => {
+    const h = harness();
+    const dropped = ["https://example.com/picture.png", "/srv/a.txt"];
+    h.drops.enter(dropped, 10, 10);
+    await tick();
+    expect(h.drops.hint()).toBe(COMPOSER_HINT);
+    await h.drops.drop(dropped, 10, 10);
+    expect(h.calls).toEqual(["files /srv/a.txt", "reveal", "attach /srv/a.txt"]);
+  });
+
+  it("says nothing for a drop without files off the panel, on another target, or on the Terminal", async () => {
+    const off = harness();
+    off.drops.enter(["https://example.com/a.png"], 10, 10);
+    off.leavePanel();
+    await off.drops.drop(["https://example.com/a.png"], 900, 10);
+    const moved = harness();
+    moved.drops.enter([], 10, 10);
+    moved.set({ composer: { key: "\nclaude/sample-project/other", canAttach: true } });
+    await moved.drops.drop([], 10, 10);
+    const shell = harness();
+    shell.set(terminalOn);
+    shell.drops.enter(["https://example.com/a.png"], 10, 10);
+    await shell.drops.drop(["https://example.com/a.png"], 10, 10);
+    expect([off.calls, moved.calls, shell.calls]).toEqual([[], [], []]);
+  });
+
+  it("tells web URLs from local and Windows paths", () => {
+    for (const url of ["https://example.com/a.png", "http://example.com/", "ftp://example.com/a", "data://x"]) expect(nonFileUrl(url), url).toBe(true);
+    for (const path of ["/srv/a.png", "C:\\Users\\example\\a.png", "\\\\server\\share\\a.png", "/srv/http://odd", "relative/a"]) expect(nonFileUrl(path), path).toBe(false);
   });
 });

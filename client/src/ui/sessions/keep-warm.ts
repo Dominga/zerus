@@ -140,6 +140,16 @@ export function remainingText(state: KeepWarmState | undefined, now: number): st
   return minutes ? tr("%1 h %2 m left", hours, minutes) : tr("%1 h left", hours);
 }
 
+/** The time left as the header shows it: "2 h 14 m", "45 m", "<1 m", or an infinity sign for Always. */
+export function remainingMark(state: KeepWarmState, now: number): string {
+  if (state.until === null) return durationMark(ALWAYS);
+  const left = state.until - now;
+  if (left < 60) return tr("<1 m");
+  const hours = Math.floor(left / 3600), minutes = Math.floor((left % 3600) / 60);
+  if (!hours) return tr("%1 m", minutes);
+  return minutes ? tr("%1 h %2 m", hours, minutes) : tr("%1 h", hours);
+}
+
 /** The one line under the row: why it cannot be on, what it is doing, or when it pings next. */
 export function statusLine(state: KeepWarmState | undefined, now: number): string {
   if (!state) return "";
@@ -170,4 +180,16 @@ export function tooltipLines(state: KeepWarmState | undefined, contextTokens: nu
     ? tr("Each ping reads the whole cached context (about %1 tokens) from this account's usage.", tokens(contextTokens))
     : tr("Each ping reads the whole cached context from this account's usage."));
   return lines;
+}
+
+/**
+ * The session header's keep-warm mark (zerus-yacns): shown only while it is
+ * on, as the time left or an infinity sign; its name and a tooltip with the
+ * whole state the Details row shows. Undefined while it is off or unreported.
+ */
+export function headerKeepWarm(state: KeepWarmState | undefined, now: number, contextTokens: number): { mark: string; label: string; tooltip: string } | undefined {
+  if (!state?.enabled) return undefined;
+  const label = tr("Keep cache warm: %1", remainingText(state, now));
+  const line = statusLine(state, now);
+  return { mark: remainingMark(state, now), label, tooltip: [label, ...(line ? [line] : []), ...tooltipLines(state, contextTokens), tr("Click to change it in Details.")].join("\n") };
 }

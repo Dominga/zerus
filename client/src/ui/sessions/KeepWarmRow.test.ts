@@ -8,6 +8,7 @@ vi.mock("../../bridge", () => ({ inTauri: () => true, setKeepWarm: native.setKee
 vi.mock("../../store/actions", () => ({ errorText: (error: unknown) => (error instanceof Error ? error.message : String(error)) }));
 vi.mock("../lib/icons", () => ({ Icon: () => null }));
 import { KeepWarmRow } from "./KeepWarmRow";
+import { confirmKeepWarm } from "./keep-warm-state";
 import type { Session } from "./types";
 import type { KeepWarmState } from "../../types";
 
@@ -25,7 +26,8 @@ const mount = (s: Session, inspected: unknown = {}, online = true) => {
   };
 };
 beforeEach(() => { vi.clearAllMocks(); host = document.createElement("div"); document.body.append(host); });
-afterEach(() => { dispose?.(); dispose = undefined; host.remove(); });
+// The one confirmed-change slot is shared with the header; move it to a target no test uses.
+afterEach(() => { dispose?.(); dispose = undefined; host.remove(); confirmKeepWarm("unused", warm()); });
 
 it("turns keep-warm on for two hours with the switch's accessible name and the host's revision", async () => {
   native.setKeepWarm.mockResolvedValue({ ...warm({ enabled: true, until: NOW + 7200, revision: 4, state: "waiting" }), supported: true, ttl_seconds: 3600, interval_seconds: 2880 });

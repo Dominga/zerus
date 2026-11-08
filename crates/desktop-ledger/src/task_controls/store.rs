@@ -328,7 +328,11 @@ impl Store<'_> {
         ensure!(
             matches!(
                 request.action,
-                Action::Resume | Action::Send | Action::Reopen | Action::DirectStart
+                Action::Resume
+                    | Action::Send
+                    | Action::Reopen
+                    | Action::DirectStart
+                    | Action::ReleaseStop
             ),
             "action cannot settle holds"
         );

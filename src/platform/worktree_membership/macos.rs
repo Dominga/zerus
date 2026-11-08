@@ -52,6 +52,25 @@ struct VnodeFile {
 }
 const _: [(); 1200] = [(); size_of::<VnodeFile>()];
 
+// proc_info.h: PROC_PIDLISTTHREADS lists each thread's handle, its user TSD
+// base (machine.cthread_self); PROC_PIDTHREADPATHINFO looks one thread up by
+// that handle and returns proc_threadwithpathinfo, whose vnode_info_path is
+// the thread's own cwd (uthread uu_cdir), or zeroed when it has none.
+// libc does not bind either flavor.
+const PROC_PIDLISTTHREADS: i32 = 6;
+const PROC_PIDTHREADPATHINFO: i32 = 10;
+#[repr(C)]
+struct ThreadPath {
+    _thread: libc::proc_threadinfo,
+    cwd: libc::vnode_info_path,
+}
+const _: [(); 112] = [(); size_of::<libc::proc_threadinfo>()];
+const _: [(); 1288] = [(); size_of::<ThreadPath>()];
+
+/// Reads of one process's threads before its observation counts as
+/// unsettled and ends in limit.
+const ATTEMPTS: usize = 4;
+
 fn errno() -> io::Error {
     io::Error::last_os_error()
 }
@@ -230,6 +249,100 @@ fn files(pid: u32, deadline: Instant) -> io::Result<Files> {
     Ok(files)
 }
 
+/// The handles of a process's threads. None: the list filled its buffer, or
+/// two threads share a handle (0 for a thread without TSD), so not every
+/// thread can be read by its handle and the observation is unsettled.
+fn thread_handles(pid: u32) -> io::Result<Option<Vec<u64>>> {
+    let mut handles = vec![0u64; MAX_FILES + 1];
+    let bytes = (handles.len() * size_of::<u64>()) as i32;
+    clear_errno();
+    let used = unsafe {
+        libc::proc_pidinfo(
+            pid as i32,
+            PROC_PIDLISTTHREADS,
+            0,
+            handles.as_mut_ptr().cast(),
+            bytes,
+        )
+    };
+    if used <= 0 {
+        return Err(failed(errno()));
+    }
+    if used >= bytes || !(used as usize).is_multiple_of(size_of::<u64>()) {
+        return Ok(None);
+    }
+    handles.truncate(used as usize / size_of::<u64>());
+    let distinct: BTreeSet<_> = handles.iter().copied().collect();
+    if distinct.len() != handles.len() || distinct.contains(&0) {
+        return Ok(None);
+    }
+    Ok(Some(handles))
+}
+
+/// Each thread's own cwd, which the process cwd does not show
+/// (zerus-q0cd5): a thread may set one with pthread_chdir_np
+/// (__pthread_chdir). Returns the cwds of one settled observation and whether
+/// a thread read was denied.
+///
+/// From XNU (bsd/kern/kern_fork.c uthread_init, bsd/vfs/vfs_syscalls.c): a
+/// thread's own cwd is set only by that thread, never inherited by threads
+/// it creates, and released when it exits. So a listed thread gone before
+/// its read (ESRCH) cannot have handed it on and is skipped, and no
+/// before/after list comparison is needed. Each listed thread is read once:
+/// an actual EACCES/EPERM keeps the per-read denial policy, and any other
+/// failure leaves the observation unsettled, read again within ATTEMPTS and
+/// the read budget, then limit, never absence.
+///
+/// The accepted residual (design-tima2's ruling, next to the Linux ones in
+/// linux.rs): a thread is read by its handle, its user TSD base. A live
+/// thread whose TSD base changes between the listing and its read, which
+/// only private APIs do, reads ESRCH and is taken as gone. A handle reused by
+/// a new thread is read as that new thread, which has no cwd of its own
+/// unless it set one.
+fn thread_cwds(pid: u32, deadline: Instant) -> io::Result<(Vec<libc::vnode_info_path>, bool)> {
+    'attempt: for _ in 0..ATTEMPTS {
+        let handles = match thread_handles(pid) {
+            Ok(Some(handles)) => handles,
+            Ok(None) => continue,
+            Err(e) if denied(&e) => return Ok((Vec::new(), true)),
+            // The process itself is gone: the callers' identity checks decide.
+            Err(e) if e.raw_os_error() == Some(libc::ESRCH) => return Err(e),
+            Err(_) => continue,
+        };
+        let (mut cwds, mut access_denied) = (Vec::new(), false);
+        for (count, handle) in handles.into_iter().enumerate() {
+            bounded(count, deadline)?;
+            let mut value = MaybeUninit::<ThreadPath>::uninit();
+            clear_errno();
+            let used = unsafe {
+                libc::proc_pidinfo(
+                    pid as i32,
+                    PROC_PIDTHREADPATHINFO,
+                    handle,
+                    value.as_mut_ptr().cast(),
+                    size_of::<ThreadPath>() as i32,
+                )
+            };
+            if used == size_of::<ThreadPath>() as i32 {
+                let value = unsafe { value.assume_init() };
+                // A thread without its own cwd has a zeroed path.
+                if unsafe { *value.cwd.vip_path.as_ptr().cast::<u8>() } != 0 {
+                    cwds.push(value.cwd);
+                }
+                continue;
+            }
+            let error = failed(errno());
+            match error.raw_os_error() {
+                Some(libc::ESRCH) => {} // Gone: its own cwd went with it.
+                _ if denied(&error) => access_denied = true,
+                _ => continue 'attempt,
+            }
+        }
+        return Ok((cwds, access_denied));
+    }
+    Err(limit())
+}
+
 fn vnode_object(value: &libc::vnode_info_path) -> objects::Object {
     objects::Object {
         device: u64::from(value.vip_vi.vi_stat.vst_dev),
@@ -256,6 +369,11 @@ fn member_with_holder(
         Ok(cwd) => found |= inventory.contains(vnode_object(&cwd.pvi_cdir)),
         Err(e) if denied(&e) && root.is_none() => {}
         Err(e) => return Err(e),
+    }
+    let (cwds, threads_denied) = thread_cwds(pid, deadline)?;
+    found |= cwds.iter().any(|cwd| inventory.contains(vnode_object(cwd)));
+    if threads_denied && root.is_some() {
+        return Err(limit());
     }
     // Known native membership wins even when the cwd or another FD was denied.
     let denied = vnode_files(pid, deadline, |number, file| {
@@ -479,6 +597,7 @@ pub(in crate::platform) fn sample(deadline: Instant) -> Result<WorktreeProcesses
             .and_then(|value| vnode_path(&value.pvi_cdir));
         let image = image(pid);
         let files = files(pid, deadline);
+        let threads = thread_cwds(pid, deadline);
         let after = match snapshot(pid) {
             Ok(value) => value,
             Err(e) if e.raw_os_error() == Some(libc::ESRCH) => continue,
@@ -503,6 +622,16 @@ pub(in crate::platform) fn sample(deadline: Instant) -> Result<WorktreeProcesses
         }
         let files =
             files.map_err(|_| error(&format!("process {pid} file inspection is incomplete")))?;
+        let (threads, threads_denied) = threads
+            .map_err(|_| error(&format!("process {pid} thread inspection is incomplete")))?;
+        cwd_denied |= threads_denied;
+        for cwd in &threads {
+            let path = vnode_path(cwd)
+                .map_err(|_| error(&format!("process {pid} thread inspection is incomplete")))?;
+            budget
+                .push(&mut rows, pid, path, &before.command)
+                .map_err(|_| error("process path inventory exceeded its bound"))?;
+        }
         if cwd_denied || image_denied || files.denied {
             rows.unreadable.push(UnreadableWorktreeProcess {
                 pid,
@@ -592,5 +721,224 @@ mod tests {
         assert!(before.identity == after.identity);
         assert!(!files.denied);
         assert!(files.paths.contains(&path.canonicalize().unwrap()));
+    }
+
+    use std::path::Path;
+
+    /// A python3 child for the zerus-q0cd5 controls, killed on drop.
+    struct Python(std::process::Child);
+    impl Python {
+        fn start(cwd: &Path, code: &str, args: &[&str]) -> Self {
+            use std::io::BufRead;
+            let mut child = std::process::Command::new("python3")
+                .arg("-I")
+                .arg("-c")
+                .arg(code)
+                .args(args)
+                .current_dir(cwd)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            assert_eq!(line, "ready\n", "the control child did not start");
+            Python(child)
+        }
+        fn pid(&self) -> u32 {
+            self.0.id()
+        }
+    }
+    impl Drop for Python {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// A thread that sets its own cwd to argv[1] (pthread_chdir_np, else the
+    /// __pthread_chdir syscall 348), or keeps none for an empty argv[1].
+    const THREAD_CWD: &str = "import ctypes,sys,threading,time\nlibc=ctypes.CDLL(None,use_errno=True)\ntarget=sys.argv[1].encode()\nready=threading.Event()\ndef work():\n    if target:\n        try:\n            rc=libc.pthread_chdir_np(target)\n        except AttributeError:\n            rc=libc.syscall(348,target)\n        assert rc==0,ctypes.get_errno()\n    ready.set()\n    time.sleep(120)\nthreading.Thread(target=work,daemon=True).start()\nassert ready.wait(10)\nprint('ready',flush=True)\ntime.sleep(120)\n";
+
+    fn soon() -> Instant {
+        Instant::now() + std::time::Duration::from_secs(5)
+    }
+
+    /// zerus-q0cd5: a thread's own cwd (pthread_chdir_np) in the checkout,
+    /// while the process cwd stays outside, makes the process an occupant
+    /// for the census, member() and sample() alike. A thread whose own cwd is
+    /// outside, or one without its own cwd, does not.
+    #[test]
+    fn a_thread_with_its_own_cwd_in_the_checkout_is_an_occupant() {
+        let checkout = tempfile::tempdir().unwrap();
+        let root = checkout.path().canonicalize().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let outside = elsewhere.path().canonicalize().unwrap();
+        let scope = objects::Scope::open(&root, soon()).unwrap();
+        let inventory = scope.inventory(soon()).unwrap();
+        let inside = Python::start(&outside, THREAD_CWD, &[root.to_str().unwrap()]);
+        let away = Python::start(&outside, THREAD_CWD, &[outside.to_str().unwrap()]);
+        let none = Python::start(&outside, THREAD_CWD, &[""]);
+        let process =
+            info::<libc::proc_vnodepathinfo>(inside.pid(), libc::PROC_PIDVNODEPATHINFO).unwrap();
+        assert!(
+            !inventory.contains(vnode_object(&process.pvi_cdir)),
+            "the process cwd itself is outside the checkout"
+        );
+        let (cwds, denied) = thread_cwds(inside.pid(), soon()).unwrap();
+        assert!(!denied);
+        assert_eq!(cwds.len(), 1, "exactly the one thread has its own cwd");
+        assert_eq!(vnode_path(&cwds[0]).unwrap(), root);
+        assert!(member(inside.pid(), &inventory, soon()).unwrap());
+        assert!(!member(away.pid(), &inventory, soon()).unwrap());
+        assert!(!member(none.pid(), &inventory, soon()).unwrap());
+        assert!(thread_cwds(none.pid(), soon()).unwrap().0.is_empty());
+        let rows = programs(&inventory, soon()).unwrap();
+        assert!(rows.iter().any(|row| row.pid == inside.pid()), "census");
+        assert!(!rows
+            .iter()
+            .any(|row| row.pid == away.pid() || row.pid == none.pid()));
+        let sampled = sample(soon()).unwrap();
+        let occupies = |pid: u32| {
+            sampled
+                .paths
+                .iter()
+                .any(|(p, path, _)| *p == pid && path.starts_with(&root))
+        };
+        assert!(occupies(inside.pid()), "sample");
+        assert!(!occupies(away.pid()) && !occupies(none.pid()));
+        assert!(!sampled.unreadable.iter().any(|row| row.pid == inside.pid()));
+    }
+
+    /// Writes a GitHub Actions notice straight to this process's stdout,
+    /// which libtest does not capture, so it reaches the CI job log.
+    fn notice(text: &str) {
+        use std::io::Write;
+        let _ = writeln!(std::io::stdout(), "::notice title=zerus-q0cd5::{text}");
+    }
+
+    /// zerus-q0cd5, design-tima2's request: a process with about 1000
+    /// threads stays inside the read budget and deadline; the time goes to
+    /// the CI log.
+    #[test]
+    fn a_process_with_a_thousand_threads_is_read_within_budget() {
+        let checkout = tempfile::tempdir().unwrap();
+        let root = checkout.path().canonicalize().unwrap();
+        let scope = objects::Scope::open(&root, soon()).unwrap();
+        let inventory = scope.inventory(soon()).unwrap();
+        let many = Python::start(
+            Path::new("/"),
+            "import threading,time\nthreading.stack_size(65536)\nfor _ in range(1000):\n    threading.Thread(target=time.sleep,args=(120,),daemon=True).start()\nprint('ready',flush=True)\ntime.sleep(120)\n",
+            &[],
+        );
+        let threads = thread_handles(many.pid()).unwrap().unwrap().len();
+        assert!(threads >= 1000, "{threads} threads");
+        let start = Instant::now();
+        assert!(!member(many.pid(), &inventory, soon()).unwrap());
+        let member_time = start.elapsed();
+        let start = Instant::now();
+        let rows = programs(&inventory, soon()).unwrap();
+        let census_time = start.elapsed();
+        assert!(!rows.iter().any(|row| row.pid == many.pid()));
+        let start = Instant::now();
+        sample(soon()).unwrap();
+        let sample_time = start.elapsed();
+        notice(&format!(
+            "a process with {threads} threads: member() {} ms; full census {} ms; sample() {} ms",
+            member_time.as_millis(),
+            census_time.as_millis(),
+            sample_time.as_millis()
+        ));
+        assert!(member_time < std::time::Duration::from_secs(2));
+    }
+
+    /// zerus-q0cd5, design-tima2's availability check (temporary): on this
+    /// host, which processes have duplicate or zero thread handles, and do
+    /// they persist across three samples a few seconds apart? Names only.
+    /// Reports through CI notices and never fails.
+    #[test]
+    fn survey_thread_handles_on_this_host() {
+        let mut pids = vec![0i32; 32_768];
+        let used = unsafe {
+            libc::proc_listallpids(
+                pids.as_mut_ptr().cast(),
+                (pids.len() * size_of::<i32>()) as i32,
+            )
+        };
+        let Ok(count) = usize::try_from(used) else {
+            notice("survey: proc_listallpids failed");
+            return;
+        };
+        pids.truncate(count.min(pids.len()));
+        let mut samples = Vec::new();
+        for round in 0..3 {
+            if round > 0 {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+            }
+            let (mut readable, mut denied, mut gone) = (0, 0, 0);
+            let mut flagged = std::collections::BTreeMap::new();
+            for &pid in &pids {
+                if pid <= 0 {
+                    continue;
+                }
+                let mut handles = vec![0u64; MAX_FILES + 1];
+                let bytes = (handles.len() * size_of::<u64>()) as i32;
+                clear_errno();
+                let used = unsafe {
+                    libc::proc_pidinfo(
+                        pid,
+                        PROC_PIDLISTTHREADS,
+                        0,
+                        handles.as_mut_ptr().cast(),
+                        bytes,
+                    )
+                };
+                if used <= 0 {
+                    match errno().raw_os_error() {
+                        Some(libc::ESRCH) => gone += 1,
+                        _ => denied += 1,
+                    }
+                    continue;
+                }
+                readable += 1;
+                handles.truncate(used as usize / size_of::<u64>());
+                let distinct: BTreeSet<_> = handles.iter().copied().collect();
+                let zeros = handles.iter().filter(|h| **h == 0).count();
+                if distinct.len() != handles.len() || zeros > 0 {
+                    let mut name = [0u8; 256];
+                    let n = unsafe {
+                        libc::proc_name(pid, name.as_mut_ptr().cast(), name.len() as u32)
+                    };
+                    let name = String::from_utf8_lossy(&name[..n.max(0) as usize]).into_owned();
+                    flagged.insert(
+                        pid,
+                        format!(
+                            "{name} (threads {}, zero {zeros}, duplicate {})",
+                            handles.len(),
+                            handles.len() - distinct.len()
+                        ),
+                    );
+                }
+            }
+            notice(&format!(
+                "survey round {}: {} processes, {readable} readable, {denied} not readable, {gone} gone; {} with duplicate or zero thread handles: {:?}",
+                round + 1,
+                pids.len(),
+                flagged.len(),
+                flagged.values().collect::<Vec<_>>()
+            ));
+            samples.push(flagged);
+        }
+        let persistent: Vec<_> = samples[0]
+            .iter()
+            .filter(|(pid, _)| samples[1..].iter().all(|s| s.contains_key(*pid)))
+            .map(|(_, name)| name.clone())
+            .collect();
+        notice(&format!(
+            "survey: {} processes kept duplicate or zero thread handles across all 3 rounds: {persistent:?}",
+            persistent.len()
+        ));
     }
 }

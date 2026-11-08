@@ -455,6 +455,9 @@ fn task_set(process: &Path, exited: bool, deadline: Instant) -> io::Result<Optio
 /// root pin, seen through a thread's table, is not the leader's excluded pin.
 /// The production holder is a single-threaded hgs child, and that refusal
 /// fails closed.
+///
+/// The macOS census's thread residual (a live thread whose TSD base changes
+/// mid-read) is documented at `thread_cwds` in macos.rs (zerus-q0cd5).
 fn same_tasks(before: &[Task], after: &[Task]) -> bool {
     before
         .iter()

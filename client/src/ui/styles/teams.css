@@ -160,6 +160,15 @@
   .team-waiting-row { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: 8px; background: var(--z-color-card); border: 1px solid var(--z-color-card-border); cursor: pointer; }
   .team-waiting-row.open { cursor: default; }
   .team-waiting-row.compact { padding: 4px 8px; background: transparent; border: 0; border-radius: 0; }
+  /* Task 304: Dismiss per row, the dismissed section with Restore, and the lead-changes digest's groups. */
+  .team-waiting-dismiss { flex: none; color: var(--z-color-muted); }
+  .team-waiting-dismiss:hover { color: var(--z-color-text); }
+  .team-waiting-row.dismissed { cursor: default; opacity: .8; border-style: dashed; }
+  .team-waiting-blocks { flex: none; font-size: var(--fs-xs); color: var(--z-color-warn); }
+  .team-waiting-dismissed { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+  .team-waiting-show-dismissed { align-self: flex-start; }
+  .team-waiting-groups { display: flex; flex-wrap: wrap; gap: 6px; padding-left: 22px; }
+  .team-waiting-group-chip { font-size: var(--fs-xs); padding: 1px 8px; border-radius: 9px; background: var(--z-color-raised); color: var(--z-color-text-2); border: 1px solid var(--z-color-card-border); }
   .team-waiting-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .team-waiting-icon { display: grid; place-items: center; color: var(--z-color-warn); flex: none; }
   .team-waiting-kind { font-weight: 600; flex: none; }

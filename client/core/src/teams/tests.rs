@@ -438,6 +438,18 @@ fn inbox_waiting_spans_and_profile_project_their_replies() {
         .items
         .iter()
         .all(|item| !item.id.is_empty() && !item.kind.is_empty()));
+    // Task 304 (hgs #246): each row's state, and the dismissed rows apart from the count.
+    let page = view::waiting(&json!({
+        "items": [{"id": "t1/team_paused/1", "kind": "team_paused", "team": "t1", "state": "paused:100.0", "title": "Paused"}],
+        "total": 1,
+        "dismissed": [{"id": "t1/plan_draft/plan", "kind": "plan_draft", "team": "t1", "state": "plan:7", "blocking": true, "blocks": "Orbit", "dismissed_at": 150.0}],
+        "dismissed_total": 1
+    }));
+    assert_eq!(page.items[0].state, "paused:100.0");
+    assert_eq!((page.dismissed.len(), page.dismissed_total, page.total), (1, 1, 1));
+    assert_eq!(page.dismissed[0].state, "plan:7");
+    assert_eq!(page.dismissed[0].detail["blocks"], "Orbit");
+    assert!(view::waiting(&fixture("waiting")).dismissed.is_empty());
     let spans = view::spans(TEAM, &fixture("spans"));
     assert_eq!(
         (spans.tasks.len(), spans.next, spans.truncated),

@@ -1,4 +1,4 @@
-import { tr } from "../../i18n";
+import { tr, trNoop } from "../../i18n";
 import { withdrawnRefusal } from "../../teamRefusals";
 import { retryContinues, retryContinueText } from "./actions";
 import type { ComputerId, TeamAction, TeamCall, TeamChoice, TeamConfirmation, TeamInboxItem, TeamMemberQuestion, TeamMemberView, TeamOutcome, TeamProposalView, TeamView, TeamWaitingItem } from "../../types";
@@ -508,8 +508,44 @@ export function waitingKindLabel(item: Pick<TeamWaitingItem, "kind" | "action">)
     case "lead_message_undelivered": return tr("Urgent message");
     // Task 245 (hgs task 162): the lead's plan changes inside the approved goal, each revertible.
     case "lead_changes": return tr("Lead's changes");
+    // Task 304 (hgs #286): a task wait the lead left unresolved, escalated once.
+    case "task_wait_escalated": return tr("Lead has not acted");
     default: return item.kind;
   }
+}
+
+/** Task 304 (hgs #286): one kind of the lead's changes, its count and its newest few. */
+export interface DigestGroup { kind: string; label: string; count: number; newest: string[] }
+
+const GROUP_LABELS: Record<string, string> = { added: trNoop("added"), moved: trNoop("moved"), cancelled: trNoop("cancelled"), "re-issued": trNoop("re-issued"), changed: trNoop("changed") };
+
+/** The lead-changes digest's groups (`groups`): "2 added", "1 moved"... with their newest summaries. */
+export function digestGroups(item: Pick<TeamWaitingItem, "kind" | "detail">): DigestGroup[] {
+  if (item.kind !== "lead_changes") return [];
+  const groups = (item.detail as { groups?: unknown } | null | undefined)?.groups;
+  if (!Array.isArray(groups)) return [];
+  return groups.flatMap((group: { kind?: unknown; count?: unknown; newest?: unknown }) => {
+    const kind = typeof group?.kind === "string" ? group.kind : "";
+    const count = typeof group?.count === "number" ? group.count : 0;
+    if (!kind || count <= 0) return [];
+    const newest = Array.isArray(group.newest) ? group.newest.flatMap((change: { summary?: unknown }) => (typeof change?.summary === "string" ? [change.summary] : [])) : [];
+    return [{ kind, label: tr("%1 %2", count, tr(GROUP_LABELS[kind] ?? GROUP_LABELS.changed)), count, newest }];
+  });
+}
+
+/**
+ * Task 304 (hgs #286): the item the strip's header names. The lead-changes
+ * digest has its own row, so the header names the newest other item; with
+ * only digests it names none.
+ */
+export function bannerHeadItem(items: readonly TeamWaitingItem[]): TeamWaitingItem | undefined {
+  return items.find((item) => item.kind !== "lead_changes");
+}
+
+/** Task 304 (hgs #246): what a dismissed row still blocks (`blocks`), when it blocks work. */
+export function stillBlocks(item: Pick<TeamWaitingItem, "detail">): string {
+  const detail = item.detail as { blocking?: unknown; blocks?: unknown } | null | undefined;
+  return detail?.blocking === true && typeof detail.blocks === "string" ? detail.blocks : "";
 }
 
 /** The item's icon (ui/lib/icons names). */
@@ -530,6 +566,7 @@ export function waitingKindIcon(kind: string): string {
     case "team_paused": return "pause";
     case "lead_message_undelivered": return "message-square";
     case "lead_changes": return "pencil";
+    case "task_wait_escalated": return "clock";
     default: return "triangle-alert";
   }
 }

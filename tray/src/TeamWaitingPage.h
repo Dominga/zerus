@@ -39,6 +39,12 @@ public:
         QJsonArray questions;
         // Task #230: the lead's plan changes the digest names, each revertible.
         QJsonArray changes;
+        // Task 304 (hgs #246, #286): the situation the row stands for, which
+        // Dismiss names; a dismissed decision's blocking flag and what it
+        // still blocks; the lead-changes digest's groups (kind, count, newest).
+        QString state, blocks;
+        bool blocking = false;
+        QJsonArray groups;
         double since = 0;
         int phase = 0, task = 0;
         // U63 (owner, 2026-10-31): a phase that waits for the owner's
@@ -75,6 +81,15 @@ public:
     // The kind's short name and its icon (WorkspaceIcons).
     static QString kindLabel(const QString &kind);
     static QString kindIcon(const QString &kind);
+    // Task 304: the digest's groups as one line ("2 added, 1 moved") and the
+    // newest changes of each, for its tooltip; empty without groups.
+    static QString groupsText(const Item &item);
+    static QString groupsTip(const Item &item);
+    // Task 304 (hgs #246): the owner's Dismiss of a row in its state, and
+    // Restore; `done` gets whether hgs took it.
+    static void dismiss(TeamController *teams, const Item &item, const std::function<void(bool ok, const QString &message)> &done);
+    static void restore(TeamController *teams, const Item &item, const std::function<void(bool ok, const QString &message)> &done);
+    const QList<Item> &dismissedItems() const { return m_dismissed; }
     static constexpr int PageSize = 50;
 protected:
     void showEvent(QShowEvent *event) override;
@@ -91,6 +106,10 @@ private:
     // The newest page as last read, and the older pages "Show older" added;
     // a poll re-reads only the newest page, so the older ones never jump.
     QList<Item> m_head, m_older, m_items;
+    // Task 304: the dismissed rows (hgs `dismissed`), shown under Show dismissed.
+    QList<Item> m_dismissed;
+    int m_dismissedTotal = 0;
+    bool m_showDismissed = false;
     QJsonValue m_headNext, m_olderNext;
     int m_total = -1;
     QString m_error;

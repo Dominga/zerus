@@ -190,9 +190,45 @@ describe("Waiting for you and the Activity strip (task 116)", () => {
     expect(html).not.toContain(">lead_changes<");
     expect(html).toContain("data-waiting-seen");
     expect(html).toMatch(/data-waiting-revert[^>]*title="Revert the newest change: split #4 into #4 and #9"|title="Revert the newest change: split #4 into #4 and #9"[^>]*data-waiting-revert/);
+    // Task 304 (hgs #286): one grouped line, counts per kind; the newest few in each tooltip.
+    const grouped = renderPage({ items: [{ ...item, detail: { ...item.detail, groups: [{ kind: "added", count: 2, newest: [{ summary: "added #9" }, { summary: "added #10" }] }, { kind: "moved", count: 1, newest: [{ summary: "moved #3" }] }] } }], total: 1, more: false, next: null });
+    expect(grouped).toContain("data-waiting-groups");
+    expect(grouped).toMatch(/data-group="added"[^>]*title="added #9\nadded #10"[^>]*>2 added</);
+    expect(grouped).toMatch(/data-group="moved"[^>]*>1 moved</);
     // Without changes in the item there is nothing to revert; Seen stays.
     const bare = renderPage({ items: [{ ...item, detail: null }], total: 1, more: false, next: null });
     expect(bare).toContain("data-waiting-seen");
     expect(bare).not.toContain("data-waiting-revert");
+  });
+
+  // Task 304 (hgs #246): a row with a state has its Dismiss; the dismissed
+  // rows wait behind Show dismissed with their own count.
+  it("each row with a state has Dismiss, and the dismissed rows are behind Show dismissed", () => {
+    const paused = { id: "t1/team_paused/1", kind: "team_paused", team: "t1", team_name: "Checkout", action: "resume_team", since: 1_800_000_000, proposal: null, title: "Team paused", state: "paused:100.0" };
+    const old = { id: "t1/tool_missing/x", kind: "tool_missing", team: "", team_name: "", action: "decide_tool", since: 1_799_000_000, proposal: null, title: "cmake is missing" };
+    const html = renderPage({ items: [paused, old], total: 2, more: false, next: null,
+      dismissed: [{ ...paused, id: "t1/plan_draft/plan", kind: "plan_draft", title: "Plan waits", state: "plan:7", detail: { blocking: true, blocks: "Checkout" } }], dismissed_total: 1 });
+    expect(html.match(/data-waiting-dismiss/g)?.length).toBe(1);
+    expect(html).toContain("Show dismissed (1)");
+    // Folded until shown.
+    expect(html).not.toContain("data-waiting-restore");
+    expect(renderPage({ items: [paused], total: 1, more: false, next: null })).not.toContain("data-show-dismissed");
+  });
+
+  // Task 304 (hgs #286): the escalation is one row naming the lead; the
+  // strip header names the newest item that is not the digest.
+  it("the escalated wait is one row, and the strip header does not repeat the digest", () => {
+    const digest = { id: "t1/lead_changes/digest", kind: "lead_changes", team: "t1", team_name: "Checkout", action: "open_team", since: 1_800_000_100, proposal: null,
+      title: "The lead changed the plan 3 times inside the approved goal, newest: added #9", detail: { changes: [{ id: "lc3", summary: "added #9" }] } };
+    const escalated = { id: "t1/task_wait_escalated/escalated-4", kind: "task_wait_escalated", team: "t1", team_name: "Checkout", action: "open_team", since: 1_800_000_000, proposal: null,
+      title: "#4 API still waits after 60 min: unknown model (Lead has not acted)", state: "wait:4" };
+    const strip = renderBanner({ items: [digest, escalated], total: 2, more: false, next: null });
+    expect(strip).toContain("2 wait for you");
+    const head = strip.slice(strip.indexOf("team-waiting-banner-head"), strip.indexOf("Show all"));
+    expect(head).toContain(escaped(escalated.title));
+    expect(head).not.toContain("The lead changed the plan");
+    const page = renderPage({ items: [escalated], total: 1, more: false, next: null });
+    expect(page).toContain("Lead has not acted");
+    expect(page.match(/data-kind="task_wait_escalated"/g)?.length).toBe(1);
   });
 });

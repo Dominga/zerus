@@ -2475,5 +2475,15 @@
   "Ask the owner": "Спросить владельца",
   "Copied for the lead's session": "Скопировано для сеанса ведущего",
   "Could not copy the command": "Не удалось скопировать команду",
-  "Copy a command and run it in the lead's session.": "Скопируйте команду и выполните её в сеансе ведущего."
+  "Copy a command and run it in the lead's session.": "Скопируйте команду и выполните её в сеансе ведущего.",
+  "Dismiss: the row leaves the list until it changes; Show dismissed brings it back": "Скрыть: строка уходит из списка, пока не изменится; «Показать скрытые» возвращает её",
+  "still blocks %1": "всё ещё блокирует %1",
+  "Hide dismissed": "Спрятать скрытые",
+  "Show dismissed (%1)": "Показать скрытые (%1)",
+  "Dismissed": "Скрытые",
+  "Lead has not acted": "Лид не ответил",
+  "added": "добавлено",
+  "moved": "перенесено",
+  "re-issued": "выдано заново",
+  "changed": "изменено"
 }

@@ -11,7 +11,7 @@ import { openSettings } from "../screens/settings/sections";
 import { ProposalCardList, useModel, windowPort } from "./ProposalCards";
 import {
   BANNER_ROWS, WaitingAnswer, acceptanceSummary, approves, opensDisk, resumesTeam, deferredRequest, opensCard, splitDeferred, toolOffer, waitingActionLabel, waitingAge,
-  waitingCount, waitingFields, waitingKindIcon, waitingKindLabel, type QuestionChoice,
+  waitingCount, waitingFields, waitingKindIcon, waitingKindLabel, bannerHeadItem, digestGroups, stillBlocks, type QuestionChoice,
 } from "./decisions";
 import type { TeamAction, TeamWaitingItem } from "../../types";
 
@@ -256,6 +256,17 @@ function Approve(props: { item: TeamWaitingItem; label?: string }) {
   );
 }
 
+/**
+ * Task 304 (hgs #246): the owner's Dismiss of a row in its current state; it
+ * leaves at once and comes back when its state changes or on Restore.
+ */
+async function dismiss(item: TeamWaitingItem) {
+  if (!item.state) return;
+  const outcome = await windowPort.send({ computer: "", team: "", team_name: item.team_name, action: { kind: "waiting_dismiss", id: item.id, state: item.state, team: item.team || undefined } });
+  if (outcome.outcome === "done") answeredWaiting(item);
+  else toast(tr("Dismiss"), outcome.outcome === "confirm" ? outcome.confirmation.text : outcome.detail, "error");
+}
+
 /** One row: kind, title, team and age; Open team; the answer in place. */
 function Row(props: { item: TeamWaitingItem; compact?: boolean }) {
   const [open, setOpen] = createSignal(false);
@@ -305,8 +316,44 @@ function Row(props: { item: TeamWaitingItem; compact?: boolean }) {
             }}>{tr("Revert")}</button>
           </Show>
         </Show>
+        <Show when={item().state}>
+          <button class="icon-btn small team-waiting-dismiss" data-waiting-dismiss aria-label={tr("Dismiss")}
+            title={tr("Dismiss: the row leaves the list until it changes; Show dismissed brings it back")}
+            onClick={(event) => { event.stopPropagation(); void dismiss(item()); }}><Icon name="x" size={13} /></button>
+        </Show>
       </div>
+      {/* Task 304 (hgs #286): the lead's changes as one grouped line: counts per kind, the newest few in each one's tooltip. */}
+      <Show when={digestGroups(item()).length > 0}>
+        <div class="team-waiting-groups" data-waiting-groups>
+          <For each={digestGroups(item())}>{(group) => (
+            <span class="team-waiting-group-chip" data-group={group.kind} title={group.newest.join("\n")}>{group.label}</span>
+          )}</For>
+        </div>
+      </Show>
       <Show when={open()}><Answer item={item()} /></Show>
+    </div>
+  );
+}
+
+/** Task 304 (hgs #246): a dismissed row: what it was, what it still blocks, and Restore. */
+function DismissedRow(props: { item: TeamWaitingItem; restored: () => void }) {
+  const item = () => props.item;
+  const restore = async () => {
+    const outcome = await windowPort.send({ computer: "", team: "", team_name: item().team_name, action: { kind: "waiting_restore", id: item().id } });
+    if (outcome.outcome === "done") props.restored();
+    else toast(tr("Restore"), outcome.outcome === "confirm" ? outcome.confirmation.text : outcome.detail, "error");
+  };
+  return (
+    <div class="team-waiting-row dismissed" data-dismissed={item().id} data-kind={item().kind}>
+      <div class="team-waiting-head">
+        <span class="team-waiting-icon"><Icon name={waitingKindIcon(item().kind)} size={14} /></span>
+        <span class="team-waiting-kind">{waitingKindLabel(item())}</span>
+        <span class="team-waiting-title ell" title={item().title}>{item().title}</span>
+        <span class="grow" />
+        <Show when={stillBlocks(item())}>{(blocks) => <span class="team-waiting-blocks" data-still-blocks>{tr("still blocks %1", blocks())}</span>}</Show>
+        <span class="team-waiting-team ell">{item().team_name}</span>
+        <button class="btn small" data-waiting-restore onClick={() => void restore()}>{tr("Restore")}</button>
+      </div>
     </div>
   );
 }
@@ -317,6 +364,10 @@ export function WaitingPage() {
   const view = () => waiting();
   const failure = () => teams.failure("", "waiting") ?? teams.followError("");
   const [loading, setLoading] = createSignal(false);
+  // Task 304: the dismissed rows apart; one restored here leaves them at once.
+  const [showDismissed, setShowDismissed] = createSignal(false);
+  const [restored, setRestored] = createSignal<ReadonlySet<string>>(new Set());
+  const dismissedRows = () => (view()?.dismissed ?? []).filter((item) => !restored().has(item.id));
   createEffect(() => { const items = view()?.items; if (items) announce(items, !view()?.more); });
   const older = async () => {
     setLoading(true);
@@ -351,6 +402,17 @@ export function WaitingPage() {
               {tr("Show older")}
             </button>
           </Show>
+          <Show when={dismissedRows().length > 0}>
+            <button type="button" class="btn ghost small team-waiting-show-dismissed" data-show-dismissed aria-expanded={showDismissed()}
+              onClick={() => setShowDismissed(!showDismissed())}>
+              {showDismissed() ? tr("Hide dismissed") : tr("Show dismissed (%1)", view()!.dismissed_total ?? dismissedRows().length)}
+            </button>
+            <Show when={showDismissed()}>
+              <section class="team-waiting-dismissed" aria-label={tr("Dismissed")}>
+                <For each={dismissedRows()}>{(item) => <DismissedRow item={item} restored={() => setRestored(new Set([...restored(), item.id]))} />}</For>
+              </section>
+            </Show>
+          </Show>
         </Show>
       </div>
     </section>
@@ -370,7 +432,8 @@ export function WaitingBanner() {
           <div class="team-waiting-banner-head">
             <Icon name="bell" size={14} />
             <b>{tr("%1 wait for you", items().length)}</b>
-            <span class="dim ell">{items()[0].title}</span>
+            {/* Task 304 (hgs #286): the lead-changes digest has its own row; the header does not repeat it. */}
+            <span class="dim ell">{bannerHeadItem(items())?.title ?? ""}</span>
             <span class="grow" />
             <button class="btn small ghost" onClick={() => setOpen(!open())}>{open() ? tr("Hide") : tr("Show all")}</button>
           </div>

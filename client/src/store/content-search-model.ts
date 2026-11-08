@@ -101,6 +101,7 @@ export function mergeSessionMatch<T extends { id: string; session: Session; foun
   if (items.length >= cap) return false;
   positions.set(item.session.key, items.length); items.push(item); return true;
 }
-export function searchCount(messages: number, sessions: number): string {
-  return `${messages} ${messages === 1 ? "message" : "messages"}, ${sessions} ${sessions === 1 ? "session" : "sessions"}`;
+export function searchCount(messages: number, sessions: number, creations = 0): string {
+  const text = `${messages} ${messages === 1 ? "message" : "messages"}, ${sessions} ${sessions === 1 ? "session" : "sessions"}`;
+  return creations ? `${text}, ${creations} ${creations === 1 ? "creation" : "creations"}` : text;
 }

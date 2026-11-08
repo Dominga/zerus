@@ -4,10 +4,10 @@ import { Icon } from "../lib/icons";
 import { teams } from "../../store/teams";
 import { useModel, windowPort } from "./ProposalCards";
 import {
-  TeamActions, barActions, barChips, finishSummary, formText, moreItems, openQuestions, phaseModeChip, phaseModeState, phaseModeSwitch, questionClosed, teamModeBadge, stageName, subtreeImpact, taskButtons,
+  TeamActions, FINDING_LABELS, barActions, barChips, finishSummary, formText, moreItems, openQuestions, phaseModeChip, phaseModeState, phaseModeSwitch, questionClosed, teamModeBadge, stageName, subtreeImpact, taskButtons,
   type ActTask, type ActTeam, type BarAction, type BarChip, type TaskForm,
 } from "./actions";
-import type { ComputerId } from "../../types";
+import type { ComputerId, TeamFindingItem } from "../../types";
 
 // Task 40: the team bar's actions and chips, and the task card's actions
 // (ui/teams/actions.ts holds what they are and what they send).
@@ -40,7 +40,85 @@ function TextDialog(props: {
   );
 }
 
-/** Task #219: every phase header's Standard | Free segmented toggle (task #58's switch and confirmation). */
+/** D2: the owner's Findings page, with every finding's answer. */
+export function FindingsDialog(props: { computer: ComputerId; team: ActTeam; close: () => void }) {
+  let dialog!: HTMLDialogElement;
+  const { model, tick } = useModel((changed) => new TeamActions(windowPort, () => ({ computer: props.computer, team: props.team }), changed));
+  const read = () => (tick(), model);
+  const [replan, setReplan] = createSignal<TeamFindingItem | undefined>();
+  onMount(() => { dialog.showModal(); });
+  onCleanup(() => { if (dialog.open) dialog.close(); });
+  const answer = (item: TeamFindingItem, action: keyof typeof FINDING_LABELS) => {
+    if (action === "replan") return setReplan(item);
+    void model.finding(item.id, action, undefined, item.task ? Number(item.task) : undefined);
+  };
+  const items = () => props.team.findings?.items ?? [];
+  return (
+    <>
+      <dialog ref={dialog} class="dlg team-findings-dialog" aria-labelledby="team-findings-title" onCancel={(event) => { event.preventDefault(); props.close(); }}>
+        <div class="dlg-head"><h2 id="team-findings-title">{tr("Findings · %1", props.team.name)}</h2></div>
+        <div class="dlg-body team-findings-list">
+          <Show when={items().length > 0} fallback={<p class="dim">{tr("No findings on this page.")}</p>}>
+            <For each={items()}>{(finding) => (
+              <div class="team-finding-row" data-finding={finding.id}>
+                <b class={`team-finding-${finding.severity}`}>{finding.severity.toUpperCase()} · {finding.title}</b>
+                <Show when={finding.scenario}><p>{finding.scenario}</p></Show>
+                <Show when={finding.file}><span class="dim mono">{finding.file}{finding.line > 0 ? `:${finding.line}` : ""}</span></Show>
+                <Show when={finding.state}><span class="dim">{tr("state: %1", finding.state)}{finding.phase > 0 ? tr(" · phase %1", finding.phase) : ""}{finding.note ? tr(" — %1", finding.note) : ""}</span></Show>
+                <Show when={finding.proposal}><p class="dim">{tr("Proposal: %1", finding.proposal)}</p></Show>
+                <div class="team-finding-actions">
+                  <For each={Object.entries(FINDING_LABELS) as [keyof typeof FINDING_LABELS, string][]}>{(entry) => (
+                    <button type="button" class="btn ghost small" data-finding-action={entry[0]} disabled={read().busy}
+                      onClick={() => answer(finding, entry[0])}>{entry[1]}</button>
+                  )}</For>
+                </div>
+              </div>
+            )}</For>
+          </Show>
+          <Show when={read().notice}><p class="danger" role="status">{read().notice}</p></Show>
+        </div>
+        <div class="dlg-foot"><span class="spacer" /><button type="button" class="btn" onClick={props.close}>{tr("Close")}</button></div>
+      </dialog>
+      <Show when={replan()}>{(finding) => (
+        <TextDialog title={tr("Replan")} hint={tr("What should the lead change in the plan for \"%1\"? The team pauses until you resume it.", finding().title)}
+          placeholder={tr("What should the lead change?")} action={tr("Replan")} close={() => setReplan(undefined)}
+          submit={(proposal) => void model.finding(finding().id, "replan", proposal, finding().task ? Number(finding().task) : undefined)} />
+      )}</Show>
+    </>
+  );
+}
+
+/** F7: a Done team's next goal, with the same people. */
+export function NextGoalDialog(props: { computer: ComputerId; team: ActTeam; close: () => void }) {
+  let dialog!: HTMLDialogElement;
+  const { model, tick } = useModel((changed) => new TeamActions(windowPort, () => ({ computer: props.computer, team: props.team }), changed));
+  const read = () => (tick(), model);
+  const [goal, setGoal] = createSignal("");
+  const [name, setName] = createSignal(props.team.name);
+  onMount(() => { dialog.showModal(); });
+  onCleanup(() => { if (dialog.open) dialog.close(); });
+  const submit = async () => {
+    if (!goal().trim()) return;
+    const outcome = await model.nextGoal(goal(), name());
+    if (outcome && outcome !== "cancelled" && outcome.outcome === "done") props.close();
+  };
+  const running = () => props.team.members.filter((member) => member.session).length;
+  return (
+    <dialog ref={dialog} class="dlg team-next-goal-dialog" aria-labelledby="team-next-goal-title" onCancel={(event) => { event.preventDefault(); props.close(); }}>
+      <div class="dlg-head"><h2 id="team-next-goal-title">{tr("Next goal · %1", props.team.name)}</h2></div>
+      <div class="dlg-body">
+        <p class="team-confirm-text">{tr("A new team takes the next goal with this folder, its settings, the lead and the members. %1 of %2 sessions are still running and keep their context; the others start with their first task. This team stays Done.", running(), props.team.members.length)}</p>
+        <label class="nt-field">{tr("Goal")}<textarea class="field" rows={5} placeholder={tr("What the team delivers next, and what done means")} value={goal()} onInput={(event) => setGoal(event.currentTarget.value)} /></label>
+        <label class="nt-field">{tr("Name")}<input class="field" maxlength={80} value={name()} onInput={(event) => setName(event.currentTarget.value)} /></label>
+        <Show when={read().notice}><p class="danger" role="status">{read().notice}</p></Show>
+      </div>
+      <div class="dlg-foot"><span class="spacer" />
+        <button type="button" class="btn" onClick={props.close}>{tr("Cancel")}</button>
+        <button type="button" class="btn primary" disabled={!goal().trim() || read().busy} onClick={() => void submit()}>{tr("Start next goal")}</button>
+      </div>
+    </dialog>
+  );
+}
 export function PhaseModeControl(props: { computer: ComputerId; team: ActTeam; phase: number; owner?: boolean }) {
   const { model, tick } = useModel((changed) => new TeamActions(windowPort, () => ({ computer: props.computer, team: props.team }), changed));
   const read = () => (tick(), model);
@@ -112,7 +190,7 @@ export function TeamBarChips(props: { team: ActTeam; onPhase: (phase: number) =>
   );
 }
 
-const ICON: Partial<Record<BarAction["id"], string>> = { approve: "play", resume: "play", pause: "pause", finish: "check", sendBack: "rotate-ccw", stop: "circle-stop", discard: "trash" };
+const ICON: Partial<Record<BarAction["id"], string>> = { approve: "play", resume: "play", pause: "pause", finish: "check", sendBack: "rotate-ccw", stop: "circle-stop", discard: "trash", findings: "search", nextGoal: "arrow-right" };
 
 /**
  * The bar's actions. `planMode` is the owner's free/standard choice for the
@@ -125,6 +203,8 @@ export function TeamBarActions(props: { computer: ComputerId; team: ActTeam; pla
   const finishOpen = () => props.finishOpen?.() ?? localFinish();
   const setFinish = (open: boolean) => (props.setFinishOpen ?? setLocalFinish)(open);
   const [sendBack, setSendBack] = createSignal(false);
+  const [findingsOpen, setFindingsOpen] = createSignal(false);
+  const [nextGoalOpen, setNextGoalOpen] = createSignal(false);
   const actions = createMemo(() => barActions(props.team, props.planMode));
   const impact = () => subtreeImpact(props.team, teams.list(props.computer)?.teams ?? []);
   const run = (action: BarAction) => {
@@ -138,6 +218,8 @@ export function TeamBarActions(props: { computer: ComputerId; team: ActTeam; pla
       case "resume": return void model.resume();
       case "stop": return void model.stop(impact());
       case "archive": return void model.archive();
+      case "findings": return setFindingsOpen(true);
+      case "nextGoal": return setNextGoalOpen(true);
     }
   };
   return (
@@ -160,6 +242,8 @@ export function TeamBarActions(props: { computer: ComputerId; team: ActTeam; pla
         <TextDialog title={tr("Send back to the coordinator")} hint={tr("What should change in the plan?")} placeholder={tr("What should change in the plan?")}
           action={tr("Send back")} close={() => setSendBack(false)} submit={(text) => props.sendToCoordinator(text)} />
       </Show>
+      <Show when={findingsOpen()}><FindingsDialog computer={props.computer} team={props.team} close={() => setFindingsOpen(false)} /></Show>
+      <Show when={nextGoalOpen()}><NextGoalDialog computer={props.computer} team={props.team} close={() => setNextGoalOpen(false)} /></Show>
     </div>
   );
 }
@@ -172,6 +256,7 @@ export function TaskActions(props: { computer: ComputerId; team: ActTeam; task: 
   const [reason, setReason] = createSignal("");
   const [returnLater, setReturnLater] = createSignal(false);
   const [menu, setMenu] = createSignal<"more" | "reassign" | undefined>();
+  const [delegate, setDelegate] = createSignal(false);
   const open = (next: TaskForm) => { setForm(next); setReason(""); setReturnLater(false); setMenu(undefined); };
   const words = () => (form() ? formText(props.team, props.task, form()!) : undefined);
   const peers = () => props.team.members.filter((member) => member.id !== props.task.assignee && !member.lead);
@@ -217,6 +302,16 @@ export function TaskActions(props: { computer: ComputerId; team: ActTeam; task: 
           )}</For>
         </div>
       )}</Show>
+      <Show when={!props.task.subteam && (props.team.status === "running" || props.team.status === "paused")}>
+        <div class="team-task-delegate">
+          <button type="button" class="btn ghost small" data-task-action="delegate" onClick={() => setDelegate(true)}>{tr("Delegate to a sub-team…")}</button>
+        </div>
+      </Show>
+      <Show when={delegate()}>
+        <TextDialog title={tr("Delegate to a sub-team")} hint={tr("Create a sub-team from task #%1? Its lead will be the assignee.", props.task.id)}
+          placeholder={tr("Sub-team name")} action={tr("Delegate")} close={() => setDelegate(false)}
+          submit={(name) => void model.createSubteam(name, props.task.id)} />
+      </Show>
       <Show when={words()}>{(text) => (
         <div class="team-task-form" data-form={form()}>
           <b>{text().heading}</b>

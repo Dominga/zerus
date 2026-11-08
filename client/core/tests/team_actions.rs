@@ -6,7 +6,7 @@ mod common;
 use common::FakeHgs;
 use serde_json::{json, Value};
 use std::time::Duration;
-use zerus_client_core::teams::action::{classify, prepare, run, TeamAction, TeamCall, TeamOutcome};
+use zerus_client_core::teams::action::{classify, prepare, run, Parent, TeamAction, TeamCall, TeamOutcome};
 use zerus_client_core::Exit;
 
 const TEAM: &str = "33fbafeb-8291-4eda-a00c-6e1448ec6f20";
@@ -306,6 +306,23 @@ fn actions() -> Vec<(TeamAction, &'static str, Value)> {
             },
             "settings",
             json!({"settings": {"build_broker": true}, "members_update": [{"id": "dev", "iron_rules": ["Run the tests"]}]}),
+        ),
+        (
+            TeamAction::Finding {
+                finding: "f1".into(), action: "fixed".into(), note: None, proposal: None, task: Some(4),
+            },
+            "finding",
+            json!({"finding": "f1", "action": "fixed", "task": 4}),
+        ),
+        (
+            TeamAction::NextGoal { goal: "Ship the next goal".into(), name: Some("Orbit 2".into()) },
+            "next-goal",
+            json!({"goal": "Ship the next goal", "name": "Orbit 2"}),
+        ),
+        (
+            TeamAction::Create { name: "child".into(), parent: Parent { team: TEAM.into(), task: 4 } },
+            "create",
+            json!({"name": "child", "parent": {"team": TEAM, "task": 4}}),
         ),
     ]
 }
@@ -955,6 +972,19 @@ fn the_webview_names_an_action_by_its_kind() {
     let settings: TeamAction =
         serde_json::from_value(json!({"kind": "settings", "settings": {"land": true}})).unwrap();
     assert_eq!(settings.op(), "settings");
+    let finding: TeamAction = serde_json::from_value(json!({
+        "kind": "finding", "finding": "f1", "action": "replan", "proposal": "Split phase 2"
+    }))
+    .unwrap();
+    assert_eq!(finding.op(), "finding");
+    let goal: TeamAction =
+        serde_json::from_value(json!({"kind": "next_goal", "goal": "Next", "name": "Orbit 2"})).unwrap();
+    assert_eq!(goal.op(), "next-goal");
+    let create: TeamAction = serde_json::from_value(json!({
+        "kind": "create", "name": "child", "parent": {"team": TEAM, "task": 4}
+    }))
+    .unwrap();
+    assert_eq!(create.op(), "create");
 }
 
 /// Task #44: Qt's catalog editor in core. The owner edits a field, exports

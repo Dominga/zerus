@@ -59,7 +59,7 @@ describe("team bar", () => {
     expect(ids(team({ status: "planning" }))).toEqual(["resumeLimits", "discard", "sendBack", "approve"]);
     expect(ids(team())).toEqual(["resumeLimits", "pause", "stop"]);
     expect(ids(team({ status: "paused" }))).toEqual(["resumeLimits", "resume", "stop"]);
-    expect(ids(team({ status: "done" }))).toEqual(["archive"]);
+    expect(ids(team({ status: "done" }))).toEqual(["archive", "nextGoal"]);
     expect(ids(team({ status: "stopped" }))).toEqual(["archive"]);
     const decided = team({ tasks: [task({ id: 1, status: "accepted" }), task({ id: 2, status: "cancelled" })] });
     expect(allDecided(decided)).toBe(true);
@@ -396,5 +396,43 @@ describe("member questions (task 55)", () => {
     const before = f.sent.length;
     expect(await actions.reply(decided, "q1", "Yes")).toBeUndefined();
     expect(f.sent).toHaveLength(before);
+  });
+});
+
+describe("Task 225: the dialogs Qt kept and Tauri lost", () => {
+  const finding = {
+    id: "f1", from_task: "2", severity: "critical", title: "Crash on empty cart", file: "src/cart.ts", line: 12,
+    scenario: "Opening an empty cart crashes", task: "4", state: "open", by: "Lead", at: 1, note: "", proposal: "", phase: 2,
+  };
+
+  it("Findings names every phase finding action, asks first, and sends the answer", async () => {
+    const t = team({ findings: { items: [finding] } });
+    expect(barActions(t, "").map((action) => action.id)).toContain("findings");
+    const f = fake();
+    await actionsOf(f, t).finding("f1", "fixed", undefined, 4);
+    expect(f.asked).toEqual([{ name: "teamFindingActionConfirm", title: "Fixed", text: "Fixed finding \"Crash on empty cart\"?", action: "Fixed" }]);
+    expect(f.sent.at(-1)?.action).toEqual({ kind: "finding", finding: "f1", action: "fixed", task: 4 });
+  });
+
+  it("Replan sends the proposal without another confirmation", async () => {
+    const f = fake();
+    await actionsOf(f, team({ findings: { items: [finding] } })).finding("f1", "replan", "Split phase 2");
+    expect(f.asked).toEqual([]);
+    expect(f.sent.at(-1)?.action).toEqual({ kind: "finding", finding: "f1", action: "replan", proposal: "Split phase 2" });
+  });
+
+  it("Next goal is a Done team's action and sends the goal and name", async () => {
+    const t = team({ status: "done", next: "" });
+    expect(barActions(t, "").map((action) => action.id)).toContain("nextGoal");
+    expect(barActions(team({ status: "done", next: "child" }), "").map((action) => action.id)).not.toContain("nextGoal");
+    const f = fake();
+    await actionsOf(f, t).nextGoal("Ship the next goal", "Orbit 2");
+    expect(f.sent.at(-1)?.action).toEqual({ kind: "next_goal", goal: "Ship the next goal", name: "Orbit 2" });
+  });
+
+  it("Delegate creates a sub-team from the task", async () => {
+    const f = fake();
+    await actionsOf(f, team()).createSubteam("Cart fixes", 4);
+    expect(f.sent.at(-1)?.action).toEqual({ kind: "create", name: "Cart fixes", parent: { team: "t1", task: 4 } });
   });
 });

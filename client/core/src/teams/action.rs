@@ -31,6 +31,13 @@ pub const TEXT_CHARS: usize = 20_000;
 /// The longest stderr a failure keeps.
 const DETAIL_CHARS: usize = 2000;
 
+/// The task a new sub-team comes from (`create`'s parent).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Parent {
+    pub team: String,
+    pub task: u64,
+}
+
 /// One team action, as the webview asks for it (`{"kind": "...", ...}`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -211,6 +218,29 @@ pub enum TeamAction {
     },
     /// Task 40: drops a plan in Planning (Discard plan); the team stops.
     Discard,
+    /// D2: the owner's answer to one finding (`hgs team finding`): Fixed,
+    /// Dropped, Defer, Reopen, Urgent phase or Replan (with the proposal).
+    Finding {
+        finding: String,
+        action: String,
+        #[serde(default)]
+        note: Option<String>,
+        #[serde(default)]
+        proposal: Option<String>,
+        #[serde(default)]
+        task: Option<u64>,
+    },
+    /// F7: a Done team starts the next goal with the same people.
+    NextGoal {
+        goal: String,
+        #[serde(default)]
+        name: Option<String>,
+    },
+    /// G1: creates a sub-team from a task; its lead is the assignee.
+    Create {
+        name: String,
+        parent: Parent,
+    },
     /// Task 40: parks a pending task with its reason until it is released.
     Hold {
         task: u64,
@@ -446,6 +476,9 @@ impl TeamAction {
             Self::Retry { .. } => "retry",
             Self::Finish { .. } => "finish",
             Self::Discard => "discard",
+            Self::Finding { .. } => "finding",
+            Self::NextGoal { .. } => "next-goal",
+            Self::Create { .. } => "create",
             Self::Hold { .. } => "hold",
             Self::SkipStage { .. } => "skip-stage",
             Self::SendBack { .. } => "send-back",
@@ -676,6 +709,36 @@ impl TeamAction {
                     return Err("Write the answer.".into());
                 }
                 plain(text, "An answer", 4000)
+            }
+            Self::Finding { finding, action, note, proposal, task: id } => {
+                word(finding, "finding id")?;
+                if !matches!(action.as_str(), "fixed" | "dropped" | "defer" | "reopen" | "urgent" | "replan") {
+                    return Err("Fixed, dropped, deferred, reopened, urgent or replan.".into());
+                }
+                if action == "replan" && proposal.as_deref().unwrap_or("").trim().is_empty() {
+                    return Err("A replan says what the lead should change.".into());
+                }
+                plain(note.as_deref().unwrap_or(""), "A note", 2000)?;
+                plain(proposal.as_deref().unwrap_or(""), "A proposal", 4000)?;
+                if let Some(id) = id {
+                    task(*id)?;
+                }
+                Ok(())
+            }
+            Self::NextGoal { goal, name } => {
+                if goal.trim().is_empty() {
+                    return Err("Write the next goal.".into());
+                }
+                plain(goal, "The next goal", 4000)?;
+                plain(name.as_deref().unwrap_or(""), "A name", 80)
+            }
+            Self::Create { name, parent } => {
+                if name.trim().is_empty() {
+                    return Err("Name the sub-team.".into());
+                }
+                plain(name, "A sub-team name", 80)?;
+                word(&parent.team, "parent team")?;
+                task(parent.task)
             }
             Self::Release { task: id } | Self::Retry { task: id } => task(*id),
             Self::DecideProposal {
@@ -957,6 +1020,29 @@ impl TeamAction {
                 if !text.trim().is_empty() {
                     put("text", json!(text.trim()));
                 }
+            }
+            Self::Finding { finding, action, note, proposal, task: id } => {
+                put("finding", json!(finding));
+                put("action", json!(action));
+                if let Some(note) = note {
+                    put("note", json!(note));
+                }
+                if let Some(proposal) = proposal {
+                    put("proposal", json!(proposal));
+                }
+                if let Some(id) = id {
+                    put("task", json!(id));
+                }
+            }
+            Self::NextGoal { goal, name } => {
+                put("goal", json!(goal));
+                if let Some(name) = name {
+                    put("name", json!(name));
+                }
+            }
+            Self::Create { name, parent } => {
+                put("name", json!(name));
+                put("parent", json!({"team": parent.team, "task": parent.task}));
             }
             Self::Release { task } | Self::Retry { task } => put("task", json!(task)),
             Self::DecideProposal {

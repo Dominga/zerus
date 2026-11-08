@@ -1196,9 +1196,18 @@ export interface TeamPhaseView {
 
 export interface TeamFinding { kind: string; text: string; task: number | null; member: string }
 
+/** D2: one finding on the owner's Findings page, with its state and replan proposal. */
+export interface TeamFindingItem {
+  id: string; from_task: string; severity: string; title: string; file: string; line: number; scenario: string;
+  task: string; state: string; by: string; at: number; note: string; proposal: string; phase: number;
+}
+export interface TeamFindingsPage { items: TeamFindingItem[]; next_cursor?: string }
+
 export interface TeamView {
   id: string; name: string; status: string; project: string; folder: string; goal: string; plan_mode: string; lead: string;
   revision: number; created: number; updated: number; waiting_for_lead: boolean; pending_phase: number | null;
+  /** F7: the team a next goal came from, and the one it led to. */
+  previous?: string; next?: string;
   /** Task #58: the phase that takes tasks as they come, and whether hgs sends each phase's mode. */
   free_phase?: number | null; phase_modes_known?: boolean;
   /** Task 112: a paused team's pause: since when, by whom and why (null otherwise). */
@@ -1212,6 +1221,8 @@ export interface TeamView {
   widenings?: { member?: string; role?: string; from?: string; to?: string }[];
   children?: { team: string; name?: string; status?: string }[];
   validation: { errors: TeamFinding[]; warnings: TeamFinding[] };
+  /** D2: the first page of the team's findings, when hgs sends it. */
+  findings?: TeamFindingsPage;
   health: { critical_path: number; parallelism: number; warnings: string[] };
   ready: number[]; cycle: number[]; draft: { revision: number; unseen: string[]; owner_edited: string[] } | null; truncated: boolean;
 }
@@ -1273,6 +1284,12 @@ export type TeamAction =
   | { kind: "finish"; summary: string }
   | { kind: "reply"; question: string; text: string }
   | { kind: "reassign"; task: number; member: string; subteam?: string | null }
+  /** D2: the owner's answer to one finding; a replan carries its proposal. */
+  | { kind: "finding"; finding: string; action: "fixed" | "dropped" | "defer" | "reopen" | "urgent" | "replan"; note?: string; proposal?: string; task?: number }
+  /** F7: a Done team starts the next goal with the same people. */
+  | { kind: "next_goal"; goal: string; name?: string }
+  /** G1: creates a sub-team from a task; its lead is the assignee. */
+  | { kind: "create"; name: string; parent: { team: string; task: number } }
   /** Task #218: a member moves to another agent/account/model or to an existing session. */
   | { kind: "swap-member"; member: string; agent?: string; model?: string; effort?: string; account?: string; session?: TeamSessionView }
   | { kind: "take_over"; task: number }

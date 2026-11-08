@@ -487,6 +487,63 @@ pub struct ProposalView {
     pub mode: String,
 }
 
+/// One finding on the Findings page (D2), with the owner's state and a replan
+/// proposal when it has one.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct OwnerFindingView {
+    pub id: String,
+    pub from_task: String,
+    pub severity: String,
+    pub title: String,
+    pub file: String,
+    pub line: u64,
+    pub scenario: String,
+    pub task: String,
+    pub state: String,
+    pub by: String,
+    pub at: f64,
+    pub note: String,
+    pub proposal: String,
+    pub phase: u64,
+}
+
+/// The first page of the team's findings (`hgs team status`'s `findings`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct FindingsView {
+    pub items: Vec<OwnerFindingView>,
+    pub next_cursor: String,
+}
+
+fn owner_findings(value: Option<&Value>) -> Option<FindingsView> {
+    let _page = value?.as_object()?;
+    Some(FindingsView {
+        items: array(value?, "items")
+            .iter()
+            .take(ITEMS_KEPT)
+            .map(|item| OwnerFindingView {
+                id: name(item, "id"),
+                from_task: name(item, "from_task"),
+                severity: name(item, "severity"),
+                title: text(item, "title", LINE_CHARS),
+                file: text(item, "file", LINE_CHARS),
+                line: count(item, "line"),
+                scenario: text(item, "scenario", TEXT_CHARS),
+                task: item.get("task").map(|task| match task {
+                    Value::String(line) => line.clone(),
+                    _ => task.to_string(),
+                }).unwrap_or_default(),
+                state: name(item, "state"),
+                by: name(item, "by"),
+                at: number(item, "at"),
+                note: text(item, "note", TEXT_CHARS),
+                proposal: text(item, "proposal", TEXT_CHARS),
+                phase: count(item, "phase"),
+            })
+            .collect(),
+        next_cursor: name(value?, "next_cursor"),
+    })
+}
+
 /// One preflight finding.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct FindingView {
@@ -562,6 +619,11 @@ pub struct TeamView {
     pub updated: f64,
     pub waiting_for_lead: bool,
     pub pending_phase: Option<u64>,
+    /// F7: the team a next goal came from, and the one it led to.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub previous: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub next: String,
     /// Task 112: a paused team's pause ({at, by, reason}), or null.
     pub paused: Value,
     /// The team's settings object as hgs stores it (a few dozen fields).
@@ -582,6 +644,9 @@ pub struct TeamView {
     /// tree confirmations of Pause and Stop.
     pub children: Vec<Value>,
     pub validation: Validation,
+    /// D2: the first page of the findings, when hgs sends it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub findings: Option<FindingsView>,
     pub health: HealthView,
     pub ready: Vec<u64>,
     pub cycle: Vec<u64>,
@@ -808,6 +873,8 @@ pub fn team(value: &Value) -> TeamView {
         updated: number(value, "updated"),
         waiting_for_lead: flag(value, "waiting_for_lead"),
         pending_phase: value.get("pending_phase").and_then(Value::as_u64),
+        previous: name(value, "previous"),
+        next: name(value, "next"),
         paused: value.get("paused").filter(|paused| paused.is_object()).map_or(Value::Null, |paused| bounded(Some(paused))),
         settings: match value.get("settings") {
             Some(Value::Object(settings)) => Value::Object(settings.clone()),
@@ -853,6 +920,7 @@ pub fn team(value: &Value) -> TeamView {
             errors: findings(validation, "errors"),
             warnings: findings(validation, "warnings"),
         },
+        findings: owner_findings(value.get("findings")),
         health: HealthView {
             critical_path: health
                 .map(|found| count(found, "critical_path"))

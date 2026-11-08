@@ -6,6 +6,7 @@ import type { PlanGraph, TeamView } from "./types";
 import type { TeamProfileView, TeamTestsView, TeamTimelineView } from "../../types";
 import { BoardView, HeatLegend, HeatLine, LayersView, PlanModeBar, ProfilePanel, TestsPanel, runStatusLabel, stageLabel } from "./plan-panels";
 import { ProfileTime } from "./TimeView";
+import { LanesView, type LaneEdit } from "./LanesView";
 import { spawnedFrom, heatSeed, stageChips, type PlanMode } from "./planModes";
 import { settings, settingsReady } from "../../store/settings";
 import { taskHeat } from "./heat";
@@ -50,6 +51,8 @@ export interface PlanViewProps {
   taskActions?: (id: number) => JSX.Element;
   /** Task #58: a phase header's mode chip and switch (ui/teams/TeamActions.tsx PhaseModeControl). */
   phaseActions?: (n: number) => JSX.Element;
+  /** Task #226: the Lanes mode's rename and move go through edit-draft; false on a refusal. */
+  onLaneEdit?: (phase: number, updates: LaneEdit[]) => Promise<boolean>;
   class?: string;
 }
 
@@ -511,12 +514,15 @@ export function PlanView(props: PlanViewProps): JSX.Element {
       <Show when={mode() === "layers"}>
         <LayersView phases={phases()} includeCancelled={includeCancelled()} profile={heatProfile()} onOpen={open} />
       </Show>
+      <Show when={mode() === "lanes"}>
+        <LanesView team={props.team} includeCancelled={includeCancelled()} profile={props.profile} onOpen={open} onEdit={props.onLaneEdit} />
+      </Show>
       <Show when={mode() === "profile"}>
         <div class="pm-profile-scroll">
           <Show when={props.loadTimeline}>{(load) => (
             <ProfileTime team={props.team} load={load()} profile={props.profile} statusName={runStatusLabel} onOpen={open} />
           )}</Show>
-          <ProfilePanel profile={props.profile} />
+          <ProfilePanel profile={props.profile} team={props.team.id} />
         </div>
       </Show>
       <Show when={mode() === "tests"}>

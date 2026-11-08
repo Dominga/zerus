@@ -3,8 +3,8 @@ import type { TeamPipelineRun, TeamProfileView, TeamTestsView } from "../../type
 import type { PlacedNode } from "./plan";
 import { taskHeat } from "./heat";
 
-/** The plan's five modes, as Qt's TeamWorkspace toolbar names them. */
-export type PlanMode = "graph" | "board" | "layers" | "profile" | "tests";
+/** The plan's six modes, as Qt's TeamWorkspace toolbar names them. */
+export type PlanMode = "graph" | "board" | "layers" | "lanes" | "profile" | "tests";
 
 export interface PlanColumn {
   key: string;

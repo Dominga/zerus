@@ -417,6 +417,26 @@ pub struct TaskView {
     /// Task 55: the newest attempt's open questions to the lead (A3): the
     /// owner answers them with `hgs team reply` too.
     pub questions: Vec<QuestionView>,
+    /// Task #226: the plan lane (U27) the task is in; absent for lane 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lane: Option<LaneView>,
+}
+
+/// Task #226: a plan lane (U27): its number (above 0) and the label every task
+/// in it carries.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct LaneView {
+    pub n: u64,
+    pub label: String,
+}
+
+fn lane(value: &Value) -> Option<LaneView> {
+    let found = value.get("lane").filter(|lane| lane.is_object())?;
+    let n = count(found, "n");
+    (n > 0).then(|| LaneView {
+        n,
+        label: name(found, "label"),
+    })
 }
 
 /// Task 55: one open question of a member to the lead.
@@ -739,6 +759,7 @@ fn task(value: &Value) -> TaskView {
         subteam_team: value.get("subteam").map(|subteam| name(subteam, "team")).unwrap_or_default(),
         origin: value.get("origin").and_then(Value::as_u64).filter(|origin| *origin > 0),
         questions: open_questions(value),
+        lane: lane(value),
     }
 }
 
@@ -1801,5 +1822,21 @@ pub fn catalog(value: &Value) -> CatalogView {
                 }
             })
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_task_carries_its_lane_and_lane_zero_is_no_lane() {
+        let lane = task(&json!({"id":1,"title":"T","lane":{"n":2,"label":"Checkpoint 2"}}));
+        assert_eq!(
+            lane.lane,
+            Some(LaneView { n: 2, label: "Checkpoint 2".into() })
+        );
+        assert_eq!(task(&json!({"id":2,"title":"T","lane":{"n":0,"label":"x"}})).lane, None);
+        assert_eq!(task(&json!({"id":3,"title":"T"})).lane, None);
     }
 }

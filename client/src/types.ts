@@ -1055,6 +1055,12 @@ export interface TeamMemberQuestion {
   subagent_confirmation?: boolean;
 }
 
+/** Task #226: a plan lane (U27): a number above 0 and the label its tasks carry. */
+export interface TeamLaneView {
+  n: number;
+  label: string;
+}
+
 export interface TeamTaskView {
   id: number; title: string; status: string; assignee: string; phase: number; deps: { task: number; hard: boolean }[];
   estimate_minutes: number; attempts: number;
@@ -1068,6 +1074,8 @@ export interface TeamTaskView {
   subteam_team?: string;
   /** Task 55: the newest attempt's open questions to the lead; the owner answers them too. */
   questions?: { id: string; text: string; at: number }[];
+  /** Task #226: the plan lane the task is in (U27); absent or null for lane 0 ("no lane"). */
+  lane?: TeamLaneView | null;
   /** Task #60: the task this follow-up was spawned from; never a dependency. */
   origin?: number | null;
   /** Task 160: "parked until <condition>, ETA HH:MM (in N min)"; absent when not parked. */
@@ -1246,6 +1254,8 @@ export type TeamAction =
   | { kind: "skip_stage"; task: number; reason: string }
   | { kind: "send_back"; task: number; reason: string }
   | { kind: "move_task"; task: number; phase: number; revision?: number | null }
+  /** Task #226: a task's lane in a draft or planning phase (`edit-draft`'s tasks_update); null takes it out. */
+  | { kind: "edit_tasks"; phase: number; tasks: { id: number; lane: { n: number; label: string } | null }[] }
   | { kind: "draft_start"; folder: string; name?: string; lead: DraftMember; project?: string; project_id?: string; template?: string }
   | { kind: "draft_update"; revision: number; set: Record<string, unknown> }
   | { kind: "draft_seen"; fields: string[] }

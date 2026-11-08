@@ -5,6 +5,7 @@ import type { TeamProfileView, TeamTestsView } from "../../types";
 import type { PlacedNode } from "./plan";
 import { KIND_STYLES, keyName, lossKey, styleOf, swatchBackground } from "./profile-palette";
 import { taskHeat, type TaskHeat } from "./heat";
+import { downloadJson, profileExport, profileFileName } from "./profileExport";
 import { skin } from "../../skin/runtime";
 import {
   boardColumns,
@@ -26,6 +27,7 @@ const MODES: { mode: PlanMode; label: string }[] = [
   { mode: "graph", label: "Graph" },
   { mode: "board", label: "Board" },
   { mode: "layers", label: "Layers" },
+  { mode: "lanes", label: "Lanes" },
   { mode: "profile", label: "Profile" },
   { mode: "tests", label: "Tests" },
 ];
@@ -65,7 +67,7 @@ export function PlanModeBar(props: {
           />
           {tr("Show cancelled")}
         </label>
-        <Show when={props.onHeat}>
+        <Show when={props.onHeat && (props.mode === "graph" || props.mode === "board" || props.mode === "layers")}>
           <label class="pm-check" title={tr("Tint each task by how late it is against the plan; its overrun shows beside it")}>
             <input type="checkbox" class="pm-heat-toggle" checked={!!props.heat} onChange={(event) => props.onHeat?.(event.currentTarget.checked)} />
             {tr("Lateness")}
@@ -80,6 +82,7 @@ function modeLabel(mode: PlanMode): string {
   if (mode === "graph") return tr("Graph");
   if (mode === "board") return tr("Board");
   if (mode === "layers") return tr("Layers");
+  if (mode === "lanes") return tr("Lanes");
   if (mode === "profile") return tr("Profile");
   return tr("Tests");
 }
@@ -291,9 +294,28 @@ export function ProfileLegend(): JSX.Element {
   );
 }
 
-export function ProfilePanel(props: { profile?: TeamProfileView | null }): JSX.Element {
+export function ProfilePanel(props: { profile?: TeamProfileView | null; team?: string; scope?: string }): JSX.Element {
+  const [status, setStatus] = createSignal("");
+  const exportJson = () => {
+    const team = props.team ?? "";
+    const scope = props.scope ?? "plan";
+    const name = profileFileName(team, scope);
+    try {
+      downloadJson(name, profileExport(team, scope, props.profile));
+      setStatus(tr("Exported to %1", name));
+    } catch (error) {
+      setStatus(tr("Not exported: %1", error instanceof Error ? error.message : String(error)));
+    }
+  };
   return (
     <div class="pm-profile">
+      <div class="pm-profile-head">
+        <span class="grow" />
+        <Show when={props.team}>
+          <button type="button" class="btn small" data-action="profile-export" onClick={exportJson}>{tr("Export JSON")}</button>
+        </Show>
+        <Show when={status()}><span class="pm-note" role="status">{status()}</span></Show>
+      </div>
       <Show when={props.profile} fallback={<p class="pm-empty">{tr("Reading the profile…")}</p>}>
         {(profile) => (
           <>

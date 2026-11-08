@@ -2501,5 +2501,6 @@
   "Switch to %1": "Переключить на %1",
   "the proposed working mode": "предложенный режим работы",
   "Open team panel": "Открыть панель команды",
-  "and %1 more": "и ещё %1"
+  "and %1 more": "и ещё %1",
+  "One additional rule per line (20 maximum)": "Одно дополнительное правило в строке (не более 20)"
 }

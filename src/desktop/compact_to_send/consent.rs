@@ -3,10 +3,11 @@
 //! constructs it; restart and import have no live value to borrow.
 use super::ledger::{self, Child};
 use crate::desktop::creation_clone::lease::Lease;
+use crate::desktop::operation_clock::Clock;
 use anyhow::{ensure, Context, Result};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, OnceLock,
+    Arc,
 };
 use std::time::{Duration, Instant};
 use zerus_client_core::desktop::compact_to_send::Verified;
@@ -16,13 +17,11 @@ pub(super) struct Consent {
     pub original: Verified,
     pub lease: Arc<Lease>,
     pub cancel: AtomicBool,
-    /// The whole operation's bound ([`super::runtime::CHAIN`]).
-    length: Duration,
-    /// Its deadline, fixed at the operation's own first turn, when it gets
-    /// the work slot, and never renewed: nothing starts after it. An
-    /// operation queued behind another's wait keeps its whole bound
-    /// (zerus-qw7wp).
-    started: OnceLock<Instant>,
+    /// The whole operation's bound ([`super::runtime::CHAIN`]), its deadline
+    /// fixed at the operation's own first turn, when it gets the work slot,
+    /// and never renewed: nothing starts after it. An operation queued
+    /// behind another's wait keeps its whole bound (zerus-qw7wp).
+    clock: Clock,
 }
 impl Consent {
     pub fn admitted(original: Verified, lease: Arc<Lease>, length: Duration) -> Result<Arc<Self>> {
@@ -36,14 +35,13 @@ impl Consent {
             original,
             lease,
             cancel: AtomicBool::new(false),
-            length,
-            started: OnceLock::new(),
+            clock: Clock::new(length),
         }))
     }
     /// The operation's deadline; its first call, at the operation's first
     /// turn, starts it.
     pub fn chain(&self) -> Instant {
-        *self.started.get_or_init(|| Instant::now() + self.length)
+        self.clock.deadline()
     }
     /// The same live original, lease and writer as the row; with a ticket,
     /// exactly `child`'s own reservation.

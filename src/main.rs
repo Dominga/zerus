@@ -69,6 +69,12 @@ fn main() {
         eprintln!("hgs: {error}");
         std::process::exit(2);
     }
+    // The same for a session resume child, with its own descriptor.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Err(error) = desktop::session_resume::adopt_custody() {
+        eprintln!("hgs: {error}");
+        std::process::exit(2);
+    }
     // Byte framing is local SSH plumbing, before configuration or managers.
     if std::env::args().nth(1).as_deref() == Some("--ssh-bytes-client") {
         let code = match ssh_bytes::run(std::env::args().skip(2).collect()) {

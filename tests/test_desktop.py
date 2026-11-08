@@ -472,6 +472,50 @@ finally:
         else:
             self.assertNotIn('desktop-deferred-compact-to-send', help_text)
 
+    def test_session_resume_is_a_closed_native_intent_with_scoped_read_only_lookup(self):
+        self.serve()
+        status = self.cli('desktop', 'status', '--json')
+        scope = dict(configuration=status['configuration'], service_epoch=status['epoch'])
+        request, send_request = str(uuid.uuid4()), str(uuid.uuid4())
+        session = 'claude/private-resume'
+        resume = dict(request_id=request, action='resume', expected_run_id='run-1',
+                      expected_conversation_id='conversation-1')
+        stdin = dict(request_id=send_request, text='hello', expected_run_id='run-1',
+                     expected_conversation_id='conversation-1')
+        intent = dict(scope=scope, session=session, request_id=request, send_request_id=send_request,
+                      checkpoint='{}', resume=json.dumps(resume, separators=(',', ':')),
+                      original=json.dumps(stdin, separators=(',', ':')))
+        # Only the native frontend lane carries it.
+        refused = self.cli('desktop', 'request', '--json', data=dict(op='session_resume', intent=intent))
+        self.assertFalse(refused['accepted'])
+        self.assertEqual(refused['code'], 'frontend_authentication_required')
+        query = dict(scope=scope, session=session, request_id=request, plan_sha256='a' * 64)
+        result = self.cli('desktop', 'request', '--json', data=dict(op='session_resume_result', query=query))
+        self.assertEqual(result['abi'], 'desktop-deferred-session-resume-v1')
+        self.assertEqual(result['scope'], scope)
+        self.assertTrue(result['read_only'])
+        self.assertFalse(result['found'])
+        self.assertIsNone(result['receipt'])
+        # Another epoch, a remote session, a Codex session (direct until
+        # zerus-5wmh.66.4.10) or a malformed request is never looked up.
+        for bad in (dict(query, scope=dict(scope, service_epoch=str(uuid.uuid4()))),
+                    dict(query, session='@peer/claude'), dict(query, session='codex/private-resume'),
+                    dict(query, request_id='not-a-uuid')):
+            self.assertEqual(self.cli('desktop', 'request', '--json', data=dict(op='session_resume_result', query=bad)),
+                             dict(accepted=False, read_only=True, code='session_resume_result_unavailable'))
+        with closing(sqlite3.connect(self.desktop / 'state.sqlite3')) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM desktop_session_resumes').fetchone()[0], 0)
+        status = self.cli('desktop', 'status', '--json')
+        self.assertEqual(status['operation_queue']['kinds']['session_resume']['undrained'], 0)
+        self.assertFalse(status['operation_queue']['kinds']['session_resume']['authority'])
+        help_text = subprocess.run([str(HGS), '--help'], env=self.env, capture_output=True, text=True).stdout
+        # macOS refuses every original until a qualified child seam exists.
+        if sys.platform.startswith('linux'):
+            self.assertIn('Desktop deferred session resume ABI: desktop-deferred-session-resume-v1',
+                          [line.strip() for line in help_text.splitlines()])
+        else:
+            self.assertNotIn('desktop-deferred-session-resume', help_text)
+
     def test_creation_launch_is_a_closed_native_intent_with_scoped_read_only_lookup(self):
         self.serve()
         status = self.cli('desktop', 'status', '--json')
@@ -1683,11 +1727,14 @@ finally:
     @staticmethod
     def remove_catalog_reason_schema(db):
         # Rewind the later leaves too, never leaving one labelled older: the
-        # schema-30 compact-to-send, schema-29 deferred answer, schema-28
+        # schema-34 session resume, schema-30 compact-to-send, schema-29
+        # deferred answer, schema-28
         # deferred send, schema-27 task
         # message inputs, schema-26 task message, schema-25 termination
         # retention, creation launch/worktree, then the schema-22 catalog
         # approval.
+        db.execute('DROP TABLE desktop_session_resumes')
+        db.execute('DROP TABLE desktop_session_resume_budget')
         db.execute('DROP TABLE desktop_compact_to_sends')
         db.execute('DROP TABLE desktop_compact_to_send_budget')
         db.execute('DROP TABLE desktop_deferred_answers')

@@ -168,7 +168,8 @@ and the start of a resume-then-send. The dispatch uses that request id. The
 checkpoint records the original intent and identity only: the kind, the draft
 save revision and the exact message digest, the run and conversation, the
 question for an answer, a resume's start choice, and the CLI receipt family
-(`input_receipts`, `question_receipts`, `compact_receipts` or `resume_input`).
+(`input_receipts`, `question_receipts`, `compact_receipts` or `resume_input`;
+`action_receipts` for a version 3 resume-then-send the service resumes).
 Restart, import or reconnect never rebuild executable consent from it, and
 nothing sends from it. Imported and recovered drafts never carry one. A
 present but invalid field leaves the draft not restored, never read as absent.
@@ -464,6 +465,99 @@ Once the slot completes:
 Linux advertises `desktop-deferred-compact-to-send-v1`. macOS refuses every
 original before any row (`compact_to_send_native_image_unavailable`) and
 Windows refuses it too (`compact_to_send_unsupported`).
+
+The fourth kind, `session_resume` (`desktop::session_resume`, ABI
+`desktop-deferred-session-resume-v1`), defines its closed wire for one
+resume-then-send of a stopped session: one `hgs session-action <session>
+--json` that resumes it and then, only in the same live admitted operation,
+one `hgs send <session> --json` bound to the run that resume returned:
+- **Checkpoint.** A version 3 resume-then-send checkpoint (a resume, never a
+  fresh start or a resume with compaction) reserves both request IDs, the
+  resume's (`request_id`) and the send's (`send_request_id`), saved together
+  with the draft before the offer. Its receipt family is `action_receipts`.
+  A version 1 checkpoint keeps today's direct `hgs resume` path.
+- **Intent.** The local session, both request IDs, the checkpoint's exact
+  JSON, the exact resume stdin and the send's frozen template.
+- **Verification.** Strict typed decoding. The resume stdin is the CLI's own
+  `{request_id, action: "resume", expected_run_id, expected_conversation_id}`
+  with no other key. The template is held to the deferred send's rules
+  (`deferred_send::frozen`), names the original run, its conversation and its
+  own request, and no compaction. One session, run and non-empty conversation
+  run across the checkpoint and both stdins, and the checkpoint's message
+  digest is the template's. Only a local Claude or Kimi session is taken.
+  Codex stays direct, decided before any offer (zerus-5wmh.66.4.10): a resumed
+  Codex stays pending until its first message, and only its terminal shows
+  when it takes one. DeepSeek, OpenCode (`session_resume_agent_refused`),
+  another computer and an original larger than the control frame stay direct
+  too.
+- **Binding the send.** `hgs session-action` mints the resumed run itself, so
+  the send's actual stdin exists only after the resume: `session_resume::bind`
+  replaces only the template's `expected_run_id` with the `result_target` run
+  of the resume's own exact receipt, and the CLI's input receipt records that
+  stdin's SHA-256. The digest is fixed in the same write that records the
+  resume and never changes.
+- **Receipts.** Each child has its own step. The resume is Recorded only from
+  the exact `completed` action receipt of its request, session, run and
+  conversation, with no archive, whose `result_target` names the same session
+  and conversation and a new run. The receipt's bytes are read from the held
+  store and projected by the CLI's own observation rule
+  (`session_action::status`, as `observe_original` applies it). Its exact
+  `failed` receipt is Failed (`session_resume_refused`): the CLI writes it
+  only before its launch began, so nothing was launched. `claimed`,
+  `uncertain` and anything else are not. The send is Recorded only by the
+  deferred send's own `input_receipts` rule for the bound stdin. NotStarted
+  (`session_resume_not_started`) is only for a child the operation's own
+  ledger proves never crossed its reservation. The send never runs without a
+  recorded resume, since there is no resumed run to bind.
+- **Settlement and lookup.** Only the drained receipt settles. The send's
+  exact receipt means sent. Neither child started means nothing ran. A send
+  that never started leaves the resume Recorded, Failed or Unknown. A send that
+  may have started is unknown. The lookup is read-only and keyed by the resume
+  request and the plan fingerprint (`session_resume_result`).
+
+On Linux the service actor runs the resume the way it runs a compaction:
+admission after BEGIN IMMEDIATE under the current lease and scope, with live
+consent for that admission alone, which covers both children; the
+`action_receipts` folder and the state root opened before the child; the
+resume's custody reserved before it can spawn; in its spawn turn the selected
+session's own record of the original run read again from the held root, then
+the consent veto; the original child once through the shared runner, which
+marks its custody close-on-exec before anything else runs, so the terminal
+server and the agent it starts never hold it; and, after the physical drain,
+the receipt read from the held objects within one never-renewed 5-second
+deadline. `completed` means only that the agent's terminal started: the
+session's supervisor writes the resumed run's record after it, and the agent
+confirms its conversation later. A resume that is not recorded ends the send.
+
+After a recorded resume the same live operation waits, and only it. The wait
+has one budget of 180 seconds from the resume's drain, as long as the direct
+path waits, never renewed, inside the operation's own deadline of 270 seconds
+from its first turn, when it gets the work slot (the clock compact-to-send
+uses, `operation_clock`). Off the actor, with the operation's loans, each read
+takes the resumed run's own record from the held original root, with the root
+checked before and after:
+- the record shows a confirmed (no `expected_id`), idle (activity and phase),
+  live agent with no unconfirmed input or settings and no pause: the send may
+  start (`state::resumed_readiness`, the CLI's own record gates, read without
+  any effect);
+- not written yet, or starting or busy: read again;
+- failed, ending or out of its conversation: the wait ends without the send
+  (`session_resume_ready_ended`).
+
+A stop, a revoke or a lost source (`session_resume_vetoed`), a replaced root
+(`session_resume_root_changed`), the budget (`session_resume_wait_expired`)
+and the deadline (`session_resume_chain_expired`) end it too; the send was
+then never reserved. Panels that only the terminal shows, such as a Claude
+resume or usage-limit choice, are checked by `hgs send` under its input lock,
+and a refusal there after a possible start stays Unknown. Once ready, the
+send's `input_receipts` folder is opened under the same held root, its custody
+is reserved, and in its spawn turn the resumed run's record and its readiness
+are read again from the held root before the consent veto and the runner's
+deadline, bounded by the operation's own. A restart never resumes a wait or
+starts the send. Linux advertises `desktop-deferred-session-resume-v1`; macOS
+refuses every original before any row (`session_resume_native_image_unavailable`)
+and Windows refuses it too (`session_resume_unsupported`). No client offers it
+yet; the composer's routing follows separately.
 
 A draft holds one such identity until it is resolved. A definite outcome
 resolves it, as does a cancellation before its call was dispatched or, for a

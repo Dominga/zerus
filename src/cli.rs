@@ -77,6 +77,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        Desktop deferred answer ABI: desktop-deferred-answer-v1
        Desktop deferred answer update phase: desktop-deferred-answer-update-phase-v1
        Desktop deferred compact to send ABI: desktop-deferred-compact-to-send-v1
+       Desktop deferred session resume ABI: desktop-deferred-session-resume-v1
        Desktop task start reconcile ABI: desktop-task-start-reconcile-v1
        Desktop pending read import ABI: desktop-pending-reads-v1
        Desktop activation ABI: desktop-activation-v1
@@ -479,6 +480,7 @@ fn unix_only_usage(line: &str) -> bool {
         zerus_client_core::desktop::deferred_answer::HELP_MARKER,
         zerus_client_core::desktop::deferred_answer::UPDATE_PHASE_MARKER,
         zerus_client_core::desktop::compact_to_send::HELP_MARKER,
+        zerus_client_core::desktop::session_resume::HELP_MARKER,
         zerus_client_core::desktop::task_start_reconcile::HELP_MARKER,
         zerus_client_core::worktree_programs::custody::HELP_MARKER,
         zerus_client_core::worktree_programs::presentation::HELP_MARKER,
@@ -531,6 +533,7 @@ fn advertised(usage: Cow<'static, str>, linux: bool) -> Cow<'static, str> {
         zerus_client_core::desktop::deferred_answer::HELP_MARKER,
         zerus_client_core::desktop::deferred_answer::UPDATE_PHASE_MARKER,
         zerus_client_core::desktop::compact_to_send::HELP_MARKER,
+        zerus_client_core::desktop::session_resume::HELP_MARKER,
     ];
     usage
         .lines()
@@ -3485,6 +3488,8 @@ mod tests {
         assert!(USAGE.lines().any(|line| line.trim() == phase_marker));
         let compact_marker = zerus_client_core::desktop::compact_to_send::HELP_MARKER;
         assert!(USAGE.lines().any(|line| line.trim() == compact_marker));
+        let resume_marker = zerus_client_core::desktop::session_resume::HELP_MARKER;
+        assert!(USAGE.lines().any(|line| line.trim() == resume_marker));
         // Windows has no `hgs paste`, `hgs clip` or `hgs notify`, no Ctrl+V
         // that pulls a peer's image, and no POSIX creation-clone executor.
         // Its dry runs print the host's requests; every other line stays as is.
@@ -3559,6 +3564,10 @@ mod tests {
                     ""
                 )
                 .replace(
+                    "       Desktop deferred session resume ABI: desktop-deferred-session-resume-v1\n",
+                    ""
+                )
+                .replace(
                     "       Desktop task start reconcile ABI: desktop-task-start-reconcile-v1\n",
                     ""
                 )
@@ -3592,6 +3601,7 @@ mod tests {
         let answer = zerus_client_core::desktop::deferred_answer::HELP_MARKER;
         let phase = zerus_client_core::desktop::deferred_answer::UPDATE_PHASE_MARKER;
         let compact = zerus_client_core::desktop::compact_to_send::HELP_MARKER;
+        let resume = zerus_client_core::desktop::session_resume::HELP_MARKER;
         let clone = zerus_client_core::desktop::creation_clone::HELP_MARKER;
         assert_eq!(advertised(usage_text(true), true), USAGE);
         let mac = advertised(usage_text(true), false);
@@ -3603,6 +3613,7 @@ mod tests {
         assert!(!mac.lines().any(|line| line.trim() == answer));
         assert!(!mac.lines().any(|line| line.trim() == phase));
         assert!(!mac.lines().any(|line| line.trim() == compact));
+        assert!(!mac.lines().any(|line| line.trim() == resume));
         assert!(mac.lines().any(|line| line.trim() == clone), "clone stays POSIX");
         assert_eq!(
             mac,
@@ -3639,9 +3650,13 @@ mod tests {
                     "       Desktop deferred compact to send ABI: desktop-deferred-compact-to-send-v1\n",
                     ""
                 )
+                .replace(
+                    "       Desktop deferred session resume ABI: desktop-deferred-session-resume-v1\n",
+                    ""
+                )
         );
         for marker in [
-            marker, message, references, review, send, answer, phase, compact,
+            marker, message, references, review, send, answer, phase, compact, resume,
         ] {
             assert_eq!(
                 help_text().lines().any(|line| line.trim() == marker),

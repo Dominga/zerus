@@ -344,9 +344,16 @@ pub(crate) enum Step {
     /// Task 277 (owner, 2026-11-08): an urgent message interrupts the
     /// member's busy turn natively; `turn` pins the displayed turn.
     InterruptMessages { member: String, turn: f64, run: String, conversation: String },
-    /// Task 277: the stopped turn opens a new one with the urgent message on
-    /// top and "continue your task from where you stopped"; the attempt goes on.
+    /// Task 277 (owner, 2026-11-08): the stopped turn opens a new one with the
+    /// urgent message on top and "continue your task from where you stopped";
+    /// the attempt goes on.
     ContinueUrgent { member: String },
+    /// Task 270 (owner, 2026-11-08): the running team's settings disagree with
+    /// the project's working mode; the lead proposes the switch once, at a
+    /// safe point.
+    WorkingMode { preset: String, title: String, reasons: Vec<String> },
+    /// Task 270: profile the project once and cache the proposal on the team.
+    ModeCheck,
     /// The member's started session appeared, or its identity changed.
     Adopt { member: String, session: SessionRef },
     Launch { member: String },
@@ -2120,6 +2127,32 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         // nothing to keep; every other live session is paused, never killed.
         let pause = found.is_some_and(|found| found.live) && member.agent != "opencode";
         steps.push(Step::Drain { member: member.id.clone(), pause });
+    }
+    // Task 270 (owner, 2026-11-08): a running team whose settings disagree with
+    // its project's profile gets one owner card from the lead proposing the
+    // switch, at a safe point: no open attempt holds a folder the switch moves.
+    // The project is profiled once and cached on the team, so a tick only
+    // compares settings and never runs Git for it.
+    if matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
+        let open = team.proposals.iter().any(|proposal| proposal["kind"] == "working-mode" && proposal["state"] == "open");
+        if team.mode_proposal.is_none() {
+            steps.push(Step::ModeCheck);
+        } else if !open {
+            if let Some((preset, wrong)) = super::working_mode::cached_disagreement(team) {
+                let offered = team.proposals.iter().any(|found| {
+                    found["kind"] == "working-mode" && found["change"]["preset"].as_str() == Some(preset.as_str())
+                });
+                if !offered && team.tasks.iter().all(|task| task.open_attempt().is_none()) {
+                    let title = team
+                        .mode_proposal
+                        .as_ref()
+                        .and_then(|proposal| proposal["title"].as_str())
+                        .unwrap_or_default()
+                        .to_owned();
+                    steps.push(Step::WorkingMode { preset, title, reasons: wrong });
+                }
+            }
+        }
     }
     coalesce_lead(steps)
 }
@@ -3927,6 +3960,40 @@ pub(crate) fn tell_lead_cache_restarted(team_id: &str, task: u64, label: &str, e
 fn tell_lead(store: &mut Store, team: &Team, kind: &str, text: &str) {
     let Some(lead) = team.member(&team.lead).and_then(|lead| lead.session.clone()) else { return };
     let _ = super::doorbell::post_and_ring(store, &team.id, &team.lead, &lead, &uuid::Uuid::new_v4().to_string(), kind, "zerus", super::working::Urgency::Normal, text);
+}
+
+/// Task 270 (owner, 2026-11-08): profiles the project once and caches the
+/// working-mode proposal on the team, so later ticks only compare settings.
+fn check_working_mode(store: &mut Store, team: &Team) -> anyhow::Result<()> {
+    let folder = std::path::PathBuf::from(team.folder.trim());
+    let proposal = super::working_mode::propose(&folder)
+        .map(|proposal| proposal.value())
+        .unwrap_or_else(|| json!({"preset":""}));
+    change(store, &team.id, |team, _events| {
+        team.mode_proposal = Some(proposal);
+        Ok(())
+    })
+}
+
+/// Task 270 (owner, 2026-11-08): the lead proposes the project's working mode
+/// once, when the running team's settings disagree with it at a safe point; the
+/// owner's Allow writes the preset's settings (hgs team propose / decide).
+fn propose_working_mode(store: &mut Store, team: &Team, preset: &str, title: &str, reasons: &[String]) -> anyhow::Result<()> {
+    // The cached proposal still names this preset, and the settings still
+    // disagree with it: a stale step creates no card.
+    if !super::working_mode::cached_disagreement(team).is_some_and(|(found, _)| found == preset) {
+        return Ok(());
+    }
+    let reason = format!(
+        "The project's profile selects {title}: {}. Switch the team to it at this safe point (no attempt is open).",
+        reasons.join("; ")
+    );
+    let input = json!({"kind":"working-mode","preset":preset,"reason":reason});
+    change(store, &team.id, |team, events| {
+        let lead = ops::Actor::Member(team.lead.clone());
+        ops::apply(team, "propose", &input, &lead, &BTreeSet::new(), events)?;
+        Ok(())
+    })
 }
 
 /// Task 161: a member's attempt that waits instead of working: a running job
@@ -9248,6 +9315,8 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         Step::TellDecision { task, decision } => tell_decision(store, team, *task, decision),
         Step::ScanReport { task } => scan_report(store, team, *task),
         Step::SpecDecisions => spec_decisions(store, team),
+        Step::WorkingMode { preset, title, reasons } => propose_working_mode(store, team, preset, title, reasons),
+        Step::ModeCheck => check_working_mode(store, team),
         Step::Brief => send_brief(store, &team.id),
         Step::AllDecided => send_all_decided(store, &team.id),
         Step::Permission { member } => sync_permission(store, team, member),

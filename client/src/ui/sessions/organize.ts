@@ -17,7 +17,8 @@ let anchor: string | undefined, cursor: string | undefined;
 const cardKeys = () => listRows().filter((r) => r.type === "card").map((r) => r.id);
 
 export const multiCount = () => Object.values(multi).filter(Boolean).length;
-export const clearMulti = () => batch(() => { for (const k of Object.keys(multi)) if (multi[k]) setMulti(k, false); });
+/** Ends a bulk selection, and its range: the next Shift key starts again from the open conversation (Qt's clearBulkSelection, zerus-m0dem). */
+export const clearMulti = () => batch(() => { anchor = cursor = undefined; for (const k of Object.keys(multi)) if (multi[k]) setMulti(k, false); });
 /** A plain click or arrow on a card: a later range starts there. */
 export const setAnchor = (key: string) => { anchor = cursor = key; };
 

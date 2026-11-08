@@ -26,7 +26,7 @@ import { SessionList } from "./SessionList";
 import { applyBatch, catalog } from "../../store/catalog";
 import { emptyBatch } from "../../types";
 import { detailTab, latestRequests, multi, selectedKey, setDetailTab, setMulti, setPage, setSelectedKey, setStripMode } from "../../store/ui";
-import { setAnchor } from "./organize";
+import { clearMulti, setAnchor } from "./organize";
 
 const KEYS = ["a0", "a1", "a2", "b0"];
 const key = (name: string) => `\nrun:${name}`;
@@ -86,6 +86,21 @@ describe("the session list's keys", () => {
     expect(selectedKey()).toBe(key("a1"));
     press("ArrowDown", { shiftKey: true });
     expect(selected()).toEqual(["a1", "a2"]);
+  });
+
+  it("Escape or Deselect all ends the range too: the next Shift key starts again from the open conversation (zerus-m0dem)", () => {
+    press("ArrowDown", { shiftKey: true });
+    press("ArrowDown", { shiftKey: true });
+    expect(selected()).toEqual(["a0", "a1", "a2"]);
+    press("Escape");
+    expect(selected()).toEqual([]);
+    press("ArrowDown", { shiftKey: true });
+    expect(selected(), "after Escape").toEqual(["a0", "a1"]);
+    press("ArrowDown", { shiftKey: true });
+    clearMulti();
+    expect(selected()).toEqual([]);
+    press("ArrowDown", { shiftKey: true });
+    expect(selected(), "after Deselect all").toEqual(["a0", "a1"]);
   });
 
   it("Home and End go to the first and last row", () => {

@@ -31,3 +31,6 @@ You lead it, its plan needs no card, it uses the team's own agents, and its memb
 count and tree budgets are capped by the parent. Outside the root, without the right,
 or before the owner granted the team's standing rule, the create is refused. Zerus
 stops it when the task you held when creating it is accepted, rejected or cancelled.
+
+A performance run checks the machine first, and a comparison alternates the
+binaries in rounds (hgs guide team-tests).

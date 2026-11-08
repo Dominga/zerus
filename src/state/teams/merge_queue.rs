@@ -336,6 +336,8 @@ pub(crate) fn affected_requests(
             resources: provider.resources.clone(),
             command,
             platforms,
+            performance: provider.performance,
+            compare: String::new(),
         });
     }
     Ok(Affected { requests, not_run, tested_ranges, not_run_since })

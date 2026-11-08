@@ -30,3 +30,11 @@ once, after all its parts. The lead plans each task's tests this way.
 A split keeps every test, counted before and after. A test that repeats
 another becomes a case of a table test; a test that guards nothing (it
 cannot fail, or its code is gone) is removed, with the reason in the report.
+
+
+A performance run looks at the machine first: a perf suite (a `performance = true`
+provider, or a bench/perf name) samples CPU, disk and the running Zerus builds
+before and during. Over the `[performance]` limits it waits for a quiet window
+(bounded by `wait_seconds`), then runs marked `loaded` with the numbers in its
+result. Compare binaries alternating rounds (A, B, A, B), never all of one then
+the other.

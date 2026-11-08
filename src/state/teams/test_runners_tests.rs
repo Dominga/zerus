@@ -73,6 +73,8 @@ fn request(id: &str, commit: &str, targets: &[&str]) -> Request {
         resources: String::new(),
         command: "never run here".into(),
         platforms: vec!["linux".into()],
+        performance: false,
+        compare: String::new(),
     }
 }
 

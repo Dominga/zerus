@@ -80,4 +80,4 @@ Models, stages, scale: team-custom. Sub-teams: hgs guide team-tree.
 
 
 Scratch teams: a QA member (operate) creates and leads them at the team's scratch
-root; deciding their task stops them.
+root; deciding their task stops them. Perf: team-tests.

@@ -17,6 +17,8 @@ export default function TaskCopyReview(props: { project: string; name: string })
   onCleanup(panel.dispose);
   return <section class="tk-damaged-review" aria-label={tr("Damaged task copies")}>
     <For each={cards().map((row) => row.uuid)}>{(uuid) => {
+      let origin: HTMLButtonElement | undefined;
+      onCleanup(() => panel.retireOrigin(origin));
       const outcome = () => copyReviewOutcome(props.project, uuid);
       const title = () => tasks.find(uuid)?.title;
       return <article class="tk-card" aria-label={tr("Damaged task copy %1", uuid)}>
@@ -30,7 +32,7 @@ export default function TaskCopyReview(props: { project: string; name: string })
             : result().state === "refused" ? tr("Local copy review refused: %1", result().reason)
               : tr("Local copy outcome is unknown. Do not retry. Review the files manually. %1", result().reason)}</p>
         }</Show>
-        <button type="button" class="btn small" disabled={copyReviewBusy() || !!reviewingCopy() || ["moved", "unknown"].includes(outcome()?.state ?? "")}
+        <button type="button" class="btn small" ref={origin} disabled={copyReviewBusy() || !!reviewingCopy() || ["moved", "unknown"].includes(outcome()?.state ?? "")}
           onClick={(event) => void panel.open(props.project, uuid, event.currentTarget)}>{tr("Review local copy…")}</button>
         <Show when={outcome()?.state === "moved"}><button type="button" class="btn small" onClick={() => dismissCopyReview(props.project, uuid)}>{tr("Dismiss")}</button></Show>
       </article>;

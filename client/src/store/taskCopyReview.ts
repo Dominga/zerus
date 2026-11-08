@@ -12,7 +12,7 @@ export interface ReviewingCopy { project: string; uuid: string; fingerprint: str
 export const [reviewingCopy, setReviewingCopy] = createSignal<ReviewingCopy>();
 export const [copyReviewBusy, setCopyReviewBusy] = createSignal(false);
 export const [copyReviewOutcomes, setCopyReviewOutcomes] = createSignal<Record<string, { state: "moved" | "refused" | "unknown"; reason: string }>>({});
-let preparing: { panel: Panel; generation: number } | undefined;
+let preparing: { panel: Panel; generation: number; origin: HTMLElement } | undefined;
 let confirming: ReviewingCopy | undefined;
 const syncBusy = () => setCopyReviewBusy(!!preparing || !!confirming);
 function retire(panel: Panel) {
@@ -28,6 +28,13 @@ export function createCopyReviewPanel() {
   return {
     open: (project: string, uuid: string, origin: HTMLElement) => openCopyReview(project, uuid, origin, panel),
     owns: (current: ReviewingCopy | undefined) => panel.live && current?.panel === panel && current.generation === panel.generation,
+    retireOrigin: (origin: HTMLElement | undefined) => {
+      if (!origin) return;
+      if (preparing?.panel === panel && preparing.origin === origin) preparing = undefined;
+      const current = reviewingCopy();
+      if (current?.panel === panel && current.origin === origin && confirming !== current) setReviewingCopy(undefined);
+      syncBusy();
+    },
     retire: () => retire(panel),
     dispose: () => { panel.live = false; retire(panel); },
   };
@@ -53,7 +60,7 @@ function matches(reply: CopyReviewReply, project: string, uuid: string) {
 }
 async function openCopyReview(project: string, uuid: string, origin: HTMLElement, panel: Panel) {
   if (!panel.live || !origin.isConnected || copyReviewBusy() || reviewingCopy() || ["unknown", "moved"].includes(copyReviewOutcome(project, uuid)?.state ?? "")) return;
-  const request = { panel, generation: panel.generation };
+  const request = { panel, generation: panel.generation, origin };
   preparing = request; syncBusy();
   const current = () => preparing === request && panel.live && panel.generation === request.generation && origin.isConnected && tasks.project() === project;
   try {
@@ -66,7 +73,8 @@ async function openCopyReview(project: string, uuid: string, origin: HTMLElement
 }
 export async function confirmCopyReview() {
   const current = reviewingCopy();
-  if (!current || copyReviewBusy() || !current.panel.live || current.generation !== current.panel.generation || !current.origin.isConnected) return;
+  if (!current || copyReviewBusy()) return;
+  if (!current.panel.live || current.generation !== current.panel.generation || !current.origin.isConnected) { setReviewingCopy(undefined); return; }
   confirming = current; syncBusy();
   try {
     const reply = await reviewTaskCopy(current.project, current.uuid, current.fingerprint);

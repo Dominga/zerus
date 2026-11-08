@@ -203,6 +203,26 @@ mod tests {
         os::unix::fs::PermissionsExt,
     };
 
+    fn make_fifo(path: &std::path::Path) {
+        use std::os::unix::fs::FileTypeExt;
+        // rustix::fs::mkfifoat is unavailable on Apple targets. POSIX mkfifo
+        // preserves real FIFO coverage without unsafe code or a new crate.
+        let output = std::process::Command::new("mkfifo")
+            .env_clear()
+            .args(["-m", "600"])
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let metadata = std::fs::symlink_metadata(path).unwrap();
+        assert!(metadata.file_type().is_fifo());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    }
+
     fn fixture() -> (tempfile::TempDir, Selection, wire::Query, wire::Context) {
         let temp = tempfile::tempdir().unwrap();
         std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -305,12 +325,7 @@ mod tests {
         symlink(&selection.path, &path).unwrap();
         assert!(selection.query(now().unwrap()).is_none());
         std::fs::remove_file(&path).unwrap();
-        rustix::fs::mkfifoat(
-            rustix::fs::CWD,
-            &path,
-            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        )
-        .unwrap();
+        make_fifo(&path);
         let start = std::time::Instant::now();
         assert!(selection.query(now().unwrap()).is_none());
         assert!(start.elapsed() < Duration::from_secs(1));
@@ -323,12 +338,7 @@ mod tests {
         assert!(selection.query(now().unwrap()).is_none());
         put(&selection, wire::QUERY_FILE, &query);
         std::fs::remove_file(&selection.path).unwrap();
-        rustix::fs::mkfifoat(
-            rustix::fs::CWD,
-            &selection.path,
-            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        )
-        .unwrap();
+        make_fifo(&selection.path);
         selection.publish(&query, Some(context), now().unwrap());
         assert!(reply(&selection).is_none());
     }

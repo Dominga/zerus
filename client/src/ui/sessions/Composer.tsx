@@ -25,6 +25,7 @@ import { allowRetryShown, moveFocusOff } from "./composer-ui";
 import { focusTranscript, following, jumpToLatest, unseen } from "./Activity";
 import type { ChipTone } from "../../types";
 import { tr } from "../../i18n";
+import { CacheChip } from "./CacheChip";
 import { trText } from "../../text";
 
 // The message composer (Qt MessageComposer, 300-366), after the mockup's
@@ -57,12 +58,9 @@ const resetEditorHeight = () => {
 const COMPACT_WIDTH = 600;
 
 const USUAL_STOP = () => tr("Interrupt the current turn, like Escape in Terminal. The session stays open; queued messages follow the agent's native behavior.");
-const USUAL_CACHE_CLEAR = () => tr("Clear this agent’s conversation, like /clear in Terminal. Your unsent message stays here.");
 const CANCEL_SEND = () => tr("Cancel the pending send and unlock the message for editing. Compaction or startup continues; use Stop to interrupt the agent.");
 const CANCEL_LOCKED = () => tr("The desktop service is finishing this send; it can't be cancelled here.");
 const ATTACH = () => tr("Attach files, paste an image, or drop files onto this session");
-
-const toneClass = (tone: ChipTone) => (tone === "danger" ? "danger" : tone === "warning" ? "warn" : tone === "success" ? "ok" : "");
 
 /**
  * ComposerResizeHandle: the free space between the leading and trailing chips
@@ -106,54 +104,6 @@ function ResizeHandle(props: { edge?: boolean; hidden?: boolean }) {
       onPointerDown={down} onDblClick={resetEditorHeight} onKeyDown={key}>
       <Show when={!props.edge}><i class="cmp-grip" /></Show>
     </div>
-  );
-}
-
-/** The cache chip and its popover (SessionsWindow.cpp 987-1002, 3789-3795; CacheStatus::Chip). */
-function CacheChip(props: { compact: boolean }) {
-  const v = () => composer.view()!;
-  const [open, setOpen] = createSignal(false);
-  const [pos, setPos] = createSignal({ left: 0, bottom: 0 });
-  let chip!: HTMLButtonElement;
-  let pop: HTMLDivElement | undefined;
-  const close = (returnFocus = false) => { setOpen(false); if (returnFocus) chip.focus(); };
-  const outside = (e: PointerEvent) => { if (open() && !pop?.contains(e.target as Node) && !chip.contains(e.target as Node)) close(); };
-  onMount(() => addEventListener("pointerdown", outside, true));
-  onCleanup(() => removeEventListener("pointerdown", outside, true));
-  // The chip goes (a session without a cache): so does its popover.
-  createEffect(() => { if (!v().cache.visible) setOpen(false); });
-  const detail = () => (v().cache_warning ? `${v().cache_warning}\n` : "") + v().cache_details;
-  return (
-    <Show when={v().cache.visible}>
-      <span class="att-anchor">
-        <button ref={chip} type="button" class={`tchip ${toneClass(v().cache.tone)}`} classList={{ on: open() }} aria-haspopup="dialog" aria-expanded={open()}
-          aria-label={v().cache.label} title={detail()}
-          onClick={(e) => {
-            const r = chip.getBoundingClientRect();
-            setPos({ left: Math.max(8, Math.min(r.left, innerWidth - 368)), bottom: innerHeight - r.top + 6 });
-            setOpen(!open());
-            if (open()) queueMicrotask(() => (e.detail === 0 ? pop?.querySelector<HTMLElement>("button:not(:disabled)") ?? pop : pop)?.focus({ preventScroll: true }));
-          }}>
-          <Icon name={v().cache.tone === "success" ? "timer" : "context-warning"} size={13} />
-          {props.compact ? v().cache.short_label : v().cache.label}
-        </button>
-        <Show when={open()}>
-          <div class="att-pop cache-pop" ref={pop} tabindex="-1" role="dialog" aria-label={tr("Prompt cache")} data-shortcut-context="none"
-            style={{ left: `${pos().left}px`, bottom: `${pos().bottom}px` }}
-            onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(true); } }}>
-            <Show when={v().cache_warning}><p class="cache-warning">{v().cache_warning}</p></Show>
-            <p class="cache-detail">{v().cache_details}</p>
-            <div class="cache-actions">
-              {/* Shown with a warning only (3793); enabled by the cache rule, not Clear session's (3794). */}
-              <Show when={v().cache_warning}>
-                <button type="button" class="btn small" disabled={!v().clear.cache_enabled} title={v().clear.cache_reason || USUAL_CACHE_CLEAR()}
-                  onClick={() => { close(); composer.openClear(); }}>{tr("Clear context")}</button>
-              </Show>
-            </div>
-          </div>
-        </Show>
-      </span>
-    </Show>
   );
 }
 

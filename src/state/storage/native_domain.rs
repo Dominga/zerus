@@ -12,8 +12,10 @@ use std::os::unix::fs::MetadataExt;
 use std::time::Instant;
 
 mod fresh;
+mod kind;
 mod reservation;
 pub(in crate::state) use fresh::Fresh;
+pub(in crate::state) use kind::{InputKind, KindProof};
 
 /// A negative allocation decision only. This does not select or mutate an
 /// existing first holder, nor prove that any record move completed.

@@ -32,6 +32,12 @@ fn current_returns_the_unread_text_and_records_one_read_receipt() {
         assert_eq!(view["attempt"], dev_attempt.as_str());
         assert!(view["messages"][0]["text"].as_str().unwrap().contains("Build it."));
         assert_eq!(view["read"], json!({"read":[id],"request_id":request,"via":"current"}));
+        // Task 287: the receipt changes the message rows only; the worker's
+        // next tick brings the member's unread summary up to date.
+        let before = stored();
+        assert_eq!(before.member("dev").unwrap().unread.as_ref().map(|unread| unread.count), Some(1), "the team record is not rewritten");
+        let mut store = Store::open(true).unwrap();
+        crate::state::teams::dispatcher::refresh_unread(&mut store, &before).unwrap();
         assert!(stored().member("dev").unwrap().unread.is_none(), "status no longer shows it unread");
         let read = working::by_request(Store::open(false).unwrap().connection(), &dev_attempt).unwrap().unwrap();
         assert_eq!((read.state.as_str(), read.read_via.as_str(), read.read_request.as_str()), ("read", "current", request.as_str()));
@@ -41,6 +47,46 @@ fn current_returns_the_unread_text_and_records_one_read_receipt() {
         // Read once: the next current has nothing new and no receipt.
         let again = run("current", &json!({"attempt":dev_attempt}), false).unwrap();
         assert!(again["messages"].as_array().unwrap().is_empty() && again["read"].is_null());
+    });
+}
+
+/// Task 287 (owner, 2026-11-08): marking messages read rewrote the whole team
+/// record, and a mark that failed while the store was busy answered with an
+/// error instead of the messages: an empty inbox. The messages are printed
+/// whatever the mark does, and stay unread until a mark succeeds.
+#[test]
+fn an_inbox_under_a_held_lock_prints_its_messages() {
+    let (team, dev_attempt, _) = review_team();
+    with_review_team(&team, || {
+        let id = post("dev", &dev_attempt, "Read me.", Urgency::Normal);
+        let revision = stored().revision;
+        // Another process holds the write lock.
+        let path = crate::state::teams::store::path();
+        let (held, ready) = std::sync::mpsc::channel();
+        let (release, done) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let db = rusqlite::Connection::open(&path).unwrap();
+            db.execute_batch("BEGIN IMMEDIATE; UPDATE teams SET updated=updated;").unwrap();
+            held.send(()).unwrap();
+            let _ = done.recv_timeout(std::time::Duration::from_secs(20));
+            db.execute_batch("COMMIT").unwrap();
+        });
+        ready.recv().unwrap();
+        crate::state::teams::store::set_test_write_wait(Some(std::time::Duration::from_millis(300)));
+        let view = run("inbox", &json!({"attempt":dev_attempt}), false);
+        crate::state::teams::store::set_test_write_wait(None);
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        let view = view.unwrap();
+        assert_eq!(view["messages"][0]["id"], id.as_str(), "the message is printed: {view}");
+        assert_eq!(view["read"]["read"], json!([]), "{view}");
+        assert!(!view["read"]["error"].as_str().unwrap_or_default().is_empty(), "{view}");
+        assert_eq!(working::unread(Store::open(false).unwrap().connection(), "rv", "dev", crate::state::now()).unwrap().len(), 1, "still unread");
+        // Once the store is free the next inbox marks it, and the team record
+        // keeps its revision.
+        let view = run("inbox", &json!({"attempt":dev_attempt}), false).unwrap();
+        assert_eq!(view["read"]["read"], json!([id]), "{view}");
+        assert_eq!(stored().revision, revision, "marking read never rewrites the team");
     });
 }
 

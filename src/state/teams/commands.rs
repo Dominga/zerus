@@ -3706,9 +3706,9 @@ fn take_messages(team: &Team, member: &str, input: &Value, via: &str, mark: bool
     let given = text(input, "request_id");
     let request = if canonical_uuid(given) { given.to_owned() } else { uuid::Uuid::new_v4().to_string() };
     let ids: Vec<String> = list.iter().map(|message| message.id.clone()).collect();
-    let written = Store::open(true).and_then(|mut store| {
-        store.mutate_working(&team.id, |tx, team, events| read_messages(tx, team, member, &ids, via, &request, events))
-    });
+    // Task 287: marking messages read changes only their rows (and the
+    // receipt's event); the team record is not rewritten.
+    let written = Store::open(true).and_then(|mut store| store.write_rows(&team.id, |tx, events| read_messages(tx, team, member, &ids, via, &request, events)));
     match written {
         Ok(marked) => Ok((values, json!({"read":marked,"request_id":request,"via":via}))),
         Err(error) if read_only(&error) => {
@@ -3718,15 +3718,20 @@ fn take_messages(team: &Team, member: &str, input: &Value, via: &str, mark: bool
             Ok((values, json!({"queued":ids,"request_id":request,"via":via,"path":path.to_string_lossy(),
                 "note":"The sandbox blocks the team store: the read receipt waits in your folder and the team worker records it."})))
         }
-        Err(error) => Err(error),
+        // Task 287: a mark that failed (the store stayed busy) never empties the
+        // inbox: the messages are printed and stay unread for the next one.
+        Err(error) => Ok((values, json!({"read":[],"request_id":request,"via":via,"error":format!("{error:#}"),
+            "note":"These messages were not marked read (the team store did not take the receipt); they stay unread and come again with the next hgs team inbox."}))),
     }
 }
 
 /// Task 134: marks `member`'s messages `ids` read in one transaction with its
 /// event (the receipt: who, which, how, under which request id).
+/// Task 287: only the rows change; the member's unread summary in the team
+/// record follows at the worker's next tick.
 pub(crate) fn read_messages(
     tx: &rusqlite::Transaction,
-    team: &mut Team,
+    team: &Team,
     member: &str,
     ids: &[String],
     via: &str,
@@ -3735,7 +3740,6 @@ pub(crate) fn read_messages(
 ) -> anyhow::Result<Vec<String>> {
     let now = super::super::now();
     let marked = super::working::mark_read(tx, &team.id, member, ids, via, request, now)?;
-    super::working::refresh(tx, team, member, now)?;
     if !marked.is_empty() {
         events.push(Event::new("message_read", json!({"member":team.role_of(member),"ids":marked,"via":via,"request_id":request})));
     }
@@ -5703,7 +5707,17 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
             let replayed = op == "draft"
                 && text(&filled, "action") == "discard"
                 && store.receipt(request, input)?.is_some();
-            let mut receipt = match store.mutate(Some((request, input)), team_id, revision, |team, events| {
+            // Task 287: a report's git reads run before the store's lock and are
+            // served inside it.
+            let reporting = if op == "report" && !parent_lead { store.load(team_id).ok().flatten() } else { None };
+            let prefetch = || {
+                if let Some(team) = reporting.as_ref() {
+                    if let Ok(caller) = actor(team, op, &filled) {
+                        ops::prefetch_git(team, op, &filled, &caller);
+                    }
+                }
+            };
+            let mut receipt = match super::dispatcher::with_git_answers(prefetch, || store.mutate(Some((request, input)), team_id, revision, |team, events| {
                 let actor = if parent_lead { Actor::ParentLead } else { actor(team, op, &filled)? };
                 let before = team.clone();
                 let result = ops::apply(team, op, &filled, &actor, &BTreeSet::new(), events)?;
@@ -5714,7 +5728,7 @@ fn run(op: &str, input: &Value, wait: bool) -> anyhow::Result<Value> {
                     events.push(Event::new("iron_rules_changed", json!({"by":actor.label(team)})));
                 }
                 Ok(result)
-            }) {
+            })) {
                 Ok(receipt) => receipt,
                 Err(error) if queues_instead(op) && read_only(&error) => {
                     return queue_write(op, input, wait)

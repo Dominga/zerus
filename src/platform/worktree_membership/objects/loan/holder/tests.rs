@@ -356,6 +356,7 @@ fn an_observation_keeps_a_missing_read_in_an_existing_entry_uncertain() {
     let roster = crate::platform::worktree_membership::test_roster::owned(&[]);
     let entry = roster.path().join(u32::MAX.to_string());
     std::fs::create_dir(&entry).unwrap();
+    std::fs::create_dir(entry.join("task")).unwrap();
     for name in ["status", "stat"] {
         std::fs::write(
             entry.join(name),

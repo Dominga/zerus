@@ -21,7 +21,10 @@ export function SearchResults() {
   // Pending creations whose details match follow the sessions, as in Qt.
   const rows = createMemo((): ResultRow[] => [...searchItems().map((item) => ({ id: item.id, item })), ...searchCards().map((card) => ({ id: `creation:${card.id}`, card }))]);
   const activate = (row: ResultRow) => { if (row.item) activateSearchItem(row.item); else selectCreation(row.card.id); };
-  const chosen = (row: ResultRow) => current() === row.id || (!current() && (row.item ? selectedKey() === row.item.session.key : selectedCreation() === row.card.id));
+  // Before a cursor is chosen, the selected session's (or creation's) first row is the one current
+  // option of this single-select list (zerus-ge5xc).
+  const fallback = createMemo(() => (current() ? undefined : rows().find((row) => (row.item ? selectedKey() === row.item.session.key : selectedCreation() === row.card.id))?.id));
+  const chosen = (row: ResultRow) => current() === row.id || fallback() === row.id;
   const list = createVirtualizer({ get count() { return rows().length; }, getScrollElement: () => element?.isConnected ? element : null,
     estimateSize: (index) => rows()[index]?.item?.found ? 90 : 64, gap: 2, getItemKey: (index) => rows()[index]?.id ?? index, overscan: 6 });
   const virtualRows = createMemo(() => list.getVirtualItems());
@@ -67,7 +70,7 @@ export function SearchResults() {
               <div class="row"><b class="ell"><SearchHighlight text={c().tag} query={search().trim()} /></b><span class="grow" /><AgentBadge agent={agentKind(c().cmd)} narrow /><MachineBadge alias={computerOf(c())} computer={c().host} /></div>
               <span class="content-search-meta sh-meta ell">{c().caption}</span>
               <Show when={c().error}><span class="content-search-excerpt sh-snippet"><SearchHighlight text={c().error} query={search().trim()} /></span></Show>
-            </button>}</Show>}>{(found) => { const item = () => found(); return <button class="content-search-row search-hit" classList={{ selected: chosen(row()) }} data-index={virtual()?.index} ref={(el) => requestAnimationFrame(() => { if (el.isConnected) list.measureElement(el); })} id={`content-search-${virtual()?.index ?? 0}`} role="option" tabindex="-1" aria-selected={current() === item().id || (!current() && selectedKey() === item().session.key)}
+            </button>}</Show>}>{(found) => { const item = () => found(); return <button class="content-search-row search-hit" classList={{ selected: chosen(row()) }} data-index={virtual()?.index} ref={(el) => requestAnimationFrame(() => { if (el.isConnected) list.measureElement(el); })} id={`content-search-${virtual()?.index ?? 0}`} role="option" tabindex="-1" aria-selected={chosen(row())}
               style={{ transform: `translateY(${virtual()?.start ?? 0}px)` }}
               onClick={() => { setCurrent(item().id); activateSearchItem(item()); }} title={searchTooltip(item())}>
               <div class="row"><b class="ell"><SearchHighlight text={item().session.title} query={search().trim()} /></b><span class="grow" /><AgentBadge agent={item().session.agent} narrow /><MachineBadge alias={item().session.machine} computer={item().session.computer} /></div>

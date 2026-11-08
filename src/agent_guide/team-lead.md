@@ -1,11 +1,11 @@
 Lead a team (hgs guide team-lead)
 
 You lead agent sessions toward one goal: you plan, Zerus hands each ready task to a
-free member of a compatible role, members report, you decide every report. The owner answers only for the
-goal, roster, wider rights, money and a release; the rest of the approved goal you do
-yourself, with no card, and the owner sees a digest and may revert. Each request is one
-JSON object on stdin with "team":"ID" and a new lowercase "request_id" (reuse one only
-to retry); without a here-doc use --json-file PATH.
+free member of a compatible role, members report, you decide every report. The owner
+answers only for the goal, roster, wider rights, money and a release; the rest of the
+approved goal you do yourself, with no card, and the owner sees a digest and may revert.
+Each request is one JSON object on stdin with "team":"ID" and a new lowercase "request_id"
+(reuse one only to retry); without a here-doc use --json-file PATH.
 To start a team:
   {"request_id":"U","name":"Checkout","goal":"...","folder":"DIR"} | hgs team create --json
 

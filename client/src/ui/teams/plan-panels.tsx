@@ -367,6 +367,19 @@ export function TestsPanel(props: {
   onForce?: (suite: string) => Promise<string>;
 }): JSX.Element {
   const rows = () => testsRows(props.tests);
+  // Task 324 (Qt TeamTests): "%1 suites failing" counts the suites whose latest
+  // run failed or timed out, each suite once.
+  const failingSuites = () => {
+    const seen = new Set<string>();
+    let failed = 0;
+    for (const run of rows().runs) {
+      if (seen.has(run.suite)) continue;
+      seen.add(run.suite);
+      const kind = testStatus(run.status);
+      if (kind === "failed" || kind === "timed-out") failed += 1;
+    }
+    return failed;
+  };
   const [open, setOpen] = createSignal("");
   const [tab, setTab] = createSignal<"tests" | "builds">("tests");
   const [forcing, setForcing] = createSignal<Record<string, boolean>>({});
@@ -389,6 +402,15 @@ export function TestsPanel(props: {
         <BuildsPanel builds={props.builds} error={props.buildsError} />
       </Show>
       <Show when={tab() === "tests" && props.tests} fallback={<Show when={tab() === "tests"}><p class="pm-empty">{tr("Reading the tests…")}</p></Show>}>
+        {/* Task 324 (Qt TeamTests): the hint, the counters and the Queue section in Qt's order. */}
+        <p class="pm-note" data-tests-hint>{tr("Test requests wait in a queue; Zerus runs them when the machine has room and keeps each result with its excerpt.")}</p>
+        <div class="pm-tests-counts" data-tests-counts>
+          <span classList={{ "pm-pill": true, "pm-count-on": rows().running.length > 0 }} data-count="running">{tr("%n running", rows().running.length)}</span>
+          <span classList={{ "pm-pill": true, "pm-count-on": rows().waiting.length > 0 }} data-count="waiting">{tr("%n waiting", rows().waiting.length)}</span>
+          <Show when={failingSuites() > 0}>
+            <span class="pm-pill danger" data-count="failing">{failingSuites() === 1 ? tr("1 suite failing") : tr("%1 suites failing", failingSuites())}</span>
+          </Show>
+        </div>
         <Show when={testSuites(props.tests).length > 0}>
           <h3>{tr("Suites")}</h3>
           <For each={testSuites(props.tests)}>{(suite) => {
@@ -423,8 +445,9 @@ export function TestsPanel(props: {
           <h3>{tr("Running now")}</h3>
           <For each={rows().running}>{(item) => <TestQueueRow item={item} />}</For>
         </Show>
-        <Show when={rows().waiting.length > 0}>
-          <h3>{tr("Waiting")}</h3>
+        {/* Task 324: Qt's Queue section is always there; "Nothing waits." is its empty line. */}
+        <h3>{tr("Queue")}</h3>
+        <Show when={rows().waiting.length > 0} fallback={<p class="pm-empty" data-tests-queue-empty>{tr("Nothing waits.")}</p>}>
           <For each={rows().waiting}>{(item) => <TestQueueRow item={item} />}</For>
         </Show>
         <h3>{tr("Recent runs")}</h3>

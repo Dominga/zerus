@@ -196,7 +196,23 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
       <div class="nt-body">
         <h3>{tr("Team iron rules")}</h3>
         <p class="nt-note">{tr("Mandatory additions to project rules. Only you, or the lead quoting your verified word, may change them.")}</p>
-        <textarea rows={4} value={rules()} onInput={(event) => setRules(event.currentTarget.value)} />
+        <textarea class="nt-rules" rows={4} data-team-rules placeholder={tr("One additional rule per line (20 maximum)")}
+          value={rules()} onInput={(event) => setRules(event.currentTarget.value)} />
+        {/* Task 324 (Qt TeamSettingsDialog): the member rules come right after the team's rules. */}
+        <For each={current.members.filter((member) => member.state !== "removed")}>
+          {(member) => (
+            <label class="nt-field">
+              <span>{tr("%1: member iron rules", member.role || member.id)}</span>
+              <textarea
+                class="nt-rules"
+                rows={2}
+                placeholder={tr("One additional rule per line (20 maximum)")}
+                value={memberRules()[member.id] ?? ""}
+                onInput={(event) => setMemberRules({ ...memberRules(), [member.id]: event.currentTarget.value })}
+              />
+            </label>
+          )}
+        </For>
 
         <h3>{tr("Branches")}</h3>
         <label class="nt-check">
@@ -220,20 +236,6 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
           <input type="checkbox" checked={restart()} onChange={(event) => setRestart(event.currentTarget.checked)} />
           {tr("Restart a member whose session crashed")}
         </label>
-        <For each={current.members.filter((member) => member.state !== "removed")}>
-          {(member) => (
-            <>
-              <label class="nt-field">
-                <span>{tr("%1: member iron rules", member.role || member.id)}</span>
-                <textarea
-                  rows={2}
-                  value={memberRules()[member.id] ?? ""}
-                  onInput={(event) => setMemberRules({ ...memberRules(), [member.id]: event.currentTarget.value })}
-                />
-              </label>
-            </>
-          )}
-        </For>
 
         <h3>{tr("Builds")}</h3>
         <label class="nt-check">

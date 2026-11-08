@@ -2979,6 +2979,7 @@
   "On: a member stopped by a usage limit with a known reset time continues after the reset": "Вкл.: участник, остановленный лимитом с известным временем сброса, продолжит после сброса",
   "Once its old session is idle, move it again; a busy session is never interrupted": "Когда старая сессия освободится, переместите снова; занятая сессия не прерывается",
   "Once its old session is paused, start its new session": "Когда старая сессия встанет на паузу, запустите новую",
+  "One additional rule per line (20 maximum)": "Одно дополнительное правило в строке (не более 20)",
   "One open phase that takes tasks as they come until you close it": "Одна открытая фаза принимает задачи по мере поступления, пока вы её не закроете",
   "One open phase. Tasks are added at any time and run as they are added, with the same pipelines and acceptance. Integration and a build run only when you or the lead ask. It never closes by itself; you close it.": "Одна открытая фаза. Задачи добавляются в любое время и идут по мере добавления, с теми же конвейерами и приёмкой. Интеграция и сборка запускаются только по вашей просьбе или лида. Фаза не закрывается сама; её закрываете вы.",
   "One rule per line": "По одному правилу в строке",

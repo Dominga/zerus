@@ -108,4 +108,42 @@ describe("Reference an existing file dialog", () => {
     await settle();
     expect(d.field.value).toBe("/home/example/chosen.txt");
   });
+
+  it("drops a pending check's answer once the path is edited, and checks the new one", async () => {
+    let answer!: (value: unknown) => void;
+    bridge.check.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    const d = open(local);
+    d.type("/srv/first.txt");
+    d.button("Insert reference")!.click();
+    expect(d.button("Insert reference")!.disabled).toBe(true);
+    d.type("/srv/replacement.txt");
+    expect(d.button("Insert reference")!.disabled).toBe(false);
+    answer({ status: "file", path: "/srv/first.txt" });
+    await settle();
+    expect(d.insert, "the checked path changed before its answer returned").not.toHaveBeenCalled();
+    expect(d.close).not.toHaveBeenCalled();
+    expect(d.error()).toBe("");
+    bridge.check.mockResolvedValueOnce({ status: "file", path: "/srv/replacement.txt" });
+    d.button("Insert reference")!.click();
+    await settle();
+    expect(bridge.check).toHaveBeenLastCalledWith(expect.any(Number), "/srv/replacement.txt");
+    expect(d.insert).toHaveBeenCalledExactlyOnceWith("Use the existing file at \"/srv/replacement.txt\".");
+  });
+
+  it("drops a pending check's answer once Browse… chose another file", async () => {
+    let answer!: (value: unknown) => void;
+    bridge.check.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    bridge.pick.mockResolvedValueOnce("/home/example/chosen.txt");
+    const d = open(local);
+    d.type("/srv/first.txt");
+    d.button("Insert reference")!.click();
+    d.button("Browse…")!.click();
+    await settle();
+    // A typed field takes the chosen path in a fresh node (TextInput's history rule).
+    expect(d.host.querySelector<HTMLInputElement>("input")!.value).toBe("/home/example/chosen.txt");
+    answer({ status: "file", path: "/srv/first.txt" });
+    await settle();
+    expect(d.insert).not.toHaveBeenCalled();
+    expect(d.close).not.toHaveBeenCalled();
+  });
 });

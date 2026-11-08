@@ -45,6 +45,15 @@ export function FileReferenceDialog(props: {
     queueMicrotask(() => field?.focus());
   });
 
+  // A changed path makes a pending check's answer obsolete: it is dropped,
+  // and Insert checks the new path (zerus-thzuz).
+  const edited = (value: string) => {
+    setPath(value);
+    setError("");
+    setBusy(false);
+    if (checking()) { attempt++; setChecking(false); }
+  };
+
   const machine = () => props.target.local ? tr("this computer") : props.target.machine || props.target.host;
 
   const finish = (value: string) => {
@@ -80,7 +89,7 @@ export function FileReferenceDialog(props: {
   };
 
   const browse = () => {
-    void fileReferencePick().then((picked) => { if (!gone && picked) { setPath(picked); setError(""); } }).catch(() => {});
+    void fileReferencePick().then((picked) => { if (!gone && picked) edited(picked); }).catch(() => {});
   };
 
   return (
@@ -94,7 +103,7 @@ export function FileReferenceDialog(props: {
         <div class="file-reference-row">
           <TextInput ref={field} class="field grow" value={path()} aria-label={tr("File path on %1", machine())}
             placeholder={props.target.local ? tr("Absolute file path") : tr("/path/to/file, ~/file or C:\\path\\file")}
-            onInput={(e) => { setPath(e.currentTarget.value); setError(""); setBusy(false); }}
+            onInput={(e) => edited(e.currentTarget.value)}
             onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); accept(); } }} />
           <Show when={props.target.local}><button type="button" class="btn" onClick={browse}>{tr("Browse…")}</button></Show>
         </div>

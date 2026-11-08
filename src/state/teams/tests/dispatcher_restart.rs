@@ -155,6 +155,148 @@ fn a_paused_archived_limited_or_unseen_session_is_never_restarted() {
     assert!(!steps(&t, &[stopped("codex/x/dev", "r1", "stopped")], 20.0).iter().any(|step| matches!(step, Step::Restart { .. })));
 }
 
+/// Task #334 (owner, 2026-11-08): installing a package restarted the agents
+/// while their members were paused; after the resume no tick had seen those
+/// sessions live, so nothing launched them and the lead sent relaunch cards.
+/// A member that holds or was handed a task is launched again all the same.
+#[test]
+fn an_exited_member_that_holds_a_task_is_launched_again_without_a_live_sighting() {
+    let mut t = team();
+    t.settings.restart_crashed = true;
+    delivered(&mut t);
+    t.members.iter_mut().find(|member| member.id == "dev").unwrap().seen = Some(MemberSeen { at: 1.0, live: false });
+    let found = steps(&t, &[stopped("codex/x/dev", "r1", "stopped")], 20.0);
+    assert!(found.contains(&Step::Restart { member: "dev".into() }), "{found:?}");
+    // A returned stage keeps the member working just as a hand-out does.
+    let mut staged = t.clone();
+    staged.tasks.iter_mut().for_each(|task| task.attempts.clear());
+    let task = staged.task_mut(2).unwrap();
+    task.status = TaskStatus::InReview;
+    task.pipeline_run = Some(PipelineRun {
+        id: "code".into(),
+        name: "Code: review, test, lead".into(),
+        max_rounds: 3,
+        round: 1,
+        folder: "hold".into(),
+        accept: "lead".into(),
+        runs: vec![StageRun { id: "stage-run-1".into(), stage: 0, kind: "review".into(), round: 1, attempt: 1, member: "dev".into(), state: StageState::Delivered, ..Default::default() }],
+        ..Default::default()
+    });
+    assert!(steps(&staged, &[stopped("codex/x/dev", "r1", "stopped")], 20.0).contains(&Step::Restart { member: "dev".into() }));
+    // With nothing in its hands the member still needs a live sighting, so a
+    // launch that never came up does not loop.
+    let mut idle = t.clone();
+    idle.tasks.iter_mut().for_each(|task| task.attempts.clear());
+    assert!(!steps(&idle, &[stopped("codex/x/dev", "r1", "stopped")], 20.0).iter().any(|step| matches!(step, Step::Restart { .. })));
+    // The setting off holds the exit for the lead, as before.
+    let mut off = t.clone();
+    off.settings.restart_crashed = false;
+    assert!(!steps(&off, &[stopped("codex/x/dev", "r1", "stopped")], 20.0).iter().any(|step| matches!(step, Step::Restart { .. })));
+}
+
+/// Task #334: the launch of a member that lost work marks its attempt
+/// unconfirmed for the crash recovery and says in the feed why it happened.
+#[test]
+fn the_restart_of_a_member_that_lost_work_says_why_in_the_feed() {
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.settings.restart_crashed = true;
+        delivered(&mut t);
+        t.members.iter_mut().find(|member| member.id == "dev").unwrap().seen = Some(MemberSeen { at: 1.0, live: false });
+        store.create("11111111-1111-4111-8111-111111111113", &json!({}), t.clone(), vec![]).unwrap();
+        set_fake_hgs(Some(Box::new(|_: &str, _: &[&str], _: Option<&Value>| Ok(fake_output(0, "{}", "")))));
+        run_step(&mut store, &t, &Step::Restart { member: "dev".into() }, "").unwrap();
+        set_fake_hgs(None);
+        let feed = store.events(&t.id, None, 50).unwrap().to_string();
+        assert!(feed.contains("member_restarted") && feed.contains("exited with a task"), "{feed}");
+        let after = store.load(&t.id).unwrap().unwrap();
+        let dev = after.members.iter().find(|member| member.id == "dev").unwrap();
+        assert_eq!(dev.restarts.len(), 1);
+        assert!(!dev.relaunch_exited);
+        let attempt = after.task(1).unwrap().open_attempt().unwrap();
+        assert_eq!(attempt.state, AttemptState::Unconfirmed);
+        assert!(attempt.error.contains("crashed"), "{}", attempt.error);
+        // The gave-back attempt is not work for a second launch: a relaunch
+        // that never comes up does not loop (the next live sighting ends it).
+        assert!(!steps(&after, &[stopped("codex/x/dev", "r1", "stopped")], 20.0).iter().any(|step| matches!(step, Step::Restart { .. })));
+    });
+}
+
+/// Task #334: the owner or the lead resuming a member whose agent exited
+/// launches the same conversation again on the next tick - without a card -
+/// and a pause withdraws that request.
+#[test]
+fn resuming_a_member_whose_agent_exited_launches_it_again() {
+    use super::super::ops::{self, Actor};
+    let mut t = team();
+    t.settings.restart_crashed = true;
+    {
+        let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        dev.state = MemberState::Paused;
+        dev.seen = Some(MemberSeen { at: 1.0, live: false });
+    }
+    let mut events = Vec::new();
+    let answer = ops::apply(&mut t, "resume-member", &json!({"member":"dev"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    assert_eq!(answer["relaunch"], json!(true), "{answer}");
+    assert_eq!(t.member("dev").unwrap().state, MemberState::Active);
+    assert!(t.member("dev").unwrap().relaunch_exited);
+    let found = steps(&t, &[stopped("codex/x/dev", "r1", "stopped")], 20.0);
+    assert!(found.contains(&Step::Restart { member: "dev".into() }), "{found:?}");
+    // A pause takes the request back.
+    let paused = ops::apply(&mut t, "pause-member", &json!({"member":"dev"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    assert_eq!(paused["relaunch"], json!(false));
+    assert!(!t.member("dev").unwrap().relaunch_exited);
+    // A member whose session was live at the last look is left to the ordinary
+    // crash path: resuming it asks for nothing extra.
+    {
+        let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+        dev.state = MemberState::Paused;
+        dev.seen = Some(MemberSeen { at: 1.0, live: true });
+    }
+    let running = ops::apply(&mut t, "resume-member", &json!({"member":"dev"}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    assert_eq!(running["relaunch"], json!(false), "{running}");
+    assert!(!t.member("dev").unwrap().relaunch_exited);
+}
+
+/// Task #334: the hourly restart bound holds for a resumed member too; the
+/// lead hears once and the request is spent instead of looping.
+#[test]
+fn a_resumed_member_at_the_hourly_bound_stays_stopped_and_the_lead_hears_once() {
+    use super::super::ops::{self, Actor};
+    let dir = tempfile::tempdir().unwrap();
+    crate::state::with_test_state_root(dir.path(), || {
+        let mut store = Store::open_at(&dir.path().join("teams/teams.sqlite3"), true).unwrap();
+        let mut t = team();
+        t.settings.restart_crashed = true;
+        {
+            let dev = t.members.iter_mut().find(|member| member.id == "dev").unwrap();
+            dev.state = MemberState::Paused;
+            dev.seen = Some(MemberSeen { at: 1.0, live: false });
+            dev.restarts = vec![10.0, 15.0, 18.0];
+        }
+        store.create("11111111-1111-4111-8111-111111111114", &json!({}), t.clone(), vec![]).unwrap();
+        // The resume itself is the stored change, as the CLI applies it.
+        store
+            .mutate(None, &t.id, None, |team, events| {
+                ops::apply(team, "resume-member", &json!({"member":"dev"}), &Actor::Human, &BTreeSet::new(), events)
+            })
+            .unwrap();
+        let t = store.load(&t.id).unwrap().unwrap();
+        assert!(t.member("dev").unwrap().relaunch_exited);
+        let found = steps(&t, &[stopped("codex/x/dev", "r1", "stopped")], 20.0);
+        assert!(!found.iter().any(|step| matches!(step, Step::Restart { .. })), "{found:?}");
+        assert!(found.contains(&Step::CrashStopped { member: "dev".into() }), "{found:?}");
+        run_step(&mut store, &t, &Step::CrashStopped { member: "dev".into() }, "").unwrap();
+        let after = store.load(&t.id).unwrap().unwrap();
+        let dev = after.members.iter().find(|member| member.id == "dev").unwrap();
+        assert!(dev.crash_told && !dev.relaunch_exited);
+        // The request is spent: no second card item from the same resume.
+        assert!(!steps(&after, &[stopped("codex/x/dev", "r1", "stopped")], 20.0).iter().any(|step| matches!(step, Step::Restart { .. } | Step::CrashStopped { .. })));
+    });
+}
+
 #[test]
 fn a_member_prompt_snapshot_wins_over_the_live_catalog() {
     let mut t = team();

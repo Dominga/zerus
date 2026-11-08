@@ -3060,16 +3060,24 @@ owner and the lead change a plan, as before.
 
 `Settings.restart_crashed` (on by default, only the owner changes it) launches a
 member's session again into the same folder and conversation when its process
-exits on its own: not a pause, an archive, a usage limit, a swap, or a session
-Zerus has not seen running since its last restart. An exit you type yourself in
-the member's terminal (for example `/exit`) counts as such an exit: turn the
-setting off before stopping a member by hand, or it is launched again. It
-happens at most three times an hour per member (`member.restarts`, the last 20
-kept); each restart returns the member's open attempt to the lead as
-`uncertain` ("the session crashed at T; restarted") and records
-`member_restarted`. The fourth crash in an hour leaves the session stopped with
-one inbox item and `member_crashed`; pausing the team stops restarts, a member
-the team paused is never restarted, and a launch that fails records
+exits on its own: not a pause, an archive, a usage limit, a swap, or - for a
+member with nothing in its hands - a session Zerus has not seen running since
+its last restart. Task #334 (owner, 2026-11-08): an exit that leaves the member
+holding or handed a task (an open attempt, or a stage delivered to it)
+relaunches it even when no tick saw the session live, as an install that
+restarted the agents while their members were paused did. `hgs team
+resume-member` also launches an exited agent's conversation again on the next
+tick, so a member the owner or the lead resumed comes back without a relaunch
+card. An exit you type yourself in the member's terminal (for example `/exit`)
+counts as such an exit: turn the setting off before stopping a member by hand,
+or it is launched again. It happens at most three times an hour per member
+(`member.restarts`, the last 20 kept); each restart returns the member's open
+attempt to the lead as `uncertain` ("the session crashed at T; restarted") and
+records `member_restarted` with `why` (`crashed`, `exited with a task` or
+`resumed`). The fourth crash in an hour leaves the session stopped with one
+inbox item and `member_crashed`; a resume that reaches the bound spends its
+request the same way, instead of looping. Pausing the team stops restarts, a
+member the team paused is never restarted, and a launch that fails records
 `restart_failed`.
 
 ### The team store never makes a reader wait

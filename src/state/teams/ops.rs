@@ -4624,6 +4624,8 @@ pub(crate) fn fresh_session(team: &mut Team, id: &str, why: &str, events: &mut V
     member.context_compact = None;
     member.context_retry_at = None;
     member.restart_pending = false;
+    // #334: a further launch starts from nothing; no resume waits here.
+    member.relaunch_exited = false;
     member.handoff = Some(super::model::HandoffNeed {
         why: why.to_owned(),
         at: now(),
@@ -7144,13 +7146,25 @@ fn apply_op(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &B
                 (false, Some(_)) => MemberState::Active,
                 (false, None) => MemberState::NotCreated,
             };
+            // Task #334 (owner, 2026-11-08): resuming a member whose agent
+            // exited launches the same conversation again on the next tick,
+            // the way restart_crashed does for a crash; the hourly restart
+            // bound still applies. A pause withdraws the request.
+            let relaunch = !pause
+                && member.session.is_some()
+                && member.limited.is_none()
+                && member.seen.is_none_or(|seen| !seen.live);
+            member.relaunch_exited = relaunch;
             let role = team.role_of(&id);
             if pause {
                 // #630 N7: a paused member's stage goes back to the pool.
                 stall_stages_of(team, &id, &format!("{} was paused", team.name_of(&id)), events);
             }
-            events.push(Event::new(if pause { "member_paused" } else { "member_resumed" }, json!({"by":label,"member":role})));
-            Ok(json!({"status":if pause {"paused"} else {"resumed"},"member":id}))
+            events.push(Event::new(
+                if pause { "member_paused" } else { "member_resumed" },
+                json!({"by":label,"member":role,"relaunch":relaunch}),
+            ));
+            Ok(json!({"status":if pause {"paused"} else {"resumed"},"member":id,"relaunch":relaunch}))
         }
         "add-member" => {
             // A running team grows: the new member starts with its first task,
@@ -7342,6 +7356,8 @@ fn apply_op(team: &mut Team, op: &str, input: &Value, actor: &Actor, offline: &B
             member.state = MemberState::Removed;
             // U49: a member removed by hand is no longer draining.
             member.draining = false;
+            // #334: nothing is launched for a member that left.
+            member.relaunch_exited = false;
             // #630 N7: its stage runs go back to Waiting for a free member.
             stall_stages_of(team, &id, &format!("{} was removed", team.name_of(&id)), events);
             let by = if input["roster_word"].as_bool() == Some(true) { "Lead on your word" } else { "You" };

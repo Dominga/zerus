@@ -3,9 +3,40 @@ use super::*;
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+use std::sync::Arc;
+mod store;
+
+/// Opaque native configured-root custody. The service retains this from startup;
+/// a later metadata request cannot reopen/adopt a replacement root by pathname.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) struct ReceiptRoot(Arc<super::repositories::directory::Directory>);
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl ReceiptRoot {
+    pub(crate) fn capture(path: &Path) -> Result<Self> {
+        let path = crate::platform::canonical(path).map_err(|e| e.to_string())?;
+        let root = super::repositories::directory::Directory::open(&path)?;
+        if !root.private()? {
+            return Err("Worktree receipt root must be private".into());
+        }
+        Ok(Self(Arc::new(root)))
+    }
+    pub(crate) fn receipt(&self, id: &str, fingerprint: Option<&str>) -> Result<Option<Value>> {
+        token(&["--request-id".into(), id.into()])?;
+        let store = Arc::new(store::Store::acquire_root(
+            self.0.clone(),
+            false,
+            fingerprint.is_some(),
+        )?);
+        match fingerprint {
+            Some(fingerprint) => fence_store(store, id, fingerprint).map(Some),
+            None => store.read(id),
+        }
+    }
+}
 
 thread_local! {
+    static ORIGINAL: RefCell<Option<Arc<store::Lock>>> = const { RefCell::new(None) };
     static CANCEL: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
     static EFFECTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     #[cfg(unix)]
@@ -22,15 +53,31 @@ pub(super) fn reserve_checkout() -> Result<()> {
             .file_stem()
             .and_then(|s| s.to_str())
             .ok_or("Invalid worktree reservation")?;
-        let mut value = read(id)?.ok_or("Missing worktree reservation")?;
-        value["effects_started"] = json!(true);
-        atomic(&path.with_extension("json"), &value.to_string())?;
+        ORIGINAL.with(|slot| -> Result<()> {
+            let slot = slot.borrow();
+            let original = slot
+                .as_ref()
+                .ok_or("Missing original worktree reservation")?;
+            let mut value = original
+                .store
+                .read(id)?
+                .ok_or("Missing worktree reservation")?;
+            value["effects_started"] = json!(true);
+            original.write(id, &value, true)
+        })?;
         EFFECTS.with(|slot| slot.set(true));
     }
     Ok(())
 }
 
 pub(super) fn cancelled() -> bool {
+    if ORIGINAL.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .is_some_and(|original| original.verify().is_err())
+    }) {
+        return true;
+    }
     let marker = CANCEL.with(|path| {
         path.borrow()
             .as_ref()
@@ -66,30 +113,20 @@ fn token(args: &[String]) -> Result<String> {
     Ok(value)
 }
 
+/// Legacy non-receipt clients use opaque string IDs (including mobile API v1).
+/// Keep that original path intact. Every UUID spelling enters the common
+/// exclusion parser, which rejects aliases instead of bypassing a fence.
+pub(super) fn has_receipt_id(args: &[String]) -> bool {
+    args.windows(2)
+        .any(|pair| pair[0] == "--request-id" && uuid::Uuid::parse_str(&pair[1]).is_ok())
+}
+
+#[cfg(all(test, target_os = "linux"))]
 fn folder() -> PathBuf {
     root().join("worktree-requests")
 }
 fn read(id: &str) -> Result<Option<Value>> {
-    let path = folder().join(format!("{id}.json"));
-    let mut file = match File::open(&path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e.to_string()),
-    };
-    let mut bytes = Vec::new();
-    use std::io::Read;
-    file.by_ref()
-        .take(32769)
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-    if bytes.len() > 32768 {
-        return Err("Worktree receipt exceeds its limit".into());
-    }
-    let value: Value = serde_json::from_slice(&bytes).map_err(|_| "Unreadable worktree receipt")?;
-    if value["schema"] != 1 || value["request_id"] != id || !value["status"].is_string() {
-        return Err("Unsupported worktree receipt".into());
-    }
-    Ok(Some(value))
+    store::Store::observe(&root())?.read(id)
 }
 
 /// The original receipt for the worktree actor's read-only recovery. A
@@ -100,28 +137,15 @@ pub(crate) fn original_receipt(id: &str) -> Result<Option<Value>> {
     read(id)
 }
 
-fn lock(id: &str, create: bool) -> Result<File> {
-    let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .write(true)
-        .create(create)
-        .truncate(false);
-    crate::platform::private_open(&mut options)
-        .open(folder().join(format!("{id}.lock")))
-        .map_err(|e| e.to_string())
-}
-
 fn snapshot(id: &str) -> Result<Value> {
     let Some(mut value) = read(id)? else {
         return Ok(json!({"schema":1,"request_id":id,"status":"not_found"}));
     };
     if value["status"] == "running" {
         // A free original lock proves the worker is gone, not that Git did nothing.
-        if let Ok(file) = lock(id, false) {
-            if file.try_lock_exclusive().is_ok() {
-                value["status"] = json!("unconfirmed");
-            }
+        let store = Arc::new(store::Store::observe(&root())?);
+        if store.observe_lock(id).is_ok() {
+            value["status"] = json!("unconfirmed");
         }
     }
     if value["status"] == "created" {
@@ -138,16 +162,87 @@ fn snapshot(id: &str) -> Result<Value> {
     Ok(value)
 }
 
+/// Explicit Stop seals future execution of this UUID in the original CLI
+/// receipt lane. It NEVER translates absence into a historical no-effects
+/// claim, and it never retires an actor, worker, pipe or service charge.
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+pub(crate) fn fence_in(root: &Path, id: &str, fingerprint: &str) -> Result<Value> {
+    token(&["--request-id".into(), id.into()])?;
+    if fingerprint.len() != 64
+        || !fingerprint
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    {
+        return Err("Invalid original worktree fingerprint".into());
+    }
+    // An absent original store cannot be repaired into absence proof. A newly
+    // installed outside-store anchor protects future calls only.
+    let store = Arc::new(store::Store::open(root, false)?);
+    fence_store(store, id, fingerprint)
+}
+fn fence_store(store: Arc<store::Store>, id: &str, fingerprint: &str) -> Result<Value> {
+    let guard = match store.try_lock(id)? {
+        Some(guard) => guard,
+        None => {
+            return match store.read(id)? {
+                Some(value) if value["fingerprint"] == fingerprint => {
+                    store.request_cancel(id)?;
+                    Ok(value)
+                }
+                Some(_) => {
+                    Err("Worktree request arguments do not match the original request".into())
+                }
+                None => Err("Worktree request is still running or being reserved".into()),
+            };
+        }
+    };
+    if let Some(mut value) = store.read(id)? {
+        if value["fingerprint"] != fingerprint {
+            return Err("Worktree request arguments do not match the original request".into());
+        }
+        if value["status"] == "running" {
+            value["status"] = json!("unconfirmed");
+        }
+        guard.verify()?;
+        return Ok(value); // Existing receipts are never overwritten by Stop.
+    }
+    let value = json!({"schema":1,"request_id":id,"fingerprint":fingerprint,
+        "status":"fenced","future_starts_fenced":true,"past_outcome":"unknown",
+        "detail":"Setup stopped. Further starts of this request are fenced. The earlier attempt's outcome is unknown; inspect the destination before creating a new session.",
+        "finished_at":now()});
+    guard.write(id, &value, false)?;
+    Ok(value)
+}
+#[cfg(all(test, target_os = "linux"))]
+fn receipt_in(root: &Path, id: &str) -> Result<Option<Value>> {
+    token(&["--request-id".into(), id.into()])?;
+    store::Store::observe(root)?.read(id)
+}
+
 pub(super) fn control(action: &str, args: &[String]) -> Result<Value> {
     let id = token(args)?;
+    let fingerprint = args
+        .windows(2)
+        .filter(|v| v[0] == "--fingerprint")
+        .map(|v| v[1].as_str())
+        .collect::<Vec<_>>();
+    if action == "cancel"
+        && args.len() == 5
+        && fingerprint.len() == 1
+        && args.iter().any(|a| a == "--json")
+    {
+        return fence_in(&root(), &id, fingerprint[0]);
+    }
     if args.len() != 3 || !args.iter().any(|a| a == "--json") {
-        return Err("usage: hgs worktrees status|cancel --request-id UUID --json".into());
+        return Err(
+            "usage: hgs worktrees status|cancel --request-id UUID [--fingerprint SHA256] --json"
+                .into(),
+        );
     }
     let value = snapshot(&id)?;
     if action == "cancel" && value["status"] == "running" {
-        // This marker is scoped to a private original request. Only its own Git
-        // group observes it; accepting this command is not proof of process exit.
-        atomic(&folder().join(format!("{id}.cancel")), "cancel")?;
+        let store = store::Store::open(&root(), false)?;
+        store.request_cancel(&id)?;
     }
     Ok(value)
 }
@@ -158,7 +253,7 @@ pub(super) fn create(args: &[String]) -> Result<Value> {
     create_direct(args)
 }
 
-fn create_direct(args: &[String]) -> Result<Value> {
+pub(super) fn create_direct(args: &[String]) -> Result<Value> {
     create_receipt(args, None)
 }
 
@@ -180,6 +275,33 @@ pub(crate) fn create_owned(
     create_receipt(args, Some(control))
 }
 
+/// Defense at the common checkout seam: an ID-bearing effect must come from
+/// the same live original exclusion and receipt. A future in-process caller
+/// cannot bypass a permanent fence by skipping the public CLI dispatcher.
+pub(super) fn original_current(args: &[String]) -> Result<()> {
+    let id = token(args)?;
+    let arguments: Vec<_> = args.iter().filter(|v| *v != "--receipt").cloned().collect();
+    let fingerprint = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&arguments).map_err(|e| e.to_string())?)
+    );
+    ORIGINAL.with(|slot| {
+        let slot = slot.borrow();
+        let original = slot
+            .as_ref()
+            .ok_or("Missing original worktree receipt exclusion")?;
+        original.verify()?;
+        let value = original
+            .store
+            .read(&id)?
+            .ok_or("Missing original worktree receipt")?;
+        if value["status"] != "running" || value["fingerprint"] != fingerprint {
+            return Err("Worktree request is no longer the original running attempt".into());
+        }
+        Ok(())
+    })
+}
+
 fn create_receipt(
     args: &[String],
     control: Option<&super::worktrees::Control<'_>>,
@@ -190,16 +312,21 @@ fn create_receipt(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&args).map_err(|e| e.to_string())?)
     );
-    private_dir(&folder())?;
-    let guard = lock(&id, true)?;
-    if guard.try_lock_exclusive().is_err() {
-        return match read(&id)? {
-            Some(value) if value["fingerprint"] == fingerprint => Ok(value),
-            Some(_) => Err("Worktree request arguments do not match the original request".into()),
-            None => Err("Worktree request is being reserved; check its original result".into()),
-        };
-    }
-    if let Some(mut value) = read(&id)? {
+    let store = Arc::new(store::Store::open(&root(), true)?);
+    let guard = match store.lock(&id) {
+        Ok(guard) => Arc::new(guard),
+        Err(error) => {
+            return match store.read(&id)? {
+                Some(value) if value["fingerprint"] == fingerprint => Ok(value),
+                Some(_) => {
+                    Err("Worktree request arguments do not match the original request".into())
+                }
+                None => Err(error),
+            }
+        }
+    };
+    if let Some(mut value) = store.read(&id)? {
+        guard.verify()?;
         if value["fingerprint"] != fingerprint {
             return Err("Worktree request arguments do not match the original request".into());
         }
@@ -210,11 +337,13 @@ fn create_receipt(
     }
     let mut receipt = json!({"schema":1,"request_id":id,"fingerprint":fingerprint,
         "status":"running","started_at":now()});
-    atomic(&folder().join(format!("{id}.json")), &receipt.to_string())?;
-    CANCEL.with(|slot| *slot.borrow_mut() = Some(folder().join(format!("{id}.cancel"))));
+    guard.write(&id, &receipt, false)?;
+    ORIGINAL.with(|slot| *slot.borrow_mut() = Some(guard.clone()));
+    CANCEL.with(|slot| *slot.borrow_mut() = Some(store.cancel_path(&id)));
     EFFECTS.with(|slot| slot.set(false));
     let result = super::worktrees::create_with(&args, control);
     CANCEL.with(|slot| *slot.borrow_mut() = None);
+    ORIGINAL.with(|slot| *slot.borrow_mut() = None);
     match result {
         Ok(value) => {
             // An owned creation returns its ownership evidence, verified under
@@ -246,7 +375,7 @@ fn create_receipt(
     }
     receipt["finished_at"] = json!(now());
     receipt["effects_started"] = json!(EFFECTS.with(std::cell::Cell::get));
-    atomic(&folder().join(format!("{id}.json")), &receipt.to_string())?;
+    guard.write(&id, &receipt, true)?;
     Ok(receipt)
 }
 
@@ -347,6 +476,182 @@ mod tests {
             !super::folder().exists(),
             "no request receipt store is touched"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn explicit_fences_share_the_original_receipt_lane_without_claiming_past_effects() {
+        crate::self_exec::private_probe("state::worktree_requests::tests::fence_probe");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "run by explicit_fences_share_the_original_receipt_lane_without_claiming_past_effects"]
+    fn fence_probe() {
+        use super::super::worktrees::{Control, Step};
+        use super::*;
+        use std::sync::atomic::AtomicBool;
+        crate::self_exec::probe_child("state::worktree_requests::tests::fence_probe");
+        let path = root();
+        private_dir(&path).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let plan = zerus_client_core::desktop::creation_worktree::Plan {
+            worktree_request_id: id.clone(),
+            expected_machine: "22222222-2222-4222-8222-222222222222".into(),
+            path: "/fixture/repo".into(),
+            common_dir: "/fixture/repo/.git".into(),
+            branch: "fixture".into(),
+            destination: "/fixture/new".into(),
+        };
+        let fp = plan.request_fingerprint().unwrap();
+        assert!(
+            fence_in(&path, &id, &fp).is_err(),
+            "Stop must not create a missing receipt store"
+        );
+        let store = Arc::new(store::Store::open(&path, true).unwrap());
+        let fence = fence_in(&path, &id, &fp).unwrap();
+        assert!(zerus_client_core::desktop::creation_worktree::fenced(
+            &fence, &plan
+        ));
+        assert!(fence.get("effects_started").is_none());
+        let original_bytes = std::fs::read(folder().join(format!("{id}.json"))).unwrap();
+        assert_eq!(
+            create_direct(&plan.arguments()).unwrap(),
+            fence,
+            "delayed direct creator returns the original fence before checkout"
+        );
+        assert_eq!(
+            super::super::worktrees::create_with(&plan.arguments(), None).unwrap_err(),
+            "Missing original worktree receipt exclusion",
+            "an ID-bearing in-process effect cannot bypass the receipt lane"
+        );
+        let lock_file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(path.join("private-custody"))
+            .unwrap();
+        let custody = zerus_client_core::run::custody::InheritedLock::try_lock(lock_file).unwrap();
+        let steps = std::sync::Mutex::new(Vec::new());
+        let cancelled = AtomicBool::new(false);
+        let before = |step| {
+            steps.lock().unwrap().push(step);
+            Ok(())
+        };
+        let control = Control {
+            before: &before,
+            cancelled: &cancelled,
+            custody: &custody,
+        };
+        assert_eq!(create_owned(&plan.arguments(), &control).unwrap(), fence);
+        assert_eq!(
+            *steps.lock().unwrap(),
+            [Step::Reserve],
+            "only original native admission is checked; no checkout callback"
+        );
+        assert_eq!(
+            std::fs::read(folder().join(format!("{id}.json"))).unwrap(),
+            original_bytes
+        );
+        let names = || {
+            std::fs::read_dir(&path)
+                .unwrap()
+                .map(|v| v.unwrap().file_name())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let before = names();
+        assert_eq!(
+            receipt_in(&path, &id).unwrap(),
+            Some(fence.clone()),
+            "lost Stop reply recovers by read only"
+        );
+        assert_eq!(names(), before);
+        assert_eq!(fence_in(&path, &id, &fp).unwrap(), fence);
+        assert!(fence_in(&path, &id, &"0".repeat(64)).is_err());
+        // An active original cannot be turned into a closed fence.
+        let busy = uuid::Uuid::new_v4().to_string();
+        let held = store.lock(&busy).unwrap();
+        assert!(fence_in(&path, &busy, &fp).is_err());
+        assert!(store.read(&busy).unwrap().is_none());
+        drop(held);
+        // Neither partial nor unconfirmed existing evidence is overwritten.
+        let partial = uuid::Uuid::new_v4().to_string();
+        let held = store.lock(&partial).unwrap();
+        let value = json!({"schema":1,"request_id":partial,"status":"unconfirmed", "fingerprint":fp,"effects_started":true});
+        held.write(&partial, &value, false).unwrap();
+        drop(held);
+        assert_eq!(fence_in(&path, &partial, &fp).unwrap(), value);
+        // A failed publish does not produce a successful/fenced answer.
+        let failed = uuid::Uuid::new_v4().to_string();
+        super::super::storage::cut::arm(0);
+        assert!(fence_in(&path, &failed, &fp).is_err());
+        super::super::storage::cut::disarm();
+        assert!(store.read(&failed).unwrap().is_none());
+        let unsynced = uuid::Uuid::new_v4().to_string();
+        super::super::repositories::directory::fail_publication_sync(Some(folder()));
+        assert!(
+            fence_in(&path, &unsynced, &fp).is_err(),
+            "a publication sync error cannot return a closed fence"
+        );
+        super::super::repositories::directory::fail_publication_sync(None);
+        // A possibly visible negative still cannot assert no historical effects.
+        assert!(store
+            .read(&unsynced)
+            .unwrap()
+            .unwrap()
+            .get("effects_started")
+            .is_none());
+        // Irregular native data never blocks and cannot mint a closed fence.
+        for leaf in ["lock", "json"] {
+            let invalid = uuid::Uuid::new_v4().to_string();
+            let path = folder().join(format!("{invalid}.{leaf}"));
+            let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+            let start = std::time::Instant::now();
+            assert!(fence_in(&root(), &invalid, &fp).is_err());
+            assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        }
+        let alias = uuid::Uuid::new_v4().to_string();
+        std::os::unix::fs::symlink(
+            folder().join(format!("{id}.json")),
+            folder().join(format!("{alias}.json")),
+        )
+        .unwrap();
+        assert!(fence_in(&root(), &alias, &fp).is_err());
+        let replaced = uuid::Uuid::new_v4().to_string();
+        let held = store.lock(&replaced).unwrap();
+        let value = json!({"schema":1,"request_id":replaced,"fingerprint":fp,"status":"running"});
+        held.write(&replaced, &value, false).unwrap();
+        std::fs::rename(
+            folder().join(format!("{replaced}.json")),
+            root().join("retained-original-receipt.json"),
+        )
+        .unwrap();
+        zerus_client_core::fsx::write_private_durable(
+            &folder().join(format!("{replaced}.json")),
+            &serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+        assert!(held.verify().is_err());
+        assert!(held.write(&replaced, &value, true).is_err());
+        drop(held);
+        let replaced = uuid::Uuid::new_v4().to_string();
+        let held = store.lock(&replaced).unwrap();
+        std::fs::rename(
+            folder().join(format!("{replaced}.lock")),
+            root().join("retained-original-exclusion.lock"),
+        )
+        .unwrap();
+        assert!(held.verify().is_err());
+        assert!(held.write(&replaced, &json!({}), false).is_err());
+        drop(held);
+        // A replacement valid-empty namespace is NOT historical coverage and
+        // cannot discard an already recorded future fence.
+        std::fs::rename(folder(), path.join("retained-original-requests")).unwrap();
+        private_dir(&folder()).unwrap();
+        assert!(store.verify().is_err());
+        assert!(fence_in(&path, &id, &fp).is_err());
+        assert!(receipt_in(&path, &id).is_err());
+        assert!(!folder().join(format!("{id}.json")).exists());
     }
 
     /// Runs inside the private probe, whose HOME/state are private: a real
@@ -545,11 +850,8 @@ mod tests {
         let repo = repository(&base.join("baseline"), true);
         let hook = repo.join(".git/hooks/post-checkout");
         std::fs::write(&hook, "#!/bin/sh\necho \"$1 $2 $3\" >> post-checkout.log\n").unwrap();
-        std::fs::set_permissions(
-            &hook,
-            std::os::unix::fs::PermissionsExt::from_mode(0o755),
-        )
-        .unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
         let (destination, receipt) = owned_git_create(&repo, &id(), |step| {
             calls.lock().unwrap().push(step);
             Ok(())
@@ -757,14 +1059,20 @@ mod tests {
                     foreign.join(".git/worktrees/-"),
                 )
             } else {
-                (repo.join(".git/worktrees/moved-entry"), repo.join(".git/worktrees/-"))
+                (
+                    repo.join(".git/worktrees/moved-entry"),
+                    repo.join(".git/worktrees/-"),
+                )
             };
             assert!(written.join("index").is_file(), "{name}: pinned entry");
             assert!(
                 std::fs::read_dir(&untouched).unwrap().next().is_none(),
                 "{name}: the replacement receives no index"
             );
-            assert!(destination.join(".git").is_file(), "{name}: the checkout is kept");
+            assert!(
+                destination.join(".git").is_file(),
+                "{name}: the checkout is kept"
+            );
         }
 
         // The common directory replaced while Git runs the tree checkout,
@@ -1000,14 +1308,25 @@ mod tests {
             std::process::Command::new("git")
                 .arg("--git-dir")
                 .arg(git_dir)
-                .args(["rev-parse", "--verify", "--quiet", "refs/heads/zerus-anchor"])
+                .args([
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    "refs/heads/zerus-anchor",
+                ])
                 .output()
                 .unwrap()
                 .status
                 .success()
         };
-        assert!(branch(&repo.join(".git-moved")), "branch in the pinned repository");
-        assert!(!branch(&foreign.join(".git")), "foreign repository untouched");
+        assert!(
+            branch(&repo.join(".git-moved")),
+            "branch in the pinned repository"
+        );
+        assert!(
+            !branch(&foreign.join(".git")),
+            "foreign repository untouched"
+        );
     }
 
     #[cfg(target_os = "linux")]

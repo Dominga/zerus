@@ -69,6 +69,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        Notification controls ABI: desktop-notification-controls-v1
        Desktop creation clone ABI: desktop-creation-clone-v1
        Desktop creation worktree ABI: desktop-creation-worktree-v1
+       Desktop creation worktree receipt control: future-fence-v1
        Desktop creation launch ABI: desktop-creation-launch-v1
        Desktop task message ABI: desktop-task-message-v1
        Desktop task message references: desktop-task-message-reference-v1
@@ -512,6 +513,7 @@ fn unix_only_usage(line: &str) -> bool {
     if [
         zerus_client_core::desktop::creation_clone::HELP_MARKER,
         zerus_client_core::desktop::creation_worktree::HELP_MARKER,
+        zerus_client_core::desktop::creation_worktree::CONTROL_HELP_MARKER,
         zerus_client_core::desktop::creation_launch::HELP_MARKER,
         zerus_client_core::desktop::task_message::HELP_MARKER,
         zerus_client_core::desktop::task_message::REFERENCE_HELP_MARKER,
@@ -571,6 +573,7 @@ fn advertised(usage: Cow<'static, str>, linux: bool) -> Cow<'static, str> {
     }
     let markers = [
         zerus_client_core::desktop::creation_worktree::HELP_MARKER,
+        zerus_client_core::desktop::creation_worktree::CONTROL_HELP_MARKER,
         zerus_client_core::desktop::task_message::HELP_MARKER,
         zerus_client_core::desktop::task_message::REFERENCE_HELP_MARKER,
         zerus_client_core::desktop::task_message::review::HELP_MARKER,
@@ -3670,7 +3673,7 @@ mod tests {
                     ""
                 )
                 .replace(
-                    "       Desktop creation worktree ABI: desktop-creation-worktree-v1\n",
+                    "       Desktop creation worktree ABI: desktop-creation-worktree-v1\n       Desktop creation worktree receipt control: future-fence-v1\n",
                     ""
                 )
                 .replace(
@@ -3767,7 +3770,7 @@ mod tests {
             mac,
             USAGE
                 .replace(
-                    "       Desktop creation worktree ABI: desktop-creation-worktree-v1\n",
+                    "       Desktop creation worktree ABI: desktop-creation-worktree-v1\n       Desktop creation worktree receipt control: future-fence-v1\n",
                     ""
                 )
                 .replace(

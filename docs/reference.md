@@ -3142,6 +3142,21 @@ worktree helpers offer **Stop after preparation**. Files and branches are always
 kept. Once launch dispatch is reserved, check its result; use normal confirmed
 session termination after an actual session appears.
 
+When a worktree admission is refused, the card shows that refusal and its
+reason rather than treating it as a transport failure. A fresh attempt may
+reuse the creation's scheduling slot only after its exact predecessor failed
+without effects and all original resources drained; the old receipt remains
+available under its original request ID.
+
+For an older missing worktree request, **Stop creating** can durably fence
+further starts while leaving the earlier outcome unknown. The card says both
+facts, retains the original request and destination for review, and never offers
+**Continue setup** for that UUID. **Recreate…** opens separately reviewed choices
+for a new creation and new request; **Hide status** dismisses the card without
+erasing its retained result. Missing, replaced or unverifiable receipt storage
+still refuses a fence. A fence alone never proves that an earlier worker,
+checkout or native resource has settled.
+
 **Check result** observes the original clone/worktree request, reads the original
 service launch receipt, or refreshes session evidence. An unknown outcome never
 permits another creation command. After a

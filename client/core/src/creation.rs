@@ -651,6 +651,7 @@ pub enum Call {
         action: String,
         request_id: String,
         expected_machine: String,
+        fingerprint: String,
     },
 }
 
@@ -967,10 +968,16 @@ pub fn run_call(hgs: &Path, call: &Call) -> Answer {
             action,
             request_id,
             expected_machine,
+            fingerprint,
         } => {
             let computer = ComputerId::from(host.as_str());
-            let invocation =
+            let mut invocation =
                 worktrees::receipt_invocation(&computer, action, request_id, expected_machine);
+            if action == "cancel" && !fingerprint.is_empty() {
+                invocation
+                    .args
+                    .extend(["--fingerprint".into(), fingerprint.clone()]);
+            }
             let result = worktrees::run_guarded(hgs, &invocation, crate::run::run)
                 .and_then(|exit| worktrees::receipt(exit, request_id));
             Answer::of(result)
@@ -1357,6 +1364,8 @@ impl Creations {
             action: action.into(),
             request_id: text(&value, "worktree_id").into(),
             expected_machine: text(&value, "expected_machine").into(),
+            fingerprint: crate::desktop::creation_worktree::Plan::receipt_fingerprint(id, &value)
+                .unwrap_or_default(),
         };
         self.flight(kind, id, call);
     }
@@ -1736,7 +1745,11 @@ impl Creations {
             }
             self.put(id, value);
         }
-        self.failed(id, error, text(result, "status") != "failed");
+        self.failed(
+            id,
+            error,
+            !matches!(text(result, "status"), "failed" | "refused"),
+        );
     }
 
     fn failed(&mut self, id: &str, error: &str, uncertain: bool) {
@@ -1946,6 +1959,20 @@ impl Creations {
         if !resource.is_empty() {
             let resource = resource.to_owned();
             return self.failed(id, &resource, false);
+        }
+        {
+            let operation = self.get(id);
+            if crate::desktop::creation_worktree::fenced_operation(id, &operation, &result) {
+                let mut value = self.get(id);
+                // Retain the original unknown UUID. Continue stays prohibited;
+                // Recreate edits a NEW creation, with fresh native admission.
+                value["worktree_future_fence"] = operation["worktree_id"].clone();
+                self.put(id, value);
+                self.stage(id, "stopped", "Setup stopped. Further starts of this request are fenced. The earlier attempt's outcome is unknown. Review the destination before using Recreate for a new session.");
+                self.release(id);
+                self.persist(id, After::Nothing);
+                return;
+            }
         }
         match text(&result, "status") {
             "created" if verifying => self.launch(id),

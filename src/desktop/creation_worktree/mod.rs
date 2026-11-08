@@ -17,6 +17,14 @@ mod ledger;
 // Merge-order allocation: the next free Store version when this lands. A
 // later schema merge renumbers this one constant, never standalone DDL.
 pub(super) const SCHEMA: i64 = 23;
+pub(super) const SLOTS_SCHEMA: i64 = 35;
+pub(super) fn migrate_slots(tx: &rusqlite::Transaction<'_>) -> anyhow::Result<()> {
+    ledger::migrate_slots(tx)
+}
+#[cfg(test)]
+pub(super) fn rewind_slots(db: &rusqlite::Connection) {
+    ledger::rewind_slots(db);
+}
 /// Test rewind of this leaf for older-version upgrade fixtures; dropping the
 /// tables drops their triggers and indexes.
 #[cfg(test)]

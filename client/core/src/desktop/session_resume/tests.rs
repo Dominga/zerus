@@ -176,7 +176,7 @@ fn only_one_target_and_one_pair_across_the_checkpoint_and_both_stdins_verify() {
         refused(good_resume.clone(), unknown),
         Some("invalid_session_resume_original")
     );
-    // Only a local Claude or Kimi session; another agent stays direct.
+    // Only a local Claude, Kimi or Codex session; another agent stays direct.
     for (session, code) in [
         ("opencode/private-resume", AGENT_REFUSED),
         ("dsh/private-resume", AGENT_REFUSED),
@@ -647,25 +647,35 @@ fn a_binding_names_two_distinct_requests() {
     assert!(!same.valid());
 }
 
-/// design-tima2 (2026-11-08): a Codex resume-then-send stays on the direct
-/// path, decided before any offer, like OpenCode and DeepSeek: its intent
-/// never verifies, so the client never offers it and no service row exists
-/// (zerus-5wmh.66.4.10 brings Codex). Claude and Kimi verify.
+/// zerus-5wmh.66.4.10: a Codex resume-then-send verifies like Claude and
+/// Kimi, and only Codex's readiness is the send's own observation, with
+/// exactly its arguments. DeepSeek and OpenCode stay direct, decided before
+/// any offer.
 #[test]
-fn a_codex_resume_stays_direct_before_any_offer() {
-    assert_eq!(AGENTS, ["claude", "kimi"]);
-    for agent in super::super::creation_launch::AGENTS {
+fn a_codex_resume_verifies_and_only_codex_is_observed() {
+    assert_eq!(AGENTS, ["claude", "kimi", "codex"]);
+    assert_eq!(OBSERVED, ["codex"]);
+    let agents = super::super::creation_launch::AGENTS
+        .into_iter()
+        .chain(["dsh", "opencode"]);
+    for agent in agents {
         let mut copy = intent();
         copy.session = format!("{agent}/private-resume");
         let verified = copy.clone().verify();
-        if agent == "codex" {
-            assert_eq!(verified.err(), Some(AGENT_REFUSED));
-            // Nor does any value of this kind name a Codex session.
+        assert_eq!(observed(&copy.session), agent == "codex", "{agent}");
+        if !AGENTS.contains(&agent) {
+            assert_eq!(verified.err(), Some(AGENT_REFUSED), "{agent}");
             let mut plan = intent().verify().unwrap().plan;
             plan.session = copy.session.clone();
-            assert!(!plan.valid());
-        } else {
-            assert!(verified.is_ok(), "{agent}");
+            assert!(!plan.valid(), "{agent}");
+            continue;
         }
+        let plan = verified.unwrap_or_else(|e| panic!("{agent}: {e}")).plan;
+        assert_eq!(plan.observed(), agent == "codex", "{agent}");
+        assert_eq!(
+            plan.observe_args(),
+            ["send", copy.session.as_str(), "--observe", "--json"]
+        );
     }
+    assert!(OBSERVE_MARKER.ends_with(": desktop-deferred-session-resume-codex-v1"));
 }

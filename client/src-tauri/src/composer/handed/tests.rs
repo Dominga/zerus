@@ -1028,9 +1028,10 @@ fn a_handed_resume_and_send_ends_as_its_send_ended() {
 
 /// One the service does not take starts the unchanged direct way, decided
 /// before any offer: a service without the kind, another computer's
-/// session, a fresh start, and a Codex session (zerus-5wmh.66.4.10), which
-/// keeps its version 1 checkpoint. One that never reached it ends with
-/// nothing run.
+/// session and a fresh start, which keep their version 1 checkpoint, and a
+/// Codex session for a service without the Codex readiness marker
+/// (zerus-5wmh.66.4.10), whose version 3 checkpoint the direct path uses.
+/// One that never reached it ends with nothing run.
 #[test]
 fn a_resume_and_send_the_service_does_not_take_starts_directly() {
     // Decided by the service before any offer: resumed directly.
@@ -1048,8 +1049,37 @@ fn a_resume_and_send_the_service_does_not_take_starts_directly() {
     );
     eventually(|| direct_calls(&fake).contains(&Action::Resume));
     assert_eq!(service.handed.load(Ordering::SeqCst), 0);
-    // Another computer's session, a fresh start and a Codex session never
-    // reserve version 3 and are never offered.
+    // A Codex session reserves version 3 and goes to the route, which
+    // decides it (zerus-5wmh.66.4.10): the real route answers Direct for a
+    // service without the Codex readiness marker, before any offer, and the
+    // direct path resumes and sends it.
+    let root = dir("handed-resume-codex");
+    let (c, fake) = send_hub_on(&drafts(&root));
+    let service = Arc::new(Resume::default());
+    resume_route(&c, &service);
+    *lock(&service.early) = Some(ResumeAnswer::Direct);
+    let codex = SessionRef {
+        name: "codex/sample-project/review".into(),
+        ..local()
+    };
+    let view = open_stopped(&c, &fake, codex);
+    start_and_send(
+        &c,
+        &view,
+        "codex",
+        zerus_client_core::send::StartChoice::Resume,
+    );
+    let checkpoint = started_with(&c, &fake).expect("its checkpoint");
+    assert_eq!(checkpoint.version, SESSION_RESUME_VERSION);
+    assert!(checkpoint.send_request_id.is_some());
+    eventually(|| direct_calls(&fake).contains(&Action::Resume));
+    assert_eq!(service.handed.load(Ordering::SeqCst), 0);
+    let offered = lock(&service.offered);
+    assert_eq!(offered.len(), 1);
+    assert_eq!(offered[0].0, "codex/sample-project/review");
+    drop(offered);
+    // Another computer's session and a fresh start never reserve version 3
+    // and are never offered.
     for (name, session, choice, action) in [
         (
             "peer",
@@ -1062,15 +1092,6 @@ fn a_resume_and_send_the_service_does_not_take_starts_directly() {
             local(),
             zerus_client_core::send::StartChoice::Fresh,
             Action::StartFresh,
-        ),
-        (
-            "codex",
-            SessionRef {
-                name: "codex/sample-project/review".into(),
-                ..local()
-            },
-            zerus_client_core::send::StartChoice::Resume,
-            Action::Resume,
         ),
     ] {
         let root = dir(&format!("handed-resume-{name}"));

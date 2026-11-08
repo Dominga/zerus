@@ -3,12 +3,13 @@
 //! custody (zerus-5wmh.66.4.9, slice 3, its fourth kind). Its records stay
 //! separate from every other leaf.
 //!
-//! One operation resumes a local Claude or Kimi session through the
+//! One operation resumes a local Claude, Kimi or Codex session through the
 //! receipted session action and, only in the same live admitted operation
 //! after that resume's own exact receipt recorded the resumed run and the
 //! resumed agent shows it takes a message, sends the person's message bound
-//! to that run. Restart never continues an operation. Codex stays on the
-//! direct path (zerus-5wmh.66.4.10).
+//! to that run. A resumed Codex shows that only on its terminal, so the
+//! send's own effect-free observation decides it (zerus-5wmh.66.4.10).
+//! Restart never continues an operation.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod child;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

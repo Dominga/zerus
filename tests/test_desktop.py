@@ -496,10 +496,14 @@ finally:
         self.assertTrue(result['read_only'])
         self.assertFalse(result['found'])
         self.assertIsNone(result['receipt'])
-        # Another epoch, a remote session, a Codex session (direct until
-        # zerus-5wmh.66.4.10) or a malformed request is never looked up.
+        # A Codex session is this kind's too (zerus-5wmh.66.4.10).
+        codex = self.cli('desktop', 'request', '--json',
+                         data=dict(op='session_resume_result', query=dict(query, session='codex/private-resume')))
+        self.assertEqual((codex['read_only'], codex['found'], codex['receipt']), (True, False, None))
+        # Another epoch, a remote session, a DeepSeek session or a malformed
+        # request is never looked up.
         for bad in (dict(query, scope=dict(scope, service_epoch=str(uuid.uuid4()))),
-                    dict(query, session='@peer/claude'), dict(query, session='codex/private-resume'),
+                    dict(query, session='@peer/claude'), dict(query, session='dsh/private-resume'),
                     dict(query, request_id='not-a-uuid')):
             self.assertEqual(self.cli('desktop', 'request', '--json', data=dict(op='session_resume_result', query=bad)),
                              dict(accepted=False, read_only=True, code='session_resume_result_unavailable'))
@@ -512,6 +516,10 @@ finally:
         # macOS refuses every original until a qualified child seam exists.
         if sys.platform.startswith('linux'):
             self.assertIn('Desktop deferred session resume ABI: desktop-deferred-session-resume-v1',
+                          [line.strip() for line in help_text.splitlines()])
+            # A client offers a Codex session only to a service with this marker.
+            self.assertIn('Desktop deferred session resume Codex readiness: '
+                          'desktop-deferred-session-resume-codex-v1',
                           [line.strip() for line in help_text.splitlines()])
         else:
             self.assertNotIn('desktop-deferred-session-resume', help_text)

@@ -484,12 +484,10 @@ one `hgs send <session> --json` bound to the run that resume returned:
   (`deferred_send::frozen`), names the original run, its conversation and its
   own request, and no compaction. One session, run and non-empty conversation
   run across the checkpoint and both stdins, and the checkpoint's message
-  digest is the template's. Only a local Claude or Kimi session is taken.
-  Codex stays direct, decided before any offer (zerus-5wmh.66.4.10): a resumed
-  Codex stays pending until its first message, and only its terminal shows
-  when it takes one. DeepSeek, OpenCode (`session_resume_agent_refused`),
-  another computer and an original larger than the control frame stay direct
-  too.
+  digest is the template's. Only a local Claude, Kimi or Codex session is
+  taken. DeepSeek, OpenCode (`session_resume_agent_refused`), another
+  computer and an original larger than the control frame stay direct,
+  decided before any offer.
 - **Binding the send.** `hgs session-action` mints the resumed run itself, so
   the send's actual stdin exists only after the resume: `session_resume::bind`
   replaces only the template's `expected_run_id` with the `result_target` run
@@ -544,6 +542,23 @@ checked before and after:
 - failed, ending or out of its conversation: the wait ends without the send
   (`session_resume_ready_ended`).
 
+A resumed Codex stays pending until its first message, and only its terminal
+shows when it takes one (zerus-5wmh.66.4.10). For a Codex session the record
+only says whether the session ended. While it has not, each read runs the
+send's own effect-free observation, `hgs send <session> --observe --json`
+with stdin `{expected_run_id, expected_conversation_id}`, from the service's
+pinned image in its own process group, with no custody and a 5-second
+deadline that never passes the wait's. The CLI runs the send's own gates
+before its lock: the record and its exact live process, a pending resume's
+own verification (the supervised Codex holding the expected rollout open)
+and the empty native composer. It takes no lock and types nothing; it writes
+no receipt, attachment, diagnostic capture, record, attention state or read
+mark, and prints `{ready, reason}`. Only a clean, timely reply of at most
+8 KiB with `ready` lets the send start, and the record is read again after
+it. Anything else reads again until the budget ends the wait. The
+observation runs once more right before the send's spawn turn, and that
+turn checks that the record has not ended.
+
 A stop, a revoke or a lost source (`session_resume_vetoed`), a replaced root
 (`session_resume_root_changed`), the budget (`session_resume_wait_expired`)
 and the deadline (`session_resume_chain_expired`) end it too; the send was
@@ -554,18 +569,22 @@ send's `input_receipts` folder is opened under the same held root, its custody
 is reserved, and in its spawn turn the resumed run's record and its readiness
 are read again from the held root before the consent veto and the runner's
 deadline, bounded by the operation's own. A restart never resumes a wait or
-starts the send. Linux advertises `desktop-deferred-session-resume-v1`; macOS
-refuses every original before any row (`session_resume_native_image_unavailable`)
-and Windows refuses it too (`session_resume_unsupported`).
+starts the send. Linux advertises `desktop-deferred-session-resume-v1` and,
+for the Codex observation,
+`desktop-deferred-session-resume-codex-v1`; macOS refuses every original
+before any row (`session_resume_native_image_unavailable`) and Windows refuses
+it too (`session_resume_unsupported`).
 
-The composer offers it only from a "Resume and send" of a stopped local Claude
-or Kimi session, while the desktop service route is set (Linux and macOS in
-desktop-service mode). Only then does the waiting save reserve a version 3
-checkpoint; a fresh start, a resume with compaction, another computer's
-session, a subagent and a Codex session keep version 1 and the direct
-`hgs resume` path. When the start call would run, the whole resume-then-send
-goes to the service if a live service advertises the kind and the original
-verifies; otherwise the direct path starts it, decided before any offer. From
+The composer offers it only from a "Resume and send" of a stopped local
+Claude, Kimi or Codex session, while the desktop service route is set (Linux
+and macOS in desktop-service mode). Only then does the waiting save reserve a
+version 3 checkpoint; a fresh start, a resume with compaction, another
+computer's session and a subagent keep version 1 and the direct `hgs resume`
+path. When the start call would run, the whole resume-then-send goes to the
+service if a live service advertises the kind and the original verifies, and,
+for a Codex session, only if the service also advertises the Codex
+observation; otherwise the direct path starts it, decided before any offer.
+An older service never sees a Codex original. From
 the hand-over the draft is the delivery the service holds, like a handed
 "Compact and continue": its row shows the message sending, the status shows
 the service's line, and Cancel send stays shown but locked. Once offered,

@@ -551,8 +551,8 @@ pub fn platform_service(
 /// input is /dev/null, its error output is dropped, at most 64 KiB is read
 /// and, on Linux, it inherits no descriptor beyond those three.
 #[cfg(target_os = "linux")]
-pub fn bounded_read(command: Command, limit: Duration) -> Option<String> {
-    bounded_read_with(command, limit, |_| {}, children_auto_reaped)
+pub fn bounded_read(program: &str, args: &[&str], limit: Duration) -> Option<String> {
+    bounded_read_with(program, args, limit, |_| {}, children_auto_reaped)
 }
 
 /// Whether a SIGCHLD disposition reaps children without a wait: ignored, or
@@ -594,27 +594,148 @@ struct Helper {
     pidfd: std::os::fd::OwnedFd,
 }
 
+/// glibc's `pidfd_spawnp` (2.39) and `posix_spawn_file_actions_addclosefrom_np`
+/// (2.34), looked up when used, so an older glibc still loads the app; the read
+/// then waits for nothing.
 #[cfg(target_os = "linux")]
-impl Helper {
-    /// The pidfd of `child`, checked to name this process's own child:
-    /// running, or exited and not yet waited for. None otherwise, or where
-    /// the kernel has no pidfds; the read then waits for nothing.
-    fn hold(child: &std::process::Child) -> Option<Helper> {
-        use std::os::fd::FromRawFd;
-        // SAFETY: pidfd_open takes a PID and flags and returns a new
-        // descriptor or -1.
-        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id() as libc::pid_t, 0) };
-        if fd < 0 {
+type PidfdSpawnp = unsafe extern "C" fn(
+    *mut libc::c_int,
+    *const libc::c_char,
+    *const libc::posix_spawn_file_actions_t,
+    *const libc::posix_spawnattr_t,
+    *const *mut libc::c_char,
+    *const *mut libc::c_char,
+) -> libc::c_int;
+#[cfg(target_os = "linux")]
+type AddClosefrom =
+    unsafe extern "C" fn(*mut libc::posix_spawn_file_actions_t, libc::c_int) -> libc::c_int;
+#[cfg(target_os = "linux")]
+type PidfdGetpid = unsafe extern "C" fn(libc::c_int) -> libc::pid_t;
+
+#[cfg(target_os = "linux")]
+fn glibc<T: Copy>(name: &std::ffi::CStr) -> Option<T> {
+    // SAFETY: dlsym only looks the name up; the caller names the matching type.
+    let found = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) };
+    (!found.is_null()).then(|| unsafe { std::mem::transmute_copy::<*mut libc::c_void, T>(&found) })
+}
+
+/// Starts `program` with `args` and returns it held by a pidfd that the
+/// kernel created with the child (`pidfd_spawnp`, CLONE_PIDFD): the
+/// descriptor names that child from its first instant, whatever reaps it
+/// later, and no number is ever looked up again (zerus-5zo1o). Its stdin and
+/// stderr are /dev/null, its stdout is the returned pipe, and it inherits no
+/// other descriptor. None when that cannot be had, with no child left.
+#[cfg(target_os = "linux")]
+fn spawn_held(program: &str, args: &[&str]) -> Option<(Helper, std::os::fd::OwnedFd)> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    let spawn: PidfdSpawnp = glibc(c"pidfd_spawnp")?;
+    let close_from: AddClosefrom = glibc(c"posix_spawn_file_actions_addclosefrom_np")?;
+    let argv: Vec<CString> = std::iter::once(program)
+        .chain(args.iter().copied())
+        .map(|word| CString::new(word).ok())
+        .collect::<Option<_>>()?;
+    // The environment as it is now: the child's own copy.
+    let envp: Vec<CString> = std::env::vars_os()
+        .filter_map(|(name, value)| {
+            let mut pair = name.as_bytes().to_vec();
+            pair.push(b'=');
+            pair.extend_from_slice(value.as_bytes());
+            CString::new(pair).ok()
+        })
+        .collect();
+    let argv_ptrs: Vec<*mut libc::c_char> = argv
+        .iter()
+        .map(|a| a.as_ptr() as *mut _)
+        .chain([std::ptr::null_mut()])
+        .collect();
+    let envp_ptrs: Vec<*mut libc::c_char> = envp
+        .iter()
+        .map(|e| e.as_ptr() as *mut _)
+        .chain([std::ptr::null_mut()])
+        .collect();
+    let mut ends = [0; 2];
+    // SAFETY: pipe2 fills two new descriptors, owned below.
+    if unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return None;
+    }
+    // SAFETY: fresh descriptors that nothing else owns.
+    let (read, write) = unsafe { (OwnedFd::from_raw_fd(ends[0]), OwnedFd::from_raw_fd(ends[1])) };
+    // SAFETY: the actions and attributes are initialised before use and
+    // destroyed after the spawn; every pointer outlives the call.
+    unsafe {
+        let mut actions: libc::posix_spawn_file_actions_t = std::mem::zeroed();
+        let mut attr: libc::posix_spawnattr_t = std::mem::zeroed();
+        if libc::posix_spawn_file_actions_init(&mut actions) != 0 {
             return None;
         }
-        // SAFETY: a fresh descriptor that nothing else owns.
-        let helper = Helper {
-            pidfd: unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as std::os::fd::RawFd) },
-        };
-        helper
-            .wait_id(libc::WEXITED | libc::WNOHANG | libc::WNOWAIT)
-            .ok()?;
-        Some(helper)
+        if libc::posix_spawnattr_init(&mut attr) != 0 {
+            libc::posix_spawn_file_actions_destroy(&mut actions);
+            return None;
+        }
+        // As std spawns: an empty signal mask and SIGPIPE at its default.
+        let mut empty: libc::sigset_t = std::mem::zeroed();
+        let mut pipe: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut empty);
+        libc::sigemptyset(&mut pipe);
+        libc::sigaddset(&mut pipe, libc::SIGPIPE);
+        let prepared = libc::posix_spawn_file_actions_addopen(
+            &mut actions,
+            0,
+            c"/dev/null".as_ptr(),
+            libc::O_RDONLY,
+            0,
+        ) == 0
+            && libc::posix_spawn_file_actions_adddup2(&mut actions, write.as_raw_fd(), 1) == 0
+            && libc::posix_spawn_file_actions_addopen(
+                &mut actions,
+                2,
+                c"/dev/null".as_ptr(),
+                libc::O_WRONLY,
+                0,
+            ) == 0
+            && close_from(&mut actions, 3) == 0
+            && libc::posix_spawnattr_setsigmask(&mut attr, &empty) == 0
+            && libc::posix_spawnattr_setsigdefault(&mut attr, &pipe) == 0
+            && libc::posix_spawnattr_setflags(
+                &mut attr,
+                (libc::POSIX_SPAWN_SETSIGMASK | libc::POSIX_SPAWN_SETSIGDEF) as libc::c_short,
+            ) == 0;
+        let mut pidfd = -1;
+        let started = prepared
+            && spawn(
+                &mut pidfd,
+                argv[0].as_ptr(),
+                &actions,
+                &attr,
+                argv_ptrs.as_ptr(),
+                envp_ptrs.as_ptr(),
+            ) == 0;
+        libc::posix_spawn_file_actions_destroy(&mut actions);
+        libc::posix_spawnattr_destroy(&mut attr);
+        if !started || pidfd < 0 {
+            return None;
+        }
+        drop(write);
+        Some((
+            Helper {
+                pidfd: OwnedFd::from_raw_fd(pidfd),
+            },
+            read,
+        ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Helper {
+    /// The child's PID, for tests and reports only: never waited for or signalled.
+    fn pid(&self) -> Option<u32> {
+        use std::os::fd::AsRawFd;
+        let getpid: PidfdGetpid = glibc(c"pidfd_getpid")?;
+        // SAFETY: pidfd_getpid reads this helper's own pidfd.
+        let pid = unsafe { getpid(self.pidfd.as_raw_fd()) };
+        u32::try_from(pid).ok().filter(|pid| *pid > 0)
     }
 
     fn wait_id(&self, options: libc::c_int) -> io::Result<Option<std::process::ExitStatus>> {
@@ -738,52 +859,43 @@ fn drain(
 
 #[cfg(target_os = "linux")]
 fn bounded_read_with(
-    mut command: Command,
+    program: &str,
+    args: &[&str],
     limit: Duration,
     spawned: impl FnOnce(u32),
     auto_reaped: impl FnOnce() -> bool,
 ) -> Option<String> {
+    use std::os::fd::AsRawFd;
     if auto_reaped() {
         return None;
     }
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    #[cfg(target_os = "linux")]
-    // SAFETY: the hook only makes an async-signal-safe syscall. Marking
-    // (rather than closing) keeps Rust's exec-error pipe until exec; a kernel
-    // without close_range refuses the read, which then waits for nothing.
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        command.pre_exec(|| {
-            if libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 1u32 << 2) != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
     let deadline = Instant::now() + limit;
-    let mut child = command.spawn().ok()?;
-    spawned(child.id());
-    // Every wait and signal goes through the child's pidfd.
-    let mut helper = Helper::hold(&child)?;
-    let mut stdout = child.stdout.take();
+    // Every wait and signal goes through the pidfd the child was born with.
+    let (mut helper, out) = spawn_held(program, args)?;
+    if let Some(pid) = helper.pid() {
+        spawned(pid);
+    }
     // SAFETY: F_GETFL and F_SETFL on this call's own pipe descriptor.
-    let nonblocking = stdout.as_ref().is_some_and(|out| unsafe {
+    let nonblocking = unsafe {
         let flags = libc::fcntl(out.as_raw_fd(), libc::F_GETFL);
         flags >= 0 && libc::fcntl(out.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) == 0
-    });
-    let text = match stdout.as_mut().filter(|_| nonblocking) {
-        Some(out) => drain(&mut helper, out, deadline, Duration::from_millis(10)),
+    };
+    let text = if nonblocking {
+        drain(
+            &mut helper,
+            &mut File::from(out),
+            deadline,
+            Duration::from_millis(10),
+        )
+    } else {
         // No pipe to read: end the child now, as at the deadline.
-        None => drain(
+        drain(
             &mut helper,
             &mut io::empty(),
             Instant::now(),
             Duration::ZERO,
         )
-        .and(None),
+        .and(None)
     }?;
     Some(String::from_utf8_lossy(&text).into_owned())
 }
@@ -793,16 +905,18 @@ fn bounded_read_with(
 /// is not systemd, reads as no service at once.
 #[cfg(target_os = "linux")]
 fn systemd_now(unit: &str) -> Service {
-    let mut command = Command::new("systemctl");
-    command.args([
-        "--user",
-        "show",
-        "--property=ActiveState,MainPID,InvocationID",
-        unit,
-    ]);
-    bounded_read(command, Duration::from_secs(2))
-        .map(|text| systemd_service(&text))
-        .unwrap_or_default()
+    bounded_read(
+        "systemctl",
+        &[
+            "--user",
+            "show",
+            "--property=ActiveState,MainPID,InvocationID",
+            unit,
+        ],
+        Duration::from_secs(2),
+    )
+    .map(|text| systemd_service(&text))
+    .unwrap_or_default()
 }
 
 /// `launchctl print`, bounded at 2 s like `SingleInstance::currentService`.
@@ -1960,10 +2074,12 @@ mod tests {
     #[test]
     fn a_read_returns_while_another_process_holds_the_pipe() {
         // A background child keeps the pipe open after the shell exits.
-        let mut command = Command::new("/bin/sh");
-        command.args(["-c", "(sleep 3) & printf 'ActiveState=active\\n'"]);
         let begun = Instant::now();
-        assert_eq!(bounded_read(command, Duration::from_millis(200)), None);
+        let script = "(sleep 3) & printf 'ActiveState=active\\n'";
+        assert_eq!(
+            bounded_read("/bin/sh", &["-c", script], Duration::from_millis(200)),
+            None
+        );
         assert!(
             begun.elapsed() < Duration::from_secs(2),
             "{:?}",
@@ -1978,73 +2094,56 @@ mod tests {
         assert!(auto_reaps(libc::SIG_DFL, libc::SA_NOCLDWAIT));
         assert!(!auto_reaps(libc::SIG_DFL, 0));
         assert!(!auto_reaps(libc::SIG_DFL, libc::SA_RESTART));
-        let mut command = Command::new("/bin/sh");
-        command.args(["-c", "printf answered"]);
-        assert_eq!(
-            bounded_read_with(
-                command,
-                Duration::from_secs(5),
-                |_| panic!("no child under SIG_IGN"),
-                || true
-            ),
-            None
+        let read = bounded_read_with(
+            "/bin/sh",
+            &["-c", "printf answered"],
+            Duration::from_secs(5),
+            |_| panic!("no child under SIG_IGN"),
+            || true,
         );
+        assert_eq!(read, None);
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    // These children are reaped through the helper's pidfd, which clippy cannot see.
-    #[allow(clippy::zombie_processes)]
-    fn a_helper_signals_and_reaps_only_through_its_pidfd() {
+    fn a_child_is_held_by_the_pidfd_it_was_born_with() {
         // Reaped through its pidfd: a signal then reaches nothing at all.
-        let child = Command::new("/bin/sh")
-            .args(["-c", "exit 0"])
-            .spawn()
-            .unwrap();
-        let mut helper = Helper::hold(&child).expect("our running child");
-        let status = helper.wait().unwrap();
-        assert!(status.success());
-        let refused = helper.kill().unwrap_err();
-        assert_eq!(refused.raw_os_error(), Some(libc::ESRCH));
+        let (mut helper, _out) = spawn_held("/bin/sh", &["-c", "exit 0"]).expect("pidfd_spawnp");
+        assert!(helper.pid().is_some());
+        assert!(helper.wait().unwrap().success());
+        assert_eq!(helper.kill().unwrap_err().raw_os_error(), Some(libc::ESRCH));
         // Exit codes and signals read as std reports them.
-        let failing = Command::new("/bin/sh")
-            .args(["-c", "exit 3"])
-            .spawn()
-            .unwrap();
-        assert_eq!(
-            Helper::hold(&failing).unwrap().wait().unwrap().code(),
-            Some(3)
-        );
-        let hung = Command::new("/bin/sh")
-            .args(["-c", "exec sleep 30"])
-            .spawn()
-            .unwrap();
-        let mut held = Helper::hold(&hung).unwrap();
-        held.kill().unwrap();
+        let (mut failing, _out) = spawn_held("/bin/sh", &["-c", "exit 3"]).unwrap();
+        assert_eq!(failing.wait().unwrap().code(), Some(3));
+        let (mut hung, _out) = spawn_held("/bin/sh", &["-c", "exec sleep 30"]).unwrap();
+        hung.kill().unwrap();
         use std::os::unix::process::ExitStatusExt;
-        assert_eq!(held.wait().unwrap().signal(), Some(libc::SIGKILL));
+        assert_eq!(hung.wait().unwrap().signal(), Some(libc::SIGKILL));
+        // A program that cannot start leaves no child and no handle.
+        assert!(spawn_held("/nonexistent/systemctl", &["--user"]).is_none());
+        // Only stdin, stdout and stderr reach the child.
+        let (mut listing, out) = spawn_held("/bin/sh", &["-c", "ls /proc/self/fd"]).unwrap();
+        assert!(listing.wait().unwrap().success());
+        let mut text = String::new();
+        File::from(out).read_to_string(&mut text).unwrap();
+        let open: Vec<&str> = text.split_whitespace().collect();
+        // ls itself opens one directory descriptor to list it.
+        assert!(
+            open.len() <= 4 && ["0", "1", "2"].iter().all(|fd| open.contains(fd)),
+            "{open:?}"
+        );
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    // These children are reaped through the helper's pidfd, which clippy cannot see.
-    #[allow(clippy::zombie_processes)]
-    fn a_child_reaped_elsewhere_is_never_held_or_signalled() {
-        // Reaped by its PID before the read held it: never held.
-        let mut gone = Command::new("/bin/sh")
-            .args(["-c", "exit 0"])
-            .spawn()
-            .unwrap();
-        gone.wait().unwrap();
-        assert!(Helper::hold(&gone).is_none());
-        // Reaped by another waiter after it was held (as an auto-reaping policy
-        // would): waiting reports the loss and the deadline path signals nothing.
-        let mut other = Command::new("/bin/sh")
-            .args(["-c", "exit 0"])
-            .spawn()
-            .unwrap();
-        let mut helper = Helper::hold(&other).unwrap();
-        other.wait().unwrap();
+    fn a_child_reaped_elsewhere_is_never_signalled() {
+        // Reaped by another waiter by its number (as an auto-reaping policy or
+        // another reaper would): waiting through the pidfd reports the loss and
+        // the deadline path signals nothing.
+        let (mut helper, _out) = spawn_held("/bin/sh", &["-c", "exit 0"]).unwrap();
+        let pid = helper.pid().unwrap() as libc::pid_t;
+        // SAFETY: waitpid on this test's own child.
+        assert_eq!(unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) }, pid);
         assert!(helper.try_wait().is_err());
         assert_eq!(helper.kill().unwrap_err().raw_os_error(), Some(libc::ESRCH));
         assert_eq!(
@@ -2061,39 +2160,27 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_bounded_read_answers_kills_or_refuses() {
-        let sh = |script: &str| {
-            let mut command = Command::new("/bin/sh");
-            command.args(["-c", script]);
-            command
-        };
+        let sh = |script: &str| bounded_read("/bin/sh", &["-c", script], Duration::from_secs(5));
         assert_eq!(
-            bounded_read(sh("printf 'ActiveState=active\\n'"), Duration::from_secs(5)).as_deref(),
+            sh("printf 'ActiveState=active\\n'").as_deref(),
             Some("ActiveState=active\n")
         );
+        assert_eq!(sh("printf partial; exit 3"), None, "a failed show");
         assert_eq!(
-            bounded_read(sh("printf partial; exit 3"), Duration::from_secs(5)),
-            None,
-            "a failed show"
-        );
-        assert_eq!(
-            bounded_read(
-                Command::new("/nonexistent/systemctl"),
-                Duration::from_secs(5)
-            ),
+            bounded_read("/nonexistent/systemctl", &[], Duration::from_secs(5)),
             None,
             "no systemctl"
         );
         let begun = Instant::now();
         let mut pid = 0;
-        assert_eq!(
-            bounded_read_with(
-                sh("exec sleep 30"),
-                Duration::from_millis(200),
-                |id| pid = id,
-                || false
-            ),
-            None
+        let read = bounded_read_with(
+            "/bin/sh",
+            &["-c", "exec sleep 30"],
+            Duration::from_millis(200),
+            |id| pid = id,
+            || false,
         );
+        assert_eq!(read, None);
         assert!(
             begun.elapsed() < Duration::from_secs(5),
             "the bound ends a hung show"

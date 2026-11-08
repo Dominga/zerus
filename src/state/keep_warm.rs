@@ -8,6 +8,11 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
 
+// Dormant owner-key carry for the legacy-to-ID metadata transaction.
+#[cfg(unix)]
+#[allow(dead_code)]
+pub(super) mod owner_transfer;
+
 /// The exact ping. Its journal marks and silent presentation depend on it.
 pub(super) const TEXT: &str = "[Zerus keep-warm] Reply with exactly OK and do nothing else.";
 /// Enabled sessions per computer: bounds every read of the store and the round.

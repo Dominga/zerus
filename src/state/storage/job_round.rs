@@ -33,21 +33,41 @@ pub(in crate::state) fn try_acquire(kind: Kind) -> Result<Option<Held>> {
     try_at(&root(), kind)
 }
 
+/// Existing-original recovery only: missing directories or round files are
+/// uncertainty, never a newly created replacement exclusion domain.
+#[allow(dead_code)]
+pub(in crate::state) fn try_existing(kind: Kind) -> Result<Option<Held>> {
+    try_mode(&root(), kind, false)
+}
+
 fn try_at(selected: &Path, kind: Kind) -> Result<Option<Held>> {
-    private_dir(selected)?;
+    try_mode(selected, kind, true)
+}
+fn try_mode(selected: &Path, kind: Kind, create: bool) -> Result<Option<Held>> {
+    if create {
+        private_dir(selected)?;
+    }
     let state = Directory::open(&crate::platform::canonical(selected).map_err(|e| e.to_string())?)?;
     if !state.owner_controls_entries()? {
         return Err(
             "The current user does not exclusively control the recovery state entries".into(),
         );
     }
-    let recovery = state.ensure_child("recovery")?;
+    let recovery = if create {
+        state.ensure_child("recovery")?
+    } else {
+        state.child("recovery")?
+    };
     if !recovery.owner_controls_entries()? {
         return Err(
             "The current user does not exclusively control the recovery round entries".into(),
         );
     }
-    let file = recovery.open_private_lock(kind.name())?;
+    let file = if create {
+        recovery.open_private_lock(kind.name())?
+    } else {
+        existing(&recovery, kind.name())?
+    };
     match file.try_lock_exclusive() {
         Ok(()) => (),
         Err(error) if crate::platform::lock_contended(&error) => return Ok(None),
@@ -67,6 +87,10 @@ fn try_at(selected: &Path, kind: Kind) -> Result<Option<Held>> {
 }
 
 impl Held {
+    pub(in crate::state) fn object(&self) -> Result<(u64, u64)> {
+        self.verify()?;
+        Ok((self.identity.device, self.identity.inode))
+    }
     pub(in crate::state) fn verify(&self) -> Result<()> {
         self.verify_at(&root())
     }
@@ -93,6 +117,31 @@ impl Held {
         }
         Ok(())
     }
+}
+
+fn existing(directory: &Directory, name: &str) -> Result<fs::File> {
+    use std::os::fd::FromRawFd;
+    let name = std::ffi::CString::new(name).map_err(|e| e.to_string())?;
+    directory.verify()?;
+    // SAFETY: the kind supplies one fixed name under the original directory.
+    // No creation, symlink follow or blocking FIFO open is requested.
+    let fd = unsafe {
+        libc::openat(
+            directory.descriptor(),
+            name.as_ptr(),
+            libc::O_RDWR | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOCTTY,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    // SAFETY: this call exclusively owns the newly returned descriptor.
+    let file = unsafe { fs::File::from_raw_fd(fd) };
+    if !crate::platform::verify_private_file(&file).map_err(|e| e.to_string())? {
+        return Err("The original recovery round is not a private regular file".into());
+    }
+    directory.verify()?;
+    Ok(file)
 }
 
 impl Drop for Held {

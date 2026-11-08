@@ -36,10 +36,64 @@ pub(in crate::state) struct Domain {
     reservation: reservation::Held,
 }
 
-impl Domain {
-    /// One try, under caller-held state writer exclusion. Only an existing
-    /// verified legacy record can prepare its fixed session-ID key.
-    pub(in crate::state) fn prepare(record: &Value, until: Instant) -> Result<Self> {
+/// Original exclusion acquired BEFORE the record/job transaction writes a
+/// pending marker. It cannot send input or prove a completed metadata move.
+pub(in crate::state) struct Original {
+    state: Directory,
+    inputs: Directory,
+    binding: Directory,
+    binding_name: String,
+    record: Value,
+    file: File,
+    original: (u64, u64, u32, u32),
+    version: Value,
+    old: String,
+    new: String,
+    until: Instant,
+}
+
+fn file_version(file: &File) -> Result<Value> {
+    let m = file.metadata().map_err(|e| e.to_string())?;
+    Ok(json!([
+        m.dev(),
+        m.ino(),
+        m.mode(),
+        m.uid(),
+        m.gid(),
+        m.len(),
+        m.mtime(),
+        m.mtime_nsec(),
+        m.ctime(),
+        m.ctime_nsec()
+    ]))
+}
+impl Original {
+    pub(in crate::state) fn acquire(record: &Value, until: Instant) -> Result<Self> {
+        Self::open(record, until, true, None)
+    }
+    /// The metadata transaction checks the actual writer BEFORE any input
+    /// namespace/lock creation, then retains that writer in its own scope.
+    pub(in crate::state) fn acquire_under(
+        writer: &Guard,
+        record: &Value,
+        until: Instant,
+    ) -> Result<Self> {
+        Self::open(record, until, true, Some(writer))
+    }
+    /// No creation or reconstruction in recovery, even before comparison of
+    /// the immutable journal's original file/directory version.
+    pub(in crate::state) fn recover(
+        record: &Value,
+        version: &Value,
+        until: Instant,
+    ) -> Result<Self> {
+        let held = Self::open(record, until, false, None)?;
+        if held.version()? != *version {
+            return Err("The original pre-transition input object changed".into());
+        }
+        Ok(held)
+    }
+    fn open(record: &Value, until: Instant, create: bool, writer: Option<&Guard>) -> Result<Self> {
         let id = string(record, "session_id");
         if in_id_layout(record)
             || string(record, "name").is_empty()
@@ -49,11 +103,18 @@ impl Domain {
             return Err("The original legacy session identity is unavailable".into());
         }
         deadline(until)?;
-        // Resolve only the configured root. All descendant opens are no-follow.
         let state =
             Directory::open(&crate::platform::canonical(root()).map_err(|e| e.to_string())?)?;
         if !state.private()? {
             return Err("The original state directory is not private".into());
+        }
+        if let Some(writer) = writer {
+            let current = state.read_private(".lock")?;
+            if crate::platform::FileIdentity::of(&current).map_err(|e| e.to_string())?
+                != writer.identity().map_err(|e| e.to_string())?
+            {
+                return Err("The original metadata writer changed before input preparation".into());
+            }
         }
         let path = label_record_path(string(record, "name"));
         let relative = path.strip_prefix(root()).map_err(|e| e.to_string())?;
@@ -72,41 +133,128 @@ impl Domain {
         if read_original(&binding, &binding_name)? != *record {
             return Err("The original legacy session changed".into());
         }
-        // Never enter the create-capable old-lock open for an already reserved
-        // key or a replaced/missing original namespace.
-        let inputs = reservation::inputs_for_prepare(&state, record)?;
+        let inputs = if create {
+            reservation::inputs_for_prepare(&state, record)?
+        } else {
+            reservation::inputs_for_existing(&state, record)?
+        };
         if !inputs.private()? {
             return Err("The native input directory is not private".into());
         }
         let old = format!("{}.lock", owner_key(record));
         let new = format!("{id}.lock");
-        let file = inputs.open_private_lock(&old)?;
+        let file = if create {
+            inputs.open_private_lock(&old)?
+        } else {
+            open_entry(&inputs, &old, true)?
+        };
         file.try_lock_exclusive()
             .map_err(|e| format!("The original native input is busy or unavailable: {e}"))?;
-        let metadata = file.metadata().map_err(|e| e.to_string())?;
-        if metadata.len() != 0 {
-            return Err("The original native input lock is not empty".into());
+        let m = file.metadata().map_err(|e| e.to_string())?;
+        if m.len() != 0
+            || !crate::platform::verify_private_file(&file).map_err(|e| e.to_string())?
+        {
+            return Err("The original native input lock is not empty and private".into());
         }
-        // Reserve the old key durably BEFORE publishing the second name or
-        // allowing a later metadata move. A partial preparation stays negative.
-        let reservation = reservation::Held::create(&state, &inputs, record, identity(&metadata))?;
-        let domain = Self {
+        let held = Self {
             state,
             inputs,
-            binding: Some(binding),
+            binding,
             binding_name,
             record: record.clone(),
-            original: identity(&metadata),
+            original: identity(&m),
+            version: file_version(&file)?,
             file,
             old,
             new,
             until,
+        };
+        held.verify(record)?;
+        Ok(held)
+    }
+    pub(in crate::state) fn version(&self) -> Result<Value> {
+        Ok(json!({"state":self.state.object()?,"inputs":self.inputs.object()?,"file":self.version}))
+    }
+    fn verify(&self, current: &Value) -> Result<()> {
+        deadline(self.until)?;
+        self.state.verify()?;
+        self.inputs.verify()?;
+        self.binding.verify()?;
+        // Only negative transition/protection fields may have been added by
+        // the same writer. Native/run/label/history values never change here.
+        let mut unchanged = current.clone();
+        for key in ["layout_transition", "worktree_protection"] {
+            match self.record.get(key) {
+                Some(value) if current.get(key) != Some(value) => {
+                    return Err("Original negative retention evidence changed".into())
+                }
+                Some(value) => unchanged[key] = value.clone(),
+                None => {
+                    unchanged
+                        .as_object_mut()
+                        .ok_or("Invalid original binding")?
+                        .remove(key);
+                }
+            }
+        }
+        if current
+            .get("worktree_protection")
+            .is_some_and(|value| value != &current["worktree_owner"]["id"])
+            || current.get("layout_transition").is_some_and(|marker| {
+                marker["version"] != 1
+                    || string(marker, "before_sha256").len() != 64
+                    || !string(marker, "before_sha256")
+                        .bytes()
+                        .all(|c| c.is_ascii_hexdigit())
+            })
+        {
+            return Err("Invalid negative transition evidence".into());
+        }
+        if unchanged != self.record
+            || read_original(&self.binding, &self.binding_name)? != *current
+            || !self.state.private()?
+            || !self.inputs.private()?
+            || crate::platform::canonical(root()).map_err(|e| e.to_string())? != self.state.path
+            || file_version(&self.file)? != self.version
+            || !crate::platform::verify_private_file(&self.file).map_err(|e| e.to_string())?
+        {
+            return Err("The original native input preparation changed".into());
+        }
+        let current_file = open_entry(&self.inputs, &self.old, false)?;
+        if identity(&current_file.metadata().map_err(|e| e.to_string())?) != self.original {
+            return Err("The original native input name changed".into());
+        }
+        deadline(self.until)
+    }
+    pub(in crate::state) fn prepare(self, current: &Value) -> Result<Domain> {
+        self.verify(current)?;
+        let reservation =
+            reservation::Held::create(&self.state, &self.inputs, current, self.original)?;
+        let domain = Domain {
+            state: self.state,
+            inputs: self.inputs,
+            binding: Some(self.binding),
+            binding_name: self.binding_name,
+            record: current.clone(),
+            file: self.file,
+            original: self.original,
+            old: self.old,
+            new: self.new,
+            until: self.until,
             reservation,
         };
         domain.verify_before_link()?;
         domain.link()?;
         domain.verify()?;
         Ok(domain)
+    }
+}
+
+impl Domain {
+    /// One try, under caller-held state writer exclusion. Only an existing
+    /// verified legacy record can prepare its fixed session-ID key.
+    pub(in crate::state) fn prepare(record: &Value, until: Instant) -> Result<Self> {
+        Original::acquire(record, until)?.prepare(record)
     }
 
     /// Recover exclusion from the immutable original before-image and its
@@ -190,15 +338,20 @@ impl Domain {
     }
 
     fn verify_scope(&self) -> Result<()> {
-        deadline(self.until)?;
-        self.state.verify()?;
-        self.inputs.verify()?;
+        self.verify_scope_objects()?;
         if let Some(binding) = &self.binding {
             binding.verify()?;
             if read_original(binding, &self.binding_name)? != self.record {
                 return Err("The original legacy binding changed".into());
             }
         }
+        deadline(self.until)
+    }
+
+    fn verify_scope_objects(&self) -> Result<()> {
+        deadline(self.until)?;
+        self.state.verify()?;
+        self.inputs.verify()?;
         self.reservation
             .verify(&self.state, &self.inputs, &self.record)?;
         if crate::platform::canonical(root()).map_err(|e| e.to_string())? != self.state.path
@@ -208,6 +361,42 @@ impl Domain {
             return Err("The original native input scope changed".into());
         }
         deadline(self.until)
+    }
+
+    /// Detach the legacy binding check ONLY after the exact canonical ID
+    /// record exists and that same complete original is retained by the
+    /// transaction. This grants no input or historical-effect acceptance.
+    pub(in crate::state) fn record_retained(
+        &mut self,
+        retained: &Directory,
+        name: &str,
+    ) -> Result<()> {
+        self.verify_scope_objects()?;
+        self.verify_file(2)?;
+        self.verify_entry(&self.old)?;
+        self.verify_entry(&self.new)?;
+        retained.verify()?;
+        if !retained.private()? || read_original(retained, name)? != self.record {
+            return Err("The retained original record is unconfirmed".into());
+        }
+        if let Some(binding) = &self.binding {
+            binding.verify()?;
+            if binding.read_private_optional(&self.binding_name)?.is_some() {
+                return Err("The original legacy record is still published".into());
+            }
+        }
+        let mut expected = self.record.clone();
+        expected["layout"] = json!("id");
+        let sessions = self.state.child("sessions")?;
+        if read_original(
+            &sessions,
+            &format!("{}.json", string(&self.record, "session_id")),
+        )? != expected
+        {
+            return Err("The published ID record does not retain the exact original".into());
+        }
+        self.binding = None;
+        self.verify()
     }
 
     fn verify_file(&self, links: u64) -> Result<()> {

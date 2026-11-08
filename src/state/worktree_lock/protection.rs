@@ -146,6 +146,20 @@ fn text(file: &mut fs::File) -> Result<String> {
 }
 
 impl Protection {
+    /// Existing immutable protection only. Transaction recovery verifies its
+    /// own original before-image; this reader never rewrites a legacy record
+    /// or creates a missing proof/lock after the record left its old name.
+    #[cfg(unix)]
+    #[allow(dead_code)]
+    pub(in crate::state) fn retained_for_move(record: &Value) -> Result<Option<Self>> {
+        if record["worktree_owner"].is_null() {return Ok(None);}
+        let owner=&record["worktree_owner"];
+        if record["worktree_protection"]!=owner["id"] {
+            return Err("The original transition protection marker is missing".into());
+        }
+        Self::retained_any(owner,None,false).map(Some)
+    }
+
     /// Dormant metadata-move preparation, under the original state writer.
     /// Unlike new-session publication, this NEVER creates a Git lock: an
     /// existing legacy holder must retain its verified original veto object.
@@ -207,6 +221,9 @@ impl Protection {
             // Use ONLY the existing-proof reader, never the create-capable
             // new-publication path (even if a receipt changes after our read).
             let held = Self::retained_any(owner, None, false)?;
+            if held.before["version"]==legacy_veto::VERSION && before["worktree_protection"]!=owner["id"] {
+                return Err("The original legacy retention marker was lost; keep it for review".into());
+            }
             if !worktree_cleanup::bindings()?.iter().any(|holder| {
                 holder.owner == string(owner, "id") && holder.session_id == held.reason
             }) {

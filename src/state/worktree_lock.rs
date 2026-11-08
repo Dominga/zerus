@@ -561,6 +561,11 @@ mod tests {
     }
 
     #[test]
+    fn the_record_job_transaction_retains_the_actual_legacy_git_veto() {
+        control_within("move_record_transaction", std::time::Duration::from_secs(15));
+    }
+
+    #[test]
     fn legacy_move_preparation_never_relocks_a_manual_unlock_or_foreign_veto() {
         control_within("move_no_relock", std::time::Duration::from_secs(15));
     }
@@ -679,7 +684,7 @@ mod tests {
         };
         match case.as_str() {
             "move_existing_veto" | "move_no_relock" | "move_retention_cut" |
-            "move_invalid_files" | "move_lost_metadata" | "move_between_unlock" |
+            "move_invalid_files" | "move_lost_metadata" | "move_between_unlock" | "move_record_transaction" |
             "move_between_relock" | "move_between_replace" => {
                 use std::os::unix::fs::PermissionsExt;
                 // This is the private native publication fixture; legacy
@@ -713,6 +718,22 @@ mod tests {
                 unsafe { libc::umask(previous_mask) };
                 use std::os::unix::fs::MetadataExt;
                 assert_eq!(fs::metadata(&lock).unwrap().mode() & 0o7777, 0o644);
+                if case == "move_record_transaction" {
+                    let original=crate::platform::file_identity(&lock).unwrap();
+                    let moved=storage::owner_transfer::begin(&_writer,&legacy,
+                        std::time::Instant::now()+std::time::Duration::from_secs(10)).unwrap();
+                    assert!(storage::is_id_layout_record(&moved,&id));
+                    assert!(!binding.exists());
+                    assert_eq!(storage::read_id(&id).unwrap()["session_id"],moved["session_id"]);
+                    assert!(!storage::owner_transfer::blocked(&moved));
+                    let retained=Protection::retained_for_move(&moved).unwrap().unwrap();
+                    retained.verify().unwrap();drop(retained);
+                    let after=crate::platform::file_identity(&lock).unwrap();
+                    assert_eq!((original.device,original.inode),(after.device,after.inode));
+                    assert_eq!(fs::read_to_string(&lock).unwrap(),format!("{own}\n"));
+                    assert_eq!(fs::metadata(&lock).unwrap().mode() & 0o7777,0o644);
+                    return;
+                }
                 if case == "move_invalid_files" {
                     let before = fs::read(&binding).unwrap();
                     for mode in [0o664,0o646,0o4644,0o2644,0o1644] {

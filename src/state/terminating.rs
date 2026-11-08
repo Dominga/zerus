@@ -2,6 +2,12 @@
 //! This leaf does not create markers, send signals or authorize finalization.
 use serde_json::Value;
 
+// Inactive durable-writer support. No marker/controller/effect entry calls it;
+// saved rows and native locks supply no Terminate or cleanup authority.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(dead_code)]
+mod writer_records;
+
 pub(super) const WAIT: &str =
     "Session termination is unfinished; inspect its original result before changing the session";
 

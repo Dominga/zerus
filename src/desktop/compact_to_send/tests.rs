@@ -1147,6 +1147,7 @@ mod actor {
             Self::build(Some(execute))
         }
         /// No executor: the original path runs through the pinned image.
+        #[cfg(target_os = "linux")]
         fn unexecuted() -> Self {
             Self::build(None)
         }

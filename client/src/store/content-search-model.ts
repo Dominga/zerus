@@ -133,6 +133,7 @@ export function searchTooltip(item: { session: Session; found?: FoundHit; matche
   if (item.found?.hit.snippet) lines.push(item.found.hit.snippet);
   return lines.join("\n");
 }
-export function searchCount(messages: number, sessions: number): string {
-  return `${messages} ${messages === 1 ? "message" : "messages"}, ${sessions} ${sessions === 1 ? "session" : "sessions"}`;
+export function searchCount(messages: number, sessions: number, creations = 0): string {
+  const text = `${messages} ${messages === 1 ? "message" : "messages"}, ${sessions} ${sessions === 1 ? "session" : "sessions"}`;
+  return creations ? `${text}, ${creations} ${creations === 1 ? "creation" : "creations"}` : text;
 }

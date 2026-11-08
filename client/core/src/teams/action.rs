@@ -341,6 +341,12 @@ pub enum TeamAction {
         #[serde(default)]
         revision: Option<u64>,
     },
+    /// Task #226: a task's lane in a planning or draft phase (`edit-draft`'s
+    /// `tasks_update`); a null lane takes it out (lane 0).
+    EditTasks {
+        phase: u64,
+        tasks: Vec<Value>,
+    },
     /// Starts a draft team (no team id yet): its folder, name, lead and
     /// template as New team's Start planning sends them.
     DraftStart {
@@ -672,6 +678,7 @@ impl TeamAction {
             Self::SkipStage { .. } => "skip-stage",
             Self::SendBack { .. } => "send-back",
             Self::MoveTask { .. } => "move-task",
+            Self::EditTasks { .. } => "edit-draft",
             Self::DraftStart { .. }
             | Self::DraftUpdate { .. }
             | Self::DraftSeen { .. }
@@ -806,6 +813,34 @@ impl TeamAction {
                 task(*id)?;
                 if *phase == 0 {
                     return Err("Not a phase number.".into());
+                }
+                Ok(())
+            }
+            Self::EditTasks { phase, tasks } => {
+                if *phase == 0 {
+                    return Err("Not a phase number.".into());
+                }
+                if tasks.is_empty() || tasks.len() > 500 {
+                    return Err("An edit names 1 to 500 tasks.".into());
+                }
+                for value in tasks {
+                    if value.get("id").and_then(Value::as_u64).is_none_or(|id| id == 0) {
+                        return Err("A task id is required.".into());
+                    }
+                    match value.get("lane") {
+                        None => return Err("A lane edit names each task's lane.".into()),
+                        Some(Value::Null) => {}
+                        Some(found) if found.is_object() => {
+                            if found.get("n").and_then(Value::as_u64).is_none_or(|n| n == 0 || n > 999) {
+                                return Err("A lane number is 1 to 999.".into());
+                            }
+                            let label = found.get("label").and_then(Value::as_str).unwrap_or_default();
+                            if label.chars().count() > 40 {
+                                return Err("A lane label is at most 40 characters.".into());
+                            }
+                        }
+                        Some(_) => return Err("A lane is an object or null.".into()),
+                    }
                 }
                 Ok(())
             }
@@ -1271,6 +1306,10 @@ impl TeamAction {
                 if let Some(revision) = revision {
                     put("revision", json!(revision));
                 }
+            }
+            Self::EditTasks { phase, tasks } => {
+                put("phase", json!(phase));
+                put("tasks_update", json!(tasks));
             }
             Self::Answer {
                 member,
@@ -1954,5 +1993,50 @@ fn read_status(hgs: &Path, call: &TeamCall) -> Result<Value, String> {
             .ok_or_else(|| "The team could not be read; nothing was sent.".to_owned()),
         Exit::Code { stderr, .. } => Err(stderr_text(&stderr).unwrap_or_else(|| "The team could not be read; nothing was sent.".to_owned())),
         _ => Err("The team could not be read; nothing was sent.".to_owned()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lane_edit() -> TeamAction {
+        TeamAction::EditTasks {
+            phase: 2,
+            tasks: vec![
+                json!({"id": 3, "lane": {"n": 1, "label": "First"}}),
+                json!({"id": 4, "lane": null}),
+            ],
+        }
+    }
+
+    #[test]
+    fn an_edit_tasks_call_sends_the_lanes_through_edit_draft() {
+        let action = lane_edit();
+        assert_eq!(action.op(), "edit-draft");
+        assert!(action.check().is_ok());
+        let input = action.input();
+        assert_eq!(input["phase"], json!(2));
+        assert_eq!(
+            input["tasks_update"],
+            json!([{"id":3,"lane":{"n":1,"label":"First"}},{"id":4,"lane":null}])
+        );
+    }
+
+    #[test]
+    fn an_edit_tasks_call_refuses_a_bad_phase_task_or_lane() {
+        let bad = [
+            TeamAction::EditTasks { phase: 0, tasks: vec![json!({"id":1,"lane":null})] },
+            TeamAction::EditTasks { phase: 1, tasks: Vec::new() },
+            TeamAction::EditTasks { phase: 1, tasks: vec![json!({"lane":null})] },
+            TeamAction::EditTasks { phase: 1, tasks: vec![json!({"id":1})] },
+            TeamAction::EditTasks { phase: 1, tasks: vec![json!({"id":1,"lane":{"n":0}})] },
+            TeamAction::EditTasks { phase: 1, tasks: vec![json!({"id":1,"lane":{"label":"x"}})] },
+            TeamAction::EditTasks { phase: 1, tasks: vec![json!({"id":1,"lane":{"n":1,"label":"x".repeat(41)}})] },
+            TeamAction::EditTasks { phase: 1, tasks: vec![json!({"id":1,"lane":"first"})] },
+        ];
+        for action in bad {
+            assert!(action.check().is_err(), "{action:?}");
+        }
     }
 }

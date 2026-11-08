@@ -97,6 +97,21 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
   // links) goes through core's plan edit and edit-draft.
   const plan = createPlanEditing(() => ({ computer: props.computer, team: props.team }));
   let body!: HTMLDivElement;
+  // Task #226: the Lanes mode renames a lane or moves a task through the same
+  // `edit-draft` the Qt workspace sends (`tasks_update`), never a browser
+  // confirm; a refusal is a toast and the view says so.
+  const editLanes = async (phase: number, updates: { id: number; lane: { n: number; label: string } | null }[]) => {
+    const call: TeamCall = { computer: props.computer, team: props.team.id, action: { kind: "edit_tasks", phase, tasks: updates } };
+    try {
+      const outcome = await teamAction(call);
+      if (outcome.outcome === "done") return true;
+      const detail = outcome.outcome === "confirm" ? outcome.confirmation.text : outcome.detail ?? outcome.outcome;
+      toast(tr("Lane not changed"), detail, "error", true);
+    } catch (cause) {
+      toast(tr("Lane not changed"), String(cause), "error", true);
+    }
+    return false;
+  };
   createEffect(() => {
     const hide = showTeam(props.computer, props.team.id);
     onCleanup(hide);
@@ -220,6 +235,9 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
                 member={focus() ?? ""}
                 onMember={(id) => setFocus(id || null)}
                 onAutoAccept={(on) => void setAutoAccept(on)}
+                phaseActions={(n) => <PhaseModeControl computer={props.computer} team={props.team} phase={n} />}
+                onApprovePhase={(n) => void approvePhase(n)}
+                onLaneEdit={editLanes}
               />
             )}
           </Show>

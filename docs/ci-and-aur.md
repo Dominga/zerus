@@ -63,7 +63,13 @@ shared registry cache, so the two jobs cannot race to save one key. Linux keeps
 
 Quick checks and the full suites start together once the commit is resolved, so
 a quick-check failure no longer holds back the other suites. New PR/manual runs cancel
-obsolete runs for the same branch/PR and workflow. Trusted public Dev main pushes
+obsolete runs for the same branch/PR and workflow. Every `pull_request` workflow has
+such a per-PR group: a new head cancels that PR's older run, and the other workflows'
+manual runs keep their earlier concurrency. Closing or merging a PR cancels its
+remaining queued and running runs (`pr-closed.yml`: one inline `gh api` script with
+only `actions: write`, no checkout, action or secret). A fork PR's runs stay until
+they finish, since its token is read-only. `tests/test_ci_security.py` keeps every
+`pull_request` workflow on a per-PR cancelling group. Trusted public Dev main pushes
 use separate bounded qualification and signing/sealing queues; each keeps its active
 phase and coalesces pending revisions to the newest one. PR/manual checks and main
 before Dev rollout keep their existing whole-run concurrency. PR jobs have read-only

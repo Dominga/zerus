@@ -76,6 +76,8 @@ const params = new URLSearchParams(location.search);
 const which = params.get("view") ?? "running";
 const shown = which === "planning" ? planning : running;
 if (params.get("note") === "0") shown.phases = shown.phases.map((item) => ({ ...item, note: "" }));
+// Task 332: phase 1 as the free phase, so its open card shows the accepted fold.
+if (params.get("free") === "1") shown.free_phase = 1;
 applySkin(skins.find((skin) => skin.id === params.get("skin")) ?? skins[0]);
 document.documentElement.dataset.platform = "windows";
 render(() => (

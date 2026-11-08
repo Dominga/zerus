@@ -4,8 +4,11 @@ import { desktopService, serviceStatus, servicePaused, retryDesktopService, owne
 import { catalog } from "../../store/catalog";
 import { toast } from "../../store/ui";
 import { tr } from "../../i18n";
-import { MigrationReportDialog } from "./MigrationReportDialog";
-import { TaskMessageInputsDialog } from "./TaskMessageInputsDialog";
+import { lazyView } from "../lazy-view";
+import { LazyBoundary } from "../lazy-boundary";
+// Opened on demand, outside the entry chunk (zerus-ycycu).
+const MigrationReportDialog = lazyView(() => import("./MigrationReportDialog"), (m) => m.MigrationReportDialog);
+const TaskMessageInputsDialog = lazyView(() => import("./TaskMessageInputsDialog"), (m) => m.TaskMessageInputsDialog);
 
 /** A connected passive service that lists no computers yet; the main area explains it. */
 export const servicePausedEmpty = () => (!!servicePaused(desktopService.state()) || firstChoicePending(desktopService.state()))
@@ -81,7 +84,7 @@ export function DesktopServiceStatus(props: { counts?: boolean }) {
     </div>
     <Show when={focused()}><Portal><div id="service-status-details" class="service-status-details" role="tooltip">{details()}</div></Portal></Show>
     </Show>
-    <Show when={reviewOrigin()}>{(origin) => <MigrationReportDialog origin={origin()} close={() => setReviewOrigin(undefined)} />}</Show>
-    <Show when={inputsOrigin()}>{(origin) => <TaskMessageInputsDialog origin={origin()} fallback={() => summary} close={() => setInputsOrigin(undefined)} />}</Show>
+    <Show when={reviewOrigin()}>{(origin) => <LazyBoundary floating><MigrationReportDialog origin={origin()} close={() => setReviewOrigin(undefined)} /></LazyBoundary>}</Show>
+    <Show when={inputsOrigin()}>{(origin) => <LazyBoundary floating><TaskMessageInputsDialog origin={origin()} fallback={() => summary} close={() => setInputsOrigin(undefined)} /></LazyBoundary>}</Show>
   </>}</Show>;
 }

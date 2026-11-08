@@ -16,7 +16,6 @@ import { MenuLayer, Toasts } from "./ui/components/Overlays";
 import { ActionDialogs } from "./ui/sessions/ActionDialogs";
 import { newSessionFromShortcut, newSessionOpened } from "./ui/sessions/newsession-view";
 import { OrganizationDialogs } from "./ui/sessions/OrganizationDialogs";
-import { ParentDialogs } from "./ui/sessions/ParentDialogs";
 import { SessionList } from "./ui/sessions/SessionList";
 import { SessionDetail } from "./ui/sessions/SessionDetail";
 import { CreationPanel } from "./ui/sessions/CreationPanel";
@@ -33,6 +32,9 @@ import { openUpdates } from "./store/desk";
 import { SessionUsageStrip } from "./ui/components/SessionUsageStrip";
 import type { BridgeMode } from "./bridge";
 import { installUiLanguage, tr, uiLanguage } from "./i18n";
+import { lazyView } from "./ui/lazy-view";
+import { LazyBoundary } from "./ui/lazy-boundary";
+const ParentDialogs = lazyView(() => import("./ui/sessions/ParentDialogs"), (m) => m.ParentDialogs);
 
 // The client shell: the rail, the pages and the status bar.
 const WorktreeCleanup = lazy(() => import("./ui/screens/WorktreeCleanup"));
@@ -164,7 +166,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
       <Show when={shortcutHelpOrigin()}><Suspense><ShortcutHelpDialog /></Suspense></Show>
       <Show when={newSessionOpened()}><Suspense><NewSessionDialog /></Suspense></Show>
       <OrganizationDialogs />
-      <ParentDialogs />
+      <LazyBoundary floating><ParentDialogs /></LazyBoundary>
       <Suspense><PerfHost /></Suspense>
     </div>
   );

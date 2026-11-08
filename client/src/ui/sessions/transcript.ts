@@ -1,6 +1,6 @@
 import type { ActivityEvent, LocalMessage, Reply } from "../../types";
 import { eventKey } from "../../store/activity";
-import type { ActivityItem, InboxItem, LocalItem, MediaMessage, TranscriptItem, VoiceState } from "./types";
+import type { ActivityItem, InboxItem, LocalItem, MediaMessage, ToolEvent, TranscriptItem, VoiceState } from "./types";
 import { imageSize } from "./attachment-image";
 import { messageTimeOf } from "../lib/dates";
 import { tr, trNoop } from "../../i18n";
@@ -195,10 +195,41 @@ function media(e: ActivityEvent, id: string): MediaMessage {
 
 const GROUP_LIMIT = 24;
 const PREVIEW = 110;
-const preview = (text: string | undefined) => {
-  const flat = (text ?? "").replace(/\s+/g, " ").trim();
+const SPACE = /\s/;
+/**
+ * The text's whitespace runs as single spaces, trimmed and cut to 110
+ * characters: read only as far as the preview shows, so a multi-megabyte
+ * output costs no more than a short one (zerus-5wmh.13.8.1).
+ */
+export function toolPreview(text: string | undefined): string {
+  const source = text ?? "";
+  let flat = "", space = false;
+  for (let i = 0; i < source.length && flat.length <= PREVIEW; i++) {
+    const c = source[i];
+    if (SPACE.test(c)) { space = flat.length > 0; continue; }
+    if (space) { flat += " "; space = false; }
+    flat += c;
+  }
   return flat.length > PREVIEW ? `${flat.slice(0, PREVIEW - 1)}…` : flat;
-};
+}
+const preview = toolPreview;
+
+/** One reader per event: rebuilding the transcript leaves an unchanged event's row unchanged. */
+const outputs = new WeakMap<ActivityEvent, () => string>();
+function outputOf(e: ActivityEvent): () => string {
+  let read = outputs.get(e);
+  if (!read) { read = () => e.detail ?? ""; outputs.set(e, read); }
+  return read;
+}
+
+/** An operational event as an expanded tool row shows it; its output stays in the event. */
+function toolEvent(e: ActivityEvent): ToolEvent {
+  const process = typeof e.process_id === "string" && e.process_id ? e.process_id : undefined;
+  return {
+    label: `${eventTitle(e.type)}${e.tool ? ` / ${e.tool}` : ""}${childEvent(e) ? tr(" (subagent %1)", e.agent_id) : ""}`,
+    at: timeText(e.at), size: (e.detail ?? "").length, process, detail: outputOf(e),
+  };
+}
 
 /**
  * The request and reply the summary recorded, when the timeline has no events
@@ -576,13 +607,13 @@ function transcriptItems(events: readonly ActivityEvent[], summary?: Record<stri
       if (g.type === "PreToolUse") calls++;
     }
     const last = group[group.length - 1];
-    const lines = group.map((g) => `${eventTitle(g.type)}${g.tool ? ` / ${g.tool}` : ""}${childEvent(g) ? tr(" (subagent %1)", g.agent_id) : ""}  ${preview(g.detail)}`);
+    const toolEvents = group.map(toolEvent);
     const shownTools = tools.slice(0, 3).join(", ") + (tools.length > 3 ? " …" : "");
     if (group.length === 1) {
-      items.push({ id, kind: "tool", at: timeText(last.at), title: `${eventTitle(e.type)}${e.tool ? ` / ${e.tool}` : ""}`, body: preview(e.detail), lines, warn: attention(e) });
+      items.push({ id, kind: "tool", at: timeText(last.at), title: `${eventTitle(e.type)}${e.tool ? ` / ${e.tool}` : ""}`, body: preview(e.detail), events: toolEvents, warn: attention(e) });
     } else {
       const title = calls > 0 ? tr("%1, %2 events", calls === 1 ? tr("1 tool call") : tr("%1 tool calls", calls), group.length) : tr("%1 activity events", group.length);
-      items.push({ id, kind: "tools", at: timeText(last.at), title, body: shownTools || preview(last.detail), lines, warn: group.some(attention) });
+      items.push({ id, kind: "tools", at: timeText(last.at), title, body: shownTools || preview(last.detail), events: toolEvents, warn: group.some(attention) });
     }
   }
   inherit();

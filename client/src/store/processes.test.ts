@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createRoot, createSignal } from "solid-js";
 import { createStore } from "solid-js/store";
 import {
-  createOutputFollow, createProcesses, groupItem, nextSelection, processesTab, processTarget, runningCommandsEntry,
+  createOutputFollow, createProcesses, groupItem, nextSelection, processesTab, processTarget, recordedProcess, runningCommandsEntry,
   trackFollow, trackShown, visibleRows, type TreeKey,
 } from "./processes";
 import type { ProcessesView, ProcessRow, ProcessTarget } from "../types";
@@ -129,6 +129,37 @@ describe("the Processes store", () => {
     h.advance(1001);
     h.store.apply(view({ selected: ["p3"], current: "p3" }));
     expect(h.menus).toEqual([]);
+  });
+});
+
+describe("View process from Activity (ActivityView.cpp:1129-1134, zerus-5wmh.13.8.1)", () => {
+  const id = (c: string) => c.repeat(32);
+  const ids = view({ groups: [
+    { group: "live", title: "Live processes", rows: [row(id("a"))] },
+    { group: "finished", title: "Finished", rows: [row(id("b"))] },
+  ] });
+
+  it("links only a 32-hex process id the session's process list holds", () => {
+    expect(recordedProcess(ids, id("a"))).toBe(true);
+    expect(recordedProcess(ids, id("b"))).toBe(true);
+    expect(recordedProcess(ids, id("c"))).toBe(false);
+    expect(recordedProcess(undefined, id("a"))).toBe(false);
+    expect(recordedProcess(view(), "p1")).toBe(false);
+    expect(recordedProcess(view({ groups: [{ group: "live", title: "", rows: [row(id("A"))] }] }), id("A"))).toBe(false);
+    expect(recordedProcess(ids, 7)).toBe(false);
+  });
+
+  it("selects the process alone and opens its collapsed group", () => {
+    const h = harness();
+    expect(h.store.reveal(id("b"))).toBe(false);
+    h.store.apply(ids);
+    expect(h.store.collapsed().finished).toBe(true);
+    expect(h.store.reveal(id("b"))).toBe(true);
+    expect(h.store.collapsed().finished).toBe(false);
+    expect(h.calls).toEqual([select("host\nname", [id("b")], id("b"))]);
+    expect(h.store.focus()?.id).toBe(id("b"));
+    expect(h.store.reveal(id("c"))).toBe(false);
+    expect(h.calls).toHaveLength(1);
   });
 });
 

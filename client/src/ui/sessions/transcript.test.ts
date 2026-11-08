@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildTranscript, createActivityProjections, localFileAvailable, mergeLocal, createTranscriptProjection } from "./transcript";
+import { buildTranscript, createActivityProjections, localFileAvailable, mergeLocal, createTranscriptProjection, toolPreview } from "./transcript";
 import type { ActivityEvent, EventAttachment, LocalMessage } from "../../types";
 import type { ActivityItem, MediaMessage } from "./types";
 import { cardTarget, rowScope } from "./attachment-card";
@@ -408,5 +408,47 @@ describe("keep-warm ping turns", () => {
     expect(running.map((i) => i.kind)).toEqual(["agent", "warm"]);
     const stray = buildTranscript([row(1, "Stop", "OK", { turn_origin: "keep_warm" }), row(2, "UserPromptSubmit", "Hello")]) as ActivityItem[];
     expect(stray.map((i) => i.kind)).toEqual(["user"]);
+  });
+});
+
+describe("tool rows (ActivityView.cpp:1105-1140, zerus-5wmh.13.8.1)", () => {
+  // The preview as it was: the whole text flattened, then cut.
+  const before = (text: string) => {
+    const flat = text.replace(/\s+/g, " ").trim();
+    return flat.length > 110 ? `${flat.slice(0, 109)}…` : flat;
+  };
+  const big = "line of output\n".repeat(400_000);
+
+  it("an expanded row carries each event's whole output, and the collapsed row keeps its preview", () => {
+    const process = "a".repeat(32);
+    const items = buildTranscript([
+      { seq: 1, type: "PreToolUse", tool: "Bash", at: 10, detail: "npm test", process_id: process },
+      { seq: 2, type: "PostToolUse", tool: "Bash", at: 11, detail: big },
+    ]) as ActivityItem[];
+    expect(items).toHaveLength(1);
+    const [row] = items;
+    expect(row).toMatchObject({ kind: "tools", body: "Bash" });
+    expect(row.events!.map((e) => [e.label, e.size, e.process])).toEqual([
+      ["Tool started / Bash", 8, process], ["Tool finished / Bash", big.length, undefined],
+    ]);
+    expect(row.events![1].detail()).toBe(big);
+    // What Activity serializes to see a row change stays small.
+    expect(JSON.stringify(row).length).toBeLessThan(1000);
+  });
+
+  it("a single event keeps its 110-character preview", () => {
+    const [row] = buildTranscript([{ seq: 1, type: "PostToolUse", tool: "Read", at: 10, detail: big }]) as ActivityItem[];
+    expect(row).toMatchObject({ kind: "tool", title: "Tool finished / Read", body: before(big) });
+    expect(row.events![0].detail()).toBe(big);
+  });
+
+  it("the preview reads only as far as it shows, with the same text as before", () => {
+    const texts = [
+      "", "   ", "short", "  lead and trail  ", "a\n\tb\r\nc", "x".repeat(109), "x".repeat(110), "x".repeat(111),
+      `${" ".repeat(5000)}${"word ".repeat(100)}`, `${"y".repeat(108)}  \n  z`, `${"y".repeat(109)} z`,
+      "\u00a0nbsp\u2028line\u2029para\ufeffbom\u3000ideo", `${"😀".repeat(60)}`, big,
+    ];
+    for (const text of texts) expect(toolPreview(text)).toBe(before(text));
+    expect(toolPreview(undefined)).toBe("");
   });
 });

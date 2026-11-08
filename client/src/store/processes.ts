@@ -53,6 +53,14 @@ export function visibleItems(view: ProcessesView, collapsed: Readonly<Record<str
 }
 
 /** The process rows that show, in tree order: what a Shift range can reach (Qt's QTreeView ranges cover visible rows). */
+/**
+ * Whether `id` is a process id the Processes view lists for its session: a
+ * View process link from Activity needs both (ActivityView.cpp:1129-1134).
+ */
+export function recordedProcess(view: ProcessesView | undefined, id: unknown): id is string {
+  return typeof id === "string" && /^[a-f0-9]{32}$/.test(id) && !!view?.groups.some((g) => g.rows.some((r) => r.id === id));
+}
+
 export const visibleRows = (view: ProcessesView, collapsed: Readonly<Record<string, boolean>>) =>
   visibleItems(view, collapsed).filter((i) => i.kind === "row").map((i) => i.id);
 
@@ -162,6 +170,19 @@ export function createProcesses(port: ProcessesPort, now: () => number = () => D
       if (v.selected.length === 1 && v.selected[0] === p.id) { pending = undefined; p.open(v); }
     },
     toggleGroup(group: string) { setGroup(group, !collapsed()[group]); },
+    /**
+     * View process from Activity: selects `id` alone, opening its group if
+     * it is collapsed. False when this view does not list it.
+     */
+    reveal(id: string): boolean {
+      const v = view();
+      const group = v && recordedProcess(v, id) ? v.groups.find((g) => g.rows.some((r) => r.id === id)) : undefined;
+      if (!v || !group) return false;
+      if (collapsed()[group.group]) setGroup(group.group, false);
+      setFocused(id);
+      port.select(v.key, [id], id);
+      return true;
+    },
     /** A row click; the hub answers with the new selection. */
     click(id: string, mods: ClickMods) {
       const v = view();

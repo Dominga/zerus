@@ -409,15 +409,22 @@ function SelectionBar() {
   const rows = createMemo(() => selectedRows(listRows()));
   const tools = createMemo(() => barTools(selectionCount(rows()), rows().length, running()));
   const split = createMemo(() => splitTools(tools(), Math.max(1, Math.floor(width() / TOOL_WIDTH))));
+  // Each tool keeps its button while the catalog refreshes (zerus-92hkz): the
+  // list is keyed by action and the button reads its current tool, so a
+  // refresh that changes nothing the bar shows replaces no button and
+  // WebKitGTK keeps the hovered button's tooltip.
+  const shownActions = createMemo(() => split().shown.map((t) => t.action), [], { equals: (a, b) => a.length === b.length && a.every((x, i) => x === b[i]) });
+  const toolOf = createMemo(() => new Map(split().shown.map((t) => [t.action, t])));
   return (
     <Show when={rows().length > 1}>
       <div class="selection-bar" role="toolbar" aria-label={tr("Selected sessions")}>
         <div class="row"><b>{tr("%1 selected", rows().length)}</b><span class="grow" /><button class="icon-btn small" title={tr("Deselect all")} aria-label={tr("Deselect all")} onClick={clearMulti}><Icon name="x" size={14} /></button></div>
         <div class="row sel-actions" ref={observe}>
-          <For each={split().shown}>
-            {(t) => (
-              <button class="icon-btn" classList={{ danger: t.danger }} title={t.hint} aria-label={t.hint} disabled={!t.enabled} data-text={t.text} onClick={() => runSelection(rows(), t.action)}><Icon name={t.icon} size={18} /></button>
-            )}
+          <For each={shownActions()}>
+            {(action) => {
+              const t = () => toolOf().get(action)!;
+              return <button class="icon-btn" classList={{ danger: t().danger }} title={t().hint} aria-label={t().hint} disabled={!t().enabled} data-text={t().text} onClick={() => runSelection(rows(), action)}><Icon name={t().icon} size={18} /></button>;
+            }}
           </For>
           <Show when={split().more.length}>
             <button class="icon-btn" title={tr("More actions for selected sessions")} aria-label={tr("More actions for selected sessions")} aria-haspopup="menu"

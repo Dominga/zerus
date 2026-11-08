@@ -38,13 +38,17 @@ import { NOT_DELIVERED_HINT } from "./inbox-actions";
 import { createInboxRemoveScope, InboxRemove, RemoveQueuedDialog, type InboxRemovePorts, type InboxRemoveScope } from "./InboxRemove";
 import { emptyActivity } from "./activity-empty";
 import { markdownReady } from "./markdown";
-import { ActivitySession, Body } from "./MarkdownBody";
+import { ActivitySession, Body, HighlightQuery } from "./MarkdownBody";
+import { searchHitItems } from "./search-hit";
 
 export { Body } from "./MarkdownBody";
 import { activityAll, activityFlow, activityRange, measureActivityRows, activitySelectionIndexes, activitySelectionText, activityText, activityTexts, activityVirtualOffset, selectActivityAll, selectionCoversActivity } from "./activity-virtual";
-import { SessionFileDialog } from "./SessionFileDialog";
 import { captionText, statusOf } from "./SessionCard";
 import type { ActivityItem, ItemAttachment, LocalItem, MediaMessage, Session, TranscriptItem } from "./types";
+import { lazyView } from "../lazy-view";
+import { LazyBoundary } from "../lazy-boundary";
+// The File reference dialog opens on demand, outside the entry chunk (zerus-ycycu).
+const SessionFileDialog = lazyView(() => import("./SessionFileDialog"), (m) => m.SessionFileDialog);
 
 // ---------------------------------------------------------------------------
 // Reading column (ActivityWidth.h): 900 px at 100% content scale, 480–2400,
@@ -614,7 +618,7 @@ function Item(props: {
           </Show>
           <Show when={it.kind === "user" && it.receipt}><span class="act-receipt"><Icon name="check" size={11} />{it.receipt}</span></Show>
           <span class="grow" />
-          <Show when={it.kind === "agent"}><button class="icon-btn small act-copy" title={tr("Copy as Markdown")} onClick={() => copyText(it.body ?? "", tr("The reply is on the clipboard"))}><Icon name="copy" size={12} /></button></Show>
+          <Show when={it.kind === "agent" && !it.excerpt}><button class="icon-btn small act-copy" title={tr("Copy as Markdown")} onClick={() => copyText(it.body ?? "", tr("The reply is on the clipboard"))}><Icon name="copy" size={12} /></button></Show>
         </header>
         {/* A fork's inherited row belongs to its source: never this session's attachments. */}
         <EchoBody item={it} scope={rowScope(it, props.scope)} />
@@ -658,7 +662,16 @@ export function focusTranscript(): boolean {
   return true;
 }
 
-/** Scrolls to the newest item and follows it again. */
+/**
+ * The search hit Activity shows instead of the session's history: the one
+ * chosen for the selected row, its run and conversation, outside a subagent.
+ */
+export function shownSearchPreview() {
+  const p = searchPreview(), row = selected();
+  return p && row && p.key === row.key && p.run === (row.runId ?? "") && p.conversation === (row.conversationId ?? "") && !subagentOpen() ? p : undefined;
+}
+
+/** Scrolls to the newest item and follows it again; a shown search hit gives way to the latest activity. */
 export function jumpToLatest() {
   if (searchPreview()) { clearSearchPreview(); return; }
   setFollowing(true);
@@ -714,10 +727,7 @@ export function paneStates(source: ActivitySource, s: Session | undefined) {
 
 export function ActivityView(props: { source?: ActivitySource }) {
   const s = () => selected();
-  const preview = () => {
-    const p = searchPreview(), row = s();
-    return p && row && p.key === row.key && p.run === (row.runId ?? "") && p.conversation === (row.conversationId ?? "") && !subagentOpen() ? p : undefined;
-  };
+  const preview = shownSearchPreview;
   /** The live follow unless the detail passes another source (an archived row's). */
   const source = (): ActivitySource => props.source ?? activity;
   let scroller!: HTMLDivElement;
@@ -1092,7 +1102,7 @@ export function ActivityView(props: { source?: ActivitySource }) {
       </Show>
       <LocalDeleteDialog />
       <RemoveQueuedDialog scope={inboxScope} />
-      <SessionFileDialog />
+      <LazyBoundary floating><SessionFileDialog /></LazyBoundary>
       <div class="act-scroll" ref={scroller} tabindex="-1" onContextMenu={activityMenu} onScroll={onScroll} style={{ "overflow-anchor": "none" }}
         onWheel={scrollIntent}
         onKeyDown={(e) => {
@@ -1128,7 +1138,12 @@ export function ActivityView(props: { source?: ActivitySource }) {
           <Show when={preview()}>{(p) => <section class="search-preview" aria-label={tr("Search result")}>
             <div class="act-label eyebrow">{tr("SEARCH RESULT — Saved message")}</div>
             <Show when={p().hit.content_truncated}><div class="hint">{tr("Excerpt around the match. This message is too long to display in full.")}</div></Show>
-            <div class="search-preview-body"><SearchHighlight text={String(p().hit.event.detail ?? "")} query={p().query} /></div>
+            {/* The message as Activity shows it, Markdown and links with the query marked (ActivityView.cpp:664, 1592-1605). */}
+            <div class="search-preview-body">
+              <HighlightQuery.Provider value={p().query}>
+                <For each={searchHitItems(p().hit)}>{(item) => <Item item={item} scope={scope()} sourceId={source().target()?.id} postersEnabled={false} expanded={item.kind === "tool" || item.kind === "tools"} />}</For>
+              </HighlightQuery.Provider>
+            </div>
           </section>}</Show>
           <Show when={!preview()}>
           <div class="act-history-header">

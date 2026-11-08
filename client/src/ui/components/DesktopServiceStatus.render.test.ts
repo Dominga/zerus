@@ -40,11 +40,12 @@ it("keeps healthy service details visible in Settings About", () => {
   expect(host.querySelector("button")).toBeNull(); expect(native.invoke).not.toHaveBeenCalled();
 });
 
-it("keeps reviewable migration results visible even while the service is online", () => {
+it("keeps reviewable migration results visible even while the service is online", async () => {
   desktopService.apply(healthy({ retained_source_import: { required: true, complete: false, running: false, code: "retained_import_qt_unavailable", phase: null } }));
   const host = mount(); expect(host.textContent).toContain("Migration report");
   [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Review")!.click();
-  expect(host.textContent).toContain("Migration review");
+  // The review dialog loads on first use, outside the entry chunk (zerus-ycycu).
+  await vi.waitFor(() => expect(host.textContent).toContain("Migration review"));
   desktopService.apply(healthy()); expect(host.querySelector(".desktop-service-status")).toBeNull();
   expect(host.textContent).toContain("Migration review"); expect(native.invoke).not.toHaveBeenCalled();
 });

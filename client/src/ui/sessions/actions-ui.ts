@@ -327,6 +327,22 @@ export function terminal(s: Pick<ActionRow, "cmd" | "terminalSupported" | "termi
   return s.terminalSupported;
 }
 
+/**
+ * Whether a saved session's agent gives a terminal once it runs again: the
+ * CLI reports `terminal_supported` only for a live pane, never for a paused
+ * or stopped row (zerus-5o1ns). The native DeepSeek adapters have none,
+ * OpenCode attaches by its own capability, and every other agent does; the
+ * resumed row's own `terminal` check runs before anything opens.
+ */
+export function terminalAfterResume(s: Pick<ActionRow, "cmd" | "terminalAttachSupported" | "terminalAttachReported">, details?: Details): boolean {
+  if (s.cmd === "dsh" || s.cmd === "deepseek") return false;
+  if (s.cmd === "opencode") {
+    if (typeof details?.terminal_attach_supported === "boolean") return details.terminal_attach_supported;
+    return s.terminalAttachReported && s.terminalAttachSupported;
+  }
+  return true;
+}
+
 /** The selected child identity, when its conversation has been inspected. */
 export interface ChildIdentity { id: string; conversationId?: string; cwd?: string }
 

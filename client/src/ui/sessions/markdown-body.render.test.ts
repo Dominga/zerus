@@ -8,7 +8,7 @@ vi.mock("./sessionFiles", () => ({
   openExternal: (url: string) => { opened.external.push(url); },
   openSessionFile: () => {},
 }));
-import { Body } from "./MarkdownBody";
+import { Body, HighlightQuery } from "./MarkdownBody";
 import { loadMarkdown } from "./markdown";
 
 // zerus-5wmh.13.8.2: the Activity's Markdown renderer, which thinking and
@@ -42,5 +42,22 @@ describe("the Activity Markdown body", () => {
     const links = host.querySelectorAll("a");
     expect(links).toHaveLength(1);
     expect(links[0].getAttribute("href")).toBe("https://b.example");
+  });
+});
+
+describe("a search hit's Markdown (zerus-5wmh.13.17.5)", () => {
+  it("highlights the query inside formatting, inline code, code blocks and links, and nowhere without a query", () => {
+    const text = "Find the **Needle** in `needle()` and [a needle link](https://example.com).\n\n```\nneedle block\n```";
+    const host = document.createElement("div");
+    document.body.append(host);
+    dispose = render(() => createComponent(HighlightQuery.Provider, { value: "needle", get children() { return createComponent(Body, { text }); } }), host);
+    expect([...host.querySelectorAll("mark")].map((m) => m.textContent)).toEqual(["Needle", "needle", "needle", "needle"]);
+    expect(host.querySelector("b mark")?.textContent).toBe("Needle");
+    expect(host.querySelector("code mark")?.textContent).toBe("needle");
+    expect(host.querySelector("a mark")?.textContent).toBe("needle");
+    expect(host.querySelector("pre mark")?.textContent).toBe("needle");
+    dispose(); dispose = undefined; host.replaceChildren();
+    dispose = render(() => createComponent(Body, { text }), host);
+    expect(host.querySelectorAll("mark")).toHaveLength(0);
   });
 });

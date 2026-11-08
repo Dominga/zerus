@@ -26,6 +26,11 @@ describe("bounded public-content search", () => {
     expect(identityMatches({ ...row, conversationId: "replacement" }, hit("one"))).toBe(false);
     expect(identityMatches({ ...row, archiveId: "other-archive" }, hit("one"))).toBe(false);
   });
+  it("counts matching creations after messages and sessions, as Qt does", () => {
+    expect(searchCount(3, 2)).toBe("3 messages, 2 sessions");
+    expect(searchCount(1, 1, 1)).toBe("1 message, 1 session, 1 creation");
+    expect(searchCount(0, 0, 2)).toBe("0 messages, 0 sessions, 2 creations");
+  });
   it("matches a child's conversation ID and names the ID that matched, as Qt does (SessionSearch.cpp:239-268)", () => {
     const row = { name: "claude/demo/sample", title: "Demo", machine: "workstation", runId: "run-one", conversationId: "conversation-one", archiveId: "archive-one",
       subagents: [{ id: "agent-one", conversationId: "child-conversation-one", name: "child", state: "ready", summary: "" }, { id: "agent-two", name: "other", state: "ready", summary: "" }] } as unknown as Session;

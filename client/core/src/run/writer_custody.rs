@@ -1,7 +1,7 @@
 //! Original owned-helper I/O custody, separate from delivery outcome/authority.
 //!
-//! No production caller is connected. The host must verify its selected image,
-//! source and durable original request, reserve BEFORE spawning, and retain any
+//! The host must verify its selected image, source and durable original request,
+//! reserve BEFORE spawning, and retain any
 //! cross-process inherited custody. An available lock or a returned error is
 //! never physical settlement, nor permission to signal an agent or replay input.
 //! This module never selects an executable, adopts a PID or stops a process tree.
@@ -11,12 +11,13 @@ use std::{
     process::{Child, ChildStderr, ChildStdin, ChildStdout, ExitStatus},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc, Condvar, Mutex, OnceLock,
     },
     time::{Duration, Instant},
 };
 
 mod io_workers;
+mod wait_policy;
 use io_workers::{Drain, Writer};
 
 const LIMIT: usize = 16;
@@ -26,6 +27,10 @@ const STDERR_BYTES: usize = 16 << 10;
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 static RETIRED: Mutex<Vec<Original>> = Mutex::new(Vec::new());
+static WAKE: Condvar = Condvar::new();
+static POLLER: OnceLock<bool> = OnceLock::new();
+#[cfg(test)]
+pub(super) static TESTS: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Failure {
@@ -62,7 +67,19 @@ impl Admission {
         if until <= now || until.duration_since(now) > Duration::from_secs(30) {
             return Err(Failure::Invalid);
         }
-        if UNAVAILABLE.load(Ordering::Acquire) {
+        if !wait_policy::waitable() {
+            return Err(Failure::Unavailable);
+        }
+        // Start the one retirement poller BEFORE any owned helper can exist.
+        // A host's busy/source charge must eventually drain without admitting
+        // another call. The poller owns no pipe and cannot manufacture a join.
+        if !*POLLER.get_or_init(|| {
+            std::thread::Builder::new()
+                .name("zerus-mutation-retirement".into())
+                .spawn(retirement_poller)
+                .is_ok()
+        }) || UNAVAILABLE.load(Ordering::Acquire)
+        {
             return Err(Failure::Unavailable);
         }
         LIVE.try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
@@ -90,6 +107,7 @@ impl Admission {
             output,
             error,
             exit: None,
+            wait_failed: false,
             offered: false,
             stopped: false,
             failure: None,
@@ -103,6 +121,31 @@ impl Admission {
         }
         Exchange(Some(original))
     }
+
+    /// A trusted guarded spawn withheld ALL input and may already have closed
+    /// its original piped stdin. No writer was ever started by that spawn.
+    /// Close any remaining stdin ourselves and retain the same failed child;
+    /// this constructor can NEVER admit input or produce a successful outcome.
+    pub fn attach_withheld(self, mut child: Child) -> Exchange {
+        drop(child.stdin.take());
+        let output = Drain::new(child.stdout.take(), STDOUT_BYTES);
+        let error = Drain::new(child.stderr.take(), STDERR_BYTES);
+        let mut original = Original {
+            child,
+            input: Writer::closed_before_worker(),
+            output,
+            error,
+            exit: None,
+            wait_failed: false,
+            offered: true,
+            stopped: false,
+            failure: Some(Failure::SourceChanged),
+            until: self.until,
+            _charge: self.charge,
+        };
+        original.stop(Failure::SourceChanged);
+        Exchange(Some(original))
+    }
 }
 
 /// Physical helper exchange data, NOT a delivery or operation-success receipt.
@@ -111,7 +154,8 @@ impl Admission {
 #[derive(Debug)]
 pub struct Report {
     pub exit: ExitStatus,
-    /// True only for a complete write/flush. False may include partial delivery.
+    /// Complete write/flush or explicit empty-input EOF. False may include
+    /// partial delivery; it never proves that nothing was offered.
     pub input_written: bool,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
@@ -120,6 +164,37 @@ pub struct Report {
 
 pub struct Exchange(Option<Original>);
 impl Exchange {
+    /// Explicit empty-input EOF for a helper already admitted by the host's
+    /// guarded spawn (including sealed Linux read-only helpers that exit fast).
+    /// There are no private bytes or writer thread. It is data, not code proof.
+    pub fn close_empty_input(
+        &mut self,
+        check: impl FnOnce(&mut Child, Instant) -> bool,
+    ) -> Result<(), Failure> {
+        let original = self.0.as_mut().ok_or(Failure::Invalid)?;
+        if original.offered || original.failure.is_some() {
+            return Err(original.failure.unwrap_or(Failure::Input));
+        }
+        original.offered = true;
+        if Instant::now() >= original.until {
+            original.stop(Failure::Expired);
+            return Err(Failure::Expired);
+        }
+        if !check(&mut original.child, original.until) {
+            original.stop(Failure::SourceChanged);
+            return Err(Failure::SourceChanged);
+        }
+        if Instant::now() >= original.until {
+            original.stop(Failure::Expired);
+            return Err(Failure::Expired);
+        }
+        if !original.input.close_empty() {
+            original.stop(Failure::Worker);
+            return Err(Failure::Worker);
+        }
+        Ok(())
+    }
+
     /// Exactly one input handoff, after the host rechecks THIS original Child.
     /// The host must bound its check by the supplied unchanged deadline. Failed
     /// check, oversized input, expiry or a second handoff never starts a writer.
@@ -206,7 +281,10 @@ impl Drop for Exchange {
         original.tick();
         if !original.settled() {
             match RETIRED.lock() {
-                Ok(mut retired) => retired.push(original),
+                Ok(mut retired) => {
+                    retired.push(original);
+                    WAKE.notify_one();
+                }
                 Err(_) => {
                     UNAVAILABLE.store(true, Ordering::Release);
                     // Lost retirement custody cannot release admission. Bound
@@ -224,6 +302,7 @@ struct Original {
     output: Drain<ChildStdout>,
     error: Drain<ChildStderr>,
     exit: Option<ExitStatus>,
+    wait_failed: bool,
     offered: bool,
     stopped: bool,
     failure: Option<Failure>,
@@ -232,10 +311,18 @@ struct Original {
 }
 impl Original {
     fn wait(&mut self) {
-        if self.exit.is_none() {
+        if self.exit.is_none() && !self.wait_failed {
+            // Auto-reaping would release the PID before Child can prove exit.
+            // Never repair policy or adopt a replacement to recover custody.
+            if !wait_policy::waitable() {
+                self.wait_failed = true;
+                self.failure.get_or_insert(Failure::Unavailable);
+                return;
+            }
             match self.child.try_wait() {
                 Ok(exit) => self.exit = exit,
                 Err(_) => {
+                    self.wait_failed = true;
                     self.failure.get_or_insert(Failure::Unavailable);
                 }
             }
@@ -245,8 +332,15 @@ impl Original {
         self.failure.get_or_insert(reason);
         self.input.close_unoffered();
         self.wait();
-        if !self.stopped && self.exit.is_none() {
+        if !self.stopped && self.exit.is_none() && !self.wait_failed {
             self.stopped = true;
+            #[cfg(test)]
+            if self.wait_failed {
+                // Fault controls detect the attempted stop via `stopped`
+                // without signalling an already reaped/unidentified PID when
+                // a private mutation deliberately removes the guard above.
+                return;
+            }
             // This Child stays unreaped and owned here; never resolve a PID,
             // signal a group/descendant or adopt another process on failure.
             let _ = self.child.kill();
@@ -301,6 +395,39 @@ fn reap() {
     // Source destructors never run under the registry lock.
     drop(retired);
     drop(finished);
+}
+
+fn retirement_poller() {
+    loop {
+        let Ok(mut retired) = RETIRED.lock() else {
+            UNAVAILABLE.store(true, Ordering::Release);
+            return;
+        };
+        while retired.is_empty() {
+            let Ok(next) = WAKE.wait(retired) else {
+                UNAVAILABLE.store(true, Ordering::Release);
+                return;
+            };
+            retired = next;
+        }
+        drop(retired);
+        reap();
+        // One process-wide poller, at most LIMIT retained originals, no work
+        // while empty. Original I/O joins alone release their source charges;
+        // elapsed time or waking this poller never supplies settlement.
+        let Ok(retired) = RETIRED.lock() else {
+            UNAVAILABLE.store(true, Ordering::Release);
+            return;
+        };
+        if !retired.is_empty()
+            && WAKE
+                .wait_timeout(retired, Duration::from_millis(5))
+                .is_err()
+        {
+            UNAVAILABLE.store(true, Ordering::Release);
+            return;
+        }
+    }
 }
 
 #[cfg(test)]

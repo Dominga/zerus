@@ -193,6 +193,14 @@ pub(super) fn start_scoped(
     if archive_id.is_none() && dsh::exists(name) {
         return dsh::fork(name, tag, expected_run, expected_conversation, dry, scope);
     }
+    // Read-only capability I/O stays outside the shared state writer. The
+    // resulting mode is frozen for the original operation below.
+    let executable = runner_executable()?;
+    let helper = if dry {
+        None
+    } else {
+        Some(launch_identity::helper::Observed::probe(&executable))
+    };
     let _guard = lock(None)?;
     let record = if let Some(id) = archive_id {
         archive::read_archive(name, id)?
@@ -235,6 +243,10 @@ pub(super) fn start_scoped(
     // Allocate before either the native Kimi fork or terminal spawn. The
     // launch environment carries this exact identity into its own bootstrap.
     let allocation=launch_identity::Allocation::fresh();
+    let count = match &helper {
+        Some(helper) => helper.count(allocation.session(), allocation.run(), 0)?,
+        None => "0".into(),
+    };
     let agent = string(&record, "agent");
     // Check the saved recipe before the only operation that can create history.
     fork_argv(&record, None)?;
@@ -249,9 +261,10 @@ pub(super) fn start_scoped(
         None
     };
     let argv = fork_argv(&record, new_id.as_deref())?;
-    let executable = runner_executable()?;
     let hint_environment = crate::config::agent_hint_environment(agent);
-    let launch = supervisor_command(&record, &executable, argv, &hint_environment);
+    let launch = storage::supervisor_command_with_count(
+        &record, &executable, argv, &hint_environment, &count,
+    );
     let new_run=allocation.run().to_owned();
     let lineage = journal::fork_lineage(&record);
     let mut environment = BTreeMap::from([
@@ -294,7 +307,10 @@ pub(super) fn start_scoped(
             nonempty_env("HGS_CLIENT").unwrap_or_else(|| "local".into()),
         ),
     ]);
-    environment.extend(allocation.environment());
+    environment.extend(helper.as_ref().map_or_else(
+        || allocation.environment(),
+        |helper| helper.environment(&allocation),
+    ));
     for key in ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME"] {
         environment.insert(key, String::new());
     }

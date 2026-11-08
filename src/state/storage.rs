@@ -882,6 +882,16 @@ pub(super) fn supervisor_command(
     argv: Vec<String>,
     hint_environment: &[String],
 ) -> Vec<String> {
+    supervisor_command_with_count(record, executable, argv, hint_environment, "0")
+}
+
+pub(super) fn supervisor_command_with_count(
+    record: &Value,
+    executable: &str,
+    argv: Vec<String>,
+    hint_environment: &[String],
+    count: &str,
+) -> Vec<String> {
     #[cfg(unix)]
     let mut launch = {
         let shell = if string(record, "shell").is_empty() {
@@ -901,13 +911,13 @@ pub(super) fn supervisor_command(
                 hint_environment,
             ),
             executable.into(),
-            "0".into(),
+            count.into(),
         ]
     };
     #[cfg(windows)]
     let mut launch = {
         let _ = (record, hint_environment);
-        vec![executable.into(), "--run".into(), "0".into()]
+        vec![executable.into(), "--run".into(), count.into()]
     };
     launch.extend(argv);
     launch

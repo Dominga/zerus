@@ -104,6 +104,8 @@ mod speech_settings;
 #[cfg(feature = "live")]
 mod startup_error;
 mod startup_log;
+#[cfg(any(all(windows, feature = "live"), test))]
+mod startup_note;
 #[cfg(feature = "live")]
 mod task_copy_review;
 #[cfg(feature = "live")]

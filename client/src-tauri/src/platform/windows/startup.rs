@@ -74,6 +74,14 @@ pub fn select_hgs(configured: Option<&Path>, installed: bool) -> PathBuf {
     if !installed || original.is_some() {
         return selected;
     }
+    // Shown while a slow check runs, as there is no tray icon yet (zerus-5wmh.13.14.4).
+    let note = crate::startup_note::StartupNote::start(
+        crate::startup_note::DELAY,
+        crate::startup_note::Window::new,
+    );
+    note.step(crate::native_text::render(&crate::startup_note::text(
+        "status",
+    )));
     let status = match session_host(&selected, "status") {
         Ok(value) => value,
         Err(error) => {
@@ -93,6 +101,9 @@ pub fn select_hgs(configured: Option<&Path>, installed: bool) -> PathBuf {
     let choice =
         crate::windows_shell::choose_hgs(&status, &selected, &digest, None, app.as_deref());
     if choice.refresh {
+        note.step(crate::native_text::render(&crate::startup_note::text(
+            "install",
+        )));
         if let Err(error) = session_host(&selected, "install") {
             eprintln!("zerus-client: session-host install: {error}");
             return choice.fallback;

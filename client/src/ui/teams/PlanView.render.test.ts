@@ -208,7 +208,7 @@ describe("the plan's Graph, Board and Layers (task 197)", () => {
     expect(html).toContain('data-severity="crit"');
     expect(html).toContain("pt-card-crit");
     expect(html).toContain("pt-edge-crit");
-    expect(plain(html)).toContain("Crit · #2");
+    expect(plain(html)).toContain("Crit #2");
     expect(html).toContain('data-phase-kind="minor"');
     expect(html).toContain(">Minor<");
     expect(html).toContain("critical task #6 in phase 2 is open");

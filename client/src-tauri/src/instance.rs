@@ -550,14 +550,14 @@ pub fn platform_service(
 /// `limit`; otherwise None, with the child killed and reaped. Its standard
 /// input is /dev/null, its error output is dropped, at most 64 KiB is read
 /// and, on Linux, it inherits no descriptor beyond those three.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 pub fn bounded_read(command: Command, limit: Duration) -> Option<String> {
     bounded_read_with(command, limit, |_| {}, children_auto_reaped)
 }
 
 /// Whether a SIGCHLD disposition reaps children without a wait: ignored, or
 /// SA_NOCLDWAIT (zerus-5zo1o).
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 fn auto_reaps(handler: libc::sighandler_t, flags: libc::c_int) -> bool {
     handler == libc::SIG_IGN || flags & libc::SA_NOCLDWAIT != 0
 }
@@ -565,7 +565,7 @@ fn auto_reaps(handler: libc::sighandler_t, flags: libc::c_int) -> bool {
 /// Whether this process's children are reaped without a wait. A bounded read
 /// refuses then: once the kernel reaped its child, the child's PID may name
 /// another process, which must never be signalled.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 fn children_auto_reaped() -> bool {
     // SAFETY: a null new action only reads the current disposition into a
     // zeroed, properly sized sigaction.
@@ -577,28 +577,108 @@ fn children_auto_reaped() -> bool {
 }
 
 /// What [`settle`] does to a child, so tests can script it.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 trait Owned {
     fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>>;
     fn kill(&mut self) -> io::Result<()>;
     fn wait(&mut self) -> io::Result<std::process::ExitStatus>;
 }
 
-#[cfg(any(target_os = "linux", test))]
-impl Owned for std::process::Child {
+/// A bounded read's child, held by a pidfd from the moment it starts. It is
+/// waited for and signalled only through that descriptor, never by its
+/// numeric PID: whatever SIGCHLD policy or other reaper retires it, a
+/// cleanup reaches that process or nothing, never one that reused its PID,
+/// and no wait collects another child by PID (zerus-5zo1o).
+#[cfg(target_os = "linux")]
+struct Helper {
+    pidfd: std::os::fd::OwnedFd,
+}
+
+#[cfg(target_os = "linux")]
+impl Helper {
+    /// The pidfd of `child`, checked to name this process's own child:
+    /// running, or exited and not yet waited for. None otherwise, or where
+    /// the kernel has no pidfds; the read then waits for nothing.
+    fn hold(child: &std::process::Child) -> Option<Helper> {
+        use std::os::fd::FromRawFd;
+        // SAFETY: pidfd_open takes a PID and flags and returns a new
+        // descriptor or -1.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id() as libc::pid_t, 0) };
+        if fd < 0 {
+            return None;
+        }
+        // SAFETY: a fresh descriptor that nothing else owns.
+        let helper = Helper {
+            pidfd: unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as std::os::fd::RawFd) },
+        };
+        helper
+            .wait_id(libc::WEXITED | libc::WNOHANG | libc::WNOWAIT)
+            .ok()?;
+        Some(helper)
+    }
+
+    fn wait_id(&self, options: libc::c_int) -> io::Result<Option<std::process::ExitStatus>> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::ExitStatusExt;
+        // SAFETY: waitid on this helper's pidfd into a zeroed siginfo.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let id = self.pidfd.as_raw_fd() as libc::id_t;
+        if unsafe { libc::waitid(libc::P_PIDFD, id, &mut info, options) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: waitid filled a SIGCHLD siginfo (or left it zeroed).
+        let (pid, status) = unsafe { (info.si_pid(), info.si_status()) };
+        if pid == 0 {
+            return Ok(None);
+        }
+        Ok(Some(std::process::ExitStatus::from_raw(
+            match info.si_code {
+                libc::CLD_EXITED => (status & 0xff) << 8,
+                libc::CLD_DUMPED => (status & 0x7f) | 0x80,
+                _ => status & 0x7f,
+            },
+        )))
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Owned for Helper {
     fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
-        std::process::Child::try_wait(self)
+        self.wait_id(libc::WEXITED | libc::WNOHANG)
     }
     fn kill(&mut self) -> io::Result<()> {
-        std::process::Child::kill(self)
+        use std::os::fd::AsRawFd;
+        // SAFETY: pidfd_send_signal on this helper's pidfd, no siginfo.
+        let sent = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                self.pidfd.as_raw_fd(),
+                libc::SIGKILL,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        };
+        if sent == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
     }
+    /// Reaps it after the signal, for at most a second.
     fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
-        std::process::Child::wait(self)
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match self.try_wait()? {
+                Some(status) => return Ok(status),
+                None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+                None => return Err(io::ErrorKind::TimedOut.into()),
+            }
+        }
     }
 }
 
 /// The most a bounded read takes from its child's output.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 const READ_CAP: usize = 64 << 10;
 
 /// The child's whole output when it exits successfully and its output ends,
@@ -608,7 +688,7 @@ const READ_CAP: usize = 64 << 10;
 /// has just reported running is signalled, then waited for: no wait has
 /// collected it, so its PID is still its own. Once waiting fails (the kernel
 /// reaped it, for example) nothing is signalled (zerus-5zo1o).
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 fn drain(
     child: &mut impl Owned,
     out: &mut impl Read,
@@ -656,7 +736,7 @@ fn drain(
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 fn bounded_read_with(
     mut command: Command,
     limit: Duration,
@@ -686,6 +766,8 @@ fn bounded_read_with(
     let deadline = Instant::now() + limit;
     let mut child = command.spawn().ok()?;
     spawned(child.id());
+    // Every wait and signal goes through the child's pidfd.
+    let mut helper = Helper::hold(&child)?;
     let mut stdout = child.stdout.take();
     // SAFETY: F_GETFL and F_SETFL on this call's own pipe descriptor.
     let nonblocking = stdout.as_ref().is_some_and(|out| unsafe {
@@ -693,9 +775,15 @@ fn bounded_read_with(
         flags >= 0 && libc::fcntl(out.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) == 0
     });
     let text = match stdout.as_mut().filter(|_| nonblocking) {
-        Some(out) => drain(&mut child, out, deadline, Duration::from_millis(10)),
+        Some(out) => drain(&mut helper, out, deadline, Duration::from_millis(10)),
         // No pipe to read: end the child now, as at the deadline.
-        None => drain(&mut child, &mut io::empty(), Instant::now(), Duration::ZERO).and(None),
+        None => drain(
+            &mut helper,
+            &mut io::empty(),
+            Instant::now(),
+            Duration::ZERO,
+        )
+        .and(None),
     }?;
     Some(String::from_utf8_lossy(&text).into_owned())
 }
@@ -1727,6 +1815,7 @@ mod tests {
         assert_eq!(*asked.borrow(), expected);
     }
 
+    #[cfg(target_os = "linux")]
     /// A scripted child for `settle`.
     struct Scripted {
         waits: VecDeque<io::Result<Option<std::process::ExitStatus>>>,
@@ -1734,6 +1823,7 @@ mod tests {
         reaped: usize,
     }
 
+    #[cfg(target_os = "linux")]
     impl Owned for Scripted {
         fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
             self.waits.pop_front().unwrap_or(Ok(None))
@@ -1748,12 +1838,14 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     /// A pipe that answers from a script, then would block (or ends).
     struct Pipe {
         reads: VecDeque<io::Result<Vec<u8>>>,
         ends: bool,
     }
 
+    #[cfg(target_os = "linux")]
     impl Read for Pipe {
         fn read(&mut self, into: &mut [u8]) -> io::Result<usize> {
             match self.reads.pop_front() {
@@ -1768,6 +1860,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_child_whose_wait_was_lost_is_never_signalled() {
         let exited = |code: i32| -> io::Result<Option<std::process::ExitStatus>> {
@@ -1863,6 +1956,7 @@ mod tests {
         assert_eq!((chatty.signalled, chatty.reaped), (1, 1));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_read_returns_while_another_process_holds_the_pipe() {
         // A background child keeps the pipe open after the shell exits.
@@ -1877,6 +1971,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn an_auto_reaping_sigchld_policy_refuses_the_read_before_any_child() {
         assert!(auto_reaps(libc::SIG_IGN, 0));
@@ -1896,6 +1991,74 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    // These children are reaped through the helper's pidfd, which clippy cannot see.
+    #[allow(clippy::zombie_processes)]
+    fn a_helper_signals_and_reaps_only_through_its_pidfd() {
+        // Reaped through its pidfd: a signal then reaches nothing at all.
+        let child = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let mut helper = Helper::hold(&child).expect("our running child");
+        let status = helper.wait().unwrap();
+        assert!(status.success());
+        let refused = helper.kill().unwrap_err();
+        assert_eq!(refused.raw_os_error(), Some(libc::ESRCH));
+        // Exit codes and signals read as std reports them.
+        let failing = Command::new("/bin/sh")
+            .args(["-c", "exit 3"])
+            .spawn()
+            .unwrap();
+        assert_eq!(
+            Helper::hold(&failing).unwrap().wait().unwrap().code(),
+            Some(3)
+        );
+        let hung = Command::new("/bin/sh")
+            .args(["-c", "exec sleep 30"])
+            .spawn()
+            .unwrap();
+        let mut held = Helper::hold(&hung).unwrap();
+        held.kill().unwrap();
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(held.wait().unwrap().signal(), Some(libc::SIGKILL));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    // These children are reaped through the helper's pidfd, which clippy cannot see.
+    #[allow(clippy::zombie_processes)]
+    fn a_child_reaped_elsewhere_is_never_held_or_signalled() {
+        // Reaped by its PID before the read held it: never held.
+        let mut gone = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        gone.wait().unwrap();
+        assert!(Helper::hold(&gone).is_none());
+        // Reaped by another waiter after it was held (as an auto-reaping policy
+        // would): waiting reports the loss and the deadline path signals nothing.
+        let mut other = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let mut helper = Helper::hold(&other).unwrap();
+        other.wait().unwrap();
+        assert!(helper.try_wait().is_err());
+        assert_eq!(helper.kill().unwrap_err().raw_os_error(), Some(libc::ESRCH));
+        assert_eq!(
+            drain(
+                &mut helper,
+                &mut io::empty(),
+                Instant::now(),
+                Duration::ZERO
+            ),
+            None
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_bounded_read_answers_kills_or_refuses() {
         let sh = |script: &str| {

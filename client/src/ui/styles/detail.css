@@ -112,6 +112,8 @@
   .act-body { line-height: 1.5; color: var(--z-color-text); }
   .act-body code { font-family: var(--z-font-mono); font-size: .9em; padding: 1px 5px; border-radius: 4px; background: var(--z-color-code-bg); }
   .act-body a { color: var(--z-color-accent); text-decoration: none; }
+  /* An address quoted as code links in the accent colour (MarkdownHtml.cpp:299-311). */
+  .act-body a code { color: inherit; }
   /* Message tables use the mockup proc-table's type, header and divider tokens. */
   .act-table-wrap { max-width: 100%; overflow-x: auto; margin: 8px 0; }
   .act-table { width: 100%; min-width: calc(var(--fs-sm) * var(--table-columns) * 9); border-collapse: collapse; font-size: var(--fs-sm); }
@@ -166,6 +168,8 @@
   .typing i:nth-child(2) { animation-delay: .15s; } .typing i:nth-child(3) { animation-delay: .3s; }
   .act-thinking { padding: 2px 14px 4px; border-left: 2px solid var(--z-color-divider); color: var(--z-color-dim); font-size: var(--fs-sm); }
   .act-thinking p { margin-top: 2px; font-style: italic; }
+  /* Thinking as Markdown keeps its dim italic text (ActivityView.cpp:942-947). */
+  .act-thinking-body.act-body { margin-top: 2px; color: inherit; font-style: italic; }
   .act-notice { padding: 8px 12px; border-radius: var(--z-radius-lg); background: var(--z-color-violet-bg); border-left: 3px solid var(--z-color-violet); font-size: var(--fs-sm); display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
   .act-notice .row { width: 100%; }
   .act-notice svg { color: var(--z-color-violet); }

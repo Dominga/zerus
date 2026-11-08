@@ -52,6 +52,22 @@ export const [multi, setMulti] = createStore<Record<string, boolean>>({});
 export const [peek, setPeek] = createSignal(false);
 export type DetailTab = "activity" | "terminal" | "native" | "processes" | "taskview";
 export const [detailTab, setDetailTab] = createSignal<DetailTab>("activity");
+const [latestRequests, setLatestRequests] = createSignal(0);
+/**
+ * Enter on a session row (Qt's jumpToLatestActivity): the Activity tab at its
+ * latest message. The mounted Activity takes the request, or the next to mount
+ * (ui/sessions/Activity.tsx), so the list never loads the transcript itself.
+ */
+export function showLatestActivity() { setDetailTab("activity"); setLatestRequests((n) => n + 1); }
+export { latestRequests };
+let latestTaken = 0;
+/** Activity's side, read in an effect: true once per request (several pending ones jump once). */
+export function takeLatestRequest(): boolean {
+  const n = latestRequests();
+  if (n <= latestTaken) return false;
+  latestTaken = n;
+  return true;
+}
 export const [subagentOpen, setSubagentOpen] = createSignal<string | undefined>();
 export const [search, setSearch] = createSignal(params.get("q") ?? "");
 export const [expandedChildren, setExpandedChildren] = createStore<Record<string, boolean>>({});

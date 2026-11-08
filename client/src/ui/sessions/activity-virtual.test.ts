@@ -43,6 +43,18 @@ describe("Activity copy and virtual retention", () => {
       .toContain("z".repeat(TOOL_OUTPUT.first + TOOL_OUTPUT.step));
   });
 
+  it("copies thinking and an opened subagent report as their Markdown shows (zerus-5wmh.13.8.2)", async () => {
+    await loadMarkdown();
+    const items: TranscriptItem[] = [
+      { id: "think", kind: "thinking", at: "10:00", body: "Check **the** `config` first" },
+      { id: "report", kind: "report", at: "10:01", title: "Done", body: "# Result\n\n- **one** item" },
+    ];
+    expect(activityText(items)).toContain("Check the config first");
+    expect(activityText(items)).not.toContain("**");
+    expect(activityText(items)).not.toContain("one item");
+    expect(activityText(items, { report: true })).toContain("Result\none item");
+  });
+
   it("keeps a loading or playing media row mounted while it is scrolled out", () => {
     expect(activityRange({ startIndex: 6, endIndex: 7, overscan: 1, count: 12 }, 1)).toEqual([1, 5, 6, 7, 8]);
   });

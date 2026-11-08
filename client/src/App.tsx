@@ -27,6 +27,7 @@ import { num, setSetting } from "./store/settings";
 import { installShortcutRouter, onCommand } from "./store/shortcuts";
 import { openGoTo, openShortcutHelp, goToOrigin, shortcutHelpOrigin } from "./store/goTo";
 import { rememberRecentSession } from "./ui/sessions/goTo";
+import { installWindowCommands } from "./ui/sessions/window-commands";
 import { updateCommands, updates } from "./store/updates";
 import { openUpdates } from "./store/desk";
 import { SessionUsageStrip } from "./ui/components/SessionUsageStrip";
@@ -127,7 +128,7 @@ export function App(props: { mode: () => BridgeMode | "starting" }) {
     ["zoom.reset", () => zoom(1)],
   ];
   onMount(() => {
-    const off = [installShortcutRouter(), ...commands.map(([id, run]) => onCommand(id, run))];
+    const off = [installShortcutRouter(), ...commands.map(([id, run]) => onCommand(id, run)), installWindowCommands()];
     onCleanup(() => off.forEach((undo) => undo()));
   });
   return (
